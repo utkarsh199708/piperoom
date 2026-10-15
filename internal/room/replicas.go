@@ -1170,7 +1170,7 @@ func (s *Service) loadMissing(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
 	}
-	return s.loadRows(ctx, rows, false)
+	return s.loadRows(ctx, rows, false, false)
 }
 
 // ---- alert dedup across replicas ----
@@ -1178,9 +1178,19 @@ func (s *Service) loadMissing(ctx context.Context) error {
 // alertLockStripes is how many in-process alert key locks there are.
 const alertLockStripes = 64
 
+// newAlertLocks makes the in-process alert key stripes (Service.alertLocks).
+func newAlertLocks() [alertLockStripes]chan struct{} {
+	var l [alertLockStripes]chan struct{}
+	for i := range l {
+		l[i] = make(chan struct{}, 1)
+	}
+	return l
+}
+
 // lockAlertKey takes the lock on an alert index key, so two alerts with the
 // same key at once open one room: first this process's (striped) lock, then,
 // with a shared store, the cluster-wide one, so two replicas do not either.
+// The unlock releases them in reverse order. Waiting for either ends with ctx.
 // It returns a no-op unlock for no key.
 func (s *Service) lockAlertKey(ctx context.Context, indexKey string) (func(), error) {
 	if indexKey == "" {
@@ -1188,19 +1198,24 @@ func (s *Service) lockAlertKey(ctx context.Context, indexKey string) (func(), er
 	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(indexKey))
-	mu := &s.alertLocks[h.Sum32()%alertLockStripes]
-	mu.Lock()
+	sem := s.alertLocks[h.Sum32()%alertLockStripes]
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("room: lock alert key: %w", ctx.Err())
+	}
+	release := func() { <-sem }
 	if s.coord == nil {
-		return mu.Unlock, nil
+		return release, nil
 	}
 	unlock, err := s.coord.LockKey(ctx, "alert:"+indexKey)
 	if err != nil {
-		mu.Unlock()
+		release()
 		return nil, fmt.Errorf("room: lock alert key: %w", err)
 	}
 	return func() {
 		unlock()
-		mu.Unlock()
+		release()
 	}, nil
 }
 

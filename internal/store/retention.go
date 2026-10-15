@@ -232,6 +232,11 @@ func deleteRoomTx(ctx context.Context, tx pgx.Tx, id string) (PurgeResult, error
 	if _, err := tx.Exec(ctx, `DELETE FROM rooms WHERE id = $1`, id); err != nil {
 		return res, fmt.Errorf("store: purge %s: delete room: %w", id, err)
 	}
+	// Same transaction as the delete, so other replicas end this room's live
+	// subscriptions at once instead of at their next safety poll.
+	if _, err := tx.Exec(ctx, `SELECT pg_notify('room_events', $1)`, id+deleteNotifySuffix); err != nil {
+		return res, fmt.Errorf("store: purge %s: notify: %w", id, err)
+	}
 	return res, nil
 }
 

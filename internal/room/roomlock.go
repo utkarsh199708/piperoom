@@ -108,19 +108,6 @@ func (st *roomState) publish() {
 	st.pub.Store(&snap)
 }
 
-// rangeRooms calls fn for every cached room in turn, with that room's lock
-// held and never two at once. Rooms that leave the cache meanwhile are
-// skipped.
-func (s *Service) rangeRooms(fn func(roomID string, st *roomState)) {
-	for id, st := range s.cachedRooms() {
-		s.lockState(st)
-		if !st.gone {
-			fn(id, st)
-		}
-		s.unlockRoom(st)
-	}
-}
-
 // readRoom returns roomID's snapshot for a read. A cached room answers from
 // its published snapshot without waiting for any lock, so a slow command on
 // the room, or on another one, does not hold the read up; the result is shared
@@ -180,6 +167,21 @@ func (s *Service) loadRoom(ctx context.Context, roomID string, wait bool) (st *r
 		s.markListDirty(roomID)
 	}
 	return st, fresh, err
+}
+
+// awaitRoom is loadRoom with wait, for the passes that must see every room
+// (the open-room limit, shadow metrics): it waits for a load another caller
+// has in flight, bounded by ctx, and loads again when that caller went away
+// before its load finished. It takes no room lock, so it never waits behind
+// a command's I/O, only behind the room's read from the store.
+func (s *Service) awaitRoom(ctx context.Context, roomID string) (st *roomState, fresh bool, err error) {
+	for {
+		st, fresh, err = s.loadRoom(ctx, roomID, true)
+		if err != nil && ctx.Err() == nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			continue // the caller that ran the load went away; load again
+		}
+		return st, fresh, err
+	}
 }
 
 // buildRoom reads a room from the store: its row (a missing room is the 404

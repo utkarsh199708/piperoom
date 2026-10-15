@@ -2,7 +2,7 @@
 
 > **Status (lead, 2026-10-11 23:50 IST):** PR #10 round 2. **Corrections to the facts below:** on `main`
 > `PIPEROOM_HTTP_ADDR` defaults to `127.0.0.1:8090` (f65c3ba, not `:8090`); `a3/row-scope` is merged (a1ceb36);
-> A6's `UserSwitcher` dev-only gate is merged (ec6d9d8); `a5/room-service` has moved past 935f17d (round 3 in
+> A6's `UserSwitcher` dev-only gate is merged (ec6d9d8; the switcher was since removed, now `web/src/components/shell/AccountMenu.tsx`); `a5/room-service` has moved past 935f17d (round 3 in
 > progress) — cite main where possible. **Webhook design must use C5's names** (`Incoming.DeliveryID`,
 > `Incoming.DedupKey`, `Verify`, `DefaultAuth` in `internal/alertin`); Standard Webhooks only as an option.
 > Propose the secret config in `config.go` style, e.g. `PIPEROOM_WEBHOOK_SECRETS_<SOURCE>` (comma-separated,
@@ -115,7 +115,7 @@ Each doc is 150–300 lines (aim for about 220). Use these sections, in this ord
      `dev/owners.yaml` `layers:` map (used by `internal/owners`). Compare owners.yaml mapped to IdP identities with IdP groups. Note that `groups`
      is not a standard OIDC claim; it is provider-specific. Pick one source of truth.
    - **Dev mode.** Allow `X-User` / `?user=` only when an explicit dev flag is set **and** the listener is loopback. The server refuses to start otherwise.
-     The production web build leaves out `UserSwitcher` (`import.meta.env.DEV` is replaced at build time by Vite).
+     The production web build leaves out the dev user switch in `web/src/components/shell/AccountMenu.tsx` (`import.meta.env.DEV` is replaced at build time by Vite).
    - **Dev IdP for A1.** If you propose a dev IdP container, name its official image with a pinned tag that you checked on the registry.
      If you cannot check it, propose a fake IdP in Go tests (`httptest`) instead.
 2. `docs/design/webhook-auth.md` (F9).

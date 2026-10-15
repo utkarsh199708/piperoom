@@ -522,6 +522,25 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	})
 }
 
+// repairClosedRow closes the rooms row of a room the log says is closed when
+// the row still says open: the store.CloseRoom after room.closed failed
+// (afterAppend), and nothing else writes it. Retention picks closed rooms from
+// the rows, and lists and counts read them, so the row must follow the log.
+// The closed time is room.closed's own, the same on every replica, so any
+// replica may repair it and a repeat writes the same row (CloseRoom is a
+// plain UPDATE). Best effort: a failure is logged and the next load or
+// retention pass tries again.
+func (s *Service) repairClosedRow(ctx context.Context, row store.Room, snap *RoomSnapshot) {
+	if row.Status != "open" || snap.Status != "closed" || snap.ClosedAt == nil {
+		return
+	}
+	if err := s.store.CloseRoom(ctx, row.ID, snap.ClosedAt.UTC()); err != nil {
+		s.log.Warn("room: repair of a closed room's row failed", "room", row.ID, "err", err)
+		return
+	}
+	s.log.Info("room: repaired a closed room's row from the log", "room", row.ID)
+}
+
 // closeRoom closes an open room as actor. check runs under the room's lock
 // after the open check and returns the resolution to record, or an error that
 // stops the close. The driver's close and the open-room limit's close share

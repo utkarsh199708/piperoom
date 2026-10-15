@@ -265,8 +265,8 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		defer s.unlockRoom(st)
 		prow = p
-		if p.Status != "open" && p.Status != store.ProposalWithdrawn {
-			return alreadyDecided("proposal already decided")
+		if err := s.decisionLockedCheck(ctx, st, p); err != nil {
+			return err
 		}
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")
@@ -348,8 +348,8 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		return events.Event{}, err
 	}
 	defer s.unlockRoom(st)
-	if p.Status != "open" && p.Status != store.ProposalWithdrawn {
-		return events.Event{}, alreadyDecided("proposal already decided")
+	if err := s.decisionLockedCheck(ctx, st, p); err != nil {
+		return events.Event{}, err
 	}
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
@@ -389,6 +389,30 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	s.log.Info("room: rejection given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
 	s.afterAppend(p.RoomID, "set proposal rejected", s.store.SetProposalStatus(ctx, proposalID, "rejected"), "proposal", proposalID)
 	return ev, nil
+}
+
+// decisionLockedCheck refuses a decision on a proposal that is already
+// decided: by its row's status, or by the room log. The log is the record
+// (afterAppend): when a rejection was logged but its "rejected" status write
+// was lost, the row still says open, and without the log check a later
+// approval would be logged for a rejected proposal. The row is repaired then,
+// best effort; the refusal does not depend on it. Caller holds st's lock, so
+// the snapshot holds every event of the room this replica has folded. A
+// withdrawn row passes: the caller answers room_closed or proposal_withdrawn
+// for it (the store withdraws only an open row, so the log never rejected it).
+func (s *Service) decisionLockedCheck(ctx context.Context, st *roomState, p store.ProposalRow) error {
+	if p.Status != "open" && p.Status != store.ProposalWithdrawn {
+		return alreadyDecided("proposal already decided")
+	}
+	if !st.snap.rejected[p.ProposalID] {
+		return nil
+	}
+	if err := s.store.SetProposalStatus(ctx, p.ProposalID, "rejected"); err != nil {
+		s.log.Warn("room: repair of a rejected proposal's status failed", "room", p.RoomID, "proposal", p.ProposalID, "err", err)
+	} else {
+		s.log.Info("room: repaired a rejected proposal's status from the log", "room", p.RoomID, "proposal", p.ProposalID)
+	}
+	return alreadyDecided("proposal already decided")
 }
 
 // lockProposalRoom locks the room of a proposal for a decision on it. The row

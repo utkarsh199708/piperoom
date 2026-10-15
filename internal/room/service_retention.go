@@ -63,6 +63,7 @@ func (p RetentionPolicy) Off() bool {
 // second pass needs to skip nothing. Totals come back even when a pass fails;
 // the errors are joined.
 func (s *Service) PurgeByPolicy(ctx context.Context, now time.Time, p RetentionPolicy) (store.PurgeResult, error) {
+	s.reconcileClosedRows(ctx)
 	var (
 		total store.PurgeResult
 		errs  []error
@@ -106,8 +107,37 @@ func (s *Service) PurgeByPolicy(ctx context.Context, now time.Time, p RetentionP
 // every room behind it), and the others carry on. The returned error joins
 // every room's error; the next run tries the failed rooms again.
 func (s *Service) PurgeExpired(ctx context.Context, cutoff time.Time) (store.PurgeResult, error) {
+	s.reconcileClosedRows(ctx)
 	days := int((s.now().Sub(cutoff) + 12*time.Hour) / (24 * time.Hour))
 	return s.purge(ctx, store.PurgeQuery{Cutoff: cutoff, AuditReason: retentionReason(days)})
+}
+
+// reconcileClosedRows closes, before a retention pass, every rooms row that
+// says open while this replica's snapshot of the room (folded from the log)
+// says closed (repairClosedRow). Retention selects closed rooms from the rows,
+// so without it a room whose close write was lost would never be purged while
+// it stays cached here. A room not cached here is repaired when it is loaded.
+func (s *Service) reconcileClosedRows(ctx context.Context) {
+	if _, ok := s.store.(store.Purger); !ok {
+		return
+	}
+	rows, err := s.store.ListRooms(ctx)
+	if err != nil {
+		s.log.Warn("room: retention could not list rooms to reconcile closed rows", "err", err)
+		return
+	}
+	var pub map[string]*RoomSnapshot
+	for _, r := range rows {
+		if r.Status != "open" {
+			continue
+		}
+		if pub == nil {
+			pub = s.publishedRooms()
+		}
+		if snap := pub[r.ID]; snap != nil {
+			s.repairClosedRow(ctx, r, snap)
+		}
+	}
 }
 
 // retentionReason is room_deletions.reason of a retention purge.
