@@ -46,7 +46,18 @@ type fakeKafka struct {
 	lags      map[string]clients.GroupLag
 	offsets   map[string][]clients.PartitionOffsets
 	findByKey map[string][]clients.RecordRef
+	truncated map[string][]int32 // FindByKeyScan's Truncated per topic
 	err       map[string]error
+}
+
+// FindByKeyScan makes fakeKafka a clients.KeyScanReader: its scan is complete
+// unless truncated names partitions. noScanReport hides it.
+func (f *fakeKafka) FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (clients.KeyScan, error) {
+	refs, err := f.FindByKey(ctx, topic, key, since, maxScan)
+	if err != nil {
+		return clients.KeyScan{}, err
+	}
+	return clients.KeyScan{Refs: refs, Truncated: f.truncated[topic]}, nil
 }
 
 func (f *fakeKafka) Topics(context.Context) ([]string, error)         { return nil, nil }
@@ -667,6 +678,7 @@ func traceFactsOK() traceFacts {
 		topicFound:     true, topicOffset: 42, topicPartition: 0,
 		groupCommitted: 43,
 		sinkFound:      true,
+		scanReported:   true,
 	}
 }
 

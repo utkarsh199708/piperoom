@@ -157,7 +157,13 @@ func (s Scenario) validatePhases(toolInputs map[string][]string, actionNames []s
 			if !isAction[on.Action] {
 				errs = append(errs, fmt.Errorf("%s: on.action: unknown action %q", where, on.Action))
 			}
-			if j, ok := anyOK[anyKey]; ok {
+			// A from-less transition fires in every phase, so it shadows a
+			// later one with a from as well.
+			j, ok := anyOK[anyKey]
+			if !ok && t.From != "" {
+				j, ok = anyOK["|"+on.Action]
+			}
+			if ok {
 				shadowed = true
 				errs = append(errs, fmt.Errorf("%s: never fires: transitions[%d] matches %s with any outcome first", where, j, on.Action))
 			} else if on.OK == nil {
@@ -177,7 +183,13 @@ func (s Scenario) validatePhases(toolInputs map[string][]string, actionNames []s
 			errs = append(errs, fmt.Errorf("%s: on needs action or after_calls", where))
 		}
 		if k := t.onKey(); k != "" && !shadowed {
-			if j, dup := seen[k]; dup {
+			j, dup := seen[k]
+			if !dup && t.From != "" {
+				anyFrom := t
+				anyFrom.From = ""
+				j, dup = seen[anyFrom.onKey()]
+			}
+			if dup {
 				errs = append(errs, fmt.Errorf("%s: never fires: same trigger as transitions[%d] (%s)", where, j, k))
 			} else {
 				seen[k] = i

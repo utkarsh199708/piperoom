@@ -15,12 +15,22 @@ import (
 // tools find them with a type assertion, the same pattern as
 // PublicationTables.
 
+// walHead is the newest WAL position of the server: pg_current_wal_lsn() on a
+// primary, but that raises "recovery is in progress" on a hot standby, where
+// logical slots exist since PG 16 (#420). A standby holds WAL up to what it
+// has received (NULL without streaming, e.g. archive recovery) or replayed,
+// whichever is further; GREATEST skips the NULL. CASE evaluates only the
+// branch it takes, and these functions are volatile, so never folded early.
+const walHead = `CASE WHEN pg_is_in_recovery()
+		            THEN GREATEST(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())
+		            ELSE pg_current_wal_lsn() END`
+
 const slotColumns = `
 		SELECT slot_name, COALESCE(plugin, ''), active,
 		       COALESCE(restart_lsn::text, ''),
 		       COALESCE(confirmed_flush_lsn::text, ''),
 		       COALESCE(wal_status, ''),
-		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0),
+		       COALESCE(pg_wal_lsn_diff(` + walHead + `, restart_lsn)::bigint, 0),
 		       safe_wal_size
 		FROM pg_replication_slots`
 

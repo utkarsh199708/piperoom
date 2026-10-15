@@ -18,6 +18,15 @@
 // deployments should keep SF_CLIENT_CONFIG_FILE unset and not place
 // sf_client_config.json in the executable's or the home directory.
 //
+// Transport: the DSN protocol parameter must be https. A DSN with
+// protocol=http (or any other protocol) is refused, because the login, the
+// password or key-pair JWT and the session token would travel in clear text.
+// This covers the protocol parameter only: an http:// oauthTokenRequestUrl or
+// oauthAuthorizationUrl is still accepted today (follow-up #496). Values the DSN sets
+// explicitly (ocspFailOpen, disableOCSPChecks, certRevocationCheckMode) are
+// the operator's choice and are kept as parsed; disableOCSPChecks=true is
+// accepted but logged as a warning.
+//
 // TLS revocation (OCSP): gosnowflake v2.3.0 turned OCSP checking off by
 // default, which accepts a revoked Snowflake or proxy certificate. New opts
 // in to fail-open OCSP (as v1 did) unless the DSN sets ocspFailOpen,
@@ -30,6 +39,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -100,6 +111,15 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 	}
 	if cfg.ClientConfigFile != "" {
 		return nil, errors.New("snowflake: dsn parameter clientConfigFile is not allowed: it can raise the driver log level; refused as defence in depth (GO-2026-6665)")
+	}
+	// ParseDSN fills in "https" when the DSN has no protocol, so anything
+	// else was set on purpose. The message names the parameter, not its value
+	// or the DSN, which holds the password.
+	if !strings.EqualFold(cfg.Protocol, "https") {
+		return nil, errors.New("snowflake: dsn parameter protocol must be https: any other value sends the login, password or key-pair JWT and session token in clear text; refused")
+	}
+	if cfg.DisableOCSPChecks {
+		slog.Warn("snowflake: disableOCSPChecks=true in the DSN: certificate revocation is not checked, a revoked Snowflake or proxy certificate is accepted")
 	}
 	// gosnowflake v2.3.0 stopped checking certificate revocation unless asked
 	// (v1.19.1 and v2.2.0 defaulted to OCSP fail-open). Opt back in, but only
@@ -172,7 +192,11 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	q, err := rowSQL(table, pkColumn)
+	col, err := d.resolveKeyColumn(ctx, table, pkColumn)
+	if err != nil {
+		return nil, false, err
+	}
+	q, err := rowSQL(table, col)
 	if err != nil {
 		return nil, false, err
 	}
@@ -202,38 +226,96 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 		return nil, false, fmt.Errorf("snowflake: row from %s: decode: %w", table, err)
 	}
 
+	// Two columns that fold to one name (a table with both "id" and ID) keep
+	// their exact names, so neither value is lost.
+	folded := make(map[string]int, len(cols))
+	for _, name := range cols {
+		folded[strings.ToLower(name)]++
+	}
 	m := make(map[string]any, len(cols))
 	for i, name := range cols {
-		m[strings.ToLower(name)] = toJSON(vals[i])
+		if lower := strings.ToLower(name); folded[lower] == 1 {
+			name = lower
+		}
+		m[name] = toJSON(vals[i])
 	}
 	return m, true, nil
+}
+
+// resolveKeyColumn maps the key column a caller names to the column's exact
+// stored name, which Row then quotes as is. Callers pass the name in whatever
+// case they have: warehouse_row passes PrimaryKeyColumn's answer, the topology
+// trace passes the source Postgres key ("id") for the sink table. A name that
+// equals a declared key column exactly is used as is; otherwise one that
+// matches a single key column ignoring case is mapped to it, so "id" reaches
+// an unquoted ID key. A table without a declared key, or a name that is not
+// its key, keeps the old behaviour (fold to upper case, as for an unquoted
+// identifier) so lookups that worked before still do.
+func (d *DB) resolveKeyColumn(ctx context.Context, table, pkColumn string) (string, error) {
+	if _, err := validateIdent(pkColumn); err != nil {
+		return "", err
+	}
+	keys, err := d.primaryKeys(ctx, table)
+	if err != nil {
+		if errors.Is(err, clients.ErrNotFound) {
+			// Either no declared key or a missing table; the row query below
+			// reports a missing table itself.
+			return strings.ToUpper(pkColumn), nil
+		}
+		return "", err
+	}
+	var folded []string
+	for _, k := range keys {
+		if k == pkColumn {
+			return k, nil
+		}
+		if strings.EqualFold(k, pkColumn) {
+			folded = append(folded, k)
+		}
+	}
+	if len(folded) == 1 {
+		return folded[0], nil
+	}
+	return strings.ToUpper(pkColumn), nil
 }
 
 var _ clients.Warehouse = (*DB)(nil)
 
 // PrimaryKeyColumn returns the first primary key column of table
-// ("schema.table" or "db.schema.table"), lower-cased like Row's column names.
-// A table without a primary key is clients.ErrNotFound. warehouse_row uses it
-// to refuse lookups by any other column, which would make the tool an
-// existence oracle for personal data. Snowflake does not enforce primary
-// keys, but the declared key is what the pipeline owners maintain.
+// ("schema.table" or "db.schema.table"), spelled exactly as Snowflake stores
+// it: ID for a column created unquoted, id for one created as "id". Row
+// quotes that spelling as is, so the two never get mixed up. A table without
+// a primary key is clients.ErrNotFound. warehouse_row uses it to refuse
+// lookups by any other column, which would make the tool an existence oracle
+// for personal data. Snowflake does not enforce primary keys, but the
+// declared key is what the pipeline owners maintain.
 func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error) {
+	keys, err := d.primaryKeys(ctx, table)
+	if err != nil {
+		return "", err
+	}
+	return keys[0], nil
+}
+
+// primaryKeys returns the primary key columns of table in key order, with
+// their stored spelling. It never returns an empty slice without an error.
+func (d *DB) primaryKeys(ctx context.Context, table string) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
 	qualified, err := quoteTable(table)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	rows, err := d.query(ctx, "SHOW PRIMARY KEYS IN TABLE "+qualified)
 	if err != nil {
-		return "", wrapQueryErr("primary key of", table, err)
+		return nil, wrapQueryErr("primary key of", table, err)
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return "", fmt.Errorf("snowflake: primary key of %s: columns: %w", table, err)
+		return nil, fmt.Errorf("snowflake: primary key of %s: columns: %w", table, err)
 	}
 	nameIdx, seqIdx := -1, -1
 	for i, c := range cols {
@@ -245,10 +327,14 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 		}
 	}
 	if nameIdx < 0 || seqIdx < 0 {
-		return "", fmt.Errorf("snowflake: primary key of %s: SHOW PRIMARY KEYS result has no column_name/key_sequence (got %v)", table, cols)
+		return nil, fmt.Errorf("snowflake: primary key of %s: SHOW PRIMARY KEYS result has no column_name/key_sequence (got %v)", table, cols)
 	}
 
-	best, bestSeq := "", -1
+	type key struct {
+		name string
+		seq  int
+	}
+	var found []key
 	for rows.Next() {
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -256,21 +342,24 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return "", fmt.Errorf("snowflake: primary key of %s: decode: %w", table, err)
+			return nil, fmt.Errorf("snowflake: primary key of %s: decode: %w", table, err)
 		}
 		seq, err := strconv.Atoi(fmt.Sprint(vals[seqIdx]))
 		if err != nil {
-			return "", fmt.Errorf("snowflake: primary key of %s: key_sequence %v: %w", table, vals[seqIdx], err)
+			return nil, fmt.Errorf("snowflake: primary key of %s: key_sequence %v: %w", table, vals[seqIdx], err)
 		}
-		if name := fmt.Sprint(vals[nameIdx]); bestSeq < 0 || seq < bestSeq {
-			best, bestSeq = name, seq
-		}
+		found = append(found, key{fmt.Sprint(vals[nameIdx]), seq})
 	}
 	if err := rows.Err(); err != nil {
-		return "", wrapQueryErr("primary key of", table, err)
+		return nil, wrapQueryErr("primary key of", table, err)
 	}
-	if bestSeq < 0 {
-		return "", fmt.Errorf("snowflake: primary key of %s: table has no declared primary key (it may exist): %w", table, clients.ErrNotFound)
+	if len(found) == 0 {
+		return nil, fmt.Errorf("snowflake: primary key of %s: table has no declared primary key (it may exist): %w", table, clients.ErrNotFound)
 	}
-	return strings.ToLower(best), nil
+	sort.SliceStable(found, func(i, j int) bool { return found[i].seq < found[j].seq })
+	names := make([]string, len(found))
+	for i, k := range found {
+		names[i] = k.name
+	}
+	return names, nil
 }
