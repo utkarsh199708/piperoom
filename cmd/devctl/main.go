@@ -5,7 +5,7 @@
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
-//	devctl demo [--fix] <scenario>
+//	devctl demo [--fix] <scenario> | devctl demo --rehearse [scenario]
 //	devctl identities unbind <user>   move a user to a new IdP account
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
 //	devctl shadow up|down|status|env   Piperoom server in shadow mode (dev/shadow.md)
@@ -20,11 +20,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
+
+	"piperoom/internal/config"
 )
 
 const usage = `devctl — local pipeline control
@@ -38,6 +39,7 @@ const usage = `devctl — local pipeline control
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
   devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
+  devctl demo --rehearse    run the schema-change demo once against the server (reset, break, wait for room, reset)
   devctl lock --owner <tag> take the shared stack lock
   devctl unlock --owner <tag>  release the shared stack lock
   devctl lock status        show who holds the lock
@@ -53,7 +55,7 @@ scenarios: %s
 `
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log := newLogger(os.Stderr, config.Load())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
