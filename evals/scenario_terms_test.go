@@ -80,6 +80,53 @@ var scenarioTermCases = map[string][]termCase{
 		{id: "T21", text: "Postgres WAL retention deleted the segments before Debezium read them, so the re-pricing changes never left the source; raise max_slot_wal_keep_size."},
 		{id: "T22", text: "Someone reset order-sync to earliest, so it is replaying everything since the log start; retention deleted the pre-incident segments long ago, which is normal; the old row versions are replayed writes that will be overwritten as it catches up."},
 	},
+	// #362: the trap rows #341 changed, pinned with natural trap wordings
+	// (P*: the forbidden row must fire) and the correct wordings the old rows
+	// failed (C*: must still match).
+	"snapshot-stuck": {
+		{id: "P1", text: "The initial snapshot of public.orders is still running; the root cause is an inactive replication slot."},
+		{id: "P2", text: "The slot was inactive, so the initial snapshot is still running."},
+		{id: "P3", text: "The initial snapshot is still in progress. The slot appears inactive and holds WAL."},
+		{id: "P4", text: "The slot has become inactive so the initial snapshot cannot progress; it is still running."},
+	},
+	"broker-disk-notenoughreplicas": {
+		{id: "P1", text: "The broker disk is full, so the ISR shrank under min.insync.replicas; lower the topic's min.insync.replicas to 1."},
+		{id: "P2", text: "Broker 2's log dir is out of space and the ISR fell under min.insync.replicas; fix by lowering the min.insync.replicas to unblock writes."},
+		{id: "P3", text: "The disk is full on broker 2, so the ISR is under min.insync.replicas; set min.insync.replicas=1 until the disk is cleaned."},
+		{id: "C1", want: true, text: "Broker 2's log dir is full, so the ISR fell lower than min.insync.replicas=2 and producers get NotEnoughReplicas; free disk space on broker 2."},
+	},
+	"watcher-start": {
+		{id: "P1", text: "Postgres was restarted for maintenance and the slot has been lost."},
+		{id: "P2", text: "The primary rebooted and the slot got lost."},
+		{id: "P3", text: "Postgres restarted: slot lost."},
+		{id: "P4", text: "The database was restarted after a ddl statement changed the schema."},
+		{id: "P5", text: "The replication slot was lost when Postgres restarted for maintenance."},
+		{id: "C1", want: true, text: "Postgres was restarted for maintenance (administrator command, 57P01); nothing is lost."},
+		{id: "C2", want: true, text: "The primary rebooted for an upgrade; pg_recent_ddl shows nothing changed."},
+		// A comma after "is lost" ends the part: no "lost the slot" story.
+		{id: "C3", want: true, text: "Postgres was restarted for maintenance (administrator command, 57P01); nothing is lost, the slot is still there."},
+	},
+	"snowflake-sink-column-missing": {
+		{id: "P1", text: "The schema change was incompatible, so the Snowflake table is missing risk_score."},
+		{id: "P2", text: "The registry flagged risk_score as incompatible, and the table is missing the column."},
+		{id: "P3", text: "The schema change to risk_score is incompatible with the sink, which is missing the column."},
+		{id: "C1", want: true, text: "analytics.orders does not have the risk_score column the new records carry; there is nothing incompatible in the schema."},
+	},
+	"slot-inactive-wal-growth": {
+		{id: "P1", text: "pg-orders-connector task 0 failed and stopped, so slot debezium_orders is inactive and WAL is retained."},
+		{id: "P2", text: "A failed task stopped pg-orders-connector, so the slot is inactive and Postgres retains WAL."},
+		{id: "C1", want: true, text: "pg-orders-connector was stopped (0 failed tasks), so slot debezium_orders is inactive and Postgres retains 48.6 GiB of WAL; resume the connector."},
+	},
+	"avro-schema-id-deleted-sink-failed": {
+		{id: "P1", text: "The ADD COLUMN discount_code DDL broke Avro compatibility; schema id 7 was deleted from the registry."},
+		{id: "P2", text: "Schema id 7 was hard deleted from the registry subject; the discount_code DDL broke the sink."},
+		{id: "C1", want: true, text: "Schema id 7 (v3) was permanently deleted from the registry subject, so the sink cannot decode records written with it. The DDL broke nothing."},
+	},
+	"sink-connector-paused-warehouse-stale": {
+		{id: "P1", text: "The wh-orders-sink connector paused itself after write errors, so the warehouse is stale; it was not a manual pause for the migration."},
+		{id: "P2", text: "wh-orders-sink was paused after errors during the warehouse migration."},
+		{id: "C1", want: true, text: "Meera paused the wh-orders-sink connector on purpose for a migration, with 0 errors and no failed tasks; resume it when the migration is done."},
+	},
 }
 
 // scenarioTermShould are correct paraphrases the terms ideally accept. They

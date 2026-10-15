@@ -87,6 +87,7 @@ func TestForbiddenNegatedClauses(t *testing.T) {
 	pill := [][]string{{"poison pill"}}
 	reset := [][]string{{"reset*", "latest"}}
 	slot := [][]string{{"slot", "inactive"}}
+	lostSlot := [][]string{{"lost the slot"}}
 	tests := []struct {
 		rows [][]string
 		text string
@@ -128,6 +129,13 @@ func TestForbiddenNegatedClauses(t *testing.T) {
 		{slot, "The slot is not inactive.", false},
 		{pill, "X cannot be the cause, and a poison pill cannot be the cause either.", false},
 		{reset, "A reset to latest and a rewind are not options.", false},
+		// A row's terms must share one comma part after a predicate; a
+		// comma list or aside keeps them together.
+		{lostSlot, "Postgres was restarted; nothing is lost, the slot is still there.", false},
+		{slot, "The slot is fine, the consumer is inactive.", false},
+		{crash, "order-sync, the consumer and the registry all crashed.", true},
+		{crash, "The consumer, which many suspected, crashed.", true},
+		{crash, "The consumer crashed, then the slot filled up.", true},
 		// Unchanged from before #17.
 		{reset, "Do not reset the group to latest.", false},
 		{reset, "Resetting to latest is not an option.", false},
