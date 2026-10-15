@@ -12,6 +12,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
+	"piperoom/internal/watch"
 )
 
 // This file holds the room-service surface the built-in watcher (internal/watch)
@@ -196,9 +197,15 @@ func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evid
 	if !s.roomOpen(st) {
 		return roomClosed("room already closed")
 	}
+	// The note keeps the evidence's incident keys, so RoomSignalKeys can tell
+	// after a restart which signals the room carried (Q3, QA S1).
+	keys := watch.EvidenceKeys(evidence)
 	var payload any = events.AgentMessagePayload{Text: text}
+	if len(keys) > 0 {
+		payload = incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, SignalKeys: keys}
+	}
 	if newIncident {
-		in := incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, NewIncident: true}
+		in := incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, NewIncident: true, SignalKeys: keys}
 		if len(evidence) > 0 {
 			in.AgentText = agent.AlertEvidenceText(evidence)
 		}
@@ -238,6 +245,9 @@ type incidentNotePayload struct {
 	// AgentText is the evidence as the agent reads it
 	// (agent.AlertEvidenceText); "" means the note text.
 	AgentText string `json:"agent_text,omitempty"`
+	// SignalKeys are the incident keys of the note's watcher evidence
+	// (watch.EvidenceKeys), kept so RoomSignalKeys works from the log.
+	SignalKeys []string `json:"signal_keys,omitempty"`
 }
 
 // incidentInput is the agent input of a new-incident note, or nil for any
@@ -357,5 +367,52 @@ func countsAsActivity(e events.Event) bool {
 		p, ok := decode[events.AgentMessagePayload](e)
 		return ok && p.Text != restartNoticeText
 	}
+	return true
+}
+
+// RoomSignalKeys returns the incident keys a watcher room carried: the union
+// of watch.EvidenceKeys over room.created.alert of a watcher room and the
+// evidence of every watcher note, sorted and de-duplicated (watch.
+// ClosedRoomKeysSink). It reads the folded log, so it works for closed rooms
+// and after a restart; the fold is cached like any room's. ok is false when
+// the room is unknown or carries no keys.
+func (s *Service) RoomSignalKeys(roomID string) ([]string, bool) {
+	var keys []string
+	if !s.withRoomFacts(roomID, func(snap RoomSnapshot) { keys = append(keys, snap.facts.signalKeys...) }) {
+		return nil, false
+	}
+	return keys, len(keys) > 0
+}
+
+// RoomTitleFlags returns the room's title_flags: the injectscan kinds found in
+// its title (watch.RoomTitleFlagsSink). ok is false for an unknown room.
+func (s *Service) RoomTitleFlags(roomID string) ([]string, bool) {
+	flags := []string{}
+	if !s.withRoomFacts(roomID, func(snap RoomSnapshot) { flags = append(flags, snap.TitleFlags...) }) {
+		return nil, false
+	}
+	return flags, true
+}
+
+// withRoomFacts runs f on the room's folded snapshot under s.mu; false when
+// the room is unknown or cannot be read.
+func (s *Service) withRoomFacts(roomID string, f func(RoomSnapshot)) bool {
+	if roomID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
+	defer cancel()
+	s.syncRoom(ctx, roomID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.getStateLocked(ctx, roomID)
+	if err != nil {
+		var re *Error
+		if !errors.As(err, &re) && s.ctx.Err() == nil {
+			s.log.Warn("room: read room facts failed", "room", roomID, "err", err)
+		}
+		return false
+	}
+	f(st.snap)
 	return true
 }

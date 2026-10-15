@@ -163,3 +163,20 @@ func TestPagingSetup(t *testing.T) {
 		t.Fatalf("secret without URL: log %s", out)
 	}
 }
+
+func TestAdapterQ3Sinks(t *testing.T) {
+	svc := &fakeRoomSvc{keys: []string{"a", "b"}, keysOK: true, flags: []string{"instruction_override"}, flagsOK: true}
+	r := watchRooms{svc}
+	if k, ok := r.RoomSignalKeys("r_1"); !ok || len(k) != 2 || k[0] != "a" {
+		t.Fatalf("keys = %v %v", k, ok)
+	}
+	if f, ok := r.RoomTitleFlags("r_1"); !ok || len(f) != 1 {
+		t.Fatalf("flags = %v %v", f, ok)
+	}
+	if _, ok := r.RoomSignalKeys("r_2"); ok {
+		t.Fatal("unknown room: want ok false")
+	}
+	if _, ok := r.RoomTitleFlags("r_2"); ok {
+		t.Fatal("unknown room: want ok false")
+	}
+}

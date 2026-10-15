@@ -21,6 +21,9 @@ type meResponse struct {
 	Layers        []string `json:"layers"`
 	Role          string   `json:"role"`
 	GroupsMissing bool     `json:"groups_missing"`
+	// Groups are the caller's group names as the server knows them for layer
+	// checks (session groups for IdP users); [] when none, never null.
+	Groups []string `json:"groups"`
 	// Verified is true for a users.yaml person only (docs/design/auth.md
 	// section 2.1).
 	Verified bool `json:"verified"`
@@ -36,7 +39,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	writeJSON(w, http.StatusOK, meResponse{
 		ID: u.ID, Name: u.Name, Layers: s.svc.LayersFor(u), Role: roleFrom(r.Context()), GroupsMissing: u.GroupsMissing,
-		Verified: u.Verified, Solo: s.svc.IsSolo(u.ID), Admin: s.svc.IsAdmin(u),
+		Groups: append([]string{}, u.Groups...), Verified: u.Verified, Solo: s.svc.IsSolo(u.ID), Admin: s.svc.IsAdmin(u),
 	})
 }
 
