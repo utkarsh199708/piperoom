@@ -3,6 +3,7 @@ package dbtools
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"piperoom/internal/tools"
@@ -48,5 +49,37 @@ func TestPgRowRequiresThePrimaryKey(t *testing.T) {
 	src.pk, src.pkErr = "", errors.New("postgres: primary key of public.orders: no rows in result set")
 	if _, err := runTool(t, pg, `{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"7"}`); err == nil || src.rowCalls != 1 {
 		t.Fatalf("key lookup failed: err = %v, row calls %d; want an error and no read", err, src.rowCalls)
+	}
+}
+
+// A column is shown by value only when its name says timestamp AND its value
+// is one. A text column that merely ends in "_at" ("contact_at" holding a
+// phone number) is personal data, not a load time (QA sweep, PII in row
+// tools).
+func TestRowToolsShowOnlyTimeValues(t *testing.T) {
+	const phone = "+1 555 0100"
+	d := testDeps()
+	d.Src.(*fakeSource).rows["public.orders|7"]["contact_at"] = phone
+	d.Wh.(*fakeWarehouse).rows["analytics.orders|7"]["contact_at"] = phone
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	for name, in := range map[string]string{
+		"pg_row":        `{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"7"}`,
+		"warehouse_row": `{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"7"}`,
+	} {
+		tt, _ := reg.Get(name)
+		res, err := runTool(t, tt, in)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		data := res.Data.(map[string]any)
+		if strings.Contains(res.Summary, phone) || data["contact_at"] != nil {
+			t.Errorf("%s shows the text value of contact_at: summary %q data %v", name, res.Summary, data)
+		}
+		if data["updated_at"] != "2026-10-11T10:00:00Z" {
+			t.Errorf("%s: updated_at = %v, want the timestamp kept", name, data["updated_at"])
+		}
 	}
 }

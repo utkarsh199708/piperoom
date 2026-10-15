@@ -514,7 +514,7 @@ type pkColumner interface {
 func redactRow(row map[string]any, pkColumn string) map[string]any {
 	out := make(map[string]any, len(row))
 	for name, v := range row {
-		if name == pkColumn || isTimestampColumn(name) {
+		if name == pkColumn || isTimeColumn(name, v) {
 			out[name] = v
 		} else {
 			out[name] = nil
@@ -528,12 +528,12 @@ func redactRow(row map[string]any, pkColumn string) map[string]any {
 func rowSummary(row map[string]any, pkColumn string) string {
 	var sb strings.Builder
 	sb.WriteString("found: yes")
-	if ts := tsValue(row, "updated_at"); ts != "" {
+	if ts := tsValue(row, "updated_at"); ts != "" && isTimeColumn("updated_at", row["updated_at"]) {
 		sb.WriteString(", updated_at=" + ts)
 	}
 	parts := make([]string, 0, len(row))
 	for _, name := range sortedKeys(row) {
-		if name == pkColumn || isTimestampColumn(name) {
+		if name == pkColumn || isTimeColumn(name, row[name]) {
 			parts = append(parts, name+"="+fmt.Sprintf("%v", row[name]))
 		} else {
 			parts = append(parts, name)

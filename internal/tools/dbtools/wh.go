@@ -141,7 +141,7 @@ func warehouseRowTool(d Deps) tools.Tool {
 func redactWhRow(row map[string]any) map[string]any {
 	out := make(map[string]any, len(row))
 	for name, v := range row {
-		if isTimestampColumn(name) {
+		if isTimeColumn(name, v) {
 			out[name] = v
 		}
 	}
@@ -153,7 +153,7 @@ func whRowSummary(row map[string]any) string {
 	var sb strings.Builder
 	sb.WriteString("found: yes")
 	for _, name := range sortedKeys(row) {
-		if isTimestampColumn(name) {
+		if isTimeColumn(name, row[name]) {
 			sb.WriteString(", " + name + "=" + fmt.Sprintf("%v", row[name]))
 		}
 	}
