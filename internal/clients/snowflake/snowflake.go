@@ -21,8 +21,13 @@
 // Transport: the DSN protocol parameter must be https. A DSN with
 // protocol=http (or any other protocol) is refused, because the login, the
 // password or key-pair JWT and the session token would travel in clear text.
-// This covers the protocol parameter only: an http:// oauthTokenRequestUrl or
-// oauthAuthorizationUrl is still accepted today (follow-up #496). Values the DSN sets
+// The OAuth parameters oauthTokenRequestUrl and oauthAuthorizationUrl, when
+// set, must be absolute https URLs without userinfo: the token endpoint gets
+// the client secret and returns the access token, and the authorization URL
+// starts the login (#496). Left empty, the driver derives both from the
+// (https) account host. An Okta authenticator URL is already refused by the
+// driver unless it is https. oauthRedirectUri is not checked: its default is
+// a loopback http://127.0.0.1 listener, which never leaves the host. Values the DSN sets
 // explicitly (ocspFailOpen, disableOCSPChecks, certRevocationCheckMode) are
 // the operator's choice and are kept as parsed; disableOCSPChecks=true is
 // accepted but logged as a warning.
@@ -40,6 +45,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -118,6 +124,14 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 	if !strings.EqualFold(cfg.Protocol, "https") {
 		return nil, errors.New("snowflake: dsn parameter protocol must be https: any other value sends the login, password or key-pair JWT and session token in clear text; refused")
 	}
+	for _, p := range []struct{ name, value string }{
+		{"oauthTokenRequestUrl", cfg.OauthTokenRequestURL},
+		{"oauthAuthorizationUrl", cfg.OauthAuthorizationURL},
+	} {
+		if err := checkOAuthURL(p.name, p.value); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.DisableOCSPChecks {
 		slog.Warn("snowflake: disableOCSPChecks=true in the DSN: certificate revocation is not checked, a revoked Snowflake or proxy certificate is accepted")
 	}
@@ -131,6 +145,24 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 		cfg.OCSPFailOpen = gosnowflake.OCSPFailOpenTrue
 	}
 	return cfg, nil
+}
+
+// checkOAuthURL refuses a set OAuth endpoint that is not an absolute https
+// URL, or that carries userinfo. Empty means the driver default (the https
+// account host) and is allowed. The error names the parameter only: the URL
+// can hold credentials, and url.Parse errors quote the whole URL.
+func checkOAuthURL(param, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
+		return fmt.Errorf("snowflake: dsn parameter %s must be an absolute https URL: any other value sends the OAuth client secret or token in clear text; refused", param)
+	}
+	if u.User != nil {
+		return fmt.Errorf("snowflake: dsn parameter %s must not carry credentials in the URL (user:password@); refused", param)
+	}
+	return nil
 }
 
 // Close releases the underlying connection pool.

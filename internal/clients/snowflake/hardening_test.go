@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -307,17 +308,81 @@ func TestRowKeepsBothIdColumns(t *testing.T) {
 	}
 }
 
-// Known gap, pinned on purpose (follow-up #496, same on main): the https check
-// reads the protocol parameter only. An http:// OAuth URL is still accepted,
-// so the client secret would go to it in clear text. When #496 lands, flip
-// this test to expect a refusal.
-func TestHardenedConfigGapHTTPOAuthURLsAccepted(t *testing.T) {
-	cfg, err := hardenedConfig("user@acct/db/sch?warehouse=wh&authenticator=OAUTH_CLIENT_CREDENTIALS&oauthClientID=c&oauthClientSecret=s3cret" +
-		"&oauthTokenRequestUrl=http%3A%2F%2Fidp.example%2Ftoken&oauthAuthorizationUrl=http%3A%2F%2Fidp.example%2Fauth")
-	if err != nil {
-		t.Fatalf("hardenedConfig = %v; the gap changed, update this test and #496", err)
+// An OAuth token or authorization URL that is not https would send the client
+// secret and the access token in clear text (#496): each setting must be an
+// absolute https URL without userinfo, and the refusal names the setting but
+// never the URL, the client secret or the DSN password.
+func TestHardenedConfigOAuthURLsMustBeHTTPS(t *testing.T) {
+	const base = "user:s3cretpw@acct/db/sch?warehouse=wh&authenticator=OAUTH_CLIENT_CREDENTIALS&oauthClientId=c&oauthClientSecret=cl1entsecret"
+	secrets := []string{"s3cretpw", "cl1entsecret", "us3rinfopw", "idp.example", "acct"}
+	for _, param := range []string{"oauthTokenRequestUrl", "oauthAuthorizationUrl"} {
+		for _, tc := range []struct{ name, value, wantMsg string }{
+			{"http", "http://idp.example/oauth", "https"},
+			{"HTTP upper-case", "HTTP://idp.example/oauth", "https"},
+			{"ftp", "ftp://idp.example/oauth", "https"},
+			{"no scheme", "idp.example/oauth", "https"},
+			{"relative path", "/oauth/token", "https"},
+			{"https without host", "https:///oauth", "https"},
+			{"unparseable", "https://idp.example/%zz", "https"},
+			{"http with userinfo", "http://c:us3rinfopw@idp.example/oauth", "https"},
+			{"https with userinfo", "https://c:us3rinfopw@idp.example/oauth", "credentials"},
+		} {
+			t.Run(param+"/"+tc.name, func(t *testing.T) {
+				dsn := base + "&" + param + "=" + url.QueryEscape(tc.value)
+				cfg, err := hardenedConfig(dsn)
+				if err == nil {
+					t.Fatalf("hardenedConfig = %+v; want %s refused", cfg, param)
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, param) || !strings.Contains(msg, tc.wantMsg) {
+					t.Errorf("err = %q; want it to name %s and %q", msg, param, tc.wantMsg)
+				}
+				for _, s := range secrets {
+					if strings.Contains(msg, s) {
+						t.Errorf("err = %q leaks %q", msg, s)
+					}
+				}
+				_, err = New(context.Background(), dsn)
+				if err == nil || !strings.Contains(err.Error(), param) {
+					t.Fatalf("New err = %v; want the %s refusal", err, param)
+				}
+				for _, s := range secrets {
+					if strings.Contains(err.Error(), s) {
+						t.Errorf("New err = %q leaks %q", err, s)
+					}
+				}
+			})
+		}
+		t.Run(param+"/HTTPS upper-case accepted", func(t *testing.T) {
+			cfg, err := hardenedConfig(base + "&" + param + "=" + url.QueryEscape("HTTPS://idp.example/oauth"))
+			if err != nil {
+				t.Fatalf("hardenedConfig = %v; want HTTPS accepted", err)
+			}
+			got := cfg.OauthTokenRequestURL
+			if param == "oauthAuthorizationUrl" {
+				got = cfg.OauthAuthorizationURL
+			}
+			if !strings.EqualFold(got, "https://idp.example/oauth") {
+				t.Errorf("%s = %q; want the value kept", param, got)
+			}
+		})
 	}
-	if !strings.HasPrefix(cfg.OauthTokenRequestURL, "http://") || !strings.HasPrefix(cfg.OauthAuthorizationURL, "http://") {
-		t.Errorf("urls = %q, %q; want the http:// values kept (gap #496)", cfg.OauthTokenRequestURL, cfg.OauthAuthorizationURL)
+	// Both empty: the driver derives the endpoints from the https account
+	// host, so the default must stay accepted and unchanged.
+	cfg, err := hardenedConfig(base)
+	if err != nil {
+		t.Fatalf("hardenedConfig = %v; want the default accepted", err)
+	}
+	if cfg.OauthTokenRequestURL != "" || cfg.OauthAuthorizationURL != "" {
+		t.Errorf("urls = %q, %q; want both left empty", cfg.OauthTokenRequestURL, cfg.OauthAuthorizationURL)
+	}
+	// Both https and set together must pass; one bad one among them must not.
+	ok := "&oauthTokenRequestUrl=" + url.QueryEscape("https://idp.example/token") + "&oauthAuthorizationUrl=" + url.QueryEscape("https://idp.example/auth")
+	if _, err := hardenedConfig(base + ok); err != nil {
+		t.Errorf("hardenedConfig(both https) = %v; want ok", err)
+	}
+	mixed := "&oauthTokenRequestUrl=" + url.QueryEscape("https://idp.example/token") + "&oauthAuthorizationUrl=" + url.QueryEscape("http://idp.example/auth")
+	if _, err := hardenedConfig(base + mixed); err == nil || !strings.Contains(err.Error(), "oauthAuthorizationUrl") {
+		t.Errorf("hardenedConfig(mixed) = %v; want oauthAuthorizationUrl refused", err)
 	}
 }

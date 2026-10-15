@@ -27,8 +27,15 @@ startup, because the login, password or key-pair JWT and session token would tra
 text. Values the DSN sets explicitly (`ocspFailOpen`, `disableOCSPChecks`,
 `certRevocationCheckMode`) are the operator's choice and are kept as written. The client
 does not second-guess them, except that `disableOCSPChecks=true` logs a warning at startup
-(without the DSN). This checks the `protocol` parameter only; an `http://` `oauthTokenRequestUrl` or
-`oauthAuthorizationUrl` is not refused yet (#496). `tracing` and `clientConfigFile` are refused.
+(without the DSN). `tracing` and `clientConfigFile` are refused.
+
+The OAuth parameters `oauthTokenRequestUrl` and `oauthAuthorizationUrl`, when set, must be
+absolute `https://` URLs without credentials in them (`user:password@`); anything else is
+refused at startup (#496), because the token endpoint receives the client secret and returns
+the access token. The error names the parameter, never the URL. Left unset, the driver uses the
+account host over the (https) `protocol`. An Okta `authenticator` URL must be `https` too (the
+driver refuses it otherwise). `oauthRedirectUri` is not checked: its default is a loopback
+`http://127.0.0.1` listener on the local host.
 
 Always URL-encode the password (for example with `url.QueryEscape`). The driver
 unescapes it, so a raw `%` breaks it, a raw `+` turns into a space, and a raw `?`,
