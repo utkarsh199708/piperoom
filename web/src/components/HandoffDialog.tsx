@@ -1,13 +1,12 @@
 import { Loader2 } from 'lucide-react'
-import { HandoffChecks } from './room/HandoffChecks'
 import { useState } from 'react'
-import type { ComponentProps, FormEvent, KeyboardEvent, ReactNode } from 'react'
-import type { HandoffState, RoomState } from '../state/types'
+import type { FormEvent, KeyboardEvent } from 'react'
+import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canAcceptHandoff } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
-import { handoffFailureText, handoffInFlight } from '@/lib/handoff'
+import { handoffFailureText, handoffInFlight, shiftIndex } from '@/lib/handoff'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -20,28 +19,10 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { PersonSelect } from './PersonSelect'
 import { PersonName } from './VerifiedBadge'
+import { HandoffCard, HandoffSummary } from './room/HandoffCard'
 import { RoomDialogClose } from './room/RoomDialogClose'
 import { useNow } from './room/useNow'
 import { useRestoreFocus } from './room/useRestoreFocus'
-
-/** The handing-off driver as the badge reads it: server-set fields only. */
-type FromPerson = ComponentProps<typeof PersonName>['person']
-
-function SummaryList({ title, items }: { title: string; items: string[] }) {
-  if (!items || items.length === 0) return null
-  return (
-    <div className="flex flex-col gap-1">
-      <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
-      <ul className="m-0 flex list-disc flex-col gap-0.5 pl-5">
-        {items.map((it, i) => (
-          <li key={i} className="break-words">
-            {it}
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
 
 // A shadcn Dialog: Esc and the X close it, focus is trapped inside and goes back to
 // whatever opened it. The room screen mounts it only while it is open.
@@ -109,16 +90,19 @@ export function HandoffDialog({
         </DialogHeader>
 
         {pending ? (
-          <HandoffSummary summary={pending.summary}>
-            {state.status === 'open' && (
-              <Button type="button" variant="ghost" onClick={() => setRedoOf(pending.handoff_id)}>
-                Hand off to someone else
+          <div className="flex flex-col gap-3">
+            <HandoffSummary summary={pending.summary} />
+            <DialogFooter>
+              {state.status === 'open' && (
+                <Button type="button" variant="ghost" onClick={() => setRedoOf(pending.handoff_id)}>
+                  Hand off to someone else
+                </Button>
+              )}
+              <Button type="button" variant="secondary" onClick={onClose}>
+                Close
               </Button>
-            )}
-            <Button type="button" variant="secondary" onClick={onClose}>
-              Close
-            </Button>
-          </HandoffSummary>
+            </DialogFooter>
+          </div>
         ) : inFlight ? (
           <div role="status" className="flex flex-col gap-3">
             <p className="m-0 flex items-center gap-2 text-muted-foreground">
@@ -171,79 +155,14 @@ export function HandoffDialog({
   )
 }
 
-function HandoffSummary({ summary: s, children }: { summary: HandoffState['summary']; children: ReactNode }) {
-  return (
-    <div className="handoff__summary flex flex-col gap-3">
-      {s.what_broke && (
-        <div className="flex flex-col gap-1">
-          <h4 className="text-xs font-medium text-muted-foreground">What broke</h4>
-          <p className="m-0 break-words">{s.what_broke}</p>
-        </div>
-      )}
-      {s.why && (
-        <div className="flex flex-col gap-1">
-          <h4 className="text-xs font-medium text-muted-foreground">Why</h4>
-          <p className="m-0 break-words">{s.why}</p>
-        </div>
-      )}
-      <SummaryList title="Done" items={s.done} />
-      <SummaryList title="Ruled out" items={s.ruled_out} />
-      <SummaryList title="Still open" items={s.open} />
-      <SummaryList title="Risks" items={s.risks} />
-      <HandoffChecks summary={s} />
-      <DialogFooter>{children}</DialogFooter>
-    </div>
-  )
-}
-
-// What the receiver reads before taking over: the same summary the driver sees, with Accept next to it.
-function HandoffReceiveDialog({
-  handoff,
-  from,
-  onAccept,
-  onClose,
-}: {
-  handoff: HandoffState
-  from: FromPerson | null
-  onAccept: () => void
-  onClose: () => void
-}) {
-  const restoreFocus = useRestoreFocus()
-  return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent hideClose className="max-h-[85vh] overflow-y-auto" onCloseAutoFocus={restoreFocus}>
-        <RoomDialogClose label="Close hand-off summary" />
-        <DialogHeader>
-          <DialogTitle>
-            Hand-off from {from ? <PersonName person={from} /> : 'Someone'}
-          </DialogTitle>
-          <DialogDescription>
-            Read this before you accept. Accepting makes you the driver
-            {handoff.stay_as_watcher ? (
-              <>
-                ; {from ? <PersonName person={from} /> : 'Someone'} stays in the room as a watcher.
-              </>
-            ) : (
-              '.'
-            )}
-          </DialogDescription>
-        </DialogHeader>
-        <HandoffSummary summary={handoff.summary}>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Not yet
-          </Button>
-          <Button type="button" onClick={onAccept}>
-            Accept and take over
-          </Button>
-        </HandoffSummary>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-/** The banner's Read summary button: a toast action clicks it through RoomCommands.readHandoff. */
+/** The pending hand-off card: the attention toast's "Read summary" focuses it, which opens it. */
 export const HANDOFF_READ_ID = 'handoff-read'
 
+/**
+ * A pending hand-off under the banners. The recipient reads it inline, expanded, before accepting
+ * (no blind accept); everyone else sees it collapsed with "waiting for <name>". Once
+ * handoff.accepted arrives it leaves here for the pinned list.
+ */
 export function HandoffAcceptBanner({
   state,
   user,
@@ -253,34 +172,81 @@ export function HandoffAcceptBanner({
   user: CurrentUser
   actions: RoomActions
 }) {
-  const [reading, setReading] = useState(false)
   const mine = state.handoffs.find((h) => canAcceptHandoff(user, h))
-  if (!mine) return null
-  const fromPerson: FromPerson | null = state.driver ? { ...state.driver, kind: 'human' } : null
+  const pending = mine ?? state.handoffs.find((h) => h.status === 'pending')
+  // Keyed by id: a newer hand-off to me opens expanded again even after "Not yet".
+  const [closedId, setClosedId] = useState<string | null>(null)
+  // One accept per hand-off: the card stays until handoff.accepted arrives, and a second POST would
+  // answer 409 already_decided into the banner right after a good take-over. Cleared on failure.
+  const [acceptingId, setAcceptingId] = useState<string | null>(null)
+  if (!pending) return null
+  const open = mine ? closedId !== mine.handoff_id : undefined
+  const accepting = !!mine && acceptingId === mine.handoff_id
+  const accept = () => {
+    if (!mine || accepting) return
+    const id = mine.handoff_id
+    setAcceptingId(id)
+    const done = actions.acceptHandoff(id)
+    if (done) void done.then((ok) => !ok && setAcceptingId((cur) => (cur === id ? null : cur)))
+  }
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (mine && e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      if (!e.repeat) accept()
+    }
+  }
   return (
-    <div
-      role="status"
-      className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border bg-primary-subtle px-4 py-1.5 font-medium text-primary-fg sm:px-6"
-    >
-      <span>
-        {fromPerson ? <PersonName person={fromPerson} nameClassName="font-semibold" /> : <strong>Someone</strong>}{' '}
-        is handing the room to you.
-      </span>
-      {/* No blind accept: the only way to take over is through the summary dialog. */}
-      <Button id={HANDOFF_READ_ID} className="ml-auto h-7 px-2.5 coarse:h-11 coarse:px-4" onClick={() => setReading(true)}>
-        Read summary
-      </Button>
-      {reading && (
-        <HandoffReceiveDialog
-          handoff={mine}
-          from={fromPerson}
-          onAccept={() => {
-            setReading(false)
-            actions.acceptHandoff(mine.handoff_id)
-          }}
-          onClose={() => setReading(false)}
-        />
+    <>
+      {mine && (
+        <div
+          role="status"
+          className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border bg-primary-subtle px-4 py-1.5 font-medium text-primary-fg sm:px-6"
+        >
+          <span>
+            <PersonName person={mine.from} nameClassName="font-semibold" /> is handing the room to you — read the
+            summary below.
+          </span>
+        </div>
       )}
-    </div>
+      <div className="px-4 pt-3 sm:px-6" onKeyDown={onKeyDown}>
+        <HandoffCard
+          key={pending.handoff_id}
+          id={mine ? HANDOFF_READ_ID : undefined}
+          handoff={pending}
+          index={shiftIndex(state.handoffs, pending)}
+          from={pending.from}
+          createdAt={pending.created_at}
+          defaultOpen={false}
+          open={open}
+          onOpenChange={mine ? (o) => setClosedId(o ? null : mine.handoff_id) : undefined}
+          onFocusSelf={mine ? () => setClosedId(null) : undefined}
+          footer={
+            mine ? (
+              <>
+                {mine.stay_as_watcher && (
+                  <p className="m-0 mr-auto self-center text-xs text-muted-foreground">
+                    <PersonName person={mine.from} /> stays in the room as a watcher.
+                  </p>
+                )}
+                <Button type="button" variant="ghost" onClick={() => setClosedId(mine.handoff_id)}>
+                  Not yet
+                </Button>
+                <Button
+                  type="button"
+                  aria-keyshortcuts="Meta+Enter Control+Enter"
+                  disabled={accepting}
+                  aria-busy={accepting || undefined}
+                  onClick={accept}
+                >
+                  {accepting && <Loader2 className="animate-spin motion-reduce:animate-none" aria-hidden="true" />}
+                  Accept and take over
+                  <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
+                </Button>
+              </>
+            ) : undefined
+          }
+        />
+      </div>
+    </>
   )
 }

@@ -287,6 +287,21 @@ describe('exportRoom', () => {
   })
 })
 
+describe('api.postmortem (F2)', () => {
+  it('GETs postmortem.md asking for text/markdown and returns the text untouched', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('# Post-mortem: x\n', { status: 200, headers: { 'Content-Type': 'text/markdown' } }))
+    await expect(api.postmortem('r 1')).resolves.toBe('# Post-mortem: x\n')
+    expect(lastCall().url).toBe('/api/rooms/r%201/postmortem.md')
+    expect(lastCall().headers.get('Accept')).toBe('text/markdown')
+    expect(lastCall().init.credentials).toBe('same-origin')
+  })
+
+  it('throws ApiClientError with the server code', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { error: { code: 'not_found', message: 'no room' } }))
+    await expect(api.postmortem('r1')).rejects.toMatchObject({ status: 404, code: 'not_found' })
+  })
+})
+
 describe('directory routes (R0)', () => {
   it('authUsers GETs /auth/users and pipelines GETs /api/pipelines', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(200, [{ id: 'arjun', name: 'Arjun', layers: [] }]))
