@@ -6,7 +6,10 @@
 //    A 409 is never retried: the stale banner and toast tell the person, they look again.
 //  - `canDecideLayer` is the only gate for the buttons (plus "no hash" and "busy", which only
 //    switch them off). A viewer or a non-owner gets no buttons at all.
+import { PersonName } from '@/components/VerifiedBadge'
+import { neutralizeBadgeText, personVerification } from '@/lib/verification'
 import { useContext, useEffect, useId, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Ban, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
@@ -597,7 +600,7 @@ function LayerRow({
 
   const reasonText = decision?.outcome === 'rejected' ? decision.reason : undefined
   const decidedAt = decision?.at ? clockTime(decision.at) : ''
-  const decidedName = decision ? decision.by.name || decision.by.id : ''
+  const decidedName = decision ? neutralizeBadgeText(decision.by.name || decision.by.id) : ''
 
   return (
     <div
@@ -628,10 +631,11 @@ function LayerRow({
             {decision.identity && ` (${describeIdentity(decision.identity)})`}
             {reasonText ? `: ${reasonText}` : ''}
             {decidedAt && ` at ${decidedAt}`}
+            {personVerification(decision.by).state !== 'verified' && `. ${decision.by.id} is not verified`}
           </span>
           <span className="inline-flex min-w-0 items-center gap-2.5" aria-hidden="true">
             <PersonAvatar actor={{ id: decision.by.id, name: decidedName }} size={20} />
-            <span className="font-medium">{decidedName}</span>
+            <PersonName person={decision.by} name={decidedName} nameClassName="font-medium" />
             {decision.identity?.grant && (
               <span className="font-mono text-xs text-subtle-foreground">{decision.identity.grant}</span>
             )}
@@ -664,7 +668,7 @@ function LayerRow({
       ) : canDecide ? (
         <>
           <PersonAvatar actor={{ id: user.id, name: user.name }} size={20} />
-          <span className="font-medium">{user.name}</span>
+          <PersonName person={{ id: user.id, name: user.name, kind: 'human', verified: user.verified }} nameClassName="font-medium" />
           <span className="text-xs text-muted-foreground">you</span>
           {/* muted, not subtle: subtle text is 4.2:1 on the amber tint of this row */}
           <span className="font-mono text-xs text-muted-foreground">user:{user.id}</span>
@@ -792,14 +796,21 @@ function LayerRow({
   )
 }
 
-function latestDecision(proposal: ProposalState): string {
-  let best: { at: number; text: string } | null = null
+function latestDecision(proposal: ProposalState): ReactNode {
+  let best: { at: number; text: ReactNode } | null = null
   for (const [layer, d] of Object.entries(proposal.decisions ?? {})) {
     const at = d.at ? Date.parse(d.at) : NaN
     if (Number.isNaN(at) || (best && at <= best.at)) continue
-    best = { at, text: `${d.by.name || d.by.id} ${d.outcome} ${layer} ${timeAgo(d.at as string)}` }
+    best = {
+      at,
+      text: (
+        <span className="inline-flex flex-wrap items-center gap-x-1">
+          <PersonName person={d.by} /> {d.outcome} {layer} {timeAgo(d.at as string)}
+        </span>
+      ),
+    }
   }
-  return best?.text ?? ''
+  return best?.text ?? null
 }
 
 function Proposal({
@@ -878,7 +889,7 @@ function Proposal({
   const riskText = riskTextOf(proposal)
   const reasons = proposal.impact_reasons ?? []
   const withdrawn = proposal.status === 'withdrawn' ? proposal.withdrawn : undefined
-  const withdrawnBy = withdrawn?.by && withdrawn.by.kind !== 'system' ? withdrawn.by.name || withdrawn.by.id : ''
+  const withdrawnBy = withdrawn?.by && withdrawn.by.kind !== 'system' ? withdrawn.by : undefined
 
   return (
     // overflow-wrap:anywhere is inherited by every line of the card: an unbroken risk, rollback, description or
@@ -896,7 +907,11 @@ function Proposal({
           <span className="min-w-0 font-medium text-foreground">
             {withdrawn?.reason ? `Withdrawn — ${withdrawn.reason}` : 'Withdrawn'}
           </span>
-          {withdrawnBy && <span className="text-xs">by {withdrawnBy}</span>}
+          {withdrawnBy && (
+            <span className="inline-flex min-w-0 items-center gap-1 text-xs">
+              by <PersonName person={withdrawnBy} />
+            </span>
+          )}
           {withdrawn?.at && (
             <span className="text-xs">
               <Clock iso={withdrawn.at} />
@@ -1139,7 +1154,7 @@ export function ProposalsPanel({
   const proposals = state.proposals
   const nudge: CloseNudge = {
     roomOpen: state.status === 'open',
-    driverName: state.driver?.name,
+    driver: state.driver ?? undefined,
     isDriver: state.driver?.id === user.id,
     onClose: onCloseRoom,
   }

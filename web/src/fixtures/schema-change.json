@@ -19,7 +19,7 @@
       "room_id": "r_schema_change",
       "seq": 1,
       "type": "room.created",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun", "verified": true },
       "payload": { "title": "Warehouse orders stale", "severity": "sev2", "pipeline_id": "orders" },
       "at": "2026-10-11T10:00:00Z"
     },
@@ -27,15 +27,15 @@
       "room_id": "r_schema_change",
       "seq": 2,
       "type": "control.granted",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
-      "payload": { "to": { "kind": "human", "id": "arjun", "name": "Arjun" }, "lease_until": "2026-10-11T10:30:00Z" },
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun", "verified": true },
+      "payload": { "to": { "kind": "human", "id": "arjun", "name": "Arjun", "verified": true }, "lease_until": "2026-10-11T10:30:00Z" },
       "at": "2026-10-11T10:00:01Z"
     },
     {
       "room_id": "r_schema_change",
       "seq": 3,
       "type": "agent.status",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "state": "working", "detail": "step 1" },
       "at": "2026-10-11T10:00:02Z"
     },
@@ -43,7 +43,7 @@
       "room_id": "r_schema_change",
       "seq": 4,
       "type": "agent.step.started",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_1", "title": "Check the Debezium connector" },
       "at": "2026-10-11T10:00:03Z"
     },
@@ -51,7 +51,7 @@
       "room_id": "r_schema_change",
       "seq": 5,
       "type": "agent.tool_call",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_1", "tool_use_id": "tu_1", "tool": "connect_status", "input": { "connector": "pg-orders-connector" } },
       "at": "2026-10-11T10:00:04Z"
     },
@@ -59,7 +59,7 @@
       "room_id": "r_schema_change",
       "seq": 6,
       "type": "agent.tool_result",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "step_id": "s_1",
         "tool_use_id": "tu_1",
@@ -86,7 +86,7 @@
       "room_id": "r_schema_change",
       "seq": 7,
       "type": "agent.step.started",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_2", "title": "Inspect the Schema Registry subject" },
       "at": "2026-10-11T10:00:07Z"
     },
@@ -94,7 +94,7 @@
       "room_id": "r_schema_change",
       "seq": 8,
       "type": "agent.tool_call",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_2", "tool_use_id": "tu_2", "tool": "schema_registry_versions", "input": { "subject": "pg.public.orders-value" } },
       "at": "2026-10-11T10:00:08Z"
     },
@@ -102,7 +102,7 @@
       "room_id": "r_schema_change",
       "seq": 9,
       "type": "agent.tool_result",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "step_id": "s_2",
         "tool_use_id": "tu_2",
@@ -118,7 +118,7 @@
       "room_id": "r_schema_change",
       "seq": 10,
       "type": "agent.step.started",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_3", "title": "Diff the attempted schema against v1" },
       "at": "2026-10-11T10:00:10Z"
     },
@@ -126,7 +126,7 @@
       "room_id": "r_schema_change",
       "seq": 11,
       "type": "agent.tool_call",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "step_id": "s_3",
         "tool_use_id": "tu_3",
@@ -142,7 +142,7 @@
       "room_id": "r_schema_change",
       "seq": 12,
       "type": "agent.tool_result",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "step_id": "s_3",
         "tool_use_id": "tu_3",
@@ -163,7 +163,7 @@
       "room_id": "r_schema_change",
       "seq": 13,
       "type": "comment.added",
-      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true },
       "payload": { "comment_id": "c_1", "step_id": "s_1", "text": "Wrong service? I'd expect Connect to be down, not the schema.", "mentions_agent": false },
       "at": "2026-10-11T10:00:14Z"
     },
@@ -171,7 +171,7 @@
       "room_id": "r_schema_change",
       "seq": 14,
       "type": "agent.message",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "text": "Connect is up; task 0 is failed on a Schema Registry compatibility error.", "step_id": "s_2", "reply_to": "c_1" },
       "at": "2026-10-11T10:00:16Z"
     },
@@ -179,7 +179,7 @@
       "room_id": "r_schema_change",
       "seq": 15,
       "type": "steer.suggested",
-      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true },
       "payload": { "suggestion_id": "g_1", "text": "Check the connector config first, not the topic." },
       "at": "2026-10-11T10:00:18Z"
     },
@@ -187,7 +187,7 @@
       "room_id": "r_schema_change",
       "seq": 16,
       "type": "steer.sent",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun", "verified": true },
       "payload": { "suggestion_id": "g_1", "text": "Check the connector config first, not the topic." },
       "at": "2026-10-11T10:00:20Z"
     },
@@ -195,7 +195,7 @@
       "room_id": "r_schema_change",
       "seq": 17,
       "type": "agent.message",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "text": "Connector config is unchanged; the failure is the value schema subject.", "step_id": "s_1" },
       "at": "2026-10-11T10:00:23Z"
     },
@@ -203,7 +203,7 @@
       "room_id": "r_schema_change",
       "seq": 18,
       "type": "agent.step.started",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_4", "title": "Check consumer lag" },
       "at": "2026-10-11T10:00:25Z"
     },
@@ -211,7 +211,7 @@
       "room_id": "r_schema_change",
       "seq": 19,
       "type": "agent.tool_call",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_4", "tool_use_id": "tu_4", "tool": "kafka_consumer_lag", "input": { "group": "order-sync" } },
       "at": "2026-10-11T10:00:26Z"
     },
@@ -219,7 +219,7 @@
       "room_id": "r_schema_change",
       "seq": 20,
       "type": "agent.tool_result",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "step_id": "s_4",
         "tool_use_id": "tu_4",
@@ -235,7 +235,7 @@
       "room_id": "r_schema_change",
       "seq": 21,
       "type": "agent.step.started",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_5", "title": "Check the DDL log" },
       "at": "2026-10-11T10:00:29Z"
     },
@@ -243,7 +243,7 @@
       "room_id": "r_schema_change",
       "seq": 22,
       "type": "agent.tool_call",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "step_id": "s_5", "tool_use_id": "tu_5", "tool": "pg_recent_ddl", "input": { "since": "2026-10-11T09:00:00Z" } },
       "at": "2026-10-11T10:00:30Z"
     },
@@ -251,7 +251,7 @@
       "room_id": "r_schema_change",
       "seq": 23,
       "type": "agent.tool_result",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "step_id": "s_5",
         "tool_use_id": "tu_5",
@@ -275,7 +275,7 @@
       "room_id": "r_schema_change",
       "seq": 24,
       "type": "agent.hypothesis",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "text": "A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.",
         "based_on_steps": ["s_1", "s_3", "s_5"],
@@ -288,7 +288,7 @@
       "room_id": "r_schema_change",
       "seq": 25,
       "type": "proposal.created",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": {
         "proposal_id": "p_1",
         "title": "Set subject compatibility to NONE and restart the connector task",
@@ -317,7 +317,7 @@
       "room_id": "r_schema_change",
       "seq": 26,
       "type": "approval.given",
-      "actor": { "kind": "human", "id": "priya", "name": "Priya" },
+      "actor": { "kind": "human", "id": "priya", "name": "Priya", "verified": true },
       "payload": { "proposal_id": "p_1", "layer": "schema-registry", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b", "identity": { "iss": "https://idp.example.com", "sub": "priya", "method": "oidc", "grant": "user:priya" } },
       "at": "2026-10-11T10:01:10Z"
     },
@@ -325,7 +325,7 @@
       "room_id": "r_schema_change",
       "seq": 27,
       "type": "approval.given",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun", "verified": true },
       "payload": { "proposal_id": "p_1", "layer": "kafka-connect", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b", "identity": { "iss": "https://idp.example.com", "sub": "arjun", "method": "oidc", "grant": "backup:group:sre" } },
       "at": "2026-10-11T10:01:32Z"
     },
@@ -333,7 +333,7 @@
       "room_id": "r_schema_change",
       "seq": 28,
       "type": "action.executed",
-      "actor": { "kind": "system", "id": "executor", "name": "Executor" },
+      "actor": { "kind": "system", "id": "executor", "name": "Executor", "verified": true },
       "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "pg.public.orders-value compatibility BACKWARD → NONE", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b" },
       "at": "2026-10-11T10:01:34Z"
     },
@@ -341,7 +341,7 @@
       "room_id": "r_schema_change",
       "seq": 29,
       "type": "action.executed",
-      "actor": { "kind": "system", "id": "executor", "name": "Executor" },
+      "actor": { "kind": "system", "id": "executor", "name": "Executor", "verified": true },
       "payload": { "proposal_id": "p_1", "step_index": 1, "ok": true, "output": "restarted pg-orders-connector task 0 (RUNNING)", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b" },
       "at": "2026-10-11T10:01:36Z"
     },
@@ -349,7 +349,7 @@
       "room_id": "r_schema_change",
       "seq": 30,
       "type": "agent.status",
-      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent", "verified": true },
       "payload": { "state": "done", "detail": "fix applied" },
       "at": "2026-10-11T10:01:40Z"
     },
@@ -357,7 +357,7 @@
       "room_id": "r_schema_change",
       "seq": 31,
       "type": "trace.pinned",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun", "verified": true },
       "payload": {
         "table": "public.orders",
         "key": "10042",
@@ -375,10 +375,10 @@
       "room_id": "r_schema_change",
       "seq": 32,
       "type": "handoff.created",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun", "verified": true },
       "payload": {
         "handoff_id": "h_1",
-        "to": { "kind": "human", "id": "kabir", "name": "Kabir" },
+        "to": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true },
         "summary": {
           "what_broke": "Debezium task 0 failed after orders.amount was altered to numeric(12,2).",
           "why": "New schema is incompatible under BACKWARD compatibility for subject pg.public.orders-value.",
@@ -395,15 +395,15 @@
       "room_id": "r_schema_change",
       "seq": 33,
       "type": "control.granted",
-      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
-      "payload": { "to": { "kind": "human", "id": "kabir", "name": "Kabir" }, "lease_until": "2026-10-11T10:35:00Z" },
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true },
+      "payload": { "to": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true }, "lease_until": "2026-10-11T10:35:00Z" },
       "at": "2026-10-11T10:05:01Z"
     },
     {
       "room_id": "r_schema_change",
       "seq": 34,
       "type": "handoff.accepted",
-      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true },
       "payload": { "handoff_id": "h_1" },
       "at": "2026-10-11T10:05:02Z"
     },

@@ -1044,13 +1044,13 @@ func TestDataFlowMustBeVerifiedForRecovery(t *testing.T) {
 			msgs := messageTexts(sink)
 			assertVerdict(t, msgs, false)
 			var found bool
-			for _, m := range msgs {
-				if strings.Contains(m, c.wantMsg) {
+			for _, v := range verifications(t, sink) {
+				if strings.Contains(v.Verdict, c.wantMsg) || (v.DataFlow != nil && strings.Contains(v.DataFlow.Detail, c.wantMsg)) {
 					found = true
 				}
 			}
 			if !found {
-				t.Fatalf("expected %q in the verdict, got %q", c.wantMsg, msgs)
+				t.Fatalf("expected %q in the verdict or data-flow detail, got %+v", c.wantMsg, verifications(t, sink))
 			}
 		})
 	}

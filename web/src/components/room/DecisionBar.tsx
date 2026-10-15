@@ -8,6 +8,7 @@ import type { CurrentUser } from '@/state/permissions'
 import { decisionFor } from '@/lib/decision'
 import type { Decision } from '@/lib/decision'
 import { cn } from '@/lib/utils'
+import { PersonName } from '@/components/VerifiedBadge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
@@ -167,7 +168,13 @@ export function DecisionBar({
     case 'rejected': {
       const id = decision.proposal.proposal_id
       if (readDismissed(id, memory.current)) return null
-      text = <span aria-live="polite">{`Proposal rejected by ${decision.by}${decision.layer ? ` · ${decision.layer}` : ''}`}</span>
+      text = (
+        <span aria-live="polite" className="inline-flex flex-wrap items-center gap-x-1.5">
+          Proposal rejected by{' '}
+          {decision.byActor ? <PersonName person={decision.byActor} /> : decision.by}
+          {decision.layer ? ` · ${decision.layer}` : ''}
+        </span>
+      )
       actions = (
         <Button
           variant="ghost"

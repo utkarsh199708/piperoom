@@ -71,7 +71,7 @@ func ComputeParamsHash(roomID, proposalID, title, risk, rollback string, require
 }
 
 // checkParamsHash compares the hash an approver or rejecter echoed with the
-// proposal's own (design section 3.2). Caller holds s.mu.
+// proposal's own (design section 3.2). Caller holds the proposal's room's lock.
 //
 // Old data: a proposal created before auth PR 4 has no stored hash. Its params
 // are frozen, so the hash is computed now from the stored row and written back

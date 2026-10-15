@@ -22,7 +22,7 @@
     "status": "open",
     "opened_at": "2026-10-11T10:00:00Z",
     "last_seq": 34,
-    "driver": { "id": "kabir", "name": "Kabir", "lease_until": "2026-10-11T10:35:00Z" },
+    "driver": { "id": "kabir", "name": "Kabir", "verified": true, "lease_until": "2026-10-11T10:35:00Z" },
     "agent_status": { "state": "done", "detail": "fix applied" },
     "hypothesis": {
       "text": "A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.",
@@ -33,10 +33,10 @@
     "open_proposals": [],
     "pending_suggestions": [],
     "members": [
-      { "id": "kabir", "name": "Kabir", "role": "driver" },
-      { "id": "arjun", "name": "Arjun", "role": "watching" },
-      { "id": "priya", "name": "Priya", "role": "watching" },
-      { "id": "meera", "name": "Meera", "role": "watching" }
+      { "id": "kabir", "name": "Kabir", "verified": true, "role": "driver" },
+      { "id": "arjun", "name": "Arjun", "verified": true, "role": "watching" },
+      { "id": "priya", "name": "Priya", "verified": true, "role": "watching" },
+      { "id": "meera", "name": "Meera", "verified": true, "role": "watching" }
     ]
   },
   {
@@ -49,14 +49,14 @@
     "closed_at": "2026-10-10T10:03:00Z",
     "resolution": "Restarted devconsumer without --fail-on-id",
     "last_seq": 21,
-    "driver": { "id": "kabir", "name": "Kabir", "lease_until": "2026-10-10T09:42:00Z" },
+    "driver": { "id": "kabir", "name": "Kabir", "verified": true, "lease_until": "2026-10-10T09:42:00Z" },
     "agent_status": { "state": "done" },
     "hypothesis": null,
     "open_proposals": [],
     "pending_suggestions": [],
     "members": [
-      { "id": "kabir", "name": "Kabir", "role": "driver" },
-      { "id": "arjun", "name": "Arjun", "role": "watching" }
+      { "id": "kabir", "name": "Kabir", "verified": true, "role": "driver" },
+      { "id": "arjun", "name": "Arjun", "verified": true, "role": "watching" }
     ]
   }
 ]

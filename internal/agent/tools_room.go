@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
@@ -213,6 +214,7 @@ func (t *proposeFixTool) Kind() tools.Kind {
 func (t *proposeFixTool) Description() string {
 	var b strings.Builder
 	b.WriteString("Propose a fix as a sequence of write actions. Nothing runs until every required layer owner approves. ")
+	b.WriteString("Fix only the cause you established, with the smallest change; propose a resume or restart only after reads confirm nothing protective stopped it. ")
 	b.WriteString("Available actions, as name(param:type, ...) [layer]: explanation:\n")
 	acts := t.actionsList()
 	if len(acts) == 0 {
@@ -221,7 +223,7 @@ func (t *proposeFixTool) Description() string {
 	for _, a := range acts {
 		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), a.Layer(), a.Describe())
 	}
-	b.WriteString("steps is an array; each step has action, params and a short description. ")
+	b.WriteString("steps is an array; each step has action, params and a short description, and may have verify (at most 200 characters): what you will check after the step runs, for example \"task 0 RUNNING within 60 s\". ")
 	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
 	b.WriteString(`A param that is itself JSON, such as the Avro schema of schema_register, is escaped once more: "{\"subject\":\"orders-value\",\"schema\":\"{\\\"type\\\":\\\"string\\\"}\"}". `)
 	b.WriteString("A step with a wrong or missing param is refused and nothing is stored. ")
@@ -285,6 +287,7 @@ func (t *proposeFixTool) stepsItemSchema() map[string]any {
 		"action":      action,
 		"params":      map[string]any{"type": "string", "description": "params as JSON object text"},
 		"description": map[string]any{"type": "string", "description": "what this step does"},
+		"verify":      map[string]any{"type": "string", "description": "optional: what you will check after this step runs"},
 	}, "action", "params", "description")
 }
 
@@ -302,9 +305,13 @@ func (t *proposeFixTool) validationSchema() map[string]any {
 		"action":      map[string]any{"type": "string"},
 		"params":      map[string]any{},
 		"description": map[string]any{"type": "string"},
+		"verify":      map[string]any{"type": "string"},
 	}, "action", "params", "description")
 	return s
 }
+
+// maxStepVerifyChars caps ProposalStep.Verify (contract: 200 characters).
+const maxStepVerifyChars = 200
 
 type proposeFixInput struct {
 	Title string `json:"title"`
@@ -315,6 +322,7 @@ type proposeFixInput struct {
 		// callers that are not the model, such as replays, need no encoding.
 		Params      json.RawMessage `json:"params"`
 		Description string          `json:"description"`
+		Verify      string          `json:"verify"`
 	} `json:"steps"`
 	Risk     string `json:"risk"`
 	Rollback string `json:"rollback"`
@@ -428,7 +436,7 @@ func NewProposeFixTool(reg *actions.Registry, proposals Proposals) tools.Tool {
 // no unknown fields), then the action's own Validate. None of it stores
 // anything. The schema check runs first because it names the bad field, which
 // the action's Validate usually does not.
-func (t *proposeFixTool) checkStep(i int, action string, rawParams json.RawMessage) (actions.Action, json.RawMessage, error) {
+func (t *proposeFixTool) checkStep(ctx context.Context, i int, action string, rawParams json.RawMessage) (actions.Action, json.RawMessage, error) {
 	if t.actions == nil {
 		return nil, nil, fmt.Errorf("agent: no actions are available")
 	}
@@ -447,7 +455,7 @@ func (t *proposeFixTool) checkStep(i int, action string, rawParams json.RawMessa
 			return nil, nil, fmt.Errorf("%w: step %d (%s): params: %v", tools.ErrBadInput, i+1, action, err)
 		}
 	}
-	if err := a.Validate(params); err != nil {
+	if err := a.Validate(ctx, params); err != nil {
 		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
 	}
 	return a, params, nil
@@ -571,16 +579,21 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	seenLayers := map[string]bool{}
 	var layers []string
 	for i, s := range in.Steps {
-		a, params, err := t.checkStep(i, s.Action, s.Params)
+		a, params, err := t.checkStep(ctx, i, s.Action, s.Params)
 		if err != nil {
 			return tools.Result{}, err
 		}
 		layer := a.Layer()
+		verify := strings.TrimSpace(s.Verify)
+		if n := utf8.RuneCountInString(verify); n > maxStepVerifyChars {
+			return tools.Result{}, fmt.Errorf("%w: step %d: verify is %d characters; the limit is %d", tools.ErrBadInput, i+1, n, maxStepVerifyChars)
+		}
 		steps = append(steps, events.ProposalStep{
 			Action:      s.Action,
 			Layer:       layer,
 			Params:      params,
 			Description: s.Description,
+			Verify:      verify,
 		})
 		if !seenLayers[layer] {
 			seenLayers[layer] = true

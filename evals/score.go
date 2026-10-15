@@ -1,9 +1,11 @@
 package evals
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -73,6 +75,14 @@ type RunResult struct {
 	HedgedOn        string `json:"hedged_on,omitempty"`
 	FinalHypothesis string `json:"final_hypothesis,omitempty"`
 	Confidence      string `json:"confidence,omitempty"`
+	// ProposedActions are the actions of every proposed step, sorted. The
+	// failed-runs section of the markdown report prints them so a CI log shows
+	// what a failing run proposed.
+	ProposedActions []string `json:"proposed_actions,omitempty"`
+	// MissingCauseGroups says which expect.root_cause groups the final
+	// hypothesis did not match ("group 2: [missing, gone]", 1-based), for a
+	// diagnose run that missed the root cause.
+	MissingCauseGroups []string `json:"missing_cause_groups,omitempty"`
 	// ToolCallsToRootCause is how many read-tool calls the agent made before
 	// its first hypothesis that matched; -1 when none did.
 	ToolCallsToRootCause int `json:"tool_calls_to_root_cause"`
@@ -318,6 +328,13 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		if proposed[a] || tried[a] {
 			res.ForbiddenProposed = append(res.ForbiddenProposed, a)
 		}
+	}
+	for a := range proposed {
+		res.ProposedActions = append(res.ProposedActions, a)
+	}
+	sort.Strings(res.ProposedActions)
+	if last != nil {
+		res.MissingCauseGroups = missingCauseGroups(sc.Expect, last.Text)
 	}
 	res.BadSteps = checkSteps(sc, propSteps)
 	res.FixOK = res.FixExpected && matchActionGroups(sc.Expect.Fix, proposed)
@@ -616,6 +633,18 @@ func negated(toks []string) bool {
 // rootCauseMatches is the deterministic root-cause verdict for one text: the
 // expected terms are all there, no forbidden story is told, and the text does
 // not hedge between causes (hedge.go).
+// missingCauseGroups lists the expect.root_cause groups that text does not
+// match on their own, 1-based, as "group N: [terms]".
+func missingCauseGroups(e Expect, text string) []string {
+	var out []string
+	for i, g := range e.RootCause {
+		if !matchGroups([][]string{g}, text) {
+			out = append(out, fmt.Sprintf("group %d: [%s]", i+1, strings.Join(g, ", ")))
+		}
+	}
+	return out
+}
+
 func rootCauseMatches(e Expect, text string) bool {
 	if _, h := causeHedge(text); h {
 		return false
@@ -743,7 +772,9 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 			bad = append(bad, fmt.Sprintf("step %d: unknown action %q", i, st.Action))
 			continue
 		}
-		if err := a.Validate(st.Params); err != nil {
+		// Judge is pure scoring with no caller context to inherit, and Validate
+		// runs against recorded resources; its own deadline bounds it.
+		if err := a.Validate(context.Background(), st.Params); err != nil {
 			bad = append(bad, fmt.Sprintf("step %d (%s): %v", i, st.Action, err))
 			continue
 		}

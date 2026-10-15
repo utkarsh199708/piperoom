@@ -35,7 +35,7 @@ describe('hand-off summary step links', () => {
     const me: CurrentUser = { id: 'priya', name: 'Priya', layers: [] }
     render(<HandoffAcceptBanner state={state} user={me} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
-    const dialog = screen.getByRole('dialog', { name: 'Hand-off from Arjun' })
+    const dialog = screen.getByRole('dialog', { name: /^Hand-off from Arjun/ })
     expect(within(dialog).getByRole('link', { name: 'step 1' })).toHaveAttribute('href', `#step-${STEP}`)
   })
 })

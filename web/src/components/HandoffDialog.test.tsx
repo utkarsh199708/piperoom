@@ -114,6 +114,36 @@ describe('HandoffDialog as a dialog', () => {
   })
 })
 
+describe('hand-off names carry the server badge', () => {
+  const badges = (root: HTMLElement) =>
+    Array.from(root.querySelectorAll<HTMLElement>('[data-slot="verified-badge"]')).map((b) => b.dataset.verification)
+
+  it('"Summary prepared for" shows the recipient’s badge; a spoofed name gets the id', () => {
+    const spoof: HandoffState = { ...pendingHandoff, to: { kind: 'human', id: 'u_7', name: 'Priya ✓' } }
+    render(<HandoffDialog state={{ ...emptyRoomState('r1'), handoffs: [spoof] }} user={user} actions={actions} onClose={() => {}} />)
+    const desc = screen.getByText(/Summary prepared for/)
+    expect(badges(desc)).toEqual(['unverified'])
+    expect(desc).toHaveTextContent('(u_7)')
+    expect(desc).not.toHaveTextContent('✓')
+  })
+
+  it('a verified recipient gets the verified badge', () => {
+    const ok: HandoffState = { ...pendingHandoff, to: { kind: 'human', id: 'priya', name: 'Priya', verified: true } }
+    render(<HandoffDialog state={{ ...emptyRoomState('r1'), handoffs: [ok] }} user={user} actions={actions} onClose={() => {}} />)
+    expect(badges(screen.getByText(/Summary prepared for/))).toEqual(['verified'])
+  })
+
+  it('the accept banner shows the handing-off driver’s badge', () => {
+    const toMe: HandoffState = { ...pendingHandoff, to: { kind: 'human', id: 'arjun', name: 'Arjun', verified: true } }
+    const state = { ...emptyRoomState('r1'), handoffs: [toMe], driver: { id: 'u_3', name: 'Kabir verified' } }
+    render(<HandoffAcceptBanner state={state} user={user} actions={actions} />)
+    const banner = screen.getByRole('status')
+    expect(badges(banner)).toEqual(['unverified'])
+    expect(banner).toHaveTextContent('(u_3)')
+    expect(banner).toHaveTextContent('is handing the room to you.')
+  })
+})
+
 describe('hand-off in flight (R0 handoff.requested)', () => {
   const requested = {
     request_id: 'hr_1',
@@ -126,7 +156,7 @@ describe('hand-off in flight (R0 handoff.requested)', () => {
     const state = { ...emptyRoomState('r1'), handoff_request: requested }
     render(<HandoffDialog state={state} user={user} actions={actions} onClose={() => {}} />)
     expect(screen.getByRole('status')).toHaveTextContent('Writing the hand-off summary')
-    expect(screen.getByText('The agent is writing the summary for Priya.')).toBeInTheDocument()
+    expect(screen.getByText(/The agent is writing the summary for/)).toHaveTextContent('Priya')
     expect(screen.queryByRole('button', { name: /Start hand-off/ })).not.toBeInTheDocument()
   })
 
@@ -160,9 +190,9 @@ describe('the receiver reads the summary before accepting', () => {
     // The banner has no one-click Accept: the summary comes first.
     expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
-    const dialog = screen.getByRole('dialog', { name: 'Hand-off from Arjun' })
+    const dialog = screen.getByRole('dialog', { name: /^Hand-off from Arjun/ })
     expect(within(dialog).getByText(/Consumer lag spiked/)).toBeInTheDocument()
-    expect(dialog).toHaveTextContent('Arjun stays in the room as a watcher')
+    expect(dialog).toHaveTextContent(/Arjun.*stays in the room as a watcher/)
     fireEvent.click(within(dialog).getByRole('button', { name: 'Not yet' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(accept).not.toHaveBeenCalled()

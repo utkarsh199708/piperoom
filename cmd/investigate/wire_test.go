@@ -15,6 +15,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/wiring"
 )
@@ -130,7 +131,7 @@ func testOwners() *owners.Owners {
 func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) {
 	t.Helper()
 	f := newFakeClients()
-	reg := tools.NewRegistry()
+	reg := tools.NewReadOnlyRegistry()
 	areg := actions.NewRegistry()
 	w := &wiring.Wired{
 		Source:    f,
@@ -285,6 +286,10 @@ func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
 	for _, a := range areg.All() {
 		available[a.Name()] = true
 	}
+
+	// similar_incidents exists only when the room service gives wiring a room
+	// store (internal/wiring pins that); the prompt may name it.
+	available[similarincidents.ToolName] = true
 
 	names := agent.PromptToolNames()
 	if len(names) == 0 {

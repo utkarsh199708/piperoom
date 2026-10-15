@@ -79,7 +79,7 @@ func scriptedRunner(script []step) agent.Runner {
 				valid := true
 				for _, st := range s.proposal.Steps {
 					a, ok := d.Actions.Get(st.Action)
-					if !ok || a.Validate(st.Params) != nil {
+					if !ok || a.Validate(ctx, st.Params) != nil {
 						valid = false
 						break
 					}

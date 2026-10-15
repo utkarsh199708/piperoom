@@ -13,11 +13,45 @@
 //
 // Passwords and short values keep no characters at all.
 //
-// Known gaps: a URL password holding a raw '@' or '/' (postgres://app:p@ss@db)
-// is not found, since the URL no longer parses one way; a bare key=value
-// password containing spaces is masked only up to its first space; JAAS
-// configs escaped twice (\\\"...\\\", JSON inside JSON inside JSON) are not
-// matched by the key=value rule.
+// Values that run past a line break are followed onto the next lines. A
+// quoted value continued with a backslash runs to its closing quote; one
+// without runs to its closing quote when that quote ends the value (end of
+// line, blank, or , ; } ] )) within four lines. A bare value runs into the
+// next line's first token when the previous line ended in a backslash, or
+// when that token reads like a credential's tail and is not followed by
+// more words. A value ending in "…" was truncated and is not followed. A URL
+// password may hold a raw '@' or '/', and a URL user one '@' (user@server);
+// a key/value pair may be URL-encoded once or twice (password%3D...,
+// %22password%22%3A%22...%22, password+%3D+...); quotes may carry up to three
+// backslashes (two JSON levels). In Kafka Connect's REST form
+// {"name":"database.password","value":"..."} the sibling name is the key.
+//
+// Known gaps (most also leak without the rules above):
+//   - an unquoted password with spaces is masked only up to its first
+//     space ("password=a b" reads the same as "password=a retries=3"); a
+//     bare password holding ; , ) or a backslash ends there too;
+//   - a wrapped tail stays when it is indented, a plain word, a number,
+//     hex digits and dashes, starts with - / . @ # or a bracket, holds ':'
+//     or '@', is followed by more words on its line, or is one byte long; an
+//     unquoted value is followed for one line only (backslash continuations
+//     chain); a weak-key token (token=, session=) under 12 characters split
+//     across lines is not seen as random;
+//   - a value that starts on the next line (password=\n..., YAML
+//     "password:\n  ..." or ">-") is not followed;
+//   - an unclosed quoted value is followed onto the next line only when its
+//     own line holds an odd number of that quote, and not past a lone CR;
+//   - quotes with more than three backslashes, and \\" or \\\' forms;
+//   - an encoded '&' (%26) inside a URL-encoded password ends it there;
+//   - a URL password holding '@' then '?' or '#', or an all-digit segment
+//     before a '/' (postgres://app:2024/Spring7x@db/..., read as a port);
+//   - key names longer than 64 characters
+//     (io.confluent.connect.jdbc.sink.JdbcSinkConnectorConfig.conn.password=);
+//   - a Bearer token split across a line; .pgpass lines
+//     (host:5432:db:user:secret); a CLI password glued to its flag
+//     (mysql -pSecret);
+//   - over-masking, not leaks: a URL whose path holds "@host" may lose the
+//     host to the mask, and a wrapped tail such as orders_v2 after a
+//     password line is masked although it is evidence.
 package redact
 
 import (
@@ -201,6 +235,7 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	lower := asciiLower(s)
 	var b strings.Builder
 	changed := false
+	var open openValue
 	for start := 0; start <= len(s); {
 		end := strings.IndexByte(s[start:], '\n')
 		if end < 0 {
@@ -208,9 +243,37 @@ func (r *Redactor) scan(s string) (string, Stats) {
 		} else {
 			end += start
 		}
-		line := s[start:end]
-		out := r.lineFixed(line, lower[start:end], &st)
-		if out != line && !changed {
+		line, lowerLine := s[start:end], lower[start:end]
+		if open.ok {
+			// The previous line left a secret value open: mask its tail here
+			// first, then run the line rules over the result.
+			line, open = continuation(line, open, &st)
+			if line != s[start:end] {
+				lowerLine = asciiLower(line)
+			}
+		}
+		next := s[min(len(s), end+1):min(len(s), end+1+128)]
+		if end < len(s) {
+			if from := openFrom(line, next); from >= 0 && kvPre(line[from:], lowerLine[from:]) {
+				open = openAtEOL(line[from:], lowerLine[from:], open)
+			}
+		}
+		out := r.lineFixed(line, lowerLine, &st)
+		// A rule may mask a token that had swallowed a later key; that key's
+		// value is then open only in the output, and a second pass would
+		// follow it. Decide on the output too, so one pass is enough.
+		if end < len(s) && !open.ok && out != line {
+			if from := openFrom(out, next); from >= 0 {
+				lo := asciiLower(out[from:])
+				if kvPre(out[from:], lo) {
+					open = openAtEOL(out[from:], lo, open)
+				}
+			}
+		}
+		if end < len(s) {
+			open = lookAhead(open, s[end+1:])
+		}
+		if out != s[start:end] && !changed {
 			changed = true
 			b.Grow(len(s) + 64)
 			b.WriteString(s[:start])

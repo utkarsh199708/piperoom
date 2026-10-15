@@ -344,7 +344,24 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 }
 
 func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
+	subset := f.only != ""
+	total := 0
+	if subset {
+		// A -only run is a subset of the baseline: compare only what ran, or
+		// every unselected scenario reads as "missing from candidate".
+		// Selected scenarios stay in the candidate even with no runs, so one
+		// that failed to run is still a regression.
+		names := make([]string, 0, len(cand.Scenarios))
+		for _, s := range cand.Scenarios {
+			names = append(names, s.Name)
+		}
+		total = len(base.Scenarios)
+		base = base.Restrict(names)
+	}
 	c := evals.Compare(base, cand, f.tolerance)
+	if subset {
+		c.Notes = append(c.Notes, fmt.Sprintf("-only run: compared %d of %d baseline scenarios; OVERALL is over the same subset", len(base.Scenarios), total))
+	}
 	if err := c.WriteMarkdown(stdout); err != nil {
 		return 1, err
 	}

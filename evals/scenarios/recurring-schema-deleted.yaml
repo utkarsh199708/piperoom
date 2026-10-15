@@ -206,6 +206,22 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: kafka_partition_rates
+    summary: |-
+      pg.public.orders last 5m: 15000 records (50/s); p2 5082 (33%), p1 5070, p0 4848; median 5070, max 5082, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 45000 records (50/s); p2 15246 (33%), p1 15210, p0 14544; median 15210, max 15246, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "30m"}
+    summary: |-
+      pg.public.orders last 30m: 90000 records (50/s); p2 30492 (33%), p1 30420, p0 29088; median 30420, max 30492, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 180000 records (50/s); p2 60984 (33%), p1 60840, p0 58176; median 60840, max 60984, max/median 1.0x → even
 
 inputs:
   - kind: comment

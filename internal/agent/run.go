@@ -16,7 +16,6 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/events"
-	"piperoom/internal/jsonnum"
 	"piperoom/internal/tools"
 )
 
@@ -136,6 +135,9 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	opts = opts.withDefaults()
 	if deps.Tools == nil {
 		return nil, errors.New("agent: Deps.Tools is nil")
+	}
+	if err := checkReadOnly(deps.Tools); err != nil {
+		return nil, err
 	}
 	if deps.Sink == nil {
 		return nil, errors.New("agent: Deps.Sink is nil")
@@ -600,20 +602,36 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 // be lost. Such numbers are written as strings holding their exact text, so the
 // event is kept and the value is still readable. The model never sees this
 // data; it reads the summary.
-func (r *runner) toolDataJSON(tool string, v any) json.RawMessage {
+func (r *runner) toolDataJSON(tool string, v any) (json.RawMessage, bool) {
 	if v == nil {
-		return nil
+		return nil, false
 	}
-	b, err := json.Marshal(v)
+	raw, n, err := encodeToolData(v)
 	if err != nil {
 		r.log.Warn("agent: tool data marshal failed", "tool", tool, "err", err)
-		return nil
+		return nil, false
 	}
-	out, n := jsonnum.Quote(b)
 	if n > 0 {
 		r.log.Warn("agent: tool data had numbers outside the double range; kept them as strings", "tool", tool, "count", n)
 	}
-	return out
+	out, cut := events.TruncateData(raw, r.maxToolData())
+	if cut {
+		r.log.Info("agent: tool data over cap; sent a preview", "tool", tool, "original_bytes", len(raw))
+	}
+	return out, cut
+}
+
+// defaultMaxToolDataBytes is the room's PIPEROOM_EVENT_MAX_DATA_BYTES default,
+// used when Options.MaxToolDataBytes is unset.
+const defaultMaxToolDataBytes = 64 << 10
+
+// maxToolData is the cap for one tool result's Data. Zero (or less) means the
+// default, never "no cap": events.TruncateData treats max <= 0 as unlimited.
+func (r *runner) maxToolData() int {
+	if r.opts.MaxToolDataBytes <= 0 {
+		return defaultMaxToolDataBytes
+	}
+	return int(r.opts.MaxToolDataBytes)
 }
 
 // stopErr maps a clean shutdown (context.Canceled or a closed inbox) to nil so
@@ -788,8 +806,11 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	res, err := entry.tool.Run(tctx, cleaned)
 	took := time.Since(start).Milliseconds()
 
-	res = r.scrubToolResult(u.name, res)
-	data := r.toolDataJSON(u.name, res.Data)
+	res, scrubErr := r.scrubToolResult(u.name, res)
+	if err == nil {
+		err = scrubErr
+	}
+	data, dataCut := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
 		msg := "error: " + r.scrubToolError(u.name, err).Error()
@@ -820,7 +841,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		Summary:   summary,
 		Data:      data,
 		IsError:   false,
-		Truncated: res.Truncated || reTruncated,
+		Truncated: res.Truncated || reTruncated || dataCut,
 		TookMS:    took,
 	})
 	return toolResult{

@@ -77,7 +77,7 @@ func TestRegisterSchemaValidateRejectsMissingSubject(t *testing.T) {
 	}
 	a, _ := reg.Get("schema_register")
 	// Valid Avro, but the subject does not exist in the fake registry.
-	if err := a.Validate(json.RawMessage(`{"subject":"pg.public.nope-value","schema":"{\"type\":\"string\"}"}`)); err == nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"subject":"pg.public.nope-value","schema":"{\"type\":\"string\"}"}`)); err == nil {
 		t.Fatal("want error for non-existent subject")
 	}
 }
@@ -88,7 +88,7 @@ func TestRegisterSchemaValidateAcceptsExistingSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := reg.Get("schema_register")
-	if err := a.Validate(json.RawMessage(`{"subject":"pg.public.orders-value","schema":"{\"type\":\"string\"}"}`)); err != nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"subject":"pg.public.orders-value","schema":"{\"type\":\"string\"}"}`)); err != nil {
 		t.Fatalf("want nil, got %v", err)
 	}
 }

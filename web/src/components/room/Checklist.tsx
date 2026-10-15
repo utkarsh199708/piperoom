@@ -1,4 +1,5 @@
 import type { ChecklistStepDonePayload } from '@/api/types'
+import { PersonName } from '@/components/VerifiedBadge'
 import { checklistKey } from '@/state/types'
 import type { ChecklistTick } from '@/state/types'
 import { runbookHits } from '@/lib/f8'
@@ -63,8 +64,8 @@ export function Checklist({
                       <span className="min-w-0 break-words">{item}</span>
                     </label>
                     {tick && (
-                      <span className="text-xs text-subtle-foreground">
-                        {tick.by.name || tick.by.id} · {timeAgo(tick.at, now)}
+                      <span className="inline-flex items-center gap-1 text-xs text-subtle-foreground">
+                        <PersonName person={tick.by} /> · {timeAgo(tick.at, now)}
                       </span>
                     )}
                     {access.canAsk && (

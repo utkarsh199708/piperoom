@@ -156,10 +156,11 @@ func TestNewIncidentRestartsAnEndedRunOnTheLeaseOwner(t *testing.T) {
 	_ = nextDeps(t, depsB, "first run")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		b.mu.Lock()
-		st := b.rooms[snap.ID]
-		done := st != nil && st.agentDone == st.agentRun && st.agentRun > 0
-		b.mu.Unlock()
+		done := false
+		if st := b.lockCachedRoom(snap.ID); st != nil {
+			done = st.agentDone == st.agentRun && st.agentRun > 0
+			b.unlockRoom(st)
+		}
 		if done {
 			break
 		}

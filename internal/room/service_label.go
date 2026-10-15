@@ -32,14 +32,13 @@ func errLabelNotAllowed() *Error {
 // one wins. A shadow room must have its blind label first, so the blind label
 // stays blind (shadow.go).
 func (s *Service) Label(ctx context.Context, user User, roomID string, in LabelInput) (events.Event, error) {
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if s.roomOpen(st) {
 		return events.Event{}, &Error{Status: 409, Code: "room_open", Msg: "the room is still open; label it after it closes"}
 	}

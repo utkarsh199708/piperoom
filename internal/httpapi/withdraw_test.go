@@ -33,7 +33,7 @@ func (a *gateAction) Describe() string { return a.name }
 func (a *gateAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (a *gateAction) Validate(json.RawMessage) error                    { return nil }
+func (a *gateAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *gateAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *gateAction) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	if a.gate == nil {

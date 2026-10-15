@@ -24,7 +24,7 @@ Status: closed
 | 10:04:00 | +04:00 | proposal `p_1` proposed: Set compatibility to NONE |
 | 10:04:30 | +04:30 | approval given for `p_1`: Priya (user:priya, dev) (kafka) |
 | 10:05:00 | +05:00 | `p_1` step 1 ok |
-| 10:05:30 | +05:30 | verification: task 0 RUNNING |
+| 10:05:30 | +05:30 | verification: `p_1` recovered; task 0 RUNNING |
 | 10:06:00 | +06:00 | room closed by Priya |
 
 ## Root cause
@@ -52,7 +52,7 @@ Outcome: executed
 
 ## Verification
 
-- task 0 RUNNING
+- `p_1` recovered; task 0 RUNNING
 
 ## Still open
 

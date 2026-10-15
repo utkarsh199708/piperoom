@@ -78,8 +78,19 @@ type pagingState struct {
 	// tickDone, when set (tests only), runs after each check of the loop.
 	tickDone func()
 	// noOwners marks rooms whose automatic page found nobody to page, so the
-	// warning is written once per room. Guarded by Service.mu.
+	// warning is written once per room. Guarded by mu, a leaf lock.
+	mu       sync.Mutex
 	noOwners map[string]bool
+}
+
+// firstNoOwners marks roomID's automatic page as having found nobody and
+// reports whether it is the first time, so the warning is written once.
+func (p *pagingState) firstNoOwners(roomID string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	first := !p.noOwners[roomID]
+	p.noOwners[roomID] = true
+	return first
 }
 
 func newPagingState(p Paging) *pagingState {
@@ -364,7 +375,7 @@ type pageReq struct {
 	// needOwners refuses the page (errNobodyToPage) when it would name
 	// nobody; the automatic page sets it.
 	needOwners bool
-	// check adds the writer's own condition under s.mu: the agent run's
+	// check adds the writer's own condition under the room's lock: the agent run's
 	// fence, or that an automatic page is still due. Nil for a person.
 	check func(st *roomState) error
 }
@@ -439,38 +450,36 @@ func clipRunes(s string, n int) string {
 }
 
 // page writes one owner.paged and returns it with the owners paged. The owners
-// are resolved between two holds of s.mu, so no store or session read runs
-// under it; everything is checked again before the append (a checked append
-// with a shared store), so a page the first check let through can still be
-// refused.
+// are resolved between two holds of the room's lock, so no store or session
+// read runs under it; everything is checked again before the append (a checked
+// append with a shared store), so a page the first check let through can still
+// be refused.
 func (s *Service) page(ctx context.Context, roomID string, r pageReq) (events.Event, []string, error) {
 	if !slices.Contains(events.Layers, r.layer) {
 		return events.Event{}, nil, validation("layer must be one of " + strings.Join(events.Layers, ", "))
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	st, err := s.getStateLocked(ctx, roomID)
-	if err == nil {
-		err = s.pageCheckLocked(st, r)
-	}
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		s.mu.Unlock()
 		return events.Event{}, nil, err
 	}
+	err = s.pageCheckLocked(st, r)
 	pipelineID := st.snap.PipelineID
-	s.mu.Unlock()
+	s.unlockRoom(st)
+	if err != nil {
+		return events.Event{}, nil, err
+	}
 
 	ownerIDs := s.pageOwners(ctx, pipelineID, r.layer)
 	if r.needOwners && len(ownerIDs) == 0 {
 		return events.Event{}, nil, errNobodyToPage
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if st, err = s.getStateLocked(ctx, roomID); err != nil {
+	if st, err = s.lockRoom(ctx, roomID); err != nil {
 		return events.Event{}, nil, err
 	}
+	defer s.unlockRoom(st)
 	payload := events.OwnerPagedPayload{Layer: r.layer, Owners: ownerIDs, Reason: r.reason, ProposalID: r.proposalID, Auto: r.auto}
 	e, err := s.emitCheckedLocked(ctx, st, roomID, func() error { return s.pageCheckLocked(st, r) }, events.OwnerPaged, r.actor, payload)
 	if err != nil {
@@ -484,7 +493,7 @@ func (s *Service) page(ctx context.Context, roomID string, r pageReq) (events.Ev
 }
 
 // pageCheckLocked is every rule of a page but the layer name. Caller holds
-// s.mu.
+// st's lock.
 func (s *Service) pageCheckLocked(st *roomState, r pageReq) error {
 	if !s.roomOpen(st) {
 		return roomClosed("room is closed")
@@ -621,10 +630,10 @@ func (s *Service) pageCandidates(ctx context.Context) []User {
 // service (s.wg, s.ctx), so the page never waits on the webhook and Close
 // waits for, and cancels, deliveries in flight. At most maxPageDeliveries run
 // at once; a page past that is logged and not delivered by webhook. Caller
-// holds s.mu.
+// holds st's lock.
 func (s *Service) notifyPageLocked(st *roomState, e events.Event, p events.OwnerPagedPayload) {
 	n := s.paging.cfg.Notifier
-	if n == nil || s.closed {
+	if n == nil {
 		return
 	}
 	select {
@@ -633,12 +642,15 @@ func (s *Service) notifyPageLocked(st *roomState, e events.Event, p events.Owner
 		s.log.Warn("room: page not sent to the webhook: too many deliveries in flight", "room", e.RoomID, "layer", p.Layer, "seq", e.Seq)
 		return
 	}
+	if !s.addWorker() {
+		<-s.paging.sem // Close has begun: nothing is delivered
+		return
+	}
 	body := notify.OwnerPaged{
 		RoomID: e.RoomID, RoomTitle: st.snap.Title, PipelineID: st.snap.PipelineID, Layer: p.Layer,
 		Reason: p.Reason, ProposalID: p.ProposalID, Auto: p.Auto, At: e.At, Seq: e.Seq,
 	}
 	ids := append([]string(nil), p.Owners...)
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer func() { <-s.paging.sem }()
@@ -653,7 +665,7 @@ func (s *Service) notifyPageLocked(st *roomState, e events.Event, p events.Owner
 
 // pageContacts names the paged people for the webhook: users.yaml first,
 // then the IdP (the newest live session: its shown name and verified email),
-// else the id alone. Runs outside s.mu.
+// else the id alone. Runs outside every lock.
 func (s *Service) pageContacts(ctx context.Context, ids []string) []notify.Owner {
 	out := make([]notify.Owner, 0, len(ids))
 	for _, id := range ids {
@@ -688,13 +700,7 @@ func (s *Service) startAutoPage() {
 		return
 	}
 	s.paging.once.Do(func() {
-		s.mu.Lock()
-		closed := s.closed
-		if !closed {
-			s.wg.Add(1)
-		}
-		s.mu.Unlock()
-		if closed {
+		if !s.addWorker() {
 			return
 		}
 		newTicker := s.paging.cfg.Ticker
@@ -731,18 +737,17 @@ func (s *Service) startAutoPage() {
 // whichever replica gets there first, and the checked append lets one page
 // land: the others fold it and find the room no longer due.
 func (s *Service) checkAutoPages(ctx context.Context) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if s.isClosed() {
 		return
 	}
+	// Judged on what each room published; only a room that looks due is
+	// locked, and a room busy in a slow call waits for the next check.
 	var due []string
-	for id, st := range s.rooms {
-		if _, _, ok := s.autoPageDueLocked(id, st); ok {
+	for id, p := range s.publishedRooms() {
+		if _, _, ok := s.autoPageDue(p); ok {
 			due = append(due, id)
 		}
 	}
-	s.mu.Unlock()
 	if len(due) == 0 {
 		return
 	}
@@ -767,32 +772,35 @@ func (s *Service) checkAutoPages(ctx context.Context) {
 		if l, ok := held[id]; ok && l.Owner != s.replica {
 			continue
 		}
+		// Shared store: fold what other replicas wrote (a driver, a page)
+		// before judging the room again; a room busy in a slow sync waits.
+		if s.trySyncRoom(ctx, id) {
+			continue
+		}
 		s.autoPage(ctx, id)
 	}
 }
 
-// autoPage writes the automatic page of one room if it is still due.
+// autoPage writes the automatic page of one room if it is still due. A room
+// whose lock is busy is left for the next check.
 func (s *Service) autoPage(ctx context.Context, roomID string) {
-	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	st := s.rooms[roomID]
+	st, _ := s.tryLockCachedRoom(roomID)
+	if st == nil {
+		return
+	}
 	layer, reason, ok := s.autoPageDueLocked(roomID, st)
 	var pipelineID, label string
 	if ok {
 		pipelineID, label = st.snap.PipelineID, st.snap.facts.alertLabelLayer
 	}
-	s.mu.Unlock()
+	s.unlockRoom(st)
 	if !ok {
 		return
 	}
 	fallback := layer == ""
 	if fallback {
 		if layer = s.fallbackLayer(ctx, pipelineID, label); layer == "" {
-			s.mu.Lock()
-			first := !s.paging.noOwners[roomID]
-			s.paging.noOwners[roomID] = true
-			s.mu.Unlock()
-			if first {
+			if s.paging.firstNoOwners(roomID) {
 				s.log.Warn("room: auto page skipped: no suspected layer and nobody to page for any layer; retry at the next check", "room", roomID)
 			}
 			return
@@ -814,11 +822,7 @@ func (s *Service) autoPage(ctx context.Context, roomID string) {
 		s.log.Info("room: paged the owners of an undriven room", "room", roomID, "layer", layer, "owners", len(ownerIDs))
 	case errors.Is(err, errPageNotDue):
 	case errors.Is(err, errNobodyToPage):
-		s.mu.Lock()
-		first := !s.paging.noOwners[roomID]
-		s.paging.noOwners[roomID] = true
-		s.mu.Unlock()
-		if first {
+		if s.paging.firstNoOwners(roomID) {
 			s.log.Warn("room: auto page skipped: nobody to page for the layer; retry at the next check", "room", roomID, "layer", layer)
 		}
 	case errors.As(err, &re) && re.Code == "already_paged":
@@ -838,21 +842,31 @@ func (s *Service) autoPage(ctx context.Context, roomID string) {
 // driver Paging.UndrivenAfter after it opened, not auto-paged yet (from the
 // log, so a restart does not repeat it), and a suspected layer: the watcher's
 // first signal, else the triage pass's suspected_layer. With neither the layer
-// is "" and autoPage falls back. Caller holds s.mu.
+// is "" and autoPage falls back. Caller holds st's lock.
 func (s *Service) autoPageDueLocked(roomID string, st *roomState) (layer, reason string, ok bool) {
-	after := s.paging.cfg.UndrivenAfter
-	if after <= 0 || st == nil || st.deleting || !s.roomOpen(st) || st.snap.Driver != nil ||
-		st.snap.facts.alertSource == "" || st.snap.facts.autoPaged || st.snap.LogCap == LogCapFull {
+	if st == nil || st.deleting || !s.roomOpen(st) {
 		return "", "", false
 	}
-	if s.now().Sub(st.snap.OpenedAt) < after {
+	return s.autoPageDue(&st.snap)
+}
+
+// autoPageDue is autoPageDueLocked on a snapshot: the room's own, under its
+// lock, or a published one (checkAutoPages), which only picks the rooms to
+// look at again under the lock.
+func (s *Service) autoPageDue(snap *RoomSnapshot) (layer, reason string, ok bool) {
+	after := s.paging.cfg.UndrivenAfter
+	if after <= 0 || snap.Status != "open" || snap.Driver != nil ||
+		snap.facts.alertSource == "" || snap.facts.autoPaged || snap.LogCap == LogCapFull {
+		return "", "", false
+	}
+	if s.now().Sub(snap.OpenedAt) < after {
 		return "", "", false
 	}
 	waited := fmtWait(after)
-	if sig := st.snap.facts.alertSignal; sig != "" {
-		layer = s.signalLayer(st.snap.PipelineID, sig, st.snap.facts.alertWriters, st.snap.facts.alertLayer)
+	if sig := snap.facts.alertSignal; sig != "" {
+		layer = s.signalLayer(snap.PipelineID, sig, snap.facts.alertWriters, snap.facts.alertLayer)
 		reason = fmt.Sprintf("nobody has taken the driver role %s after this room opened; the watcher's first signal (%s) points at %s", waited, sig, layer)
-	} else if t := st.snap.Triage; t != nil && slices.Contains(events.Layers, t.SuspectedLayer) {
+	} else if t := snap.Triage; t != nil && slices.Contains(events.Layers, t.SuspectedLayer) {
 		layer = t.SuspectedLayer
 		reason = fmt.Sprintf("nobody has taken the driver role %s after this room opened; the first look suspects %s", waited, layer)
 	}

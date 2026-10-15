@@ -27,11 +27,11 @@ type outAction struct {
 	err  error
 }
 
-func (a *outAction) Name() string                   { return a.name }
-func (a *outAction) Layer() string                  { return "postgres" }
-func (a *outAction) Describe() string               { return a.name }
-func (a *outAction) ParamsSchema() map[string]any   { return map[string]any{"type": "object"} }
-func (a *outAction) Validate(json.RawMessage) error { return nil }
+func (a *outAction) Name() string                                    { return a.name }
+func (a *outAction) Layer() string                                   { return "postgres" }
+func (a *outAction) Describe() string                                { return a.name }
+func (a *outAction) ParamsSchema() map[string]any                    { return map[string]any{"type": "object"} }
+func (a *outAction) Validate(context.Context, json.RawMessage) error { return nil }
 func (a *outAction) Execute(context.Context, json.RawMessage) (string, error) {
 	return a.out, a.err
 }
@@ -209,9 +209,9 @@ func TestExecutorOutputVeryLongIsMaskedAndBounded(t *testing.T) {
 	}
 }
 
-// The cases below are leaks in internal/redact (not owned by A5), found while
-// writing these tests. They are skipped, not hidden: see the PR's "Not done".
-func TestExecutorOutputKnownRedactorGaps(t *testing.T) {
+// The cases below were leaks in internal/redact, found while writing these
+// tests and closed by #217. They fail now if the executor's output leaks again.
+func TestExecutorOutputFormerRedactorGaps(t *testing.T) {
 	cases := []struct{ name, out, secret string }{
 		{"url-encoded key", "password%3DZx9%21hunter2-Qw7", "Zx9%21hunter2-Qw7"},
 		{"secret split across a line break", "password=Zx9!hun\nter2-Qw7", "ter2-Qw7"},
@@ -221,7 +221,7 @@ func TestExecutorOutputKnownRedactorGaps(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ev, _, _ := runMasked(t, tc.out, nil)
 			if strings.Contains(ev, tc.secret) {
-				t.Skipf("known gap in internal/redact: %q survives masking", tc.secret)
+				t.Errorf("secret %q survives masking in the event", tc.secret)
 			}
 		})
 	}

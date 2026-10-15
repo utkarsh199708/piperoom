@@ -18,9 +18,13 @@ func (c *Client) PartitionRates(ctx context.Context, since time.Time, topics ...
 	if len(topics) == 0 {
 		return nil, nil
 	}
+	ms, err := afterMilli(since)
+	if err != nil {
+		return nil, err
+	}
 	adm := c.clusterAdm()
 	start := time.Now()
-	firsts, err := adm.ListOffsetsAfterMilli(ctx, since.UnixMilli(), topics...)
+	firsts, err := adm.ListOffsetsAfterMilli(ctx, ms, topics...)
 	c.record(ctx, start, "kadm.ListOffsetsAfterMilli(since, topics)", "since="+since.UTC().Format(time.RFC3339), topicsParam(topics))
 	if err != nil {
 		return nil, fmt.Errorf("kafka: offsets after %s: %w", since.UTC().Format(time.RFC3339), err)

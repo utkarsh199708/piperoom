@@ -26,6 +26,7 @@ import (
 type fakeLister struct {
 	starts, ends kadm.ListedOffsets
 	stable       kadm.ListedOffsets // last stable offsets; nil means same as ends
+	after        kadm.ListedOffsets // ListOffsetsAfterMilli; nil means same as starts
 	stableCalls  atomic.Int32
 	err          error
 	calls        atomic.Int32
@@ -51,6 +52,14 @@ func (f *fakeLister) ListCommittedOffsets(ctx context.Context, topics ...string)
 		return f.ends, f.err
 	}
 	return f.stable, f.err
+}
+
+func (f *fakeLister) ListOffsetsAfterMilli(ctx context.Context, _ int64, topics ...string) (kadm.ListedOffsets, error) {
+	f.calls.Add(1)
+	if f.after == nil {
+		return f.starts, f.err
+	}
+	return f.after, f.err
 }
 
 func listed(topic string, offs map[int32]int64) map[string]map[int32]kadm.ListedOffset {
@@ -204,9 +213,9 @@ func hdr(k, v string) kgo.RecordHeader { return kgo.RecordHeader{Key: k, Value: 
 func peekClient(starts, ends kadm.ListedOffsets, cons *fakeConsumer, opened *map[string]map[int32]kgo.Offset) *Client {
 	return &Client{
 		offs: &fakeLister{starts: starts, ends: ends},
-		consumerFn: func(p map[string]map[int32]kgo.Offset) (dlqConsumer, error) {
+		consumerFn: func(opts []kgo.Opt) (pollConsumer, error) {
 			if opened != nil {
-				*opened = p
+				*opened = consumeModeOf(opts).parts
 			}
 			return cons, nil
 		},
@@ -347,8 +356,8 @@ type fnConsumer struct {
 func (f *fnConsumer) PollFetches(ctx context.Context) kgo.Fetches { return f.poll(ctx) }
 func (f *fnConsumer) Close()                                      { f.closed.Store(true) }
 
-func clientWith(l *fakeLister, cons dlqConsumer) *Client {
-	return &Client{offs: l, consumerFn: func(map[string]map[int32]kgo.Offset) (dlqConsumer, error) { return cons, nil }}
+func clientWith(l *fakeLister, cons pollConsumer) *Client {
+	return &Client{offs: l, consumerFn: func([]kgo.Opt) (pollConsumer, error) { return cons, nil }}
 }
 
 func controlRec(p int32, off int64) *kgo.Record {
@@ -391,8 +400,8 @@ func TestPeekDLQPlansAgainstLastStableOffset(t *testing.T) {
 	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d",
 		rec(0, 2, now), rec(0, 3, now.Add(time.Second)),
 		rec(1, 5, now.Add(2*time.Second)))}}
-	c := &Client{offs: l, consumerFn: func(p map[string]map[int32]kgo.Offset) (dlqConsumer, error) {
-		opened = p
+	c := &Client{offs: l, consumerFn: func(opts []kgo.Opt) (pollConsumer, error) {
+		opened = consumeModeOf(opts).parts
 		return cons, nil
 	}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -609,7 +618,7 @@ func TestPeekDLQMissingTopicIsNotFound(t *testing.T) {
 	called := false
 	c := &Client{
 		offs: &fakeLister{starts: merge(missing("gone")), ends: merge(missing("gone"))},
-		consumerFn: func(map[string]map[int32]kgo.Offset) (dlqConsumer, error) {
+		consumerFn: func([]kgo.Opt) (pollConsumer, error) {
 			called = true
 			return cons, nil
 		},
@@ -627,7 +636,7 @@ func TestPeekDLQEmptyTopic(t *testing.T) {
 	called := false
 	c := &Client{
 		offs: &fakeLister{starts: merge(listed("d", map[int32]int64{0: 7})), ends: merge(listed("d", map[int32]int64{0: 7}))},
-		consumerFn: func(map[string]map[int32]kgo.Offset) (dlqConsumer, error) {
+		consumerFn: func([]kgo.Opt) (pollConsumer, error) {
 			called = true
 			return &fakeConsumer{}, nil
 		},
@@ -791,7 +800,7 @@ func TestNoGoroutineLeakFromRealConsumer(t *testing.T) {
 	runtime.GC()
 	before := runtime.NumGoroutine()
 	for i := 0; i < 5; i++ {
-		cons, err := c.newDLQConsumer(map[string]map[int32]kgo.Offset{"d": {0: kgo.NewOffset().AtEnd().Relative(-1)}})
+		cons, err := c.newConsumer(map[string]map[int32]kgo.Offset{"d": {0: kgo.NewOffset().AtEnd().Relative(-1)}})
 		if err != nil {
 			t.Fatal(err)
 		}

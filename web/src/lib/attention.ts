@@ -4,6 +4,7 @@
 import type { CurrentUser } from '../state/permissions'
 import type { RoomState } from '../state/types'
 import { plainText } from './title'
+import { neutralizeBadgeText } from './verification'
 
 export type AttentionKind =
   | 'approval_needed'
@@ -69,9 +70,9 @@ export function attentionItems(prev: RoomState, next: RoomState, user: CurrentUs
     items.push({
       kind: 'handoff',
       title: toMe ? `Hand-off for you to accept: ${room}` : `Hand-off: ${room}`,
-      body: `To ${body(h.to.name, 60)}`,
+      body: `To ${body(neutralizeBadgeText(h.to.name), 60)}`,
       tag: `handoff:${h.handoff_id}`,
-      from: body(next.driver?.name ?? 'Someone', 60),
+      from: body(neutralizeBadgeText(next.driver?.name ?? 'Someone'), 60),
       forMe: toMe,
     })
   }
@@ -83,7 +84,7 @@ export function attentionItems(prev: RoomState, next: RoomState, user: CurrentUs
     items.push({
       kind: 'driver_changed',
       title: `New driver: ${room}`,
-      body: `${body(next.driver?.name ?? after, 60)} is driving`,
+      body: `${body(neutralizeBadgeText(next.driver?.name ?? after), 60)} is driving`,
       tag: `driver:${room}`,
     })
   }
@@ -113,7 +114,7 @@ export function attentionItems(prev: RoomState, next: RoomState, user: CurrentUs
     items.push({
       kind: 'resolved',
       title: `Resolved: ${room}`,
-      body: closer ? `Closed by ${body(closer, 60)}` : 'Closed',
+      body: closer ? `Closed by ${body(neutralizeBadgeText(closer), 60)}` : 'Closed',
       tag: `resolved:${next.id}`,
       forMe: true,
     })
