@@ -5,12 +5,14 @@ package kafkatools
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/netsec"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -31,6 +33,11 @@ type Deps struct {
 	// process (cmd/server); nil in cmd/investigate and the evals, where
 	// dlq_peek then says the arrival rate is unknown.
 	DLQStats func(topic string) (newInWindow int64, window time.Duration, ok bool)
+	// CertTargets are the configured endpoints tls_cert_expiry may dial
+	// (CertTargets(config)). Empty = the tool is not registered.
+	CertTargets []CertTarget
+	// CertProbe replaces netsec.CertExpiry in tests.
+	CertProbe func(ctx context.Context, addr string, cfg *tls.Config) (netsec.CertInfo, error)
 }
 
 const timeout = 10 * time.Second
@@ -59,6 +66,28 @@ func Register(reg *tools.Registry, d Deps) error {
 		&dlqPeek{d: d},
 	} {
 		if err := reg.Register(t); err != nil {
+			return err
+		}
+	}
+	// The F12a reads are optional on a KafkaAdmin: a client (or fake, or eval
+	// replay) without them gets no tool the model could call in vain.
+	if _, ok := d.Kafka.(clients.ClusterReader); ok {
+		if err := reg.Register(&clusterHealth{d: d}); err != nil {
+			return err
+		}
+	}
+	if _, ok := d.Kafka.(clients.RateReader); ok {
+		if err := reg.Register(&partitionRates{d: d}); err != nil {
+			return err
+		}
+	}
+	if len(d.CertTargets) > 0 {
+		if err := reg.Register(&certExpiry{d: d}); err != nil {
+			return err
+		}
+	}
+	if _, ok := d.Kafka.(clients.ACLReader); ok {
+		if err := reg.Register(&kafkaACLs{d: d}); err != nil {
 			return err
 		}
 	}

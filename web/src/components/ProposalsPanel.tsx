@@ -8,18 +8,40 @@
 //    switch them off). A viewer or a non-owner gets no buttons at all.
 import { PersonName } from '@/components/VerifiedBadge'
 import { personVerification } from '@/lib/verification'
-import { useEffect, useId, useRef, useState } from 'react'
-import { CircleCheck, CircleX, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
+import { useContext, useEffect, useId, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
+import { Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canDecideLayer } from '../state/permissions'
+import { canDecideLayer, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
-import { describeIdentity, identityDetails, shortHash } from '../lib/hash'
+import { describeIdentity, identityDetails } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
+import { Clock } from './room/Clock'
+import { BlastRadius } from './room/BlastRadius'
+import { ExecutionCard } from './room/ExecutionCard'
+import { VerificationCard } from './room/VerificationCard'
+import type { CloseNudge } from './room/VerificationCard'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
+import { DecisionHandleContext } from './shell/context'
+import { completesSet } from '../lib/decision'
+import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
+import { WaitingFor } from './room/WaitingFor'
+import type { Person, PresenceMember, Topology } from '../api/types'
+import type { NudgeState } from '../state/types'
+
+/** What a pending layer row needs to say who it waits on and to nudge them (F9). */
+export interface WaitingContext {
+  roomId: string
+  roomTitle: string
+  people?: Person[]
+  presence: PresenceMember[]
+  nudges: Record<string, NudgeState>
+  canNudge: boolean
+}
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -355,6 +377,71 @@ function SoloConfirmDialog({
   )
 }
 
+// The approval that completes the set runs the fix right away. One more look, with the steps
+// that will run, before a production change (Enter or Ctrl/⌘⏎ confirms, Esc cancels).
+function RunConfirmDialog({
+  proposal,
+  layer,
+  busy,
+  onConfirm,
+  onCancel,
+  onClosed,
+}: {
+  proposal: ProposalState
+  layer: string
+  busy: boolean
+  onConfirm: () => void
+  onCancel: () => void
+  onClosed: () => void
+}) {
+  const n = proposal.steps.length
+  const layers = [...new Set(proposal.steps.map((s) => s.layer))]
+  return (
+    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+      <DialogContent
+        hideClose
+        role="alertdialog"
+        className="max-w-[480px]"
+        onCloseAutoFocus={(e) => {
+          e.preventDefault()
+          onClosed()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !busy && !(e.target instanceof HTMLButtonElement && e.target.dataset.cancel)) {
+            e.preventDefault()
+            onConfirm()
+          }
+        }}
+      >
+        <DialogHeader className="gap-1.5">
+          <DialogTitle>Run this fix now?</DialogTitle>
+          <DialogDescription>
+            Your approval completes the set. Piperoom runs {n} {n === 1 ? 'step' : 'steps'} on {layers.join(' and ') || layer}{' '}
+            right away.
+          </DialogDescription>
+        </DialogHeader>
+        <ul className="m-0 flex list-none flex-col gap-1 rounded-lg border border-border bg-muted p-3 font-mono text-xs">
+          {proposal.steps.map((s, i) => (
+            <li key={i}>
+              {i + 1}. {s.layer} · {s.action}
+            </li>
+          ))}
+        </ul>
+        <DialogFooter className="items-center">
+          <Button variant="ghost" data-cancel="1" onClick={onCancel}>
+            Cancel
+            <Kbd aria-hidden="true">esc</Kbd>
+          </Button>
+          <Button variant="success" disabled={busy} autoFocus onClick={onConfirm}>
+            Approve and run
+            <Kbd aria-hidden="true">⏎</Kbd>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // One row of the approval matrix: a layer, who decided it (grant and method), when, and for
 // the layer you own, the buttons.
 function LayerRow({
@@ -367,6 +454,7 @@ function LayerRow({
   noHashNoteId,
   headingId,
   onSolo,
+  waiting,
 }: {
   proposal: ProposalState
   layer: string
@@ -380,10 +468,12 @@ function LayerRow({
   headingId: string
   /** The server asked for a solo confirm: the panel shows the solo banner. */
   onSolo: () => void
+  waiting?: WaitingContext
 }) {
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
   const [confirming, setConfirming] = useState(false)
+  const [runConfirm, setRunConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [refused, setRefused] = useState(false)
   const approveRef = useRef<HTMLButtonElement>(null)
@@ -436,13 +526,15 @@ function LayerRow({
   const hashed = proposal.params_hash !== ''
   const canDecide = canDecideLayer(proposal, user, layer)
 
-  const startApprove = () => (user.solo ? setConfirming(true) : void approve())
+  // Solo: the typed box. The approval that completes the set: the run confirm. Otherwise at once.
+  const completing = completesSet(proposal, layer)
+  const startApprove = () => (user.solo ? setConfirming(true) : completing ? setRunConfirm(true) : void approve())
 
   // A and R. The listener is added once; it calls the handler of the latest render.
   const latest = useRef<(key: 'a' | 'r') => boolean>(() => false)
   useEffect(() => {
     latest.current = (key) => {
-      if (!canDecide || rejecting || confirming || busy) return false
+      if (!canDecide || rejecting || confirming || runConfirm || busy) return false
       if (key === 'a') {
         if (!hashed) return false
         startApprove()
@@ -463,6 +555,23 @@ function LayerRow({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [shortcuts])
+
+  // The decision bar acts through this row, so A, R, the bar and the buttons share startApprove.
+  const registry = useContext(DecisionHandleContext)
+  useEffect(() => {
+    if (!shortcuts) return
+    registry?.set({
+      approve: () => void latest.current('a'),
+      reject: () => void latest.current('r'),
+      scrollTo: () => {
+        const el = document.getElementById(PROPOSAL_ANCHOR)
+        const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+        el?.scrollIntoView?.({ behavior: calm ? 'auto' : 'smooth', block: 'start' })
+        document.getElementById(headingId)?.focus({ preventScroll: true })
+      },
+    })
+    return () => registry?.set(null)
+  })
 
   const reasonText = decision?.outcome === 'rejected' ? decision.reason : undefined
   const decidedAt = decision?.at ? clockTime(decision.at) : ''
@@ -509,7 +618,12 @@ function LayerRow({
               <X className="size-3" aria-hidden="true" />
             )}
             {decision.outcome === 'approved' ? 'Approved' : 'Rejected'}
-            {decidedAt && ` · ${decidedAt}`}
+            {decision.at && (
+              <>
+                {' · '}
+                <Clock iso={decision.at} />
+              </>
+            )}
           </Badge>
           {reasonText && (
             <span className="basis-full text-xs text-muted-foreground" aria-hidden="true">
@@ -520,12 +634,24 @@ function LayerRow({
       ) : canDecide ? (
         <>
           <PersonAvatar actor={{ id: user.id, name: user.name }} size={20} />
-          <span className="font-medium">{user.name}</span>
+          <PersonName person={{ id: user.id, name: user.name, kind: 'human', verified: user.verified }} nameClassName="font-medium" />
           <span className="text-xs text-muted-foreground">you</span>
           {/* muted, not subtle: subtle text is 4.2:1 on the amber tint of this row */}
           <span className="font-mono text-xs text-muted-foreground">user:{user.id}</span>
           <span className="text-xs font-medium text-warning-foreground">pending · your layer</span>
         </>
+      ) : waiting && state === 'pending' ? (
+        <WaitingFor
+          proposalId={proposal.proposal_id}
+          layer={layer}
+          roomId={waiting.roomId}
+          roomTitle={waiting.roomTitle}
+          people={waiting.people}
+          presence={waiting.presence}
+          nudge={waiting.nudges[`${proposal.proposal_id}/${layer}`]}
+          canNudge={waiting.canNudge}
+          actions={actions}
+        />
       ) : (
         <Badge className="ml-auto" variant="neutral">
           <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" />
@@ -535,13 +661,14 @@ function LayerRow({
 
       {canDecide && !rejecting && (
         <span className="ml-auto inline-flex items-center gap-2">
-          <Button variant="ghost-danger" size="sm" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
+          <Button variant="ghost-danger" size="sm" className="coarse:h-11 coarse:px-4" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
             Reject
             {shortcuts && <Kbd aria-hidden="true">R</Kbd>}
           </Button>
           <Button
             variant="success"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             ref={approveRef}
             disabled={busy || !hashed}
             aria-describedby={hashed ? undefined : noHashNoteId}
@@ -581,12 +708,13 @@ function LayerRow({
             autoComplete="off"
             autoFocus
           />
-          <Button type="submit" variant="destructive" size="sm" disabled={!reason.trim()}>
+          <Button type="submit" variant="destructive" size="sm" className="coarse:h-11 coarse:px-4" disabled={!reason.trim()}>
             Confirm
           </Button>
           <Button
             variant="ghost"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             onClick={() => {
               setRejecting(false)
               setReason('')
@@ -595,6 +723,19 @@ function LayerRow({
             Cancel
           </Button>
         </form>
+      )}
+      {canDecide && runConfirm && (
+        <RunConfirmDialog
+          proposal={proposal}
+          layer={layer}
+          busy={busy}
+          onCancel={() => setRunConfirm(false)}
+          onConfirm={() => {
+            setRunConfirm(false)
+            void approve()
+          }}
+          onClosed={restoreFocus}
+        />
       )}
       {canDecide && confirming && (
         <SoloConfirmDialog
@@ -615,56 +756,21 @@ function LayerRow({
   )
 }
 
-function ExecutedList({ proposal }: { proposal: ProposalState }) {
-  if (proposal.executed.length === 0) return null
-  return (
-    <>
-      <Separator />
-      <ul className="flex flex-col gap-1.5 px-3.5 py-2.5 text-sm">
-        {proposal.executed.map((ex) => {
-          // The executor checked this hash before it ran the step. A different
-          // one than the card shows is flagged; an event without one is not.
-          const differs = !!ex.params_hash && !!proposal.params_hash && ex.params_hash !== proposal.params_hash
-          return (
-            <li key={ex.step_index} className="flex flex-wrap items-center gap-2">
-              {ex.ok ? (
-                <CircleCheck className="size-4 text-success-foreground" role="img" aria-label="succeeded" />
-              ) : (
-                <CircleX className="size-4 text-destructive-fg" role="img" aria-label="failed" />
-              )}
-              <span className="font-mono text-xs text-subtle-foreground">step {ex.step_index + 1}</span>
-              <span className="min-w-0 break-words">{ex.output}</span>
-              {ex.params_hash && (
-                <code
-                  className="mono exec__hash rounded-md border border-input bg-muted px-1.5 py-0.5 font-mono text-xs"
-                  data-testid={`exec-hash-${ex.step_index}`}
-                  title={ex.params_hash}
-                >
-                  {shortHash(ex.params_hash)}
-                </code>
-              )}
-              {differs && (
-                <Badge variant="destructive" title="The step ran with a different params_hash than this proposal shows">
-                  <TriangleAlert className="size-3" aria-hidden="true" />
-                  hash differs from proposal
-                </Badge>
-              )}
-            </li>
-          )
-        })}
-      </ul>
-    </>
-  )
-}
-
-function latestDecision(proposal: ProposalState): string {
-  let best: { at: number; text: string } | null = null
+function latestDecision(proposal: ProposalState): ReactNode {
+  let best: { at: number; text: ReactNode } | null = null
   for (const [layer, d] of Object.entries(proposal.decisions ?? {})) {
     const at = d.at ? Date.parse(d.at) : NaN
     if (Number.isNaN(at) || (best && at <= best.at)) continue
-    best = { at, text: `${d.by.name || d.by.id} ${d.outcome} ${layer} ${timeAgo(d.at as string)}` }
+    best = {
+      at,
+      text: (
+        <span className="inline-flex flex-wrap items-center gap-x-1">
+          <PersonName person={d.by} /> {d.outcome} {layer} {timeAgo(d.at as string)}
+        </span>
+      ),
+    }
   }
-  return best?.text ?? ''
+  return best?.text ?? null
 }
 
 function Proposal({
@@ -674,8 +780,14 @@ function Proposal({
   pipelineId,
   shortcutLayer,
   sentHash,
+  ribbon,
   onSolo,
+  waiting,
+  topology,
+  nudge,
 }: {
+  nudge: CloseNudge
+  topology: Topology | null
   proposal: ProposalState
   user: CurrentUser
   actions: RoomActions
@@ -684,7 +796,10 @@ function Proposal({
   shortcutLayer: string | undefined
   /** The hash the person looked at when the server answered 409 for this proposal (kept by useRoom). */
   sentHash: string | null
+  /** False while the decision bar already says "Needs your approval": one amber per fact. */
+  ribbon: boolean
   onSolo: () => void
+  waiting: WaitingContext
 }) {
   const titleId = useId()
   const noteId = useId()
@@ -701,7 +816,7 @@ function Proposal({
 
   return (
     <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
-      {mine.length > 0 && (
+      {ribbon && mine.length > 0 && (
         <div className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-t-lg border-b border-border bg-warning-subtle px-3.5 py-1.5 text-sm font-medium text-warning-foreground">
           <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
           <span>Needs your approval · {mine.join(' · ')}</span>
@@ -753,12 +868,15 @@ function Proposal({
                     <span className="font-mono font-medium">{s.action}</span>
                   </div>
                   {s.description && <p className="text-xs text-muted-foreground">{s.description}</p>}
+                  {s.verify && <p className="text-xs text-muted-foreground">After it runs — {s.verify}</p>}
                   <StepParams params={s.params} />
                 </div>
               </li>
             ))}
           </ol>
         )}
+
+        <BlastRadius proposal={proposal} topology={topology} />
 
         {hashed ? (
           <ParamsHash hash={proposal.params_hash} deciding={mine.length > 0} noteId={noteId} />
@@ -805,10 +923,15 @@ function Proposal({
             noHashNoteId={noteId}
             headingId={titleId}
             onSolo={onSolo}
+            waiting={waiting}
           />
         ))}
       </div>
-      <ExecutedList proposal={proposal} />
+      <ExecutionCard
+        proposal={proposal}
+        rollback={isViewer(user) ? undefined : { asDriver: nudge.isDriver, onSteer: actions.steer }}
+      />
+      {proposal.verification && <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} />}
     </article>
   )
 }
@@ -818,14 +941,42 @@ export function ProposalsPanel({
   user,
   actions,
   stale = null,
+  ribbon = true,
+  people,
+  presence = [],
+  topology = null,
+  onCloseRoom,
 }: {
+  /** Opens the close dialog with the resolution filled in (the driver's "Close room" after a verified fix). */
+  onCloseRoom?: (initialText: string) => void
+  /** From useTopology: names the downstream node ids a preview lists. */
+  topology?: Topology | null
   state: RoomState
   user: CurrentUser
   actions: RoomActions
   /** From useRoom: the 409 that is being shown, if any. Survives the room reload. */
   stale?: StaleInfo | null
+  /** Draw each card's amber "Needs your approval" ribbon. RoomScreen turns it off when the decision bar shows it. */
+  ribbon?: boolean
+  /** From RoomScreen: GET /api/people (members only) and the presence frame. */
+  people?: Person[]
+  presence?: PresenceMember[]
 }) {
+  const waiting: WaitingContext = {
+    roomId: state.id,
+    roomTitle: state.title,
+    people,
+    presence,
+    nudges: state.nudges,
+    canNudge: !isViewer(user) && state.status === 'open',
+  }
   const proposals = state.proposals
+  const nudge: CloseNudge = {
+    roomOpen: state.status === 'open',
+    driver: state.driver ?? undefined,
+    isDriver: state.driver?.id === user.id,
+    onClose: onCloseRoom,
+  }
   // `/api/me.solo` says so up front; on an older server the first approve that
   // asks for a confirm tells us.
   const [soloSeen, setSoloSeen] = useState(false)
@@ -868,7 +1019,11 @@ export function ProposalsPanel({
               pipelineId={state.pipeline_id}
               sentHash={stale?.proposalId === p.proposal_id ? stale.sentHash : null}
               shortcutLayer={shortcutKey.startsWith(`${p.proposal_id}/`) ? shortcutKey.slice(p.proposal_id.length + 1) : undefined}
+              ribbon={ribbon}
               onSolo={() => setSoloSeen(true)}
+              waiting={waiting}
+              topology={topology}
+              nudge={nudge}
             />
           ))}
         </div>

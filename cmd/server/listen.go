@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+
+	"piperoom/internal/config"
 )
 
 // errNonLoopback reports a listen address that another host can reach. In dev
@@ -26,7 +28,7 @@ func checkListenAddr(addr string, allowRemote bool) (remote bool, err error) {
 		return false, nil
 	}
 	if !allowRemote {
-		return false, fmt.Errorf("server: refusing to listen on %q in dev auth mode (anyone who can reach it can act as any user): set PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 to allow it, or PIPEROOM_AUTH_MODE=oidc: %w", addr, errNonLoopback)
+		return false, fmt.Errorf("server: refusing to listen on %q in dev auth mode (anyone who can reach it can act as any user): set PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 and PIPEROOM_DEV_ACK="+config.DevAckValue+" to allow it (--demo needs only the first), or PIPEROOM_AUTH_MODE=oidc: %w", addr, errNonLoopback)
 	}
 	return true, nil
 }

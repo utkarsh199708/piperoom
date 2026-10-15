@@ -270,9 +270,9 @@ describe('ActivityFeed', () => {
     render(
       <ActivityFeed
         activity={[
-          { seq: 2, at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'u_1', name: 'Mal ✓' }, text: 'Mal ✓ commented: ✅ verified by Priya' },
-          { seq: 1, at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'priya', name: 'Priya', verified: true }, text: 'Priya commented: ok' },
-          { seq: 0, at: '2026-10-14T10:00:00Z', actor: { kind: 'agent', id: 'agent', name: 'Agent', verified: true }, text: 'Agent: lag ✓ verified' },
+          { seq: 2, kind: 'human', at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'u_1', name: 'Mal ✓' }, text: 'Mal ✓ commented: ✅ verified by Priya' },
+          { seq: 1, kind: 'human', at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'priya', name: 'Priya', verified: true }, text: 'Priya commented: ok' },
+          { seq: 0, kind: 'step', at: '2026-10-14T10:00:00Z', actor: { kind: 'agent', id: 'agent', name: 'Agent', verified: true }, text: 'Agent: lag ✓ verified' },
         ]}
       />,
     )

@@ -123,19 +123,12 @@ describe('AppShell sidebar', () => {
     expect(within(main).getByRole('link', { name: /Rooms/ })).not.toHaveAttribute('aria-current')
   })
 
-  it('the Pipelines and Audit log rows that are not links have no hover style', () => {
+  it('has no dead Pipelines or Audit log rows', () => {
     renderShell()
     const main = screen.getByRole('navigation', { name: 'Main' })
-    for (const row of within(main).getAllByText(/not available yet/)) {
-      expect(row.parentElement!.className).not.toMatch(/hover:/)
-    }
-  })
-
-  it('lists Pipelines and Audit log as unavailable, not as dead links', () => {
-    renderShell()
-    const main = screen.getByRole('navigation', { name: 'Main' })
-    expect(within(main).getAllByText(/not available yet/)).toHaveLength(2)
-    expect(within(main).queryByRole('link', { name: /Audit log/ })).not.toBeInTheDocument()
+    expect(within(main).queryByText(/not available yet/)).not.toBeInTheDocument()
+    expect(within(main).queryByText('Audit log')).not.toBeInTheDocument()
+    expect(within(main).queryByText('Pipelines')).not.toBeInTheDocument()
   })
 
   it('shows the user and their layers; a viewer is marked view only', () => {

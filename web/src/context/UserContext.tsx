@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { clearSigninNotice, noticeForExpiredSession } from '../lib/signinNotice'
+import type { SigninNotice } from '../lib/signinNotice'
 import type { ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { DEFAULT_USER_ID, findUser } from '../dev/users'
+import { DEFAULT_USER_ID, findUser } from '../fixtures/users'
 import type { CurrentUser } from '../state/permissions'
 import { ApiClientError, api, isFixtures, probeSession } from '../api/client'
 import {
@@ -98,6 +100,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<AuthProblem | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
+  const [notice, setNotice] = useState<SigninNotice | null>(null)
 
   const phaseRef = useRef<Phase>('loading')
   const epochRef = useRef(0)
@@ -130,6 +133,8 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
       })
       setPhase('ready')
       setFailure(null)
+      setNotice(null)
+      clearSigninNotice()
       return true
     } catch (e) {
       // session_expired is routed by the listener below.
@@ -167,6 +172,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
             if (m === 'oidc' && redirectToLogin()) return
             // dev, unknown, or oidc with the loop guard on: show the sign-in choice
             setMode(m ?? null)
+            setNotice(noticeForExpiredSession(m === 'dev'))
             setUser(null)
             setPhase('login')
             bumpEpoch()
@@ -240,7 +246,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
       <div className="shell">
         {banners}
         {mode === 'dev' ? (
-          <LoginScreen onPick={setUserId} busy={busy} />
+          <LoginScreen onPick={setUserId} busy={busy} notice={notice ?? undefined} />
         ) : mode === 'oidc' ? (
           <main className="roomlist">
             <p className="empty">

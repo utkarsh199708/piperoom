@@ -406,6 +406,22 @@
       "actor": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true },
       "payload": { "handoff_id": "h_1" },
       "at": "2026-10-11T10:05:02Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 35,
+      "type": "agent.usage",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "model": "claude-opus-5-5", "role": "main", "input_tokens": 120000, "cache_creation_input_tokens": 20000, "cache_read_input_tokens": 41000, "output_tokens": 9000, "latency_ms": 41000, "cost_usd": 0.32 },
+      "at": "2026-10-11T10:05:10Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 36,
+      "type": "agent.usage",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "model": "claude-haiku-5-5", "role": "triage", "input_tokens": 510000, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 2200, "latency_ms": 20000 },
+      "at": "2026-10-11T10:05:20Z"
     }
   ]
 }

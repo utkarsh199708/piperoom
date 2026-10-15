@@ -23,15 +23,22 @@ func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts Options) 
 
 // writeHandoff is the testable seam: the model is injected.
 func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, m model) (events.HandoffSummary, error) {
+	return writeSummary(ctx, roomEvents, opts, m, handoffPrompt(), "handoff")
+}
+
+// writeSummary is the request shared by the hand-off and the post-mortem: one
+// structured call over the room log with the given system prompt. what names
+// the caller in error text.
+func writeSummary(ctx context.Context, roomEvents []events.Event, opts Options, m model, prompt, what string) (events.HandoffSummary, error) {
 	if len(roomEvents) == 0 {
-		return events.HandoffSummary{}, fmt.Errorf("agent: cannot write handoff from an empty room")
+		return events.HandoffSummary{}, fmt.Errorf("agent: cannot write %s from an empty room", what)
 	}
 
 	params := anthropic.BetaMessageNewParams{
 		Model:     opts.Model,
 		MaxTokens: handoffMaxTokens,
 		System: []anthropic.BetaTextBlockParam{
-			{Text: handoffPrompt(), CacheControl: anthropic.NewBetaCacheControlEphemeralParam()},
+			{Text: prompt, CacheControl: anthropic.NewBetaCacheControlEphemeralParam()},
 		},
 		Messages: []anthropic.BetaMessageParam{
 			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(renderRoomEvents(roomEvents))),
@@ -47,26 +54,26 @@ func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, 
 
 	msg, err := m.Turn(ctx, params)
 	if err != nil {
-		return events.HandoffSummary{}, fmt.Errorf("agent: handoff request: %w", err)
+		return events.HandoffSummary{}, fmt.Errorf("agent: %s request: %w", what, err)
 	}
 	if msg.StopReason == anthropic.BetaStopReasonRefusal {
-		return events.HandoffSummary{}, fmt.Errorf("agent: handoff: model refused the request")
+		return events.HandoffSummary{}, fmt.Errorf("agent: %s: model refused the request", what)
 	}
 
 	text := extractText(msg.Content)
 	if strings.TrimSpace(text) == "" {
-		return events.HandoffSummary{}, fmt.Errorf("agent: handoff: model returned no text")
+		return events.HandoffSummary{}, fmt.Errorf("agent: %s: model returned no text", what)
 	}
 
 	var summary events.HandoffSummary
 	if err := json.Unmarshal([]byte(text), &summary); err != nil {
-		return events.HandoffSummary{}, fmt.Errorf("agent: handoff: model output is not valid JSON: %w", err)
+		return events.HandoffSummary{}, fmt.Errorf("agent: %s: model output is not valid JSON: %w", what, err)
 	}
 	if strings.TrimSpace(summary.WhatBroke) == "" {
-		return events.HandoffSummary{}, fmt.Errorf("agent: handoff: model omitted what_broke")
+		return events.HandoffSummary{}, fmt.Errorf("agent: %s: model omitted what_broke", what)
 	}
 	if strings.TrimSpace(summary.Why) == "" {
-		return events.HandoffSummary{}, fmt.Errorf("agent: handoff: model omitted why")
+		return events.HandoffSummary{}, fmt.Errorf("agent: %s: model omitted why", what)
 	}
 	return summary, nil
 }

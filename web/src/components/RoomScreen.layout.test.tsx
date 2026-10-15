@@ -25,6 +25,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -32,7 +33,11 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 const reload = vi.fn()
 
@@ -73,7 +78,7 @@ function show(user: CurrentUser, state: RoomState | null, conn: ConnState = 'liv
     dismissStale: vi.fn(),
     reload,
   })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   return render(
     <MemoryRouter initialEntries={['/rooms/r_schema_change']}>
       <Routes>
@@ -190,6 +195,8 @@ describe('RoomScreen rail and column', () => {
           based_on_steps: ['s2', 's1'],
           confidence: 'high',
           confirmed: false,
+          seq: 3,
+          verdicts: [],
         },
       }),
     )
@@ -202,17 +209,17 @@ describe('RoomScreen rail and column', () => {
     show(vera, room({ driver: null }))
     expect(screen.getByText('View only')).toBeInTheDocument()
     expect(screen.queryByLabelText('Steer the agent')).not.toBeInTheDocument()
-    for (const name of ['Hand off', 'Trace one record', 'Take control', 'Take control and steer', 'Request control']) {
+    for (const name of ['Hand off', 'Trace a record', 'Take control', 'Take control and steer', 'Request control']) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
     }
     expect(screen.getByText(/you can read this room but not steer it/)).toBeInTheDocument()
   })
 
-  it('a room with no driver shows the banner, the idle pill and a disabled composer', () => {
+  it('a room with no driver shows the banner, the idle pill and a composer that takes a suggestion', () => {
     show(arjun, room({ driver: null, steps: [], agent_status: { state: 'idle' } }))
     expect(screen.getByText('Agent idle · waiting for a driver')).toBeInTheDocument()
-    expect(screen.getByLabelText('Steer the agent')).toBeDisabled()
-    expect(screen.getByText('The agent has not started yet.')).toBeInTheDocument()
+    expect(screen.getByLabelText('Steer the agent')).toBeEnabled()
+    expect(screen.getByText('The agent is idle and has not started yet.')).toBeInTheDocument()
     // Banner, plus the empty state's own button.
     fireEvent.click(screen.getByRole('button', { name: 'Take control and steer' }))
     expect(actions.grantControl).toHaveBeenCalledWith('arjun')
@@ -273,7 +280,7 @@ describe('RoomScreen loading and error', () => {
 
   it('shows an error state with Try again and Back to rooms', () => {
     show(arjun, null, 'error', 'boom')
-    expect(screen.getByText('Could not load room: boom')).toBeInTheDocument()
+    expect(screen.getByText('boom')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(reload).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('link', { name: 'Back to rooms' }))

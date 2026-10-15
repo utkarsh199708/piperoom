@@ -84,6 +84,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 		s.log.Warn("room: persist creator driver failed", "room", roomID, "err", err)
 	}
 	snap := st.snap.Clone()
+	st.firstLook = true
 	s.startAgentLocked(roomID, title, pipelineID, nil, st)
 	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
@@ -230,7 +231,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	if ok {
 		st := s.rooms[existing]
-		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, resolved)
+		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, raw, resolved)
 		s.mu.Unlock()
 		return snap, false, err
 	}
@@ -284,6 +285,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		}
 	}
 	snap := st.snap.Clone()
+	st.firstLook = true
 	s.startAgentLocked(roomID, title, pipelineID, raw, st)
 	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
@@ -346,19 +348,24 @@ func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
 // joinAlertRoomLocked records a repeat of an alert in the room that is already
 // open for it, as a system message, and returns that room. A repeat that the
 // source reports resolved does not close the room: only the driver does that.
-// Caller must hold s.mu.
-func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string, resolved bool) (RoomSnapshot, error) {
+// A firing repeat also reaches the agent as a quiet alert update with raw's
+// evidence (alertUpdateLocked). Caller must hold s.mu.
+func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string, raw json.RawMessage, resolved bool) (RoomSnapshot, error) {
 	text := fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title)
 	if resolved {
 		text = fmt.Sprintf("alert %q reported resolved at its source; the room stays open until the driver closes it", title)
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text}); err != nil {
+	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text})
+	if err != nil {
 		// A full log cannot take the note, but the alert still belongs to
 		// this room: answering an error would make the sender retry forever.
 		if !errors.Is(err, store.ErrLogFull) {
 			return RoomSnapshot{}, err
 		}
 		s.log.Warn("room: repeat alert joined a room whose log is full; note not stored", "room", roomID)
+	}
+	if !resolved {
+		s.alertUpdateLocked(roomID, st, e.Seq, raw)
 	}
 	return st.snap.Clone(), nil
 }
@@ -558,6 +565,12 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 	pipelineID := st.snap.PipelineID
 	hookKey := hookDedupKey(pipelineID, st.dedupKey)
 	runHook := s.onRoomClosed != nil && !s.closed
+	// A shadow room's log has no agent events: no draft. wg.Add under s.mu,
+	// like Close sets closed, so Close's Wait cannot miss the goroutine.
+	runDraft := !st.snap.Shadow && !s.closed
+	if runDraft {
+		s.wg.Add(1)
+	}
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -568,6 +581,9 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 	// Outside s.mu, so the hook may call OpenRoomForPipeline and the like.
 	if runHook {
 		s.onRoomClosed(s.ctx, roomID, pipelineID, hookKey)
+	}
+	if runDraft {
+		go s.draftPostmortem(roomID, true)
 	}
 	return e, nil
 }

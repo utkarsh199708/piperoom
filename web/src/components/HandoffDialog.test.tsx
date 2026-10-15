@@ -11,6 +11,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -18,7 +19,11 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const user: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'] }
@@ -136,5 +141,65 @@ describe('hand-off names carry the server badge', () => {
     expect(badges(banner)).toEqual(['unverified'])
     expect(banner).toHaveTextContent('(u_3)')
     expect(banner).toHaveTextContent('is handing the room to you.')
+  })
+})
+
+describe('hand-off in flight (R0 handoff.requested)', () => {
+  const requested = {
+    request_id: 'hr_1',
+    to: { kind: 'human' as const, id: 'priya', name: 'Priya' },
+    stay_as_watcher: false,
+    expires_at: new Date(Date.now() + 3 * 60_000).toISOString(),
+  }
+
+  it('shows progress instead of the form, so a second click cannot start another', () => {
+    const state = { ...emptyRoomState('r1'), handoff_request: requested }
+    render(<HandoffDialog state={state} user={user} actions={actions} onClose={() => {}} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Writing the hand-off summary')
+    expect(screen.getByText(/The agent is writing the summary for/)).toHaveTextContent('Priya')
+    expect(screen.queryByRole('button', { name: /Start hand-off/ })).not.toBeInTheDocument()
+  })
+
+  it('a request past expires_at shows the form again', () => {
+    const state = {
+      ...emptyRoomState('r1'),
+      handoff_request: { ...requested, expires_at: new Date(Date.now() - 1000).toISOString() },
+    }
+    render(<HandoffDialog state={state} user={user} actions={actions} onClose={() => {}} />)
+    expect(screen.getByRole('button', { name: /Start hand-off/ })).toBeInTheDocument()
+  })
+
+  it('after handoff.failed the form shows why, in words', () => {
+    const state = { ...emptyRoomState('r1'), handoff_failure: { request_id: 'hr_1', reason: 'summary_failed' } }
+    render(<HandoffDialog state={state} user={user} actions={actions} onClose={() => {}} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('The agent could not write the summary')
+  })
+})
+
+describe('the receiver reads the summary before accepting', () => {
+  const me: CurrentUser = { id: 'priya', name: 'Priya', layers: [] }
+  const state = {
+    ...emptyRoomState('r1'),
+    driver: { id: 'arjun', name: 'Arjun' },
+    handoffs: [{ ...pendingHandoff, stay_as_watcher: true }],
+  }
+
+  it('Read summary opens the summary with Accept and take over; Not yet closes it', () => {
+    const accept = vi.fn()
+    render(<HandoffAcceptBanner state={state} user={me} actions={{ ...actions, acceptHandoff: accept }} />)
+    // The banner has no one-click Accept: the summary comes first.
+    expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
+    const dialog = screen.getByRole('dialog', { name: /^Hand-off from Arjun/ })
+    expect(within(dialog).getByText(/Consumer lag spiked/)).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(/Arjun.*stays in the room as a watcher/)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Not yet' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(accept).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Accept and take over' }))
+    expect(accept).toHaveBeenCalledWith('h1')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })

@@ -28,18 +28,29 @@ export type EventType =
   | 'agent.message'
   | 'agent.hypothesis'
   | 'agent.usage'
+  | 'agent.triage'
   | 'comment.added'
   | 'steer.suggested'
   | 'steer.sent'
+  | 'steer.declined'
   | 'control.requested'
   | 'control.granted'
+  | 'control.lease_expired'
   | 'proposal.created'
   | 'approval.given'
   | 'approval.rejected'
   | 'action.executed'
+  | 'handoff.requested'
+  | 'handoff.failed'
   | 'handoff.created'
   | 'handoff.accepted'
   | 'trace.pinned'
+  | 'hypothesis.verdict'
+  | 'approval.nudged'
+  | 'room.labelled'
+  | 'checklist.step_done'
+  | 'proposal.previewed'
+  | 'agent.verification'
 
 export interface Event {
   room_id: string
@@ -52,6 +63,34 @@ export interface Event {
 
 // ---- payloads (one per Type, matching events.go) ----
 
+/** room.labelled: the human label of a closed room (POST /api/rooms/{id}/label). */
+export interface RoomLabelledPayload {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
+
+/** checklist.step_done: item `item` of hits[`hit`].items of tool result `tool_use_id` ticked or unticked. */
+export interface ChecklistStepDonePayload {
+  step_id: string
+  tool_use_id: string
+  hit: number
+  item: number
+  done: boolean
+  note?: string
+}
+
+/** Body of POST /api/rooms/{id}/label. */
+export interface LabelInput {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
+
 export interface RoomCreatedPayload {
   title: string
   severity: string // "sev1".."sev4"
@@ -60,6 +99,7 @@ export interface RoomCreatedPayload {
   /** Server-set route that opened the room: "webhook", a signed source name, or "watcher". */
   alert_source?: string
   dedup_key?: string
+  /** Shadow mode: the agent runs silently and its numbers are revealed after close. */
   shadow?: boolean
 }
 
@@ -108,11 +148,27 @@ export interface AgentHypothesisPayload {
   confirmed: boolean
 }
 
+/**
+ * The triage pass's first look (F6): one line shown as "triage, unverified". `failed` has no
+ * headline and a fixed `reason` (timeout | model_error | budget | refused | no_tools | off).
+ */
+export interface AgentTriagePayload {
+  status: 'ok' | 'failed'
+  reason?: string
+  headline?: string
+  suspected_layer?: string
+  confidence?: string
+  evidence_refs: string[]
+  next_check?: string
+  model: string
+  took_ms: number
+}
+
 // One model request's tokens, latency and estimated cost (docs/design/cost.md).
 // Cost telemetry: the reducer keeps it out of the activity feed and the steps.
 export interface AgentUsagePayload {
   model: string
-  role: 'triage' | 'main' | 'handoff' | 'compaction'
+  role: string // triage | main | handoff | compaction | postmortem | first_look | judge
   input_tokens: number
   cache_creation_input_tokens: number
   cache_read_input_tokens: number
@@ -138,6 +194,17 @@ export interface SteerSentPayload {
   text: string
 }
 
+export interface SteerDeclinedPayload {
+  suggestion_id: string
+  reason?: string
+}
+
+/** System actor; the driver's lease ran out with no renewal and no new driver. */
+export interface ControlLeaseExpiredPayload {
+  driver: Actor
+  lease_until: string
+}
+
 export type ControlRequestedPayload = Record<string, never>
 
 export interface ControlGrantedPayload {
@@ -150,6 +217,72 @@ export interface ProposalStep {
   layer: string
   params: unknown
   description: string
+  /** What the agent will check after this step runs, e.g. "task 0 RUNNING within 60 s". */
+  verify?: string
+}
+
+/** The target system's own answer to "would this be accepted" (registry check, connect validate). */
+export interface DryRunResult {
+  ok: boolean
+  source: string
+  text: string
+  skipped?: string
+}
+
+/** What one write step would do, read before approval (proposal.previewed). */
+export interface PreviewResult {
+  target: string
+  current: string
+  expected: string
+  /** Topology node ids reachable over data edges, at most 12; absent when unknown. */
+  downstream?: string[]
+  reversible: boolean
+  rollback?: string
+  dry_run?: DryRunResult
+}
+
+export interface StepPreview {
+  step_index: number
+  preview?: PreviewResult
+  error?: string
+}
+
+export interface ProposalPreviewedPayload {
+  proposal_id: string
+  steps: StepPreview[]
+  at: string
+}
+
+export interface VerificationCheck {
+  layer: string
+  name: string
+  ok: boolean
+  detail: string
+}
+
+export interface SinkCheck {
+  table: string
+  newest?: string
+  baseline?: string
+  passed: boolean
+  passed_by?: string
+}
+
+export interface DataFlowCheck {
+  checked: boolean
+  fresh: boolean
+  sinks?: SinkCheck[]
+  detail?: string
+}
+
+/** The agent's verdict on a fix (agent.verification). `repeat` means "already verified", no checks. */
+export interface AgentVerificationPayload {
+  proposal_id: string
+  checks: VerificationCheck[]
+  data_flow?: DataFlowCheck
+  recovered: boolean
+  verdict: string
+  repeat?: boolean
 }
 
 export interface ProposalCreatedPayload {
@@ -198,6 +331,8 @@ export interface ActionExecutedPayload {
   output: string
   /** The proposal's params_hash the executor checked before this step ran (auth PR 4). */
   params_hash?: string
+  /** The step may or may not have run (its executor stopped mid-step); never retried. */
+  outcome_unknown?: boolean
 }
 
 export interface HandoffSummary {
@@ -209,8 +344,24 @@ export interface HandoffSummary {
   risks: string[]
 }
 
+/** handoff.requested (R0): a hand-off is being written; in flight until created / failed / expires_at. */
+export interface HandoffRequestedPayload {
+  request_id: string
+  to: Actor
+  stay_as_watcher: boolean
+  expires_at: string
+}
+
+/** handoff.failed (R0): ends a request without a hand-off. `reason` is a fixed code, never error text. */
+export interface HandoffFailedPayload {
+  request_id: string
+  reason: 'summary_failed' | 'not_driver' | 'room_closed' | 'internal_error' | string
+}
+
 export interface HandoffCreatedPayload {
   handoff_id: string
+  /** The handoff.requested it completes; absent on events from before R0. */
+  request_id?: string
   to: Actor
   summary: HandoffSummary
   stay_as_watcher: boolean
@@ -294,6 +445,37 @@ export interface HypothesisSummary {
   based_on_steps: string[]
   confidence: string
   confirmed: boolean
+  /** F9: seq of the agent.hypothesis event. */
+  seq?: number
+  /** F9: latest verdict per person on `seq`. */
+  verdicts?: { verdict: HypothesisVerdict; by: { id: string; name: string; verified?: boolean }; note?: string; at: string }[]
+}
+
+export type HypothesisVerdict = 'confirmed' | 'disputed'
+
+/** hypothesis.verdict (F9). hypothesis_seq is the agent.hypothesis it answers. */
+export interface HypothesisVerdictPayload {
+  verdict: HypothesisVerdict
+  note?: string
+  hypothesis_seq: number
+}
+
+/** approval.nudged (F9): ids only. */
+export interface ApprovalNudgedPayload {
+  proposal_id: string
+  layer: string
+}
+
+/** The newest agent.triage of a room (snapshot `triage`, F6). */
+export interface TriageSummary {
+  status: 'ok' | 'failed'
+  reason?: string
+  headline?: string
+  suspected_layer?: string
+  confidence?: string
+  evidence_refs: string[]
+  next_check?: string
+  at: string
 }
 
 export interface RoomSnapshot {
@@ -309,9 +491,55 @@ export interface RoomSnapshot {
   driver: DriverSummary | null
   agent_status: AgentStatusSummary
   hypothesis: HypothesisSummary | null
+  /** F6: absent on an older server; null until the first agent.triage. */
+  triage?: TriageSummary | null
   open_proposals: ProposalSummary[]
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
+  /** F8: a room.labelled exists. */
+  labelled?: boolean
+  /** Shadow room (docs/api.md): its insight is zeros until revealed. */
+  shadow?: boolean
+  /** F11: cost and clock facts folded server-side; absent on an older server. */
+  insight?: RoomInsight
+}
+
+/** RoomSnapshot.insight (docs/api.md, F11). */
+export interface RoomInsight {
+  first_hypothesis_at: string | null
+  /** Whole seconds from opened_at to the first hypothesis; -1 before one exists. */
+  time_to_first_hypothesis_s: number
+  final_confidence: string
+  steps: number
+  tool_calls: number
+  tool_errors: number
+  usage: {
+    calls: number
+    unpriced_calls: number
+    tokens: number
+    cost_usd: number | null
+    latency_ms_total: number
+  }
+}
+
+/** GET /api/pipelines/{pid}/agent-stats (F11): the agent's track record on one pipeline. */
+export interface AgentStats {
+  pipeline_id: string
+  window_days: number
+  generated_at: string
+  rooms: number
+  hypothesised: number
+  labelled: number
+  graded: number
+  layer_correct: number
+  root_cause: { yes: number; partial: number; no: number }
+  by_confidence: { confidence: string; runs: number; correct: number; accuracy: number }[]
+  median_time_to_first_hypothesis_s: number
+  median_human_mttr_s: number
+  median_cost_usd: number
+  cost_available: boolean
+  enough_data: boolean
+  shadow: { rooms: number; graded: number; layer_correct: number }
 }
 
 export interface TopologyNode {
@@ -353,12 +581,28 @@ export interface Me {
 }
 
 /** One row of GET /api/people: a person a driver may grant control or hand off to. */
+/** One row of GET /auth/users (dev mode only): who the dev login screen may pick. */
+export interface AuthUser {
+  id: string
+  name: string
+  layers: string[]
+}
+
+/** One row of GET /api/pipelines. */
+export interface PipelineInfo {
+  id: string
+  title: string
+  shadow: boolean
+}
+
 export interface Person {
   id: string
   name: string
   verified?: boolean
   /** Only for IdP users with a verified email. */
   email?: string
+  /** F9: the layers the person may approve; absent from an old server. */
+  layers?: string[]
 }
 
 export interface PresenceMember {
@@ -366,12 +610,21 @@ export interface PresenceMember {
   name: string
   verified?: boolean
   state: 'viewing' | 'away'
+  /** F9: when the member entered `state`, RFC 3339 UTC; absent from an old server. */
+  since?: string
 }
 
 export interface EventsPage {
   events: Event[]
   last_seq: number
 }
+
+/** Frames of the room list socket (GET /api/rooms/ws, F6). */
+export type ListWsServerMessage =
+  | { type: 'rooms'; rooms: RoomSnapshot[] }
+  | { type: 'room'; room: RoomSnapshot }
+  | { type: 'room_deleted'; room_id: string }
+  | { type: 'error'; error: { code: string; message: string } }
 
 export type WsServerMessage =
   | { type: 'event'; event: Event }
