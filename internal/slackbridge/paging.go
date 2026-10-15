@@ -32,7 +32,8 @@ import (
 
 // The pages are: approval needed (proposal.created, to the required layers'
 // owners), hand-off (handoff.created, to Users[to.id]) and no active driver
-// (control.lease_expired, to Users[driver.id] plus NoDriver).
+// (control.lease_expired, to Users[driver.id] plus NoDriver) and nudge
+// (approval.nudged, to the owners of the nudged layer only).
 
 // slackUserID is the shape of a Slack member ID. It also keeps `|`, `>` and
 // spaces out of a configured ID, so a config typo cannot break the markup.
@@ -229,6 +230,33 @@ func (p *pager) message(r *renderer, e events.Event) (m message, keys []pageKey,
 		}
 		text := ":handshake: " + mention(id) + " " + clip(actorName(e.Actor), 100) + " is handing this room over to you"
 		return r.pageMessage(e.RoomID, "Hand-off to you: ", []string{mention(id)}, actorName(e.Actor), text, "Accept the hand-off in Piperoom"), []pageKey{k}, nil
+
+	case events.ApprovalNudged:
+		pl, err := events.Decode[events.ApprovalNudgedPayload](e)
+		if err != nil {
+			return m, nil, err
+		}
+		// Only the nudged layer's owners are paged; the layer is a map key.
+		// The key is the event seq: one nudge event pages once, even when the
+		// stream is redelivered, and the re-nudge the server allows every 10
+		// minutes is a new event that pages again. check adds the per-user limits.
+		var ms []string
+		picked := map[string]bool{}
+		for _, id := range p.layers[pl.Layer] {
+			k := pageKey{e.RoomID, id, "nudge:" + strconv.FormatInt(e.Seq, 10)}
+			if picked[id] || len(ms) >= maxPagedUsers || !p.check(k, keys) {
+				continue
+			}
+			picked[id] = true
+			keys = append(keys, k)
+			ms = append(ms, mention(id))
+		}
+		if len(keys) == 0 {
+			return m, nil, nil
+		}
+		text := ":bell: " + strings.Join(ms, " ") + " " + clip(actorName(e.Actor), 100) + " asked for your approval of " +
+			inlineCode(pl.ProposalID, 100) + " (layer " + inlineCode(pl.Layer, 60) + ")"
+		return r.pageMessage(e.RoomID, "Your approval is needed: ", ms, actorName(e.Actor), text, "Approve or reject in Piperoom"), keys, nil
 
 	case events.ControlLeaseExpired:
 		pl, err := events.Decode[events.ControlLeaseExpiredPayload](e)
