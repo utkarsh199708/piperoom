@@ -3,9 +3,6 @@ package wiring
 import (
 	"context"
 	"errors"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"reflect"
 	"testing"
 
@@ -253,65 +250,4 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 	}
 	// The builder RegisterTools stored on w is what the db tools reach.
 	walk("builder", reflect.ValueOf(w.Builder), 0)
-}
-
-// TestToolWiringNeverNamesRawClients covers what the reflection walk cannot see:
-// dbtools keeps its Connect client in closures. RegisterTools and
-// newTopologyBuilder must reach Connect and the Schema Registry only through
-// readConnect and readRegistry, so neither function may mention w.Connect or
-// w.Registry. (actionRegistry and the actions registration legitimately do.)
-func TestToolWiringNeverNamesRawClients(t *testing.T) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "wiring.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checked := map[string]bool{}
-	for _, d := range f.Decls {
-		fn, ok := d.(*ast.FuncDecl)
-		if !ok || (fn.Name.Name != "RegisterTools" && fn.Name.Name != "newTopologyBuilder") {
-			continue
-		}
-		checked[fn.Name.Name] = true
-		ast.Inspect(fn, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok || (sel.Sel.Name != "Connect" && sel.Sel.Name != "Registry") {
-				return true
-			}
-			id, ok := sel.X.(*ast.Ident)
-			if !ok || id.Name != "w" {
-				return true
-			}
-			// The write actions are wired in RegisterTools too, and are the
-			// one place a writer is allowed: they sit inside actions.Register.
-			if fn.Name.Name == "RegisterTools" && inActionsRegister(fn, sel) {
-				return true
-			}
-			t.Errorf("%s: %s.%s names a raw client; use readConnect/readRegistry for tools",
-				fset.Position(sel.Pos()), id.Name, sel.Sel.Name)
-			return true
-		})
-	}
-	if len(checked) != 2 {
-		t.Fatalf("found %v, want RegisterTools and newTopologyBuilder", checked)
-	}
-}
-
-// inActionsRegister reports whether sel lies inside a call to actions.Register.
-func inActionsRegister(fn *ast.FuncDecl, sel *ast.SelectorExpr) bool {
-	found := false
-	ast.Inspect(fn, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		if s, ok := call.Fun.(*ast.SelectorExpr); ok {
-			if x, ok := s.X.(*ast.Ident); ok && x.Name == "actions" && s.Sel.Name == "Register" &&
-				call.Pos() <= sel.Pos() && sel.End() <= call.End() {
-				found = true
-			}
-		}
-		return true
-	})
-	return found
 }

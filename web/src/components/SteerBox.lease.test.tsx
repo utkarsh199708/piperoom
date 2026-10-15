@@ -17,6 +17,8 @@ const room = (min: number, extra = {}) => ({
   driver: { id: 'arjun', name: 'Arjun', lease_until: lease(min), ...extra },
 })
 
+const status = () => document.querySelector('[data-slot="steer-status"]')
+
 describe('SteerBox lease awareness (F9)', () => {
   it('draws a bar as wide as the lease left of 30 minutes', () => {
     render(<SteerBox state={room(15)} user={arjun} actions={actions} />)
@@ -27,7 +29,7 @@ describe('SteerBox lease awareness (F9)', () => {
 
   it('turns amber at 5 minutes and Renew takes the driver role for yourself', () => {
     render(<SteerBox state={room(4)} user={arjun} actions={actions} />)
-    const line = screen.getByText('Lease ends in 4m — any action renews')
+    const line = screen.getByText('Lease ends in 4m — any action renews').closest('[data-slot="steer-status"]')!
     expect(line.className).toMatch(/text-warning-foreground/)
     expect(line).toHaveAttribute('aria-live', 'polite')
     fireEvent.click(screen.getByRole('button', { name: 'Renew' }))
@@ -40,7 +42,7 @@ describe('SteerBox lease awareness (F9)', () => {
     expect(screen.getByRole('button', { name: 'Renew' })).toBeInTheDocument()
     unmount()
     render(<SteerBox state={room(20, { lease_expired: true })} user={kabir} actions={actions} />)
-    expect(screen.getByText("Arjun's lease expired · anyone can take control")).toBeInTheDocument()
+    expect(status()).toHaveTextContent(/^Arjun.*'s lease expired · anyone can take control$/)
     expect(screen.queryByRole('button', { name: 'Renew' })).not.toBeInTheDocument()
     expect(screen.queryByTestId('lease-bar')).not.toBeInTheDocument()
   })
@@ -54,6 +56,6 @@ describe('SteerBox lease awareness (F9)', () => {
 
   it('non-drivers keep "lease 24m left"', () => {
     render(<SteerBox state={room(24)} user={kabir} actions={actions} />)
-    expect(screen.getByText(/Arjun is driving · lease 24m left/)).toBeInTheDocument()
+    expect(status()).toHaveTextContent(/^Arjun.* is driving · lease 24m left/)
   })
 })

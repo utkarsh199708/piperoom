@@ -29,7 +29,7 @@ describe('Checklist', () => {
     const { onTick } = setup({ done: { 'tu1:0:1': { by: { kind: 'human', id: 'kabir', name: 'Kabir' }, at: new Date().toISOString() } } })
     const box = screen.getByRole('checkbox', { name: 'Resume the connector' })
     expect(box).toBeChecked()
-    expect(screen.getByText(/Kabir · just now/)).toBeInTheDocument()
+    expect(screen.getByText(/· just now/)).toHaveTextContent(/Kabir.* · just now/)
     fireEvent.click(box)
     expect(onTick).toHaveBeenCalledWith(expect.objectContaining({ item: 1, done: false }))
   })

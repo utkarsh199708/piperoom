@@ -39,7 +39,7 @@ describe('SteerBox', () => {
   it('watcher sees "Suggest", "Request control", and the driver queue hint', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
-    expect(screen.getByText(/Arjun's queue/)).toBeInTheDocument()
+    expect(screen.getByText(/your message goes to their queue/)).toBeInTheDocument()
     fireEvent.focus(screen.getByLabelText('Steer the agent'))
     expect(screen.getByRole('button', { name: 'Suggest' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Request control' })).toBeInTheDocument()
@@ -119,7 +119,9 @@ describe('SteerBox composer (U3)', () => {
   it('a watcher is told whose queue the message goes to, and the lease', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
-    expect(screen.getByText(/Arjun is driving · lease 2[34]m left · your message goes to Arjun's queue/)).toBeInTheDocument()
+    expect(document.querySelector('[data-slot="steer-status"]')).toHaveTextContent(
+      /^Arjun.* is driving · lease 2[34]m left · your message goes to their queue/,
+    )
     expect(screen.getByPlaceholderText(/Suggest a step for Arjun/)).toBeInTheDocument()
   })
 
@@ -324,9 +326,10 @@ describe('SteerBox idle row (F1b)', () => {
       }
       render(<SteerBox state={state} user={kabir} actions={actions} />)
       fireEvent.focus(field())
-      expect(screen.getByText('Queued for Arjun')).toBeInTheDocument()
-      expect(screen.getByText(/^Sent by Arjun · /)).toBeInTheDocument()
-      expect(screen.getByText('Declined by Arjun')).toHaveAttribute('title', 'not now')
+      expect(screen.getByText(/^Queued for/)).toHaveTextContent(/^Queued for Arjun/)
+      expect(screen.getByText(/^Sent by/)).toHaveTextContent(/^Sent by Arjun.* · /)
+      expect(screen.getByText(/^Declined by/)).toHaveTextContent(/^Declined by Arjun/)
+      expect(screen.getByText(/^Declined by/)).toHaveAttribute('title', 'not now')
     })
 
     it('with no driver a pending chip says no driver yet', () => {

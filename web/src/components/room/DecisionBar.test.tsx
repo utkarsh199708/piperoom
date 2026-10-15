@@ -76,7 +76,7 @@ describe('DecisionBar', () => {
       decisions: { 'kafka-connect': { outcome: 'rejected', reason: 'no', by: { kind: 'human', id: 'k', name: 'Kabir' }, params_hash: 'h' } },
     })
     show(room(rejected))
-    expect(screen.getByRole('region', { name: 'Decision' })).toHaveTextContent('Proposal rejected by Kabir · kafka-connect')
+    expect(screen.getByRole('region', { name: 'Decision' })).toHaveTextContent(/Proposal rejected by Kabir.* · kafka-connect/)
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }))
     expect(screen.queryByRole('region', { name: 'Decision' })).not.toBeInTheDocument()
     expect(window.sessionStorage.getItem('piperoom.dismissed.p1')).toBe('1')

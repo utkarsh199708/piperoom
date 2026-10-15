@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { clockTime } from '@/lib/time'
+import { PersonName } from '@/components/VerifiedBadge'
 import { PersonAvatar } from './PersonAvatar'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
@@ -91,7 +92,6 @@ export function HypothesisCard({
           </Badge>
         )}
         {verdicts.map((v) => {
-          const name = v.by.name || v.by.id
           const when = clockTime(v.at)
           const ok = v.verdict === 'confirmed'
           return (
@@ -102,7 +102,7 @@ export function HypothesisCard({
               data-testid={`verdict-${v.by.id}`}
             >
               {ok ? <Check className="size-3" aria-hidden="true" /> : <X className="size-3" aria-hidden="true" />}
-              {v.verdict} by {name} {when}
+              {v.verdict} by <PersonName person={v.by} /> {when}
               {v.note && <span className="sr-only">: {v.note}</span>}
             </Badge>
           )

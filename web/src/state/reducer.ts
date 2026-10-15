@@ -64,11 +64,14 @@ function updateStep(
 // upsertMember mirrors the server's snapshot.Apply: every human actor is a room
 // member. New actors join as "watching"; an actor already in the list is never
 // downgraded (a driver who acts stays the driver).
+// `verified` follows the latest event, like the name: the server decides it when
+// it writes each event.
 function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
+  const verified = actor.verified === true
   const existing = members.find((m) => m.id === actor.id)
-  if (!existing) return [...members, { id: actor.id, name: actor.name, role: 'watching' }]
-  if (existing.name === actor.name) return members
-  return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name } : m))
+  if (!existing) return [...members, { id: actor.id, name: actor.name, verified, role: 'watching' }]
+  if (existing.name === actor.name && existing.verified === verified) return members
+  return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name, verified } : m))
 }
 
 // foldInsight mirrors the server's insight fold (internal/room/insight.go): same
@@ -188,14 +191,16 @@ function applyCore(state: RoomState, event: Event): RoomState {
       const p = as<RoomCreatedPayload>(event)
       const driver =
         event.actor.kind === 'human'
-          ? { id: event.actor.id, name: event.actor.name }
+          ? { id: event.actor.id, name: event.actor.name, verified: event.actor.verified === true }
           : state.driver
       // Webhook-opened rooms carry the raw alert body here; a room created via
-      // POST /api/rooms has no alert at all.
+      // POST /api/rooms has no alert at all. alert_source is server-set and is
+      // what the alert badge reads; the body-inferred source is only a label.
+      const alertSourceField = typeof p.alert_source === 'string' && p.alert_source !== '' ? p.alert_source : undefined
       const alert =
-        p.alert === undefined || p.alert === null
+        (p.alert === undefined || p.alert === null) && alertSourceField === undefined
           ? null
-          : { source: alertSource(p.alert) }
+          : { source: alertSource(p.alert), alert_source: alertSourceField }
       next = {
         ...state,
         title: p.title,
@@ -208,7 +213,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         alert,
         members:
           event.actor.kind === 'human'
-            ? [{ id: event.actor.id, name: event.actor.name, role: 'driver' }]
+            ? [{ id: event.actor.id, name: event.actor.name, verified: event.actor.verified === true, role: 'driver' }]
             : state.members,
       }
       break
@@ -455,7 +460,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
       const members = state.members.some((m) => m.id === p.to.id)
         ? state.members.map((m) =>
             m.id === p.to.id
-              ? { ...m, role: 'driver' }
+              ? { ...m, verified: p.to.verified === true, role: 'driver' }
               : m.role === 'driver'
                 ? { ...m, role: 'watching' }
                 : m,
@@ -464,11 +469,11 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ...state.members.map((m) =>
               m.role === 'driver' ? { ...m, role: 'watching' } : m,
             ),
-            { id: p.to.id, name: p.to.name, role: 'driver' },
+            { id: p.to.id, name: p.to.name, verified: p.to.verified === true, role: 'driver' },
           ]
       next = {
         ...state,
-        driver: { id: p.to.id, name: p.to.name, lease_until: p.lease_until },
+        driver: { id: p.to.id, name: p.to.name, verified: p.to.verified === true, lease_until: p.lease_until },
         members,
         control_requests: state.control_requests.filter((r) => r.from.id !== p.to.id),
       }
@@ -673,7 +678,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         driver: accepted
           ? state.driver?.id === accepted.to.id
             ? state.driver
-            : { id: accepted.to.id, name: accepted.to.name }
+            : { id: accepted.to.id, name: accepted.to.name, verified: accepted.to.verified === true }
           : state.driver,
         members: accepted
           ? state.members.some((m) => m.id === accepted.to.id)
@@ -688,7 +693,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
                 ...state.members.map((m) =>
                   m.role === 'driver' ? { ...m, role: 'watching' } : m,
                 ),
-                { id: accepted.to.id, name: accepted.to.name, role: 'driver' },
+                { id: accepted.to.id, name: accepted.to.name, verified: accepted.to.verified === true, role: 'driver' },
               ]
           : state.members,
       }
