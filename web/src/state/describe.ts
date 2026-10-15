@@ -22,6 +22,7 @@ import type {
   HypothesisVerdictPayload,
   ApprovalNudgedPayload,
   ProposalCreatedPayload,
+  ProposalWithdrawnPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   SteerDeclinedPayload,
@@ -216,6 +217,19 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'proposal.previewed':
       return { text: 'Previewed what the fix will do', kind: 'decision' }
+    case 'proposal.withdrawn': {
+      const p = as<ProposalWithdrawnPayload>(e)
+      const title = ctx.proposalTitles[p.proposal_id]
+      return {
+        // The system actor writes the withdrawal that follows room.closed: nobody "withdrew" it.
+        text:
+          e.actor.kind === 'system'
+            ? `Fix withdrawn${title ? ` · ${clip(title, 80)}` : ''}`
+            : `${who} withdrew a fix${title ? ` · ${clip(title, 80)}` : ''}`,
+        detail: p.reason ? clip(p.reason, 200) : undefined,
+        kind: 'decision',
+      }
+    }
     case 'agent.verification': {
       const p = as<AgentVerificationPayload>(e)
       return { text: `Verification: ${p.recovered ? 'recovered' : 'not recovered'}`, kind: 'decision' }

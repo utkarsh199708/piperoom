@@ -44,6 +44,7 @@ const reload = vi.fn()
 const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'], role: 'member' }
 const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member' }
 const vera: CurrentUser = { id: 'vera', name: 'Vera', layers: [], role: 'viewer' }
+const sam: CurrentUser = { id: 'sam', name: 'Sam', layers: [], role: 'member' }
 
 function room(over: Partial<RoomState> = {}): RoomState {
   return {
@@ -224,8 +225,14 @@ describe('RoomScreen close room', () => {
     expect(screen.getByRole('dialog', { name: 'Close the room' })).toBeInTheDocument()
   })
 
-  it('a non-driver, a viewer and a closed room get no Close room button', () => {
-    const a = show(arjun, room())
+  it('a layer owner who is not the driver gets the Close room button too (Q0, QA G16)', () => {
+    show(arjun, room())
+    fireEvent.click(screen.getByRole('button', { name: /Close room/ }))
+    expect(screen.getByRole('dialog', { name: 'Close the room' })).toBeInTheDocument()
+  })
+
+  it('a non-driver without a layer, a viewer and a closed room get no Close room button', () => {
+    const a = show(sam, room())
     expect(screen.queryByRole('button', { name: /Close room/ })).not.toBeInTheDocument()
     a.unmount()
     const v = show(vera, room())
@@ -288,12 +295,16 @@ describe('RoomScreen keys', () => {
     expect(screen.getByRole('dialog', { name: 'Hand off the room' })).toBeInTheDocument()
   })
 
-  it('C opens the close dialog for the driver only', () => {
+  it('C opens the close dialog for the driver and a layer owner, not for anyone else', () => {
     const { unmount } = show(kabir, room())
     press('c')
     expect(screen.getByRole('dialog', { name: 'Close the room' })).toBeInTheDocument()
     unmount()
-    show(arjun, room())
+    const owner = show(arjun, room())
+    press('c')
+    expect(screen.getByRole('dialog', { name: 'Close the room' })).toBeInTheDocument()
+    owner.unmount()
+    show(sam, room())
     press('c')
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })

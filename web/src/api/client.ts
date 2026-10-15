@@ -184,6 +184,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ resolution }),
     }),
+  // Q0 (QA G9): the driver ends an open proposal nobody has approved or run; `reason` is optional.
+  withdrawProposal: (roomId: string, proposalId: string, reason?: string) =>
+    request<Event>(`${room(roomId)}/proposals/${encodeURIComponent(proposalId)}/withdraw`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   approve: (proposalId: string, layer: string, extra: ApproveExtras) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/approve`, {
       method: 'POST',

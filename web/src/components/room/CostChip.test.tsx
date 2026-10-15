@@ -26,14 +26,21 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('CostChip', () => {
-  it('shows cost, steps and a running duration while open', () => {
+  it('shows steps and a running duration while open; a priced cost is the header badge\'s, not the chip\'s', () => {
     render(<CostChip state={room()} />)
-    expect(screen.getByTestId('cost-chip')).toHaveTextContent('$0.42 · 11 steps · 2m 10s')
+    expect(screen.getByTestId('cost-chip')).toHaveTextContent(/^11 steps · 2m 10s$/)
+  })
+
+  it('names the tokens while no call is priced', () => {
+    const i = emptyInsight()
+    const unpriced = room({ insight: { ...i, steps: 11, usage: { ...i.usage, calls: 9, unpriced_calls: 9, tokens: 812_200 } } })
+    render(<CostChip state={unpriced} />)
+    expect(screen.getByTestId('cost-chip')).toHaveTextContent(/^812k tokens · 11 steps · 2m 10s$/)
   })
 
   it('freezes the duration at closed_at', () => {
     render(<CostChip state={room({ status: 'closed', closed_at: '2026-10-14T10:01:00Z' })} />)
-    expect(screen.getByTestId('cost-chip')).toHaveTextContent('$0.42 · 11 steps · 1m 0s')
+    expect(screen.getByTestId('cost-chip')).toHaveTextContent(/^11 steps · 1m 0s$/)
   })
 
   it('describes itself with the tooltip text and is not a live region', () => {

@@ -12,6 +12,8 @@ function describe(p: ProposalState): { tone: DotTone; word: string; count: strin
   const count = total > 0 ? `${done} of ${total}` : ''
   if (p.status === 'approved') return { tone: 'ok', word: 'Approved', count }
   if (p.status === 'rejected') return { tone: 'fail', word: 'Rejected', count }
+  // Q0: ended without running; it waits on nobody and is not counted as open.
+  if (p.status === 'withdrawn') return { tone: 'muted', word: 'Withdrawn', count: '' }
   const waiting = p.required_layers.find((l) => p.approvals[l] === 'pending')
   return { tone: 'warn', word: waiting ? `Waiting for ${waiting}` : 'Open', count }
 }

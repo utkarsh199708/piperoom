@@ -11,6 +11,7 @@ import type {
   Identity,
   ProposalPreviewedPayload,
   ProposalStep,
+  RoomInsight,
   RoomLabelledPayload,
   RoomSnapshot,
   TraceStage,
@@ -141,6 +142,18 @@ export interface DecisionState {
   at?: string
 }
 
+/** Why and when a proposal ended without running (proposal.withdrawn, or the room closing around it). */
+export interface WithdrawnState {
+  /** The withdrawer's line, or "room closed". May be empty. */
+  reason: string
+  /** Who withdrew it; absent when only the room closing told us (a log from before Q0). */
+  by?: Actor
+  at?: string
+}
+
+/** The reason of the withdrawal the system actor writes when the room closes (events.ProposalWithdrawnRoomClosed). */
+export const WITHDRAWN_ROOM_CLOSED = 'room closed'
+
 export interface ProposalState {
   proposal_id: string
   title: string
@@ -148,6 +161,15 @@ export interface ProposalState {
   risk: string
   rollback: string
   required_layers: string[]
+  /**
+   * Q0 (QA G5): layers the steps do not write to but the fix still affects. They are part of
+   * `required_layers`, so their owners must approve; the card labels them "impacted".
+   */
+  impacted_layers?: string[]
+  /** Q0: "low" | "medium" | "high"; absent on a proposal from before Q0. */
+  risk_level?: string
+  /** Q0: why the risk is what it is, for approvers. */
+  impact_reasons?: string[]
   approvals: Record<string, ApprovalValue>
   /** Per layer, for the layers that have been decided. */
   decisions: Record<string, DecisionState>
@@ -156,7 +178,9 @@ export interface ProposalState {
    * proposal.created (or the snapshot for an older event); "" when there is none.
    */
   params_hash: string
-  status: 'open' | 'approved' | 'rejected'
+  status: 'open' | 'approved' | 'rejected' | 'withdrawn'
+  /** Set with status 'withdrawn': the proposal left the open list and takes no more decisions. */
+  withdrawn?: WithdrawnState
   executed: ActionExecutedPayload[]
   /** When proposal.created was logged: the preview skeleton counts its 20 s from here. */
   created_at?: string
@@ -324,6 +348,11 @@ export interface RoomState {
   /** Shadow room: no cost chip until its numbers are revealed. */
   shadow: boolean
   insight: InsightState
+  /**
+   * The snapshot's `insight.usage`, kept for the header cost until the first replay has caught up
+   * with `replay_target`. Never added to `insight` (the replay folds the same calls again).
+   */
+  snapshot_usage?: RoomInsight['usage']
 }
 
 export function emptyRoomState(id: string): RoomState {
@@ -381,6 +410,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     resolution: snapshot.resolution,
     last_seq: 0,
     shadow: snapshot.shadow ?? false,
+    snapshot_usage: snapshot.insight?.usage,
     replay_target: snapshot.last_seq ?? 0,
     title_flags: snapshot.title_flags ?? [],
     snapshot_hashes: Object.fromEntries(
