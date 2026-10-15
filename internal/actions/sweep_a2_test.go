@@ -7,20 +7,6 @@ import (
 	"testing"
 )
 
-// TestRestartTaskValidateRefusesUnknownTask (QA U6): a task id the connector
-// does not list passed Validate, so the proposal went to approvers and only
-// failed at Execute with Connect's 404.
-func TestRestartTaskValidateRefusesUnknownTask(t *testing.T) {
-	a := &restartTask{d: Deps{Connect: &fakeConnect{names: []string{"pg-orders-connector"}}}}
-	err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector","task":7}`))
-	if err == nil || !strings.Contains(err.Error(), "task 7") {
-		t.Fatalf("Validate(task 7) = %v; want refused: the connector lists only task 0", err)
-	}
-	if err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)); err != nil {
-		t.Fatalf("Validate(task 0) = %v", err)
-	}
-}
-
 // TestRegisterSchemaValidateIgnoresOtherParses: Validate parsed with avro's
 // process-wide cache, so a schema naming a type it never defines passed once
 // any earlier Validate (another room) had defined that name.

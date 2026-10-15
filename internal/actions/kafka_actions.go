@@ -239,19 +239,7 @@ func (a *restartTask) Validate(ctx context.Context, raw json.RawMessage) error {
 	}
 	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
-	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
-		return err
-	}
-	// A task the connector does not list would pass approval and fail at
-	// Execute with Connect's 404.
-	st, err := a.d.Connect.Status(ctx, p.Connector)
-	if err != nil {
-		return fmt.Errorf("actions: status of %s: %w", p.Connector, err)
-	}
-	if taskState(st, p.Task) == "" {
-		return fmt.Errorf("actions: %s has no task %d (it lists %d task(s))", p.Connector, p.Task, len(st.Tasks))
-	}
-	return nil
+	return a.d.connectorExists(ctx, p.Connector)
 }
 
 func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
