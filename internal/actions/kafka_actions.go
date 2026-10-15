@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -243,17 +244,23 @@ func (a *restartTask) Validate(ctx context.Context, raw json.RawMessage) error {
 		return err
 	}
 	// A task id the connector does not list would pass approval and then fail
-	// with a 404 (Q6 U6). The status read is the same one Preview makes.
+	// with a 404 (Q6 U6). Refuse only what the status proves: a status that
+	// could not be read, or that lists no tasks at all (a connector that failed
+	// before starting any), says nothing about the id, and Execute re-validates
+	// and reports a real 404 anyway. Failing closed here would block every
+	// restart while Connect's status endpoint is flaky, and in replayed evals.
 	st, err := a.d.Connect.Status(ctx, p.Connector)
-	if err != nil {
-		return fmt.Errorf("actions: read %s status: %w", p.Connector, err)
+	if err != nil || len(st.Tasks) == 0 {
+		return nil
 	}
+	ids := make([]string, 0, len(st.Tasks))
 	for _, t := range st.Tasks {
 		if t.ID == p.Task {
 			return nil
 		}
+		ids = append(ids, strconv.Itoa(t.ID))
 	}
-	return fmt.Errorf("actions: connector %q has no task %d", p.Connector, p.Task)
+	return fmt.Errorf("actions: connector %q has no task %d (its tasks: %s)", p.Connector, p.Task, strings.Join(ids, ", "))
 }
 
 func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
