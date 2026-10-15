@@ -265,18 +265,24 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 		return "", err
 	}
 	var col string
+	var keyCols int
 	err = d.queryRow(ctx, `
-		SELECT a.attname
+		SELECT a.attname, i.indnkeyatts
 		FROM pg_index i
 		JOIN pg_class c ON c.oid = i.indrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
-		WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2`, schema, tbl).Scan(&col)
+		WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2`, schema, tbl).Scan(&col, &keyCols)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("postgres: primary key of %s: %w", table, clients.ErrNotFound)
 	}
 	if err != nil {
 		return "", fmt.Errorf("postgres: primary key of %s: %w", table, err)
+	}
+	// A lookup by the first column of a composite key reads whichever row
+	// shares it (another tenant's, with its timestamps): refuse it (#483).
+	if keyCols > 1 {
+		return "", fmt.Errorf("postgres: primary key of %s is composite (%d columns): a lookup by %q alone is not one row: %w", table, keyCols, col, clients.ErrNotSupported)
 	}
 	return col, nil
 }

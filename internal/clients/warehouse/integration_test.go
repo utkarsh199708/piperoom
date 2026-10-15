@@ -305,6 +305,19 @@ func TestPrimaryKeyColumnIntegration(t *testing.T) {
 	if _, err := db.PrimaryKeyColumn(ctx, "analytics."+bare); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("table without a key: err = %v, want ErrNotFound", err)
 	}
+	// A composite key's first column alone is not one row (#483).
+	composite := testenv.Name("cpk")
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, "DROP TABLE IF EXISTS analytics."+composite)
+	})
+	if _, err := conn.Exec(ctx, "CREATE TABLE analytics."+composite+" (tenant_id int, order_id bigint, PRIMARY KEY (tenant_id, order_id))"); err != nil {
+		t.Fatalf("setup composite: %v", err)
+	}
+	if col, err := db.PrimaryKeyColumn(ctx, "analytics."+composite); !errors.Is(err, clients.ErrNotSupported) {
+		t.Fatalf("composite key: %q, %v; want clients.ErrNotSupported", col, err)
+	}
 	if _, err := db.PrimaryKeyColumn(ctx, "analytics.x;drop"); err == nil {
 		t.Fatal("bad table name accepted")
 	}

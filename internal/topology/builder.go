@@ -386,15 +386,17 @@ const lagUnknown = "unknown (no partition of this pipeline's topics)"
 // pipelineLag keeps only the partitions of the pipeline's own topics and sums
 // the lag again from them. A group can also read other pipelines' topics:
 // their lag is not this pipeline's health and must not show on its map (the
-// same rule as kafka_consumer_lag). ok is false when the group has partitions
-// but none of them is the pipeline's: the lag is then unknown, never 0. A lag
-// without partitions is kept as it is: there is nothing to tell apart, and the
-// real client only returns one when the group has no readable partition.
+// same rule as kafka_consumer_lag). Unknown (unreadable) partitions are kept
+// the same way, so a broker outage on the pipeline's topics reaches
+// groupHealth (#508). ok is false when the group has partitions but none of
+// them is the pipeline's: the lag is then unknown, never 0. A lag without
+// partitions is kept as it is: there is nothing to tell apart, and the real
+// client only returns one when the group has no readable partition.
 func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) (clients.GroupLag, bool) {
-	if len(l.Partitions) == 0 {
+	if len(l.Partitions) == 0 && len(l.Unknown) == 0 {
 		return l, true
 	}
-	var kept []clients.PartitionLag
+	var kept, unknown []clients.PartitionLag
 	var total int64
 	for _, pl := range l.Partitions {
 		if ownTopics[pl.Topic] {
@@ -402,8 +404,13 @@ func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) (clients.GroupLa
 			total += pl.Lag
 		}
 	}
-	l.Partitions, l.TotalLag = kept, total
-	return l, len(kept) > 0
+	for _, pl := range l.Unknown {
+		if ownTopics[pl.Topic] {
+			unknown = append(unknown, pl)
+		}
+	}
+	l.Partitions, l.TotalLag, l.Unknown = kept, total, unknown
+	return l, len(kept) > 0 || len(unknown) > 0
 }
 
 func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
