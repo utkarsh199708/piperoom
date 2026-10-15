@@ -20,12 +20,12 @@ hardening, or dev-only exposure).
 
 - **Severity:** critical
 - **Status (2026-10-13, design rev 2):** design in `docs/design/auth.md` (OIDC login, server-side session, `X-User` dev-only; dev mode listens on loopback unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, which the Docker image sets with loud warnings; Host allow-list against DNS rebinding). On `main` @ 0172826 the listen guard exists (`cmd/server/listen.go`), the image passes `--allow-remote` (`Dockerfile:67`) and the pilot compose binds the host side to `127.0.0.1` by default. Login is not built. Revision 3: a reverse proxy needs `PIPEROOM_AUTH_MODE=oidc`; proxy pilots build from git tag `pre-auth` (there is no image pipeline; pilots build from source) until OIDC lands (`auth.md` §5.4, lead decision 2026-10-13). Revision 4: a proxy pilot that upgrades to PR 2 and stays in dev mode could otherwise let a proxied user call `POST /auth/dev-login` and keep another user's cookie; dev mode now answers `403 proxy_identity` when `dev-login` carries `X-User`, or when a session cookie and an `X-User` for a different user arrive together (`auth.md` §5.2).
-- **Where:** `docs/api.md` §Auth (contract); `web/src/components/UserSwitcher.tsx:1-18`;
+- **Where:** `docs/api.md` §Auth (contract); `web/src/components/UserSwitcher.tsx:1-18` (since removed; now `web/src/components/shell/AccountMenu.tsx`);
   `web/src/context/UserContext.tsx:9-49`
 - **Scenario:** The entire approval model rests on "only the owner of a layer may approve a
   write for it." Identity was the `X-User` HTTP header (or `?user=` on the WebSocket) until auth PR 2 (main d034ae7, which added dev cookie sessions and removed `?user=`), checked
   only against a *name*, not a credential, in `dev/users.yaml`. The web app's own
-  `UserSwitcher` is a `<select>` listing every known user — one click turns Kabir (consumer
+  `UserSwitcher` (since removed; now `web/src/components/shell/AccountMenu.tsx`) is a `<select>` listing every known user — one click turns Kabir (consumer
   owner) into Arjun (kafka-connect/kafka/schema-registry owner) or Meera (warehouse owner), no
   password, no session, no server-side check beyond "is this a known id." Anyone who can reach
   the API directly can do the same with `curl -H "X-User: arjun" ...`. This means any room
@@ -36,10 +36,10 @@ hardening, or dev-only exposure).
 - **Fix:** Before any production use: real SSO (OIDC/SAML) issuing a signed session; the server
   derives identity and layer ownership from that session, never from a client-supplied header.
   Until then, treat every approval as unauthenticated and do not run this against real
-  production systems. Gate `UserSwitcher` behind a `VITE_FIXTURES`/dev-only flag so it cannot
+  production systems. Gate `UserSwitcher` (since removed; now `web/src/components/shell/AccountMenu.tsx`, gated by `isDev`) behind a `VITE_FIXTURES`/dev-only flag so it cannot
   ship to a production build by accident.
 - **Owner:** A5 (`internal/httpapi` — auth middleware, not yet merged) for the server fix;
-  A6 (`web/src/components/UserSwitcher.tsx`) to remove/guard the dev switcher in production
+  A6 (`web/src/components/UserSwitcher.tsx`, since removed; now `web/src/components/shell/AccountMenu.tsx`) to remove/guard the dev switcher in production
   builds. (Flagged in the contract today at `docs/api.md`, owned by the leads.)
 
 ---

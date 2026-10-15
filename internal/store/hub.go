@@ -18,7 +18,8 @@ import (
 )
 
 // Fan-out across processes (docs/design/replicas.md section 6.1). Append
-// notifies room_events with "room_id:seq" in its transaction; every process
+// notifies room_events with "room_id:seq" in its transaction, and a room delete
+// with "room_id:deleted" in the delete's transaction; every process
 // LISTENs on one connection. Per room with local subscribers there is one feed
 // that reads the new events once and keeps the last feedBuffer of them, so N
 // sockets on one room cost one query per event, not N. While the LISTEN
@@ -276,7 +277,9 @@ func (h *hub) run() {
 			if n.Channel != "room_events" {
 				continue
 			}
-			if roomID, seq, ok := parseNotify(n.Payload); ok {
+			if roomID, ok := parseDeleteNotify(n.Payload); ok {
+				h.notifyDeleted(roomID)
+			} else if roomID, seq, ok := parseNotify(n.Payload); ok {
 				h.notify(roomID, seq)
 			}
 		}
@@ -358,6 +361,28 @@ func parseNotify(payload string) (string, int64, bool) {
 		return "", 0, false
 	}
 	return payload[:i], seq, true
+}
+
+// deleteNotifySuffix marks a delete notification: "room_id:deleted". It is not
+// a number, so parseNotify rejects it and an older process ignores it.
+const deleteNotifySuffix = ":deleted"
+
+// parseDeleteNotify extracts the room id of a "room_id:deleted" payload.
+func parseDeleteNotify(payload string) (string, bool) {
+	id, ok := strings.CutSuffix(payload, deleteNotifySuffix)
+	return id, ok && id != ""
+}
+
+// notifyDeleted wakes the room's feed so it reads the room, finds it gone and
+// ends its subscribers now, not at the next safety poll. Watchers are not told:
+// a delete is no append.
+func (h *hub) notifyDeleted(roomID string) {
+	h.mu.Lock()
+	f := h.feeds[roomID]
+	h.mu.Unlock()
+	if f != nil {
+		signal(f.wake)
+	}
 }
 
 // notify routes one notification to the room's feed and every watcher.

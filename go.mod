@@ -16,7 +16,8 @@ require (
 	github.com/snowflakedb/gosnowflake v1.19.1
 	github.com/twmb/franz-go v1.22.1
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
-	github.com/twmb/franz-go/pkg/kmsg v1.14.0
+	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261013022759-7b6cac30a57a
+	github.com/twmb/franz-go/pkg/kmsg v1.15.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/text v0.43.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -79,7 +80,7 @@ require (
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/asmfmt v1.3.2 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.3 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/minio/asm2plan9s v0.0.0-20200509001527-cdd76441f9d8 // indirect

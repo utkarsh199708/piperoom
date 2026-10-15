@@ -80,7 +80,7 @@ Boundary-by-boundary:
 3. **Browser/API → identity.** Weak by design for the MVP (`docs/api.md` §Auth: any `X-User`
    value matching a line in `dev/users.yaml` is accepted, no password). The web app even ships a
    dropdown that lets anyone become any user, including every layer owner
-   (`web/src/components/UserSwitcher.tsx`). This collapses the approval boundary (F1).
+   (`web/src/components/UserSwitcher.tsx`, since removed; now `web/src/components/shell/AccountMenu.tsx`). This collapses the approval boundary (F1).
 
 4. **Webhook/alert → room.** Not yet built (A5). `docs/api.md` doesn't say whether this endpoint
    is exempt from `X-User` or needs a different secret. Needs a decision before it ships (F9).

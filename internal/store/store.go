@@ -401,7 +401,9 @@ func (s *PG) CloseRoom(ctx context.Context, id string, closedAt time.Time) error
 func (s *PG) DeleteEmptyRoom(ctx context.Context, id string) error {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
-	tag, err := s.pool.Exec(ctx, `DELETE FROM rooms WHERE id = $1 AND last_seq = 0`, id)
+	// One statement, so the notify commits with the delete.
+	tag, err := s.pool.Exec(ctx, `WITH d AS (DELETE FROM rooms WHERE id = $1 AND last_seq = 0 RETURNING id)
+		SELECT pg_notify('room_events', id || $2) FROM d`, id, deleteNotifySuffix)
 	if err != nil {
 		return fmt.Errorf("store: delete empty room %s: %w", id, err)
 	}
@@ -644,8 +646,8 @@ const SubscribeBuffer = 16
 
 // Subscribe replays events after afterSeq then streams new ones live from the
 // room's shared feed (hub.go). The channel closes when ctx ends, and when the
-// room is deleted: at the feed's next read after the delete (an append
-// notification or a poll; the safety poll at the latest).
+// room is deleted: at once through the delete's notification, or at the feed's
+// next poll if that was lost (the safety poll at the latest).
 func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan events.Event, error) {
 	if _, err := s.GetRoom(ctx, roomID); err != nil {
 		return nil, err
