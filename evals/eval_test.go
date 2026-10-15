@@ -254,3 +254,20 @@ func TestEvaluatePassesAlertAndOptions(t *testing.T) {
 		t.Errorf("options = %+v", gotOpts)
 	}
 }
+
+// Evaluate's own validation refuses two scenarios of one name: they would
+// share a report row and count every run twice.
+func TestValidateAllRefusesDuplicateNames(t *testing.T) {
+	defs, err := LiveTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := loadSeed()
+	if err := ValidateAll([]Scenario{sc}, defs); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	err = ValidateAll([]Scenario{sc, sc}, defs)
+	if err == nil || !strings.Contains(err.Error(), `duplicate scenario name "schema-change"`) {
+		t.Fatalf("err = %v", err)
+	}
+}
