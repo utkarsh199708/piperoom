@@ -29,7 +29,7 @@ export function useOwnerPages(
   if (mine === null) setSeen({ userId: user.id, map: readSeen(user.id) })
   const map = mine ?? {}
 
-  const all = unseenPages(rooms, user.id, map)
+  const all = unseenPages(rooms, user.id, map, user.groups)
   // The room on screen shows its own pages in the timeline, so the banner leaves it out.
   const unseen = all.filter((p) => p.room.id !== currentRoomId)
   const key = all.map((p) => `${p.key}@${p.page.at}`).join('\u0000')

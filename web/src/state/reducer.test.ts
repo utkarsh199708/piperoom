@@ -68,6 +68,7 @@ describe('applyEvent — every event type', () => {
     const s = applyEvent(base(), ev(1, 'room.closed', { resolution: 'fixed' }, human))
     expect(s.status).toBe('closed')
     expect(s.resolution).toBe('fixed')
+    expect(s.closed_by).toEqual({ kind: 'human', id: human.id, name: human.name })
   })
 
   it('agent.status updates agent state', () => {

@@ -538,6 +538,8 @@ export interface RoomSnapshot {
   status: string // "open" | "closed"
   opened_at: string
   closed_at?: string
+  /** Who closed the room (F10); absent while open. */
+  closed_by?: Actor
   resolution?: string
   last_seq: number
   driver: DriverSummary | null
@@ -631,6 +633,8 @@ export interface Me {
   role?: 'member' | 'viewer'
   /** The IdP sent no groups claim (docs/design/auth.md 2.2). */
   groups_missing?: boolean
+  /** Group names of the session, so `group:<name>` page owners can match. Not sent by the server yet (docs/api.md /api/me has none). */
+  groups?: string[]
   /** This user is PIPEROOM_SOLO_USER (omitted otherwise): approvals need a typed confirm. */
   solo?: boolean
 }

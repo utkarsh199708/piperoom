@@ -236,6 +236,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         ...state,
         status: 'closed',
         closed_at: event.at,
+        closed_by: { kind: event.actor.kind, id: event.actor.id, name: event.actor.name },
         resolution: p.resolution,
         // An open proposal does not outlive its room. The server writes proposal.withdrawn right after
         // room.closed, but a log from before Q0 has none and must not show "waiting for approval" forever.
