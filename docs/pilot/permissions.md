@@ -200,19 +200,25 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 | `connect_restart_task` | `POST /connectors/{name}/tasks/{id}/restart` | `connect.go:102`; `kafka_actions.go:201` (`restartTask`) |
 | `connect_restart_connector` | `POST /connectors/{name}/restart?includeTasks=true&onlyFailed=true` | `connect.go:108`; `kafka_actions.go:273` (`restartConnector`) |
 | `connect_resume_connector` | `PUT /connectors/{name}/resume`. Validate refuses any state other than PAUSED or STOPPED | `connect.go:112-115`; `kafka_actions.go:372` (`resumeConnector`) |
-| `connect_update_connector_config` | `PATCH /connectors/{name}/config` with **one** key and value | `connect.go:119-140`; `connector_config.go:74` (`updateConnectorConfig`) |
+| `connect_update_connector_config` | `PATCH /connectors/{name}/config` with **one** key and value | `Client.UpdateConfig` in `internal/clients/connect/connect.go`; `updateConnectorConfig` in `internal/actions/connector_config.go` |
 
 Notes on the table:
 
 - Piperoom sends no other write. No create, no delete, no pause, and no `PUT` on config.
 - `connect_update_connector_config` may change only these keys and values
-  (`connector_config.go:22-28`): `decimal.handling.mode` = `precise|double|string`;
-  `time.precision.mode` = `adaptive|adaptive_time_microseconds|connect`;
-  `tombstones.on.delete` = `true|false`. `errors.tolerance` is deliberately not allowed
-  (`connector_config.go:14-21`). Keys that look like credentials are refused
-  (`connector_config.go:47-62`).
+  (`defaultConnectorConfigAllowList` in `internal/actions/connector_config.go`):
+  `decimal.handling.mode` = `precise|string` (`double` is not offered: it loses precision, which matters
+  for money); `time.precision.mode` = `adaptive|adaptive_time_microseconds|connect`;
+  `tombstones.on.delete` = `true|false`; `errors.log.enable` = `true` only (refused when
+  `errors.log.include.messages` is set to true, because that would write record values into the Connect
+  worker log); `errors.deadletterqueue.context.headers.enable` = `true` only, and only on a sink
+  connector. The two `errors.*` keys add visibility (worker log lines, Connect error headers on DLQ
+  records) and never change which records are kept. Turning them off is not offered. `errors.tolerance`
+  is deliberately not allowed: on a source connector `all` drops CDC events for good. Keys that look
+  like credentials are refused (`looksSecret` in the same file). This list is as of PR #216 (removes
+  `double`); re-read the function on your release.
 - A config `PATCH` needs Kafka Connect 3.5 or later. An older Connect answers 405, which is
-  reported as an error. There is no `PUT` fallback (`connect.go:119-140`).
+  reported as an error. There is no `PUT` fallback (`Client.UpdateConfig`).
 - Connect restarts the connector's tasks when its config changes, so the update is not free.
 
 **Read-only mode (recommended default):** allow only these three `GET` calls:
