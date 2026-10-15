@@ -277,6 +277,7 @@ function CommentThread({
       {open && offline && (
         <div className="ml-7">
           <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent reply.</p>
         </div>
       )}
     </div>
@@ -328,7 +329,12 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
           {sending ? 'Sending…' : 'Comment'}
         </Button>
       </form>
-      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+      {offline && (
+        <>
+          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent comment.</p>
+        </>
+      )}
     </div>
   )
 }

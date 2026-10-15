@@ -205,15 +205,38 @@ describe('SendLedger cancel and isPending', () => {
     expect(post).toHaveBeenCalledTimes(1)
   })
 
-  it('cancel cannot call back a send on the wire: it finishes, and is kept if it fails', async () => {
+  // Round 8 (ADV-A, ADV-B): a send given up on while on the wire must not be drained later.
+  it.each([
+    ['fails', new TypeError('Failed to fetch')],
+    ['gets no answer', new SendUnconfirmedError(12_000)],
+  ])('cancel on a send on the wire: if it %s, it is dropped, never kept or drained', async (_, err) => {
     let fail: (e: unknown) => void = () => {}
-    const post = vi.fn(() => new Promise<Event | undefined>((_, reject) => (fail = reject)))
+    const post = vi.fn(() => new Promise<Event | undefined>((_r, reject) => (fail = reject)))
+    const { l, error } = ledger(post, true)
+    const sent = l.send(stop, 'k1')
+    l.cancel('k1')
+    expect(l.isPending('k1')).toBe(false) // no composer may retry it
+    fail(err)
+    expect(await sent).toBe(false)
+    expect(l.isPending('k1')).toBe(false)
+    expect(l.banner()).toBeNull()
+    expect(error()).toBeNull()
+    post.mockResolvedValue(undefined)
+    l.drain()
+    await vi.advanceTimersByTimeAsync(LIVE_RETRY_MS)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancel on a send on the wire: if it lands, it lands', async () => {
+    let answer: (ev: Event) => void = () => {}
+    const post = vi.fn(() => new Promise<Event | undefined>((resolve) => (answer = resolve)))
     const { l } = ledger(post)
     const sent = l.send(stop, 'k1')
     l.cancel('k1')
-    fail(new TypeError('Failed to fetch'))
-    expect(await sent).toBe(false)
-    expect(l.isPending('k1')).toBe(true) // owed to the reconnect like any failed send
+    answer(event('stop', 'k1'))
+    expect(await sent).toBe(true)
+    expect(await l.send(stop, 'k1')).toBe(true) // landed: answered without a request
+    expect(post).toHaveBeenCalledTimes(1)
   })
 
   it('a refused send (409) is no longer pending, so no composer keeps its id', async () => {

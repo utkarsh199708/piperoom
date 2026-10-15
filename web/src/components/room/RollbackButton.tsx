@@ -78,6 +78,7 @@ export function RollbackButton({
             {rollback || 'none recorded'}
           </p>
           {failed && <OfflineStrip onRetry={() => void send(true)} disabled={busy} />}
+          {failed && <p className="m-0 text-xs text-muted-foreground">Closing discards the unsent request.</p>}
           <DialogFooter>
             <Button variant="ghost" onClick={() => onOpenChange(false)}>
               Cancel

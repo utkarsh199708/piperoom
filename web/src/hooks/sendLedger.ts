@@ -55,6 +55,11 @@ interface Action {
   /** When the latest send of it started. */
   since: number
   flight?: Promise<Outcome>
+  /**
+   * The person gave up on it while it was on the wire (edited the words, closed the dialog). A
+   * success still lands; a failure or an unknown outcome drops it, never kept or drained (#390).
+   */
+  cancelled?: boolean
 }
 
 export interface LedgerDeps {
@@ -135,7 +140,10 @@ export class SendLedger {
       // Another send of this action (the reconnect copy, or a double click) is on its way.
       const out = await this.wait(a.flight)
       if (out === 'ok' || this.isLanded(clientId, item)) return this.settled()
-      if (out === 'timeout' && this.actions.get(clientId) === a && a.state === 'inflight') this.toUnknown(a)
+      if (out === 'timeout' && this.actions.get(clientId) === a && a.state === 'inflight') {
+        if (a.cancelled) this.actions.delete(clientId) // given up on: dropped, not kept as unknown
+        else this.toUnknown(a)
+      }
       a = this.actions.get(clientId)
       if (a?.state === 'inflight') return false
     }
@@ -150,20 +158,25 @@ export class SendLedger {
   /**
    * The person gave up on this action: the words were edited or the dialog closed. A kept or
    * unknown entry is removed, so no Retry, reconnect or live retry sends it. An entry on the wire
-   * cannot be called back: it finishes like any send (the edited words are another action, with
-   * another id). Only after this may the composer start a new action with a new id: an id
-   * belongs to its entry until that entry ends.
+   * cannot be called back, so it is marked: if it lands, it lands; if it fails or gets no
+   * answer, it is dropped instead of kept. Either way it is never sent again, so the composer
+   * may start a new action with a new id at once.
    */
   cancel(clientId: string): void {
     const a = this.actions.get(clientId)
-    if (!a || a.state === 'inflight') return
+    if (!a) return
+    if (a.state === 'inflight') {
+      a.cancelled = true
+      return
+    }
     this.actions.delete(clientId)
     this.setError(this.banner())
   }
 
   /** The ledger still holds this action (on the wire, kept, or unknown): a Retry of it is owed. */
   isPending(clientId: string): boolean {
-    return this.actions.has(clientId)
+    const a = this.actions.get(clientId)
+    return a !== undefined && !a.cancelled
   }
 
   /** On reconnect: sends again every action that is safe to send again, with its own id. */
@@ -211,6 +224,12 @@ export class SendLedger {
   private failed(a: Action, e: unknown): Outcome {
     if (this.isLanded(a.clientId, a.item)) return 'ok' // its event arrived meanwhile
     if (this.actions.get(a.clientId) !== a) return 'refused' // superseded by a newer send of it
+    if (a.cancelled) {
+      // Given up on while on the wire, and it did not land: dropped, never kept or drained.
+      this.actions.delete(a.clientId)
+      this.setError(this.banner())
+      return 'refused'
+    }
     if (isClientIdReused(e)) {
       // One id, two bodies: a bug in this client. Never retried, so it cannot loop.
       console.error('piperoom: client_id_reused for', a.clientId)

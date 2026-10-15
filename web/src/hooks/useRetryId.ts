@@ -11,9 +11,9 @@ import type { SendControls } from './useRoom'
  * - `settle(id, ok)`: after the send. The id stays for a Retry only while the ledger still owes
  *   it (kept or unknown) and nothing was cancelled since the send began; a refused send (an error
  *   answer, 409) is no longer owed, so its id is not kept.
- * - `drop()`: the person gave up on the action (edited the words, closed the dialog). A kept or
- *   unknown entry is cancelled in the ledger, so it is never sent again, before any new action
- *   starts; one on the wire finishes as it is, and the composer no longer owns it.
+ * - `drop()`: the person gave up on the action (edited the words, closed the dialog). It is
+ *   cancelled in the ledger before any new action starts, so it is never sent again: a kept or
+ *   unknown entry is removed, and one on the wire lands if it succeeds and is dropped if not.
  * - When the action lands without the composer hearing (the reconnect copy, or its event),
  *   `onLanded` lets the composer take its Retry strip down.
  */

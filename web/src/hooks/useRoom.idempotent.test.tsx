@@ -77,7 +77,8 @@ function fakeServer(mode: 'contract' | 'old') {
   const conflicts: string[] = [] // client_ids answered 409 client_id_reused
   const byKey = new Map<string, { route: string; body: string; ev: Event }>()
   // resetAfterStore: the next POST is stored, then its connection drops (a TypeError, no answer).
-  const state = { answerAfter: 100, offlineNext: 0, resetAfterStore: 0 }
+  // failAfter: the next POST fails with a TypeError after this many ms, without being stored.
+  const state = { answerAfter: 100, offlineNext: 0, resetAfterStore: 0, failAfter: 0 }
   const answer = (status: number, body: unknown, after: number) =>
     new Promise<Response>((resolve) =>
       setTimeout(
@@ -89,6 +90,11 @@ function fakeServer(mode: 'contract' | 'old') {
     if (state.offlineNext > 0) {
       state.offlineNext--
       return Promise.reject(new TypeError('Failed to fetch')) // never left the browser
+    }
+    if (state.failAfter > 0) {
+      const after = state.failAfter
+      state.failAfter = 0
+      return new Promise<Response>((_, reject) => setTimeout(() => reject(new TypeError('Failed to fetch')), after))
     }
     const route = path.endsWith('/steer') ? 'steer' : 'comments'
     const body = JSON.parse(String(init.body)) as Body
@@ -476,6 +482,44 @@ describe('composers with the real hook: a new action after a delivery is stored 
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
     await screen.findByRole('button', { name: 'Retry' })
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    await pass(500)
+    act(() => socket.onopen?.())
+    await pass(6_000)
+    expect(server.stored).toHaveLength(1)
+  })
+
+  // Round 8 (review of 3b0b523): giving up on a send that is still on the wire must take effect
+  // when it ends. If it fails, it is dropped, never kept or drained next to the new action.
+  it('ADV-A: a step comment is edited away and back while on the wire, the send fails, Retry, reconnect: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <TimelineRoom />)
+    server.state.failAfter = 2_000
+    fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
+    const box = screen.getByLabelText('Comment on this step')
+    fireEvent.change(box, { target: { value: 'ack' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    await pass(500)
+    fireEvent.change(box, { target: { value: 'ack!' } })
+    fireEvent.change(box, { target: { value: 'ack' } })
+    await pass(2_000) // the first send fails
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await pass(500)
+    act(() => socket.onopen?.())
+    await pass(6_000)
+    expect(server.stored.map((e) => (e.payload as { text: string }).text)).toEqual(['ack'])
+  })
+
+  it('ADV-B: a rollback\'s dialog is cancelled while it is on the wire, the send fails, asked again, reconnect: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <RollbackRoom />)
+    server.state.failAfter = 2_000
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    await pass(500)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await pass(2_000) // the first send fails
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
     await pass(500)

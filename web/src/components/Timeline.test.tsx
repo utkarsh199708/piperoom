@@ -125,6 +125,7 @@ describe('Timeline step stream', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument())
     expect(screen.getByLabelText('Reply to comment')).toHaveValue('ack')
+    expect(screen.getByText('Editing discards the unsent reply.')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.queryByLabelText('Reply to comment')).not.toBeInTheDocument())
     expect(onComment).toHaveBeenCalledTimes(2)

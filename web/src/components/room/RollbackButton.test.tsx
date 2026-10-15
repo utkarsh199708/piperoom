@@ -35,6 +35,8 @@ describe('RollbackButton', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
     expect(await screen.findByRole('alert')).toBeInTheDocument()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+    // Closing withdraws the failed request (#459), and the dialog says so.
+    expect(screen.getByText('Closing discards the unsent request.')).toBeInTheDocument()
   })
 
   // #459: Retry is the same action, so it keeps the client_id; the next request is a new one.
