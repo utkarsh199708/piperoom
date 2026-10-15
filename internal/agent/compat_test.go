@@ -285,14 +285,19 @@ func TestRecoveredVerdictAfterNoneProposesRestore(t *testing.T) {
 			}
 
 			// The room saw the warning too, and the episode ends parked as done.
-			var warned bool
-			for _, m := range messageTexts(sink) {
-				if strings.HasPrefix(m, "recovered:") && strings.Contains(m, "follow-up: "+compatSubject+" compatibility is still NONE") {
-					warned = true
+			// The follow-up is for the model only; the room gets the typed verdict.
+			var recoveredEvent bool
+			for _, v := range verifications(sink) {
+				recoveredEvent = recoveredEvent || (v.Recovered && strings.HasPrefix(v.Verdict, "recovered:"))
+				if strings.Contains(v.Verdict, "follow-up") {
+					t.Fatalf("the verdict must not carry the model follow-up: %q", v.Verdict)
 				}
 			}
-			if !warned {
-				t.Fatalf("the room message must carry the follow-up, got %q", messageTexts(sink))
+			if !recoveredEvent {
+				t.Fatalf("the room must get a recovered agent.verification, got %q", messageTexts(sink))
+			}
+			if !strings.Contains(requestText(model.calls[2]), "follow-up: "+compatSubject+" compatibility is still NONE") {
+				t.Fatal("the model must still read the follow-up")
 			}
 			if countDoneStatuses(sink, waitingDetail) != 1 {
 				t.Fatalf("the episode must park as done once the model is finished, got %v", statusList(sink))
@@ -562,8 +567,10 @@ func TestRestoreProposalOnStaleWarehouseIsRecovered(t *testing.T) {
 			verdict = m
 		}
 	}
-	if !strings.Contains(verdict, "schema_registry_versions:") || !strings.Contains(verdict, "information only") {
-		t.Fatalf("the verdict must show the layer check and data flow as information, got %q", verdict)
+	vs := verifications(sink)
+	if len(vs) != 1 || len(vs[0].Checks) != 1 || vs[0].Checks[0].Name != "schema_registry_versions" || vs[0].Checks[0].Layer != "schema-registry" ||
+		vs[0].DataFlow == nil || !strings.Contains(vs[0].DataFlow.Detail, "information only") {
+		t.Fatalf("the verdict must show the layer check and data flow as information, got %+v", vs)
 	}
 	if strings.Contains(verdict, "data is flowing") {
 		t.Fatalf("a config-only verdict must not claim data is flowing, got %q", verdict)
