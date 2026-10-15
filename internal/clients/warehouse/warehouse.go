@@ -120,6 +120,33 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	return m, true, nil
 }
 
+// PrimaryKeyColumn returns the first primary key column of table
+// ("schema.table"). A table without a primary key is clients.ErrNotFound.
+func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error) {
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
+	defer cancel()
+
+	parts := strings.Split(table, ".")
+	if len(parts) != 2 || !identRe.MatchString(parts[0]) || !identRe.MatchString(parts[1]) {
+		return "", fmt.Errorf("warehouse: table must be \"schema.table\", got %q", table)
+	}
+	var col string
+	err := d.queryRow(ctx, `
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
+		WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2`, parts[0], parts[1]).Scan(&col)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("warehouse: primary key of %s: %w", table, clients.ErrNotFound)
+	}
+	if err != nil {
+		return "", fmt.Errorf("warehouse: primary key of %s: %w", table, err)
+	}
+	return col, nil
+}
+
 // notFound adds clients.ErrNotFound to an error for a schema, table or
 // column that does not exist, so callers can tell a dropped sink table from
 // an unreachable warehouse. Other errors are returned unchanged.
