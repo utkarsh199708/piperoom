@@ -90,6 +90,11 @@ func watchClients(st stackFinder) func(pipelineID string) watch.PipelineClients 
 			if r, ok := s.Clients.Kafka.(clients.DLQReader); ok {
 				pc.Kafka = r
 			}
+			// The consumer-group signals read GroupLag from the same client;
+			// without this they stay unknown ("no consumer-group lag reader").
+			if l, ok := s.Clients.Kafka.(watch.LagReader); ok {
+				pc.Lag = l
+			}
 		}
 		return pc
 	}

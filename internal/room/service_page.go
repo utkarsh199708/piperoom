@@ -76,16 +76,13 @@ type pagingState struct {
 	once sync.Once     // the auto-page loop starts once
 	// tickDone, when set (tests only), runs after each check of the loop.
 	tickDone func()
-	// noLayer marks rooms whose missing suspected layer was logged, so the
-	// debug line is written once per room. Guarded by Service.mu.
-	noLayer map[string]bool
 	// noOwners marks rooms whose automatic page found nobody to page, so the
 	// warning is written once per room. Guarded by Service.mu.
 	noOwners map[string]bool
 }
 
 func newPagingState(p Paging) *pagingState {
-	return &pagingState{cfg: p, sem: make(chan struct{}, maxPageDeliveries), noLayer: map[string]bool{}, noOwners: map[string]bool{}}
+	return &pagingState{cfg: p, sem: make(chan struct{}, maxPageDeliveries), noOwners: map[string]bool{}}
 }
 
 // Page is one entry of the snapshot's pages (docs/api.md, Q-wave snapshot
@@ -126,6 +123,9 @@ type roomFacts struct {
 	alertSignal  string
 	alertWriters []string
 	alertLayer   string
+	// alertLabelLayer is a valid `layer` label of the alert (labelLayer), the
+	// auto page's fallback when no signal or triage layer exists.
+	alertLabelLayer string
 	// lastActivity is the time of the newest event that is room activity
 	// (countsAsActivity).
 	lastActivity time.Time
@@ -141,6 +141,7 @@ func foldRoomFacts(snap *RoomSnapshot, e events.Event) {
 	case events.RoomCreated:
 		if p, ok := decode[events.RoomCreatedPayload](e); ok {
 			snap.facts.alertSource = p.AlertSource
+			snap.facts.alertLabelLayer = labelLayer(p.Alert)
 			if p.AlertSource == string(alertin.Watcher) {
 				snap.facts.alertSignal, snap.facts.alertWriters, snap.facts.alertLayer = firstWatcherSignal(p.Alert)
 			}
@@ -259,6 +260,49 @@ func firstWatcherSignal(raw json.RawMessage) (string, []string, string) {
 		return body.Signal, nil, ""
 	}
 	return "", nil, ""
+}
+
+// labelLayer is the valid layer named by a `layer` label of a raw alert
+// (Alertmanager commonLabels, groupLabels, alerts[].labels, or a top-level
+// labels map), "" if there is none.
+func labelLayer(raw json.RawMessage) string {
+	var body struct {
+		Labels       map[string]string `json:"labels"`
+		CommonLabels map[string]string `json:"commonLabels"`
+		GroupLabels  map[string]string `json:"groupLabels"`
+		Alerts       []struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"alerts"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &body) != nil {
+		return ""
+	}
+	sets := []map[string]string{body.Labels, body.CommonLabels, body.GroupLabels}
+	for _, a := range body.Alerts {
+		sets = append(sets, a.Labels)
+	}
+	for _, m := range sets {
+		if l := m["layer"]; slices.Contains(events.Layers, l) {
+			return l
+		}
+	}
+	return ""
+}
+
+// fallbackLayer picks the layer to page when neither the watcher nor triage
+// named one: the alert's layer label, else the first layer of events.Layers
+// (the pipeline's flow order; owners.yaml keeps layers in a map) that has
+// someone to page. "" when nobody can be paged.
+func (s *Service) fallbackLayer(ctx context.Context, pipelineID, label string) string {
+	if label != "" {
+		return label
+	}
+	for _, l := range events.Layers {
+		if len(s.pageOwners(ctx, pipelineID, l)) > 0 {
+			return l
+		}
+	}
+	return ""
 }
 
 // signalLayer is the layer of a watcher signal in pipelineID; evLayer is the
@@ -711,14 +755,32 @@ func (s *Service) autoPage(ctx context.Context, roomID string) {
 	s.mu.Lock()
 	st := s.rooms[roomID]
 	layer, reason, ok := s.autoPageDueLocked(roomID, st)
+	var pipelineID, label string
+	if ok {
+		pipelineID, label = st.snap.PipelineID, st.snap.facts.alertLabelLayer
+	}
 	s.mu.Unlock()
 	if !ok {
 		return
 	}
+	fallback := layer == ""
+	if fallback {
+		if layer = s.fallbackLayer(ctx, pipelineID, label); layer == "" {
+			s.mu.Lock()
+			first := !s.paging.noOwners[roomID]
+			s.paging.noOwners[roomID] = true
+			s.mu.Unlock()
+			if first {
+				s.log.Warn("room: auto page skipped: no suspected layer and nobody to page for any layer; retry at the next check", "room", roomID)
+			}
+			return
+		}
+		reason = fmt.Sprintf("nobody has taken the driver role %s after this room opened; no layer is suspected, so the owners of %s are paged", fmtWait(s.paging.cfg.UndrivenAfter), layer)
+	}
 	_, ownerIDs, err := s.page(ctx, roomID, pageReq{
 		actor: systemActor, layer: layer, reason: reason, auto: true, needOwners: true,
 		check: func(st *roomState) error {
-			if l, _, ok := s.autoPageDueLocked(roomID, st); !ok || l != layer {
+			if l, _, ok := s.autoPageDueLocked(roomID, st); !ok || (l != "" && l != layer) {
 				return errPageNotDue
 			}
 			return nil
@@ -753,8 +815,8 @@ func (s *Service) autoPage(ctx context.Context, roomID string) {
 // the layer and the reason: open, opened by an alert or the watcher, no
 // driver Paging.UndrivenAfter after it opened, not auto-paged yet (from the
 // log, so a restart does not repeat it), and a suspected layer: the watcher's
-// first signal, else the triage pass's suspected_layer. A room with neither is
-// skipped (one debug line). Caller holds s.mu.
+// first signal, else the triage pass's suspected_layer. With neither the layer
+// is "" and autoPage falls back. Caller holds s.mu.
 func (s *Service) autoPageDueLocked(roomID string, st *roomState) (layer, reason string, ok bool) {
 	after := s.paging.cfg.UndrivenAfter
 	if after <= 0 || st == nil || st.deleting || !s.roomOpen(st) || st.snap.Driver != nil ||
@@ -772,13 +834,7 @@ func (s *Service) autoPageDueLocked(roomID string, st *roomState) (layer, reason
 		layer = t.SuspectedLayer
 		reason = fmt.Sprintf("nobody has taken the driver role %s after this room opened; the first look suspects %s", waited, layer)
 	}
-	if layer == "" {
-		if !s.paging.noLayer[roomID] {
-			s.paging.noLayer[roomID] = true
-			s.log.Debug("room: auto page skipped: no suspected layer yet", "room", roomID)
-		}
-		return "", "", false
-	}
+	// layer "" is due too: autoPage then falls back (fallbackLayer).
 	return layer, reason, true
 }
 

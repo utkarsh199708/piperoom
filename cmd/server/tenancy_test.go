@@ -13,6 +13,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
 )
 
@@ -100,6 +101,17 @@ func TestStackAdapters(t *testing.T) {
 	wc := watchClients(f)
 	if got := wc("pa"); got.Set != "pipeline pa" || got.Source != srcA || got.Connect != connA || got.Kafka != kafkaA {
 		t.Fatalf("watch adapter pa = %+v", got)
+	}
+	// S3: a set with a Kafka client reads consumer-group lag from it; the empty
+	// set has none (its signals stay unknown).
+	if got := wc("pa"); got.Lag != watch.LagReader(kafkaA) {
+		t.Fatalf("watch adapter pa Lag = %v, want the set's Kafka client", got.Lag)
+	}
+	if got := wc("pb"); got.Lag == nil {
+		t.Fatal("watch adapter pb: no lag reader for a set with a Kafka client")
+	}
+	if got := wc("zz"); got.Lag != nil {
+		t.Fatalf("watch adapter on the empty set has Lag %v, want nil", got.Lag)
 	}
 	if got := wc("pb"); got.Set != "pipeline pb" || got.Kafka != nil {
 		t.Fatalf("watch adapter pb = %+v, want no DLQ reader for a Kafka client without one", got)
