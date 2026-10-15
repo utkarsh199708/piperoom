@@ -9,7 +9,7 @@ what each failure scenario looks like and how to fix it.
 ```sh
 go run ./cmd/devctl lock --owner <tag>     # take the shared stack lock first (see below)
 go run ./cmd/devctl up --owner <tag>       # start the stack, register the connector, start devconsumer
-go run ./cmd/devctl reset --owner <tag>    # remove all data and start clean (use this most of the time)
+go run ./cmd/devctl reset --owner <tag>    # remove pipeline data, start clean; rooms in roomdb are kept (use this most of the time)
 go run ./cmd/devctl status                 # one-screen health: connector, replication slot, consumer group, warehouse
 go run ./cmd/devctl down --owner <tag>     # stop the stack
 go run ./cmd/devctl unlock --owner <tag>   # release the lock when you're done
