@@ -39,7 +39,12 @@ export function agentPill(state: RoomState): AgentPillInfo {
       return { tone: 'fail', text: 'Agent error', title: detail }
     case 'waiting_approval': {
       const open = state.proposals.find((p) => p.status === 'open' && p.required_layers.length > 0)
-      if (!open) return { tone: 'warn', text: 'Agent waiting for approval', title: detail }
+      if (!open) {
+        // The agent keeps saying "waiting for approval" until it has read a withdrawal (Q0): the room knows better.
+        return latest?.status === 'withdrawn'
+          ? { tone: 'muted', text: 'Proposal withdrawn · waiting for a steer', title: detail }
+          : { tone: 'warn', text: 'Agent waiting for approval', title: detail }
+      }
       const done = open.required_layers.filter((l) => open.approvals[l] === 'approved').length
       return { tone: 'warn', text: `Agent waiting · ${done} of ${open.required_layers.length} approvals`, title: detail }
     }

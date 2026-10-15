@@ -4,6 +4,9 @@
 import { ApiClientError } from '../api/client'
 
 const FRIENDLY_TEXT: Record<string, string> = {
+  // Q0: approve, reject and withdraw all answer these for a proposal that is no longer open.
+  proposal_withdrawn: 'this fix was already withdrawn, so it can no longer be decided on',
+  proposal_running: 'this fix is already approved or running, so it can no longer be withdrawn',
   lease_held: 'someone else holds control',
   stale_handoff: 'this hand-off is out of date',
   no_hypothesis: 'there is no hypothesis to decide on yet',
@@ -32,4 +35,22 @@ export function errorText(e: unknown): string {
   if (e instanceof ApiClientError) return friendlyError(e.code, e.message)
   if (e instanceof Error) return e.message
   return String(e)
+}
+
+// The friendly texts above are lowercase fragments for the room banner; an inline message is a sentence.
+const sentence = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1)
+
+/** What a failed withdraw (POST .../proposals/{pid}/withdraw) says. Nothing is kept or retried. */
+export function withdrawErrorText(e: unknown): string {
+  if (isNetworkError(e)) return "Can't reach Piperoom. The fix was not withdrawn; try again."
+  if (e instanceof ApiClientError && e.code === 'not_driver') return 'Only the driver can withdraw a fix.'
+  return sentence(errorText(e))
+}
+
+/** What a failed close says. A layer owner who is not the driver gets 403 not_driver when the server disagrees. */
+export function closeErrorText(e: unknown): string {
+  if (e instanceof ApiClientError && e.code === 'not_driver') {
+    return "Only the driver or an approver of one of this pipeline's layers can close the room."
+  }
+  return errorText(e)
 }

@@ -1,10 +1,11 @@
 import { useId } from 'react'
 import type { RoomState } from '@/state/types'
-import { chipText, chipTooltip } from '@/lib/insight'
+import { chipText, chipTooltip, headerUsage } from '@/lib/insight'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useNow } from './useNow'
 
-// "$0.42 · 11 steps · 2m 10s" in the header facts line. Plain information: the
+// "11 steps · 2m 10s" in the header facts line ("812k tokens · 11 steps · 2m 10s" while no call is priced;
+// a priced cost is the CostBadge's job, next to the agent pill). Plain information: the
 // button opens nothing and is not a live region. The duration runs while the
 // room is open and is frozen at closed_at afterwards. Hidden in a shadow room
 // (its numbers are revealed after close).
@@ -16,7 +17,7 @@ export function CostChip({ state }: { state: RoomState }) {
   if (Number.isNaN(opened)) return null
   const end = state.closed_at ? Date.parse(state.closed_at) : now
   const ms = Math.max(0, (Number.isNaN(end) ? now : end) - opened)
-  const text = chipText(state.insight, ms)
+  const text = chipText(state.insight, ms, headerUsage(state).cost_usd === null)
   const tip = chipTooltip(state.insight)
   return (
     <TooltipProvider>

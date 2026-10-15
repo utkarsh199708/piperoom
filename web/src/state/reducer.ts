@@ -27,6 +27,7 @@ import type {
   HypothesisVerdictPayload,
   ApprovalNudgedPayload,
   ProposalCreatedPayload,
+  ProposalWithdrawnPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   RoomLabelledPayload,
@@ -39,8 +40,17 @@ import { describeEvent } from './describe'
 import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
-import { checklistKey } from './types'
-import type { HypothesisHistoryEntry, InsightState, MemberState, RoomState, StepState, VerdictState } from './types'
+import { checklistKey, WITHDRAWN_ROOM_CLOSED } from './types'
+import type {
+  HypothesisHistoryEntry,
+  InsightState,
+  MemberState,
+  ProposalState,
+  RoomState,
+  StepState,
+  VerdictState,
+  WithdrawnState,
+} from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -161,6 +171,12 @@ function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: n
   return null
 }
 
+// Only an open proposal can end by withdrawal: an approved one is running or ran, and a rejected
+// one keeps its outcome (the server refuses the first with 409 proposal_running).
+function endIfOpen(p: ProposalState, withdrawn: WithdrawnState): ProposalState {
+  return p.status === 'open' ? { ...p, status: 'withdrawn', withdrawn } : p
+}
+
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
   const next = applyCore(state, event)
@@ -215,6 +231,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
         status: 'closed',
         closed_at: event.at,
         resolution: p.resolution,
+        // An open proposal does not outlive its room. The server writes proposal.withdrawn right after
+        // room.closed, but a log from before Q0 has none and must not show "waiting for approval" forever.
+        proposals: state.proposals.map((prop) => endIfOpen(prop, { reason: WITHDRAWN_ROOM_CLOSED, at: event.at })),
       }
       break
     }
@@ -487,6 +506,10 @@ function applyCore(state: RoomState, event: Event): RoomState {
             risk: p.risk,
             rollback: p.rollback,
             required_layers: p.required_layers ?? [],
+            // Q0 fields stay off a proposal that has none (events from before Q0).
+            ...(p.impacted_layers?.length ? { impacted_layers: p.impacted_layers } : {}),
+            ...(p.risk_level ? { risk_level: p.risk_level } : {}),
+            ...(p.impact_reasons?.length ? { impact_reasons: p.impact_reasons } : {}),
             approvals,
             decisions: {},
             // The event's hash, else the snapshot's (an event written before the
@@ -507,6 +530,21 @@ function applyCore(state: RoomState, event: Event): RoomState {
       next = {
         ...state,
         proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? { ...prop, preview: p } : prop)),
+      }
+      break
+    }
+
+    // The proposal leaves the open list and takes no more decisions. The real event also refines a
+    // withdrawal the reducer inferred from room.closed: it knows who wrote it and why.
+    case 'proposal.withdrawn': {
+      const p = as<ProposalWithdrawnPayload>(event)
+      const withdrawn = { reason: p.reason ?? '', by: event.actor, at: event.at }
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          return prop.status === 'withdrawn' ? { ...prop, withdrawn } : endIfOpen(prop, withdrawn)
+        }),
       }
       break
     }

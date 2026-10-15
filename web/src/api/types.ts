@@ -32,6 +32,7 @@ export type EventType =
   | 'control.granted'
   | 'control.lease_expired'
   | 'proposal.created'
+  | 'proposal.withdrawn'
   | 'approval.given'
   | 'approval.rejected'
   | 'action.executed'
@@ -286,6 +287,24 @@ export interface ProposalCreatedPayload {
   required_layers: string[]
   /** Hex SHA-256 of the frozen proposal (auth PR 4). Absent on events written before it. */
   params_hash?: string
+  /**
+   * Q0 (QA G5): layers the fix does not write to but whose data it changes. They are inside
+   * `required_layers` already, so their owners must approve too.
+   */
+  impacted_layers?: string[]
+  /** Q0: "low" | "medium" | "high". Absent on events written before Q0. */
+  risk_level?: string
+  /** Q0: why the server raised the risk or added impacted layers (at most 8, each at most 300 characters). */
+  impact_reasons?: string[]
+}
+
+/**
+ * proposal.withdrawn (Q0, QA G8/G9): the proposal ended without running. By the agent, the driver,
+ * or the system actor right after room.closed with reason "room closed".
+ */
+export interface ProposalWithdrawnPayload {
+  proposal_id: string
+  reason: string
 }
 
 /**
@@ -405,6 +424,10 @@ export interface ProposalSummary {
   approvals: Record<string, ApprovalValue>
   /** After auth PR 4. "" only for a proposal that cannot be hashed. */
   params_hash?: string
+  /** Q0: copied from proposal.created. */
+  impacted_layers?: string[]
+  risk_level?: string
+  impact_reasons?: string[]
 }
 
 export interface SuggestionSummary {

@@ -15,7 +15,7 @@ import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
-import { errorText, friendlyError, isNetworkError } from '../lib/errors'
+import { closeErrorText, errorText, friendlyError, isNetworkError, withdrawErrorText } from '../lib/errors'
 import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
@@ -67,6 +67,12 @@ export interface CloseResult {
   error?: string
 }
 
+/** What a withdraw attempt came to; `error` is the sentence for the proposal card. */
+export interface WithdrawResult {
+  ok: boolean
+  error?: string
+}
+
 /** A steer or comment that could not reach the server, kept for one retry. */
 interface PendingSend {
   kind: 'steer' | 'comment'
@@ -100,6 +106,12 @@ export interface RoomActions {
    * banner; `ok: false` lets the close dialog, which covers that banner, show it too.
    */
   close: (resolution: string) => Promise<CloseResult>
+  /**
+   * The driver ends an open proposal (POST .../proposals/{pid}/withdraw, Q0). The result carries the
+   * error, which the proposal card shows itself; the room banner stays out of it. Optional so a caller
+   * that builds its own actions (a test, a read-only view) does not have to supply one; useRoom always does.
+   */
+  withdraw?: (proposalId: string, reason?: string) => Promise<WithdrawResult>
   /**
    * Resolves when the call is done. `needsConfirm` means the server wants the
    * solo-mode string (docs/design/auth.md 5.3): the caller asks for it and calls
@@ -579,9 +591,21 @@ export function useRoom(roomId: string) {
         setError(null)
         return { ok: true }
       } catch (e) {
-        const text = errorText(e)
+        const text = closeErrorText(e)
         setError(text)
         return { ok: false, error: text }
+      }
+    },
+    withdraw: async (proposalId, reason) => {
+      if (isFixtures()) {
+        synthesize('proposal.withdrawn', { proposal_id: proposalId, reason: reason ?? '' })
+        return { ok: true }
+      }
+      try {
+        await api.withdrawProposal(roomId, proposalId, reason)
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: withdrawErrorText(e) }
       }
     },
     approve: async (proposalId, layer, extra) => {

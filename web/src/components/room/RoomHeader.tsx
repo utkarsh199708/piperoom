@@ -11,6 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Kbd } from '@/components/ui/kbd'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { AgentPill } from './AgentPill'
+import { CostBadge } from './CostBadge'
 import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
@@ -105,6 +106,7 @@ export function RoomHeader({
               View only
             </span>
           )}
+          <CostBadge state={state} />
           <AgentPill state={state} />
           {state.agent_status.state === 'error' && state.agent_status.detail && (
             <span
