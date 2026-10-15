@@ -186,7 +186,8 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if err := checkJSONBStorable(raw); err != nil {
 		return RoomSnapshot{}, false, err
 	}
-	if err := rejectUnstorable(title); err != nil {
+	// Machine text: a bidi control is flagged (title_flags), not refused.
+	if err := checkStorable(title); err != nil {
 		return RoomSnapshot{}, false, err
 	}
 	if title == "" {
@@ -361,10 +362,14 @@ func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
 // evidence (alertUpdateLocked). Caller holds st's lock.
 func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string, raw json.RawMessage, resolved bool) (RoomSnapshot, error) {
 	text := fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title)
+	state := alertFiring
 	if resolved {
-		text = fmt.Sprintf("alert %q reported resolved at its source; the room stays open until the driver closes it", title)
+		text = fmt.Sprintf("alert %q %s", title, resolvedJoinSuffix)
+		state = alertResolved
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text})
+	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, incidentNotePayload{
+		AgentMessagePayload: events.AgentMessagePayload{Text: text}, AlertState: state,
+	})
 	if err != nil {
 		// A full log cannot take the note, but the alert still belongs to
 		// this room: answering an error would make the sender retry forever.

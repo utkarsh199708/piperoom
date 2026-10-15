@@ -254,3 +254,25 @@ func TestNewWebhookRejectsBadURL(t *testing.T) {
 		t.Errorf("error = %v; must refuse and not quote the URL", err)
 	}
 }
+
+// TestDeliverTitleFlags (Q5 T9): the body carries the room's title_flags, so a
+// relay can tell a flagged title before it shows it; [] when clean, never null.
+func TestDeliverTitleFlags(t *testing.T) {
+	for _, tc := range []struct {
+		flags []string
+		want  string
+	}{
+		{nil, `"title_flags":[]`},
+		{[]string{"bidi_override", "override"}, `"title_flags":["bidi_override","override"]`},
+	} {
+		r := newReceiver(t)
+		p := sample()
+		p.TitleFlags = tc.flags
+		if err := newHook(t, r.srv.URL, "", nil).Deliver(context.Background(), p); err != nil {
+			t.Fatalf("deliver: %v", err)
+		}
+		if body := string(r.requests()[0].body); !strings.Contains(body, tc.want) {
+			t.Fatalf("body %s, want %s", body, tc.want)
+		}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"piperoom/internal/injectscan"
 	"piperoom/internal/store"
 )
 
@@ -66,12 +67,36 @@ const replacementChar = string(rune(0xFFFD))
 // invalid UTF-8 the request is refused with a 400 validation error before any
 // write. Nothing is changed, because the person should see that the text did
 // not go through. The message never quotes the text.
+//
+// A bidi embedding, override or isolate character (U+202A–U+202E,
+// U+2066–U+2069) is refused the same way (Q5 T8): it makes the text render in
+// another order than it is stored, so a comment could read differently on
+// screen than in the log, the export or the agent's prompt. Machine text (an
+// alert title, watcher evidence) goes through checkStorable instead and is
+// flagged, not refused (title_flags, injectscan.KindBidi).
 func rejectUnstorable(fields ...string) error {
+	if err := checkStorable(fields...); err != nil {
+		return err
+	}
+	for _, f := range fields {
+		if injectscan.HasBidiOverride(f) {
+			return validation(bidiTextMsg)
+		}
+	}
+	return nil
+}
+
+// checkStorable refuses only what Postgres cannot hold (NUL, invalid UTF-8),
+// for text a person did not type.
+func checkStorable(fields ...string) error {
 	if err := store.CheckText(fields...); err != nil {
 		return validation(unstorableTextMsg)
 	}
 	return nil
 }
+
+// bidiTextMsg is the 400 message for typed text with a bidi control.
+const bidiTextMsg = "text contains bidirectional control characters (U+202A–U+202E, U+2066–U+2069); remove them and send again"
 
 // sanitizeAgentText is the policy for text a model or a tool produced (agent
 // steps, hypothesis, proposal fields, hand-off summary, action output): NUL and
