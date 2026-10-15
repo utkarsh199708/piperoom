@@ -927,8 +927,11 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 	res, err := entry.tool.Run(tctx, input)
 	took := time.Since(start).Milliseconds()
 
-	res = r.scrubToolResult(name, res)
-	data := r.toolDataJSON(name, res.Data)
+	res, scrubErr := r.scrubToolResult(name, res)
+	if err == nil {
+		err = scrubErr
+	}
+	data, dataCut := r.toolDataJSON(name, res.Data)
 	if err != nil {
 		// The verdict lines built from this error reach the model and the log.
 		err = r.scrubToolError(name, err)
@@ -943,7 +946,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 	r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID: stepID, ToolUseID: toolUseID, Tool: name,
 		Summary: summary, Data: data, IsError: false,
-		Truncated: res.Truncated || reTruncated, TookMS: took,
+		Truncated: res.Truncated || reTruncated || dataCut, TookMS: took,
 	})
 	return res, nil
 }
