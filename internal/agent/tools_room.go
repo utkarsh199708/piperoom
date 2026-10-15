@@ -106,6 +106,22 @@ func (t *updateHypothesisTool) checkSteps(in hypothesisInput) error {
 	return nil
 }
 
+// unbacked returns the terms of the hypothesis that its cited steps do not
+// show (see groundTerms). Without a ledger nothing is known about the steps,
+// so nothing is marked.
+func (t *updateHypothesisTool) unbacked(in hypothesisInput) []string {
+	if t.steps == nil {
+		return nil
+	}
+	cited := make([]string, 0, len(in.BasedOnSteps))
+	for _, id := range in.BasedOnSteps {
+		if f, ok := t.steps.get(id); ok {
+			cited = append(cited, f.summary)
+		}
+	}
+	return groundTerms(in.Text, cited)
+}
+
 // clipID shortens a model-supplied id for an error message.
 func clipID(s string) string {
 	const max = 80
@@ -169,15 +185,17 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
 	}
+	unbacked := t.unbacked(in)
 	if err := t.sink.Emit(ctx, events.AgentHypothesis, events.AgentHypothesisPayload{
-		Text:         in.Text,
-		BasedOnSteps: in.BasedOnSteps,
-		Confidence:   in.Confidence,
-		Confirmed:    false,
+		Text:          in.Text,
+		BasedOnSteps:  in.BasedOnSteps,
+		Confidence:    in.Confidence,
+		Confirmed:     false,
+		UnbackedTerms: unbacked,
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit hypothesis: %w", err)
 	}
-	return tools.Result{Summary: "hypothesis recorded"}, nil
+	return tools.Result{Summary: "hypothesis recorded" + unbackedNote(unbacked)}, nil
 }
 
 // ---- post_message ----
