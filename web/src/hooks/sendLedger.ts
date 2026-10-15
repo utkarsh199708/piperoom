@@ -160,7 +160,8 @@ export class SendLedger {
    * unknown entry is removed, so no Retry, reconnect or live retry sends it. An entry on the wire
    * cannot be called back, so it is marked: if it lands, it lands; if it fails or gets no
    * answer, it is dropped instead of kept. Either way it is never sent again, so the composer
-   * may start a new action with a new id at once.
+   * may start a new action with a new id at once. Known gap (#519, shared with main): a send()
+   * already waiting on that flight posts the action again once the flight fails.
    */
   cancel(clientId: string): void {
     const a = this.actions.get(clientId)

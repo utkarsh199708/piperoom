@@ -257,3 +257,25 @@ describe('SendLedger cancel and isPending', () => {
   })
 })
 
+// Gap shared with main (org.md §12), pinned as it is today; follow-up #519. When it is fixed,
+// this row flips to assert two posts, isPending false and no banner.
+describe('gap rows (today\'s behaviour, shared with main)', () => {
+  it('GAP (#519): a Retry waiting on the reconnect copy re-posts after a cancel, once that copy fails', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post)
+    await l.send(stop, 'k1') // fails offline: kept for the reconnect
+    let failCopy: (e: unknown) => void = () => {}
+    post.mockImplementationOnce(() => new Promise<Event | undefined>((_r, reject) => (failCopy = reject)))
+    l.drain() // the reconnect copy is on the wire
+    const retry = l.send(stop, 'k1') // the person's Retry waits on that copy
+    l.cancel('k1') // ...then they edit the words or close the dialog
+    post.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    failCopy(new TypeError('Failed to fetch'))
+    expect(await retry).toBe(false)
+    // Today: the waiting Retry posts the cancelled action again, and it is kept once more.
+    expect(post).toHaveBeenCalledTimes(3)
+    expect(l.isPending('k1')).toBe(true)
+    expect(error()).toBe(OFFLINE_TEXT)
+  })
+})
+
