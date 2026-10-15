@@ -27,6 +27,16 @@ function fold(events: Event[], from: RoomState = emptyRoomState('r1')): RoomStat
   return events.reduce(applyEvent, from)
 }
 
+// Q5 W2: a proposal.created that lands after room.closed (a late write) must not
+// show a card that waits on approval in a closed room.
+describe('proposal.created after room.closed', () => {
+  it('is ignored', () => {
+    const s = fold([ev(1, 'room.closed', { resolution: 'fixed' }, human), ev(2, 'proposal.created', created('p1'))])
+    expect(s.status).toBe('closed')
+    expect(s.proposals).toHaveLength(0)
+  })
+})
+
 describe('proposal.withdrawn', () => {
   it('ends an open proposal: it takes the withdrawn status, the reason and who wrote it', () => {
     const s = fold([ev(1, 'proposal.created', created('p1')), ev(2, 'proposal.withdrawn', { proposal_id: 'p1', reason: 'wrong connector' })])

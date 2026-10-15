@@ -16,6 +16,7 @@ import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeContr
 import { ageLabel } from '../lib/time'
 import { needsYou } from '../lib/rooms'
 import { handoffInFlight } from '../lib/handoff'
+import { REVEAL_PROPOSAL_EVENT } from '../lib/triage'
 import { useNow } from './room/useNow'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PipelineMap } from './PipelineMap'
@@ -99,6 +100,14 @@ export function RoomScreen() {
     }),
     [setTab],
   )
+  // A proposal id in agent prose links to its card, which lives on the Fix tab of the tabbed layout (T12).
+  useEffect(() => {
+    const open = () => {
+      if (narrowRef.current) setTab('fix')
+    }
+    window.addEventListener(REVEAL_PROPOSAL_EVENT, open)
+    return () => window.removeEventListener(REVEAL_PROPOSAL_EVENT, open)
+  }, [setTab])
   const roomList = useContext(RoomListContext)
   const elsewhereNeedsMe = useMemo(
     () => (roomList?.rooms ?? []).some((r) => r.id !== roomId && needsYou(r, user)),
@@ -339,6 +348,7 @@ export function RoomScreen() {
       </div>
       <Timeline
         steps={state.steps}
+        proposalIds={state.proposals.map((x) => x.proposal_id)}
         messages={state.messages}
         comments={state.comments}
         onComment={actions.comment}

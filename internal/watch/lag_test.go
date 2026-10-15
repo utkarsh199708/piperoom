@@ -274,7 +274,7 @@ func TestCrashLoopCounterFiresWhileRunning(t *testing.T) {
 	trace := "org.apache.kafka.connect.errors.ConnectException: MISSING_UNION_BRANCH\n\tat frame"
 	for i := 0; i < 6; i++ { // F R F R F R: 3 restarts in 6 minutes
 		if i%2 == 0 {
-			h.breakConnector("orders", trace)
+			h.conn.setStatus("pg-orders", taskFailed("pg-orders", trace))
 		} else {
 			h.fixConnector("orders")
 		}
@@ -284,7 +284,7 @@ func TestCrashLoopCounterFiresWhileRunning(t *testing.T) {
 	// keeps looping until `for` (3m) is over.
 	for i := 0; i < 3; i++ {
 		if i%2 == 0 {
-			h.breakConnector("orders", trace)
+			h.conn.setStatus("pg-orders", taskFailed("pg-orders", trace))
 		} else {
 			h.fixConnector("orders")
 		}
@@ -323,7 +323,7 @@ func TestCrashLoopCounterFiresWhileRunning(t *testing.T) {
 func TestCrashLoopNeedsEnoughRestarts(t *testing.T) {
 	h := newHarness(t, opts{})
 	for range 2 { // two restarts, 10 minutes apart: not a loop
-		h.breakConnector("orders", "boom")
+		h.conn.setStatus("pg-orders", taskFailed("pg-orders", "boom"))
 		h.step(time.Minute)
 		h.fixConnector("orders")
 		h.steps(10, time.Minute)
@@ -332,7 +332,7 @@ func TestCrashLoopNeedsEnoughRestarts(t *testing.T) {
 		t.Fatal("two restarts fired connector_down")
 	}
 	// An error tick between FAILED and RUNNING still counts the restart.
-	h.breakConnector("orders", "boom")
+	h.conn.setStatus("pg-orders", taskFailed("pg-orders", "boom"))
 	h.step(time.Minute)
 	h.conn.setStatusErr("pg-orders", errors.New("connect: timeout"))
 	h.step(time.Minute)

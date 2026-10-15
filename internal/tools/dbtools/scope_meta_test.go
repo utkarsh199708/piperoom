@@ -554,18 +554,30 @@ func TestPublicationTablesScopedCountOtherMembers(t *testing.T) {
 	})
 }
 
-// The publication name comes from the connector config: unreadable means an
-// error and no source read at all.
-func TestPublicationTablesScopedFailClosed(t *testing.T) {
+// Q5 T6 (behaviour changed from fail-closed): with Connect unreachable the
+// tool falls back to the pipeline's own data (the default publication name,
+// the pipeline's own source tables), says role checks need the connector
+// config and shows nothing of other pipelines.
+func TestPublicationTablesScopedConnectDownFallsBack(t *testing.T) {
 	src := &pubSQLSource{fakeSource: &fakeSource{pubTables: twoPipelinePublication()}}
 	d := metaDeps(src)
-	down := errors.New("connect: connection refused")
-	d.Connect = &fakeConnect{configErr: down}
+	d.Connect = &fakeConnect{configErr: errors.New("connect: connection refused")}
 	r, err := scopedTool(t, d, "pg_publication_tables").Run(roomCtx(), json.RawMessage(`{"pipeline_id":"orders"}`))
-	if !errors.Is(err, down) || r.Summary != "" || r.Data != nil {
-		t.Fatalf("r = %+v, err = %v; want the Connect error and no data", r, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(src.asked) != 0 || src.listAll != 0 {
-		t.Fatalf("source read without the publication name: asked %v, full %d", src.asked, src.listAll)
+	assertNoForeign(t, r)
+	for _, want := range []string{"Connect unreachable: role checks need the connector config", "publication dbz_publication", "public.orders: in_publication=yes"} {
+		if !strings.Contains(r.Summary, want) {
+			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
+		}
+	}
+	for _, bad := range []string{"selectable=", "PROBLEM", "NOTE"} {
+		if strings.Contains(r.Summary, bad) {
+			t.Errorf("summary states %q without the role:\n%s", bad, r.Summary)
+		}
+	}
+	if len(src.asked) != 1 || src.listAll != 0 {
+		t.Fatalf("source reads: asked %v, full %d; want one filtered read", src.asked, src.listAll)
 	}
 }

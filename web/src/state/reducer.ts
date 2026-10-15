@@ -520,6 +520,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
 
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(event)
+      // A proposal written after room.closed (a late write) would wait on approval in a closed room.
+      if (state.status === 'closed') break
       // A second proposal.created with the same id (a replay over a snapshot, a retry) is
       // ignored: the first one stays, with the decisions it already collected.
       if (state.proposals.some((x) => x.proposal_id === p.proposal_id)) break
