@@ -48,7 +48,10 @@ function Node({
   worst,
   selected,
   onSelect,
+  healed = false,
 }: {
+  /** The node just went from fail/warn to ok: it flashes once. */
+  healed?: boolean
   node: TopologyNode
   compact: boolean
   worst: boolean
@@ -63,6 +66,7 @@ function Node({
     node.health === 'fail' ? 'border-destructive' : 'border-border',
     node.health === 'unknown' && 'border-dashed',
     selected && 'ring-2 ring-ring',
+    healed && 'motion-safe:animate-heal',
   )
   if (compact) {
     return (
@@ -159,6 +163,33 @@ function SkeletonNode({ compact }: { compact: boolean }) {
     </div>
   )
 }
+// Set VITE_RUNBOOK_URL where the runbook is served; without it the link is not shown.
+const RUNBOOK_URL = (import.meta.env.VITE_RUNBOOK_URL as string | undefined) || ''
+
+function NotConfigured({ id, onRetry }: { id: string; onRetry?: () => void }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border bg-card px-4 py-3">
+      <h2 className="m-0 text-sm font-medium">Pipeline &quot;{id}&quot; is not configured</h2>
+      <p className="m-0 text-muted-foreground">
+        Alerts for it open a room, but there is no topology to show and the agent cannot propose a fix here. Add the
+        pipeline to owners.yaml (see docs/runbook.md) and restart the server.
+      </p>
+      <div className="flex items-center gap-2">
+        {onRetry && (
+          <Button variant="secondary" size="sm" onClick={onRetry}>
+            Try again
+          </Button>
+        )}
+        {RUNBOOK_URL && (
+          <Button variant="ghost" size="sm" asChild>
+            <a href={RUNBOOK_URL}>Open runbook</a>
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function PipelineMap({
   topology,
   updatedAt = null,
@@ -167,8 +198,13 @@ export function PipelineMap({
   stalledFor,
   selectedLayer,
   onSelectLayer,
+  notFound = false,
+  onRetry,
 }: {
   topology: Topology | null
+  /** The server answered 404 for this pipeline: it is not in owners.yaml. */
+  notFound?: boolean
+  onRetry?: () => void
   updatedAt?: number | null
   /** Absent for a viewer: tracing a record is a write (POST .../trace). */
   onTrace?: () => void
@@ -211,6 +247,17 @@ export function PipelineMap({
   const worst = worstNode(nodes)
   const worstId = worst && worst.health !== 'ok' ? worst.id : null
 
+  // Nodes that went from fail/warn to ok since the last render flash once (animate-heal, 600 ms). The ref is
+  // read while rendering and written after it, so a re-render for another reason does not replay the flash
+  // beyond the next tick (the clock re-renders every second, longer than the animation).
+  const prevHealth = useRef<Map<string, string>>(new Map())
+  const healedIds = new Set(
+    nodes.filter((n) => n.health === 'ok' && ['fail', 'warn'].includes(prevHealth.current.get(n.id) ?? '')).map((n) => n.id),
+  )
+  useEffect(() => {
+    prevHealth.current = new Map(nodes.map((n) => [n.id, n.health]))
+  })
+
   const scroller = useRef<HTMLDivElement>(null)
   const overflow = useLaneOverflow(scroller, [nodes.length, compact, !!topology])
 
@@ -230,6 +277,14 @@ export function PipelineMap({
   const by = (dir: 1 | -1) => {
     const el = scroller.current
     if (el && typeof el.scrollBy === 'function') el.scrollBy({ left: dir * 0.8 * el.clientWidth, behavior: 'smooth' })
+  }
+
+  if (notFound) {
+    return (
+      <section aria-label="Pipeline" className="flex min-w-0 flex-col gap-2.5">
+        <NotConfigured id={id} onRetry={onRetry} />
+      </section>
+    )
   }
 
   return (
@@ -304,6 +359,7 @@ export function PipelineMap({
                     node={n}
                     compact={compact}
                     worst={n.id === worstId}
+                    healed={healedIds.has(n.id)}
                     selected={selectedLayer === n.layer}
                     onSelect={onSelectLayer ? () => onSelectLayer(selectedLayer === n.layer ? null : n.layer) : undefined}
                   />

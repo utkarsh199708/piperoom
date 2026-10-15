@@ -10,8 +10,8 @@ const actions = { grantControl } as unknown as RoomActions
 const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka'] }
 const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'] }
 
-// A lease with `min` minutes left, plus 20 s so the rounded-up minute count is `min`.
-const lease = (min: number) => new Date(Date.now() + min * 60_000 - 40_000).toISOString()
+// A lease with `min` minutes left, plus 20 s so the floored minute count is `min`.
+const lease = (min: number) => new Date(Date.now() + min * 60_000 + 20_000).toISOString()
 const room = (min: number, extra = {}) => ({
   ...emptyRoomState('r1'),
   driver: { id: 'arjun', name: 'Arjun', lease_until: lease(min), ...extra },

@@ -103,6 +103,14 @@ const config: Config = {
           '0%': { transform: 'translateX(-100%)' },
           '100%': { transform: 'translateX(250%)' },
         },
+        check: {
+          '0%': { transform: 'scale(0.6)', opacity: '0' },
+          '100%': { transform: 'scale(1)', opacity: '1' },
+        },
+        heal: {
+          '0%': { backgroundColor: 'hsl(var(--success-subtle))' },
+          '100%': { backgroundColor: 'transparent' },
+        },
         shimmer: {
           '0%, 100%': { opacity: '1' },
           '50%': { opacity: '.55' },
@@ -111,6 +119,8 @@ const config: Config = {
       animation: {
         indeterminate: 'indeterminate 1.4s ease-in-out infinite',
         shimmer: 'shimmer 1.6s ease-in-out infinite',
+        check: 'check 200ms cubic-bezier(.2,.8,.2,1) both',
+        heal: 'heal 600ms cubic-bezier(.2,.8,.2,1) both',
       },
     },
   },

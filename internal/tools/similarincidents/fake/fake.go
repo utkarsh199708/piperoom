@@ -47,6 +47,8 @@ type Room struct {
 	UnverifiedCloser bool
 	// Label, when set, adds a room.labelled event after the room's other events.
 	Label *events.RoomLabelledPayload
+	// Relabels are further room.labelled events after Label; the last wins.
+	Relabels []events.RoomLabelledPayload
 	// Fix, when set, adds a proposal and its executed steps before closing.
 	Fix *Fix
 }
@@ -139,6 +141,11 @@ func Seed(ctx context.Context, st store.Store, r Room) error {
 	}
 	if r.Label != nil {
 		if err := app(events.RoomLabelled, human, *r.Label); err != nil {
+			return err
+		}
+	}
+	for _, l := range r.Relabels {
+		if err := app(events.RoomLabelled, human, l); err != nil {
 			return err
 		}
 	}

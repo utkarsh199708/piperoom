@@ -20,6 +20,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 function Harness() {
@@ -154,5 +156,12 @@ describe('CloseRoomDialog', () => {
       await waitFor(() => expect(actions.label).toHaveBeenCalled())
       expect(screen.queryByRole('alert')).toBeNull() // the close worked: no error in the dialog
     })
+  })
+})
+
+describe('CloseRoomDialog initialText', () => {
+  it('starts with the given resolution, so the close nudge can pre-fill it', () => {
+    render(<CloseRoomDialog actions={actions} onClose={() => {}} initialText={'Fixed by "Restart task"'} />)
+    expect(screen.getByRole('textbox')).toHaveValue('Fixed by "Restart task"')
   })
 })

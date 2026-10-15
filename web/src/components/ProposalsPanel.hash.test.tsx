@@ -24,6 +24,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const H1 = '9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b'

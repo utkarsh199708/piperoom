@@ -46,6 +46,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 const staleOff = { stale: null, dismissStale: vi.fn(), reload: vi.fn() }
 
@@ -81,7 +83,7 @@ function busyRoom(): RoomState {
 
 function showRoom(state: RoomState) {
   vi.mocked(useRoom).mockReturnValue({ state, presence: [], conn: 'live', error: null, actions, ...staleOff })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   return render(
     <MemoryRouter initialEntries={['/rooms/r1']}>
       <Routes>
@@ -175,7 +177,7 @@ describe('role-aware room list', () => {
     },
   ]
   beforeEach(() => {
-    vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload: vi.fn() })
+    vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload: vi.fn(), mode: 'push', updatedAt: null })
   })
 
   it('a member can create a room', () => {

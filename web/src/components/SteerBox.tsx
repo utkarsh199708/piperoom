@@ -4,7 +4,7 @@ import { Eye, Lock } from 'lucide-react'
 import type { RoomState, SuggestionState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
-import type { RoomActions } from '../hooks/useRoom'
+import type { ConnState, RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
 import { planComposer, quickSteers, sendLabel } from '@/lib/composer'
 import { clockTime } from '@/lib/time'
@@ -15,9 +15,10 @@ import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { PersonSelect } from './PersonSelect'
+import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { StatusDot } from './room/StatusDot'
-import { minutesLeft, useNow } from './room/useNow'
+import { leaseExpired, minutesLeft, useNow } from './room/useNow'
 
 // The driver lease is 30 minutes (docs/api.md); the bar shows what is left of it, and from
 // LEASE_WARN_MIN minutes on the status line turns amber and offers Renew.
@@ -192,14 +193,18 @@ export function SteerBox({
   user,
   actions,
   prefill,
+  conn,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
+  conn?: ConnState
   /** Text to put in the field ("Ask the agent" on a checklist item); `n` makes the same text count again. */
   prefill?: { text: string; n: number }
 }) {
   const [text, setText] = useState(() => readStore('local', draftKey(state.id)))
+  const [sending, setSending] = useState(false)
+  const [offline, setOffline] = useState(false)
   const [seenPrefill, setSeenPrefill] = useState(0)
   // Set during render (React's derived-state pattern), so the field is filled before it paints.
   if (prefill && prefill.n !== seenPrefill) {
@@ -247,27 +252,39 @@ export function SteerBox({
   const take = !isDriver && canTakeControl(state, user)
   const request = !isDriver && !take && canRequestControl(state, user)
   const mod = modKeyLabel()
-  const left = minutesLeft(state.driver?.lease_until, now)
+  const leaseIso = state.driver?.lease_until
+  const left = minutesLeft(leaseIso, now)
+  const expired = leaseExpired(leaseIso, now)
+  // "under a minute" while 0 whole minutes remain but the lease is still live.
+  const leaseText = expired ? 'lease expired' : left === 0 ? 'lease ends in under a minute' : left != null ? `lease ${left}m` : null
 
   const plan = planComposer(text, isDriver ? 'driver' : 'suggester', state.driver?.name ?? null, mod)
-  const send = () => {
+  // The field clears only once the server took the message; a failed send keeps the words
+  // and puts the cursor back in the field.
+  const send = async () => {
     // "?" alone has nothing to ask.
-    if (!text.trim() || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
-    if (plan.send === 'comment') actions.comment(plan.text)
-    else actions.steer(plan.text)
-    writeStore('session', lastSentKey(roomId), text.trim())
-    writeStore('local', draftKey(roomId), '')
-    setText('')
-    if (ref.current) ref.current.style.height = ''
+    if (!text.trim() || sending || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
+    setSending(true)
+    const ok = plan.send === 'comment' ? await actions.comment(plan.text) : await actions.steer(plan.text)
+    setSending(false)
+    setOffline(!ok)
+    if (ok) {
+      writeStore('session', lastSentKey(roomId), text.trim())
+      writeStore('local', draftKey(roomId), '')
+      setText('')
+      if (ref.current) ref.current.style.height = ''
+    } else {
+      ref.current?.focus()
+    }
   }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    send()
+    void send()
   }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      send()
+      void send()
     } else if (e.key === 'ArrowUp' && !text && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
       const last = readStore('session', lastSentKey(roomId))
       if (last) {
@@ -288,24 +305,26 @@ export function SteerBox({
 
   // The server's lease signal (control.lease_expired) or, before it arrives, a clock that has run out
   // (minutesLeft is 0 only once the lease has run out; it rounds up while time remains).
-  const leaseExpired = state.driver?.lease_expired === true || left === 0
-  const leaseEnding = isDriver && !leaseExpired && left != null && left <= LEASE_WARN_MIN
+  const signalled = state.driver?.lease_expired === true
+  const isLeaseExpired = signalled || expired
+  const leaseEnding = isDriver && !signalled && !expired && left != null && left <= LEASE_WARN_MIN
   let status: string
   if (isDriver) {
-    status = leaseExpired
+    status = signalled
       ? 'Your lease expired — you still drive until someone takes over'
-      : leaseEnding
+      : leaseEnding && left != null && left > 0
         ? `Lease ends in ${left}m — any action renews`
-        : left != null
-          ? `You are driving · lease ${left}m`
+        : leaseText
+          ? `You are driving · ${leaseText}`
           : 'You are driving'
   } else if (noDriver) {
     status = 'No driver · your suggestion is queued for whoever takes control'
   } else {
     const name = state.driver?.name ?? 'Someone'
-    status = leaseExpired
+    const lease = leaseText ? ` · ${leaseText.replace(/^lease (\d+m)$/, 'lease $1 left')}` : ''
+    status = signalled
       ? `${name}'s lease expired · anyone can take control`
-      : `${name} is driving${left != null ? ` · lease ${left}m left` : ''} · your message goes to ${name}'s queue`
+      : `${name} is driving${lease} · your message goes to ${name}'s queue`
   }
 
   // Empty and not focused: one row (status, then the field as a placeholder). It grows on focus or text.
@@ -363,11 +382,11 @@ export function SteerBox({
       )}
 
       <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[45%] shrink-0' : 'flex-wrap')}>
-        <StatusDot tone={noDriver || leaseExpired ? 'warn' : 'accent'} />
+        <StatusDot tone={noDriver || isLeaseExpired ? 'warn' : 'accent'} />
         <span
           className={cn(
             'text-xs text-muted-foreground',
-            (leaseEnding || (isDriver && leaseExpired)) && 'text-warning-foreground',
+            (leaseEnding || (isDriver && isLeaseExpired)) && 'text-warning-foreground',
             idle && 'truncate',
           )}
           title={idle ? status : undefined}
@@ -375,7 +394,7 @@ export function SteerBox({
         >
           {status}
         </span>
-        {isDriver && (leaseEnding || leaseExpired) && (
+        {isDriver && (leaseEnding || isLeaseExpired) && (
           <Button variant="ghost" className="h-7" onClick={() => actions.grantControl(user.id)}>
             Renew
           </Button>
@@ -449,15 +468,19 @@ export function SteerBox({
               type="submit"
               variant={isDriver ? 'default' : 'secondary'}
               className="ml-auto"
-              disabled={!text.trim()}
+              disabled={!text.trim() || sending}
               aria-keyshortcuts={`${mod === '⌘' ? 'Meta' : 'Control'}+Enter`}
             >
-              {sendLabel(plan)}
-              <Kbd aria-hidden="true">{mod}⏎</Kbd>
+              {sending ? 'Sending…' : sendLabel(plan)}
+              {!sending && <Kbd aria-hidden="true">{mod}⏎</Kbd>}
             </Button>
           </div>
         )}
       </form>
+      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+      {!offline && conn === 'reconnecting' && (
+        <p className="m-0 text-xs text-muted-foreground">Reconnecting — messages are kept until the room is back</p>
+      )}
     </section>
   )
 }

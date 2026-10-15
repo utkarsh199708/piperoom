@@ -210,3 +210,29 @@ describe('PipelineMap — overflow pill', () => {
     }
   })
 })
+
+describe('PipelineMap — pipeline not configured', () => {
+  it('shows the dashed card with a heading and Try again, not the skeleton', () => {
+    const retry = vi.fn()
+    render(<PipelineMap topology={null} pipelineId="payments" notFound onRetry={retry} />)
+    expect(screen.getByRole('heading', { name: 'Pipeline "payments" is not configured' })).toBeInTheDocument()
+    expect(screen.getByText(/owners\.yaml/)).toBeInTheDocument()
+    expect(screen.queryByText('Loading topology…')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('PipelineMap — heal flash', () => {
+  const node = (health: 'fail' | 'ok') => ({ ...topology.nodes[0], health })
+  it('flashes a node that goes from fail to ok, and not one that was already ok', () => {
+    const { rerender, container } = render(<PipelineMap topology={{ ...topology, nodes: [node('fail')] }} />)
+    expect(container.querySelector('.motion-safe\\:animate-heal')).toBeNull()
+    rerender(<PipelineMap topology={{ ...topology, nodes: [node('ok')] }} />)
+    expect(container.querySelector('[data-node]')?.className).toContain('motion-safe:animate-heal')
+  })
+  it('does not flash on first render with an ok node', () => {
+    const { container } = render(<PipelineMap topology={{ ...topology, nodes: [node('ok')] }} />)
+    expect(container.querySelector('[data-node]')?.className).not.toContain('animate-heal')
+  })
+})

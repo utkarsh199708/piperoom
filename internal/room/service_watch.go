@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -132,7 +133,7 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 // only one holding the watcher's key (an Alertmanager room found through
 // OpenRoomForPipeline). It never starts or wakes the agent: system messages do
 // not reach the agent inbox, and a room restored by Load stays idle. Humans see
-// the note; the agent sees only the alert body it was started with. A closed
+// the note; the agent sees evidence only through PostRoomEvidence. A closed
 // room returns a room_closed error and an unknown one not_found.
 //
 // The text is made storable first, so evidence is kept rather than refused:
@@ -141,6 +142,15 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 // that the stored note, ellipsis included, is at most 4096 bytes, on a UTF-8
 // boundary.
 func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
+	return s.PostRoomEvidence(ctx, roomID, text, nil)
+}
+
+// PostRoomEvidence is PostRoomNote for a watcher join that carries its
+// evidence JSON (F6): after the note, the room's agent gets the evidence as a
+// quiet "alert_update" input (agent.AlertEvidenceText; it never wakes an idle
+// agent), and an old first look is re-run (alertUpdateLocked). Empty evidence
+// is a plain note.
+func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evidence json.RawMessage) error {
 	text = sanitizeAgentText(text)
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -168,7 +178,8 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 	if !s.roomOpen(st) {
 		return roomClosed("room already closed")
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text}); err != nil {
+	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text})
+	if err != nil {
 		// A full log cannot take more evidence; retrying would not help, so
 		// the note is dropped with a log line instead of an error the watcher
 		// would retry on every tick.
@@ -177,6 +188,9 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 			return nil
 		}
 		return fmt.Errorf("room: post note: %w", mapUnstorable(err))
+	}
+	if len(evidence) > 0 {
+		s.alertUpdateLocked(roomID, st, e.Seq, evidence)
 	}
 	return nil
 }
