@@ -91,15 +91,15 @@ export function RoomScreen() {
       get: (): DecisionHandle | null => {
         const h = handleRef.current
         if (!h) return null
-        return {
-          ...h,
-          scrollTo: () => {
-            if (narrowRef.current) {
-              setTab('fix')
-              window.requestAnimationFrame(() => h.scrollTo())
-            } else h.scrollTo()
-          },
+        // Reject opens a reason field in the card: in a hidden Fix panel it could not take focus,
+        // and the card would then refuse every later Approve/Reject while "rejecting".
+        const onFixTab = (run: () => void) => () => {
+          if (narrowRef.current) {
+            setTab('fix')
+            window.requestAnimationFrame(run)
+          } else run()
         }
+        return { ...h, reject: onFixTab(() => h.reject()), scrollTo: onFixTab(() => h.scrollTo()) }
       },
       set: (h: DecisionHandle | null) => void (handleRef.current = h),
     }),
@@ -480,6 +480,7 @@ export function RoomScreen() {
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
             onPageOwner={actions.page && canPageOwner(state, user) ? () => setPageOpen(true) : undefined}
             onLogFix={actions.fixNote && canLogFix(state, user) ? () => setFixOpen(true) : undefined}
+            onCite={citeStep}
           />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />

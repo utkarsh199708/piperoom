@@ -252,7 +252,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		} else {
 			liveOK = true
 			for _, r := range rows {
-				if scope.SourceTableInScope(r.ObjectIdentity) && !r.At.Before(since) {
+				if ddlInScope(scope, r.ObjectIdentity) && !r.At.Before(since) {
 					all = append(all, ddlChange(pipeline, r))
 				}
 			}
@@ -316,10 +316,30 @@ func objectInScope(sc tools.Scope, name string) bool {
 	return false
 }
 
-// objectMatches reports whether a change is about object: the object itself
-// or, for a connector, one of its tasks.
+// ddlInScope reports whether an audit row is about a source table of the
+// pipeline: the table itself or one of its columns (a column rename or
+// comment is logged as schema.table.column).
+func ddlInScope(sc tools.Scope, identity string) bool {
+	if sc.SourceTableInScope(identity) {
+		return true
+	}
+	table, _, ok := cutLast(identity, ".")
+	return ok && strings.Contains(table, ".") && sc.SourceTableInScope(table)
+}
+
+// cutLast is strings.Cut at the last sep.
+func cutLast(s, sep string) (before, after string, found bool) {
+	if i := strings.LastIndex(s, sep); i >= 0 {
+		return s[:i], s[i+len(sep):], true
+	}
+	return s, "", false
+}
+
+// objectMatches reports whether a change is about object: the object itself,
+// for a connector one of its tasks, for a table DDL on one of its columns.
 func objectMatches(c clients.PipelineChange, object string) bool {
-	return c.Object == object || strings.HasPrefix(c.Object, object+"/")
+	return c.Object == object || strings.HasPrefix(c.Object, object+"/") ||
+		(c.Kind == clients.ChangeDDL && strings.HasPrefix(c.Object, object+"."))
 }
 
 // ddlChange converts an audit row to the change form. The fingerprint follows

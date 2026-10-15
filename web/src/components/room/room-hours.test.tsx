@@ -200,6 +200,26 @@ describe('useJumpToLatest', () => {
     expect(scroll).toHaveBeenCalledTimes(1)
   })
 
+  // The room's activity is newest first, and RoomScreen renders the sentinel only once the
+  // room loaded (the first render is the skeleton).
+  it('counts newest-first activity with a sentinel that mounts after the first render', () => {
+    function Late({ activity, ready }: { activity: ReturnType<typeof act1>[]; ready: boolean }) {
+      const { sentinelRef, unseen } = useJumpToLatest(activity, false)
+      return (
+        <>
+          {ready && <div ref={sentinelRef} />}
+          {unseen > 0 && <button>Jump {unseen}</button>}
+        </>
+      )
+    }
+    cb = () => {}
+    const { rerender } = render(<Late activity={[]} ready={false} />)
+    rerender(<Late activity={[act1(1)]} ready />)
+    act(() => cb([{ isIntersecting: false }]))
+    rerender(<Late activity={[act1(3), act1(2), act1(1)]} ready />)
+    expect(screen.getByRole('button', { name: 'Jump 2' })).toBeInTheDocument()
+  })
+
   it('shows nothing when at the bottom or while replaying', () => {
     const { rerender } = render(<Harness activity={[act1(1)]} />)
     rerender(<Harness activity={[act1(1), act1(2)]} />)

@@ -88,3 +88,24 @@ describe('describeEvent', () => {
     expect(c.detail).toBe('see … now')
   })
 })
+
+describe('describeEvent agent.verification', () => {
+  const v = (p: object) => describeEvent(ev('agent.verification', { proposal_id: 'p_1', checks: [], ...p }, agent), ctx)
+
+  // A repeat (same last-step result delivered again) must not announce the recovery a second time.
+  it('keeps a repeat out of the default feed', () => {
+    expect(v({ recovered: true, verdict: 'already verified', repeat: true })).toEqual({
+      text: 'Verification already recorded',
+      kind: 'system',
+    })
+  })
+
+  it.each([
+    [true, 'recovered: every layer check passed', 'Verification: recovered'],
+    [false, 'NOT recovered: a layer check did not pass.', 'Verification: not recovered'],
+    [false, 'not verified: a step outcome is unknown; recovery is not claimed.', 'Verification: not verified'],
+    [false, 'inconclusive: no source changes observed', 'Verification: inconclusive'],
+  ])('recovered=%s %j reads %j', (recovered, verdict, text) => {
+    expect(v({ recovered, verdict })).toEqual({ text, kind: 'decision' })
+  })
+})

@@ -95,3 +95,20 @@ describe('roomStatus', () => {
     expect(roomStatus(statusInputFromSnapshot(snap), now).kind).toBe('needs-approval')
   })
 })
+
+describe('roomStatus after the verdict', () => {
+  const ran = (verification?: StatusProposal['verification']) =>
+    run({ agent: { state: 'working' }, proposals: [prop({ status: 'approved', executed: ok(2), verification })] })
+
+  // A fix that ran and was verified NOT recovered must not keep a green "verifying" header.
+  it.each([
+    [undefined, 'fixed', 'Fix ran · verifying', 'ok'],
+    [{ recovered: true, verdict: 'recovered: all good' }, 'fixed', 'Fix ran · recovered', 'ok'],
+    [{ recovered: false, verdict: 'NOT recovered: a layer check did not pass.' }, 'fix-failed', 'Fix ran · not recovered', 'fail'],
+    [{ recovered: false, verdict: 'not verified: a step outcome is unknown' }, 'fixed', 'Fix ran · not verified', 'warn'],
+    [{ recovered: false, verdict: 'inconclusive: no source changes observed' }, 'fixed', 'Fix ran · inconclusive', 'warn'],
+  ])('%j → %s %j', (verification, kind, label, tone) => {
+    expect(ran(verification)).toMatchObject({ kind, label, tone })
+  })
+})
+

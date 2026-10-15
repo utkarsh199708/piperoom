@@ -1,37 +1,33 @@
 import type { ProposalState } from '@/state/types'
 import { cn } from '@/lib/utils'
+import { executionPhase, verdictKind, verdictWords } from '@/lib/execution'
 import { StatusDot } from './StatusDot'
 import type { DotTone } from './StatusDot'
 
 /** The id the full proposal card (ProposalsPanel) is wrapped in, so the rail can jump to it. */
 export const PROPOSAL_ANCHOR = 'proposal'
 
-// What happened after approval (Q6 U4): a bare "Approved 1 of 1" hid a failed step and a fix that
-// did not recover. The newest fact wins: verdict, then a failed or unknown step, then progress.
-function approvedState(p: ProposalState, count: string): { tone: DotTone; word: string; count: string } {
-  const v = p.verification && !p.verification.repeat ? p.verification : undefined
-  if (v) {
-    if (v.recovered) return { tone: 'ok', word: 'Verified recovered', count }
-    if (/^inconclusive/i.test(v.verdict)) return { tone: 'warn', word: 'Verification inconclusive', count }
-    return { tone: 'fail', word: 'NOT recovered', count }
-  }
-  const bad = p.executed.find((e) => !e.ok)
-  if (bad) {
-    if (bad.outcome_unknown) return { tone: 'warn', word: 'Outcome unknown', count }
-    return { tone: 'fail', word: `Step ${bad.step_index + 1} failed`, count }
-  }
-  if (p.executed.length > 0) {
-    const done = p.steps.length > 0 && p.executed.length >= p.steps.length
-    return done ? { tone: 'ok', word: 'Executed', count } : { tone: 'warn', word: 'Executing', count }
-  }
-  return { tone: 'ok', word: 'Approved', count }
-}
-
 function describe(p: ProposalState): { tone: DotTone; word: string; count: string } {
   const total = p.required_layers.length
   const done = p.required_layers.filter((l) => p.approvals[l] === 'approved').length
   const count = total > 0 ? `${done} of ${total}` : ''
-  if (p.status === 'approved') return approvedState(p, count)
+  if (p.status === 'approved') {
+    // Approval is not the end: once steps ran, what happened to them is the news.
+    const run = executionPhase(p)
+    if (run.phase === 'failed') return { tone: 'fail', word: `Step ${run.step} failed`, count }
+    if (run.phase === 'unknown') return { tone: 'warn', word: `Step ${run.step} outcome unknown`, count }
+    if (run.phase === 'done') {
+      // A repeat only says the verdict was already given; it is not the verdict (Q6 U4).
+      const verification = p.verification && !p.verification.repeat ? p.verification : undefined
+      if (!verification) return { tone: 'ok', word: 'Ran · verifying', count }
+      const v = verdictKind(verification)
+      const tone: DotTone = v === 'recovered' ? 'ok' : v === 'not-recovered' ? 'fail' : 'warn'
+      return { tone, word: `Ran · ${verdictWords(v)}`, count }
+    }
+    // Some steps ran and the rest are on their way (Q6 U4).
+    if (run.phase === 'running' && p.executed.length > 0) return { tone: 'warn', word: 'Executing', count }
+    return { tone: 'ok', word: 'Approved', count }
+  }
   if (p.status === 'rejected') return { tone: 'fail', word: 'Rejected', count }
   // Q0: ended without running; it waits on nobody and is not counted as open.
   if (p.status === 'withdrawn') return { tone: 'muted', word: 'Withdrawn', count: '' }

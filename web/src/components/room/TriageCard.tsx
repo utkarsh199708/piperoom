@@ -1,13 +1,22 @@
 import type { RoomState } from '@/state/types'
 import { Badge, layerVariant } from '@/components/ui/badge'
-import { TRIAGE_FAILED_SHOW_MS, goToStep, stepAnchor, triageReasonText, triageStepNumbers } from '@/lib/triage'
+import { TRIAGE_FAILED_SHOW_MS, goToStep, triageReasonText, triageStepNumbers } from '@/lib/triage'
 import { useNow } from './useNow'
 
 // The triage pass's first look (F6) under the room title: the one-line diagnosis the
 // on-call reads before the full investigation has a hypothesis. It is labelled
 // "triage, unverified" and every text in it is model or system output, rendered as
 // plain text only. Once a hypothesis exists it shrinks to one muted line.
-export function TriageCard({ state }: { state: Pick<RoomState, 'triage' | 'hypothesis' | 'steps'> }) {
+// The step chips are buttons, not "#step-…" links: the app routes on the URL hash
+// (HashRouter), so a fragment link would leave the room for the room list.
+export function TriageCard({
+  state,
+  onCite,
+}: {
+  state: Pick<RoomState, 'triage' | 'hypothesis' | 'steps'>
+  /** Jump to a step row (RoomScreen: opens the steps tab, clears a layer filter, scrolls). */
+  onCite?: (stepId: string) => void
+}) {
   const now = useNow(5_000)
   const t = state.triage
   if (!t) return null
@@ -56,14 +65,15 @@ export function TriageCard({ state }: { state: Pick<RoomState, 'triage' | 'hypot
             <span className="inline-flex flex-wrap items-center gap-1">
               based on steps
               {refs.map((r) => (
-                <a
+                <button
                   key={r.id}
-                  href={`#${stepAnchor(r.id)}`}
- onClick={(e) => { e.preventDefault(); goToStep(r.id) }}
-                  className="rounded-sm border border-border px-1 font-mono text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  type="button"
+                  aria-label={`Go to step ${r.n}`}
+                  onClick={() => (onCite ? onCite(r.id) : goToStep(r.id))}
+                  className="rounded-sm border border-border px-1 font-mono text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-11 coarse:min-w-11"
                 >
                   {r.n}
-                </a>
+                </button>
               ))}
             </span>
           )}

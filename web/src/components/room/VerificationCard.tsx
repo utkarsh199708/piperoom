@@ -7,6 +7,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
 import { PersonName } from '@/components/VerifiedBadge'
 import { clockTime } from '../../lib/time'
+import { verdictKind, verdictWords } from '../../lib/execution'
 
 export interface CloseNudge {
   /** The room is open, so closing it is still possible. */
@@ -72,13 +73,19 @@ export function VerificationCard({
       </p>
     )
   }
-  const ok = verification.recovered
+  const kind = verdictKind(verification)
+  const ok = kind === 'recovered'
   const flow = verification.data_flow
   return (
     <div role="status" className="flex flex-col gap-2 px-3.5 py-2.5 text-sm" data-testid="verification-card">
       <div className="flex flex-col gap-0.5">
-        <p className={cn('m-0 font-medium', ok ? 'text-success-foreground' : 'text-destructive-fg')}>
-          Verified · {ok ? 'recovered' : 'not recovered'}
+        <p
+          className={cn(
+            'm-0 font-medium',
+            ok ? 'text-success-foreground' : kind === 'not-recovered' ? 'text-destructive-fg' : 'text-warning-foreground',
+          )}
+        >
+          {ok || kind === 'not-recovered' ? `Verified · ${verdictWords(kind)}` : kind === 'inconclusive' ? 'Inconclusive' : 'Not verified'}
         </p>
         <p className="m-0 max-w-[72ch] text-sm leading-5 text-muted-foreground">{verification.verdict}</p>
       </div>

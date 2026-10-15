@@ -214,18 +214,44 @@ describe('ProposalsSummary', () => {
     const verdict = (recovered: boolean, text: string) => ({ proposal_id: 'p1', checks: [], recovered, verdict: text })
     const cases: [string, Partial<ProposalState>, string][] = [
       ['executing', { executed: [ran(0)] }, 'Executing'],
-      ['executed ok', { executed: [ran(0), ran(1)] }, 'Executed'],
+      ['executed, no verdict yet', { executed: [ran(0), ran(1)] }, 'Ran · verifying'],
       ['a step failed', { executed: [ran(0), ran(1, false)] }, 'Step 2 failed'],
-      ['outcome unknown', { executed: [ran(0, false, { outcome_unknown: true })] }, 'Outcome unknown'],
-      ['recovered', { executed: [ran(0), ran(1)], verification: verdict(true, 'recovered: ok') }, 'Verified recovered'],
-      ['NOT recovered', { executed: [ran(0), ran(1)], verification: verdict(false, 'NOT recovered: lag') }, 'NOT recovered'],
-      ['inconclusive', { executed: [ran(0), ran(1)], verification: verdict(false, 'inconclusive: idle') }, 'Verification inconclusive'],
+      ['outcome unknown', { executed: [ran(0, false, { outcome_unknown: true })] }, 'Step 1 outcome unknown'],
+      ['recovered', { executed: [ran(0), ran(1)], verification: verdict(true, 'recovered: ok') }, 'Ran · recovered'],
+      ['NOT recovered', { executed: [ran(0), ran(1)], verification: verdict(false, 'NOT recovered: lag') }, 'Ran · not recovered'],
+      ['inconclusive', { executed: [ran(0), ran(1)], verification: verdict(false, 'inconclusive: idle') }, 'Ran · inconclusive'],
     ]
     it.each(cases)('%s', (_n, over, word) => {
       render(<ProposalsSummary proposals={[approved(over)]} />)
       expect(screen.getByText(word)).toBeInTheDocument()
       expect(screen.queryByText('Approved')).not.toBeInTheDocument()
     })
+  })
+
+  // "Approved 1 of 1" on a fix whose step failed, or that was verified NOT recovered, hides the news.
+  it.each([
+    ['a failed step', [{ proposal_id: 'p1', step_index: 0, ok: false, output: 'boom' }], undefined, 'Step 1 failed'],
+    ['an unknown outcome', [{ proposal_id: 'p1', step_index: 0, ok: false, output: '', outcome_unknown: true }], undefined, 'Step 1 outcome unknown'],
+    ['no verdict yet', [{ proposal_id: 'p1', step_index: 0, ok: true, output: 'ok' }], undefined, 'Ran · verifying'],
+    ['NOT recovered', [{ proposal_id: 'p1', step_index: 0, ok: true, output: 'ok' }], { recovered: false, verdict: 'NOT recovered: a layer check did not pass.' }, 'Ran · not recovered'],
+    ['recovered', [{ proposal_id: 'p1', step_index: 0, ok: true, output: 'ok' }], { recovered: true, verdict: 'recovered: all good' }, 'Ran · recovered'],
+  ])('an approved proposal after %s reads %j', (_, executed, v, word) => {
+    const verification = v && { proposal_id: 'p1', checks: [], ...v }
+    render(
+      <ProposalsSummary
+        proposals={[
+          proposal({
+            status: 'approved',
+            steps: [{ action: 'connect_restart_task', layer: 'kafka-connect', params: {}, description: 'restart' }],
+            approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' },
+            executed,
+            verification,
+          }),
+        ]}
+      />,
+    )
+    expect(screen.getByText(word)).toBeInTheDocument()
+    expect(screen.queryByText('Approved')).toBeNull()
   })
 
   it('jumps to the proposal on the page without touching the hash route', () => {

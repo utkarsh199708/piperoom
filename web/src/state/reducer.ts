@@ -42,6 +42,7 @@ import { describeEvent } from './describe'
 import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
+import { stripBidi } from '../lib/title'
 import { checklistKey, WITHDRAWN_ROOM_CLOSED } from './types'
 import type {
   HypothesisHistoryEntry,
@@ -187,6 +188,12 @@ function endIfOpen(p: ProposalState, withdrawn: WithdrawnState): ProposalState {
   return p.status === 'open' ? { ...p, status: 'withdrawn', withdrawn } : p
 }
 
+function voidPending(handoffs: RoomState['handoffs'], when: (h: RoomState['handoffs'][number]) => boolean) {
+  return handoffs.some((h) => h.status === 'pending' && when(h))
+    ? handoffs.map((h) => (h.status === 'pending' && when(h) ? { ...h, status: 'voided' as const } : h))
+    : handoffs
+}
+
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
   const next = applyCore(state, event)
@@ -225,7 +232,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
           : { source: alertSource(p.alert), alert_source: alertSourceField }
       next = {
         ...state,
-        title: p.title,
+        title: stripBidi(p.title),
         severity: p.severity as RoomState['severity'],
         pipeline_id: p.pipeline_id,
         shadow: p.shadow ?? state.shadow,
@@ -258,6 +265,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         // An open proposal does not outlive its room. The server writes proposal.withdrawn right after
         // room.closed, but a log from before Q0 has none and must not show "waiting for approval" forever.
         proposals: state.proposals.map((prop) => endIfOpen(prop, { reason: WITHDRAWN_ROOM_CLOSED, at: event.at })),
+        handoffs: voidPending(state.handoffs, () => true),
       }
       break
     }
@@ -422,7 +430,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
           {
             id: p.comment_id,
             step_id: p.step_id,
-            text: p.text,
+            text: stripBidi(p.text),
             mentions_agent: p.mentions_agent,
             author: event.actor,
             at: event.at,
@@ -465,7 +473,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
           {
             suggestion_id: p.suggestion_id,
             from: event.actor,
-            text: p.text,
+            text: stripBidi(p.text),
             status: 'pending' as const,
             at: event.at,
           },
@@ -533,6 +541,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
         driver: { id: p.to.id, name: p.to.name, verified: p.to.verified === true, lease_until: p.lease_until },
         members,
         control_requests: state.control_requests.filter((r) => r.from.id !== p.to.id),
+        // A hand-off is accepted only while its creator drives (409 stale_handoff). The receiver's
+        // own grant comes just before handoff.accepted, which then marks theirs accepted.
+        handoffs: voidPending(state.handoffs, (h) => h.from_id !== p.to.id),
       }
       break
     }
@@ -737,8 +748,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
         handoff_request:
           !p.request_id || state.handoff_request?.request_id === p.request_id ? null : state.handoff_request,
         handoff_failure: null,
+        // A newer hand-off voids the older ones: the driver can redo a hand-off to someone else.
         handoffs: [
-          ...state.handoffs,
+          ...voidPending(state.handoffs, () => true),
           {
             handoff_id: p.handoff_id,
             to: p.to,
@@ -747,6 +759,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
             status: 'pending' as const,
             // A manual summary was written by the driver who sent the request (the event's actor).
             ...(p.manual ? { manual: true, written_by: event.actor } : {}),
+            from_id: state.driver?.id,
           },
         ],
       }

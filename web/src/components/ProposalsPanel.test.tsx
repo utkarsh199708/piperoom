@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { ProposalsPanel } from './ProposalsPanel'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -82,6 +82,17 @@ describe('ProposalsPanel approval gating', () => {
     render(<ProposalsPanel state={state} user={priya} actions={actions} />)
     expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
     expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(1)
+  })
+
+  // room.closed leaves proposals "open"; the server answers 409 room_closed to a decision.
+  it('shows no Approve or Reject on a closed room, and A does nothing', () => {
+    const state = { ...emptyRoomState('r1'), status: 'closed' as const, proposals: [proposal] }
+    const approve = vi.fn()
+    render(<ProposalsPanel state={state} user={arjun} actions={{ ...actions, approve }} />)
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'a' })
+    expect(approve).not.toHaveBeenCalled()
   })
 
   it('shows no Approve buttons for a user who owns none of the layers', () => {

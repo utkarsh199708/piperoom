@@ -201,3 +201,12 @@ describe('foldListFrame', () => {
     expect(out.map((r) => r.id)).toEqual(['new', 'old'])
   })
 })
+
+describe('foldListFrame titles', () => {
+  // U+202E (right-to-left override) would make "orders missing lag" read reversed in the list.
+  it('drops bidi controls from pushed titles', () => {
+    const t = 'orders ‮gal gnissim‬ now ⁦x⁩'
+    expect(foldListFrame([], { type: 'rooms', rooms: [room('a', { title: t })] })[0].title).toBe('orders gal gnissim now x')
+    expect(foldListFrame([], { type: 'room', room: room('b', { title: t }) })[0].title).toBe('orders gal gnissim now x')
+  })
+})

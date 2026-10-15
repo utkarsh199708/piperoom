@@ -455,6 +455,17 @@ describe('the run confirm (the approval that completes the set)', () => {
     await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
   })
 
+  // Holding Enter on Approve: the first keydown opens the confirm, the auto-repeat must not run the fix.
+  it('a repeated Enter (key held down) does not confirm the run', () => {
+    show(arjun)
+    fireEvent.keyDown(window, { key: 'a' })
+    const run = screen.getByRole('button', { name: 'Approve and run' })
+    // false: the default (the focused button's activation) was prevented.
+    expect(fireEvent.keyDown(run, { key: 'Enter', repeat: true })).toBe(false)
+    expect(approve).not.toHaveBeenCalled()
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+  })
+
   it('Esc leaves the proposal open and calls nothing', async () => {
     show(arjun)
     fireEvent.keyDown(window, { key: 'a' })

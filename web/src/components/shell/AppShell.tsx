@@ -144,8 +144,14 @@ export function AppShell() {
          <BreadcrumbTailContext.Provider value={setCrumbPipeline}>
           <TooltipProvider>
             <div className="flex min-h-0 flex-1 overflow-hidden bg-background text-sm text-foreground">
+              {/* The app routes on the URL hash, so the browser's own "#main" jump would leave the
+                  page for the catch-all route: move focus to <main> by hand instead. */}
               <a
                 href="#main"
+                onClick={(e) => {
+                  e.preventDefault()
+                  document.getElementById('main')?.focus()
+                }}
                 className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-[60] focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
               >
                 Skip to content

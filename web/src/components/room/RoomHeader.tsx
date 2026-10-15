@@ -75,6 +75,7 @@ export function RoomHeader({
   handoffBusy = false,
   onPageOwner,
   onLogFix,
+  onCite,
 }: {
   state: RoomState
   user: CurrentUser
@@ -93,6 +94,8 @@ export function RoomHeader({
   onPageOwner?: () => void
   /** Log a fix made outside Piperoom (Q0, G10). Left out when this person may not, or a closed room is past 24 h. */
   onLogFix?: () => void
+  /** A first-look step chip was clicked. */
+  onCite?: (stepId: string) => void
 }) {
   // Below md the four actions would stack ~280px of buttons; they go behind one ⋯ menu. The keys still work:
   // useRoomShortcuts does not depend on the buttons.
@@ -242,7 +245,7 @@ export function RoomHeader({
         </div>
       </div>
 
-      <TriageCard state={state} />
+      <TriageCard state={state} onCite={onCite} />
 
       <p className="m-0 flex flex-wrap items-center gap-x-2.5 font-mono text-xs text-subtle-foreground">
         {state.pipeline_id && (

@@ -477,6 +477,18 @@ func pgRowTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
+			// Only the primary key: a lookup by any other column (an email,
+			// a tax id, ctid) makes the tool an existence oracle for personal
+			// data and puts the probed value in the room log.
+			if pc, ok := d.Src.(pkColumner); ok {
+				pk, err := pc.PrimaryKeyColumn(ctx, input.Table)
+				if err != nil {
+					return tools.Result{}, fmt.Errorf("dbtools: pg_row: %w", err)
+				}
+				if input.PKColumn != pk {
+					return tools.Result{}, fmt.Errorf("%w: pk_column must be the primary key column of %s (%q)", tools.ErrBadInput, input.Table, pk)
+				}
+			}
 			row, found, err := d.Src.Row(ctx, input.Table, input.PKColumn, input.Key)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_row: %w", err)
@@ -490,13 +502,19 @@ func pgRowTool(d Deps) tools.Tool {
 	}
 }
 
+// pkColumner is implemented by SourceDB implementations that report a
+// table's primary key column (the postgres client does).
+type pkColumner interface {
+	PrimaryKeyColumn(ctx context.Context, table string) (string, error)
+}
+
 // redactRow returns the same values rowSummary exposes: the primary-key and
 // timestamp column values, with every other column kept as a name only (nil
 // value), so the full row never leaves the tool (finding F3).
 func redactRow(row map[string]any, pkColumn string) map[string]any {
 	out := make(map[string]any, len(row))
 	for name, v := range row {
-		if name == pkColumn || isTimestampColumn(name) {
+		if name == pkColumn || isTimeColumn(name, v) {
 			out[name] = v
 		} else {
 			out[name] = nil
@@ -510,12 +528,12 @@ func redactRow(row map[string]any, pkColumn string) map[string]any {
 func rowSummary(row map[string]any, pkColumn string) string {
 	var sb strings.Builder
 	sb.WriteString("found: yes")
-	if ts := tsValue(row, "updated_at"); ts != "" {
+	if ts := tsValue(row, "updated_at"); ts != "" && isTimeColumn("updated_at", row["updated_at"]) {
 		sb.WriteString(", updated_at=" + ts)
 	}
 	parts := make([]string, 0, len(row))
 	for _, name := range sortedKeys(row) {
-		if name == pkColumn || isTimestampColumn(name) {
+		if name == pkColumn || isTimeColumn(name, row[name]) {
 			parts = append(parts, name+"="+fmt.Sprintf("%v", row[name]))
 		} else {
 			parts = append(parts, name)
@@ -569,7 +587,7 @@ func (d Deps) recentDDLTables(ctx context.Context, since time.Time, tables []str
 			return nil, err
 		}
 		for _, c := range all {
-			if slices.Contains(tables, c.ObjectIdentity) {
+			if slices.ContainsFunc(tables, func(t string) bool { return ddlOnTable(c.ObjectIdentity, t) }) {
 				out = append(out, c)
 			}
 		}
@@ -582,17 +600,23 @@ func (d Deps) recentDDLTables(ctx context.Context, since time.Time, tables []str
 }
 
 // tableDDLFilterer is implemented by SourceDB implementations that can filter
-// DDL by table inside SQL (exact object_identity match, before LIMIT).
+// DDL by table inside SQL (the table and its columns, before LIMIT).
 type tableDDLFilterer interface {
 	RecentDDLTable(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error)
 }
 
-// filterDDL is the exact-match fallback for SourceDB implementations without a
-// SQL table filter.
+// ddlOnTable reports whether an audit row's object_identity is table or one
+// of its columns (a column rename is logged as schema.table.column).
+func ddlOnTable(identity, table string) bool {
+	return identity == table || strings.HasPrefix(identity, table+".")
+}
+
+// filterDDL is the fallback for SourceDB implementations without a SQL table
+// filter.
 func filterDDL(changes []clients.DDLChange, table string) []clients.DDLChange {
 	out := changes[:0]
 	for _, c := range changes {
-		if c.ObjectIdentity == table {
+		if ddlOnTable(c.ObjectIdentity, table) {
 			out = append(out, c)
 		}
 	}

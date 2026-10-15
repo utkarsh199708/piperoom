@@ -53,6 +53,15 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if ts.IsZero() {
 				summary = "no rows (empty table)"
 				data["newest"] = nil
+			} else if ahead := time.Until(ts); ahead > topology.FutureSkew {
+				// Clamped to "stale for 0s" this would read as fresh while
+				// loading may have stopped: the column is not comparable with
+				// this clock (skew, another time zone) or holds a bad value.
+				summary = fmt.Sprintf("newest=%s is IN THE FUTURE by %s (clock skew, time zone or bad data): staleness cannot be judged from %s",
+					topology.FormatTS(ts), topology.HumanAge(ahead), input.TSColumn)
+				data["newest"] = topology.FormatTS(ts)
+				data["in_future"] = true
+				data["ahead_by"] = topology.HumanAge(ahead)
 			} else {
 				stale := time.Since(ts)
 				summary = fmt.Sprintf("newest=%s (stale for %s)", topology.FormatTS(ts), topology.HumanAge(stale))
@@ -132,7 +141,7 @@ func warehouseRowTool(d Deps) tools.Tool {
 func redactWhRow(row map[string]any) map[string]any {
 	out := make(map[string]any, len(row))
 	for name, v := range row {
-		if isTimestampColumn(name) {
+		if isTimeColumn(name, v) {
 			out[name] = v
 		}
 	}
@@ -144,7 +153,7 @@ func whRowSummary(row map[string]any) string {
 	var sb strings.Builder
 	sb.WriteString("found: yes")
 	for _, name := range sortedKeys(row) {
-		if isTimestampColumn(name) {
+		if isTimeColumn(name, row[name]) {
 			sb.WriteString(", " + name + "=" + fmt.Sprintf("%v", row[name]))
 		}
 	}

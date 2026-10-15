@@ -23,7 +23,7 @@ export function agentPill(state: RoomState): AgentPillInfo {
   // A shadow room's log holds no agent events, so agent_status would read "idle" while the run works.
   if (state.shadow) return { tone: 'agent', text: 'Shadow · agent works silently' }
   const derived = roomStatus(statusInputFromState(state))
-  if (derived.kind === 'fixed') return { tone: 'ok', text: 'Fix ran · verifying', title: detail }
+  if (derived.kind === 'fixed') return { tone: derived.tone === 'warn' ? 'warn' : 'ok', text: derived.label, title: detail }
   if (derived.kind === 'fix-failed') return { tone: 'fail', text: derived.label, title: detail }
   if (derived.kind === 'executing') return { tone: 'agent', text: 'Executing fix', step: derived.step, title: detail }
   if (derived.kind === 'log-full') return { tone: 'fail', text: 'Log full · agent stopped', title: detail }
