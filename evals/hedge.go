@@ -55,18 +55,18 @@ var (
 // first marker it found. An "either" that closes its phrase and a marker right
 // after an un-negated denial do not count.
 func causeHedge(text string) (string, bool) {
-	// Inside a fix list only the fix alternatives are skipped; a cause
-	// hedge there still counts ("Fix: ...; the cause could also be X").
-	full, fixless := hedgeText(text), hedgeText(dropFixLines(text))
+	// clauseSplit, not clausesOf: a question still offers its alternatives.
+	var cls [][]string
+	for _, c := range clauseSplit.Split(text, -1) {
+		cls = append(cls, tokenize(c))
+	}
+	eitherAll := len(eitherWord.FindAllStringIndex(text, -1))
+	eitherTrailing := len(trailingEither.FindAllStringIndex(text, -1))
 	for _, m := range hedgeMarkers {
-		ht := full
-		if fixAlternatives[m] {
-			ht = fixless
-		}
-		if m == "either" && ht.eitherTrailing == ht.eitherAll {
+		if m == "either" && eitherTrailing == eitherAll {
 			continue
 		}
-		for _, toks := range ht.cls {
+		for _, toks := range cls {
 			for _, i := range findTerm(toks, m) {
 				if hedgeDenied(toks, i) {
 					continue
@@ -76,79 +76,6 @@ func causeHedge(text string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// fixAlternatives are the hedge markers that also list alternative fixes;
-// they alone are skipped inside a fix list.
-var fixAlternatives = map[string]bool{"either": true, "alternatively": true, "or alternatively": true}
-
-// hedgeClauses is a text cut for causeHedge.
-type hedgeClauses struct {
-	cls                       [][]string
-	eitherAll, eitherTrailing int
-}
-
-func hedgeText(text string) hedgeClauses {
-	// clauseSplit, not clausesOf: a question still offers its alternatives.
-	var h hedgeClauses
-	for _, c := range clauseSplit.Split(text, -1) {
-		h.cls = append(h.cls, tokenize(c))
-	}
-	h.eitherAll = len(eitherWord.FindAllStringIndex(text, -1))
-	h.eitherTrailing = len(trailingEither.FindAllStringIndex(text, -1))
-	return h
-}
-
-// fixLabel opens a list of fixes ("Fix: restart the connector; alternatively,
-// recreate it"): alternatives there are fixes, not causes. It must start a
-// line or a sentence, so the "fix:" of "Root cause and fix:" is none. An
-// inline label's scope ends with its sentence, its line or the next label; a
-// label that ends its line covers the list items (-, *, 1.) right below it,
-// or else its first sentence: any other line after it is checked.
-var (
-	fixLabel     = regexp.MustCompile(`(?im)(?:^|[.!?;]\s+)\s*((?:proposed\s+)?fix(?:es)?\s*:)`)
-	anyLabel     = regexp.MustCompile(`(?i)\b[a-z][a-z -]{0,30}:(?:\s|$)`)
-	sentenceEnd  = regexp.MustCompile(`[.!?](?:\s|$)|…`)
-	listItems    = regexp.MustCompile(`^[ \t]*\n(?:[ \t]*(?:[-*•]|\d+[.)])[ \t][^\n]*(?:\n|$))+`)
-	restOfLineWS = regexp.MustCompile(`^[ \t]*\n`)
-)
-
-// dropFixLines cuts the scope of every fix label out of text, leaving a
-// clause break in its place.
-func dropFixLines(text string) string {
-	var b strings.Builder
-	for {
-		m := fixLabel.FindStringSubmatchIndex(text)
-		if m == nil {
-			b.WriteString(text)
-			return b.String()
-		}
-		b.WriteString(text[:m[2]])
-		b.WriteString("\n")
-		rest := text[m[3]:]
-		end := len(rest)
-		cut := func(re *regexp.Regexp, s string) {
-			if l := re.FindStringIndex(s); l != nil && l[0] < end {
-				end = l[0]
-			}
-		}
-		if l := listItems.FindStringIndex(rest); l != nil {
-			end = l[1]
-		} else if l := restOfLineWS.FindStringIndex(rest); l != nil {
-			// Prose under the label: its first sentence or line.
-			if i := strings.IndexByte(rest[l[1]:], '\n'); i >= 0 {
-				end = l[1] + i
-			}
-			cut(sentenceEnd, rest)
-		} else {
-			if i := strings.IndexByte(rest, '\n'); i >= 0 {
-				end = i
-			}
-			cut(sentenceEnd, rest)
-			cut(anyLabel, rest)
-		}
-		text = rest[end:]
-	}
 }
 
 // hedgeDenied reports whether a hedge denial ends in the four words before

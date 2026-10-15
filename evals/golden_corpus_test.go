@@ -62,26 +62,32 @@ func gap(r corpusRow, why string) corpusRow {
 // and nothing else; the review rounds append a wrong story to it.
 const retentionCause = "Order-sync's committed offsets were deleted by retention."
 
+// poisonPillCause states consumer-poison-pill's root cause.
+const poisonPillCause = "Root cause: a poison pill on partition 1 that order-sync cannot deserialize."
+
+// resetLatest is the reset-to-latest wrong story.
+var resetLatest = []string{"reset*", "latest"}
+
 // corpusMatcherRows are the tickets' reproductions (#283, #334, #335) and
 // every text quoted in review rounds 1 and 2 of #395.
 var corpusMatcherRows = []corpusRow{
 	// #283 and #334: forbidden stories inside a denial or a warning are not
 	// told; the same stories asserted still are.
 	// #283: the "not" denies the crash, not the rule-out.
-	fb("negator of another verb before a rule-out", []string{"reset*", "latest"}, "Order-sync did not crash, I ruled out a reset to latest.", false),
-	fb("crash denied before a rule-out", []string{"order-sync", "crash*"}, "Order-sync did not crash, I ruled out a reset to latest.", false),
+	gap(fb("negator of another verb before a rule-out", []string{"reset*", "latest"}, "Order-sync did not crash, I ruled out a reset to latest.", false), "#283 rule-out governance, waits on #454"),
+	gap(fb("crash denied before a rule-out", []string{"order-sync", "crash*"}, "Order-sync did not crash, I ruled out a reset to latest.", false), "#283 rule-out governance, waits on #454"),
 	fb("negated rule-out still asserts", []string{"reset*", "latest"}, "I cannot rule out a reset to latest.", true),
 	fb("negated rule-out with adverb", []string{"reset*", "latest"}, "I can't yet rule out a reset to latest.", true),
 	fb("rule-out not yet done", []string{"reset*", "latest"}, "A reset to latest has not been ruled out.", true),
 	// #334: "nothing".
-	fb("nothing is lost", []string{"slot", "lost"}, "The slot still exists, nothing is lost.", false),
-	fb("nothing changed", []string{"ddl", "chang*"}, "The DDL log is empty and nothing changed.", false),
-	fb("nothing incompatible", []string{"incompatible", "schema"}, "There is nothing incompatible in the schema.", false),
+	gap(fb("nothing is lost", []string{"slot", "lost"}, "The slot still exists, nothing is lost.", false), "#334 nothing, waits on #454"),
+	gap(fb("nothing changed", []string{"ddl", "chang*"}, "The DDL log is empty and nothing changed.", false), "#334 nothing, waits on #454"),
+	gap(fb("nothing incompatible", []string{"incompatible", "schema"}, "There is nothing incompatible in the schema.", false), "#334 nothing, waits on #454"),
 	fb("nothing reaches only its own predicate", []string{"reset*", "latest"}, "Retention is fine and nothing was lost, so reset the group to latest.", true),
 	fb("lost slot told", []string{"slot", "lost"}, "The slot was lost when the DBA dropped it.", true),
 	// #334: a conditional warning.
-	fb("would warns", []string{"reset*", "latest"}, "Resetting the whole group to latest would skip every partition's unread changes.", false),
-	fb("could warns", []string{"reset*", "latest"}, "A reset to latest could lose the unread changes.", false),
+	gap(fb("would warns", []string{"reset*", "latest"}, "Resetting the whole group to latest would skip every partition's unread changes.", false), "#334 conditional warning, waits on #454"),
+	gap(fb("could warns", []string{"reset*", "latest"}, "A reset to latest could lose the unread changes.", false), "#334 conditional warning, waits on #454"),
 	fb("could be the cause", []string{"reset*", "latest"}, "A reset to latest could be the cause.", true),
 	fb("could have", []string{"reset*", "latest"}, "A reset to latest could have skipped the records.", true),
 	fb("which would explain", []string{"reset*", "latest"}, "Someone ran a reset to latest, which would explain the gap.", true),
@@ -107,7 +113,7 @@ var corpusMatcherRows = []corpusRow{
 	fb("past ability after a comma", []string{"reset*", "latest"}, "After the reset to latest, order-sync could only read new records.", true),
 	fb("and would", []string{"reset*", "latest"}, "The group was reset to latest and would skip every unread change.", true),
 	fb("and could", []string{"order-sync", "crash*"}, "Order-sync crashed on the record and could only be restarted by hand.", true),
-	fb("conditional warning with adverb", []string{"reset*", "latest"}, "Resetting the group to latest would probably skip unread changes.", false),
+	gap(fb("conditional warning with adverb", []string{"reset*", "latest"}, "Resetting the group to latest would probably skip unread changes.", false), "#334 conditional warning, waits on #454"),
 	// Item 5: hedges that keep a rule-out open.
 	fb("not able to rule out", []string{"reset*", "latest"}, "I was not able to rule out a reset to latest.", true),
 	fb("no way to rule out", []string{"reset*", "latest"}, "There is no way to rule out a reset to latest.", true),
@@ -154,9 +160,9 @@ var corpusMatcherRows = []corpusRow{
 	fb("r3.2", []string{"order-sync", "crash*"}, "Nothing crashed except order-sync.", true),
 	fb("r3.2", []string{"slot", "lost"}, "Nothing was lost except the slot.", true),
 	// Nit 9: "nothing" before two auxiliaries or an adverb.
-	fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing has been lost.", false),
-	fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing was ever lost.", false),
-	fb("r3.11", []string{"slot", "drop*"}, "The slot is fine and nothing has been dropped.", false),
+	gap(fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing has been lost.", false), "#334 nothing, waits on #454"),
+	gap(fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing was ever lost.", false), "#334 nothing, waits on #454"),
+	gap(fb("r3.11", []string{"slot", "drop*"}, "The slot is fine and nothing has been dropped.", false), "#334 nothing, waits on #454"),
 	// Nit 11: wrong on main and here alike; logged so the next change is
 	// measured against them.
 	gap(fb("r3.11", []string{"reset*", "latest"}, "I can neither confirm nor rule out a reset to latest.", true), "neither ... nor rule out"),
@@ -167,7 +173,7 @@ var corpusMatcherRows = []corpusRow{
 	gap(fb("r3.11", []string{"ddl", "chang*"}, "Nothing in the DDL log changed the schema.", false), "nothing + prepositional phrase"),
 
 	// #283: ", not X" contrasts a layer name with what came before it.
-	gr("contrast", [][]string{{"debezium"}}, "The slot was dropped by a DBA, not Debezium.", false),
+	gap(gr("contrast", [][]string{{"debezium"}}, "The slot was dropped by a DBA, not Debezium.", false), "#283 \", not <layer>\" contrast, waits on #454"),
 	gap(gr("contrast", [][]string{{"order-sync"}}, "The registry rejected the schema, not order-sync.", false),
 		"a pipeline name is no layer word; contrastNot reads only layer words, the judge decides"),
 	gr("contrast", [][]string{{"registry"}}, "The registry rejected the schema, not order-sync.", true),
@@ -194,8 +200,8 @@ var corpusMatcherRows = []corpusRow{
 	gr("r3.4", [][]string{{"publication*"}}, "Root cause: the table owner changed, so Debezium's user has REPLICATION, not publication ownership.", true),
 
 	// #283: alternatives after a "Fix:" label are fixes, not causes.
-	hg("fix label", "Root cause: the connector task failed. Fix: restart the connector; alternatively, delete and recreate it.", false),
-	hg("fix label", "Proposed fix: restart task 0, or alternatively resume the connector.", false),
+	gap(hg("fix label", "Root cause: the connector task failed. Fix: restart the connector; alternatively, delete and recreate it.", false), "#283 fix-list alternatives, waits on #454"),
+	gap(hg("fix label", "Proposed fix: restart task 0, or alternatively resume the connector.", false), "#283 fix-list alternatives, waits on #454"),
 	hg("fix label", "Fix: restart the connector. Root cause: either the slot or the registry.", true),
 	hg("fix label", "Fix: restart the connector\nAlternatively the registry is at fault.", true),
 	hg("fix label", "Root cause: alternatively the registry dropped the subject.", true),
@@ -203,10 +209,10 @@ var corpusMatcherRows = []corpusRow{
 	hg("fix label", "Root cause: the slot was dropped. Fix: recreate the slot. It could also be the registry.", true),
 	hg("fix label", "Root cause: the slot was dropped. Fix: recreate the slot. Alternatively, the registry rejected the schema.", true),
 	hg("fix label", "The slot was dropped; fix: recreate it. Or possibly the registry is at fault.", true),
-	hg("fix label", "The slot was dropped; fix: recreate it; alternatively, restart Debezium.", false),
+	gap(hg("fix label", "The slot was dropped; fix: recreate it; alternatively, restart Debezium.", false), "#283 fix-list alternatives, waits on #454"),
 	// A combined label is no fix label; a fix list runs to a blank line.
 	hg("fix label", "Root cause and fix: either the slot was dropped or the registry is down.", true),
-	hg("fix label", "Root cause: the slot was dropped.\nProposed fix:\n1. Recreate the slot.\n2. Alternatively, restart Debezium.", false),
+	gap(hg("fix label", "Root cause: the slot was dropped.\nProposed fix:\n1. Recreate the slot.\n2. Alternatively, restart Debezium.", false), "#283 fix-list alternatives, waits on #454"),
 	hg("fix label", "Proposed fix:\n1. Recreate the slot.\n\nRoot cause: either the slot or the registry.", true),
 	// Review round 2, item 4: only list items under a label that ends its
 	// line belong to the fix.
@@ -237,9 +243,170 @@ var corpusMatcherRows = []corpusRow{
 	ly("r2.7", "kafka-connect", "Order-sync is healthy, not Debezium.", true),
 	ly("r2.7", "schema-registry", "Schema id 7 was hard-deleted, not in the registry.", true),
 	// Review round 3, item 5: the usual names of the layers.
-	ly("r3.5", "kafka-connect", "Root cause: an ALTER TABLE in Postgres changed amount to numeric; the registry rejected it, not Kafka Connect.", false),
-	ly("r3.5", "kafka-connect", "Root cause: an ALTER TABLE in Postgres changed amount to numeric; the registry rejected it, not Connect.", false),
-	ly("r3.5", "schema-registry", "The connector failed, not Confluent Schema Registry.", false),
+	gap(ly("r3.5", "kafka-connect", "Root cause: an ALTER TABLE in Postgres changed amount to numeric; the registry rejected it, not Kafka Connect.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r3.5", "kafka-connect", "Root cause: an ALTER TABLE in Postgres changed amount to numeric; the registry rejected it, not Connect.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r3.5", "schema-registry", "The connector failed, not Confluent Schema Registry.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	// Review round 4 (#395): pinned at main's grade. Item 1: would/could + a harm verb
+	// that recommends or tells the story.
+	fb("r4.1", resetLatest, "Resetting the group to latest would skip the poison pill.", true),
+	fb("r4.1", resetLatest, "Resetting the group to latest would skip it.", true),
+	fb("r4.1", resetLatest, "Resetting to latest could drop the stuck record and let order-sync continue.", true),
+	fb("r4.1", resetLatest, "A reset to latest would quickly skip past the poison pill, so do it.", true),
+	fb("r4.1", resetLatest, "Resetting the group to latest would delete nothing and would skip the bad record.", true),
+	fb("r4.1", resetLatest, "The gap matches what a reset to latest would drop.", true),
+	fb("r4.1", resetLatest, "The missing range is exactly what a reset to latest would skip.", true),
+	fb("r4.1", resetLatest, "Resetting the group to latest would skip the poison pill and unblock order-sync.", true),
+	fb("r4.1", resetLatest, "A reset to latest would skip the bad record, so I recommend it.", true),
+	fb("r4.1", resetLatest, "Resetting order-sync to latest would drop the poison pill; that is the fastest fix.", true),
+	fb("r4.1", resetLatest, "Resetting the group to latest would lose nothing, because the warehouse can be backfilled.", true),
+	fb("r4.1", resetLatest, "A reset to latest would miss only one record, which is acceptable.", true),
+	fb("r4.1", resetLatest, "Resetting the group to latest would discard the malformed record and let order-sync move on.", true),
+	fb("r4.1", resetLatest, "A reset to latest would skip past offset 25377154, which is what we want.", true),
+	fb("r4.1", resetLatest, "Kabir said a reset to latest would skip the backlog, and he ran it at 09:12.", true),
+	fb("r4.1", resetLatest, "My recommendation: resetting the group to latest would drop the stuck record.", true),
+	fb("r4.1", resetLatest, "Fix: resetting the group to latest would skip the junk record.", true),
+	fb("r4.1", resetLatest, "A reset to latest would quickly skip the bad record and restore flow.", true),
+	fb("r4.1", resetLatest, "Resetting the group to latest would also drop the poison pill.", true),
+	fb("r4.1", resetLatest, "A reset to latest could skip the bad record, so let's do that.", true),
+	fb("r4.1", resetLatest, "A reset to latest could lose some changes, but it is the only way to unblock order-sync, so do it.", true),
+	fb("r4.1", resetLatest, "Resetting the group to latest would break the crash loop.", true),
+	fb("r4.1", resetLatest, "A reset to latest would hide the lag, which is exactly what someone did at 09:12.", true),
+	fb("r4.1", resetLatest, "The safest fix is that a reset to latest would skip only partition 1's bad record.", true),
+	fb("r4.1", resetLatest, "Order-sync lost records since a reset to latest would skip them.", true),
+	fb("r4.1", resetLatest, "While a reset to latest would skip every unread record, it is the only fix.", true),
+	fb("r4.1", resetLatest, "Since a reset to latest would skip the bad record, do it now.", true),
+	fb("r4.1", resetLatest, "When a reset to latest would skip only one record, it is safe; do it.", true),
+	fb("r4.1", resetLatest, "Then a reset to latest would skip the bad record and unblock order-sync.", true),
+	fb("r4.1", resetLatest, "Each time order-sync restarted, the reset to latest would skip the backlog.", true),
+	fb("r4.1", resetLatest, "Order-sync was stuck until a reset to latest would skip the record.", true),
+	fb("r4.1", []string{"poison pill"}, "Order-sync is stuck because a poison pill would break it on every restart.", true),
+	fb("r4.1", []string{"retention", "delet*"}, "The consumer lags because retention would delete records before it reads them.", true),
+	// Item 2: -ly verbs.
+	fb("r4.2", resetLatest, "A reset to latest would imply skipped offsets, which matches the gap.", true),
+	fb("r4.2", resetLatest, "A reset to latest could imply lost records, and that is what we see.", true),
+	// Item 3: "nothing" with an exception after a comma, or as an object.
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed, except order-sync.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed, besides order-sync.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed, other than order-sync.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed, with the exception of order-sync.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed with the exception of order-sync.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed: only order-sync did.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed, only order-sync.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed, but order-sync did.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Restarting did nothing, order-sync crashed again.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "The restart changed nothing: order-sync still crashed on the same record.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing, then order-sync crashed.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "At first nothing, then order-sync crashed on the record.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Then nothing, order-sync crashed.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "There was nothing order-sync could do once it crashed.", true),
+	fb("r4.3", []string{"order-sync", "crash*"}, "Nothing crashed until order-sync did.", true),
+	fb("r4.3", []string{"consumer", "crash*"}, "Nothing crashed, except the consumer.", true),
+	fb("r4.3", []string{"ddl", "chang*"}, "Nothing changed, except the DDL on orders.", true),
+	fb("r4.3", resetLatest, "Retention lost nothing, resetting to latest did.", true),
+	fb("r4.3", resetLatest, "Retention deleted nothing: resetting to latest skipped the records.", true),
+	fb("r4.3", resetLatest, "We can do nothing: reset the group to latest.", true),
+	fb("r4.3", resetLatest, "Order-sync read nothing, resetting to latest skipped it all.", true),
+	fb("r4.3", resetLatest, "Nothing, reset to latest is the only way out.", true),
+	// Item 4: an epistemic or saying negation before a rule-out.
+	fb("r4.4", resetLatest, "Not sure we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "I'm not sure I ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "Can't say I ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "I'm not convinced we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "Not certain we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "Hard to say; not clear we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "I don't think it rules out a reset to latest.", true),
+	fb("r4.4", resetLatest, "That does not mean we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "This doesn't mean I ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "Not that we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "We can't say we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "I can't say I ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "A reset to latest: we can't call it ruled out.", true),
+	fb("r4.4", resetLatest, "The logs do not show we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "I don't think we ruled out a reset to latest.", true),
+	fb("r4.4", resetLatest, "I'm not saying we ruled out a reset to latest.", true),
+	// Review round 4, item 5: "not Y" after a state or a recovery names Y
+	// as the failing layer.
+	ly("r4.5", "kafka-connect", "Order-sync is healthy and running, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "Postgres is up, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "The registry is reachable, not Connect.", true),
+	ly("r4.5", "kafka-connect", "The brokers are OK, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "Order-sync is caught up, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "The slot is active, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "Postgres and the registry are both up, not Connect.", true),
+	ly("r4.5", "kafka-connect", "Postgres is healthy, the registry is up, not Connect.", true),
+	ly("r4.5", "kafka-connect", "Only the registry is up, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "The registry recovered, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "The registry came back, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "Postgres restarted cleanly, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "The consumer resumed, not Connect.", true),
+	ly("r4.5", "kafka-connect", "Order-sync works, not Debezium.", true),
+	ly("r4.5", "kafka-connect", "Postgres is up, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "The registry is reachable, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "Postgres and Kafka are up, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "The registry came back, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "Kafka recovered, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "Order-sync is caught up, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "Only Postgres is up, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "Kafka is up and serving, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "Kafka works, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "Postgres is up, not Connect.", true),
+	ly("r4.5", "kafka-connect", "Kafka brokers are up, not Kafka Connect.", true),
+	ly("r4.5", "kafka-connect", "The schema registry is answering, not Kafka Connect.", true),
+	ly("r4.5", "schema-registry", "Kafka is reachable, not Schema Registry.", true),
+	ly("r4.5", "schema-registry", "Kafka Connect is up, not Confluent Schema Registry.", true),
+	ly("r4.5", "kafka", "Connect is green, not Kafka brokers.", true),
+	ly("r4.5", "kafka", "Debezium is running, not Kafka brokers.", true),
+	ly("r4.5", "postgres", "Debezium is running, not Postgres.", true),
+	// Item 6: "not X alone" asserts X.
+	ly("r4.6", "kafka-connect", "The fault spans the registry, not Debezium alone.", true),
+	ly("r4.6", "kafka-connect", "Several layers broke, not Kafka Connect alone.", true),
+	ly("r4.6", "kafka-connect", "The registry broke too, not Debezium alone.", true),
+	ly("r4.6", "kafka-connect", "It is the registry as well, not Connect alone.", true),
+	ly("r4.6", "kafka-connect", "The registry rejected it, not Kafka Connect alone.", true),
+	gr("r4.6", [][]string{{"debezium"}}, "Two layers failed, not Debezium alone.", true),
+	gr("r4.6", [][]string{{"debezium"}}, "Several components broke, not Debezium alone.", true),
+	gr("r4.6", [][]string{{"owner*"}}, "Debezium's user has REPLICATION, not table ownership.", true),
+	gr("r4.6", [][]string{{"publication*"}}, "Root cause: the owner changed; Debezium owns the slot, not publications.", true),
+	// Item 7: a cause alternative inside a fix scope.
+	hg("r4.7", "Root cause: the slot was dropped. Fix: recreate the slot; alternatively the registry is at fault and needs a restart.", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fix: restart task 0; either the registry or the slot is the cause.", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fix: recreate the slot, or alternatively the root cause is the registry.", true),
+	hg("r4.7", "Fix: restart task 0 - either the registry or the slot caused it.", true),
+	hg("r4.7", "Fix: restart task 0, since either the registry or the slot dropped.", true),
+	hg("r4.7", "Root cause: the slot was dropped; Fix: recreate it; alternatively, the cause is a registry outage.", true),
+	hg("r4.7", "Fix: recreate the slot; alternatively it was the registry all along.", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fix: recreate the slot; the root cause is either the DBA or a failover.", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fix: restart task 0; alternatively the registry itself is at fault.", true),
+	hg("r4.7", "Fix: restart the connector, since either the slot or the registry broke.", true),
+	hg("r4.7", "Proposed fix: recreate the slot, because either a DBA dropped it or a failover lost it.", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fix: set compatibility to NONE; alternatively, the cause could be a network problem.", true),
+	hg("r4.7", "Root cause: the slot was dropped.\nFix:\nRestart the connector; either the slot or the registry is at fault.\n", true),
+	hg("r4.7", "Root cause: the slot was dropped.\nFix:\n- recreate the slot\n- either the DBA or a failover dropped it, check both", true),
+	hg("r4.7", "Root cause: the slot was dropped; fix: recreate it; either a DBA or a failover is to blame.", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fixes: recreate the slot; alternatively the WAL was recycled and the slot never existed.", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fix: recreate it (alternatively a failover lost it, so check the standby).", true),
+	hg("r4.7", "Root cause: the slot was dropped. Fix: recreate the slot – either a DBA or a failover removed it.", true),
+	hg("r4.7", "Fix: restart the connector; the cause may be either the slot or the registry.", true),
+	// Round 4, item 8: graded right only by the rules this PR no longer
+	// carries; main grades them wrong.
+	gap(fb("r4.8", resetLatest, "Order-sync did not crash, which rules out a reset to latest.", false), "#283 rule-out governance, waits on #454"),
+	gap(fb("r4.8", resetLatest, "The offsets were not touched, ruling out a reset to latest.", false), "#283 rule-out governance, waits on #454"),
+	gap(fb("r4.8", resetLatest, "The committed offsets were not touched, ruling out a reset to latest.", false), "#283 rule-out governance, waits on #454"),
+	gap(ly("r4.8", "schema-registry", "The connector failed, not Schema Registry.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	// Nit 11: graded wrong by main and by every round of this PR.
+	gap(ly("r4.11", "kafka-connect", "The registry rejected it, not Apache Kafka Connect.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "kafka-connect", "The registry rejected it, not Confluent Kafka Connect.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "schema-registry", "The connector failed, not Confluent's Schema Registry.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "schema-registry", "The connector failed, not Confluent Schema Registry itself.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "kafka-connect", "The registry rejected it, not Connect or Debezium.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "kafka-connect", "The registry rejected it, not Kafka Connect or Debezium.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "kafka-connect", "The registry rejected it, not Kafka Connect's fault.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "schema-registry", "The connector failed, and not Confluent Schema Registry.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "kafka-connect", "Not Kafka Connect: the registry rejected the schema.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(ly("r4.11", "kafka-connect", "Order-sync and not Debezium crashed.", false), "#283 \", not <layer>\" contrast, waits on #454"),
+	gap(fb("r4.11", resetLatest, "We cannot confirm, nor rule out, a reset to latest.", true), "#283 rule-out governance, waits on #454"),
+	gap(fb("r4.11", resetLatest, "I'm not sure we've ruled out a reset to latest.", true), "#283 rule-out governance, waits on #454"),
+	gap(fb("r4.11", []string{"slot", "lost"}, "Nothing of the slot was lost.", false), "#334 nothing, waits on #454"),
 }
 
 // corpusReviewScenarioRows are the review texts read with real scenario
@@ -283,6 +450,64 @@ var corpusReviewScenarioRows = []corpusRow{
 	// Item 6: cause hedges inside an inline fix scope.
 	sc("r3.6", "schema-change", seedCause+" Fix: set compatibility to NONE; the root cause could also be a network problem between Connect and the registry.", false),
 	sc("r3.6", "schema-change", seedCause+" Fix: set compatibility to NONE; I am not sure whether order-sync also crashed.", false),
+	// Round 4 (#395), items 1-4 and 6-7: real expects, pinned at main's
+	// grade.
+	sc("r4", "consumer-poison-pill", poisonPillCause+" Resetting the group to latest would skip the bad record and unblock order-sync.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" A reset to latest would skip it.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" Resetting the group to latest would skip the poison pill.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" Resetting the group to latest would skip the poison pill and unblock order-sync.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" Fix: a reset to latest would skip the bad record.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" Resetting order-sync to latest would drop just the poison pill.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" A reset to latest could skip the junk record and get order-sync going again.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" Since a reset to latest would skip the bad record, do it now.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" While a reset to latest would skip every unread record, it is the only fix.", false),
+	sc("r4", "consumer-poison-pill", poisonPillCause+" Fix: move partition 1 past the record; alternatively the consumer has a deserializer bug.", false),
+	sc("r4", "topic-retention-data-loss", "Retention is 6 h and records expired before order-sync read them, so they were lost. Resetting the group to latest would skip the gap and get order-sync going.", false),
+	sc("r4", "topic-retention-data-loss", "Retention is 6 h and records were lost. Kabir said a reset to latest would skip the backlog, and he ran it at 09:12.", false),
+	sc("r4", "topic-retention-data-loss", "Records were lost. Retention deleted nothing: resetting the group to latest skipped them.", false),
+	sc("r4", "topic-retention-data-loss", "Retention is 6 h and records were lost. I'm not sure I ruled out a reset to latest.", false),
+	sc("r4", "topic-retention-data-loss", "Retention is 6 h and records were lost. We can't say we ruled out a reset to latest.", false),
+	sc("r4", "topic-retention-data-loss", "Retention is 6 h and records were lost. Fix: raise retention; alternatively the consumer skipped them on its own.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" Resetting the group to latest would skip the missing range and restart consumption.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" The missing range is exactly what a reset to latest would skip.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" Resetting the group to latest would lose nothing more, so do it now.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" A reset to latest would skip exactly the missing records, which is what happened.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" A reset to latest would imply lost records too.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" Order-sync read nothing, resetting to latest skipped it all.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" Not sure we ruled out a reset to latest.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" I'm not sure I ruled out a reset to latest.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" Can't say I ruled out a reset to latest.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" I'm not convinced we ruled out a reset to latest.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" I don't think it rules out a reset to latest.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" That does not mean we ruled out a reset to latest.", false),
+	sc("r4", "consumer-offsets-out-of-range-retention", retentionCause+" Not that we ruled out a reset to latest.", false),
+	sc("r4", "schema-change", seedCause+" Order-sync also stopped, since a poison pill would break it on every restart.", false),
+	sc("r4", "schema-change", seedCause+" Nothing crashed, except order-sync.", false),
+	sc("r4", "schema-change", seedCause+" A restart did nothing, order-sync crashed again.", false),
+	sc("r4", "schema-change", seedCause+" Nothing crashed, but the order-sync consumer did.", false),
+	sc("r4", "schema-change", seedCause+" The restart fixed nothing: order-sync crashed again.", false),
+	sc("r4", "schema-change", seedCause+" There was nothing order-sync could do once it crashed.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE; alternatively, the cause is a broker outage, so restart the brokers.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE; either the registry or a broker outage is to blame.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE, or alternatively it is a network problem between Connect and the registry.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE; alternatively the consumer is the root cause.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE, since either the registry or a network problem broke the connector.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE; alternatively, a broker may be the cause.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE and restart task 0, because either the ALTER TABLE or a network problem stopped it.", false),
+	sc("r4", "schema-change", seedCause+" Fix: set compatibility to NONE (either the registry or the broker is to blame).", false),
+	sc("r4", "schema-change", seedCause+" Proposed fix: set compatibility to NONE; alternatively, order-sync has a bug that rejects decimals.", false),
+	sc("r4", "watcher-start", watcherCause+" Nothing changed the schema, except the DDL at 09:10.", false),
+	sc("r4", "publication-permission-denied", "Root cause: the table owner changed; Debezium's user can read the slot, not publications.", true),
+	sc("r4", "publication-permission-denied", "Root cause: the table owner changed, so Debezium's role owns tables, not publications.", true),
+	sc("r4", "publication-permission-denied", "Root cause: the debezium role has REPLICATION, not table owner, so it cannot alter the publication.", true),
+	sc("r4", "publication-permission-denied", "Root cause: Debezium's role has REPLICATION, not table ownership, so it cannot alter the publication.", true),
+	sc("r4", "publication-permission-denied", "Root cause: the orders table owner changed; the debezium role still owns its slot, not publications.", true),
+	// Round 4, nit 10: round 3 item 3 on topic-retention-data-loss.
+	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We can't yet, however, rule out a reset to latest.", false),
+	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We cannot fully, though, rule out a reset to latest.", false),
+	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We cannot confirm, or rule out, a reset to latest.", false),
+	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We can't, I think, rule out a reset to latest.", false),
+	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We cannot, it seems, rule out a reset to latest.", false),
 }
 
 // heldoutWrongHypotheses are the wrong final hypotheses of
@@ -308,6 +533,7 @@ func corpusScenarioRows(t *testing.T) []corpusRow {
 			case c.matcherLimit:
 				r = gap(r, "matcher limit (scenario_terms_test)")
 			case c.knownGap:
+				r.want = true // a correct text the terms cannot accept
 				r = gap(r, "known gap, the judge decides (scenario_terms_test)")
 			}
 			rows = append(rows, r)
@@ -386,6 +612,9 @@ func TestGoldenCorpus(t *testing.T) {
 		}
 		if r.gap != "" {
 			gaps++
+			if got == r.want {
+				t.Errorf("gap row graded right now; remove its gap marker: [%s] %s %s: %q", r.src, r.kind, r.scenario, r.text)
+			}
 			t.Logf("gap [%s] %s %s = %v (want %v): %s: %q", r.src, r.kind, r.scenario, got, r.want, r.gap, clip(r.text, 100))
 			continue
 		}

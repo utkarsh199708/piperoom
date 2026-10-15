@@ -24,37 +24,11 @@ package evals
 // so anything the pre-#17 rule skipped because of a negator in scope is still
 // skipped; only negators that do not reach the term stopped counting.
 
-import (
-	"regexp"
-	"strings"
-)
+import "regexp"
 
 var (
 	forbiddenNegators = []string{"not", "never", "no", "t", "cannot", "without", "against", "avoid*",
 		"instead of", "rather than", "neither", "nor"}
-	// conditionals right after a story, followed by a harm verb, make it a
-	// warning, not the story: "resetting the group to latest would skip
-	// every unread change". They deny only the term directly before them: a
-	// story with any other word or a comma before would/could ("the reset to
-	// latest meant order-sync could ...", "... latest and would skip ...") is
-	// still told. Any other verb after them (adverbs skipped) recommends or
-	// explains the story ("... would fix the lag", "... could well be the
-	// cause"), and "would have"/"would've" tells it in the past.
-	conditionals = []string{"would", "could"}
-	harmVerbs    = []string{"skip*", "los*", "miss*", "drop*", "delet*", "discard*", "break*", "wipe*",
-		"corrupt*", "hide", "mask*"}
-	// exceptions after "nothing" tell what they name: "nothing crashed
-	// except order-sync".
-	exceptions = []string{"except", "but", "besides", "other than", "apart from", "save"}
-	// adverbs are skipped after a conditional; any -ly word counts too.
-	adverbs = map[string]bool{"yet": true, "even": true, "ever": true, "still": true, "also": true,
-		"well": true, "then": true, "really": true, "quite": true, "perhaps": true, "maybe": true}
-	// newSubjects between a negator and a rule-out show that the negator
-	// belongs to another predicate: "order-sync did not crash and I ruled out
-	// a reset". "and"/"or" alone do not: "cannot confirm or rule out X"
-	// keeps X open.
-	newSubjects = map[string]bool{"i": true, "we": true, "you": true, "they": true,
-		"he": true, "she": true, "it": true, "someone": true, "nobody": true}
 	// ruleOuts deny what follows ("ruled out X") or, as a predicate, what
 	// precedes ("X was ruled out").
 	ruleOuts = []string{"rule out", "rules out", "ruled out", "ruling out", "excluded", "exclude", "excludes"}
@@ -74,54 +48,18 @@ var (
 
 // denialSpan is one negator or rule-out in a clause: toks[start:end].
 type denialSpan struct {
-	start, end  int
-	ruleOut     bool
-	conditional bool // denies only the term that ends right before it
-	nothing     bool // denies only the word after it, or after its auxiliary
-}
-
-// isAdverb reports whether t is an adverb that may stand between a modal and
-// its verb.
-func isAdverb(t string) bool {
-	return adverbs[t] || len(t) > 4 && strings.HasSuffix(t, "ly")
+	start, end int
+	ruleOut    bool
 }
 
 // forbiddenDenials lists the denials of one clause, after cancelling each
-// negated rule-out together with its negator. brk[i] marks a comma or colon
-// just before toks[i].
-func forbiddenDenials(toks []string, brk []bool) []denialSpan {
+// negated rule-out together with its negator.
+func forbiddenDenials(toks []string) []denialSpan {
 	var spans []denialSpan
 	for i := 0; i < len(toks); i++ {
 		if l := phraseAt(toks, i, ruleOuts); l > 0 {
 			spans = append(spans, denialSpan{start: i, end: i + l, ruleOut: true})
 			i += l - 1
-			continue
-		}
-		if phraseAt(toks, i, conditionals) > 0 {
-			next := i + 1
-			for next < len(toks) && isAdverb(toks[next]) {
-				next++
-			}
-			if next < len(toks) && toks[next] != "have" && toks[next] != "ve" && phraseAt(toks, next, harmVerbs) > 0 {
-				spans = append(spans, denialSpan{start: i, end: i + 1, conditional: true})
-			}
-			continue
-		}
-		// "nothing" is a subject: it denies its own predicate's first word
-		// ("nothing is lost", "nothing has been lost", "nothing changed") and
-		// nothing else, so no story after it is hidden; with an exception in
-		// its comma part it denies nothing ("nothing crashed except X").
-		if toks[i] == "nothing" {
-			exc := false
-			for k := i + 1; k < len(toks) && !brk[k]; k++ {
-				if phraseAt(toks, k, exceptions) > 0 {
-					exc = true
-					break
-				}
-			}
-			if !exc {
-				spans = append(spans, denialSpan{start: i, end: i + 1, nothing: true})
-			}
 			continue
 		}
 		l := phraseAt(toks, i, forbiddenNegators)
@@ -135,20 +73,18 @@ func forbiddenDenials(toks []string, brk []bool) []denialSpan {
 		i += l - 1
 	}
 	// A negator up to two words before a rule-out ("cannot rule out", "can't
-	// really rule out", "not able to rule out", "cannot confirm or rule out",
-	// "not been ruled out") cancels it, and both drop, unless a new subject
-	// or a comma or colon stands between them: in "order-sync did not crash,
-	// I ruled out a reset" the "not" denies the crash, and the rule-out
-	// stands. A comma right after the negator opens an aside, which does not
-	// block: "we cannot, however, rule out X".
+	// yet rule out", "not been ruled out") cancels it, and both drop.
 	drop := make([]bool, len(spans))
 	for r, s := range spans {
-		if !s.ruleOut || r == 0 {
+		if !s.ruleOut {
 			continue
 		}
-		n := r - 1
-		if p := spans[n]; !p.ruleOut && !p.conditional && !p.nothing && s.start-p.end <= 2 && governs(toks, brk, p.end, s.start) {
+		for n := r - 1; n >= 0; n-- {
+			if spans[n].ruleOut || s.start-spans[n].end > 2 {
+				break
+			}
 			drop[n], drop[r] = true, true
+			break
 		}
 	}
 	var out []denialSpan
@@ -161,17 +97,10 @@ func forbiddenDenials(toks []string, brk []bool) []denialSpan {
 }
 
 // forbiddenDenied reports whether a denial in spans covers toks[s:e].
-func forbiddenDenied(toks []string, brk []bool, spans []denialSpan, s, e int) bool {
+func forbiddenDenied(toks []string, spans []denialSpan, s, e int) bool {
 	for _, d := range spans {
 		switch {
-		case d.nothing:
-			if s >= d.end && s-d.end <= 2 && auxOrAdverbs(toks[d.end:s]) {
-				return true
-			}
 		case d.end <= s:
-			if d.conditional {
-				continue
-			}
 			if !contrastBetween(toks, d.end, s) {
 				return true
 			}
@@ -182,84 +111,10 @@ func forbiddenDenied(toks []string, brk []bool, spans []denialSpan, s, e int) bo
 			if contrastBetween(toks, e, d.start) || markerBetween(toks, e, d.start) {
 				continue
 			}
-			if d.conditional && (d.start != e || brk[d.start]) {
-				continue
-			}
-			if d.ruleOut || d.conditional || toks[d.start] == "against" || toks[d.start] == "cannot" ||
+			if d.ruleOut || toks[d.start] == "against" || toks[d.start] == "cannot" ||
 				(d.start > 0 && auxVerbs[toks[d.start-1]]) {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// governs reports whether a negator ending at from governs a rule-out
-// starting at to. Adverbs right after the negator are skipped ("can't yet,
-// however, rule out"). A pair of commas around at most two words is an
-// aside, read through whatever it holds ("cannot, however, rule out", "can't,
-// I think, rule out"). Outside asides, a new subject or an unpaired comma or
-// colon blocks ("did not crash, I ruled out X", "not touched, ruling out
-// X"), except a comma right before an "or"/"nor" that joins the rule-out
-// ("cannot confirm, or rule out, X"). At most two words that are neither
-// adverbs nor aside may stand between.
-func governs(toks []string, brk []bool, from, to int) bool {
-	i := from
-	for i < to && !brk[i] && isAdverb(toks[i]) {
-		i++
-	}
-	words, closed := 0, -1
-	for i <= to {
-		if i < to && brk[i] && i != closed {
-			if c := asideEnd(brk, i, to); c > 0 {
-				i, closed = c, c
-				continue
-			}
-		}
-		if brk[i] && i != closed && !(i+1 == to && (toks[i] == "or" || toks[i] == "nor")) {
-			return false
-		}
-		if i == to {
-			break
-		}
-		if newSubjects[toks[i]] {
-			return false
-		}
-		if !isAdverb(toks[i]) {
-			words++
-		}
-		i++
-	}
-	return words <= 2
-}
-
-// asideEnd returns the index of the token after the closing comma of an
-// aside that opens before toks[at] and holds at most two tokens, or 0.
-func asideEnd(brk []bool, at, to int) int {
-	for k := at + 1; k <= at+2 && k <= to; k++ {
-		if brk[k] {
-			return k
-		}
-	}
-	return 0
-}
-
-// auxOrAdverbs reports whether every token is an auxiliary or an adverb.
-func auxOrAdverbs(toks []string) bool {
-	for _, t := range toks {
-		if !auxVerbs[t] && !isAdverb(t) {
-			return false
-		}
-	}
-	return true
-}
-
-// breakBetween reports whether a comma or colon stands before one of
-// toks[from:to+1].
-func breakBetween(brk []bool, from, to int) bool {
-	for i := from; i <= to && i < len(brk); i++ {
-		if brk[i] {
-			return true
 		}
 	}
 	return false
@@ -290,13 +145,13 @@ func contrastBetween(toks []string, from, to int) bool {
 
 // termAsserted reports whether term occurs in toks inside comma part p (see
 // commaParts) at a position no denial in spans covers.
-func termAsserted(toks []string, brk []bool, part []int, p int, spans []denialSpan, term string) bool {
+func termAsserted(toks []string, part []int, p int, spans []denialSpan, term string) bool {
 	want, _, ok := termTokens(term)
 	if !ok {
 		return false
 	}
 	for _, at := range findTerm(toks, term) {
-		if part[at] == p && part[at+len(want)-1] == p && !forbiddenDenied(toks, brk, spans, at, at+len(want)) {
+		if part[at] == p && part[at+len(want)-1] == p && !forbiddenDenied(toks, spans, at, at+len(want)) {
 			return true
 		}
 	}
@@ -304,29 +159,18 @@ func termAsserted(toks []string, brk []bool, part []int, p int, spans []denialSp
 }
 
 // partSplit is a comma that ends a part of a clause; "1,000" is one number.
-// colonSplit is a colon before a space; "10:30" is one time.
-var (
-	partSplit  = regexp.MustCompile(`,(\s|$)`)
-	colonSplit = regexp.MustCompile(`:(\s|$)`)
-)
+var partSplit = regexp.MustCompile(`,(\s|$)`)
 
 // commaParts tokenises a clause and numbers each token's comma part. A comma
 // ends a part only after a predicate of its own (an auxiliary verb: "nothing
 // is lost, the slot is still there"); after a bare noun phrase it is a list
 // or an aside ("order-sync, Connect and the registry crashed", "the
 // consumer, which many suspected, crashed") and the part goes on. The tokens
-// are tokenize(clause): a comma never joins two tokens. brk marks each token
-// that follows a comma or a colon.
-func commaParts(clause string) (toks []string, brk []bool, part []int, n int) {
+// are tokenize(clause): a comma never joins two tokens.
+func commaParts(clause string) (toks []string, part []int, n int) {
 	cur := 0
 	for _, p := range partSplit.Split(clause, -1) {
-		var pt []string
-		for _, q := range colonSplit.Split(p, -1) {
-			for k, t := range tokenize(q) {
-				brk = append(brk, k == 0 && len(toks)+len(pt) > 0)
-				pt = append(pt, t)
-			}
-		}
+		pt := tokenize(p)
 		for _, t := range pt {
 			toks = append(toks, t)
 			part = append(part, cur)
@@ -341,7 +185,7 @@ func commaParts(clause string) (toks []string, brk []bool, part []int, n int) {
 	if len(part) > 0 {
 		n = part[len(part)-1] + 1
 	}
-	return toks, brk, part, n
+	return toks, part, n
 }
 
 // matchForbidden reports whether text tells one of the forbidden stories: a
@@ -350,7 +194,7 @@ func commaParts(clause string) (toks []string, brk []bool, part []int, n int) {
 // another still fires.
 func matchForbidden(rows [][]string, text string) bool {
 	for _, clause := range clauseSplit.Split(text, -1) {
-		toks, brk, part, n := commaParts(clause)
+		toks, part, n := commaParts(clause)
 		if len(toks) == 0 {
 			continue
 		}
@@ -358,7 +202,7 @@ func matchForbidden(rows [][]string, text string) bool {
 		// no story), but a row's terms must share one comma part:
 		// "nothing is lost, the slot is still there" does not say "lost the
 		// slot".
-		spans := forbiddenDenials(toks, brk)
+		spans := forbiddenDenials(toks)
 		for _, row := range rows {
 			if len(row) == 0 {
 				continue
@@ -366,7 +210,7 @@ func matchForbidden(rows [][]string, text string) bool {
 			for p := 0; p < n; p++ {
 				all := true
 				for _, term := range row {
-					if !termAsserted(toks, brk, part, p, spans, term) {
+					if !termAsserted(toks, part, p, spans, term) {
 						all = false
 						break
 					}

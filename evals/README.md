@@ -261,12 +261,6 @@ before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`,
   rule out the registry" keeps it); `not`, `n't`, `never`, `cannot` only before a noun phrase
   or `be` ("not a Connect problem", "it can't be amount"), not before a verb ("cannot register the
   schema", "can't decode the record", "is not active") or a passive ("cannot be read as numeric");
-  and a bare `not` that opens a part after a comma or `and` when the part is exactly one layer name,
-  optionally after `Kafka`/`Apache`/`Confluent` and before `itself`/`alone` ("dropped by a DBA, not
-  Debezium", "..., not Kafka Connect", "..., not Confluent Schema Registry"), unless an exonerator
-  comes before it ("order-sync is healthy, not Debezium"). Any other part after `not` describes the
-  failure: "not compatible", "not committing offsets", "not in wire format", "not publication
-  ownership";
 - **backward over the same part of the fragment** (a plain comma list stays one part): `ruled out`,
   `is not the cause`/`problem`/`issue`, `isn't the cause`/`problem`, `not to blame`, `not at fault`,
   `not involved`, `red herring` ("an ALTER TABLE ... is ruled out").
@@ -287,15 +281,13 @@ comes before it up to the previous `,` or `and`: "Connect is healthy" does not n
   denial set off by commas ("it was not, as some thought, the amount") is not seen;
 - a self-answered rhetorical question ("Restarting now? No: it would fail again.", "Why did it fail?
   Because ...") or a quoted "?" counts as asking the driver;
-- healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass;
-- ", not <pipeline name>" ("the registry rejected it, not order-sync") is not a denial: only layer
-  names are read after a contrastive `not` (#283 stays open for this).
+- healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass.
 
 | field | type | meaning |
 |---|---|---|
 | `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
 | `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
-| `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split), and in one comma part of it: a comma after a predicate of its own (an auxiliary such as `is`, `was`, `has`) ends a part, so "nothing is lost, the slot is still there" does not tell `lost the slot`, while a comma list or aside ("order-sync, the consumer and the registry all crashed", "the consumer, which many suspected, crashed") stays one part. Denials still reach across commas. A term inside a denial does not count (`forbidden.go`): after a negator (`not`, `never`, `no`, `cannot`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`, `neither`, `nor`, plus `nothing`, which denies only the word right after it or after up to two auxiliaries or adverbs: "nothing is lost", "nothing has been lost", "nothing changed", "nothing incompatible", and nothing at all with an exception in its comma part: "nothing crashed except order-sync" tells the crash) or a rule-out (`rule`/`rules`/`ruled`/`ruling out`, `exclude*`) up to the next contrast word (`but`, `however`, `although`, `though`, `whereas`, `actually`), or before a predicate denial within five words with no `so`/`because`/`since`/`therefore`/`thus`/`then`/`while`/`when`/`until` between ("X is not the cause", "X wasn't", "X cannot be", "X was ruled out", "X is advised against", and a conditional warning whose would/could follows the story's last term directly and is followed (adverbs skipped) by a harm verb (`skip*`, `los*`, `miss*`, `drop*`, `delet*`, `discard*`, `break*`, `wipe*`, `corrupt*`, `hide`, `mask*`): "resetting the group to latest would skip every unread change". Any other verb recommends or explains the story ("... would fix the lag", "... could well be the cause", "... would explain the gap"), "would have"/"would've" tells it, and a would/could with any other word or a comma before it ("the reset to latest meant order-sync could ...") is no warning; but "the slot has become inactive so the snapshot cannot progress" still tells the inactive-slot story). So "do not reset to latest" and "I ruled out a poison pill" are fine, while "the cause is a consumer crash, not the schema", "not only X but" and a negated rule-out ("cannot rule out X", "not able to rule out X", "X has not been ruled out": at most two words between the negator and the rule-out besides adverbs and asides ("cannot confirm or rule out X", "not able to rule out X"), and no new subject such as `I` and no unpaired comma or colon between them: a pair of commas around at most two words is an aside, read through ("we cannot, however, rule out X", "we can't, I think, rule out X"), and a comma before an `or` that joins the rule-out does not block ("we cannot confirm, or rule out, X"); so in "order-sync did not crash, I ruled out a reset to latest" both stories are denied) still tell the story. A negator reaches to the end of its clause unless a contrast word stops it, so "no lag, so reset to latest" is (cautiously) not told. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
+| `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split), and in one comma part of it: a comma after a predicate of its own (an auxiliary such as `is`, `was`, `has`) ends a part, so "nothing is lost, the slot is still there" does not tell `lost the slot`, while a comma list or aside ("order-sync, the consumer and the registry all crashed", "the consumer, which many suspected, crashed") stays one part. Denials still reach across commas. A term inside a denial does not count (`forbidden.go`): after a negator (`not`, `never`, `no`, `cannot`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`, `neither`, `nor`) or a rule-out (`rule`/`rules`/`ruled`/`ruling out`, `exclude*`) up to the next contrast word (`but`, `however`, `although`, `though`, `whereas`, `actually`), or before a predicate denial within five words with no `so`/`because`/`since`/`therefore`/`thus`/`then`/`while`/`when`/`until` between ("X is not the cause", "X wasn't", "X cannot be", "X was ruled out", "X is advised against"; but "the slot has become inactive so the snapshot cannot progress" still tells the inactive-slot story). So "do not reset to latest" and "I ruled out a poison pill" are fine, while "the cause is a consumer crash, not the schema", "not only X but" and a negated rule-out ("cannot rule out X", "X has not been ruled out") still tell the story. A negator reaches to the end of its clause unless a contrast word stops it, so "no lag, so reset to latest" is (cautiously) not told. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
 | `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
@@ -764,14 +756,8 @@ counting (`hedge.go`):
   change either."), `or possibly`, `could also be`, `possible causes`, `one of these`, `not sure whether`
   and similar make the root cause wrong (`hedged`, `hedged_on`), unless a denial stands just before them
   ("there are no other possibilities", "I ruled out the other possible causes"; a negated rule-out,
-  "cannot rule out other possibilities", still hedges). A `Fix:` label that starts a line or a sentence
-  opens a fix list, in which `alternatively` and `either` list alternative fixes and are skipped:
-  inline to the end of its sentence (`.`, `?`, `!`, `…`) or line or the next label ("Fix: restart the
-  connector; alternatively, recreate it"); a label that ends its line over the list items (`-`, `*`,
-  `1.`) right below it, or else over its first sentence. Any later line is checked, and cause hedges
-  (`could also be`, `not sure whether`, ...) count inside a fix list too. "Root cause and fix:" is no
-  fix label; "- Fix:", "**Fix:**", "Suggested fix:" and a blank line after the label are not read
-  (gap rows in the golden corpus). The LLM judge's verdict cannot undo this.
+  "cannot rule out other possibilities", still hedges). The LLM
+  judge's verdict cannot undo this.
 - **`root_cause_forbidden`** (per scenario): a plain list ("amount changed; order-sync crashed;
   retention deleted records") has no hedge words; only the scenario's wrong-story rows catch it. Name
   the wrong stories a shotgun answer would tell. `-validate` notes diagnose scenarios without any.
@@ -779,10 +765,13 @@ counting (`hedge.go`):
 Both apply to every hypothesis, so they also govern `tool_calls_to_root_cause` and time to cause.
 
 **Golden corpus** (`golden_corpus_test.go`): every text the deterministic matcher has been judged on
-(the existing tests' correct, trap, shotgun and wrong-story answers read with the real expect of each
-default and held-out scenario, plus the tickets' and reviews' reproductions) in one table. Run it after
-any change to `textmatch.go`, `forbidden.go`, `hedge.go` or `tokenize`; a change that flips a row is
-not done. Rows the matcher deliberately leaves to the judge are logged as gaps.
+in one table: the existing tests' correct, trap, shotgun and wrong-story answers read with the real
+expect of each default and held-out scenario, plus the reproductions of #283, #334 and #335 and every
+text quoted in the #395 reviews. Each row is pinned at the grade the matcher gives today. A row the
+matcher gets wrong is a **gap** row: it carries the right grade and a reason, is logged and never
+fails. Run the corpus after any change to `textmatch.go`, `forbidden.go`, `hedge.go` or `tokenize`:
+a change that flips a row is not done, and a fix that makes a gap row right removes its gap marker.
+The denial and warning gaps of #283 and #334 wait on #454 (keyword rules or the LLM judge).
 
 ## Time to cause
 

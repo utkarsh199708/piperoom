@@ -163,11 +163,7 @@ func denied(c clauseToks, layers bool) []bool {
 				neg[i] = true
 			}
 		}
-		l := forwardDenial(c.toks, j)
-		if l == 0 {
-			l = contrastNot(c, j)
-		}
-		if l > 0 {
+		if l := forwardDenial(c.toks, j); l > 0 {
 			for i := j + l; i < n && c.sub[i] == c.sub[j]; i++ {
 				neg[i] = true
 			}
@@ -209,59 +205,6 @@ func forwardDenial(toks []string, j int) int {
 		}
 	}
 	return l
-}
-
-// contrastNot returns 1 for a bare "not" that opens a short sub after a
-// comma or "and" in its back segment and is exactly one layer name (see
-// isLayerName: "dropped by a DBA, not Debezium", "..., not Kafka Connect"),
-// or 0. Anything else after "not", an adjective ("not compatible"), a verb
-// ("not committing"), a preposition ("not in the registry"), "only" or a
-// layer word that starts a longer phrase ("not publication ownership"), more
-// likely describes the failure. After an exonerator ("order-sync is healthy,
-// not Debezium") the "not" clears nothing.
-func contrastNot(c clauseToks, j int) int {
-	if j == 0 || j+1 >= len(c.toks) || c.sub[j-1] == c.sub[j] || c.back[j-1] != c.back[j] || c.toks[j] != "not" {
-		return 0
-	}
-	end := j + 1
-	for end < len(c.toks) && c.sub[end] == c.sub[j] {
-		end++
-	}
-	if end == j+1 || end-(j+1) > contrastNotMax || !isLayerName(c.toks[j+1:end]) {
-		return 0
-	}
-	for i := j - 1; i >= 0 && c.sub[i] == c.sub[j-1]; i-- {
-		if phraseAt(c.toks, i, exonerators) > 0 {
-			return 0
-		}
-	}
-	return 1
-}
-
-// contrastNotMax is the longest sub, in tokens after the negator, that
-// contrastNot reads as a name: "Confluent Schema Registry" is three.
-const contrastNotMax = 3
-
-// isLayerName reports whether toks is exactly one layer term, after an
-// optional vendor word and before an optional "itself" or "alone": "Debezium",
-// "Kafka Connect", "Confluent Schema Registry", "the registry itself" is not
-// (a determiner is read by forwardDenial). "publication ownership" is no
-// name: a layer word that starts a longer phrase describes the failure.
-func isLayerName(toks []string) bool {
-	if len(toks) > 1 && (toks[0] == "kafka" || toks[0] == "apache" || toks[0] == "confluent") {
-		toks = toks[1:]
-	}
-	if n := len(toks); n > 1 && (toks[n-1] == "itself" || toks[n-1] == "alone") {
-		toks = toks[:n-1]
-	}
-	for _, terms := range layerTerms {
-		for _, term := range terms {
-			if want, _, ok := termTokens(term); ok && len(want) == len(toks) && phraseAt(toks, 0, []string{term}) == len(toks) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // affirmsDoubt reports whether toks[j] starts "no doubt", "without doubt" or
