@@ -209,6 +209,7 @@ type Service struct {
 	tools        *tools.Registry
 	stackFor     func(pipelineID string) PipelineStack
 	topo         topology.Builder
+	preview      previewBudget
 	users        *Users
 	owners       *owners.Owners
 	run          agent.Runner
@@ -319,6 +320,7 @@ func New(d Deps) *Service {
 		tools:           tls,
 		stackFor:        d.StackFor,
 		topo:            topo,
+		preview:         defaultPreviewBudget,
 		users:           users,
 		owners:          d.Owners,
 		run:             run,
@@ -1093,6 +1095,8 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 // inputFor converts an event into the agent.HumanInput it carries, or nil.
 func inputFor(e events.Event) *agent.HumanInput {
 	switch e.Type {
+	case events.AgentMessage:
+		return incidentInput(e) // service_watch.go; nil for other messages
 	case events.SteerSent:
 		p, ok := decode[events.SteerSentPayload](e)
 		if !ok {

@@ -802,6 +802,12 @@ func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, 
 	trackPending(st, e)
 	s.feedInbox(st, e)
 	s.markListDirtyLocked(roomID)
+	if remote && st.leased && incidentInput(e) != nil {
+		// Another replica (the watcher's leader) joined a new incident into
+		// a room whose agent runs here: a run that ended on its own must
+		// start again to read it (QA F21).
+		s.wakeForIncidentLocked(ctx, roomID, st)
+	}
 	if remote && wasOpen && !s.roomOpen(st) {
 		s.closedElsewhereLocked(ctx, roomID, st)
 	}

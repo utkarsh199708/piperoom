@@ -180,12 +180,14 @@ func (s *Service) withdrawLocked(ctx context.Context, st *roomState, roomID, pro
 // fresh deadline detached from the request: room.closed is already in the log.
 // A shadow room has no proposals. Caller holds s.mu.
 func (s *Service) withdrawOnCloseLocked(ctx context.Context, st *roomState, roomID string) {
-	if st.snap.Shadow || len(st.snap.OpenProposals) == 0 {
+	// room.closed already emptied OpenProposals; openAtClose is what it
+	// found open.
+	if st.snap.Shadow || len(st.snap.openAtClose) == 0 {
 		return
 	}
 	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resultWriteTimeout)
 	defer cancel()
-	for _, p := range append([]Proposal(nil), st.snap.OpenProposals...) {
+	for _, p := range append([]Proposal(nil), st.snap.openAtClose...) {
 		if fullyApproved(p) {
 			continue
 		}
@@ -199,7 +201,7 @@ func (s *Service) withdrawOnCloseLocked(ctx context.Context, st *roomState, room
 			ProposalID: p.ProposalID, Reason: events.ProposalWithdrawnRoomClosed,
 		}); err != nil {
 			// The row says withdrawn and the room is closed, so nothing can
-			// approve or run it; only the snapshot still lists it.
+			// approve or run it; only the log lacks the withdrawal.
 			s.log.Warn("room: log withdrawal at close failed", "room", roomID, "proposal", p.ProposalID, "err", err)
 		}
 	}

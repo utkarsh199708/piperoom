@@ -436,9 +436,11 @@ func TestCloseWithdrawsOpenProposals(t *testing.T) {
 			t.Fatalf("%s: row status %q (%v), want %q", pid, row.Status, err, want)
 		}
 	}
+	// A closed room lists no open proposal, not even the one still running
+	// (QA X1): its outcome comes as action.executed.
 	snap, _ := e.svc.GetRoom(ctx, roomID)
-	if len(snap.OpenProposals) != 1 || snap.OpenProposals[0].ProposalID != busy {
-		t.Fatalf("open_proposals = %+v, want only the running one", snap.OpenProposals)
+	if len(snap.OpenProposals) != 0 {
+		t.Fatalf("open_proposals = %+v, want none in a closed room", snap.OpenProposals)
 	}
 	// The closed room answers room_closed, not proposal_withdrawn.
 	_, err = e.svc.ApproveProposal(ctx, e.user(t, "kabir"), partly, "consumer", "any")
