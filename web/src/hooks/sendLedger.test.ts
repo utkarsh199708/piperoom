@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClientError, SendUnconfirmedError } from '../api/client'
 import type { Event } from '../api/types'
 import { NOT_CONFIRMED_TEXT, OFFLINE_TEXT, UNCONFIRMED_TEXT } from '../lib/errors'
-import { LIVE_RETRY_MS, MAX_KEPT, SendLedger, UNCONFIRMED_WINDOW_MS } from './sendLedger'
+import { INFLIGHT_WAIT_MS, LIVE_RETRY_MS, MAX_KEPT, SendLedger, UNCONFIRMED_WINDOW_MS } from './sendLedger'
 import type { SendItem } from './sendLedger'
 
 const ME = { kind: 'human' as const, id: 'arjun', name: 'Arjun' }
@@ -257,10 +257,9 @@ describe('SendLedger cancel and isPending', () => {
   })
 })
 
-// Gap shared with main (org.md §12), pinned as it is today; follow-up #519. When it is fixed,
-// this row flips to assert two posts, isPending false and no banner.
-describe('gap rows (today\'s behaviour, shared with main)', () => {
-  it('GAP (#519): a Retry waiting on the reconnect copy re-posts after a cancel, once that copy fails', async () => {
+// #519: a send waiting on an entry the person gave up on ends with it, and never posts it again.
+describe('a waiter on a cancelled entry', () => {
+  it('#519: a Retry waiting on the reconnect copy resolves as cancelled once that copy fails: no re-post', async () => {
     const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
     const { l, error } = ledger(post)
     await l.send(stop, 'k1') // fails offline: kept for the reconnect
@@ -272,10 +271,37 @@ describe('gap rows (today\'s behaviour, shared with main)', () => {
     post.mockRejectedValueOnce(new TypeError('Failed to fetch'))
     failCopy(new TypeError('Failed to fetch'))
     expect(await retry).toBe(false)
-    // Today: the waiting Retry posts the cancelled action again, and it is kept once more.
-    expect(post).toHaveBeenCalledTimes(3)
-    expect(l.isPending('k1')).toBe(true)
-    expect(error()).toBe(OFFLINE_TEXT)
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(l.isPending('k1')).toBe(false)
+    expect(error()).toBeNull()
+  })
+
+  it('#519: the same when the copy hangs past the wait: dropped, no re-post', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post)
+    await l.send(stop, 'k1')
+    post.mockImplementationOnce(() => new Promise<Event | undefined>(() => {}))
+    l.drain()
+    const retry = l.send(stop, 'k1')
+    l.cancel('k1')
+    await vi.advanceTimersByTimeAsync(INFLIGHT_WAIT_MS + 1)
+    expect(await retry).toBe(false)
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(l.isPending('k1')).toBe(false)
+    expect(error()).toBeNull()
+  })
+
+  it('#519: a cancelled copy that lands still settles its waiter', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post)
+    await l.send(stop, 'k1')
+    let land: (ev: Event) => void = () => {}
+    post.mockImplementationOnce(() => new Promise<Event | undefined>((r) => (land = r)))
+    l.drain()
+    const retry = l.send(stop, 'k1')
+    l.cancel('k1')
+    land(event('stop', 'k1'))
+    expect(await retry).toBe(true)
+    expect(post).toHaveBeenCalledTimes(2)
   })
 })
-

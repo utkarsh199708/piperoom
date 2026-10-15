@@ -140,10 +140,16 @@ export class SendLedger {
       // Another send of this action (the reconnect copy, or a double click) is on its way.
       const out = await this.wait(a.flight)
       if (out === 'ok' || this.isLanded(clientId, item)) return this.settled()
-      if (out === 'timeout' && this.actions.get(clientId) === a && a.state === 'inflight') {
-        if (a.cancelled) this.actions.delete(clientId) // given up on: dropped, not kept as unknown
-        else this.toUnknown(a)
+      if (a.cancelled) {
+        // The person gave up on the action this send waited on (#519): it ends with that entry,
+        // and is never posted again.
+        if (this.actions.get(clientId) === a) {
+          this.actions.delete(clientId)
+          this.setError(this.banner())
+        }
+        return false
       }
+      if (out === 'timeout' && this.actions.get(clientId) === a && a.state === 'inflight') this.toUnknown(a)
       a = this.actions.get(clientId)
       if (a?.state === 'inflight') return false
     }
@@ -160,8 +166,8 @@ export class SendLedger {
    * unknown entry is removed, so no Retry, reconnect or live retry sends it. An entry on the wire
    * cannot be called back, so it is marked: if it lands, it lands; if it fails or gets no
    * answer, it is dropped instead of kept. Either way it is never sent again, so the composer
-   * may start a new action with a new id at once. Known gap (#519, shared with main): a send()
-   * already waiting on that flight posts the action again once the flight fails.
+   * may start a new action with a new id at once; a send() already waiting on that flight ends
+   * with it (#519).
    */
   cancel(clientId: string): void {
     const a = this.actions.get(clientId)
