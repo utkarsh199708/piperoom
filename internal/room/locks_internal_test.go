@@ -768,7 +768,6 @@ func (r *inputRun) got(roomID, text string) bool {
 // hold up the other rooms' leases: they are renewed, their agents keep
 // running, and the follower keeps feeding them what other replicas append.
 func TestSharedStoreStalledRoomKeepsOthersLeased(t *testing.T) {
-	t.Skip("enabled in phase B: per-room lock flip")
 	ls := newLeaseStore()
 	runs := &inputRun{inputs: map[string][]agent.HumanInput{}, live: map[string]context.Context{}}
 	svc := New(Deps{
@@ -785,10 +784,17 @@ func TestSharedStoreStalledRoomKeepsOthersLeased(t *testing.T) {
 	pollUntil(t, func() bool { return runs.running(a) && runs.running(b) })
 
 	release, wait := stallAppend(t, svc, ls.gatedStore, a)
-	// phase B: wake the follower for A while it is stalled, so the test also
-	// shows a stuck room does not hold up the follower: read ls.watch under
-	// ls.lmu and call w.OnAppend(a, <A's last seq>+1) here, before B's
-	// appendElsewhere below.
+	// Wake the follower for A while it is stuck, as another replica's append
+	// to A would: the follower must not wait for A, or B's steer below would
+	// never reach B's agent.
+	pa, err := svc.GetRoom(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ls.lmu.Lock()
+	w := ls.watch
+	ls.lmu.Unlock()
+	w.OnAppend(a, pa.LastSeq+1)
 	renewedBefore := ls.renewals(b)
 	time.Sleep(2 * time.Second) // more than two lease TTLs
 
@@ -1107,7 +1113,6 @@ func TestEventsLastSeqCoversEventsInFlight(t *testing.T) {
 // up the room list or another room's hand-off check: neither may wait for the
 // stuck room's lock to fold it.
 func TestSharedStoreSlowCommandReadsDoNotWait(t *testing.T) {
-	t.Skip("enabled in phase B: per-room lock flip")
 	ls := newLeaseStore()
 	svc := New(Deps{
 		Store: ls, Users: DefaultUsers(), Owners: tenantOwners(), Run: idleRun, ReplicaID: "replica-a",

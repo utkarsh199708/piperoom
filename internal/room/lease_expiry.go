@@ -65,9 +65,17 @@ func applyLeaseExpired(snap *RoomSnapshot, e events.Event) {
 // closed room, a room being deleted or a room with no driver. Caller holds
 // st's lock.
 func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpiredPayload, bool) {
-	d := st.snap.Driver
-	if st.deleting || !s.roomOpen(st) || d == nil || d.LeaseExpired || st.snap.grantedLease.IsZero() ||
-		st.leaseLogFullFor.Equal(st.snap.grantedLease) {
+	if st.deleting || st.leaseLogFullFor.Equal(st.snap.grantedLease) {
+		return events.ControlLeaseExpiredPayload{}, false
+	}
+	return s.leaseExpiryDue(&st.snap)
+}
+
+// leaseExpiryDue is leaseExpiryDueLocked as far as the snapshot tells: on a
+// published snapshot, it finds the rooms worth locking.
+func (s *Service) leaseExpiryDue(snap *RoomSnapshot) (events.ControlLeaseExpiredPayload, bool) {
+	d := snap.Driver
+	if snap.Status != "open" || d == nil || d.LeaseExpired || snap.grantedLease.IsZero() {
 		return events.ControlLeaseExpiredPayload{}, false
 	}
 	if s.now().Before(d.LeaseUntil) {
@@ -75,7 +83,7 @@ func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpire
 	}
 	return events.ControlLeaseExpiredPayload{
 		Driver:     events.Actor{Kind: events.ActorHuman, ID: d.ID, Name: d.Name, Verified: d.Verified},
-		LeaseUntil: st.snap.grantedLease,
+		LeaseUntil: snap.grantedLease,
 	}, true
 }
 
@@ -131,12 +139,14 @@ func (s *Service) checkLeases(ctx context.Context) {
 	if s.isClosed() {
 		return
 	}
+	// Judged on what each room published; only a room that looks due is
+	// locked, and a room busy in a slow call waits for the next check.
 	var due []string
-	s.rangeRooms(func(id string, st *roomState) {
-		if _, ok := s.leaseExpiryDueLocked(st); ok {
+	for id, p := range s.publishedRooms() {
+		if _, ok := s.leaseExpiryDue(p); ok {
 			due = append(due, id)
 		}
-	})
+	}
 	if len(due) == 0 {
 		return
 	}
@@ -164,18 +174,21 @@ func (s *Service) checkLeases(ctx context.Context) {
 		}
 		// Shared store: adopt a renewal another replica persisted on the
 		// rooms row and fold its events before judging the lease.
-		s.syncRoom(ctx, id)
+		if s.trySyncRoom(ctx, id) {
+			continue
+		}
 		s.emitLeaseExpired(ctx, id)
 	}
 }
 
 // emitLeaseExpired re-checks one room under its lock and appends its
-// control.lease_expired as the system actor.
+// control.lease_expired as the system actor. A busy room is left for the next
+// check.
 func (s *Service) emitLeaseExpired(ctx context.Context, roomID string) {
 	if s.isClosed() {
 		return
 	}
-	st := s.lockCachedRoom(roomID)
+	st, _ := s.tryLockCachedRoom(roomID)
 	if st == nil {
 		return
 	}

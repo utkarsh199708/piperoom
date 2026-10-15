@@ -210,12 +210,17 @@ type roomState struct {
 	graceTimer      *time.Timer
 
 	// Multi-replica state (replicas.go). leased: this replica owns the room's
-	// agent lease, so it runs the agent and feeds its inbox; leaseValid is the
-	// local deadline after which the agent stops unless a renew confirmed the
-	// lease. pending is the human input logged after the agent's last own
-	// event, which primes the inbox of a replica that becomes the owner.
+	// agent lease, so it runs the agent and feeds its inbox; it is changed
+	// only by setLeased, which mirrors it in leasedHint for the lease loops,
+	// which read it without the room's lock. leaseValid (Unix ns) is the local
+	// deadline after which the agent stops unless a renew confirmed the lease;
+	// the renew loop moves it without the lock, so a room stuck in a slow
+	// call keeps a lease the store still confirms. pending is the human input
+	// logged after the agent's last own event, which primes the inbox of a
+	// replica that becomes the owner.
 	leased     bool
-	leaseValid time.Time
+	leasedHint atomic.Bool
+	leaseValid atomic.Int64
 	pending    []agent.HumanInput
 
 	// shadowLogFull is set when the shadow log reached the room's cap: the
@@ -865,7 +870,7 @@ func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 		return fmt.Errorf("room: agent write on %s: %w", roomID, store.ErrLeaseLost)
 	case run != st.agentRun:
 		return fmt.Errorf("room: agent write on %s from a replaced run: %w", roomID, store.ErrLeaseLost)
-	case time.Now().After(st.leaseValid):
+	case time.Now().After(st.leaseDeadline()):
 		return fmt.Errorf("room: agent write on %s after the lease deadline: %w", roomID, store.ErrLeaseLost)
 	}
 	return nil

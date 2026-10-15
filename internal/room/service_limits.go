@@ -65,8 +65,11 @@ func (s *Service) ReloadUsage(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Read outside the room's lock; the count may then trail an append
+		// made in between, which is the safe side for the cap warning.
+		n := s.loadUsage(ctx, id)
 		if st := s.lockCachedRoom(id); st != nil {
-			st.logBytes = s.loadUsage(ctx, id)
+			st.logBytes = n
 			s.unlockRoom(st)
 		}
 	}
