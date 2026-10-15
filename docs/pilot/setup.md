@@ -426,17 +426,21 @@ On start-up the service reloads every room from the event log (`Load` in `intern
 **It starts no agent by itself**, because a restart must not spend model calls on rooms nobody is
 watching. What an open room shows depends on what its agent was doing:
 
-- If the agent was **working or queued** when the server stopped, the room is marked idle: an
-  `agent.status` `idle` event with the detail "server restarted" and a system message ("the agent is
-  paused; the driver can steer, or anyone can mention @agent, to resume"). With the Postgres store a
-  stop hands the room's agent lease over at once (a crash lets it run out after 30 s), and the
-  take-over scan, which runs every 10 s, writes the notice (`Close` in `internal/room/service.go`;
-  `adoptRoom` in `internal/room/replicas.go`). With a store that belongs to one process (the `--demo`
-  store) `Load` writes it for every open room.
-- If the agent had already finished or was idle, the room gets **no** "server restarted" message. Its
-  agent is simply not running.
-- The agent runs again when a driver steers, a comment mentions `@agent`, or a suggestion is sent
-  (`internal/room/service_steer.go`, `ensureAgentLocked`). The new run starts from the room's original
+- **Nearly every open room gets the notice.** An agent that has finished its answer does not end its
+  run: it goes idle and waits for input, so its room still holds an agent lease. A stop expires the
+  lease at once (a crash lets it run out after 30 s), and the take-over scan, which runs every 10 s,
+  adopts the room. Unless the next bullet applies, it writes an `agent.status` `idle` event with the
+  detail "server restarted" and a system message ("the agent is paused; the driver can steer, or anyone
+  can mention @agent, to resume"). That covers idle, done, working and queued agents alike
+  (`Close` in `internal/room/service.go`; `adoptRoom` in `internal/room/replicas.go`;
+  `docs/design/replicas.md` §4.3).
+- The rooms that get **no** notice are those whose agent holds no lease: its supervisor gave up
+  earlier, or an earlier restart already marked it "server restarted" and nobody has steered since.
+  Their agent is simply not running.
+- `--demo` uses an in-memory store that starts empty, so no demo room survives a restart.
+- The agent runs again when a driver steers, a comment mentions `@agent`, a suggestion is sent, or any
+  member confirms or disputes its hypothesis (`internal/room/service_steer.go`,
+  `service_hypothesis.go`, `ensureAgentLocked`). The new run starts from the room's original
   alert, not from where the old run stopped.
 - **`PIPEROOM_RESUME_ON_TAKEOVER=1` changes this, even with one server.** Then a room whose agent was
   working (or that has unanswered input) resumes by itself after the restart: a system message, a fresh
@@ -454,11 +458,19 @@ A failing agent run is retried, up to 3 runs in total, with a pause that starts 
 doubles (`service.go`). Each failure posts an `agent.status` `error` event, and runs wait in
 the agent queue when the cap is reached (`service.go`; `PIPEROOM_MAX_AGENTS`, section 1).
 
-A fix that was fully approved but had not finished when the server stopped is **not re-run**.
-It is marked failed. The service writes one `action.executed` event with `ok=false` and the text
-"proposal was interrupted by a service restart before it finished; create a new proposal to retry",
-and sets the proposal to failed (`service.go`). Check the target system yourself to see how
-far the interrupted step got, before you ask for a new proposal.
+A fix that was fully approved but had not finished when the server stopped is **not re-run**. It is
+marked failed, not immediately: the sweep acts only on a stale claim (`sweepStaleProposals`,
+`recordInterruption` in `internal/room/replicas.go`). The service writes one `action.executed` event with
+`ok=false` and sets the proposal to failed:
+
+- A fix whose step was already claimed is failed after the claim goes stale: the step timeout (30 s)
+  plus 2 minutes. The text is "outcome unknown: the server running this proposal stopped before it
+  recorded the result of step N; check the target before you retry with a new proposal". Check the
+  target system yourself to see how far the step got, before you ask for a new proposal.
+- A fix that was approved but never started is failed after 2 minutes, with "the proposal was approved,
+  but the server that should have run it stopped before it started; create a new proposal to retry".
+- Only the in-memory `--demo` store uses the older text "proposal was interrupted by a service restart
+  before it finished; create a new proposal to retry".
 
 ### Network exposure
 
@@ -686,6 +698,6 @@ an identical body (`service_room.go`; index key);
 | Login problems in `oidc` mode (`login_expired`, `not_provisioned`, `idp_unavailable`, `rate_limited`, `403 viewer`, `groups_missing`) | the table in [deploy/README.md](../../deploy/README.md#troubleshooting) has one row for each |
 | Web UI shows WebSocket errors | the page's origin host is not the server's own host, the `PIPEROOM_PUBLIC_URL` host, a `PIPEROOM_ALLOWED_HOSTS` entry, or (no web dir, not oidc) `localhost:5173` / `127.0.0.1:5173`. Add the name to `PIPEROOM_ALLOWED_HOSTS`. These checks are browser-only |
 | Server exits at start with "index.html" | `PIPEROOM_WEB_DIR` does not point at a built UI (`cmd/server/main.go`) |
-| A fix shows "interrupted by a service restart" | the server restarted mid-fix; check the system, then re-propose |
-| No agent response after a restart | the agent is idle until a driver steers or someone mentions `@agent` (step 4) |
+| A fix shows "outcome unknown: the server running this proposal stopped..." or "the server that should have run it stopped before it started" | the server stopped mid-fix (the first text can appear about 2.5 minutes later). Check the target system, then re-propose |
+| No agent response after a restart | the agent is idle until a driver steers, someone mentions `@agent`, a suggestion is sent, or a member confirms or disputes its hypothesis (step 4) |
 | No agent response | the provider's key or credentials are missing, `ANTHROPIC_BASE_URL` points somewhere unexpected (`anthropic` only), or egress to the provider is blocked |

@@ -83,7 +83,7 @@ Run these from the repository root.
    |---|---|
    | `ANTHROPIC_API_KEY` | the agent's API key (`ANTHROPIC_WORKSPACE_ID` too, for a user key). Only for the default `anthropic` provider; for AWS Bedrock or Google Vertex AI see [Model provider](#model-provider) |
    | `PIPEROOM_POSTGRES_PASSWORD` | the bundled Postgres password. Generate it with `openssl rand -hex 32`. It goes into a URL unescaped, so it must not contain `/ @ : # ? % $` |
-   | `PIPEROOM_PUBLIC_URL`, `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID`, `PIPEROOM_OIDC_CLIENT_SECRET` | login. `PIPEROOM_AUTH_MODE` defaults to `oidc` here, and the container refuses to start without these (the log names the missing one). `PIPEROOM_PUBLIC_URL` must be `https`. Set up your identity provider first: [Single sign-on](#single-sign-on-oidc). For a quick look with no identity provider use the [demo](#try-the-ui-with-no-stack-demo-mode) or the dev-auth override |
+   | `PIPEROOM_PUBLIC_URL`, `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID`, `PIPEROOM_OIDC_CLIENT_SECRET` (or `PIPEROOM_OIDC_PUBLIC_CLIENT=1`) | login. `PIPEROOM_AUTH_MODE` defaults to `oidc` here, and the container refuses to start without these (the log names the missing one). `PIPEROOM_PUBLIC_URL` must be `https`. Set up your identity provider first: [Single sign-on](#single-sign-on-oidc). For a quick look with no identity provider use the [demo](#try-the-ui-with-no-stack-demo-mode) or the dev-auth override |
    | `SOURCE_DB_URL`, `WAREHOUSE_DB_URL` | the read-only connection URLs |
    | `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL` | your hosts (`SCHEMA_REGISTRY_URL`: `off` when the pipelines use no registry; compose requires a value). `localhost` inside the container is the container itself, so use real host names |
 
@@ -112,11 +112,10 @@ Run these from the repository root.
    own room log in the `piperoom-pgdata` volume. Database migrations run by themselves.
    Add `-d` to run in the background.
 
-5. **Open it:** `http://<host>:8090` (`http://localhost:8090` on the same machine; with the
-   default `PIPEROOM_BIND` that is the only place it works). With the default `oidc` mode the
-   address must be your `PIPEROOM_PUBLIC_URL` (https), so a TLS proxy must run in front of the
-   container and reach its published port. With the default `PIPEROOM_BIND=127.0.0.1` that proxy
-   has to run on the same host; for a proxy on another host, set `PIPEROOM_BIND` to the address it
+5. **Open it.** With the default `oidc` mode, people open your `PIPEROOM_PUBLIC_URL` (https), so a
+   TLS proxy must run in front of the container and reach its published port. With the default
+   `PIPEROOM_BIND=127.0.0.1` the container is reachable only on that host, so the proxy has to run
+   there too and forward to `127.0.0.1:8090`; for a proxy on another host, set `PIPEROOM_BIND` to the address it
    can reach (not `0.0.0.0` unless a firewall limits it). You sign in at your identity provider. The rest of this step describes the **dev login**, which exists only
    with the dev-auth override: the login screen lists the users
    from `users.yaml`: pick one. The page sets a session cookie
@@ -130,9 +129,13 @@ Run these from the repository root.
 docker compose -f deploy/docker-compose.pilot.yml ps              # piperoom should be "healthy"
 curl http://localhost:8090/healthz                                # {"status":"ok"}
 curl http://localhost:8090/readyz                                 # also checks the room database
-curl -H 'X-User: alice' http://localhost:8090/api/me              # your user, from users.yaml
+curl -H 'X-User: alice' http://localhost:8090/api/me              # dev mode only: your user, from users.yaml
 docker compose -f deploy/docker-compose.pilot.yml logs -f piperoom
 ```
+
+In the default `oidc` mode `X-User` is ignored and `/api/me` without a session answers `401`. Check
+the login by opening your `PIPEROOM_PUBLIC_URL` in a browser and signing in; `/healthz` and `/readyz`
+need no login.
 
 **Using curl in dev mode.** Every `POST` needs `-H 'Content-Type: application/json'`, except
 the signed `POST /api/alerts/{source}` routes, which take the sender's own content type.
@@ -406,7 +409,7 @@ tell the two apart.
 | Role | Who | May |
 |---|---|---|
 | **member** | in `users.yaml`, or an approver or backup (`user:` or `group:`) in `layers:` or a pipeline `owners:` block | everything a room allows: create rooms, comment, steer, suggest, request and take control, hand off, close, trace. Approve only the layers they own |
-| **viewer** | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` or `auditors:` | read and watch: every `GET` except export and `GET /api/people` (`403 viewer`), and the live WebSocket. **Every non-GET under `/api` answers `403 viewer`**, including accepting a hand-off. A viewer can still log out |
+| **viewer** | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` or `auditors:` | read and watch: every `GET` except `GET /api/people` (`403 viewer`); export only when named in `auditors:` (else `403 not_allowed`), and the live WebSocket. **Every non-GET under `/api` answers `403 viewer`**, including accepting a hand-off. A viewer can still log out |
 | **auditor** | named in `auditors:`, any role | export a room. `auditors:` **never makes a member**: a person who is only in `auditors:` is a viewer who can also export |
 
 A member who is not an approver, a backup or an auditor gets `403 not_allowed` on export, and so does a
@@ -663,9 +666,10 @@ docker compose -f deploy/docker-compose.pilot.yml down -v         # stop AND del
 ```
 
 On a restart the server rebuilds every room from its log. By default it does **not** start an agent
-for the open rooms. A room whose agent was working when the server stopped is marked idle with a
-"server restarted" message, and the agent runs again only when a driver steers, someone mentions
-`@agent`, or a suggestion is sent. Only with `PIPEROOM_RESUME_ON_TAKEOVER=1` does an agent that was
+for the open rooms. Open rooms are marked idle with a "server restarted" message (with Postgres, every
+room that still holds an agent lease, which includes rooms whose agent had finished), and the agent runs
+again when a driver steers, someone mentions `@agent`, a suggestion is sent, or a member confirms or
+disputes its hypothesis. Only with `PIPEROOM_RESUME_ON_TAKEOVER=1` does an agent that was
 working resume by itself, even on one server. A fix that was approved but not finished is marked
 failed, not re-run ([setup.md](../docs/pilot/setup.md#what-happens-on-a-restart), checked against
 `Load` and `adoptRoom` in `internal/room`).

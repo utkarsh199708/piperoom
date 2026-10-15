@@ -175,10 +175,9 @@ principal is still read-only. In practice:
 - A key that triggers GO-2026-5047 makes one run fail; the server turns the panic into a failed room run
   and keeps running (`reviews/vuln-report-2026-10.md` §avro).
 
-`go.mod` on `main` still lists `hamba/avro/v2 v2.31.0`. The fix, pilot gate G2, is a separate change, "[G2] kafka: decode keys with the
-maintained avro fork" (`github.com/iskorotkov/avro/v2` v2.33.0, with size limits set). Until it is
-merged and in your build, limit who can produce to the pipeline's topics, and keep the principal's
-`Read` to those topics. Sources: `reviews/vuln-report-2026-10.md` (§Summary, §avro),
+This is what `main` does today. It is tracked as pilot gate G2 (`docs/pilot/decision.md` §4). Until
+that gate is closed, limit who can produce to the pipeline's topics, and keep the principal's `Read`
+to those topics. Sources: `reviews/vuln-report-2026-10.md` (§Summary, §avro),
 `docs/pilot/decision.md` §2.2 and §4 (G2), `internal/clients/kafka/kafka.go` (`decodeKey`).
 
 Use TLS and SASL on the listener if your cluster has them. The settings exist
@@ -220,7 +219,7 @@ Notes on the table:
   `decimal.handling.mode` = `precise|string` (`double` is not offered: it loses precision, which matters
   for money); `time.precision.mode` = `adaptive|adaptive_time_microseconds|connect`;
   `tombstones.on.delete` = `true|false`; `errors.log.enable` = `true` only (refused
-  unless `errors.log.include.messages` is unset or exactly `false`; a value that is `true` or cannot be
+  unless `errors.log.include.messages` is unset or `false` (any letter case, surrounding spaces ignored); a value that is `true` or cannot be
   read as `false`, such as an unresolved config-provider reference, is refused too, because enabling the
   error log could then write record values into the Connect worker log); `errors.deadletterqueue.context.headers.enable` = `true` only, and only on a sink
   connector. The two `errors.*` keys add visibility (worker log lines, Connect error headers on DLQ

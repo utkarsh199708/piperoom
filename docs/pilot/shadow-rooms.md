@@ -78,7 +78,8 @@ route, `GET .../shadow`, is open to any logged-in user, viewers included, once t
 
 **The web app has no screen for these three steps yet.** There is no blind-label form, no run viewer and
 no grade form for shadow rooms in `web/src`. The app shows no shadow indicator at all; it only uses the
-flag to hide the cost chip, the opened timer and the insight line. Use the API. Every `POST` needs
+flag to hide the cost chip (with its running duration) and the room-list insight line, and to keep
+usage at zero. Use the API. Every `POST` needs
 `Content-Type: application/json`. Set these once in your shell:
 
 ```sh
