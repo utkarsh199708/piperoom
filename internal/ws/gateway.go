@@ -48,10 +48,13 @@ const replayTimeout = 30 * time.Second
 // covers anyone with a few rooms open on two machines; a page that reconnects
 // in a loop without closing hits the cap instead of exhausting the server.
 // 200 per room is far above any incident team and bounds the fan-out cost of
-// one room's events.
+// one room's events. 5000 in all is 2.5 times the largest fan-out measured on
+// one replica (2,000 sockets, reviews/capacity-2026-10.md); it bounds the
+// process when many users each stay under their own cap.
 const (
 	DefaultMaxConnsPerRoom = 200
 	DefaultMaxConnsPerUser = 20
+	DefaultMaxConns        = 5000
 )
 
 // Gateway serves /api/rooms/{id}/ws.
@@ -85,12 +88,14 @@ type Gateway struct {
 	// session's connections with "session_expired". Set before serving.
 	SessionAlive func(ctx context.Context, id Identity) bool
 
-	// MaxConnsPerRoom and MaxConnsPerUser cap live connections (counted from
+	// MaxConnsPerRoom, MaxConnsPerUser and MaxConns (room and list
+	// connections of the whole gateway) cap live connections (counted from
 	// the upgrade until the connection ends, replay included). An upgrade
-	// over either cap is refused with 429 too_many_connections before the
+	// over any cap is refused with 429 too_many_connections before the
 	// handshake. Zero means the Default value. Set before serving.
 	MaxConnsPerRoom int
 	MaxConnsPerUser int
+	MaxConns        int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -102,6 +107,7 @@ type Gateway struct {
 	lists     map[*client]struct{} // room list connections (listgateway.go)
 	roomSlots map[string]int       // connections per room, held from reserve to release
 	userSlots map[string]int       // connections per user id
+	slots     int                  // connections in all
 	// connsChanged is closed and replaced (under mu) whenever a connection
 	// registers or leaves, so a waiter wakes on the change itself.
 	connsChanged chan struct{}
@@ -369,7 +375,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ch, err := g.store.Subscribe(ctx, roomID, lastSeq)
 	if err != nil {
-		c.shutdown(websocket.StatusInternalError, "subscribe failed")
+		if errors.Is(err, store.ErrNotFound) {
+			// Deleted since the lookup above; CloseRoom may have run already
+			// (shutdown happens once).
+			c.shutdown(websocket.StatusNormalClosure, RoomDeletedReason)
+		} else {
+			c.shutdown(websocket.StatusInternalError, "subscribe failed")
+		}
 		return
 	}
 
@@ -387,21 +399,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		defer g.wg.Done()
-		g.eventLoop(ctx, c, ch)
+		g.eventLoop(ctx, roomID, c, ch)
 	}()
 }
 
 // reserve takes one connection slot for roomID and userID; a list connection
-// passes roomID "" and counts against the user cap only. It returns a
-// release func that gives the slot back (safe to call more than once), or nil
-// and the reason when either cap is reached.
+// passes roomID "" and counts against the user and total caps only. It
+// returns a release func that gives the slot back (safe to call more than
+// once), or nil and the reason when a cap is reached. The caps are checked
+// and taken under g.mu, so concurrent upgrades never overshoot them.
 func (g *Gateway) reserve(roomID, userID string) (func(), string) {
-	perRoom, perUser := g.MaxConnsPerRoom, g.MaxConnsPerUser
+	perRoom, perUser, total := g.MaxConnsPerRoom, g.MaxConnsPerUser, g.MaxConns
 	if perRoom <= 0 {
 		perRoom = DefaultMaxConnsPerRoom
 	}
 	if perUser <= 0 {
 		perUser = DefaultMaxConnsPerUser
+	}
+	if total <= 0 {
+		total = DefaultMaxConns
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -411,6 +427,10 @@ func (g *Gateway) reserve(roomID, userID string) (func(), string) {
 	if roomID != "" && g.roomSlots[roomID] >= perRoom {
 		return nil, fmt.Sprintf("this room already has %d live connections; retry later", perRoom)
 	}
+	if g.slots >= total {
+		return nil, fmt.Sprintf("this server already has %d live connections; retry later", total)
+	}
+	g.slots++
 	g.userSlots[userID]++
 	if roomID != "" {
 		g.roomSlots[roomID]++
@@ -420,6 +440,7 @@ func (g *Gateway) reserve(roomID, userID string) (func(), string) {
 		once.Do(func() {
 			g.mu.Lock()
 			defer g.mu.Unlock()
+			g.slots--
 			if g.userSlots[userID]--; g.userSlots[userID] <= 0 {
 				delete(g.userSlots, userID)
 			}
@@ -488,13 +509,14 @@ func (g *Gateway) readLoop(ctx context.Context, roomID string, c *client) {
 	}
 }
 
-func (g *Gateway) eventLoop(ctx context.Context, c *client, ch <-chan events.Event) {
+func (g *Gateway) eventLoop(ctx context.Context, roomID string, c *client, ch <-chan events.Event) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case e, ok := <-ch:
 			if !ok {
+				g.feedEnded(ctx, roomID, c)
 				return
 			}
 			b, err := json.Marshal(serverMsg{Type: "event", Event: &e})
@@ -507,6 +529,32 @@ func (g *Gateway) eventLoop(ctx context.Context, c *client, ch <-chan events.Eve
 			}
 		}
 	}
+}
+
+// feedEndedTimeout bounds the audit-row read of feedEnded.
+const feedEndedTimeout = 5 * time.Second
+
+// feedEnded handles a room subscription that closed while its connection was
+// still live. Both stores close it when the room is gone (deleted by an admin
+// or by retention, on any replica), so this ends a deleted room's sockets even
+// when no CloseRoom reached them, with the same room.deleted frame (from the
+// room's audit row) and close. A feed that ended for any other reason closes
+// with an internal error, and the client reconnects with after=.
+func (g *Gateway) feedEnded(ctx context.Context, roomID string, c *client) {
+	if ctx.Err() != nil {
+		return // the connection is closing already
+	}
+	dctx, cancel := context.WithTimeout(ctx, feedEndedTimeout)
+	deleted, gone := g.svc.DeletedEvent(dctx, roomID)
+	cancel()
+	if !gone {
+		c.shutdown(websocket.StatusInternalError, "subscription ended")
+		return
+	}
+	frame := g.deletedFrame(roomID, deleted)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.spawnRoomDeleted(c, frame)
 }
 
 func parseAfterQuery(r *http.Request) (int64, error) {

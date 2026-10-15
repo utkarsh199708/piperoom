@@ -21,8 +21,9 @@ import (
 // deletingStore deletes the room through the service on the gateway's first
 // replay read, which is after the gateway's first lookup and before it
 // registers the connection, so the service's delete finds no connection to
-// close. pgEmpty answers that read the way Postgres does for a room that is
-// gone (an empty page, no error); otherwise memstore's ErrNotFound comes back.
+// close. pgEmpty answers that read with an empty page, as a read that ran
+// just before the delete committed does; otherwise the store's ErrNotFound
+// comes back.
 type deletingStore struct {
 	*memstore.Store
 	t       *testing.T
@@ -47,8 +48,8 @@ func (d *deletingStore) Since(ctx context.Context, roomID string, after int64, l
 // TestDeletedDuringReplayClosesAsDeleted: a room deleted while a connection is
 // still replaying (not yet registered, so the delete cannot reach it) closes
 // with the room-deleted reason, not an internal error: through the replay's
-// ErrNotFound (memstore), or, when the replay reads an empty page as on
-// Postgres, through the lookup the gateway makes again after registering.
+// ErrNotFound, or, when the replay's last read came just before the delete,
+// through the lookup the gateway makes again after registering.
 func TestDeletedDuringReplayClosesAsDeleted(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

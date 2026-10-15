@@ -121,17 +121,17 @@ func TestLiveActionsValidateButNeverWrite(t *testing.T) {
 	}
 	ctx := context.Background()
 	restart, _ := reg.Get("connect_restart_task")
-	if err := restart.Validate(json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)); err != nil {
+	if err := restart.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)); err != nil {
 		t.Errorf("valid params refused: %v", err)
 	}
-	if err := restart.Validate(json.RawMessage(`{"connector":"nope","task":0}`)); err == nil {
+	if err := restart.Validate(t.Context(), json.RawMessage(`{"connector":"nope","task":0}`)); err == nil {
 		t.Error("unknown connector accepted")
 	}
 	if _, err := restart.Execute(ctx, json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)); err == nil {
 		t.Error("restart executed in replay")
 	}
 	compat, _ := reg.Get("schema_set_compatibility")
-	if err := compat.Validate(json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err != nil {
+	if err := compat.Validate(t.Context(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err != nil {
 		t.Errorf("valid params refused: %v", err)
 	}
 	if _, err := compat.Execute(ctx, json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err == nil {
@@ -161,8 +161,8 @@ func TestRecordingActionKeepsScope(t *testing.T) {
 	if err := scoped.CheckScope(p, json.RawMessage(`{"connector":"billing","task":0}`)); err == nil {
 		t.Error("out-of-scope accepted")
 	}
-	_ = a.Validate(json.RawMessage(`{"connector":"pg-orders-connector","task":0}`))
-	_ = a.Validate(json.RawMessage(`{"connector":"nope","task":0}`))
+	_ = a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector","task":0}`))
+	_ = a.Validate(t.Context(), json.RawMessage(`{"connector":"nope","task":0}`))
 	got := log.snapshot()
 	if len(got) != 2 || got[0].Error != "" || got[1].Error == "" || got[1].Action != "connect_restart_task" {
 		t.Errorf("attempts = %+v", got)

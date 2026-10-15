@@ -697,8 +697,8 @@ type recordingAction struct {
 	log *attemptLog
 }
 
-func (a *recordingAction) Validate(params json.RawMessage) error {
-	err := a.Action.Validate(params)
+func (a *recordingAction) Validate(ctx context.Context, params json.RawMessage) error {
+	err := a.Action.Validate(ctx, params)
 	a.record(params, err)
 	return err
 }

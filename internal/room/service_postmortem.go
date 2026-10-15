@@ -20,31 +20,29 @@ const postmortemRestartWindow = 10 * time.Minute
 
 var errPostmortemDecided = errors.New("room: postmortem already drafted")
 
-// sweepPostmortemsLocked gives every room closed within the restart window that
-// has neither postmortem event the events-only draft, so a crash during the
-// drafting leaves no room without one. No model call after a restart. Caller
-// holds s.mu (Load).
-func (s *Service) sweepPostmortemsLocked() {
-	if s.closed {
-		return
-	}
-	for id, st := range s.rooms {
-		sn := st.snap
+// sweepPostmortems gives every room closed within the restart window that has
+// neither postmortem event the events-only draft, so a crash during the
+// drafting leaves no room without one. No model call after a restart (Load).
+// It reads the published snapshots: the drafter takes the room's lock itself.
+func (s *Service) sweepPostmortems() {
+	for id, sn := range s.publishedRooms() {
 		if sn.Shadow || sn.Status != "closed" || sn.Postmortem.Status != PostmortemDrafting || sn.ClosedAt == nil {
 			continue
 		}
 		if s.now().Sub(*sn.ClosedAt) > postmortemRestartWindow {
 			continue
 		}
-		s.wg.Add(1)
+		if !s.addWorker() {
+			return
+		}
 		go s.draftPostmortem(id, false)
 	}
 }
 
 // draftPostmortem writes postmortem.drafted (or .failed) for a closed room. The
-// caller did wg.Add(1). It runs outside s.mu on the service context, after
-// room.closed, so closing never waits on the model. allowModel is false after a
-// restart.
+// caller reserved its place in wg (addWorker). It runs outside every lock on
+// the service context, after room.closed, so closing never waits on the model.
+// allowModel is false after a restart.
 func (s *Service) draftPostmortem(roomID string, allowModel bool) {
 	defer s.wg.Done()
 	evs, err := s.allEvents(s.ctx, roomID)
@@ -61,12 +59,11 @@ func (s *Service) draftPostmortem(roomID string, allowModel bool) {
 	actx, cancel := context.WithTimeout(s.ctx, postmortemAppendTimeout)
 	defer cancel()
 	s.syncRoom(actx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.rooms[roomID]
+	st := s.lockCachedRoom(roomID)
 	if st == nil {
 		return
 	}
+	defer s.unlockRoom(st)
 	// A checked append: of two replicas that both drafted, one wins.
 	_, err = s.emitCheckedLocked(actx, st, roomID, func() error {
 		if st.snap.Postmortem.Status == PostmortemDrafted || st.snap.Postmortem.Status == PostmortemFailed {

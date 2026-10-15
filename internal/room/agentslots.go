@@ -30,7 +30,7 @@ type slotWaiter struct {
 // are released. The queue is round-robin across pipelines and FIFO within a
 // pipeline, so one pipeline with many rooms cannot starve another
 // (docs/design/replicas.md section 4.4). It never calls back into the Service,
-// so it is safe to use while holding Service.mu.
+// so it is safe to use while holding a room's lock.
 type agentSlots struct {
 	mu    sync.Mutex
 	max   int
@@ -339,10 +339,10 @@ func (g *agentGate) acquireGlobal(ctx context.Context, localShown bool) (shown b
 	if g.globalHeld {
 		return false, nil
 	}
-	backoff := globalSlotRetry
+	backoff := g.s.globalRetry
 	for {
 		ok, err := g.s.global.take(ctx, g.roomID)
-		wait := globalSlotRetry
+		wait := g.s.globalRetry
 		switch {
 		case err != nil && (ctx.Err() != nil || errors.Is(err, store.ErrLeaseLost)):
 			return shown, err
@@ -357,7 +357,7 @@ func (g *agentGate) acquireGlobal(ctx context.Context, localShown bool) (shown b
 			g.globalHeld = true
 			return shown, nil
 		default:
-			backoff = globalSlotRetry
+			backoff = g.s.globalRetry
 			if !shown && !localShown {
 				shown = g.s.emitQueued(g, func() bool { return true },
 					fmt.Sprintf("waiting for an agent slot (all %d across the servers are in use)", g.s.global.limit()))
@@ -393,13 +393,13 @@ func (g *agentGate) release() {
 }
 
 // emitQueued writes agent.status "queued" for a room that has to wait. It
-// checks, under s.mu, that the room is still open and still waiting: the
-// agent's own "working" status needs s.mu too, so a late "queued" can never
-// land after it. Reports whether the event was written.
+// checks, under the room's lock, that the room is still open and still
+// waiting: the agent's own "working" status needs that lock too, so a late
+// "queued" can never land after it. Reports whether the event was written.
 func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || !s.roomOpen(g.st) || !waiting() {
+	s.lockState(g.st)
+	defer s.unlockRoom(g.st)
+	if g.st.gone || s.isClosed() || !s.roomOpen(g.st) || !waiting() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
@@ -419,9 +419,9 @@ func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) b
 // granted, so the room never keeps showing "queued" for a run that has begun.
 // The agent emits its own, more specific status right after.
 func (s *Service) emitSlotAcquired(ctx context.Context, g *agentGate) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if ctx.Err() != nil || s.closed || !s.roomOpen(g.st) {
+	s.lockState(g.st)
+	defer s.unlockRoom(g.st)
+	if g.st.gone || ctx.Err() != nil || s.isClosed() || !s.roomOpen(g.st) {
 		return
 	}
 	ectx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

@@ -91,7 +91,7 @@ func (a *approveProposals) runStep(st events.ProposalStep) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unknown action %q", st.Action)
 	}
-	if err := act.Validate(st.Params); err != nil {
+	if err := act.Validate(a.ctx, st.Params); err != nil {
 		return "", fmt.Errorf("validate: %w", err)
 	}
 	sc, ok := act.(actions.Scoped)

@@ -161,10 +161,13 @@ type Store interface {
 	// Append stores one event and assigns the next Seq for the room atomically.
 	// payload is marshalled to JSON.
 	Append(ctx context.Context, roomID string, typ Type, actor Actor, payload any) (Event, error)
-	// Since returns events with Seq > afterSeq in order, at most limit.
+	// Since returns events with Seq > afterSeq in order, at most limit. A room
+	// that does not exist (never created, or deleted) is an error matching the
+	// store's ErrNotFound; limit <= 0 is an empty page.
 	Since(ctx context.Context, roomID string, afterSeq int64, limit int) ([]Event, error)
 	// Subscribe replays events after afterSeq, then streams new ones live.
-	// The channel closes when ctx ends. No event may be skipped or repeated.
+	// The channel closes when ctx ends, and when the room is deleted. No event
+	// may be skipped or repeated.
 	Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan Event, error)
 }
 
@@ -450,8 +453,13 @@ type SteerSuggestedPayload struct {
 }
 
 // SteerSentPayload is an instruction delivered to the agent by the driver.
+// When the driver forwards a suggestion, SuggestionID names it and From is
+// the person who wrote it; the event's Actor stays the forwarding driver.
+// The agent treats a forwarded suggestion's text as that person's words
+// (untrusted data), not as the driver's instruction.
 type SteerSentPayload struct {
 	SuggestionID string `json:"suggestion_id,omitempty"` // set when forwarding a suggestion
+	From         *Actor `json:"from,omitempty"`          // the suggester; set only with SuggestionID
 	Text         string `json:"text"`
 }
 

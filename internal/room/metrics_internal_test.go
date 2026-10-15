@@ -8,21 +8,22 @@ import (
 	"piperoom/internal/store/memstore"
 )
 
-// recountOpen is the slow, authoritative count OpenRooms must always equal.
+// recountOpen is the slow, authoritative count OpenRooms must always equal:
+// every cached room, read under its own lock.
 func recountOpen(s *Service) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	n := 0
-	for _, st := range s.rooms {
-		if s.roomOpen(st) {
+	for _, st := range s.cachedRooms() {
+		s.lockState(st)
+		if !st.gone && s.roomOpen(st) {
 			n++
 		}
+		s.unlockRoom(st)
 	}
 	return n
 }
 
-// OpenRooms is a counter, never a stale zero and never a wait on s.mu: right
-// after Load it is already right, even while another goroutine holds the lock.
+// OpenRooms is never a stale zero and never waits on a room lock: right after
+// Load it is already right, even while another goroutine holds a room's lock.
 func TestOpenRoomsCorrectAfterLoadWhileLockHeld(t *testing.T) {
 	st := memstore.New()
 	first := New(Deps{Store: st, Users: DefaultUsers()})
@@ -51,17 +52,18 @@ func TestOpenRoomsCorrectAfterLoadWhileLockHeld(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	held := s.cached(ids[1])
+	s.lockState(held)
+	defer s.unlockRoom(held)
 	got := make(chan int, 1)
 	go func() { got <- s.OpenRooms() }()
 	select {
 	case n := <-got:
 		if n != 2 {
-			t.Fatalf("OpenRooms with s.mu held right after Load = %d, want 2", n)
+			t.Fatalf("OpenRooms with a room lock held right after Load = %d, want 2", n)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("OpenRooms waited on s.mu")
+		t.Fatal("OpenRooms waited on a room lock")
 	}
 }
 
@@ -92,12 +94,8 @@ func TestOpenRoomsTracksCreateCloseDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("one closed", 1)
-	s.mu.Lock()
-	s.uncacheRoomLocked(b.ID)
-	s.mu.Unlock()
+	s.uncacheRoom(b.ID, s.cached(b.ID))
 	check("open room dropped from cache", 0)
-	s.mu.Lock()
-	s.uncacheRoomLocked(a.ID)
-	s.mu.Unlock()
+	s.uncacheRoom(a.ID, s.cached(a.ID))
 	check("closed room dropped from cache", 0)
 }

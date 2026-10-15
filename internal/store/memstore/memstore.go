@@ -185,7 +185,9 @@ func (s *Store) Since(ctx context.Context, roomID string, afterSeq int64, limit 
 	return out, nil
 }
 
-// Subscribe replays events after afterSeq then streams new ones live.
+// Subscribe replays events after afterSeq then streams new ones live. The
+// channel closes when ctx ends, and when the room is deleted (as on Postgres,
+// where it closes at the room feed's next read).
 func (s *Store) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan events.Event, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -322,7 +324,19 @@ func (s *Store) DeleteEmptyRoom(ctx context.Context, id string) error {
 		return fmt.Errorf("memstore: delete empty room %q: %w", id, store.ErrRoomNotEmpty)
 	}
 	delete(s.rooms, id)
+	wakeSubs(log)
 	return nil
+}
+
+// wakeSubs wakes every subscriber of a room that was just deleted: its next
+// Since wraps ErrNotFound and its channel closes. Caller holds s.mu.
+func wakeSubs(log *roomLog) {
+	for sub := range log.subs {
+		select {
+		case sub.wake <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // LastRoomByDedupKey returns the newest room whose room.created event carries

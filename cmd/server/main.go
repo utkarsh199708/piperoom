@@ -306,6 +306,9 @@ func run() error {
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
+		// deletedHook is room.Deps.OnRoomDeleted: it closes a deleted room's
+		// WebSockets once the HTTP handler (and its gateway) exists.
+		deletedHook = &roomDeletedHook{}
 		// usage hands the hand-off's agent.usage events to the room service
 		// once it exists.
 		usage = &usageRelay{log: log}
@@ -405,6 +408,7 @@ func run() error {
 		Limits:           limits,
 		OnRoomOpened:     slack.onRoomOpened(),
 		OnRoomClosed:     closedHook.onClosed,
+		OnRoomDeleted:    deletedHook.onDeleted,
 	}, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
@@ -481,6 +485,9 @@ func run() error {
 		log.Info("server: serving the web UI", "dir", cfg.WebDir)
 	}
 	handler := httpapi.New(svc, st, log, httpOpts...)
+	// Retention and other replicas' deletes close sockets from here on; none
+	// is open before the handler exists.
+	deletedHook.set(handler.CloseRoomSockets)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,

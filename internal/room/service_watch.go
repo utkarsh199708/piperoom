@@ -45,7 +45,7 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 	}
 	if s.coord != nil {
 		// Shared store: rooms other replicas opened or closed since the last
-		// fold count too. The reads happen outside s.mu (refreshAll); a
+		// fold count too. The reads happen outside every lock (refreshAll); a
 		// failure falls back to the cache (the follower keeps it close).
 		ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
 		if err := s.refreshAll(ctx); err != nil && s.ctx.Err() == nil {
@@ -53,16 +53,29 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 		}
 		cancel()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var newest *roomState
-	for id, st := range s.rooms {
-		if st.snap.PipelineID != pipelineID || !s.roomOpen(st) {
+	rooms, opening := s.roomsForPipeline(pipelineID)
+	// A room being opened for the pipeline right now is waited for, so the
+	// watcher does not open a second one beside it: its lock is held until
+	// it is published (or dropped, when its room.created failed).
+	for _, id := range opening {
+		st := s.lockCachedRoom(id)
+		if st == nil {
 			continue
 		}
-		if newest == nil || st.snap.OpenedAt.After(newest.snap.OpenedAt) ||
-			(st.snap.OpenedAt.Equal(newest.snap.OpenedAt) && id < roomID) {
-			newest, roomID = st, id
+		if !st.gone {
+			snap := st.snap.Clone()
+			rooms[id] = &snap
+		}
+		s.unlockRoom(st)
+	}
+	var newest *RoomSnapshot
+	for id, p := range rooms {
+		if p.PipelineID != pipelineID || p.Status != "open" {
+			continue
+		}
+		if newest == nil || p.OpenedAt.After(newest.OpenedAt) ||
+			(p.OpenedAt.Equal(newest.OpenedAt) && id < roomID) {
+			newest, roomID = p, id
 		}
 	}
 	return roomID, newest != nil
@@ -107,22 +120,18 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 		closedAt = &t
 	}
 	// The event log is the source of truth. When the room is cached and its
-	// snapshot disagrees with the row (the row write after room.closed failed),
-	// the snapshot wins.
+	// published snapshot is closed while the row is not (the row write after
+	// room.closed failed), the snapshot's close counts. It only ever adds a
+	// close: a snapshot still open may just not have published a close in
+	// progress, whose row write already landed.
 	// Shared store: fold a close another replica wrote first, reading the
-	// store before s.mu is taken. A room deleted meanwhile is evicted and
+	// store outside the room's lock. A room deleted meanwhile is evicted and
 	// simply loses the snapshot vote.
 	s.syncRoom(ctx, row.ID)
-	s.mu.Lock()
-	if st, cached := s.rooms[row.ID]; cached {
-		if s.roomOpen(st) {
-			closedAt = nil
-		} else if st.snap.ClosedAt != nil {
-			t := *st.snap.ClosedAt
-			closedAt = &t
-		}
+	if p := s.published(row.ID); p != nil && p.Status != "open" && p.ClosedAt != nil {
+		t := *p.ClosedAt
+		closedAt = &t
 	}
-	s.mu.Unlock()
 	return row.ID, closedAt, true
 }
 
@@ -167,14 +176,13 @@ func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evi
 	if err := rejectUnstorable(text); err != nil {
 		return err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return roomClosed("room already closed")
 	}

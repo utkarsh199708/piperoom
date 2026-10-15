@@ -172,31 +172,52 @@ func pgRecentDDLTool(d Deps) tools.Tool {
 	}
 }
 
+const (
+	longTxnDefaultMinutes = 5
+	// longTxnMaxMinutes (30 days) is far past any transaction worth asking
+	// about. The bound also keeps minutes*time.Minute inside int64: an
+	// unclamped value above about 1.5e8 wraps the Duration negative, which
+	// would turn "older than N" into "every transaction".
+	longTxnMaxMinutes = 30 * 24 * 60
+)
+
+// olderThanMinutes applies the older_than_minutes rules: missing is the
+// default, below 1 is refused rather than quietly replaced (the model would
+// read the answer as covering the age it asked for), above the maximum is
+// clamped.
+func olderThanMinutes(v *int) (int, error) {
+	if v == nil {
+		return longTxnDefaultMinutes, nil
+	}
+	if *v < 1 {
+		return 0, fmt.Errorf("%w: older_than_minutes must be between 1 and %d", tools.ErrBadInput, longTxnMaxMinutes)
+	}
+	return min(*v, longTxnMaxMinutes), nil
+}
+
 func pgLongTransactionsTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_long_transactions",
 		desc: "List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text). In a room, only transactions that hold or wait for a lock on the pipeline's source tables are listed; the others are counted, and the oldest writers among them (a writer on any table or database holds back every logical slot) are shown with pid, same_database, state, age, xid_age and wait type only. has_xid marks writers that hold the WAL horizon; long read-only transactions are listed too because they block DDL and VACUUM.",
 		schema: objSchema(map[string]any{
-			"older_than_minutes": intProp("Minimum transaction age in minutes. Default 5."),
+			"older_than_minutes": intProp("Minimum transaction age in minutes, 1-43200. Default 5."),
 		}),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
 			var input struct {
-				OlderThanMinutes int `json:"older_than_minutes"`
+				OlderThanMinutes *int `json:"older_than_minutes"`
 			}
 			if err := decode(in, &input); err != nil {
 				return tools.Result{}, err
 			}
-			if input.OlderThanMinutes == 0 {
-				input.OlderThanMinutes = 5
-			}
-			if input.OlderThanMinutes < 0 {
-				return tools.Result{}, fmt.Errorf("%w: older_than_minutes must be >= 0", tools.ErrBadInput)
+			minutes, err := olderThanMinutes(input.OlderThanMinutes)
+			if err != nil {
+				return tools.Result{}, err
 			}
 			sc, err := d.scope(ctx)
 			if err != nil {
 				return tools.Result{}, err
 			}
-			olderThan := time.Duration(input.OlderThanMinutes) * time.Minute
+			olderThan := time.Duration(minutes) * time.Minute
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()

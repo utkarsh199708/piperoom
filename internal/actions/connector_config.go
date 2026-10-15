@@ -145,12 +145,12 @@ func (a *updateConnectorConfig) parseParams(raw json.RawMessage) (updateConnecto
 	return p, nil
 }
 
-func (a *updateConnectorConfig) Validate(raw json.RawMessage) error {
+func (a *updateConnectorConfig) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := a.parseParams(raw)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
 	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
 		return err

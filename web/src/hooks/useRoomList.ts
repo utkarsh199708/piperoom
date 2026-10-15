@@ -5,10 +5,11 @@ import { fixtureRooms } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { sortRoomsForList } from '../lib/rooms'
+import { equalJitter } from '../lib/backoff'
 
 /** Poll period when the push socket is not available (fixtures, refused, failing). */
 export const POLL_MS = 15_000
-/** Reconnect backoff of the push socket: 1 s, doubling to 30 s. */
+/** Reconnect backoff of the push socket: 1 s, doubling to 30 s. Each wait is jittered, never above it. */
 export const BACKOFF_MIN_MS = 1_000
 export const BACKOFF_MAX_MS = 30_000
 /** Opens that fail in a row before the list falls back to polling. */
@@ -42,9 +43,13 @@ export function foldListFrame(rooms: RoomSnapshot[], msg: ListWsServerMessage): 
  * last poll, null while pushed (the list is live). `reload` refetches now (the Retry button).
  *
  * `enabled: false` loads nothing: a screen inside the shell reads the shell's copy
- * (RoomListContext) instead of fetching its own.
+ * (RoomListContext) instead of fetching its own. `random` is the jitter source for reconnect
+ * delays; tests pass a fixed one.
  */
-export function useRoomList({ enabled = true }: { enabled?: boolean } = {}) {
+export function useRoomList({
+  enabled = true,
+  random = Math.random,
+}: { enabled?: boolean; random?: () => number } = {}) {
   const { user, sessionEpoch } = useCurrentUser()
   const [rooms, setRooms] = useState<RoomSnapshot[]>([])
   const [loading, setLoading] = useState(true)
@@ -55,6 +60,11 @@ export function useRoomList({ enabled = true }: { enabled?: boolean } = {}) {
   useEffect(() => {
     modeRef.current = mode
   }, [mode])
+  // A ref, so a new function on every render does not restart the socket.
+  const randomRef = useRef(random)
+  useEffect(() => {
+    randomRef.current = random
+  }, [random])
 
   const reload = useCallback(async () => {
     setLoading(true)
@@ -98,7 +108,7 @@ export function useRoomList({ enabled = true }: { enabled?: boolean } = {}) {
         setMode('poll')
         return
       }
-      reconnectTimer = window.setTimeout(connect, backoff)
+      reconnectTimer = window.setTimeout(connect, equalJitter(backoff, randomRef.current))
       backoff = Math.min(backoff * 2, BACKOFF_MAX_MS)
     }
 

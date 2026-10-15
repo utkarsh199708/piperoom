@@ -29,7 +29,8 @@ func newExecQueue() *execQueue {
 	return &execQueue{wake: make(chan struct{}, 1)}
 }
 
-// push appends without blocking and signals the worker. Called with s.mu held.
+// push appends without blocking and signals the worker. Called with the room's
+// lock held.
 func (q *execQueue) push(p store.ProposalRow) {
 	q.mu.Lock()
 	q.items = append(q.items, p)
@@ -89,9 +90,12 @@ func (q *execQueue) busy() bool {
 // here, when it is queued (docs/design/replicas.md section 5): a proposal that
 // waits behind a long one in this room's queue is then a live claim this
 // replica refreshes, never "approved and unclaimed". A claim another executor
-// already holds queues nothing. Caller must hold s.mu.
+// already holds queues nothing. Caller holds st's lock.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
-	if s.closed {
+	// The worker's place in wg is reserved before the claim, so a closing
+	// service claims nothing; it is given back when the room has its worker
+	// already or nothing is queued.
+	if !s.addWorker() {
 		return
 	}
 	if s.coord != nil {
@@ -103,10 +107,12 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 			// not, the proposal reads "approved, unclaimed" and the stale
 			// sweep records it after its grace; if it did, as a dead claim.
 			s.log.Error("room: claim approved proposal failed; not queued", "proposal", p.ProposalID, "err", err)
+			s.wg.Done()
 			return
 		}
 		if !claimed {
 			s.log.Info("room: proposal already claimed by another executor; not queued here", "proposal", p.ProposalID)
+			s.wg.Done()
 			return
 		}
 	}
@@ -114,18 +120,20 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 		st.exec = newExecQueue()
 		execCtx, cancel := context.WithCancel(s.ctx)
 		st.execCancel = cancel
-		s.wg.Add(1)
 		go s.runExecutor(execCtx, p.RoomID, st.exec)
+	} else {
+		s.wg.Done()
 	}
 	st.exec.push(p)
 }
 
 // runExecutor drains the room's queue one proposal at a time until its room
-// context ends (the room closes) or the service lifetime ends.
+// context ends (the room closes) or the service lifetime ends. Then nothing
+// more runs, and what is still queued is recorded as failed (abandonQueued).
 func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) {
 	defer s.wg.Done()
 	for {
-		for {
+		for ctx.Err() == nil {
 			p, ok := q.pop()
 			if !ok {
 				break
@@ -135,11 +143,37 @@ func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) 
 			}
 			q.done()
 		}
+		// A proposal approved just before the close may still be queued: when
+		// its wake and the close are both ready, select picks either.
 		select {
 		case <-ctx.Done():
+			s.abandonQueued(roomID, q)
 			return
 		case <-q.wake:
 		}
+	}
+}
+
+// abandonQueued records every proposal still queued when the executor stops
+// as failed, with the failing action.executed for its first step, so a fully
+// approved proposal never stays open (or keeps a claim this replica refreshes
+// forever, or keeps DeleteRoom answering "executing"). None of them started a
+// step. Each was claimed by this replica when it was queued, and with a shared
+// store failProposal writes only while that claim holds, so a proposal the
+// stale sweep already recorded is not recorded again.
+func (s *Service) abandonQueued(roomID string, q *execQueue) {
+	output := "the server stopped before this proposal ran; create a new proposal to retry"
+	if !s.isRoomOpen(s.ctx, roomID) {
+		output = "room closed before this step ran"
+	}
+	for {
+		p, ok := q.pop()
+		if !ok {
+			return
+		}
+		s.log.Warn("room: approved proposal not run; recorded as failed", "room", roomID, "proposal", p.ProposalID)
+		s.failProposal(p.RoomID, p.ProposalID, 0, p.ParamsHash, output)
+		q.done()
 	}
 }
 
@@ -320,7 +354,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
 		}
-		if err := action.Validate(step.Params); err != nil {
+		if err := action.Validate(ctx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
 		}
@@ -547,15 +581,13 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 	return nil
 }
 
-// roomPipeline returns the pipeline of a cached room ("" when unknown).
+// roomPipeline returns the pipeline of a room ("" when unknown).
 func (s *Service) roomPipeline(ctx context.Context, roomID string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	p, err := s.readRoom(ctx, roomID)
 	if err != nil {
 		return ""
 	}
-	return st.snap.PipelineID
+	return p.PipelineID
 }
 
 // setProposalStatus persists a proposal status using resultCtx, so the write
@@ -599,9 +631,16 @@ func (s *Service) finishStepRow(ctx context.Context, proposalID string, i int, s
 	return s.store.FinishProposalStep(ctx, proposalID, i, status, output)
 }
 
+// isRoomOpen reports whether a cached room is open. It takes the room's lock,
+// not the published snapshot: a close (or a close another replica wrote,
+// being folded) holds the lock from room.closed until it has stopped the
+// executor, and no step may start in that window.
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.rooms[roomID]
-	return st != nil && st.snap.Status == "open"
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
+		return false
+	}
+	open := !st.gone && st.snap.Status == "open"
+	s.unlockRoom(st)
+	return open
 }

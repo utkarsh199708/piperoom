@@ -21,12 +21,12 @@ type fakeAction struct {
 	ran     *int
 }
 
-func (f fakeAction) ranPtr() *int                   { return f.ran }
-func (f fakeAction) Name() string                   { return f.name }
-func (f fakeAction) Layer() string                  { return "connect" }
-func (f fakeAction) Describe() string               { return "fake" }
-func (f fakeAction) ParamsSchema() map[string]any   { return map[string]any{"type": "object"} }
-func (f fakeAction) Validate(json.RawMessage) error { return nil }
+func (f fakeAction) ranPtr() *int                                    { return f.ran }
+func (f fakeAction) Name() string                                    { return f.name }
+func (f fakeAction) Layer() string                                   { return "connect" }
+func (f fakeAction) Describe() string                                { return "fake" }
+func (f fakeAction) ParamsSchema() map[string]any                    { return map[string]any{"type": "object"} }
+func (f fakeAction) Validate(context.Context, json.RawMessage) error { return nil }
 func (f fakeAction) Execute(context.Context, json.RawMessage) (string, error) {
 	*f.ran++
 	return "done", f.execErr

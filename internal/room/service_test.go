@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ func (a *fakeAction) ParamsSchema() map[string]any {
 	// duplicate keys for a schema like this; see strictAction for the rest).
 	return map[string]any{"type": "object"}
 }
-func (a *fakeAction) Validate(json.RawMessage) error { return nil }
+func (a *fakeAction) Validate(context.Context, json.RawMessage) error { return nil }
 
 func (a *fakeAction) CheckScope(p owners.Pipeline, params json.RawMessage) error {
 	return a.scopeErr
@@ -139,6 +140,12 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %s", timeout)
+}
+
+// fastRetry makes svc wait 1/100 of the production backoff between failed
+// agent attempts (10 ms, then 20 ms), so tests need not sit it out.
+func fastRetry(svc *room.Service) {
+	room.SetRetryAfterForTest(svc, func(d time.Duration) <-chan time.Time { return time.After(d / 100) })
 }
 
 func mustUser(t *testing.T, svc *room.Service, id string) room.User {
@@ -817,6 +824,11 @@ func TestSendSuggestionForwards(t *testing.T) {
 	if sent.SuggestionID != sp.SuggestionID || sent.Text != "try the registry" {
 		t.Fatalf("bad steer.sent: %+v", sent)
 	}
+	// The suggester is recorded so the agent can read the text as theirs,
+	// not as the forwarding driver's instruction.
+	if sent.From == nil || sent.From.ID != "priya" || sent.From.Kind != events.ActorHuman || ev.Actor.ID != "arjun" {
+		t.Fatalf("steer.sent from=%+v actor=%+v, want from priya, actor arjun", sent.From, ev.Actor)
+	}
 	snap, _ := svc.GetRoom(context.Background(), roomID)
 	if len(snap.PendingSuggestions) != 0 {
 		t.Fatalf("suggestion should be consumed: %+v", snap.PendingSuggestions)
@@ -833,7 +845,7 @@ func (unscopedAction) Describe() string { return "unscoped" }
 func (unscopedAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (unscopedAction) Validate(json.RawMessage) error { return nil }
+func (unscopedAction) Validate(context.Context, json.RawMessage) error { return nil }
 func (unscopedAction) Execute(context.Context, json.RawMessage) (string, error) {
 	return "", nil
 }
@@ -990,7 +1002,7 @@ func (a *blockingAction) Describe() string { return "blocks until the context en
 func (a *blockingAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (a *blockingAction) Validate(json.RawMessage) error                    { return nil }
+func (a *blockingAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *blockingAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *blockingAction) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	a.once.Do(func() { close(a.started) })
@@ -1361,7 +1373,7 @@ func (a *closeRoomAction) Describe() string { return "closes the room" }
 func (a *closeRoomAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (a *closeRoomAction) Validate(json.RawMessage) error                    { return nil }
+func (a *closeRoomAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *closeRoomAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *closeRoomAction) Execute(context.Context, json.RawMessage) (string, error) {
 	if _, err := a.svc.CloseRoom(context.Background(), a.user, a.roomID, "closed by the action"); err != nil {
@@ -1488,6 +1500,7 @@ func TestAgentAutoRestartsAfterFailure(t *testing.T) {
 		},
 	})
 	t.Cleanup(svc.Close)
+	fastRetry(svc)
 	roomID := createRoom(t, svc, "arjun").ID
 
 	select {
@@ -2178,6 +2191,15 @@ func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
 		},
 	})
 	t.Cleanup(svc.Close)
+	// The first supervisor's backoffs are short so it gives up quickly; later
+	// supervisors wait the production backoff, which the callers rely on.
+	var slow atomic.Bool
+	room.SetRetryAfterForTest(svc, func(d time.Duration) <-chan time.Time {
+		if slow.Load() {
+			return time.After(d)
+		}
+		return time.After(d / 100)
+	})
 	roomID := createRoom(t, svc, "arjun").ID
 	runsOf := func() int {
 		mu.Lock()
@@ -2185,6 +2207,7 @@ func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
 		return runs
 	}
 	waitFor(t, 15*time.Second, func() bool { return runsOf() >= 3 })
+	slow.Store(true)
 	return svc, roomID, runsOf
 }
 
@@ -2277,12 +2300,14 @@ func TestAgentSupervisorStopsOnUnretryable(t *testing.T) {
 		},
 	})
 	t.Cleanup(svc.Close)
+	fastRetry(svc)
 	roomID := createRoom(t, svc, "arjun").ID
 	waitFor(t, 5*time.Second, func() bool {
 		return len(eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)) >= 1
 	})
-	// A retry would wait out the one-second backoff; give it time to show up.
-	time.Sleep(1500 * time.Millisecond)
+	// A retry would wait out the backoff (10 ms with fastRetry); give it
+	// many times that to show up.
+	time.Sleep(150 * time.Millisecond)
 	mu.Lock()
 	n := runs
 	mu.Unlock()

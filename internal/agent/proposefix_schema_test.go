@@ -233,7 +233,7 @@ type countingAction struct {
 	validated int
 }
 
-func (a *countingAction) Validate(json.RawMessage) error {
+func (a *countingAction) Validate(context.Context, json.RawMessage) error {
 	a.validated++
 	return nil
 }

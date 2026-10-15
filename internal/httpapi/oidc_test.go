@@ -93,7 +93,7 @@ func (a *testAction) Describe() string { return "test action" }
 func (a *testAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}
 }
-func (a *testAction) Validate(json.RawMessage) error                    { return nil }
+func (a *testAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *testAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *testAction) Execute(context.Context, json.RawMessage) (string, error) {
 	a.mu.Lock()

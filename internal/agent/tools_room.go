@@ -390,7 +390,7 @@ func NewProposeFixTool(reg *actions.Registry, proposals Proposals) tools.Tool {
 // no unknown fields), then the action's own Validate. None of it stores
 // anything. The schema check runs first because it names the bad field, which
 // the action's Validate usually does not.
-func (t *proposeFixTool) checkStep(i int, action string, rawParams json.RawMessage) (actions.Action, json.RawMessage, error) {
+func (t *proposeFixTool) checkStep(ctx context.Context, i int, action string, rawParams json.RawMessage) (actions.Action, json.RawMessage, error) {
 	if t.actions == nil {
 		return nil, nil, fmt.Errorf("agent: no actions are available")
 	}
@@ -409,7 +409,7 @@ func (t *proposeFixTool) checkStep(i int, action string, rawParams json.RawMessa
 			return nil, nil, fmt.Errorf("%w: step %d (%s): params: %v", tools.ErrBadInput, i+1, action, err)
 		}
 	}
-	if err := a.Validate(params); err != nil {
+	if err := a.Validate(ctx, params); err != nil {
 		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
 	}
 	return a, params, nil
@@ -529,7 +529,7 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	seenLayers := map[string]bool{}
 	var layers []string
 	for i, s := range in.Steps {
-		a, params, err := t.checkStep(i, s.Action, s.Params)
+		a, params, err := t.checkStep(ctx, i, s.Action, s.Params)
 		if err != nil {
 			return tools.Result{}, err
 		}

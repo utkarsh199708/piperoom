@@ -81,10 +81,12 @@ func (s *Service) previewProposal(parent context.Context, roomID, pipelineID, pr
 
 	payload := events.ProposalPreviewedPayload{ProposalID: proposalID, Steps: out, At: s.now().UTC()}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.rooms[roomID]
-	if !ok || !s.roomOpen(st) {
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
+		return
+	}
+	defer s.unlockRoom(st)
+	if !s.roomOpen(st) {
 		return
 	}
 	open := false
