@@ -284,8 +284,8 @@ func TestRecoveredVerdictAfterNoneProposesRestore(t *testing.T) {
 				t.Fatal("the model must be told that p_2 waits for approval")
 			}
 
-			// The room saw the warning too, and the episode ends parked as done.
-			// The follow-up is for the model only; the room gets the typed verdict.
+			// The room saw the warning too, right after the typed verdict, and the
+			// episode ends parked as done.
 			var recoveredEvent bool
 			for _, v := range verifications(sink) {
 				recoveredEvent = recoveredEvent || (v.Recovered && strings.HasPrefix(v.Verdict, "recovered:"))
@@ -298,6 +298,18 @@ func TestRecoveredVerdictAfterNoneProposesRestore(t *testing.T) {
 			}
 			if !strings.Contains(requestText(model.calls[2]), "follow-up: "+compatSubject+" compatibility is still NONE") {
 				t.Fatal("the model must still read the follow-up")
+			}
+			var verIdx, warnIdx = -1, -1
+			for i, e := range sink.events {
+				switch {
+				case e.typ == events.AgentVerification && verIdx < 0:
+					verIdx = i
+				case e.typ == events.AgentMessage && strings.HasPrefix(string(e.payload), `{"text":"follow-up: `+compatSubject+` compatibility is still NONE`):
+					warnIdx = i
+				}
+			}
+			if verIdx < 0 || warnIdx != verIdx+1 {
+				t.Fatalf("the follow-up must be the agent.message right after the verification (verification %d, follow-up %d)", verIdx, warnIdx)
 			}
 			if countDoneStatuses(sink, waitingDetail) != 1 {
 				t.Fatalf("the episode must park as done once the model is finished, got %v", statusList(sink))
@@ -561,19 +573,13 @@ func TestRestoreProposalOnStaleWarehouseIsRecovered(t *testing.T) {
 	}
 	msgs := messageTexts(sink)
 	assertVerdict(t, msgs, true)
-	var verdict string
-	for _, m := range msgs {
-		if strings.HasPrefix(m, "recovered:") {
-			verdict = m
-		}
-	}
 	vs := verifications(sink)
 	if len(vs) != 1 || len(vs[0].Checks) != 1 || vs[0].Checks[0].Name != "schema_registry_versions" || vs[0].Checks[0].Layer != "schema-registry" ||
 		vs[0].DataFlow == nil || !strings.Contains(vs[0].DataFlow.Detail, "information only") {
 		t.Fatalf("the verdict must show the layer check and data flow as information, got %+v", vs)
 	}
-	if strings.Contains(verdict, "data is flowing") {
-		t.Fatalf("a config-only verdict must not claim data is flowing, got %q", verdict)
+	if strings.Contains(vs[0].Verdict, "data is flowing") {
+		t.Fatalf("a config-only verdict must not claim data is flowing, got %q", vs[0].Verdict)
 	}
 	if countDoneStatuses(sink, "pipeline recovered") != 1 {
 		t.Fatalf("status must be done, got %v", statusList(sink))
