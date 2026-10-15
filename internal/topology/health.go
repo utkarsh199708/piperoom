@@ -172,6 +172,20 @@ func sourceHealth(slot clients.ReplicationSlot, t Thresholds) (Health, map[strin
 		"slot_retained": HumanBytes(slot.RetainedWALBytes),
 		"slot_active":   strconv.FormatBool(slot.Active),
 	}
+	// A NULL restart_lsn (a lost slot) reaches us as 0 retained bytes: that is
+	// not "holding nothing" (#402).
+	if slot.RestartLSN == "" && slot.RetainedWALBytes == 0 {
+		facts["slot_retained"] = "unknown"
+	}
+	if slot.WALStatus != "" {
+		facts["wal_status"] = slot.WALStatus
+	}
+	// lost: the WAL the connector needs is gone, it cannot resume without a
+	// re-snapshot. unreserved: one checkpoint from that. The watcher treats
+	// both as a hard breach.
+	if slot.WALStatus == "lost" || slot.WALStatus == "unreserved" {
+		return HealthFail, facts
+	}
 	// >= matches the watcher's slot_wal rule ("retained >= fire"). t comes from
 	// ThresholdsFor, so the per-pipeline watch.slot_wal.fire overrides the base
 	// SlotRetainedWarnBytes default.
@@ -220,6 +234,16 @@ func groupHealth(lag clients.GroupLag, t Thresholds) (Health, map[string]string)
 	facts := map[string]string{
 		"lag":   strconv.FormatInt(lag.TotalLag, 10),
 		"state": lag.State,
+	}
+	// A Dead or Empty group without partitions has no committed offset to
+	// measure from: its lag is unknown, not 0 (#402).
+	if len(lag.Partitions) == 0 && (lag.State == "Dead" || lag.State == "Empty") {
+		facts["lag"] = "unknown (no committed offsets)"
+	}
+	// Dead: the group is gone (deleted, renamed, offsets expired); nothing
+	// consumes the pipeline's topics.
+	if lag.State == "Dead" {
+		return HealthFail, facts
 	}
 	if lag.State == "Empty" || lag.TotalLag > t.GroupLagWarn {
 		return HealthWarn, facts
