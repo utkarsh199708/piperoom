@@ -45,6 +45,10 @@ A PR is merged only when **both** leads approve: `[LEAD-REVIEW] APPROVED` (code)
 For cloud-agent (C*) PRs the code approval comes from `[LEAD-CLOUD]` instead of `[LEAD-REVIEW]`.
 Each agent owns folders. **Never edit a file you do not own.**
 
+**Tracking:** agents are grouped into squads (PIPE, BRAIN, ROOM, WEB, PLATFORM, TRUST), and every PR title is
+`[<work ID>][<lane>] area: what` (e.g. `[F3d][A4] agent: provenance ledger`). Rules: `docs/agents/org.md`. Who is
+fixing what right now: `docs/agents/board.md`.
+
 | Agent | Task file | Owns |
 |---|---|---|
 | A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
