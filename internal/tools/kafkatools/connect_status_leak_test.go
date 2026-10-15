@@ -25,7 +25,11 @@ func TestConnectStatusMasksRecordValues(t *testing.T) {
 		"Caused by: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO \"orders\" (\"id\",\"email\",\"card\") VALUES (42,'" + email + "','" + card + "') was aborted\n" +
 		"\tat org.postgresql.jdbc.BatchResultHandler.handleError(BatchResultHandler.java:165)\n" +
 		"Caused by: org.postgresql.util.PSQLException: ERROR: duplicate key value violates unique constraint \"orders_pkey\" Detail: Key (ssn)=(" + ssn + ") already exists.\n" +
-		"Caused by: com.fasterxml.jackson.core.JsonParseException: Unrecognized token '" + token + "': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false') at [Source: (byte[])\"{\"email\":\"" + email + "\"}\"; line: 1, column: 2]"
+		"Caused by: com.fasterxml.jackson.core.JsonParseException: Unrecognized token '" + token + "': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false') at [Source: (byte[])\"{\"email\":\"" + email + "\"}\"; line: 1, column: 2]\n" +
+		"Caused by: org.postgresql.util.PSQLException: ERROR: invalid input syntax for type integer: \"" + email + "\"\n" +
+		"Caused by: java.lang.NumberFormatException: For input string: \"" + card + "\"\n" +
+		"Caused by: org.apache.kafka.connect.errors.DataException: Cannot parse value \"" + ssn + "\" as timestamp\n" +
+		"Caused by: org.postgresql.util.PSQLException: ERROR: new row violates check constraint \"amount_positive\" Failing row contains (7, " + token + ", -1)."
 	fc := &fakeConnect{
 		statusFn: func(ctx context.Context, n string) (clients.ConnectorStatus, error) {
 			return clients.ConnectorStatus{Name: "pg-orders-sink", Type: "sink", State: "RUNNING",
@@ -51,7 +55,8 @@ func TestConnectStatusMasksRecordValues(t *testing.T) {
 		}
 	}
 	// The diagnosis survives: exception classes and the constraint name.
-	for _, want := range []string{"BatchUpdateException", "duplicate key value violates unique constraint", "JsonParseException"} {
+	for _, want := range []string{"BatchUpdateException", "duplicate key value violates unique constraint", "JsonParseException",
+		"invalid input syntax for type integer", "NumberFormatException: For input string", "Cannot parse value", "violates check constraint"} {
 		if !strings.Contains(r.Summary, want) {
 			t.Errorf("summary lost %q:\n%s", want, r.Summary)
 		}
