@@ -31,7 +31,9 @@
 #     must reason from the alert, the DDL and freshness, not read the DLQ.
 #   - The DDL and schema v4 look like the schema-change seed, but v4 registered fine (adding
 #     an optional field is BACKWARD compatible) and the source connector never failed.
-#   - connect_config hides errors.* keys on main, so errors.tolerance is not visible.
+#   - The tools now show the DLQ: the pipeline map lists the DLQ node (config_risk=dlq_no_log)
+#     and connect_config returns the errors.* keys. The trap is therefore not a hidden
+#     errors.tolerance but the cause: the DLQ is the symptom, the missing column is the cause.
 #
 # Sources:
 #   - Confluent JDBC sink connector (kafka-connect-jdbc 10.x), "JDBC Sink Connector
@@ -79,36 +81,58 @@ alert:
   title: 'DLQ dlq.jdbc-payments-sink received 18204 records in 45 min (ConnectSinkDLQGrowth); analytics.payments newest row 47 min old; sample payment id 88123401'
   pipeline_map: |
     pipeline payments
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
     1 pg:public.payments [postgres, owner nadia] OK slot_active=true slot_retained=18.4 MiB
     2 connect:pg-payments-source [kafka-connect, owner tomas] OK
-    3 connect:jdbc-payments-sink [kafka-connect, owner tomas] OK
-    4 topic:pay.public.payments [kafka, owner tomas] OK newest_record=9s ago
-    5 group:connect-jdbc-payments-sink [consumer, owner lena] OK lag=11 state=Stable
-    6 wh:analytics.payments [warehouse, owner omar] FAIL stale_for=47m ts_column=updated_at
+      from: pg:public.payments
+    3 topic:pay.public.payments [kafka, owner tomas] OK newest_record=9s ago
+      from: connect:pg-payments-source
+    4 connect:jdbc-payments-sink [kafka-connect, owner tomas] OK config_risk=dlq_no_log dlq=dlq.jdbc-payments-sink errors_tolerance=all
+      from: topic:pay.public.payments
+    5 dlq:dlq.jdbc-payments-sink [kafka-connect, owner tomas] WARN newest_record=9s ago recent=true records=18204 writer=jdbc-payments-sink
+      from: connect:jdbc-payments-sink
+    6 group:connect-jdbc-payments-sink [consumer, owner lena] OK lag=11 state=Stable
+      from: topic:pay.public.payments
+    7 wh:analytics.payments [warehouse, owner omar] FAIL stale_for=47m ts_column=updated_at
+      from: connect:jdbc-payments-sink (unconfirmed), group:connect-jdbc-payments-sink (unconfirmed)
 
 recordings:
   - tool: pipeline_map
     input: {pipeline_id: payments}
     summary: |
       pipeline payments
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
       1 pg:public.payments [postgres, owner nadia] OK slot_active=true slot_retained=18.4 MiB
       2 connect:pg-payments-source [kafka-connect, owner tomas] OK
-      3 connect:jdbc-payments-sink [kafka-connect, owner tomas] OK
-      4 topic:pay.public.payments [kafka, owner tomas] OK newest_record=9s ago
-      5 group:connect-jdbc-payments-sink [consumer, owner lena] OK lag=11 state=Stable
-      6 wh:analytics.payments [warehouse, owner omar] FAIL stale_for=47m ts_column=updated_at
+        from: pg:public.payments
+      3 topic:pay.public.payments [kafka, owner tomas] OK newest_record=9s ago
+        from: connect:pg-payments-source
+      4 connect:jdbc-payments-sink [kafka-connect, owner tomas] OK config_risk=dlq_no_log dlq=dlq.jdbc-payments-sink errors_tolerance=all
+        from: topic:pay.public.payments
+      5 dlq:dlq.jdbc-payments-sink [kafka-connect, owner tomas] WARN newest_record=9s ago recent=true records=18204 writer=jdbc-payments-sink
+        from: connect:jdbc-payments-sink
+      6 group:connect-jdbc-payments-sink [consumer, owner lena] OK lag=11 state=Stable
+        from: topic:pay.public.payments
+      7 wh:analytics.payments [warehouse, owner omar] FAIL stale_for=47m ts_column=updated_at
+        from: connect:jdbc-payments-sink (unconfirmed), group:connect-jdbc-payments-sink (unconfirmed)
     data:
       edges:
         - from: pg:public.payments
           to: connect:pg-payments-source
-        - from: pg:public.payments
-          to: connect:jdbc-payments-sink
         - from: connect:pg-payments-source
           to: topic:pay.public.payments
         - from: topic:pay.public.payments
+          to: connect:jdbc-payments-sink
+        - from: topic:pay.public.payments
           to: group:connect-jdbc-payments-sink
-        - from: group:connect-jdbc-payments-sink
+        - from: connect:jdbc-payments-sink
+          mapping: inferred
           to: wh:analytics.payments
+        - from: group:connect-jdbc-payments-sink
+          mapping: inferred
+          to: wh:analytics.payments
+        - from: connect:jdbc-payments-sink
+          to: dlq:dlq.jdbc-payments-sink
       nodes:
         - facts:
             slot_active: "true"
@@ -125,7 +149,11 @@ recordings:
           layer: kafka-connect
           name: pg-payments-source
           owner: tomas
-        - health: ok
+        - facts:
+            config_risk: dlq_no_log
+            dlq: dlq.jdbc-payments-sink
+            errors_tolerance: all
+          health: ok
           id: connect:jdbc-payments-sink
           kind: connector
           layer: kafka-connect
@@ -138,6 +166,17 @@ recordings:
           kind: topic
           layer: kafka
           name: pay.public.payments
+          owner: tomas
+        - facts:
+            newest_record: 9s ago
+            recent: "true"
+            records: "18204"
+            writer: jdbc-payments-sink
+          health: warn
+          id: dlq:dlq.jdbc-payments-sink
+          kind: dlq_topic
+          layer: kafka-connect
+          name: dlq.jdbc-payments-sink
           owner: tomas
         - facts:
             lag: "11"
@@ -228,6 +267,10 @@ recordings:
     summary: |-
       connection.password: ***
       connector.class: io.confluent.connect.jdbc.JdbcSinkConnector
+      errors.deadletterqueue.context.headers.enable: true
+      errors.deadletterqueue.topic.name: dlq.jdbc-payments-sink
+      errors.log.enable: false
+      errors.tolerance: all
       key.converter: io.confluent.connect.avro.AvroConverter
       transforms: unwrap
       transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
@@ -235,6 +278,10 @@ recordings:
     data:
       connection.password: '***'
       connector.class: io.confluent.connect.jdbc.JdbcSinkConnector
+      errors.deadletterqueue.context.headers.enable: "true"
+      errors.deadletterqueue.topic.name: dlq.jdbc-payments-sink
+      errors.log.enable: "false"
+      errors.tolerance: all
       key.converter: io.confluent.connect.avro.AvroConverter
       transforms: unwrap
       transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
@@ -371,8 +418,11 @@ recordings:
         username: payments_migrator
   - tool: pg_long_transactions
     summary: |
-      (no long transactions)
-    data: []
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
   - tool: pg_publication_tables
     input: {pipeline_id: payments}
     summary: |
@@ -432,6 +482,7 @@ recordings:
           timestamp: "2026-10-11T09:37:01Z"
           topic: pay.public.payments
       topic: pay.public.payments
+      truncated: false
   - tool: trace_record
     input: {key: "88123401", pipeline_id: payments, table: public.payments}
     summary: |
@@ -513,6 +564,7 @@ recordings:
       key: "1"
       records: null
       topic: pay.public.payments
+      truncated: false
   - tool: pg_row
     summary: |-
       not found
@@ -554,6 +606,7 @@ expect:
   root_cause:
     - [risk_score]
     - [dead letter, dead-letter, dlq, errors.tolerance]
+  root_cause_forbidden: [[incompatib*], [schema registry, reject*]]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   evidence_tools: [connect_status, warehouse_freshness]

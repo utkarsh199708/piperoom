@@ -50,6 +50,9 @@ pipelines:
     consumer_groups: [invoice-loader]
     sink_tables: [analytics.invoices]
     sink_ts_column: updated_at
+    # Connect is unreachable, so the slot cannot be read from the connector config.
+    watch:
+      slot: debezium_billing
   # (f) Phased recovery: a fix runs and the agent must re-check.
   - id: ledger
     title: Ledger CDC

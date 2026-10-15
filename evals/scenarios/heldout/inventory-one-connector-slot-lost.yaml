@@ -77,37 +77,49 @@ alert:
   title: 'Warehouse analytics.stock_levels stale for 3.2 h (WarehouseFreshness, pipeline inventory); analytics.sites fresh'
   pipeline_map: |
     pipeline inventory
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
     1 pg:public.stock_levels [postgres, owner nadia] WARN slot_active=false slot_retained=0 B
     2 pg:public.sites [postgres, owner nadia] OK slot_active=true slot_retained=4.2 MiB
     3 connect:pg-inventory-stock [kafka-connect, owner tomas] FAIL tasks_failed=1
+      from: pg:public.stock_levels
     4 connect:pg-inventory-sites [kafka-connect, owner tomas] OK
+      from: pg:public.sites
     5 topic:inv.public.stock_levels [kafka, owner tomas] OK newest_record=3.2h ago
+      from: connect:pg-inventory-stock
     6 topic:inv.public.sites [kafka, owner tomas] OK newest_record=20s ago
+      from: connect:pg-inventory-sites
     7 group:inventory-sync [consumer, owner lena] OK lag=1 state=Stable
+      from: topic:inv.public.stock_levels, topic:inv.public.sites
     8 wh:analytics.stock_levels [warehouse, owner omar] FAIL stale_for=3.2h ts_column=updated_at
+      from: group:inventory-sync (unconfirmed)
     9 wh:analytics.sites [warehouse, owner omar] OK stale_for=31s ts_column=updated_at
+      from: group:inventory-sync (unconfirmed)
 
 recordings:
   - tool: pipeline_map
     input: {pipeline_id: inventory}
     summary: |
       pipeline inventory
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
       1 pg:public.stock_levels [postgres, owner nadia] WARN slot_active=false slot_retained=0 B
       2 pg:public.sites [postgres, owner nadia] OK slot_active=true slot_retained=4.2 MiB
       3 connect:pg-inventory-stock [kafka-connect, owner tomas] FAIL tasks_failed=1
+        from: pg:public.stock_levels
       4 connect:pg-inventory-sites [kafka-connect, owner tomas] OK
+        from: pg:public.sites
       5 topic:inv.public.stock_levels [kafka, owner tomas] OK newest_record=3.2h ago
+        from: connect:pg-inventory-stock
       6 topic:inv.public.sites [kafka, owner tomas] OK newest_record=20s ago
+        from: connect:pg-inventory-sites
       7 group:inventory-sync [consumer, owner lena] OK lag=1 state=Stable
+        from: topic:inv.public.stock_levels, topic:inv.public.sites
       8 wh:analytics.stock_levels [warehouse, owner omar] FAIL stale_for=3.2h ts_column=updated_at
+        from: group:inventory-sync (unconfirmed)
       9 wh:analytics.sites [warehouse, owner omar] OK stale_for=31s ts_column=updated_at
+        from: group:inventory-sync (unconfirmed)
     data:
       edges:
         - from: pg:public.stock_levels
-          to: connect:pg-inventory-stock
-        - from: pg:public.stock_levels
-          to: connect:pg-inventory-sites
-        - from: pg:public.sites
           to: connect:pg-inventory-stock
         - from: pg:public.sites
           to: connect:pg-inventory-sites
@@ -120,8 +132,10 @@ recordings:
         - from: topic:inv.public.sites
           to: group:inventory-sync
         - from: group:inventory-sync
+          mapping: inferred
           to: wh:analytics.stock_levels
         - from: group:inventory-sync
+          mapping: inferred
           to: wh:analytics.sites
       nodes:
         - facts:
@@ -499,8 +513,11 @@ recordings:
       (no DDL since 2026-10-10T09:40:00Z)
   - tool: pg_long_transactions
     summary: |
-      (no long transactions)
-    data: []
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
   - tool: pg_publication_tables
     input: {pipeline_id: inventory}
     summary: |
@@ -574,6 +591,7 @@ recordings:
       key: "1"
       records: null
       topic: inv.public.stock_levels
+      truncated: false
   - tool: pg_row
     summary: |-
       not found
