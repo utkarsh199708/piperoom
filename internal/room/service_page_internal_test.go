@@ -427,10 +427,12 @@ func TestPageOwnersResolution(t *testing.T) {
 		want            []string
 	}{
 		// Pipeline owners: approvers (file users, then group members), then backups.
-		{"orders", "consumer", []string{"kabir", "u_cons", "meera", "u_night"}},
+		// Group principals follow the people found in them: the server
+		// cannot list a group's members (QA F6).
+		{"orders", "consumer", []string{"kabir", "u_cons", "group:consumers", "meera", "u_night", "group:night"}},
 		// No pipeline block: layers:.
 		{"billing", "consumer", []string{"arjun"}},
-		{"orders", "kafka", []string{"arjun", "u_kafka"}},
+		{"orders", "kafka", []string{"arjun", "u_kafka", "group:dataeng-oncall"}},
 		// No owners.yaml entry: the users.yaml layers (dev mode) decide.
 		{"orders", "warehouse", []string{"meera"}},
 		// Nobody: [] (never nil).
@@ -445,7 +447,7 @@ func TestPageOwnersResolution(t *testing.T) {
 	}
 	// No session store: users.yaml and owners.yaml only.
 	plain := pageOwnersService(t, nil, nil)
-	if got := plain.pageOwners(ctx, "orders", "consumer"); !reflect.DeepEqual(got, []string{"kabir", "meera"}) {
+	if got := plain.pageOwners(ctx, "orders", "consumer"); !reflect.DeepEqual(got, []string{"kabir", "group:consumers", "meera", "group:night"}) {
 		t.Errorf("without sessions: %v", got)
 	}
 	// The payload of a page with nobody to page carries [], not null.
@@ -521,7 +523,9 @@ func TestPageNotifierBody(t *testing.T) {
 		Owners: []notify.Owner{
 			{ID: "kabir", Name: "Kabir", Email: "kabir@example.com"},
 			{ID: "u_cons", Name: "Cole", Email: "cole@example.com"},
+			{ID: "group:consumers", Name: "group:consumers"},
 			{ID: "meera", Name: "Meera"},
+			{ID: "group:night", Name: "group:night"},
 		},
 		Reason: "lag keeps growing", At: ev.At, Seq: ev.Seq,
 	}
@@ -579,5 +583,86 @@ func TestPageDeliveryBoundedAndStopsAtClose(t *testing.T) {
 		if err == nil {
 			t.Fatalf("delivery %d saw a live context after Close", i)
 		}
+	}
+}
+
+// loadOwners parses an owners.yaml body for a test.
+func loadOwners(t *testing.T, body string) *owners.Owners {
+	t.Helper()
+	path := t.TempDir() + "/owners.yaml"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	own, err := owners.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return own
+}
+
+// QA F6: a layer owned only by groups, with nobody of them signed in. The
+// server cannot list a group's members, so the page names the groups as
+// principals: the event, the snapshot and the webhook carry them, and the
+// room's one automatic page reaches someone a relay can route to.
+func TestGroupOwnedLayerPagesTheGroup(t *testing.T) {
+	c := &testClock{t: pageT0}
+	ms := memstore.NewWithClock(c.Now)
+	n := newRecNotifier(false)
+	r := newPageRig(t, ms, c, 5*time.Minute, n)
+	r.svc.owners = loadOwners(t, `pipelines:
+  - id: orders
+    topic_prefix: pg
+    source_tables: [public.orders]
+    connectors: [c1]
+    consumer_groups: [order-sync]
+    owners:
+      consumer: { approvers: [group:data-eng], backup: [group:night] }
+`)
+	r.load()
+	roomID := openWatcherRoom(t, r.svc, owners.SignalConsumerLag)
+	c.Advance(5 * time.Minute)
+	r.tick()
+	got := autoPages(t, ms, roomID)
+	want := []string{"group:data-eng", "group:night"}
+	if len(got) != 1 || got[0].Layer != "consumer" || !reflect.DeepEqual(got[0].Owners, want) {
+		t.Fatalf("auto pages = %+v, want one consumer page to %v", got, want)
+	}
+	if snap := mustRoom(t, r.svc, roomID); len(snap.Pages) != 1 || !reflect.DeepEqual(snap.Pages[0].Owners, want) {
+		t.Fatalf("snapshot pages = %+v", snap.Pages)
+	}
+	select {
+	case <-n.called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("notifier never called")
+	}
+	r.svc.Close()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	wantOwners := []notify.Owner{{ID: "group:data-eng", Name: "group:data-eng"}, {ID: "group:night", Name: "group:night"}}
+	if len(n.got) != 1 || !reflect.DeepEqual(n.got[0].Owners, wantOwners) {
+		t.Fatalf("webhook owners = %+v, want %+v", n.got, wantOwners)
+	}
+}
+
+// QA F6: an automatic page that would reach nobody is not written, so it is
+// not spent: the next check pages once someone can be paged.
+func TestAutoPageToNobodyIsNotSpent(t *testing.T) {
+	c := &testClock{t: pageT0}
+	ms := memstore.NewWithClock(c.Now)
+	r := newPageRig(t, ms, c, 5*time.Minute, nil)
+	r.svc.users = mustUsers([]User{{ID: "arjun", Name: "Arjun"}})
+	r.load()
+	roomID := openWatcherRoom(t, r.svc, owners.SignalConsumerLag)
+	c.Advance(5 * time.Minute)
+	r.tick()
+	if got := autoPages(t, ms, roomID); len(got) != 0 {
+		t.Fatalf("auto pages to nobody = %+v, want none", got)
+	}
+	r.svc.users = DefaultUsers() // kabir owns consumer
+	c.Advance(time.Minute)
+	r.tick()
+	got := autoPages(t, ms, roomID)
+	if len(got) != 1 || !reflect.DeepEqual(got[0].Owners, []string{"kabir"}) {
+		t.Fatalf("auto pages = %+v, want one to kabir", got)
 	}
 }

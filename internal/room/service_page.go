@@ -79,10 +79,13 @@ type pagingState struct {
 	// noLayer marks rooms whose missing suspected layer was logged, so the
 	// debug line is written once per room. Guarded by Service.mu.
 	noLayer map[string]bool
+	// noOwners marks rooms whose automatic page found nobody to page, so the
+	// warning is written once per room. Guarded by Service.mu.
+	noOwners map[string]bool
 }
 
 func newPagingState(p Paging) *pagingState {
-	return &pagingState{cfg: p, sem: make(chan struct{}, maxPageDeliveries), noLayer: map[string]bool{}}
+	return &pagingState{cfg: p, sem: make(chan struct{}, maxPageDeliveries), noLayer: map[string]bool{}, noOwners: map[string]bool{}}
 }
 
 // Page is one entry of the snapshot's pages (docs/api.md, Q-wave snapshot
@@ -101,6 +104,10 @@ type Page struct {
 func alreadyPaged(msg string) *Error {
 	return &Error{Status: 409, Code: "already_paged", Msg: msg}
 }
+
+// errNobodyToPage ends an automatic page that would name nobody: it is not
+// written, so the room's one automatic page is not spent on it (QA F6).
+var errNobodyToPage = errors.New("room: nobody to page")
 
 // errPageNotDue ends an automatic page whose room stopped being due between
 // the check and the write (a driver arrived, another replica paged).
@@ -288,6 +295,9 @@ type pageReq struct {
 	reason     string
 	proposalID string
 	auto       bool
+	// needOwners refuses the page (errNobodyToPage) when it would name
+	// nobody; the automatic page sets it.
+	needOwners bool
 	// check adds the writer's own condition under s.mu: the agent run's
 	// fence, or that an automatic page is still due. Nil for a person.
 	check func(st *roomState) error
@@ -386,6 +396,9 @@ func (s *Service) page(ctx context.Context, roomID string, r pageReq) (events.Ev
 	s.mu.Unlock()
 
 	ownerIDs := s.pageOwners(ctx, pipelineID, r.layer)
+	if r.needOwners && len(ownerIDs) == 0 {
+		return events.Event{}, nil, errNobodyToPage
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -428,12 +441,16 @@ func (s *Service) pageCheckLocked(st *roomState, r pageReq) error {
 	return nil
 }
 
-// pageOwners resolves the user ids to page for a layer of a pipeline: the
-// people the approve path accepts for it (authorizeLayer, the not_layer_owner
-// rule), approvers first, then backups, each id once, never nil. Named
-// owners.yaml users come first in file order; then users.yaml users and
-// members with a live session whose groups (or, in dev mode, users.yaml
-// layers) grant the layer. The solo user's blanket grant does not count.
+// pageOwners resolves who to page for a layer of a pipeline: the people the
+// approve path accepts for it (authorizeLayer, the not_layer_owner rule),
+// approvers first, then backups, each once, never nil. Named owners.yaml users
+// come first in file order; then users.yaml users and members with a live
+// session whose groups (or, in dev mode, users.yaml layers) grant the layer;
+// then the layer's `group:` principals themselves. The server has no IdP
+// directory, so a group's members are known only while they have a live
+// session: naming the group lets a webhook relay route the page to the group
+// when none of them is signed in (QA F6). The solo user's blanket grant does
+// not count.
 func (s *Service) pageOwners(ctx context.Context, pipelineID, layer string) []string {
 	out := []string{}
 	seen := map[string]bool{}
@@ -441,6 +458,13 @@ func (s *Service) pageOwners(ctx context.Context, pipelineID, layer string) []st
 		if id != "" && !seen[id] {
 			seen[id] = true
 			out = append(out, id)
+		}
+	}
+	addGroups := func(ps owners.Principals) {
+		for _, p := range ps {
+			if p.Kind == owners.KindGroup {
+				add(p.String())
+			}
 		}
 	}
 	approvers, backups := s.layerRights(pipelineID, layer)
@@ -459,13 +483,21 @@ func (s *Service) pageOwners(ctx context.Context, pipelineID, layer string) []st
 			add(u.ID)
 		}
 	}
+	addGroups(approvers)
 	for _, id := range backups.Users() {
 		add(id)
 	}
 	for _, id := range candBackups {
 		add(id)
 	}
+	addGroups(backups)
 	return out
+}
+
+// isGroupOwner reports whether an owners entry of a page is a group
+// principal ("group:data-eng"), not a user id.
+func isGroupOwner(id string) bool {
+	return strings.HasPrefix(id, owners.KindGroup+":")
 }
 
 // layerRights is the owners.yaml approvers and backups of a layer of a
@@ -560,7 +592,9 @@ func (s *Service) pageContacts(ctx context.Context, ids []string) []notify.Owner
 	out := make([]notify.Owner, 0, len(ids))
 	for _, id := range ids {
 		o := notify.Owner{ID: id, Name: id}
-		if u, ok := s.users.Get(id); ok {
+		if isGroupOwner(id) {
+			// A group: the relay routes on the id; nobody to look up.
+		} else if u, ok := s.users.Get(id); ok {
 			if u.Name != "" {
 				o.Name = u.Name
 			}
@@ -682,7 +716,7 @@ func (s *Service) autoPage(ctx context.Context, roomID string) {
 		return
 	}
 	_, ownerIDs, err := s.page(ctx, roomID, pageReq{
-		actor: systemActor, layer: layer, reason: reason, auto: true,
+		actor: systemActor, layer: layer, reason: reason, auto: true, needOwners: true,
 		check: func(st *roomState) error {
 			if l, _, ok := s.autoPageDueLocked(roomID, st); !ok || l != layer {
 				return errPageNotDue
@@ -695,6 +729,14 @@ func (s *Service) autoPage(ctx context.Context, roomID string) {
 	case err == nil:
 		s.log.Info("room: paged the owners of an undriven room", "room", roomID, "layer", layer, "owners", len(ownerIDs))
 	case errors.Is(err, errPageNotDue):
+	case errors.Is(err, errNobodyToPage):
+		s.mu.Lock()
+		first := !s.paging.noOwners[roomID]
+		s.paging.noOwners[roomID] = true
+		s.mu.Unlock()
+		if first {
+			s.log.Warn("room: auto page skipped: nobody to page for the layer; retry at the next check", "room", roomID, "layer", layer)
+		}
 	case errors.As(err, &re) && re.Code == "already_paged":
 		// Someone paged the layer moments ago; once the window has passed and
 		// the room is still undriven, the server pages.
