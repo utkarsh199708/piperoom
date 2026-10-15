@@ -210,3 +210,16 @@ func TestOneLineCorpus(t *testing.T) {
 		t.Errorf("gap (#426) changed: oneLine(%q) = %q (fixed? flip the row)", gap, got)
 	}
 }
+
+// #440: a Connect trace whose first line carries a PostgreSQL key detail
+// without a "Detail:" label keeps the columns and loses the values.
+func TestTraceLineMasksKeyValues(t *testing.T) {
+	for in, want := range map[string]string{
+		"org.apache.kafka.connect.errors.ConnectException: ERROR: duplicate key value violates unique constraint \"u_name\" Key (full_name)=(Jane Doe) already exists.\n\tat io.debezium.Foo.bar(Foo.java:1)": "org.apache.kafka.connect.errors.ConnectException: ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists.",
+		"org.apache.kafka.connect.errors.ConnectException: Key (tax_id, region)=(AB123456, EU) is not present in table t.":                                                                                    "org.apache.kafka.connect.errors.ConnectException: Key (tax_id, region)=<redacted> is not present in table t.",
+	} {
+		if got := traceLine(in); got != want {
+			t.Errorf("traceLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
