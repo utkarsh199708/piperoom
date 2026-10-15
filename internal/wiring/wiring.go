@@ -53,6 +53,11 @@ type Wired struct {
 	Connect       clients.ConnectClient
 	Kafka         clients.KafkaAdmin
 	Registry      clients.SchemaRegistryClient
+	// ConnectLog reads the Connect worker log for connect_worker_log; nil when
+	// CONNECT_WORKER_LOG_FILE is empty or "off", and then the tool is not
+	// registered. A pipeline with its own connections: block gets none: its
+	// settings start empty, and one process-wide log file is not its Connect's.
+	ConnectLog clients.ConnectLogReader
 	// DebeziumMetrics is the parsed DEBEZIUM_METRICS_URL/_PREFIX; an empty URL
 	// leaves debezium_metrics registered but answering "not configured".
 	DebeziumMetrics config.DebeziumMetrics
@@ -90,6 +95,8 @@ type a2Clients struct {
 	Connect  *connect.Client
 	Kafka    *kafka.Client
 	Registry *schemareg.Client
+	// ConnectLog is nil unless the worker log file is configured.
+	ConnectLog clients.ConnectLogReader
 }
 
 // buildA2Clients constructs the A2 clients from the C8 security settings
@@ -140,7 +147,12 @@ func buildA2Clients(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error) {
 		return nil, fmt.Errorf("wiring: kafka client: %w", err)
 	}
 
-	return &a2Clients{Connect: connectClient, Kafka: kafkaClient, Registry: registry}, nil
+	a2 := &a2Clients{Connect: connectClient, Kafka: kafkaClient, Registry: registry}
+	// Not a typed nil in the interface: the tool is registered iff this is set.
+	if cfg.ConnectWorkerLogFile != "" {
+		a2.ConnectLog = connect.NewLogReader(cfg.ConnectWorkerLogFile)
+	}
+	return a2, nil
 }
 
 // kafkaSecurity maps the Kafka security settings of cfg onto netsec. With
@@ -246,6 +258,7 @@ func assemble(o *owners.Owners, whKind string, a2 *a2Clients, src clients.Source
 		WarehouseKind: whKind,
 		Connect:       a2.Connect,
 		Kafka:         a2.Kafka,
+		ConnectLog:    a2.ConnectLog,
 		Owners:        o,
 		close:         func() { once.Do(closeAll) },
 	}
@@ -303,7 +316,7 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect, Kafka: w.Kafka}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
-	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {
+	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners, ConnectLog: w.ConnectLog}); err != nil {
 		return fmt.Errorf("wiring: register kafka tools: %w", err)
 	}
 	if err := debeziumtools.Register(reg, debeziumtools.Deps{Connect: w.Connect, Metrics: w.DebeziumMetrics, Owners: w.Owners}); err != nil {

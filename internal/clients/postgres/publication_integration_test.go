@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"piperoom/internal/clients"
 	"piperoom/internal/testenv"
 )
@@ -91,5 +93,87 @@ func TestPublicationTablesSourceNotInPublicationIntegration(t *testing.T) {
 	}
 	if !got.Selectable {
 		t.Fatalf("piperoom (owner) should have SELECT on public.%s: %+v", table, *got)
+	}
+}
+
+// TestPublicationOwnersIntegration rebuilds the connector-auth break in miniature
+// (QA G3): a table owned by one role, a publication owned by the connector
+// role, and a connector role that is neither the table's owner nor a member of
+// it. It then makes the role a member and checks the answer changes. Needs a
+// superuser SOURCE_DB_URL (the dev stack's piperoom), like the other write tests.
+func TestPublicationOwnersIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+
+	table, pub := testenv.Name("ownt"), testenv.Name("ownp")
+	ownerRole, connRole := testenv.Name("owno"), testenv.Name("ownc")
+	id := func(n string) string { return pgx.Identifier{n}.Sanitize() }
+	exec := func(sql string) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		for _, sql := range []string{
+			"DROP PUBLICATION IF EXISTS " + id(pub),
+			"DROP TABLE IF EXISTS public." + id(table),
+			"DROP ROLE IF EXISTS " + id(connRole),
+			"DROP ROLE IF EXISTS " + id(ownerRole),
+		} {
+			_, _ = conn.Exec(ctx, sql)
+		}
+	})
+	exec("CREATE ROLE " + id(ownerRole))
+	exec("CREATE ROLE " + id(connRole) + " REPLICATION")
+	exec("CREATE TABLE public." + id(table) + " (id int primary key)")
+	exec("ALTER TABLE public." + id(table) + " OWNER TO " + id(ownerRole))
+	exec("GRANT SELECT ON public." + id(table) + " TO " + id(connRole))
+	exec("CREATE PUBLICATION " + id(pub) + " FOR TABLE public." + id(table))
+	exec("ALTER PUBLICATION " + id(pub) + " OWNER TO " + id(connRole))
+
+	ctx := context.Background()
+	tables, other, err := db.PublicationSourceTables(ctx, pub, connRole, []string{"public." + table})
+	if err != nil {
+		t.Fatalf("PublicationSourceTables: %v", err)
+	}
+	if len(tables) != 1 || other != 0 {
+		t.Fatalf("tables = %+v, other = %d", tables, other)
+	}
+	got := tables[0]
+	if !got.InPublication || !got.Selectable || got.Owner != ownerRole || got.RoleIsOwner || got.RoleMemberOfOwner {
+		t.Fatalf("connector role is neither owner nor member: %+v", got)
+	}
+
+	info, err := db.PublicationInfo(ctx, pub, connRole)
+	if err != nil {
+		t.Fatalf("PublicationInfo: %v", err)
+	}
+	want := PublicationInfo{Publication: pub, Owner: connRole, Role: connRole, RoleExists: true, RoleReplication: true, RoleIsOwner: true, RoleMemberOfOwner: true}
+	if info != want {
+		t.Fatalf("PublicationInfo = %+v, want %+v", info, want)
+	}
+
+	// Membership of the table owner is what DBAs grant to fix it.
+	exec("GRANT " + id(ownerRole) + " TO " + id(connRole))
+	tables, _, err = db.PublicationSourceTables(ctx, pub, connRole, []string{"public." + table})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tables[0].RoleMemberOfOwner || tables[0].RoleIsOwner {
+		t.Fatalf("after GRANT: %+v", tables[0])
+	}
+
+	// A role that does not exist, and a publication that does not.
+	info, err = db.PublicationInfo(ctx, pub, testenv.Name("norole"))
+	if err != nil || info.RoleExists || info.RoleReplication || info.RoleIsOwner {
+		t.Fatalf("missing role: %+v, %v", info, err)
+	}
+	if _, err := db.PublicationInfo(ctx, testenv.Name("nopub"), connRole); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("missing publication: err = %v, want ErrNotFound", err)
 	}
 }
