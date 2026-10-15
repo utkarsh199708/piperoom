@@ -470,11 +470,42 @@ func mentionsDebeziumThread(text, name string) bool {
 		rest := text[from+i+len("debezium-"):]
 		if j := strings.Index(rest, "connector-"); j > 0 && !strings.ContainsAny(rest[:j], " \t|[]") {
 			tail := rest[j+len("connector-"):]
-			if strings.HasPrefix(tail, name) && (len(tail) == len(name) || tail[len(name)] == '-' || !isNameRune(rune(tail[len(name)]))) {
+			if strings.HasPrefix(tail, name) && threadNameEnds(tail[len(name):]) {
 				return true
 			}
 		}
 		from += i + 1
+	}
+	return false
+}
+
+// debeziumThreadSuffixes are what Debezium appends to the logical name in its
+// thread names. A bare '-' is not enough: "pg-eu-change-..." belongs to the
+// logical name "pg-eu", not to "pg" (Q4 R12, R19).
+var debeziumThreadSuffixes = []string{
+	"change-event-source-coordinator", "SignalProcessor", "snapshot",
+	"streaming", "blocking-snapshot", "incremental-snapshot", "records-processor",
+}
+
+// threadNameEnds is true when rest, what follows the logical name in a thread
+// name, is the end of the name or one known Debezium suffix.
+func threadNameEnds(rest string) bool {
+	if rest == "" {
+		return true
+	}
+	r, _ := utf8.DecodeRuneInString(rest)
+	if r != '-' {
+		return !isNameRune(r)
+	}
+	for _, suf := range debeziumThreadSuffixes {
+		if after, ok := strings.CutPrefix(rest[1:], suf); ok {
+			if after == "" {
+				return true
+			}
+			if c, _ := utf8.DecodeRuneInString(after); !isNameRune(c) {
+				return true
+			}
+		}
 	}
 	return false
 }
