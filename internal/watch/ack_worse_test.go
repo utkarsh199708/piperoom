@@ -81,3 +81,48 @@ func TestCloseWhileClearingKeepsBreachSeverity(t *testing.T) {
 		t.Fatalf("the flap must stay acked, phase %v", h.phase("orders", owners.SignalConnectorDown))
 	}
 }
+
+// The same for a storm follower: the storm room closes while b clears, and b
+// flaps back at the same severity. The close acked b at its breach severity
+// (assignFollowers/ackLocked), so no room opens inside the cooldown (#391).
+func TestStormFollowerClosedWhileClearingStaysAcked(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{{id: "a"}, {id: "b"}, {id: "c"}}})
+	room := stormOf(t, h)
+	h.fixConnector("b")
+	h.step(20 * time.Second)
+	if h.phase("b", owners.SignalConnectorDown) != phaseFiring {
+		t.Fatal("setup: b must still be clearing when the room closes")
+	}
+	h.rooms.closeRoom(room, h.clk.Now())
+	h.w.OnRoomClosed(room, "a", "a|watcher:a")
+
+	h.breakConnector("b", "worker died")
+	h.steps(3, 20*time.Second)
+	if n := len(h.rooms.created()); n != 1 {
+		t.Fatalf("a same-severity flap of a storm follower re-opened: %d rooms\n%s", n, h.logs)
+	}
+}
+
+// A close while clearing must not hide a real rise: PAUSED (sev3) acked while
+// RUNNING again, then FAILED (sev2) is worse and re-opens past the cooldown.
+func TestCloseWhileClearingStillReopensOnEscalation(t *testing.T) {
+	paused := clients.ConnectorStatus{Name: "pg-orders", State: "PAUSED", Tasks: []clients.TaskStatus{{ID: 0, State: "PAUSED"}}}
+	h := newHarness(t, opts{})
+	h.conn.setStatus("pg-orders", paused)
+	h.steps(4, time.Minute)
+	rooms := h.rooms.created()
+	if len(rooms) != 1 || rooms[0].alert.Severity != "sev3" {
+		t.Fatalf("setup: want one sev3 room, got %+v", rooms)
+	}
+	h.fixConnector("orders")
+	h.step(20 * time.Second)
+	h.rooms.closeRoom(rooms[0].roomID, h.clk.Now())
+	h.w.OnRoomClosed(rooms[0].roomID, "orders", DedupKey("orders"))
+
+	h.breakConnector("orders", "org.apache.kafka.connect.errors.ConnectException: boom")
+	h.steps(3, 20*time.Second)
+	rooms = h.rooms.created()
+	if len(rooms) != 2 || rooms[1].alert.Severity != "sev2" {
+		t.Fatalf("PAUSED -> FAILED after a close while clearing opened no sev2 room: %+v\n%s", rooms, h.logs)
+	}
+}

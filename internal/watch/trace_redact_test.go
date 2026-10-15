@@ -133,3 +133,28 @@ func TestDDLSummaryMasksPII(t *testing.T) {
 		t.Errorf("summary lost the statement: %q", rows[0].Summary)
 	}
 }
+
+// TestOneLineCorpus pins what the change log keeps and masks (org.md §12):
+// keep rows come back unchanged, as on main; mask rows lose the value.
+func TestOneLineCorpus(t *testing.T) {
+	for _, keep := range []string{
+		"ALTER TABLE public.events ALTER COLUMN token TYPE varchar(64) USING token::varchar(64)",
+		"ALTER TABLE public.t ALTER COLUMN access_token TYPE text USING access_token::text",
+		"COMMENT ON TABLE public.t IS 'bearer token rotation policy'",
+		"ALTER TABLE public.t ALTER COLUMN ts SET DEFAULT 'UTC+1 2026-10-15 18:00'",
+		"ConnectException: lag +12500000 behind",
+	} {
+		if got := oneLine(keep); got != keep {
+			t.Errorf("oneLine(%q) = %q, want it unchanged", keep, got)
+		}
+	}
+	for in, gone := range map[string]string{
+		"ALTER TABLE public.t ADD CONSTRAINT c CHECK (phone <> '+44 20 7946 0958')":   "7946",
+		"ALTER TABLE public.t ADD CONSTRAINT c CHECK (card <> '2223 0031 2200 3222')": "2223",
+		"ALTER ROLE app SET my.password = hunter2":                                    "hunter2",
+	} {
+		if got := oneLine(in); strings.Contains(got, gone) {
+			t.Errorf("oneLine(%q) = %q, still has %q", in, got, gone)
+		}
+	}
+}

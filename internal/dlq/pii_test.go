@@ -93,6 +93,16 @@ func TestRedactMessageCapNeverSplitsAValue(t *testing.T) {
 		{"card 4111 1111 1111 1111", "4111 1111"},
 		{"intl +44 20 7946 0958", "7946"},
 		{"jdbc:postgresql://app:S3cretPw@db:5432/orders", "S3cr"},
+		{"card 2223 0031 2200 3222", "2223 0031"},
+		{"card 2223-0031-2200-3222", "2223-0031"},
+		{"card 2221 0000 0000 0009", "2221 0000"},
+		{"card 2720 9900 0000 0007", "2720 9900"},
+		{"card 2200 0000 0000 0004", "2200 0000"},
+		{"phone 555\t123\t4567", "555 123"},
+		{"phone 555\u00a0123\u00a04567", "555 123"},
+		{"phone 555  123  4567", "555 123"},
+		{"card 4111  1111  1111  1111", "4111 1111"},
+		{"card 4111\t1111\t1111\t1111", "4111 1111"},
 	}
 	for _, v := range values {
 		for pad := 260; pad <= 300; pad++ {
@@ -129,43 +139,111 @@ func TestRedactMessageCapKeepsEvidence(t *testing.T) {
 	if got := RedactMessage(strings.Repeat("a", 1000)); len(got) != MaxMessageRunes {
 		t.Errorf("a long word is cut at the cap, got %d runes", len(got))
 	}
+	// A masked value at the cap is replaced, its key kept: the message is
+	// never emptied.
+	for in, want := range map[string]string{
+		"password=" + strings.Repeat("a", 320) + " failed to write": "password=" + Redacted,
+		"jane@" + strings.Repeat("a", 320) + ".com failed":          Redacted,
+	} {
+		if got := RedactMessage(in); got != want {
+			t.Errorf("RedactMessage(%.20q...) = %q, want %q", in, got, want)
+		}
+	}
+	// An offset the phone rule keeps is not cut out at the cap either.
+	got := RedactMessage(strings.Repeat("x ", 140) + "y offset 555 123 4567 next")
+	if !strings.Contains(got, "offset 555 123") {
+		t.Errorf("offset at the cap lost: ...%q", got[len(got)-30:])
+	}
 }
 
-// #426: E.164 and international phone numbers and a bare bearer token are
-// masked; offset ranges and positions that pass Luhn or look like a phone
-// are not.
-func TestRedactMessagePhonesBearerPositions(t *testing.T) {
+// TestRedactCorpus is the redaction corpus (docs/agents/org.md §12): every
+// text a review quoted is a row. mask: the secret part is gone. keep: the text
+// comes back unchanged (main keeps it too). gap: a value main leaks as well,
+// pinned at today's output until its follow-up ticket fixes it.
+func TestRedactCorpus(t *testing.T) {
 	tests := []struct {
-		name   string
-		in     string
-		gone   []string
-		intact []string
+		kind, in string
+		gone     string // mask: the part that must be gone
+		want     string // gap: today's output
 	}{
-		{"intl grouped", "phone +44 20 7946 0958 now", []string{"7946", "0958"}, []string{"phone", "now"}},
-		{"e164", "phone +15551234567 now", []string{"5551234567"}, []string{"phone", "now"}},
-		{"intl dashes", "tel +49-30-1234-5678.", []string{"1234-5678"}, []string{"tel"}},
-		{"bare bearer", "auth header bearer abcdef123456 sent", []string{"abcdef123456"}, []string{"auth header bearer", "sent"}},
-		{"bearer any case", "got Bearer eyJhbGciOi.x.y here", []string{"eyJhbGciOi"}, []string{"here"}},
-		{"luhn offset range", "skipped offsets 1234520-1234619 on orders-0", nil, []string{"1234520-1234619", "orders-0"}},
-		{"offset phone shape", "Topic orders-dlq partition 0 offset 555 123 4567", nil, []string{"offset 555 123 4567"}},
-		{"partition phone shape", "partitions: 555-123-4567", nil, []string{"555-123-4567"}},
-		{"short plus number", "retry +1 2 3 times", nil, []string{"+1 2 3"}},
-		{"plus offset delta", "lag +12 at 10:00", nil, []string{"+12"}},
-		{"grouped luhn bad first digit", "ids 1234 5678 9012 3452", nil, []string{"1234 5678 9012 3452"}},
-		{"grouped amex", "card 3782 822463 10005 ok", []string{"822463"}, []string{"card", "ok"}},
-		{"phone not after offset", "call 555 123 4567 now", []string{"555 123 4567"}, []string{"call", "now"}},
+		// #426: international phones and a bare bearer token are masked.
+		{kind: "mask", in: "phone +44 20 7946 0958 now", gone: "7946"},
+		{kind: "mask", in: "phone +15551234567 now", gone: "5551234567"},
+		{kind: "mask", in: "tel +49-30-1234-5678.", gone: "1234-5678"},
+		{kind: "mask", in: "phone +91-98765-43210 now", gone: "98765"},
+		{kind: "mask", in: "tel +91 98765 43210 now", gone: "98765"},
+		{kind: "mask", in: "customer at offset +44 20 7946 0958", gone: "7946"},
+		{kind: "mask", in: "phone.offset: 555-123-4567", gone: "555-123"},
+		{kind: "mask", in: "call 555 123 4567 now", gone: "555 123"},
+		{kind: "mask", in: "call +1 2 3 4 5 555-123-4567 now", gone: "123-4567"},
+		{kind: "mask", in: "auth header bearer abcdef123456 sent", gone: "abcdef123456"},
+		{kind: "mask", in: "got Bearer eyJhbGciOi.x.y here", gone: "eyJhbGciOi"},
+		{kind: "mask", in: "Authorization: Bearer x", gone: " x"},
+		{kind: "mask", in: "authorization=Basic dXNlcjpwYXNz retry", gone: "dXNlcjpwYXNz"},
+		// Cards main masks: 2-series and Mir, and every Luhn-valid grouping.
+		{kind: "mask", in: "card 2223 0031 2200 3222 declined", gone: "2223"},
+		{kind: "mask", in: "card 2223-0031-2200-3222 declined", gone: "2223"},
+		{kind: "mask", in: "card 2221 0000 0000 0009 rejected", gone: "2221"},
+		{kind: "mask", in: "card 2720 9900 0000 0007 declined", gone: "2720"},
+		{kind: "mask", in: "card 2200 0000 0000 0004 rejected", gone: "2200"},
+		{kind: "mask", in: "card 4111 11111111 1111 declined", gone: "4111"},
+		{kind: "mask", in: "card 41111111 11111111 declined", gone: "41111111"},
+		{kind: "mask", in: "card 41 11 11 11 11 11 11 11 declined", gone: "41 11"},
+		{kind: "mask", in: "card 41 1111 1111 1111 11 rejected", gone: "1111"},
+		{kind: "mask", in: "card 3782 8224 6310 005 rejected", gone: "3782"},
+		{kind: "mask", in: "card 3782-8224-6310-005 rejected", gone: "3782"},
+		{kind: "mask", in: "card 3056 9309 0259 04 rejected", gone: "3056"},
+		{kind: "mask", in: "card 4222 2222 2222 2 rejected", gone: "4222"},
+		{kind: "mask", in: "card 3782 822463 10005 ok", gone: "822463"},
+		{kind: "mask", in: "ids 1234 5678 9012 3452", gone: "1234"},
+		// #426: Kafka positions and offset ranges are kept.
+		{kind: "keep", in: "skipped offsets 1234520-1234619 on orders-0"},
+		{kind: "keep", in: "offsets 123456789-123456999 skipped"},
+		{kind: "keep", in: "Topic orders-dlq partition 0 offset 555 123 4567"},
+		{kind: "keep", in: "partitions: 555-123-4567"},
+		// Prose around "bearer" is kept.
+		{kind: "keep", in: "bearer token expired"},
+		{kind: "keep", in: "the Bearer scheme is required by the sink"},
+		{kind: "keep", in: "HTTP 401 invalid bearer token for sink"},
+		{kind: "keep", in: "missing bearer header"},
+		{kind: "keep", in: "WWW-Authenticate: Bearer realm=api, error=invalid_token"},
+		{kind: "keep", in: "Bearer realm=example rejected"},
+		// Counts, builds and zone offsets are not phones.
+		{kind: "keep", in: "consumer lag grew +12500000 messages"},
+		{kind: "keep", in: "consumer lag grew by +12500000 in 5m"},
+		{kind: "keep", in: "lag delta +123456789 records"},
+		{kind: "keep", in: "lag delta +1234567890 since 18:00"},
+		{kind: "keep", in: "build 2.7.0+20261015.1234 deployed"},
+		{kind: "keep", in: "Europe/Paris UTC+1 2026-10-15 18:00:00"},
+		{kind: "keep", in: "retry +1 2026-10-15 scheduled"},
+		{kind: "keep", in: "retry +1 2 3 times"},
+		{kind: "keep", in: "lag +12 at 10:00"},
+		// Known gaps: main leaks these too (follow-up ticket in the PR).
+		{kind: "gap", in: "tel 0049-30-123456 now", want: "tel 0049-30-123456 now"},
+		{kind: "gap", in: "phone +44 (0)20 7946 0958 now", want: "phone +44 (0)20 7946 0958 now"},
+		{kind: "gap", in: "phone +49 30 1234567 now", want: "phone +49 30 1234567 now"},
+		{kind: "gap", in: "phone +49 30 12345678 now", want: "phone +49 30 12345678 now"},
+		{kind: "gap", in: "phone 020 7946 0958 now", want: "phone 020 7946 0958 now"},
+		{kind: "gap", in: "phone: 5551234567 now", want: "phone: 5551234567 now"},
+		{kind: "gap", in: "header bearer: abc123def456 rejected", want: "header bearer: abc123def456 rejected"},
+		{kind: "gap", in: "ssn 123 45 6789 invalid", want: "ssn 123 45 6789 invalid"},
+		{kind: "gap", in: "card 2223003122003222 rejected", want: "card 2223003122003222 rejected"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		t.Run(tt.kind+" "+tt.in, func(t *testing.T) {
 			got := RedactMessage(tt.in)
-			for _, g := range tt.gone {
-				if strings.Contains(got, g) {
-					t.Errorf("RedactMessage(%q) = %q, still has %q", tt.in, got, g)
+			switch tt.kind {
+			case "mask":
+				if strings.Contains(got, tt.gone) || !strings.Contains(got, Redacted) {
+					t.Errorf("RedactMessage(%q) = %q, %q must be masked", tt.in, got, tt.gone)
 				}
-			}
-			for _, k := range tt.intact {
-				if !strings.Contains(got, k) {
-					t.Errorf("RedactMessage(%q) = %q, lost %q", tt.in, got, k)
+			case "keep":
+				if got != tt.in {
+					t.Errorf("RedactMessage(%q) = %q, want it unchanged", tt.in, got)
+				}
+			case "gap":
+				if got != tt.want {
+					t.Errorf("known gap changed: RedactMessage(%q) = %q, want %q (fixed? flip the row to mask)", tt.in, got, tt.want)
 				}
 			}
 			if again := RedactMessage(got); again != got {
@@ -185,5 +263,14 @@ func TestMaskPIIKeepsShape(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "ALTER TABLE public.t ADD CONSTRAINT c CHECK (email <> '") {
 		t.Errorf("MaskPII changed the statement: %q", got)
+	}
+	// A Postgres cast is not a key and value.
+	for _, keep := range []string{
+		"ALTER TABLE public.events ALTER COLUMN token TYPE varchar(64) USING token::varchar(64)",
+		"ALTER TABLE public.t ALTER COLUMN access_token TYPE text USING access_token::text",
+	} {
+		if got := MaskPII(keep); got != keep {
+			t.Errorf("MaskPII(%q) = %q, want it unchanged", keep, got)
+		}
 	}
 }

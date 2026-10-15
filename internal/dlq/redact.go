@@ -26,9 +26,10 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 // drivers quote the failing record in their messages, and a 300-rune cap
 // keeps exactly the part where the snippet sits, so:
 //
-//  1. cap at 300 runes; a cut that would split a value a rule of step 6
-//     masks, or a word of up to 160 runes, moves back to its start, so no
-//     part of an e-mail or a number survives the cut unmasked;
+//  1. cap at 300 runes (after white space is tidied, so a tab or a double
+//     space counts as one space); a value a rule of step 6 masks that the cut
+//     would split is replaced whole, so no part of it survives the cut; else
+//     a word of up to 160 runes the cut would split is dropped;
 //  2. drop everything from "[Source:", "Detail:" or "Where:" (any case) to
 //     the end;
 //  3. replace every balanced {...} and [...] (an unbalanced opener takes the
@@ -70,15 +71,16 @@ func RedactMessage(s string) string {
 }
 
 func redactOnce(s string) string {
-	rs := []rune(s)
+	// Tidy first: the cut must see the separators the masks see, or a
+	// "555\t123\t4567" at the cap is not found as a phone.
+	rs := tidy([]rune(s))
 	// A cut can drop the closing quote of a value: then an open single quote
 	// is a value, not an apostrophe (scrub).
 	cut := len(rs) > MaxMessageRunes
 	if cut {
-		rs = rs[:safeCut(rs)]
+		rs = safeCut(rs)
 	}
 	rs = capRunes(rs)
-	rs = tidy(rs)
 	rs = cutTail(rs)
 	rs = scrub(rs, cut)
 	rs = []rune(maskUnquoted(string(rs)))
@@ -97,13 +99,14 @@ const (
 	maxCutToken = 160
 )
 
-// safeCut returns where the first cap cuts rs (len(rs) > MaxMessageRunes):
-// at the cap, or earlier at the start of a value the cut would split. A cut
-// value no longer matches its mask ("jane.doe@exam", "123-45-678") and went
-// out in part, so the cut moves to the start of a masked value that straddles
-// the cap (also one with spaces, "4111 1111 1111 1111"), then to the start of
-// a word that straddles it.
-func safeCut(rs []rune) int {
+// safeCut makes the first cut of rs (len(rs) > MaxMessageRunes, tidied). A
+// cut value no longer matches its mask ("jane.doe@exam", "123-45-678") and
+// went out in part. So a masked value that straddles the cap (also one with
+// spaces, "4111 1111 1111 1111") is replaced by Redacted from its start;
+// otherwise the cut moves back to the start of a word that straddles the cap.
+// The word rule does not follow the value rule: it would drop the key of
+// "password=<value>" and could empty the message.
+func safeCut(rs []rune) []rune {
 	at := MaxMessageRunes
 	win := string(rs[:min(len(rs), MaxMessageRunes+cutLookahead)])
 	capByte := len(string(rs[:MaxMessageRunes]))
@@ -111,6 +114,9 @@ func safeCut(rs []rune) int {
 		if sp[0] < capByte && sp[1] > capByte {
 			at = min(at, utf8.RuneCountInString(win[:sp[0]]))
 		}
+	}
+	if at < MaxMessageRunes {
+		return append(rs[:at:at], redactedRunes...)
 	}
 	if at > 0 && at < len(rs) && !unicode.IsSpace(rs[at-1]) && !unicode.IsSpace(rs[at]) {
 		start := at
@@ -121,7 +127,7 @@ func safeCut(rs []rune) int {
 			at = start
 		}
 	}
-	return at
+	return rs[:at]
 }
 
 // capRunes is the one capping mechanism. It never leaves half a marker
