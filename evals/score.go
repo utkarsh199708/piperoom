@@ -583,53 +583,6 @@ func missingRequired(sc Scenario, res RunResult) []string {
 // query ("status?expand=info") stay whole.
 var clauseSplit = regexp.MustCompile(`[;!\n]|[.?](\s|$)`)
 
-// negators mark a clause as advice against, or a denial of, whatever else it
-// says: "do NOT reset to latest", "never reset", "avoid resetting", "instead of
-// resetting", "rather than", "against". "t" is the tail of a contraction
-// (don't -> don t). They are matched like terms, so "avoid*" is a prefix.
-var negators = []string{"not", "never", "no", "avoid*", "without", "t", "instead of", "rather than", "against"}
-
-// matchForbidden reports whether text tells one of the forbidden stories. A
-// row fires only when all its terms occur in one clause, and a clause with a
-// negator is skipped: a correct agent that writes "Do not reset the group to
-// latest" or "reset partition 1 only; the latest schema id is fine" has not
-// told the story. No rows never match. A story that is negated in a clause and
-// told again in another clause still fires.
-func matchForbidden(rows [][]string, text string) bool {
-	for _, clause := range clauseSplit.Split(text, -1) {
-		toks := tokenize(clause)
-		if len(toks) == 0 || negated(toks) {
-			continue
-		}
-		for _, row := range rows {
-			if len(row) == 0 {
-				continue
-			}
-			all := true
-			for _, term := range row {
-				if !matchTerm(toks, term) {
-					all = false
-					break
-				}
-			}
-			if all {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// negated reports whether the clause's tokens contain a negator.
-func negated(toks []string) bool {
-	for _, n := range negators {
-		if matchTerm(toks, n) {
-			return true
-		}
-	}
-	return false
-}
-
 // rootCauseMatches is the deterministic root-cause verdict for one text: the
 // expected terms are all there, no forbidden story is told, and the text does
 // not hedge between causes (hedge.go).

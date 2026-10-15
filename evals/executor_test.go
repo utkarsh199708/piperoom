@@ -179,6 +179,8 @@ func TestApprovalsOncePerProposal(t *testing.T) {
 // max_verify_calls and kept out of the investigation's tool_calls.
 func TestVerifyCallsBudget(t *testing.T) {
 	sc := loadScenario(t, "scenarios/slot-inactive-wal-growth.yaml")
+	// The test is about the default budget, not the scenario's own (C7 may set one).
+	sc.Expect.MaxVerifyCalls = 0
 	check := step{tool: "pg_replication_slots", input: map[string]any{}}
 	r, _ := evalOnce(t, sc, resumeScript(t, check, check, step{message: recoveredMessage}))
 	if !r.Pass || r.VerifyCalls != 2 || r.ToolCalls != 2 {

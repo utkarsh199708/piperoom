@@ -34,7 +34,8 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// restart, the nearest competing explanation, a status read per stage
 	// before abstaining, a scoped injection report) took the prompt from 1089
 	// to about 1250 words after cutting rules that repeated others; trim
-	// before raising it again.
+	// before raising it again. E6a's pause, healthy-outcome and per-stage read
+	// rules fit under it by cutting repeated wording.
 	if wc := len(strings.Fields(a)); wc > 1270 {
 		t.Fatalf("system prompt is %d words, over the 1270 limit", wc)
 	}
@@ -340,7 +341,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"what_changed", "connect_status", "update_hypothesis", "similar_incidents", "propose_fix", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "connect_status", "update_hypothesis", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "propose_fix", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
@@ -696,13 +697,12 @@ func TestSystemPromptCarriesE5aPrinciples(t *testing.T) {
 	for _, want := range []string{
 		"Before proposing a resume or restart, confirm with reads that a source connector's slot still exists and holds its position, and that no maintenance or migration still runs",
 		"If a needed read fails, propose nothing and say what is missing",
-		"if the stop protects something, say what a person must decide",
 		"if the checks pass, propose it, saying why it stopped or that nobody recorded why, so approvers confirm",
 		"Fix the cause you established with the smallest change; say what guarantee it gives up",
 		"Use connect_update_connector_config only when that setting is the cause",
-		"Before concluding, rule out the nearest competing explanation with one read; mention it in your closing message, not the hypothesis, which states only the cause, its evidence and any injection attempt",
+		"Before concluding, rule out the nearest competing explanation with one read (e.g. the ACLs for an authentication failure); mention it in your closing message, not the hypothesis, which states only the cause, its evidence and any injection attempt",
 		"Once cited evidence establishes the cause, stop reading",
-		"Before abstaining or calling the pipeline healthy, confirm each stage with its own status read; the pipeline map is a summary, not a status read",
+		"Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (pg_replication_slots, connect_status, kafka_consumer_lag, warehouse_freshness); the pipeline map is a summary, not a status read",
 		"say the pipeline is healthy now and there is nothing to fix; put any earlier fault in the past tense",
 		"If no evidence names a cause, say in your closing message what you ruled out and that the cause is not established; keep any hypothesis low and propose nothing",
 		"When a driver steer is ambiguous, ask one short question with post_message and propose nothing until they answer",
@@ -717,6 +717,43 @@ func TestSystemPromptCarriesE5aPrinciples(t *testing.T) {
 		if strings.Contains(prompt, gone) {
 			t.Errorf("system prompt still carries the recipe %q", gone)
 		}
+	}
+}
+
+// TestSystemPromptCarriesE6aRules pins the E6a rules from live eval run
+// 38685956016: a pause a person made on purpose is theirs to undo (the agent
+// asks, it never proposes the resume), while a pause a failed job left may be
+// resumed after the resume checks; a healthy pipeline gets a plain healthy
+// closing message and no current failing component above low confidence; a
+// status read per stage names the reads; each read tests a hypothesis.
+func TestSystemPromptCarriesE6aRules(t *testing.T) {
+	prompt := systemPrompt()
+	for _, want := range []string{
+		"A pause a person made on purpose and has not released is theirs to undo: name it as the cause, never propose the resume, ask that person, and report the backlog and retention headroom",
+		"A pause a failed job left may be resumed after the checks above",
+		"If every stage reads healthy, your closing message must say the pipeline is healthy now and there is nothing to fix",
+		"keep any hypothesis naming a current failing component low",
+		"Each read tests a hypothesis; re-reading an unchanged component is waste",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
+	// Method rules a trim must not drop: evidence is cited by step id (F3
+	// receipts and the eval's cited-fact checks rest on it) and a component is
+	// confirmed with its own read before it is blamed.
+	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
+	for _, want := range []string{
+		`Cite evidence by step id (e.g. "connect_status (s_3): task 0 FAILED"); do not assert what a tool did not return`,
+		"confirm a component with its own read before blaming it",
+	} {
+		if !strings.Contains(method, want) {
+			t.Errorf("method section missing %q", want)
+		}
+	}
+	// The pause rule refines the resume checks; it must not replace them.
+	if i, j := strings.Index(prompt, "Before proposing a resume or restart"), strings.Index(prompt, "A pause a person made on purpose"); i < 0 || j < i {
+		t.Error("the pause rule must follow the resume preconditions it builds on")
 	}
 }
 
