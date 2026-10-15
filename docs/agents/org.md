@@ -157,3 +157,9 @@ adversarial reviewer that tries to break the change) and one merged verdict comm
 ticket is really fixed by a test that fails without the fix. The authoring session is subscribed to its PR and fixes
 CHANGES REQUESTED items. APPROVED + green PRs are sent to the LEAD-ARCH session, which does the architecture check and
 merges. A PR APPROVED and green for more than 2 hours without a merge is reported to the human.
+
+**Matching and grading changes (LEAD-ARCH, 2026-10-15).** Eval scorer rows, matchers, redaction rules and
+tokenizers change corpus-first: a regression found by example texts is fixed by committing those texts to the
+package's corpus or golden test, then changing rules. No such change merges if it flips a text that `main` grades
+or masks correctly; it may fix texts the corpus lists as known gaps. A ticket whose fix cannot meet that bar with
+rules alone is split out of its PR and redone after the matcher work it depends on (#384 → #332 after #395).
