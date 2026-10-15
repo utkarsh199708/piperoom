@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import { flushSync } from 'react-dom'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { CircleCheck, Copy, Download, FileText, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Sun, UserCheck } from 'lucide-react'
@@ -12,7 +13,7 @@ import {
   CommandList,
   CommandShortcut,
 } from '@/components/ui/command'
-import { handOverFocus, usable } from '@/components/room/useRestoreFocus'
+import { handOverFocus, takeHandedOver, usable } from '@/components/room/useRestoreFocus'
 import { Kbd } from '@/components/ui/kbd'
 import { isFixtures } from '@/api/client'
 import type { RoomSnapshot } from '@/api/types'
@@ -47,8 +48,9 @@ export function CommandMenu({
   const { theme, toggleTheme } = useTheme()
   // What closed the menu: null = Esc or a click outside (Radix would focus the dialog's trigger, and
   // there is none, so onCloseAutoFocus returns focus to the opener itself), 'dialog' = an action that
-  // opens a dialog (it keeps the focus), 'other' = anything else. Reset each time the menu opens.
-  const closedBy = useRef<'dialog' | 'other' | null>(null)
+  // opens a dialog (it keeps the focus), 'keep' = an action that cannot remove the opener (theme,
+  // copy, export: focus goes back to it), 'other' = anything else. Reset each time the menu opens.
+  const closedBy = useRef<'dialog' | 'keep' | 'other' | null>(null)
   const mod = modKeyLabel()
   // What had focus before the palette opened. Read while rendering the opening frame, before
   // Radix moves focus into the palette. A dialog notes document.activeElement when it mounts, and
@@ -67,15 +69,21 @@ export function CommandMenu({
   const room = open ? registry.get() : null
   const sorted = sortRoomsForList(rooms).slice(0, 25)
 
-  const run = (fn: () => void, opensDialog = false) => {
-    closedBy.current = opensDialog ? 'dialog' : 'other'
+  const run = (fn: () => void, kind: 'dialog' | 'keep' | 'other' = 'other') => {
+    closedBy.current = kind
     const from = opener.current
     onOpenChange(false)
     // After the menu has closed, so a dialog it opens (hand-off, trace) keeps the focus.
     window.setTimeout(() => {
       // The dialog returns focus to it on close, if it is still usable then, else to #main.
-      if (opensDialog) handOverFocus(from)
-      fn()
+      if (kind === 'dialog') handOverFocus(from)
+      // Render now, so a dialog the action mounts has taken the slot before it is checked below.
+      flushSync(fn)
+      // Nothing took the slot: the dialog was already open (⌘K from inside it), so no new dialog will
+      // place focus. Put it back where it was, else on #main, never <body>.
+      if (kind === 'dialog' && takeHandedOver()) {
+        ;[from, document.getElementById('main')].find(usable)?.focus()
+      }
     }, 0)
   }
 
@@ -92,7 +100,7 @@ export function CommandMenu({
       onCloseAutoFocus={(e) => {
         e.preventDefault()
         if (closedBy.current === 'dialog') return
-        const back = closedBy.current === null && usable(returnTo.current) ? returnTo.current : null
+        const back = (closedBy.current === null || closedBy.current === 'keep') && usable(returnTo.current) ? returnTo.current : null
         ;(back ?? document.getElementById('main'))?.focus()
       }}
     >
@@ -136,7 +144,7 @@ export function CommandMenu({
               <CommandItem
                 value="hand off the room"
                 keywords={['handoff', 'shift', 'transfer']}
-                onSelect={() => run(() => registry.get()?.handoff?.(), true)}
+                onSelect={() => run(() => registry.get()?.handoff?.(), 'dialog')}
               >
                 <GitCompareArrows aria-hidden="true" />
                 Hand off the room
@@ -146,7 +154,7 @@ export function CommandMenu({
               <CommandItem
                 value="trace a record through the pipeline"
                 keywords={['record', 'key', 'table']}
-                onSelect={() => run(() => registry.get()?.trace?.(), true)}
+                onSelect={() => run(() => registry.get()?.trace?.(), 'dialog')}
               >
                 <Route aria-hidden="true" />
                 Trace a record through the pipeline
@@ -156,7 +164,7 @@ export function CommandMenu({
               <CommandItem
                 value="close the room"
                 keywords={['resolve', 'resolution', 'finish', 'done']}
-                onSelect={() => run(() => registry.get()?.closeRoom?.(), true)}
+                onSelect={() => run(() => registry.get()?.closeRoom?.(), 'dialog')}
               >
                 <CircleCheck aria-hidden="true" />
                 Close the room
@@ -166,7 +174,7 @@ export function CommandMenu({
               <CommandItem
                 value="copy invite link"
                 keywords={['share', 'url']}
-                onSelect={() => run(() => registry.get()?.invite?.())}
+                onSelect={() => run(() => registry.get()?.invite?.(), 'keep')}
               >
                 <Copy aria-hidden="true" />
                 Copy invite link
@@ -176,7 +184,7 @@ export function CommandMenu({
               <CommandItem
                 value="export room as json"
                 keywords={['download', 'audit', 'hash']}
-                onSelect={() => run(() => registry.get()?.exportJson?.())}
+                onSelect={() => run(() => registry.get()?.exportJson?.(), 'keep')}
               >
                 <Download aria-hidden="true" />
                 Export room as JSON
@@ -186,7 +194,7 @@ export function CommandMenu({
               <CommandItem
                 value="post-mortem draft"
                 keywords={['markdown', 'retro', 'summary']}
-                onSelect={() => run(() => registry.get()?.postmortem?.(), true)}
+                onSelect={() => run(() => registry.get()?.postmortem?.(), 'dialog')}
               >
                 <FileText aria-hidden="true" />
                 Post-mortem draft
@@ -225,7 +233,7 @@ export function CommandMenu({
         </CommandGroup>
 
         <CommandGroup heading="Account">
-          <CommandItem value="toggle theme dark light" onSelect={() => run(toggleTheme)}>
+          <CommandItem value="toggle theme dark light" onSelect={() => run(toggleTheme, 'keep')}>
             {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
             Toggle theme
             <Keys>
