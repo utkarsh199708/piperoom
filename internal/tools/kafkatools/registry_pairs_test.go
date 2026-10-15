@@ -8,6 +8,9 @@ type schemaPair struct{ name, from, to string }
 func pRec(fields ...string) string {
 	return `{"type":"record","name":"R","fields":[` + strings.Join(fields, ",") + `]}`
 }
+func pRecNS(ns string, fields ...string) string {
+	return `{"type":"record","name":"R","namespace":"` + ns + `","fields":[` + strings.Join(fields, ",") + `]}`
+}
 func pF(name, typ string) string { return `{"name":"` + name + `","type":` + typ + `}` }
 func pArr(items string) string   { return `{"type":"array","items":` + items + `}` }
 func pMap(vals string) string    { return `{"type":"map","values":` + vals + `}` }
@@ -68,6 +71,23 @@ var diffPairs = []schemaPair{
 	{"nested record in array changed",
 		pRec(pF("f", pArr(`{"type":"record","name":"N","fields":[{"name":"x","type":"int"}]}`))),
 		pRec(pF("f", pArr(`{"type":"record","name":"N","fields":[{"name":"x","type":"long"}]}`)))},
+	{"external ref in array, short vs full, enclosing namespace",
+		pRecNS("com.x", pF("a", pArr(`"Addr"`))), pRecNS("com.x", pF("a", pArr(`"com.x.Addr"`)))},
+	{"external ref in array, short vs full, no namespace",
+		pRec(pF("a", pArr(`"Addr"`))), pRec(pF("a", pArr(`"com.x.Addr"`)))},
+	{"external ref in map, short vs full, enclosing namespace",
+		pRecNS("com.x", pF("m", pMap(`"Addr"`))), pRecNS("com.x", pF("m", pMap(`"com.x.Addr"`)))},
+	{"external ref in map, short vs full, no namespace",
+		pRec(pF("m", pMap(`"Addr"`))), pRec(pF("m", pMap(`"com.x.Addr"`)))},
+	{"external ref in union in array, short vs full, enclosing namespace",
+		pRecNS("com.x", pF("a", pArr(`["null","Addr"]`))), pRecNS("com.x", pF("a", pArr(`["null","com.x.Addr"]`)))},
+	{"external ref in union in array, short vs full, no namespace",
+		pRec(pF("a", pArr(`["null","Addr"]`))), pRec(pF("a", pArr(`["null","com.x.Addr"]`)))},
+	{"type defined in v1 only, external reference in v2",
+		pRecNS("com.x", pF("a", pArr(`{"type":"record","name":"Addr","fields":[{"name":"z","type":"int"}]}`))),
+		pRecNS("com.x", pF("a", pArr(`"Addr"`)))},
+	{"gap #493: top-level external ref, short vs full",
+		pRec(pF("a", `"Addr"`)), pRec(pF("a", `"com.x.Addr"`))},
 	{"gap #493: plain-field definition vs reference",
 		pRec(pF("a", pEnum("S", "", "A")), pF("b", `"S"`)),
 		pRec(pF("b", pEnum("S", "", "A")), pF("a", `"S"`))},
@@ -80,21 +100,29 @@ type pairVerdict struct{ main, want, why string }
 const noChange = "no field changes"
 
 var pairVerdicts = map[string]pairVerdict{
-	"round1 reorder arrays enum def/ref":                   {main: noChange, want: noChange},
-	"round1 dropped defining field":                        {main: "- R.status: enum:S", want: "- R.status: enum:S"},
-	"map enum def moves to ref":                            {main: noChange, want: noChange},
-	"fixed decimal in array, fields swapped":               {main: noChange, want: noChange},
-	"fixed duration in map, fields swapped":                {main: noChange, want: noChange},
-	"same short enum name, two namespaces, swapped":        {main: noChange, want: noChange},
-	"same short enum name, field added before":             {main: "+ R.z: enum:S", want: "+ R.z: enum:S"},
-	"symbol added on the second same-name enum":            {main: noChange, want: "enum q.S: symbols → +Y", why: "#425: enum symbols are compared"},
-	"namespace attribute vs dotted reference in array":     {main: noChange, want: noChange},
-	"inherited namespace, short reference in array":        {main: noChange, want: noChange},
-	"unchanged: every named-type position":                 {main: noChange, want: noChange},
-	"unchanged: Geometry reused through a union reference": {main: noChange, want: noChange},
-	"enum symbol removed":                                  {main: noChange, want: "enum E: symbols → -B", why: "#425: enum symbols are compared"},
-	"array item type changed":                              {main: noChange, want: "R.f: array<int> → array<long>", why: "#425: array items are compared"},
-	"nested record in array changed":                       {main: "N.x: int → long", want: "N.x: int → long"},
+	"round1 reorder arrays enum def/ref":                                 {main: noChange, want: noChange},
+	"round1 dropped defining field":                                      {main: "- R.status: enum:S", want: "- R.status: enum:S"},
+	"map enum def moves to ref":                                          {main: noChange, want: noChange},
+	"fixed decimal in array, fields swapped":                             {main: noChange, want: noChange},
+	"fixed duration in map, fields swapped":                              {main: noChange, want: noChange},
+	"same short enum name, two namespaces, swapped":                      {main: noChange, want: noChange},
+	"same short enum name, field added before":                           {main: "+ R.z: enum:S", want: "+ R.z: enum:S"},
+	"symbol added on the second same-name enum":                          {main: noChange, want: "enum q.S: symbols → +Y", why: "#425: enum symbols are compared"},
+	"namespace attribute vs dotted reference in array":                   {main: noChange, want: noChange},
+	"inherited namespace, short reference in array":                      {main: noChange, want: noChange},
+	"unchanged: every named-type position":                               {main: noChange, want: noChange},
+	"unchanged: Geometry reused through a union reference":               {main: noChange, want: noChange},
+	"enum symbol removed":                                                {main: noChange, want: "enum E: symbols → -B", why: "#425: enum symbols are compared"},
+	"array item type changed":                                            {main: noChange, want: "R.f: array<int> → array<long>", why: "#425: array items are compared"},
+	"nested record in array changed":                                     {main: "N.x: int → long", want: "N.x: int → long"},
+	"external ref in array, short vs full, enclosing namespace":          {main: noChange, want: noChange},
+	"external ref in array, short vs full, no namespace":                 {main: noChange, want: noChange},
+	"external ref in map, short vs full, enclosing namespace":            {main: noChange, want: noChange},
+	"external ref in map, short vs full, no namespace":                   {main: noChange, want: noChange},
+	"external ref in union in array, short vs full, enclosing namespace": {main: noChange, want: noChange},
+	"external ref in union in array, short vs full, no namespace":        {main: noChange, want: noChange},
+	"type defined in v1 only, external reference in v2":                  {main: "- Addr.z: int", want: "- Addr.z: int"},
 	// Known gap, same as main, pinned for follow-up #493.
-	"gap #493: plain-field definition vs reference": {main: "R.a: enum:S → S\nR.b: S → enum:S", want: "R.a: enum:S → S\nR.b: S → enum:S"},
+	"gap #493: top-level external ref, short vs full": {main: "R.a: Addr → com.x.Addr", want: "R.a: Addr → com.x.Addr"},
+	"gap #493: plain-field definition vs reference":   {main: "R.a: enum:S → S\nR.b: S → enum:S", want: "R.a: enum:S → S\nR.b: S → enum:S"},
 }

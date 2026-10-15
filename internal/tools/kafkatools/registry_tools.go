@@ -279,7 +279,6 @@ func formatChanges(changes []fieldChange) string {
 type schemaIndex struct {
 	fields map[string]string
 	enums  map[string][]string // full enum name → symbols
-	types  map[string]bool     // full names of every named type defined
 }
 
 // recordFields flattens every record field in an Avro schema into name→canonical type.
@@ -288,8 +287,7 @@ func recordFields(schema string) (schemaIndex, error) {
 	if err := json.Unmarshal([]byte(schema), &root); err != nil {
 		return schemaIndex{}, err
 	}
-	idx := schemaIndex{fields: map[string]string{}, enums: map[string][]string{}, types: map[string]bool{}}
-	collectNames(root, "", idx.types) // first pass: references need every definition
+	idx := schemaIndex{fields: map[string]string{}, enums: map[string][]string{}}
 	walkFields(root, "", idx)
 	return idx, nil
 }
@@ -321,33 +319,8 @@ func qualify(m map[string]any, name, enclosing string) (full, ns string) {
 	return ns + "." + name, ns
 }
 
-// resolveRef gives a by-name reference its full name: dotted names are
-// already full, a short one is looked up in the enclosing namespace first.
-func resolveRef(ref, ns string, types map[string]bool) string {
-	if strings.Contains(ref, ".") || ns == "" || !types[ns+"."+ref] {
-		return ref
-	}
-	return ns + "." + ref
-}
-
-// collectNames records the full name of every named type in the schema.
-func collectNames(node any, ns string, types map[string]bool) {
-	switch v := node.(type) {
-	case map[string]any:
-		if name, ok := namedKind(v); ok {
-			full, childNS := qualify(v, name, ns)
-			types[full] = true
-			ns = childNS
-		}
-		for _, val := range v {
-			collectNames(val, ns, types)
-		}
-	case []any:
-		for _, x := range v {
-			collectNames(x, ns, types)
-		}
-	}
-}
+// shortName drops the namespace of a type name.
+func shortName(n string) string { return n[strings.LastIndex(n, ".")+1:] }
 
 func walkFields(node any, ns string, idx schemaIndex) {
 	switch v := node.(type) {
@@ -389,7 +362,7 @@ func walkFields(node any, ns string, idx schemaIndex) {
 				key = recordName + "." + fname
 			}
 			if _, exists := idx.fields[key]; !exists {
-				idx.fields[key] = canon(fm["type"], false, ns, idx.types)
+				idx.fields[key] = canon(fm["type"], false)
 			}
 			walkFields(fm["type"], ns, idx)
 		}
@@ -404,24 +377,25 @@ var avroPrimitives = map[string]bool{"null": true, "boolean": true, "int": true,
 
 // canon renders an Avro type as a compact, comparable string. Enum symbols are
 // compared separately (see enumChanges), so an enum prints as its name. Inside
-// array items and map values (elem) a named type is written by its full name
-// whether it is defined there or only referenced, so moving the definition
-// between fields is not a change. Outside them the text is unchanged (gap #493).
-func canon(t any, elem bool, ns string, types map[string]bool) string {
+// array items and map values (elem) a named type is written by its short name
+// whether it is defined there, defined elsewhere or only referenced (a type
+// from another subject cannot be resolved here), so moving a definition or
+// writing a reference short or full is not a change. Outside them the text is
+// unchanged (gap #493).
+func canon(t any, elem bool) string {
 	switch v := t.(type) {
 	case string:
 		if elem && !avroPrimitives[v] {
-			return resolveRef(v, ns, types)
+			return shortName(v)
 		}
 		return v
 	case map[string]any:
 		vt, _ := v["type"].(string)
 		if _, nested := v["type"].(map[string]any); nested {
-			return canon(v["type"], elem, ns, types) // {"type":{"type":"array",...}}
+			return canon(v["type"], elem) // {"type":{"type":"array",...}}
 		}
 		if name, ok := v["name"].(string); ok && elem {
-			full, _ := qualify(v, name, ns)
-			return full // before logicalType: a named fixed must match its reference
+			return shortName(name) // before logicalType: a named fixed must match its reference
 		}
 		if lt, ok := v["logicalType"].(string); ok {
 			if vt == "bytes" && lt == "decimal" {
@@ -431,9 +405,9 @@ func canon(t any, elem bool, ns string, types map[string]bool) string {
 		}
 		switch vt {
 		case "array":
-			return "array<" + canon(v["items"], true, ns, types) + ">"
+			return "array<" + canon(v["items"], true) + ">"
 		case "map":
-			return "map<" + canon(v["values"], true, ns, types) + ">"
+			return "map<" + canon(v["values"], true) + ">"
 		}
 		if name, ok := v["name"].(string); ok {
 			if vt == "" {
@@ -448,7 +422,7 @@ func canon(t any, elem bool, ns string, types map[string]bool) string {
 	case []any:
 		parts := make([]string, len(v))
 		for i, x := range v {
-			parts[i] = canon(x, elem, ns, types)
+			parts[i] = canon(x, elem)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
