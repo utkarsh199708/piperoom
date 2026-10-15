@@ -10,11 +10,13 @@ import { useTheme } from '@/context/theme'
 import { useCurrentUser } from '@/context/user'
 import { roomsNeedingYou, useListAttention } from '@/hooks/useListAttention'
 import { useRoomList } from '@/hooks/useRoomList'
+import { useOwnerPages } from '@/hooks/useOwnerPages'
 import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, RoomListContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
 import { isEditableTarget } from './keys'
 import { pipelineSummaries } from './pipelines'
 import { BrandMark } from './BrandMark'
+import { PagedBanner } from './PagedBanner'
 import { SidebarContent } from './Sidebar'
 import { ThemeToggle } from './ThemeToggle'
 
@@ -131,6 +133,8 @@ export function AppShell() {
   const roomId = location.pathname.startsWith('/rooms/') ? safeDecode(location.pathname.split('/')[2] ?? '') : ''
   const currentPipelineId = rooms.find((r) => r.id === roomId)?.pipeline_id
   useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`))
+  // Q0 (G2): a banner (and a browser notification, if allowed) when someone pages this person.
+  const paged = useOwnerPages(rooms, user, roomsLoading, roomId)
 
   return (
     <InShellContext.Provider value>
@@ -199,6 +203,13 @@ export function AppShell() {
                     <ThemeToggle />
                   </div>
                 </header>
+                <PagedBanner
+                  items={paged.unseen}
+                  onDismiss={paged.dismiss}
+                  onDismissAll={paged.dismissAll}
+                  permission={paged.permission}
+                  onEnableNotifications={() => void paged.enable()}
+                />
                 <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scroll-padding-bottom:calc(var(--composer-h,0px)+var(--sheet-h,0px))] [scroll-padding-top:3rem] focus:outline-none">
                   <div className="min-h-full">
                     <Outlet />
