@@ -570,3 +570,29 @@ func TestNudgeWithoutPagingConfigIsReplyOnly(t *testing.T) {
 		t.Errorf("requests=%d pages=%d", fs.count(), n)
 	}
 }
+
+// With the default limits a re-nudge inside the 10-minute user gap is not
+// paged, one after it is, and another proposal is subject to the same gap.
+func TestPagingNudgeIntervals(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	st := &fakeStore{evs: []events.Event{created, nudgeEvent(2, "p1", "kafka")}}
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, st, fs, func(o *Options) { o.Paging = pagingOpts() })
+	now := time.Unix(1700000000, 0)
+	b.pager.now = func() time.Time { return now }
+	step := func(after time.Duration, e events.Event, wantPages int) {
+		t.Helper()
+		now = now.Add(after)
+		st.evs = append(st.evs, e)
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_ = b.Run(ctx, "r1")
+		if n, _ := mentionCount(fs.reqs); n != wantPages {
+			t.Fatalf("pages = %d, want %d", n, wantPages)
+		}
+	}
+	step(0, nudgeEvent(3, "p1", "kafka"), 1)              // first nudge pages once (seq 2); seq 3 is inside the gap
+	step(11*time.Minute, nudgeEvent(4, "p1", "kafka"), 2) // after the gap: pages again
+	step(time.Minute, nudgeEvent(5, "p2", "kafka"), 2)    // another proposal inside the gap: blocked
+	step(11*time.Minute, nudgeEvent(6, "p2", "kafka"), 3) // and its own page after the gap
+}
