@@ -321,7 +321,7 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	if len(scan.Truncated) > 0 {
 		// Matches past the cut would be newer than any listed: say so before
 		// the list can be read as complete.
-		fmt.Fprintf(&sb, "\nmax_scan %d stopped the scan before the end of partition(s) %v: newer matches may exist there; use a later since or a larger max_scan", maxScan, scan.Truncated)
+		fmt.Fprintf(&sb, "\nthe scan stopped (max_scan %d or the time limit) before the end of partition(s) %v: newer matches may exist there; use a later since or a larger max_scan", maxScan, scan.Truncated)
 		data["truncated_partitions"] = scan.Truncated
 	}
 	return res(sb.String(), data), nil

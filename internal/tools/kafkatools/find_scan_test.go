@@ -45,7 +45,7 @@ func TestFindByKeyReportsTruncation(t *testing.T) {
 			}
 			tool, _ := reg.Get("kafka_find_by_key")
 			r := runTool(t, tool, `{"topic":"t","key":"k","since":"2026-10-11T00:00:00Z","max_scan":10}`)
-			if !strings.Contains(r.Summary, tt.want) || !strings.Contains(r.Summary, "max_scan 10 stopped the scan before the end of partition(s) ") {
+			if !strings.Contains(r.Summary, tt.want) || !strings.Contains(r.Summary, "the scan stopped (max_scan 10 or the time limit) before the end of partition(s) ") {
 				t.Fatalf("summary %q: want %q and the truncation line", r.Summary, tt.want)
 			}
 			data, _ := r.Data.(map[string]any)
