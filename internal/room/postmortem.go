@@ -363,19 +363,62 @@ func (f *pmFold) prose() pmProse {
 // process ("One handoff failed", "Agent summary lines were truncated") and not
 // about the incident. The log already shows those events in the timeline; in
 // "Still open" or "Risks" they read as problems of the pipeline. The match is
-// deliberately narrow: a line must name the summary or the hand-off together
-// with a failure or a cut.
+// deliberately narrow: a line must name the summary or the hand-off as a word
+// (not part of an identifier such as orders_summary, and not followed by a
+// data noun such as "table": QA F12) together with a failure or a cut.
 func isHandoffNoise(line string) bool {
 	l := strings.ToLower(line)
 	cut := containsAny(l, "truncat", "cut off", "clipped", "shortened")
-	if strings.Contains(l, "summary") && cut {
+	if cut && hasProcessWord(l, "summary", "summaries") {
 		return true
 	}
-	if containsAny(l, "hand-off", "handoff", "hand off") &&
+	if hasProcessWord(l, "hand-off", "handoff", "hand off", "hand-offs", "handoffs") &&
 		(cut || containsAny(l, "fail", "time out", "timed out", "timeout", "retried", "retry")) {
 		return true
 	}
 	return false
+}
+
+// dataNouns follow a word that names a data object, not the agent's summary
+// or the hand-off ("summary table", "summary rows").
+var dataNouns = map[string]bool{
+	"table": true, "tables": true, "view": true, "views": true, "row": true, "rows": true,
+	"column": true, "columns": true, "partition": true, "partitions": true, "topic": true,
+	"topics": true, "job": true, "jobs": true, "load": true, "loads": true, "data": true,
+	"record": true, "records": true, "schema": true, "file": true, "files": true,
+}
+
+// hasProcessWord reports whether l (lower case) holds one of words as a word
+// of its own: no identifier character (letter, digit, _ . - /) right before or
+// after it, and the next word not a data noun.
+func hasProcessWord(l string, words ...string) bool {
+	for _, w := range words {
+		for from := 0; from < len(l); {
+			i := strings.Index(l[from:], w)
+			if i < 0 {
+				break
+			}
+			i += from
+			end := i + len(w)
+			from = i + 1
+			if i > 0 && isIdentByte(l[i-1]) {
+				continue
+			}
+			if end < len(l) && isIdentByte(l[end]) {
+				continue
+			}
+			next := strings.Fields(strings.TrimLeft(l[end:], " \t,:;"))
+			if len(next) > 0 && dataNouns[strings.Trim(next[0], ".,;:!?()")] {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func isIdentByte(b byte) bool {
+	return b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '_' || b == '.' || b == '-' || b == '/'
 }
 
 func containsAny(s string, subs ...string) bool {

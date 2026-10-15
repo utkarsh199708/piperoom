@@ -24,6 +24,16 @@ func TestIsHandoffNoise(t *testing.T) {
 		{"The log line was truncated by the broker", false},
 		{"Tool output was truncated", false},
 		{"", false},
+		// QA F12: a table or object named "summary" is the incident, not
+		// the hand-off.
+		{"orders_summary table was truncated by the failed reload; rows missing", false},
+		{"daily-summary was truncated by the reload", false},
+		{"summary.orders was truncated", false},
+		{"The summary table was truncated by the failed reload", false},
+		{"order summary rows were cut off by the failed load", false},
+		{"handoff_log table truncated", false},
+		{"Summaries were truncated", true},
+		{"The closing summary was truncated", true},
 	}
 	for _, c := range cases {
 		if got := isHandoffNoise(c.line); got != c.want {
