@@ -171,6 +171,9 @@ type RoomSnapshot struct {
 	Members            []Member     `json:"members"`
 	// Insight is the room's cost and clock facts (F11), folded from the log.
 	Insight Insight `json:"insight"`
+	// Pages is the newest owner.paged per layer, in seq order, while the
+	// room is open; [] on a closed room (Q0, service_page.go).
+	Pages []Page `json:"pages"`
 
 	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
 	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
@@ -210,6 +213,10 @@ type RoomSnapshot struct {
 	// proposal.created (a replay over a snapshot); it is attached when the
 	// proposal appears.
 	pendingPreviews map[string]events.ProposalPreviewedPayload
+
+	// facts are the alert source, suspected layer, newest activity and
+	// auto-page mark the watcher and paging code read (Q1, foldRoomFacts).
+	facts roomFacts
 
 	// Postmortem is the closing draft's state (F2): "none", "drafting" from
 	// room.closed until postmortem.drafted or postmortem.failed, "drafted" or
@@ -271,6 +278,7 @@ func NewSnapshot() RoomSnapshot {
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
 		ChecklistDone:      map[string]ChecklistTick{},
+		Pages:              []Page{},
 	}
 }
 
@@ -318,6 +326,7 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
 	c.ChecklistDone = cloneTicks(s.ChecklistDone)
+	c.Pages = clonePages(s.Pages)
 	return c
 }
 
@@ -689,6 +698,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
 		}
 	}
+	foldRoomFacts(&snap, e) // Q1: pages, alert facts, activity (service_page.go)
 
 	return normalize(snap)
 }
@@ -751,6 +761,9 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 	}
 	if snap.PendingSuggestions == nil {
 		snap.PendingSuggestions = []Suggestion{}
+	}
+	if snap.Pages == nil {
+		snap.Pages = []Page{}
 	}
 	if snap.AgentStatus.State == "" {
 		snap.AgentStatus.State = "idle"
