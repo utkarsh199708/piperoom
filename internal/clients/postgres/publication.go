@@ -118,7 +118,10 @@ type sourceTable struct {
 // sourcePrivileges reports, for each table in tables, whether it is a member
 // of publication and whether role has SELECT on it. Membership is checked
 // against pg_publication_tables so FOR ALL TABLES / FOR TABLES IN SCHEMA
-// publications are handled correctly.
+// publications are handled correctly. pg_publication_tables lists only the
+// leaf partitions of a partitioned table (publish_via_partition_root = false)
+// or only its root (true), so a table is a member when a listed relation is
+// the table, one of its partitions or one of its partition ancestors (#400).
 func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tables []string) ([]PublicationTable, error) {
 	sources := make([]sourceTable, 0, len(tables))
 	for _, t := range tables {
@@ -136,7 +139,7 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	args := []any{publication, role}
 	sb.WriteString(`
 		SELECT v.schemaname, v.tablename,
-		       (pt.pubname IS NOT NULL) AS in_publication,
+		       EXISTS (` + publishedRelative("c.oid") + `) AS in_publication,
 		       (c.oid IS NOT NULL AND has_table_privilege($2::name, c.oid, 'SELECT')) AS selectable
 		FROM (VALUES `)
 	for i := range sources {
@@ -147,8 +150,6 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		args = append(args, sources[i].schema, sources[i].table)
 	}
 	sb.WriteString(`) AS v(pos, schemaname, tablename)
-		LEFT JOIN pg_publication_tables pt
-		  ON pt.pubname = $1 AND pt.schemaname = v.schemaname AND pt.tablename = v.tablename
 		LEFT JOIN pg_namespace n ON n.nspname = v.schemaname
 		LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.tablename
 		ORDER BY v.pos`)
@@ -171,4 +172,19 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		return nil, fmt.Errorf("postgres: read publication %q source privileges: %w", publication, err)
 	}
 	return out, nil
+}
+
+// publishedRelative is a subquery with a row for each relation that
+// publication $1 lists (pg_publication_tables) and that is the relation rel,
+// one of its partitions, or one of its partition ancestors.
+// pg_partition_ancestors (PG 12+) is empty for a table that is not in a
+// partition tree, hence the plain equality.
+func publishedRelative(rel string) string {
+	return `SELECT 1 FROM pg_publication_tables pt
+		JOIN pg_namespace pn ON pn.nspname = pt.schemaname
+		JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = pt.tablename
+		WHERE pt.pubname = $1
+		  AND (pc.oid = ` + rel + `
+		       OR ` + rel + ` IN (SELECT relid FROM pg_partition_ancestors(pc.oid))
+		       OR pc.oid IN (SELECT relid FROM pg_partition_ancestors(` + rel + `)))`
 }

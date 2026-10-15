@@ -252,14 +252,22 @@ func (d *DB) PublicationSourceTables(ctx context.Context, publication, role stri
 		schemas = append(schemas, schema)
 		names = append(names, tbl)
 	}
+	// A partition (or partition root) of a pipeline table is that table, not
+	// another member (#400).
 	var other int
 	if err := d.queryRow(ctx, `
 		SELECT count(*)
 		FROM pg_publication_tables pt
+		JOIN pg_namespace pn ON pn.nspname = pt.schemaname
+		JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = pt.tablename
 		WHERE pt.pubname = $1
 		  AND NOT EXISTS (
 		      SELECT 1 FROM unnest($2::text[], $3::text[]) AS v(nsp, relname)
-		      WHERE v.nsp = pt.schemaname AND v.relname = pt.tablename)`, publication, schemas, names).Scan(&other); err != nil {
+		      JOIN pg_namespace vn ON vn.nspname = v.nsp
+		      JOIN pg_class vc ON vc.relnamespace = vn.oid AND vc.relname = v.relname
+		      WHERE vc.oid = pc.oid
+		         OR vc.oid IN (SELECT relid FROM pg_partition_ancestors(pc.oid))
+		         OR pc.oid IN (SELECT relid FROM pg_partition_ancestors(vc.oid)))`, publication, schemas, names).Scan(&other); err != nil {
 		return nil, 0, fmt.Errorf("postgres: count other publication %q tables: %w", publication, err)
 	}
 	return sources, other, nil
