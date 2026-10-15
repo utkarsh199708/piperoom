@@ -250,7 +250,7 @@ expect:
     - [missing, 'does not exist', gone, lost, 'did not carry logical slot debezium_orders',
        'did not carry the logical slot debezium_orders', 'didn''t carry logical slot debezium_orders',
        'didn''t carry the logical slot debezium_orders',
-       'doesn''t exist', 'debezium_orders no longer exists', 'debezium_orders is not present']
+       'debezium_orders doesn''t exist', 'slot doesn''t exist', 'debezium_orders no longer exists', 'debezium_orders is not present']
     - [failover, promot*, standby, 'new primary']
   first_failing_layer: postgres
   root_cause_layer: postgres
