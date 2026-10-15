@@ -54,9 +54,8 @@ var pemRule = rule{
 var baseRules = []rule{
 	// user:password@ in URLs and DSNs (postgres://, jdbc:mysql://, amqp://...).
 	{
-		kind: KindURLPass,
-		find: anchoredAt("://", isSchemeChar, 30,
-			regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://([^\s:/@?#"'<>]*):([^\s@/"'<>]+)@`)),
+		kind:   KindURLPass,
+		find:   urlFind,
 		groups: []int{2},
 		style:  styleSecret,
 		pre:    containsAny("://"),
@@ -154,20 +153,39 @@ var baseRules = []rule{
 	{
 		kind:    KindKeyValue,
 		find:    kvFind,
-		groups:  []int{2, 3, 4, 5},
-		pre:     containsAny(kvWords...),
+		groups:  kvValueGroups,
+		pre:     kvPre,
 		ok:      kvOK,
 		styleOf: kvStyle,
 	},
 }
 
 // kvAnchored matches one key/value pair starting at a candidate key: group 1
-// is the key, groups 2-5 the value: escaped-quoted (\"...\" inside a JSON
-// string or a Go %q error), double-quoted, single-quoted, bare. A bare value
-// ends at whitespace, so a password with spaces is masked only up to its
-// first space (key=value text has no way to say where such a value ends).
-var kvAnchored = regexp.MustCompile(`^(?:\\?["'])?([A-Za-z][A-Za-z0-9_.-]{1,63})(?:\\?["'])?[ \t]*(?:=|:)[ \t]*` +
-	`(?:\\"((?:[^"\\\n]|\\[^"\n])*)\\"|"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)'|([^\s,;&"'}\])<>\\]+))`)
+// is the key, groups 2-9 the value. Closed values come first: escaped twice
+// (\\\"...\\\" in JSON inside JSON inside JSON), escaped-quoted (\"...\" inside a
+// JSON string or a Go %q error), double-quoted, single-quoted, bare. Then
+// quoted values whose closing quote is not on this line: they run to the end
+// of the line (a truncated summary, or a value continued on the next line;
+// see continuation). The separator may be URL-encoded (%3D, %3A).
+//
+// A bare value ends at whitespace, so an unquoted password with spaces is
+// masked only up to its first space: "password=a b c" and "password=abc
+// retries=3" cannot be told apart, and key=value lines are far more common.
+var kvAnchored = regexp.MustCompile(`^(?:\\{0,3}["'])?([A-Za-z][A-Za-z0-9_.-]{1,63})(?:\\{0,3}["'])?[ \t]*(?:=|:|%3[DdAa])[ \t]*` +
+	`(?:\\\\\\"((?:[^"\\\n]|\\[^"\n])*?)\\\\\\"|\\"((?:[^"\\\n]|\\[^"\n])*)\\"|"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)'|([^\s,;&"'}\])<>\\]+)` +
+	`|\\"((?:[^"\\\r\n]|\\[^"\r\n])*)\\?\r?$|"((?:[^"\\\r\n]|\\[^\r\n])*)\\?\r?$|'([^'\r\n]*)\r?$)`)
+
+// kvValueGroups are the value groups of kvAnchored, in order.
+var kvValueGroups = []int{2, 3, 4, 5, 6, 7, 8, 9}
+
+// Value groups of kvAnchored that need care: the bare value, and the quoted
+// values left open at the end of the line.
+const (
+	kvBare       = 6
+	kvOpenEsc    = 7
+	kvOpenDouble = 8
+	kvOpenSingle = 9
+)
 
 // kvWords are the fragments a secret key name contains; secretKey makes the
 // real decision.
@@ -201,16 +219,19 @@ func kvFind(s, lower string) [][]int {
 			}
 			off = ke
 			j := ke
-			if j+1 < len(s) && s[j] == '\\' && (s[j+1] == '"' || s[j+1] == '\'') {
+			// A quoted key may be escaped up to three times.
+			for b := 0; b < 3 && j+1 < len(s) && s[j] == '\\'; b++ {
 				j++
 			}
 			if j < len(s) && (s[j] == '"' || s[j] == '\'') {
 				j++
+			} else if j > ke && s[j-1] == '\\' {
+				continue
 			}
 			for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
 				j++
 			}
-			if j >= len(s) || (s[j] != '=' && s[j] != ':') {
+			if j >= len(s) || (s[j] != '=' && s[j] != ':' && encodedSep(s, j) == 0) {
 				continue
 			}
 			for ks < p && !isLetter(s[ks]) {
@@ -249,10 +270,51 @@ func kvFind(s, lower string) [][]int {
 		if !kvOK(s, m) {
 			continue
 		}
+		trimEncoded(s, m)
 		out = append(out, m)
 		last = m[1]
 	}
 	return out
+}
+
+// kvPre is the prefilter of the key/value rule.
+var kvPre = containsAny(kvWords...)
+
+// encodedSep returns the length of a URL-encoded '=' or ':' at s[j] ("%3D",
+// "%3A", any case), or 0.
+func encodedSep(s string, j int) int {
+	if j+2 < len(s) && s[j] == '%' && s[j+1] == '3' {
+		switch s[j+2] | 0x20 {
+		case 'd', 'a':
+			return 3
+		}
+	}
+	return 0
+}
+
+// trimEncoded ends a bare value at an encoded '&' ("%26") when its key was
+// followed by an encoded separator: in URL-encoded text that is where the
+// next parameter starts, while a raw '%' in a plain value is just a byte.
+func trimEncoded(s string, m []int) {
+	g := 2 * kvBare
+	if m[g] < 0 || m[g] < 3 || encodedSep(s, sepBefore(s, m)) == 0 {
+		return
+	}
+	v := strings.ToLower(s[m[g]:m[g+1]])
+	if i := strings.Index(v, "%26"); i >= 0 {
+		m[g+1] = m[g] + i
+		m[1] = m[g+1]
+	}
+}
+
+// sepBefore returns where the separator between the key and the value of
+// match m starts.
+func sepBefore(s string, m []int) int {
+	j := m[3]
+	for j < len(s) && (s[j] == '\\' || s[j] == '"' || s[j] == '\'' || s[j] == ' ' || s[j] == '\t') {
+		j++
+	}
+	return j
 }
 
 var emailRule = rule{
@@ -423,7 +485,7 @@ func secretKey(k string) keyStrength {
 
 func kvGroups(s string, m []int) (key, val string) {
 	key = s[m[2]:m[3]]
-	for _, g := range []int{2, 3, 4, 5} {
+	for _, g := range kvValueGroups {
 		if m[2*g] >= 0 {
 			return key, s[m[2*g]:m[2*g+1]]
 		}
@@ -553,6 +615,98 @@ func anchoredAt(needle string, back func(byte) bool, maxBack int, re *regexp.Reg
 			off = max(m[1], p+len(needle))
 		}
 		return out
+	}
+}
+
+// urlUserinfo matches the scheme and user of a URL with a password; urlFind
+// decides where the password ends.
+var urlUserinfo = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://([^\s:/@?#"'<>]*):`)
+
+// urlFind finds user:password@ in URLs, laid out as [match, user, password].
+// A password may hold a raw '@' or '/' (postgres://app:p@ss/w@db/x): such a
+// URL no longer parses one way, so the password runs to the last '@' that is
+// followed by a plausible host and comes before the query of the first such
+// host. That can over-mask a path holding "@host" (never under-mask); an
+// '@' right after a '/' (npm's /@scope/) never ends a password. With no
+// plausible host at all, the password ends at the first '@', as long as no
+// '/' comes before it.
+func urlFind(s, lower string) [][]int {
+	var out [][]int
+	last := 0
+	for _, m := range urlStarts(s, lower) {
+		if m[0] < last {
+			continue
+		}
+		ps := m[1]
+		te := ps
+		for te < len(s) && !isURLStop(s[te]) {
+			te++
+		}
+		end := -1
+		for i := ps; i < te; i++ {
+			switch s[i] {
+			case '?', '#':
+				if end >= 0 {
+					te = i
+				}
+			case '@':
+				if i > ps && s[i-1] != '/' && urlHost(s[i+1:te]) {
+					end = i
+				}
+			}
+		}
+		if end < 0 {
+			i := strings.IndexByte(s[ps:te], '@')
+			if i <= 0 || strings.IndexByte(s[ps:ps+i], '/') >= 0 {
+				continue
+			}
+			end = ps + i
+		}
+		out = append(out, []int{m[0], end + 1, m[2], m[3], ps, end})
+		last = end + 1
+	}
+	return out
+}
+
+// urlStarts finds scheme://user: prefixes.
+var urlStarts = anchoredAt("://", isSchemeChar, 30, urlUserinfo)
+
+func isURLStop(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '"' || c == '\'' || c == '<' || c == '>'
+}
+
+// urlHost reports whether h starts with a host list (host[:port][,host...],
+// IPv6 in brackets) followed by the end, '/', '?' or '#'. An empty host
+// counts when a path follows (postgres://u:p@/db?host=/sock).
+func urlHost(h string) bool {
+	i := 0
+	for {
+		st := i
+		if i < len(h) && h[i] == '[' {
+			j := strings.IndexByte(h[i:min(len(h), i+64)], ']')
+			if j < 0 {
+				return false
+			}
+			i += j + 1
+		} else {
+			for i < len(h) && (isLetter(h[i]) || h[i] >= '0' && h[i] <= '9' || h[i] == '.' || h[i] == '-' || h[i] == '_') {
+				i++
+			}
+		}
+		if i < len(h) && h[i] == ':' {
+			i++
+			for i < len(h) && h[i] >= '0' && h[i] <= '9' {
+				i++
+			}
+		}
+		if i == st && !(i < len(h) && h[i] == '/') {
+			return false
+		}
+		if i < len(h) && h[i] == ',' {
+			i++
+			continue
+		}
+		return i == len(h) || h[i] == '/' || h[i] == '?' || h[i] == '#'
 	}
 }
 

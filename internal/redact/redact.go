@@ -13,11 +13,21 @@
 //
 // Passwords and short values keep no characters at all.
 //
-// Known gaps: a URL password holding a raw '@' or '/' (postgres://app:p@ss@db)
-// is not found, since the URL no longer parses one way; a bare key=value
-// password containing spaces is masked only up to its first space; JAAS
-// configs escaped twice (\\\"...\\\", JSON inside JSON inside JSON) are not
-// matched by the key=value rule.
+// Values that run past a line break are followed onto the next line: a
+// quoted value to its closing quote (or, continued with a backslash, over
+// the whole line), a bare value into the next line's first token when the
+// previous line ended in a backslash or that token reads like a credential's
+// tail. A URL password may hold a raw '@' or '/'; a key/value separator may
+// be URL-encoded (password%3D...); quotes may be escaped up to three times.
+//
+// Known gaps: an unquoted password with spaces is masked only up to its
+// first space ("password=a b" reads the same as "password=a retries=3"); a
+// password wrapped onto the next line whose tail is a plain word, a number
+// or holds ':' stays, as do tails after the first continued line of an
+// unquoted value; an unclosed quoted value is followed onto the next line
+// only when its own line holds an odd number of that quote; a URL whose path holds "@host" may lose the
+// host to the mask (over-masking, not a leak); a wrapped tail such as
+// orders_v2 after a password line is masked although it is evidence.
 package redact
 
 import (
@@ -201,6 +211,7 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	lower := asciiLower(s)
 	var b strings.Builder
 	changed := false
+	var open openValue
 	for start := 0; start <= len(s); {
 		end := strings.IndexByte(s[start:], '\n')
 		if end < 0 {
@@ -208,9 +219,22 @@ func (r *Redactor) scan(s string) (string, Stats) {
 		} else {
 			end += start
 		}
-		line := s[start:end]
-		out := r.lineFixed(line, lower[start:end], &st)
-		if out != line && !changed {
+		line, lowerLine := s[start:end], lower[start:end]
+		if open.ok {
+			// The previous line left a secret value open: mask its tail here
+			// first, then run the line rules over the result.
+			line, open = continuation(line, open, &st)
+			if line != s[start:end] {
+				lowerLine = asciiLower(line)
+			}
+		}
+		if end < len(s) {
+			if from := openFrom(line, s[end+1:min(len(s), end+1+128)]); from >= 0 && kvPre(line[from:], lowerLine[from:]) {
+				open = openAtEOL(line[from:], lowerLine[from:], open)
+			}
+		}
+		out := r.lineFixed(line, lowerLine, &st)
+		if out != s[start:end] && !changed {
 			changed = true
 			b.Grow(len(s) + 64)
 			b.WriteString(s[:start])
