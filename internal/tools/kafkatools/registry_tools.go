@@ -275,10 +275,11 @@ func formatChanges(changes []fieldChange) string {
 }
 
 // schemaIndex is what a diff compares: every record field's canonical type,
-// plus the symbols of every enum definition.
+// plus the symbols of every enum definition, keyed by full name.
 type schemaIndex struct {
 	fields map[string]string
-	enums  map[string][]string // short enum name → symbols
+	enums  map[string][]string // full enum name → symbols
+	types  map[string]bool     // full names of every named type defined
 }
 
 // recordFields flattens every record field in an Avro schema into name→canonical type.
@@ -287,19 +288,78 @@ func recordFields(schema string) (schemaIndex, error) {
 	if err := json.Unmarshal([]byte(schema), &root); err != nil {
 		return schemaIndex{}, err
 	}
-	idx := schemaIndex{fields: map[string]string{}, enums: map[string][]string{}}
-	walkFields(root, idx)
+	idx := schemaIndex{fields: map[string]string{}, enums: map[string][]string{}, types: map[string]bool{}}
+	collectNames(root, "", idx.types) // first pass: references need every definition
+	walkFields(root, "", idx)
 	return idx, nil
 }
 
-func walkFields(node any, idx schemaIndex) {
+// namedKind reports whether m defines a named Avro type (record, enum, fixed).
+func namedKind(m map[string]any) (name string, ok bool) {
+	name, _ = m["name"].(string)
+	switch m["type"] {
+	case "record", "enum", "fixed", "error":
+		return name, name != ""
+	}
+	return "", false
+}
+
+// qualify returns the full name of a definition and the namespace its
+// children inherit, following Avro: a dotted name carries its own namespace,
+// else the namespace attribute, else the enclosing one.
+func qualify(m map[string]any, name, enclosing string) (full, ns string) {
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		return name, name[:i]
+	}
+	ns = enclosing
+	if a, ok := m["namespace"].(string); ok {
+		ns = a
+	}
+	if ns == "" {
+		return name, ns
+	}
+	return ns + "." + name, ns
+}
+
+// resolveRef gives a by-name reference its full name: dotted names are
+// already full, a short one is looked up in the enclosing namespace first.
+func resolveRef(ref, ns string, types map[string]bool) string {
+	if strings.Contains(ref, ".") || ns == "" || !types[ns+"."+ref] {
+		return ref
+	}
+	return ns + "." + ref
+}
+
+// collectNames records the full name of every named type in the schema.
+func collectNames(node any, ns string, types map[string]bool) {
+	switch v := node.(type) {
+	case map[string]any:
+		if name, ok := namedKind(v); ok {
+			full, childNS := qualify(v, name, ns)
+			types[full] = true
+			ns = childNS
+		}
+		for _, val := range v {
+			collectNames(val, ns, types)
+		}
+	case []any:
+		for _, x := range v {
+			collectNames(x, ns, types)
+		}
+	}
+}
+
+func walkFields(node any, ns string, idx schemaIndex) {
 	switch v := node.(type) {
 	case map[string]any:
 		if v["type"] == "enum" {
-			name := shortName(v["name"])
-			if _, exists := idx.enums[name]; !exists {
-				for _, x := range anySlice(v["symbols"]) {
-					idx.enums[name] = append(idx.enums[name], fmt.Sprint(x))
+			if name, ok := namedKind(v); ok {
+				full, _ := qualify(v, name, ns)
+				if _, exists := idx.enums[full]; !exists {
+					idx.enums[full] = []string{}
+					for _, x := range anySlice(v["symbols"]) {
+						idx.enums[full] = append(idx.enums[full], fmt.Sprint(x))
+					}
 				}
 			}
 			return
@@ -307,11 +367,14 @@ func walkFields(node any, idx schemaIndex) {
 		fields, hasFields := v["fields"].([]any)
 		if !hasFields {
 			for _, val := range v {
-				walkFields(val, idx)
+				walkFields(val, ns, idx)
 			}
 			return
 		}
 		recordName, _ := v["name"].(string)
+		if recordName != "" {
+			_, ns = qualify(v, recordName, ns)
+		}
 		for _, f := range fields {
 			fm, ok := f.(map[string]any)
 			if !ok {
@@ -326,44 +389,39 @@ func walkFields(node any, idx schemaIndex) {
 				key = recordName + "." + fname
 			}
 			if _, exists := idx.fields[key]; !exists {
-				idx.fields[key] = canonType(fm["type"])
+				idx.fields[key] = canon(fm["type"], false, ns, idx.types)
 			}
-			walkFields(fm["type"], idx)
+			walkFields(fm["type"], ns, idx)
 		}
 	case []any:
 		for _, x := range v {
-			walkFields(x, idx)
+			walkFields(x, ns, idx)
 		}
 	}
 }
 
-// shortName drops the namespace: a reference inside the defining namespace
-// uses the short form, so only the short form is the same at both places.
-func shortName(n any) string {
-	s := fmt.Sprint(n)
-	return s[strings.LastIndex(s, ".")+1:]
-}
-
 var avroPrimitives = map[string]bool{"null": true, "boolean": true, "int": true, "long": true, "float": true, "double": true, "bytes": true, "string": true}
 
-// canonType renders an Avro type as a compact, comparable string. Enum symbols
-// are compared separately (see enumChanges), so an enum prints as its name.
-func canonType(t any) string { return canon(t, false) }
-
-// canon renders t. Inside array items and map values (elem) a named type is
-// written by its short name whether it is defined there or only referenced, so
-// moving the definition between fields is not a change.
-func canon(t any, elem bool) string {
+// canon renders an Avro type as a compact, comparable string. Enum symbols are
+// compared separately (see enumChanges), so an enum prints as its name. Inside
+// array items and map values (elem) a named type is written by its full name
+// whether it is defined there or only referenced, so moving the definition
+// between fields is not a change. Outside them the text is unchanged (gap #493).
+func canon(t any, elem bool, ns string, types map[string]bool) string {
 	switch v := t.(type) {
 	case string:
 		if elem && !avroPrimitives[v] {
-			return shortName(v)
+			return resolveRef(v, ns, types)
 		}
 		return v
 	case map[string]any:
 		vt, _ := v["type"].(string)
 		if _, nested := v["type"].(map[string]any); nested {
-			return canon(v["type"], elem) // {"type":{"type":"array",...}}
+			return canon(v["type"], elem, ns, types) // {"type":{"type":"array",...}}
+		}
+		if name, ok := v["name"].(string); ok && elem {
+			full, _ := qualify(v, name, ns)
+			return full // before logicalType: a named fixed must match its reference
 		}
 		if lt, ok := v["logicalType"].(string); ok {
 			if vt == "bytes" && lt == "decimal" {
@@ -373,14 +431,11 @@ func canon(t any, elem bool) string {
 		}
 		switch vt {
 		case "array":
-			return "array<" + canon(v["items"], true) + ">"
+			return "array<" + canon(v["items"], true, ns, types) + ">"
 		case "map":
-			return "map<" + canon(v["values"], true) + ">"
+			return "map<" + canon(v["values"], true, ns, types) + ">"
 		}
 		if name, ok := v["name"].(string); ok {
-			if elem {
-				return shortName(name)
-			}
 			if vt == "" {
 				return "record:" + name
 			}
@@ -393,7 +448,7 @@ func canon(t any, elem bool) string {
 	case []any:
 		parts := make([]string, len(v))
 		for i, x := range v {
-			parts[i] = canon(x, elem)
+			parts[i] = canon(x, elem, ns, types)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	}

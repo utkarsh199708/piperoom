@@ -149,7 +149,7 @@ func TestDiffNamedTypeDefinitionVsReference(t *testing.T) {
 	}
 }
 
-// Known gap, same as main: outside array/map a definition and a by-name
+// Known gap (follow-up #493), same as main: outside array/map a definition and a by-name
 // reference to the same type render differently. Pinned so a fix is noticed.
 func TestDiffGapPlainFieldDefinitionVsReference(t *testing.T) {
 	enum := `{"type":"enum","name":"S","symbols":["A"]}`
@@ -172,5 +172,28 @@ func TestEnumDeltaIsCompact(t *testing.T) {
 	ch, _ := diffFields(mk(syms), mk(syms[:599]))
 	if len(ch) != 1 || len(formatChanges(ch)) > 100 {
 		t.Errorf("changes %+v, text %q", ch, formatChanges(ch))
+	}
+}
+
+// TestDiffCorpus runs the schema-pair corpus. A row may differ from main only
+// where #425 names the case, and must say why.
+func TestDiffCorpus(t *testing.T) {
+	for _, p := range diffPairs {
+		v, ok := pairVerdicts[p.name]
+		if !ok {
+			t.Fatalf("pair %q has no verdict", p.name)
+		}
+		t.Run(p.name, func(t *testing.T) {
+			if v.want != v.main && v.why == "" {
+				t.Fatalf("want differs from main without a reason")
+			}
+			ch, err := diffFields(p.from, p.to)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := formatChanges(ch); got != v.want {
+				t.Errorf("got %q, want %q (main: %q)", got, v.want, v.main)
+			}
+		})
 	}
 }
