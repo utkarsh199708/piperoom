@@ -21,6 +21,8 @@ describe('neutralizeBadgeText: spellings of "verified"', () => {
     ['negative squared', '🆅🅴🆁🅸🅵🅸🅴🅳'],
     ['negative circled', '🅥🅔🅡🅘🅕🅘🅔🅓'],
     ['Cherokee small letters', 'ꮩꭼꭱꮖꮀꮖꭼꭰ'],
+    ['Cherokee small letters with ꮢ', 'ꮩꭼꮢꮖꮀꮖꭼꭰ'],
+    ['Cherokee capitals with Ꮢ', 'ᏙᎬᏒᏆᎰᏆᎬᎠ'],
     ['℮ for e', 'v℮rified'],
     ['ⱱ for v', 'ⱱerified'],
     ['ⱴ for v', 'ⱴerified'],

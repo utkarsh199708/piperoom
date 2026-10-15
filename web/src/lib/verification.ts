@@ -117,6 +117,10 @@ const CONFUSABLE: Record<string, string> = {
   '\ua4e6': 'v', '\ua4f0': 'e', '\ua4e3': 'r', '\ua4f2': 'i', '\ua4dd': 'f', '\ua4d3': 'd', '\ua4f4': 'u', '\ua4e0': 'n',
   // Cherokee capitals (they lower-case to U+AB70…, so the lookup tries the raw letter first): "ᏙᎬᎡᏆᎰᏆᎬᎠ".
   '\u13d9': 'v', '\u13ac': 'e', '\u13a1': 'r', '\u13c6': 'i', '\u13b0': 'f', '\u13a0': 'd',
+  // The rest of the Cherokee Latin look-alikes. Ꮮ reads as "l", which folds to "i" like Latin l.
+  '\u13aa': 'a', '\u13f4': 'b', '\u13df': 'c', '\u13c0': 'g', '\u13bb': 'h', '\u13ab': 'j', '\u13e6': 'k',
+  '\u13de': 'i', '\u13b7': 'm', '\u13c1': 'n', '\u13be': 'o', '\u13e2': 'p', '\u13d2': 'r', '\u13da': 's',
+  '\u13d4': 't', '\u13b3': 'w', '\u13c3': 'z',
   // More look-alikes: Cyrillic ғ (what "small caps generator" sites emit for f), Canadian Syllabics ᐯ,
   // logical-or signs, ℮, Latin extended ⱱ ⱴ, Old Italic 𐌖.
   '\u0493': 'f', '\u142f': 'v', '\u2228': 'v', '\u22c1': 'v', '\u212e': 'e', '\u2c71': 'v', '\u2c74': 'v', '\u{10316}': 'v',
