@@ -269,13 +269,15 @@ func (s *PG) DeleteRoom(ctx context.Context, d RoomDeletion, wantSeq int64) (Roo
 			return fmt.Errorf("store: delete room %s: archived %d events, room has %d: %w", d.RoomID, wantSeq, lastSeq, ErrRoomChanged)
 		}
 		// The service's busy check sees only its own replica's executor; the
-		// claim is the record every replica shares. A claim committed after
-		// this read loses its row to the delete below, so its executor's
-		// StartClaimedStep fails with ErrClaimLost before any action runs.
-		var executing bool
-		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM proposals WHERE room_id = $1 AND status = 'open' AND claimed_by IS NOT NULL)`,
-			d.RoomID).Scan(&executing); err != nil {
+		// claim is the record every replica shares. The rooms row lock does
+		// not stop ClaimProposal or StartClaimedStep (they touch only the
+		// proposals tables), and the delete below runs for minutes on a long
+		// log, so the room's open proposals are locked here: a claim already
+		// written is seen (FOR UPDATE waits for it and reads the committed
+		// row), and a claim attempted later waits for this transaction and
+		// then finds no row.
+		executing, err := openProposalClaimed(ctx, tx, d.RoomID)
+		if err != nil {
 			return fmt.Errorf("store: delete room %s: check claims: %w", d.RoomID, err)
 		}
 		if executing {
@@ -323,4 +325,26 @@ func (s *PG) GetRoomDeletion(ctx context.Context, roomID string) (RoomDeletion, 
 	}
 	d.DeletedAt = d.DeletedAt.UTC()
 	return d, nil
+}
+
+// openProposalClaimed locks the room's open proposal rows for the rest of tx
+// and reports whether any of them is claimed by an executor.
+func openProposalClaimed(ctx context.Context, tx pgx.Tx, roomID string) (bool, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT claimed_by FROM proposals WHERE room_id = $1 AND status = 'open' FOR UPDATE`, roomID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	claimed := false
+	for rows.Next() {
+		var by *string
+		if err := rows.Scan(&by); err != nil {
+			return false, err
+		}
+		if by != nil && *by != "" {
+			claimed = true
+		}
+	}
+	return claimed, rows.Err()
 }
