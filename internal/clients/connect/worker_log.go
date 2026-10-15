@@ -447,6 +447,39 @@ func cutMessage(s string) string {
 // but may sit inside Debezium's "Postgres|pg-orders|streaming" or Connect's
 // "[pg-orders|task-0]" and "WorkerSourceTask{id=pg-orders-0}".
 func mentionsConnector(text, name string) bool {
+	return mentionsName(text, name) || mentionsDebeziumThread(text, name)
+}
+
+// MentionsName reports whether text names name (a connector, its task, or a
+// Debezium logical name) by the same rules the reader filters with.
+func MentionsName(text, name string) bool { return name != "" && mentionsConnector(text, name) }
+
+// mentionsDebeziumThread matches Debezium's own thread names, which carry the
+// logical name (topic.prefix) behind a joined prefix, e.g.
+// "debezium-postgresconnector-pg-change-event-source-coordinator". The plain
+// token rule cannot see it because '-' joins names.
+func mentionsDebeziumThread(text, name string) bool {
+	if name == "" {
+		return false
+	}
+	for from := 0; from < len(text); {
+		i := strings.Index(text[from:], "debezium-")
+		if i < 0 {
+			return false
+		}
+		rest := text[from+i+len("debezium-"):]
+		if j := strings.Index(rest, "connector-"); j > 0 && !strings.ContainsAny(rest[:j], " \t|[]") {
+			tail := rest[j+len("connector-"):]
+			if strings.HasPrefix(tail, name) && (len(tail) == len(name) || tail[len(name)] == '-' || !isNameRune(rune(tail[len(name)]))) {
+				return true
+			}
+		}
+		from += i + 1
+	}
+	return false
+}
+
+func mentionsName(text, name string) bool {
 	for from := 0; from < len(text); {
 		i := strings.Index(text[from:], name)
 		if i < 0 {
