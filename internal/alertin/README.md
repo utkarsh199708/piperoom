@@ -30,7 +30,10 @@ A source with no secret is disabled, and every request for it fails `ErrUnauthen
 1. the alert's own `pipeline` or `pipeline_id` label, tag or field;
 2. for PagerDuty, the service ID looked up in `Config.PagerDutyServices`;
 3. the single `owners.yaml` pipeline whose connector, consumer group or table the alert mentions (label
-   values exactly, or whole names in the title or summary);
+   values exactly, or whole names in the title or summary). Only the first `MaxMatchTextRunes` (2000) runes
+   of each title or description are scanned, and only the first `MaxLabelValues` (256) label values are
+   compared, each cut to `MaxLabelRunes` (256). A name past those limits is not matched. Explicit
+   `pipeline` / `pipeline_id` labels are read directly and are not affected by these limits;
 4. `Config.DefaultPipeline`.
 
 If more than one pipeline matches in step 3, no guess is made. `Alert.PipelineVia` records which step
