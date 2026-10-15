@@ -114,9 +114,11 @@ type Deps struct {
 
 	// Sessions lets LookupPerson find a person who is not in users.yaml by their
 	// newest live session (design section 2.1). Nil: users.yaml only.
-	// SessionIdle is the idle limit that decides whether a session is live.
+	// SessionLive is the rule that decides whether a session is live: the
+	// server's auth.Settings.Liveness, so a session no request may use is
+	// never listed or given control (#417).
 	Sessions    auth.Store
-	SessionIdle time.Duration
+	SessionLive auth.Liveness
 	// ViewerGroups are the IdP groups that let a person in as a viewer
 	// (PIPEROOM_AUTH_VIEWER_GROUPS).
 	ViewerGroups []string
@@ -281,7 +283,7 @@ type Service struct {
 	slots           *agentSlots // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store
-	sessionIdle     time.Duration
+	sessionLive     auth.Liveness
 	viewerGroups    map[string]struct{}
 	soloUser        string
 	limits          config.Limits
@@ -408,7 +410,7 @@ func New(d Deps) *Service {
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,
-		sessionIdle:     d.SessionIdle,
+		sessionLive:     d.SessionLive,
 		viewerGroups:    groupSet(d.ViewerGroups),
 		soloUser:        d.SoloUser,
 		limits:          d.Limits,

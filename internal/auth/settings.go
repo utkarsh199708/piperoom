@@ -61,6 +61,16 @@ func Default() Settings {
 // IsOIDC reports whether the mode is oidc.
 func (s Settings) IsOIDC() bool { return s.Mode == ModeOIDC }
 
+// Liveness is the session rule under these settings (Liveness): idle and max
+// always, and only oidc sessions in oidc mode.
+func (s Settings) Liveness() Liveness {
+	l := Liveness{Idle: s.Idle, Max: s.Max}
+	if s.IsOIDC() {
+		l.Method = MethodOIDC
+	}
+	return l
+}
+
 // CookieName is the session cookie name for the mode.
 func (s Settings) CookieName() string {
 	if s.IsOIDC() {

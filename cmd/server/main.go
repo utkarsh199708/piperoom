@@ -398,7 +398,7 @@ func run() error {
 		MaxAgentsGlobal:   maxAgentsGlobal,
 		ResumeOnTakeover:  resumeOnTakeover,
 		Sessions:          sessions,
-		SessionIdle:       authSettings.Idle,
+		SessionLive:       authSettings.Liveness(),
 		ViewerGroups:      authSettings.ViewerGroups,
 		SoloUser:          soloUser,
 		Limits:            limits,

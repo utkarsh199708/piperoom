@@ -18,8 +18,11 @@ ci: go-ci web-ci
 
 go-ci: fmt vet build test evals
 
+# gofmt prints a parse error to stderr and nothing to stdout, so the exit status
+# of the pipeline is checked on its own: `test -z "$(...)"` alone would pass.
 fmt:
-	test -z "$$(find . -name '*.go' -not -path './web/node_modules/*' -not -path './.git/*' -print0 | xargs -0 $(GOFMT) -l)"
+	@out="$$(find . -name '*.go' -not -path './web/node_modules/*' -not -path './.git/*' -print0 | xargs -0 $(GOFMT) -l)" || { echo "make fmt: gofmt failed (a file does not parse?)" >&2; exit 1; }; \
+	if [ -n "$$out" ]; then echo "$$out"; echo "make fmt: files above are not gofmt-clean" >&2; exit 1; fi
 
 # Same tag sets as CI (.github/workflows/ci.yml, Go job).
 vet:

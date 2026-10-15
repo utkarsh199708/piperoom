@@ -40,6 +40,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: gofmt
         run: |
           fmt_out="$(gofmt -l .)"
@@ -104,6 +107,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: Start the dev stack (postgres, kafka, schema registry, connect, devconsumer)
         # No --wait: wait-for-stack.sh polls Connect's REST API itself, with a
         # bounded timeout, and dumps the container logs when it gives up.
@@ -181,6 +187,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: go test -race
         run: go test -race -count=1 ./...
 
@@ -198,6 +207,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      # setup-go (v6+) exports GOTOOLCHAIN=local to every later step: `go` never
+      # downloads another toolchain. A tool pinned below whose go.mod needs a Go
+      # newer than go.mod's here fails to install; bump the toolchain in go.mod first.
       - name: Install govulncheck (built with the same Go as the other jobs)
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: govulncheck (fails on reachable findings not in the reviewed allowlist)
@@ -226,6 +241,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      # setup-go (v6+) exports GOTOOLCHAIN=local to every later step: `go` never
+      # downloads another toolchain. A tool pinned below whose go.mod needs a Go
+      # newer than go.mod's here fails to install; bump the toolchain in go.mod first.
       - name: Install helm and kubeconform (pinned, built from source by the Go module proxy)
         run: |
           go install helm.sh/helm/v3/cmd/helm@v3.16.3
@@ -277,6 +298,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: Run test/e2e/oidc/run.sh
         run: test/e2e/oidc/run.sh
       - name: Upload stack logs
@@ -285,6 +309,7 @@ jobs:
         with:
           name: oidc-e2e-logs
           path: test/e2e/oidc/.logs
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
