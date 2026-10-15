@@ -94,7 +94,12 @@ jobs:
       - name: Start the dev stack (postgres, roomdb, kafka, schema registry, connect, devconsumer)
         # No --wait: wait-for-stack.sh polls Connect's REST API itself, with a
         # bounded timeout, and dumps the container logs when it gives up.
-        run: docker compose -f dev/docker-compose.yml up -d --build
+        # The Connect worker-log mount first, writable, as `devctl up` makes it:
+        # left to compose it would be created root-owned, and devctl's chmod of
+        # it below would then fail (operation not permitted).
+        run: |
+          mkdir -p dev/.logs/connect && chmod 0777 dev/.logs/connect
+          docker compose -f dev/docker-compose.yml up -d --build
       - name: Wait until Connect and the Schema Registry answer
         run: .github/scripts/wait-for-stack.sh 300
       - name: Register the connector (devctl up is idempotent)
