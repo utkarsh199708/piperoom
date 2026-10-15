@@ -60,6 +60,7 @@ type flags struct {
 	compare     string
 	agreement   string
 	tolerance   float64
+	learned     string
 	failOnRegr  bool
 	check       bool
 	fromShadow  string
@@ -67,6 +68,8 @@ type flags struct {
 	name        string
 	verbose     bool
 	prices      string
+	commit      string
+	noTap       bool
 	// args are the positional arguments: the candidate of -compare a.json b.json.
 	args []string
 }
@@ -108,6 +111,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.out, "out", "", "write the JSON report here")
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
 	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
+	fs.StringVar(&f.learned, "learned", "", "private directory of learned scenarios (evals/README.md): its *.yaml join the default set, and -check also validates its pending/ subdirectory, which is never replayed; without the flag nothing learned is read")
 	fs.StringVar(&f.baseline, "baseline", "", "after the run, compare against this earlier report")
 	fs.StringVar(&f.compare, "compare", "", "BASE.json CANDIDATE.json (or BASE.json,CANDIDATE.json): compare two reports, with a paired run-by-run comparison, and exit; no model calls")
 	fs.StringVar(&f.prices, "prices", "", "model price table (JSON, as PIPEROOM_MODEL_PRICES) for cost per run; default PIPEROOM_MODEL_PRICES")
@@ -121,6 +125,8 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.name, "name", "", "scenario name for -from-shadow (default shadow-<room id>)")
 	fs.StringVar(&f.out, "o", "", "same as -out")
 	fs.BoolVar(&f.verbose, "v", false, "show the agent's own logs")
+	fs.StringVar(&f.commit, "commit", "", "source revision to record in every result (default: the build's VCS stamp, else git rev-parse HEAD)")
+	fs.BoolVar(&f.noTap, "no-tap", false, "do not put the model tap in front of the Anthropic API; results then record prompt_hash \"untapped\"")
 	// Go's flag package stops at the first positional argument; parse on after
 	// each one so "-compare a.json b.json -fail-on-regression" keeps its flag.
 	for {
@@ -182,7 +188,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	scenarios, err := evals.LoadScenarios(dir)
+	scenarios, pending, err := loadSet(f, dir)
 	if err != nil {
 		return 1, err
 	}
@@ -190,6 +196,10 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		return 1, err
 	}
 	if f.check {
+		// -check also validates learned/pending/ so a fresh export is at least
+		// well-formed. Pending files are never replayed (loadSet keeps them out
+		// of scenarios).
+		scenarios = append(scenarios, pending...)
 		defs, err := evals.LiveTools()
 		if err != nil {
 			return 1, err
@@ -201,14 +211,19 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			for _, w := range sc.Warnings() {
 				fmt.Fprintf(stderr, "warning: %s: %s\n", sc.Name, w)
 			}
+			for _, n := range sc.Notes() {
+				fmt.Fprintf(stderr, "note: %s: %s\n", sc.Name, n)
+			}
 		}
 		fmt.Fprintf(stdout, "%d scenario(s) OK\n", len(scenarios))
 		return 0, nil
 	}
 
+	cfg := config.Load()
 	// Fail before any work rather than after the first model call; the key
-	// itself is read by the SDK and never touched or logged here.
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+	// itself is read by the SDK and never touched or logged here. Bedrock
+	// and Vertex use their own credentials.
+	if p := strings.ToLower(strings.TrimSpace(cfg.ModelProvider)); (p == "" || p == agent.ProviderAnthropic) && os.Getenv("ANTHROPIC_API_KEY") == "" {
 		return 1, errors.New("ANTHROPIC_API_KEY is not set (use -check to validate scenarios without it)")
 	}
 	var baseline *evals.Report
@@ -220,7 +235,6 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		baseline = &b
 	}
 
-	cfg := config.Load()
 	pricesFile := f.prices
 	if pricesFile == "" {
 		pricesFile = cfg.ModelPrices
@@ -258,8 +272,32 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The agent runs as in cmd/server: the room service starts the Endpoint
+	// that wiring.NewAgentEndpoint builds. The tap goes in first, because the
+	// SDK reads its base URL when the Endpoint's client is built.
+	var tap *evals.ModelTap
+	if !f.noTap {
+		if tap, err = evals.InstallModelTap(cfg.ModelProvider); err != nil {
+			return 1, err
+		}
+		if tap != nil {
+			defer tap.Close()
+		}
+	}
+	runner, err := evals.NewEndpointRunner(ctx, cfg, logger)
+	if err != nil {
+		return 1, err
+	}
+	commit := f.commit
+	if commit == "" {
+		commit = evals.SourceCommit()
+	}
+
 	rep, runErr := evals.Evaluate(ctx, scenarios, evals.Config{
 		Label:       f.label,
+		Runner:      runner,
+		Tap:         tap,
+		Commit:      commit,
 		Judge:       f.judge,
 		JudgeClient: judgeClient,
 		Options:     opts,
@@ -462,6 +500,44 @@ const (
 	setDefault = "default"
 	setHeldout = "heldout"
 )
+
+// loadSet reads the scenarios a run replays and the pending ones only -check
+// validates. The default set is the scenarios directory plus, when -learned
+// names a private directory, its reviewed *.yaml (L1a). learned/pending/ is
+// returned apart so no run can replay it by accident. The held-out set and a
+// run without -learned read nothing learned.
+func loadSet(f flags, dir string) (run, pending []evals.Scenario, err error) {
+	run, err = evals.LoadScenarios(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if f.learned != "" && (f.set == "" || f.set == setDefault) {
+		learned, err := evals.LoadLearned(f.learned)
+		if err != nil {
+			return nil, nil, err
+		}
+		run = append(run, learned...)
+		if pending, err = evals.LoadPending(f.learned); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := uniqueNames(append(append([]evals.Scenario(nil), run...), pending...)); err != nil {
+		return nil, nil, err
+	}
+	return run, pending, nil
+}
+
+// uniqueNames refuses two scenarios of one name, across the directories a set reads.
+func uniqueNames(scs []evals.Scenario) error {
+	seen := map[string]bool{}
+	for _, sc := range scs {
+		if seen[sc.Name] {
+			return fmt.Errorf("duplicate scenario name %q", sc.Name)
+		}
+		seen[sc.Name] = true
+	}
+	return nil
+}
 
 // scenarioDir resolves -set against -scenarios.
 func scenarioDir(f flags) (string, error) {

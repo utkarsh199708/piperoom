@@ -1,8 +1,42 @@
 # evals — agent evaluation harness
 
 Shows whether a prompt, tool-description or model change makes the investigation agent better or
-worse. The harness runs the **real** agent loop (`agent.Run`, real Claude model) on recorded incidents,
-with tool results replayed from a YAML file. It scores every run and compares two reports.
+worse. Every run goes through **the room's own code path**: a real `room.Service` (over the in-memory
+store) opens the room from an alert or from the built-in watcher and starts the agent the way
+`cmd/server` does, on the `agent.Endpoint` that `wiring.NewAgentEndpoint` builds. Tool results are
+replayed from a YAML file. The harness scores every run and compares two reports.
+
+## The room path
+
+`cmd/server` starts an investigation like this: an alert (or the watcher) calls
+`room.Service.OpenAlertRoom`; the service builds the alert's pipeline map from the topology and runs
+`Deps.Run`, which is `Endpoint.Run` from `wiring.NewAgentEndpoint`, with its own sink, inbox and
+proposal path. The harness (`room_path.go`) runs exactly that, so **a run that passes here passes in a
+room**:
+
+| part | in an eval | same as production? |
+|---|---|---|
+| room opening | `OpenAlertRoom` (alert scenarios) or the real `watch.Watcher` on a fake clock (`start: watcher`) | yes |
+| owners, pipeline | the scenario's `pipeline` written to an owners file and read by `owners.Load` | yes (invalid pipelines fail `-validate`) |
+| pipeline map in the alert | the room's topology call; the builder returns `alert.pipeline_map` | the text is recorded |
+| agent runner | `Endpoint.Run` (`wiring.NewAgentEndpoint`, budgets, triage model) | yes |
+| sink, inbox, proposals | the room service's: `CreateProposal` checks (Validate, CheckScope, param keys, plan texts, params hash) | yes |
+| steers, comments | `Service.Steer` as the driver (who took control), `Service.AddComment` (an `@agent ` is added when missing: a room delivers only comments that mention the agent) | yes |
+| executed fixes | `ApproveProposal` by each required layer's owner, then the room's executor; the action **writes** are scripted (`execScript`) | the writes are not |
+| tool results | replayed | no (recorded) |
+| model | Claude through the model tap (below), or a fake Messages server in tests | live |
+
+Differences that remain, on purpose: the harness ends a run at the first runner error (a room retries up
+to three times), and it holds the agent at each idle until the scripted human has acted (a person is
+just slower). Input `kind: approval_result`, and `action_result` without `action`, are refused by
+validation: no room can produce them except by executing a proposal.
+
+The room's log is the transcript (with each event's actor); the scorer reads `agent.*` events written by
+the agent only, since the room also writes system notes as `agent.message`.
+
+Found by running the room path (for A4): `agent.Alert.Raw` never reaches the model
+(`agent.firstUserMessage` renders only the title, pipeline, room id and map), so the watcher's evidence
+JSON is invisible to the agent; only its title is. `watcher-start` measures the agent with that title.
 
 - Tool **definitions** (names, descriptions, input schemas) come from the live code: A2's
   `kafkatools`, A3's `dbtools` and A2's `actions`. A changed tool description is part of what gets
@@ -15,7 +49,7 @@ with tool results replayed from a YAML file. It scores every run and compares tw
 ## Run it
 
 ```sh
-go run ./evals/cmd/evalrun -validate                                 # (alias -check) validate scenarios; no API key, no model calls
+go run ./evals/cmd/evalrun -validate                                 # (alias -check) validate scenarios; no API key, no model calls; prints notes
 go run ./evals/cmd/evalrun -scenarios evals/scenarios -out report.json   # needs ANTHROPIC_API_KEY
 go run ./evals/cmd/evalrun -validate -set heldout                    # the held-out set (see below)
 go run ./evals/cmd/evalrun -set heldout -runs 3 -out heldout.json    # report it; never tune on it
@@ -67,12 +101,15 @@ agreement. Default tests and CI never call the network.
 | `-compare A,B` | — | compare two reports and exit, with no model calls |
 | `-tolerance` | 5 | score drop per scenario that counts as a regression |
 | `-fail-on-regression` | off | exit 2 if any scenario regressed |
+| `-commit` | VCS stamp, else `git rev-parse HEAD` (+`-dirty`) | revision recorded in every result |
+| `-no-tap` | off | skip the model tap; results record `prompt_hash: untapped` |
 
 A scenario **regresses** when its pass rate drops, its mean score drops by more than `-tolerance`,
 or it is missing from the candidate report.
 
-Tests: `go test ./evals/...` needs no network and no key. It uses a scripted fake `agent.Runner`
-that drives the real replay tools, inbox, sink and proposals. The live test is
+Tests: `go test ./evals/...` needs no network and no key. Most use a scripted fake `agent.Runner` that
+the room service starts like the real one; `endpoint_e2e_test.go` runs the real Endpoint against a
+local fake Messages server (streamed turns) through the model tap. The live test is
 `go test -tags claude ./evals -run TestLiveSchemaChange -v` and needs `ANTHROPIC_API_KEY`.
 
 ## Agreement scoring for shadow runs
@@ -395,20 +432,19 @@ expect:
 - **Sequences** advance per recording: each matching call gets the next result, and the last one
   repeats. A sequence's position lasts for the whole run: a phase change does not reset it, and
   re-entering a phase continues where its sequences were. Specificity is unchanged within a phase.
-- **Executed fixes.** The agent can only propose; the harness plays the room and the executor, with
-  the room's rules. When an `action_result` input with `action` comes up on an idle, the harness binds
-  it to the newest proposal of the run that has a not yet executed step of that action, skipping
-  proposals the room would have refused at creation (unknown action, failed `Validate` or
-  `CheckScope`) and proposals whose execution already stopped. It then delivers what the room would:
-  one `approval_result` per required layer, then the proposal's steps in order, each as an
-  `action_result` with `proposal_id`, `step_index` and `ok` set as `internal/room` sets them. Earlier
-  steps succeed, the named step gets the input's `ok` and `text`, and the later steps succeed too.
-  The executor stops at the first step that fails, so the rest of that proposal never runs and later
-  inputs for it are skipped. If the input has `params` and the named step's params do not contain
-  them (same rule as a recording's `input`), the step is the wrong fix: it fails with a `not found`
-  result and fires no transition. Each executed step can fire a transition. An input with nothing to
-  execute is skipped and the next input is delivered on the same idle; skips are listed as
-  `unexecuted_inputs` in the run result (and printed by `evalrun`).
+- **Executed fixes.** The agent can only propose; the room executes. When an `action_result` input
+  with `action` comes up on an idle, the harness takes the newest proposal of the run that is still
+  open in the room and has a step with that action (a proposal the room refused at creation never
+  exists), approves it as the owner of each required layer through `ApproveProposal`, and waits for
+  the room's executor. The executor runs the steps in order and delivers the approvals and step
+  results itself. The writes are scripted: the first step with the input's action gets the input's
+  `ok` and `text`, every other step succeeds; the executor stops at the first step that fails, so the
+  rest of that proposal never runs and later inputs for it are skipped. If the input has `params` and
+  the step's params do not contain them (same rule as a recording's `input`), the step is the wrong
+  fix: it fails with a `not found` result and fires no transition. Each executed step can fire a
+  transition. An input with nothing to execute is skipped and the next input is delivered on the same
+  idle; skips are listed as `unexecuted_inputs` in the run result (and printed by `evalrun`). The
+  input's `from` is not used for approvals: the approvers are the run's layer owners.
 - The replay is deterministic for a given call order and safe under concurrent tool calls.
 
 **Re-check rule.** A *recovered phase* is the target of an `on.action` transition with `ok: true`.
@@ -442,6 +478,105 @@ Every run of a phased scenario also reports `phases_visited`, `verified_after_fi
 lists every executed step, transition and phase-tagged answer (with `changed`). Anything that reads
 what a recording shows (fact checks, for example) must read every sequence element
 (`recordingResults` in `phases.go`), not only the top-level `summary`.
+
+## Learned scenarios
+
+**Where they live: a private directory, never this repository.** This repository is public. Even redacted, a
+learned scenario names tables, connectors, consumer groups and hosts, which describe a customer's systems. Keep
+learned scenarios in a private repository checkout or a local folder; `evals/scenarios/learned/` here holds only a
+`.gitignore` (`*`, `!.gitignore`), so a file dropped there by mistake is never committed. `roomcase` refuses an
+`-out` inside this working tree (resolved with `git rev-parse --show-toplevel`, symlinks followed), and has no
+default for it.
+
+A closed room that people labelled and confirmed holds everything a scenario needs: the alert, every tool call
+and result, the steers, the executed fix and its verification, and two human judgements (`hypothesis.verdict`,
+`room.labelled`). `roomcase` turns one such room into a scenario. The input is the room's export, so it needs
+no database and no network and runs on any laptop:
+
+```sh
+curl -H ... http://piperoom/api/rooms/$ID/export > room.json     # or the download in the UI
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.yaml -out ~/piperoom-learned   # [-force]
+go run ./evals/cmd/evalrun -validate -learned ~/piperoom-learned          # also checks pending/
+go run ./evals/cmd/evalrun -learned ~/piperoom-learned -runs 3 -out cand.json   # replays the reviewed ones
+```
+
+It verifies `integrity.sha256` first (a changed or truncated export is refused), then writes
+`<out>/pending/<pipeline>-<yyyy-mm-dd>-<short room id>.yaml`. **Nothing replays `pending/`**: `evalrun -learned DIR`
+adds `DIR/*.yaml` to the default set, and `-validate` also parses and checks `DIR/pending/` so a fresh export is at
+least well-formed. Without `-learned`, nothing learned is read. A person reviews the file and moves it from
+`pending/` up into `DIR` (in the private repository, as a pull request there); the move is the review.
+
+**Who is eligible** (the exporter says which rule failed): the room is closed, `room.created.shadow` is false,
+the last `room.labelled` by a person has `cause` and `actual_layer`, and a person confirmed a hypothesis. If a fix
+was executed, its `agent.verification` must say `recovered: true`. A room where every verdict is `disputed` is
+exported as a **hard case**: `expect.outcome: abstain`, and `hard: true` plus the disputed hypothesis' terms in the
+`description`. Scenario validation grades an `abstain` outcome on its own (it rejects `root_cause`,
+`root_cause_forbidden` and the layer fields there), so the denied story lives in the description for the reviewer,
+not in a field. A hard case is never used as a worked example.
+
+**What is written** (no new scenario fields):
+
+| scenario field | from |
+|---|---|
+| `name`, `description` | file name; the alert title + the label's `cause` |
+| `pipeline`, `resources` | the `owners.yaml` entry of `room.created.pipeline_id` (no `owners:`, `watch`, connections); the pipeline's connectors, plus the connector or subject an executed step names |
+| `alert.title`, `alert.pipeline_map` | `room.created`; the first successful `pipeline_map` result |
+| `recordings` | each `agent.tool_call` joined to its `agent.tool_result` by `tool_use_id`. Inputs lose the keys the model picks freely (`droppedInputKeys` in `learned.go`: `since`, `until`, `limit`, `max_scan`, `window`, `older_than_minutes`, `max_results`, `query`, `from`, `to`, `at`, `timestamp`). `data` over 4 KB, or a cut `data` (`truncated: true`), is dropped. Two calls with the same tool and input keep their order as a `sequence`. `similar_incidents` is never recorded (it quotes other rooms) |
+| `phases`, `transitions`, `inputs` | an executed, verified fix gives `[broken, recovered]`, a transition on its first successful action, and results after that step get `phase: recovered`. Steers, comments (display name only) and the executed steps (`action_result` with `action`, `ok`, `params`) follow in log order |
+| `expect` | `outcome: diagnose`; `root_cause_layer` = `actual_layer`; `root_cause` = one single-term group each for the identifiers (`pg-orders-connector`, `public.orders`), numbers (`409`) and the three longest specific words of `cause`, with terms that only repeat the alert title left out (a hypothesis that merely echoes the alert must not pass); `fix` = the action names of the labelled `fix_proposal_id` |
+
+**No customer data in git.** Every string goes through `redact.Text` / `redact.JSON` (summaries, `data`, inputs,
+steers, comments, labels, names); then the finished file is read back and a second redaction pass over every
+string must change nothing, or nothing is written. This catches rooms closed before the room log was redacted.
+Redaction masks secrets (passwords, tokens, DSN credentials, emails). It does not know what a customer name or
+a row value is: that is the reviewer's job.
+
+**Dedup and cap.** The first line of the file is `# fingerprint: <pipeline>|<layer>|<sorted cause terms>`. The
+exporter refuses a fingerprint already in the learned directory or its `pending/` unless `-force` (a file without the
+line is compared by the terms it expects), and allows at most 10 scenarios per pipeline there (learned plus pending); `-force` does not
+lift the cap. A neighbour file that cannot be read stops the export, so it cannot hide from the cap.
+
+**Review checklist** (the reviewer of the pull request that moves the file):
+
+1. Read every `summary` and `input`: no row values, DSNs, hostnames of customers, or personal names survive.
+2. `expect` says what the person on the room would have said: the layer, the cause terms and the fix.
+3. `description` and the alert title carry no customer name; the pipeline block is the pipeline, nothing more.
+4. `evalrun -validate` is clean and the file's `# fingerprint:` line is still the first non-comment header.
+
+The learned directory is never tuned by hand. A wrong expectation is fixed by re-labelling the room and exporting it again
+(`-force` replaces the pending file); an edit of a learned file by hand is a review comment, not a fix.
+
+Fixtures: `evals/testdata/rooms/*.json` are real export documents, written by
+`go run -tags evalgen ./evals/gen -rooms` from the gen fakes and the real tools through `room.Service`
+(`-rooms -check` shows a stale file). They include the shapes the exporter must refuse (shadow, unlabelled, open,
+fix not recovered) and a room with a planted credential.
+
+## CI (evals-live)
+
+`.github/workflows/evals-live.yml` runs `go run ./evals/cmd/evalrun -runs 3 -label ci -out cand.json` against the
+hosted model, on `workflow_dispatch` and nightly (`schedule`). The `pull_request` trigger (limited to
+`internal/agent/**`, `internal/wiring/model.go`, `internal/config/config.go`, `evals/scenarios/**`) is switched
+off in the job (`if: false`) until `evals/baseline/default.json` is on `main`; one more PR then turns it on. The
+repository is public, so the job never uses `pull_request_target`, runs PRs only from this repository's own
+branches, and uploads only the report of the committed synthetic scenarios (`cand.json`, 14 days). The learned
+set stays in a private store and is never passed with `-learned`. When a baseline file exists the run adds
+`-baseline evals/baseline/default.json -fail-on-regression`: the job fails on a regression by the rule above
+or when `misses` grew. It prints the paired comparison and the cost-per-run delta, and never fails on cost alone.
+
+**Add the secret.** Settings → Environments → New environment `evals`. Add `ANTHROPIC_API_KEY` as an
+*environment* secret there (not a repository secret), and add the owner under *Required reviewers* so no run
+spends money without approval. Without the secret the job prints a `::notice::` and exits 0.
+
+**Produce and commit the baseline.** Run the workflow by hand (Actions → evals-live → Run workflow) with
+`make_baseline: true` on `main`, approve the environment, download the `baseline-default` artifact, and commit it
+as `evals/baseline/default.json` in a PR. Read the diff of the report, not just the code. Refresh it in the
+same PR as any *intended* prompt change. The held-out set is never part of CI or the baseline.
+
+**Cost.** Not yet measured: the first `make_baseline` run prices one full `-runs 3` pass if
+`PIPEROOM_MODEL_PRICES` is set; record the number here. Above $5, run only the learned and schema-change sets
+on PRs and the full set nightly.
+
+`go test ./...` and `go test ./evals/...` never need the key.
 
 ## Held-out set
 
@@ -551,6 +686,99 @@ was wrong, so these are written too, with a warning and `PARTIAL RUN` at the sta
 - `max_tool_calls` is a lower bound; raise it when you complete the scenario.
 - `queued` and `running` runs are refused (nothing is final), and so is a run with no finished tool call.
 
+## Watcher-started scenarios
+
+```yaml
+start:
+  by: watcher                       # default: alert (alert.title opens the room)
+  watcher:                          # what the watcher's own client reads return
+    connectors:                     # Connect status, one per pipeline connector
+      - {name: pg-orders-connector, type: source, state: RUNNING, tasks: [{id: 0, state: FAILED, trace: "..."}]}
+    configs:                        # Connect config per connector (slot.name, heartbeat)
+      pg-orders-connector: {slot.name: debezium_orders}
+    slots:                          # pg_replication_slots rows
+      - {name: debezium_orders, active: false, retained_wal_bytes: 188416, wal_status: reserved}
+    signals: [connector_down]       # the signals the room must open on
+```
+
+The harness runs the real `watch.Watcher` in mode `rooms` (interval 15 s, no jitter) on a fake clock
+that moves one tick at a time, with the pipeline's own `watch:` settings (defaults when absent), until
+it calls `OpenAlertRoom`; then it stops the watcher. A `for: 3m` costs no wall time. The room's title,
+severity, dedup key (`watcher:<pipeline>`) and evidence are the watcher's. `alert.title` must be left
+out; `alert.pipeline_map` is still the map. A run fails with an error when the watcher opens no room
+within 200 ticks, or opens it on other signals than `signals` (the scenario would measure another
+incident). Only `connector_down`, `slot_inactive` and `slot_wal` can fire (no Kafka client, so no
+`dlq_growth`).
+
+## Fix targets
+
+`expect.fix` names actions; on its own it passes a restart of the wrong task, or a proposal that lists
+every action. `expect.fix_targets` says what each step must aim at:
+
+```yaml
+fix:
+  - [schema_set_compatibility]
+  - [connect_restart_task, connect_restart_connector]
+fix_targets:
+  schema_set_compatibility: {subject: pg.public.orders-value}
+  connect_restart_task: {connector: pg-orders-connector, task: 0}
+  connect_restart_connector: {connector: pg-orders-connector}
+```
+
+With `fix_targets` set (`fixscore.go`):
+- every action in a `fix` group must have a target, and counts only through a step whose params contain
+  the target (the recording `input` rule: listed keys present, equal values; one target per action);
+- **every** proposed step must match a target. An action listed in `fix_targets` but in no `fix` group is
+  an allowed extra; any other step, or a step aimed elsewhere, fails the fix (`fix_unexpected`);
+- every proposal holding a fix step must come **after its evidence**: a hypothesis was posted and every
+  required `expected_facts` entry was established by a step that ran before the proposal. A right fix
+  proposed first and checked later fails (`fix_ungrounded`). Validation therefore requires at least one
+  required fact.
+
+`-validate` notes every diagnose scenario with a `fix` and no `fix_targets`.
+
+## Answers that list every cause
+
+A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from
+counting (`hedge.go`):
+- **Hedge words** (every scenario): `either`, `or possibly`, `could also be`, `possible causes`, `one of
+  these`, `not sure whether` and similar make the root cause wrong (`hedged`, `hedged_on`). The LLM
+  judge's verdict cannot undo this.
+- **`root_cause_forbidden`** (per scenario): a plain list ("amount changed; order-sync crashed;
+  retention deleted records") has no hedge words; only the scenario's wrong-story rows catch it. Name
+  the wrong stories a shotgun answer would tell. `-validate` notes diagnose scenarios without any.
+
+Both apply to every hypothesis, so they also govern `tool_calls_to_root_cause` and time to cause.
+
+## Time to cause
+
+`time_to_cause` (`ttc.go`) is how long the room took to its first correct hypothesis:
+- **start**: the `room.created` event (the room opening; for a watcher room, when the watcher opened it,
+  not when the signal began);
+- **end**: the first `agent.hypothesis` event written by the agent whose text is a correct root cause by
+  the deterministic rule (root-cause groups affirmed, no forbidden story, no hedge). Messages do not count:
+  they carry plans and questions, while `update_hypothesis` is the agent's stated belief;
+- **measured**: `ms` between the two events' room-log timestamps, `steps` = `agent.step.started` events
+  and `tool_calls` = `agent.tool_call` events before the end event, `hypothesis` = its number (1 = first);
+- **null** unless the run's final root cause is correct (after the LLM judge, when it graded): a cause
+  found and then left has no time to cause. `cause_retracted` says a wrong hypothesis followed the first
+  correct one, even if a later one was correct again (then the time is still to the first).
+
+With a fake model `ms` is near zero; it means something on live runs. The report gives the median per
+scenario (overall: the median of the scenario medians) and the count of retracted runs.
+
+## Provenance
+
+Every result records `commit`, `model` (configured), `models_used`, `prompt_hash` and `entry` (`alert` or
+`watcher`); the report records `commit` and every `prompt_hashes` seen. The prompt hash comes from the
+**model tap** (`modeltap.go`): `evalrun` points `ANTHROPIC_BASE_URL` at a reverse proxy on 127.0.0.1
+before it builds the Endpoint. The tap forwards every request and response unchanged (headers, the key
+among them, are never read), and per room (found by the `Room:` line of the first user message) records
+the models named and `sha256` of the request's `system` and `tools`, exactly as sent: any change to the
+prompt, a tool description or schema, or the actions in `propose_fix` changes it. More than one hash in a
+run is listed in `prompt_hashes`. `untapped`: no tap (`-no-tap`, Bedrock, Vertex, scripted runners);
+`none`: tapped, but no model request.
+
 ## Scoring (per run, 0–100)
 
 | part | points | rule |
@@ -567,7 +795,7 @@ A `diagnose` run **passes** when all of the following hold:
 - the root cause matches, and both layers are named
 - every evidence tool returned a successful result, and every required fact was established
 - every claim is backed by a cited step that established one of its facts
-- the expected fix is proposed
+- the expected fix is proposed (with `fix_targets`: aimed right, nothing else, after its evidence)
 - no forbidden action is proposed or attempted, and no invalid or out-of-scope step is proposed
 - it stays within the tool budget
 - **verify after fix** (phased scenarios): every move into a recovered phase is re-checked before
@@ -586,6 +814,7 @@ Per run the result also gives:
   outcome otherwise), `claims_cause` (final hypothesis at medium or high confidence), `abstained` (no
   proposal and no `claims_cause`; on `ask`, asked after the steer and proposed nothing), `asked_driver`, `says_healthy`
 - `tool_calls_to_root_cause`: read-tool calls made before the first hypothesis that matched
+- `time_to_cause`, `cause_retracted`, `hedged`, `fix_unexpected`, `fix_ungrounded` (above)
 - misses, action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes"
   column), idles, duration
 

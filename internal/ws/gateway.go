@@ -99,8 +99,9 @@ type Gateway struct {
 	mu        sync.Mutex
 	closed    bool
 	rooms     map[string]*roomHub
-	roomSlots map[string]int // connections per room, held from reserve to release
-	userSlots map[string]int // connections per user id
+	lists     map[*client]struct{} // room list connections (listgateway.go)
+	roomSlots map[string]int       // connections per room, held from reserve to release
+	userSlots map[string]int       // connections per user id
 }
 
 // NewGateway builds the gateway and starts its presence loop.
@@ -110,7 +111,7 @@ func NewGateway(svc *room.Service, st store.Store, log *slog.Logger) *Gateway {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, ctx: ctx, cancel: cancel, rooms: map[string]*roomHub{},
-		roomSlots: map[string]int{}, userSlots: map[string]int{}}
+		lists: map[*client]struct{}{}, roomSlots: map[string]int{}, userSlots: map[string]int{}}
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
@@ -136,6 +137,9 @@ func (g *Gateway) Close() {
 		for c := range hub.conns {
 			clients = append(clients, c)
 		}
+	}
+	for c := range g.lists {
+		clients = append(clients, c)
 	}
 	g.mu.Unlock()
 	g.cancel()
@@ -190,6 +194,10 @@ type Member struct {
 	Name     string `json:"name"`
 	Verified bool   `json:"verified"`
 	State    string `json:"state"` // "viewing" | "away"
+	// Since is when the member entered State on the server (connect time for a
+	// new member), UTC; clients show "away 12m" from it. With several
+	// connections it is the earliest among those in the winning state.
+	Since time.Time `json:"since"`
 }
 
 // Identity is who a connection belongs to. SessionID is the public id of the
@@ -238,12 +246,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	origins := g.OriginPatterns
-	if origins == nil {
-		origins = []string{"localhost:5173", "127.0.0.1:5173"}
-	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: origins,
+		OriginPatterns: g.origins(),
 	})
 	if err != nil {
 		// Accept already wrote the response.
@@ -253,15 +257,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(4096)
 
 	c := &client{
-		sessionID: ident.SessionID,
-		userID:    user.ID,
-		userName:  user.Name,
-		verified:  user.Verified,
-		state:     "viewing",
-		lastSeen:  g.now(),
-		send:      make(chan []byte, sendBuffer),
-		conn:      conn,
-		once:      sync.Once{},
+		sessionID:  ident.SessionID,
+		userID:     user.ID,
+		userName:   user.Name,
+		verified:   user.Verified,
+		state:      "viewing",
+		lastSeen:   g.now(),
+		stateSince: g.now(),
+		send:       make(chan []byte, sendBuffer),
+		conn:       conn,
+		once:       sync.Once{},
 	}
 	ctx, cancel := context.WithCancel(g.ctx)
 	c.cancel = cancel
@@ -383,7 +388,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// reserve takes one connection slot for roomID and userID. It returns a
+// reserve takes one connection slot for roomID and userID; a list connection
+// passes roomID "" and counts against the user cap only. It returns a
 // release func that gives the slot back (safe to call more than once), or nil
 // and the reason when either cap is reached.
 func (g *Gateway) reserve(roomID, userID string) (func(), string) {
@@ -399,11 +405,13 @@ func (g *Gateway) reserve(roomID, userID string) (func(), string) {
 	if g.userSlots[userID] >= perUser {
 		return nil, fmt.Sprintf("you already have %d live connections; close some Piperoom tabs and retry", perUser)
 	}
-	if g.roomSlots[roomID] >= perRoom {
+	if roomID != "" && g.roomSlots[roomID] >= perRoom {
 		return nil, fmt.Sprintf("this room already has %d live connections; retry later", perRoom)
 	}
 	g.userSlots[userID]++
-	g.roomSlots[roomID]++
+	if roomID != "" {
+		g.roomSlots[roomID]++
+	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -411,6 +419,9 @@ func (g *Gateway) reserve(roomID, userID string) (func(), string) {
 			defer g.mu.Unlock()
 			if g.userSlots[userID]--; g.userSlots[userID] <= 0 {
 				delete(g.userSlots, userID)
+			}
+			if roomID == "" {
+				return
 			}
 			if g.roomSlots[roomID]--; g.roomSlots[roomID] <= 0 {
 				delete(g.roomSlots, roomID)

@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/tools"
 )
 
 func readFile(t *testing.T, name string) string {
@@ -253,5 +255,75 @@ func TestOversizedBody(t *testing.T) {
 	})
 	if _, err := c.ListConnectors(context.Background()); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("want decode error, got %v", err)
+	}
+}
+
+func recordCtx() (context.Context, *tools.Recorder) {
+	rec := tools.NewRecorder()
+	return tools.WithRecorder(context.Background(), rec), rec
+}
+
+func TestConnectStatusRecordsCall(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(readFile(t, "status_running.json")))
+	})
+	ctx, rec := recordCtx()
+	if _, err := c.Status(ctx, "c1"); err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	calls := rec.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1: %+v", len(calls), calls)
+	}
+	got := calls[0]
+	if got.Kind != tools.CallHTTP || got.Text != "GET /connectors/c1/status" || got.Target != c.baseURL {
+		t.Fatalf("call = %+v", got)
+	}
+	if got.TookMS < 0 || got.At.IsZero() || len(got.ParamsRedacted) != 0 {
+		t.Fatalf("call = %+v", got)
+	}
+}
+
+func TestConnectErrorStillRecords(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	})
+	ctx, rec := recordCtx()
+	if _, err := c.Status(ctx, "c1"); err == nil {
+		t.Fatal("want error")
+	}
+	if calls := rec.Calls(); len(calls) != 1 || calls[0].Text != "GET /connectors/c1/status" {
+		t.Fatalf("calls = %+v", calls)
+	}
+}
+
+func TestConnectNotFoundRecords(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	ctx, rec := recordCtx()
+	_, _ = c.Status(ctx, "gone")
+	if n := len(rec.Calls()); n != 1 {
+		t.Fatalf("got %d calls, want 1", n)
+	}
+}
+
+func TestConnectWriteRecordsNoBody(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{}")) })
+	ctx, rec := recordCtx()
+	if err := c.UpdateConfig(ctx, "c1", "database.password", "hunter2"); err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	calls := rec.Calls()
+	if len(calls) != 1 || calls[0].Text != "PATCH /connectors/c1/config" {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if b, _ := json.Marshal(calls); strings.Contains(string(b), "hunter2") || strings.Contains(string(b), "database.password") {
+		t.Fatalf("request body leaked into provenance: %s", b)
+	}
+}
+
+func TestConnectWithoutRecorderIsFine(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("[]")) })
+	if _, err := c.ListConnectors(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

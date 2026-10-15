@@ -97,9 +97,14 @@ type ago time.Duration
 
 func main() {
 	check := flag.Bool("check", false, "report files that are out of date and exit 1; write nothing")
+	roomsOnly := flag.Bool("rooms", false, "only the room export fixtures of evals/testdata/rooms (L1a)")
 	flag.Parse()
 	var stale []string
-	for _, s := range specs() {
+	scenarioSpecs := specs()
+	if *roomsOnly {
+		scenarioSpecs = nil
+	}
+	for _, s := range scenarioSpecs {
 		out, err := s.render()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "gen:", s.file+":", err)
@@ -123,6 +128,12 @@ func main() {
 		}
 		fmt.Println("wrote", s.file)
 	}
+	roomStale, err := roomFixtures(*check)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gen:", err)
+		os.Exit(1)
+	}
+	stale = append(stale, roomStale...)
 	if len(stale) > 0 {
 		fmt.Fprintln(os.Stderr, "gen: out of date (run go run -tags evalgen ./evals/gen):", strings.Join(stale, ", "))
 		os.Exit(1)

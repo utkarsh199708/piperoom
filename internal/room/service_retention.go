@@ -183,5 +183,6 @@ func (s *Service) evictRooms(ids []string) {
 			delete(s.alertRooms, st.dedupKey)
 		}
 		delete(s.rooms, id)
+		s.markListDirtyLocked(id)
 	}
 }

@@ -175,13 +175,19 @@ func (e *Endpoint) prices() Prices {
 // handoffModel is the model the hand-off writes with: counted against the
 // room's budget (never refused) and reported through OnUsage.
 func (e *Endpoint) handoffModel(roomEvents []events.Event) model {
+	return e.summaryModel(roomEvents, events.UsageRoleHandoff)
+}
+
+// summaryModel is handoffModel with the usage role of the request, so the
+// closing post-mortem draft is reported as its own role.
+func (e *Endpoint) summaryModel(roomEvents []events.Event, role string) model {
 	roomID := roomEvents[0].RoomID
 	var m model = &budgetModel{inner: e.model, budget: e.budget(roomID), guard: e.guard(roomID, pipelineOf(roomEvents))}
 	s := e.spendSettings()
 	if s == nil || s.onUsage == nil {
 		return m
 	}
-	return &reportingModel{inner: m, role: events.UsageRoleHandoff, prices: s.prices, report: func(ctx context.Context, p events.AgentUsagePayload) {
+	return &reportingModel{inner: m, role: role, prices: s.prices, report: func(ctx context.Context, p events.AgentUsagePayload) {
 		s.onUsage(ctx, roomID, p)
 	}}
 }

@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, ChevronDown, Plus, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -10,7 +10,8 @@ import { isViewer } from '../state/permissions'
 import type { CurrentUser } from '../state/permissions'
 import { addFixtureRoom, emptySnapshot, fixtureRooms } from '../fixtures/player'
 import { useRoomList } from '../hooks/useRoomList'
-import { ageLabel, updatedAgoLabel } from '../lib/time'
+import { usePipelines } from '../hooks/usePipelines'
+import { ageLabel, durationLabel, updatedAgoLabel, utcLabel } from '../lib/time'
 import {
   ROOM_TABS,
   agentCell,
@@ -26,10 +27,13 @@ import {
 } from '../lib/rooms'
 import type { Dot, RoomTab } from '../lib/rooms'
 import { errorText } from '../lib/errors'
+import { triageLine } from '../lib/triage'
+import { useNow } from './room/useNow'
 import { initials, personColor } from '../lib/people'
 import { cn } from '../lib/utils'
+import { modKeyLabel } from '../lib/envLabel'
 import { Avatar, AvatarFallback } from './ui/avatar'
-import { Badge } from './ui/badge'
+import { Badge, layerVariant } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
 import {
@@ -56,7 +60,6 @@ import { RoomListContext, useInShell } from './shell/context'
 import { isEditableTarget } from './shell/keys'
 
 const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
-const POLL_MS = 15_000
 
 const TAB_LABEL: Record<RoomTab, string> = {
   open: 'Open',
@@ -92,7 +95,8 @@ export function RoomList() {
   // In the shell the list is the shell's copy (the sidebar shows it too); on its own it loads its own.
   const shared = useContext(RoomListContext)
   const own = useRoomList({ enabled: shared === null })
-  const { rooms, loading, error, reload } = shared ?? own
+  // Pushed over GET /api/rooms/ws (F6); `updatedAt` is set only while the list falls back to polling.
+  const { rooms, loading, error, reload, updatedAt } = shared ?? own
   const [searchParams, setSearchParams] = useSearchParams()
   const pipeline = searchParams.get('pipeline') || null
   const [tab, setTab] = useState<RoomTab>('open')
@@ -101,31 +105,12 @@ export function RoomList() {
   const [newOpen, setNewOpen] = useState(false)
   const [taking, setTaking] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
-  const [updatedAt, setUpdatedAt] = useState<number | null>(null)
   const rowLinks = useRef(new Map<string, HTMLAnchorElement>())
 
-  // "Live": the list is fetched again every 15 s while the tab is visible. The skeleton is only for
-  // the first load; a refresh keeps the table on screen.
+  // The skeleton is only for the first load; a later update keeps the table on screen.
   useEffect(() => {
-    if (!loading) {
-      setLoaded(true)
-      if (!error) setUpdatedAt(Date.now())
-    }
-  }, [loading, error])
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      if (!document.hidden) void reload()
-    }, POLL_MS)
-    // Back to the tab after a while: do not wait for the next tick.
-    const onVisible = () => {
-      if (!document.hidden) void reload()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      window.clearInterval(t)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
-  }, [reload])
+    if (!loading) setLoaded(true)
+  }, [loading])
 
   const sorted = useMemo(() => sortRoomsForList(rooms), [rooms])
   const scoped = useMemo(() => roomsForPipeline(sorted, pipeline), [sorted, pipeline])
@@ -230,7 +215,7 @@ export function RoomList() {
 
   const controls = (
     <>
-      <LivePill updatedAt={updatedAt} error={error !== null} />
+      <LivePill updatedAt={updatedAt ?? null} error={error !== null} />
       {!viewer && (
         <Button
           size="sm"
@@ -336,6 +321,7 @@ export function RoomList() {
                     onActive={setActiveId}
                     onOpen={(id) => navigate(`/rooms/${id}`)}
                     onTake={(r) => void takeControl(r)}
+                    showResolution={tab === 'resolved'}
                   />
                 )}
               </TabsContent>
@@ -356,7 +342,7 @@ export function RoomList() {
       )}
 
       {!viewer && (
-        <NewRoomDialog open={newOpen} onOpenChange={setNewOpen} pipelines={pipelines} defaultPipeline={pipeline} />
+        <NewRoomDialog open={newOpen} onOpenChange={setNewOpen} defaultPipeline={pipeline} />
       )}
     </div>
   )
@@ -505,7 +491,9 @@ function RoomTable({
   onActive,
   onOpen,
   onTake,
+  showResolution,
 }: {
+  showResolution?: boolean
   rooms: RoomSnapshot[]
   user: CurrentUser
   active: number
@@ -558,6 +546,7 @@ function RoomTable({
               onActivate={() => onActive(room.id)}
               onOpen={() => onOpen(room.id)}
               onTake={() => onTake(room)}
+              showResolution={showResolution}
             />
           ))}
         </tbody>
@@ -577,7 +566,9 @@ function RoomRow({
   onActivate,
   onOpen,
   onTake,
+  showResolution,
 }: {
+  showResolution?: boolean
   room: RoomSnapshot
   user: CurrentUser
   active: boolean
@@ -588,7 +579,10 @@ function RoomRow({
   onTake: () => void
 }) {
   const tinted = needsYou(room, user) // only for layers this person owns
+  const resolved = room.status !== 'open'
   const status = roomStatusCell(room)
+  // A closed room reads "Resolved · 6 min": how long it was open, not a stale live state.
+  const duration = resolved && room.closed_at ? durationLabel(room.opened_at, room.closed_at) : ''
   const agent = agentCell(room)
   const layers = layersNeedingYou(room, user)
   const canTake = canTakeControlOf(room, user)
@@ -626,7 +620,16 @@ function RoomRow({
             </Badge>
           )}
           <span className="truncate font-mono text-xs text-muted-foreground md:hidden">{room.pipeline_id}</span>
+          {room.status === 'open' && !room.shadow && (room.insight?.time_to_first_hypothesis_s ?? -1) >= 0 && (
+            <span className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">
+              · insight {room.insight?.time_to_first_hypothesis_s} s
+            </span>
+          )}
         </div>
+        <TriageRowLine room={room} />
+        {showResolution && resolved && room.resolution && (
+          <p className="m-0 line-clamp-1 whitespace-normal text-xs text-muted-foreground">{room.resolution.slice(0, 100)}</p>
+        )}
       </td>
       <td className={TD}>
         <Badge variant={severityVariant(room.severity)} className="uppercase">
@@ -636,7 +639,7 @@ function RoomRow({
       <td className={cn(TD, 'max-md:hidden')}>
         <span className="inline-flex items-center gap-1.5">
           <StatusDot dot={status.dot} />
-          {status.label}
+          {resolved && duration ? `Resolved · ${duration}` : status.label}
         </span>
       </td>
       <td className={cn(TD, 'font-mono text-muted-foreground max-md:hidden')}>{room.pipeline_id}</td>
@@ -644,7 +647,7 @@ function RoomRow({
         {canTake ? (
           <Button
             variant="outline"
-            className="h-[26px] gap-1.5 px-2 text-xs"
+            className="h-[26px] gap-1.5 px-2 text-xs coarse:h-11 coarse:px-4"
             disabled={taking}
             title={room.driver ? `${room.driver.name}'s lease has expired` : undefined}
             onClick={onTake}
@@ -679,13 +682,56 @@ function RoomRow({
         </span>
       </td>
       <td className={cn(TD, 'text-right tabular-nums text-muted-foreground max-md:hidden')}>
-        <span title={room.opened_at}>
-          <span className="sr-only">opened </span>
-          {ageLabel(room.opened_at)}
-          <span className="sr-only"> ago</span>
-        </span>
+        {resolved && room.closed_at ? (
+          <span title={utcLabel(room.closed_at)}>
+            closed {ageLabel(room.closed_at)} ago
+          </span>
+        ) : (
+          <span title={utcLabel(room.opened_at)}>
+            <span className="sr-only">opened </span>
+            {ageLabel(room.opened_at)}
+            <span className="sr-only"> ago</span>
+          </span>
+        )}
       </td>
     </tr>
+  )
+}
+
+// The row's second line (F6): the first look's headline, "triage, unverified". A young open
+// room with no first look yet shows a shimmer; a failed or old-enough-to-miss one shows nothing.
+function TriageRowLine({ room }: { room: RoomSnapshot }) {
+  const now = useNow(10_000)
+  const line = triageLine(room, now)
+  if (line.kind === 'none') return null
+  if (line.kind === 'pending') {
+    return (
+      <span role="status" aria-label="First look in progress" className="mt-0.5 flex items-center gap-1" data-testid="triage-pending">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            aria-hidden="true"
+            className="size-1 animate-pulse rounded-full bg-agent/60"
+            style={{ animationDelay: `${i * 150}ms` }}
+          />
+        ))}
+      </span>
+    )
+  }
+  return (
+    <div className="mt-0.5 flex min-w-0 items-center gap-1.5" data-testid="triage-line">
+      <Badge variant="agent" className="shrink-0" title="triage, unverified">
+        first look
+      </Badge>
+      {line.layer && (
+        <Badge variant={layerVariant(line.layer)} className="shrink-0">
+          {line.layer}
+        </Badge>
+      )}
+      <span className="min-w-0 truncate text-xs text-muted-foreground" title={line.headline}>
+        {line.headline}
+      </span>
+    </div>
   )
 }
 
@@ -828,46 +874,41 @@ const FIELD_LABEL = 'text-xs font-medium text-muted-foreground'
 function NewRoomDialog({
   open,
   onOpenChange,
-  pipelines,
   defaultPipeline,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  pipelines: string[]
   defaultPipeline: string | null
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <NewRoomForm onClose={() => onOpenChange(false)} pipelines={pipelines} defaultPipeline={defaultPipeline} />
+        <NewRoomForm onClose={() => onOpenChange(false)} defaultPipeline={defaultPipeline} />
       </DialogContent>
     </Dialog>
   )
 }
 
-function NewRoomForm({
-  onClose,
-  pipelines,
-  defaultPipeline,
-}: {
-  onClose: () => void
-  pipelines: string[]
-  defaultPipeline: string | null
-}) {
+function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaultPipeline: string | null }) {
+  const loaded = usePipelines()
+  const mod = modKeyLabel()
+  const pipelines = loaded.status === 'ready' ? loaded.data : []
   const navigate = useNavigate()
   const [title, setTitle] = useState('')
   const [severity, setSeverity] = useState('sev2')
-  const [pipelineId, setPipelineId] = useState(defaultPipeline ?? pipelines[0] ?? 'orders')
+  const [pipelineId, setPipelineId] = useState(defaultPipeline ?? '')
   const [busy, setBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  // The choice must be one the server lists; until the person picks, the first (or the filter on screen).
+  const chosen = pipelines.some((p) => p.id === pipelineId) ? pipelineId : (pipelines[0]?.id ?? '')
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!title.trim()) return
+    if (!title.trim() || !chosen) return
     setBusy(true)
     setCreateError(null)
     try {
-      const pipeline = pipelineId.trim() || 'orders'
+      const pipeline = chosen
       let id: string
       if (isFixtures()) {
         const snapshot = emptySnapshot(`r_${Date.now().toString(36)}`, title.trim(), severity, pipeline)
@@ -885,8 +926,16 @@ function NewRoomForm({
     }
   }
 
+  // Same shortcut as the close and hand-off dialogs.
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLFormElement>) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      e.currentTarget.requestSubmit()
+    }
+  }
+
   return (
-        <form className="grid gap-4" onSubmit={onSubmit}>
+        <form className="grid gap-4" onSubmit={onSubmit} onKeyDown={onKeyDown}>
           <DialogHeader>
             <DialogTitle>New room</DialogTitle>
             <DialogDescription>Open a room by hand. Alerts open one on their own.</DialogDescription>
@@ -899,7 +948,7 @@ function NewRoomForm({
               id="new-title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Warehouse orders stale"
+              placeholder="What is wrong?"
               required
               autoFocus
             />
@@ -926,21 +975,35 @@ function NewRoomForm({
               <label htmlFor="new-pipeline" className={FIELD_LABEL}>
                 Pipeline
               </label>
-              <Input
+              <select
                 id="new-pipeline"
-                className="font-mono"
-                list="new-pipeline-options"
-                value={pipelineId}
+                value={chosen}
                 onChange={(e) => setPipelineId(e.target.value)}
-                placeholder="orders"
-              />
-              <datalist id="new-pipeline-options">
+                disabled={pipelines.length === 0}
+                className="h-8 w-full rounded-md border border-input-border bg-background px-2 font-mono text-sm text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60"
+              >
+                {pipelines.length === 0 && <option value="">{loaded.status === 'loading' ? 'Loading…' : 'None'}</option>}
                 {pipelines.map((p) => (
-                  <option key={p} value={p} />
+                  <option key={p.id} value={p.id}>
+                    {p.title && p.title !== p.id ? `${p.id} · ${p.title}` : p.id}
+                  </option>
                 ))}
-              </datalist>
+              </select>
             </div>
           </div>
+          {loaded.status === 'error' && (
+            <div role="alert" className="flex items-center gap-2 text-sm text-destructive-fg">
+              <span>Could not load the pipelines: {loaded.message}</span>
+              <Button type="button" variant="secondary" onClick={loaded.reload}>
+                Try again
+              </Button>
+            </div>
+          )}
+          {loaded.status === 'ready' && pipelines.length === 0 && (
+            <p role="status" className="m-0 text-sm text-muted-foreground">
+              This server has no pipelines configured, so a room cannot be opened by hand. Add one to owners.yaml.
+            </p>
+          )}
           {createError && (
             <p role="alert" className="text-sm text-destructive-fg">
               {createError}
@@ -950,8 +1013,13 @@ function NewRoomForm({
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy || !title.trim()}>
+            <Button
+              type="submit"
+              disabled={busy || !title.trim() || !chosen}
+              aria-keyshortcuts={`${mod === '⌘' ? 'Meta' : 'Control'}+Enter`}
+            >
               Open room
+              <Kbd aria-hidden="true">{mod}⏎</Kbd>
             </Button>
           </DialogFooter>
         </form>

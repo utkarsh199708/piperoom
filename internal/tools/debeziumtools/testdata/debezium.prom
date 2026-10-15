@@ -1,0 +1,23 @@
+# HELP debezium_metrics_Connected Flag that denotes whether the connector is currently connected to the database server.
+# TYPE debezium_metrics_Connected untyped
+debezium_metrics_Connected{context="streaming",name="pg",plugin="postgres",task="0"} 1.0
+debezium_metrics_Connected{context="snapshot",name="pg",plugin="postgres",task="0"} 1.0
+# TYPE debezium_metrics_MilliSecondsBehindSource untyped
+debezium_metrics_MilliSecondsBehindSource{context="streaming",name="pg",plugin="postgres",task="0"} 2300.0
+# TYPE debezium_metrics_MilliSecondsSinceLastEvent untyped
+debezium_metrics_MilliSecondsSinceLastEvent{context="streaming",name="pg",plugin="postgres",task="0"} 41000.0
+debezium_metrics_MilliSecondsSinceLastEvent{context="snapshot",name="pg",plugin="postgres",task="0"} 12000.0
+debezium_metrics_QueueRemainingCapacity{context="streaming",name="pg",plugin="postgres",task="0"} 8192.0
+debezium_metrics_QueueTotalCapacity{context="streaming",name="pg",plugin="postgres",task="0"} 8192.0
+debezium_metrics_QueueRemainingCapacity{context="snapshot",name="pg",plugin="postgres",task="0"} 8000.0
+debezium_metrics_QueueTotalCapacity{context="snapshot",name="pg",plugin="postgres",task="0"} 8192.0
+debezium_metrics_TotalNumberOfEventsSeen{context="streaming",name="pg",plugin="postgres",task="0"} 0.0
+debezium_metrics_TotalNumberOfEventsSeen{context="snapshot",name="pg",plugin="postgres",task="0"} 4.8203110E7
+debezium_metrics_NumberOfErroneousEvents{context="streaming",name="pg",plugin="postgres",task="0"} 0.0
+debezium_metrics_SnapshotRunning{context="snapshot",name="pg",plugin="postgres",task="0"} 1.0
+debezium_metrics_SnapshotCompleted{context="snapshot",name="pg",plugin="postgres",task="0"} 0.0
+debezium_metrics_SnapshotPaused{context="snapshot",name="pg",plugin="postgres",task="0"} 0.0
+debezium_metrics_RowsScanned{context="snapshot",name="pg",plugin="postgres",table="public.orders",task="0"} 4.8203110E7
+# a metric of another connector on the same worker
+debezium_metrics_Connected{context="streaming",name="other",plugin="postgres",task="0"} 0.0
+jvm_memory_bytes_used{area="heap"} 1.23456789E8

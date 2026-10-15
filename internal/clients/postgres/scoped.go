@@ -34,7 +34,7 @@ func (d *DB) ReplicationSlotsNamed(ctx context.Context, names []string) ([]clien
 		names = []string{} // a NULL array would make "<> ALL" NULL, and count nothing
 	}
 
-	rows, err := d.pool.Query(ctx, slotColumns+`
+	rows, err := d.query(ctx, slotColumns+`
 		WHERE slot_name = ANY($1::text[])
 		ORDER BY slot_name`, names)
 	if err != nil {
@@ -54,7 +54,7 @@ func (d *DB) ReplicationSlotsNamed(ctx context.Context, names []string) ([]clien
 	}
 
 	var other int
-	if err := d.pool.QueryRow(ctx, `
+	if err := d.queryRow(ctx, `
 		SELECT count(*) FROM pg_replication_slots
 		WHERE slot_name <> ALL($1::text[])`, names).Scan(&other); err != nil {
 		return nil, 0, fmt.Errorf("postgres: count other replication slots: %w", err)
@@ -154,7 +154,7 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 	}
 	secs := olderThan.Seconds()
 
-	rows, err := d.pool.Query(ctx, longTxnScope+`
+	rows, err := d.query(ctx, longTxnScope+`
 	SELECT pid,
 	       COALESCE(usename, ''),
 	       COALESCE(application_name, ''),
@@ -184,7 +184,7 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 		return TableTransactions{}, fmt.Errorf("postgres: read long transactions on tables: %w", err)
 	}
 
-	if err := d.pool.QueryRow(ctx, longTxnScope+`
+	if err := d.queryRow(ctx, longTxnScope+`
 	SELECT count(*), count(*) FILTER (WHERE backend_xid IS NOT NULL)
 	FROM lt
 	WHERE NOT on_tables`, secs, schemas, names).Scan(&out.Other, &out.OtherWriters); err != nil {
@@ -193,7 +193,7 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 
 	// Only the allow-listed columns of the oldest other writers. Readers
 	// (no xid) cannot hold a slot's restart_lsn back and stay a count.
-	wrows, err := d.pool.Query(ctx, longTxnScope+`
+	wrows, err := d.query(ctx, longTxnScope+`
 	SELECT pid,
 	       COALESCE(datname = current_database(), false),
 	       COALESCE(state, ''),
@@ -231,7 +231,7 @@ func (d *DB) PublicationSourceTables(ctx context.Context, publication, role stri
 	defer cancel()
 
 	var exists bool
-	if err := d.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
+	if err := d.queryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
 		return nil, 0, fmt.Errorf("postgres: check publication %q: %w", publication, err)
 	}
 	if !exists {
@@ -253,7 +253,7 @@ func (d *DB) PublicationSourceTables(ctx context.Context, publication, role stri
 		names = append(names, tbl)
 	}
 	var other int
-	if err := d.pool.QueryRow(ctx, `
+	if err := d.queryRow(ctx, `
 		SELECT count(*)
 		FROM pg_publication_tables pt
 		WHERE pt.pubname = $1
