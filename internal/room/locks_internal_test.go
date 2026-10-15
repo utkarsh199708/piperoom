@@ -906,14 +906,15 @@ func TestRoomLocksStress(t *testing.T) {
 	}
 }
 
-// cacheVsLog compares every cached room with a fold of its log and returns
-// the first difference ("" when there is none).
+// cacheVsLog compares every cached room, as published, with a fold of its
+// log and returns the first difference ("" when there is none).
 func cacheVsLog(ctx context.Context, svc *Service, ms *memstore.Store) string {
-	for id := range svc.cachedRooms() {
-		got, err := svc.GetRoom(ctx, id)
-		if err != nil {
-			return fmt.Sprintf("room %s: GetRoom: %v", id, err)
+	for id, st := range svc.cachedRooms() {
+		pub := st.pub.Load()
+		if pub == nil {
+			return fmt.Sprintf("room %s: cached but never published", id)
 		}
+		got := *pub
 		row, err := ms.GetRoom(ctx, id)
 		if err != nil {
 			return fmt.Sprintf("room %s: cached but not in the store: %v", id, err)

@@ -87,10 +87,8 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	s.deleteMu.Lock()
 	defer s.deleteMu.Unlock()
 
-	s.mu.Lock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		s.mu.Unlock()
 		var re *Error
 		if errors.As(err, &re) && re.Code == codeNotFound {
 			return s.priorDeletion(ctx, del, user, roomID)
@@ -100,13 +98,13 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	// Tenancy: a room of a pipeline the admin may not see is answered like a
 	// room that does not exist.
 	if !s.CanSeePipeline(user, st.snap.PipelineID) {
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return Deletion{}, notFound("room not found")
 	}
-	// Checked under s.mu, as the executor queue is fed under s.mu: once
-	// deleting is set no approval can append, so none can queue a run.
+	// Checked under the room's lock, as the executor queue is fed under it:
+	// once deleting is set no approval can append, so none can queue a run.
 	if st.exec.busy() {
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return Deletion{}, errExecuting()
 	}
 	// From here every append through the service is refused, so the archive
@@ -114,13 +112,13 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	st.deleting = true
 	wasOpen := s.roomOpen(st)
 	pipelineID := st.snap.PipelineID
-	hookKey := hookDedupKey(pipelineID, st.dedupKey)
-	s.mu.Unlock()
+	hookKey := hookDedupKey(pipelineID, s.dedupKeyOf(st))
+	s.unlockRoom(st)
 
 	undo := func() {
-		s.mu.Lock()
+		s.lockState(st)
 		st.deleting = false
-		s.mu.Unlock()
+		s.unlockRoom(st)
 	}
 	wantSeq := int64(-1)
 	archived := false
@@ -232,7 +230,7 @@ func (s *Service) DeletedEvent(ctx context.Context, roomID string) (events.Event
 }
 
 // roomDeleted hands a deleted room's last frame to the OnRoomDeleted hook.
-// Caller must not hold s.mu.
+// Caller holds no lock of the service.
 func (s *Service) roomDeleted(roomID string, deleted events.Event) {
 	if s.onRoomDeleted != nil {
 		s.onRoomDeleted(roomID, deleted)

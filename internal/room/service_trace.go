@@ -48,20 +48,17 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 		return events.Event{}, err
 	}
 
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		s.mu.Unlock()
 		return events.Event{}, err
 	}
-	if !s.roomOpen(st) {
-		s.mu.Unlock()
+	open, pipelineID := s.roomOpen(st), st.snap.PipelineID
+	s.unlockRoom(st)
+	if !open {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	pipelineID := st.snap.PipelineID
-	s.mu.Unlock()
 
 	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	stages, err := s.topo.Trace(tctx, pipelineID, table, key)
@@ -75,12 +72,11 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 		return events.Event{}, fmt.Errorf("room: trace: %w", err)
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st2 := s.cached(roomID)
+	st2 := s.lockCachedRoom(roomID)
 	if st2 == nil {
 		return events.Event{}, notFound("room not found")
 	}
+	defer s.unlockRoom(st2)
 	if !s.roomOpen(st2) {
 		return events.Event{}, roomClosed("room is closed")
 	}

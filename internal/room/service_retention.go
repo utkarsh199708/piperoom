@@ -163,7 +163,7 @@ func (s *Service) purge(ctx context.Context, q store.PurgeQuery) (store.PurgeRes
 
 // evictRooms forgets deleted rooms: the cache entry, the alert key, and any
 // agent, executor or shadow grace timer still running for them. Then, outside
-// s.mu, it hands each room's room.deleted frame to the OnRoomDeleted hook, so
+// every lock, it hands each room's room.deleted frame to the OnRoomDeleted hook, so
 // its WebSockets close; frame builds it from the last seq this replica had
 // folded (0 for a room it had not cached).
 func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int64) events.Event) {
@@ -177,6 +177,7 @@ func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int
 		if st == nil {
 			continue
 		}
+		s.holdRoomLocked(st)
 		lastSeqs[id] = st.snap.LastSeq
 		if st.agentCancel != nil {
 			st.agentCancel()
@@ -188,8 +189,10 @@ func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int
 			st.graceTimer.Stop()
 		}
 		s.releaseAlertKeyLocked(id, st)
+		st.gone = true
 		s.uncacheRoom(id, st)
-		s.markListDirtyLocked(id)
+		s.releaseRoomLocked(st)
+		s.markListDirty(id)
 	}
 	s.mu.Unlock()
 	for _, id := range ids {

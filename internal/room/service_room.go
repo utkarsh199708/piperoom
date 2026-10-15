@@ -65,13 +65,15 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
 	st.snap.ID = roomID
+	// Locked before it is cached: nobody sees the room before room.created.
+	s.holdRoomLocked(st)
 	s.cacheRoom(roomID, st)
 
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, s.humanActor(user), events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID,
 	}); err != nil {
 		s.discardNewRoomLocked(ctx, roomID, st)
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return RoomSnapshot{}, mapUnstorable(err)
 	}
 	// room.created is logged, so the room exists (afterAppend): a failed
@@ -88,7 +90,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	st.firstLook = true
 	s.startAgentLocked(roomID, title, pipelineID, nil, st)
 	s.notifyRoomOpenedLocked(roomID)
-	s.mu.Unlock()
+	s.unlockRoom(st)
 	return snap, nil
 }
 
@@ -105,8 +107,9 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 // only logged), and the next Load, ListRooms or GetRoom rebuilds it from its
 // log (those load any room that is not cached). The caller got an
 // error for a room that exists; a retry of an alert joins it by its dedup key.
-// Caller must hold s.mu.
+// Caller holds st's lock.
 func (s *Service) discardNewRoomLocked(ctx context.Context, roomID string, st *roomState) {
+	st.gone = true
 	s.uncacheRoom(roomID, st)
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
@@ -232,8 +235,9 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	if ok {
 		st := s.cached(existing)
+		s.holdRoomLocked(st)
 		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, raw, resolved)
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return snap, false, err
 	}
 	if resolved {
@@ -248,6 +252,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newRoomInbox(shadow)}
 	st.snap.ID = roomID
+	s.holdRoomLocked(st)
 	s.cacheRoom(roomID, st)
 
 	created, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
@@ -256,7 +261,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	})
 	if err != nil {
 		s.discardNewRoomLocked(ctx, roomID, st)
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return RoomSnapshot{}, false, mapUnstorable(err)
 	}
 	// Later runs of the agent start from the alert as the log holds it, as
@@ -294,7 +299,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	st.firstLook = true
 	s.startAgentLocked(roomID, title, pipelineID, raw, st)
 	s.notifyRoomOpenedLocked(roomID)
-	s.mu.Unlock()
+	s.unlockRoom(st)
 	return snap, true, nil
 }
 
@@ -351,7 +356,7 @@ func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
 // open for it, as a system message, and returns that room. A repeat that the
 // source reports resolved does not close the room: only the driver does that.
 // A firing repeat also reaches the agent as a quiet alert update with raw's
-// evidence (alertUpdateLocked). Caller must hold s.mu.
+// evidence (alertUpdateLocked). Caller holds st's lock.
 func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string, raw json.RawMessage, resolved bool) (RoomSnapshot, error) {
 	text := fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title)
 	if resolved {
@@ -436,12 +441,11 @@ func (s *Service) notifyRoomOpenedLocked(roomID string) {
 
 // GetRoom returns a room snapshot or a not-found error.
 func (s *Service) GetRoom(ctx context.Context, roomID string) (RoomSnapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return RoomSnapshot{}, err
 	}
+	defer s.unlockRoom(st)
 	return st.snap.Clone(), nil
 }
 
@@ -452,12 +456,14 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 		return nil, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	rooms := s.cachedRooms()
 	out := make([]RoomSnapshot, 0, len(rooms))
 	for _, st := range rooms {
+		s.holdRoomLocked(st)
 		out = append(out, st.snap.Clone())
+		s.releaseRoomLocked(st)
 	}
+	s.mu.Unlock()
 	sort.SliceStable(out, func(i, j int) bool {
 		if (out[i].Status == "open") != (out[j].Status == "open") {
 			return out[i].Status == "open"
@@ -482,15 +488,13 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 	if err != nil {
 		return nil, 0, fmt.Errorf("room: events: %w", err)
 	}
-	s.mu.Lock()
-	st := s.cached(roomID)
 	lastSeq := int64(0)
-	if st != nil {
+	if st := s.lockCachedRoom(roomID); st != nil {
 		lastSeq = st.snap.LastSeq
+		s.unlockRoom(st)
 	} else if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		lastSeq = row.LastSeq
 	}
-	s.mu.Unlock()
 	return evs, lastSeq, nil
 }
 
@@ -511,30 +515,28 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	})
 }
 
-// closeRoom closes an open room as actor. check runs under s.mu after the
-// open check and returns the resolution to record, or an error that stops the
-// close. The driver's close and the open-room limit's close share everything
-// else: the alert key release, the persisted close, the shadow grace and
-// reveal, the agent and executor stop and the room-closed hook.
+// closeRoom closes an open room as actor. check runs under the room's lock
+// after the open check and returns the resolution to record, or an error that
+// stops the close. The driver's close and the open-room limit's close share
+// everything else: the alert key release, the persisted close, the shadow
+// grace and reveal, the agent and executor stop and the room-closed hook.
 //
 // With a shared store the room is first brought up to the log (reading outside
-// s.mu), and the close is a checked append: a close and a control change on
+// the lock), and the close is a checked append: a close and a control change on
 // two replicas at once cannot both pass (docs/design/replicas.md 9.1).
 func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Actor, check func(st *roomState) (string, error)) (events.Event, error) {
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		s.mu.Unlock()
 		return events.Event{}, err
 	}
 	if !s.roomOpen(st) {
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return events.Event{}, roomClosed("room already closed")
 	}
 	resolution, err := check(st)
 	if err != nil {
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return events.Event{}, err
 	}
 	e, err := s.emitCheckedLocked(ctx, st, roomID, func() error {
@@ -545,7 +547,7 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 		return cerr
 	}, events.RoomClosed, actor, events.RoomClosedPayload{Resolution: resolution})
 	if err != nil {
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return events.Event{}, err
 	}
 	// A closed room no longer takes repeats of its alert: the next one opens a
@@ -569,14 +571,15 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 	// A shadow room's log has no agent events: no draft. The drafter's place
 	// in wg is taken here (addWorker), so Close's Wait cannot miss it.
 	runDraft := !st.snap.Shadow && s.addWorker()
-	s.mu.Unlock()
+	s.unlockRoom(st)
 	if cancel != nil {
 		cancel()
 	}
 	if execCancel != nil {
 		execCancel()
 	}
-	// Outside s.mu, so the hook may call OpenRoomForPipeline and the like.
+	// Outside the room's lock, so the hook may call OpenRoomForPipeline and the
+	// like.
 	if runHook {
 		s.onRoomClosed(s.ctx, roomID, pipelineID, hookKey)
 	}

@@ -27,12 +27,11 @@ func (s *Service) DecideHypothesis(ctx context.Context, user User, roomID, verdi
 		return events.Event{}, validation(fmt.Sprintf("note is longer than %d characters", maxVerdictNote))
 	}
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	// The checked append re-runs this after catching up with other replicas,
 	// so two replicas cannot both pass the duplicate check.
 	var hypSeq int64 // set by the first check; the payload carries it

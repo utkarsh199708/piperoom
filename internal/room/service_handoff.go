@@ -55,12 +55,11 @@ const handoffFailTimeout = 10 * time.Second
 // own handoff.requested append.
 func (s *Service) HandoffInFlight(ctx context.Context, roomID string) error {
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return nil
 	}
+	defer s.unlockRoom(st)
 	if st.snap.handoffInFlight(s.now()) {
 		return handoffInProgress()
 	}
@@ -69,12 +68,13 @@ func (s *Service) HandoffInFlight(ctx context.Context, roomID string) error {
 
 // CreateHandoff asks the agent for a shift summary and emits handoff.created.
 //
-// The request is logged first (handoff.requested, under s.mu and as a checked
-// append, so of two concurrent requests exactly one gets in and the other
-// answers 409 handoff_in_progress) and ends with handoff.created or
-// handoff.failed for the same request_id. The summary is written outside s.mu
-// and may take minutes; meanwhile the fold of handoff.requested keeps every
-// other request out, on this replica and, through the log, on the others.
+// The request is logged first (handoff.requested, under the room's lock and as
+// a checked append, so of two concurrent requests exactly one gets in and the
+// other answers 409 handoff_in_progress) and ends with handoff.created or
+// handoff.failed for the same request_id. The summary is written outside the
+// lock and may take minutes; meanwhile the fold of handoff.requested keeps
+// every other request out, on this replica and, through the log, on the
+// others.
 func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID string, stayAsWatcher bool) (events.Event, error) {
 	if err := s.HandoffInFlight(ctx, roomID); err != nil {
 		return events.Event{}, err
@@ -85,10 +85,8 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 	}
 
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		s.mu.Unlock()
 		return events.Event{}, err
 	}
 	now := s.now().UTC()
@@ -114,7 +112,7 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		StayAsWatcher: stayAsWatcher,
 		ExpiresAt:     expiresAt,
 	})
-	s.mu.Unlock()
+	s.unlockRoom(st)
 	if err != nil {
 		return events.Event{}, err
 	}
@@ -148,12 +146,11 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 	}
 	summary = sanitizeHandoff(summary)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st2 := s.cached(roomID)
+	st2 := s.lockCachedRoom(roomID)
 	if st2 == nil {
 		return events.Event{}, notFound("room not found")
 	}
+	defer s.unlockRoom(st2)
 	if !s.roomOpen(st2) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -228,12 +225,11 @@ func (s *Service) failHandoff(ctx context.Context, roomID, requestID, reason str
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), handoffFailTimeout)
 	defer cancel()
 	s.syncRoom(fctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.cached(roomID)
+	st := s.lockCachedRoom(roomID)
 	if st == nil {
 		return
 	}
+	defer s.unlockRoom(st)
 	if _, err := s.emitLocked(fctx, st, roomID, events.HandoffFailed, systemActor, events.HandoffFailedPayload{
 		RequestID: requestID, Reason: reason,
 	}); err != nil {
@@ -273,6 +269,8 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	if err != nil {
 		return events.Event{}, err
 	}
+	s.holdRoomLocked(st)
+	defer s.releaseRoomLocked(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -332,7 +330,7 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 //     the hand-off is stale as before.
 //
 // Other pending hand-offs are not voided here: one created after the role
-// moved belongs to the new driver and is live. Caller holds s.mu.
+// moved belongs to the new driver and is live. Caller holds st's lock.
 func (s *Service) finishHandoffLocked(ctx context.Context, st *roomState, user User, h store.HandoffRow) (events.Event, error) {
 	took, accepted, err := s.handoffInLog(ctx, h)
 	if err != nil {

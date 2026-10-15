@@ -64,22 +64,26 @@ func TestListHubCoalesces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Hold the service lock while many events fold: the hub cannot copy
-	// until it is released, so the burst becomes few updates.
-	s.mu.Lock()
-	st := s.cached(snap.ID)
+	// Hold the room's lock while many events fold: the room is published,
+	// and the hub told, only when it is released, so the burst becomes few
+	// updates.
+	st, err := s.lockRoom(context.Background(), snap.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i := range 50 {
 		if _, err := s.emitLocked(context.Background(), st, snap.ID, events.AgentMessage, events.AgentActor, events.AgentMessagePayload{Text: "m" + string(rune('a'+i%26))}); err != nil {
-			s.mu.Unlock()
+			s.unlockRoom(st)
 			t.Fatal(err)
 		}
 	}
-	s.mu.Unlock()
+	want := st.snap.LastSeq
+	s.unlockRoom(st)
 
 	got := 0
 	var last *RoomSnapshot
 	deadline := time.After(2 * time.Second)
-	for last == nil || last.LastSeq < st.snap.LastSeq {
+	for last == nil || last.LastSeq < want {
 		select {
 		case up := <-ch:
 			if up.Room != nil && up.Room.ID == snap.ID {

@@ -33,7 +33,7 @@ import (
 // LeaseCheckEvery is how often the service looks for expired driver leases.
 // The signal pages people (Slack) and shows in the room, so a delay of up to
 // one period after the 30-minute lease ends is fine; a check costs one pass
-// over the cached rooms under s.mu and no I/O unless a lease is due.
+// over the cached rooms and no I/O unless a lease is due.
 const LeaseCheckEvery = 15 * time.Second
 
 // leaseCheckTimeout bounds one check: the coordination read and the appends.
@@ -63,7 +63,7 @@ func applyLeaseExpired(snap *RoomSnapshot, e events.Event) {
 // leaseExpiryDueLocked returns the control.lease_expired payload of a room
 // whose driver lease has passed and has not been signalled yet. Not for a
 // closed room, a room being deleted or a room with no driver. Caller holds
-// s.mu.
+// st's lock.
 func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpiredPayload, bool) {
 	d := st.snap.Driver
 	if st.deleting || !s.roomOpen(st) || d == nil || d.LeaseExpired || st.snap.grantedLease.IsZero() ||
@@ -134,9 +134,11 @@ func (s *Service) checkLeases(ctx context.Context) {
 	s.mu.Lock()
 	var due []string
 	for id, st := range s.cachedRooms() {
+		s.holdRoomLocked(st)
 		if _, ok := s.leaseExpiryDueLocked(st); ok {
 			due = append(due, id)
 		}
+		s.releaseRoomLocked(st)
 	}
 	s.mu.Unlock()
 	if len(due) == 0 {
@@ -171,18 +173,17 @@ func (s *Service) checkLeases(ctx context.Context) {
 	}
 }
 
-// emitLeaseExpired re-checks one room under s.mu and appends its
+// emitLeaseExpired re-checks one room under its lock and appends its
 // control.lease_expired as the system actor.
 func (s *Service) emitLeaseExpired(ctx context.Context, roomID string) {
 	if s.isClosed() {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.cached(roomID)
+	st := s.lockCachedRoom(roomID)
 	if st == nil {
 		return
 	}
+	defer s.unlockRoom(st)
 	p, ok := s.leaseExpiryDueLocked(st)
 	if !ok {
 		return

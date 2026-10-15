@@ -68,9 +68,9 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	return s.createProposal(ctx, roomID, p, actor, nil)
 }
 
-// createProposal is CreateProposal with an optional fence, checked under s.mu
-// before anything is written: the agent's proposals refuse a run that lost its
-// lease (fenceLocked).
+// createProposal is CreateProposal with an optional fence, checked under the
+// room's lock before anything is written: the agent's proposals refuse a run
+// that lost its lease (fenceLocked).
 func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, error) {
 	p = sanitizeProposal(p)
 	if len(p.Steps) == 0 {
@@ -107,14 +107,13 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 	}
 
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return "", err
 	}
+	defer s.unlockRoom(st)
 	if fence != nil {
 		if err := fence(st); err != nil {
 			return "", err
@@ -191,9 +190,9 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 		return "", err
 	}
-	// Preview runs outside s.mu, on the service lifetime context; it waits for
-	// this call to release the lock before it appends anything. A closing
-	// service previews nothing.
+	// Preview runs outside the room's lock, on the service lifetime context;
+	// it waits for this call to release the lock before it appends anything.
+	// A closing service previews nothing.
 	if s.addWorker() {
 		go func(pipelineID string, steps []events.ProposalStep) {
 			defer s.wg.Done()
@@ -247,6 +246,8 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		if err != nil {
 			return err
 		}
+		s.holdRoomLocked(st)
+		defer s.releaseRoomLocked(st)
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")
 		}
@@ -334,6 +335,8 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if err != nil {
 		return events.Event{}, err
 	}
+	s.holdRoomLocked(st)
+	defer s.releaseRoomLocked(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}

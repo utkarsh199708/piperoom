@@ -55,17 +55,20 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var newest *roomState
+	var newest time.Time
+	found := false
 	for id, st := range s.cachedRooms() {
-		if st.snap.PipelineID != pipelineID || !s.roomOpen(st) {
+		s.holdRoomLocked(st)
+		pipeline, open, openedAt := st.snap.PipelineID, s.roomOpen(st), st.snap.OpenedAt
+		s.releaseRoomLocked(st)
+		if pipeline != pipelineID || !open {
 			continue
 		}
-		if newest == nil || st.snap.OpenedAt.After(newest.snap.OpenedAt) ||
-			(st.snap.OpenedAt.Equal(newest.snap.OpenedAt) && id < roomID) {
-			newest, roomID = st, id
+		if !found || openedAt.After(newest) || (openedAt.Equal(newest) && id < roomID) {
+			found, newest, roomID = true, openedAt, id
 		}
 	}
-	return roomID, newest != nil
+	return roomID, found
 }
 
 // lastRoomLookupTimeout bounds the store query behind LastRoomForKey, whose
@@ -113,16 +116,15 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 	// store before s.mu is taken. A room deleted meanwhile is evicted and
 	// simply loses the snapshot vote.
 	s.syncRoom(ctx, row.ID)
-	s.mu.Lock()
-	if st := s.cached(row.ID); st != nil {
+	if st := s.lockCachedRoom(row.ID); st != nil {
 		if s.roomOpen(st) {
 			closedAt = nil
 		} else if st.snap.ClosedAt != nil {
 			t := *st.snap.ClosedAt
 			closedAt = &t
 		}
+		s.unlockRoom(st)
 	}
-	s.mu.Unlock()
 	return row.ID, closedAt, true
 }
 
@@ -167,14 +169,13 @@ func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evi
 	if err := rejectUnstorable(text); err != nil {
 		return err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return roomClosed("room already closed")
 	}

@@ -95,9 +95,9 @@ func TestEvictedElsewhereWithoutAuditRow(t *testing.T) {
 	if _, _, err := st.DeleteRoom(ctx, store.RoomDeletion{RoomID: snap.ID, DeletedBy: "ada", DeletedAt: time.Now().UTC(), Reason: "x"}, -1); err != nil {
 		t.Fatal(err)
 	}
-	s.mu.Lock()
-	s.evictLocked(snap.ID, s.cached(snap.ID))
-	s.mu.Unlock()
+	rs := s.lockCachedRoom(snap.ID)
+	s.evictLocked(snap.ID, rs)
+	s.unlockRoom(rs)
 	if c := nextHookCall(t, calls); c.roomID != snap.ID || c.ev.Type != "" {
 		t.Fatalf("hook call = %+v, want the zero Event", c)
 	}

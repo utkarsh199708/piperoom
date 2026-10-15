@@ -100,6 +100,8 @@ func (s *Service) checkVisibleLocked(ctx context.Context, u User, roomID string)
 // missing room is the 404 of mapStoreErr. Caller must hold s.mu.
 func (s *Service) roomPipelineLocked(ctx context.Context, roomID string) (string, error) {
 	if st := s.cached(roomID); st != nil {
+		s.holdRoomLocked(st)
+		defer s.releaseRoomLocked(st)
 		return st.snap.PipelineID, nil
 	}
 	row, err := s.store.GetRoom(ctx, roomID)

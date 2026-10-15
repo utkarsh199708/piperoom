@@ -29,7 +29,8 @@ func newExecQueue() *execQueue {
 	return &execQueue{wake: make(chan struct{}, 1)}
 }
 
-// push appends without blocking and signals the worker. Called with s.mu held.
+// push appends without blocking and signals the worker. Called with the room's
+// lock held.
 func (q *execQueue) push(p store.ProposalRow) {
 	q.mu.Lock()
 	q.items = append(q.items, p)
@@ -89,7 +90,7 @@ func (q *execQueue) busy() bool {
 // here, when it is queued (docs/design/replicas.md section 5): a proposal that
 // waits behind a long one in this room's queue is then a live claim this
 // replica refreshes, never "approved and unclaimed". A claim another executor
-// already holds queues nothing. Caller must hold s.mu.
+// already holds queues nothing. Caller holds st's lock.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 	// The worker's place in wg is reserved before the claim, so a closing
 	// service claims nothing; it is given back when the room has its worker
@@ -582,12 +583,11 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 
 // roomPipeline returns the pipeline of a cached room ("" when unknown).
 func (s *Service) roomPipeline(ctx context.Context, roomID string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return ""
 	}
+	defer s.unlockRoom(st)
 	return st.snap.PipelineID
 }
 
@@ -633,8 +633,10 @@ func (s *Service) finishStepRow(ctx context.Context, proposalID string, i int, s
 }
 
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.cached(roomID)
-	return st != nil && st.snap.Status == "open"
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
+		return false
+	}
+	defer s.unlockRoom(st)
+	return st.snap.Status == "open"
 }

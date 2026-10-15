@@ -6,9 +6,9 @@ import (
 )
 
 // The rooms list is pushed (GET /api/rooms/ws, docs/api.md "Room list
-// socket"), not polled. Every fold marks its room dirty (markListDirtyLocked,
-// under s.mu); one hub goroutine wakes, copies the dirty rooms' snapshots
-// under s.mu, releases it and hands the copies to every subscriber. A burst of
+// socket"), not polled. A room whose snapshot changed is marked dirty when its
+// lock is released (releaseRoomLocked); one hub goroutine wakes, copies the
+// dirty rooms' snapshots and hands the copies to every subscriber. A burst of
 // events on one room between two wakes is one update. Subscribers filter by
 // tenancy and by a digest of the list-relevant fields themselves.
 
@@ -46,10 +46,9 @@ func newListHub() *listHub {
 	return &listHub{dirty: map[string]struct{}{}, subs: map[*listSub]struct{}{}, wake: make(chan struct{}, 1)}
 }
 
-// markListDirtyLocked records that roomID's list entry may have changed and
-// wakes the hub. Caller holds s.mu. It never blocks, and with no subscriber it
-// does nothing.
-func (s *Service) markListDirtyLocked(roomID string) {
+// markListDirty records that roomID's list entry may have changed and wakes
+// the hub. It never blocks, and with no subscriber it does nothing.
+func (s *Service) markListDirty(roomID string) {
 	h := s.list
 	h.mu.Lock()
 	if len(h.subs) == 0 {
@@ -136,7 +135,9 @@ func (s *Service) runListHub() {
 		s.mu.Lock()
 		for id := range ids {
 			if st := s.cached(id); st != nil {
+				s.holdRoomLocked(st)
 				snap := st.snap.Clone()
+				s.releaseRoomLocked(st)
 				updates = append(updates, RoomUpdate{Room: &snap})
 			} else {
 				updates = append(updates, RoomUpdate{DeletedID: id})

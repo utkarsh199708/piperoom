@@ -382,12 +382,12 @@ func (g *agentGate) release() {
 }
 
 // emitQueued writes agent.status "queued" for a room that has to wait. It
-// checks, under s.mu, that the room is still open and still waiting: the
-// agent's own "working" status needs s.mu too, so a late "queued" can never
-// land after it. Reports whether the event was written.
+// checks, under the room's lock, that the room is still open and still
+// waiting: the agent's own "working" status needs that lock too, so a late
+// "queued" can never land after it. Reports whether the event was written.
 func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockState(g.st)
+	defer s.unlockRoom(g.st)
 	if s.isClosed() || !s.roomOpen(g.st) || !waiting() {
 		return false
 	}
@@ -408,8 +408,8 @@ func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) b
 // granted, so the room never keeps showing "queued" for a run that has begun.
 // The agent emits its own, more specific status right after.
 func (s *Service) emitSlotAcquired(ctx context.Context, g *agentGate) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.lockState(g.st)
+	defer s.unlockRoom(g.st)
 	if ctx.Err() != nil || s.isClosed() || !s.roomOpen(g.st) {
 		return
 	}

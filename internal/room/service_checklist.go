@@ -48,14 +48,13 @@ func (s *Service) ChecklistStep(ctx context.Context, user User, roomID string, i
 	if err := rejectUnstorable(in.StepID, in.ToolUseID, in.Note); err != nil {
 		return events.Event{}, err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}

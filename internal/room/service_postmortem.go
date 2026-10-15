@@ -26,7 +26,9 @@ var errPostmortemDecided = errors.New("room: postmortem already drafted")
 // holds s.mu (Load).
 func (s *Service) sweepPostmortemsLocked() {
 	for id, st := range s.cachedRooms() {
+		s.holdRoomLocked(st)
 		sn := st.snap
+		s.releaseRoomLocked(st)
 		if sn.Shadow || sn.Status != "closed" || sn.Postmortem.Status != PostmortemDrafting || sn.ClosedAt == nil {
 			continue
 		}
@@ -41,9 +43,9 @@ func (s *Service) sweepPostmortemsLocked() {
 }
 
 // draftPostmortem writes postmortem.drafted (or .failed) for a closed room. The
-// caller reserved its place in wg (addWorker). It runs outside s.mu on the service context, after
-// room.closed, so closing never waits on the model. allowModel is false after a
-// restart.
+// caller reserved its place in wg (addWorker). It runs outside every lock on
+// the service context, after room.closed, so closing never waits on the model.
+// allowModel is false after a restart.
 func (s *Service) draftPostmortem(roomID string, allowModel bool) {
 	defer s.wg.Done()
 	evs, err := s.allEvents(s.ctx, roomID)
@@ -60,12 +62,11 @@ func (s *Service) draftPostmortem(roomID string, allowModel bool) {
 	actx, cancel := context.WithTimeout(s.ctx, postmortemAppendTimeout)
 	defer cancel()
 	s.syncRoom(actx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.cached(roomID)
+	st := s.lockCachedRoom(roomID)
 	if st == nil {
 		return
 	}
+	defer s.unlockRoom(st)
 	// A checked append: of two replicas that both drafted, one wins.
 	_, err = s.emitCheckedLocked(actx, st, roomID, func() error {
 		if st.snap.Postmortem.Status == PostmortemDrafted || st.snap.Postmortem.Status == PostmortemFailed {
