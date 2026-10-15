@@ -86,6 +86,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      # setup-go exports GOTOOLCHAIN=local: the Go of go.mod is the only one used.
       - name: Run evals
         id: run
         if: steps.key.outputs.run == 'true'
