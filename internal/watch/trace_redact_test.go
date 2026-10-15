@@ -83,3 +83,17 @@ func TestCheckErrorLogIsRedacted(t *testing.T) {
 	}
 	assertNoSecret(t, "logs", h.logs.String())
 }
+
+// A task trace whose first line is longer than the cap: the quoted record value
+// runs past the cut, so its closing quote is gone.
+func TestLongTraceQuoteCutIsRedacted(t *testing.T) {
+	line := "org.apache.kafka.connect.errors.DataException: Failed to convert value for customer 'Jane Q. Doe, 12 Elm St, " +
+		strings.Repeat("filler ", 50) + "' at offset 5"
+	got := traceLine(line + "\n\tat io.debezium.Foo.bar(Foo.java:1)")
+	if strings.Contains(got, "Jane") || strings.Contains(got, "Elm St") || !strings.Contains(got, "DataException") {
+		t.Fatalf("traceLine = %q", got)
+	}
+	if n := len([]rune(got)); n > maxTraceChars {
+		t.Fatalf("traceLine is %d runes, cap %d", n, maxTraceChars)
+	}
+}

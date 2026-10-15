@@ -19,8 +19,11 @@ const maxTraceChars = 300
 
 // traceLine is what the watcher keeps of a task trace: the first line, with
 // record values and credentials removed by the DLQ message rules (a Connect
-// exception message quotes the failing record and connection URLs).
-func traceLine(s string) string { return dlq.RedactMessage(firstLine(s, maxTraceChars)) }
+// exception message quotes the failing record and connection URLs). The line
+// is handed over longer than the cap, so RedactMessage makes the cut and
+// knows a quote's closer may lie past it; its result is at most
+// dlq.MaxMessageRunes (= maxTraceChars).
+func traceLine(s string) string { return dlq.RedactMessage(firstLine(s, 4*maxTraceChars)) }
 
 // slotNameRE is the owners rule for a slot name (the same check as watch.slot).
 var slotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)

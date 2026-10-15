@@ -64,10 +64,14 @@ func RedactMessage(s string) string {
 }
 
 func redactOnce(s string) string {
-	rs := capRunes([]rune(s))
+	rs := []rune(s)
+	// A cut can drop the closing quote of a value: then an open single quote
+	// is a value, not an apostrophe (scrub).
+	cut := len(rs) > MaxMessageRunes
+	rs = capRunes(rs)
 	rs = tidy(rs)
 	rs = cutTail(rs)
-	rs = scrub(rs)
+	rs = scrub(rs, cut)
 	rs = []rune(maskUnquoted(string(rs)))
 	// Markers can make the text longer than what went in ("" -> "<redacted>"),
 	// so the cap runs again at the end.
@@ -156,8 +160,10 @@ func hasPrefixFold(rs, p []rune) bool {
 }
 
 // scrub replaces quoted strings, balanced groups, the Jackson token operand
-// and VALUES tuples.
-func scrub(rs []rune) []rune {
+// and VALUES tuples. cut says the text was cut at the cap: a single quote that
+// opens a value and has no closer then takes the rest of the text, because
+// its closer was past the cut.
+func scrub(rs []rune, cut bool) []rune {
 	out := make([]rune, 0, len(rs))
 	for i := 0; i < len(rs); {
 		r := rs[i]
@@ -180,6 +186,8 @@ func scrub(rs []rune) []rune {
 		case r == '\'' && wordStart(rs, i):
 			end := apostropheEnd(rs, i)
 			switch {
+			case end < 0 && cut:
+				return append(out, redactedRunes...)
 			case end < 0:
 				out = append(out, r) // an apostrophe, not a quote
 				i++
