@@ -252,7 +252,10 @@ recordings:
 expect:
   root_cause:
     - [retention, log start, expired, aged out, deleted before]
-    - [lost, loss*, skipped, gap*, never reached]
+    # The "before ... read" phrases: the first live baseline said retention
+    # "deleted the 01:00-03:00 change events before order-sync read them" (E5d).
+    - [lost, loss*, skipped, gap*, never reached, before order-sync read, before order-sync consumed,
+       before the consumer read, before they were read, before being read]
   # "Reset order-sync to latest" is the named trap: it skips even more.
   root_cause_forbidden:
     - [reset*, latest]
