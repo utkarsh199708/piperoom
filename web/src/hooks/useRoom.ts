@@ -184,6 +184,11 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const [reloadKey, setReloadKey] = useState(0)
 
   const lastSeqRef = useRef(0)
+  // The room whose socket last closed with stale_position, until an event arrives (docs/api.md,
+  // Stale position; #464). Outlives the reload that the close starts, so a second stale_position
+  // in a row is told apart from the first. Not cleared on open: the server accepts the upgrade
+  // before it refuses the position.
+  const staleRoomRef = useRef<string | null>(null)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
   // Steers and comments not settled yet, keyed by client_id. Each entry keeps the room it was
@@ -303,6 +308,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
 
     const applyEventSeq = (ev: Event) => {
       if (ev.seq <= lastSeqRef.current) return
+      staleRoomRef.current = null
       dispatch({ type: 'event', event: ev })
       lastSeqRef.current = ev.seq
       // The stream settles a send by its client_id (an answer may have been lost).
@@ -398,6 +404,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             msg.error.message,
           )
           if (problem) reportAuthProblem({ ...problem, epoch: sessionEpoch })
+          // The first stale_position is handled silently by a reload (see onclose).
+          if (msg.error.code === 'stale_position' && staleRoomRef.current !== roomId) return
           setError(friendlyError(msg.error.code, msg.error.message))
         }
       }
@@ -409,6 +417,19 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           // Stop retrying; the login screen (or redirect) takes over.
           reportAuthProblem({ kind: 'session_expired', message: 'session_expired', epoch: sessionEpoch })
           setConn('error')
+          return
+        }
+        if (ev?.reason === 'stale_position') {
+          if (staleRoomRef.current === roomId) {
+            // A second one in a row: after=0 cannot cause it, so it is a client bug. The error
+            // frame is on screen; retrying would only repeat it.
+            setConn('error')
+            setError((prev) => prev ?? "This room's event log could not be replayed (stale_position).")
+            return
+          }
+          // The position is past the stored log: drop the room state and replay it all, once.
+          staleRoomRef.current = roomId
+          setReloadKey((k) => k + 1)
           return
         }
         if (ev?.reason === 'room deleted') {
