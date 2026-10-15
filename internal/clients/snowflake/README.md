@@ -11,11 +11,16 @@ WAREHOUSE_KIND=snowflake
 WAREHOUSE_DB_URL='svc_piperoom:<password>@myorg-myaccount/ANALYTICS/PUBLIC?warehouse=PIPEROOM_WH&role=PIPEROOM_RO'
 ```
 
-`WAREHOUSE_DB_URL` is a [gosnowflake DSN](https://pkg.go.dev/github.com/snowflakedb/gosnowflake#hdr-Connection_String):
+`WAREHOUSE_DB_URL` is a [gosnowflake DSN](https://pkg.go.dev/github.com/snowflakedb/gosnowflake/v2#hdr-Connection_String):
 `user:password@account/database/schema?warehouse=...&role=...`. `WAREHOUSE_KIND`
 defaults to `postgres`. Any value other than `postgres` or `snowflake` stops the
 server at startup. The DSN holds the password: it is never logged, and startup errors
 are scrubbed of it (`snowflake.Redact`).
+
+TLS revocation: gosnowflake v2.3.0 checks no certificate revocation by default. The client
+turns on fail-open OCSP (v1's behaviour) unless the DSN sets `ocspFailOpen`,
+`disableOCSPChecks` or a `certRevocationCheckMode` itself; `ocspFailOpen=false` makes it
+fail-closed. `SF_DISABLE_OCSP_CHECKS=true` in the environment switches fail-open OCSP off.
 
 Always URL-encode the password (for example with `url.QueryEscape`). The driver
 unescapes it, so a raw `%` breaks it, a raw `+` turns into a space, and a raw `?`,
