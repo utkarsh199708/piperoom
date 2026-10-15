@@ -496,6 +496,11 @@ func (w *Watcher) dlqGrowthReading(now time.Time, t target, ps *pipeState, obs *
 	switch {
 	case most >= int64(sc.FireRecords):
 		r.v = vBreach
+		for _, tr := range rs {
+			if tr.newN >= int64(sc.FireRecords) {
+				r.targets = append(r.targets, tr.t.name)
+			}
+		}
 	case most == 0:
 		r.v = vClear
 	default:
@@ -529,6 +534,9 @@ func (w *Watcher) dlqGrowthReading(now time.Time, t target, ps *pipeState, obs *
 		"records": p.snap.records, "end_offset_sum": p.snap.endSum,
 		"new_in_window": p.newN, "window": fmtDur(sc.Window),
 		"older_than_watcher": p.backlog, "shared": p.t.shared,
+	}
+	if !slices.ContainsFunc(p.t.writers, func(wr string) bool { return slices.Contains(t.connectors, wr) }) && len(p.t.writers) > 0 {
+		ev["layer"] = "consumer" // only consumer groups write it (SignalLayer says kafka-connect)
 	}
 	if p.rateOK {
 		ev["rate_per_hour"] = ratePerHour
@@ -705,9 +713,16 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 		if more := len(parts) - len(shown); more > 0 {
 			label += fmt.Sprintf(" (+%d more)", more)
 		}
+		var conns []string
+		for _, f := range bad {
+			if !slices.Contains(conns, f.conn) {
+				conns = append(conns, f.conn)
+			}
+		}
 		r = reading{
 			v: vBreach, sev: sev, label: label, value: strings.Join(parts, ", "), threshold: th,
-			ev: map[string]any{"signal": owners.SignalConfigRisk, "severity": sev, "risks": evs},
+			ev:      map[string]any{"signal": owners.SignalConfigRisk, "severity": sev, "risks": evs},
+			targets: conns,
 		}
 	case firstErr != nil:
 		r = reading{v: vUnknown, err: firstErr}
