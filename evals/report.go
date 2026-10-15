@@ -6,22 +6,30 @@ import (
 	"io"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
 
 // Report is the result of one evaluation.
 type Report struct {
-	Label      string            `json:"label"`
-	Model      string            `json:"model"`
-	Effort     string            `json:"effort"`
-	MaxTurns   int               `json:"max_turns,omitempty"`
-	Runs       int               `json:"runs_per_scenario"`
-	StartedAt  time.Time         `json:"started_at"`
-	DurationMS int64             `json:"duration_ms"`
-	Overall    Summary           `json:"overall"`
-	Scenarios  []ScenarioSummary `json:"scenarios"`
-	Results    []RunResult       `json:"results"`
+	Label string `json:"label"`
+	// Commit is the source revision of the run (Config.Commit).
+	Commit string `json:"commit,omitempty"`
+	// Entry names the code path: every run went through room.Service.
+	Entry string `json:"entry,omitempty"`
+	// PromptHashes are every prompt hash the model tap saw; one when the
+	// prompt was the same for every run. Empty when untapped.
+	PromptHashes []string          `json:"prompt_hashes,omitempty"`
+	Model        string            `json:"model"`
+	Effort       string            `json:"effort"`
+	MaxTurns     int               `json:"max_turns,omitempty"`
+	Runs         int               `json:"runs_per_scenario"`
+	StartedAt    time.Time         `json:"started_at"`
+	DurationMS   int64             `json:"duration_ms"`
+	Overall      Summary           `json:"overall"`
+	Scenarios    []ScenarioSummary `json:"scenarios"`
+	Results      []RunResult       `json:"results"`
 	// Calibration and Evidence are over every run (calibration.go). Nil in
 	// reports written before they existed.
 	Calibration *Calibration    `json:"calibration,omitempty"`
@@ -44,9 +52,15 @@ type Summary struct {
 	// MeanToolCallsToRootCause is over runs that found the cause; -1 if none did.
 	MeanToolCallsToRootCause float64 `json:"mean_tool_calls_to_root_cause"`
 	MeanDurationMS           float64 `json:"mean_duration_ms"`
-	Misses                   int     `json:"misses"`
-	RejectedAttempts         int     `json:"rejected_attempts"`
-	Errors                   int     `json:"errors"`
+	// MedianMSToCause and MedianStepsToCause are over runs with a time to
+	// cause (ttc.go); -1 when none had one. CauseRetracted counts runs that
+	// posted a wrong hypothesis after a correct one.
+	MedianMSToCause    float64 `json:"median_ms_to_cause"`
+	MedianStepsToCause float64 `json:"median_steps_to_cause"`
+	CauseRetracted     int     `json:"cause_retracted"`
+	Misses             int     `json:"misses"`
+	RejectedAttempts   int     `json:"rejected_attempts"`
+	Errors             int     `json:"errors"`
 	// Usage holds the latency percentiles, tokens, cost and model routing
 	// (stats.go); nil until UsageCollector.Apply fills it.
 	Usage *UsageSummary `json:"usage,omitempty"`
@@ -61,6 +75,8 @@ type ScenarioSummary struct {
 func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started time.Time) Report {
 	rep := Report{
 		Label:      cfg.Label,
+		Commit:     cfg.Commit,
+		Entry:      "room",
 		Model:      cfg.Options.Model,
 		Effort:     cfg.Options.Effort,
 		MaxTurns:   cfg.Options.MaxTurns,
@@ -82,16 +98,30 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 		}
 	}
 	rep.Overall = combine(withRuns)
+	if cfg.Tap != nil {
+		rep.PromptHashes = cfg.Tap.PromptHashes()
+	}
 	cal, ev := calibrate(results), evidenceTotals(results)
 	rep.Calibration, rep.Evidence = &cal, &ev
 	return rep
 }
 
 func summarize(rs []RunResult) Summary {
-	s := Summary{Runs: len(rs), MeanToolCallsToRootCause: -1}
+	s := Summary{Runs: len(rs), MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1}
 	if len(rs) == 0 {
 		return s
 	}
+	var ms, steps []float64
+	for _, r := range rs {
+		if r.TimeToCause != nil {
+			ms = append(ms, float64(r.TimeToCause.MS))
+			steps = append(steps, float64(r.TimeToCause.Steps))
+		}
+		if r.CauseRetracted {
+			s.CauseRetracted++
+		}
+	}
+	s.MedianMSToCause, s.MedianStepsToCause = median(ms), median(steps)
 	var score, calls, dur, toCause float64
 	var rootCauses, layers, found int
 	for _, r := range rs {
@@ -130,15 +160,37 @@ func summarize(rs []RunResult) Summary {
 	return s
 }
 
+// median is the middle value (mean of the two middle ones); -1 when empty.
+func median(xs []float64) float64 {
+	if len(xs) == 0 {
+		return -1
+	}
+	xs = append([]float64(nil), xs...)
+	sort.Float64s(xs)
+	n := len(xs)
+	if n%2 == 1 {
+		return xs[n/2]
+	}
+	return (xs[n/2-1] + xs[n/2]) / 2
+}
+
 // combine averages per-scenario summaries so each scenario weighs the same.
 func combine(ss []Summary) Summary {
-	out := Summary{MeanToolCallsToRootCause: -1}
+	out := Summary{MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1}
 	if len(ss) == 0 {
 		return out
 	}
 	var toCause float64
 	var found int
+	// Overall time to cause is the median of the scenarios' medians, so
+	// each scenario weighs the same here too.
+	var ms, steps []float64
 	for _, s := range ss {
+		out.CauseRetracted += s.CauseRetracted
+		if s.MedianMSToCause >= 0 {
+			ms = append(ms, s.MedianMSToCause)
+			steps = append(steps, s.MedianStepsToCause)
+		}
 		out.Runs += s.Runs
 		out.Passes += s.Passes
 		out.Misses += s.Misses
@@ -165,6 +217,7 @@ func combine(ss []Summary) Summary {
 	if found > 0 {
 		out.MeanToolCallsToRootCause = toCause / float64(found)
 	}
+	out.MedianMSToCause, out.MedianStepsToCause = median(ms), median(steps)
 	return out
 }
 
@@ -198,8 +251,11 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	fmt.Fprintf(&b, "model `%s` · effort `%s` · %d run(s) per scenario · took %s\n\n",
 		orDefault(r.Model), orDefault(r.Effort), r.Runs,
 		(time.Duration(r.DurationMS) * time.Millisecond).Round(time.Second))
-	b.WriteString("| scenario | pass | score | root cause | layer | tool calls | calls to cause | misses | rejected fixes | errors |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
+	if r.Commit != "" || len(r.PromptHashes) > 0 {
+		fmt.Fprintf(&b, "commit `%s` · prompt %s\n\n", mdCell(orDefault(r.Commit)), mdCell(promptCell(r.PromptHashes)))
+	}
+	b.WriteString("| scenario | pass | score | root cause | layer | tool calls | calls to cause | time to cause ms / steps | retracted | misses | rejected fixes | errors |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, s := range r.Scenarios {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
@@ -222,9 +278,25 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {
-	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %.1f | %s | %d | %d | %d |\n",
+	ttc := "-"
+	if s.MedianMSToCause >= 0 {
+		ttc = fmt.Sprintf("%.0f / %.1f", s.MedianMSToCause, s.MedianStepsToCause)
+	}
+	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %.1f | %s | %s | %d | %d | %d | %d |\n",
 		mdCell(name), s.Passes, s.Runs, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate,
-		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), s.Misses, s.RejectedAttempts, s.Errors)
+		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), ttc, s.CauseRetracted, s.Misses, s.RejectedAttempts, s.Errors)
+}
+
+// promptCell lists the prompt hashes; more than one means runs saw
+// different prompts.
+func promptCell(hashes []string) string {
+	switch len(hashes) {
+	case 0:
+		return "untapped"
+	case 1:
+		return "`" + hashes[0] + "`"
+	}
+	return fmt.Sprintf("**%d different**: `%s`", len(hashes), strings.Join(hashes, "`, `"))
 }
 
 // writeUsageTable adds the latency and cost table when the report has usage.

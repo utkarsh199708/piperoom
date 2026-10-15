@@ -1,0 +1,27 @@
+# DEV AUTH OVERRIDE. Not for a shared or reachable host.
+#
+# Dev login has no password: anyone who can reach the port can pick any user from
+# users.yaml, including approving fixes. The release image and
+# docker-compose.pilot.yml do not enable it. Use this file only on a laptop,
+# behind a VPN, or behind an SSH tunnel, and only on purpose:
+#
+#   docker compose -f deploy/docker-compose.pilot.yml -f deploy/docker-compose.dev-auth.yml up -d
+#
+# It changes nothing else, so the same deploy/.env works, plus
+# PIPEROOM_DEV_ACK=dev-login-has-no-password in deploy/.env (see below). Leave
+# PIPEROOM_BIND=127.0.0.1 (the default) when using it.
+
+services:
+  piperoom:
+    environment:
+      PIPEROOM_AUTH_MODE: dev
+      # Dev mode refuses to listen on 0.0.0.0 (needed inside a container)
+      # without this; the server then logs a loud warning at every start.
+      PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1"
+      # From R9 the server also needs this acknowledgement to start in dev mode
+      # on a non-loopback address (it listens on 0.0.0.0 inside the container).
+      # It is NOT set here on purpose: whoever starts dev login must type the
+      # sentence themselves, in deploy/.env or the shell:
+      #   PIPEROOM_DEV_ACK=dev-login-has-no-password
+      # Any other non-empty value stops the start. Older servers ignore it.
+      PIPEROOM_DEV_ACK: ${PIPEROOM_DEV_ACK:-}

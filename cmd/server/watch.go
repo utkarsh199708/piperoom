@@ -211,6 +211,7 @@ func startWatcher(ctx context.Context, d watch.Deps, hook *roomClosedHook, log *
 	log.Info("server: watcher starting",
 		"mode", string(d.Config.Mode),
 		"interval", d.Config.Interval.String(),
+		"max_open_rooms", d.MaxOpenRooms,
 		"pipelines", w.Targets())
 	return startWatch(ctx, w, watchStopTimeout, log), nil
 }

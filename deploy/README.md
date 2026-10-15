@@ -8,17 +8,26 @@ database, Kafka, Kafka Connect, Schema Registry, the warehouse, and `api.anthrop
 
 Piperoom has two login modes (`PIPEROOM_AUTH_MODE`):
 
-- **`dev`** (the default, and what the image starts in). You open the UI and pick a user from
-  `users.yaml`. There is **no password**. Anyone who can reach the port can pick any user,
-  **including approving fixes**.
-- **`oidc`**: real single sign-on through your identity provider (Okta, Entra, Keycloak, Google, ...).
+- **`oidc`** (the default of the image and of `docker-compose.pilot.yml`): real single sign-on through your identity provider (Okta, Entra, Keycloak, Google, ...).
   Set it up with [Single sign-on (OIDC)](#single-sign-on-oidc) below. This is the mode for anything
-  that is reachable by more than the people you trust on a VPN.
+  that is reachable by more than the people you trust on a VPN. **A pilot needs these set in
+  `deploy/.env` before the first start** (see [Single sign-on (OIDC)](#single-sign-on-oidc)):
+  `PIPEROOM_PUBLIC_URL` (https), `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID` and
+  `PIPEROOM_OIDC_CLIENT_SECRET` (or `PIPEROOM_OIDC_PUBLIC_CLIENT=1`). If one is missing the server
+  refuses to start and says which, for example
+  `auth: PIPEROOM_AUTH_MODE=oidc needs PIPEROOM_OIDC_ISSUER`; read it with
+  `docker compose -f deploy/docker-compose.pilot.yml logs piperoom`.
+- **`dev`**: you open the UI and pick a user from `users.yaml`. There is **no password**. Anyone
+  who can reach the port can pick any user, **including approving fixes**. The image does not
+  contain it and the pilot compose file does not enable it. You ask for it on purpose with
+  `docker compose -f deploy/docker-compose.pilot.yml -f deploy/docker-compose.dev-auth.yml up -d`.
+  From R9 it also needs `PIPEROOM_DEV_ACK=dev-login-has-no-password` in `deploy/.env`: the
+  override forwards it but never sets it, so you must type the sentence yourself.
 
 So:
 
 - Pilots build from source with `deploy/docker-compose.pilot.yml`. There is no published image.
-- **Dev mode:** run it on a laptop, behind the customer's **VPN**, or behind an SSH tunnel. Never
+- **Dev mode (the override file above):** run it on a laptop, behind the customer's **VPN**, or behind an SSH tunnel. Never
   publish it to the internet.
 - **A TLS reverse proxy is supported in `oidc` mode only.** Dev mode cannot trust an identity
   header from a proxy: the browser logs in with its own cookie, which a proxy cannot force, and a
@@ -28,10 +37,10 @@ So:
   and no longer needs the git tag `pre-auth`. Or, if it cannot use OIDC yet, stay on the git tag
   `pre-auth` (`git checkout pre-auth`, then rebuild with `up -d --build`). Do not upgrade a
   proxy pilot to the current code and leave it in dev mode.
-- Inside the container the server must listen on `0.0.0.0`, so the image sets
-  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (dev mode refuses a non-loopback address without it
-  and logs a loud warning when it is on). In `oidc` mode the variable is ignored, with a
-  warning (see [the expected warning](#expected-start-up-messages)). The old `--allow-remote`
+- Inside the container the server must listen on `0.0.0.0`. Dev mode refuses a non-loopback
+  address unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, which only `docker-compose.dev-auth.yml`
+  sets (the image does not); the server then logs a loud warning at every start. `oidc` mode does
+  not need it and ignores it, with a warning. The old `--allow-remote`
   flag still works in dev mode for one release but is deprecated; use the variable.
 - The compose file publishes the port on `127.0.0.1` only. To let other machines reach it, set
   `PIPEROOM_BIND` in `deploy/.env` to the host's VPN address (better) or `0.0.0.0`. With a
@@ -40,7 +49,7 @@ So:
   a loopback name (any port), the host of `PIPEROOM_PUBLIC_URL`, or a value in
   `PIPEROOM_ALLOWED_HOSTS`. The allow-list counts in every mode. The `PIPEROOM_PUBLIC_URL` host
   counts always in `oidc` mode, and in dev mode only with `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, which
-  the image sets. Set `PIPEROOM_ALLOWED_HOSTS`
+  the dev-auth override sets. Set `PIPEROOM_ALLOWED_HOSTS`
   (comma-separated, `host` or `host:port`, compared as written) when a tunnel or proxy
   rewrites `Host`, for example an SSH tunnel to `localhost:9000`, or a name the VPN uses
   for the machine. Signed alert routes `POST /api/alerts/{source}` and `GET /healthz`,
@@ -102,9 +111,11 @@ Run these from the repository root.
    Add `-d` to run in the background.
 
 5. **Open it:** `http://<host>:8090` (`http://localhost:8090` on the same machine; with the
-   default `PIPEROOM_BIND` that is the only place it works). This is dev mode; for real login
-   see [Single sign-on (OIDC)](#single-sign-on-oidc). The login screen lists the users
-   from `users.yaml`: pick one. That is the **dev login**; the page sets a session cookie
+   default `PIPEROOM_BIND` that is the only place it works). With the default `oidc` mode the
+   address must be your `PIPEROOM_PUBLIC_URL` (https, usually behind a TLS proxy) and you sign in
+   at your identity provider. The rest of this step describes the **dev login**, which exists only
+   with the dev-auth override: the login screen lists the users
+   from `users.yaml`: pick one. The page sets a session cookie
    (`piperoom_session`) and the user switcher in the UI changes user later. There are no more
    `?user=` links: a link cannot choose the user. Behind an SSH tunnel to a different port,
    or by a name other than `localhost`, set `PIPEROOM_ALLOWED_HOSTS` (see the Host check above).
@@ -243,8 +254,9 @@ supported. The browser talks `https` to the proxy; the proxy talks `http` to the
 
 ### Expected start-up messages
 
-In `oidc` mode under the image and the compose file you will see this warning on **every** start.
-It is normal. The image and compose set `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, and `oidc` mode ignores it:
+You see this warning only when `PIPEROOM_DEV_ALLOW_NONLOOPBACK` (or `--allow-remote`) is set
+together with `oidc` mode. The image and the pilot compose file no longer set it, so a normal
+start does not log it. If you see it, remove the variable from `deploy/.env` or your shell:
 
 ```
 server: PIPEROOM_DEV_ALLOW_NONLOOPBACK and --allow-remote are ignored in oidc mode
@@ -597,11 +609,15 @@ URL must point at the primary, PostgreSQL 13 or newer. See
 No database, keys or data stack needed. Scripted agent, in-memory, nothing is saved:
 
 ```sh
-docker compose -f deploy/docker-compose.pilot.yml run --rm --no-deps --service-ports piperoom --demo
+docker compose -f deploy/docker-compose.pilot.yml -f deploy/docker-compose.dev-auth.yml \
+  run --rm --no-deps --service-ports piperoom --demo
 ```
 
-`--no-deps` keeps the bundled Postgres from starting; the image already sets `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`.
-Demo mode still needs:
+`--no-deps` keeps the bundled Postgres from starting. `--demo` always runs in dev mode, and inside
+the container the server listens on `0.0.0.0`, so it needs the non-loopback switch, which only the
+dev-auth override sets (the image and the pilot file do not). Without the override the server exits
+with `refusing to listen on "0.0.0.0:8090"`. `--demo` does **not** need `PIPEROOM_DEV_ACK` (from
+R9 the acknowledgement is for real dev logins, not the scripted demo). Demo mode still needs:
 
 - `deploy/.env` with `PIPEROOM_POSTGRES_PASSWORD` set to any value (compose refuses to read
   the file without it, even though demo mode never connects to the database);
@@ -615,7 +631,7 @@ It needs no API key and no data stack. Do not use demo mode for a real incident.
 
 | | |
 |---|---|
-| Build | `Dockerfile` at the repo root: Node 24 builds `web/dist`, Go 1.27 builds `cmd/server` (`CGO_ENABLED=0`, `-trimpath`), then both go into `gcr.io/distroless/static-debian13:nonroot` |
+| Build | `Dockerfile` at the repo root: Node 24 builds `web/dist`, Go 1.27.2 builds `cmd/server` (`CGO_ENABLED=0`, `-trimpath`), then both go into `gcr.io/distroless/static-debian13:nonroot` |
 | Size | about 100 MB on disk (the server binary is about 73 MB, with the Anthropic, AWS and Google SDKs in it); about 22 MB compressed to pull |
 | Runs as | uid 65532 (`nonroot`), read-only root filesystem in compose, all capabilities dropped |
 | Listens on | `0.0.0.0:8090` (`PIPEROOM_HTTP_ADDR`); the UI is served from `/web` (`PIPEROOM_WEB_DIR`) at `/`, the API at `/api` |
@@ -655,7 +671,9 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | Exits with `users/owners config` | `users.yaml` and `owners.yaml` disagree about a layer owner |
 | Exits with `load users file` or `load owners file` | `deploy/config/users.yaml` or `owners.yaml` is missing (step 3) |
 | Exits with `PIPEROOM_PUBLIC_URL ... invalid host` (or similar) | the URL has a wildcard, a user name, a query or a bad port (see above) |
-| Exits with `auth: PIPEROOM_AUTH_MODE=oidc needs ...` | `oidc` mode needs `PIPEROOM_PUBLIC_URL` (https), `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID`, and `PIPEROOM_OIDC_CLIENT_SECRET` or `PIPEROOM_OIDC_PUBLIC_CLIENT=1`. The message names the missing one |
+| Exits with `config: PIPEROOM_DEV_ACK: want exactly "dev-login-has-no-password" (or unset)` | `PIPEROOM_DEV_ACK` holds anything but that exact sentence (`1` and `true` are refused on purpose). Set it exactly, or clear it |
+| Dev mode exits, naming `PIPEROOM_DEV_ACK` (from R9) | dev login off loopback needs both `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (the dev-auth override sets it) and `PIPEROOM_DEV_ACK=dev-login-has-no-password` in `deploy/.env`. Not needed in `oidc` mode or with `--demo` |
+| Exits with `config: PIPEROOM_LOG_LEVEL=... want debug, info, warn or error` or `PIPEROOM_LOG_FORMAT=... want text or json` | fix or clear the variable. Defaults are `info` and `text` |
 | Exits with `PIPEROOM_OIDC_SCOPES must include openid`, or with an error about `PIPEROOM_SESSION_IDLE`, `PIPEROOM_SESSION_MAX` or `PIPEROOM_TRUSTED_PROXIES` | fix the named variable (durations look like `30m` or `8h`; proxies are CIDRs like `10.0.0.0/8` or plain addresses) |
 | Exits with `solo mode: ...` | `PIPEROOM_SOLO_USER` is not in `users.yaml`, or `owners.yaml` names someone else. Remove the variable or the other owners |
 | Exits with `user id "u_..." ... reserved` or `bad email` | `users.yaml`: ids may not start with `u_`, and emails must be ASCII with no spaces (see [Upgrade notes](#upgrade-notes)) |
@@ -665,7 +683,8 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | `421 bad_host` | the `Host` header is not allowed: add it to `PIPEROOM_ALLOWED_HOSTS` (tunnel or proxy that rewrites `Host`) |
 | `403 proxy_identity` | in dev mode: more than one `X-User` value (several header lines, or a comma in one line), cookie or not; or `X-User` sent to `/auth/dev-login`; or `X-User` with a cookie for another user. A proxy needs `PIPEROOM_AUTH_MODE=oidc` (the git tag `pre-auth` is only for a proxy pilot that cannot use OIDC yet) |
 | `400 bad_request` on a curl `POST` | add `-H 'Content-Type: application/json'` (not needed on the signed `/api/alerts/{source}` routes) |
-| Exits with `refusing to listen on ... listen address is not loopback` | dev mode needs `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`. The image and the compose file set it, so you see this only if the variable is overridden with an empty value (for example `docker run -e PIPEROOM_DEV_ALLOW_NONLOOPBACK=`) or with a value other than `1` |
+| Exits with `refusing to listen on ... listen address is not loopback` | dev mode needs `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`. The image no longer sets it: you get this when you run `PIPEROOM_AUTH_MODE=dev` without `deploy/docker-compose.dev-auth.yml`. Add that file, or switch to `oidc` |
+| Exits with `auth: PIPEROOM_AUTH_MODE=oidc needs ...` | `oidc` is the default and a required setting is missing: set `PIPEROOM_PUBLIC_URL` (https), `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID`, `PIPEROOM_OIDC_CLIENT_SECRET` in `deploy/.env` (the container restarts until you do; `docker compose logs piperoom` shows the name) |
 | UI loads but live updates fail behind a proxy | the proxy does not pass WebSocket upgrades, or `PIPEROOM_PUBLIC_URL` is not set |
 | No agent answer | the model provider's credentials are missing, or egress to its API is blocked (behind a proxy, set `HTTPS_PROXY` and `NO_PROXY`) |
 | Exits at start with an error about the model provider, region, project or credentials | see [Model provider](#model-provider); the error names the setting |
@@ -694,6 +713,10 @@ Moving to the version with OIDC login (auth PR 3):
 - **Migration `00007`** runs on the first start. It adds two tables, `login_states` and
   `identities`, and an `email` column on `sessions`. A pilot that stays in dev mode does not use
   the new tables.
+- **The default is now `oidc`.** A pilot that stays in dev mode must add
+  `-f deploy/docker-compose.dev-auth.yml` to its `docker compose` commands (or set
+  `PIPEROOM_AUTH_MODE=dev` and `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` in its own run command), or it
+  will not start. No other change.
 - A pilot that stays in dev mode needs no other change. A proxy pilot that was held on the git
   tag `pre-auth` can move to the current code once it switches to `oidc` mode.
 - The new settings are in [Single sign-on](#2-settings-in-deployenv). Compose already passes them
@@ -701,7 +724,7 @@ Moving to the version with OIDC login (auth PR 3):
 
 ## Not covered here
 
-- Images are pinned by tag, not digest (`node:24-alpine`, `golang:1.27-alpine`,
+- Images are pinned by tag, not digest (`node:24-alpine`, `golang:1.27.2-alpine`,
   `distroless/static-debian13:nonroot`, `postgres:17`). Pin digests for a regulated site.
 - The UI loads two fonts from Google Fonts. On a network with no internet the page still works
   with fallback fonts; the CSP allows only those two hosts for this.

@@ -67,7 +67,8 @@ func ApplyVerdict(sc Scenario, res RunResult, v Verdict) RunResult {
 	}
 	res.Judged = &JudgeResult{Verdict: v, TermsRootCause: res.RootCause, TermsLayer: res.LayerNamed,
 		TermsRootCauseLayer: res.RootCauseLayerNamed}
-	res.RootCause = v.RootCauseCorrect
+	// The hedge guard stands: a list of causes is never the cause.
+	res.RootCause = v.RootCauseCorrect && !res.Hedged
 	res.ForbiddenCause = false
 	res.LayerNamed = sc.Expect.FirstFailingLayer == "" || v.LayerCorrect
 	res.RootCauseLayerNamed = sc.Expect.RootCauseLayer == "" || v.RootCauseLayerCorrect

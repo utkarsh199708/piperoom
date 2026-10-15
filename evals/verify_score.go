@@ -167,6 +167,9 @@ func verifyFailures(sc Scenario, res RunResult) []string {
 // a message, a hypothesis or a status detail (the runner's own verdict is a
 // message "recovered: ..." and a status "pipeline recovered").
 func claimsRecovery(ev RecordedEvent) bool {
+	if !fromAgent(ev) {
+		return false
+	}
 	var text string
 	switch ev.Type {
 	case events.AgentMessage:

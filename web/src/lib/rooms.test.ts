@@ -189,10 +189,13 @@ describe('roomStats', () => {
 describe('status and agent cells', () => {
   const r = room('r', 'open', '2026-10-11T10:00:00Z')
   it('status words carry the meaning', () => {
-    expect(roomStatusCell({ ...r, status: 'closed' })).toEqual({ dot: 'ok', label: 'Resolved' })
-    expect(roomStatusCell(withProposal(r, { warehouse: 'pending' })).label).toBe('Needs approval')
-    expect(roomStatusCell({ ...r, severity: 'sev1' })).toEqual({ dot: 'fail', label: 'Investigating' })
-    expect(roomStatusCell({ ...r, severity: 'sev3' })).toEqual({ dot: 'info', label: 'Investigating' })
+    expect(roomStatusCell({ ...r, status: 'closed', resolution: 'fixed' })).toMatchObject({ dot: 'ok', label: 'Resolved' })
+    expect(roomStatusCell({ ...r, status: 'closed' })).toMatchObject({ dot: 'idle', label: 'Closed' })
+    expect(roomStatusCell(withProposal(r, { warehouse: 'pending' })).label).toMatch(/^Needs approval · /)
+    const driven = { ...r, driver: { id: 'k', name: 'K' } }
+    expect(roomStatusCell({ ...driven, agent_status: { state: 'working' } })).toMatchObject({ dot: 'agent', label: 'Investigating' })
+    expect(roomStatusCell(driven).label).toBe('Idle · waiting for a steer')
+    expect(roomStatusCell(r).label).toMatch(/^No driver · /)
   })
   it('agent cell', () => {
     expect(agentCell(r)).toMatchObject({ label: 'idle', agent: false })
@@ -202,7 +205,11 @@ describe('status and agent cells', () => {
     })
     const waiting = withProposal({ ...r, agent_status: { state: 'waiting_approval' } }, { a: 'approved', b: 'pending' })
     expect(agentCell(waiting).label).toBe('waiting · 1 of 2')
-    expect(agentCell({ ...r, status: 'closed', agent_status: { state: 'done' } }).label).toBe('resolved · verified')
+    expect(agentCell({ ...r, status: 'closed', agent_status: { state: 'done' } }).label).toBe('resolved')
+    expect(agentCell({ ...r, status: 'closed', agent_status: { state: 'waiting_approval' } })).toMatchObject({
+      dot: 'ok',
+      label: 'resolved',
+    })
     expect(agentCell({ ...r, agent_status: { state: 'error' } })).toMatchObject({ dot: 'fail', label: 'error' })
   })
 })

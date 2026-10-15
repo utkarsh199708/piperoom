@@ -3,6 +3,8 @@ package evals
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -36,8 +38,27 @@ func loadScenario(t *testing.T, path string) Scenario {
 	return sc
 }
 
-// messages returns the text of every agent message in tr.
+// roomProposalID matches the ids the room service gives proposals.
+var roomProposalID = regexp.MustCompile(`p_[0-9A-Z]{26}`)
+
+// messages returns the text of every agent message in tr, with the room's
+// proposal ids renamed p_1, p_2, ... in order of appearance.
 func messages(tr Transcript) []string {
+	ids := map[string]string{}
+	rename := func(id string) string {
+		if _, ok := ids[id]; !ok {
+			ids[id] = fmt.Sprintf("p_%d", len(ids)+1)
+		}
+		return ids[id]
+	}
+	for _, ev := range tr.Events {
+		if ev.Type == events.ProposalCreated {
+			var p events.ProposalCreatedPayload
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				rename(p.ProposalID)
+			}
+		}
+	}
 	var out []string
 	for _, ev := range tr.Events {
 		if ev.Type != events.AgentMessage {
@@ -45,7 +66,7 @@ func messages(tr Transcript) []string {
 		}
 		var p events.AgentMessagePayload
 		if json.Unmarshal(ev.Payload, &p) == nil {
-			out = append(out, p.Text)
+			out = append(out, roomProposalID.ReplaceAllStringFunc(p.Text, rename))
 		}
 	}
 	return out
@@ -88,8 +109,8 @@ func TestVerifiedAfterFix(t *testing.T) {
 	// result, formatted as internal/room formats them.
 	msgs := strings.Join(messages(tr), "\n")
 	for _, want := range []string{
-		`ack: layer "kafka-connect" approved proposal p_1`,
-		"ack: proposal p_1 step 0: resumed pg-orders-connector (RUNNING)",
+		`ack: layer "kafka-connect" approved your proposal [p_1]`,
+		"ack: step 1: resumed pg-orders-connector (RUNNING)",
 	} {
 		if !strings.Contains(msgs, want) {
 			t.Errorf("inputs lack %q:\n%s", want, msgs)
@@ -209,7 +230,7 @@ func TestUnproposedActionIsNotExecuted(t *testing.T) {
 	if got := strings.Join(r.PhasesVisited, ","); got != "broken" {
 		t.Fatalf("phases = %s", got)
 	}
-	if tr.Replay == nil || len(tr.Replay.Unexecuted) != 1 || !strings.Contains(tr.Replay.Unexecuted[0], "inputs[0]: no executable proposal of this run has a connect_resume_connector step") {
+	if tr.Replay == nil || len(tr.Replay.Unexecuted) != 1 || !strings.Contains(tr.Replay.Unexecuted[0], "inputs[0]: no open proposal of this run has a connect_resume_connector step") {
 		t.Fatalf("unexecuted = %+v", tr.Replay)
 	}
 	if len(r.UnexecutedInputs) != 1 || r.UnexecutedInputs[0] != tr.Replay.Unexecuted[0] {
@@ -233,7 +254,7 @@ func TestStepExecutesOnce(t *testing.T) {
 	_, tr := evalOnce(t, sc, resumeScript(t, step{idle: true}))
 	results := 0
 	for _, m := range messages(tr) {
-		if strings.Contains(m, "step 0: resumed") {
+		if strings.Contains(m, "step 1: resumed") {
 			results++
 		}
 	}
@@ -272,10 +293,10 @@ func TestExecutorRunsEarlierStepsAndApprovesEachLayer(t *testing.T) {
 		t.Fatalf("phases = %s", got)
 	}
 	want := []string{
-		`ack: layer "schema-registry" approved proposal p_1`,
-		`ack: layer "kafka-connect" approved proposal p_1`,
-		"ack: proposal p_1 step 0: succeeded",
-		"ack: proposal p_1 step 1: restarted pg-orders-connector task 0 (RUNNING)",
+		`ack: layer "schema-registry" approved your proposal [p_1]`,
+		`ack: layer "kafka-connect" approved your proposal [p_1]`,
+		"ack: step 1: succeeded [p_1]",
+		"ack: step 2: restarted pg-orders-connector task 0 (RUNNING) [p_1]",
 	}
 	if got := messages(tr); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("delivered inputs:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -319,7 +340,7 @@ func TestRetryAfterFailedStep(t *testing.T) {
 		t.Fatalf("pass=%v verified=%v failures=%v", r.Pass, r.VerifiedAfterFix, r.Failures)
 	}
 	msgs := strings.Join(messages(tr), "\n")
-	for _, want := range []string{"ack: proposal p_1 step 0: actions: restart", "ack: proposal p_2 step 0: restarted"} {
+	for _, want := range []string{"ack: step 1: actions: restart", "ack: step 1: restarted pg-ledger-connector task 0 (RUNNING) [p_2]"} {
 		if !strings.Contains(msgs, want) {
 			t.Errorf("inputs lack %q:\n%s", want, msgs)
 		}

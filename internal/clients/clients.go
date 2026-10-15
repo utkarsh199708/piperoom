@@ -19,12 +19,16 @@ package clients
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
 
 // ErrNotFound is returned (wrapped) when the named object does not exist.
 var ErrNotFound = errors.New("not found")
+
+// ErrNotSupported is returned by an optional read a client cannot do. (F12)
+var ErrNotSupported = errors.New("clients: not supported by this client")
 
 // ---- Kafka Connect (REST) ----
 
@@ -193,6 +197,83 @@ type DLQReader interface {
 	PeekDLQ(ctx context.Context, topic string, limit int) ([]DLQRecord, error)
 }
 
+// ---- Kafka: cluster and partition reads (optional on a KafkaAdmin, F12) ----
+//
+// Asserted at use time like DLQReader. These interfaces are not embedded in
+// KafkaAdmin, so fakes and the eval replay need not implement them.
+
+// BrokerHealth is one broker from a metadata response plus its log dirs.
+type BrokerHealth struct {
+	NodeID       int32  `json:"node_id"`
+	Host         string `json:"host"`
+	Port         int32  `json:"port"`
+	IsController bool   `json:"is_controller"`
+	// LogDirTotalBytes/UsableBytes sum the broker's log directories; -1 when
+	// the broker does not report them (Kafka < 3.3 or remote storage).
+	LogDirTotalBytes  int64  `json:"log_dir_total_bytes"`
+	LogDirUsableBytes int64  `json:"log_dir_usable_bytes"`
+	LogDirErr         string `json:"log_dir_err,omitempty"`
+}
+
+// PartitionHealth is one partition of a pipeline topic from metadata.
+type PartitionHealth struct {
+	Topic           string  `json:"topic"`
+	Partition       int32   `json:"partition"`
+	Leader          int32   `json:"leader"` // -1 = no leader
+	Replicas        []int32 `json:"replicas"`
+	ISR             []int32 `json:"isr"`
+	OfflineReplicas []int32 `json:"offline_replicas"`
+	MinISR          int     `json:"min_isr"` // from min.insync.replicas; 0 = unknown
+	Reassigning     bool    `json:"reassigning"`
+}
+
+// ClusterHealth is what ClusterReader.ClusterHealth returns for a set of topics.
+type ClusterHealth struct {
+	ClusterID  string            `json:"cluster_id"`
+	Controller int32             `json:"controller"`
+	Brokers    []BrokerHealth    `json:"brokers"`
+	Partitions []PartitionHealth `json:"partitions"`
+}
+
+// ClusterReader reads broker and partition health for the given topics only
+// (never the whole cluster's topics). Needs Describe on Cluster and the
+// topics; log dirs need DescribeConfigs on Cluster and are best-effort.
+type ClusterReader interface {
+	ClusterHealth(ctx context.Context, topics ...string) (ClusterHealth, error)
+}
+
+// PartitionRate is records written to one partition in a window.
+type PartitionRate struct {
+	Topic         string `json:"topic"`
+	Partition     int32  `json:"partition"`
+	End           int64  `json:"end"`
+	OffsetAtStart int64  `json:"offset_at_start"` // first offset with timestamp >= window start; -1 = none
+	Records       int64  `json:"records"`         // End - OffsetAtStart, or 0
+}
+
+// RateReader reads per-partition write counts over a window from offsets
+// alone (ListOffsetsAfterMilli + ListEndOffsets); it fetches no record.
+type RateReader interface {
+	PartitionRates(ctx context.Context, since time.Time, topics ...string) ([]PartitionRate, error)
+}
+
+// ACLEntry is one described ACL.
+type ACLEntry struct {
+	Principal    string `json:"principal"`
+	Host         string `json:"host"`
+	ResourceType string `json:"resource_type"` // TOPIC | GROUP | CLUSTER
+	Resource     string `json:"resource"`
+	Pattern      string `json:"pattern"` // LITERAL | PREFIXED
+	Operation    string `json:"operation"`
+	Permission   string `json:"permission"` // ALLOW | DENY
+}
+
+// ACLReader lists ACLs that touch the given topics and groups (any
+// principal, any host), plus cluster ACLs. Needs Describe on Cluster.
+type ACLReader interface {
+	ACLs(ctx context.Context, topics, groups []string) ([]ACLEntry, error)
+}
+
 // ---- Source Postgres (the CDC source) ----
 
 // SourceReader is the source Postgres client as read-only tools take it.
@@ -269,4 +350,83 @@ type WarehouseReader interface {
 // Warehouse is the whole warehouse client. It adds nothing to WarehouseReader.
 type Warehouse interface {
 	WarehouseReader
+}
+
+// ---- Warehouse: load history and counts (optional, F12) ----
+//
+// Asserted at use time; not embedded in Warehouse or SourceDB.
+
+// LoadError is one failed or partial load into a sink table.
+type LoadError struct {
+	Table      string    `json:"table"`
+	At         time.Time `json:"at"`
+	Status     string    `json:"status"` // LOADED | LOAD_FAILED | PARTIALLY_LOADED
+	Rows       int64     `json:"rows"`
+	Errors     int64     `json:"errors"`
+	FirstError string    `json:"first_error"`    // redacted, ≤ 300 runes; never a record value
+	File       string    `json:"file,omitempty"` // file name only (no path, no URL)
+}
+
+// LoadErrorReader reads a sink table's load history. Snowflake implements it
+// over INFORMATION_SCHEMA.COPY_HISTORY; the dev Postgres warehouse returns
+// ErrNotSupported.
+type LoadErrorReader interface {
+	LoadErrors(ctx context.Context, table string, since time.Time, limit int) ([]LoadError, error)
+}
+
+// MinuteCount is rows per bucket for reconcile.
+type MinuteCount struct {
+	Bucket time.Time `json:"bucket"`
+	Count  int64     `json:"count"`
+}
+
+// CountReader counts rows of table by tsColumn in buckets of width
+// (optional on a SourceDB and a Warehouse). Counts only, never values.
+type CountReader interface {
+	CountByBucket(ctx context.Context, table, tsColumn string, since, until time.Time, width time.Duration) ([]MinuteCount, error)
+}
+
+// ---- Pipeline change log (Piperoom's own table, fed by the watcher, F8) ----
+//
+// Not a customer system: the room store implements both interfaces.
+
+// Change kinds of PipelineChange.Kind.
+const (
+	ChangeDDL             = "ddl"              // a row of the source DDL audit table
+	ChangeConnectorConfig = "connector_config" // connector config keys changed (values masked)
+	ChangeConnectorState  = "connector_state"  // connector or task state transition
+	ChangeSchemaVersion   = "schema_version"   // a subject's latest version went up (registered) or down (deleted)
+)
+
+// PipelineChange is one recorded change on a pipeline. Before and After hold
+// only the changed keys (config), the two states (state), the version pair
+// (schema) or nothing (DDL: the statement is in Summary, cut at 300 runes).
+// A credential value is never stored: masked keys read "***". Actor is the
+// DDL username or ""; Source is "watcher" or "ddl_audit".
+type PipelineChange struct {
+	ID          int64           `json:"id"`
+	PipelineID  string          `json:"pipeline_id"`
+	Kind        string          `json:"kind"`
+	Object      string          `json:"object"` // "public.orders", "pg-orders-connector", "pg-orders-connector/0", "pg.public.orders-value"
+	At          time.Time       `json:"at"`
+	Actor       string          `json:"actor,omitempty"`
+	Source      string          `json:"source"`
+	Fingerprint string          `json:"fingerprint"` // dedup key: sha256 of kind|object|at|before|after
+	Before      json.RawMessage `json:"before,omitempty"`
+	After       json.RawMessage `json:"after,omitempty"`
+	Summary     string          `json:"summary"` // one line, ≤ 300 runes, control characters removed
+}
+
+// ChangeReader lists changes of one pipeline, newest first, at most limit.
+// kinds nil = every kind. Implemented by the room store (store.PG, memstore).
+type ChangeReader interface {
+	ListChanges(ctx context.Context, pipelineID string, since, until time.Time, kinds []string, limit int) ([]PipelineChange, error)
+}
+
+// ChangeWriter records a change. A row with the same (pipeline, kind, object,
+// fingerprint) is not written again; inserted reports whether it was.
+// It writes Piperoom's own table, never a customer system, so the Reader /
+// Writer rule above does not apply: the watcher (F8c) may hold one.
+type ChangeWriter interface {
+	RecordChange(ctx context.Context, c PipelineChange) (inserted bool, err error)
 }

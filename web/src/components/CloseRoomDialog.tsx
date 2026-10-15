@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
+import { toast } from 'sonner'
 import type { RoomActions } from '../hooks/useRoom'
+import type { RoomState } from '../state/types'
 import { modKeyLabel } from '@/lib/envLabel'
 import { Button } from '@/components/ui/button'
 import {
@@ -15,6 +17,8 @@ import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { RoomDialogClose } from './room/RoomDialogClose'
 import { useRestoreFocus } from './room/useRestoreFocus'
+import { LabelFields } from './room/LabelForm'
+import { draftToInput, initialDraft } from '../lib/label'
 
 /** Longest resolution the dialog accepts; a resolution is a sentence or two, not a report. */
 export const MAX_RESOLUTION = 2000
@@ -23,30 +27,53 @@ export const MAX_RESOLUTION = 2000
 // and it is what the export and the room list show afterwards, so it is required here for
 // every room. The room screen unmounts the dialog once `room.closed` arrives; until then it
 // stays open, so a failed close keeps the text and shows the error where the person is looking.
-export function CloseRoomDialog({ actions, onClose }: { actions: RoomActions; onClose: () => void }) {
-  const [text, setText] = useState('')
+export function CloseRoomDialog({
+  actions,
+  onClose,
+  state,
+  initialText = '',
+}: {
+  actions: RoomActions
+  onClose: () => void
+  /** The room, for the label form's pre-filled values. Without it the dialog only closes. */
+  state?: RoomState
+  /** Pre-filled resolution, e.g. `Fixed by "<title>"` from the close nudge. */
+  initialText?: string
+}) {
+  const [text, setText] = useState(initialText)
+  const [draft, setDraft] = useState(() => (state ? initialDraft(state) : null))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const restoreFocus = useRestoreFocus()
   const field = useRef<HTMLTextAreaElement>(null)
   const resolution = text.trim()
 
-  const submit = async () => {
+  // Two calls: /close, then /label. A failed label is a toast, not a failed close: the room is
+  // closed and the "Add label" banner keeps the form available.
+  const submit = async (withLabel: boolean) => {
     if (!resolution || busy) return
     setBusy(true)
     setError(null)
+    const input = withLabel && state && draft ? draftToInput(state, draft) : null
     const res = await actions.close(resolution)
     setBusy(false)
-    if (!res.ok) setError(res.error ?? 'The room could not be closed.')
+    if (!res.ok) {
+      setError(res.error ?? 'The room could not be closed.')
+      return
+    }
+    if (input) {
+      const labelled = await actions.label(input)
+      if (!labelled.ok) toast.error(`The room is closed, but the label was not saved: ${labelled.error ?? 'unknown error'}. Use "Add label" to try again.`)
+    }
   }
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
-    void submit()
+    void submit(true)
   }
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      void submit()
+      void submit(true)
     }
   }
 
@@ -86,6 +113,15 @@ export function CloseRoomDialog({ actions, onClose }: { actions: RoomActions; on
               placeholder="e.g. Schema compatibility set back to BACKWARD; connector restarted and caught up."
             />
           </div>
+          {state && draft && (
+            <fieldset className="m-0 flex flex-col gap-3 border-0 p-0">
+              <legend className="mb-1 p-0 text-sm font-medium">Label for later incidents</legend>
+              <p className="m-0 text-xs text-muted-foreground">
+                What the cause was and what fixed it. Similar rooms show it. Clear the cause to close without a label.
+              </p>
+              <LabelFields state={state} draft={draft} onChange={setDraft} idPrefix="close-label" />
+            </fieldset>
+          )}
           {error && (
             <p role="alert" className="m-0 text-sm font-medium text-destructive-fg">
               {error}
@@ -95,6 +131,11 @@ export function CloseRoomDialog({ actions, onClose }: { actions: RoomActions; on
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
+            {state && (
+              <Button type="button" variant="outline" disabled={!resolution || busy} onClick={() => void submit(false)}>
+                Skip label
+              </Button>
+            )}
             <Button type="submit" variant="destructive" disabled={!resolution || busy}>
               {busy ? 'Closing…' : 'Close room'}
               <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>

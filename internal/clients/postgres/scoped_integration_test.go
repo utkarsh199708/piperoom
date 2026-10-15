@@ -16,6 +16,7 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/testenv"
+	"piperoom/internal/tools"
 )
 
 // The pipeline-scoped reads (task T2) against a real Postgres with logical
@@ -448,5 +449,25 @@ func TestLongTransactionsOnTablesClonedDatabaseIntegration(t *testing.T) {
 		if strings.Contains(string(raw), mark) {
 			t.Fatalf("result names %q of the other session: %s", mark, raw)
 		}
+	}
+}
+
+func TestReplicationSlotsNamedRecordsProvenanceIntegration(t *testing.T) {
+	db, f := newScopeFixture(t)
+	rec := tools.NewRecorder()
+	ctx := tools.WithRecorder(context.Background(), rec)
+	if _, _, err := db.ReplicationSlotsNamed(ctx, []string{f.slotMine}); err != nil {
+		t.Fatal(err)
+	}
+	calls := rec.Calls()
+	if len(calls) == 0 {
+		t.Fatal("no call recorded")
+	}
+	c := calls[0]
+	if !strings.HasPrefix(c.Text, "SELECT slot_name, plugin, active") || len(c.ParamsRedacted) != 1 || c.ParamsRedacted[0] != "$1=["+f.slotMine+"]" {
+		t.Fatalf("call = %+v", c)
+	}
+	if strings.Contains(c.Target, "@") && strings.Contains(c.Target, ":") && !strings.HasPrefix(c.Target, "postgres ") {
+		t.Fatalf("target = %q", c.Target)
 	}
 }

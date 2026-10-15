@@ -6,8 +6,10 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -56,7 +58,14 @@ type Config struct {
 	// Slack mirror of rooms. Off unless both token and channel are set.
 	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
 	SlackChannelID string // SLACK_CHANNEL_ID
-	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
+	// SlackPageNoDriver is PIPEROOM_SLACK_PAGE_NO_DRIVER split on commas:
+	// the on-call Slack member IDs the bridge pages on control.lease_expired
+	// (slackbridge.PagingOptions.NoDriver, C12 #130; cmd/server builds the
+	// options, A5 follow-up). Empty means no paging on lease expiry. Load
+	// only splits and trims; cmd/server calls ParseSlackMemberIDs at start
+	// and refuses to run on a value that is not a Slack member ID.
+	SlackPageNoDriver []string
+	PublicURL         string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
 	// "snowflake" uses it as a gosnowflake DSN.
@@ -103,6 +112,29 @@ type Config struct {
 	WatchInterval     string // PIPEROOM_WATCH_INTERVAL: Go duration, default 60s, minimum 15s
 	WatchCheckTimeout string // PIPEROOM_WATCH_CHECK_TIMEOUT: per-check deadline, default 10s (max 10s = the pilot role's statement_timeout)
 	WatchCooldown     string // PIPEROOM_WATCH_COOLDOWN: quiet time after a watcher room is closed, default 60m
+	WatchMaxOpenRooms string // PIPEROOM_WATCH_MAX_OPEN_ROOMS: rooms the watcher keeps open at once; default 6, min 1 (F6; ParseWatchMaxOpenRooms)
+
+	// Triage pass (F6): one bounded first look on a cheap model before the
+	// full investigation, outside the agent pool. Not PIPEROOM_TRIAGE_MODEL,
+	// which runs the first turns of the investigation itself. ParseTriagePass
+	// types them and names the env var on error.
+	TriagePass        string // PIPEROOM_TRIAGE_PASS: on | off, default on
+	TriagePassModel   string // PIPEROOM_TRIAGE_PASS_MODEL: default "claude-haiku-5-5"
+	TriagePassTimeout string // PIPEROOM_TRIAGE_PASS_TIMEOUT: Go duration, default 40s, max 90s
+
+	// PostmortemModel says whether a closed room without a fresh hand-off
+	// summary gets one model call for the post-mortem prose (F2):
+	// auto (default) | off (events-only draft). ParsePostmortemModel.
+	PostmortemModel string // PIPEROOM_POSTMORTEM_MODEL
+
+	// ChangesRetentionDays deletes pipeline_changes rows older than this many
+	// days (F8); "0" = keep. Rows per pipeline are capped at 5000 regardless.
+	ChangesRetentionDays string // PIPEROOM_CHANGES_RETENTION_DAYS: default 30
+
+	// Debezium metrics (F12): the Prometheus text endpoint of the JMX
+	// exporter next to Kafka Connect. ParseDebeziumMetrics.
+	DebeziumMetricsURL    string // DEBEZIUM_METRICS_URL: http(s)://host:port/metrics; empty = debezium_metrics says "not configured"
+	DebeziumMetricsPrefix string // DEBEZIUM_METRICS_PREFIX: metric name prefix, default "debezium_metrics_"
 
 	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
 	WebDir string // PIPEROOM_WEB_DIR
@@ -189,7 +221,7 @@ type Config struct {
 
 // Load reads the environment and applies dev defaults.
 func Load() Config {
-	return Config{
+	c := Config{
 		HTTPAddr:          get("PIPEROOM_HTTP_ADDR", "127.0.0.1:8090"),
 		RoomDBURL:         get("PIPEROOM_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/piperoom?sslmode=disable"),
 		SourceDBURL:       get("SOURCE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/orders?sslmode=disable"),
@@ -246,6 +278,18 @@ func Load() Config {
 		WatchInterval:     get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),
 		WatchCheckTimeout: get("PIPEROOM_WATCH_CHECK_TIMEOUT", DefaultWatchCheckTimeout),
 		WatchCooldown:     get("PIPEROOM_WATCH_COOLDOWN", DefaultWatchCooldown),
+		WatchMaxOpenRooms: get("PIPEROOM_WATCH_MAX_OPEN_ROOMS", DefaultWatchMaxOpenRooms),
+
+		TriagePass:        get("PIPEROOM_TRIAGE_PASS", DefaultTriagePass),
+		TriagePassModel:   get("PIPEROOM_TRIAGE_PASS_MODEL", DefaultTriagePassModel),
+		TriagePassTimeout: get("PIPEROOM_TRIAGE_PASS_TIMEOUT", DefaultTriagePassTimeout),
+
+		PostmortemModel: get("PIPEROOM_POSTMORTEM_MODEL", PostmortemModelAuto),
+
+		ChangesRetentionDays: get("PIPEROOM_CHANGES_RETENTION_DAYS", DefaultChangesRetentionDays),
+
+		DebeziumMetricsURL:    get("DEBEZIUM_METRICS_URL", ""),
+		DebeziumMetricsPrefix: get("DEBEZIUM_METRICS_PREFIX", DefaultDebeziumMetricsPrefix),
 
 		WebDir: get("PIPEROOM_WEB_DIR", ""),
 
@@ -294,6 +338,8 @@ func Load() Config {
 
 		DevAck: get("PIPEROOM_DEV_ACK", ""),
 	}
+	c.SlackPageNoDriver = splitList(get("PIPEROOM_SLACK_PAGE_NO_DRIVER", ""))
+	return c
 }
 
 // Log defaults.
@@ -374,6 +420,42 @@ func ParseDevAck(c Config) (bool, error) {
 		return true, nil
 	}
 	return false, fmt.Errorf("config: PIPEROOM_DEV_ACK: want exactly %q (or unset)", DevAckValue)
+}
+
+// slackMemberID is the shape of a Slack member ID ("U0…" for users, "W0…"
+// for Enterprise Grid users), which is what the paging allow-list holds.
+var slackMemberID = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
+
+// ParseSlackMemberIDs validates a list of Slack member IDs from the env var
+// name (Config.SlackPageNoDriver from PIPEROOM_SLACK_PAGE_NO_DRIVER): each
+// must match ^[UW][A-Z0-9]{2,}$. It returns a copy with duplicates removed,
+// in order, so a repeated ID pages once. An empty list is fine (no paging).
+func ParseSlackMemberIDs(name string, ids []string) ([]string, error) {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if !slackMemberID.MatchString(id) {
+			return nil, fmt.Errorf("config: %s: %q is not a Slack member ID (want U… or W…, letters and digits)", name, id)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// splitList splits a comma-separated env value, trims each item and drops
+// empty ones, so "a, b,,c" and "" read as expected.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Tenancy modes (docs/design/tenancy.md section 4).
@@ -682,6 +764,9 @@ func parseByteSize(name, v, def string) (int64, error) {
 
 // Watcher defaults and limits.
 const (
+	// DefaultWatchMode stays "log" (shadow) for now. F6 moves it to "rooms";
+	// that flip lands with F6d, which owns the tests that pin "log"
+	// (cmd/server/watch_test.go) and the setup.md wording.
 	DefaultWatchMode         = "log"
 	DefaultWatchInterval     = "60s"
 	DefaultWatchCheckTimeout = "10s"
@@ -762,6 +847,160 @@ func parseWatchDuration(name, v, def string) (time.Duration, error) {
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("config: %s=%q: must be greater than zero", name, v)
+	}
+	return d, nil
+}
+
+// ---- F wave (F2, F6, F8, F12) ----
+
+// DefaultWatchMaxOpenRooms is the watcher's open-room cap (F6). It is not
+// PIPEROOM_MAX_AGENTS: a room beyond the agent pool still opens and queues.
+const (
+	DefaultWatchMaxOpenRooms = "6"
+	// MaxWatchMaxOpenRooms bounds a typo, not a real limit.
+	MaxWatchMaxOpenRooms = 1000
+)
+
+// ParseWatchMaxOpenRooms validates PIPEROOM_WATCH_MAX_OPEN_ROOMS: a whole
+// number from 1 to MaxWatchMaxOpenRooms; empty = 6. The error names the var.
+func ParseWatchMaxOpenRooms(c Config) (int, error) {
+	n, err := parseWholeNumber("PIPEROOM_WATCH_MAX_OPEN_ROOMS", c.WatchMaxOpenRooms, DefaultWatchMaxOpenRooms, false)
+	if err != nil {
+		return 0, err
+	}
+	if n > MaxWatchMaxOpenRooms {
+		return 0, fmt.Errorf("config: PIPEROOM_WATCH_MAX_OPEN_ROOMS=%q: at most %d", c.WatchMaxOpenRooms, MaxWatchMaxOpenRooms)
+	}
+	return int(n), nil
+}
+
+// Triage pass defaults and limits (F6).
+const (
+	DefaultTriagePass        = "on"
+	DefaultTriagePassModel   = "claude-haiku-5-5"
+	DefaultTriagePassTimeout = "40s"
+	// MaxTriagePassTimeout keeps the first look a first look: the room shows
+	// a pending triage line until it ends.
+	MaxTriagePassTimeout = 90 * time.Second
+)
+
+// TriagePass holds the typed triage-pass settings.
+type TriagePass struct {
+	On      bool
+	Model   string
+	Timeout time.Duration
+}
+
+// ParseTriagePass validates PIPEROOM_TRIAGE_PASS (on | off, any case),
+// PIPEROOM_TRIAGE_PASS_MODEL (a model id without spaces) and
+// PIPEROOM_TRIAGE_PASS_TIMEOUT (a Go duration, at most 90s). Empty fields
+// mean the default. The error names the env var.
+func ParseTriagePass(c Config) (TriagePass, error) {
+	var t TriagePass
+	switch v := strings.ToLower(strings.TrimSpace(c.TriagePass)); v {
+	case "", "on":
+		t.On = true
+	case "off":
+	default:
+		return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS=%q: want on or off", c.TriagePass)
+	}
+	t.Model = strings.TrimSpace(c.TriagePassModel)
+	if t.Model == "" {
+		t.Model = DefaultTriagePassModel
+	}
+	if strings.ContainsAny(t.Model, " \t\r\n") {
+		return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_MODEL=%q: want a model id without spaces", c.TriagePassModel)
+	}
+	var err error
+	if t.Timeout, err = parseWatchDuration("PIPEROOM_TRIAGE_PASS_TIMEOUT", c.TriagePassTimeout, DefaultTriagePassTimeout); err != nil {
+		return TriagePass{}, err
+	}
+	if t.Timeout > MaxTriagePassTimeout {
+		return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_TIMEOUT=%q: must be at most %s", c.TriagePassTimeout, MaxTriagePassTimeout)
+	}
+	return t, nil
+}
+
+// Post-mortem model modes (PIPEROOM_POSTMORTEM_MODEL, F2).
+const (
+	// PostmortemModelAuto makes one model call at close only when the room
+	// has no hand-off summary newer than its last proposal, action and hypothesis.
+	PostmortemModelAuto = "auto"
+	// PostmortemModelOff never calls the model: the draft is events-only.
+	PostmortemModelOff = "off"
+)
+
+// ParsePostmortemModel validates PIPEROOM_POSTMORTEM_MODEL (auto | off, any
+// case; empty = auto). Any other value refuses start; the error names the var.
+func ParsePostmortemModel(c Config) (string, error) {
+	switch v := strings.ToLower(strings.TrimSpace(c.PostmortemModel)); v {
+	case "", PostmortemModelAuto:
+		return PostmortemModelAuto, nil
+	case PostmortemModelOff:
+		return PostmortemModelOff, nil
+	default:
+		return "", fmt.Errorf("config: PIPEROOM_POSTMORTEM_MODEL=%q: want auto or off", c.PostmortemModel)
+	}
+}
+
+// Pipeline change log retention (F8).
+const (
+	DefaultChangesRetentionDays = "30"
+	// MaxChangesRetentionDays bounds a typo (ten years).
+	MaxChangesRetentionDays = 3650
+	// MaxChangesPerPipeline is the row cap per pipeline the store keeps
+	// whatever the retention.
+	MaxChangesPerPipeline = 5000
+)
+
+// ParseChangesRetentionDays validates PIPEROOM_CHANGES_RETENTION_DAYS: a whole
+// number of days, "0" = keep (the per-pipeline row cap still applies); empty
+// = 30. The error names the env var.
+func ParseChangesRetentionDays(c Config) (int, error) {
+	n, err := parseWholeNumber("PIPEROOM_CHANGES_RETENTION_DAYS", c.ChangesRetentionDays, DefaultChangesRetentionDays, true)
+	if err != nil {
+		return 0, err
+	}
+	if n > MaxChangesRetentionDays {
+		return 0, fmt.Errorf("config: PIPEROOM_CHANGES_RETENTION_DAYS=%q: at most %d", c.ChangesRetentionDays, MaxChangesRetentionDays)
+	}
+	return int(n), nil
+}
+
+// DefaultDebeziumMetricsPrefix is the JMX exporter's usual prefix for
+// Debezium MBeans (F12).
+const DefaultDebeziumMetricsPrefix = "debezium_metrics_"
+
+// DebeziumMetrics holds the typed Debezium metrics settings. URL "" = not configured.
+type DebeziumMetrics struct {
+	URL    string
+	Prefix string
+}
+
+// ParseDebeziumMetrics validates DEBEZIUM_METRICS_URL (empty, or an absolute
+// http or https URL with a host and no user info: credentials do not belong
+// in a URL that is logged) and DEBEZIUM_METRICS_PREFIX (a Prometheus metric
+// name prefix: letters, digits, '_' and ':', not starting with a digit;
+// empty = the default). The error names the env var.
+func ParseDebeziumMetrics(c Config) (DebeziumMetrics, error) {
+	d := DebeziumMetrics{URL: strings.TrimSpace(c.DebeziumMetricsURL), Prefix: strings.TrimSpace(c.DebeziumMetricsPrefix)}
+	if d.URL != "" {
+		u, err := url.Parse(d.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return DebeziumMetrics{}, fmt.Errorf("config: DEBEZIUM_METRICS_URL: want an http(s)://host:port/metrics URL")
+		}
+		if u.User != nil {
+			return DebeziumMetrics{}, fmt.Errorf("config: DEBEZIUM_METRICS_URL: must not carry user info")
+		}
+	}
+	if d.Prefix == "" {
+		d.Prefix = DefaultDebeziumMetricsPrefix
+	}
+	for i, r := range d.Prefix {
+		ok := r == '_' || r == ':' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (i > 0 && r >= '0' && r <= '9')
+		if !ok {
+			return DebeziumMetrics{}, fmt.Errorf("config: DEBEZIUM_METRICS_PREFIX=%q: want a metric name prefix like debezium_metrics_", c.DebeziumMetricsPrefix)
+		}
 	}
 	return d, nil
 }
