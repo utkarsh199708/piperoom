@@ -204,16 +204,19 @@ export interface CommentAddedPayload {
   step_id?: string
   text: string
   mentions_agent: boolean
+  client_id?: string // the request's idempotency key (#459)
 }
 
 export interface SteerSuggestedPayload {
   suggestion_id: string
   text: string
+  client_id?: string // the steer request's idempotency key (#459)
 }
 
 export interface SteerSentPayload {
   suggestion_id?: string // set when forwarding a suggestion
   text: string
+  client_id?: string // the steer request's idempotency key (#459); none on a forward
 }
 
 export interface SteerDeclinedPayload {

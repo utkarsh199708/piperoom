@@ -8,6 +8,7 @@ import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
 import type { ConnState, RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
+import { newClientId } from '@/lib/clientId'
 import { planComposer, quickSteers, sendLabel } from '@/lib/composer'
 import { clockTime } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -235,6 +236,32 @@ export function SteerBox({
   const ref = useRef<HTMLTextAreaElement>(null)
   const now = useNow()
   const roomId = state.id
+  // The send that failed (the Retry strip is up for it): its client_id, so a Retry is the same
+  // action (#459), and the field as it is now, for the listener below, which runs outside render.
+  const failedRef = useRef<{ clientId: string; kind: 'steer' | 'comment'; text: string; typed: string } | null>(null)
+  const textRef = useRef(text)
+  useEffect(() => {
+    textRef.current = text
+  }, [text])
+  // The failed send landed after all (the reconnect copy, or its event): take the Retry strip
+  // down and clear the field if it still holds those words (#390).
+  const onDelivered = actions.onDelivered
+  useEffect(() => {
+    if (!onDelivered) return
+    return onDelivered((sent) => {
+      const failed = failedRef.current
+      if (!failed || sent.clientId !== failed.clientId) return false
+      failedRef.current = null
+      setOffline(false)
+      if (textRef.current === failed.typed) {
+        writeStore('session', lastSentKey(roomId), failed.typed.trim())
+        writeStore('local', draftKey(roomId), '')
+        setText('')
+        if (ref.current) ref.current.style.height = ''
+      }
+      return true
+    })
+  }, [onDelivered, roomId])
   // Debounced so typing is not a storage write per key; a send clears it at once (see send).
   useEffect(() => {
     const t = setTimeout(() => writeStore('local', draftKey(roomId), text), 300)
@@ -283,14 +310,27 @@ export function SteerBox({
     // "?" alone has nothing to ask.
     if (!text.trim() || sending || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
     setSending(true)
-    const ok = plan.send === 'comment' ? await actions.comment(plan.text) : await actions.steer(plan.text)
+    // One submit is one action with one client_id. The same words while the Retry strip is up
+    // are that action's retry and keep its id, so the server stores them at most once; edited
+    // words, or any send after a success, are a new action.
+    const failed = failedRef.current
+    const retry = offline && failed !== null && failed.kind === plan.send && failed.text === plan.text
+    const clientId = retry ? failed.clientId : newClientId()
+    const ok =
+      plan.send === 'comment'
+        ? await actions.comment(plan.text, undefined, { clientId })
+        : await actions.steer(plan.text, { clientId })
     setSending(false)
     setOffline(!ok)
+    failedRef.current = ok ? null : { clientId, kind: plan.send, text: plan.text, typed: text }
     if (ok) {
       writeStore('session', lastSentKey(roomId), text.trim())
-      writeStore('local', draftKey(roomId), '')
-      setText('')
-      if (ref.current) ref.current.style.height = ''
+      // Words typed while this send waited are a new draft: keep them.
+      if (textRef.current === text) {
+        writeStore('local', draftKey(roomId), '')
+        setText('')
+        if (ref.current) ref.current.style.height = ''
+      }
     } else {
       ref.current?.focus()
     }

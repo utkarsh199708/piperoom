@@ -1,3 +1,4 @@
+import type { SendControls, SendOptions } from '../../hooks/useRoom'
 import { CircleCheck, CircleX, LoaderCircle, TriangleAlert } from 'lucide-react'
 import type { ProposalState } from '../../state/types'
 import { executionPhase } from '../../lib/execution'
@@ -32,7 +33,11 @@ export function ExecutionCard({
 }: {
   proposal: ProposalState
   /** Absent for a viewer. The driver's steer goes to the agent; a member's is a suggestion. */
-  rollback?: { asDriver: boolean; onSteer: (text: string) => Promise<boolean> }
+  rollback?: {
+    asDriver: boolean
+    onSteer: (text: string, opts?: SendOptions) => Promise<boolean>
+    sends?: SendControls
+  }
 }) {
   const info = executionPhase(proposal)
   if (proposal.executed.length === 0 && info.phase !== 'running') return null
@@ -103,6 +108,7 @@ export function ExecutionCard({
             rollback={proposal.rollback}
             asDriver={rollback.asDriver}
             onSteer={rollback.onSteer}
+            sends={rollback.sends}
           />
         </div>
       )}
