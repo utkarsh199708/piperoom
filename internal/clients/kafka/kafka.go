@@ -505,8 +505,9 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 // The key is attacker-controlled, including the schema id, so the decode is
 // bounded by construction (GO-2026-5046/5047/5048): keys over 64 KiB are
 // refused; key schemas are parsed in a private cache and refused if they hold
-// array/map types, recursion, fixed sizes or decimal precision/scale beyond
-// the caps in checkKeySchema; the decoder is capped (see newKeyAPI); and a
+// array/map types, recursion, fixed sizes, decimal precision/scale, size or
+// node counts beyond the caps in checkKeySchema (the walk runs before any
+// decoder is built; refusals are cached per id); the decoder is capped (see newKeyAPI); and a
 // decoder panic becomes an error. Decode takes no context, so these limits,
 // not a deadline, are what bound its time and memory; FindByKey also checks
 // its deadline between records.
@@ -530,16 +531,11 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 		return "", err
 	}
 	c.srMu.Lock()
-	refused := c.keyRefused[id]
-
 	if c.keyAPI == nil {
 		c.keyAPI = newKeyAPI()
 	}
 	api := c.keyAPI
 	c.srMu.Unlock()
-	if refused != "" {
-		return "", fmt.Errorf("kafka: avro key schema %d refused: %s", id, refused)
-	}
 	if c.decodeHook != nil {
 		c.decodeHook()
 	}
@@ -560,10 +556,17 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 	return string(b), nil
 }
 
-// schemaByID returns a parsed schema, cached by id (schema ids are immutable).
-// It also records whether the schema holds array/map types.
+// schemaByID returns a parsed, vetted key schema, cached by id (schema ids are
+// immutable). A schema that is too large, does not parse or fails
+// checkKeySchema is refused, and the refusal is cached too so a hostile id
+// costs one fetch and parse, not one per key. Both caches stop growing at
+// maxSchemaCache entries.
 func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	c.srMu.Lock()
+	if why := c.keyRefused[id]; why != "" {
+		c.srMu.Unlock()
+		return nil, fmt.Errorf("kafka: avro key schema %d refused: %s", id, why)
+	}
 	s, ok := c.srCache[id]
 	c.srMu.Unlock()
 	if ok {
@@ -573,24 +576,31 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A fresh cache per schema: avro.Parse shares a process-wide cache, so a
-	// name defined by an earlier (safe) schema would shadow a hostile
-	// redefinition in this one and hide it from the walk below.
-	s, err = avro.ParseWithCache(schemaStr, "", &avro.SchemaCache{})
-	if err != nil {
-		return nil, err
-	}
-	var bad string
-	if err := checkKeySchema(s); err != nil {
-		bad = err.Error()
+	var why string
+	if len(schemaStr) > maxKeySchemaBytes {
+		why = fmt.Sprintf("schema text too large (%d bytes)", len(schemaStr))
+	} else if s, err = avro.ParseWithCache(schemaStr, "", &avro.SchemaCache{}); err != nil {
+		// A fresh cache per schema: avro.Parse shares a process-wide cache, so
+		// a name defined by an earlier (safe) schema would shadow a hostile
+		// redefinition in this one and hide it from the walk below.
+		why = "does not parse: " + err.Error()
+	} else if werr := checkKeySchema(s); werr != nil {
+		why = werr.Error()
 	}
 	c.srMu.Lock()
-	c.srCache[id] = s
-	if c.keyRefused == nil {
-		c.keyRefused = map[int]string{}
+	defer c.srMu.Unlock()
+	if why != "" {
+		if c.keyRefused == nil {
+			c.keyRefused = map[int]string{}
+		}
+		if len(c.keyRefused) < maxSchemaCache {
+			c.keyRefused[id] = why
+		}
+		return nil, fmt.Errorf("kafka: avro key schema %d refused: %s", id, why)
 	}
-	c.keyRefused[id] = bad
-	c.srMu.Unlock()
+	if len(c.srCache) < maxSchemaCache {
+		c.srCache[id] = s
+	}
 	return s, nil
 }
 
@@ -599,46 +609,66 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 const maxDecimalDigits = 76
 
 // checkKeySchema returns an error if decoding a key with s could allocate or
-// spin beyond what the 64 KiB key implies: arrays and maps (block counts),
-// recursive records, fixed sizes above the key cap (hamba allocates at decoder
-// build time), and oversized decimal precision/scale. Named records are
-// tracked by pointer, never by name, so a redefinition cannot hide.
+// spin beyond what the 64 KiB key implies. hamba decodes every reference to a
+// named type afresh, so the walk visits the schema the way it will be decoded
+// (no shared-node shortcut) and gives up after maxSchemaNodes visits or
+// maxSchemaDepth levels. It refuses array/map types (block counts), recursive
+// records (stack overflow), fixed sizes above the key cap summed per visit
+// (hamba allocates at decoder build time), and oversized decimal
+// precision/scale. Records are tracked by pointer, never by name, so a
+// redefinition cannot hide.
 func checkKeySchema(s avro.Schema) error {
-	w := &keyWalk{onPath: map[*avro.RecordSchema]bool{}, done: map[*avro.RecordSchema]bool{}}
-	return w.walk(s)
+	w := &keyWalk{onPath: map[*avro.RecordSchema]bool{}}
+	return w.walk(s, 0)
 }
+
+const (
+	maxSchemaNodes = 1000 // fields, union branches and enum symbols count one each
+	maxSchemaDepth = 32
+	// maxKeySchemaBytes caps the schema text before parsing: hamba builds
+	// fingerprint strings quadratically, and a real key schema is tiny.
+	maxKeySchemaBytes = 64 << 10
+	maxSchemaCache    = 1024
+)
 
 type keyWalk struct {
-	onPath, done map[*avro.RecordSchema]bool
-	fixedTotal   int
+	onPath     map[*avro.RecordSchema]bool
+	nodes      int
+	fixedTotal int
 }
 
-func (w *keyWalk) walk(s avro.Schema) error {
+func (w *keyWalk) walk(s avro.Schema, depth int) error {
+	if depth > maxSchemaDepth {
+		return errors.New("schema nested too deeply")
+	}
+	if w.nodes++; w.nodes > maxSchemaNodes {
+		return errors.New("schema too large (node count)")
+	}
 	switch t := s.(type) {
 	case *avro.ArraySchema, *avro.MapSchema:
 		return errors.New("array/map type")
 	case *avro.RefSchema:
-		return w.walk(t.Schema())
+		return w.walk(t.Schema(), depth+1)
 	case *avro.RecordSchema:
 		if w.onPath[t] {
 			return errors.New("recursive record " + t.FullName())
 		}
-		if w.done[t] {
-			return nil
-		}
 		w.onPath[t] = true
 		defer delete(w.onPath, t)
 		for _, f := range t.Fields() {
-			if err := w.walk(f.Type()); err != nil {
+			if err := w.walk(f.Type(), depth+1); err != nil {
 				return err
 			}
 		}
-		w.done[t] = true
 	case *avro.UnionSchema:
 		for _, u := range t.Types() {
-			if err := w.walk(u); err != nil {
+			if err := w.walk(u, depth+1); err != nil {
 				return err
 			}
+		}
+	case *avro.EnumSchema:
+		if w.nodes += len(t.Symbols()); w.nodes > maxSchemaNodes {
+			return errors.New("schema too large (node count)")
 		}
 	case *avro.FixedSchema:
 		w.fixedTotal += t.Size()

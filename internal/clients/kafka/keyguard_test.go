@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +41,30 @@ func zigzag(n int64) []byte {
 	return binary.AppendUvarint(nil, uint64(n<<1)^uint64(n>>63))
 }
 
+// dagSchema builds D0{f0: D1{...}, f1: "D1"} down to a leaf of two null
+// fields: a small text that decodes to 2^depth nodes.
+func dagSchema(depth, fan int) string {
+	cur := `{"type":"record","name":"D` + strconv.Itoa(depth) + `","fields":[{"name":"f0","type":"null"},{"name":"f1","type":"null"}]}`
+	for i := depth - 1; i >= 0; i-- {
+		name := "D" + strconv.Itoa(i)
+		child := "D" + strconv.Itoa(i+1)
+		fields := `{"name":"f0","type":` + cur + `}`
+		for j := 1; j < fan; j++ {
+			fields += `,{"name":"f` + strconv.Itoa(j) + `","type":"` + child + `"}`
+		}
+		cur = `{"type":"record","name":"` + name + `","fields":[` + fields + `]}`
+	}
+	return cur
+}
+
+func nested(depth int) string {
+	cur := `"null"`
+	for i := 0; i < depth; i++ {
+		cur = `{"type":"record","name":"N` + strconv.Itoa(i) + `","fields":[{"name":"x","type":` + cur + `}]}`
+	}
+	return cur
+}
+
 func TestDecodeKeyGuard(t *testing.T) {
 	const (
 		arr       = `{"type":"array","items":"long"}`
@@ -48,6 +73,23 @@ func TestDecodeKeyGuard(t *testing.T) {
 		recursive = `{"type":"record","name":"Node","fields":[{"name":"id","type":"long"},{"name":"kids","type":{"type":"array","items":"Node"}}]}`
 		recNoArr  = `{"type":"record","name":"Node","fields":[{"name":"id","type":"long"},{"name":"next","type":["null","Node"]}]}`
 	)
+	var manyFields, manySymbols strings.Builder
+	manyFields.WriteString(`{"type":"record","name":"W","fields":[`)
+	for i := 0; i < 2000; i++ {
+		if i > 0 {
+			manyFields.WriteByte(',')
+		}
+		manyFields.WriteString(`{"name":"f` + strconv.Itoa(i) + `","type":"null"}`)
+	}
+	manyFields.WriteString(`]}`)
+	manySymbols.WriteString(`{"type":"enum","name":"E","symbols":[`)
+	for i := 0; i < 3000; i++ {
+		if i > 0 {
+			manySymbols.WriteByte(',')
+		}
+		manySymbols.WriteString(`"S` + strconv.Itoa(i) + `"`)
+	}
+	manySymbols.WriteString(`]}`)
 	huge := append(zigzag(math.MaxInt64), 0) // block count near MaxInt64, then EOF
 	tests := []struct {
 		name    string
@@ -105,6 +147,19 @@ func TestDecodeKeyGuard(t *testing.T) {
 		// parse; with the shared cache it parsed and the array was decoded.
 		if got, err := c.decodeKey(context.Background(), key); err == nil {
 			t.Fatalf("decoded %q, want an error", got)
+		}
+	})
+
+	t.Run("parse failure cached per id", func(t *testing.T) {
+		var n int
+		c := registryWith(t, `{"type":"record","name":"R","fields":[{"name":"a","type":"Nope"}]}`, &n)
+		for i := 0; i < 3; i++ {
+			if _, err := c.decodeKey(context.Background(), framed(raw(0))); err == nil {
+				t.Fatal("want refusal")
+			}
+		}
+		if n != 1 {
+			t.Fatalf("registry fetched %d times, want 1", n)
 		}
 	})
 
