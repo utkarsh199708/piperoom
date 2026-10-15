@@ -236,6 +236,19 @@ func (k fakeKafka) FindByKey(_ context.Context, topic, key string, since time.Ti
 	return out, nil
 }
 
+// FindByKeyScan reports a complete scan: the fake holds every record, so
+// nothing is truncated. Without it kafka_find_by_key hedges with text the
+// production client (a KeyScanReader since #430) never emits.
+func (k fakeKafka) FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (clients.KeyScan, error) {
+	refs, err := k.FindByKey(ctx, topic, key, since, maxScan)
+	if err != nil {
+		return clients.KeyScan{}, err
+	}
+	return clients.KeyScan{Refs: refs}, nil
+}
+
+var _ clients.KeyScanReader = (*fakeKafka)(nil)
+
 // DescribeTopicConfigs is kafkatools' local adapter for kafka_topic_config.
 func (k fakeKafka) DescribeTopicConfigs(_ context.Context, topic string) (kafka.TopicConfig, error) {
 	c, ok := k.w.topicCfg[topic]
