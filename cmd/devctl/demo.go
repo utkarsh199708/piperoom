@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -14,23 +12,18 @@ import (
 // PIPEROOM_STACK_OWNER, like the other commands), resets to a clean seeded
 // state, loads a short burst of traffic so the healthy pipeline is visible,
 // breaks the scenario, and prints what to watch. `--fix` repairs the scenario
-// and releases the lock.
+// and releases the lock. `--rehearse` runs the whole demo once (rehearse.go).
 func demoCmd(ctx context.Context, s *stack, args []string) error {
-	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
-	fix := fs.Bool("fix", false, "repair the scenario and release the stack lock")
-	owner := fs.String("owner", os.Getenv(ownerEnv), "lock owner tag")
-	fs.SetOutput(os.Stderr)
-	if err := fs.Parse(args); err != nil {
+	o, err := parseDemoFlags(args, os.Getenv(ownerEnv))
+	if err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) != 1 {
-		return fmt.Errorf("usage: devctl demo [--fix] <scenario> (%s)", strings.Join(scenarioNames(), ", "))
+	if o.rehearse {
+		return rehearseCmd(ctx, s, o, os.Stdout)
 	}
-	sc, ok := scenarios[rest[0]]
-	if !ok {
-		return fmt.Errorf("unknown scenario %q (%s)", rest[0], strings.Join(scenarioNames(), ", "))
-	}
+	fix, owner := &o.fix, &o.owner
+	rest := []string{o.scenario}
+	sc := scenarios[o.scenario]
 
 	if *fix {
 		if err := requireLock(*owner); err != nil {
@@ -67,7 +60,7 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 	}
 	s.log.Info("demo: loading a short burst of traffic")
 	loadCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	err := s.load(loadCtx, 5)
+	err = s.load(loadCtx, 5)
 	cancel()
 	if err != nil {
 		return err

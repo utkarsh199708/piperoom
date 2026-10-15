@@ -108,8 +108,8 @@ func (c Config) Enabled(src Source) bool {
 // room service needs.
 func (c Config) Ingest(src Source, h http.Header, body []byte) (Alert, error) {
 	c = c.withDefaults()
-	if len(body) > MaxBodyBytes {
-		return Alert{}, fmt.Errorf("%w: %d bytes, limit %d", ErrTooLarge, len(body), MaxBodyBytes)
+	if err := checkSize(body); err != nil {
+		return Alert{}, err
 	}
 	if err := c.Verify(src, h, body); err != nil {
 		return Alert{}, err
