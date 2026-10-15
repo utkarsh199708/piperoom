@@ -1012,9 +1012,12 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 
 	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
+	rec := tools.NewRecorder()
+	tctx = tools.WithRecorder(tctx, rec)
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, input)
 	took := time.Since(start).Milliseconds()
+	prov := r.receipt(name, res.Provenance, rec)
 
 	res, scrubErr := r.scrubToolResult(name, res)
 	if err == nil {
@@ -1028,7 +1031,9 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID: stepID, ToolUseID: toolUseID, Tool: name,
 			Summary: summary, IsError: true, Truncated: truncated, TookMS: took,
+			Provenance: prov,
 		})
+		r.steps.add(stepID, name, summary, true)
 		return tools.Result{}, err
 	}
 	summary, reTruncated := tools.Truncate(res.Summary)
@@ -1036,7 +1041,9 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 		StepID: stepID, ToolUseID: toolUseID, Tool: name,
 		Summary: summary, Data: data, IsError: false,
 		Truncated: res.Truncated || reTruncated || dataCut, TookMS: took,
+		Provenance: prov,
 	})
+	r.steps.add(stepID, name, summary, false)
 	return res, nil
 }
 
