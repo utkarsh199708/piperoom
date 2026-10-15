@@ -61,9 +61,11 @@ type Scenario struct {
 	// comment, approve). When none are left the run ends there.
 	Inputs []Input `yaml:"inputs"`
 	Expect Expect  `yaml:"expect"`
-	// Judge picks how the root cause and layer are judged: "terms" (default,
-	// deterministic) or "claude" (LLM judge, see judge.go). The evalrun -judge
-	// flag overrides it.
+	// Judge picks how the root cause and layer are judged: "terms"
+	// (deterministic), "claude" (LLM judge, see judge.go) or "auto" (the
+	// judge only for a hypothesis the keyword pass finds ambiguous,
+	// judge_auto.go). Unset uses the run's default (evalrun: auto). The
+	// evalrun -judge flag overrides it.
 	Judge string `yaml:"judge"`
 
 	// pipelineYAML is the pipeline as written, for the room path's owners
@@ -382,9 +384,9 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	errs = append(errs, checkGroups("expect.root_cause", s.Expect.RootCause, nil)...)
 	errs = append(errs, checkGroups("expect.root_cause_forbidden", s.Expect.RootCauseForbidden, nil)...)
 	switch s.Judge {
-	case "", JudgeTerms, JudgeClaude:
+	case "", JudgeTerms, JudgeClaude, JudgeAuto:
 	default:
-		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q or %q)", s.Judge, JudgeTerms, JudgeClaude))
+		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q or %q)", s.Judge, JudgeTerms, JudgeClaude, JudgeAuto))
 	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
 	if l := s.Expect.FirstFailingLayer; l != "" && layerTerms[l] == nil {
@@ -521,8 +523,8 @@ func (s Scenario) checkOutcome() []error {
 			errs = append(errs, fmt.Errorf("expect.%s: only graded when outcome is %s, not %s", field, OutcomeDiagnose, e.Outcome))
 		}
 	}
-	if s.Judge == JudgeClaude {
-		errs = append(errs, fmt.Errorf("judge: %q grades a root cause; outcome %s has none", JudgeClaude, e.Outcome))
+	if s.Judge == JudgeClaude || s.Judge == JudgeAuto {
+		errs = append(errs, fmt.Errorf("judge: %q grades a root cause; outcome %s has none", s.Judge, e.Outcome))
 	}
 	if e.Outcome == OutcomeAsk && !s.hasDriverInput() {
 		errs = append(errs, errors.New("inputs: outcome ask needs a steer or comment to ask about; only questions after the first one count"))

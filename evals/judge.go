@@ -12,13 +12,22 @@ import (
 	"piperoom/internal/events"
 )
 
-// Judge modes. "terms" is the deterministic default and the only mode CI
-// needs; "claude" asks a model to grade the final hypothesis (judge_claude.go,
-// build tag claude).
+// Judge modes. "terms" is the deterministic keyword grade; "claude" asks a
+// model to grade every final hypothesis (judge_claude.go, build tag claude);
+// "auto" keeps the keyword grade of a clear hypothesis and asks the judge only
+// about one the tri-state keyword pass marks ambiguous (tristate.go,
+// judge_auto.go), from the recorded verdict cache first.
 const (
 	JudgeTerms  = "terms"
 	JudgeClaude = "claude"
+	JudgeAuto   = "auto"
 )
+
+// JudgePromptVersion names the judge's prompt (judgeSystem and judgePrompt).
+// It is part of every verdict cache key (judgecache.go), so bumping it
+// invalidates every recorded verdict. TestJudgePromptVersionPinned fails when
+// the prompt changes and this does not.
+const JudgePromptVersion = "judge-2026-10-15.1"
 
 // Verdict is what an LLM judge says about one final hypothesis.
 type Verdict struct {
@@ -45,10 +54,20 @@ type JudgeResult struct {
 	TermsRootCauseLayer bool `json:"terms_root_cause_layer"`
 }
 
+// validJudge reports whether m is a judge mode ("" means unset).
+func validJudge(m string) bool {
+	switch m {
+	case "", JudgeTerms, JudgeClaude, JudgeAuto:
+		return true
+	}
+	return false
+}
+
 // effectiveJudge returns the judge mode for sc: the evalrun flag wins over the
-// scenario's own field; the default is terms.
-func effectiveJudge(flag string, sc Scenario) string {
-	for _, m := range []string{flag, sc.Judge} {
+// scenario's own field, which wins over the run's default (Config.DefaultJudge);
+// the last resort is terms.
+func effectiveJudge(flag string, sc Scenario, def string) string {
+	for _, m := range []string{flag, sc.Judge, def} {
 		if m != "" {
 			return m
 		}
@@ -196,22 +215,51 @@ func parseVerdict(raw string) (Verdict, error) {
 		RootCauseLayerCorrect: *in.RootCauseLayerCorrect, Reason: *in.Reason}, nil
 }
 
+// JudgeUsage is the tokens one or more judge calls used.
+type JudgeUsage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+}
+
+// MeteredJudge is a HypothesisJudge that also reports the tokens of each call,
+// so a report can show the judge's spend. NewMeteredTextJudge builds one.
+type MeteredJudge interface {
+	HypothesisJudge
+	JudgeHypothesisMetered(ctx context.Context, sc Scenario, hypothesis string) (Verdict, JudgeUsage, error)
+}
+
 // textJudge is a HypothesisJudge on top of any function that sends a system
-// prompt and a user message and returns the reply text. Claude's transport
-// (judge_claude.go) and test fakes both plug in here.
+// prompt and a user message and returns the reply text (and, when it knows
+// them, the tokens). Claude's transport (judge_claude.go) and test fakes both
+// plug in here.
 type textJudge struct {
-	send func(ctx context.Context, system, user string) (string, error)
+	send func(ctx context.Context, system, user string) (string, JudgeUsage, error)
 }
 
 // NewTextJudge builds a HypothesisJudge from a send function.
 func NewTextJudge(send func(ctx context.Context, system, user string) (string, error)) HypothesisJudge {
+	return textJudge{send: func(ctx context.Context, system, user string) (string, JudgeUsage, error) {
+		reply, err := send(ctx, system, user)
+		return reply, JudgeUsage{}, err
+	}}
+}
+
+// NewMeteredTextJudge builds a MeteredJudge from a send function that also
+// returns the call's tokens.
+func NewMeteredTextJudge(send func(ctx context.Context, system, user string) (string, JudgeUsage, error)) MeteredJudge {
 	return textJudge{send: send}
 }
 
 func (j textJudge) JudgeHypothesis(ctx context.Context, sc Scenario, hypothesis string) (Verdict, error) {
-	reply, err := j.send(ctx, judgeSystem, judgePrompt(sc, hypothesis))
+	v, _, err := j.JudgeHypothesisMetered(ctx, sc, hypothesis)
+	return v, err
+}
+
+func (j textJudge) JudgeHypothesisMetered(ctx context.Context, sc Scenario, hypothesis string) (Verdict, JudgeUsage, error) {
+	reply, u, err := j.send(ctx, judgeSystem, judgePrompt(sc, hypothesis))
 	if err != nil {
-		return Verdict{}, fmt.Errorf("evals: judge call for scenario %q: %w", sc.Name, err)
+		return Verdict{}, u, fmt.Errorf("evals: judge call for scenario %q: %w", sc.Name, err)
 	}
-	return parseVerdict(reply)
+	v, err := parseVerdict(reply)
+	return v, u, err
 }
