@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -30,8 +31,15 @@ func roomToolNames() []string {
 // verify recovery when its last step's action_result arrives; it may be nil
 // (the tool then just skips recording).
 func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
+	return newRoomToolsWith(d, track, nil)
+}
+
+// newRoomToolsWith is newRoomTools with the run's step ledger, which
+// update_hypothesis checks the cited steps against. A nil ledger turns those
+// checks off, for harnesses that build room tools without a runner.
+func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools.Tool {
 	return []tools.Tool{
-		&updateHypothesisTool{sink: d.Sink},
+		&updateHypothesisTool{sink: d.Sink, steps: steps},
 		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track},
 		&postMessageTool{sink: d.Sink},
 	}
@@ -59,6 +67,56 @@ func roomObjectSchema(props map[string]any, required ...string) map[string]any {
 
 type updateHypothesisTool struct {
 	sink Sink
+	// steps is the run's step ledger; nil means the cited steps are not checked.
+	steps *stepLedger
+}
+
+// stepIDRe is the shape of a step id (newStepID): "s_" and 26 Crockford digits.
+var stepIDRe = regexp.MustCompile(`^s_[0-9A-HJKMNP-TV-Z]{26}$`)
+
+// maxKnownStepsListed is how many known step ids a refusal lists.
+const maxKnownStepsListed = 8
+
+// checkSteps refuses a hypothesis that cites steps that do not exist, are not
+// ids, or errored, or that claims medium or high confidence with no step. The
+// errors are tools.ErrBadInput: the model sees them and retries. After a
+// restart the ledger is empty, so the model must re-read before it cites.
+func (t *updateHypothesisTool) checkSteps(in hypothesisInput) error {
+	if t.steps == nil {
+		return nil
+	}
+	for _, id := range in.BasedOnSteps {
+		if !stepIDRe.MatchString(id) {
+			return fmt.Errorf("%w: based_on_steps: %q is not a step id; cite the step= attribute of a tool_output", tools.ErrBadInput, clipID(id))
+		}
+	}
+	for _, id := range in.BasedOnSteps {
+		if _, ok := t.steps.get(id); !ok {
+			return fmt.Errorf("%w: based_on_steps: %s is not a step of this run (known: %s)", tools.ErrBadInput, id, strings.Join(t.steps.recent(maxKnownStepsListed), ", "))
+		}
+	}
+	for _, id := range in.BasedOnSteps {
+		if f, _ := t.steps.get(id); f.isError {
+			return fmt.Errorf("%w: based_on_steps: %s errored; it supports nothing", tools.ErrBadInput, id)
+		}
+	}
+	if len(in.BasedOnSteps) == 0 && in.Confidence != "low" {
+		return fmt.Errorf("%w: medium or high confidence needs at least one supporting step", tools.ErrBadInput)
+	}
+	return nil
+}
+
+// clipID shortens a model-supplied id for an error message.
+func clipID(s string) string {
+	const max = 80
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && s8(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 func (t *updateHypothesisTool) Name() string { return "update_hypothesis" }
@@ -104,6 +162,9 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	case "low", "medium", "high":
 	default:
 		return tools.Result{}, fmt.Errorf("%w: confidence must be low, medium or high", tools.ErrBadInput)
+	}
+	if err := t.checkSteps(in); err != nil {
+		return tools.Result{}, err
 	}
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
