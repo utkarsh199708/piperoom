@@ -20,11 +20,11 @@ const (
 // step is unbacked until the agent cites that step. The matching rules are
 // the hand-off check's (candidateNames, candidateNumbers: dates, durations,
 // percentages, approximations and magnitudes are exempt; a byte size only has
-// to be within 10 % of a number in the steps), against the cited summaries
+// to be within 10 % of a number in the steps), against the backing texts
 // only. Terms are de-duplicated, in text order, at most maxUnbackedTerms, each
 // cut to maxUnbackedTermBytes on a rune boundary.
-func groundTerms(text string, cited []string) []string {
-	idx := textIndex(strings.Join(cited, "\n"))
+func groundTerms(text string, backing []string) []string {
+	idx := textIndex(strings.Join(backing, "\n"))
 	low := strings.ToLower(text)
 
 	type found struct {

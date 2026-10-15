@@ -9,6 +9,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/events"
+	"piperoom/internal/tools"
 )
 
 func TestGroundTermsTable(t *testing.T) {
@@ -245,5 +246,62 @@ func TestPostmortemIsNotRetried(t *testing.T) {
 	}
 	if len(m.calls) != 1 {
 		t.Fatalf("%d calls, want 1", len(m.calls))
+	}
+}
+
+func hypoRunnerWithAlert(t *testing.T, alert Alert) *runner {
+	t.Helper()
+	reg := tools.NewRegistry()
+	if err := reg.Register(&callingTool{name: "connect_status", res: tools.Result{Summary: "ok"}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := newRunner(alert, Deps{Tools: reg, Inbox: &fakeInbox{}, Sink: &fakeSink{}, Logger: discardLogger()}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.toolList = buildToolList(r.deps.Tools, newRoomToolsWith(r.deps, r.proposals, r.steps))
+	r.steps.add(stepA, "connect_status", "task 0 FAILED", false)
+	return r
+}
+
+func TestHypothesisNamesFromTheAlertAndMapAreBacked(t *testing.T) {
+	r := hypoRunnerWithAlert(t, Alert{
+		Title:       "orders stale",
+		PipelineID:  "orders",
+		Description: "consumer order-sync is behind",
+		Labels:      map[string]string{"topic": "pg.public.orders"},
+		PipelineMap: "postgres(orders) -> pg-orders-connector -> kafka(pg.public.orders) -> order-sync",
+	})
+	// None of these is in the cited step ("task 0 FAILED"): they come from the alert or the map.
+	_, p := hypoWith(t, r, "`pg-orders-connector` failed and order-sync reads pg.public.orders", stepA)
+	if len(p.UnbackedTerms) != 0 {
+		t.Fatalf("unbacked = %v, want none: the alert and the pipeline map back these names", p.UnbackedTerms)
+	}
+	_, p = hypoWith(t, r, "`order_audit_sink` failed too", stepA)
+	if strings.Join(p.UnbackedTerms, ",") != "order_audit_sink" {
+		t.Fatalf("a name from nowhere is still unbacked: %v", p.UnbackedTerms)
+	}
+}
+
+func TestHypothesisNamesFromCitedInputAreBackedUncitedAreNot(t *testing.T) {
+	r := hypoRunnerWithAlert(t, Alert{})
+	r.steps.addWithInput(stepB, "connect_status", `{"connector":"inventory-connector"}`, "task 0 FAILED", false)
+	r.steps.addWithInput("s_01J0000000000000000000000C", "connect_status", `{"connector":"billing-connector"}`, "ok", false)
+	_, p := hypoWith(t, r, "`inventory-connector` failed", stepB)
+	if len(p.UnbackedTerms) != 0 {
+		t.Fatalf("unbacked = %v, want none: the cited step ran on that connector", p.UnbackedTerms)
+	}
+	_, p = hypoWith(t, r, "`billing-connector` failed", stepB)
+	if strings.Join(p.UnbackedTerms, ",") != "billing-connector" {
+		t.Fatalf("an uncited step's input must not back a term: %v", p.UnbackedTerms)
+	}
+}
+
+func TestRunReadToolLedgersTheInput(t *testing.T) {
+	r, sink := provRunner(t, &callingTool{name: "connect_status", res: tools.Result{Summary: "ok"}})
+	r.runReadTool(context.Background(), toolUse{id: "1", name: "connect_status", input: json.RawMessage(`{"why":"check","connector":"inventory-connector"}`)})
+	f, ok := r.steps.get(lastToolResult(t, sink).StepID)
+	if !ok || !strings.Contains(f.input, "inventory-connector") || strings.Contains(f.input, "why") {
+		t.Fatalf("ledger fact = %+v, %v", f, ok)
 	}
 }

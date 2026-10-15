@@ -1,6 +1,9 @@
 package agent
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // maxLedgerSummaryBytes caps the summary kept per step. It is the summary the
 // model saw (already capped by tools.MaxSummaryBytes); the cap here is a
@@ -14,11 +17,15 @@ type stepLedger struct {
 	mu    sync.Mutex
 	steps map[string]stepFact
 	order []string // step ids, oldest first
+	// background is the text the model was given up front (alert, pipeline map),
+	// lower-cased once. A term in it needs no step to back it (see groundTerms).
+	background string
 }
 
 // stepFact is what the ledger keeps of one step.
 type stepFact struct {
 	tool    string
+	input   string // the tool input as the model wrote it
 	summary string
 	isError bool
 }
@@ -27,8 +34,14 @@ func newStepLedger() *stepLedger {
 	return &stepLedger{steps: map[string]stepFact{}}
 }
 
-// add records a step. A nil ledger ignores it.
+// add records a step with no input. A nil ledger ignores it.
 func (l *stepLedger) add(stepID, tool, summary string, isError bool) {
+	l.addWithInput(stepID, tool, "", summary, isError)
+}
+
+// addWithInput records a step and the input its tool was called with. A name the
+// model typed into the input (a connector, a topic) is backed by the step it ran in.
+func (l *stepLedger) addWithInput(stepID, tool, input, summary string, isError bool) {
 	if l == nil || stepID == "" {
 		return
 	}
@@ -44,7 +57,10 @@ func (l *stepLedger) add(stepID, tool, summary string, isError bool) {
 	if _, ok := l.steps[stepID]; !ok {
 		l.order = append(l.order, stepID)
 	}
-	l.steps[stepID] = stepFact{tool: tool, summary: summary, isError: isError}
+	if len(input) > maxLedgerSummaryBytes {
+		input = cutBytes(input, maxLedgerSummaryBytes)
+	}
+	l.steps[stepID] = stepFact{tool: tool, input: input, summary: summary, isError: isError}
 }
 
 // get returns the step's fact.
@@ -67,3 +83,50 @@ func (l *stepLedger) recent(n int) []string {
 
 // s8 reports whether b is a UTF-8 continuation byte.
 func s8(b byte) bool { return b&0xC0 == 0x80 }
+
+// seedTriage adds the reads of the triage pass, which the first message shows as
+// <tool_output step="s_..."> and tells the model to cite instead of repeating.
+// It applies firstLookBlock's own filter (a real step id, at most triagePassReads),
+// so the ledger holds exactly the ids the model was shown.
+func (l *stepLedger) seedTriage(t *TriageResult) {
+	if t == nil {
+		return
+	}
+	n := 0
+	for _, s := range t.Steps {
+		if n == triagePassReads {
+			break
+		}
+		if !triageStepID.MatchString(s.StepID) {
+			continue
+		}
+		n++
+		text := s.Summary
+		if s.IsError && !strings.HasPrefix(text, "error: ") {
+			text = "error: " + text
+		}
+		l.add(s.StepID, s.Tool, text, s.IsError)
+	}
+}
+
+// setBackground records the text the model was given up front.
+func (l *stepLedger) setBackground(text string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.background = strings.ToLower(text)
+}
+
+// backgroundText returns the text set by setBackground.
+func (l *stepLedger) backgroundText() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.background
+}
+
+// alertBackground is the alert text that goes into the first message: title,
+// pipeline, description, labels, watcher evidence and the pipeline map. A hypothesis
+// that names a component from there is not making it up.
+func alertBackground(a Alert) string {
+	parts := []string{a.Title, a.PipelineID, alertDescription(a), alertLabels(a), watcherEvidence(a.Raw), a.PipelineMap}
+	return strings.Join(parts, "\n")
+}

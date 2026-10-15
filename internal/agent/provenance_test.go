@@ -212,11 +212,70 @@ func TestHypothesisRefusesUnknownStep(t *testing.T) {
 	}
 }
 
-func TestHypothesisRefusesErroredStep(t *testing.T) {
+func TestHypothesisMayCiteAnErroredStep(t *testing.T) {
+	// A tool error is a finding (connector missing, timeout): it may be cited.
+	r, sink := hypoRunner(t)
+	for _, conf := range []string{"low", "medium"} {
+		res := hypoRun(t, r, []string{stepB}, conf)
+		if res.isError {
+			t.Fatalf("%s: refused: %s", conf, res.content)
+		}
+	}
+	if n := len(sink.ofType(events.AgentHypothesis)); n != 2 {
+		t.Fatalf("%d hypotheses emitted, want 2", n)
+	}
+	res := hypoRun(t, r, []string{stepA, stepB}, "high")
+	if res.isError {
+		t.Fatalf("high with one step that worked must pass: %s", res.content)
+	}
+}
+
+func TestHypothesisHighNeedsAStepThatWorked(t *testing.T) {
 	r, _ := hypoRunner(t)
-	res := hypoRun(t, r, []string{stepA, stepB}, "medium")
-	if !res.isError || !strings.Contains(res.content, stepB+" errored; it supports nothing") {
+	res := hypoRun(t, r, []string{stepB}, "high")
+	if !res.isError || !strings.Contains(res.content, "every cited step errored; high confidence needs a step that returned a result") {
 		t.Fatalf("content = %s", res.content)
+	}
+}
+
+func TestHypothesisEmptyLedgerSaysRunAToolFirst(t *testing.T) {
+	r, _ := provRunner(t, &callingTool{name: "connect_status", res: tools.Result{Summary: "ok"}})
+	for _, id := range []string{"s_3", "s_01J0000000000000000000000Z"} {
+		res := hypoRun(t, r, []string{id}, "low")
+		if !res.isError || !strings.Contains(res.content, "(no steps recorded yet; run a read tool first)") {
+			t.Fatalf("id %q: content = %s", id, res.content)
+		}
+	}
+}
+
+func TestHypothesisCitesATriageStep(t *testing.T) {
+	// The first message shows the triage pass's reads as <tool_output step="s_...">
+	// and tells the model to cite them, so the ledger of the main run knows them.
+	alert := Alert{Triage: &TriageResult{Steps: []TriageStep{
+		{StepID: stepA, Tool: "connect_status", Summary: "task 0 FAILED"},
+		{StepID: stepB, Tool: "pg_replication_slots", Summary: "timeout", IsError: true},
+		{StepID: "s_01J000000000000000000000C1", Tool: "extra", Summary: "beyond the cap"},
+		{StepID: "bad id", Tool: "x", Summary: "not shown"},
+	}}}
+	reg := tools.NewRegistry()
+	sink := &fakeSink{}
+	r, err := newRunner(alert, Deps{Tools: reg, Inbox: &fakeInbox{}, Sink: sink, Logger: discardLogger()}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.toolList = buildToolList(r.deps.Tools, newRoomToolsWith(r.deps, r.proposals, r.steps))
+	res := hypoRun(t, r, []string{stepA}, "high")
+	if res.isError {
+		t.Fatalf("a triage step must be citable: %s", res.content)
+	}
+	if f, _ := r.steps.get(stepB); !f.isError || f.summary != "error: timeout" {
+		t.Fatalf("errored triage step = %+v", f)
+	}
+	if _, ok := r.steps.get("s_01J000000000000000000000C1"); ok {
+		t.Fatal("only the reads firstLookBlock shows (triagePassReads) are seeded")
+	}
+	if _, ok := r.steps.get("bad id"); ok {
+		t.Fatal("a malformed triage id is not seeded")
 	}
 }
 
@@ -224,7 +283,7 @@ func TestHypothesisRefusesMalformedID(t *testing.T) {
 	r, _ := hypoRunner(t)
 	for _, id := range []string{"3", "s_short", "p_01J0000000000000000000000A", strings.ToLower(stepA), "s_01J0000000000000000000000A "} {
 		res := hypoRun(t, r, []string{id}, "low")
-		if !res.isError || !strings.Contains(res.content, "is not a step id; cite the step= attribute of a tool_output") {
+		if !res.isError || !strings.Contains(res.content, "is not a step id; cite the step= attribute of a tool_output in this run") {
 			t.Fatalf("id %q: content = %s", id, res.content)
 		}
 	}

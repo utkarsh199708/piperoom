@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -46,7 +47,11 @@ func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, 
 		)
 		// A failed or late second attempt keeps the first summary and its
 		// violations: the request deadline is shared, so the retry gets what is left.
-		if second, _, rerr := requestSummary(ctx, retry, m, "handoff"); rerr == nil {
+		second, _, rerr := requestSummary(ctx, retry, m, "handoff")
+		if rerr != nil {
+			// Counts only: the error text can quote the model's output.
+			slog.Warn("agent: handoff self-correction failed; keeping the first summary", "violations", len(vs), "ctx_done", ctx.Err() != nil)
+		} else {
 			summary, vs = second, CheckHandoff(roomEvents, second)
 		}
 	}
