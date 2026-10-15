@@ -17,14 +17,16 @@ import (
 // existing tests must pass, and their trap, shotgun and wrong-story answers
 // must fail. Matcher rows pin one function on one text: matchForbidden
 // (fb, want = the story is told), matchGroups (gr, want = the terms are
-// stated), causeHedge (hg, want = hedged) and namesLayer (ly).
+// stated), causeHedge (hg, want = hedged), namesLayer (ly) and shadow
+// Agreement (ag, want = the labelled layer).
 //
-// A gap row is a case the matcher deliberately leaves to the LLM judge or to
-// the scenario terms (C7): it is logged with its result and never fails.
+// A gap row is a case the matcher grades wrong today, left to the LLM judge
+// (#454) or to the scenario terms (C7): it carries the right grade, is
+// logged, and fails once it grades right, so the fix must remove its marker.
 
 type corpusRow struct {
 	src      string
-	kind     string // scenario | forbidden | groups | hedge | layer
+	kind     string // scenario | forbidden | groups | hedge | layer | agree
 	scenario string // scenario id, or "heldout/<id>"
 	terms    [][]string
 	layer    string
@@ -49,6 +51,12 @@ func ly(src, layer, text string, want bool) corpusRow {
 	return corpusRow{src: src, kind: "layer", layer: layer, text: text, want: want}
 }
 
+// ag is a shadow-agreement row: want is whether Agreement puts the text in
+// the labelled layer.
+func ag(src, layer string, causeTerms []string, text string, want bool) corpusRow {
+	return corpusRow{src: src, kind: "agree", layer: layer, terms: [][]string{causeTerms}, text: text, want: want}
+}
+
 func sc(src, scenario, text string, want bool) corpusRow {
 	return corpusRow{src: src, kind: "scenario", scenario: scenario, text: text, want: want}
 }
@@ -69,7 +77,7 @@ const poisonPillCause = "Root cause: a poison pill on partition 1 that order-syn
 var resetLatest = []string{"reset*", "latest"}
 
 // corpusMatcherRows are the tickets' reproductions (#283, #334, #335) and
-// every text quoted in review rounds 1 and 2 of #395.
+// every text quoted in review rounds 1-4 of #395.
 var corpusMatcherRows = []corpusRow{
 	// #283 and #334: forbidden stories inside a denial or a warning are not
 	// told; the same stories asserted still are.
@@ -175,7 +183,7 @@ var corpusMatcherRows = []corpusRow{
 	// #283: ", not X" contrasts a layer name with what came before it.
 	gap(gr("contrast", [][]string{{"debezium"}}, "The slot was dropped by a DBA, not Debezium.", false), "#283 \", not <layer>\" contrast, waits on #454"),
 	gap(gr("contrast", [][]string{{"order-sync"}}, "The registry rejected the schema, not order-sync.", false),
-		"a pipeline name is no layer word; contrastNot reads only layer words, the judge decides"),
+		"#283 \", not <pipeline name>\" contrast, waits on #454"),
 	gr("contrast", [][]string{{"registry"}}, "The registry rejected the schema, not order-sync.", true),
 	gr("contrast", [][]string{{"replication slot"}}, "Task 0 failed, not able to read the replication slot.", true),
 	gr("contrast", [][]string{{"debezium"}}, "Debezium is not running.", true),
@@ -409,6 +417,21 @@ var corpusMatcherRows = []corpusRow{
 	gap(fb("r4.11", []string{"slot", "lost"}, "Nothing of the slot was lost.", false), "#334 nothing, waits on #454"),
 }
 
+// saslCause are sasl-credential-rotated's cause words for agreement rows.
+var saslCause = []string{"sasl", "credential", "rotated", "password"}
+
+// corpusAgreementRows pin shadow agreement (agreement.go) on the texts review
+// round 5 found it reads through layerTerms: correct SASL-first answers to
+// sasl-credential-rotated, whose first failing layer is kafka-connect.
+var corpusAgreementRows = []corpusRow{
+	ag("r5.1", "kafka-connect", saslCause, "SASL authentication fails for pg-payments-connector task 0: the SCRAM password of the Kafka user debezium was rotated.", true),
+	ag("r5.1", "kafka-connect", saslCause, "SASL login failed: the security team rotated the debezium password and pg-payments-connector task 0 is FAILED.", true),
+	ag("r5.1", "kafka-connect", saslCause, "Authentication failed with SASL mechanism SCRAM-SHA-512 for task 0 of pg-payments-connector after the password rotation.", true),
+	ag("r5.1 control", "kafka-connect", saslCause, "pg-payments-connector task 0 is FAILED: SASL authentication fails because the debezium password was rotated.", true),
+	ag("r5.1 control", "kafka-connect", saslCause, "The Debezium connector cannot log in: SCRAM credentials for the kafka user were rotated.", true),
+	ag("r5.1 control", "kafka-connect", saslCause, "Connector task failed after the SMT threw on a tombstone.", true),
+}
+
 // corpusReviewScenarioRows are the review texts read with real scenario
 // expects.
 var corpusReviewScenarioRows = []corpusRow{
@@ -573,6 +596,9 @@ func (r corpusRow) eval(t *testing.T, scs map[string]Scenario) (bool, error) {
 		return h, nil
 	case "layer":
 		return namesLayer(layerTermsFor(owners.Pipeline{}, r.layer), r.text), nil
+	case "agree":
+		res, err := Agreement(r.text, Label{Layer: r.layer, RootCauseTerms: r.terms[0]})
+		return res.LayerAgree, err
 	case "scenario":
 		s, ok := scs[r.scenario]
 		if !ok {
@@ -594,7 +620,7 @@ func TestGoldenCorpus(t *testing.T) {
 			scs[set.prefix+s.Name] = s
 		}
 	}
-	rows := append([]corpusRow(nil), corpusMatcherRows...)
+	rows := append(append([]corpusRow(nil), corpusMatcherRows...), corpusAgreementRows...)
 	for _, r := range corpusScenarioRows(t) {
 		// Root cause is graded only for diagnose (billing-connect-unreachable
 		// abstains).

@@ -280,11 +280,19 @@ var layerTerms = map[string][]string{
 	// An SMT runs inside a Connect task.
 	"kafka-connect":   {"connect", "connector*", "debezium", "smt", "smts", "single message transform*"},
 	"schema-registry": {"schema registry", "registry", "subject*"},
+	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
+	"consumer":        {"consumer*"},
+	"warehouse":       {"warehouse*", "sink table"},
+}
+
+// scorerLayerTerms name a layer for the scorer (namesLayer) only. Shadow
+// agreement (agreement.go) picks the first layer word of a failure clause,
+// and these words lead correct answers that blame another layer: "SASL
+// authentication fails for pg-payments-connector task 0" blames Connect.
+var scorerLayerTerms = map[string][]string{
 	// SASL and SCRAM are Kafka's own login; "kafka user" is the principal
 	// it checks.
-	"kafka":     {"topic*", "broker*", "partition*", "retention", "log start", "sasl", "scram", "kafka user*"},
-	"consumer":  {"consumer*"},
-	"warehouse": {"warehouse*", "sink table"},
+	"kafka": {"sasl", "scram", "kafka user*"},
 }
 
 // layerTermsFor adds the pipeline's own names to a layer's words: its
@@ -292,7 +300,7 @@ var layerTerms = map[string][]string{
 // (topic_prefix.source_table, "pg.public.orders/1") Kafka, its connectors
 // Connect and its sink tables the warehouse.
 func layerTermsFor(p owners.Pipeline, layer string) []string {
-	terms := append([]string(nil), layerTerms[layer]...)
+	terms := append(append([]string(nil), layerTerms[layer]...), scorerLayerTerms[layer]...)
 	switch layer {
 	case "consumer":
 		terms = append(terms, p.ConsumerGroups...)
