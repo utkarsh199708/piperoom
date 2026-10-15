@@ -223,6 +223,44 @@ func combine(ss []Summary) Summary {
 	return out
 }
 
+// Restrict returns r limited to the named scenarios, for comparing a -only run
+// with a full baseline like with like. Overall is recomputed from the kept
+// per-scenario summaries exactly as buildReport does (each scenario weighs
+// the same), so it is not the full report's number. Fields that are not
+// per-scenario (Calibration, Evidence) are dropped rather than left covering
+// scenarios that were removed.
+func (r Report) Restrict(names []string) Report {
+	keep := make(map[string]bool, len(names))
+	for _, n := range names {
+		keep[n] = true
+	}
+	out := r
+	out.Scenarios, out.Results, out.RunUsage = nil, nil, nil
+	out.Calibration, out.Evidence = nil, nil
+	var withRuns []Summary
+	for _, s := range r.Scenarios {
+		if !keep[s.Name] {
+			continue
+		}
+		out.Scenarios = append(out.Scenarios, s)
+		if s.Runs > 0 {
+			withRuns = append(withRuns, s.Summary)
+		}
+	}
+	for _, res := range r.Results {
+		if keep[res.Scenario] {
+			out.Results = append(out.Results, res)
+		}
+	}
+	for _, u := range r.RunUsage {
+		if keep[u.Scenario] {
+			out.RunUsage = append(out.RunUsage, u)
+		}
+	}
+	out.Overall = combine(withRuns)
+	return out
+}
+
 // WriteJSON writes the report as indented JSON.
 func (r Report) WriteJSON(w io.Writer) error {
 	enc := json.NewEncoder(w)
