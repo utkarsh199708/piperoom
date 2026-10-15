@@ -418,6 +418,58 @@ func (w *Watcher) recordVersions(ctx context.Context, now time.Time, t target, b
 	return ok
 }
 
+// ddlInScope reports whether an audit row is about a source table of the
+// pipeline: the table itself or one of its columns (a column rename or comment
+// is logged as schema.table.column). The trigger quotes a mixed-case name
+// (public."Name"), while the owners file holds catalog names, so the identity
+// is also tried with its quotes removed (same rule as ddlInScope in
+// internal/tools/changes, plus the quoted form).
+func ddlInScope(sc tools.Scope, identity string) bool {
+	parts, ok := splitIdentity(identity)
+	if !ok {
+		return sc.SourceTableInScope(identity)
+	}
+	// The table itself has two parts (schema.table); a column has a third.
+	if len(parts) == 2 || len(parts) == 3 {
+		return sc.SourceTableInScope(strings.Join(parts[:2], "."))
+	}
+	return sc.SourceTableInScope(identity)
+}
+
+// splitIdentity splits an object_identity on the dots outside double quotes
+// and removes the quotes ("" inside quotes is one quote). It reports false for
+// an unterminated quote or an empty part.
+func splitIdentity(s string) ([]string, bool) {
+	var parts []string
+	var cur strings.Builder
+	inQ := false
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		switch r := rs[i]; {
+		case r == '"' && inQ && i+1 < len(rs) && rs[i+1] == '"':
+			cur.WriteRune('"')
+			i++
+		case r == '"':
+			inQ = !inQ
+		case r == '.' && !inQ:
+			parts = append(parts, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if inQ {
+		return nil, false
+	}
+	parts = append(parts, cur.String())
+	for _, p := range parts {
+		if p == "" {
+			return nil, false
+		}
+	}
+	return parts, true
+}
+
 // recordDDL writes the audit rows of the pipeline's source tables. The row
 // carries its own time; the fingerprint is (at, object, query), so reading the
 // same row on the next tick writes nothing.
@@ -442,7 +494,7 @@ func (w *Watcher) recordDDL(ctx context.Context, t target, sc *setChanges) bool 
 	rows := slices.Clone(sc.ddl)
 	slices.SortFunc(rows, func(a, b clients.DDLChange) int { return a.At.Compare(b.At) })
 	for _, r := range rows {
-		if !scope.SourceTableInScope(r.ObjectIdentity) {
+		if !ddlInScope(scope, r.ObjectIdentity) {
 			continue
 		}
 		summary := strings.TrimSpace(r.CommandTag+" "+r.ObjectIdentity) + " | " + r.Query

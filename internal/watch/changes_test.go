@@ -188,6 +188,34 @@ func TestFirstTickRecordsDDLWithItsOwnTime(t *testing.T) {
 	}
 }
 
+// A column rename is logged under schema.table.column and a mixed-case table
+// quoted (public."Name"); both are the pipeline's tables (#330).
+func TestDDLRecordsColumnAndMixedCaseTables(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{{id: "orders", tables: "[public.t, public.Mixed]"}}})
+	ddl := &fakeDDL{}
+	d := h.deps
+	d.Changes, d.Registry, d.DDL = &fakeChanges{}, &fakeRegistry{versions: map[string][]int{}, err: map[string]error{}}, ddl
+	w, err := New(d)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.w = w
+	at := t0.Add(-time.Minute)
+	for _, id := range []string{"public.t.b", `public."Mixed"`, `public."Mixed".note`, "public.other.b", "public.tx", "other.public.t.b", "public.t."} {
+		ddl.rows = append(ddl.rows, clients.DDLChange{At: at, CommandTag: "ALTER TABLE", ObjectIdentity: id, Query: "q " + id})
+	}
+	h.step(0)
+	var got []string
+	for _, r := range d.Changes.(*fakeChanges).all() {
+		got = append(got, r.Object)
+	}
+	slices.Sort(got)
+	want := []string{`public."Mixed"`, `public."Mixed".note`, "public.t.b"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("recorded %v, want %v", got, want)
+	}
+}
+
 func TestDDLRowsCarryAuditTime(t *testing.T) {
 	h := newChangesHarness(t)
 	h.step(0)
