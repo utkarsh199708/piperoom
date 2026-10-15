@@ -554,7 +554,7 @@ export). Another user's request with the same value is a different key.
   is checked as a new request.
 - **Payload.** The event carries the key: `comment.added`, `steer.suggested` and `steer.sent` have `client_id`
   (omitted when the request had none; a `steer.sent` that forwards a suggestion has none, because the forward is the
-  driver's action, not the suggester's request). Clients reconcile their pending copies by it, never by matching text.
+  driver's action, not the suggester's request). Clients reconcile their pending copies by `(actor.id, client_id)`, the event's actor being the caller, never by `client_id` alone (every room reader sees it, so another user can send the same value) and never by matching text.
 - **Without a key** nothing changes: every request appends, so a client that cannot tell whether a request landed
   must not re-send it without a key. A server without this feature ignores the field, so a client retries
   automatically only when the answer's event carries `client_id`.

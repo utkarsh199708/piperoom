@@ -572,29 +572,40 @@ func TestNudgeWithoutPagingConfigIsReplyOnly(t *testing.T) {
 	}
 }
 
-// With the default limits a re-nudge inside the 10-minute user gap is not
-// paged, one after it is, and another proposal is subject to the same gap.
+// Nudges skip the per-room gap (the server limits them per proposal and layer)
+// and have their own hourly cap, so a nudge 5 minutes after the proposal page
+// still pages, and nudges never use up the budget for proposal pages.
 func TestPagingNudgeIntervals(t *testing.T) {
-	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
-	st := &fakeStore{evs: []events.Event{created, nudgeEvent(2, "p1", "kafka")}}
-	fs := &fakeSlack{}
-	b, _, _ := newBridge(t, st, fs, func(o *Options) { o.Paging = pagingOpts() })
 	now := time.Unix(1700000000, 0)
-	b.pager.now = func() time.Time { return now }
-	step := func(after time.Duration, e events.Event, wantPages int) {
-		t.Helper()
-		now = now.Add(after)
-		st.evs = append(st.evs, e)
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		defer cancel()
-		_ = b.Run(ctx, "r1")
-		if n, _ := mentionCount(fs.reqs); n != wantPages {
-			t.Fatalf("pages = %d, want %d", n, wantPages)
-		}
+	p := newPrunePager(t, &now, PagingLimits{})
+	if !pageOnce(p, "r1", "proposal:p1") {
+		t.Fatal("proposal page denied")
 	}
-	step(0, nudgeEvent(3, "p1", "kafka"), 1)              // first nudge pages once (seq 2); seq 3 is inside the gap
-	step(11*time.Minute, nudgeEvent(4, "p1", "kafka"), 2) // after the gap: pages again
-	step(time.Minute, nudgeEvent(5, "p2", "kafka"), 2)    // another proposal inside the gap: blocked
-	step(11*time.Minute, nudgeEvent(6, "p2", "kafka"), 3) // and its own page after the gap
-	step(10*time.Minute, nudgeEvent(7, "p2", "kafka"), 4) // exactly at the boundary: pages
+	now = now.Add(5 * time.Minute)
+	if !pageOnce(p, "r1", "nudge:2") {
+		t.Error("nudge 5m after the proposal page paged nobody")
+	}
+	// A re-nudge whose page was stamped late is still allowed at 10m of event time.
+	now = now.Add(9*time.Minute + 58*time.Second)
+	if !pageOnce(p, "r1", "nudge:3") {
+		t.Error("re-nudge after lag paged nobody")
+	}
+}
+
+// Nudge pages cap at UserPerHour per user and leave the other buckets alone.
+func TestPagingNudgesDoNotStarveOtherPages(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := newPrunePager(t, &now, PagingLimits{})
+	for i := 0; i < 6; i++ {
+		if !pageOnce(p, "r1", fmt.Sprintf("nudge:%d", i)) {
+			t.Fatalf("nudge %d denied", i)
+		}
+		now = now.Add(5 * time.Minute)
+	}
+	if pageOnce(p, "r1", "nudge:99") {
+		t.Error("a seventh nudge page in the hour was allowed")
+	}
+	if !pageOnce(p, "r2", "proposal:p9") {
+		t.Error("nudges used up the owner's budget for a proposal page in another room")
+	}
 }

@@ -12,7 +12,7 @@ import {
   CommandList,
   CommandShortcut,
 } from '@/components/ui/command'
-import { handOverFocus } from '@/components/room/useRestoreFocus'
+import { handOverFocus, usable } from '@/components/room/useRestoreFocus'
 import { Kbd } from '@/components/ui/kbd'
 import { isFixtures } from '@/api/client'
 import type { RoomSnapshot } from '@/api/types'
@@ -45,17 +45,23 @@ export function CommandMenu({
   const navigate = useNavigate()
   const { user, logout, busy } = useCurrentUser()
   const { theme, toggleTheme } = useTheme()
-  // What closed the menu: null = Esc or a click outside (Radix then focuses the dialog's trigger,
-  // and there is none, so focus drops to <body>: a known gap, pinned in CommandMenu.focus.test.tsx),
-  // 'dialog' = an action that opens a dialog (it keeps the focus), 'other' = anything else.
+  // What closed the menu: null = Esc or a click outside (Radix would focus the dialog's trigger, and
+  // there is none, so onCloseAutoFocus returns focus to the opener itself), 'dialog' = an action that
+  // opens a dialog (it keeps the focus), 'other' = anything else. Reset each time the menu opens.
   const closedBy = useRef<'dialog' | 'other' | null>(null)
   const mod = modKeyLabel()
   // What had focus before the palette opened. Read while rendering the opening frame, before
   // Radix moves focus into the palette. A dialog notes document.activeElement when it mounts, and
   // the palette is gone by then, so run() hands this element over (without focusing it).
   const opener = useRef<Element | null>(null)
+  // opener is cleared on close, but Esc needs it after the close, so the last one is kept here.
+  const returnTo = useRef<Element | null>(null)
   if (!open) opener.current = null
-  else if (opener.current === null && typeof document !== 'undefined') opener.current = document.activeElement
+  else if (opener.current === null && typeof document !== 'undefined') {
+    opener.current = document.activeElement
+    returnTo.current = opener.current
+    closedBy.current = null
+  }
 
   // Read when the menu renders, i.e. when it opens: the room screen wrote it by then.
   const room = open ? registry.get() : null
@@ -82,11 +88,12 @@ export function CommandMenu({
       }}
       // After a dialog action the new dialog keeps focus; after any other action the page content
       // gets it, because the thing that opened the menu may be gone (a link followed, a theme
-      // switched). Esc or a click outside falls through to Radix's default (see closedBy).
+      // switched). Esc or a click outside returns focus to what had it before the palette, else #main.
       onCloseAutoFocus={(e) => {
-        if (closedBy.current === null) return
         e.preventDefault()
-        if (closedBy.current === 'other') document.getElementById('main')?.focus()
+        if (closedBy.current === 'dialog') return
+        const back = closedBy.current === null && usable(returnTo.current) ? returnTo.current : null
+        ;(back ?? document.getElementById('main'))?.focus()
       }}
     >
       {room && (

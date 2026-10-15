@@ -461,6 +461,42 @@ func TestValidatePhases(t *testing.T) {
 			s.Transitions = append(s.Transitions, Transition{On: TransitionOn{Action: "connect_restart_task", OK: okp(true)}, To: "broken", From: "recovered"})
 		}, ""},
 		{"negative verify budget", func(s *Scenario) { s.Expect.MaxVerifyCalls = -1 }, "max_verify_calls is negative"},
+		// #340: a from-less transition fires in every phase, so it shadows a
+		// later one with a from.
+		{"shadowed from any phase by any outcome", func(s *Scenario) {
+			s.Transitions = []Transition{
+				{On: TransitionOn{Action: "connect_restart_task"}, To: "broken"},
+				{From: "broken", On: TransitionOn{Action: "connect_restart_task", OK: okp(true)}, To: "recovered"},
+			}
+		}, "transitions[1]: never fires: transitions[0] matches connect_restart_task with any outcome first"},
+		{"shadowed from any phase by the same trigger", func(s *Scenario) {
+			s.Transitions = append(s.Transitions, Transition{From: "broken", On: TransitionOn{Action: "connect_restart_task", OK: okp(true)}, To: "broken"})
+		}, "transitions[1]: never fires: same trigger as transitions[0]"},
+		{"from first, then any phase", func(s *Scenario) {
+			s.Transitions = []Transition{
+				{From: "broken", On: TransitionOn{Action: "connect_restart_task"}, To: "recovered"},
+				{On: TransitionOn{Action: "connect_restart_task", OK: okp(true)}, To: "recovered"},
+			}
+		}, ""},
+		// #340: replay breaks a tie for the earlier recording.
+		{"duplicate recording", func(s *Scenario) {
+			dup := s.Recordings[0]
+			dup.Summary = "other"
+			s.Recordings = append(s.Recordings, dup)
+		}, "recordings[3] (connect_status): never matches: recordings[0] has the same tool, input and phase"},
+		{"duplicate recording, empty input", func(s *Scenario) {
+			s.Recordings = append(s.Recordings,
+				Recording{Tool: "connect_status", Summary: "a"},
+				Recording{Tool: "connect_status", Input: map[string]any{}, Summary: "b"})
+		}, "recordings[4] (connect_status): never matches: recordings[3]"},
+		{"input not JSON", func(s *Scenario) {
+			s.Recordings[0].Input = map[string]any{"connector": func() {}}
+		}, "recordings[0] (connect_status): input does not convert to JSON"},
+		{"same input, other phase", func(s *Scenario) {
+			dup := s.Recordings[0]
+			dup.Phase = "broken"
+			s.Recordings = append(s.Recordings, dup)
+		}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
