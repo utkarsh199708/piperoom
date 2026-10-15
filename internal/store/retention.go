@@ -48,6 +48,12 @@ const PurgeRoomTimeout = 2 * time.Minute
 // archived: the delete is skipped so the archive never misses an event.
 var ErrRoomChanged = errors.New("store: room changed after it was archived")
 
+// ErrRoomExecuting is returned (wrapped) by DeleteRoom while an executor on
+// any replica holds the claim of one of the room's open proposals: deleting
+// would erase the step rows it writes, and its action would land with no
+// action.executed.
+var ErrRoomExecuting = errors.New("store: a fix is running in the room")
+
 var _ Purger = (*PG)(nil)
 
 // PurgeClosedBefore purges closed rooms of every pipeline, with no archive. It
@@ -261,6 +267,19 @@ func (s *PG) DeleteRoom(ctx context.Context, d RoomDeletion, wantSeq int64) (Roo
 		}
 		if wantSeq >= 0 && lastSeq != wantSeq {
 			return fmt.Errorf("store: delete room %s: archived %d events, room has %d: %w", d.RoomID, wantSeq, lastSeq, ErrRoomChanged)
+		}
+		// The service's busy check sees only its own replica's executor; the
+		// claim is the record every replica shares. A claim committed after
+		// this read loses its row to the delete below, so its executor's
+		// StartClaimedStep fails with ErrClaimLost before any action runs.
+		var executing bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM proposals WHERE room_id = $1 AND status = 'open' AND claimed_by IS NOT NULL)`,
+			d.RoomID).Scan(&executing); err != nil {
+			return fmt.Errorf("store: delete room %s: check claims: %w", d.RoomID, err)
+		}
+		if executing {
+			return fmt.Errorf("store: delete room %s: %w", d.RoomID, ErrRoomExecuting)
 		}
 		res, err = deleteRoomTx(ctx, tx, d.RoomID)
 		if err != nil {
