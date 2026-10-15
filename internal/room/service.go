@@ -319,8 +319,11 @@ type Service struct {
 	// alertLocks serialise the opens of one alert key in this process
 	// (lockAlertKey): the check for an open room and the create must be one
 	// step, and no service-wide lock makes them so. Striped by key hash, so
-	// unrelated keys rarely wait for each other.
-	alertLocks [alertLockStripes]sync.Mutex
+	// unrelated keys rarely wait for each other. Each stripe is a channel
+	// of capacity one used as a semaphore, so a caller can stop waiting when
+	// its context ends (a slow open must not hold up its stripe's other keys
+	// without bound).
+	alertLocks [alertLockStripes]chan struct{}
 
 	// list pushes rooms-list changes to SubscribeRooms (listhub.go).
 	list *listHub
@@ -401,6 +404,7 @@ func New(d Deps) *Service {
 		rooms:           map[string]*roomState{},
 		loading:         map[string]*roomLoad{},
 		alertRooms:      map[string]string{},
+		alertLocks:      newAlertLocks(),
 		list:            newListHub(),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
@@ -480,21 +484,25 @@ func (s *Service) Load(ctx context.Context) error {
 	return nil
 }
 
-// ensureAllLoaded rebuilds every room not yet cached. restarted is true only
-// for the start-up Load: those open rooms are marked as idle after a server
-// restart.
+// ensureAllLoaded rebuilds every room not yet cached, and waits (bounded by
+// ctx) for the loads other callers have in flight, so that on return every
+// room of the store row list is cached: the passes that call it (Load, the
+// open-room limit) must not leave a room out. restarted is true only for the
+// start-up Load: those open rooms are marked as idle after a server restart.
 func (s *Service) ensureAllLoaded(ctx context.Context, restarted bool) error {
 	rooms, err := s.store.ListRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
 	}
-	return s.loadRows(ctx, rooms, restarted)
+	return s.loadRows(ctx, rooms, restarted, true)
 }
 
 // loadRows rebuilds the rooms among rows that are not cached yet (see
 // ensureAllLoaded), each outside every lock (loadRoom); a room this call put
-// into the cache is then locked for what a load writes into it.
-func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted bool) error {
+// into the cache is then locked for what a load writes into it. With wait, a
+// load another caller has in flight is waited for (awaitRoom: no room lock,
+// bounded by ctx); without, it is skipped, and that load caches the room.
+func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, wait bool) error {
 	var leases map[string]store.RoomLease
 	if s.coord != nil && restarted {
 		var err error
@@ -516,24 +524,41 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted bo
 			}
 			continue
 		}
-		// A load in flight elsewhere is not waited for: one slow room must
-		// not hold up a pass over all of them (ListRooms, the open-room
-		// limit). That load caches the room.
-		st, fresh, err := s.loadRoom(ctx, r.ID, false)
+		// Without wait, a load in flight elsewhere is skipped: one slow room
+		// must not hold up ListRooms, and that load caches the room. A pass
+		// that must see every room waits for it instead; the load runs with
+		// no lock held, so this waits for that room's read only.
+		var st *roomState
+		var fresh bool
+		var err error
+		if wait {
+			st, fresh, err = s.awaitRoom(ctx, r.ID)
+		} else {
+			st, fresh, err = s.loadRoom(ctx, r.ID, false)
+		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("room: load: %w", ctx.Err())
+			}
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
 		if !fresh {
 			continue // a command or the follower loaded it meanwhile
 		}
+		// With a shared store a proposal may be running on another replica
+		// right now; the stale-claim sweep decides instead. The store reads
+		// are made before the lock (staleProposals), the writes after it.
+		var stale []staleProposal
+		if s.coord == nil {
+			if p := st.pub.Load(); p != nil && p.Status == "open" {
+				stale = s.staleProposals(ctx, r.ID, *p)
+			}
+		}
+		var interrupted []staleProposal
 		s.lockState(st)
 		if snap := st.snap; !st.gone && snap.Status == "open" {
-			// With a shared store a proposal may be running on another
-			// replica right now; the stale-claim sweep decides instead.
-			if s.coord == nil {
-				s.interruptStaleProposalsLocked(ctx, r.ID, st)
-			}
+			interrupted = s.interruptStaleProposalsLocked(ctx, r.ID, st, stale)
 			// A shadow room never resumes its agent, so the "steer to
 			// resume" notice would be wrong there (the sweep in Load marks
 			// its run interrupted instead).
@@ -544,6 +569,7 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted bo
 			}
 		}
 		s.unlockRoom(st)
+		s.finishInterrupted(interrupted)
 	}
 	return nil
 }
@@ -598,14 +624,21 @@ func (s *Service) ensureAgentLocked(roomID string, st *roomState) {
 	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, st.alertRaw, st)
 }
 
-// interruptStaleProposalsLocked records the outcome of proposals that were
-// fully approved but never finished before this (re)start (review item 6):
-// without it they would stay "open" forever in the snapshot. For each stale
-// proposal it finishes every claimed store step (best effort), emits one
-// action.executed with OK=false naming the step that was in flight, and sets
-// the proposal status to "failed". Caller holds st's lock.
-func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID string, st *roomState) {
-	for _, p := range append([]Proposal{}, st.snap.OpenProposals...) {
+// staleProposal is a proposal of a room being loaded that was fully
+// approved but never finished before this (re)start (review item 6), with the
+// index of the step that was in flight (interruptedStep).
+type staleProposal struct {
+	p    Proposal
+	next int
+}
+
+// staleProposals finds the stale proposals of a room just loaded, from its
+// snapshot snap: fully approved, still open in the snapshot, and still open
+// in the store. It reads the store, so it runs before the room's lock is
+// taken (interruptStaleProposalsLocked checks again under it).
+func (s *Service) staleProposals(ctx context.Context, roomID string, snap RoomSnapshot) []staleProposal {
+	var out []staleProposal
+	for _, p := range snap.OpenProposals {
 		if !fullyApproved(p) {
 			continue
 		}
@@ -617,21 +650,64 @@ func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID stri
 		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil && row.Status != "open" {
 			continue
 		}
-		next := s.interruptedStep(ctx, roomID, p)
-		for i := range p.Steps {
-			s.finishClaimedStep(p.ProposalID, i, "interrupted by a service restart")
+		out = append(out, staleProposal{p: p, next: s.interruptedStep(ctx, roomID, p)})
+	}
+	return out
+}
+
+// interruptStaleProposalsLocked records the outcome of the stale proposals
+// found by staleProposals: without it they would stay "open" forever in the
+// snapshot. For each one still open and fully approved in the snapshot it
+// emits one action.executed with OK=false naming the step that was in
+// flight, and returns those proposals; the caller then finishes their store
+// steps and marks them failed (finishInterrupted) after releasing the lock.
+// Caller holds st's lock.
+func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID string, st *roomState, stale []staleProposal) []staleProposal {
+	var out []staleProposal
+	for _, sp := range stale {
+		// Something may have decided the proposal between the read and the
+		// lock: only a proposal that is still open and fully approved here
+		// is interrupted.
+		p, ok := openProposal(st.snap, sp.p.ProposalID)
+		if !ok || !fullyApproved(p) {
+			continue
 		}
 		if _, err := s.emitLocked(ctx, st, roomID, events.ActionExecuted, executorActor, events.ActionExecutedPayload{
 			ProposalID: p.ProposalID,
-			StepIndex:  next,
+			StepIndex:  sp.next,
 			OK:         false,
 			ParamsHash: p.ParamsHash,
 			Output:     "proposal was interrupted by a service restart before it finished; create a new proposal to retry",
 		}); err != nil {
 			s.log.Warn("room: emit interruption failed", "proposal", p.ProposalID, "err", err)
 		}
-		s.setProposalStatus(p.ProposalID, "failed")
+		// Marked failed in the store even when the append failed, so a
+		// later load does not interrupt it again (staleProposals).
+		out = append(out, staleProposal{p: p, next: sp.next})
 	}
+	return out
+}
+
+// finishInterrupted finishes every claimed store step of the proposals
+// interruptStaleProposalsLocked interrupted (best effort) and sets their
+// status to "failed". Store writes only: the caller holds no room lock.
+func (s *Service) finishInterrupted(stale []staleProposal) {
+	for _, sp := range stale {
+		for i := range sp.p.Steps {
+			s.finishClaimedStep(sp.p.ProposalID, i, "interrupted by a service restart")
+		}
+		s.setProposalStatus(sp.p.ProposalID, "failed")
+	}
+}
+
+// openProposal returns the open proposal id of snap.
+func openProposal(snap RoomSnapshot, id string) (Proposal, bool) {
+	for _, p := range snap.OpenProposals {
+		if p.ProposalID == id {
+			return p, true
+		}
+	}
+	return Proposal{}, false
 }
 
 // interruptedStep returns the index of the step that had not finished: the

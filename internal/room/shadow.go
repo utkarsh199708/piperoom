@@ -401,7 +401,9 @@ func revealPayload(openedAt, closedAt time.Time, run store.ShadowRun) events.Sha
 // sweepShadow is Load's shadow pass (design 3.7). No shadow run survives a
 // restart and none is started again: an open room without a row gets one, a
 // queued or running row becomes interrupted, and every closed room whose run
-// has ended is revealed. Each room is swept under its own lock.
+// has ended is revealed. The run rows are read and written outside the room
+// locks (sweepShadowRoom); only a reveal, which appends to the room, takes
+// the room's lock.
 func (s *Service) sweepShadow(ctx context.Context) {
 	if s.shadow == nil {
 		return
@@ -418,36 +420,60 @@ func (s *Service) sweepShadow(ctx context.Context) {
 		}
 	}
 	now := s.now().UTC()
-	s.rangeRooms(func(id string, st *roomState) {
+	for id, st := range s.cachedRooms() {
 		if _, held := leases[id]; !held {
-			s.sweepShadowRoomLocked(ctx, id, st, now)
+			s.sweepShadowRoom(ctx, id, st, now)
 		}
-	})
+	}
 	ids, err := s.shadow.UnrevealedShadowRuns(ctx)
 	if err != nil {
 		s.log.Warn("room: shadow sweep: list unrevealed runs failed", "err", err)
 		return
 	}
 	for _, id := range ids {
-		if st := s.lockCachedRoom(id); st != nil {
-			if st.snap.Shadow {
-				s.revealLocked(ctx, id, st)
-			}
-			s.unlockRoom(st)
+		// Only a closed shadow room can reveal (revealLocked): the others
+		// cost no wait for their lock. Shadow is fixed at create and a room
+		// never reopens, so the published snapshot answers both.
+		if p := s.published(id); p == nil || !p.Shadow || p.Status == "open" {
+			continue
 		}
+		s.revealCached(ctx, id)
 	}
 }
 
-// sweepShadowRoomLocked is sweepShadow for one room. Caller holds st's
-// lock.
-func (s *Service) sweepShadowRoomLocked(ctx context.Context, id string, st *roomState, now time.Time) {
-	if !st.snap.Shadow {
+// revealCached runs revealLocked on roomID when it is cached.
+func (s *Service) revealCached(ctx context.Context, roomID string) {
+	if st := s.lockCachedRoom(roomID); st != nil {
+		if st.snap.Shadow {
+			s.revealLocked(ctx, roomID, st)
+		}
+		s.unlockRoom(st)
+	}
+}
+
+// sweepShadowRoom is sweepShadow for one room. The run row is read and
+// written with no lock held; the room's lock is taken only to check that no
+// run of this process is active before the row is marked interrupted, and
+// for a reveal.
+//
+// The reveal (revealLocked) still reads the run row and appends
+// shadow.revealed under the room's lock: finishShadow and CloseRoom decide
+// under that lock who reveals, and finishShadow writes the run's final status
+// under it, so a row read outside it could reveal stale numbers or reveal
+// twice.
+func (s *Service) sweepShadowRoom(ctx context.Context, id string, st *roomState, now time.Time) {
+	// Shadow is fixed at create and a room never reopens, so the published
+	// snapshot is enough to choose; nothing below relies on it staying
+	// current but the checks made under the lock.
+	p := st.pub.Load()
+	if p == nil || !p.Shadow {
 		return
 	}
+	open := p.Status == "open"
 	run, err := s.shadow.GetShadowRun(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
-		if !s.roomOpen(st) {
-			s.revealLocked(ctx, id, st) // upserts an error row and reveals
+		if !open {
+			s.revealCached(ctx, id) // upserts an error row and reveals
 			return
 		}
 		if s.createShadowRun(ctx, id) != nil {
@@ -460,15 +486,29 @@ func (s *Service) sweepShadowRoomLocked(ctx context.Context, id string, st *room
 		return
 	}
 	if run.Status == store.ShadowQueued || run.Status == store.ShadowRunning {
-		run.Status = store.ShadowInterrupted
-		run.FinishedAt = &now
-		run.FinishedAfterClose = st.snap.ClosedAt != nil && now.After(*st.snap.ClosedAt)
-		if err := s.shadow.UpdateShadowRun(ctx, run); err != nil {
-			s.log.Warn("room: shadow sweep: mark run interrupted failed", "room", id, "err", err)
+		// A run active in this process writes its own result
+		// (finishShadow), and a room that has none now never gets one: a
+		// shadow run starts only when its room opens. So the check is made
+		// under the lock, and the write after it needs none.
+		s.lockState(st)
+		active := st.gone || st.shadowActive
+		closedAt := st.snap.ClosedAt
+		s.unlockRoom(st)
+		if !active {
+			run.Status = store.ShadowInterrupted
+			run.FinishedAt = &now
+			run.FinishedAfterClose = closedAt != nil && now.After(*closedAt)
+			if err := s.shadow.UpdateShadowRun(ctx, run); err != nil {
+				s.log.Warn("room: shadow sweep: mark run interrupted failed", "room", id, "err", err)
+			}
 		}
 	}
-	if !s.roomOpen(st) && st.snap.shadowRevealed && run.RevealedAt == nil {
-		s.revealLocked(ctx, id, st) // the event is there; set revealed_at
+	if !open && p.shadowRevealed && run.RevealedAt == nil {
+		// The event is in the log (shadowRevealed is never unset): only
+		// revealed_at is missing, a row write that needs no room lock.
+		if _, err := s.shadow.MarkRevealed(ctx, id, s.now().UTC()); err != nil {
+			s.log.Warn("room: mark shadow run revealed failed", "room", id, "err", err)
+		}
 	}
 }
 
@@ -836,14 +876,29 @@ func (s *Service) shadowMetrics(ctx context.Context, pipelineID string, since ti
 	if keep != nil {
 		runs = slices.DeleteFunc(runs, func(r store.ShadowRunRoom) bool { return !keep(r.PipelineID) })
 	}
-	if err := s.ensureAllLoaded(ctx, false); err != nil {
-		return m, err
-	}
 	// The published snapshots are enough: the labels and grades are folded
-	// from the log, and no room's lock is waited for.
+	// from the log, and no room's lock is waited for. A room that is not
+	// cached is loaded, and one another caller is loading is waited for
+	// (awaitRoom, bounded by ctx), so no run counts as unlabelled only
+	// because its room was mid-load.
 	snaps := make(map[string]RoomSnapshot, len(runs))
 	for _, r := range runs {
-		if p := s.published(r.RoomID); p != nil {
+		p := s.published(r.RoomID)
+		if p == nil {
+			st, _, err := s.awaitRoom(ctx, r.RoomID)
+			switch {
+			case err == nil:
+				p = st.pub.Load()
+			case ctx.Err() != nil:
+				return m, fmt.Errorf("room: shadow metrics: %w", ctx.Err())
+			case isNotFound(err):
+				// Deleted since the run list was read: its row counts, with
+				// no labels.
+			default:
+				return m, fmt.Errorf("room: shadow metrics: load %s: %w", r.RoomID, err)
+			}
+		}
+		if p != nil {
 			snaps[r.RoomID] = *p
 		}
 	}

@@ -194,6 +194,13 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 	var expired []string
 	for _, id := range ids {
 		st := rooms[id]
+		// Most rooms are nowhere near their deadline: judged from the
+		// published snapshot, they cost no wait for their lock (which a
+		// command may hold across a store call). The locked check below
+		// decides for the others.
+		if p := st.pub.Load(); p != nil && !s.openLimitMayAct(*p) {
+			continue
+		}
 		s.lockState(st)
 		var warned, due bool
 		var err error
@@ -260,6 +267,21 @@ func (s *Service) warnOpenLimitLocked(ctx context.Context, roomID string, st *ro
 		return false, false, err
 	}
 	return true, false, nil
+}
+
+// openLimitMayAct reports whether warnOpenLimitLocked could warn the room of
+// snap now, or find it due to close. A snapshot that says no needs no lock:
+// a later state only moves the deadline out (an extension) or is closed.
+func (s *Service) openLimitMayAct(snap RoomSnapshot) bool {
+	d, ok := s.deadline(snap)
+	if !ok {
+		return false
+	}
+	now := s.now().UTC()
+	if d.warned {
+		return !now.Before(d.closeAt)
+	}
+	return !now.Before(d.due.Add(-retentionWarnLead))
 }
 
 // openDays is the whole number of days from opened to deadline.
