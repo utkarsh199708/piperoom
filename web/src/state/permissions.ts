@@ -15,6 +15,8 @@ export interface CurrentUser {
   role?: Role
   /** The IdP sent no groups claim, so group-based rights are not available. */
   groupsMissing?: boolean
+  /** `/api/me.groups` when the server sends it; page owners `group:<name>` match against it. */
+  groups?: string[]
   /** `/api/me.solo`: show the solo banner and ask for the typed confirm up front. */
   solo?: boolean
 }

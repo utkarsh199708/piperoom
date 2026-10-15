@@ -52,7 +52,7 @@ describe('PresencePanel layers and state (F9)', () => {
     { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'] },
   ]
 
-  it('shows layer badges (at most 3, then +N) and away from the server-side since', () => {
+  it('shows every layer badge (they wrap, Q3 S9) and away from the server-side since', () => {
     const since = new Date(Date.now() - 12 * 60_000).toISOString()
     render(
       <PresencePanel
@@ -68,8 +68,7 @@ describe('PresencePanel layers and state (F9)', () => {
     const priya = screen.getByText('Priya').closest('li') as HTMLElement
     expect(within(priya).getByLabelText('owns postgres')).toBeInTheDocument()
     expect(within(priya).getByLabelText('owns kafka')).toBeInTheDocument()
-    expect(within(priya).queryByLabelText('owns consumer')).not.toBeInTheDocument()
-    expect(within(priya).getByText('+1')).toHaveAttribute('title', 'consumer')
+    expect(within(priya).getByLabelText('owns consumer')).toBeInTheDocument()
     expect(within(priya).getByText('away 12m')).toBeInTheDocument()
   })
 

@@ -30,13 +30,21 @@ export function canPageOwner(state: RoomState, user: CurrentUser): boolean {
   return !isViewer(user) && state.status === 'open'
 }
 
-/** Every page, in open rooms, that names `userId` among its owners, newest first. */
-export function pagesFor(rooms: RoomSnapshot[], userId: string): PagedRoom[] {
+/**
+ * True when an owner entry names this person: their id (also as `user:<id>`), or `group:<name>` for a
+ * group they belong to. `groups` comes from the session; an empty list matches no group.
+ */
+export function ownsPage(owners: string[], userId: string, groups: readonly string[] = []): boolean {
+  return owners.some((o) => o === userId || o === `user:${userId}` || (o.startsWith('group:') && groups.includes(o.slice(6))))
+}
+
+/** Every page, in open rooms, that names `userId` (or one of `groups`) among its owners, newest first. */
+export function pagesFor(rooms: RoomSnapshot[], userId: string, groups: readonly string[] = []): PagedRoom[] {
   const out: PagedRoom[] = []
   for (const room of rooms) {
     if (room.status !== 'open') continue
     for (const page of room.pages ?? []) {
-      if (Array.isArray(page.owners) && page.owners.includes(userId)) {
+      if (Array.isArray(page.owners) && ownsPage(page.owners, userId, groups)) {
         out.push({ room, page, key: pageKey(room.id, page.layer) })
       }
     }
@@ -57,8 +65,8 @@ function newer(at: string, seenAt: string | undefined): boolean {
 }
 
 /** The pages for `userId` that are newer than what `seen` records. */
-export function unseenPages(rooms: RoomSnapshot[], userId: string, seen: SeenPages): PagedRoom[] {
-  return pagesFor(rooms, userId).filter((p) => newer(p.page.at, seen[p.key]))
+export function unseenPages(rooms: RoomSnapshot[], userId: string, seen: SeenPages, groups: readonly string[] = []): PagedRoom[] {
+  return pagesFor(rooms, userId, groups).filter((p) => newer(p.page.at, seen[p.key]))
 }
 
 /** `seen` with `items` marked as seen (never moves a slot back to an older time). */

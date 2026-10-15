@@ -322,6 +322,8 @@ export interface RoomState {
   status: RoomStatus
   opened_at: string
   closed_at?: string
+  /** Who closed the room: the actor of room.closed (snapshot closed_by); absent while open. */
+  closed_by?: Actor
   resolution?: string
   last_seq: number
   /**
@@ -429,6 +431,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     status: snapshot.status as RoomStatus,
     opened_at: snapshot.opened_at,
     closed_at: snapshot.closed_at,
+    closed_by: snapshot.closed_by,
     resolution: snapshot.resolution,
     last_seq: 0,
     shadow: snapshot.shadow ?? false,

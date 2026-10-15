@@ -79,3 +79,20 @@ describe('RoomHeader Close (QA G16)', () => {
     expect(screen.queryByRole('button', { name: /Close room/ })).not.toBeInTheDocument()
   })
 })
+
+// Q3 S9: a closed room has no driver; the header says who closed it.
+describe('RoomHeader closed room', () => {
+  it('shows who closed it and not "is driving"', () => {
+    show(
+      room({}, { status: 'closed', closed_at: '2026-10-15T10:05:00Z', closed_by: { kind: 'human', id: 'kabir', name: 'Kabir' } }),
+      priya,
+    )
+    expect(screen.queryByText(/is driving/)).toBeNull()
+    expect(screen.getByText('Closed by Kabir')).toBeInTheDocument()
+  })
+
+  it('still says "is driving" while open', () => {
+    show(room({}), priya)
+    expect(screen.getByText('Kabir is driving')).toBeInTheDocument()
+  })
+})

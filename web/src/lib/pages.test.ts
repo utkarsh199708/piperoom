@@ -46,6 +46,18 @@ describe('pagesFor', () => {
     expect(pagesFor(rooms, 'nobody')).toEqual([])
   })
 
+  it('matches group:<name> owners against the groups of the user', () => {
+    const rooms = [room('a', [page({ owners: ['group:dataeng-oncall'] })]), room('b', [page({ owners: ['group:other', 'meera'] })])]
+    expect(pagesFor(rooms, 'kabir', ['dataeng-oncall']).map((p) => p.key)).toEqual(['a|consumer'])
+    expect(pagesFor(rooms, 'kabir')).toEqual([])
+    expect(pagesFor(rooms, 'kabir', ['dataeng'])).toEqual([])
+    expect(unseenPages(rooms, 'kabir', {}, ['dataeng-oncall']).map((p) => p.key)).toEqual(['a|consumer'])
+  })
+
+  it('matches a user:<id> owner', () => {
+    expect(pagesFor([room('a', [page({ owners: ['user:kabir'] })])], 'kabir').length).toBe(1)
+  })
+
   it('survives a page without owners', () => {
     expect(pagesFor([room('a', [{ ...page(), owners: undefined as unknown as string[] }])], 'kabir')).toEqual([])
   })

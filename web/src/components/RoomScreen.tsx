@@ -364,6 +364,7 @@ export function RoomScreen() {
       selfName={user.name}
       selfIsViewer={viewer}
       people={peopleList}
+      closed={state.status !== 'open'}
     />
   )
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />

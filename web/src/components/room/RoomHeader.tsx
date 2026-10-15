@@ -277,7 +277,13 @@ export function RoomHeader({
           </ul>
         )}
         <span className="text-muted-foreground">
-          {state.driver ? `${state.driver.name} is driving` : 'No driver'}
+          {state.status !== 'open'
+            ? state.closed_by
+              ? `Closed by ${state.closed_by.name || state.closed_by.id}`
+              : 'Closed'
+            : state.driver
+              ? `${state.driver.name} is driving`
+              : 'No driver'}
         </span>
         <Sep />
         <span className="text-subtle-foreground">{members.length} here</span>
