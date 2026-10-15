@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"piperoom/internal/clients"
@@ -60,7 +61,7 @@ func (d *DB) Close() {
 }
 
 // Freshness returns max(tsColumn) of table. A zero time means the table has
-// no rows.
+// no rows (or only '-infinity'); 'infinity' returns a year-9999 time.
 func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -70,15 +71,28 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 		return time.Time{}, err
 	}
 	q := fmt.Sprintf("SELECT max(%s) FROM %s", pgx.Identifier{col}.Sanitize(), pgx.Identifier{schema, tbl}.Sanitize())
-	var ts *time.Time
+	var ts pgtype.Timestamptz
 	if err := d.queryRow(ctx, q).Scan(&ts); err != nil {
 		return time.Time{}, fmt.Errorf("warehouse: freshness of %s: %w", table, notFound(err))
 	}
-	if ts == nil {
+	if !ts.Valid {
 		return time.Time{}, nil
 	}
-	return *ts, nil
+	switch ts.InfinityModifier {
+	case pgtype.Infinity:
+		// time.Time cannot hold it. A far-future value takes the caller's
+		// "in the future / bad data" path instead of failing the scan, which
+		// would blame the warehouse connection.
+		return infinityTime, nil
+	case pgtype.NegativeInfinity:
+		// No usable newest value: the same answer as an empty table.
+		return time.Time{}, nil
+	}
+	return ts.Time, nil
 }
+
+// infinityTime stands in for a Postgres 'infinity' timestamp.
+var infinityTime = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // Row reads one row by primary key. table is "schema.table". Values are
 // converted to JSON-friendly types (numbers -> strings, times -> RFC 3339).
