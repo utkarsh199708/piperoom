@@ -167,6 +167,10 @@ func TestSourceHealth(t *testing.T) {
 		{"healthy", clients.ReplicationSlot{Name: "s", Active: true, RetainedWALBytes: 100}, HealthOK},
 		{"inactive", clients.ReplicationSlot{Name: "s", Active: false}, HealthWarn},
 		{"retained over", clients.ReplicationSlot{Name: "s", Active: true, RetainedWALBytes: 2 << 30}, HealthWarn},
+		// #402: a lost slot needs a re-snapshot, an unreserved one is a
+		// checkpoint from it; neither is a mere warning.
+		{"lost", clients.ReplicationSlot{Name: "s", Active: false, WALStatus: "lost"}, HealthFail},
+		{"unreserved", clients.ReplicationSlot{Name: "s", Active: true, RestartLSN: "0/1", RetainedWALBytes: 100, WALStatus: "unreserved"}, HealthFail},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,6 +217,7 @@ func TestGroupHealth(t *testing.T) {
 	}{
 		{"ok", clients.GroupLag{State: "Stable", TotalLag: 10}, HealthOK},
 		{"empty", clients.GroupLag{State: "Empty", TotalLag: 0}, HealthWarn},
+		{"dead", clients.GroupLag{State: "Dead"}, HealthFail}, // #402
 		{"lag", clients.GroupLag{State: "Stable", TotalLag: 5000}, HealthWarn},
 	}
 	for _, tc := range cases {
@@ -1054,5 +1059,23 @@ func TestDiffColumnsNormalizesNumbers(t *testing.T) {
 	sink["amount"] = "99.00"
 	if got := diffColumns(src, sink); len(got) != 1 || got[0] != "amount" {
 		t.Fatalf("diff = %v, want [amount]", got)
+	}
+}
+
+// A lost slot's NULL restart_lsn arrives as 0 retained bytes; the map showed
+// "slot_retained=0 B" and no wal_status (#402).
+func TestSourceHealthLostSlotFacts(t *testing.T) {
+	_, facts := sourceHealth(clients.ReplicationSlot{Name: "debezium", WALStatus: "lost"}, DefaultThresholds())
+	if facts["slot_retained"] != "unknown" || facts["wal_status"] != "lost" {
+		t.Fatalf("facts = %v, want slot_retained=unknown wal_status=lost", facts)
+	}
+}
+
+// A Dead group has no partitions and lag 0 from the client; its lag is
+// unknown, not 0 (#402).
+func TestGroupHealthDeadLagUnknown(t *testing.T) {
+	_, facts := groupHealth(clients.GroupLag{State: "Dead"}, DefaultThresholds())
+	if facts["lag"] == "0" {
+		t.Fatalf("facts = %v, want lag unknown", facts)
 	}
 }

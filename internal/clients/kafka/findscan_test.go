@@ -7,19 +7,22 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"piperoom/internal/clients"
 )
 
 // TestFindByKeyReportsMaxScanCut: a window cut by maxScan before the
 // partition's readable end must say so; "not found" alone reads as "the key
 // is absent" when the scan never reached the newer records.
 func TestFindByKeyReportsMaxScanCut(t *testing.T) {
+	var _ clients.KeyScanReader = (*Client)(nil)
 	f := &fakeTopic{name: "t", parts: map[int32]partLog{
 		0: decided(data(0, 0, "a"), data(0, 1, "b"), data(0, 2, "k")),
 		1: decided(data(1, 0, "k")),
 	}}
-	var got KeyScan
+	var got clients.KeyScan
 	quick(t, func(ctx context.Context) (err error) {
-		got, err = f.client().FindByKeyReport(ctx, "t", "k", epoch, 2)
+		got, err = f.client().FindByKeyScan(ctx, "t", "k", epoch, 2)
 		return err
 	})
 	if !reflect.DeepEqual(got.Truncated, []int32{0}) {
@@ -32,7 +35,7 @@ func TestFindByKeyReportsMaxScanCut(t *testing.T) {
 	// A window that reaches the readable end is not truncated, even when
 	// maxScan equals the records left.
 	quick(t, func(ctx context.Context) (err error) {
-		got, err = f.client().FindByKeyReport(ctx, "t", "k", epoch, 3)
+		got, err = f.client().FindByKeyScan(ctx, "t", "k", epoch, 3)
 		return err
 	})
 	if len(got.Truncated) != 0 || len(got.Refs) != 2 {
@@ -46,9 +49,9 @@ func TestFindByKeyOpenTxnIsNotTruncation(t *testing.T) {
 	f := &fakeTopic{name: "t", parts: map[int32]partLog{
 		0: {recs: []*kgo.Record{data(0, 0, "a"), data(0, 1, "k"), txData(0, 2, "x"), txData(0, 3, "y")}, lso: 2},
 	}}
-	var got KeyScan
+	var got clients.KeyScan
 	quick(t, func(ctx context.Context) (err error) {
-		got, err = f.client().FindByKeyReport(ctx, "t", "k", epoch, 2)
+		got, err = f.client().FindByKeyScan(ctx, "t", "k", epoch, 2)
 		return err
 	})
 	if len(got.Truncated) != 0 || len(got.Refs) != 1 {
@@ -68,9 +71,9 @@ func TestFindByKeyScansWholeWindow(t *testing.T) {
 		fetchOf("t", data(0, 0, "k"), data(0, 1, "a")),
 		fetchOf("t", data(0, 2, "k"), data(0, 3, "b")),
 	}}
-	var got KeyScan
+	var got clients.KeyScan
 	quick(t, func(ctx context.Context) (err error) {
-		got, err = clientWith(l, cons).FindByKeyReport(ctx, "t", "k", epoch, 0)
+		got, err = clientWith(l, cons).FindByKeyScan(ctx, "t", "k", epoch, 0)
 		return err
 	})
 	if len(got.Refs) != 2 || got.Refs[1].Offset != 2 || len(got.Truncated) != 0 {
@@ -89,7 +92,7 @@ func TestFindByKeyDeadlineKeepsMatches(t *testing.T) {
 	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("t", data(0, 0, "k"))}}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	got, err := clientWith(l, cons).FindByKeyReport(ctx, "t", "k", epoch, 0)
+	got, err := clientWith(l, cons).FindByKeyScan(ctx, "t", "k", epoch, 0)
 	if err != nil {
 		t.Fatalf("err = %v, want the match found before the deadline", err)
 	}
@@ -110,9 +113,9 @@ func TestFindByKeyOrdersByOffset(t *testing.T) {
 	cons := &fakeConsumer{polls: []kgo.Fetches{
 		fetchOf("t", data(1, 0, "k"), late, data(0, 1, "a"), data(0, 2, "k")),
 	}}
-	var got KeyScan
+	var got clients.KeyScan
 	quick(t, func(ctx context.Context) (err error) {
-		got, err = clientWith(l, cons).FindByKeyReport(ctx, "t", "k", epoch, 0)
+		got, err = clientWith(l, cons).FindByKeyScan(ctx, "t", "k", epoch, 0)
 		return err
 	})
 	var order [][2]int64
@@ -134,9 +137,9 @@ func TestFindByKeyGapAtWindowEnd(t *testing.T) {
 		ends:   merge(listed("t", map[int32]int64{0: 10})),
 	}
 	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("t", data(0, 0, "a"), data(0, 1, "b"), data(0, 5, "c"))}}
-	var got KeyScan
+	var got clients.KeyScan
 	quick(t, func(ctx context.Context) (err error) {
-		got, err = clientWith(l, cons).FindByKeyReport(ctx, "t", "k", epoch, 3)
+		got, err = clientWith(l, cons).FindByKeyScan(ctx, "t", "k", epoch, 3)
 		return err
 	})
 	if len(got.Refs) != 0 || !reflect.DeepEqual(got.Truncated, []int32{0}) {
