@@ -938,7 +938,7 @@ function Proposal({
         rollback={
           isViewer(user)
             ? undefined
-            : { asDriver: nudge.isDriver, onSteer: actions.steer, onDelivered: actions.onDelivered }
+            : { asDriver: nudge.isDriver, onSteer: actions.steer, sends: actions.sends }
         }
       />
       {proposal.verification && <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} />}

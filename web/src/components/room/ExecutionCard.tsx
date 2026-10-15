@@ -1,4 +1,4 @@
-import type { DeliveredListener, SendOptions } from '../../hooks/useRoom'
+import type { SendControls, SendOptions } from '../../hooks/useRoom'
 import { CircleCheck, CircleX, LoaderCircle, TriangleAlert } from 'lucide-react'
 import type { ProposalState } from '../../state/types'
 import { executionPhase } from '../../lib/execution'
@@ -36,7 +36,7 @@ export function ExecutionCard({
   rollback?: {
     asDriver: boolean
     onSteer: (text: string, opts?: SendOptions) => Promise<boolean>
-    onDelivered?: (listener: DeliveredListener) => () => void
+    sends?: SendControls
   }
 }) {
   const info = executionPhase(proposal)
@@ -108,7 +108,7 @@ export function ExecutionCard({
             rollback={proposal.rollback}
             asDriver={rollback.asDriver}
             onSteer={rollback.onSteer}
-            onDelivered={rollback.onDelivered}
+            sends={rollback.sends}
           />
         </div>
       )}

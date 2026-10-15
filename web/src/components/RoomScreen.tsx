@@ -360,7 +360,7 @@ export function RoomScreen() {
         messages={state.messages}
         comments={state.comments}
         onComment={actions.comment}
-        onDelivered={actions.onDelivered}
+        sends={actions.sends}
         readOnly={viewer}
         working={state.agent_status.state === 'working'}
         onTakeControl={takeControl}

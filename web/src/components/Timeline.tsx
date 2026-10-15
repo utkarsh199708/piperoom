@@ -7,7 +7,7 @@ import { Check, ChevronRight, Copy, X } from 'lucide-react'
 import type { AgentMessageState, ChecklistTick, CommentState, StepState, ToolCallState } from '../state/types'
 import type { ToolCall } from '../api/types'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
-import type { DeliveredListener, SendOptions } from '../hooks/useRoom'
+import type { SendControls, SendOptions } from '../hooks/useRoom'
 import { useRetryId } from '../hooks/useRetryId'
 import { cn } from '@/lib/utils'
 import { Badge, layerVariant } from '@/components/ui/badge'
@@ -200,7 +200,7 @@ function CommentThread({
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
   // The failed reply landed after all (reconnect copy or its event): close it like a success.
-  const retryId = useRetryId(useContext(DeliveredContext), () => {
+  const retryId = useRetryId(useContext(SendsContext), () => {
     setOffline(false)
     setText('')
     setOpen(false)
@@ -259,7 +259,7 @@ function CommentThread({
             value={text}
             onChange={(e) => {
               setText(e.target.value)
-              retryId.drop() // edited words are a new action
+              retryId.drop() // edited words: the failed action is cancelled, the next send is new
             }}
             placeholder="Reply…"
             aria-label="Reply to comment"
@@ -283,15 +283,15 @@ function CommentThread({
   )
 }
 
-/** Tells the reply boxes when a failed send of theirs landed after all (#459): RoomActions.onDelivered. */
-const DeliveredContext = createContext<((listener: DeliveredListener) => () => void) | undefined>(undefined)
+/** The reply boxes' handle on their actions (#459): RoomActions.sends. */
+const SendsContext = createContext<SendControls | undefined>(undefined)
 
 function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => void | Promise<boolean> }) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
   // The failed comment landed after all (reconnect copy or its event): clear it like a success.
-  const retryId = useRetryId(useContext(DeliveredContext), () => {
+  const retryId = useRetryId(useContext(SendsContext), () => {
     setOffline(false)
     setText('')
   })
@@ -319,7 +319,7 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => 
           value={text}
           onChange={(e) => {
             setText(e.target.value)
-            retryId.drop() // edited words are a new action
+            retryId.drop() // edited words: the failed action is cancelled, the next send is new
           }}
           placeholder="Comment on this step…"
           aria-label="Comment on this step"
@@ -547,7 +547,7 @@ export function Timeline({
   onClearFilter,
   shadow = false,
   citedStep,
-  onDelivered,
+  sends,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
@@ -570,8 +570,8 @@ export function Timeline({
   shadow?: boolean
   /** The step a hypothesis chip asked for: it opens, scrolls into view and flashes (F3). */
   citedStep?: CitedStep | null
-  /** RoomActions.onDelivered: a reply box's failed send that landed after all takes its Retry down. */
-  onDelivered?: (listener: DeliveredListener) => () => void
+  /** RoomActions.sends: a reply box's failed send that lands takes its Retry down; an edit cancels it. */
+  sends?: SendControls
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
@@ -602,7 +602,7 @@ export function Timeline({
     : steps.length
 
   return (
-    <DeliveredContext.Provider value={onDelivered}>
+    <SendsContext.Provider value={sends}>
       <div className="flex flex-col gap-2">
         {messages.length > 0 && <AgentMessageList messages={messages} />}
 
@@ -667,6 +667,6 @@ export function Timeline({
           </section>
         )}
       </div>
-    </DeliveredContext.Provider>
+    </SendsContext.Provider>
   )
 }

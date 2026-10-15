@@ -74,6 +74,7 @@ interface Body {
 
 function fakeServer(mode: 'contract' | 'old') {
   const stored: Event[] = []
+  const conflicts: string[] = [] // client_ids answered 409 client_id_reused
   const byKey = new Map<string, { route: string; body: string; ev: Event }>()
   // resetAfterStore: the next POST is stored, then its connection drops (a TypeError, no answer).
   const state = { answerAfter: 100, offlineNext: 0, resetAfterStore: 0 }
@@ -96,6 +97,7 @@ function fakeServer(mode: 'contract' | 'old') {
     if (id !== undefined) {
       const prev = byKey.get(id)
       if (prev && (prev.route !== route || prev.body !== sameBody)) {
+        conflicts.push(id)
         return answer(409, { error: { code: 'client_id_reused', message: 'client_id was used for another request' } }, 10)
       }
       if (prev) return answer(200, prev.ev, state.answerAfter) // a repeat appends nothing
@@ -121,7 +123,7 @@ function fakeServer(mode: 'contract' | 'old') {
     }
     return answer(200, ev, state.answerAfter)
   })
-  return { stored, fetchMock, state }
+  return { stored, fetchMock, state, conflicts }
 }
 
 type Server = ReturnType<typeof fakeServer>
@@ -355,7 +357,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   function TimelineRoom() {
     const { actions } = useRoom('r1')
     return (
-      <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} onDelivered={actions.onDelivered} />
+      <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} sends={actions.sends} />
     )
   }
 
@@ -368,7 +370,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
         rollback="set it back"
         asDriver
         onSteer={actions.steer}
-        onDelivered={actions.onDelivered}
+        sends={actions.sends}
       />
     )
   }
@@ -406,7 +408,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
     expect(server.stored.filter((e) => e.type === 'comment.added')).toHaveLength(2)
   })
 
-  it('ADV-6: a rollback fails offline, is cancelled, the reconnect stores it, then Roll back 30 minutes later: 2 stored', async () => {
+  it('ADV-6: a failed rollback is withdrawn when its dialog closes; Roll back 30 minutes later is a new request: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <RollbackRoom />)
     server.state.offlineNext = 1
@@ -416,16 +418,98 @@ describe('composers with the real hook: a new action after a delivery is stored 
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     act(() => socket.onopen?.())
     await pass(500)
-    expect(server.stored).toHaveLength(1)
+    expect(server.stored).toHaveLength(0) // cancelled: never sent again
     await pass(30 * 60_000)
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
     await pass(500)
-    expect(server.stored).toHaveLength(2)
-    const ids = server.fetchMock.mock.calls
-      .slice(1)
-      .map((c) => (JSON.parse(String((c[1] as RequestInit).body)) as Body).client_id)
+    expect(server.stored).toHaveLength(1)
+    const ids = server.fetchMock.mock.calls.map((c) => (JSON.parse(String((c[1] as RequestInit).body)) as Body).client_id)
     expect(new Set(ids).size).toBe(2)
+  })
+
+  // Round 7 (review of 198dac9): an id belongs to its ledger entry until the entry ends. An edit
+  // or a dialog close cancels a kept entry before a new action starts, so the two never both go out.
+  async function failComment(server: Server, socket: FakeWebSocket, text: string) {
+    server.state.offlineNext = 1
+    fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
+    const box = screen.getByLabelText('Comment on this step')
+    fireEvent.change(box, { target: { value: text } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    void socket
+    return box
+  }
+
+  it('X1/Z2: a step comment fails, the words are edited and changed back, then Retry: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <TimelineRoom />)
+    const box = await failComment(server, socket, 'ack')
+    fireEvent.change(box, { target: { value: 'ack!' } })
+    fireEvent.change(box, { target: { value: 'ack' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await pass(500)
+    act(() => socket.onopen?.())
+    await pass(6_000) // a reconnect and the live retry have nothing left to send
+    expect(server.stored.map((e) => (e.payload as { text: string }).text)).toEqual(['ack'])
+  })
+
+  it('X3: the same while still offline, then the reconnect: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <TimelineRoom />)
+    const box = await failComment(server, socket, 'ack')
+    fireEvent.change(box, { target: { value: 'ack!' } })
+    fireEvent.change(box, { target: { value: 'ack' } })
+    server.state.offlineNext = 1
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await pass(100)
+    act(() => socket.onopen?.())
+    await pass(500)
+    expect(server.stored.map((e) => (e.payload as { text: string }).text)).toEqual(['ack'])
+  })
+
+  it('X2/Z3: a rollback fails offline, the dialog is cancelled, then asked again before the reconnect: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <RollbackRoom />)
+    server.state.offlineNext = 1
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    await pass(500)
+    act(() => socket.onopen?.())
+    await pass(6_000)
+    expect(server.stored).toHaveLength(1)
+  })
+
+  // Z1: an edit while the send is on the wire. The original finishes as it is (stored once by the
+  // slow server); the edited words are a new action with a new id. Never a 409, never a silent
+  // "landed" for the edited words. (Main lost the edited words here: it cleared the field.)
+  it('Z1: an edit while a slow send is on the wire: no 409 loop, the original stored once, the edit stored as its own action', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <TimelineRoom />)
+    server.state.answerAfter = 20_000
+    fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
+    const box = screen.getByLabelText('Comment on this step')
+    fireEvent.change(box, { target: { value: 'ack' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    await pass(1_000)
+    fireEvent.change(box, { target: { value: 'ack!' } })
+    await pass(SEND_DEADLINE_MS)
+    server.state.answerAfter = 100
+    await push(socket, server.stored[0]) // the original lands in the stream
+    for (let i = 0; i < 3; i++) {
+      const retry = screen.queryByRole('button', { name: 'Retry' })
+      if (retry) fireEvent.click(retry)
+      else fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+      await pass(500)
+    }
+    expect(server.conflicts).toEqual([])
+    const texts = server.stored.map((e) => (e.payload as { text: string }).text)
+    expect(texts.filter((t) => t === 'ack')).toHaveLength(1)
+    expect(texts.filter((t) => t === 'ack!')).toHaveLength(1)
   })
 })
 

@@ -187,3 +187,50 @@ describe('SendLedger never settles by words', () => {
     expect(post.mock.calls[1][1]).toBe('k1')
   })
 })
+
+// Round 7: an id belongs to its ledger entry until the entry ends; a composer may only Retry it
+// or cancel it.
+describe('SendLedger cancel and isPending', () => {
+  it('cancel withdraws a kept action: no drain, no live retry sends it', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post, true)
+    await l.send(stop, 'k1')
+    expect(l.isPending('k1')).toBe(true)
+    l.cancel('k1')
+    expect(l.isPending('k1')).toBe(false)
+    expect(error()).toBeNull()
+    post.mockResolvedValue(undefined)
+    l.drain()
+    await vi.advanceTimersByTimeAsync(LIVE_RETRY_MS)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancel cannot call back a send on the wire: it finishes, and is kept if it fails', async () => {
+    let fail: (e: unknown) => void = () => {}
+    const post = vi.fn(() => new Promise<Event | undefined>((_, reject) => (fail = reject)))
+    const { l } = ledger(post)
+    const sent = l.send(stop, 'k1')
+    l.cancel('k1')
+    fail(new TypeError('Failed to fetch'))
+    expect(await sent).toBe(false)
+    expect(l.isPending('k1')).toBe(true) // owed to the reconnect like any failed send
+  })
+
+  it('a refused send (409) is no longer pending, so no composer keeps its id', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new ApiClientError(409, 'client_id_reused', 'reused'))
+    const { l } = ledger(post)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(await l.send(stop, 'k1')).toBe(false)
+    expect(l.isPending('k1')).toBe(false)
+    logged.mockRestore()
+  })
+
+  it('an id landed through another tab\'s event is posted again, so the server decides', async () => {
+    const post = vi.fn().mockResolvedValue(event('go', 'k1'))
+    const { l } = ledger(post)
+    l.onEvent(event('stop', 'k1'), 'arjun') // not this ledger's action: its body is unknown here
+    expect(await l.send({ kind: 'steer', text: 'go' }, 'k1')).toBe(true)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+})
+

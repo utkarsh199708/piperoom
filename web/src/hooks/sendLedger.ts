@@ -147,6 +147,25 @@ export class SendLedger {
     return (await this.post(item, clientId)) === 'ok' ? this.settled() : false
   }
 
+  /**
+   * The person gave up on this action: the words were edited or the dialog closed. A kept or
+   * unknown entry is removed, so no Retry, reconnect or live retry sends it. An entry on the wire
+   * cannot be called back: it finishes like any send (the edited words are another action, with
+   * another id). Only after this may the composer start a new action with a new id: an id
+   * belongs to its entry until that entry ends.
+   */
+  cancel(clientId: string): void {
+    const a = this.actions.get(clientId)
+    if (!a || a.state === 'inflight') return
+    this.actions.delete(clientId)
+    this.setError(this.banner())
+  }
+
+  /** The ledger still holds this action (on the wire, kept, or unknown): a Retry of it is owed. */
+  isPending(clientId: string): boolean {
+    return this.actions.has(clientId)
+  }
+
   /** On reconnect: sends again every action that is safe to send again, with its own id. */
   drain(): void {
     for (const a of [...this.actions.values()]) {
@@ -258,8 +277,10 @@ export class SendLedger {
   private isLanded(clientId: string, item: SendItem): boolean {
     const l = this.landed.get(clientId)
     if (!l) return false
+    // Landed through an event of an action this ledger did not hold (another tab): its body is
+    // unknown, so post and let the server answer (200 with its event, or 409 for another body).
     const was = l.item
-    return !was || (was.kind === item.kind && was.text === item.text && (was.stepId ?? '') === (item.stepId ?? ''))
+    return !!was && was.kind === item.kind && was.text === item.text && (was.stepId ?? '') === (item.stepId ?? '')
   }
 
   private land(clientId: string, notify: boolean) {

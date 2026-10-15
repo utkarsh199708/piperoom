@@ -75,6 +75,19 @@ export type { DeliveredListener, Sent } from './sendLedger'
 /** What a steer or comment says (kept for older imports). */
 export type PendingSend = SendItem
 
+/**
+ * What a composer may do with the action of its failed send (#459): hear that it landed, or
+ * cancel it when the person gives up on it (edits the words, closes the dialog). An id belongs to
+ * its ledger entry until that entry ends; only then may the composer start a new action.
+ */
+export interface SendControls {
+  onDelivered: (listener: DeliveredListener) => () => void
+  /** Withdraws a kept or unknown action; one on the wire finishes, and is dropped if it fails. */
+  cancel: (clientId: string) => void
+  /** The action is still owed (on the wire, kept or unknown), so its Retry may reuse its id. */
+  isPending: (clientId: string) => boolean
+}
+
 /** How a steer or comment is sent. */
 export interface SendOptions {
   /**
@@ -97,6 +110,8 @@ export interface RoomActions {
   steer: (text: string, opts?: SendOptions) => Promise<boolean>
   /** Hear about actions that landed without their caller hearing (reconnect copy, event stream). */
   onDelivered?: (listener: DeliveredListener) => () => void
+  /** The composers' handle on their actions (see SendControls). */
+  sends?: SendControls
   sendSuggestion: (suggestionId: string) => void
   /** The driver declines a pending suggestion, with an optional note to its author. */
   declineSuggestion: (suggestionId: string, reason?: string) => void
@@ -481,6 +496,11 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   )
 
   const onDelivered = useCallback((listener: DeliveredListener) => ledger.onDelivered(listener), [ledger])
+  const [sends] = useState<SendControls>(() => ({
+    onDelivered: (listener) => ledger.onDelivered(listener),
+    cancel: (clientId) => ledger.cancel(clientId),
+    isPending: (clientId) => ledger.isPending(clientId),
+  }))
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
@@ -513,6 +533,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
 
   const actions: RoomActions = {
     onDelivered,
+    sends,
     comment: async (text, stepId, opts) => {
       if (isFixtures()) {
         synthesize('comment.added', {

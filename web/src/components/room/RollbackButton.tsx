@@ -10,7 +10,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { rollbackSteer } from '../../lib/rollback'
-import type { DeliveredListener, SendOptions } from '../../hooks/useRoom'
+import type { SendControls, SendOptions } from '../../hooks/useRoom'
 import { useRetryId } from '../../hooks/useRetryId'
 import { OfflineStrip } from './OfflineStrip'
 
@@ -22,7 +22,7 @@ export function RollbackButton({
   rollback,
   asDriver,
   onSteer,
-  onDelivered,
+  sends,
 }: {
   title: string
   proposalId: string
@@ -30,16 +30,16 @@ export function RollbackButton({
   /** The driver's steer goes to the agent; a member's is a suggestion in the driver's queue. */
   asDriver: boolean
   onSteer: (text: string, opts?: SendOptions) => Promise<boolean>
-  /** RoomActions.onDelivered: a failed request that landed after all closes the dialog. */
-  onDelivered?: (listener: DeliveredListener) => () => void
+  /** RoomActions.sends: a failed request that lands closes the dialog; closing it cancels the request. */
+  sends?: SendControls
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
   // One rollback request is one action (#459): only the Retry of a failed request keeps its
-  // client_id. Closing the dialog, or the request landing after all, ends that action, so the
-  // next request is a new one.
-  const retryId = useRetryId(onDelivered, () => {
+  // client_id. Closing the dialog cancels it in the ledger (it is never sent again), and the
+  // request landing after all ends it too; the next request is then a new one.
+  const retryId = useRetryId(sends, () => {
     setFailed(false)
     setOpen(false)
   })
