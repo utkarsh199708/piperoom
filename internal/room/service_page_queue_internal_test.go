@@ -86,8 +86,13 @@ func TestPageDeliveryQueueOverflowWarns(t *testing.T) {
 	buf := &syncBuf{}
 	svc.log = slog.New(slog.NewTextHandler(buf, nil))
 	svc.paging.queue = make(chan pageJob, 2)
-	pageN(t, svc, maxPageDeliveries+2+1)
-	waitCount(t, &g.started, maxPageDeliveries)
+	// Fill every worker first, so the queue is provably empty and all workers
+	// are blocked before the next pages arrive: 2 queue, the third overflows.
+	for i := 1; i <= maxPageDeliveries; i++ {
+		pageN(t, svc, 1)
+		waitCount(t, &g.started, int32(i))
+	}
+	pageN(t, svc, 2+1)
 	if !strings.Contains(buf.String(), "queue is full") {
 		t.Fatalf("no overflow warning in log:\n%s", buf.String())
 	}
