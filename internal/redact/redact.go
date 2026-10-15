@@ -50,13 +50,20 @@
 //     (host:5432:db:user:secret); a CLI password glued to its flag
 //     (mysql -pSecret);
 //   - a bare flag argument that is a plain lower-case word (psql --password
-//     hunter) is kept: "--password requires an argument" reads the same; so
-//     is a -u user:password whose password is a plain word or a number,
-//     which is docker's user:group or uid:gid; a flag argument on the next
-//     line (YAML "- --password" then "- X") is not followed;
+//     hunter), a shell variable ($PGPASSWORD) or the flag's own name in
+//     capitals (an argparse metavar) is kept: "--password requires an
+//     argument" reads the same; so is a -u user:password whose password is
+//     a plain name or a number, which is docker's user:group or uid:gid; a
+//     flag argument on the next line (YAML "- --password" then "- X") or in
+//     an unquoted flow list ([--password, X]) is not followed; \"...\"
+//     inside a \"...\" flag value ends it there;
+//   - over-masking: a flag that takes no argument masks the next word when
+//     it is not plain (psql --password orders_v2, --password Required);
 //   - a secret in an XML attribute (<entry key="password" value="X"/>), in
-//     an entity-escaped element (&lt;password&gt;), or more than one child
-//     element deep;
+//     an entity-escaped element (&lt;password&gt;), more than one child
+//     element deep, or in an element cut off before its end tag (an open
+//     CDATA section, or truncated output) or closed by another element's
+//     end tag;
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence.
