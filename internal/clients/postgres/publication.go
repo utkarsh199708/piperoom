@@ -196,21 +196,25 @@ const publishedCTEs = `listed AS MATERIALIZED (
 
 // publishedMember is a boolean SQL expression over publishedCTEs: the
 // relation rel (a non-NULL oid expression, never input) is in the
-// publication. Every publishable leaf partition of rel, or rel itself when it
-// has no leaf, must be covered. A publication that lists only some leaves
-// leaves the others' rows unpublished, so the table is not a member (#400
-// review). Unlogged and foreign leaves are never published, so they do not
-// count. A partitioned table with no partition has nothing listed under
-// publish_via_partition_root = false and reads as not a member, as before;
-// it can hold no rows.
+// publication. Every publishable leaf partition of rel must be covered; a
+// publication that lists only some leaves leaves the others' rows
+// unpublished, so the table is not a member (#400 review). Unlogged and
+// foreign leaves are never published, so they do not count. A table with no
+// publishable leaf (not partitioned, partitioned with no partition, every
+// leaf unlogged or foreign, or itself such a leaf) must be covered itself:
+// an empty leaf set must never make it a member of a publication that does
+// not list it (#416 review round 3). A partitioned table with no partition
+// has nothing listed under publish_via_partition_root = false and reads as
+// not a member, as before; it can hold no rows.
 func publishedMember(rel string) string {
+	publishable := `SELECT t.relid FROM pg_partition_tree(` + rel + `) t
+				JOIN pg_class tc ON tc.oid = t.relid
+				WHERE t.isleaf AND tc.relkind = 'r' AND tc.relpersistence = 'p'`
 	return `NOT EXISTS (
 			SELECT 1 FROM (
-				SELECT t.relid FROM pg_partition_tree(` + rel + `) t
-				JOIN pg_class tc ON tc.oid = t.relid
-				WHERE t.isleaf AND tc.relkind = 'r' AND tc.relpersistence = 'p'
+				` + publishable + `
 				UNION ALL
-				SELECT ` + rel + ` WHERE NOT EXISTS (SELECT 1 FROM pg_partition_tree(` + rel + `) WHERE isleaf)
+				SELECT ` + rel + ` WHERE NOT EXISTS (` + publishable + `)
 			) AS leaf(oid)
 			WHERE NOT EXISTS (SELECT 1 FROM covered cv WHERE cv.oid = leaf.oid))`
 }

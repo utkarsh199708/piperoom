@@ -218,3 +218,78 @@ func TestPublicationAllTablesUnloggedLeafIntegration(t *testing.T) {
 		t.Fatalf("got %+v; want the table in the publication", got)
 	}
 }
+
+// A table none of whose data any publication can carry (every leaf unlogged
+// or foreign, or the table itself such a leaf) is not a member of a
+// publication that does not list it: the leaf filter must apply when the
+// table falls back to being checked itself (#416 review round 3).
+func TestPublicationNoPublishableLeafIntegration(t *testing.T) {
+	cfg := testenv.Require(t)
+	db := sourceDB(t)
+	conn := writeConn(t, cfg.SourceDBURL)
+	cases := []struct {
+		name     string
+		setup    []string // %s is the case's root name
+		pipeline string   // %s is the case's root name
+	}{
+		{"root with only an unlogged leaf", []string{
+			"CREATE TABLE public.%s (id int, k int, PRIMARY KEY (id, k)) PARTITION BY LIST (k)",
+			"CREATE UNLOGGED TABLE public.%s_u PARTITION OF public.%s FOR VALUES IN (1)",
+		}, "public.%s"},
+		{"root with only a foreign leaf", []string{
+			"CREATE TABLE public.%s (id int, k int) PARTITION BY LIST (k)",
+			"CREATE FOREIGN TABLE public.%s_f PARTITION OF public.%s FOR VALUES IN (1) SERVER %s_srv",
+		}, "public.%s"},
+		{"unlogged leaf as the pipeline table", []string{
+			"CREATE TABLE public.%s (id int, k int, PRIMARY KEY (id, k)) PARTITION BY LIST (k)",
+			"CREATE UNLOGGED TABLE public.%s_u PARTITION OF public.%s FOR VALUES IN (1)",
+		}, "public.%s_u"},
+		{"foreign leaf as the pipeline table", []string{
+			"CREATE TABLE public.%s (id int, k int) PARTITION BY LIST (k)",
+			"CREATE FOREIGN TABLE public.%s_f PARTITION OF public.%s FOR VALUES IN (1) SERVER %s_srv",
+		}, "public.%s_f"},
+	}
+	for _, tc := range cases {
+		for _, viaRoot := range []string{"false", "true"} {
+			t.Run(tc.name+"/publish_via_partition_root="+viaRoot, func(t *testing.T) {
+				root := testenv.Name("nopub")
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				t.Cleanup(func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					_, _ = conn.Exec(ctx, "DROP PUBLICATION IF EXISTS "+root+"_pub")
+					_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+root+", public."+root+"_other")
+					_, _ = conn.Exec(ctx, "DROP SERVER IF EXISTS "+root+"_srv")
+					_, _ = conn.Exec(ctx, "DROP FOREIGN DATA WRAPPER IF EXISTS "+root+"_fdw")
+				})
+				stmts := []string{
+					// A wrapper with no handler is enough to create the
+					// foreign table; it is never read.
+					"CREATE FOREIGN DATA WRAPPER " + root + "_fdw",
+					"CREATE SERVER " + root + "_srv FOREIGN DATA WRAPPER " + root + "_fdw",
+				}
+				for _, s := range tc.setup {
+					stmts = append(stmts, strings.ReplaceAll(s, "%s", root))
+				}
+				stmts = append(stmts,
+					"CREATE TABLE public."+root+"_other (id int PRIMARY KEY)",
+					"CREATE PUBLICATION "+root+"_pub FOR TABLE public."+root+"_other WITH (publish_via_partition_root = "+viaRoot+")")
+				for _, stmt := range stmts {
+					if _, err := conn.Exec(ctx, stmt); err != nil {
+						t.Fatalf("%s: %v", stmt, err)
+					}
+				}
+
+				pipeline := strings.ReplaceAll(tc.pipeline, "%s", root)
+				got, other, err := db.PublicationSourceTables(context.Background(), root+"_pub", "piperoom", []string{pipeline})
+				if err != nil {
+					t.Fatalf("PublicationSourceTables: %v", err)
+				}
+				if len(got) != 1 || got[0].InPublication || other != 1 {
+					t.Fatalf("%s: got %+v other=%d; want in_publication=false other=1", pipeline, got, other)
+				}
+			})
+		}
+	}
+}
