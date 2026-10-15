@@ -5,12 +5,14 @@ package warehouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"piperoom/internal/clients"
@@ -70,7 +72,7 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 	q := fmt.Sprintf("SELECT max(%s) FROM %s", pgx.Identifier{col}.Sanitize(), pgx.Identifier{schema, tbl}.Sanitize())
 	var ts *time.Time
 	if err := d.queryRow(ctx, q).Scan(&ts); err != nil {
-		return time.Time{}, fmt.Errorf("warehouse: freshness of %s: %w", table, err)
+		return time.Time{}, fmt.Errorf("warehouse: freshness of %s: %w", table, notFound(err))
 	}
 	if ts == nil {
 		return time.Time{}, nil
@@ -94,7 +96,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	// schema change cannot break a cached plan.
 	rows, err := d.query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
 	if err != nil {
-		return nil, false, fmt.Errorf("warehouse: query row: %w", err)
+		return nil, false, fmt.Errorf("warehouse: query row: %w", notFound(err))
 	}
 	defer rows.Close()
 
@@ -116,6 +118,20 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 		}
 	}
 	return m, true, nil
+}
+
+// notFound adds clients.ErrNotFound to an error for a schema, table or
+// column that does not exist, so callers can tell a dropped sink table from
+// an unreachable warehouse. Other errors are returned unchanged.
+func notFound(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "3F000", "42P01", "42703": // invalid_schema_name, undefined_table, undefined_column
+			return fmt.Errorf("%w: %w", clients.ErrNotFound, err)
+		}
+	}
+	return err
 }
 
 var identRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)

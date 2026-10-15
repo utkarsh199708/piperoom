@@ -254,3 +254,25 @@ func TestCountByBucketIntegration(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 }
+
+// A missing sink table, schema or column is clients.ErrNotFound, so the
+// pipeline map can show a dropped table as failed rather than unreachable.
+func TestMissingObjectsAreNotFoundIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	missing := testenv.Name("gone")
+	for _, tc := range []struct{ table, col string }{
+		{"analytics." + missing, "loaded_at"},
+		{missing + ".orders", "loaded_at"},
+		{"analytics.orders", missing},
+	} {
+		if _, err := db.Freshness(ctx, tc.table, tc.col); !errors.Is(err, clients.ErrNotFound) {
+			t.Errorf("Freshness(%s, %s) err = %v, want ErrNotFound", tc.table, tc.col, err)
+		}
+		if _, _, err := db.Row(ctx, tc.table, tc.col, "1"); !errors.Is(err, clients.ErrNotFound) {
+			t.Errorf("Row(%s, %s) err = %v, want ErrNotFound", tc.table, tc.col, err)
+		}
+	}
+}
