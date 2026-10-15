@@ -566,19 +566,21 @@ func (s *Service) sweepStaleProposals() {
 
 // recordInterruption writes the outcome of a proposal the sweep interrupted:
 // every started step is finished as failed and one failing action.executed
-// names the step that had not finished.
+// names the step that had not finished. The reads (the proposal, the log scan
+// for the step) and the step writes happen outside the room's lock, which only
+// the append takes: InterruptProposal already decided that this replica
+// records the outcome, so nothing here races another writer of it.
 func (s *Service) recordInterruption(sp store.StaleProposal) {
 	ctx, cancel := s.resultCtx()
 	defer cancel()
-	st, err := s.lockRoom(ctx, sp.RoomID)
+	snap, err := s.readRoom(ctx, sp.RoomID)
 	if err != nil {
 		s.log.Warn("room: record interruption: load room failed", "room", sp.RoomID, "err", err)
 		return
 	}
-	defer s.unlockRoom(st)
 	var p Proposal
 	found := false
-	for _, op := range st.snap.OpenProposals {
+	for _, op := range snap.OpenProposals {
 		if op.ProposalID == sp.ProposalID {
 			p, found = op, true
 			break
@@ -601,6 +603,12 @@ func (s *Service) recordInterruption(sp store.StaleProposal) {
 	for i := range p.Steps {
 		s.finishClaimedStep(sp.ProposalID, i, output)
 	}
+	st, err := s.lockRoom(ctx, sp.RoomID)
+	if err != nil {
+		s.log.Warn("room: record interruption: load room failed", "room", sp.RoomID, "err", err)
+		return
+	}
+	defer s.unlockRoom(st)
 	if _, err := s.emitLocked(ctx, st, sp.RoomID, events.ActionExecuted, executorActor, events.ActionExecutedPayload{
 		ProposalID: sp.ProposalID, StepIndex: next, OK: false, ParamsHash: p.ParamsHash, Output: output,
 		// Claimed: the step may have run. Never claimed: it did not.
