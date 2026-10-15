@@ -918,6 +918,9 @@ var agentEventTypes = map[events.Type]bool{
 	events.AgentHypothesis: true,
 	events.AgentUsage:      true,
 	events.AgentTriage:     true,
+	// The verdict on an executed fix (internal/agent verify.go); the
+	// post-mortem and the verification card read it.
+	events.AgentVerification: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
