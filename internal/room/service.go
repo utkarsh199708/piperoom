@@ -209,6 +209,7 @@ type Service struct {
 	tools        *tools.Registry
 	stackFor     func(pipelineID string) PipelineStack
 	topo         topology.Builder
+	preview      previewBudget
 	users        *Users
 	owners       *owners.Owners
 	run          agent.Runner
@@ -319,6 +320,7 @@ func New(d Deps) *Service {
 		tools:           tls,
 		stackFor:        d.StackFor,
 		topo:            topo,
+		preview:         defaultPreviewBudget,
 		users:           users,
 		owners:          d.Owners,
 		run:             run,
