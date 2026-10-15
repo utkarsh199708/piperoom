@@ -1,12 +1,15 @@
 package evals
 
 import (
+	"bufio"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The tap forwards bytes unchanged both ways, passes headers on, and counts
@@ -91,5 +94,47 @@ func TestModelTapForwardsOversizedBodyWhole(t *testing.T) {
 	}
 	if r := tap.Room("r_big"); r.Requests != 0 {
 		t.Errorf("oversized body observed: %+v", r)
+	}
+}
+
+// A body that breaks off is not forwarded as a complete request: upstream
+// never gets a body that matches its Content-Length, and the client gets no
+// 2xx.
+func TestModelTapBodyReadError(t *testing.T) {
+	complete := make(chan bool, 1)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		complete <- err == nil && int64(len(b)) == r.ContentLength
+	}))
+	defer up.Close()
+	tap, err := newModelTap(up.URL, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tap.Close()
+	conn, err := net.Dial("tcp", strings.TrimPrefix(tap.URL(), "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Content-Length promises 200 bytes; only 20 arrive before the client
+	// stops writing.
+	_, _ = io.WriteString(conn, "POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: 200\r\n\r\n"+strings.Repeat("x", 20))
+	_ = conn.(*net.TCPConn).CloseWrite()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err == nil {
+		_ = resp.Body.Close()
+		if resp.StatusCode < 300 {
+			t.Errorf("status %d for a broken body", resp.StatusCode)
+		}
+	}
+	// Upstream sees the request fail, or never sees it.
+	select {
+	case ok := <-complete:
+		if ok {
+			t.Error("upstream got a complete body")
+		}
+	case <-time.After(time.Second):
 	}
 }

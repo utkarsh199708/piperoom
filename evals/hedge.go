@@ -80,11 +80,18 @@ func causeHedge(text string) (string, bool) {
 }
 
 // fixLabel opens a list of fixes ("Fix: restart the connector; alternatively,
-// recreate it"): alternatives there are fixes, not causes. Its scope runs to
-// the end of the line or the next label ("Root cause:").
+// recreate it"): alternatives there are fixes, not causes. It must start a
+// line or a sentence, so the "fix:" of "Root cause and fix:" is none. An
+// inline label's scope ends with its sentence, its line or the next label; a
+// label that ends its line covers the list below it, up to a blank line or
+// the next label line.
 var (
-	fixLabel = regexp.MustCompile(`(?i)\b(?:proposed\s+)?fix(?:es)?\s*:`)
-	anyLabel = regexp.MustCompile(`(?i)\b[a-z][a-z -]{0,30}:(?:\s|$)`)
+	fixLabel     = regexp.MustCompile(`(?im)(?:^|[.!?;]\s+)\s*((?:proposed\s+)?fix(?:es)?\s*:)`)
+	anyLabel     = regexp.MustCompile(`(?i)\b[a-z][a-z -]{0,30}:(?:\s|$)`)
+	lineLabel    = regexp.MustCompile(`(?im)^\s*[a-z][a-z -]{0,30}:(?:\s|$)`)
+	sentenceEnd  = regexp.MustCompile(`[.!?](?:\s|$)`)
+	blankLine    = regexp.MustCompile(`\n\s*\n`)
+	restOfLineWS = regexp.MustCompile(`^[ \t]*(?:\n|$)`)
 )
 
 // dropFixLines cuts the scope of every fix label out of text, leaving a
@@ -92,20 +99,29 @@ var (
 func dropFixLines(text string) string {
 	var b strings.Builder
 	for {
-		m := fixLabel.FindStringIndex(text)
+		m := fixLabel.FindStringSubmatchIndex(text)
 		if m == nil {
 			b.WriteString(text)
 			return b.String()
 		}
-		b.WriteString(text[:m[0]])
+		b.WriteString(text[:m[2]])
 		b.WriteString("\n")
-		rest := text[m[1]:]
+		rest := text[m[3]:]
 		end := len(rest)
-		if i := strings.IndexByte(rest, '\n'); i >= 0 {
-			end = i
+		cut := func(re *regexp.Regexp, s string) {
+			if l := re.FindStringIndex(s); l != nil && l[0] < end {
+				end = l[0]
+			}
 		}
-		if l := anyLabel.FindStringIndex(rest[:end]); l != nil {
-			end = l[0]
+		if restOfLineWS.MatchString(rest) {
+			cut(blankLine, rest)
+			cut(lineLabel, rest)
+		} else {
+			if i := strings.IndexByte(rest, '\n'); i >= 0 {
+				end = i
+			}
+			cut(sentenceEnd, rest)
+			cut(anyLabel, rest)
 		}
 		text = rest[end:]
 	}

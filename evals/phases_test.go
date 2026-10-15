@@ -489,6 +489,9 @@ func TestValidatePhases(t *testing.T) {
 				Recording{Tool: "connect_status", Summary: "a"},
 				Recording{Tool: "connect_status", Input: map[string]any{}, Summary: "b"})
 		}, "recordings[4] (connect_status): never matches: recordings[3]"},
+		{"input not JSON", func(s *Scenario) {
+			s.Recordings[0].Input = map[string]any{"connector": func() {}}
+		}, "recordings[0] (connect_status): input does not convert to JSON"},
 		{"same input, other phase", func(s *Scenario) {
 			dup := s.Recordings[0]
 			dup.Phase = "broken"

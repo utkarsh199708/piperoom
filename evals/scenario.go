@@ -403,10 +403,13 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 		if len(in) == 0 {
 			in = nil
 		}
-		if key, err := json.Marshal(struct {
+		key, err := json.Marshal(struct {
 			T, P string
 			I    map[string]any
-		}{r.Tool, r.Phase, in}); err == nil {
+		}{r.Tool, r.Phase, in})
+		if err != nil {
+			errs = append(errs, fmt.Errorf("recordings[%d] (%s): input does not convert to JSON: %v", i, r.Tool, err))
+		} else {
 			if j, dup := recKeys[string(key)]; dup {
 				errs = append(errs, fmt.Errorf("recordings[%d] (%s): never matches: recordings[%d] has the same tool, input and phase and wins every tie", i, r.Tool, j))
 			} else {

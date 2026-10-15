@@ -211,17 +211,19 @@ func forwardDenial(toks []string, j int) int {
 	return l
 }
 
-// contrastNot returns the length of a weak negator that opens a short sub
-// after a comma or "and" in its back segment ("dropped by a DBA, not
-// Debezium"), or 0. Such a "not" contrasts a bare name with what came before;
-// a longer sub is more likely a verb phrase that describes the failure ("task
-// 0 failed, not able to read the replication slot").
+// contrastNot returns 1 for a bare "not" that opens a short sub after a
+// comma or "and" in its back segment ("dropped by a DBA, not Debezium"), or
+// 0. Such a "not" contrasts a name with what came before. "cannot", "never"
+// and a "not" before a verb describe the failure ("crashed, cannot decode
+// Avro", "running, not committing offsets"), "not only/just/yet" adds to it,
+// and a longer sub is more likely a verb phrase ("failed, not able to read
+// the replication slot").
 func contrastNot(c clauseToks, j int) int {
-	if j == 0 || c.sub[j-1] == c.sub[j] || c.back[j-1] != c.back[j] {
+	if j == 0 || c.sub[j-1] == c.sub[j] || c.back[j-1] != c.back[j] || c.toks[j] != "not" {
 		return 0
 	}
-	l := phraseAt(c.toks, j, weakNegators)
-	if l == 0 {
+	l := 1
+	if j+1 < len(c.toks) && c.sub[j+1] == c.sub[j] && (phraseAt(c.toks, j+1, notAdditive) > 0 || verbForm(c.toks[j+1])) {
 		return 0
 	}
 	end := j + l
@@ -233,6 +235,27 @@ func contrastNot(c clauseToks, j int) int {
 	}
 	return l
 }
+
+// notAdditive after "not" add to what came before instead of contrasting it.
+var notAdditive = []string{"only", "just", "merely", "simply", "yet", "even"}
+
+// verbForm reports whether t looks like a verb: an -ing, -ed or -en form, or
+// one of the verbs a failure is told with. A name rarely ends that way;
+// "Debezium" and "order-sync" do not.
+func verbForm(t string) bool {
+	for _, suf := range []string{"ing", "ed", "en"} {
+		if len(t) > len(suf)+2 && strings.HasSuffix(t, suf) {
+			return true
+		}
+	}
+	return phraseAt([]string{t}, 0, failureVerbs) > 0
+}
+
+// failureVerbs follow "not" in a failure description: "not able to", "not
+// reach the broker", "not read".
+var failureVerbs = []string{"able", "be", "read", "reach", "connect", "start", "run", "find", "see", "get",
+	"keep", "make", "accept", "match", "decode", "deserialize", "serialize", "register", "commit", "consume",
+	"produce", "send", "write", "load", "apply", "replicate", "resume", "restart", "recover", "progress"}
 
 // contrastNotMax is the longest sub, in tokens after the negator, that
 // contrastNot reads as a name: "pg-payments-connector" is three.
