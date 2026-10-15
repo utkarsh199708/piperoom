@@ -70,7 +70,7 @@ func (a *fakeAction) ParamsSchema() map[string]any {
 	// duplicate keys for a schema like this; see strictAction for the rest).
 	return map[string]any{"type": "object"}
 }
-func (a *fakeAction) Validate(json.RawMessage) error { return nil }
+func (a *fakeAction) Validate(context.Context, json.RawMessage) error { return nil }
 
 func (a *fakeAction) CheckScope(p owners.Pipeline, params json.RawMessage) error {
 	return a.scopeErr
@@ -845,7 +845,7 @@ func (unscopedAction) Describe() string { return "unscoped" }
 func (unscopedAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (unscopedAction) Validate(json.RawMessage) error { return nil }
+func (unscopedAction) Validate(context.Context, json.RawMessage) error { return nil }
 func (unscopedAction) Execute(context.Context, json.RawMessage) (string, error) {
 	return "", nil
 }
@@ -1002,7 +1002,7 @@ func (a *blockingAction) Describe() string { return "blocks until the context en
 func (a *blockingAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (a *blockingAction) Validate(json.RawMessage) error                    { return nil }
+func (a *blockingAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *blockingAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *blockingAction) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	a.once.Do(func() { close(a.started) })
@@ -1373,7 +1373,7 @@ func (a *closeRoomAction) Describe() string { return "closes the room" }
 func (a *closeRoomAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (a *closeRoomAction) Validate(json.RawMessage) error                    { return nil }
+func (a *closeRoomAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *closeRoomAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *closeRoomAction) Execute(context.Context, json.RawMessage) (string, error) {
 	if _, err := a.svc.CloseRoom(context.Background(), a.user, a.roomID, "closed by the action"); err != nil {

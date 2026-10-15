@@ -27,11 +27,11 @@ type outAction struct {
 	err  error
 }
 
-func (a *outAction) Name() string                   { return a.name }
-func (a *outAction) Layer() string                  { return "postgres" }
-func (a *outAction) Describe() string               { return a.name }
-func (a *outAction) ParamsSchema() map[string]any   { return map[string]any{"type": "object"} }
-func (a *outAction) Validate(json.RawMessage) error { return nil }
+func (a *outAction) Name() string                                    { return a.name }
+func (a *outAction) Layer() string                                   { return "postgres" }
+func (a *outAction) Describe() string                                { return a.name }
+func (a *outAction) ParamsSchema() map[string]any                    { return map[string]any{"type": "object"} }
+func (a *outAction) Validate(context.Context, json.RawMessage) error { return nil }
 func (a *outAction) Execute(context.Context, json.RawMessage) (string, error) {
 	return a.out, a.err
 }

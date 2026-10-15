@@ -354,7 +354,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
 		}
-		if err := action.Validate(step.Params); err != nil {
+		if err := action.Validate(ctx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
 		}

@@ -53,7 +53,7 @@ func TestRealActionsOverFakesPreventDemoDrift(t *testing.T) {
 			t.Fatalf("action %q not registered", st.action)
 		}
 		params := json.RawMessage(st.params)
-		if err := a.Validate(params); err != nil {
+		if err := a.Validate(t.Context(), params); err != nil {
 			t.Fatalf("%s: validate: %v", st.action, err)
 		}
 		sc, ok := a.(actions.Scoped)
@@ -104,7 +104,7 @@ func TestRealResumeConnectorOverFakes(t *testing.T) {
 		t.Fatal("connect_resume_connector not registered")
 	}
 	params := json.RawMessage(`{"connector":"pg-orders-connector"}`)
-	if err := a.Validate(params); err != nil {
+	if err := a.Validate(t.Context(), params); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	if err := a.(actions.Scoped).CheckScope(pipeline, params); err != nil {

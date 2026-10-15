@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -743,7 +744,9 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 			bad = append(bad, fmt.Sprintf("step %d: unknown action %q", i, st.Action))
 			continue
 		}
-		if err := a.Validate(st.Params); err != nil {
+		// Judge is pure scoring with no caller context to inherit, and Validate
+		// runs against recorded resources; its own deadline bounds it.
+		if err := a.Validate(context.Background(), st.Params); err != nil {
 			bad = append(bad, fmt.Sprintf("step %d (%s): %v", i, st.Action, err))
 			continue
 		}

@@ -124,7 +124,7 @@ func TestUpdateConnectorConfigSendsOnlyOneKey(t *testing.T) {
 		}
 	})
 	a := mustGet(t, resumeRegistry(t, d), "connect_update_connector_config")
-	if err := a.Validate(json.RawMessage(updateIn)); err != nil {
+	if err := a.Validate(t.Context(), json.RawMessage(updateIn)); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	out, err := a.Execute(context.Background(), json.RawMessage(updateIn))
@@ -262,7 +262,7 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := a.Validate(json.RawMessage(tc.params))
+			err := a.Validate(t.Context(), json.RawMessage(tc.params))
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("want nil, got %v", err)
@@ -299,7 +299,7 @@ func TestUpdateConnectorConfigExactMatchOnly(t *testing.T) {
 			c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 			a := configAction(c)
 			p := paramsJSON(t, tc.key, tc.value)
-			if err := a.Validate(p); err == nil {
+			if err := a.Validate(t.Context(), p); err == nil {
 				t.Fatal("Validate accepted a lookalike")
 			}
 			if _, err := a.Execute(context.Background(), p); err == nil {
@@ -319,15 +319,15 @@ func TestUpdateConnectorConfigSecretCheckBeatsAllowList(t *testing.T) {
 		d:     testDeps(),
 		allow: map[string]map[string]bool{"database.password": {"x": true}, "decimal.handling.mode": {"double": true}},
 	}
-	err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector","key":"database.password","value":"x"}`))
+	err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector","key":"database.password","value":"x"}`))
 	if err == nil || !strings.Contains(err.Error(), "credential") {
 		t.Fatalf("err %v", err)
 	}
 	// The override really is in force: only its own entries pass.
-	if err := a.Validate(json.RawMessage(updateIn)); err != nil {
+	if err := a.Validate(t.Context(), json.RawMessage(updateIn)); err != nil {
 		t.Fatalf("override entry refused: %v", err)
 	}
-	if err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"true"}`)); err == nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"true"}`)); err == nil {
 		t.Fatal("default entry accepted despite the override")
 	}
 }
@@ -456,7 +456,7 @@ func TestVisibilityGuards(t *testing.T) {
 					t.Fatalf("%s: err = %v, want %q", what, err, tc.wantErr)
 				}
 			}
-			check("Validate", a.Validate(json.RawMessage(tc.in)))
+			check("Validate", a.Validate(t.Context(), json.RawMessage(tc.in)))
 			_, err := a.Execute(context.Background(), json.RawMessage(tc.in))
 			check("Execute", err)
 			if tc.wantErr != "" && len(c.updates) != 0 {

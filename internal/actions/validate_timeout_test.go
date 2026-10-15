@@ -35,7 +35,7 @@ var validateCases = []struct {
 
 // A target that accepts the request and never answers must not hold Validate
 // past its deadline: the room service calls Validate while creating a proposal
-// and again right before Execute, and neither passes a context.
+// and again right before Execute; the deadline is a ceiling over the caller's ctx.
 func TestValidateReturnsDeadlineErrorWhenTargetNeverAnswers(t *testing.T) {
 	for _, tc := range validateCases {
 		t.Run(tc.action+tc.hangPath, func(t *testing.T) {
@@ -71,7 +71,7 @@ func TestValidateReturnsDeadlineErrorWhenTargetNeverAnswers(t *testing.T) {
 			a := mustGet(t, resumeRegistry(t, d), tc.action)
 
 			start := time.Now()
-			err := a.Validate(json.RawMessage(tc.params))
+			err := a.Validate(t.Context(), json.RawMessage(tc.params))
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("Validate = %v, want a wrapped context.DeadlineExceeded", err)
 			}
@@ -103,7 +103,7 @@ func TestValidateNormalPathWithInjectedTimeout(t *testing.T) {
 			continue
 		}
 		t.Run(tc.action, func(t *testing.T) {
-			if err := mustGet(t, reg, tc.action).Validate(json.RawMessage(tc.params)); err != nil {
+			if err := mustGet(t, reg, tc.action).Validate(t.Context(), json.RawMessage(tc.params)); err != nil {
 				t.Fatalf("Validate: %v", err)
 			}
 		})
@@ -112,7 +112,7 @@ func TestValidateNormalPathWithInjectedTimeout(t *testing.T) {
 
 // Without an override, Validate uses the 10 s tool default (AGENTS.md rule 4).
 func TestValidateContextDefaultsToToolTimeout(t *testing.T) {
-	ctx, cancel := Deps{}.validateContext()
+	ctx, cancel := Deps{}.validateContext(t.Context())
 	defer cancel()
 	dl, ok := ctx.Deadline()
 	if !ok {
@@ -120,5 +120,43 @@ func TestValidateContextDefaultsToToolTimeout(t *testing.T) {
 	}
 	if left := time.Until(dl); left <= 0 || left > timeout {
 		t.Fatalf("deadline in %v, want within (0, %v]", left, timeout)
+	}
+}
+
+// A caller ctx cancelled before the call must reach Validate: it returns
+// promptly with context.Canceled, well before the 10 s default ceiling.
+func TestValidateHonoursCallerCancellation(t *testing.T) {
+	for _, tc := range validateCases {
+		if tc.hangPath != "" {
+			continue
+		}
+		t.Run(tc.action, func(t *testing.T) {
+			release := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			}))
+			t.Cleanup(srv.Close)
+			t.Cleanup(func() { close(release) })
+
+			d := Deps{
+				Connect:  connect.New(srv.URL, srv.Client()),
+				Registry: schemareg.New(srv.URL, srv.Client()),
+			}
+			a := mustGet(t, resumeRegistry(t, d), tc.action)
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			start := time.Now()
+			err := a.Validate(ctx, json.RawMessage(tc.params))
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Validate = %v, want a wrapped context.Canceled", err)
+			}
+			if elapsed := time.Since(start); elapsed > 2*time.Second {
+				t.Fatalf("Validate took %v with a cancelled ctx", elapsed)
+			}
+		})
 	}
 }

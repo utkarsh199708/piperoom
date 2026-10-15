@@ -97,7 +97,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		if !isKnownLayer(step.Layer) {
 			return "", validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
 		}
-		if err := a.Validate(step.Params); err != nil {
+		if err := a.Validate(ctx, step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 		// Exact, case-sensitive keys only: the decoder would fold case and the

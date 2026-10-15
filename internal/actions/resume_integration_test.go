@@ -116,7 +116,7 @@ func TestResumeConnectorIntegration(t *testing.T) {
 	if !ok {
 		t.Fatal("connect_resume_connector not registered")
 	}
-	if err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector"}`)); err != nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector"}`)); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	out, err := a.Execute(context.Background(), json.RawMessage(`{"connector":"pg-orders-connector"}`))

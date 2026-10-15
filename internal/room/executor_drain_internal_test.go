@@ -22,7 +22,7 @@ func (a *countAction) Name() string                                      { retur
 func (a *countAction) Layer() string                                     { return "postgres" }
 func (a *countAction) Describe() string                                  { return "counts its runs" }
 func (a *countAction) ParamsSchema() map[string]any                      { return map[string]any{"type": "object"} }
-func (a *countAction) Validate(json.RawMessage) error                    { return nil }
+func (a *countAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *countAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *countAction) Execute(context.Context, json.RawMessage) (string, error) {
 	a.calls.Add(1)

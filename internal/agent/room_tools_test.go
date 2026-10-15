@@ -19,11 +19,11 @@ type fakeAction struct {
 	params map[string]any
 }
 
-func (a *fakeAction) Name() string                   { return a.name }
-func (a *fakeAction) Layer() string                  { return a.layer }
-func (a *fakeAction) Describe() string               { return a.name + " description" }
-func (a *fakeAction) ParamsSchema() map[string]any   { return a.params }
-func (a *fakeAction) Validate(json.RawMessage) error { return nil }
+func (a *fakeAction) Name() string                                    { return a.name }
+func (a *fakeAction) Layer() string                                   { return a.layer }
+func (a *fakeAction) Describe() string                                { return a.name + " description" }
+func (a *fakeAction) ParamsSchema() map[string]any                    { return a.params }
+func (a *fakeAction) Validate(context.Context, json.RawMessage) error { return nil }
 func (a *fakeAction) Execute(context.Context, json.RawMessage) (string, error) {
 	return "done", nil
 }

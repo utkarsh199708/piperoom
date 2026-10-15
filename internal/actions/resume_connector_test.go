@@ -141,7 +141,7 @@ func TestResumeConnectorValidateUnknownConnector(t *testing.T) {
 	})
 	reg := resumeRegistry(t, d)
 	a := mustGet(t, reg, "connect_resume_connector")
-	if err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector"}`)); err == nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector"}`)); err == nil {
 		t.Fatal("want error for unknown connector")
 	}
 }
@@ -163,7 +163,7 @@ func TestResumeConnectorValidateStates(t *testing.T) {
 			d := resumeTestDeps(t, resumeRoutes(tc.state, http.StatusAccepted))
 			reg := resumeRegistry(t, d)
 			a := mustGet(t, reg, "connect_resume_connector")
-			err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector"}`))
+			err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector"}`))
 			if !tc.wantErr {
 				if err != nil {
 					t.Fatalf("Validate(%s): %v", tc.state, err)
@@ -187,7 +187,7 @@ func TestResumeConnectorValidateStatusError(t *testing.T) {
 	})
 	reg := resumeRegistry(t, d)
 	a := mustGet(t, reg, "connect_resume_connector")
-	if err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector"}`)); err == nil || !strings.Contains(err.Error(), "status 500") {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector"}`)); err == nil || !strings.Contains(err.Error(), "status 500") {
 		t.Fatalf("want status 500 error from status read, got %v", err)
 	}
 }
@@ -196,7 +196,7 @@ func TestResumeConnectorValidateBadInput(t *testing.T) {
 	reg := resumeRegistry(t, testDeps())
 	a := mustGet(t, reg, "connect_resume_connector")
 	for _, in := range []string{`{}`, `{"connector":""}`, `{`} {
-		if err := a.Validate(json.RawMessage(in)); err == nil {
+		if err := a.Validate(t.Context(), json.RawMessage(in)); err == nil {
 			t.Fatalf("Validate(%q): want error, got nil", in)
 		}
 	}
@@ -259,7 +259,7 @@ func TestResumeConnectorValidateKnownConnector(t *testing.T) {
 	d := resumeTestDeps(t, resumeRoutes("STOPPED", http.StatusAccepted))
 	reg := resumeRegistry(t, d)
 	a := mustGet(t, reg, "connect_resume_connector")
-	if err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector"}`)); err != nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"connector":"pg-orders-connector"}`)); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
