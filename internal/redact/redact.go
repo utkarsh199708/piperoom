@@ -23,7 +23,8 @@
 // password may hold a raw '@' or '/', and a URL user one '@' (user@server);
 // a key/value pair may be URL-encoded once or twice (password%3D...,
 // %22password%22%3A%22...%22, password+%3D+...); quotes may carry up to three
-// backslashes (two JSON levels).
+// backslashes (two JSON levels). In Kafka Connect's REST form
+// {"name":"database.password","value":"..."} the sibling name is the key.
 //
 // Known gaps (most also leak without the rules above):
 //   - an unquoted password with spaces is masked only up to its first
@@ -41,7 +42,13 @@
 //     own line holds an odd number of that quote, and not past a lone CR;
 //   - quotes with more than three backslashes, and \\" or \\\' forms;
 //   - an encoded '&' (%26) inside a URL-encoded password ends it there;
-//   - a URL password holding '@' then '?' or '#';
+//   - a URL password holding '@' then '?' or '#', or an all-digit segment
+//     before a '/' (postgres://app:2024/Spring7x@db/..., read as a port);
+//   - key names longer than 64 characters
+//     (io.confluent.connect.jdbc.sink.JdbcSinkConnectorConfig.conn.password=);
+//   - a Bearer token split across a line; .pgpass lines
+//     (host:5432:db:user:secret); a CLI password glued to its flag
+//     (mysql -pSecret);
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence.

@@ -148,6 +148,16 @@ var baseRules = []rule{
 		pre:    containsCase("sk-", "k_live_", "k_test_", "xox", "xapp-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-", "npm_", "hf_"),
 		ok:     randomGroup(1, 10),
 	},
+	// Kafka Connect's REST form {"name":"database.password","value":"..."}:
+	// the sibling "name" is the key.
+	{
+		kind:    KindKeyValue,
+		find:    nameValueFind,
+		groups:  []int{2, 3},
+		pre:     nameValuePre,
+		ok:      nameValueOK,
+		styleOf: func(s string, m []int) maskStyle { return keyStyle(s[m[2]:m[3]]) },
+	},
 	// key=value, key: value, "key": "value", key="value" whose key names a
 	// secret. The key decides; see secretKey.
 	{
@@ -480,6 +490,67 @@ func kvEncoded(c kvStart, ends *valueEnds) []int {
 	return m
 }
 
+// nameValue matches a "name"/"value" pair at a "name" key, raw or escaped
+// once (JSON inside a JSON string): group 1 is the name, 2 or 3 the value.
+var nameValue = regexp.MustCompile(`^(?:"name"[ \t]*:[ \t]*"([A-Za-z][A-Za-z0-9_.-]{1,63})"[ \t]*,[ \t]*"value"[ \t]*:[ \t]*"((?:[^"\\\n]|\\.)*)"` +
+	`|\\"name\\"[ \t]*:[ \t]*\\"([A-Za-z][A-Za-z0-9_.-]{1,63})\\"[ \t]*,[ \t]*\\"value\\"[ \t]*:[ \t]*\\"((?:[^"\\\n]|\\[^"\n])*)\\")`)
+
+func nameValuePre(s, _ string) bool {
+	return strings.Contains(s, `name`) && strings.Contains(s, `value`)
+}
+
+// nameValueFind runs nameValue at each "name" key and lays matches out as
+// [match, name, raw value, escaped value].
+func nameValueFind(s, _ string) [][]int {
+	var out [][]int
+	for off := 0; off < len(s); {
+		i := strings.Index(s[off:], `name`)
+		if i < 0 {
+			break
+		}
+		p := off + i
+		off = p + 4
+		st := p - 1
+		if st < 0 || s[st] != '"' {
+			continue
+		}
+		if st > 0 && s[st-1] == '\\' {
+			st--
+		}
+		m := nameValue.FindStringSubmatchIndex(s[st:])
+		if m == nil {
+			continue
+		}
+		for k := range m {
+			if m[k] >= 0 {
+				m[k] += st
+			}
+		}
+		if m[2] < 0 { // the escaped form: move its groups down
+			m[2], m[3], m[4], m[5], m[6], m[7] = m[6], m[7], -1, -1, m[8], m[9]
+		}
+		out = append(out, m[:8])
+		off = m[1]
+	}
+	return out
+}
+
+func nameValueOK(s string, m []int) bool {
+	key := s[m[2]:m[3]]
+	g := 4
+	if m[g] < 0 {
+		g = 6
+	}
+	val := s[m[g]:m[g+1]]
+	switch secretKey(key) {
+	case keyStrong:
+		return true
+	case keyWeak:
+		return looksRandom(val, 12)
+	}
+	return false
+}
+
 // kvPre is the prefilter of the key/value rule.
 var kvPre = containsAny(kvWords...)
 
@@ -789,7 +860,9 @@ func anchoredAt(needle string, back func(byte) bool, maxBack int, re *regexp.Reg
 // urlUserinfo matches the scheme and user of a URL with a password; urlFind
 // decides where the password ends. The user may hold one '@' (Azure's
 // user@server form); a following ':' and '@' are still needed.
-var urlUserinfo = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://([^\s:/@?#"'<>]*(?:@[^\s:/@?#"'<>]+)?):`)
+// An IPv6 host ("http://[::1]:8083/...") starts with '[', so the user never
+// holds brackets.
+var urlUserinfo = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.-]*://([^\s:/@?#"'<>\[\]]*(?:@[^\s:/@?#"'<>\[\]]+)?):`)
 
 // urlFind finds user:password@ in URLs, laid out as [match, user, password].
 // A password may hold a raw '@' or '/' (postgres://app:p@ss/w@db/x): such a

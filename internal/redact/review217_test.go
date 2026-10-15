@@ -1,6 +1,7 @@
 package redact
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -126,12 +127,13 @@ var slowLines = map[string]func(n int) string{
 }
 
 // TestReviewLinearTime checks how cost grows, not a wall-clock bound, so it
-// holds under -race on a slow runner: four times the input may cost at most
-// ten times as much (linear is 4, quadratic 16).
+// holds under -race on a busy runner: sixteen times the input may cost at
+// most forty times as much (linear is 16x, quadratic 256x). Each size takes
+// its best of ten runs, so one descheduled run does not count.
 func TestReviewLinearTime(t *testing.T) {
 	best := func(s string) time.Duration {
 		d := time.Duration(1 << 62)
-		for range 3 {
+		for range 10 {
 			start := time.Now()
 			Text(s)
 			d = min(d, time.Since(start))
@@ -139,9 +141,9 @@ func TestReviewLinearTime(t *testing.T) {
 		return d
 	}
 	for name, mk := range slowLines {
-		small, large := best(mk(MaxScan/4)), best(mk(MaxScan))
-		if large > 10*max(small, time.Millisecond/4) {
-			t.Errorf("%s: %v for %d KiB but %v for %d KiB: superlinear", name, large, MaxScan>>10, small, MaxScan>>12)
+		small, large := best(mk(MaxScan/16)), best(mk(MaxScan))
+		if large > 40*max(small, 50*time.Microsecond) {
+			t.Errorf("%s: %v for %d KiB but %v for %d KiB: superlinear", name, large, MaxScan>>10, small, MaxScan>>14)
 		}
 	}
 }
@@ -162,5 +164,51 @@ func TestReviewPaddedKeys(t *testing.T) {
 	in := "password" + strings.Repeat(" ", 300) + "= Zx9hunter2Qw7"
 	if got, _ := Text(in); strings.Contains(got, "Zx9hunter2Qw7") {
 		t.Errorf("padded key: secret survives in %q", got)
+	}
+}
+
+// Round 2 of the #217 review.
+
+func TestReviewIPv6URLs(t *testing.T) {
+	for _, in := range []string{
+		"http://[::1]:8083/connectors/orders@v2/status",
+		"https://[2001:db8::1]:443/v1/users/alice@corp.com",
+		"GET http://[fe80::1]:8080/users/bob@example.com HTTP/1.1",
+		"kafka://[::1]:9092/topic@latest",
+	} {
+		if got, _ := New(Options{}).Text(in); got != in {
+			t.Errorf("Text(%q)\n got  %q\n want it unchanged", in, got)
+		}
+	}
+	in := "postgres://app:Zx9abc12Qw@[2001:db8::1]:5432/orders"
+	want := "postgres://app:[redacted 16]@[2001:db8::1]:5432/orders"
+	if got, _ := Text(in); got != want {
+		t.Errorf("Text(%q)\n got  %q\n want %q", in, got, want)
+	}
+}
+
+// TestConnectNameValue covers the Connect REST form, where the key is the
+// sibling "name" of a "value".
+func TestConnectNameValue(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`{"name":"database.password","value":"Zx9hunter2Qw7"}`, `{"name":"database.password","value":"[redacted 16]"}`},
+		{`[{"name": "connection.password", "value": "Zx9 hunter2"}, {"name":"tasks.max","value":"1"}]`,
+			`[{"name": "connection.password", "value": "[redacted 16]"}, {"name":"tasks.max","value":"1"}]`},
+		{`{\"name\":\"database.password\",\"value\":\"Zx9hunter2Qw7\"}`, `{\"name\":\"database.password\",\"value\":\"[redacted 16]\"}`},
+		{`{"name":"database.user","value":"debezium"}`, `{"name":"database.user","value":"debezium"}`},
+		{`{"name":"password_encryption","value":"scram-sha-256"}`, `{"name":"password_encryption","value":"scram-sha-256"}`},
+		{`{"name":"session.token","value":"abc"}`, `{"name":"session.token","value":"abc"}`},
+	} {
+		if got, _ := New(Options{}).Text(tc.in); got != tc.want {
+			t.Errorf("Text(%q)\n got  %q\n want %q", tc.in, got, tc.want)
+		}
+	}
+	v := map[string]any{"configs": []any{
+		map[string]any{"name": "database.password", "value": "Zx9hunter2Qw7"},
+		map[string]any{"name": "database.user", "value": "debezium"},
+	}}
+	b, _ := json.Marshal(JSON(v))
+	if strings.Contains(string(b), "Zx9hunter2Qw7") || !strings.Contains(string(b), "debezium") {
+		t.Errorf("JSON name/value: %s", b)
 	}
 }
