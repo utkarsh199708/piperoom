@@ -31,19 +31,16 @@ import (
 
 var (
 	forbiddenNegators = []string{"not", "never", "no", "t", "cannot", "without", "against", "avoid*",
-		"instead of", "rather than", "neither", "nor", "nothing"}
-	// conditionals after a story make it a warning, not the story: "resetting
-	// to latest would skip every unread change". They deny only backwards,
-	// and only a story that is their subject: no comma, colon, "and" or "or"
-	// between ("the group was reset to latest and would skip ...", "after the
-	// reset to latest, order-sync could only read new records" tell it).
-	// Not before "be", "have", "explain", "account" or "cause", adverbs
-	// skipped: "a reset to latest could well be the cause", "... could have
-	// skipped the records" and "... would likely explain the gap" still offer
-	// the story; nor after "which", "that", "this" or "it", which point back
-	// at a story already told ("a reset to latest, which would explain the
-	// gap"); nor before a negator or rule-out ("... could not be ruled out"),
-	// which the rules below read.
+		"instead of", "rather than", "neither", "nor"}
+	// conditionals right after a story make it a warning, not the story:
+	// "resetting the group to latest would skip every unread change". They
+	// deny only the term directly before them, with nothing between: a story
+	// with any other word or a comma before would/could ("the reset to
+	// latest meant order-sync could ...", "... latest and would skip ...") is
+	// still told. Not before "be", "have", "explain", "account" or "cause",
+	// adverbs skipped ("a reset to latest could well be the cause", "...
+	// would likely explain the gap"), nor before a negator or rule-out ("...
+	// could not be ruled out"), which the rules below read.
 	conditionals    = []string{"would", "could"}
 	conditionalNext = []string{"be", "have", "explain*", "account*", "cause*"}
 	conditionalPrev = []string{"which", "that", "this", "it"}
@@ -52,9 +49,10 @@ var (
 		"well": true, "then": true, "really": true, "quite": true, "perhaps": true, "maybe": true}
 	// newSubjects between a negator and a rule-out show that the negator
 	// belongs to another predicate: "order-sync did not crash and I ruled out
-	// a reset".
-	newSubjects = map[string]bool{"and": true, "or": true, "i": true, "we": true, "you": true, "they": true,
-		"he": true, "she": true, "it": true, "someone": true}
+	// a reset". "and"/"or" alone do not: "cannot confirm or rule out X"
+	// keeps X open.
+	newSubjects = map[string]bool{"i": true, "we": true, "you": true, "they": true,
+		"he": true, "she": true, "it": true, "someone": true, "nobody": true}
 	// ruleOuts deny what follows ("ruled out X") or, as a predicate, what
 	// precedes ("X was ruled out").
 	ruleOuts = []string{"rule out", "rules out", "ruled out", "ruling out", "excluded", "exclude", "excludes"}
@@ -76,7 +74,8 @@ var (
 type denialSpan struct {
 	start, end  int
 	ruleOut     bool
-	conditional bool // only a predicate denial of what precedes it
+	conditional bool // denies only the term that ends right before it
+	nothing     bool // denies only the word after it, or after its auxiliary
 }
 
 // isAdverb reports whether t is an adverb that may stand between a modal and
@@ -107,6 +106,13 @@ func forbiddenDenials(toks []string, brk []bool) []denialSpan {
 			}
 			continue
 		}
+		// "nothing" is a subject: it denies its own predicate's first word
+		// ("nothing is lost", "nothing changed", "nothing incompatible") and
+		// nothing else, so no story after it is hidden.
+		if toks[i] == "nothing" {
+			spans = append(spans, denialSpan{start: i, end: i + 1, nothing: true})
+			continue
+		}
 		l := phraseAt(toks, i, forbiddenNegators)
 		if l == 0 {
 			continue
@@ -118,17 +124,19 @@ func forbiddenDenials(toks []string, brk []bool) []denialSpan {
 		i += l - 1
 	}
 	// A negator up to two words before a rule-out ("cannot rule out", "can't
-	// really rule out", "not able to rule out", "not been ruled out") cancels
-	// it, and both drop, unless a comma, colon, contrast word or new subject
-	// stands between them: in "order-sync did not crash, I ruled out a reset"
-	// the "not" denies the crash, and the rule-out stands.
+	// really rule out", "not able to rule out", "cannot confirm or rule out",
+	// "not been ruled out") cancels it, and both drop, unless a new subject
+	// or a comma or colon stands between them: in "order-sync did not crash,
+	// I ruled out a reset" the "not" denies the crash, and the rule-out
+	// stands. A comma right after the negator opens an aside, which does not
+	// block: "we cannot, however, rule out X".
 	drop := make([]bool, len(spans))
 	for r, s := range spans {
 		if !s.ruleOut || r == 0 {
 			continue
 		}
 		n := r - 1
-		if p := spans[n]; !p.ruleOut && !p.conditional && s.start-p.end <= 2 && governs(toks, brk, p.end, s.start) {
+		if p := spans[n]; !p.ruleOut && !p.conditional && !p.nothing && s.start-p.end <= 2 && governs(toks, brk, p.end, s.start) {
 			drop[n], drop[r] = true, true
 		}
 	}
@@ -145,11 +153,12 @@ func forbiddenDenials(toks []string, brk []bool) []denialSpan {
 func forbiddenDenied(toks []string, brk []bool, spans []denialSpan, s, e int) bool {
 	for _, d := range spans {
 		switch {
+		case d.nothing:
+			if s == d.end || s == d.end+1 && auxVerbs[toks[d.end]] {
+				return true
+			}
 		case d.end <= s:
-			// "nothing" is a subject: it denies its own predicate, not the
-			// next one ("nothing was lost, so reset to latest", "nothing
-			// older can be recovered: reset to latest").
-			if d.conditional || toks[d.start] == "nothing" && predicateEnds(toks, brk, d.end, s) {
+			if d.conditional {
 				continue
 			}
 			if !contrastBetween(toks, d.end, s) {
@@ -162,7 +171,7 @@ func forbiddenDenied(toks []string, brk []bool, spans []denialSpan, s, e int) bo
 			if contrastBetween(toks, e, d.start) || markerBetween(toks, e, d.start) {
 				continue
 			}
-			if d.conditional && (breakBetween(brk, e, d.start) || joinBetween(toks, e, d.start)) {
+			if d.conditional && (d.start != e || brk[d.start]) {
 				continue
 			}
 			if d.ruleOut || d.conditional || toks[d.start] == "against" || toks[d.start] == "cannot" ||
@@ -175,9 +184,10 @@ func forbiddenDenied(toks []string, brk []bool, spans []denialSpan, s, e int) bo
 }
 
 // governs reports whether a negator ending at from governs a rule-out
-// starting at to: no comma, colon, contrast word or new subject between.
+// starting at to: no new subject between, and no comma or colon unless one
+// opens an aside right after the negator.
 func governs(toks []string, brk []bool, from, to int) bool {
-	if breakBetween(brk, from, to) || contrastBetween(toks, from, to) {
+	if from < len(brk) && !brk[from] && breakBetween(brk, from, to) {
 		return false
 	}
 	for _, t := range toks[from:to] {
@@ -188,27 +198,11 @@ func governs(toks []string, brk []bool, from, to int) bool {
 	return true
 }
 
-// predicateEnds reports whether the predicate that starts at from ends
-// before to: at a comma or colon, a predicate marker, "and" or "or".
-func predicateEnds(toks []string, brk []bool, from, to int) bool {
-	return breakBetween(brk, from, to) || markerBetween(toks, from, to) || joinBetween(toks, from, to)
-}
-
 // breakBetween reports whether a comma or colon stands before one of
 // toks[from:to+1].
 func breakBetween(brk []bool, from, to int) bool {
 	for i := from; i <= to && i < len(brk); i++ {
 		if brk[i] {
-			return true
-		}
-	}
-	return false
-}
-
-// joinBetween reports whether "and" or "or" is among toks[from:to].
-func joinBetween(toks []string, from, to int) bool {
-	for i := from; i < to; i++ {
-		if toks[i] == "and" || toks[i] == "or" {
 			return true
 		}
 	}

@@ -212,54 +212,44 @@ func forwardDenial(toks []string, j int) int {
 }
 
 // contrastNot returns 1 for a bare "not" that opens a short sub after a
-// comma or "and" in its back segment ("dropped by a DBA, not Debezium"), or
-// 0. Such a "not" contrasts a name with what came before. "cannot", "never"
-// and a "not" before a verb describe the failure ("crashed, cannot decode
-// Avro", "running, not committing offsets"), "not only/just/yet" adds to it,
-// and a longer sub is more likely a verb phrase ("failed, not able to read
-// the replication slot").
+// comma or "and" in its back segment and names a pipeline layer ("dropped by
+// a DBA, not Debezium"), or 0. Only a layer word counts as the contrasted
+// name: after "not" anything else, an adjective ("not compatible"), a verb
+// ("not committing"), a preposition ("not in the registry") or "only", more
+// likely describes the failure. After an exonerator ("order-sync is healthy,
+// not Debezium") the "not" clears nothing.
 func contrastNot(c clauseToks, j int) int {
-	if j == 0 || c.sub[j-1] == c.sub[j] || c.back[j-1] != c.back[j] || c.toks[j] != "not" {
+	if j == 0 || j+1 >= len(c.toks) || c.sub[j-1] == c.sub[j] || c.back[j-1] != c.back[j] || c.toks[j] != "not" {
 		return 0
 	}
-	l := 1
-	if j+1 < len(c.toks) && c.sub[j+1] == c.sub[j] && (phraseAt(c.toks, j+1, notAdditive) > 0 || verbForm(c.toks[j+1])) {
-		return 0
-	}
-	end := j + l
+	end := j + 1
 	for end < len(c.toks) && c.sub[end] == c.sub[j] {
 		end++
 	}
-	if end == j+l || end-(j+l) > contrastNotMax {
+	if end == j+1 || end-(j+1) > contrastNotMax || !startsLayerTerm(c.toks, j+1) {
 		return 0
 	}
-	return l
+	for i := j - 1; i >= 0 && c.sub[i] == c.sub[j-1]; i-- {
+		if phraseAt(c.toks, i, exonerators) > 0 {
+			return 0
+		}
+	}
+	return 1
 }
 
-// notAdditive after "not" add to what came before instead of contrasting it.
-var notAdditive = []string{"only", "just", "merely", "simply", "yet", "even"}
+// contrastNotMax is the longest sub, in tokens after the negator, that
+// contrastNot reads as a name: "Schema Registry" is two.
+const contrastNotMax = 3
 
-// verbForm reports whether t looks like a verb: an -ing, -ed or -en form, or
-// one of the verbs a failure is told with. A name rarely ends that way;
-// "Debezium" and "order-sync" do not.
-func verbForm(t string) bool {
-	for _, suf := range []string{"ing", "ed", "en"} {
-		if len(t) > len(suf)+2 && strings.HasSuffix(t, suf) {
+// startsLayerTerm reports whether one of layerTerms starts at toks[i].
+func startsLayerTerm(toks []string, i int) bool {
+	for _, terms := range layerTerms {
+		if phraseAt(toks, i, terms) > 0 {
 			return true
 		}
 	}
-	return phraseAt([]string{t}, 0, failureVerbs) > 0
+	return false
 }
-
-// failureVerbs follow "not" in a failure description: "not able to", "not
-// reach the broker", "not read".
-var failureVerbs = []string{"able", "be", "read", "reach", "connect", "start", "run", "find", "see", "get",
-	"keep", "make", "accept", "match", "decode", "deserialize", "serialize", "register", "commit", "consume",
-	"produce", "send", "write", "load", "apply", "replicate", "resume", "restart", "recover", "progress"}
-
-// contrastNotMax is the longest sub, in tokens after the negator, that
-// contrastNot reads as a name: "pg-payments-connector" is three.
-const contrastNotMax = 3
 
 // affirmsDoubt reports whether toks[j] starts "no doubt", "without doubt" or
 // "no question": they affirm what follows ("there is no doubt the slot was

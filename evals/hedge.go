@@ -83,15 +83,14 @@ func causeHedge(text string) (string, bool) {
 // recreate it"): alternatives there are fixes, not causes. It must start a
 // line or a sentence, so the "fix:" of "Root cause and fix:" is none. An
 // inline label's scope ends with its sentence, its line or the next label; a
-// label that ends its line covers the list below it, up to a blank line or
-// the next label line.
+// label that ends its line covers the list items (-, *, 1.) right below it,
+// or else its first sentence: any other line after it is checked.
 var (
 	fixLabel     = regexp.MustCompile(`(?im)(?:^|[.!?;]\s+)\s*((?:proposed\s+)?fix(?:es)?\s*:)`)
 	anyLabel     = regexp.MustCompile(`(?i)\b[a-z][a-z -]{0,30}:(?:\s|$)`)
-	lineLabel    = regexp.MustCompile(`(?im)^\s*[a-z][a-z -]{0,30}:(?:\s|$)`)
 	sentenceEnd  = regexp.MustCompile(`[.!?](?:\s|$)`)
-	blankLine    = regexp.MustCompile(`\n\s*\n`)
-	restOfLineWS = regexp.MustCompile(`^[ \t]*(?:\n|$)`)
+	listItems    = regexp.MustCompile(`^[ \t]*\n(?:[ \t]*(?:[-*•]|\d+[.)])[ \t][^\n]*(?:\n|$))+`)
+	restOfLineWS = regexp.MustCompile(`^[ \t]*\n`)
 )
 
 // dropFixLines cuts the scope of every fix label out of text, leaving a
@@ -113,9 +112,14 @@ func dropFixLines(text string) string {
 				end = l[0]
 			}
 		}
-		if restOfLineWS.MatchString(rest) {
-			cut(blankLine, rest)
-			cut(lineLabel, rest)
+		if l := listItems.FindStringIndex(rest); l != nil {
+			end = l[1]
+		} else if l := restOfLineWS.FindStringIndex(rest); l != nil {
+			// Prose under the label: its first sentence or line.
+			if i := strings.IndexByte(rest[l[1]:], '\n'); i >= 0 {
+				end = l[1] + i
+			}
+			cut(sentenceEnd, rest)
 		} else {
 			if i := strings.IndexByte(rest, '\n'); i >= 0 {
 				end = i
