@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"math"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -123,22 +124,44 @@ func TestSplitWire(t *testing.T) {
 
 func TestAsDecimal(t *testing.T) {
 	tests := []struct {
+		name    string
 		in      any
 		want    string
 		wantErr bool
 	}{
-		{int32(500), "500", false},
-		{int64(-3), "-3", false},
-		{big.NewRat(124950, 100), "1249.5", false},
-		{big.NewRat(9999, 100), "99.99", false},
-		{big.NewRat(100, 1), "100", false},
-		{"1.0", "", true},
+		// int: amount before the schema change
+		{"int32", int32(500), "500", false},
+		{"int64", int64(-3), "-3", false},
+		// decimal bytes: amount after the schema change (*big.Rat)
+		{"decimal bytes", big.NewRat(124950, 100), "1249.5", false},
+		{"decimal bytes 2dp", big.NewRat(9999, 100), "99.99", false},
+		{"decimal bytes whole", big.NewRat(100, 1), "100", false},
+		{"decimal bytes value", *big.NewRat(5, 2), "2.5", false},
+		// float64: decimal.handling.mode=double
+		{"float64", float64(1249.5), "1249.5", false},
+		{"float64 whole", float64(100), "100", false},
+		{"float64 small", float64(0.1), "0.1", false},
+		{"float64 nan", math.NaN(), "", true},
+		{"float64 inf", math.Inf(1), "", true},
+		// string: decimal.handling.mode=string
+		{"string", "1249.50", "1249.5", false},
+		{"string whole", "100", "100", false},
+		{"string padded", " 7.25 ", "7.25", false},
+		{"string exponent", "1e3", "1000", false},
+		{"string not a number", "oops", "", true},
+		{"string fraction", "1/3", "", true},
+		{"string empty", "", "", true},
+		// other types
+		{"bool", true, "", true},
+		{"nil", nil, "", true},
 	}
 	for _, tt := range tests {
-		got, err := asDecimal(tt.in)
-		if (err != nil) != tt.wantErr || got != tt.want {
-			t.Errorf("asDecimal(%v) = %q, %v; want %q (err %v)", tt.in, got, err, tt.want, tt.wantErr)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := asDecimal(tt.in)
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Errorf("asDecimal(%v) = %q, %v; want %q (err %v)", tt.in, got, err, tt.want, tt.wantErr)
+			}
+		})
 	}
 }
 
