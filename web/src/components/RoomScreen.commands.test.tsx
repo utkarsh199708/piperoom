@@ -100,30 +100,30 @@ describe('RoomScreen registers ⌘K room commands', () => {
   it('the driver can hand off, close, trace and invite; not take or request control', () => {
     const c = registered(driver, room())
     expect(c?.title).toBe('Orders stale')
-    expect(offered(c)).toEqual(['closeRoom', 'handoff', 'invite', 'trace'])
+    expect(offered(c)).toEqual(['closeRoom', 'exportJson', 'handoff', 'invite', 'postmortem', 'trace'])
   })
 
   it('a non-driver can request control, trace and invite; not hand off or take control', () => {
     const c = registered(other, room())
-    expect(offered(c)).toEqual(['invite', 'requestControl', 'trace'])
+    expect(offered(c)).toEqual(['exportJson', 'invite', 'postmortem', 'requestControl', 'trace'])
     c?.requestControl?.()
     expect(actions.requestControl).toHaveBeenCalledTimes(1)
   })
 
   it('with no driver anyone can take control (it grants control to themselves)', () => {
     const c = registered(other, room({ driver: null }))
-    expect(offered(c)).toEqual(['invite', 'takeControl', 'trace'])
+    expect(offered(c)).toEqual(['exportJson', 'invite', 'postmortem', 'takeControl', 'trace'])
     c?.takeControl?.()
     expect(actions.grantControl).toHaveBeenCalledWith('arjun')
   })
 
-  it('a viewer gets no write command, only the invite link', () => {
+  it('a viewer gets no write command, export or post-mortem: only the invite link', () => {
     const c = registered(viewer, room({ driver: null }))
     expect(offered(c)).toEqual(['invite'])
   })
 
   it('a closed room offers no control, hand-off or close', () => {
     const c = registered(driver, room({ status: 'closed' }))
-    expect(offered(c)).toEqual(['invite', 'trace'])
+    expect(offered(c)).toEqual(['exportJson', 'invite', 'postmortem', 'trace'])
   })
 })

@@ -59,7 +59,7 @@ describe('catchUpSummary', () => {
   it('reports a hand-off for you, a new driver, a closed room and an agent error, in that order', () => {
     const next: RoomState = {
       ...prev(),
-      handoffs: [{ handoff_id: 'h1', to: { kind: 'human', id: 'arjun', name: 'Arjun' }, summary: {} as never, stay_as_watcher: false, status: 'pending' }],
+      handoffs: [{ handoff_id: 'h1', to: { kind: 'human', id: 'arjun', name: 'Arjun' }, summary: {} as never, stay_as_watcher: false, status: 'pending', from: { kind: 'human' as const, id: 'arjun', name: 'Arjun' }, created_at: '2026-10-14T10:05:00Z' }],
       driver: { id: a.id, name: a.name },
       status: 'closed',
       agent_status: { state: 'error' },
@@ -74,7 +74,7 @@ describe('catchUpSummary', () => {
   })
 
   it('ignores a hand-off for someone else', () => {
-    const next = { ...prev(), handoffs: [{ handoff_id: 'h1', to: a, summary: {} as never, stay_as_watcher: false, status: 'pending' as const }] }
+    const next = { ...prev(), handoffs: [{ handoff_id: 'h1', to: a, summary: {} as never, stay_as_watcher: false, status: 'pending' as const, from: a, created_at: '2026-10-14T10:05:00Z' }] }
     expect(catchUpSummary(prev(), next, me)).toBeNull()
   })
 

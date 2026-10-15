@@ -569,14 +569,20 @@ func (l *logBuf) count(s string) int {
 type pipeSpec struct {
 	id    string
 	watch string // already indented under the pipeline (4 spaces)
+	// tables is the YAML flow list of source_tables; empty means [public.t].
+	tables string
 }
 
 func ownersYAML(ps ...pipeSpec) string {
 	var b strings.Builder
 	b.WriteString("pipelines:\n")
 	for _, p := range ps {
-		fmt.Fprintf(&b, "  - id: %s\n    title: %s\n    topic_prefix: %s\n    source_tables: [public.t]\n    connectors: [pg-%s]\n    consumer_groups: [g-%s]\n",
-			p.id, p.id, p.id, p.id, p.id)
+		tables := p.tables
+		if tables == "" {
+			tables = "[public.t]"
+		}
+		fmt.Fprintf(&b, "  - id: %s\n    title: %s\n    topic_prefix: %s\n    source_tables: %s\n    connectors: [pg-%s]\n    consumer_groups: [g-%s]\n",
+			p.id, p.id, p.id, tables, p.id, p.id)
 		b.WriteString(p.watch)
 	}
 	return b.String()

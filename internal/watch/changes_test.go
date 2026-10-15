@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/tools"
 )
 
 // ---- fakes of the change feed ----
@@ -185,6 +186,71 @@ func TestFirstTickRecordsDDLWithItsOwnTime(t *testing.T) {
 	}
 	if !strings.HasPrefix(r.Summary, "ALTER TABLE public.t | ALTER TABLE public.t ADD COLUMN x int") {
 		t.Fatalf("summary = %q", r.Summary)
+	}
+}
+
+// A column rename is logged under schema.table.column and a mixed-case table
+// quoted (public."Name"); both are the pipeline's tables (#330).
+func TestDDLRecordsColumnAndMixedCaseTables(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{{id: "orders", tables: "[public.t, public.Mixed]"}}})
+	ddl := &fakeDDL{}
+	d := h.deps
+	d.Changes, d.Registry, d.DDL = &fakeChanges{}, &fakeRegistry{versions: map[string][]int{}, err: map[string]error{}}, ddl
+	w, err := New(d)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	h.w = w
+	at := t0.Add(-time.Minute)
+	for _, id := range []string{"public.t.b", `public."Mixed"`, `public."Mixed".note`, "public.other.b", "public.tx", "other.public.t.b", "public.t."} {
+		ddl.rows = append(ddl.rows, clients.DDLChange{At: at, CommandTag: "ALTER TABLE", ObjectIdentity: id, Query: "q " + id})
+	}
+	h.step(0)
+	var got []string
+	for _, r := range d.Changes.(*fakeChanges).all() {
+		got = append(got, r.Object)
+	}
+	slices.Sort(got)
+	want := []string{`public."Mixed"`, `public."Mixed".note`, "public.t.b"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("recorded %v, want %v", got, want)
+	}
+}
+
+// An owners entry in the quoted form keeps matching, as it did on main, and
+// malformed identities fall back to the exact match only.
+func TestDDLInScopeQuotedOwnersAndMalformed(t *testing.T) {
+	tests := []struct {
+		name   string
+		tables string
+		id     string
+		want   bool
+	}{
+		{"quoted owners entry, table", `['public."Mixed"']`, `public."Mixed"`, true},
+		{"quoted owners entry, column", `['public."Mixed"']`, `public."Mixed".col`, true},
+		{"quoted owners entry, other table", `['public."Mixed"']`, `public."Other"`, false},
+		{"catalog owners entry, quoted column", "[public.Mixed]", `public."Mixed"."Col"`, true},
+		{"unterminated quote", "[public.Mixed]", `public."Mix`, false},
+		{"empty quoted part", "[public.Mixed]", `public."".x`, false},
+		{"trailing dot", "[public.t]", "public.t.", false},
+		{"too many parts", "[public.t]", "other.public.t.b", false},
+		{"exact match of an odd identity", `['public."Mix']`, `public."Mix`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, opts{pipes: []pipeSpec{{id: "orders", tables: tt.tables}}})
+			p, ok := h.deps.Owners.Pipeline("orders")
+			if !ok {
+				t.Fatal("pipeline orders missing")
+			}
+			sc, err := tools.ScopeFor(tools.WithPipeline(context.Background(), p), h.deps.Owners)
+			if err != nil {
+				t.Fatalf("ScopeFor: %v", err)
+			}
+			if got := ddlInScope(sc, tt.id); got != tt.want {
+				t.Fatalf("ddlInScope(%q) with %s = %v, want %v", tt.id, tt.tables, got, tt.want)
+			}
+		})
 	}
 }
 

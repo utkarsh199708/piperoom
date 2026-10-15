@@ -8,12 +8,21 @@
 // schema, and SELECT on the tables it reads (see README.md in this folder and
 // docs/pilot/permissions.md for the exact grants). The driver has no session-level read-only switch, so a
 // role with write grants could still write; keep this role SELECT-only.
+//
+// Driver logging (GO-2026-6665): gosnowflake v1 logs session tokens when its
+// level is raised, and New pins it to error and refuses the tracing and
+// clientConfigFile DSN parameters. The driver's easy logging can still read
+// a client config file on the first connection, so deployments must keep
+// SF_CLIENT_CONFIG_FILE unset and must not place sf_client_config.json in the
+// executable's or the home directory. Remove this once on gosnowflake v2.
 package snowflake
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,10 +47,11 @@ type DB struct {
 func New(ctx context.Context, dsn string) (*DB, error) {
 	// The DSN carries the password and driver errors can echo parts of it,
 	// so every error leaving New goes through Redact.
-	db, err := sql.Open("snowflake", dsn)
+	cfg, err := hardenedConfig(dsn)
 	if err != nil {
-		return nil, Redact(fmt.Errorf("snowflake: open: %w", err), dsn)
+		return nil, Redact(err, dsn)
 	}
+	db := sql.OpenDB(gosnowflake.NewConnector(gosnowflake.SnowflakeDriver{}, *cfg))
 	pctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 	if err := db.PingContext(pctx); err != nil {
@@ -54,6 +64,30 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	db.SetConnMaxIdleTime(30 * time.Minute)
 	db.SetConnMaxLifetime(time.Hour)
 	return &DB{db: db, q: dbQuerier{db: db}, target: targetFromDSN(dsn)}, nil
+}
+
+// hardenedConfig is the mitigation for GO-2026-6665 (gosnowflake v1 logs
+// session tokens and response bodies once its log level is raised; the fix is
+// only in v2). It pins the driver logger to error, refuses the DSN parameters
+// that raise the level or load a client config file (easy logging, which can
+// also raise it on the first connection), and returns the parsed config to
+// open through NewConnector. The logger is pinned even when the DSN is
+// refused. See reviews/vuln-report-2026-10.md.
+func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
+	if err := gosnowflake.GetLogger().SetLogLevel("error"); err != nil {
+		return nil, fmt.Errorf("snowflake: set driver log level: %w", err)
+	}
+	cfg, err := gosnowflake.ParseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("snowflake: parse dsn: %w", err)
+	}
+	if cfg.Tracing != "" {
+		return nil, errors.New("snowflake: dsn parameter tracing is not allowed: it raises the driver log level, which logs session tokens")
+	}
+	if cfg.ClientConfigFile != "" {
+		return nil, errors.New("snowflake: dsn parameter clientConfigFile is not allowed: it can raise the driver log level, which logs session tokens")
+	}
+	return cfg, nil
 }
 
 // Close releases the underlying connection pool.
@@ -153,3 +187,67 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 }
 
 var _ clients.Warehouse = (*DB)(nil)
+
+// PrimaryKeyColumn returns the first primary key column of table
+// ("schema.table" or "db.schema.table"), lower-cased like Row's column names.
+// A table without a primary key is clients.ErrNotFound. warehouse_row uses it
+// to refuse lookups by any other column, which would make the tool an
+// existence oracle for personal data. Snowflake does not enforce primary
+// keys, but the declared key is what the pipeline owners maintain.
+func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
+	defer cancel()
+
+	qualified, err := quoteTable(table)
+	if err != nil {
+		return "", err
+	}
+	rows, err := d.query(ctx, "SHOW PRIMARY KEYS IN TABLE "+qualified)
+	if err != nil {
+		return "", wrapQueryErr("primary key of", table, err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", fmt.Errorf("snowflake: primary key of %s: columns: %w", table, err)
+	}
+	nameIdx, seqIdx := -1, -1
+	for i, c := range cols {
+		switch strings.ToLower(c) {
+		case "column_name":
+			nameIdx = i
+		case "key_sequence":
+			seqIdx = i
+		}
+	}
+	if nameIdx < 0 || seqIdx < 0 {
+		return "", fmt.Errorf("snowflake: primary key of %s: SHOW PRIMARY KEYS result has no column_name/key_sequence (got %v)", table, cols)
+	}
+
+	best, bestSeq := "", -1
+	for rows.Next() {
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return "", fmt.Errorf("snowflake: primary key of %s: decode: %w", table, err)
+		}
+		seq, err := strconv.Atoi(fmt.Sprint(vals[seqIdx]))
+		if err != nil {
+			return "", fmt.Errorf("snowflake: primary key of %s: key_sequence %v: %w", table, vals[seqIdx], err)
+		}
+		if name := fmt.Sprint(vals[nameIdx]); bestSeq < 0 || seq < bestSeq {
+			best, bestSeq = name, seq
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", wrapQueryErr("primary key of", table, err)
+	}
+	if bestSeq < 0 {
+		return "", fmt.Errorf("snowflake: primary key of %s: table has no declared primary key (it may exist): %w", table, clients.ErrNotFound)
+	}
+	return strings.ToLower(best), nil
+}
