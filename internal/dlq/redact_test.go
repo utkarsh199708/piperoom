@@ -38,6 +38,16 @@ func TestRedactMessage(t *testing.T) {
 		{"VALUES with a close paren in a quoted value", "VALUES (1,'a)b') end", "VALUES <redacted> end"},
 		{"VALUES unbalanced", "VALUES (1,2", "VALUES <redacted>"},
 		{"values in prose is kept", "the values must be positive", "the values must be positive"},
+		{"Failing row contains without Detail",
+			`ERROR: new row violates check constraint "c" Failing row contains (7, TOKMARKER, -1).`,
+			"ERROR: new row violates check constraint <redacted> Failing row contains <redacted>."},
+		{"Failing row contains lower case, quoted value with a paren",
+			"new row violates not-null constraint failing row contains (7, 'a)b', null) and more",
+			"new row violates not-null constraint failing row contains <redacted> and more"},
+		{"Failing row contains unbalanced", "x Failing row contains (7, TOKMARKER", "x Failing row contains <redacted>"},
+		{"Failing row contains with no tuple", "x Failing row contains 7, TOKMARKER", "x Failing row contains <redacted>"},
+		{"Failing row contains already redacted", "x Failing row contains <redacted>.", "x Failing row contains <redacted>."},
+		{"Failing row in prose is kept", "the failing row is logged", "the failing row is logged"},
 		{"identifier-shaped single quotes are kept", "Cannot cast field 'amount' of type 'VALUE_CONVERTER' to 'users.order-id' (null 'x')", "Cannot cast field 'amount' of type 'VALUE_CONVERTER' to 'users.order-id' (null 'x')"},
 		{"number in single quotes", "bad id '5' here", "bad id <redacted> here"},
 		{"empty single quotes", "bad id '' here", "bad id <redacted> here"},
@@ -281,7 +291,7 @@ func FuzzRedactMessage(f *testing.F) {
 		`{"a":"}`, `"\"`, `"\`, "[{[{[", "}}]]", `"" "" ""`, "Det}ail:", "[Sou}rce:", `Det"x"ail:`,
 		"a\x00b", "\xff\xfe", "‮​", strings.Repeat(`""`, 400), strings.Repeat("[", 400),
 		"Where:Where:", "wHeRe: x", "deTAIL:", "[SOURCE:",
-		"Unrecognized token 'a': x", "VALUES (1,'a'), (2", "Det\x00ail:", "'a b' 'c d'", "''''", "x 'it's' y",
+		"Unrecognized token 'a': x", "VALUES (1,'a'), (2", "Det\x00ail:", "Failing row contains (1,", "Failing row contains <redacted>.", "'a b' 'c d'", "''''", "x 'it's' y",
 	}
 	for _, s := range seeds {
 		f.Add(s)

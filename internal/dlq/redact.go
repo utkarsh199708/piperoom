@@ -35,8 +35,10 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 //     'VALUE_CONVERTER', 'null'); the quote must open at a word start and have
 //     a closer, so "can't" is not a quote;
 //  5. replace the operand after "Unrecognized token" (Jackson quotes the
-//     offending bytes there, even when they look like an identifier) and the
-//     tuples after VALUES (batch SQL with the row's values);
+//     offending bytes there, even when they look like an identifier), the
+//     tuples after VALUES (batch SQL with the row's values) and the tuple
+//     after "Failing row contains" (PostgreSQL's row, which some drivers
+//     print without a Detail: prefix; with no tuple the rest is replaced);
 //  6. replace unquoted values: e-mail addresses, Luhn-valid card numbers,
 //     SSN-like and phone-like numbers, the value after a credential key
 //     (password=, token:, api_key=, ...) and what internal/redact finds (a
@@ -204,6 +206,12 @@ func scrub(rs []rune, cut bool) []rune {
 			if done {
 				return out
 			}
+		case wordStart(rs, i) && hasPrefixFold(rs[i:], failingRowPhrase):
+			var done bool
+			out, i, done = redactFailingRow(out, rs, i)
+			if done {
+				return out
+			}
 		case wordStart(rs, i) && hasPrefixFold(rs[i:], valuesWord) && (i+len(valuesWord) == len(rs) || !isWordRune(rs[i+len(valuesWord)])):
 			var done bool
 			out, i, done = redactValues(out, rs, i)
@@ -221,6 +229,8 @@ func scrub(rs []rune, cut bool) []rune {
 var (
 	tokenPhrase = []rune("unrecognized token")
 	valuesWord  = []rune("values")
+
+	failingRowPhrase = []rune("failing row contains")
 )
 
 func wordStart(rs []rune, i int) bool { return i == 0 || !isWordRune(rs[i-1]) }
@@ -292,6 +302,33 @@ func redactTokenOperand(out, rs []rune, i int) ([]rune, int, bool) {
 		k++
 	}
 	return append(out, redactedRunes...), k, false
+}
+
+// redactFailingRow handles "Failing row contains (7, jane@example.com, -1)".
+// The tuple is the row's values, so it goes whole; without a tuple the rest of
+// the text goes, since the row is then in some other shape. Text that is
+// already redacted stays, which keeps the function idempotent.
+func redactFailingRow(out, rs []rune, i int) ([]rune, int, bool) {
+	j := i + len(failingRowPhrase)
+	k := j
+	for k < len(rs) && rs[k] == ' ' {
+		k++
+	}
+	switch {
+	case k >= len(rs):
+		return append(out, rs[i:j]...), j, false // phrase at the end: nothing to hide
+	case strings.HasPrefix(string(rs[k:]), Redacted):
+		return append(out, rs[i:k]...), k, false
+	case rs[k] != '(':
+		out = append(out, rs[i:k]...)
+		return append(out, redactedRunes...), len(rs), true
+	}
+	out = append(out, rs[i:k]...)
+	e := parenEnd(rs, k)
+	if e < 0 {
+		return append(out, redactedRunes...), len(rs), true
+	}
+	return append(out, redactedRunes...), e + 1, false
 }
 
 // redactValues handles "VALUES (..), (..)": the tuples hold a row's values.
