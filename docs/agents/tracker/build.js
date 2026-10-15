@@ -1,7 +1,7 @@
 // Builds the tracker page and docs/agents/board.md from data.json: node build.js [data.json] [out.html]
 const fs=require('fs');const d=JSON.parse(fs.readFileSync(process.argv[2]||__dirname+'/data.json','utf8'));
 fs.writeFileSync(process.argv[3]||'piperoom-tracker.html',fs.readFileSync(__dirname+'/template.html','utf8').replace('__DATA__',JSON.stringify(d)));
-const L={done:'done',review:'in review',todo:'**NOBODY ON IT**',blocked:'**blocked**',check:'needs your call'};
+const L={done:'done',review:'in review',wip:'in progress',todo:'**NOBODY ON IT**',blocked:'**blocked**',check:'needs your call'};
 const pr=a=>a.length?a.map(n=>'#'+n).join(', '):'—';
 const rows=d.features.flatMap(f=>f.sub.map(s=>({...s,f})));
 let m=`# Feature board: who is building what\n\nRules: \`docs/agents/org.md\`. Updated by \`[LEAD-ARCH]\` only. **Snapshot: ${d.asOf}** (task files + every PR on GitHub).\n\n`;

@@ -1,11 +1,21 @@
 # Feature board: who is building what
 
-Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-15 10:20 UTC** (task files + every PR on GitHub).
+Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-15 11:00 UTC** (task files + every PR on GitHub).
 
 ## Needs an owner, unblocking or a decision
 
 | Part | Agent | What | PR | Status | Note |
 |---|---|---|---|---|---|
+| A5-sweep | A5 | room/store/httpapi/ws/auth: security + bugs | — | in progress | Cloud session, branch claude/fix-a5-20261015 |
+| A4-sweep | A4 | agent/wiring/redact/injectscan: evals + security + bugs | — | in progress | Cloud session, branch claude/fix-a4-20261015 |
+| A6-sweep | A6 | web: bugs + security | — | in progress | Cloud session, branch claude/fix-a6-20261015 |
+| A2-sweep | A2 | kafka/connect/schemareg/netsec/actions: security + bugs | — | in progress | Cloud session, branch claude/fix-a2-20261015 |
+| A3-sweep | A3 | postgres/warehouse/dbtools/topology/owners: security + bugs; makes #246 test robust | — | in progress | Cloud session, branch claude/fix-a3-20261015 |
+| A7-sweep | A7 | watch/dlq: restart re-post (Q7-V1), redaction | — | in progress | Cloud session, branch claude/fix-a7-20261015 |
+| C6-sweep | C6 | evals harness: scoring, compare, evalrun CLI | — | in progress | Cloud session, branch claude/fix-c6-20261015 |
+| C7-sweep | C7 | eval scenarios: right-answer failures, scorer fit | — | in progress | Cloud session, branch claude/fix-c7-20261015 |
+| C1-sweep | C1 | CI/build/deploy: exit codes, secrets, dependency upgrades; closes #253 | — | in progress | Cloud session, branch claude/fix-c1-20261015 |
+| small-lanes | C5 + C12 + A1 + C3 + C10 + C11 | alertin, slackbridge, dev stack, snowflake, discover, runbooks | — | in progress | Local workflow fix-sweep (2 agents at a time); branches claude/fix-<lane>-<n>-20261015 |
 | F2a | A6 | Web: pinned shift summary, export, post-mortem view | — | **NOBODY ON IT** | No PR and no web code for it on main. Nobody is working on it. |
 | F9-slack | C12 | Slack follow-up: nudges and lease-expiry paging | — | **NOBODY ON IT** | Named as a C12 follow-up in the task file and AGENTS.md (R11). No PR found. |
 | F10d | C1 | README and runbook: Slack bridge, stack lock | — | **NOBODY ON IT** | No PR, and README.md / docs/runbook.md have not changed since the F wave started. |
@@ -26,6 +36,21 @@ Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-
 | R7 | C1 | Full dev-stack integration job, smoke, release image | #246 |
 
 ## By feature
+
+### SWEEP — Fix sweep 2026-10-15: evals, security, bugs (one PR per lane) (0/10 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| A5-sweep | A5 | room/store/httpapi/ws/auth: security + bugs | — | in progress |
+| A4-sweep | A4 | agent/wiring/redact/injectscan: evals + security + bugs | — | in progress |
+| A6-sweep | A6 | web: bugs + security | — | in progress |
+| A2-sweep | A2 | kafka/connect/schemareg/netsec/actions: security + bugs | — | in progress |
+| A3-sweep | A3 | postgres/warehouse/dbtools/topology/owners: security + bugs; makes #246 test robust | — | in progress |
+| A7-sweep | A7 | watch/dlq: restart re-post (Q7-V1), redaction | — | in progress |
+| C6-sweep | C6 | evals harness: scoring, compare, evalrun CLI | — | in progress |
+| C7-sweep | C7 | eval scenarios: right-answer failures, scorer fit | — | in progress |
+| C1-sweep | C1 | CI/build/deploy: exit codes, secrets, dependency upgrades; closes #253 | — | in progress |
+| small-lanes | C5 + C12 + A1 + C3 + C10 + C11 | alertin, slackbridge, dev stack, snowflake, discover, runbooks | — | in progress |
 
 ### F1 — Decision bar, room status, attention (4/4 done)
 
