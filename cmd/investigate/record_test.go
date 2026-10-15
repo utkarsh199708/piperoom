@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -186,8 +188,10 @@ func TestRecorderWriteFailureIsReported(t *testing.T) {
 	if err := r.Emit(context.Background(), events.AgentStatus, events.AgentStatusPayload{State: "working"}); err == nil {
 		t.Fatal("Emit after a failed write = nil, want error")
 	}
-	if len(next.got) != 0 {
-		t.Error("event was forwarded although it was not recorded")
+	// The terminal still gets the event: a dead recording must not blind the
+	// operator while the agent keeps running.
+	if len(next.got) != 1 {
+		t.Errorf("forwarded %d events, want 1 even though recording failed", len(next.got))
 	}
 	if err := r.Close(nil); err == nil {
 		t.Fatal("Close = nil, want the write error")
@@ -225,4 +229,104 @@ func TestRecordingInboxRecordsDrained(t *testing.T) {
 func jsonEqual(got json.RawMessage, want string) bool {
 	var a, b any
 	return json.Unmarshal(got, &a) == nil && json.Unmarshal([]byte(want), &b) == nil && reflect.DeepEqual(a, b)
+}
+
+// An event that cannot be encoded is still forwarded, the error comes back
+// after the forward, and the recording is marked incomplete.
+func TestRecorderForwardsWhenEncodingFails(t *testing.T) {
+	dir := t.TempDir()
+	next := &memSink{}
+	r, err := newRecorder(dir, next, recordMeta{}, fixedClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Emit(context.Background(), events.AgentStatus, make(chan int)); err == nil {
+		t.Fatal("Emit of an unencodable payload = nil, want error")
+	}
+	if len(next.got) != 1 {
+		t.Fatalf("forwarded %d events, want 1", len(next.got))
+	}
+	if err := r.Close(nil); err == nil {
+		t.Fatal("Close = nil, want the encode error")
+	}
+	var meta recordMeta
+	b, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	_ = json.Unmarshal(b, &meta)
+	if meta.Complete {
+		t.Error("meta.complete = true after a failed event")
+	}
+}
+
+// -title and the pipeline id are operator text and pass through redact too.
+func TestRecorderRedactsMetaTitleAndPipeline(t *testing.T) {
+	dir := t.TempDir()
+	const pw = "hunter2hunter2"
+	r, err := newRecorder(dir, nil, recordMeta{
+		Title:    "debug postgres://svc:" + pw + "@db.internal:5432/orders",
+		Pipeline: "orders password=" + pw,
+	}, fixedClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(nil); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if strings.Contains(string(b), pw) {
+		t.Fatalf("meta.json holds the password:\n%s", b)
+	}
+}
+
+// Big integers and out-of-range numbers survive recording as written, and the
+// data stub hashes the original bytes.
+func TestRecordPayloadKeepsNumbers(t *testing.T) {
+	data := json.RawMessage(`{"offset":9007199254740993,"big":1e400}`)
+	out, err := recordPayload(events.AgentToolResult, events.AgentToolResultPayload{
+		Tool: "kafka_x", Summary: "offset 9007199254740993 of 1e400", Data: data, TookMS: 9007199254740993,
+	})
+	if err != nil {
+		t.Fatalf("recordPayload: %v", err)
+	}
+	if !strings.Contains(string(out), `"took_ms":9007199254740993`) {
+		t.Errorf("large integer changed: %s", out)
+	}
+	var got struct {
+		Data struct {
+			NotRecorded bool   `json:"not_recorded"`
+			Bytes       int    `json:"bytes"`
+			SHA256      string `json:"sha256"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	if !got.Data.NotRecorded || got.Data.Bytes != len(data) || got.Data.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Errorf("data stub = %+v, want bytes %d sha256 %x of the original", got.Data, len(data), sum)
+	}
+	if strings.Contains(string(out), "9007199254740992") {
+		t.Errorf("number was rounded: %s", out)
+	}
+}
+
+// A symlink at the old fixed temp name must not be written through.
+func TestRecorderMetaDoesNotFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, "meta.json.tmp")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	r, err := newRecorder(dir, nil, recordMeta{}, fixedClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Fatalf("symlink target overwritten: %q", b)
+	}
 }

@@ -91,6 +91,10 @@ func newRecorder(dir string, next agent.Sink, meta recordMeta, now func() time.T
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("record: creating %s: %w", dir, err)
 	}
+	// -title and the pipeline id are operator text; a DSN or token pasted into
+	// one must not reach meta.json.
+	meta.Title = redactText(meta.Title)
+	meta.Pipeline = redactText(meta.Pipeline)
 	r := &recorder{next: next, dir: dir, now: now, meta: meta}
 	var err error
 	if r.evF, err = os.OpenFile(filepath.Join(dir, "events.jsonl"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err != nil {
@@ -111,9 +115,17 @@ func newRecorder(dir string, next agent.Sink, meta recordMeta, now func() time.T
 	return r, nil
 }
 
-// Emit records the event, then forwards it. A failed write is remembered and
-// returned: a recording with a hole in it must not look complete.
+// Emit forwards the event to the next sink, then records it. The forward comes
+// first and always happens: when the recording fails (encode error, full disk)
+// the operator's live view must not go dark while the agent keeps running,
+// possibly executing fixes under -approve-all. A failed write is remembered,
+// which marks the recording incomplete, and returned after the forward, so a
+// recording with a hole in it never looks complete.
 func (r *recorder) Emit(ctx context.Context, typ events.Type, payload any) error {
+	var fwdErr error
+	if r.next != nil {
+		fwdErr = r.next.Emit(ctx, typ, payload)
+	}
 	r.mu.Lock()
 	rec, err := recordPayload(typ, payload)
 	if err == nil {
@@ -138,12 +150,9 @@ func (r *recorder) Emit(ctx context.Context, typ events.Type, payload any) error
 	}
 	r.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("record: %w", err)
+		return errors.Join(fmt.Errorf("record: %w", err), fwdErr)
 	}
-	if r.next == nil {
-		return nil
-	}
-	return r.next.Emit(ctx, typ, payload)
+	return fwdErr
 }
 
 // recordInput writes one human input to inputs.jsonl.
@@ -195,11 +204,23 @@ func (r *recorder) writeMeta() error {
 	if err != nil {
 		return fmt.Errorf("record: encoding meta.json: %w", err)
 	}
-	tmp := filepath.Join(r.dir, "meta.json.tmp")
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+	// CreateTemp opens with O_EXCL, so a symlink planted at a guessable temp
+	// name is never followed (os.WriteFile would write through it).
+	f, err := os.CreateTemp(r.dir, "meta-*.tmp")
+	if err != nil {
 		return fmt.Errorf("record: writing meta.json: %w", err)
 	}
+	tmp := f.Name()
+	_, werr := f.Write(append(b, '\n'))
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("record: writing meta.json: %w", werr)
+	}
 	if err := os.Rename(tmp, filepath.Join(r.dir, "meta.json")); err != nil {
+		os.Remove(tmp)
 		return fmt.Errorf("record: replacing meta.json: %w", err)
 	}
 	return nil
@@ -232,22 +253,35 @@ func recordPayload(typ events.Type, payload any) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encoding %s payload: %w", typ, err)
 	}
-	var v any
-	if err := json.Unmarshal(b, &v); err != nil {
-		return nil, fmt.Errorf("decoding %s payload: %w", typ, err)
-	}
-	if m, ok := v.(map[string]any); ok && typ == events.AgentToolResult {
-		if raw, has := m["data"]; has && raw != nil {
-			db, _ := json.Marshal(raw)
-			sum := sha256.Sum256(db)
-			m["data"] = map[string]any{
-				"not_recorded": true,
-				"bytes":        len(db),
-				"sha256":       hex.EncodeToString(sum[:]),
+	if typ == events.AgentToolResult {
+		// Work on raw bytes, never a decoded tree: decoding into any turns
+		// 9007199254740993 into ...992 and fails on 1e400.
+		var m map[string]json.RawMessage
+		if err := json.Unmarshal(b, &m); err != nil {
+			// Fail closed: a payload that is not an object cannot have its
+			// data replaced, so it is not recorded.
+			return nil, fmt.Errorf("decoding %s payload: %w", typ, err)
+		}
+		{
+			if raw, has := m["data"]; has && string(raw) != "null" {
+				sum := sha256.Sum256(raw)
+				stub, err := json.Marshal(map[string]any{
+					"not_recorded": true,
+					"bytes":        len(raw),
+					"sha256":       hex.EncodeToString(sum[:]),
+				})
+				if err != nil {
+					return nil, fmt.Errorf("encoding %s data stub: %w", typ, err)
+				}
+				m["data"] = stub
+				if b, err = json.Marshal(m); err != nil {
+					return nil, fmt.Errorf("encoding %s payload: %w", typ, err)
+				}
 			}
 		}
 	}
-	out, err := json.Marshal(redact.JSON(v))
+	// redact.JSON keeps numbers as their exact text.
+	out, err := json.Marshal(redact.JSON(json.RawMessage(b)))
 	if err != nil {
 		return nil, fmt.Errorf("encoding redacted %s payload: %w", typ, err)
 	}

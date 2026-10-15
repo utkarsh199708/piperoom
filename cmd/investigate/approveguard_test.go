@@ -92,6 +92,34 @@ func TestApproveAllRefusals(t *testing.T) {
 			mutate: func(c *config.Config) { c.SourceDBURL = "postgres://u:p@localhost/orders?host=db.example.com" }, want: "SOURCE_DB_URL"},
 		{name: "keyword host override", flag: true, getenv: noEnv,
 			mutate: func(c *config.Config) { c.SourceDBURL = "host=db.example.com dbname=orders" }, want: "SOURCE_DB_URL"},
+		{name: "keyword spaces around =, last host wins", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost dbname=orders host = db.example.internal" }, want: "SOURCE_DB_URL"},
+		{name: "keyword duplicate host", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.WarehouseDBURL = "host=localhost host=db.example.internal dbname=wh" }, want: "WAREHOUSE_DB_URL"},
+		{name: "keyword hostaddr", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost hostaddr=10.0.0.5 dbname=orders" }, want: "SOURCE_DB_URL"},
+		{name: "keyword multi-host", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost,db.remote dbname=orders" }, want: "SOURCE_DB_URL"},
+		{name: "keyword unix socket", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SourceDBURL = "host=/var/run/postgresql dbname=orders" }, want: "SOURCE_DB_URL"},
+		{name: "dsn that does not parse", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost port=notaport password=" + secret }, want: "SOURCE_DB_URL"},
+		{name: "https connect on localhost", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.ConnectURL = "https://localhost:8443" }, want: "CONNECT_URL is https"},
+		{name: "https registry on localhost", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SchemaRegistryURL = "https://127.0.0.1:8443" }, want: "SCHEMA_REGISTRY_URL is https"},
+		{name: "connect tls ca file", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.ConnectTLSCAFile = "/ca.pem" }, want: "CONNECT_TLS_CA_FILE"},
+		{name: "connect tls cert file", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.ConnectTLSCertFile = "/c.pem" }, want: "CONNECT_TLS_CERT_FILE"},
+		{name: "connect tls key file", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.ConnectTLSKeyFile = "/k.pem" }, want: "CONNECT_TLS_KEY_FILE"},
+		{name: "registry tls ca file", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SchemaRegistryTLSCAFile = "/ca.pem" }, want: "SCHEMA_REGISTRY_TLS_CA_FILE"},
+		{name: "registry tls cert file", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SchemaRegistryTLSCertFile = "/c.pem" }, want: "SCHEMA_REGISTRY_TLS_CERT_FILE"},
+		{name: "registry tls key file", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SchemaRegistryTLSKeyFile = "/k.pem" }, want: "SCHEMA_REGISTRY_TLS_KEY_FILE"},
 		{name: "userinfo trick", flag: true, getenv: noEnv,
 			mutate: func(c *config.Config) { c.ConnectURL = "http://localhost@evil.example.com:8083" }, want: "CONNECT_URL"},
 		{name: "localhost lookalike", flag: true, getenv: noEnv,
@@ -148,5 +176,23 @@ func TestApproveAllReportsAllProblems(t *testing.T) {
 	err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv)
 	if err == nil || !strings.Contains(err.Error(), "SOURCE_DB_URL") || !strings.Contains(err.Error(), "CONNECT_URL") {
 		t.Fatalf("err = %v, want both settings named", err)
+	}
+}
+
+// A DSN with no host takes it from PGHOST. The guard checks the parsed result,
+// not the string, so the environment cannot smuggle a remote host in.
+func TestApproveAllChecksPGHOSTFallback(t *testing.T) {
+	cfg := devCfg()
+	cfg.SourceDBURL = "dbname=orders user=u"
+
+	t.Setenv("PGHOST", "db.example.internal")
+	err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv)
+	if err == nil || !strings.Contains(err.Error(), "SOURCE_DB_URL") {
+		t.Fatalf("PGHOST=remote: err = %v, want SOURCE_DB_URL refused", err)
+	}
+
+	t.Setenv("PGHOST", "localhost")
+	if err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv); err != nil {
+		t.Fatalf("PGHOST=localhost: err = %v, want nil", err)
 	}
 }

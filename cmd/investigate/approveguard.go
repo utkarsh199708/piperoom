@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 )
@@ -44,14 +46,15 @@ func checkApproveAll(cfg config.Config, pipe owners.Pipeline, havePipe bool, con
 	for _, a := range []struct {
 		name, value string
 		optional    bool
+		postgres    bool
 	}{
-		{"PIPEROOM_DB_URL", cfg.RoomDBURL, false},
-		{"SOURCE_DB_URL", cfg.SourceDBURL, false},
-		{"WAREHOUSE_DB_URL", cfg.WarehouseDBURL, false},
-		{"KAFKA_BROKERS", cfg.KafkaBrokers, false},
-		{"CONNECT_URL", cfg.ConnectURL, false},
+		{"PIPEROOM_DB_URL", cfg.RoomDBURL, false, true},
+		{"SOURCE_DB_URL", cfg.SourceDBURL, false, true},
+		{"WAREHOUSE_DB_URL", cfg.WarehouseDBURL, false, true},
+		{"KAFKA_BROKERS", cfg.KafkaBrokers, false, false},
+		{"CONNECT_URL", cfg.ConnectURL, false, false},
 		// "off" is stored as "": a pipeline without a Schema Registry is fine.
-		{"SCHEMA_REGISTRY_URL", cfg.SchemaRegistryURL, true},
+		{"SCHEMA_REGISTRY_URL", cfg.SchemaRegistryURL, true, false},
 	} {
 		if strings.TrimSpace(a.value) == "" {
 			if !a.optional {
@@ -59,8 +62,22 @@ func checkApproveAll(cfg config.Config, pipe owners.Pipeline, havePipe bool, con
 			}
 			continue
 		}
-		if err := localAddress(a.value); err != nil {
+		check := localAddress
+		if a.postgres {
+			check = localPostgres
+		}
+		if err := check(a.value); err != nil {
 			add("%s: %v", a.name, err)
+		}
+	}
+	// An https URL is TLS, which the plaintext dev stack never has; a tunnel
+	// to a managed Connect or Registry listens on localhost too.
+	for _, a := range []struct{ name, value string }{
+		{"CONNECT_URL", cfg.ConnectURL},
+		{"SCHEMA_REGISTRY_URL", cfg.SchemaRegistryURL},
+	} {
+		if u, err := url.Parse(strings.TrimSpace(a.value)); err == nil && strings.EqualFold(u.Scheme, "https") {
+			add("%s is https: the dev stack is plaintext", a.name)
 		}
 	}
 
@@ -85,6 +102,18 @@ func checkApproveAll(cfg config.Config, pipe owners.Pipeline, havePipe bool, con
 			add("%s is set: the dev stack has no logins", name)
 		}
 	}
+	for name, v := range map[string]string{
+		"CONNECT_TLS_CA_FILE":           cfg.ConnectTLSCAFile,
+		"CONNECT_TLS_CERT_FILE":         cfg.ConnectTLSCertFile,
+		"CONNECT_TLS_KEY_FILE":          cfg.ConnectTLSKeyFile,
+		"SCHEMA_REGISTRY_TLS_CA_FILE":   cfg.SchemaRegistryTLSCAFile,
+		"SCHEMA_REGISTRY_TLS_CERT_FILE": cfg.SchemaRegistryTLSCertFile,
+		"SCHEMA_REGISTRY_TLS_KEY_FILE":  cfg.SchemaRegistryTLSKeyFile,
+	} {
+		if v != "" {
+			add("%s is set: the dev stack has no TLS", name)
+		}
+	}
 	// A pipeline with its own connections: block reads addresses from env vars
 	// or files that this check cannot see, so it is never "the dev stack".
 	if havePipe && len(pipe.Connections) > 0 {
@@ -97,9 +126,37 @@ func checkApproveAll(cfg config.Config, pipe owners.Pipeline, havePipe bool, con
 	return nil
 }
 
+// localPostgres reports nil when every host pgx would try for the DSN v is
+// localhost or a loopback IP. The DSN is not parsed here: it goes through the
+// same pgxpool.ParseConfig the clients use, so spacing around '=', repeated
+// keys (the last wins), multi-host lists, ?host= overrides and PGHOST or
+// service-file fallbacks all show up in the parsed result. A unix-socket path
+// is refused: the dev stack is TCP on loopback, and a socket can be a tunnel.
+// A DSN that does not parse is refused. Errors never echo v (it has a password).
+func localPostgres(v string) error {
+	cfg, err := pgxpool.ParseConfig(strings.TrimSpace(v))
+	if err != nil {
+		// Do not wrap err: pgconn parse errors can quote the DSN.
+		return errors.New("DSN does not parse")
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["hostaddr"]; ok {
+		return errors.New("hostaddr is not supported by pgx and is refused")
+	}
+	hosts := []string{cfg.ConnConfig.Host}
+	for _, fb := range cfg.ConnConfig.Fallbacks {
+		hosts = append(hosts, fb.Host)
+	}
+	for _, h := range hosts {
+		if h == "" || !isLocalHost(h) {
+			return fmt.Errorf("host %q is not local", h)
+		}
+	}
+	return nil
+}
+
 // localAddress reports nil when every host in v is localhost or a loopback IP.
-// v is a URL, a libpq key=value string, or a comma-separated host:port list
-// (Kafka brokers).
+// v is a URL or a comma-separated host:port list (Kafka brokers, Connect,
+// Schema Registry). Postgres DSNs go through localPostgres.
 func localAddress(v string) error {
 	hosts, err := hostsOf(strings.TrimSpace(v))
 	if err != nil {
@@ -134,17 +191,6 @@ func hostsOf(v string) ([]string, error) {
 		for _, k := range []string{"host", "hostaddr"} {
 			for _, qv := range u.Query()[k] {
 				for _, hp := range strings.Split(qv, ",") {
-					hosts = append(hosts, hostOnly(hp))
-				}
-			}
-		}
-		return hosts, nil
-	case strings.Contains(v, "="):
-		var hosts []string
-		for _, f := range strings.Fields(v) {
-			k, val, ok := strings.Cut(f, "=")
-			if ok && (k == "host" || k == "hostaddr") {
-				for _, hp := range strings.Split(strings.Trim(val, "'"), ",") {
 					hosts = append(hosts, hostOnly(hp))
 				}
 			}
