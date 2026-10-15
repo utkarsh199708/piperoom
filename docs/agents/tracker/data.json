@@ -1,5 +1,5 @@
 {
- "asOf": "2026-10-15 11:00 UTC",
+ "asOf": "2026-10-15 14:50 UTC",
  "features": [
   {
    "id": "SWEEP",
@@ -9,8 +9,10 @@
      "id": "A5-sweep",
      "agent": "A5",
      "what": "room/store/httpapi/ws/auth: security + bugs",
-     "prs": [],
-     "s": "wip",
+     "prs": [
+      289
+     ],
+     "s": "review",
      "note": "Cloud session, branch claude/fix-a5-20261015"
     },
     {
@@ -19,63 +21,77 @@
      "what": "agent/wiring/redact/injectscan: evals + security + bugs",
      "prs": [],
      "s": "wip",
-     "note": "Cloud session, branch claude/fix-a4-20261015"
+     "note": "Session hit the usage limit at 11:23 with 7 commits pushed and no PR; restarted 14:46 to finish and open the PR"
     },
     {
      "id": "A6-sweep",
      "agent": "A6",
      "what": "web: bugs + security",
-     "prs": [],
-     "s": "wip",
-     "note": "Cloud session, branch claude/fix-a6-20261015"
+     "prs": [
+      359
+     ],
+     "s": "done",
+     "note": "14 web fixes merged 14:43; closes #343, #345–#357, #288"
     },
     {
      "id": "A2-sweep",
      "agent": "A2",
      "what": "kafka/connect/schemareg/netsec/actions: security + bugs",
-     "prs": [],
-     "s": "wip",
+     "prs": [
+      319
+     ],
+     "s": "review",
      "note": "Cloud session, branch claude/fix-a2-20261015"
     },
     {
      "id": "A3-sweep",
      "agent": "A3",
      "what": "postgres/warehouse/dbtools/topology/owners: security + bugs; makes #246 test robust",
-     "prs": [],
-     "s": "wip",
-     "note": "Cloud session, branch claude/fix-a3-20261015"
+     "prs": [
+      333
+     ],
+     "s": "done",
+     "note": "Merged 14:43; session is writing failing tests for a follow-up fix"
     },
     {
      "id": "A7-sweep",
      "agent": "A7",
      "what": "watch/dlq: restart re-post (Q7-V1), redaction",
-     "prs": [],
-     "s": "wip",
+     "prs": [
+      360
+     ],
+     "s": "review",
      "note": "Cloud session, branch claude/fix-a7-20261015"
     },
     {
      "id": "C6-sweep",
      "agent": "C6",
      "what": "evals harness: scoring, compare, evalrun CLI",
-     "prs": [],
-     "s": "wip",
+     "prs": [
+      347
+     ],
+     "s": "review",
      "note": "Cloud session, branch claude/fix-c6-20261015"
     },
     {
      "id": "C7-sweep",
      "agent": "C7",
      "what": "eval scenarios: right-answer failures, scorer fit",
-     "prs": [],
-     "s": "wip",
+     "prs": [
+      341
+     ],
+     "s": "review",
      "note": "Cloud session, branch claude/fix-c7-20261015"
     },
     {
      "id": "C1-sweep",
      "agent": "C1",
      "what": "CI/build/deploy: exit codes, secrets, dependency upgrades; closes #253",
-     "prs": [],
-     "s": "wip",
-     "note": "Cloud session, branch claude/fix-c1-20261015"
+     "prs": [
+      264
+     ],
+     "s": "done",
+     "note": "Merged 14:43; closes #253, #256–#259; follow-ups #260–#263 for their owners"
     },
     {
      "id": "small-lanes",
@@ -83,7 +99,7 @@
      "what": "alertin, slackbridge, dev stack, snowflake, discover, runbooks",
      "prs": [],
      "s": "wip",
-     "note": "Local workflow fix-sweep (2 agents at a time); branches claude/fix-<lane>-<n>-20261015"
+     "note": "Local workflow: first run lost 17 agents to the usage limit; resumed 14:46 with seeds cached"
     }
    ]
   },
