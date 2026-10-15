@@ -20,6 +20,8 @@ func TestClusterSummaryDiskClaims(t *testing.T) {
 		{"over threshold", []clients.BrokerHealth{full, ok}, "log dir 95% used", "below 85%"},
 		{"all fine", []clients.BrokerHealth{ok}, "log dirs below 85% used", "unknown"},
 		{"no data", []clients.BrokerHealth{none}, "disk usage unknown", "below 85%"},
+		{"over and unmeasured", []clients.BrokerHealth{full, none}, "unknown for 1 of 2", "below 85%"},
+		{"no brokers", nil, "(0 brokers", "below 85%"},
 		{"partial data", []clients.BrokerHealth{ok, none}, "disk usage unknown", "below 85%"},
 	}
 	for _, tc := range tests {

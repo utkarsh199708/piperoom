@@ -86,12 +86,16 @@ func clusterSummary(h clients.ClusterHealth, topics []string) string {
 		sb.WriteString("; log dirs: not permitted (needs DescribeConfigs on Cluster, docs/pilot/permissions.md)")
 	case other > 0:
 		sb.WriteString("; log dirs: unavailable")
-	case over > 0:
-		// The broker lines above already name the full ones.
-	case measured < len(h.Brokers):
-		sb.WriteString("; log dir disk usage unknown for " + fmt.Sprint(len(h.Brokers)-measured) + " of " + fmt.Sprint(len(h.Brokers)) + " brokers")
-	default:
-		sb.WriteString("; log dirs below " + fmt.Sprint(diskWarnPct) + "% used")
+	}
+	// Unmeasured brokers are named even when another one is over: the model
+	// must not read silence as "fine". "Below" needs at least one broker.
+	if notPermitted == 0 && other == 0 {
+		switch {
+		case measured < len(h.Brokers):
+			fmt.Fprintf(&sb, "; log dir disk usage unknown for %d of %d brokers", len(h.Brokers)-measured, len(h.Brokers))
+		case over == 0 && len(h.Brokers) > 0:
+			fmt.Fprintf(&sb, "; log dirs below %d%% used", diskWarnPct)
+		}
 	}
 
 	byTopic := map[string][]clients.PartitionHealth{}

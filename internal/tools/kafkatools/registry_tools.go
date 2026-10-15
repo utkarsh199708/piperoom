@@ -131,9 +131,9 @@ func (t *registryDiff) Kind() tools.Kind { return tools.KindRead }
 func (t *registryDiff) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"subject":      strProp("subject name"),
-		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (at most 2147483647)"},
-		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest; at most 2147483647)"},
-		"schema":       strProp("optional raw Avro schema JSON; when set, diffs it against to_version (default latest) instead of from_version"),
+		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (at most 2147483647); with schema, the registered side of the diff"},
+		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest; at most 2147483647); with schema and no from_version, the registered side of the diff"},
+		"schema":       strProp("optional raw candidate Avro schema JSON; when set, it is the to side: the registered version (from_version, else to_version, else latest) is diffed to it, so a field the candidate adds shows as added. Reported as to_version 0"),
 	}, "subject")
 }
 func (t *registryDiff) Description() string {
@@ -184,8 +184,16 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	fromSchema, toSchema := "", to.Schema
 	fromVersion, outTo := p.FromVersion, toVersion
 	if p.Schema != "" {
-		fromSchema, toSchema = to.Schema, p.Schema
-		fromVersion, outTo = toVersion, 0 // 0 = raw schema, not a registered version
+		// from_version names the registered side; else to_version, else latest.
+		regVersion, reg := toVersion, to
+		if p.FromVersion > 0 {
+			regVersion = p.FromVersion
+			if reg, err = t.d.Registry.Schema(cctx, p.Subject, regVersion); err != nil {
+				return tools.Result{}, err
+			}
+		}
+		fromSchema, toSchema = reg.Schema, p.Schema
+		fromVersion, outTo = regVersion, 0 // 0 = raw schema, not a registered version
 	} else {
 		if p.FromVersion <= 0 {
 			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
@@ -216,15 +224,16 @@ type fieldChange struct {
 
 // diffFields compares two Avro record schemas field by field.
 func diffFields(fromSchema, toSchema string) ([]fieldChange, error) {
-	fromFields, err := recordFields(fromSchema)
+	fromIdx, err := recordFields(fromSchema)
 	if err != nil {
 		return nil, err
 	}
-	toFields, err := recordFields(toSchema)
+	toIdx, err := recordFields(toSchema)
 	if err != nil {
 		return nil, err
 	}
-	var changes []fieldChange
+	fromFields, toFields := fromIdx.fields, toIdx.fields
+	changes := enumChanges(fromIdx.enums, toIdx.enums)
 	for name, toType := range toFields {
 		fromType, ok := fromFields[name]
 		switch {
@@ -265,24 +274,40 @@ func formatChanges(changes []fieldChange) string {
 	return sb.String()
 }
 
-// recordFields flattens every record field in an Avro schema into name→canonical type.
-func recordFields(schema string) (map[string]string, error) {
-	var root any
-	if err := json.Unmarshal([]byte(schema), &root); err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	walkFields(root, out)
-	return out, nil
+// schemaIndex is what a diff compares: every record field's canonical type,
+// plus the symbols of every enum definition.
+type schemaIndex struct {
+	fields map[string]string
+	enums  map[string][]string // short enum name → symbols
 }
 
-func walkFields(node any, out map[string]string) {
+// recordFields flattens every record field in an Avro schema into name→canonical type.
+func recordFields(schema string) (schemaIndex, error) {
+	var root any
+	if err := json.Unmarshal([]byte(schema), &root); err != nil {
+		return schemaIndex{}, err
+	}
+	idx := schemaIndex{fields: map[string]string{}, enums: map[string][]string{}}
+	walkFields(root, idx)
+	return idx, nil
+}
+
+func walkFields(node any, idx schemaIndex) {
 	switch v := node.(type) {
 	case map[string]any:
+		if v["type"] == "enum" {
+			name := shortName(v["name"])
+			if _, exists := idx.enums[name]; !exists {
+				for _, x := range anySlice(v["symbols"]) {
+					idx.enums[name] = append(idx.enums[name], fmt.Sprint(x))
+				}
+			}
+			return
+		}
 		fields, hasFields := v["fields"].([]any)
 		if !hasFields {
 			for _, val := range v {
-				walkFields(val, out)
+				walkFields(val, idx)
 			}
 			return
 		}
@@ -300,27 +325,45 @@ func walkFields(node any, out map[string]string) {
 			if recordName != "" {
 				key = recordName + "." + fname
 			}
-			if _, exists := out[key]; !exists {
-				out[key] = canonType(fm["type"])
+			if _, exists := idx.fields[key]; !exists {
+				idx.fields[key] = canonType(fm["type"])
 			}
-			walkFields(fm["type"], out)
+			walkFields(fm["type"], idx)
 		}
 	case []any:
 		for _, x := range v {
-			walkFields(x, out)
+			walkFields(x, idx)
 		}
 	}
 }
 
-// canonType renders an Avro type as a compact, comparable string.
-func canonType(t any) string {
+// shortName drops the namespace: a reference inside the defining namespace
+// uses the short form, so only the short form is the same at both places.
+func shortName(n any) string {
+	s := fmt.Sprint(n)
+	return s[strings.LastIndex(s, ".")+1:]
+}
+
+var avroPrimitives = map[string]bool{"null": true, "boolean": true, "int": true, "long": true, "float": true, "double": true, "bytes": true, "string": true}
+
+// canonType renders an Avro type as a compact, comparable string. Enum symbols
+// are compared separately (see enumChanges), so an enum prints as its name.
+func canonType(t any) string { return canon(t, false) }
+
+// canon renders t. Inside array items and map values (elem) a named type is
+// written by its short name whether it is defined there or only referenced, so
+// moving the definition between fields is not a change.
+func canon(t any, elem bool) string {
 	switch v := t.(type) {
 	case string:
+		if elem && !avroPrimitives[v] {
+			return shortName(v)
+		}
 		return v
 	case map[string]any:
 		vt, _ := v["type"].(string)
 		if _, nested := v["type"].(map[string]any); nested {
-			return canonType(v["type"]) // {"type":{"type":"array",...}}
+			return canon(v["type"], elem) // {"type":{"type":"array",...}}
 		}
 		if lt, ok := v["logicalType"].(string); ok {
 			if vt == "bytes" && lt == "decimal" {
@@ -330,18 +373,14 @@ func canonType(t any) string {
 		}
 		switch vt {
 		case "array":
-			return "array<" + canonType(v["items"]) + ">"
+			return "array<" + canon(v["items"], true) + ">"
 		case "map":
-			return "map<" + canonType(v["values"]) + ">"
-		case "enum":
-			// Symbols are part of the type: dropping one breaks old data.
-			var syms []string
-			for _, x := range anySlice(v["symbols"]) {
-				syms = append(syms, fmt.Sprint(x))
-			}
-			return "enum:" + fmt.Sprint(v["name"]) + "{" + strings.Join(syms, ",") + "}"
+			return "map<" + canon(v["values"], true) + ">"
 		}
 		if name, ok := v["name"].(string); ok {
+			if elem {
+				return shortName(name)
+			}
 			if vt == "" {
 				return "record:" + name
 			}
@@ -354,11 +393,60 @@ func canonType(t any) string {
 	case []any:
 		parts := make([]string, len(v))
 		for i, x := range v {
-			parts[i] = canonType(x)
+			parts[i] = canon(x, elem)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return fmt.Sprint(t)
+}
+
+// enumChanges reports enums defined on both sides whose symbols differ, as a
+// compact delta: a long enum must not push the real cause out of the summary.
+func enumChanges(from, to map[string][]string) []fieldChange {
+	var out []fieldChange
+	for name, fs := range from {
+		ts, ok := to[name]
+		if !ok {
+			continue
+		}
+		rm, add := setDiff(fs, ts), setDiff(ts, fs)
+		if len(rm) == 0 && len(add) == 0 {
+			continue
+		}
+		var parts []string
+		for _, x := range capList(rm) {
+			parts = append(parts, "-"+x)
+		}
+		for _, x := range capList(add) {
+			parts = append(parts, "+"+x)
+		}
+		out = append(out, fieldChange{Field: "enum " + name, Kind: "changed", From: "symbols", To: strings.Join(parts, " ")})
+	}
+	return out
+}
+
+// setDiff returns the elements of a that are not in b, in a's order.
+func setDiff(a, b []string) []string {
+	in := map[string]bool{}
+	for _, x := range b {
+		in[x] = true
+	}
+	var out []string
+	for _, x := range a {
+		if !in[x] {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+const maxEnumSymbolsShown = 10
+
+func capList(l []string) []string {
+	if len(l) <= maxEnumSymbolsShown {
+		return l
+	}
+	return append(l[:maxEnumSymbolsShown:maxEnumSymbolsShown], fmt.Sprintf("…(%d more)", len(l)-maxEnumSymbolsShown))
 }
 
 func anySlice(v any) []any {
