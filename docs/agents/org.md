@@ -131,3 +131,14 @@ lanes active, parked or surging per squad, and the tickets nobody owns.
 - The 8-session ceiling caps cost; the dispatcher logs each scale action as a comment on a pinned `Agent ops log` issue.
 - Any agent stops and files a `sev:critical` ticket for LEAD-ARCH instead of acting when an action would write to
   a real customer system, touch secrets, or rewrite git history.
+
+## 11. Scheduled tasks (live)
+
+| Role | Schedule (UTC) | Model | Scheduled task |
+|---|---|---|---|
+| QA | every hour at :24 | Opus 5.5 | `trig_01UgELZvZyhH1vUPonA46Pq5` |
+| Dispatcher | every hour at :54 (after QA, so new tickets are routed the same hour) | Opus 5.5 | `trig_01NWKMCX4G5JahG18YwtYWar` |
+| PM | daily 08:47 | Fable 5.1 | `trig_01VdaXpKTkaRA85EFhp8j64U` |
+
+Each run is a fresh cloud session that reads its role file and the ops log issue #250. Seed tickets: #251 (F2a),
+#252 (F9 Slack), #253 (F10d), #254 (split the untagged QA PRs).
