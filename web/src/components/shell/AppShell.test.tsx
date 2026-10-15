@@ -101,6 +101,18 @@ beforeEach(() => {
   document.documentElement.removeAttribute('data-theme')
 })
 
+describe('AppShell skip link', () => {
+  // HashRouter: letting the browser follow "#main" would route to "/main" (the catch-all list).
+  it('moves focus to the main region without following the hash', () => {
+    renderShell('/rooms/r_x')
+    const skip = screen.getByRole('link', { name: 'Skip to content' })
+    const followed = fireEvent.click(skip)
+    expect(followed).toBe(false)
+    expect(document.activeElement).toBe(document.getElementById('main'))
+    expect(screen.getByTestId('where')).toHaveTextContent('/rooms/r_x')
+  })
+})
+
 describe('AppShell sidebar', () => {
   it('shows the nav with the open-room count and a pipeline with its health', () => {
     renderShell()

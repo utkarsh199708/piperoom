@@ -59,7 +59,10 @@ export function HandoffDialog({
   const [to, setTo] = useState('')
   const [stay, setStay] = useState(false)
   const restoreFocus = useRestoreFocus()
-  const pending = state.handoffs.find((h) => h.status === 'pending')
+  // "Hand off to someone else" on a pending hand-off: a new one voids it on the server. Keyed by
+  // id, so the next hand-off's summary shows again once it arrives.
+  const [redoOf, setRedoOf] = useState<string | null>(null)
+  const pending = state.handoffs.find((h) => h.status === 'pending' && h.handoff_id !== redoOf)
   const now = useNow(5_000)
   const inFlight = pending ? null : handoffInFlight(state, now)
   const failure = state.handoff_failure
@@ -107,6 +110,11 @@ export function HandoffDialog({
 
         {pending ? (
           <HandoffSummary summary={pending.summary}>
+            {state.status === 'open' && (
+              <Button type="button" variant="ghost" onClick={() => setRedoOf(pending.handoff_id)}>
+                Hand off to someone else
+              </Button>
+            )}
             <Button type="button" variant="secondary" onClick={onClose}>
               Close
             </Button>

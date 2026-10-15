@@ -70,6 +70,7 @@ export function RoomHeader({
   onExport,
   exporting = false,
   handoffBusy = false,
+  onCite,
 }: {
   state: RoomState
   user: CurrentUser
@@ -84,6 +85,8 @@ export function RoomHeader({
   exporting?: boolean
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
   handoffBusy?: boolean
+  /** A first-look step chip was clicked. */
+  onCite?: (stepId: string) => void
 }) {
   // Below md the four actions would stack ~280px of buttons; they go behind one ⋯ menu. The keys still work:
   // useRoomShortcuts does not depend on the buttons.
@@ -207,7 +210,7 @@ export function RoomHeader({
         </div>
       </div>
 
-      <TriageCard state={state} />
+      <TriageCard state={state} onCite={onCite} />
 
       <p className="m-0 flex flex-wrap items-center gap-x-2.5 font-mono text-xs text-subtle-foreground">
         {state.pipeline_id && (

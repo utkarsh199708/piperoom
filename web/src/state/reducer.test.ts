@@ -862,3 +862,62 @@ describe('applyEvent — preview and verification', () => {
     expect(s.proposals[0].verification?.repeat).toBe(true)
   })
 })
+
+describe('applyEvent — bidi controls in typed text', () => {
+  const RLO = '‮'
+  it('strips them from the title, comments and suggestions, keeping newlines', () => {
+    let s = applyEvent(base(), ev(1, 'room.created', { title: `orders ${RLO}gal`, severity: 'sev2', pipeline_id: 'p' }, human))
+    s = applyEvent(s, ev(2, 'comment.added', { comment_id: 'c1', text: `line 1\n${RLO}line 2`, mentions_agent: false }, human))
+    s = applyEvent(s, ev(3, 'steer.suggested', { suggestion_id: 'g1', text: `check ⁧the slot⁩` }, human))
+    expect(s.title).toBe('orders gal')
+    expect(s.comments[0].text).toBe('line 1\nline 2')
+    expect(s.suggestions[0].text).toBe('check the slot')
+    expect(s.activity.some((a) => a.text.includes(RLO) || (a.detail ?? '').includes(RLO))).toBe(false)
+  })
+
+  it('strips them from the snapshot title', () => {
+    const snap: RoomSnapshot = {
+      id: 'r1', title: `a${RLO}b`, severity: 'sev2', pipeline_id: 'p', status: 'open', opened_at: '', last_seq: 0,
+      driver: null, agent_status: { state: 'idle' }, hypothesis: null, open_proposals: [], pending_suggestions: [], members: [],
+    }
+    expect(fromSnapshot(snap).title).toBe('ab')
+  })
+})
+
+// The server voids a hand-off once a newer one exists, its creator stops driving or the room
+// closes (409 stale_handoff / room_closed): the UI must not keep offering it.
+describe('applyEvent — stale hand-offs', () => {
+  const summary = { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] }
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+  const meera = { kind: 'human' as const, id: 'meera', name: 'Meera' }
+  const lease = '2026-10-11T11:00:00Z'
+  const driving = () =>
+    applyEvent(base(), ev(1, 'control.granted', { to: human, lease_until: lease }, human))
+  const created = (seq: number, id: string, to: typeof kabir) =>
+    ev(seq, 'handoff.created', { handoff_id: id, to, summary, stay_as_watcher: false }, human)
+
+  it('a newer hand-off voids the older pending one', () => {
+    let s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, created(3, 'h2', meera))
+    expect(s.handoffs.map((h) => h.status)).toEqual(['voided', 'pending'])
+  })
+
+  it('a driver change voids it, but the receiver accepting it does not', () => {
+    let s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, ev(3, 'control.granted', { to: meera, lease_until: lease }, meera))
+    expect(s.handoffs[0].status).toBe('voided')
+
+    s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, ev(3, 'control.granted', { to: human, lease_until: lease }, human))
+    expect(s.handoffs[0].status).toBe('pending') // a renewal by the same driver
+    s = applyEvent(s, ev(4, 'control.granted', { to: kabir, lease_until: lease }, kabir))
+    s = applyEvent(s, ev(5, 'handoff.accepted', { handoff_id: 'h1' }, kabir))
+    expect(s.handoffs[0].status).toBe('accepted')
+  })
+
+  it('closing the room voids it', () => {
+    let s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, ev(3, 'room.closed', { resolution: 'fixed' }, human))
+    expect(s.handoffs[0].status).toBe('voided')
+  })
+})

@@ -10,15 +10,21 @@ const BOTTOM_MARGIN_PX = 200
  * can say how many arrived. `activity` is the room's recent-event feed (it carries seq).
  */
 export function useJumpToLatest(activity: ActivityEntry[], replaying: boolean) {
-  const sentinelRef = useRef<HTMLDivElement>(null)
+  const elRef = useRef<HTMLDivElement | null>(null)
+  const ioRef = useRef<IntersectionObserver | null>(null)
   const atBottomRef = useRef(true)
   const [atBottom, setAtBottom] = useState(true)
-  const latest = activity.length > 0 ? activity[activity.length - 1].seq : 0
+  // The room's feed is newest first; the highest seq is the latest whatever the order.
+  const latest = activity.reduce((m, a) => Math.max(m, a.seq), 0)
   const [seen, setSeen] = useState(latest)
   const wasReplaying = useRef(replaying)
 
-  useEffect(() => {
-    const el = sentinelRef.current
+  // A callback ref, not a mount effect: the sentinel is not there on the first render (the room
+  // skeleton) and moves when the layout switches, so each node it lands on is observed.
+  const sentinelRef = useCallback((el: HTMLDivElement | null) => {
+    ioRef.current?.disconnect()
+    ioRef.current = null
+    elRef.current = el
     if (!el || typeof IntersectionObserver === 'undefined') return
     const io = new IntersectionObserver(
       ([entry]) => {
@@ -28,8 +34,9 @@ export function useJumpToLatest(activity: ActivityEntry[], replaying: boolean) {
       { rootMargin: `0px 0px ${BOTTOM_MARGIN_PX}px 0px` },
     )
     io.observe(el)
-    return () => io.disconnect()
+    ioRef.current = io
   }, [])
+  useEffect(() => () => ioRef.current?.disconnect(), [])
 
   // Runs after the new event rendered but before the observer reports the grown page, so the
   // ref still says where the person was.
@@ -44,14 +51,14 @@ export function useJumpToLatest(activity: ActivityEntry[], replaying: boolean) {
     }
     if (atBottomRef.current) {
       setSeen(latest)
-      sentinelRef.current?.scrollIntoView?.({ block: 'end' })
+      elRef.current?.scrollIntoView?.({ block: 'end' })
     }
   }, [latest, replaying])
 
   const unseen = replaying || atBottom ? 0 : activity.filter((a) => a.seq > seen).length
   const jump = useCallback(() => {
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    sentinelRef.current?.scrollIntoView?.({ block: 'end', behavior: reduce ? 'auto' : 'smooth' })
+    elRef.current?.scrollIntoView?.({ block: 'end', behavior: reduce ? 'auto' : 'smooth' })
     setSeen(latest)
   }, [latest])
 

@@ -248,6 +248,28 @@ func isTimestampColumn(name string) bool {
 	return name == "at" || strings.HasSuffix(name, "_at")
 }
 
+// isTimeColumn reports whether a row tool may show this column's value: the
+// name says timestamp and the value is one (or NULL). The clients report no
+// column types, so the value is checked: a text column that merely ends in
+// "_at" can hold personal data.
+func isTimeColumn(name string, v any) bool {
+	if !isTimestampColumn(name) {
+		return false
+	}
+	switch t := v.(type) {
+	case nil, time.Time:
+		return true
+	case string:
+		if t == "infinity" || t == "-infinity" {
+			return true
+		}
+		_, err := time.Parse(time.RFC3339Nano, t)
+		return err == nil
+	default:
+		return false
+	}
+}
+
 func sortedKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

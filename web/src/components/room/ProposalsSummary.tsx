@@ -1,5 +1,6 @@
 import type { ProposalState } from '@/state/types'
 import { cn } from '@/lib/utils'
+import { executionPhase, verdictKind, verdictWords } from '@/lib/execution'
 import { StatusDot } from './StatusDot'
 import type { DotTone } from './StatusDot'
 
@@ -10,7 +11,19 @@ function describe(p: ProposalState): { tone: DotTone; word: string; count: strin
   const total = p.required_layers.length
   const done = p.required_layers.filter((l) => p.approvals[l] === 'approved').length
   const count = total > 0 ? `${done} of ${total}` : ''
-  if (p.status === 'approved') return { tone: 'ok', word: 'Approved', count }
+  if (p.status === 'approved') {
+    // Approval is not the end: once steps ran, what happened to them is the news.
+    const run = executionPhase(p)
+    if (run.phase === 'failed') return { tone: 'fail', word: `Step ${run.step} failed`, count }
+    if (run.phase === 'unknown') return { tone: 'warn', word: `Step ${run.step} outcome unknown`, count }
+    if (run.phase === 'done') {
+      if (!p.verification) return { tone: 'ok', word: 'Ran · verifying', count }
+      const v = verdictKind(p.verification)
+      const tone: DotTone = v === 'recovered' ? 'ok' : v === 'not-recovered' ? 'fail' : 'warn'
+      return { tone, word: `Ran · ${verdictWords(v)}`, count }
+    }
+    return { tone: 'ok', word: 'Approved', count }
+  }
   if (p.status === 'rejected') return { tone: 'fail', word: 'Rejected', count }
   const waiting = p.required_layers.find((l) => p.approvals[l] === 'pending')
   return { tone: 'warn', word: waiting ? `Waiting for ${waiting}` : 'Open', count }

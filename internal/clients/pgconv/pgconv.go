@@ -51,6 +51,16 @@ func ToJSON(v any) any {
 		return strconv.FormatFloat(float64(t), 'f', -1, 32)
 	case pgtype.Numeric:
 		return NumericString(t)
+	case pgtype.InfinityModifier:
+		// pgx decodes an infinite timestamp, timestamptz or date to this
+		// type; JSON-marshalled it would read as the number 1 or -1.
+		switch t {
+		case pgtype.Infinity:
+			return "infinity"
+		case pgtype.NegativeInfinity:
+			return "-infinity"
+		}
+		return ""
 	case []byte:
 		return string(t)
 	case string:
@@ -89,7 +99,7 @@ func NumericString(n pgtype.Numeric) string {
 	neg := n.Int.Sign() < 0
 	abs := new(big.Int).Abs(n.Int)
 	s := abs.String()
-	if n.Exp > 0 {
+	if n.Exp > 0 && abs.Sign() != 0 {
 		e := int(n.Exp)
 		if e > 100000 {
 			return s + "e+" + strconv.Itoa(e)
