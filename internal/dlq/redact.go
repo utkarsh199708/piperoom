@@ -3,6 +3,7 @@ package dlq
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // MaxMessageRunes is the cap on a Connect error-header value (the same 300
@@ -25,7 +26,10 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 // drivers quote the failing record in their messages, and a 300-rune cap
 // keeps exactly the part where the snippet sits, so:
 //
-//  1. cap at 300 runes;
+//  1. cap at 300 runes; a value that step 6's own patterns match (not one
+//     only internal/redact finds) and that the cut would split is replaced
+//     whole, also when tabs or runs of spaces separate its groups; else a
+//     word of up to 160 runes the cut would split is dropped;
 //  2. drop everything from "[Source:", "Detail:" or "Where:" (any case) to
 //     the end;
 //  3. replace every balanced {...} and [...] (an unbalanced opener takes the
@@ -71,6 +75,9 @@ func redactOnce(s string) string {
 	// A cut can drop the closing quote of a value: then an open single quote
 	// is a value, not an apostrophe (scrub).
 	cut := len(rs) > MaxMessageRunes
+	if cut {
+		rs = safeCut(rs)
+	}
 	rs = capRunes(rs)
 	rs = tidy(rs)
 	rs = cutTail(rs)
@@ -79,6 +86,89 @@ func redactOnce(s string) string {
 	// Markers can make the text longer than what went in ("" -> "<redacted>"),
 	// so the cap runs again at the end.
 	return string(capRunes(tidy(rs)))
+}
+
+// urlTokenSpans are the URLs as safeCut cuts them, found by the literal
+// "://" alone (no scheme rule: "my_postgres://" and a scheme glued to a long
+// word are URLs too): each runs from the last white space, quote or bracket
+// before the "://" (or the start) to the next white space or quote after it.
+func urlTokenSpans(s string) [][]int {
+	var spans [][]int
+	for off := 0; ; {
+		k := strings.Index(s[off:], "://")
+		if k < 0 {
+			return spans
+		}
+		k += off
+		start := strings.LastIndexAny(s[:k], urlTokenStops+"([{<") + 1
+		end := len(s)
+		if e := strings.IndexAny(s[k:], urlTokenStops); e >= 0 {
+			end = k + e
+		}
+		spans = append(spans, []int{start, end})
+		off = end
+		if off <= k {
+			off = k + 3
+		}
+	}
+}
+
+// urlTokenStops end a URL token: white space and quotes.
+const urlTokenStops = " \t\n\r\v\f'\""
+
+// Look-ahead of safeCut past the cap: enough for the longest value a mask
+// rule matches (a 128-rune e-mail local part plus its domain).
+const (
+	cutLookahead = 256
+	// maxCutToken is the longest word the cut drops whole. A longer run
+	// without spaces is cut where the cap falls (it is not a value a mask
+	// rule knows, and dropping it could empty the message).
+	maxCutToken = 160
+)
+
+// safeCut makes the first cut of rs (len(rs) > MaxMessageRunes). A cut value
+// no longer matches its mask ("jane.doe@exam", "123-45-678") and went out in
+// part. So a value that maskUnquoted's own patterns match, or a URL, and that
+// straddles the cap (also one with spaces, "4111 1111 1111 1111") is replaced by
+// Redacted from its start; otherwise the cut moves back to the start of a word
+// that straddles the cap. The values are found in the tidied window, as the
+// masks see it ("555\t123\t4567" is a phone), and mapped back to rs. The word
+// rule does not follow the value rule: it would drop the key of
+// "password=<value>" and could empty the message.
+func safeCut(rs []rune) []rune {
+	at := MaxMessageRunes
+	tw, raw := tidyIndex(rs[:min(len(rs), MaxMessageRunes+cutLookahead)])
+	capT := len(tw) // tidied runes that come from before the cap
+	for j, i := range raw {
+		if i >= MaxMessageRunes {
+			capT = j
+			break
+		}
+	}
+	win := string(tw)
+	capByte := len(string(tw[:capT]))
+	// A URL is one value from its scheme to the next white space or quote:
+	// internal/redact allows '/', '@', '?', '#' and ':' in its password, so no
+	// split inside it is safe ("postgres://app:S3cr/t9x@db..." cut after "/").
+	spans := append(piiSpans(win), urlTokenSpans(win)...)
+	for _, sp := range spans {
+		if sp[0] < capByte && sp[1] > capByte {
+			at = min(at, raw[utf8.RuneCountInString(win[:sp[0]])])
+		}
+	}
+	if at < MaxMessageRunes {
+		return append(rs[:at:at], redactedRunes...)
+	}
+	if at > 0 && at < len(rs) && !unicode.IsSpace(rs[at-1]) && !unicode.IsSpace(rs[at]) {
+		start := at
+		for start > 0 && !unicode.IsSpace(rs[start-1]) {
+			start--
+		}
+		if at-start <= maxCutToken {
+			at = start
+		}
+	}
+	return rs[:at]
 }
 
 // capRunes is the one capping mechanism. It never leaves half a marker
@@ -105,26 +195,34 @@ func capRunes(rs []rune) []rune {
 // (zero-width joiners, bidi overrides) and trims. Dropping, not spacing, the
 // others means "Det\x00ail:" still reads as "Detail:" to the tail rule.
 func tidy(rs []rune) []rune {
+	out, _ := tidyIndex(rs)
+	return out
+}
+
+// tidyIndex is tidy that also returns, for each rune of the result, its index
+// in rs.
+func tidyIndex(rs []rune) ([]rune, []int) {
 	out := make([]rune, 0, len(rs))
+	idx := make([]int, 0, len(rs))
 	space := true // true at the start, so leading spaces are dropped
-	for _, r := range rs {
+	for i, r := range rs {
 		switch {
 		case unicode.IsSpace(r):
 			if !space {
-				out = append(out, ' ')
+				out, idx = append(out, ' '), append(idx, i)
 				space = true
 			}
 		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
 			// dropped
 		default:
-			out = append(out, r)
+			out, idx = append(out, r), append(idx, i)
 			space = false
 		}
 	}
 	if n := len(out); n > 0 && out[n-1] == ' ' {
-		out = out[:n-1]
+		out, idx = out[:n-1], idx[:n-1]
 	}
-	return out
+	return out, idx
 }
 
 // cutTail replaces everything from the first tail marker with one Redacted.

@@ -465,8 +465,7 @@ func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
 	for id, ss := range ps.sigs {
 		if ss.phase == phaseFiring {
-			ss.phase = phaseAcked
-			ss.ackSev = ss.last.sev
+			ss.ack()
 			w.log.Info("watch: signal acked, room closed while it still fires",
 				"mode", string(w.cfg.Mode), "pipeline", pipelineID, "signal", id, "room", roomID)
 		}
