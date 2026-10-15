@@ -115,6 +115,7 @@ func dlqDeps(t *testing.T, mode string, k *fakeDLQ, cfgs map[string]map[string]s
 		}
 		return c, nil
 	}}
+	guardWrites(t, fc)
 	return Deps{Connect: fc, Kafka: k, Owners: dlqOwners(t, mode)}
 }
 

@@ -63,7 +63,7 @@ func main() {
 	flag.DurationVar(&o.delay, "delay", delay, "sleep per record (to build lag)")
 	flag.Parse()
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	log := newLogger(os.Stderr, config.Load())
 	// SIGTERM is what `docker stop` sends; handling it lets the client leave
 	// the group cleanly instead of leaving a stale member behind.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
