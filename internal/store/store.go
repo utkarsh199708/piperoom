@@ -466,8 +466,9 @@ func (s *PG) RoomUsage(ctx context.Context, roomID string) (Usage, error) {
 // transaction. The row lock serialises concurrent appends of a room and
 // Postgres re-checks the WHERE on the newest row version, so no interleaving
 // passes a cap. Agent events stop at the cap, human and system events at the
-// cap plus ReservePercent, room.closed never (classOf). A refused event wraps
-// ErrLogFull and uses no seq. The bytes counted are len(Event.Payload).
+// cap plus ReservePercent, room.closed and the close's proposal.withdrawn
+// never (classOf). A refused event wraps ErrLogFull and uses no seq. The
+// bytes counted are len(Event.Payload).
 func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	return s.appendEvent(ctx, roomID, -1, typ, actor, payload)
 }

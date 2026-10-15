@@ -206,6 +206,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/control/request", visible(s.handleRequestControl))
 				short.Post("/rooms/{id}/control/grant", visible(s.handleGrantControl))
 				short.Post("/rooms/{id}/close", visible(s.handleCloseRoom))
+				short.Post("/rooms/{id}/proposals/{pid}/withdraw", visible(s.handleWithdrawProposal))
 				short.Post("/rooms/{id}/extend", visible(s.handleExtendRoom))
 				short.Post("/rooms/{id}/trace", visible(s.handleTrace))
 				short.Post("/rooms/{id}/label", visible(s.handleLabel))

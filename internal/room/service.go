@@ -1121,6 +1121,8 @@ func inputFor(e events.Event) *agent.HumanInput {
 			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
+	case events.ProposalWithdrawn:
+		return withdrawnInput(e) // service_withdraw.go
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
