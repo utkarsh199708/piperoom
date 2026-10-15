@@ -18,6 +18,8 @@ import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
 import { stepAnchor } from '@/lib/triage'
+import { evidenceFor } from '@/lib/evidence'
+import { Raw } from './room/evidence/Raw'
 import { Checklist } from './room/Checklist'
 import type { ChecklistAccess } from './room/Checklist'
 import type { ChecklistStepDonePayload } from '../api/types'
@@ -41,8 +43,18 @@ function totalMs(step: StepState): number | null {
   return times.length > 0 ? times.reduce((a, b) => a + b, 0) : null
 }
 
+// The summary of one tool call: a structured view for the tools that have one, the plain
+// summary text otherwise (an error, a tool with no view, or data that does not fit its view).
+function ToolSummary({ t }: { t: ToolCallState }) {
+  const View = t.is_error ? null : evidenceFor(t.tool)
+  return View ? <View t={t} /> : <Raw t={t} />
+}
+
 function rawJson(t: ToolCallState): string {
-  const raw: Record<string, unknown> = { input: t.input }
+  // With a structured view the summary is no longer on screen, so it is kept here.
+  const raw: Record<string, unknown> = {}
+  if (!t.is_error && evidenceFor(t.tool) && t.summary != null) raw.summary = t.summary
+  raw.input = t.input
   if (t.data !== undefined) raw.data = t.data
   try {
     return JSON.stringify(raw, null, 2)
@@ -127,16 +139,7 @@ function Evidence({ step, checklist }: { step: StepState; checklist?: ChecklistW
             )}
           </div>
           {t.provenance?.map((c, i) => <RanLine key={i} call={c} />)}
-          {t.summary != null && (
-            <pre
-              className={cn(
-                'm-0 whitespace-pre-wrap break-words rounded-md border bg-muted px-2.5 py-2 font-mono text-xs leading-[17px]',
-                t.is_error ? 'border-destructive/50 text-destructive-fg' : 'border-border text-muted-foreground',
-              )}
-            >
-              {t.summary}
-            </pre>
-          )}
+          {t.summary != null && <ToolSummary t={t} />}
           {checklist && t.tool === 'runbook_lookup' && !t.is_error && (
             <Checklist
               stepId={step.id}
