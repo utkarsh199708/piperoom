@@ -209,7 +209,11 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 		worst = worst[:5]
 	}
 	for _, pl := range worst {
-		fmt.Fprintf(&sb, "\n  %s/%d: committed %d, end %d, lag %d", pl.Topic, pl.Partition, pl.Committed, pl.End, pl.Lag)
+		committed := fmt.Sprintf("committed %d", pl.Committed)
+		if pl.Committed < 0 {
+			committed = "no committed offset" // kadm's -1 is not a position
+		}
+		fmt.Fprintf(&sb, "\n  %s/%d: %s, end %d, lag %d", pl.Topic, pl.Partition, committed, pl.End, pl.Lag)
 	}
 	if line := tools.NotShown(other, "topic partition", "topic partitions"); line != "" {
 		appendLine(&sb, line+"; the total lag above counts only this pipeline's partitions")
