@@ -2,6 +2,7 @@ package watch
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -62,6 +63,9 @@ type reading struct {
 	// ev is this signal's evidence. Built fresh each tick and never changed
 	// afterwards, so it can be read without the lock.
 	ev map[string]any
+	// targets name the objects a breach is about (connector, slot, topic or
+	// group names). With the signal id they are the incident keys (QA G1).
+	targets []string
 }
 
 // transition is what a step did to the state.
@@ -93,6 +97,42 @@ type sigState struct {
 	last reading
 	// errText is the latest error, "" after a good tick.
 	errText string
+	// targets are the objects the signal breached on since its breach began
+	// (sorted, capped); see keys. Reset when the signal resolves.
+	targets []string
+	// firedAt is when the signal last fired; ackedAt when its room closed
+	// while it still fired. escalated: it already fired EscalateAfter with no
+	// room in this episode, so it re-opened (or tried to) once.
+	firedAt, ackedAt time.Time
+	escalated        bool
+}
+
+// maxSignalTargets caps the incident keys of one signal: a storm of a hundred
+// connectors is still one connector_down.
+const maxSignalTargets = 16
+
+// addTargets merges the targets of a breach reading.
+func (s *sigState) addTargets(ts []string) {
+	for _, t := range ts {
+		if t == "" || slices.Contains(s.targets, t) || len(s.targets) >= maxSignalTargets {
+			continue
+		}
+		s.targets = append(s.targets, t)
+	}
+	slices.Sort(s.targets)
+}
+
+// keys are the signal's incident keys: "connector_down:pg-orders" per target,
+// or the bare signal id when the breach named no object.
+func (s *sigState) keys(id string) []string {
+	if len(s.targets) == 0 {
+		return []string{id}
+	}
+	out := make([]string, 0, len(s.targets))
+	for _, t := range s.targets {
+		out = append(out, sigKey(id, t))
+	}
+	return out
 }
 
 // step feeds one reading into the state machine. All timing is wall-clock
@@ -106,6 +146,7 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 	switch r.v {
 	case vBreach, vBreachNow:
 		s.clearingSince = time.Time{}
+		s.addTargets(r.targets)
 		if s.phase != phaseOK {
 			return tNone
 		}
@@ -114,17 +155,18 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 		}
 		if r.v == vBreachNow || now.Sub(s.breachingSince) >= forD {
 			s.phase = phaseFiring
+			s.firedAt = now
 			return tFired
 		}
 	case vHold:
 		if s.phase == phaseOK {
-			s.breachingSince = time.Time{}
+			s.breachingSince, s.targets = time.Time{}, nil
 		} else {
 			s.clearingSince = time.Time{}
 		}
 	case vClear:
 		if s.phase == phaseOK {
-			s.breachingSince = time.Time{}
+			s.breachingSince, s.targets = time.Time{}, nil
 			return tNone
 		}
 		if s.clearingSince.IsZero() {
@@ -134,6 +176,7 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 			s.phase = phaseOK
 			s.breachingSince, s.clearingSince = time.Time{}, time.Time{}
 			s.notified, s.ackSev = false, ""
+			s.targets, s.firedAt, s.ackedAt, s.escalated = nil, time.Time{}, time.Time{}, false
 			return tResolved
 		}
 	}

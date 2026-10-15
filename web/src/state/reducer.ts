@@ -24,9 +24,11 @@ import type {
   HandoffCreatedPayload,
   HandoffFailedPayload,
   HandoffRequestedPayload,
+  OwnerPagedPayload,
   HypothesisVerdictPayload,
   ApprovalNudgedPayload,
   ProposalCreatedPayload,
+  ProposalWithdrawnPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   RoomLabelledPayload,
@@ -39,8 +41,17 @@ import { describeEvent } from './describe'
 import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
-import { checklistKey } from './types'
-import type { HypothesisHistoryEntry, InsightState, MemberState, RoomState, StepState, VerdictState } from './types'
+import { checklistKey, WITHDRAWN_ROOM_CLOSED } from './types'
+import type {
+  HypothesisHistoryEntry,
+  InsightState,
+  MemberState,
+  ProposalState,
+  RoomState,
+  StepState,
+  VerdictState,
+  WithdrawnState,
+} from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -115,6 +126,8 @@ function foldInsight(state: RoomState, event: Event): InsightState {
 }
 
 const ACTIVITY_WINDOW = 50
+/** Pages kept per room; one per layer per 10 minutes, so this is far more than a room sees. */
+const PAGES_CAP = 50
 
 function describeContext(before: RoomState, after: RoomState): DescribeContext {
   const stepIndex: Record<string, number> = {}
@@ -127,7 +140,10 @@ function describeContext(before: RoomState, after: RoomState): DescribeContext {
   for (const p of after.proposals) proposalTitles[p.proposal_id] = p.title
   const suggesters: Record<string, string> = {}
   for (const s of after.suggestions) suggesters[s.suggestion_id] = s.from.name
+  const names: Record<string, string> = {}
+  for (const m of after.members) names[m.id] = m.name
   return {
+    names,
     driverBefore: before.driver?.id ?? null,
     stepTitles,
     proposalTitles,
@@ -159,6 +175,12 @@ function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: n
     if (h && h.items[item] !== undefined) return { section: h.section, text: h.items[item] }
   }
   return null
+}
+
+// Only an open proposal can end by withdrawal: an approved one is running or ran, and a rejected
+// one keeps its outcome (the server refuses the first with 409 proposal_running).
+function endIfOpen(p: ProposalState, withdrawn: WithdrawnState): ProposalState {
+  return p.status === 'open' ? { ...p, status: 'withdrawn', withdrawn } : p
 }
 
 export function applyEvent(state: RoomState, event: Event): RoomState {
@@ -215,6 +237,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
         status: 'closed',
         closed_at: event.at,
         resolution: p.resolution,
+        // An open proposal does not outlive its room. The server writes proposal.withdrawn right after
+        // room.closed, but a log from before Q0 has none and must not show "waiting for approval" forever.
+        proposals: state.proposals.map((prop) => endIfOpen(prop, { reason: WITHDRAWN_ROOM_CLOSED, at: event.at })),
       }
       break
     }
@@ -382,8 +407,31 @@ function applyCore(state: RoomState, event: Event): RoomState {
             author: event.actor,
             at: event.at,
             replies: [],
+            // An unknown kind is a plain comment: only "fix_note" is styled apart.
+            kind: p.kind === 'fix_note' ? 'fix_note' : undefined,
           },
         ],
+      }
+      break
+    }
+
+    case 'owner.paged': {
+      const p = as<OwnerPagedPayload>(event)
+      next = {
+        ...state,
+        pages: [
+          ...state.pages,
+          {
+            seq: event.seq,
+            at: event.at,
+            by: event.actor,
+            layer: p.layer,
+            owners: p.owners ?? [],
+            reason: p.reason,
+            proposal_id: p.proposal_id || undefined,
+            auto: p.auto === true,
+          },
+        ].slice(-PAGES_CAP),
       }
       break
     }
@@ -487,6 +535,10 @@ function applyCore(state: RoomState, event: Event): RoomState {
             risk: p.risk,
             rollback: p.rollback,
             required_layers: p.required_layers ?? [],
+            // Q0 fields stay off a proposal that has none (events from before Q0).
+            ...(p.impacted_layers?.length ? { impacted_layers: p.impacted_layers } : {}),
+            ...(p.risk_level ? { risk_level: p.risk_level } : {}),
+            ...(p.impact_reasons?.length ? { impact_reasons: p.impact_reasons } : {}),
             approvals,
             decisions: {},
             // The event's hash, else the snapshot's (an event written before the
@@ -507,6 +559,21 @@ function applyCore(state: RoomState, event: Event): RoomState {
       next = {
         ...state,
         proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? { ...prop, preview: p } : prop)),
+      }
+      break
+    }
+
+    // The proposal leaves the open list and takes no more decisions. The real event also refines a
+    // withdrawal the reducer inferred from room.closed: it knows who wrote it and why.
+    case 'proposal.withdrawn': {
+      const p = as<ProposalWithdrawnPayload>(event)
+      const withdrawn = { reason: p.reason ?? '', by: event.actor, at: event.at }
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          return prop.status === 'withdrawn' ? { ...prop, withdrawn } : endIfOpen(prop, withdrawn)
+        }),
       }
       break
     }
@@ -637,6 +704,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
             summary: p.summary,
             stay_as_watcher: p.stay_as_watcher,
             status: 'pending' as const,
+            // A manual summary was written by the driver who sent the request (the event's actor).
+            ...(p.manual ? { manual: true, written_by: event.actor } : {}),
           },
         ],
       }

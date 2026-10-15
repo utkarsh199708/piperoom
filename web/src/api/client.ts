@@ -10,11 +10,14 @@ import type {
   ApiError,
   AuthUser,
   ChecklistStepDonePayload,
+  CommentKind,
   Event,
   EventsPage,
+  HandoffSummary,
   HypothesisVerdict,
   LabelInput,
   Me,
+  PageInput,
   Person,
   AgentStats,
   PipelineInfo,
@@ -148,7 +151,7 @@ export const api = {
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
-  comment: (roomId: string, body: { step_id?: string; text: string }) =>
+  comment: (roomId: string, body: { step_id?: string; text: string; kind?: CommentKind }) =>
     request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
   steer: (roomId: string, text: string) =>
     request<Event>(`${room(roomId)}/steer`, { method: 'POST', body: JSON.stringify({ text }) }),
@@ -184,6 +187,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ resolution }),
     }),
+  // Q0 (QA G9): the driver ends an open proposal nobody has approved or run; `reason` is optional.
+  withdrawProposal: (roomId: string, proposalId: string, reason?: string) =>
+    request<Event>(`${room(roomId)}/proposals/${encodeURIComponent(proposalId)}/withdraw`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   approve: (proposalId: string, layer: string, extra: ApproveExtras) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/approve`, {
       method: 'POST',
@@ -195,11 +204,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ layer, reason, params_hash: paramsHash }),
     }),
-  handoff: (roomId: string, to: string, stayAsWatcher: boolean) =>
+  // `summary` (Q0, G4): the driver's own hand-off summary; the server then makes no model call.
+  handoff: (roomId: string, to: string, stayAsWatcher: boolean, summary?: HandoffSummary) =>
     request<Event>(`${room(roomId)}/handoffs`, {
       method: 'POST',
-      body: JSON.stringify({ to, stay_as_watcher: stayAsWatcher }),
+      body: JSON.stringify(summary ? { to, stay_as_watcher: stayAsWatcher, summary } : { to, stay_as_watcher: stayAsWatcher }),
     }),
+  // Q0 (G2): ask the owners of a layer to look. Any member; 409 already_paged within 10 minutes.
+  page: (roomId: string, body: PageInput) =>
+    request<Event>(`${room(roomId)}/page`, { method: 'POST', body: JSON.stringify(body) }),
   acceptHandoff: (handoffId: string) =>
     request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, { method: 'POST' }),
   label: (roomId: string, body: LabelInput) =>

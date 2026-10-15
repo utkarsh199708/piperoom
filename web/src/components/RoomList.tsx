@@ -29,6 +29,7 @@ import type { Dot, RoomTab } from '../lib/rooms'
 import { errorText } from '../lib/errors'
 import { triageLine } from '../lib/triage'
 import { useNow } from './room/useNow'
+import { TitleFlagChip } from './room/TitleFlagChip'
 import { initials, personColor } from '../lib/people'
 import { cn } from '../lib/utils'
 import { modKeyLabel } from '../lib/envLabel'
@@ -614,6 +615,7 @@ function RoomRow({
           >
             {room.title}
           </Link>
+          <TitleFlagChip flags={room.title_flags} />
           {tinted && (
             <Badge variant="warning" title={`Waiting on your ${layers.join(', ')} approval`}>
               Needs you

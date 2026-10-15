@@ -1,5 +1,6 @@
 import { useId, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { AgentText } from './AgentText'
 
 /** Prose longer than this (or with more lines) starts collapsed. */
 const COLLAPSE_CHARS = 280
@@ -14,11 +15,11 @@ function isLongText(text: string): boolean {
 export function CollapsibleText({ text, className }: { text: string; className?: string }) {
   const [open, setOpen] = useState(false)
   const id = useId()
-  if (!isLongText(text)) return <span className={className}>{text}</span>
+  if (!isLongText(text)) return <span className={className}><AgentText text={text} /></span>
   return (
     <span className={cn('flex flex-col items-start gap-0.5', className)}>
       <span id={id} className={cn('whitespace-pre-line break-words', !open && 'line-clamp-3')}>
-        {text}
+        <AgentText text={text} />
       </span>
       <button
         type="button"

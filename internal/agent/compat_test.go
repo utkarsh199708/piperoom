@@ -284,15 +284,19 @@ func TestRecoveredVerdictAfterNoneProposesRestore(t *testing.T) {
 				t.Fatal("the model must be told that p_2 waits for approval")
 			}
 
-			// The room saw the warning too, and the episode ends parked as done.
-			var warned bool
+			// The room saw the warning too (one message next to the verdict
+			// event, not a second verdict), and the episode ends parked as done.
+			var warned int
 			for _, m := range messageTexts(sink) {
-				if strings.HasPrefix(m, "recovered:") && strings.Contains(m, "follow-up: "+compatSubject+" compatibility is still NONE") {
-					warned = true
+				if strings.Contains(m, "follow-up: "+compatSubject+" compatibility is still NONE") {
+					warned++
 				}
 			}
-			if !warned {
-				t.Fatalf("the room message must carry the follow-up, got %q", messageTexts(sink))
+			if warned != 1 {
+				t.Fatalf("the room must see the follow-up once, got %d in %q", warned, messageTexts(sink))
+			}
+			if got := verifications(t, sink); len(got) != 1 || !got[0].Recovered {
+				t.Fatalf("want one recovered verdict event, got %+v", got)
 			}
 			if countDoneStatuses(sink, waitingDetail) != 1 {
 				t.Fatalf("the episode must park as done once the model is finished, got %v", statusList(sink))

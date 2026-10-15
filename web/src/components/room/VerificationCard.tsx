@@ -12,7 +12,7 @@ export interface CloseNudge {
   roomOpen: boolean
   driverName?: string
   isDriver: boolean
-  /** Opens the close dialog with the resolution filled in. */
+  /** Opens the close dialog with the resolution filled in. Set when this person may close: the driver, or (Q0, QA G16) a layer owner. */
   onClose?: (initialText: string) => void
 }
 
@@ -102,7 +102,7 @@ export function VerificationCard({
       {ok && nudge.roomOpen && (
         <div className="flex flex-wrap items-center gap-2 border-t border-border pt-2">
           <span className="font-medium">Pipeline recovered.</span>
-          {nudge.isDriver && nudge.onClose ? (
+          {nudge.onClose ? (
             <Button size="sm" aria-keyshortcuts="C" onClick={() => nudge.onClose?.(`Fixed by "${title}"`)}>
               Close room
               <Kbd aria-hidden="true" className="max-sm:hidden coarse:hidden">

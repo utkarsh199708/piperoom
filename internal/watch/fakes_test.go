@@ -366,6 +366,9 @@ type openRec struct {
 type postRec struct {
 	roomID, text string
 	ev           json.RawMessage
+	// via is the q1Rooms method that took the post: "evidence" or
+	// "incident"; "" for plain PostEvidence.
+	via string
 }
 
 // evidenceRooms is a fakeRooms that also implements EvidenceSink.
@@ -379,6 +382,61 @@ func (r evidenceRooms) PostEvidenceJSON(ctx context.Context, roomID, text string
 	defer r.mu.Unlock()
 	r.posts[len(r.posts)-1].ev = slices.Clone(ev)
 	return nil
+}
+
+// q1Rooms is a fakeRooms with every optional extension: EvidenceSink,
+// IncidentSink and RoomInfoSink (info, guarded by fakeRooms.mu: pipeline ->
+// its open room; absent = no open room).
+type q1Rooms struct {
+	*fakeRooms
+	info map[string]RoomInfo
+}
+
+func (r q1Rooms) OpenRoomInfo(p string) (RoomInfo, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	i, ok := r.info[p]
+	return i, ok
+}
+
+func (r q1Rooms) PostEvidenceJSON(ctx context.Context, roomID, text string, ev json.RawMessage) error {
+	return r.postVia(ctx, roomID, text, ev, "evidence")
+}
+
+func (r q1Rooms) PostIncidentJSON(ctx context.Context, roomID, text string, ev json.RawMessage) error {
+	return r.postVia(ctx, roomID, text, ev, "incident")
+}
+
+func (r q1Rooms) postVia(ctx context.Context, roomID, text string, ev json.RawMessage, via string) error {
+	if err := r.PostEvidence(ctx, roomID, text); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := &r.posts[len(r.posts)-1]
+	p.ev, p.via = slices.Clone(ev), via
+	return nil
+}
+
+// setInfo sets the open room OpenRoomInfo reports for the pipeline.
+func (r q1Rooms) setInfo(p string, i RoomInfo) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.info[p] = i
+}
+
+// postsTo returns the posts into roomID.
+func (r *fakeRooms) postsTo(roomID string) []postRec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []postRec
+	for _, p := range r.posts {
+		if p.roomID == roomID {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 type lastRoom struct {
@@ -607,6 +665,11 @@ type opts struct {
 	noKafka      bool // Deps.Kafka stays nil: the client cannot read DLQ offsets
 	lag          bool // Deps.Lag is h.lag; otherwise nil
 	evidenceSink bool // Deps.Rooms also implements EvidenceSink
+	// q1Sink: Deps.Rooms is h.q1 (EvidenceSink, IncidentSink, RoomInfoSink).
+	q1Sink bool
+	// escalateAfter and joinMaxAge go to config.Watch (0 = never and the
+	// 2 h default).
+	escalateAfter, joinMaxAge time.Duration
 }
 
 type harness struct {
@@ -620,6 +683,7 @@ type harness struct {
 	lag   *fakeLag
 	logs  *logBuf
 	deps  Deps
+	q1    q1Rooms // wraps rooms; the sink when opts.q1Sink
 }
 
 func newHarness(t *testing.T, o opts) *harness {
@@ -653,7 +717,8 @@ func newHarness(t *testing.T, o opts) *harness {
 	}
 	d := Deps{
 		Source: h.src, Connect: h.conn, Owners: loadOwners(t, o.pipes...), Rooms: h.rooms,
-		Config:       config.Watch{Mode: o.mode, Interval: time.Minute, CheckTimeout: o.checkTimeout, Cooldown: o.cooldown},
+		Config: config.Watch{Mode: o.mode, Interval: time.Minute, CheckTimeout: o.checkTimeout, Cooldown: o.cooldown,
+			EscalateAfter: o.escalateAfter, JoinMaxAge: o.joinMaxAge},
 		MaxOpenRooms: o.maxRooms, Clock: h.clk,
 		Log:    slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Jitter: func(time.Duration) time.Duration { return 0 },
@@ -666,6 +731,10 @@ func newHarness(t *testing.T, o opts) *harness {
 	}
 	if o.evidenceSink {
 		d.Rooms = evidenceRooms{h.rooms}
+	}
+	h.q1 = q1Rooms{fakeRooms: h.rooms, info: map[string]RoomInfo{}}
+	if o.q1Sink {
+		d.Rooms = h.q1
 	}
 	h.deps = d
 	w, err := New(d)

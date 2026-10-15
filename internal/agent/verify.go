@@ -29,6 +29,11 @@ import (
 // rows after the fix. A sink table with no known timestamp column, or a pipeline
 // with no or too many sink tables, is "data flow not verified" and never counts
 // as recovered.
+//
+// The layers do not settle at once (Kafka Connect restarts asynchronously), so
+// the layer checks are polled (verify_settle.go) before any verdict is reached.
+// The verdict is then announced once, as agent.verification; a later repeat of
+// the last step's result gets the Repeat form of the event and no new checks.
 
 const (
 	// freshnessAttempts is how many warehouse_freshness reads follow the check
@@ -51,6 +56,9 @@ const (
 	recoveredConfigHead = "recovered: every layer check passed. The proposal only changed schema configuration, so data flow was not part of this verdict.\n"
 	// waitingDetail is the status detail of a recovered episode parked for input.
 	waitingDetail = "pipeline recovered; waiting for input"
+	// dataFlowInfoOnly is the data-flow detail of a verdict that did not need
+	// data flow (a compatibility restore): the reading is shown, not judged.
+	dataFlowInfoOnly = "information only, not part of this verdict"
 )
 
 // proposalRecord is what the agent remembers about a proposal it created, so a
@@ -224,8 +232,17 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		return actionOutcome{}
 	}
 	if rec.verified {
-		// A repeated last-step result never runs the checks again and never
-		// emits done again; it reports the verdict already reached.
+		// A repeated last-step result never runs the checks again, never emits
+		// done again and never announces a second verdict: it gets the Repeat
+		// form of agent.verification, which clients keep from overwriting the
+		// full one. The model hears the verdict already reached.
+		r.emit(ctx, events.AgentVerification, events.AgentVerificationPayload{
+			ProposalID: id,
+			Checks:     []events.VerificationCheck{},
+			Recovered:  rec.recovered,
+			Verdict:    "already verified: " + verdictWord(rec.recovered) + "; no checks were run again",
+			Repeat:     true,
+		})
 		return actionOutcome{
 			recovered: rec.recovered,
 			broken:    !rec.recovered,
@@ -233,12 +250,18 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		}
 	}
 
-	recovered, evidence, head := r.verifyProposal(ctx, rec)
+	v := r.verifyProposal(ctx, rec)
+	if v.aborted {
+		// The run is ending. A verdict reached half way would be a guess, and
+		// marking the proposal verified would stop a later run from checking it.
+		return actionOutcome{}
+	}
+	recovered, head, evidence := v.recovered, v.head, v.evidence
 	var followUp string
 	if recovered {
 		followUp = compatFollowUp(rec.steps)
 	}
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence + followUp})
+	r.announceVerdict(ctx, id, v, followUp)
 	r.proposals.markVerified(id, recovered)
 	if recovered {
 		r.trackNoneSubjects(rec.steps)
@@ -260,6 +283,40 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
 	}
 	return out
+}
+
+// announceVerdict tells the room the verdict on a proposal, once: as the typed
+// agent.verification event, which replaces the plain-text verdict message.
+//
+// A room service that does not know the type yet refuses it (an older build
+// during a rolling upgrade). Then the same verdict goes out as one agent.message
+// so the room is never left without it; the message is the fallback, never sent
+// next to the event.
+func (r *runner) announceVerdict(ctx context.Context, proposalID string, v verifyOutcome, followUp string) {
+	err := r.tryEmit(ctx, events.AgentVerification, events.AgentVerificationPayload{
+		ProposalID: proposalID,
+		Checks:     v.checks,
+		DataFlow:   v.flow,
+		Recovered:  v.recovered,
+		Verdict:    strings.TrimSuffix(v.head, "\n"),
+	})
+	if err == nil {
+		// The follow-up is a warning about what the fix left behind, not a second
+		// announcement of the verdict: the room keeps seeing it.
+		if note := strings.TrimSpace(followUp); note != "" {
+			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: note})
+		}
+		return
+	}
+	r.log.Warn("agent: verification event not accepted; announcing the verdict as a message", "proposal", proposalID, "err", err)
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: v.head + v.evidence + followUp})
+}
+
+// tryEmit is emit that returns the sink's error instead of logging it.
+func (r *runner) tryEmit(ctx context.Context, typ events.Type, payload any) error {
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	return r.deps.Sink.Emit(ctx, typ, payload)
 }
 
 // compatFollowUp tells the model that a recovered fix left a schema subject at
@@ -370,21 +427,45 @@ func unknownOutcomeText(id string, step int, parsed bool) string {
 	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step)
 }
 
-// verifyProposal runs the layer checks and then the data-flow check. It returns
-// whether recovery is confirmed, one evidence line per check, and the verdict
-// head that opens the room message and the model note. The data-flow check runs
-// only after the layer checks pass.
-func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, string, string) {
-	var lines []string
-	layersOK := true
-	for _, c := range verifyChecks(rec.steps) {
-		ok, line := r.runVerifyCheck(ctx, c)
-		layersOK = layersOK && ok
-		lines = append(lines, c.name+": "+line)
+// verifyOutcome is the verdict on one proposal, before it is announced.
+type verifyOutcome struct {
+	recovered bool
+	// head opens the model note and the legacy message; it ends in a newline.
+	// The agent.verification verdict is the same text without it.
+	head string
+	// evidence is one line per check and per sink, for the model note.
+	evidence string
+	// checks and flow are the structured form of the evidence, for the event.
+	checks []events.VerificationCheck
+	flow   *events.DataFlowCheck
+	// aborted is true when ctx ended before a verdict: nothing is announced and
+	// the proposal stays unverified, so a replayed result can verify it.
+	aborted bool
+}
+
+// verifyProposal runs the layer checks, polling until they settle (see
+// settleLayers), and then the data-flow check. The data-flow check runs only
+// after the layer checks pass.
+func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyOutcome {
+	settle := r.settleLayers(ctx, verifyChecks(rec.steps))
+	if settle.aborted {
+		return verifyOutcome{aborted: true}
 	}
-	if !layersOK {
-		lines = append(lines, "data flow: not checked because a layer check did not pass")
-		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
+	lines := append([]string(nil), settle.lines...)
+	out := verifyOutcome{checks: settle.checks}
+	if out.checks == nil {
+		out.checks = []events.VerificationCheck{} // JSON [], never null
+	}
+	if !settle.ok {
+		const why = "not checked because a layer check did not pass"
+		lines = append(lines, "data flow: "+why)
+		out.evidence = strings.Join(lines, "\n")
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: why}
+		out.head = "NOT recovered: a layer check did not pass.\n"
+		if settle.timedOut {
+			out.head = fmt.Sprintf("NOT recovered: a layer check had not passed after %s of waiting for the layers to settle.\n", r.timing.verifySettleDeadline())
+		}
+		return out
 	}
 
 	if r.recoveredIdle && schemaConfigOnly(rec.steps) && r.restoresTrackedSubjects(rec.steps) {
@@ -396,31 +477,61 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		// change of any other subject (for example FULL to BACKWARD after a
 		// re-break) is not that restore, so the data-flow rule applies.
 		flow := r.verifyDataFlow(ctx, rec, false)
+		if ctx.Err() != nil {
+			return verifyOutcome{aborted: true}
+		}
 		lines = append(lines, "data flow (information only, not part of this verdict):")
 		lines = append(lines, flow.lines...)
-		return true, strings.Join(lines, "\n"), recoveredConfigHead
+		out.evidence = strings.Join(lines, "\n")
+		out.flow = flow.event()
+		if out.flow.Checked {
+			// Checked is shown to people as a reading; Detail says it is not part
+			// of the verdict (clients show Detail only for an unchecked flow).
+			out.flow.Detail = dataFlowInfoOnly
+		}
+		out.recovered = true
+		out.head = recoveredConfigHead
+		return out
 	}
 
 	flow := r.verifyDataFlow(ctx, rec, true)
+	if ctx.Err() != nil {
+		return verifyOutcome{aborted: true}
+	}
 	lines = append(lines, flow.lines...)
-	evidence := strings.Join(lines, "\n")
+	out.evidence = strings.Join(lines, "\n")
+	out.flow = flow.event()
 	switch {
 	case !flow.verified:
-		return false, evidence, "NOT recovered: data flow not verified.\n"
+		out.head = "NOT recovered: data flow not verified.\n"
 	case !flow.fresh:
-		return false, evidence, "NOT recovered: data flow did not pass; no new rows since the fix.\n"
+		out.head = "NOT recovered: data flow did not pass; no new rows since the fix.\n"
+	default:
+		out.recovered = true
+		out.head = recoveredHead
 	}
-	return true, evidence, recoveredHead
+	return out
 }
 
 // verifyCheck is one read-tool check of a layer in the verification pass.
 type verifyCheck struct {
 	name  string
 	input json.RawMessage
+	// layer is the layer the check reads (one of events.Layers), for the
+	// agent.verification event.
+	layer string
 	judge func(tools.Result) bool
+	// state, when set, tells a result that is not a pass apart: still settling
+	// (checkPending) or really failed (checkFail). Nil means judge decides and
+	// everything that is not a pass has failed: the layer answers at once.
+	state func(tools.Result) checkState
 	// settle makes a passing check count only if it still passes after
 	// settleWait, so a transient healthy state does not count as recovery.
 	settle bool
+	// failConfirm is how many rounds in a row a failure must be read before it
+	// counts as final (0 and 1 mean once). The layer may still be showing the
+	// state from before the fix while it restarts.
+	failConfirm int
 }
 
 // verifyChecks maps the layers a proposal touched to read-tool checks, in step
@@ -471,7 +582,11 @@ func compatCheck(s events.ProposalStep, steps []events.ProposalStep) (verifyChec
 	if want == "" {
 		return verifyCheck{}, "", false
 	}
-	return verifyCheck{name: "schema_registry_versions", input: jsonObject("subject", subject), judge: compatibilityIs(want)}, subject, true
+	layer := s.Layer
+	if layer == "" {
+		layer = "schema-registry"
+	}
+	return verifyCheck{name: "schema_registry_versions", input: jsonObject("subject", subject), layer: layer, judge: compatibilityIs(want)}, subject, true
 }
 
 // compatibilityIs judges a schema_registry_versions result: the subject's
@@ -564,9 +679,9 @@ func checkForStep(s events.ProposalStep) (verifyCheck, bool) {
 		if !ok {
 			return verifyCheck{}, false
 		}
-		return verifyCheck{name: "connect_status", input: jsonObject("connector", conn), judge: connectRecovered, settle: true}, true
+		return verifyCheck{name: "connect_status", input: jsonObject("connector", conn), layer: s.Layer, judge: connectRecovered, state: connectState, settle: true, failConfirm: connectFailConfirm}, true
 	case "postgres":
-		return verifyCheck{name: "pg_replication_slots", input: json.RawMessage(`{}`), judge: pgSlotsRecovered}, true
+		return verifyCheck{name: "pg_replication_slots", input: json.RawMessage(`{}`), layer: s.Layer, judge: pgSlotsRecovered, state: pgSlotsState}, true
 	default:
 		return verifyCheck{}, false
 	}
@@ -582,6 +697,9 @@ type flowResult struct {
 	// lines is the evidence, one line per sink table or per reason it was not
 	// verified.
 	lines []string
+	// sinks is the same evidence for the agent.verification event; empty when
+	// the check could not run.
+	sinks []events.SinkCheck
 }
 
 // sinkTable is one warehouse table the alert's pipeline loads, with the column
@@ -623,6 +741,7 @@ type sinkState struct {
 	proposalAt  time.Time // creation baseline; meaningful only when hasProposal
 	hasProposal bool
 	checkAt     time.Time // check baseline: the newest row when the check began
+	newest      time.Time // the newest row of the latest read
 	passed      bool
 	passedBy    string // "rows since proposal" or "rows during check"
 	lastSummary string
@@ -664,6 +783,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 			return flowResult{lines: []string{"data flow not verified: reading " + s.name + ": " + err.Error()}}
 		}
 		st.checkAt = newest
+		st.newest = newest
 		st.lastSummary = summary
 		if st.hasProposal && newest.After(st.proposalAt) {
 			st.passed = true
@@ -686,6 +806,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 				return flowResult{lines: []string{"data flow not verified: reading " + st.table.name + ": " + err.Error()}}
 			}
 			st.lastSummary = summary
+			st.newest = newest
 			if newest.After(st.checkAt) {
 				st.passed = true
 				st.passedBy = "rows during check"
@@ -695,6 +816,11 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 
 	res := flowResult{verified: true, fresh: true}
 	for _, st := range states {
+		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
+		if st.hasProposal {
+			sc.Baseline = st.proposalAt
+		}
+		res.sinks = append(res.sinks, sc)
 		if st.passed {
 			res.lines = append(res.lines, fmt.Sprintf("data flow %s: %s (%s)", st.table.name, st.passedBy, st.readings()))
 			continue
@@ -703,6 +829,20 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		res.lines = append(res.lines, fmt.Sprintf("data flow %s: no new rows since the fix (%s); last read %s", st.table.name, st.readings(), clipLine(st.lastSummary)))
 	}
 	return res
+}
+
+// event renders the data-flow result for agent.verification. A check that
+// could not run says why in Detail, without the "data flow not verified: "
+// lead of the evidence line.
+func (f flowResult) event() *events.DataFlowCheck {
+	if !f.verified {
+		detail := ""
+		if len(f.lines) > 0 {
+			detail = clipLine(strings.TrimPrefix(f.lines[0], "data flow not verified: "))
+		}
+		return &events.DataFlowCheck{Checked: false, Detail: detail}
+	}
+	return &events.DataFlowCheck{Checked: true, Fresh: f.fresh, Sinks: f.sinks}
 }
 
 // anyPending reports whether some sink has not passed yet.
@@ -819,7 +959,22 @@ func decodeData(data any, v any) error {
 // connectRecovered reports whether a connect_status result shows a connector
 // that is RUNNING with at least one task, and every task RUNNING. A payload that
 // cannot be decoded is never a recovery: the summary text is not judged.
-func connectRecovered(res tools.Result) bool {
+func connectRecovered(res tools.Result) bool { return connectState(res) == checkPass }
+
+// connectState reads a connect_status result. Kafka Connect restarts a
+// connector or task asynchronously, so right after a fix the status is often a
+// transition, not an outcome:
+//
+//   - checkPass: the connector and every task are RUNNING, and there is at
+//     least one task;
+//   - checkPending: still settling. A connector or task is UNASSIGNED or
+//     RESTARTING, or the connector is RUNNING with no task yet. This wins over
+//     a failure elsewhere in the same status: while something restarts, a FAILED
+//     task next to it may be the state from before the fix;
+//   - checkFail: anything else (FAILED, PAUSED, STOPPED, a state this code does
+//     not know), and a payload that cannot be decoded. Summary text is never
+//     judged.
+func connectState(res tools.Result) checkState {
 	var d struct {
 		State string `json:"state"`
 		Tasks []struct {
@@ -827,83 +982,87 @@ func connectRecovered(res tools.Result) bool {
 		} `json:"tasks"`
 	}
 	if err := decodeData(res.Data, &d); err != nil {
-		return false
+		return checkFail
 	}
-	if d.State != "RUNNING" || len(d.Tasks) == 0 {
-		return false
-	}
-	for _, t := range d.Tasks {
-		if t.State != "RUNNING" {
-			return false
+	pending, failed := false, false
+	classify := func(state string) {
+		switch state {
+		case "RUNNING":
+		case "UNASSIGNED", "RESTARTING":
+			pending = true
+		default:
+			failed = true
 		}
 	}
-	return true
+	classify(d.State)
+	if len(d.Tasks) == 0 && !failed {
+		pending = true // the tasks are created after the connector starts
+	}
+	for _, t := range d.Tasks {
+		classify(t.State)
+	}
+	switch {
+	case pending:
+		return checkPending
+	case failed:
+		return checkFail
+	}
+	return checkPass
 }
 
 // pgSlotsRecovered reports whether pg_replication_slots shows at least one
 // active logical replication slot. A payload that cannot be decoded is never a
 // recovery: the summary text carries slot names from the database, so it can
 // hold "active=true" without any slot being active, and it is not judged.
-func pgSlotsRecovered(res tools.Result) bool {
+func pgSlotsRecovered(res tools.Result) bool { return pgSlotsState(res) == checkPass }
+
+// pgSlotsState reads a pg_replication_slots result. A slot turns active when
+// the connector reconnects, which follows the fix by a few seconds: no active
+// slot yet is checkPending. A payload that cannot be decoded is checkFail.
+func pgSlotsState(res tools.Result) checkState {
 	var slots []struct {
 		Active bool `json:"active"`
 	}
 	if err := decodeData(res.Data, &slots); err != nil {
-		return false
+		return checkFail
 	}
 	for _, s := range slots {
 		if s.Active {
-			return true
+			return checkPass
 		}
 	}
-	return false
+	return checkPending
 }
 
-// runVerifyCheck runs one layer check. A settling check must also pass a second
-// read after settleWait. It returns whether the check passed and an evidence
-// line.
-func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, string) {
-	ok, line := r.readCheck(ctx, c)
-	if !ok || !c.settle {
-		return ok, line
-	}
-	if err := r.clk.Sleep(ctx, r.timing.settleWait); err != nil {
-		return false, "settling: " + err.Error()
-	}
-	ok, again := r.readCheck(ctx, c)
-	return ok, line + "; read again after " + r.timing.settleWait.String() + ": " + again
-}
+// errVerifyUnrunnable marks a verification read that cannot run at all (the
+// tool is missing or is not a read tool, or the input is invalid). Waiting does
+// not change that, unlike a tool that failed while its layer restarts.
+var errVerifyUnrunnable = errors.New("agent: verify: check cannot run")
 
-// readCheck reads one layer check once and judges it. It returns whether the
-// check passed and the evidence line (a tool summary, or an error message).
-func (r *runner) readCheck(ctx context.Context, c verifyCheck) (bool, string) {
-	res, err := r.runVerifyTool(ctx, c.name, c.input)
-	if err != nil {
-		return false, "error: " + err.Error()
-	}
-	return c.judge(res), clipLine(res.Summary)
-}
-
-// runVerifyTool executes one read tool for verification, emitting the same
+// runStep executes one read tool for verification, emitting the same
 // step/tool events a normal read-tool call produces, and returns the raw
-// result so the caller can judge it.
-func (r *runner) runVerifyTool(ctx context.Context, name string, input json.RawMessage) (tools.Result, error) {
-	return r.runStep(ctx, "verify", name, input)
+// result so the caller can judge it. The room step is titled verb + " " +
+// name, so the room tells a creation baseline read ("baseline ...") from a
+// check read ("verify ...").
+func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, error) {
+	return r.runStepEvents(ctx, verb, name, input, true)
 }
 
-// runStep is runVerifyTool with the room step titled verb + " " + name, so the
-// room tells a creation baseline read ("baseline ...") from a check read
-// ("verify ...").
-func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, error) {
+// runStepEvents is runStep with the room events optional. The settle loop
+// reads the same check every few seconds; only its first read goes to the room,
+// so a layer that takes a minute to restart does not fill the log with a dozen
+// identical steps. The result is scrubbed either way, since its summary reaches
+// the model and the verdict.
+func (r *runner) runStepEvents(ctx context.Context, verb, name string, input json.RawMessage, withEvents bool) (tools.Result, error) {
 	entry, ok := r.toolList.byName[name]
 	if !ok {
-		return tools.Result{}, fmt.Errorf("agent: verify: unknown tool %q", name)
+		return tools.Result{}, fmt.Errorf("%w: unknown tool %q", errVerifyUnrunnable, name)
 	}
 	if entry.isRoom {
-		return tools.Result{}, fmt.Errorf("agent: verify: %q is not a read tool", name)
+		return tools.Result{}, fmt.Errorf("%w: %q is not a read tool", errVerifyUnrunnable, name)
 	}
 	if err := validateInput(entry.schema, input); err != nil {
-		return tools.Result{}, fmt.Errorf("agent: verify: invalid input for %s: %w", name, err)
+		return tools.Result{}, fmt.Errorf("%w: invalid input for %s: %w", errVerifyUnrunnable, name, err)
 	}
 
 	stepID := newStepID()
@@ -913,13 +1072,15 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 	// context. So events are emitted without the deadline, and only the tool
 	// call itself is bounded by it.
 	emitCtx := context.WithoutCancel(ctx)
-	r.emit(emitCtx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: verb + " " + name})
-	r.emit(emitCtx, events.AgentToolCall, events.AgentToolCallPayload{
-		StepID:    stepID,
-		ToolUseID: toolUseID,
-		Tool:      name,
-		Input:     input,
-	})
+	if withEvents {
+		r.emit(emitCtx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: verb + " " + name})
+		r.emit(emitCtx, events.AgentToolCall, events.AgentToolCallPayload{
+			StepID:    stepID,
+			ToolUseID: toolUseID,
+			Tool:      name,
+			Input:     input,
+		})
+	}
 
 	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
@@ -928,23 +1089,26 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 	took := time.Since(start).Milliseconds()
 
 	res = r.scrubToolResult(name, res)
-	data := r.toolDataJSON(name, res.Data)
 	if err != nil {
 		// The verdict lines built from this error reach the model and the log.
 		err = r.scrubToolError(name, err)
-		summary, truncated := tools.Truncate("error: " + err.Error())
-		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
-			StepID: stepID, ToolUseID: toolUseID, Tool: name,
-			Summary: summary, IsError: true, Truncated: truncated, TookMS: took,
-		})
+		if withEvents {
+			summary, truncated := tools.Truncate("error: " + err.Error())
+			r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
+				StepID: stepID, ToolUseID: toolUseID, Tool: name,
+				Summary: summary, IsError: true, Truncated: truncated, TookMS: took,
+			})
+		}
 		return tools.Result{}, err
 	}
-	summary, reTruncated := tools.Truncate(res.Summary)
-	r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
-		StepID: stepID, ToolUseID: toolUseID, Tool: name,
-		Summary: summary, Data: data, IsError: false,
-		Truncated: res.Truncated || reTruncated, TookMS: took,
-	})
+	if withEvents {
+		summary, reTruncated := tools.Truncate(res.Summary)
+		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
+			StepID: stepID, ToolUseID: toolUseID, Tool: name,
+			Summary: summary, Data: r.toolDataJSON(name, res.Data), IsError: false,
+			Truncated: res.Truncated || reTruncated, TookMS: took,
+		})
+	}
 	return res, nil
 }
 

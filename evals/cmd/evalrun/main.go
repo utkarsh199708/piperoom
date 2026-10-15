@@ -237,7 +237,12 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 
 	pricesFile := f.prices
 	if pricesFile == "" {
-		pricesFile = cfg.ModelPrices
+		// Same default as the server: unset means the built-in table, "off" none.
+		cost, err := config.ParseCost(config.Config{ModelPrices: cfg.ModelPrices})
+		if err != nil {
+			return 1, err
+		}
+		pricesFile = cost.PricesFile
 	}
 	prices, err := agent.LoadModelPrices(pricesFile)
 	if err != nil {

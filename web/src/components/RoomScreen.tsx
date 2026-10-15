@@ -31,6 +31,10 @@ import { NoDriverBanner } from './NoDriverBanner'
 import { ChangesLane } from './room/ChangesLane'
 import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
+import { PageOwnerDialog } from './room/PageOwnerDialog'
+import { FixNoteDialog } from './room/FixNoteDialog'
+import { canPageOwner } from '../lib/pages'
+import { canLogFix } from '../lib/fixNote'
 import type { ChecklistWiring } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
@@ -140,6 +144,8 @@ export function RoomScreen() {
   const [closeOpen, setCloseOpen] = useState(false)
   const [closeText, setCloseText] = useState('')
   const [labelOpen, setLabelOpen] = useState(false)
+  const [pageOpen, setPageOpen] = useState(false)
+  const [fixOpen, setFixOpen] = useState(false)
   // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
@@ -268,6 +274,10 @@ export function RoomScreen() {
   }
 
   const viewer = isViewer(user)
+  // The names an owner.paged shows for the user ids it carries: members first, then everyone GET /api/people knows.
+  const ownerLabels: Record<string, string> = {}
+  for (const p of peopleList ?? []) ownerLabels[p.id] = p.name
+  for (const m of state.members) ownerLabels[m.id] = m.name
   const stalledFor = state.status === 'open' && state.opened_at ? ageLabel(state.opened_at) : undefined
   const showProposals = state.proposals.length > 0 || user.solo === true
   const roomOpen = state.status === 'open'
@@ -339,6 +349,8 @@ export function RoomScreen() {
         checklist={checklist}
         filterLayer={layerFilter ?? undefined}
         onClearFilter={() => setLayerFilter(null)}
+        pages={state.pages}
+        ownerNames={ownerLabels}
       />
     </section>
     </>
@@ -405,6 +417,8 @@ export function RoomScreen() {
             onExport={viewer ? undefined : exportTranscript}
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
+            onPageOwner={actions.page && canPageOwner(state, user) ? () => setPageOpen(true) : undefined}
+            onLogFix={actions.fixNote && canLogFix(state, user) ? () => setFixOpen(true) : undefined}
           />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
 
@@ -499,6 +513,12 @@ export function RoomScreen() {
       )}
       {labelOpen && state.status === 'closed' && !state.labelled && (
         <LabelDialog state={state} onSubmit={actions.label} onClose={() => setLabelOpen(false)} />
+      )}
+      {pageOpen && canPageOwner(state, user) && (
+        <PageOwnerDialog state={state} actions={actions} people={peopleList} onClose={() => setPageOpen(false)} />
+      )}
+      {fixOpen && canLogFix(state, user) && (
+        <FixNoteDialog state={state} actions={actions} onClose={() => setFixOpen(false)} />
       )}
     </div>
     </DecisionHandleContext.Provider>

@@ -2,8 +2,10 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type {
   ChecklistStepDonePayload,
   Event,
+  HandoffSummary,
   HypothesisVerdict,
   LabelInput,
+  PageInput,
   PresenceMember,
   RoomSnapshot,
   WsServerMessage,
@@ -14,8 +16,8 @@ import { isSoloConfirmError } from '../lib/solo'
 import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
-import { findUser } from '../fixtures/users'
-import { errorText, friendlyError, isNetworkError } from '../lib/errors'
+import { DEV_USERS, findUser } from '../fixtures/users'
+import { closeErrorText, errorText, friendlyError, isNetworkError, withdrawErrorText } from '../lib/errors'
 import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
@@ -67,6 +69,19 @@ export interface CloseResult {
   error?: string
 }
 
+/** What a withdraw attempt came to; `error` is the sentence for the proposal card. */
+export interface WithdrawResult {
+  ok: boolean
+  error?: string
+}
+
+/** What a hand-off request came to; `code` is the server error code (`summary_failed`...) on a failure. */
+export interface HandoffResult {
+  ok: boolean
+  code?: string
+  error?: string
+}
+
 /** A steer or comment that could not reach the server, kept for one retry. */
 interface PendingSend {
   kind: 'steer' | 'comment'
@@ -101,6 +116,12 @@ export interface RoomActions {
    */
   close: (resolution: string) => Promise<CloseResult>
   /**
+   * The driver ends an open proposal (POST .../proposals/{pid}/withdraw, Q0). The result carries the
+   * error, which the proposal card shows itself; the room banner stays out of it. Optional so a caller
+   * that builds its own actions (a test, a read-only view) does not have to supply one; useRoom always does.
+   */
+  withdraw?: (proposalId: string, reason?: string) => Promise<WithdrawResult>
+  /**
    * Resolves when the call is done. `needsConfirm` means the server wants the
    * solo-mode string (docs/design/auth.md 5.3): the caller asks for it and calls
    * again with `extra.confirm`. `mismatch` means the stale banner is up and the room
@@ -110,7 +131,13 @@ export interface RoomActions {
   approve: (proposalId: string, layer: string, extra: ApproveExtras) => Promise<ApproveResult>
   /** `paramsHash` is the hash the UI rendered with the proposal, sent as is. */
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) => void
-  handoff: (to: string, stayAsWatcher: boolean) => void
+  /**
+   * Ask for a hand-off. Without `summary` the agent writes it (up to 3 minutes); with one (Q0, G4) the
+   * driver wrote it and no model is called. Resolves when the server answered. A failure of the agent's
+   * request is also in the room error banner; the caller keeps `code` (`summary_failed`) to offer writing
+   * the summary by hand. A failure of the driver's own summary is only returned, for the form to show.
+   */
+  handoff: (to: string, stayAsWatcher: boolean, summary?: HandoffSummary) => Promise<HandoffResult>
   acceptHandoff: (handoffId: string) => void
   trace: (table: string, key: string) => void
   /**
@@ -120,6 +147,17 @@ export interface RoomActions {
   label: (input: LabelInput) => Promise<CloseResult>
   /** Tick or untick one runbook item (POST /api/rooms/{id}/checklist). A failure shows in the room banner. */
   checklist: (step: ChecklistStepDonePayload) => void
+  /**
+   * Ask the owners of a layer to look at the room (POST /api/rooms/{id}/page, Q0). Resolves when the call
+   * is done; a failure (`already_paged` and the rest) is returned, not put in the room banner, so the
+   * dialog that asked shows the server's message. Optional so test doubles need not provide it.
+   */
+  page?: (input: PageInput) => Promise<CloseResult>
+  /**
+   * Log a fix made outside Piperoom: a comment of kind `fix_note` (Q0, G10). Same result rule as `page`.
+   * Optional so test doubles need not provide it.
+   */
+  fixNote?: (text: string) => Promise<CloseResult>
 }
 
 type RoomAction =
@@ -579,9 +617,21 @@ export function useRoom(roomId: string) {
         setError(null)
         return { ok: true }
       } catch (e) {
-        const text = errorText(e)
+        const text = closeErrorText(e)
         setError(text)
         return { ok: false, error: text }
+      }
+    },
+    withdraw: async (proposalId, reason) => {
+      if (isFixtures()) {
+        synthesize('proposal.withdrawn', { proposal_id: proposalId, reason: reason ?? '' })
+        return { ok: true }
+      }
+      try {
+        await api.withdrawProposal(roomId, proposalId, reason)
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: withdrawErrorText(e) }
       }
     },
     approve: async (proposalId, layer, extra) => {
@@ -641,13 +691,13 @@ export function useRoom(roomId: string) {
           }
         })
     },
-    handoff: (to, stayAsWatcher) => {
+    handoff: async (to, stayAsWatcher, summary) => {
       if (isFixtures()) {
         const target = findUser(to)
         synthesize('handoff.created', {
           handoff_id: nextLocalId(),
           to: { kind: 'human', id: target?.id ?? to, name: target?.name ?? to },
-          summary: {
+          summary: summary ?? {
             what_broke: '',
             why: '',
             done: [],
@@ -656,10 +706,20 @@ export function useRoom(roomId: string) {
             risks: [],
           },
           stay_as_watcher: stayAsWatcher,
+          ...(summary ? { manual: true } : {}),
         })
-        return
+        return { ok: true }
       }
-      void runAction(api.handoff(roomId, to, stayAsWatcher))
+      try {
+        await api.handoff(roomId, to, stayAsWatcher, summary)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        const text = errorText(e)
+        // A summary the driver wrote is answered inside the dialog that sent it, with their words kept.
+        if (!summary) setError(text)
+        return { ok: false, code: e instanceof ApiClientError ? e.code : undefined, error: text }
+      }
     },
     acceptHandoff: (handoffId) => {
       if (isFixtures()) {
@@ -686,6 +746,35 @@ export function useRoom(roomId: string) {
         return
       }
       void runAction(api.checklist(roomId, step))
+    },
+    page: async (input) => {
+      if (isFixtures()) {
+        synthesize('owner.paged', {
+          layer: input.layer,
+          owners: DEV_USERS.filter((u) => u.layers.includes(input.layer)).map((u) => u.id),
+          reason: input.reason,
+          ...(input.proposal_id ? { proposal_id: input.proposal_id } : {}),
+        })
+        return { ok: true }
+      }
+      try {
+        await api.page(roomId, input)
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: errorText(e) }
+      }
+    },
+    fixNote: async (text) => {
+      if (isFixtures()) {
+        synthesize('comment.added', { comment_id: nextLocalId(), text, mentions_agent: false, kind: 'fix_note' })
+        return { ok: true }
+      }
+      try {
+        await api.comment(roomId, { text, kind: 'fix_note' })
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: errorText(e) }
+      }
     },
     trace: (table, key) => {
       if (isFixtures()) {

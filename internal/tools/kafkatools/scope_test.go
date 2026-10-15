@@ -122,7 +122,13 @@ func scopeFakes() (Deps, *counted) {
 			return kafka.TopicConfig{Topic: topic, Partitions: 3, ReplicationFactor: 1}, nil
 		},
 	}
-	return Deps{Connect: fc, Registry: fr, Kafka: fk, Owners: scopeOwners()}, c
+	// The worker log reader counts its calls too, so the scope tests prove
+	// that a refused connector never reaches it.
+	fl := &fakeLogReader{fn: func(_ context.Context, q clients.WorkerLogQuery) ([]clients.LogLine, error) {
+		c.add("log.read:" + q.Connector)
+		return []clients.LogLine{{At: time.Date(2026, 10, 15, 4, 10, 9, 0, time.UTC), Level: "ERROR", Message: "boom"}}, nil
+	}}
+	return Deps{Connect: fc, Registry: fr, Kafka: fk, Owners: scopeOwners(), ConnectLog: fl}, c
 }
 
 func scopeTool(t *testing.T, d Deps, name string) tools.Tool {
@@ -150,6 +156,7 @@ var scopeCases = []struct {
 }{
 	{"connect_status", `{"connector":"pg-orders-connector"}`, `{"connector":"bill-connector"}`},
 	{"connect_config", `{"connector":"pg-orders-connector"}`, `{"connector":"bill-connector"}`},
+	{"connect_worker_log", `{"connector":"pg-orders-connector"}`, `{"connector":"bill-connector"}`},
 	{"schema_registry_versions", `{"subject":"pg.public.orders-value"}`, `{"subject":"bill.public.invoices-value"}`},
 	{"schema_registry_diff", `{"subject":"pg.public.orders-key","from_version":1}`, `{"subject":"bill.public.invoices-value","from_version":1}`},
 	{"kafka_topic_offsets", `{"topic":"pg.public.orders"}`, `{"topic":"bill.public.invoices"}`},

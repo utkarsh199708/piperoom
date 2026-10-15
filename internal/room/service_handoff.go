@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/events"
@@ -75,9 +76,36 @@ func (s *Service) HandoffInFlight(ctx context.Context, roomID string) error {
 // handoff.failed for the same request_id. The summary is written outside s.mu
 // and may take minutes; meanwhile the fold of handoff.requested keeps every
 // other request out, on this replica and, through the log, on the others.
+//
+// A summary the agent cannot write (a model error, a timeout, an incomplete
+// summary) ends the request with handoff.failed {summary_failed} and answers
+// 503 summary_failed, so the driver can retry or write the summary themselves
+// (CreateHandoffManual). Only a store failure is a 500.
 func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID string, stayAsWatcher bool) (events.Event, error) {
+	return s.createHandoff(ctx, user, roomID, toID, stayAsWatcher, nil)
+}
+
+// CreateHandoffManual is CreateHandoff with a summary the driver wrote (QA G4:
+// the agent's attempt failed, or the driver knows better). No model call is
+// made and handoff.created has manual: true. Every other rule of the request
+// is the same: handoff.requested, the in-flight rule, the voiding of older
+// hand-offs, accept. The summary is validated before anything is written
+// (400 validation) and its Violations are never set: no check ran.
+func (s *Service) CreateHandoffManual(ctx context.Context, user User, roomID, toID string, stayAsWatcher bool, summary events.HandoffSummary) (events.Event, error) {
+	return s.createHandoff(ctx, user, roomID, toID, stayAsWatcher, &summary)
+}
+
+// createHandoff is the shared body; manual is nil for an agent-written summary.
+func (s *Service) createHandoff(ctx context.Context, user User, roomID, toID string, stayAsWatcher bool, manual *events.HandoffSummary) (events.Event, error) {
 	if err := s.HandoffInFlight(ctx, roomID); err != nil {
 		return events.Event{}, err
+	}
+	if manual != nil {
+		clean, err := normalizeManualSummary(*manual)
+		if err != nil {
+			return events.Event{}, err
+		}
+		manual = &clean
 	}
 	to, err := s.LookupPerson(ctx, toID)
 	if err != nil {
@@ -119,7 +147,7 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		return events.Event{}, err
 	}
 
-	e, err := s.completeHandoff(ctx, user, to, roomID, requestID, stayAsWatcher)
+	e, err := s.completeHandoff(ctx, user, to, roomID, requestID, stayAsWatcher, manual)
 	if err != nil {
 		s.failHandoff(ctx, roomID, requestID, handoffFailReason(err))
 		return events.Event{}, err
@@ -127,15 +155,98 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 	return e, nil
 }
 
-// errSummary marks a failed summary call, for handoffFailReason.
-var errSummary = errors.New("summary failed")
+// summaryFailed is 503 summary_failed: the agent could not write the hand-off
+// summary (docs/api.md, error table). It carries no cause: model and tool
+// errors can quote room content, so the cause goes to the server log only.
+func summaryFailed() *Error {
+	return &Error{
+		Status: 503, Code: events.HandoffFailedSummary,
+		Msg: "the agent could not write the hand-off summary; try again, or write the summary yourself and send it with the hand-off",
+	}
+}
 
-// completeHandoff writes the summary and appends handoff.created for
-// requestID.
-func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, requestID string, stayAsWatcher bool) (events.Event, error) {
+// Limits of a driver-written summary (docs/api.md, POST /api/rooms/{id}/handoffs).
+const (
+	maxManualSummaryChars = 1000 // what_broke and why
+	maxManualItemChars    = 500  // one item of done, ruled_out, open or risks
+	maxManualListItems    = 20   // items per list
+)
+
+// normalizeManualSummary validates a driver-written summary and returns the
+// form that is stored: trimmed text, blank list items dropped, lists never
+// nil, no Violations. It refuses with 400 validation and never quotes the text.
+func normalizeManualSummary(in events.HandoffSummary) (events.HandoffSummary, error) {
+	var out events.HandoffSummary
+	var err error
+	if out.WhatBroke, err = manualText("what_broke", in.WhatBroke); err != nil {
+		return events.HandoffSummary{}, err
+	}
+	if out.Why, err = manualText("why", in.Why); err != nil {
+		return events.HandoffSummary{}, err
+	}
+	for _, l := range []struct {
+		name string
+		in   []string
+		out  *[]string
+	}{
+		{"done", in.Done, &out.Done},
+		{"ruled_out", in.RuledOut, &out.RuledOut},
+		{"open", in.Open, &out.Open},
+		{"risks", in.Risks, &out.Risks},
+	} {
+		if *l.out, err = manualList(l.name, l.in); err != nil {
+			return events.HandoffSummary{}, err
+		}
+	}
+	return out, nil
+}
+
+// manualText checks one required text of a manual summary.
+func manualText(field, s string) (string, error) {
+	if err := rejectUnstorable(s); err != nil {
+		return "", err
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", validation(field + " is required")
+	}
+	if err := checkLen(field, s, maxManualSummaryChars); err != nil {
+		return "", err
+	}
+	return s, nil
+}
+
+// manualList checks one list of a manual summary. A blank item is dropped, not
+// refused: a form that sends one empty line should not fail the hand-off.
+func manualList(field string, in []string) ([]string, error) {
+	if err := rejectUnstorable(in...); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(in))
+	for _, item := range in {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if err := checkLen(field+" item", item, maxManualItemChars); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	if len(out) > maxManualListItems {
+		return nil, validation(fmt.Sprintf("%s has %d items, the limit is %d", field, len(out), maxManualListItems))
+	}
+	return out, nil
+}
+
+// agentSummary asks the agent for the hand-off summary of roomID. Every
+// failure of the writer (a model error, a timeout, a summary without
+// what_broke) is summaryFailed; only a failure to read the log is an internal
+// error.
+func (s *Service) agentSummary(ctx context.Context, roomID, requestID string) (events.HandoffSummary, error) {
 	roomEvents, err := s.allEvents(ctx, roomID)
 	if err != nil {
-		return events.Event{}, fmt.Errorf("room: handoff: read events: %w", err)
+		return events.HandoffSummary{}, fmt.Errorf("room: handoff: read events: %w", err)
 	}
 	// The same budget handoff.requested announced as expires_at. A relative
 	// timeout, not a deadline at expiresAt: that time is from s.now, which
@@ -144,9 +255,31 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 	summary, err := s.writeHandoff(wctx, roomEvents, s.opts)
 	cancel()
 	if err != nil {
-		return events.Event{}, fmt.Errorf("room: handoff: write summary: %w: %w", errSummary, err)
+		s.log.Warn("room: hand-off summary failed", "room", roomID, "request", requestID, "err", err)
+		return events.HandoffSummary{}, summaryFailed()
 	}
 	summary = sanitizeHandoff(summary)
+	// The writer is meant to refuse an incomplete summary itself; a hand-off
+	// with no headline would still reach the recipient, so check here too.
+	if strings.TrimSpace(summary.WhatBroke) == "" {
+		s.log.Warn("room: hand-off summary has no what_broke", "room", roomID, "request", requestID)
+		return events.HandoffSummary{}, summaryFailed()
+	}
+	return summary, nil
+}
+
+// completeHandoff gets the summary (the driver's, or the agent's) and appends
+// handoff.created for requestID.
+func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, requestID string, stayAsWatcher bool, manual *events.HandoffSummary) (events.Event, error) {
+	var summary events.HandoffSummary
+	if manual != nil {
+		summary = *manual
+	} else {
+		var err error
+		if summary, err = s.agentSummary(ctx, roomID, requestID); err != nil {
+			return events.Event{}, err
+		}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -193,6 +326,7 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 		To:            s.humanActor(to),
 		Summary:       summary,
 		StayAsWatcher: stayAsWatcher,
+		Manual:        manual != nil,
 	})
 	if err != nil {
 		if delErr := s.store.DeleteHandoff(ctx, handoffID); delErr != nil {
@@ -214,7 +348,7 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 func handoffFailReason(err error) string {
 	var re *Error
 	switch {
-	case errors.Is(err, errSummary):
+	case errors.As(err, &re) && re.Code == events.HandoffFailedSummary:
 		return events.HandoffFailedSummary
 	case errors.As(err, &re) && re.Code == codeNotDriver:
 		return events.HandoffFailedNotDriver

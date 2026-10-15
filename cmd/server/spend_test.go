@@ -36,8 +36,20 @@ func TestSpendSetup(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s.roomLimit != agent.DefaultRoomTokenBudget || s.cost != (config.Cost{}) || s.prices != nil {
+		// Q0 (QA G14): an unset PIPEROOM_MODEL_PRICES means the built-in table.
+		if s.roomLimit != agent.DefaultRoomTokenBudget || s.cost != (config.Cost{PricesFile: config.BuiltinModelPrices}) || !s.prices.Has(base.Model) {
 			t.Fatalf("defaults = %+v", s)
+		}
+	})
+	t.Run("prices off", func(t *testing.T) {
+		c := base
+		c.ModelPrices = "off"
+		s, err := spendSetup(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.cost != (config.Cost{}) || s.prices != nil {
+			t.Fatalf("off = %+v", s)
 		}
 	})
 	t.Run("everything set", func(t *testing.T) {
@@ -63,7 +75,7 @@ func TestSpendSetup(t *testing.T) {
 		"cost with a dangling .":      {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "5.", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
 		"cost finer than a millionth": {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "1.0000001", prices }, "decimal places"},
 		"cost too large":              {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "2000000000", prices }, "too large"},
-		"cost without prices":         {func(c *config.Config) { c.PipelineDailyCostUSD = "10" }, "needs PIPEROOM_MODEL_PRICES"},
+		"cost without prices":         {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "10", "off" }, "needs PIPEROOM_MODEL_PRICES"},
 		"bad daily tokens":            {func(c *config.Config) { c.PipelineDailyTokenBudget = "lots" }, "PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET"},
 		"negative daily tokens":       {func(c *config.Config) { c.PipelineDailyTokenBudget = "-5" }, "PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET"},
 		"bad room budget":             {func(c *config.Config) { c.RoomTokenBudget = "2M" }, "PIPEROOM_ROOM_TOKEN_BUDGET"},

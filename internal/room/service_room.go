@@ -491,14 +491,20 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 	return evs, lastSeq, nil
 }
 
-// CloseRoom closes the room (driver only) and stops the agent.
+// CloseRoom closes the room and stops the agent. The driver may close it, and
+// so may an approver or backup of any layer of the room's pipeline (Q0, QA
+// G16: the owner who fixed it need not be handed control first); that is the
+// label and export rule (canGradeShadow: owners.yaml, users.yaml layers in dev
+// mode, the solo user). Anyone else gets 403 not_driver.
 func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution string) (events.Event, error) {
 	if err := rejectUnstorable(resolution); err != nil {
 		return events.Event{}, err
 	}
 	return s.closeRoom(ctx, roomID, s.humanActor(user), func(st *roomState) (string, error) {
 		if !s.isDriver(st, user.ID) {
-			return "", ErrNotDriver()
+			if _, owner := s.canGradeShadow(st.snap.PipelineID, user); !owner {
+				return "", ErrNotDriver()
+			}
 		}
 		// The resolution is what the shadow run is graded against.
 		if st.snap.Shadow && strings.TrimSpace(resolution) == "" {
@@ -511,8 +517,9 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 // closeRoom closes an open room as actor. check runs under s.mu after the
 // open check and returns the resolution to record, or an error that stops the
 // close. The driver's close and the open-room limit's close share everything
-// else: the alert key release, the persisted close, the shadow grace and
-// reveal, the agent and executor stop and the room-closed hook.
+// else: the withdrawal of the proposals still open (withdrawOnCloseLocked),
+// the alert key release, the persisted close, the shadow grace and reveal, the
+// agent and executor stop and the room-closed hook.
 //
 // With a shared store the room is first brought up to the log (reading outside
 // s.mu), and the close is a checked append: a close and a control change on
@@ -545,6 +552,8 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 		s.mu.Unlock()
 		return events.Event{}, err
 	}
+	// Right after room.closed: no proposal stays open in a closed room.
+	s.withdrawOnCloseLocked(ctx, st, roomID)
 	// A closed room no longer takes repeats of its alert: the next one opens a
 	// new room.
 	s.releaseAlertKeyLocked(roomID, st)
