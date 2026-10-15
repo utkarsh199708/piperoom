@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { emptyStateFor } from '../lib/emptyState'
 import type { ComponentProps, FormEvent } from 'react'
 import { Check, ChevronRight, Wrench, X } from 'lucide-react'
@@ -15,7 +15,7 @@ import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
 import { StepNumbersProvider } from './room/AgentText'
-import { stepAnchor } from '@/lib/triage'
+import { REVEAL_STEP_EVENT, stepAnchor } from '@/lib/triage'
 import { Checklist } from './room/Checklist'
 import { PagesList } from './room/PagesList'
 import type { ChecklistAccess } from './room/Checklist'
@@ -449,6 +449,17 @@ function TimelineBody({
   /** user id -> display name, for the owners a page names. */
   ownerNames?: Record<string, string>
 }) {
+  // QA R18 (G11): a step link to a step that the layer filter hides clears the filter.
+  useEffect(() => {
+    if (!filterLayer || !onClearFilter) return
+    const onReveal = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail
+      const step = steps.find((s) => s.id === id)
+      if (step && !step.tool_calls.some((t) => toolLayer(t.tool) === filterLayer)) onClearFilter()
+    }
+    window.addEventListener(REVEAL_STEP_EVENT, onReveal)
+    return () => window.removeEventListener(REVEAL_STEP_EVENT, onReveal)
+  }, [steps, filterLayer, onClearFilter])
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
     const empty = emptyStateFor(agent)
