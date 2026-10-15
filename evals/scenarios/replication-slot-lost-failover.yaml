@@ -227,10 +227,13 @@ inputs:
 expect:
   root_cause:
     - ['slot*', debezium_orders]
-    # "did not carry", "not carried", "not copied" and "empty slot list": the
-    # first live baseline said the failover "did not carry logical slot
-    # debezium_orders" and cited "the empty slot list" (E5d).
-    - [missing, 'does not exist', gone, lost, 'did not carry', 'not carried', 'not copied', 'empty slot list']
+    # The "did not carry ... slot" phrases name the slot as what the failover
+    # dropped: the first live baseline said it "did not carry logical slot
+    # debezium_orders" (E5d). Bare "not carried"/"not copied" also pass traps
+    # about offsets, publications or passwords (scenario_terms_test.go).
+    - [missing, 'does not exist', gone, lost, 'did not carry logical slot*', 'did not carry the logical slot*',
+       'did not carry the slot*', 'did not carry slot*', 'didn''t carry logical slot*', 'didn''t carry the logical slot*',
+       'didn''t carry the slot*', 'didn''t carry slot*']
     - [failover, promot*, standby, 'new primary']
   first_failing_layer: postgres
   root_cause_layer: postgres
