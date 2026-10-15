@@ -14,6 +14,7 @@ import { AgentPill } from './AgentPill'
 import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
+import { TitleFlagChip } from './TitleFlagChip'
 import { TriageCard } from './TriageCard'
 
 export interface HeaderMember {
@@ -80,6 +81,7 @@ export function RoomHeader({
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
         <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{state.title}</h1>
+        <TitleFlagChip flags={state.title_flags} />
         <Badge variant={state.severity} className="uppercase">
           {state.severity}
         </Badge>

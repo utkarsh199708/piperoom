@@ -42,6 +42,11 @@ type Room struct {
 	// MoreHandoffs are written after Handoff, in order.
 	MoreHandoffs []events.HandoffSummary
 	ToolResults  []ToolResult
+	// Hypothesis adds an agent.hypothesis event, as a worked room has.
+	Hypothesis bool
+	// Steps adds that many agent.step.started events, which the index never
+	// reads. They bring a room to the event count of a worked incident.
+	Steps int
 	// UnverifiedCloser closes the room as a person the server cannot vouch
 	// for (events.Actor.Verified false). The default closer is verified.
 	UnverifiedCloser bool
@@ -100,6 +105,16 @@ func Seed(ctx context.Context, st store.Store, r Room) error {
 			StepID: fmt.Sprintf("s%d", i), ToolUseID: fmt.Sprintf("u%d", i), Tool: tr.Tool, Summary: tr.Summary, IsError: tr.IsError,
 			Data: []byte(`{"bulky":"detail that must not be read"}`),
 		}); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < r.Steps; i++ {
+		if err := app(events.AgentStepStart, events.AgentActor, events.AgentStepStartPayload{StepID: fmt.Sprintf("p%d", i), Title: "check"}); err != nil {
+			return err
+		}
+	}
+	if r.Hypothesis {
+		if err := app(events.AgentHypothesis, events.AgentActor, events.AgentHypothesisPayload{Text: "fixture hypothesis", Confidence: "high"}); err != nil {
 			return err
 		}
 	}

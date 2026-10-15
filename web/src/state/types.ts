@@ -286,6 +286,8 @@ export interface RoomState {
    * unknown (fixtures, empty room). Drives the replay progress bar.
    */
   replay_target: number
+  /** Q0: injection kinds found in the title, from the snapshot; empty when clean. */
+  title_flags?: string[]
   driver: DriverInfo | null
   /** Set when room.created carried an alert webhook body (alert-opened room). */
   alert: AlertInfo | null
@@ -380,6 +382,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     last_seq: 0,
     shadow: snapshot.shadow ?? false,
     replay_target: snapshot.last_seq ?? 0,
+    title_flags: snapshot.title_flags ?? [],
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
         .filter((p) => p.params_hash)

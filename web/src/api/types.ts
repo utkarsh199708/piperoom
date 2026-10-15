@@ -492,6 +492,8 @@ export interface RoomSnapshot {
   shadow?: boolean
   /** F11: cost and clock facts folded server-side; absent on an older server. */
   insight?: RoomInsight
+  /** Q0: injection kinds found in the title (`[]` when clean). The title is still shown, as text. */
+  title_flags?: string[]
 }
 
 /** RoomSnapshot.insight (docs/api.md, F11). */
