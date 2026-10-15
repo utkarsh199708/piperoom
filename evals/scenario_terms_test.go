@@ -103,6 +103,8 @@ var scenarioTermCases = map[string][]termCase{
 		{id: "P5", text: "The replication slot was lost when Postgres restarted for maintenance."},
 		{id: "C1", want: true, text: "Postgres was restarted for maintenance (administrator command, 57P01); nothing is lost."},
 		{id: "C2", want: true, text: "The primary rebooted for an upgrade; pg_recent_ddl shows nothing changed."},
+		// A comma after "is lost" ends the part: no "lost the slot" story.
+		{id: "C3", want: true, text: "Postgres was restarted for maintenance (administrator command, 57P01); nothing is lost, the slot is still there."},
 	},
 	"snowflake-sink-column-missing": {
 		{id: "P1", text: "The schema change was incompatible, so the Snowflake table is missing risk_score."},
