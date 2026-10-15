@@ -125,16 +125,41 @@ describe('⌘K: a dialog it opens returns focus to what had it before the palett
     await waitFor(() => expect(document.activeElement).toBe(document.getElementById('main')))
   })
 
-  // Known gap, #466 (also on main): closing the palette without choosing anything leaves focus on
-  // <body>, because Radix tries the dialog's Trigger and CommandDialog has none. Flip this row to
-  // expect the timeline item when #466 is fixed.
-  it('GAP #466: Escape on the palette itself lands on <body>', async () => {
+  // #466: closing the palette without choosing anything must not drop focus to <body>.
+  async function escapePalette() {
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    fireEvent.keyDown(await screen.findByRole('dialog'), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  }
+
+  it('Escape on the palette itself returns focus to the timeline item', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await escapePalette()
+    await waitFor(() => expect(document.activeElement).toBe(item))
+  })
+
+  it('Escape on the palette falls back to #main when the opener is hidden', async () => {
     render(<Harness />)
     const item = screen.getByRole('button', { name: 'timeline item' })
     item.focus()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    item.setAttribute('hidden', '')
     fireEvent.keyDown(await screen.findByRole('dialog'), { key: 'Escape' })
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('main')))
+  })
+
+  it('Escape after an earlier dialog action still returns focus to the opener', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    await openFromPalette(/Post-mortem draft/)
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-    await waitFor(() => expect(document.activeElement).toBe(document.body))
+    await waitFor(() => expect(document.activeElement).toBe(item))
+    await escapePalette()
+    await waitFor(() => expect(document.activeElement).toBe(item))
   })
 })
