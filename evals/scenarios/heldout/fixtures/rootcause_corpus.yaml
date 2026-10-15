@@ -222,9 +222,8 @@ entries:
     source: "r1"
   - scenario: ledger-producer-timeout-recovery
     text: "Task 0 of pg-ledger-connector timed out because of a Kafka outage."
-    want_root_cause: false
+    want_root_cause: true
     source: "r3"
-    gap: "main has no root_cause_forbidden for this scenario, so this 'Kafka is down' story passes; the #332 redo (after #395) must reject it without rejecting right answers."
   - scenario: payments-sink-dlq
     text: "the v4 records are incompatible with analytics.payments, which lacks the risk_score column, so jdbc-payments-sink fails every write and errors.tolerance=all sends them to the DLQ."
     want_root_cause: true
@@ -741,3 +740,7 @@ entries:
     want_root_cause: false
     source: "r4"
     gap: "main has no root_cause_forbidden for this scenario, so this present-tense 'Kafka outage' story passes; the #332 redo (after #395) must reject it without rejecting the past-tense 'short Kafka outage caused by the 08:52 rolling restart' right answer."
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector timed out because of a Kafka outage during the 08:52 rolling restart, and Connect does not restart a failed task."
+    want_root_cause: true
+    source: "r4"
