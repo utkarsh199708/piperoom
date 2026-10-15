@@ -77,6 +77,8 @@ func TestFirstUserMessageAlertInjectionStaysInsideWrapper(t *testing.T) {
 			for _, alert := range []Alert{
 				{Title: tc.title, PipelineID: "orders"},
 				{Title: "orders stale", PipelineID: tc.title},
+				{Title: "orders stale", Description: tc.title},
+				{Title: "orders stale", Labels: map[string]string{"team": tc.title, tc.title: "x"}},
 			} {
 				msg := firstUserMessage(alert)
 				if out := outsideWrappers(t, msg); strings.Contains(out, marker) {
@@ -97,26 +99,78 @@ func TestFirstUserMessageMasksSecretsInAlert(t *testing.T) {
 	const (
 		dsnPass = "s3cr3tPassw0rdXyz"
 		token   = "ghp_" + "Zq9xLmN2pR7sT4vW8yB1cD5fG3hJ6kQ0aE2u"
+		labPass = "hunter2hunter2"
 	)
 	alert := Alert{
-		Title:      "orders stale: postgres://app:" + dsnPass + "@db:5432/orders refused; Authorization: Bearer " + token,
-		PipelineID: "orders password=" + dsnPass,
+		Title:       "orders stale: postgres://app:" + dsnPass + "@db:5432/orders refused",
+		PipelineID:  "orders password=" + dsnPass,
+		Description: "lag high; Authorization: Bearer " + token,
+		Labels:      map[string]string{"connector": "orders-src", "password": labPass},
 	}
 	msg := firstUserMessage(alert)
-	for _, secret := range []string{dsnPass, token} {
+	for _, secret := range []string{dsnPass, token, labPass} {
 		if strings.Contains(msg, secret) {
 			t.Fatalf("secret %q reached the prompt:\n%s", secret, msg)
 		}
 	}
-	for _, want := range []string{"Alert: <untrusted>orders stale: postgres://app:", "Pipeline: <untrusted>orders"} {
+	for _, want := range []string{
+		"Alert: <untrusted>orders stale: postgres://app:",
+		"Pipeline: <untrusted>orders",
+		"Alert description: <untrusted>lag high",
+		"Alert labels: <untrusted>connector=orders-src, password=",
+	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, msg)
 		}
 	}
+	if out := outsideWrappers(t, msg); strings.Contains(out, "orders-src") || strings.Contains(out, "lag high") {
+		t.Fatalf("alert detail outside the wrapper:\n%s", msg)
+	}
 }
 
-// TestFirstUserMessageNeverReadsRawBody pins that the webhook body stays out
-// of the prompt: internal/alertin selects the alert, the agent reads fields.
+func TestAlertDescriptionAndLabels(t *testing.T) {
+	if alertDescription(Alert{Description: "  "}) != "" || alertLabels(Alert{}) != "" {
+		t.Fatal("empty fields must render nothing")
+	}
+	if !strings.Contains(firstUserMessage(Alert{Title: "t"}), "Alert: ") ||
+		strings.Contains(firstUserMessage(Alert{Title: "t"}), "Alert description") ||
+		strings.Contains(firstUserMessage(Alert{Title: "t"}), "Alert labels") {
+		t.Fatal("an alert without description or labels must not get those lines")
+	}
+
+	long := strings.Repeat("x", 5000)
+	if d := alertDescription(Alert{Description: long}); len(d) > alertDescriptionBytes {
+		t.Fatalf("description %d bytes, cap %d", len(d), alertDescriptionBytes)
+	}
+
+	// Preferred keys come first in their own order, then the rest by key.
+	got := alertLabels(Alert{Labels: map[string]string{"b": "2", "team": "data", "a": "1", "severity": "sev2"}})
+	if want := "severity=sev2, team=data, a=1, b=2"; got != want {
+		t.Fatalf("labels = %q, want %q", got, want)
+	}
+
+	// The cap keeps the preferred keys even when many others sort first.
+	labels := map[string]string{"severity": "sev1", "pipeline": "orders"}
+	for i := 0; i < 50; i++ {
+		labels["a"+strings.Repeat("k", i)] = long
+	}
+	parts := strings.Split(alertLabels(Alert{Labels: labels}), ", ")
+	if len(parts) != alertLabelCount {
+		t.Fatalf("labels = %d, want %d", len(parts), alertLabelCount)
+	}
+	if parts[0] != "severity=sev1" || parts[1] != "pipeline=orders" {
+		t.Fatalf("preferred labels not first: %q", parts[:2])
+	}
+	for _, p := range parts {
+		if len(p) > alertLabelBytes {
+			t.Fatalf("label %d bytes, cap %d", len(p), alertLabelBytes)
+		}
+	}
+}
+
+// TestFirstUserMessageNeverReadsRawBody pins that an external webhook body
+// stays out of the prompt: internal/alertin selects the alert and fills
+// Description and Labels, the agent reads those fields.
 func TestFirstUserMessageNeverReadsRawBody(t *testing.T) {
 	msg := firstUserMessage(Alert{
 		Title: "orders stale",
@@ -147,6 +201,8 @@ func TestSystemPromptNeverCarriesAlertText(t *testing.T) {
 		Title:       title,
 		PipelineID:  "PIPELINE_MARKER",
 		PipelineMap: "MAP_MARKER pg -> kafka",
+		Description: "DESC_MARKER",
+		Labels:      map[string]string{"l": "LABEL_MARKER"},
 	}
 	reg := tools.NewRegistry()
 	r, err := newRunner(alert, Deps{Tools: reg, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: &fakeSink{}, Logger: discardLogger()}, Options{MaxTurns: 1})
@@ -164,7 +220,7 @@ func TestSystemPromptNeverCarriesAlertText(t *testing.T) {
 		t.Fatal("system block must be exactly systemPrompt()")
 	}
 	sys := params.System[0].Text
-	for _, m := range []string{"ALERT_TITLE_MARKER", "PIPELINE_MARKER", "MAP_MARKER"} {
+	for _, m := range []string{"ALERT_TITLE_MARKER", "PIPELINE_MARKER", "MAP_MARKER", "DESC_MARKER", "LABEL_MARKER"} {
 		if strings.Contains(sys, m) {
 			t.Fatalf("system prompt carries alert text %q", m)
 		}

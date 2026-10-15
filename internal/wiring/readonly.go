@@ -15,10 +15,10 @@ import (
 // Reader: the write methods below refuse, and no type assertion reaches the
 // concrete client's. The write halves go to package actions only.
 //
-// The adapters exist because kafkatools.Deps and dbtools.Deps (A2/A3) and
-// topology.NewBuilder still take the whole *Client interfaces. Once R5c
-// switches them to Readers, readConnect and readRegistry can hand over the
-// Reader itself.
+// The adapters exist because kafkatools.Deps, dbtools.Deps,
+// debeziumtools.Deps and topology.NewBuilder still take the whole *Client
+// interfaces. When their owners switch them to Readers (no PR does yet),
+// readConnect and readRegistry can hand over the Reader itself.
 
 // ErrReadOnly is returned by a write method reached through a read-only client.
 // Not to be confused with tools.ErrNotReadOnly, which a read-only registry
