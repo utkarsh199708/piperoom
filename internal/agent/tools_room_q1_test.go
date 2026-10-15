@@ -647,3 +647,19 @@ func TestStrictSchemaBytesWithAllRoomTools(t *testing.T) {
 		}
 	}
 }
+
+// QA S6: decimal.handling.mode=string with no impacted_layers given must still
+// name every approver, because the action's own impact adds consumer and
+// warehouse.
+func TestProposeFixSummaryNamesActionImpactWithoutImpactedLayers(t *testing.T) {
+	store := &withdrawingProposals{}
+	tool := roomToolsWithActions(t, Deps{Proposals: store})["propose_fix"]
+	in := `{"title":"decimals as strings",` + connectorFix + `,"risk":"precision","rollback":"set precise back"}`
+	res, err := runTool(t, tool, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Summary, "waiting for approval from: kafka-connect, consumer, warehouse") {
+		t.Fatalf("summary = %q", res.Summary)
+	}
+}

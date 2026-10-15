@@ -54,6 +54,11 @@ const (
 	// recoveredConfigHead opens the verdict of a proposal that only changed
 	// schema configuration. No data path was touched, so it claims no flow.
 	recoveredConfigHead = "recovered: every layer check passed. The proposal only changed schema configuration, so data flow was not part of this verdict.\n"
+	// recoveredIdleHead opens the verdict of a proposal whose layer checks all
+	// passed while the source had no new change: data flow cannot be judged.
+	recoveredIdleHead = "recovered: every layer check passed; no new source changes to confirm data flow.\n"
+	// idleDetail is the data-flow detail of that verdict.
+	idleDetail = "inconclusive: the source was idle (replication slot did not move, no new WAL), so no new rows could be expected"
 	// waitingDetail is the status detail of a recovered episode parked for input.
 	waitingDetail = "pipeline recovered; waiting for input"
 	// dataFlowInfoOnly is the data-flow detail of a verdict that did not need
@@ -504,6 +509,10 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyO
 	switch {
 	case !flow.verified:
 		out.head = "NOT recovered: data flow not verified.\n"
+	case !flow.fresh && flow.idle:
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: idleDetail}
+		out.recovered = true
+		out.head = recoveredIdleHead
 	case !flow.fresh:
 		out.head = "NOT recovered: data flow did not pass; no new rows since the fix.\n"
 	default:
@@ -700,6 +709,10 @@ type flowResult struct {
 	// sinks is the same evidence for the agent.verification event; empty when
 	// the check could not run.
 	sinks []events.SinkCheck
+	// idle is true when no sink received rows and the source slot did not move
+	// across the check, so the source had no change to replicate. The data-flow
+	// check is then inconclusive, not failed.
+	idle bool
 }
 
 // sinkTable is one warehouse table the alert's pipeline loads, with the column
@@ -815,6 +828,12 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 	}
 
 	res := flowResult{verified: true, fresh: true}
+	if wait && anyPending(states) && !anyPassed(states) {
+		// Only a failing check pays for the slot reads. Idle means every sink is
+		// stale AND the source slot did not move over one more wait: a source
+		// that wrote while the slot stood still is a real failure.
+		res.idle = r.sourceIdle(ctx)
+	}
 	for _, st := range states {
 		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
 		if st.hasProposal {
@@ -843,6 +862,61 @@ func (f flowResult) event() *events.DataFlowCheck {
 		return &events.DataFlowCheck{Checked: false, Detail: detail}
 	}
 	return &events.DataFlowCheck{Checked: true, Fresh: f.fresh, Sinks: f.sinks}
+}
+
+// anyPassed reports whether some sink has passed.
+func anyPassed(states []sinkState) bool {
+	for _, st := range states {
+		if st.passed {
+			return true
+		}
+	}
+	return false
+}
+
+// sourceIdle reports whether the replication slots stood still across one
+// freshnessWait. Any read that fails means unknown, which is not idle.
+func (r *runner) sourceIdle(ctx context.Context) bool {
+	before, ok := r.readSlotPositions(ctx)
+	if !ok {
+		return false
+	}
+	if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+		return false
+	}
+	after, ok := r.readSlotPositions(ctx)
+	return ok && after == before
+}
+
+// readSlotPositions reads the pipeline's replication slots with
+// pg_replication_slots and returns a comparable fingerprint of their
+// confirmed_flush_lsn, restart_lsn and retained WAL. Retained WAL grows with
+// every source write while the slot stands still, so an equal fingerprint
+// before and after the check window means the source had no change. ok is false
+// when the tool is missing, fails, or names no slot: then idleness is unknown
+// and the data-flow rule applies unchanged.
+func (r *runner) readSlotPositions(ctx context.Context) (string, bool) {
+	res, err := r.runStep(ctx, "verify", "pg_replication_slots", json.RawMessage(`{}`))
+	if err != nil {
+		return "", false
+	}
+	var slots []struct {
+		Name              string `json:"name"`
+		ConfirmedFlushLSN string `json:"confirmed_flush_lsn"`
+		RestartLSN        string `json:"restart_lsn"`
+		RetainedWALBytes  int64  `json:"retained_wal_bytes"`
+	}
+	if err := decodeData(res.Data, &slots); err != nil || len(slots) == 0 {
+		return "", false
+	}
+	var sb strings.Builder
+	for _, s := range slots {
+		if s.ConfirmedFlushLSN == "" && s.RestartLSN == "" {
+			return "", false
+		}
+		fmt.Fprintf(&sb, "%s|%s|%s|%d;", s.Name, s.ConfirmedFlushLSN, s.RestartLSN, s.RetainedWALBytes)
+	}
+	return sb.String(), true
 }
 
 // anyPending reports whether some sink has not passed yet.
