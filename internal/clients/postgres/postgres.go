@@ -1,5 +1,6 @@
 // Package postgres implements clients.SourceDB against the CDC source
-// Postgres database. Every connection is opened read-only.
+// Postgres database. Every read runs in its own READ ONLY transaction that is
+// rolled back (pgconv.ReadOnlyPool).
 package postgres
 
 import (
@@ -46,7 +47,7 @@ func New(ctx context.Context, url string) (*DB, error) {
 		pool.Close()
 		return nil, fmt.Errorf("postgres: ping: %w", err)
 	}
-	return &DB{pool: pool, q: pool, target: targetOf(pool)}, nil
+	return &DB{pool: pool, q: pgconv.ReadOnlyPool{Pool: pool}, target: targetOf(pool)}, nil
 }
 
 // Close releases the pool.

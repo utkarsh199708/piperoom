@@ -47,7 +47,7 @@ func New(ctx context.Context, url string) (*DB, error) {
 		pool.Close()
 		return nil, fmt.Errorf("warehouse: ping: %w", err)
 	}
-	return &DB{pool: pool, q: pool, target: targetOf(pool)}, nil
+	return &DB{pool: pool, q: pgconv.ReadOnlyPool{Pool: pool}, target: targetOf(pool)}, nil
 }
 
 // Close releases the pool.
