@@ -771,6 +771,8 @@ var agentEventTypes = map[events.Type]bool{
 	events.AgentHypothesis: true,
 	events.AgentUsage:      true,
 	events.AgentTriage:     true,
+	// The typed verdict after a fix (F4; written by the Q1 settle verifier).
+	events.AgentVerification: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
