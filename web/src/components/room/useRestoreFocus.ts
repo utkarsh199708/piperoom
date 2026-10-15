@@ -1,8 +1,34 @@
 import { useState } from 'react'
 
 /** An element a keyboard user can land on: attached and not inside a `hidden` subtree. */
-function usable(el: Element | null | undefined): el is HTMLElement {
+export function usable(el: Element | null | undefined): el is HTMLElement {
   return el instanceof HTMLElement && el !== document.body && el.isConnected && !el.closest('[hidden]')
+}
+
+/**
+ * The ⌘K palette closes before the dialog it opens mounts, so the dialog cannot see what had focus
+ * before the palette. The palette hands that element over here without focusing it (focusing it
+ * would flash its tooltip and fire its onFocus/onBlur). One slot, taken by the first dialog that
+ * mounts and dropped after a second, so a later unrelated dialog never inherits it. Module scope
+ * because the palette and the dialog share no React parent.
+ */
+let handedOver: Element | null = null
+let handedOverTimer: number | undefined
+
+/** Offer `el` as the element the next dialog should return focus to. */
+export function handOverFocus(el: Element | null): void {
+  window.clearTimeout(handedOverTimer)
+  handedOver = el
+  handedOverTimer = window.setTimeout(() => {
+    handedOver = null
+  }, 1000)
+}
+
+function takeHandedOver(): Element | null {
+  const el = handedOver
+  handedOver = null
+  window.clearTimeout(handedOverTimer)
+  return el
 }
 
 /**
@@ -27,7 +53,11 @@ export function useRestoreFocus(): (event: Event) => void {
   // Read during render: the menu is still mounted then, and gone by the time the dialog closes.
   const [from] = useState<{ opener: Element | null; trigger: HTMLElement | null }>(() => {
     if (typeof document === 'undefined') return { opener: null, trigger: null }
-    return { opener: document.activeElement, trigger: menuTrigger(document.activeElement) }
+    const active = document.activeElement
+    const given = takeHandedOver()
+    // The palette's own input (or <body>) is not an opener worth returning to; the handed-over element is.
+    if (given && (!usable(active) || active.closest('[cmdk-root]'))) return { opener: given, trigger: null }
+    return { opener: active, trigger: menuTrigger(active) }
   })
   return (event) => {
     const target = [from.opener, from.trigger, document.getElementById('main')].find(usable)

@@ -38,3 +38,76 @@ func TestConsumerLagShowsOnlyThePipelinesTopics(t *testing.T) {
 		t.Fatalf("unscoped summary = %q, err = %v", r.Summary, err)
 	}
 }
+
+// TestConsumerLagUnknownPartitions: during a broker outage GroupLag lists the
+// partitions it could not read in Unknown. The summary must call the total a
+// lower bound instead of "total lag 0", and the other pipelines' unknown
+// partitions stay out, as their lag does.
+func TestConsumerLagUnknownPartitions(t *testing.T) {
+	d, _ := scopeFakes(t)
+	d.Kafka.(*fakeKafkaConfig).lagFn = func(_ context.Context, g string) (clients.GroupLag, error) {
+		return clients.GroupLag{Group: g, State: "Stable", Members: 1, TotalLag: 0,
+			Partitions: []clients.PartitionLag{{Topic: "pg.public.orders", Partition: 0, Committed: 5, End: 5, Lag: 0}},
+			Unknown: []clients.PartitionLag{
+				{Topic: "pg.public.orders", Partition: 1, Committed: 40, End: -1, Lag: -1},
+				{Topic: "bill.public.invoices", Partition: 0, Committed: -1, End: -1, Lag: -1},
+			}}, nil
+	}
+	r, err := scopeTool(t, d, "kafka_consumer_lag").Run(roomCtx(), json.RawMessage(`{"group":"order-sync"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"total lag at least 0", "lag unknown for 1 partition(s)", "pg.public.orders/1"} {
+		if !strings.Contains(r.Summary, want) {
+			t.Fatalf("summary %q: want %q", r.Summary, want)
+		}
+	}
+	if strings.Contains(r.Summary, "bill.public") {
+		t.Fatalf("summary leaks the other topic: %q", r.Summary)
+	}
+	data, _ := json.Marshal(r.Data)
+	if !strings.Contains(string(data), `"unknown_partitions":[{"topic":"pg.public.orders","partition":1`) || strings.Contains(string(data), "bill.public") {
+		t.Fatalf("data = %s", data)
+	}
+}
+
+// TestListGroupsCountsUnknownPartitions: a group whose every partition of the
+// topic is unreadable still reads the topic.
+func TestListGroupsCountsUnknownPartitions(t *testing.T) {
+	lag := clients.GroupLag{Unknown: []clients.PartitionLag{{Topic: "pg.public.orders", Partition: 0, Committed: -1, End: -1, Lag: -1}}}
+	if !groupReadsTopic(lag, "pg.public.orders") {
+		t.Fatal("groupReadsTopic ignores Unknown")
+	}
+}
+
+// TestConsumerLagUnknownCapped: during an outage every partition of a large
+// group can be unreadable; Data lists at most maxUnknownShown of them and
+// counts all.
+func TestConsumerLagUnknownCapped(t *testing.T) {
+	var unknown []clients.PartitionLag
+	for p := int32(0); p < 300; p++ {
+		unknown = append(unknown, clients.PartitionLag{Topic: "pg.public.orders", Partition: p, Committed: -1, End: -1, Lag: -1})
+	}
+	d, _ := scopeFakes(t)
+	d.Kafka.(*fakeKafkaConfig).lagFn = func(_ context.Context, g string) (clients.GroupLag, error) {
+		return clients.GroupLag{Group: g, State: "Stable", Members: 1, Unknown: unknown}, nil
+	}
+	r, err := scopeTool(t, d, "kafka_consumer_lag").Run(roomCtx(), json.RawMessage(`{"group":"order-sync"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data struct {
+		Unknown      []clients.PartitionLag `json:"unknown_partitions"`
+		UnknownCount int                    `json:"unknown_count"`
+	}
+	raw, _ := json.Marshal(r.Data)
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Unknown) != 20 || data.UnknownCount != 300 {
+		t.Fatalf("unknown_partitions = %d entries, unknown_count = %d; want 20 and 300", len(data.Unknown), data.UnknownCount)
+	}
+	if !strings.Contains(r.Summary, "lag unknown for 300 partition(s)") || !strings.Contains(r.Summary, "and 295 more") {
+		t.Fatalf("summary = %q", r.Summary)
+	}
+}

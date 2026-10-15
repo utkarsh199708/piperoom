@@ -11,11 +11,24 @@ WAREHOUSE_KIND=snowflake
 WAREHOUSE_DB_URL='svc_piperoom:<password>@myorg-myaccount/ANALYTICS/PUBLIC?warehouse=PIPEROOM_WH&role=PIPEROOM_RO'
 ```
 
-`WAREHOUSE_DB_URL` is a [gosnowflake DSN](https://pkg.go.dev/github.com/snowflakedb/gosnowflake#hdr-Connection_String):
+`WAREHOUSE_DB_URL` is a [gosnowflake DSN](https://pkg.go.dev/github.com/snowflakedb/gosnowflake/v2#hdr-Connection_String):
 `user:password@account/database/schema?warehouse=...&role=...`. `WAREHOUSE_KIND`
 defaults to `postgres`. Any value other than `postgres` or `snowflake` stops the
 server at startup. The DSN holds the password: it is never logged, and startup errors
 are scrubbed of it (`snowflake.Redact`).
+
+TLS revocation: gosnowflake v2.3.0 checks no certificate revocation by default. The client
+turns on fail-open OCSP (v1's behaviour) unless the DSN sets `ocspFailOpen`,
+`disableOCSPChecks` or a `certRevocationCheckMode` itself; `ocspFailOpen=false` makes it
+fail-closed. `SF_DISABLE_OCSP_CHECKS=true` in the environment switches fail-open OCSP off.
+
+The DSN `protocol` parameter must be `https`: a DSN with `protocol=http` (or any other protocol) is refused at
+startup, because the login, password or key-pair JWT and session token would travel in clear
+text. Values the DSN sets explicitly (`ocspFailOpen`, `disableOCSPChecks`,
+`certRevocationCheckMode`) are the operator's choice and are kept as written. The client
+does not second-guess them, except that `disableOCSPChecks=true` logs a warning at startup
+(without the DSN). This checks the `protocol` parameter only; an `http://` `oauthTokenRequestUrl` or
+`oauthAuthorizationUrl` is not refused yet (#496). `tracing` and `clientConfigFile` are refused.
 
 Always URL-encode the password (for example with `url.QueryEscape`). The driver
 unescapes it, so a raw `%` breaks it, a raw `+` turns into a space, and a raw `?`,
@@ -40,7 +53,14 @@ exact SQL is in [docs/pilot/permissions.md](../../../docs/pilot/permissions.md)
   case and then double-quotes it, so `analytics.orders` runs as
   `"ANALYTICS"."ORDERS"`. Reserved words such as `ORDER` or `TIMESTAMP` work.
   A table or column that was created with quotes and a lower- or mixed-case name
-  cannot be reached.
+  cannot be reached, with one exception: the primary key column. `PrimaryKeyColumn`
+  returns it spelled as Snowflake stores it (`ID` if unquoted, `id` if created as `"id"`),
+  and `Row` looks the declared key up and quotes it exactly as stored, so a quoted `"id"`
+  key, an unquoted `ID` key and a table with both are told apart. A caller that names the
+  key in another case (the trace passes the source's `id`) is mapped to the one key column
+  that matches ignoring case; any other name is upper-cased as before. In the returned row,
+  column names are lower-cased unless two columns would collide (`id` and `ID`), which keep
+  their exact names. `Row` runs one extra `SHOW PRIMARY KEYS` per call.
 - Freshness is `SELECT MAX("TS") FROM "SCHEMA"."TABLE"`, returned in UTC.
   `TIMESTAMP_NTZ` is read as UTC wall time. `TIMESTAMP_LTZ` and `TIMESTAMP_TZ` are exact instants.
   The column must be a timestamp type.
