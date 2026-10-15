@@ -151,6 +151,11 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 		Current:  fmt.Sprintf("%s = %s (GET /connectors/%s/config)", p.Key, configText(cfg, p.Key), p.Connector),
 		Expected: fmt.Sprintf("%s = %s; Connect restarts the tasks", p.Key, p.Value),
 	}
+	if cur, set := cfg[p.Key]; set && cur == p.Value {
+		// Execute writes nothing then; the preview must not promise a change.
+		res.Expected = fmt.Sprintf("no change: %s is already %s; no task restart", p.Key, p.Value)
+		return res, nil
+	}
 	// Undo needs a stored value the allow-list would accept again; an unset
 	// key (or a value we truncated or do not offer) cannot be restored by an action.
 	if cur, set := cfg[p.Key]; set && a.allowList()[p.Key][cur] {

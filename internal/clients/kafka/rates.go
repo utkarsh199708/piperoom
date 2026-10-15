@@ -2,9 +2,12 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kerr"
 
 	"piperoom/internal/clients"
 )
@@ -38,14 +41,25 @@ func (c *Client) PartitionRates(ctx context.Context, since time.Time, topics ...
 	var out []clients.PartitionRate
 	for topic, parts := range ends {
 		for p, e := range parts {
-			if p < 0 { // kadm's marker for an unknown topic
+			if p < 0 {
+				// kadm's marker for a topic-level error: only an unknown topic
+				// is absent; any other (authorization, leader election) is a
+				// failure the caller must see, not "not found".
+				if e.Err != nil && !errors.Is(e.Err, kerr.UnknownTopicOrPartition) {
+					return nil, fmt.Errorf("kafka: end offsets %s: %w", topic, e.Err)
+				}
 				continue
 			}
 			if e.Err != nil {
 				return nil, fmt.Errorf("kafka: end offset %s/%d: %w", topic, p, mapNotFound(e.Err))
 			}
 			r := clients.PartitionRate{Topic: topic, Partition: p, End: e.Offset, OffsetAtStart: -1}
-			if f, ok := firsts.Lookup(topic, p); ok && f.Err == nil && f.Offset >= 0 {
+			f, ok := firsts.Lookup(topic, p)
+			if ok && f.Err != nil {
+				// A failed lookup is not "no record since": it would read as zero writes.
+				return nil, fmt.Errorf("kafka: offset after %s for %s/%d: %w", since.UTC().Format(time.RFC3339), topic, p, f.Err)
+			}
+			if ok && f.Offset >= 0 {
 				r.OffsetAtStart = f.Offset
 				if d := e.Offset - f.Offset; d > 0 {
 					r.Records = d
