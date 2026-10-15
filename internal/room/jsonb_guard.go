@@ -109,7 +109,13 @@ func stripBidi(s string) string {
 // sanitizeAgentText is the policy for text a model or a tool produced (agent
 // steps, hypothesis, proposal fields, hand-off summary, action output): NUL and
 // invalid UTF-8 become U+FFFD, so an agent run never fails on bad tool output.
+//
+// Bidi controls are dropped too (stripBidi): forms are pre-filled from agent
+// text (a label from the hypothesis, a close resolution from a proposal title,
+// a checklist steer from runbook text), and typed text holding them is
+// refused.
 func sanitizeAgentText(s string) string {
+	s = stripBidi(s)
 	if err := store.CheckText(s); err == nil {
 		return s
 	}
@@ -127,5 +133,7 @@ func sanitizeAgentPayload(payload any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("room: marshal agent payload: %w", err)
 	}
-	return json.RawMessage(store.SanitizeJSON(raw)), nil
+	// A bidi control is never JSON syntax, so dropping it from the encoded
+	// payload drops it from the strings it was in (sanitizeAgentText).
+	return json.RawMessage(stripBidi(string(store.SanitizeJSON(raw)))), nil
 }

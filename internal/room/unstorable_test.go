@@ -390,3 +390,34 @@ func TestLabelDropsBidiControlsFromAgentText(t *testing.T) {
 		t.Fatalf("label = %+v, %v; want the controls dropped", p, err)
 	}
 }
+
+// Agent text loses bidi controls, so the web forms pre-filled from it pass:
+// a proposal title is stored without them, and a close resolution built from
+// it (the verified-fix nudge) is accepted; one typed with them is dropped of
+// them too, since an older room may still carry them in its titles (#358).
+func TestAgentTextDropsBidiAndPrefilledCloseIsAccepted(t *testing.T) {
+	ctx := context.Background()
+	act := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, _, _ := newTestService(t, act)
+	arjun := mustUser(t, svc, "arjun")
+	roomID := createRoom(t, svc, "arjun").ID
+	title := "restart ⁦orders⁩ connector"
+	if _, err := svc.CreateProposal(ctx, roomID, events.ProposalCreatedPayload{
+		Title: title, Risk: "low", Rollback: "revert",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor); err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	created := eventsOf[events.ProposalCreatedPayload](t, svc, roomID, events.ProposalCreated)
+	if len(created) != 1 || created[0].Title != "restart orders connector" {
+		t.Fatalf("stored proposal titles = %+v, want the bidi controls dropped", created)
+	}
+	ev, err := svc.CloseRoom(ctx, arjun, roomID, `Fixed by "`+title+`"`)
+	if err != nil {
+		t.Fatalf("close with a resolution pre-filled from a proposal title: %v", err)
+	}
+	p, err := events.Decode[events.RoomClosedPayload](ev)
+	if err != nil || p.Resolution != `Fixed by "restart orders connector"` {
+		t.Fatalf("resolution = %q, %v; want the bidi controls dropped", p.Resolution, err)
+	}
+}

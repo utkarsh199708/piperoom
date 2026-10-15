@@ -3,12 +3,12 @@ package room
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
@@ -84,18 +84,48 @@ func TestGapFillSurvivesEndedRequest(t *testing.T) {
 	}
 }
 
-// failingSinceCoord fails every log read while failing is set (a store that
-// accepts our append, then drops every read).
+// failingSinceCoord is a store whose log reads can fail (failing), answer not
+// found (notFound), leave one seq out of the page (drop), or run afterRead
+// once right after the next read from the start of the log (the rebuild) is
+// taken, to change the store while the rebuild reads. sinces counts reads.
 type failingSinceCoord struct {
 	fakeCoord
-	failing atomic.Bool
+	failing   atomic.Bool
+	notFound  atomic.Bool
+	drop      atomic.Int64
+	sinces    atomic.Int32
+	mu        sync.Mutex
+	afterRead func()
 }
 
 func (c *failingSinceCoord) Since(ctx context.Context, roomID string, after int64, limit int) ([]events.Event, error) {
+	c.sinces.Add(1)
+	if c.notFound.Load() {
+		return nil, store.ErrNotFound
+	}
 	if c.failing.Load() {
 		return nil, errors.New("connection reset")
 	}
-	return c.fakeCoord.Store.Since(ctx, roomID, after, limit)
+	evs, err := c.fakeCoord.Store.Since(ctx, roomID, after, limit)
+	if d := c.drop.Load(); d != 0 {
+		evs = slices.DeleteFunc(evs, func(e events.Event) bool { return e.Seq == d })
+	}
+	if after == 0 {
+		c.mu.Lock()
+		f := c.afterRead
+		c.afterRead = nil
+		c.mu.Unlock()
+		if f != nil {
+			f()
+		}
+	}
+	return evs, err
+}
+
+func (c *failingSinceCoord) onRebuildRead(f func()) {
+	c.mu.Lock()
+	c.afterRead = f
+	c.mu.Unlock()
 }
 
 // When the gap still cannot be read after the retry, our event is folded over
@@ -206,31 +236,6 @@ func (r *staleRig) grant(t *testing.T) events.Event {
 		events.ControlGrantedPayload{To: r.svc.humanActor(r.priya), LeaseUntil: leaseT0.Add(DriverLease)})
 }
 
-// While the store still cannot be read, the rebuild fails: the room stays
-// stale with its snapshot as it was, and the rebuild is queued again.
-func TestStaleRebuildFailureStaysStaleAndRetries(t *testing.T) {
-	r := newStaleRig(t)
-	remote := r.grant(t)
-	r.emitOverFailedGap(t)
-	before := mustRoom(t, r.svc, r.roomID)
-
-	r.svc.follow.take() // forget the queue fillGapLocked's rebuildLater may fill
-	r.svc.followRoom(r.roomID, remote.Seq)
-	st := r.svc.cached(r.roomID)
-	if !st.stale.Load() {
-		t.Fatal("room no longer stale after a failed rebuild")
-	}
-	if after := mustRoom(t, r.svc, r.roomID); after.LastSeq != before.LastSeq || after.Driver.ID != "arjun" {
-		t.Fatalf("snapshot changed by a failed rebuild: last_seq %d -> %d, driver %v", before.LastSeq, after.LastSeq, after.Driver)
-	}
-	waitForCond(t, 3*time.Second, func() bool {
-		r.svc.follow.mu.Lock()
-		defer r.svc.follow.mu.Unlock()
-		_, queued := r.svc.follow.dirty[r.roomID]
-		return queued
-	}, "rebuild not queued again after it failed")
-}
-
 // A room.closed in the skipped gap is applied by the rebuild, and the
 // room-closed hook runs once, as closedElsewhereLocked does for a fold.
 func TestStaleRebuildAppliesRemoteClose(t *testing.T) {
@@ -268,32 +273,6 @@ func TestStaleRoomRebuiltBeforeCommand(t *testing.T) {
 	}
 }
 
-// On the replica that runs the room's agent, the rebuild feeds the inbox the
-// human input the snapshot never folded: a steer in the skipped gap and one
-// appended after it, in log order and once each.
-func TestStaleRebuildFeedsSkippedInput(t *testing.T) {
-	r := newStaleRig(t)
-	st := r.svc.cached(r.roomID)
-	r.svc.lockState(st)
-	st.setLeased(true)
-	r.svc.unlockRoom(st)
-
-	driver := r.svc.humanActor(r.arjun)
-	inGap := r.remote(t, events.SteerSent, driver, events.SteerSentPayload{Text: "in the gap"})
-	r.emitOverFailedGap(t)
-	r.fc.failing.Store(false)
-	after := r.remote(t, events.SteerSent, driver, events.SteerSentPayload{Text: "after the gap"})
-	r.svc.followRoom(r.roomID, after.Seq)
-	r.svc.followRoom(r.roomID, after.Seq) // a repeated notify feeds nothing twice
-
-	st.inbox.mu.Lock()
-	items := append([]agent.HumanInput(nil), st.inbox.items...)
-	st.inbox.mu.Unlock()
-	if len(items) != 2 || items[0].Seq != inGap.Seq || items[1].Seq != after.Seq {
-		t.Fatalf("inbox = %+v, want the steers at seq %d and %d", items, inGap.Seq, after.Seq)
-	}
-}
-
 func waitForCond(t *testing.T, d time.Duration, ok func() bool, msg string) {
 	t.Helper()
 	deadline := time.Now().Add(d)
@@ -302,5 +281,224 @@ func waitForCond(t *testing.T, d time.Duration, ok func() bool, msg string) {
 			t.Fatal(msg)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// emitEvent appends one event through the service as this replica would, and
+// returns it.
+func emitEvent(t *testing.T, svc *Service, roomID string, actor events.Actor, typ events.Type, payload any) events.Event {
+	t.Helper()
+	st := svc.lockCachedRoom(roomID)
+	if st == nil {
+		t.Fatalf("room %s not cached", roomID)
+	}
+	defer svc.unlockRoom(st)
+	e, err := svc.emitLocked(context.Background(), st, roomID, typ, actor, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// leased makes this replica the one that runs the room's agent, so folds feed
+// its inbox.
+func (r *staleRig) leased(t *testing.T) *roomState {
+	t.Helper()
+	st := r.svc.cached(r.roomID)
+	r.svc.lockState(st)
+	st.setLeased(true)
+	r.svc.unlockRoom(st)
+	return st
+}
+
+func inboxSeqs(st *roomState) []int64 {
+	st.inbox.mu.Lock()
+	defer st.inbox.mu.Unlock()
+	seqs := make([]int64, 0, len(st.inbox.items))
+	for _, in := range st.inbox.items {
+		seqs = append(seqs, in.Seq)
+	}
+	return seqs
+}
+
+// While the store still cannot be read, the rebuild fails: the room stays
+// stale with its snapshot as it was, and the rebuild is queued again; until
+// that timer fires, notifies for the room read nothing.
+func TestStaleRebuildFailureStaysStaleAndRetries(t *testing.T) {
+	r := newStaleRig(t)
+	remote := r.grant(t)
+	r.emitOverFailedGap(t)
+	before := mustRoom(t, r.svc, r.roomID)
+	r.svc.follow.take() // markStaleLocked's immediate notify
+
+	r.svc.followRoom(r.roomID, remote.Seq)
+	st := r.svc.cached(r.roomID)
+	if !st.stale.Load() {
+		t.Fatal("room no longer stale after a failed rebuild")
+	}
+	if after := mustRoom(t, r.svc, r.roomID); after.LastSeq != before.LastSeq || after.Driver.ID != "arjun" {
+		t.Fatalf("snapshot changed by a failed rebuild: last_seq %d -> %d, driver %v", before.LastSeq, after.LastSeq, after.Driver)
+	}
+	if !st.rebuildQueued.Load() {
+		t.Fatal("failed rebuild not queued again")
+	}
+	r.fc.sinces.Store(0)
+	r.svc.followRoom(r.roomID, remote.Seq)
+	if n := r.fc.sinces.Load(); n != 0 {
+		t.Fatalf("a notify while the retry is queued read the log %d times, want 0", n)
+	}
+	waitForCond(t, 3*time.Second, func() bool {
+		r.svc.follow.mu.Lock()
+		defer r.svc.follow.mu.Unlock()
+		_, queued := r.svc.follow.dirty[r.roomID]
+		return queued && !st.rebuildQueued.Load()
+	}, "queued rebuild never handed back to the follower")
+}
+
+// A stale room whose lock is held (a command in flight) is not read: the
+// rebuild is queued for later.
+func TestStaleRebuildSkipsBusyRoom(t *testing.T) {
+	r := newStaleRig(t)
+	r.grant(t)
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	st := r.svc.cached(r.roomID)
+	r.fc.sinces.Store(0)
+	st.mu.Lock()
+	r.svc.followRoom(r.roomID, 100)
+	st.mu.Unlock()
+	if n := r.fc.sinces.Load(); n != 0 {
+		t.Fatalf("busy stale room read %d times, want 0", n)
+	}
+	if !st.stale.Load() || !st.rebuildQueued.Load() {
+		t.Fatalf("busy stale room: stale=%v queued=%v, want both", st.stale.Load(), st.rebuildQueued.Load())
+	}
+}
+
+// Our own append made while the rebuild reads is in the tail: the rebuild is
+// swapped in with it, and its input (fed when it was folded) is not fed again.
+func TestStaleRebuildKeepsOwnAppendsMadeDuringRead(t *testing.T) {
+	r := newStaleRig(t)
+	st := r.leased(t)
+	r.grant(t)
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	var own events.Event
+	r.fc.onRebuildRead(func() {
+		own = emitEvent(t, r.svc, r.roomID, r.svc.humanActor(r.arjun), events.SteerSent, events.SteerSentPayload{Text: "mine"})
+	})
+	r.svc.followRoom(r.roomID, 100)
+	got := mustRoom(t, r.svc, r.roomID)
+	if own.Seq == 0 || st.stale.Load() || got.LastSeq != own.Seq || got.Driver == nil || got.Driver.ID != "priya" {
+		t.Fatalf("after the rebuild: stale=%v last_seq=%d (want %d) driver=%v (want priya)", st.stale.Load(), got.LastSeq, own.Seq, got.Driver)
+	}
+	if seqs := inboxSeqs(st); !slices.Equal(seqs, []int64{own.Seq}) {
+		t.Fatalf("inbox seqs = %v, want only our steer %d once", seqs, own.Seq)
+	}
+}
+
+// When the tail cannot be read the rebuild is not installed: the room keeps
+// its snapshot, stays stale and is queued again.
+func TestStaleRebuildTailReadFailureLeavesRoom(t *testing.T) {
+	r := newStaleRig(t)
+	st := r.svc.cached(r.roomID)
+	r.grant(t)
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	var own events.Event
+	r.fc.onRebuildRead(func() {
+		own = emitEvent(t, r.svc, r.roomID, executorActor, events.AgentMessage, events.AgentMessagePayload{Text: "y"})
+		r.fc.failing.Store(true) // the tail read fails
+	})
+	r.svc.followRoom(r.roomID, 100)
+	got := mustRoom(t, r.svc, r.roomID)
+	if !st.stale.Load() || !st.rebuildQueued.Load() {
+		t.Fatalf("after a failed tail read: stale=%v queued=%v, want both", st.stale.Load(), st.rebuildQueued.Load())
+	}
+	if own.Seq == 0 || got.LastSeq != own.Seq || got.Driver == nil || got.Driver.ID != "arjun" {
+		t.Fatalf("snapshot changed by a failed swap: last_seq=%d (want %d) driver=%v (want arjun)", got.LastSeq, own.Seq, got.Driver)
+	}
+}
+
+// A room deleted elsewhere while it was stale is evicted by its rebuild.
+func TestStaleRebuildEvictsDeletedRoom(t *testing.T) {
+	r := newStaleRig(t)
+	r.grant(t)
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	r.fc.notFound.Store(true)
+	r.svc.followRoom(r.roomID, 100)
+	if r.svc.cached(r.roomID) != nil {
+		t.Fatal("deleted stale room still cached after its rebuild")
+	}
+}
+
+// A gap page that does not continue the snapshot (a hole) marks the room
+// stale instead of folding our event over the hole.
+func TestGapFillHoleMarksStale(t *testing.T) {
+	r := newStaleRig(t)
+	g1 := r.grant(t)
+	r.remote(t, events.CommentAdded, r.svc.humanActor(r.arjun), events.CommentAddedPayload{Text: "c"})
+	r.fc.drop.Store(g1.Seq)
+	if err := r.svc.emitAs(context.Background(), r.roomID, executorActor, events.AgentMessage, events.AgentMessagePayload{Text: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	st := r.svc.cached(r.roomID)
+	if !st.stale.Load() {
+		t.Fatal("room not stale after a gap page with a hole")
+	}
+	r.fc.drop.Store(0)
+	r.svc.followRoom(r.roomID, g1.Seq)
+	if got := mustRoom(t, r.svc, r.roomID); got.Driver == nil || got.Driver.ID != "priya" {
+		t.Fatalf("driver = %v after the rebuild, want priya", got.Driver)
+	}
+}
+
+// On the replica that runs the room's agent, the rebuild feeds the inbox the
+// human input the snapshot never folded: a steer in the skipped gap and one
+// appended after it, in log order and once each; a steer folded before the
+// gap is not fed again.
+func TestStaleRebuildFeedsSkippedInput(t *testing.T) {
+	r := newStaleRig(t)
+	st := r.leased(t)
+	driver := r.svc.humanActor(r.arjun)
+	pre := r.remote(t, events.SteerSent, driver, events.SteerSentPayload{Text: "before the gap"})
+	r.svc.followRoom(r.roomID, pre.Seq)
+	inGap := r.remote(t, events.SteerSent, driver, events.SteerSentPayload{Text: "in the gap"})
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	after := r.remote(t, events.SteerSent, driver, events.SteerSentPayload{Text: "after the gap"})
+	r.svc.followRoom(r.roomID, after.Seq)
+	r.svc.followRoom(r.roomID, after.Seq) // a repeated notify feeds nothing twice
+
+	want := []int64{pre.Seq, inGap.Seq, after.Seq}
+	if seqs := inboxSeqs(st); !slices.Equal(seqs, want) {
+		t.Fatalf("inbox seqs = %v, want %v", seqs, want)
+	}
+}
+
+// A gap marked while the rebuild reads (a remote steer, then our append whose
+// gap read fails) lies in the tail: its steer is fed too, once, in order.
+func TestStaleRebuildFeedsGapMarkedDuringRead(t *testing.T) {
+	r := newStaleRig(t)
+	st := r.leased(t)
+	driver := r.svc.humanActor(r.arjun)
+	first := r.remote(t, events.SteerSent, driver, events.SteerSentPayload{Text: "first gap"})
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	var second, ours events.Event
+	r.fc.onRebuildRead(func() {
+		second = r.remote(t, events.SteerSent, driver, events.SteerSentPayload{Text: "second gap"})
+		r.fc.failing.Store(true)
+		ours = emitEvent(t, r.svc, r.roomID, executorActor, events.AgentMessage, events.AgentMessagePayload{Text: "y"})
+		r.fc.failing.Store(false)
+	})
+	r.svc.followRoom(r.roomID, first.Seq)
+	if got := mustRoom(t, r.svc, r.roomID); ours.Seq == 0 || st.stale.Load() || got.LastSeq != ours.Seq {
+		t.Fatalf("after the rebuild: stale=%v last_seq=%d, want false and %d", st.stale.Load(), got.LastSeq, ours.Seq)
+	}
+	want := []int64{first.Seq, second.Seq}
+	if seqs := inboxSeqs(st); !slices.Equal(seqs, want) {
+		t.Fatalf("inbox seqs = %v, want %v", seqs, want)
 	}
 }

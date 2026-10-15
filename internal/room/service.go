@@ -183,6 +183,9 @@ type roomState struct {
 	// skipped seqs, whose human input the rebuild feeds to the inbox.
 	stale     atomic.Bool
 	staleGaps seqGaps
+	// rebuildQueued is set while a rebuild of the stale room waits on its
+	// timer (rebuildLater), so retries never pile up per notify.
+	rebuildQueued atomic.Bool
 
 	snap RoomSnapshot
 	// leaseLogFullFor is the logged lease whose control.lease_expired a full
@@ -938,7 +941,9 @@ func (s *Service) markStaleLocked(roomID string, st *roomState, seq int64) {
 	}
 	st.staleGaps = append(st.staleGaps, seqGap{after: st.snap.LastSeq, before: seq})
 	st.stale.Store(true)
-	s.rebuildLater(roomID, seq)
+	// The follower tries at once (after this lock is released); a failure
+	// there waits rebuildRetry.
+	s.follow.noteAppend(roomID, seq)
 }
 
 // seqGap is the seqs strictly between after and before.
@@ -1123,21 +1128,19 @@ func (s *Service) proposalsDisabled(st *roomState) bool {
 	return s.pipelineProposalsDisabled(st.snap.PipelineID)
 }
 
-// proposalsDisabledMsg ends the validation error of a proposal in a room
-// whose pipeline is unknown (errProposalsDisabled).
-const proposalsDisabledMsg = "proposals are disabled for this room"
+// proposalsDisabledKind marks errProposalsDisabled (Error.kind).
+var proposalsDisabledKind = errors.New("room: proposals disabled")
 
 // errProposalsDisabled is the refusal of a proposal in a room whose pipeline
 // is unknown.
 func errProposalsDisabled(pipelineID string) *Error {
-	return validation(fmt.Sprintf("pipeline %q is unknown; %s", pipelineID, proposalsDisabledMsg))
+	e := validation(fmt.Sprintf("pipeline %q is unknown; proposals are disabled for this room", pipelineID))
+	e.kind = proposalsDisabledKind
+	return e
 }
 
 // isProposalsDisabled reports whether err is errProposalsDisabled.
-func isProposalsDisabled(err error) bool {
-	var re *Error
-	return errors.As(err, &re) && re.Code == codeValidation && strings.HasSuffix(re.Msg, proposalsDisabledMsg)
-}
+func isProposalsDisabled(err error) bool { return errors.Is(err, proposalsDisabledKind) }
 
 // pipelineProposalsDisabled is proposalsDisabled by pipeline id, for code that
 // does not hold the room's lock.
