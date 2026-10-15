@@ -1,0 +1,78 @@
+package topology
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"piperoom/internal/clients"
+	"piperoom/internal/owners"
+)
+
+func twoTableOwners(groups, sinks []string) *owners.Owners {
+	o := testOwners()
+	o.Pipelines[0].SourceTables = []string{"public.orders", "public.customers"}
+	o.Pipelines[0].ConsumerGroups = groups
+	o.Pipelines[0].SinkTables = sinks
+	return o
+}
+
+func twoTableBuilder(o *owners.Owners, lags map[string]clients.GroupLag) Builder {
+	return NewBuilder(
+		o,
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders,public.customers"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+		},
+		&fakeKafka{
+			findByKey: map[string][]clients.RecordRef{"pg.public.customers": {{Key: "7", Partition: 0, Offset: 3}}},
+			lags:      lags,
+		},
+		&fakeSource{rows: map[string]map[string]any{"public.customers|7": {"id": "7", "updated_at": time.Now().Format(time.RFC3339Nano)}}},
+		&fakeWarehouse{rows: map[string]map[string]any{"analytics.customers|7": {"id": "7"}}},
+	)
+}
+
+// A trace of public.customers read the first sink table (analytics.orders)
+// and the first group, and reported "stopped at the warehouse" for a row that
+// had arrived (#401). The sink is the one with the same table name and the
+// group is the one that reads the topic.
+func TestTracePicksSinkAndGroupOfTheTable(t *testing.T) {
+	o := twoTableOwners([]string{"order-sync", "customer-sync"}, []string{"analytics.orders", "analytics.customers"})
+	b := twoTableBuilder(o, map[string]clients.GroupLag{
+		"order-sync":    {State: "Stable", Partitions: []clients.PartitionLag{{Topic: "pg.public.orders", Partition: 0, Committed: 1}}},
+		"customer-sync": {State: "Stable", Partitions: []clients.PartitionLag{{Topic: "pg.public.customers", Partition: 0, Committed: 4}}},
+	})
+	stages, err := b.Trace(context.Background(), "orders", "public.customers", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := stages[3]; g.Name != "customer-sync" || g.Status != "seen" {
+		t.Fatalf("consumer stage = %+v, want customer-sync seen", g)
+	}
+	if w := stages[4]; w.Name != "analytics.customers" || w.Status != "seen" {
+		t.Fatalf("warehouse stage = %+v, want analytics.customers seen", w)
+	}
+}
+
+// When no sink matches and no group reads the topic, those stages are
+// unknown: never another table's verdict, never "stopped_here".
+func TestTraceUnknownSinkAndGroup(t *testing.T) {
+	o := twoTableOwners([]string{"g1", "g2"}, []string{"analytics.a", "analytics.b"})
+	b := twoTableBuilder(o, map[string]clients.GroupLag{
+		"g1": {State: "Stable", Partitions: []clients.PartitionLag{{Topic: "pg.public.orders"}}},
+		"g2": {State: "Dead"},
+	})
+	stages, err := b.Trace(context.Background(), "orders", "public.customers", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range stages[3:] {
+		if s.Status != "unknown" {
+			t.Fatalf("stage %+v: want unknown (all stages %+v)", s, stages)
+		}
+	}
+	if stages[3].Facts["error"] != "no group reads the topic" || stages[4].Facts["error"] != "no matching sink table" {
+		t.Fatalf("unknown reasons: %+v / %+v", stages[3].Facts, stages[4].Facts)
+	}
+}
