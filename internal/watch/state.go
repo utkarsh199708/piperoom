@@ -93,6 +93,9 @@ type sigState struct {
 	// ackSev is the severity when the driver closed the room; a rise above it
 	// re-opens the incident (reviveWorse).
 	ackSev string
+	// breachSev is the severity of the latest breach reading. A clear reading
+	// has no severity, so a close while the signal clears acks with this one.
+	breachSev string
 	// last is the latest known (non-error) reading.
 	last reading
 	// errText is the latest error, "" after a good tick.
@@ -157,6 +160,7 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 	switch r.v {
 	case vBreach, vBreachNow:
 		s.clearingSince = time.Time{}
+		s.breachSev = r.sev
 		grew := s.addTargets(r.targets)
 		if s.phase == phaseAcked && grew {
 			// A target the closed incident did not carry (a second connector,
@@ -195,12 +199,22 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 			s.phase = phaseOK
 			s.clearedFrom = s.clearingSince
 			s.breachingSince, s.clearingSince = time.Time{}, time.Time{}
-			s.notified, s.ackSev = false, ""
+			s.notified, s.ackSev, s.breachSev = false, "", ""
 			s.targets, s.firedAt, s.ackedAt, s.escalated, s.escFree = nil, time.Time{}, time.Time{}, false, false
 			return tResolved
 		}
 	}
 	return tNone
+}
+
+// ack marks a firing signal acked at the severity the driver last saw firing:
+// the latest breach, not a clear reading's "" (sevRank 9), which would make the
+// same severity count as a rise in reviveWorse.
+func (s *sigState) ack() {
+	s.phase, s.ackSev = phaseAcked, s.breachSev
+	if s.ackSev == "" {
+		s.ackSev = s.last.sev
+	}
 }
 
 // ---- severity ----

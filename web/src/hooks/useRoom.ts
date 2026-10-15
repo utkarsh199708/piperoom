@@ -17,7 +17,10 @@ import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { DEV_USERS, findUser } from '../fixtures/users'
-import { closeErrorText, errorText, friendlyError, isNetworkError, withdrawErrorText } from '../lib/errors'
+import { closeErrorText, errorText, friendlyError, withdrawErrorText } from '../lib/errors'
+import { newClientId } from '../lib/clientId'
+import { SendLedger } from './sendLedger'
+import type { DeliveredListener, SendItem } from './sendLedger'
 import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
@@ -83,26 +86,47 @@ export interface HandoffResult {
   error?: string
 }
 
-/** A steer or comment that could not reach the server, kept for one retry. */
-interface PendingSend {
-  kind: 'steer' | 'comment'
-  text: string
-  stepId?: string
+export type { DeliveredListener, Sent } from './sendLedger'
+/** What a steer or comment says (kept for older imports). */
+export type PendingSend = SendItem
+
+/**
+ * What a composer may do with the action of its failed send (#459): hear that it landed, or
+ * cancel it when the person gives up on it (edits the words, closes the dialog). An id belongs to
+ * its ledger entry until that entry ends; only then may the composer start a new action.
+ */
+export interface SendControls {
+  onDelivered: (listener: DeliveredListener) => () => void
+  /** Withdraws a kept or unknown action; one on the wire finishes, and is dropped if it fails. */
+  cancel: (clientId: string) => void
+  /** The action is still owed (on the wire, kept or unknown), so its Retry may reuse its id. */
+  isPending: (clientId: string) => boolean
 }
 
-const MAX_PENDING = 5
-/** A manual retry this soon after the reconnect delivered the same words is the same message. */
-const DELIVERED_DEDUPE_MS = 2 * 60_000
-
-const samePending = (a: PendingSend, b: PendingSend) => a.kind === b.kind && a.text === b.text && a.stepId === b.stepId
+/** How a steer or comment is sent. */
+export interface SendOptions {
+  /**
+   * The idempotency key of the user action this send belongs to (docs/api.md, Idempotent posts;
+   * #459). A component makes one with newClientId() per click or submit and passes the same id
+   * on every Retry of it; without one, the send is a new action.
+   */
+  clientId?: string
+}
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
 export interface RoomActions {
-  /** Resolves true when the server took it. A failed network call is kept and retried once when the socket reopens. */
-  comment: (text: string, stepId?: string) => Promise<boolean>
+  /**
+   * Resolves true when the server took it. A send that did not get through is kept and sent
+   * again, with the same client_id, when the socket reopens (see hooks/sendLedger.ts).
+   */
+  comment: (text: string, stepId?: string, opts?: SendOptions) => Promise<boolean>
   /** Same contract as `comment`. */
-  steer: (text: string) => Promise<boolean>
+  steer: (text: string, opts?: SendOptions) => Promise<boolean>
+  /** Hear about actions that landed without their caller hearing (reconnect copy, event stream). */
+  onDelivered?: (listener: DeliveredListener) => () => void
+  /** The composers' handle on their actions (see SendControls). */
+  sends?: SendControls
   sendSuggestion: (suggestionId: string) => void
   /** The driver declines a pending suggestion, with an optional note to its author. */
   declineSuggestion: (suggestionId: string, reason?: string) => void
@@ -200,9 +224,30 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
-  const pendingRef = useRef<PendingSend[]>([])
-  // What the reconnect drain sent: the composer still shows those words with a Retry button.
-  const deliveredRef = useRef<{ item: PendingSend; at: number }[]>([])
+  // Steers and comments not settled yet, keyed by client_id. Its post reads roomIdRef: the room
+  // on screen when it posts, not the room the action was typed in. Gap shared with main (pinned by
+  // a test): only App.tsx keying RoomScreen by roomId keeps a kept action from draining into
+  // another room (#491).
+  const roomIdRef = useRef(roomId)
+  // The socket is open (set by onopen/onclose, cleared on cleanup): with it open, the ledger
+  // retries kept actions itself, since no reconnect will.
+  const liveRef = useRef(false)
+  useEffect(() => {
+    roomIdRef.current = roomId
+  }, [roomId])
+  const [ledger] = useState(
+    () =>
+      new SendLedger({
+        post: (item, clientId) =>
+          item.kind === 'steer'
+            ? api.steer(roomIdRef.current, item.text, clientId)
+            : api.comment(roomIdRef.current, { step_id: item.stepId, text: item.text, client_id: clientId }),
+        setError,
+        newId: newClientId,
+        isLive: () => liveRef.current,
+      }),
+  )
+  useEffect(() => () => ledger.dispose(), [ledger])
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -298,6 +343,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       if (ev.seq <= lastSeqRef.current) return
       dispatch({ type: 'event', event: ev })
       lastSeqRef.current = ev.seq
+      // The stream settles a send by its client_id (an answer may have been lost).
+      ledger.onEvent(ev, user.id)
     }
 
     // Page /events until the gap before `ev` closes. On failure (fetch throws or
@@ -360,23 +407,13 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         probed = false
         backoff = 1000
         setConn('live')
-        setError(null)
+        liveRef.current = true
+        setError(ledger.banner())
         sendPresence(currentPresence())
-        // Messages typed while the server was away: one retry each, in order. Success
-        // emits nothing here (the event arrives over the socket); a failure shows its text.
-        const kept = pendingRef.current
-        pendingRef.current = []
-        for (const item of kept) {
-          const call =
-            item.kind === 'steer'
-              ? api.steer(roomId, item.text)
-              : api.comment(roomId, { step_id: item.stepId, text: item.text })
-          call
-            .then(() => {
-              deliveredRef.current = [...deliveredRef.current, { item, at: Date.now() }].slice(-MAX_PENDING)
-            })
-            .catch((e: unknown) => setError(errorText(e)))
-        }
+        // Messages that did not get through: sent again, each with its own client_id, so a
+        // server that already stored one appends nothing (docs/api.md, Idempotent posts).
+        // Success emits nothing here (the event arrives over the socket).
+        ledger.drain()
       }
       sock.onmessage = (m) => {
         if (cancelled) return // a socket from an older session epoch
@@ -404,6 +441,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       }
       sock.onclose = (ev: CloseEvent) => {
         if (cancelled) return
+        if (ws === sock) liveRef.current = false
         if (ev?.reason === 'session_expired') {
           // The server closed the socket because the session ended (auth.md 1.6).
           // Stop retrying; the login screen (or redirect) takes over.
@@ -459,13 +497,14 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
 
     return () => {
       cancelled = true
+      liveRef.current = false
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       if (presenceTimer !== undefined) window.clearInterval(presenceTimer)
       document.removeEventListener('visibilitychange', onVisibility)
       ws?.close()
       ws = null
     }
-  }, [roomId, user.id, user.name, sessionEpoch, reloadKey])
+  }, [roomId, user.id, user.name, sessionEpoch, reloadKey, ledger])
 
   // Fetch the snapshot and replay the log again (a fresh socket, after=0).
   // Reload closes the stale toast and it stays closed: the toast is raised only where the 409
@@ -494,34 +533,12 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     [reload],
   )
 
-  // Steer and comment keep the person's words: a call that never reached the server is
-  // queued (max 5) and the caller learns it failed, so the field is not cleared.
-  const sendKept = useCallback(
-    async (item: PendingSend): Promise<boolean> => {
-      // A manual retry replaces the queued copy, so the text is not sent twice.
-      pendingRef.current = pendingRef.current.filter((p) => !samePending(p, item))
-      // The reconnect already sent it: posting again would steer the agent twice.
-      const fresh = deliveredRef.current.filter((d) => Date.now() - d.at < DELIVERED_DEDUPE_MS)
-      const sent = fresh.findIndex((d) => samePending(d.item, item))
-      deliveredRef.current = sent >= 0 ? fresh.filter((_, i) => i !== sent) : fresh
-      if (sent >= 0) {
-        setError(null)
-        return true
-      }
-      try {
-        await (item.kind === 'steer'
-          ? api.steer(roomId, item.text)
-          : api.comment(roomId, { step_id: item.stepId, text: item.text }))
-        setError(null)
-        return true
-      } catch (e) {
-        if (isNetworkError(e) && pendingRef.current.length < MAX_PENDING) pendingRef.current.push(item)
-        setError(errorText(e))
-        return false
-      }
-    },
-    [roomId],
-  )
+  const onDelivered = useCallback((listener: DeliveredListener) => ledger.onDelivered(listener), [ledger])
+  const [sends] = useState<SendControls>(() => ({
+    onDelivered: (listener) => ledger.onDelivered(listener),
+    cancel: (clientId) => ledger.cancel(clientId),
+    isPending: (clientId) => ledger.isPending(clientId),
+  }))
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
@@ -553,7 +570,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   }, [])
 
   const actions: RoomActions = {
-    comment: async (text, stepId) => {
+    onDelivered,
+    sends,
+    comment: async (text, stepId, opts) => {
       if (isFixtures()) {
         synthesize('comment.added', {
           comment_id: nextLocalId(),
@@ -563,9 +582,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         })
         return true
       }
-      return sendKept({ kind: 'comment', text, stepId })
+      return ledger.send({ kind: 'comment', text, stepId }, opts?.clientId)
     },
-    steer: async (text) => {
+    steer: async (text, opts) => {
       if (isFixtures()) {
         const s = stateRef.current
         const isDriver = s?.driver?.id === user.id
@@ -575,7 +594,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         )
         return true
       }
-      return sendKept({ kind: 'steer', text })
+      return ledger.send({ kind: 'steer', text }, opts?.clientId)
     },
     sendSuggestion: (suggestionId) => {
       if (isFixtures()) {

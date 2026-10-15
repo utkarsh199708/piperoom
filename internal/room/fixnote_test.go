@@ -257,3 +257,33 @@ func TestFixNoteCloserLookupStoreFailure(t *testing.T) {
 		t.Fatalf("member refused while the log is unreadable: %v", err)
 	}
 }
+
+// A fix note takes an idempotency key like a plain comment (docs/api.md,
+// Idempotent posts): the same key and body answer the stored event and append
+// nothing; the same key with another kind is another body, 409
+// client_id_reused.
+func TestFixNoteClientID(t *testing.T) {
+	ctx := context.Background()
+	svc, st, _ := newTestService(t)
+	kabir := mustUser(t, svc, "kabir")
+	roomID := createRoom(t, svc, "kabir").ID
+
+	first, err := svc.AddCommentKindKeyed(ctx, kabir, roomID, "", "restarted by hand", events.CommentKindFixNote, "k1")
+	if err != nil {
+		t.Fatalf("fix note: %v", err)
+	}
+	if p := lastComment(t, st, roomID); p.Kind != events.CommentKindFixNote || p.ClientID != "k1" {
+		t.Fatalf("stored comment = %+v, want a fix note with client_id k1", p)
+	}
+	before := lastSeq(t, st, roomID)
+	again, err := svc.AddCommentKindKeyed(ctx, kabir, roomID, "", "restarted by hand", events.CommentKindFixNote, "k1")
+	if err != nil || again.Seq != first.Seq {
+		t.Fatalf("repeat = seq %d, %v; want the stored seq %d", again.Seq, err, first.Seq)
+	}
+	if _, err := svc.AddCommentKindKeyed(ctx, kabir, roomID, "", "restarted by hand", "", "k1"); !isCode(err, "client_id_reused") {
+		t.Fatalf("same key as a plain comment: err = %v, want 409 client_id_reused", err)
+	}
+	if after := lastSeq(t, st, roomID); after != before {
+		t.Fatalf("last_seq %d -> %d, want no write", before, after)
+	}
+}

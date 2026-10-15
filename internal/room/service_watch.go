@@ -149,7 +149,8 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 //
 // The text is made storable first, so evidence is kept rather than refused:
 // NUL bytes and invalid UTF-8 become U+FFFD (Postgres text and jsonb hold
-// neither; Connect trace text can carry them). Then it is trimmed and cut so
+// neither; Connect trace text can carry them), and bidi controls are dropped
+// (stripBidi), not refused as in typed text. Then it is trimmed and cut so
 // that the stored note, ellipsis included, is at most 4096 bytes, on a UTF-8
 // boundary.
 func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
@@ -179,7 +180,7 @@ func (s *Service) PostIncidentJSON(ctx context.Context, roomID, text string, evi
 
 // postWatcherNote is PostRoomEvidence and PostIncidentJSON.
 func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evidence json.RawMessage, newIncident bool) error {
-	text = sanitizeAgentText(text)
+	text = stripBidi(sanitizeAgentText(text))
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return validation("note text is required")

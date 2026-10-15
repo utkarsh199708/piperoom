@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/auth"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
@@ -180,7 +181,7 @@ func TestUsageRelay(t *testing.T) {
 func TestNewRoomServiceWiresTheUsageRelay(t *testing.T) {
 	ctx := context.Background()
 	relay := &usageRelay{log: slog.New(slog.DiscardHandler)}
-	svc := newRoomService(room.Deps{Store: memstore.New(), Users: room.DefaultUsers(), Run: fakeRun}, relay)
+	svc := newRoomService(room.Deps{Store: memstore.New(), Users: room.DefaultUsers(), Run: fakeRun}, auth.Settings{}, relay)
 	t.Cleanup(svc.Close)
 	snap, err := svc.CreateRoom(ctx, room.DefaultUsers().All()[0], "t", "sev2", "orders")
 	if err != nil {

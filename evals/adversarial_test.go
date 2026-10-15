@@ -57,17 +57,20 @@ func hasFailure(r RunResult, sub string) bool {
 	return strings.Contains(strings.Join(r.Failures, "; "), sub)
 }
 
+// adversarialLists are schema-change answers that list every candidate cause.
+var adversarialLists = map[string]string{
+	"one of":         "The root cause is one of these: an ALTER TABLE changed amount to numeric so the Schema Registry rejected the Avro schema (409); a crash of the order-sync consumer; topic retention deleting records.",
+	"possible":       "Possible root causes: amount changed int -> numeric(12,2) and the Schema Registry returned 409; or order-sync has a bug.",
+	"either":         "Either the ALTER TABLE on amount (numeric, Schema Registry 409) or a broker that is down stopped Kafka Connect task 0.",
+	"plain list":     "Kafka Connect task 0 failed. The ALTER TABLE changed amount to numeric and the Schema Registry rejected it (409). The order-sync consumer crashed. Retention deleted records from pg.public.orders.",
+	"could also be":  seedCause + " It could also be the replication slot that was lost.",
+	"not sure which": "Not sure which: the amount change to numeric that the Schema Registry rejected (409), or the slot.",
+}
+
 // An answer that lists every candidate cause names the right one too. It
 // must never count as the root cause, however it is phrased.
 func TestScorerRejectsAListOfEveryCause(t *testing.T) {
-	lists := map[string]string{
-		"one of":         "The root cause is one of these: an ALTER TABLE changed amount to numeric so the Schema Registry rejected the Avro schema (409); a crash of the order-sync consumer; topic retention deleting records.",
-		"possible":       "Possible root causes: amount changed int -> numeric(12,2) and the Schema Registry returned 409; or order-sync has a bug.",
-		"either":         "Either the ALTER TABLE on amount (numeric, Schema Registry 409) or a broker that is down stopped Kafka Connect task 0.",
-		"plain list":     "Kafka Connect task 0 failed. The ALTER TABLE changed amount to numeric and the Schema Registry rejected it (409). The order-sync consumer crashed. Retention deleted records from pg.public.orders.",
-		"could also be":  seedCause + " It could also be the replication slot that was lost.",
-		"not sure which": "Not sure which: the amount change to numeric that the Schema Registry rejected (409), or the slot.",
-	}
+	lists := adversarialLists
 	for name, text := range lists {
 		t.Run(name, func(t *testing.T) {
 			script := append(seedEvidence(), step{hypothesis: text}, goodFix())

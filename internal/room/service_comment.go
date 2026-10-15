@@ -35,6 +35,30 @@ func errFixNoteNotAllowed() *Error {
 // for 24 hours after the close, from the person who closed it or a member of
 // its pipeline.
 func (s *Service) AddCommentKind(ctx context.Context, user User, roomID, stepID, text, kind string) (events.Event, error) {
+	return s.AddCommentKindKeyed(ctx, user, roomID, stepID, text, kind, "")
+}
+
+// AddCommentKindKeyed is AddCommentKind with the request's idempotency key
+// (docs/api.md, Idempotent posts); "" is no key. As for AddCommentKeyed, a key
+// the caller already used in the room answers the stored event, or 409
+// client_id_reused for another body (the kind included), before any other
+// check.
+func (s *Service) AddCommentKindKeyed(ctx context.Context, user User, roomID, stepID, text, kind, clientID string) (events.Event, error) {
+	if err := checkClientID(clientID); err != nil {
+		return events.Event{}, err
+	}
+	same := sameComment(stepID, text, kind)
+	if e, done, err := s.repeatOf(ctx, roomID, user.ID, clientID, same); done {
+		return e, err
+	}
+	e, err := s.addComment(ctx, user, roomID, stepID, text, kind, clientID)
+	if err != nil {
+		return s.raceLoser(ctx, roomID, user.ID, clientID, same, err)
+	}
+	return e, nil
+}
+
+func (s *Service) addComment(ctx context.Context, user User, roomID, stepID, text, kind, clientID string) (events.Event, error) {
 	switch kind {
 	case "", events.CommentKindFixNote:
 	default:
@@ -72,6 +96,7 @@ func (s *Service) AddCommentKind(ctx context.Context, user User, roomID, stepID,
 		// No agent runs in a closed room: the flag would promise an answer.
 		MentionsAgent: open && mentionsAgent(text),
 		Kind:          kind,
+		ClientID:      clientID,
 	}
 	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
 	if err == nil && payload.MentionsAgent {

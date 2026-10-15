@@ -14,3 +14,5 @@ func TestSinceConformance(t *testing.T) { storetest.RunSince(t, New()) }
 func TestSubscribeEndsOnDelete(t *testing.T) {
 	storetest.RunSubscribeEndsOnDelete(t, New(), 5*time.Second)
 }
+
+func TestClientIDUniqueConformance(t *testing.T) { storetest.RunClientIDUnique(t, New()) }

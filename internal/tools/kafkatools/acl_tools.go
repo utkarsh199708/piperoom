@@ -101,7 +101,7 @@ func pipelineACLs(in []clients.ACLEntry, topics, groups []string, principal stri
 }
 
 func aclSummary(entries []clients.ACLEntry, topics []string, principal string) string {
-	type key struct{ perm, typ, res, pat string }
+	type key struct{ perm, typ, res, pat, host string }
 	byPrincipal := map[string]map[key][]string{}
 	for _, e := range entries {
 		m := byPrincipal[e.Principal]
@@ -109,7 +109,7 @@ func aclSummary(entries []clients.ACLEntry, topics []string, principal string) s
 			m = map[key][]string{}
 			byPrincipal[e.Principal] = m
 		}
-		k := key{e.Permission, strings.ToLower(e.ResourceType), e.Resource, e.Pattern}
+		k := key{e.Permission, strings.ToLower(e.ResourceType), e.Resource, e.Pattern, e.Host}
 		m[k] = append(m[k], e.Operation)
 	}
 	names := make([]string, 0, len(byPrincipal))
@@ -137,7 +137,10 @@ func aclSummary(entries []clients.ACLEntry, topics []string, principal string) s
 		}
 		sort.Slice(keys, func(a, b int) bool {
 			x, y := keys[a], keys[b]
-			return x.typ+x.res+x.perm < y.typ+y.res+y.perm
+			if x.typ+x.res+x.perm != y.typ+y.res+y.perm {
+				return x.typ+x.res+x.perm < y.typ+y.res+y.perm
+			}
+			return x.host < y.host
 		})
 		parts := make([]string, 0, len(keys))
 		for _, k := range keys {
@@ -147,24 +150,40 @@ func aclSummary(entries []clients.ACLEntry, topics []string, principal string) s
 			if k.typ != "cluster" {
 				s += fmt.Sprintf(" %s (%s)", k.res, k.pat)
 			}
+			if !anyHost(k.host) {
+				s += " from " + k.host
+			}
 			parts = append(parts, s)
 		}
 		appendLine(&sb, n+": "+strings.Join(parts, "; "))
 	}
 	if principal != "" {
 		for _, topic := range topics {
-			if !canWrite(entries, principal, topic) {
+			allowed, only, denied := writeAccess(entries, principal, topic)
+			switch {
+			case !allowed:
 				appendLine(&sb, fmt.Sprintf("missing: WRITE on topic %s for the connector principal %s", topic, principal))
+			case len(only) > 0:
+				appendLine(&sb, fmt.Sprintf("WRITE on topic %s for %s is allowed only from %s", topic, principal, strings.Join(only, ", ")))
+			case len(denied) > 0:
+				appendLine(&sb, fmt.Sprintf("WRITE on topic %s for %s is denied from %s", topic, principal, strings.Join(denied, ", ")))
 			}
 		}
 	}
 	return sb.String()
 }
 
-// canWrite reports whether principal may WRITE to topic: an ALLOW of WRITE or
-// ALL that covers the topic, with no DENY of either.
-func canWrite(entries []clients.ACLEntry, principal, topic string) bool {
-	allowed := false
+// anyHost reports whether an ACL host matches every client host.
+func anyHost(h string) bool { return h == "*" || h == "" }
+
+// writeAccess reports whether principal may WRITE to topic from some host:
+// an ALLOW of WRITE or ALL that covers the topic and is not overridden by a
+// DENY of either from the same host (or from every host). only lists the
+// hosts it is limited to when no ALLOW is for every host; denied lists the
+// hosts a DENY excludes from an every-host ALLOW.
+func writeAccess(entries []clients.ACLEntry, principal, topic string) (allowed bool, only, denied []string) {
+	allowHosts, denyHosts := map[string]bool{}, map[string]bool{}
+	allowAll, denyAll := false, false
 	for _, e := range entries {
 		if e.ResourceType != "TOPIC" || (e.Principal != principal && e.Principal != "User:*") || (e.Operation != "WRITE" && e.Operation != "ALL") {
 			continue
@@ -173,10 +192,32 @@ func canWrite(entries []clients.ACLEntry, principal, topic string) bool {
 		if !covers {
 			continue
 		}
-		if e.Permission == "DENY" {
-			return false
+		switch {
+		case e.Permission == "DENY" && anyHost(e.Host):
+			denyAll = true
+		case e.Permission == "DENY":
+			denyHosts[e.Host] = true
+		case anyHost(e.Host):
+			allowAll = true
+		default:
+			allowHosts[e.Host] = true
 		}
-		allowed = true
 	}
-	return allowed
+	if denyAll {
+		return false, nil, nil
+	}
+	if allowAll {
+		for h := range denyHosts {
+			denied = append(denied, h)
+		}
+		sort.Strings(denied)
+		return true, nil, denied
+	}
+	for h := range allowHosts {
+		if !denyHosts[h] {
+			only = append(only, h)
+		}
+	}
+	sort.Strings(only)
+	return len(only) > 0, only, nil
 }

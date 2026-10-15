@@ -304,7 +304,13 @@ const publishedCTEs = `listed AS MATERIALIZED (
 // an empty leaf set must never make it a member of a publication that does
 // not list it (#416 review round 3). A partitioned table with no partition
 // has nothing listed under publish_via_partition_root = false and reads as
-// not a member, as before; it can hold no rows.
+// not a member, as before; it can hold no rows. An unlogged or foreign leaf
+// that is itself the pipeline table is a member when it or an ancestor is
+// listed, under publish_via_partition_root true or false alike (false lists
+// it in pg_publication_tables too): no publication carries its rows, but the
+// answer is about the publication's definition, and "not a member" would send
+// the agent to ALTER PUBLICATION ... ADD TABLE, which cannot help either
+// (#416 review, nit 1).
 func publishedMember(rel string) string {
 	publishable := `SELECT t.relid FROM pg_partition_tree(` + rel + `) t
 				JOIN pg_class tc ON tc.oid = t.relid

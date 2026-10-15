@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SteerBox } from './SteerBox'
-import type { RoomActions } from '../hooks/useRoom'
+import type { DeliveredListener, RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
 
@@ -79,7 +79,7 @@ describe('SteerBox composer (U3)', () => {
     expect(send).toBeDisabled()
     fireEvent.change(box, { target: { value: 'check the DDL log' } })
     fireEvent.click(send)
-    expect(actions.steer).toHaveBeenCalledWith('check the DDL log')
+    expect(actions.steer).toHaveBeenCalledWith('check the DDL log', { clientId: expect.any(String) })
     await waitFor(() => expect(box).toHaveValue(''))
   })
 
@@ -100,6 +100,100 @@ describe('SteerBox composer (U3)', () => {
     expect(actions.steer).toHaveBeenCalledTimes(2)
   })
 
+  // #459: a Retry is the same action, so it keeps the failed send's client_id.
+  it('the Retry keeps the failed send\'s client_id', async () => {
+    vi.mocked(actions.steer).mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={actions} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+    const [first, second] = vi.mocked(actions.steer).mock.calls
+    expect(first[0]).toBe('look at the slot')
+    expect(second[0]).toBe('look at the slot')
+    expect(second[1]?.clientId).toBeTruthy()
+    expect(second[1]?.clientId).toBe(first[1]?.clientId)
+  })
+
+  it('edited words sent while the Retry strip is up are a new message, not a retry', async () => {
+    vi.mocked(actions.steer).mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={actions} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.change(box, { target: { value: 'look at the lag' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+    const [first, second] = vi.mocked(actions.steer).mock.calls
+    expect(second[0]).toBe('look at the lag')
+    expect(second[1]?.clientId).not.toBe(first[1]?.clientId)
+  })
+
+  // #390 scenario B: the failed send landed (reconnect copy or its event); the field and the Retry
+  // strip go away without waiting for the person.
+  it('clears the field and the Retry strip when its failed send landed', async () => {
+    let listener: DeliveredListener | null = null
+    const withSignal: RoomActions = {
+      ...actions,
+      steer: vi.fn().mockResolvedValue(false),
+      onDelivered: (l) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+    }
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={withSignal} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    const clientId = vi.mocked(withSignal.steer).mock.calls[0][1]!.clientId!
+    // Another action is not the composer's, even with the same words.
+    let taken = true
+    act(() => {
+      taken = listener!({ clientId: 'other', kind: 'steer', text: 'look at the slot' })
+    })
+    expect(taken).toBe(false)
+    act(() => {
+      taken = listener!({ clientId, kind: 'steer', text: 'look at the slot' })
+    })
+    expect(taken).toBe(true)
+    expect(box).toHaveValue('')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(withSignal.steer).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps edited words when the reconnect delivered the old ones', async () => {
+    let listener: DeliveredListener | null = null
+    const withSignal: RoomActions = {
+      ...actions,
+      steer: vi.fn().mockResolvedValue(false),
+      onDelivered: (l) => {
+        listener = l
+        return () => {}
+      },
+    }
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={withSignal} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.change(box, { target: { value: 'look at the slot and the lag' } })
+    const clientId = vi.mocked(withSignal.steer).mock.calls[0][1]!.clientId!
+    act(() => {
+      listener!({ clientId, kind: 'steer', text: 'look at the slot' })
+    })
+    expect(box).toHaveValue('look at the slot and the lag')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+  })
+
   it('says messages are kept while the socket reconnects', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={arjun} actions={actions} conn="reconnecting" />)
@@ -113,7 +207,7 @@ describe('SteerBox composer (U3)', () => {
     const box = screen.getByLabelText('Steer the agent')
     fireEvent.change(box, { target: { value: 'go' } })
     fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
-    expect(actions.steer).toHaveBeenCalledWith('go')
+    expect(actions.steer).toHaveBeenCalledWith('go', { clientId: expect.any(String) })
   })
 
   it('a watcher is told whose queue the message goes to, and the lease', () => {
@@ -134,7 +228,7 @@ describe('SteerBox composer (U3)', () => {
     expect(screen.getByText(/No driver · your suggestion is queued for whoever takes control/)).toBeInTheDocument()
     fireEvent.change(field, { target: { value: 'check the connector' } })
     fireEvent.click(screen.getByRole('button', { name: 'Suggest' }))
-    expect(actions.steer).toHaveBeenCalledWith('check the connector')
+    expect(actions.steer).toHaveBeenCalledWith('check the connector', { clientId: expect.any(String) })
   })
 
   it('with no driver the composer has no Take control (the banner offers it); with an expired lease it does', () => {
@@ -236,7 +330,7 @@ describe('SteerBox idle row (F1b)', () => {
       fireEvent.change(field(), { target: { value: '?why is task 0 failing' } })
       expect(screen.getByText('Asking the agent · it answers under Room comments')).toBeInTheDocument()
       fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
-      expect(actions.comment).toHaveBeenCalledWith('@agent why is task 0 failing')
+      expect(actions.comment).toHaveBeenCalledWith('@agent why is task 0 failing', undefined, { clientId: expect.any(String) })
       expect(actions.steer).not.toHaveBeenCalled()
     })
 
@@ -244,7 +338,7 @@ describe('SteerBox idle row (F1b)', () => {
       render(<SteerBox state={driverState} user={arjun} actions={actions} />)
       fireEvent.change(field(), { target: { value: '?why is task 0 failing' } })
       fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
-      expect(actions.steer).toHaveBeenCalledWith('Question: why is task 0 failing')
+      expect(actions.steer).toHaveBeenCalledWith('Question: why is task 0 failing', { clientId: expect.any(String) })
     })
 
     it('a bare ? sends nothing', () => {

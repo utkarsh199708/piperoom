@@ -85,10 +85,13 @@ type pager struct {
 	mu       sync.Mutex
 	last     map[[2]string]time.Time // room, user
 	userHits map[string][]time.Time
-	roomHits map[string][]time.Time
-	seen     map[pageKey]struct{}
-	seenQ    []pageKey // insertion order of seen, oldest first
-	lastSwp  time.Time
+	// nudgeHits counts person-triggered nudge pages per user, apart from userHits,
+	// so a room member's nudges cannot use up an owner's budget for agent pages.
+	nudgeHits map[string][]time.Time
+	roomHits  map[string][]time.Time
+	seen      map[pageKey]struct{}
+	seenQ     []pageKey // insertion order of seen, oldest first
+	lastSwp   time.Time
 }
 
 // newPager validates o. It returns nil when nothing is allow-listed.
@@ -99,7 +102,8 @@ func newPager(o PagingOptions) (*pager, error) {
 	p := &pager{
 		layers: map[string][]string{}, users: map[string]string{}, lim: o.Limits, now: time.Now,
 		last: map[[2]string]time.Time{}, userHits: map[string][]time.Time{},
-		roomHits: map[string][]time.Time{}, seen: map[pageKey]struct{}{},
+		nudgeHits: map[string][]time.Time{},
+		roomHits:  map[string][]time.Time{}, seen: map[pageKey]struct{}{},
 	}
 	if p.lim.UserRoomInterval <= 0 {
 		p.lim.UserRoomInterval = 10 * time.Minute
@@ -139,6 +143,11 @@ func newPager(o PagingOptions) (*pager, error) {
 // pageKey names one page: who, in which room, for which reason.
 type pageKey struct{ room, user, reason string }
 
+// isNudge reports whether k is a person-triggered nudge page. The server already
+// limits nudges to one per (proposal, layer) every 10 minutes, so they skip the
+// per-user-per-room gap and have their own hourly bucket.
+func (k pageKey) isNudge() bool { return strings.HasPrefix(k.reason, "nudge:") }
+
 // check reports whether key may be paged now, counting the pages already
 // planned in the same message. It records nothing; call record once Slack
 // accepted the post. The first rule that fails wins: a repeated reason is
@@ -150,11 +159,23 @@ func (p *pager) check(key pageKey, planned []pageKey) bool {
 		return false
 	}
 	now := p.now()
+	if key.isNudge() {
+		var planned1 int
+		for _, k := range planned {
+			if k.isNudge() && k.user == key.user {
+				planned1++
+			}
+		}
+		return len(recent(p.nudgeHits[key.user], now))+planned1 < p.lim.UserPerHour
+	}
 	if t, ok := p.last[[2]string{key.room, key.user}]; ok && now.Sub(t)+gapSlack < p.lim.UserRoomInterval {
 		return false
 	}
 	var userPlanned, roomPlanned int
 	for _, k := range planned {
+		if k.isNudge() {
+			continue
+		}
 		if k.user == key.user {
 			userPlanned++
 		}
@@ -179,6 +200,10 @@ func (p *pager) record(keys []pageKey) {
 		if _, dup := p.seen[k]; !dup {
 			p.seen[k] = struct{}{}
 			p.seenQ = append(p.seenQ, k)
+		}
+		if k.isNudge() {
+			p.nudgeHits[k.user] = append(recent(p.nudgeHits[k.user], now), now)
+			continue
 		}
 		p.last[[2]string{k.room, k.user}] = now
 		p.userHits[k.user] = append(recent(p.userHits[k.user], now), now)
@@ -335,7 +360,9 @@ func (p *pager) message(r *renderer, e events.Event) (m message, keys []pageKey,
 		// Only the nudged layer's owners are paged; the layer is a map key.
 		// The key is the event seq: one nudge event pages once, even when the
 		// stream is redelivered, and the re-nudge the server allows every 10
-		// minutes is a new event that pages again. check adds the per-user limits.
+		// minutes is a new event that pages again. check adds the nudge hourly cap;
+		// the per-room gap does not apply, or a nudge soon after the proposal page
+		// would page nobody.
 		var ms []string
 		picked := map[string]bool{}
 		for _, id := range p.layers[pl.Layer] {

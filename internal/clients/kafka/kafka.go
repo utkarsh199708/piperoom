@@ -38,12 +38,14 @@ type Client struct {
 	cl       *kgo.Client
 	sr       *schemareg.Client
 
-	// offs, meta, clusterFn and consumerFn are test seams; nil means the real
-	// kadm/kgo clients. consumerFn gets the options newConsumer builds with.
+	// offs, meta, clusterFn, consumerFn and probeFn are test seams; nil means
+	// the real kadm/kgo clients. consumerFn gets the options newConsumer
+	// builds with; probeFn stands in for one probe round (prober.round).
 	offs       offsetLister
 	meta       metaReader
 	clusterFn  clusterAdmin
 	consumerFn func(opts []kgo.Opt) (pollConsumer, error)
+	probeFn    func(ctx context.Context, topic string, wins map[int32]readWindow) map[int32]int64
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
@@ -201,13 +203,13 @@ func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.Part
 	if err != nil {
 		return nil, fmt.Errorf("kafka: topic offsets %s: %w", topic, err)
 	}
-	at := map[int32]int64{}
+	at, lo := map[int32]int64{}, map[int32]int64{}
 	for _, r := range readable {
 		if r.End > r.Start {
-			at[r.Partition] = r.End - 1
+			at[r.Partition], lo[r.Partition] = r.End-1, r.Start
 		}
 	}
-	timestamps, terr := c.recordTimestamps(ctx, topic, at)
+	timestamps, terr := c.recordTimestamps(ctx, topic, at, lo)
 	if terr != nil {
 		return nil, fmt.Errorf("kafka: record timestamps %s: %w", topic, terr)
 	}
@@ -491,6 +493,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 	}
 	partOffsets := map[string]map[int32]kgo.Offset{topic: {}}
 	stopAt := map[int32]int64{}
+	wait := map[int32]readWindow{} // what each unfinished partition has left
 	finished := map[int32]bool{}
 	var truncated []int32
 	for _, w := range windows {
@@ -503,6 +506,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 		}
 		partOffsets[topic][w.Partition] = kgo.NewOffset().At(w.Start)
 		stopAt[w.Partition] = w.End
+		wait[w.Partition] = readWindow{from: w.Start, end: w.End}
 	}
 	if len(partOffsets[topic]) == 0 {
 		return clients.KeyScan{}, nil
@@ -513,6 +517,8 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 		return clients.KeyScan{}, fmt.Errorf("kafka: scan client: %w", err)
 	}
 	defer cl.Close()
+	pr := c.newProber(topic)
+	defer pr.record(ctx) // runs after the scan's receipt below
 	// One receipt for the whole scan, on every exit path. The key is a record
 	// value (it can name a customer), so it is never recorded.
 	scanStart := time.Now()
@@ -540,7 +546,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	for {
-		fetches := cl.PollFetches(cctx)
+		fetches := pollBounded(cctx, cl)
 		for _, fe := range fetches.Errors() {
 			if fe.Err != nil && !errors.Is(fe.Err, context.Canceled) && !errors.Is(fe.Err, context.DeadlineExceeded) {
 				return clients.KeyScan{}, fmt.Errorf("kafka: scan %s: %w", topic, fe.Err)
@@ -553,6 +559,10 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 			// transaction can leave no record at the last offset.
 			if r.Offset+1 >= stopAt[r.Partition] {
 				finished[r.Partition] = true
+				delete(wait, r.Partition)
+			} else if w, ok := wait[r.Partition]; ok && r.Offset >= w.from {
+				w.from = r.Offset + 1
+				wait[r.Partition] = w
 			}
 			if r.Offset >= stopAt[r.Partition] || r.Attrs.IsControl() {
 				continue
@@ -574,6 +584,16 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 					Timestamp: r.Timestamp,
 					Key:       dk,
 				})
+			}
+		}
+		// An aborted tail below an open transaction delivers no record
+		// (#300), while other partitions may keep delivering: probe each
+		// window that stopped moving.
+		pr.stalled(cctx, wait)
+		for p, w := range wait {
+			if w.from >= w.end {
+				finished[p] = true
+				delete(wait, p)
 			}
 		}
 		if len(finished) == len(stopAt) {
@@ -601,8 +621,11 @@ func keyScan(found []clients.RecordRef, truncated []int32) clients.KeyScan {
 // recordTimestamps fetches one record per partition (at the given offsets) in a
 // single consumer and returns their timestamps. A transaction marker at the
 // offset counts as the record; a later record stands in when the offset
-// itself is never delivered but newer records are.
-func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int32]int64) (map[int32]time.Time, error) {
+// itself is never delivered but newer records are. When nothing readable is
+// at or after the offset (an aborted record below an open transaction, #300),
+// the newest readable record in [lo, offset) stands in; a partition with none
+// at all has no entry.
+func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[int32]int64) (map[int32]time.Time, error) {
 	if len(at) == 0 {
 		return map[int32]time.Time{}, nil
 	}
@@ -616,23 +639,43 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 	}
 	defer cl.Close()
 	rctx := ctx
+	pr := c.newProber(topic)
+	defer pr.record(rctx) // runs after the poll's receipt below
 	pollStart := time.Now()
 	defer func() { c.record(rctx, pollStart, "kgo.PollFetches(topic, offsets)", "topic="+topic) }()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	got := map[int32]time.Time{}
-	for len(got) < len(at) {
-		fetches := cl.PollFetches(ctx)
+	wait := map[int32]readWindow{}
+	for p, off := range at {
+		wait[p] = readWindow{from: off, end: off + 1}
+	}
+	for len(wait) > 0 {
+		fetches := pollBounded(ctx, cl)
 		for _, r := range fetches.Records() {
-			if _, done := got[r.Partition]; done {
-				continue
-			}
-			if want, ok := at[r.Partition]; ok && r.Offset >= want {
+			if _, waiting := wait[r.Partition]; waiting && r.Offset >= at[r.Partition] {
 				got[r.Partition] = r.Timestamp
+				delete(wait, r.Partition)
 			}
 		}
 		if err := fetches.Err(); err != nil {
 			return got, err
+		}
+		// An offset the probe passes holds no readable record (an aborted
+		// one, #300): the newest readable one below stands in.
+		pr.stalled(ctx, wait)
+		for p, w := range wait {
+			if w.from < w.end {
+				continue
+			}
+			delete(wait, p)
+			ts, ok, err := pr.newestReadable(ctx, p, lo[p], at[p])
+			if err != nil {
+				return got, fmt.Errorf("newest readable record %s/%d: %w", topic, p, err)
+			}
+			if ok {
+				got[p] = ts
+			}
 		}
 		if ctx.Err() != nil {
 			return got, ctx.Err()

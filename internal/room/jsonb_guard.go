@@ -68,12 +68,14 @@ const replacementChar = string(rune(0xFFFD))
 // write. Nothing is changed, because the person should see that the text did
 // not go through. The message never quotes the text.
 //
-// A bidi embedding, override or isolate character (U+202A–U+202E,
-// U+2066–U+2069) is refused the same way (Q5 T8): it makes the text render in
-// another order than it is stored, so a comment could read differently on
-// screen than in the log, the export or the agent's prompt. Machine text (an
-// alert title, watcher evidence) goes through checkStorable instead and is
-// flagged, not refused (title_flags, injectscan.KindBidi).
+// The bidi embedding, override and isolate controls (U+202A–U+202E,
+// U+2066–U+2069) are refused the same way (#358, Q5 T8): stored verbatim they
+// reorder the text for every other reader of the log (Slack, the notify
+// webhook, exports, the post-mortem, the agent's prompt), which do not strip
+// them like the web app does. Text no person typed goes through checkStorable
+// instead: an alert title is kept as it arrived and flagged (title_flags,
+// injectscan.KindBidi; the snapshot title drops them), while watcher notes and
+// agent text drop them (stripBidi).
 //
 // Hidden text is refused the same way (Q6 U1): Unicode tag characters
 // (U+E0000–U+E007F), zero-width spaces and non-joiners, a zero-width joiner
@@ -106,16 +108,42 @@ func checkStorable(fields ...string) error {
 	return nil
 }
 
-// bidiTextMsg is the 400 message for typed text with a bidi control.
-const bidiTextMsg = "text contains bidirectional control characters (U+202A–U+202E, U+2066–U+2069); remove them and send again"
+// bidiTextMsg is the 400 message for typed text holding a bidi control.
+const bidiTextMsg = "text contains bidirectional control characters (U+202A-U+202E, U+2066-U+2069)"
 
 // hiddenTextMsg is the 400 message for typed text with invisible characters.
 const hiddenTextMsg = "text contains invisible characters (Unicode tag characters U+E0000–U+E007F, zero-width spaces or joiners, word joiner, U+FEFF); remove them and send again"
 
+// bidiControl reports the bidi embedding, override and isolate controls.
+func bidiControl(r rune) bool {
+	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+}
+
+// stripBidi removes the bidi controls from text no person typed (an alert
+// title, a watcher note): it is kept, not refused, but must not reorder what
+// is shown around it.
+func stripBidi(s string) string {
+	if strings.IndexFunc(s, bidiControl) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if bidiControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // sanitizeAgentText is the policy for text a model or a tool produced (agent
 // steps, hypothesis, proposal fields, hand-off summary, action output): NUL and
 // invalid UTF-8 become U+FFFD, so an agent run never fails on bad tool output.
+//
+// Bidi controls are dropped too (stripBidi): forms are pre-filled from agent
+// text (a label from the hypothesis, a close resolution from a proposal title,
+// a checklist steer from runbook text), and typed text holding them is
+// refused.
 func sanitizeAgentText(s string) string {
+	s = stripBidi(s)
 	if err := store.CheckText(s); err == nil {
 		return s
 	}
@@ -133,5 +161,7 @@ func sanitizeAgentPayload(payload any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("room: marshal agent payload: %w", err)
 	}
-	return json.RawMessage(store.SanitizeJSON(raw)), nil
+	// A bidi control is never JSON syntax, so dropping it from the encoded
+	// payload drops it from the strings it was in (sanitizeAgentText).
+	return json.RawMessage(stripBidi(string(store.SanitizeJSON(raw)))), nil
 }

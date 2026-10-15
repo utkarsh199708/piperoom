@@ -1,5 +1,5 @@
 import { PersonName } from '@/components/VerifiedBadge'
-import { useEffect, useId, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useId, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { plainText } from '@/lib/title'
 import { emptyStateFor } from '../lib/emptyState'
@@ -8,6 +8,8 @@ import { Check, ChevronRight, Copy, Wrench, X } from 'lucide-react'
 import type { AgentMessageState, ChecklistTick, CommentState, PageState, StepState, ToolCallState } from '../state/types'
 import type { ToolCall } from '../api/types'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
+import type { SendControls, SendOptions } from '../hooks/useRoom'
+import { useRetryId } from '../hooks/useRetryId'
 import { cn } from '@/lib/utils'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -193,22 +195,31 @@ function CommentThread({
   readOnly = false,
 }: {
   comment: CommentState
-  onReply: (text: string) => void | Promise<boolean>
+  onReply: (text: string, clientId: string) => void | Promise<boolean>
   readOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  // The failed reply landed after all (reconnect copy or its event): close it like a success.
+  const retryId = useRetryId(useContext(SendsContext), () => {
+    setOffline(false)
+    setText('')
+    setOpen(false)
+  })
 
   // Like ReplyBox: the reply closes only once the server took it; a failed send keeps the words.
   const send = async () => {
     const t = text.trim()
     if (!t || sending) return
     setSending(true)
-    const ok = (await onReply(t)) !== false
+    // While the Retry strip is up and the words are unedited, this send is that Retry (#459).
+    const clientId = retryId.next(offline)
+    const ok = (await onReply(t, clientId)) !== false
     setSending(false)
     setOffline(!ok)
+    retryId.settle(clientId, ok)
     if (ok) {
       setText('')
       setOpen(false)
@@ -260,7 +271,10 @@ function CommentThread({
         <form className="ml-7 flex items-center gap-2" onSubmit={submit}>
           <Input
             value={text}
-            onChange={(e) => setText(e.target.value)}
+            onChange={(e) => {
+              setText(e.target.value)
+              retryId.drop() // edited words: the failed action is cancelled, the next send is new
+            }}
             placeholder="Reply…"
             aria-label="Reply to comment"
             autoFocus
@@ -277,24 +291,36 @@ function CommentThread({
       {open && offline && (
         <div className="ml-7">
           <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent reply.</p>
         </div>
       )}
     </div>
   )
 }
 
-function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void | Promise<boolean> }) {
+/** The reply boxes' handle on their actions (#459): RoomActions.sends. */
+const SendsContext = createContext<SendControls | undefined>(undefined)
+
+function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => void | Promise<boolean> }) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  // The failed comment landed after all (reconnect copy or its event): clear it like a success.
+  const retryId = useRetryId(useContext(SendsContext), () => {
+    setOffline(false)
+    setText('')
+  })
   // The field clears only once the server took the comment; a failed send keeps the words.
   const send = async () => {
     const t = text.trim()
     if (!t || sending) return
     setSending(true)
-    const ok = (await onSubmit(t)) !== false
+    // While the Retry strip is up and the words are unedited, this send is that Retry (#459).
+    const clientId = retryId.next(offline)
+    const ok = (await onSubmit(t, clientId)) !== false
     setSending(false)
     setOffline(!ok)
+    retryId.settle(clientId, ok)
     if (ok) setText('')
   }
   const submit = (e: FormEvent) => {
@@ -306,7 +332,10 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void | Promise<boo
       <form className="flex items-center gap-2" onSubmit={submit}>
         <Input
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => {
+            setText(e.target.value)
+            retryId.drop() // edited words: the failed action is cancelled, the next send is new
+          }}
           placeholder="Comment on this step…"
           aria-label="Comment on this step"
         />
@@ -314,7 +343,12 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void | Promise<boo
           {sending ? 'Sending…' : 'Comment'}
         </Button>
       </form>
-      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+      {offline && (
+        <>
+          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent comment.</p>
+        </>
+      )}
     </div>
   )
 }
@@ -342,7 +376,7 @@ function StepExtras({
 }: {
   step: StepState
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   readOnly: boolean
   showReplyBox: boolean
 }) {
@@ -350,9 +384,9 @@ function StepExtras({
     <>
       <AgentMessageList messages={step.messages} />
       {comments.map((c) => (
-        <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t, step.id)} readOnly={readOnly} />
+        <CommentThread key={c.id} comment={c} onReply={(t, clientId) => onComment(t, step.id, { clientId })} readOnly={readOnly} />
       ))}
-      {!readOnly && showReplyBox && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
+      {!readOnly && showReplyBox && <ReplyBox onSubmit={(t, clientId) => onComment(t, step.id, { clientId })} />}
     </>
   )
 }
@@ -391,7 +425,7 @@ function DoneStep({
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   readOnly: boolean
   checklist?: ChecklistWiring
   cited?: CitedStep | null
@@ -447,7 +481,7 @@ function DoneStep({
 
       <div id={regionId} hidden={!open} className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}>
         <Evidence step={step} checklist={checklist} />
-        {!readOnly && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
+        {!readOnly && <ReplyBox onSubmit={(t, clientId) => onComment(t, step.id, { clientId })} />}
       </div>
 
       {(step.messages.length > 0 || comments.length > 0) && (
@@ -474,7 +508,7 @@ function LiveStep({
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   readOnly: boolean
   checklist?: ChecklistWiring
   /** The step is outside the active layer filter: kept so the live work stays visible. */
@@ -544,13 +578,14 @@ function TimelineBody({
   ownerNames,
   shadow = false,
   citedStep,
+  sends,
 }: {
   steps: StepState[]
   /** Proposal ids of the room: a raw id in agent prose links to its card. */
   proposalIds?: readonly string[]
   messages: AgentMessageState[]
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   /** A viewer reads comments but cannot write any. */
   readOnly?: boolean
   /** The agent is working: the last step is the live one. */
@@ -572,6 +607,8 @@ function TimelineBody({
   shadow?: boolean
   /** The step a hypothesis chip asked for: it opens, scrolls into view and flashes (F3). */
   citedStep?: CitedStep | null
+  /** RoomActions.sends: a reply box's failed send that lands takes its Retry down; an edit cancels it. */
+  sends?: SendControls
 }) {
   // QA R18 (G11): a step link to a step that the layer filter hides clears the filter.
   useEffect(() => {
@@ -616,71 +653,73 @@ function TimelineBody({
     : steps.length
 
   return (
-    <div className="flex flex-col gap-2">
-      {messages.length > 0 && <AgentMessageList messages={messages} />}
+    <SendsContext.Provider value={sends}>
+      <div className="flex flex-col gap-2">
+        {messages.length > 0 && <AgentMessageList messages={messages} />}
 
-      {filterLayer && (
-        <p role="status" className="m-0 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-          {matched === 0 ? (
-            <>
-              No steps on <Badge variant={layerVariant(filterLayer)} mono>{filterLayer}</Badge> yet
-            </>
-          ) : (
-            <>
-              Showing {matched} {matched === 1 ? 'step' : 'steps'} on{' '}
-              <Badge variant={layerVariant(filterLayer)} mono>{filterLayer}</Badge>
-            </>
-          )}
-          <span aria-hidden="true">·</span>
-          <Button variant="ghost" className="h-6 px-1.5 text-xs" onClick={onClearFilter}>
-            Clear
-          </Button>
-        </p>
-      )}
+        {filterLayer && (
+          <p role="status" className="m-0 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            {matched === 0 ? (
+              <>
+                No steps on <Badge variant={layerVariant(filterLayer)} mono>{filterLayer}</Badge> yet
+              </>
+            ) : (
+              <>
+                Showing {matched} {matched === 1 ? 'step' : 'steps'} on{' '}
+                <Badge variant={layerVariant(filterLayer)} mono>{filterLayer}</Badge>
+              </>
+            )}
+            <span aria-hidden="true">·</span>
+            <Button variant="ghost" className="h-6 px-1.5 text-xs" onClick={onClearFilter}>
+              Clear
+            </Button>
+          </p>
+        )}
 
-      <ol className="m-0 flex list-none flex-col gap-0.5 p-0">
-        {steps.map((step, i) => {
-          const live = working && i === steps.length - 1
-          const hit = !filterLayer || step.tool_calls.some((t) => toolLayer(t.tool) === filterLayer)
-          if (!hit && !live) return null
-          const stepComments = comments.filter((c) => c.step_id === step.id)
-          return live ? (
-            <LiveStep
-              key={step.id}
-              step={step}
-              n={i + 1}
-              comments={stepComments}
-              onComment={onComment}
-              readOnly={readOnly}
-              checklist={checklist}
-              offFilter={!hit}
-              cited={citedStep}
-            />
-          ) : (
-            <DoneStep
-              key={step.id}
-              step={step}
-              n={i + 1}
-              comments={stepComments}
-              onComment={onComment}
-              readOnly={readOnly}
-              checklist={checklist}
-              cited={citedStep}
-            />
-          )
-        })}
-      </ol>
+        <ol className="m-0 flex list-none flex-col gap-0.5 p-0">
+          {steps.map((step, i) => {
+            const live = working && i === steps.length - 1
+            const hit = !filterLayer || step.tool_calls.some((t) => toolLayer(t.tool) === filterLayer)
+            if (!hit && !live) return null
+            const stepComments = comments.filter((c) => c.step_id === step.id)
+            return live ? (
+              <LiveStep
+                key={step.id}
+                step={step}
+                n={i + 1}
+                comments={stepComments}
+                onComment={onComment}
+                readOnly={readOnly}
+                checklist={checklist}
+                offFilter={!hit}
+                cited={citedStep}
+              />
+            ) : (
+              <DoneStep
+                key={step.id}
+                step={step}
+                n={i + 1}
+                comments={stepComments}
+                onComment={onComment}
+                readOnly={readOnly}
+                checklist={checklist}
+                cited={citedStep}
+              />
+            )
+          })}
+        </ol>
 
-      <PagesList pages={pages} names={ownerNames} />
+        <PagesList pages={pages} names={ownerNames} />
 
-      {unanchored.length > 0 && (
-        <section aria-label="Room comments" className="flex flex-col gap-2.5 pt-2">
-          <h3 className="m-0 text-sm font-medium">Room comments</h3>
-          {unanchored.map((c) => (
-            <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t)} readOnly={readOnly} />
-          ))}
-        </section>
-      )}
-    </div>
+        {unanchored.length > 0 && (
+          <section aria-label="Room comments" className="flex flex-col gap-2.5 pt-2">
+            <h3 className="m-0 text-sm font-medium">Room comments</h3>
+            {unanchored.map((c) => (
+              <CommentThread key={c.id} comment={c} onReply={(t, clientId) => onComment(t, undefined, { clientId })} readOnly={readOnly} />
+            ))}
+          </section>
+        )}
+      </div>
+    </SendsContext.Provider>
   )
 }

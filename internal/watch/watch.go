@@ -520,8 +520,7 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string, tol
 				ss.notified = false
 				continue
 			}
-			ss.phase = phaseAcked
-			ss.ackSev = ss.last.sev
+			ss.ack()
 			ss.ackedAt = now
 			ps.cool(ss.keys(id), roomID, now)
 			w.log.Info("watch: signal acked, room closed while it still fires",
