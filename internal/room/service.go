@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"piperoom/internal/actions"
@@ -266,6 +267,10 @@ type Service struct {
 	list *listHub
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
+
+	// openRoomsSeen is the last open-room count OpenRooms computed, served
+	// when s.mu is busy (see metrics.go).
+	openRoomsSeen atomic.Int64
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -367,6 +372,9 @@ func (s *Service) Close() {
 	}
 	s.closed = true
 	s.mu.Unlock()
+	// Before the cancel: cancelling the running agents frees their slots, and
+	// a slot granted then would start a queued room on a closing service.
+	s.slots.shutdown()
 	s.cancel()
 	s.wg.Wait()
 	if s.coord != nil {

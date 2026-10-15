@@ -223,7 +223,7 @@ func newStack(name string, ids []string, w *Wired, prepare func(*Wired)) (*Stack
 	if prepare != nil {
 		prepare(w)
 	}
-	reg, areg := tools.NewRegistry(), actions.NewRegistry()
+	reg, areg := tools.NewReadOnlyRegistry(), actions.NewRegistry()
 	if err := RegisterTools(reg, areg, w); err != nil {
 		return nil, err
 	}
@@ -233,7 +233,7 @@ func newStack(name string, ids []string, w *Wired, prepare func(*Wired)) (*Stack
 // emptyStack serves pipelines no set covers: the runbook tool only (it needs no
 // client), no action, and a topology that refuses.
 func emptyStack() (*Stack, error) {
-	reg := tools.NewRegistry()
+	reg := tools.NewReadOnlyRegistry()
 	if err := runbooks.Register(reg); err != nil {
 		return nil, fmt.Errorf("wiring: register runbooks: %w", err)
 	}

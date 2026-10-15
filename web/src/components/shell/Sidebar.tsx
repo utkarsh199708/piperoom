@@ -1,4 +1,4 @@
-import { Inbox, Search } from 'lucide-react'
+import { EyeOff, Inbox, Search } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -149,6 +149,17 @@ export function SidebarContent({
               ) : (
                 <Count>{openRooms}</Count>
               )}
+            </Link>
+          </li>
+          <li>
+            <Link
+              to="/shadow"
+              className={cn(itemClass, pathname === '/shadow' && activeClass)}
+              aria-current={pathname === '/shadow' ? 'page' : undefined}
+              onClick={onNavigate}
+            >
+              <EyeOff aria-hidden="true" />
+              Shadow results
             </Link>
           </li>
         </ul>

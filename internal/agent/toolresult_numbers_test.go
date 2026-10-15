@@ -64,13 +64,13 @@ func TestToolDataJSONLeavesOrdinaryDataAlone(t *testing.T) {
 	r := newTestRunner(t, &scriptedModel{}, &fakeInbox{}, &fakeSink{}, &recordingTool{name: "t", schema: testSchema()}, Options{})
 	in := map[string]any{"a": 1, "b": []float64{0, -1.5, 1e300, 5e-324}, "c": "x"}
 	want, _ := json.Marshal(in)
-	if got := r.toolDataJSON("t", in); string(got) != string(want) {
-		t.Fatalf("data = %s, want %s", got, want)
+	if got, cut := r.toolDataJSON("t", in); string(got) != string(want) || cut {
+		t.Fatalf("data = %s cut=%v, want %s uncut", got, cut, want)
 	}
-	if got := r.toolDataJSON("t", nil); got != nil {
-		t.Fatalf("nil data = %s, want nil", got)
+	if got, cut := r.toolDataJSON("t", nil); got != nil || cut {
+		t.Fatalf("nil data = %s cut=%v, want nil", got, cut)
 	}
-	if got := r.toolDataJSON("t", make(chan int)); got != nil {
-		t.Fatalf("unmarshalable data = %s, want nil", got)
+	if got, cut := r.toolDataJSON("t", make(chan int)); got != nil || cut {
+		t.Fatalf("unmarshalable data = %s cut=%v, want nil", got, cut)
 	}
 }

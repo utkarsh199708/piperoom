@@ -142,6 +142,7 @@ func (g *Gateway) addListClient(c *client) bool {
 		return false
 	}
 	g.lists[c] = struct{}{}
+	g.connsChangedLocked()
 	return true
 }
 
@@ -149,6 +150,7 @@ func (g *Gateway) removeListClient(c *client) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.lists, c)
+	g.connsChangedLocked()
 }
 
 // listReadLoop reads the client's pings; their content is ignored. A client
