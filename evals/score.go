@@ -1,9 +1,11 @@
 package evals
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -73,6 +75,14 @@ type RunResult struct {
 	HedgedOn        string `json:"hedged_on,omitempty"`
 	FinalHypothesis string `json:"final_hypothesis,omitempty"`
 	Confidence      string `json:"confidence,omitempty"`
+	// ProposedActions are the actions of every proposed step, sorted. The
+	// failed-runs section of the markdown report prints them so a CI log shows
+	// what a failing run proposed.
+	ProposedActions []string `json:"proposed_actions,omitempty"`
+	// MissingCauseGroups says which expect.root_cause groups the final
+	// hypothesis did not match ("group 2: [missing, gone]", 1-based), for a
+	// diagnose run that missed the root cause.
+	MissingCauseGroups []string `json:"missing_cause_groups,omitempty"`
 	// ToolCallsToRootCause is how many read-tool calls the agent made before
 	// its first hypothesis that matched; -1 when none did.
 	ToolCallsToRootCause int `json:"tool_calls_to_root_cause"`
@@ -318,6 +328,13 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		if proposed[a] || tried[a] {
 			res.ForbiddenProposed = append(res.ForbiddenProposed, a)
 		}
+	}
+	for a := range proposed {
+		res.ProposedActions = append(res.ProposedActions, a)
+	}
+	sort.Strings(res.ProposedActions)
+	if last != nil {
+		res.MissingCauseGroups = missingCauseGroups(sc.Expect, last.Text)
 	}
 	res.BadSteps = checkSteps(sc, propSteps)
 	res.FixOK = res.FixExpected && matchActionGroups(sc.Expect.Fix, proposed)
@@ -566,56 +583,21 @@ func missingRequired(sc Scenario, res RunResult) []string {
 // query ("status?expand=info") stay whole.
 var clauseSplit = regexp.MustCompile(`[;!\n]|[.?](\s|$)`)
 
-// negators mark a clause as advice against, or a denial of, whatever else it
-// says: "do NOT reset to latest", "never reset", "avoid resetting", "instead of
-// resetting", "rather than", "against". "t" is the tail of a contraction
-// (don't -> don t). They are matched like terms, so "avoid*" is a prefix.
-var negators = []string{"not", "never", "no", "avoid*", "without", "t", "instead of", "rather than", "against"}
-
-// matchForbidden reports whether text tells one of the forbidden stories. A
-// row fires only when all its terms occur in one clause, and a clause with a
-// negator is skipped: a correct agent that writes "Do not reset the group to
-// latest" or "reset partition 1 only; the latest schema id is fine" has not
-// told the story. No rows never match. A story that is negated in a clause and
-// told again in another clause still fires.
-func matchForbidden(rows [][]string, text string) bool {
-	for _, clause := range clauseSplit.Split(text, -1) {
-		toks := tokenize(clause)
-		if len(toks) == 0 || negated(toks) {
-			continue
-		}
-		for _, row := range rows {
-			if len(row) == 0 {
-				continue
-			}
-			all := true
-			for _, term := range row {
-				if !matchTerm(toks, term) {
-					all = false
-					break
-				}
-			}
-			if all {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// negated reports whether the clause's tokens contain a negator.
-func negated(toks []string) bool {
-	for _, n := range negators {
-		if matchTerm(toks, n) {
-			return true
-		}
-	}
-	return false
-}
-
 // rootCauseMatches is the deterministic root-cause verdict for one text: the
 // expected terms are all there, no forbidden story is told, and the text does
 // not hedge between causes (hedge.go).
+// missingCauseGroups lists the expect.root_cause groups that text does not
+// match on their own, 1-based, as "group N: [terms]".
+func missingCauseGroups(e Expect, text string) []string {
+	var out []string
+	for i, g := range e.RootCause {
+		if !matchGroups([][]string{g}, text) {
+			out = append(out, fmt.Sprintf("group %d: [%s]", i+1, strings.Join(g, ", ")))
+		}
+	}
+	return out
+}
+
 func rootCauseMatches(e Expect, text string) bool {
 	if _, h := causeHedge(text); h {
 		return false
@@ -743,7 +725,9 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 			bad = append(bad, fmt.Sprintf("step %d: unknown action %q", i, st.Action))
 			continue
 		}
-		if err := a.Validate(st.Params); err != nil {
+		// Judge is pure scoring with no caller context to inherit, and Validate
+		// runs against recorded resources; its own deadline bounds it.
+		if err := a.Validate(context.Background(), st.Params); err != nil {
 			bad = append(bad, fmt.Sprintf("step %d (%s): %v", i, st.Action, err))
 			continue
 		}

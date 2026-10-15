@@ -1,4 +1,5 @@
-import { BellRing, Check, CircleCheck, Download, Eye, Loader2, MoreHorizontal, Repeat2, UserPlus, Wrench } from 'lucide-react'
+import { BellRing, Check, CircleCheck, Download, Eye, Loader2, MoreHorizontal, Repeat2, ShieldAlert, UserPlus, Wrench } from 'lucide-react'
+import { plainText } from '@/lib/title'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -16,19 +17,36 @@ import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
 import { TitleFlagChip } from './TitleFlagChip'
+import { cn } from '@/lib/utils'
+import { PersonName, VerifiedBadge } from '@/components/VerifiedBadge'
+import { alertSourceLabel, alertVerification, neutralizeBadgeText, personVerification } from '@/lib/verification'
 import { TriageCard } from './TriageCard'
 
 export interface HeaderMember {
   id: string
   name: string
+  /** Server-set; anything but true is unverified. */
+  verified?: boolean
 }
 
 const MAX_AVATARS = 4
 
-// "Kabir · driving", "Arjun · you", "Arjun · you, driving".
-function avatarLabel(name: string, you: boolean, driver: boolean): string {
+// "Kabir · driving", "Arjun · you", "Arjun · you, driving"; an unverified person
+// adds their id: "Priya (u_7f3a) · unverified".
+function avatarLabel(m: HeaderMember, you: boolean, driver: boolean): string {
+  const name =
+    personVerification(m).state === 'verified'
+      ? neutralizeBadgeText(m.name)
+      : `${neutralizeBadgeText(m.name)} (${m.id}) · unverified`
   if (you) return driver ? `${name} · you, driving` : `${name} · you`
   return driver ? `${name} · driving` : name
+}
+
+// The server-set source names the chip when there is one; the body-inferred
+// source (untrusted) is only a fallback label and is neutralized like a name.
+function alertChipLabel(alert: NonNullable<RoomState['alert']>): string {
+  const source = alertSourceLabel(alert.alert_source) ?? (alert.source ? neutralizeBadgeText(alert.source) : null)
+  return source ? `alert · ${source}` : 'alert'
 }
 
 function Sep() {
@@ -87,15 +105,19 @@ export function RoomHeader({
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
-        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{state.title}</h1>
+        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{plainText(state.title, 300)}</h1>
         <TitleFlagChip flags={state.title_flags} />
         <Badge variant={state.severity} className="uppercase">
           {state.severity}
         </Badge>
         {state.alert && (
-          <Badge variant="info" title="This room was opened by an alert webhook">
-            {state.alert.source ? `alert · ${state.alert.source}` : 'alert'}
-          </Badge>
+          <span className="inline-flex items-center gap-1">
+            <Badge variant="info" title="This room was opened by an alert">
+              {alertChipLabel(state.alert)}
+            </Badge>
+            {/* Reads only the server-set alert_source, never the alert body. */}
+            <VerifiedBadge verification={alertVerification(state.alert.alert_source)} />
+          </span>
         )}
         <Badge variant="outline">
           <StatusDot tone={status.tone} />
@@ -256,14 +278,26 @@ export function RoomHeader({
             {shown.map((m, i) => {
               const driver = m.id === state.driver?.id
               return (
-                <li key={m.id} className={i === 0 ? '' : '-ml-1.5'}>
+                <li
+                  key={m.id}
+                  className={cn('relative', i === 0 ? '' : '-ml-1.5')}
+                  data-verification={personVerification(m).state}
+                >
                   <PersonAvatar
                     actor={{ id: m.id, name: m.name }}
                     driver={driver}
                     stacked
-                    label={avatarLabel(m.name, m.id === user.id, driver)}
+                    label={avatarLabel(m, m.id === user.id, driver)}
                     className={driver ? 'ring-offset-0' : undefined}
                   />
+                  {personVerification(m).state !== 'verified' && (
+                    // Drawn mark, like the badge: avatars have no room for the full pill.
+                    <ShieldAlert
+                      aria-hidden="true"
+                      strokeWidth={2.5}
+                      className="absolute -bottom-1 -right-1 size-3 rounded-full bg-warning-subtle text-warning-foreground"
+                    />
+                  )}
                 </li>
               )
             })}
@@ -276,14 +310,23 @@ export function RoomHeader({
             )}
           </ul>
         )}
-        <span className="text-muted-foreground">
-          {state.status !== 'open'
-            ? state.closed_by
-              ? `Closed by ${state.closed_by.name || state.closed_by.id}`
-              : 'Closed'
-            : state.driver
-              ? `${state.driver.name} is driving`
-              : 'No driver'}
+        <span className="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
+          {/* A closed room has no driver: it says who closed it instead. */}
+          {state.status !== 'open' ? (
+            state.closed_by ? (
+              <>
+                Closed by <PersonName person={state.closed_by} />
+              </>
+            ) : (
+              'Closed'
+            )
+          ) : state.driver ? (
+            <>
+              <PersonName person={state.driver} /> is driving
+            </>
+          ) : (
+            'No driver'
+          )}
         </span>
         <Sep />
         <span className="text-subtle-foreground">{members.length} here</span>

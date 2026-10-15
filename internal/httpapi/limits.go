@@ -28,7 +28,10 @@ func (s *Server) handleExtendRoom(w http.ResponseWriter, r *http.Request) {
 // handleDeleteRoom is DELETE /api/rooms/{id}?reason=&archive=: an admin deletes one
 // room and its open WebSockets get the room.deleted frame and close
 // (docs/api.md). A repeat for a deleted room answers its audit row again; its
-// sockets were closed the first time.
+// sockets were closed the first time. With room.Deps.OnRoomDeleted wired to
+// CloseRoomSockets (cmd/server) the service has closed them already; the call
+// here is then a no-op (CloseRoom is idempotent) and covers a service built
+// without the hook.
 func (s *Server) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	u := userFrom(ctx)
@@ -69,4 +72,12 @@ func (s *Server) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
 		At:      d.DeletedAt.UTC(),
 	})
 	writeJSON(w, http.StatusOK, d)
+}
+
+// CloseRoomSockets ends every WebSocket of a deleted room with the
+// room.deleted frame (ws.Gateway.CloseRoom). cmd/server hands it to
+// room.Deps.OnRoomDeleted, so a room purged by retention or deleted on another
+// replica closes its sockets here too.
+func (s *Server) CloseRoomSockets(roomID string, deleted events.Event) {
+	s.gw.CloseRoom(roomID, deleted)
 }

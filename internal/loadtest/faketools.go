@@ -75,7 +75,7 @@ func (noopAction) ParamsSchema() map[string]any {
 	}
 }
 
-func (noopAction) Validate(params json.RawMessage) error {
+func (noopAction) Validate(_ context.Context, params json.RawMessage) error {
 	var p struct {
 		Key string `json:"key"`
 	}

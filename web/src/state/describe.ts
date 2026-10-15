@@ -1,5 +1,6 @@
 // Turns an event into one curated line for the activity feed. Pure: no ids ever reach the text,
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
+import { neutralizeBadgeText } from '../lib/verification'
 import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
@@ -63,6 +64,11 @@ export interface DescribeContext {
 
 export const EMPTY_CONTEXT: DescribeContext = { driverBefore: null, stepTitles: {}, proposalTitles: {}, stepIndex: {} }
 
+/** A person's display name, safe to embed in a sentence (see neutralizeBadgeText). */
+function nm(name: string | undefined): string {
+  return name ? neutralizeBadgeText(name) : ''
+}
+
 function as<T>(e: Event): T {
   return e.payload as T
 }
@@ -92,7 +98,8 @@ function took(ms: number): string {
 }
 
 export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): Described {
-  const who = e.actor.kind === 'agent' ? 'Agent' : e.actor.name || e.actor.id
+  // Every person name below is untrusted, so it goes in neutralized: a name cannot read as a badge or a verdict.
+  const who = e.actor.kind === 'agent' ? 'Agent' : nm(e.actor.name || e.actor.id)
   const step = (id?: string) => {
     const n = id ? ctx.stepIndex[id] : undefined
     return n ? `step ${n}` : 'a step'
@@ -185,14 +192,14 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     case 'steer.sent': {
       const p = as<SteerSentPayload>(e)
       if (p.suggestion_id) {
-        const from = ctx.suggesters?.[p.suggestion_id]
+        const from = nm(ctx.suggesters?.[p.suggestion_id])
         return { text: from ? `${who} sent ${from}'s suggestion` : `${who} sent a suggestion`, detail: clip(p.text, 200), kind: 'human' }
       }
       return { text: `${who} steered: "${clip(p.text, 80)}"`, kind: 'human' }
     }
     case 'steer.declined': {
       const p = as<SteerDeclinedPayload>(e)
-      const from = ctx.suggesters?.[p.suggestion_id]
+      const from = nm(ctx.suggesters?.[p.suggestion_id])
       return {
         text: from ? `${who} declined ${from}'s suggestion` : `${who} declined a suggestion`,
         detail: p.reason ? clip(p.reason, 200) : undefined,
@@ -210,17 +217,17 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
           ? { text: `${who} renewed the lease`, kind: 'system' }
           : { text: `${who} took control`, kind: 'control' }
       }
-      return { text: `${who} handed control to ${p.to.name}`, kind: 'control' }
+      return { text: `${who} handed control to ${nm(p.to.name)}`, kind: 'control' }
     }
     case 'control.lease_expired': {
       const p = as<ControlLeaseExpiredPayload>(e)
-      return { text: `${p.driver?.name || 'The driver'}'s lease expired · no one is driving`, kind: 'control' }
+      return { text: `${nm(p.driver?.name) || 'The driver'}'s lease expired · no one is driving`, kind: 'control' }
     }
     case 'owner.paged': {
       // Owners are user ids; the room's member names stand in where the room knows them.
       const p = as<OwnerPagedPayload>(e)
       const layer = clip(p.layer, 40)
-      const owners = (p.owners ?? []).map((id) => clip(ctx.names?.[id] ?? id, 40))
+      const owners = (p.owners ?? []).map((id) => clip(nm(ctx.names?.[id] ?? id), 40))
       const target = owners.length > 0 ? `${owners.join(', ')} (${layer})` : `the ${layer} owners (nobody listed)`
       const reason = clip(p.reason, 80)
       const lead = p.auto ? 'Piperoom auto-paged' : `${who} paged`
@@ -269,7 +276,7 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'handoff.requested': {
       const p = as<HandoffRequestedPayload>(e)
-      return { text: `${who} asked for a hand-off to ${p.to.name}`, kind: 'control' }
+      return { text: `${who} asked for a hand-off to ${nm(p.to.name)}`, kind: 'control' }
     }
     case 'handoff.failed': {
       const p = as<HandoffFailedPayload>(e)
@@ -282,7 +289,7 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     case 'handoff.created': {
       const p = as<HandoffCreatedPayload>(e)
       return {
-        text: p.manual ? `${who} wrote a hand-off summary for ${p.to.name}` : `${who} started a hand-off to ${p.to.name}`,
+        text: p.manual ? `${who} wrote a hand-off summary for ${nm(p.to.name)}` : `${who} started a hand-off to ${nm(p.to.name)}`,
         kind: 'control',
       }
     }
@@ -309,6 +316,13 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const p = as<TracePinnedPayload>(e)
       return { text: `${who} traced ${clip(p.table, 40)} · ${clip(p.key, 40)}`, kind: 'human' }
     }
+    // Shadow events carry no agent text, so these lines cannot un-blind anyone.
+    case 'shadow.revealed':
+      return { text: 'Shadow run finished: its result is ready to read after you label the room', kind: 'system' }
+    case 'shadow.labelled':
+      return { text: `${who} recorded a blind label`, kind: 'human' }
+    case 'shadow.graded':
+      return { text: `${who} graded the shadow run`, kind: 'human' }
     default:
       return { text: clip(e.type, 60), kind: 'system' }
   }

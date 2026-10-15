@@ -40,7 +40,7 @@ func triageWaitFor(d time.Duration) time.Duration {
 // startTriageLocked starts the pass for a room on its own goroutine and
 // returns where its result arrives (closed without a value when it failed to
 // run). run is the agent run whose sink the pass writes through, so the
-// pass is fenced like the run. Caller holds s.mu.
+// pass is fenced like the run. Caller holds the room's lock.
 func (s *Service) startTriageLocked(ctx context.Context, roomID string, run uint64, alert agent.Alert) <-chan agent.TriageResult {
 	out := make(chan agent.TriageResult, 1)
 	deps := agent.Deps{
@@ -48,7 +48,10 @@ func (s *Service) startTriageLocked(ctx context.Context, roomID string, run uint
 		Sink:   roomSink{s: s, roomID: roomID, run: run},
 		Logger: s.log,
 	}
-	s.wg.Add(1)
+	if !s.addWorker() {
+		close(out) // a closing service runs no pass
+		return out
+	}
 	go func() {
 		defer s.wg.Done()
 		defer close(out)
@@ -104,7 +107,7 @@ func (s *Service) awaitTriage(ctx context.Context, roomID string, ch <-chan agen
 // evidence as a quiet "alert_update" input (it never wakes an idle agent and
 // replaces one still pending), and re-runs the first look when the last one
 // is old and the agent is not working. seq is the room event the update came
-// with. Caller holds s.mu.
+// with. Caller holds st's lock.
 func (s *Service) alertUpdateLocked(roomID string, st *roomState, seq int64, raw json.RawMessage) {
 	if st.snap.Shadow || st.inbox == nil {
 		return
@@ -120,9 +123,9 @@ func (s *Service) alertUpdateLocked(roomID string, st *roomState, seq int64, raw
 
 // refireTriageLocked re-runs the first look for a re-fire when the newest
 // agent.triage is at least refireTriageAfter old and the agent is idle or
-// queued. It uses no agent slot. Caller holds s.mu.
+// queued. It uses no agent slot. Caller holds st's lock.
 func (s *Service) refireTriageLocked(roomID string, st *roomState, raw json.RawMessage) {
-	if s.triage == nil || s.closed || st.snap.Triage == nil || st.agentCancel == nil {
+	if s.triage == nil || s.isClosed() || st.snap.Triage == nil || st.agentCancel == nil {
 		return
 	}
 	if s.now().Sub(st.snap.Triage.At) < refireTriageAfter {

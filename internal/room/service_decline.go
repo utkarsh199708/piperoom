@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/events"
+	"piperoom/internal/store"
 )
 
 // maxDeclineReason caps the driver's note on a declined suggestion, in
@@ -25,14 +26,13 @@ func (s *Service) DeclineSuggestion(ctx context.Context, user User, roomID, sugg
 	if utf8.RuneCountInString(reason) > maxDeclineReason {
 		return events.Event{}, validation(fmt.Sprintf("reason is longer than %d characters", maxDeclineReason))
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -75,9 +75,7 @@ func (s *Service) DeclineSuggestion(ctx context.Context, user User, roomID, sugg
 	}
 	// A failed status write leaves the row saying pending; the snapshot check
 	// in send and decline still refuses the suggestion, so this only warns.
-	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "declined"); err != nil {
-		s.log.Warn("room: mark suggestion declined failed", "suggestion", suggestionID, "err", err)
-	}
+	s.afterAppend(roomID, "mark suggestion declined", s.store.SetSuggestionStatus(ctx, suggestionID, "declined"), "suggestion", suggestionID)
 	// A driver action renews the driver lease (docs/api.md), as send does.
 	s.touchDriverLease(ctx, st, roomID)
 	return e, nil
@@ -98,4 +96,16 @@ func hasPendingSuggestion(snap RoomSnapshot, suggestionID string) bool {
 		}
 	}
 	return false
+}
+
+// suggester is the author of a pending suggestion as the room recorded it
+// (steer.suggested's actor, with its verified flag), falling back to the
+// suggestion row when the snapshot no longer lists it.
+func suggester(snap RoomSnapshot, suggestionID string, row store.SuggestionRow) *events.Actor {
+	for _, sg := range snap.PendingSuggestions {
+		if sg.SuggestionID == suggestionID {
+			return &events.Actor{Kind: events.ActorHuman, ID: sg.From.ID, Name: sg.From.Name, Verified: sg.From.Verified}
+		}
+	}
+	return &events.Actor{Kind: events.ActorHuman, ID: row.FromID, Name: row.FromName}
 }

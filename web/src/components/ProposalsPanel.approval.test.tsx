@@ -97,7 +97,7 @@ describe('the approval moment', () => {
     expect(screen.getAllByText(/Needs your approval/)).toHaveLength(1)
     expect(screen.getByText(/Needs your approval/)).toHaveTextContent('Needs your approval · kafka-connect')
     // Priya's decision is mentioned on the ribbon as well.
-    expect(screen.getByText(/Priya approved schema-registry/)).toBeInTheDocument()
+    expect(screen.getByText(/approved schema-registry/)).toHaveTextContent(/Priya.* approved schema-registry/)
   })
 
   it('shows no ribbon and no buttons to someone who cannot decide, and says who it waits for', () => {

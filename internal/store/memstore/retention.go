@@ -131,6 +131,7 @@ func (s *Store) deleteLocked(id string) store.PurgeResult {
 	log := s.rooms[id]
 	res.Events += int64(len(log.events))
 	delete(s.rooms, id)
+	wakeSubs(log)
 
 	for pid, p := range s.proposals {
 		if p.RoomID != id {

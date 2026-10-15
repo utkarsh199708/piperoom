@@ -49,14 +49,13 @@ func (s *Service) AddCommentKind(ctx context.Context, user User, roomID, stepID,
 	if err := checkLen("text", text, MaxMessageChars); err != nil {
 		return events.Event{}, err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	open := s.roomOpen(st)
 	if !open {
 		if kind != events.CommentKindFixNote {
@@ -76,7 +75,7 @@ func (s *Service) AddCommentKind(ctx context.Context, user User, roomID, stepID,
 	}
 	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
 	if err == nil && payload.MentionsAgent {
-		s.ensureAgentLocked(ctx, roomID, st)
+		s.ensureAgentLocked(roomID, st)
 	}
 	return e, err
 }
@@ -84,7 +83,7 @@ func (s *Service) AddCommentKind(ctx context.Context, user User, roomID, stepID,
 // checkFixNoteClosedLocked decides whether user may add a fix note to the
 // closed room st: within fixNoteWindow of the close (409 room_closed after
 // that), and a member of the room's pipeline or the person who closed it (403
-// not_allowed otherwise). Caller holds s.mu.
+// not_allowed otherwise). Caller holds st's lock.
 func (s *Service) checkFixNoteClosedLocked(ctx context.Context, st *roomState, user User) error {
 	if st.snap.ClosedAt == nil {
 		return roomClosed("room is closed")

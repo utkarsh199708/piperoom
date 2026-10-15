@@ -186,3 +186,64 @@ func TestComparePairedSampleSizeNote(t *testing.T) {
 		}
 	}
 }
+
+func restrictFixture() Report {
+	mk := func(name string, pass float64) ScenarioSummary {
+		return ScenarioSummary{Name: name, Summary: Summary{Runs: 2, Passes: int(pass * 2), PassRate: pass, MeanScore: 100 * pass}}
+	}
+	r := Report{Runs: 3, Scenarios: []ScenarioSummary{mk("a", 1), mk("b", 0), mk("c", 1)}}
+	for _, n := range []string{"a", "b", "c"} {
+		r.Results = append(r.Results, RunResult{Scenario: n, Run: 1, Pass: n != "b"})
+	}
+	var ss []Summary
+	for _, s := range r.Scenarios {
+		ss = append(ss, s.Summary)
+	}
+	r.Overall = combine(ss)
+	return r
+}
+
+func TestRestrictRecomputesOverall(t *testing.T) {
+	r := restrictFixture().Restrict([]string{"a", "b"})
+	if len(r.Scenarios) != 2 || len(r.Results) != 2 {
+		t.Fatalf("scenarios=%d results=%d", len(r.Scenarios), len(r.Results))
+	}
+	if math.Abs(r.Overall.PassRate-0.5) > 1e-9 || r.Overall.Runs != 4 {
+		t.Fatalf("overall = %+v", r.Overall)
+	}
+}
+
+func TestCompareSubsetVersusFull(t *testing.T) {
+	base := restrictFixture()
+	cand := Report{Runs: 3, Scenarios: []ScenarioSummary{
+		{Name: "a", Summary: base.Scenarios[0].Summary},
+		{Name: "c"}, // selected but produced no runs
+	}}
+	cand.Overall = combine([]Summary{base.Scenarios[0].Summary})
+	for _, tc := range []struct {
+		name        string
+		subset      bool
+		regressions int
+		rows        int
+	}{
+		{"full run keeps missing-from-candidate", false, 2, 3}, // b and c missing/empty
+		{"subset compares only selected", true, 1, 2},          // c selected but empty
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := base
+			if tc.subset {
+				b = b.Restrict([]string{"a", "c"})
+			}
+			c := Compare(b, cand, 5)
+			if c.Regressions != tc.regressions || len(c.Rows) != tc.rows {
+				t.Fatalf("regressions=%d rows=%d, want %d/%d: %+v", c.Regressions, len(c.Rows), tc.regressions, tc.rows, c.Rows)
+			}
+			if tc.subset && c.Overall.Regressed {
+				t.Fatalf("overall compared unlike sets: %+v", c.Overall)
+			}
+			if wantRuns := map[bool]int{false: 6, true: 4}[tc.subset]; c.Overall.Base.Runs != wantRuns {
+				t.Fatalf("baseline overall runs = %d, want %d", c.Overall.Base.Runs, wantRuns)
+			}
+		})
+	}
+}

@@ -670,6 +670,24 @@ describe('top bar', () => {
   })
 })
 
+describe('driver column verification', () => {
+  it('draws the server badge, never one from the name, and shows an unverified driver’s id', () => {
+    mockList([
+      room({ id: 'a', title: 'Verified driver', driver: { id: 'kabir', name: 'Kabir', verified: true } }),
+      room({ id: 'b', title: 'Spoofed driver', driver: { id: 'u_9', name: 'Kabir ✓ verified' } }),
+    ])
+    renderList()
+    const badge = (row: HTMLElement) =>
+      Array.from(row.querySelectorAll<HTMLElement>('[data-slot="verified-badge"]')).map((b) => b.dataset.verification)
+    const a = screen.getByRole('row', { name: /Verified driver/ })
+    expect(badge(a)).toEqual(['verified'])
+    const b = screen.getByRole('row', { name: /Spoofed driver/ })
+    expect(badge(b)).toEqual(['unverified'])
+    expect(b).toHaveTextContent('(u_9)')
+    expect(b).not.toHaveTextContent('✓')
+  })
+})
+
 describe('New room — Ctrl+Enter', () => {
   it('submits the form from the keyboard like the close and hand-off dialogs', async () => {
     vi.mocked(api.createRoom).mockResolvedValueOnce(room({ id: 'r_kbd' }))

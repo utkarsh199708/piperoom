@@ -16,8 +16,8 @@ import (
 // own proposals through agent.ProposalWithdrawer, and the close every
 // proposal still open.
 //
-// Who wins against the last approval: in one process s.mu orders the
-// withdrawal and the approval, and a fully approved proposal is refused
+// Who wins against the last approval: in one process the room's lock orders
+// the withdrawal and the approval, and a fully approved proposal is refused
 // (proposal_running). Across replicas the snapshot can lag, so the store
 // decides: WithdrawProposal changes the row only while no executor claimed it
 // and no step started, and the executor's claim needs the row still open, so
@@ -57,14 +57,13 @@ func (s *Service) WithdrawProposal(ctx context.Context, user User, roomID, propo
 	if err := checkLen("reason", reason, maxWithdrawReason); err != nil {
 		return events.Event{}, err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -94,12 +93,11 @@ var _ agent.ProposalWithdrawer = proposalCreator{}
 func (s *Service) agentWithdraw(ctx context.Context, roomID string, run uint64, proposalID, reason string) error {
 	reason = clipChars(strings.TrimSpace(sanitizeAgentText(reason)), maxWithdrawReason)
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return err
 	}
+	defer s.unlockRoom(st)
 	if err := s.fenceLocked(roomID, st, run); err != nil {
 		return err
 	}
@@ -121,7 +119,7 @@ func (s *Service) agentWithdraw(ctx context.Context, roomID string, run uint64, 
 // another room, 409 proposal_withdrawn, already_decided (rejected, executed
 // or failed) or proposal_running. The row is changed first (the store decides
 // against an executor's claim) and put back when the event cannot be written,
-// so the log and the row agree. Caller holds s.mu.
+// so the log and the row agree. Caller holds st's lock.
 func (s *Service) withdrawLocked(ctx context.Context, st *roomState, roomID, proposalID string, actor events.Actor, reason string, own bool) (events.Event, error) {
 	row, err := s.store.GetProposal(ctx, proposalID)
 	if err != nil {
@@ -178,7 +176,7 @@ func (s *Service) withdrawLocked(ctx context.Context, st *roomState, roomID, pro
 // and so is one the store says an executor claimed. The store counts these
 // events like room.closed, so a full log takes them too. The writes use a
 // fresh deadline detached from the request: room.closed is already in the log.
-// A shadow room has no proposals. Caller holds s.mu.
+// A shadow room has no proposals. Caller holds st's lock.
 func (s *Service) withdrawOnCloseLocked(ctx context.Context, st *roomState, roomID string) {
 	// room.closed already emptied OpenProposals; openAtClose is what it
 	// found open.

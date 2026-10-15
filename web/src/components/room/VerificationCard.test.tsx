@@ -17,7 +17,7 @@ const base: AgentVerificationPayload = {
     sinks: [{ table: 'analytics.orders', newest: '2026-10-11T10:12:04Z', baseline: '2026-10-11T10:04:00Z', passed: true, passed_by: 'rows since proposal' }],
   },
 }
-const nudge = { roomOpen: true, isDriver: true, driverName: 'Arjun', onClose: vi.fn() }
+const nudge = { roomOpen: true, isDriver: true, driver: { id: 'arjun', name: 'Arjun' }, onClose: vi.fn() }
 
 describe('VerificationCard', () => {
   it('shows the verdict, each check with an accessible mark, and the sink line', () => {
@@ -61,8 +61,8 @@ describe('VerificationCard', () => {
     fireEvent.click(screen.getByRole('button', { name: /Close room/ }))
     expect(onClose).toHaveBeenCalledWith('Fixed by "Restart task"')
     first.unmount()
-    const second = render(<VerificationCard verification={base} title="t" nudge={{ roomOpen: true, isDriver: false, driverName: 'Arjun' }} />)
-    expect(screen.getByText('Arjun can close the room')).toBeInTheDocument()
+    const second = render(<VerificationCard verification={base} title="t" nudge={{ roomOpen: true, isDriver: false, driver: { id: 'arjun', name: 'Arjun' } }} />)
+    expect(screen.getByText(/can close the room/)).toHaveTextContent(/Arjun.* can close the room/)
     second.unmount()
     render(<VerificationCard verification={base} title="t" nudge={{ roomOpen: true, isDriver: false }} />)
     expect(screen.getByText('Take control to close')).toBeInTheDocument()
@@ -70,10 +70,16 @@ describe('VerificationCard', () => {
 
   it('a layer owner who is not the driver can close too, once the panel hands them onClose (Q0, QA G16)', () => {
     const onClose = vi.fn()
-    render(<VerificationCard verification={base} title="Restart task" nudge={{ roomOpen: true, isDriver: false, driverName: 'Arjun', onClose }} />)
+    render(
+      <VerificationCard
+        verification={base}
+        title="Restart task"
+        nudge={{ roomOpen: true, isDriver: false, driver: { id: 'arjun', name: 'Arjun' }, onClose }}
+      />,
+    )
     fireEvent.click(screen.getByRole('button', { name: /Close room/ }))
     expect(onClose).toHaveBeenCalledWith('Fixed by "Restart task"')
-    expect(screen.queryByText('Arjun can close the room')).not.toBeInTheDocument()
+    expect(screen.queryByText(/can close the room/)).not.toBeInTheDocument()
   })
 
   it('no nudge once the room is closed', () => {

@@ -39,6 +39,8 @@ const ToolName = "what_changed"
 const (
 	// DefaultWindow is how far back the tool looks when window is not given.
 	DefaultWindow = 6 * time.Hour
+	// MinWindow is the shortest window the tool accepts.
+	MinWindow = time.Second
 	// MaxWindow is the longest window the tool accepts.
 	MaxWindow = 7 * 24 * time.Hour
 	// callTimeout bounds each read, as for every tool.
@@ -113,7 +115,7 @@ func (t *Tool) InputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"window": map[string]any{"type": "string", "description": "How far back, like \"6h\" or \"2d\". Default 6h, at most 7d."},
+			"window": map[string]any{"type": "string", "description": "How far back, like \"6h\" or \"2d\". Default 6h, from 1s to 7d."},
 			"kinds": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string", "enum": Kinds},
@@ -148,6 +150,12 @@ func parseWindow(s string) (time.Duration, error) {
 		if n > int(MaxWindow/(24*time.Hour)) {
 			return 0, fmt.Errorf("%w: window %q is longer than 7d", tools.ErrBadInput, s)
 		}
+		// Refuse before multiplying: a large negative count wraps the Duration,
+		// and some counts wrap it to a small positive one that passes the range
+		// check below.
+		if n < 1 {
+			return 0, fmt.Errorf("%w: window %q must be between 1s and 7d", tools.ErrBadInput, s)
+		}
 		d = time.Duration(n) * 24 * time.Hour
 	} else {
 		var err error
@@ -155,7 +163,7 @@ func parseWindow(s string) (time.Duration, error) {
 			return 0, fmt.Errorf("%w: window %q must look like 6h, 90m or 2d", tools.ErrBadInput, s)
 		}
 	}
-	if d <= 0 || d > MaxWindow {
+	if d < MinWindow || d > MaxWindow {
 		return 0, fmt.Errorf("%w: window %q must be between 1s and 7d", tools.ErrBadInput, s)
 	}
 	return d, nil

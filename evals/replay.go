@@ -187,6 +187,10 @@ type replayer struct {
 	marks      []ReplayMark
 	unexecuted []string
 	misses     []Miss
+	// isLookup tells the agent's own room-start past-incidents lookup from a
+	// call the model made. It is a field so a test can mark a context; the
+	// production value is agent.IsPastIncidentsLookup.
+	isLookup func(context.Context) bool
 }
 
 // replayRecord is a Recording with its results already converted to JSON, so
@@ -272,6 +276,7 @@ func newPhasedReplayer(recs []Recording, phases []string, transitions []Transiti
 		transitions: transitions,
 		calls:       map[string]int{},
 		seqPos:      map[int]int{},
+		isLookup:    agent.IsPastIncidentsLookup,
 	}
 	if len(phases) > 0 {
 		r.phase = phases[0]
@@ -366,6 +371,20 @@ func (r *replayer) match(tool string, input json.RawMessage) (int, bool) {
 		}
 	}
 	return best, best >= 0
+}
+
+// peek answers the agent's own room-start lookup. The lookup is not a call the
+// model made, so it neither advances a sequence, counts toward an after_calls
+// transition, nor shows up as a miss: otherwise every room would start with a
+// phantom call that moves phases and inflates the miss count.
+func (r *replayer) peek(tool string, input json.RawMessage) (replayObs, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i, ok := r.match(tool, input)
+	if !ok {
+		return replayObs{}, false
+	}
+	return r.recs[i].obs[r.seqPos[i]], true
 }
 
 // serve answers one call: it finds the recording, hands out the next
@@ -563,7 +582,11 @@ func (t *replayTool) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 	if err := ctx.Err(); err != nil {
 		return tools.Result{}, err
 	}
-	ob, ok := t.r.serve(t.def.Name(), input)
+	serve := t.r.serve
+	if t.r.isLookup(ctx) {
+		serve = t.r.peek
+	}
+	ob, ok := serve(t.def.Name(), input)
 	if !ok {
 		return tools.Result{}, errNoRecording
 	}
@@ -674,8 +697,8 @@ type recordingAction struct {
 	log *attemptLog
 }
 
-func (a *recordingAction) Validate(params json.RawMessage) error {
-	err := a.Action.Validate(params)
+func (a *recordingAction) Validate(ctx context.Context, params json.RawMessage) error {
+	err := a.Action.Validate(ctx, params)
 	a.record(params, err)
 	return err
 }

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { TraceState } from '../state/types'
 import type { RoomActions } from '../hooks/useRoom'
@@ -40,13 +40,17 @@ export function TracePanel({
   const [key, setKey] = useState('')
   const [busy, setBusy] = useState(false)
   const restoreFocus = useRestoreFocus()
+  const busyTimer = useRef<number | undefined>(undefined)
+  // A timer that outlives the panel would set state on an unmounted component (and in tests, after teardown).
+  useEffect(() => () => window.clearTimeout(busyTimer.current), [])
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
     if (!table.trim() || !key.trim()) return
     setBusy(true)
     actions.trace(table.trim(), key.trim())
-    window.setTimeout(() => setBusy(false), 400)
+    window.clearTimeout(busyTimer.current)
+    busyTimer.current = window.setTimeout(() => setBusy(false), 400)
   }
 
   return (

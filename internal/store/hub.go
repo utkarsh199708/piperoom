@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -65,6 +66,9 @@ type roomFeed struct {
 	tail int64
 	// buf holds the events tail-len(buf)+1 .. tail, in order.
 	buf []events.Event
+	// gone is set once a read found the room deleted; the buffer then answers
+	// nobody, so each subscriber reads the store, gets ErrNotFound and ends.
+	gone bool
 }
 
 // after returns the buffered events with seq > lastSeq. ok is false when the
@@ -73,7 +77,7 @@ type roomFeed struct {
 func (f *roomFeed) after(lastSeq int64) (evs []events.Event, ok bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.tail < 0 {
+	if f.tail < 0 || f.gone {
 		return nil, false
 	}
 	if lastSeq >= f.tail {
@@ -104,6 +108,20 @@ func (f *roomFeed) add(evs []events.Event) {
 	if n := len(f.buf); n > feedBuffer {
 		f.buf = append(f.buf[:0:0], f.buf[n-feedBuffer:]...)
 	}
+	subs := make([]*subscriber, 0, len(f.subs))
+	for sub := range f.subs {
+		subs = append(subs, sub)
+	}
+	f.mu.Unlock()
+	for _, sub := range subs {
+		signal(sub.wake)
+	}
+}
+
+// markGone records that the room was deleted and wakes every subscriber.
+func (f *roomFeed) markGone() {
+	f.mu.Lock()
+	f.gone = true
 	subs := make([]*subscriber, 0, len(f.subs))
 	for sub := range f.subs {
 		subs = append(subs, sub)
@@ -475,6 +493,10 @@ func (h *hub) runFeed(ctx context.Context, f *roomFeed) {
 func (h *hub) readFeed(ctx context.Context, f *roomFeed) (retry bool) {
 	if f.getTail() < 0 {
 		row, err := h.store.GetRoom(ctx, f.roomID)
+		if errors.Is(err, ErrNotFound) {
+			f.markGone()
+			return false
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				h.log.Warn("store: room feed: read last seq", "room", f.roomID, "err", err)
@@ -488,6 +510,11 @@ func (h *hub) readFeed(ctx context.Context, f *roomFeed) (retry bool) {
 	}
 	for {
 		evs, err := h.store.Since(ctx, f.roomID, f.getTail(), 1000)
+		if errors.Is(err, ErrNotFound) {
+			// Deleted: nothing to retry until the subscribers leave.
+			f.markGone()
+			return false
+		}
 		if err != nil {
 			if ctx.Err() == nil {
 				h.log.Warn("store: room feed: read events", "room", f.roomID, "err", err)
@@ -504,9 +531,10 @@ func (h *hub) readFeed(ctx context.Context, f *roomFeed) (retry bool) {
 	}
 }
 
-// runSub replays events after afterSeq, then streams live until ctx ends. It
-// takes events from its room feed's buffer when it can and reads the store
-// itself when it is behind, so events are never skipped or repeated.
+// runSub replays events after afterSeq, then streams live until ctx ends or
+// the room is deleted. It takes events from its room feed's buffer when it can
+// and reads the store itself when it is behind, so events are never skipped or
+// repeated.
 func (s *PG) runSub(ctx context.Context, sub *subscriber) {
 	defer func() {
 		s.hub.unregister(sub)
@@ -519,7 +547,9 @@ func (s *PG) runSub(ctx context.Context, sub *subscriber) {
 			var err error
 			evs, err = s.Since(ctx, sub.roomID, sub.lastSeq, 1000)
 			if err != nil {
-				if ctx.Err() != nil {
+				if ctx.Err() != nil || errors.Is(err, ErrNotFound) {
+					// Done, or the room was deleted: either way the
+					// channel closes.
 					return
 				}
 				s.log.Warn("store: subscriber read", "room", sub.roomID, "err", err)

@@ -225,6 +225,10 @@ func StartServer(ctx context.Context, cfg ServerConfig, log *slog.Logger) (*Serv
 	for _, id := range cfg.Pipelines {
 		pipes = append(pipes, owners.Pipeline{ID: id, SourceTables: []string{"public." + id}})
 	}
+	// As cmd/server does: the room service exists before the HTTP handler
+	// that owns the WebSocket gateway, so OnRoomDeleted reaches the gateway
+	// through a func set once s.api exists; before that no socket is open.
+	var closeSockets atomic.Pointer[func(string, events.Event)]
 	s.svc = room.New(room.Deps{
 		Store:        ts,
 		Actions:      acts,
@@ -242,6 +246,11 @@ func StartServer(ctx context.Context, cfg ServerConfig, log *slog.Logger) (*Serv
 		MaxAgentsGlobal: cfg.MaxAgentsGlobal,
 		Sessions:        pg.Sessions(),
 		OnRoomClosed:    func(_ context.Context, roomID, _, _ string) { ep.Forget(roomID) },
+		OnRoomDeleted: func(roomID string, deleted events.Event) {
+			if f := closeSockets.Load(); f != nil {
+				(*f)(roomID, deleted)
+			}
+		},
 	})
 	lctx, lcancel := context.WithTimeout(ctx, 60*time.Second)
 	err = s.svc.Load(lctx)
@@ -253,6 +262,8 @@ func StartServer(ctx context.Context, cfg ServerConfig, log *slog.Logger) (*Serv
 	}
 	s.api = httpapi.New(s.svc, ts, log, httpapi.WithReady(ts), httpapi.WithSessions(pg.Sessions()),
 		httpapi.WithLoginStates(pg.LoginStates()), httpapi.WithIdentities(pg.Identities()))
+	closeRoom := s.api.CloseRoomSockets
+	closeSockets.Store(&closeRoom)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /loadtest/stats", s.handleStats)

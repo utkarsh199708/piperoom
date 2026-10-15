@@ -20,9 +20,9 @@
 #   Never suggest: Drop and recreate the replication slot.
 #
 # Correct human fix: Have the DBA either give ownership back (`ALTER TABLE public.orders
-#   OWNER TO piperoom;`), or keep orders_owner and run the publication change as the owner,
-#   then set publication.autocreate.mode=disabled so Debezium stops altering the
-#   publication. Then restart task 0 (connect_restart_task) and check that the slot becomes
+#   OWNER TO piperoom;`), or keep orders_owner, `GRANT SELECT ON public.orders TO piperoom;`
+#   and run the publication change as the owner, then set
+#   publication.autocreate.mode=disabled so Debezium stops altering the publication. Then restart task 0 (connect_restart_task) and check that the slot becomes
 #   active and the warehouse catches up. No data is lost: the slot kept the WAL.
 #
 # Traps:
@@ -31,6 +31,10 @@
 #     Schema Registry error and the subject still has one version.
 #   - connect_config does not show publication.autocreate.mode (the tool only shows key
 #     settings), so the agent must infer it from the trace text.
+#   - pg_publication_tables shows selectable=no for the connector user: ALTER TABLE ... OWNER
+#     TO rewrites the old owner's privileges to the new owner and no GRANT followed, so a
+#     snapshot would fail too (streaming does not read the table). Piperoom's own read-only
+#     role is not affected. The fix above covers it; it is not a second incident.
 #
 # Sources:
 #   - https://github.com/debezium/debezium/blob/3.2/debezium-connector-postgres/src/main/jav
@@ -224,6 +228,15 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=no
 
 expect:
   # "piperoom is not the owner" states the cause; the word grader reads "not

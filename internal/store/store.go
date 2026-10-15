@@ -562,11 +562,17 @@ func (s *PG) appendEvent(ctx context.Context, roomID string, expectSeq int64, ty
 
 // Since returns events with Seq > afterSeq in order, at most limit. Seq is the
 // room's primary key part, so (room_id, seq) is total and the order is stable.
+// A room that does not exist (never created, or deleted) wraps ErrNotFound,
+// as in memstore, so a caller can tell "nothing new" from "room gone"; limit
+// <= 0 is an empty page for any room.
 func (s *PG) Since(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	if limit <= 0 {
 		return []events.Event{}, nil
+	}
+	if CheckText(roomID) != nil {
+		return nil, fmt.Errorf("store: since: %w", ErrNotFound) // no such id can be stored
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT seq, type, actor, payload, at FROM room_events WHERE room_id = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3`,
@@ -585,6 +591,21 @@ func (s *PG) Since(ctx context.Context, roomID string, afterSeq int64, limit int
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: since %s: %w", roomID, err)
+	}
+	if len(out) == 0 {
+		// An empty page is either "nothing after afterSeq" or "no such room".
+		// Only then is the room looked up, so a page with events (the live
+		// feed reads one on every append) still costs one query. Next
+		// returning false already gave the connection back (pgx); Close
+		// keeps that explicit before the lookup takes one.
+		rows.Close()
+		var exists bool
+		if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rooms WHERE id = $1)`, roomID).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("store: since %s: look up room: %w", roomID, err)
+		}
+		if !exists {
+			return nil, fmt.Errorf("store: since %s: %w", roomID, ErrNotFound)
+		}
 	}
 	return out, nil
 }
@@ -623,7 +644,9 @@ func scanEvent(roomID string, row scanner) (events.Event, error) {
 const SubscribeBuffer = 16
 
 // Subscribe replays events after afterSeq then streams new ones live from the
-// room's shared feed (hub.go). The channel closes when ctx ends.
+// room's shared feed (hub.go). The channel closes when ctx ends, and when the
+// room is deleted: at the feed's next read after the delete (an append
+// notification or a poll; the safety poll at the latest).
 func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan events.Event, error) {
 	if _, err := s.GetRoom(ctx, roomID); err != nil {
 		return nil, err

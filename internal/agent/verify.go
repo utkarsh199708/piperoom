@@ -334,17 +334,18 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		// done again and never announces a second verdict: it gets the Repeat
 		// form of agent.verification, which clients keep from overwriting the
 		// full one. The model hears the verdict already reached.
+		repeat := "already verified: " + verdictWord(rec) + "; no checks were run again"
 		r.emit(ctx, events.AgentVerification, events.AgentVerificationPayload{
 			ProposalID: id,
 			Checks:     []events.VerificationCheck{},
 			Recovered:  rec.recovered,
-			Verdict:    "already verified: " + verdictWord(rec) + "; no checks were run again",
+			Verdict:    repeat,
 			Repeat:     true,
 		})
 		return actionOutcome{
 			recovered: rec.recovered,
 			broken:    !rec.recovered,
-			notes:     []string{verifyTag + "already verified: " + verdictWord(rec) + "; no checks were run again"},
+			notes:     []string{verifyTag + repeat},
 		}
 	}
 
@@ -854,6 +855,13 @@ type flowResult struct {
 	// idleDetail replaces idleDetail as the data-flow detail of a quiet
 	// source when the proof came from somewhere else than the slots.
 	idleDetail string
+	// detail is the reason the flow was not verified, without the evidence prefix.
+	detail string
+}
+
+// flowNotVerified is the flowResult of a data-flow check that could not run.
+func flowNotVerified(why string) flowResult {
+	return flowResult{lines: []string{"data flow not verified: " + why}, detail: why}
 }
 
 // sinkTable is one warehouse table the alert's pipeline loads, with the column
@@ -925,7 +933,7 @@ func (st sinkState) readings() string {
 func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bool) flowResult {
 	sinks, why := r.pipelineSinks(ctx, "verify")
 	if why != "" {
-		return flowResult{lines: []string{"data flow not verified: " + why}}
+		return flowNotVerified(why)
 	}
 
 	states := make([]sinkState, len(sinks))
@@ -934,7 +942,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		st.proposalAt, st.hasProposal = rec.baseline[s.name]
 		newest, summary, err := r.readNewest(ctx, "verify", st.input)
 		if err != nil {
-			return flowResult{lines: []string{"data flow not verified: reading " + s.name + ": " + err.Error()}}
+			return flowNotVerified("reading " + s.name + ": " + err.Error())
 		}
 		st.checkAt = newest
 		st.newest = newest
@@ -948,7 +956,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 
 	for attempt := 0; wait && attempt < freshnessAttempts && anyPending(states); attempt++ {
 		if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
-			return flowResult{lines: []string{"data flow not verified: waiting for new rows: " + err.Error()}}
+			return flowNotVerified("waiting for new rows: " + err.Error())
 		}
 		for i := range states {
 			st := &states[i]
@@ -957,7 +965,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 			}
 			newest, summary, err := r.readNewest(ctx, "verify", st.input)
 			if err != nil {
-				return flowResult{lines: []string{"data flow not verified: reading " + st.table.name + ": " + err.Error()}}
+				return flowNotVerified("reading " + st.table.name + ": " + err.Error())
 			}
 			st.lastSummary = summary
 			st.newest = newest
@@ -994,15 +1002,10 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 }
 
 // event renders the data-flow result for agent.verification. A check that
-// could not run says why in Detail, without the "data flow not verified: "
-// lead of the evidence line.
+// could not run says why in Detail, clipped like a per-check detail.
 func (f flowResult) event() *events.DataFlowCheck {
 	if !f.verified {
-		detail := ""
-		if len(f.lines) > 0 {
-			detail = clipLine(strings.TrimPrefix(f.lines[0], "data flow not verified: "))
-		}
-		return &events.DataFlowCheck{Checked: false, Detail: detail}
+		return &events.DataFlowCheck{Checked: false, Detail: clipLine(f.detail)}
 	}
 	return &events.DataFlowCheck{Checked: true, Fresh: f.fresh, Sinks: f.sinks}
 }
@@ -1516,7 +1519,10 @@ func (r *runner) runStepEvents(ctx context.Context, verb, name string, input jso
 	res, err := entry.tool.Run(tctx, input)
 	took := time.Since(start).Milliseconds()
 
-	res = r.scrubToolResult(name, res)
+	res, scrubErr := r.scrubToolResult(name, res)
+	if err == nil {
+		err = scrubErr
+	}
 	if err != nil {
 		// The verdict lines built from this error reach the model and the log.
 		err = r.scrubToolError(name, err)
@@ -1530,11 +1536,12 @@ func (r *runner) runStepEvents(ctx context.Context, verb, name string, input jso
 		return tools.Result{}, err
 	}
 	if withEvents {
+		data, dataCut := r.toolDataJSON(name, res.Data)
 		summary, reTruncated := tools.Truncate(res.Summary)
 		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID: stepID, ToolUseID: toolUseID, Tool: name,
-			Summary: summary, Data: r.toolDataJSON(name, res.Data), IsError: false,
-			Truncated: res.Truncated || reTruncated, TookMS: took,
+			Summary: summary, Data: data, IsError: false,
+			Truncated: res.Truncated || reTruncated || dataCut, TookMS: took,
 		})
 	}
 	return res, nil

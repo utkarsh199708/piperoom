@@ -3,6 +3,8 @@ package room_test
 import (
 	"context"
 	"errors"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,7 +108,8 @@ func TestShadowRevealedAtIsWriteOnceMarker(t *testing.T) {
 func queuedRetry(t *testing.T) (env *shadowEnv, shadowID, liveID string) {
 	t.Helper()
 	failed := make(chan struct{}, 8)
-	env = newShadowEnv(t, shadowCfg{maxAgents: 1, grace: 10 * time.Second, fn: func(ctx context.Context, _ int, d agent.Deps) error {
+	hb := newHeldBackoff(t)
+	env = newShadowEnv(t, shadowCfg{maxAgents: 1, grace: 10 * time.Second, retryAfter: hb.after, fn: func(ctx context.Context, _ int, d agent.Deps) error {
 		failed <- struct{}{}
 		return errors.New("test: model down")
 	}})
@@ -118,7 +121,10 @@ func queuedRetry(t *testing.T) (env *shadowEnv, shadowID, liveID string) {
 		t.Fatal(err)
 	}
 	waitFor(t, 5*time.Second, func() bool { return env.run.live.Load() == 1 })
-	time.Sleep(1300 * time.Millisecond) // the 1s backoff is over: the retry is queued
+	// The live room holds the slot: end the backoff and wait until the retry
+	// shows it is queued for the slot.
+	hb.release()
+	waitFor(t, 5*time.Second, func() bool { return slices.Contains(statuses(env.shadowLog(t, snap.ID)), "queued") })
 	return env, snap.ID, live.ID
 }
 
@@ -165,18 +171,20 @@ func TestShadowQueuedRetryEndsAtClose(t *testing.T) {
 // and the backoff wakes on the close, so the run ends at once.
 func TestShadowClosedDuringBackoffNotRetried(t *testing.T) {
 	failed := make(chan struct{}, 8)
-	env := newShadowEnv(t, shadowCfg{grace: 10 * time.Second, fn: func(ctx context.Context, _ int, d agent.Deps) error {
+	hb := newHeldBackoff(t)
+	env := newShadowEnv(t, shadowCfg{grace: 10 * time.Second, retryAfter: hb.after, fn: func(ctx context.Context, _ int, d agent.Deps) error {
 		failed <- struct{}{}
 		return errors.New("test: model down")
 	}})
 	snap := env.open(t, "backoff")
 	<-failed
-	time.Sleep(100 * time.Millisecond) // inside the 1s backoff
+	<-hb.entered // inside the backoff, which lasts until the test ends it
 	start := time.Now()
 	env.close(t, snap.ID, "fixed by hand")
 	r := env.waitFinished(t, snap.ID)
 	took := time.Since(start)
-	time.Sleep(2500 * time.Millisecond) // past every backoff
+	hb.release()                       // every backoff is over
+	time.Sleep(100 * time.Millisecond) // a retry would start at once
 	if r.Status != store.ShadowInterrupted || env.run.Calls() != 1 {
 		t.Fatalf("status %q after %d calls, want interrupted after 1", r.Status, env.run.Calls())
 	}
@@ -187,3 +195,33 @@ func TestShadowClosedDuringBackoffNotRetried(t *testing.T) {
 		t.Fatalf("reveals = %d", n)
 	}
 }
+
+// heldBackoff is a retry backoff the test ends by hand: every wait started
+// through after ends at release (or at the end of the test). entered gets a
+// value each time a wait starts.
+type heldBackoff struct {
+	entered chan struct{}
+	done    chan struct{}
+	once    sync.Once
+}
+
+func newHeldBackoff(t *testing.T) *heldBackoff {
+	hb := &heldBackoff{entered: make(chan struct{}, 8), done: make(chan struct{})}
+	t.Cleanup(hb.release)
+	return hb
+}
+
+func (hb *heldBackoff) after(time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	go func() {
+		<-hb.done
+		ch <- time.Now()
+	}()
+	select {
+	case hb.entered <- struct{}{}:
+	default:
+	}
+	return ch
+}
+
+func (hb *heldBackoff) release() { hb.once.Do(func() { close(hb.done) }) }

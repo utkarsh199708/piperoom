@@ -78,12 +78,14 @@ func TestAlertBodyGuard(t *testing.T) {
 	}
 	for name, body := range bad {
 		t.Run(name+"/webhook", func(t *testing.T) {
+			t.Parallel() // each case has its own service; assertNothingCreated waits 50 ms
 			svc, runs, hooks := guardSetup(t, memstore.New())
 			_, created, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders", json.RawMessage(body))
 			wantValidation400(t, err)
 			assertNothingCreated(t, svc, runs, hooks, created)
 		})
 		t.Run(name+"/signed", func(t *testing.T) {
+			t.Parallel() // each case has its own service; assertNothingCreated waits 50 ms
 			svc, runs, hooks := guardSetup(t, memstore.New())
 			_, created, err := svc.OpenAlertRoom(context.Background(), alertin.Alert{
 				Source: alertin.Generic, Status: alertin.StatusFiring, Title: "lag", Severity: "sev2",
@@ -149,6 +151,7 @@ func TestAlertBodyGuardWritesNothingToAnOpenRoom(t *testing.T) {
 func TestCreateRoomTitleGuard(t *testing.T) {
 	for name, title := range map[string]string{"nul": "bad\x00title", "invalid utf-8": "bad\xfftitle"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel() // each case has its own service; assertNothingCreated waits 50 ms
 			svc, runs, hooks := guardSetup(t, memstore.New())
 			_, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), title, "sev2", "orders")
 			wantValidation400(t, err)
@@ -170,6 +173,7 @@ func TestUnstorableAppendErrorIs400(t *testing.T) {
 	body := json.RawMessage(`{"n":1}`)
 	for _, code := range []string{"22003", "22P05", "22021"} {
 		t.Run(code, func(t *testing.T) {
+			t.Parallel() // each case has its own service; assertNothingCreated waits 50 ms
 			mem := memstore.New()
 			pgErr := &pgconn.PgError{Code: code, Message: "value overflows numeric format: 1e131072"}
 			svc, runs, hooks := guardSetup(t, failAppendStore{Store: mem, err: fmt.Errorf("store: insert event: %w", pgErr)})

@@ -90,7 +90,10 @@ func TestPurgeClosedBeforeDeletesOnlyOldClosedRooms(t *testing.T) {
 	if _, err := s.GetRoom(ctx, aID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("purged room still there: %v", err)
 	}
-	if evs, err := s.Since(ctx, aID, 0, 100); err != nil || len(evs) != 0 {
+	// A purged room has no events left, and Since says the room is gone
+	// (ErrNotFound) rather than "nothing new"; leftover events would come
+	// back without the error.
+	if evs, err := s.Since(ctx, aID, 0, 100); !errors.Is(err, store.ErrNotFound) || len(evs) != 0 {
 		t.Fatalf("purged room's events remain: %d %v", len(evs), err)
 	}
 	if _, err := s.GetProposal(ctx, aPid); !errors.Is(err, store.ErrNotFound) {
@@ -193,7 +196,7 @@ func TestPurgeLargeRoomDeletesInBatches(t *testing.T) {
 	if res.Events != n || len(res.RoomIDs) != 1 {
 		t.Fatalf("want %d events deleted in one room, got %+v", n, res)
 	}
-	if evs, err := s.Since(ctx, roomID, 0, 10); err != nil || len(evs) != 0 {
+	if evs, err := s.Since(ctx, roomID, 0, 10); !errors.Is(err, store.ErrNotFound) || len(evs) != 0 {
 		t.Fatalf("events remain: %d %v", len(evs), err)
 	}
 }

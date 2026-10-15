@@ -1,4 +1,6 @@
+import { PersonName } from '@/components/VerifiedBadge'
 import { useEffect, useId, useState } from 'react'
+import { plainText } from '@/lib/title'
 import { emptyStateFor } from '../lib/emptyState'
 import type { ComponentProps, FormEvent } from 'react'
 import { Check, ChevronRight, Wrench, X } from 'lucide-react'
@@ -160,7 +162,7 @@ function CommentThread({
         <PersonAvatar actor={comment.author} size={20} className="mt-px" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <strong className="font-medium">{comment.author.name}</strong>
+            <PersonName person={comment.author} nameClassName="font-medium" />
             {fix && (
               <Badge variant="success" className="self-center">
                 <Wrench className="size-3" aria-hidden="true" />
@@ -169,7 +171,7 @@ function CommentThread({
             )}
             <Clock iso={comment.at} className="text-xs text-subtle-foreground" />
           </div>
-          <p className="m-0 break-words text-muted-foreground">{comment.text}</p>
+          <p className="m-0 break-words text-muted-foreground">{plainText(comment.text, Infinity)}</p>
         </div>
       </div>
       {comment.replies.map((r, i) => (
@@ -406,7 +408,7 @@ function LiveStep({
 // The agent prose in the timeline links its step ids to the rows of these steps.
 export function Timeline(props: ComponentProps<typeof TimelineBody>) {
   return (
-    <StepNumbersProvider steps={props.steps}>
+    <StepNumbersProvider steps={props.steps} proposalIds={props.proposalIds}>
       <TimelineBody {...props} />
     </StepNumbersProvider>
   )
@@ -426,8 +428,11 @@ function TimelineBody({
   onClearFilter,
   pages = [],
   ownerNames,
+  shadow = false,
 }: {
   steps: StepState[]
+  /** Proposal ids of the room: a raw id in agent prose links to its card. */
+  proposalIds?: readonly string[]
   messages: AgentMessageState[]
   comments: CommentState[]
   onComment: (text: string, stepId?: string) => void | Promise<boolean>
@@ -448,6 +453,8 @@ function TimelineBody({
   pages?: PageState[]
   /** user id -> display name, for the owners a page names. */
   ownerNames?: Record<string, string>
+  /** Shadow room: the agent works silently, so the empty state neither reports it nor offers a steer. */
+  shadow?: boolean
 }) {
   // QA R18 (G11): a step link to a step that the layer filter hides clears the filter.
   useEffect(() => {
@@ -462,7 +469,7 @@ function TimelineBody({
   }, [steps, filterLayer, onClearFilter])
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
-    const empty = emptyStateFor(agent)
+    const empty = emptyStateFor(agent, shadow)
     return (
       <div className="flex flex-col gap-2">
         <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">

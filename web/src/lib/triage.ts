@@ -44,9 +44,11 @@ export type TriageLine =
   | { kind: 'none' }
 
 export function triageLine(
-  room: { status: string; opened_at: string; triage?: TriageSummary | null },
+  room: { status: string; opened_at: string; triage?: TriageSummary | null; shadow?: boolean },
   now: number,
 ): TriageLine {
+  // The server never triages a shadow room, so "in progress" would be false.
+  if (room.shadow) return { kind: 'none' }
   const t = room.triage
   if (t) {
     if (t.status === 'ok' && t.headline) return { kind: 'headline', headline: t.headline, layer: t.suspected_layer || undefined }
@@ -85,4 +87,30 @@ export function goToStep(stepId: string): void {
   if (focusStep(stepId)) return
   window.dispatchEvent(new CustomEvent<string>(REVEAL_STEP_EVENT, { detail: stepId }))
   window.setTimeout(() => focusStep(stepId), 0)
+}
+
+/** DOM id of a proposal card, the target of a proposal id in agent prose (Q5 T12). */
+export function proposalCardAnchor(proposalId: string): string {
+  return `proposal-${proposalId}`
+}
+
+/** Fired on window before a proposal link scrolls; the room screen opens the Fix tab on the tabbed layout. */
+export const REVEAL_PROPOSAL_EVENT = 'piperoom:reveal-proposal'
+
+/**
+ * Scrolls to and focuses a proposal card. Like step links these are not `#` hrefs (HashRouter).
+ * 'proposal' is the id of the proposals block (ProposalsSummary's PROPOSAL_ANCHOR), the fallback
+ * when the card itself is not rendered.
+ */
+export function goToProposal(proposalId: string): void {
+  window.dispatchEvent(new CustomEvent<string>(REVEAL_PROPOSAL_EVENT, { detail: proposalId }))
+  window.setTimeout(() => {
+    const el = document.getElementById(proposalCardAnchor(proposalId)) ?? document.getElementById('proposal')
+    if (!el) return
+    el.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+    el.setAttribute('tabindex', '-1')
+    el.focus({ preventScroll: true })
+    el.classList.add('ring-2', 'ring-ring')
+    window.setTimeout(() => el.classList.remove('ring-2', 'ring-ring'), 2000)
+  }, 0)
 }

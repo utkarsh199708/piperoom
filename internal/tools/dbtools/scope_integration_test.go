@@ -209,12 +209,17 @@ func TestScopedSlotAndPublicationToolsIntegration(t *testing.T) {
 		if err := Register(reg, Deps{Src: db, Connect: &fakeConnect{configErr: down}, Owners: o}); err != nil {
 			t.Fatal(err)
 		}
-		for name, in := range map[string]string{"pg_replication_slots": `{}`, "pg_publication_tables": `{"pipeline_id":"mine"}`} {
-			tl, _ := reg.Get(name)
-			r, err := tl.Run(room, json.RawMessage(in))
-			if !errors.Is(err, down) || r.Summary != "" || r.Data != nil {
-				t.Fatalf("%s: r = %+v, err = %v; want the Connect error and nothing else", name, r, err)
-			}
+		// pg_replication_slots stays fail-closed. pg_publication_tables falls
+		// back to the pipeline's own data (Q5 T6, expectation changed).
+		tl, _ := reg.Get("pg_replication_slots")
+		r, err := tl.Run(room, json.RawMessage(`{}`))
+		if !errors.Is(err, down) || r.Summary != "" || r.Data != nil {
+			t.Fatalf("pg_replication_slots: r = %+v, err = %v; want the Connect error and nothing else", r, err)
+		}
+		tl, _ = reg.Get("pg_publication_tables")
+		r, err = tl.Run(room, json.RawMessage(`{"pipeline_id":"mine"}`))
+		if err != nil || !strings.Contains(r.Summary, "Connect unreachable: role checks need the connector config") {
+			t.Fatalf("pg_publication_tables: r = %+v, err = %v; want the fallback", r, err)
 		}
 	})
 }

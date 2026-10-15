@@ -36,7 +36,11 @@ export function NoDriverBanner({
       className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border bg-warning-subtle px-4 py-1.5 font-medium text-warning-foreground sm:px-6"
     >
       <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
-      <span>No one is driving — take control to steer the agent.</span>
+      <span>
+        {state.shadow
+          ? 'No one is driving — take control to run the incident and close the room.'
+          : 'No one is driving — take control to steer the agent.'}
+      </span>
       {age && <span className="text-xs font-normal text-muted-foreground">opened {age} ago</span>}
       {withOwner.length > 0 && (
         <span className="text-xs font-normal text-muted-foreground">

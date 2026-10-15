@@ -130,6 +130,35 @@ describe('useRoomList push', () => {
     expect(result.current.mode).toBe('push')
   })
 
+  it.each([
+    [0, 500],
+    [0.5, 750],
+    [1, 1000],
+  ])('with random %s the first reconnect waits %s ms', (r, wait) => {
+    renderHook(() => useRoomList({ random: () => r }))
+    act(() => sockets[0].drop())
+    act(() => vi.advanceTimersByTime(wait - 1))
+    expect(sockets).toHaveLength(1)
+    act(() => vi.advanceTimersByTime(1))
+    expect(sockets).toHaveLength(2)
+  })
+
+  it('draws a new delay for every reconnect, from a ceiling that doubles', () => {
+    const draws = [0, 1] // 500 ms of a 1 s ceiling, then 2000 ms of a 2 s ceiling
+    let i = 0
+    renderHook(() => useRoomList({ random: () => draws[i++] }))
+    act(() => sockets[0].drop())
+    act(() => vi.advanceTimersByTime(499))
+    expect(sockets).toHaveLength(1)
+    act(() => vi.advanceTimersByTime(1))
+    expect(sockets).toHaveLength(2)
+    act(() => sockets[1].drop())
+    act(() => vi.advanceTimersByTime(1999))
+    expect(sockets).toHaveLength(2)
+    act(() => vi.advanceTimersByTime(1))
+    expect(sockets).toHaveLength(3)
+  })
+
   it(`falls back to polling after ${MAX_FAILED_OPENS} failed opens in a row`, async () => {
     const { result } = renderHook(() => useRoomList())
     act(() => sockets[0].drop())

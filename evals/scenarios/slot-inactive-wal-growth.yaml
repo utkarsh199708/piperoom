@@ -46,6 +46,17 @@
 #     active=false.
 #   - internal/actions/kafka_actions.go: The only write actions: connect_restart_task,
 #     connect_restart_connector, schema_set_compatibility, schema_register.
+#
+# Verify budget (E6b review, max_verify_calls 6 -> 8): reads after the executed resume.
+#   agent.Run's own verification pass (internal/agent/verify.go) makes 4 of them here:
+#   connect_status twice (the kafka-connect check settles and reads again), pipeline_map (to
+#   find the sink tables) and warehouse_freshness once (the first recovered read, 14:20, is newer
+#   than the creation baseline, 14:04:56, so it does not wait; without a creation baseline it
+#   reads a fifth time). That pass never reads the slot, and the alert is about the slot's WAL:
+#   the careful engineer (the fix above: "watch the slot become active and retained WAL shrink")
+#   reads pg_replication_slots twice, active=true at 44.1 GiB and then 31.7 GiB, so the WAL is
+#   seen shrinking, not only once lower than before the fix. 4 + 2 = 6 leaves no margin; 6 + 2
+#   = 8. The investigation budget (max_tool_calls 14) was not exceeded and stays.
 
 name: slot-inactive-wal-growth
 description: |
@@ -454,6 +465,15 @@ recordings:
       - layer: warehouse
         name: analytics.orders
         status: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
 
 # The kafka-connect owner approves the resume and the executor runs it; the text is what
 # connect_resume_connector's Execute returns. If the agent never proposed the resume there is
@@ -495,5 +515,6 @@ expect:
   fix: [[connect_resume_connector]]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
   # Reads after the executed resume (the re-check, including agent.Run's own verify pass)
-  # count against max_verify_calls (default 6), not this budget.
+  # count against max_verify_calls, not this budget. 8: see the header (E6b).
   max_tool_calls: 14
+  max_verify_calls: 8

@@ -213,6 +213,8 @@ type pipeState struct {
 	groups map[string]*groupMem
 	// taskHist is each connector task's recent state changes (crash loops).
 	taskHist map[string]*taskHist
+	// connState is each connector's last read state (crash loops: a person's restart).
+	connState map[string]string
 	// risks are the current config findings of the pipeline (codes only), added
 	// to the evidence of whatever signal opens a room.
 	risks []map[string]any
