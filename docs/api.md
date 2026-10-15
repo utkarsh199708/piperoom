@@ -189,8 +189,9 @@ never as HTML or Markdown.
   ≤ 2 KiB; each `params_redacted` item ≤ 200 bytes; `target` names a system, never credentials). It is outside
   `data`, so a cut `data` keeps its receipt. `agent.hypothesis` may carry `unbacked_terms: [string]` (≤ 20, each
   ≤ 80 bytes): names and numbers in `text` that no cited step's summary contains; they never block the hypothesis.
-  `handoff.created.summary` may carry `violations: [{rule, field, detail}]`, the hand-off checks still failing
-  after the agent's self-correction pass; shown to the recipient before Accept, never blocking.
+  `handoff.created.summary` carries `violations: [{rule, field, detail}]`, the hand-off checks still failing
+  after the agent's self-correction pass; shown to the recipient before Accept, never blocking. `[]` means
+  checked and clean; no field (summaries written before F3) means not checked.
 - **Fix ceremony (F4).** `ProposalStep` gains `verify?` (one sentence, what the agent checks after the step;
   part of the hashed proposal, omitted when empty). `proposal.previewed {proposal_id, steps: [{step_index,
   preview?: {target, current, expected, downstream?, reversible, rollback?, dry_run?: {ok, source, text,
