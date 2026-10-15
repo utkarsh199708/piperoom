@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,13 +20,47 @@ import (
 
 // ---- fakes ----
 
+// errWriteRefused is returned by a fake's write method unless the test sets
+// allowWrites. Read-only tools must never reach a write, so one that does
+// fails here instead of quietly changing a fake.
+var errWriteRefused = errors.New("fake write refused: allowWrites is off")
+
+// refuseWrite counts the refusal (so guardWrites can fail the test) and
+// returns the wrapped error.
+func refuseWrite(refusals *atomic.Int32, fake, method string) error {
+	refusals.Add(1)
+	return fmt.Errorf("%s.%s: %w", fake, method, errWriteRefused)
+}
+
+// writeCounter is implemented by every fake that has write methods.
+type writeCounter interface{ refusedWrites() int32 }
+
+// guardWrites fails the test at cleanup if any of the fakes refused a write.
+// Read-only tools must never reach a write, and a tool that swallows the
+// refusal error would otherwise pass its test.
+func guardWrites(t *testing.T, fakes ...writeCounter) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, f := range fakes {
+			if n := f.refusedWrites(); n > 0 {
+				t.Errorf("%d write(s) refused by a fake: a read-only path reached a write", n)
+			}
+		}
+	})
+}
+
 type fakeConnect struct {
 	listFn     func(context.Context) ([]string, error)
 	statusFn   func(context.Context, string) (clients.ConnectorStatus, error)
 	configFn   func(context.Context, string) (map[string]string, error)
 	restartTFn func(context.Context, string, int) error
 	restartCFn func(context.Context, string) error
+	// allowWrites lets the write methods call their hooks. Off by default.
+	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *fakeConnect) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *fakeConnect) ListConnectors(ctx context.Context) ([]string, error) { return f.listFn(ctx) }
 func (f *fakeConnect) Status(ctx context.Context, n string) (clients.ConnectorStatus, error) {
@@ -34,9 +70,15 @@ func (f *fakeConnect) Config(ctx context.Context, n string) (map[string]string, 
 	return f.configFn(ctx, n)
 }
 func (f *fakeConnect) RestartTask(ctx context.Context, n string, t int) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "fakeConnect", "RestartTask")
+	}
 	return f.restartTFn(ctx, n, t)
 }
 func (f *fakeConnect) RestartConnector(ctx context.Context, n string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "fakeConnect", "RestartConnector")
+	}
 	return f.restartCFn(ctx, n)
 }
 
@@ -47,7 +89,12 @@ type fakeRegistry struct {
 	compatFn   func(context.Context, string) (string, bool, error)
 	setFn      func(context.Context, string, string) error
 	registerFn func(context.Context, string, string) (int, error)
+	// allowWrites lets SetCompatibility and Register call their hooks. Off by default.
+	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *fakeRegistry) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *fakeRegistry) Subjects(ctx context.Context) ([]string, error) { return f.subjectsFn(ctx) }
 func (f *fakeRegistry) Versions(ctx context.Context, s string) ([]int, error) {
@@ -60,9 +107,15 @@ func (f *fakeRegistry) Compatibility(ctx context.Context, s string) (string, boo
 	return f.compatFn(ctx, s)
 }
 func (f *fakeRegistry) SetCompatibility(ctx context.Context, s, l string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "fakeRegistry", "SetCompatibility")
+	}
 	return f.setFn(ctx, s, l)
 }
 func (f *fakeRegistry) Register(ctx context.Context, s, sc string) (int, error) {
+	if !f.allowWrites {
+		return 0, refuseWrite(&f.refusals, "fakeRegistry", "Register")
+	}
 	return f.registerFn(ctx, s, sc)
 }
 
@@ -113,12 +166,14 @@ Caused by: RestClientException: Schema being registered is incompatible with an 
 			}, nil
 		},
 	}
+	guardWrites(t, fc)
 	fr := &fakeRegistry{
 		schemaFn: func(ctx context.Context, s string, v int) (clients.SchemaVersion, error) {
 			return clients.SchemaVersion{Subject: s, Version: 1, ID: 1,
 				Schema: `{"type":"record","name":"Envelope","fields":[{"name":"id","type":"long"},{"name":"amount","type":"int"}]}`}, nil
 		},
 	}
+	guardWrites(t, fr)
 	reg := tools.NewRegistry()
 	if err := Register(reg, Deps{Connect: fc, Registry: fr}); err != nil {
 		t.Fatal(err)
@@ -159,6 +214,7 @@ func TestConnectConfigRedacts(t *testing.T) {
 			}, nil
 		},
 	}
+	guardWrites(t, fc)
 	reg := tools.NewRegistry()
 	if err := Register(reg, Deps{Connect: fc}); err != nil {
 		t.Fatal(err)
@@ -187,6 +243,7 @@ func TestSchemaRegistryDiff(t *testing.T) {
 			return clients.SchemaVersion{Subject: s, Version: 2, ID: 2, Schema: v2}, nil
 		},
 	}
+	guardWrites(t, fr)
 	reg := tools.NewRegistry()
 	if err := Register(reg, Deps{Registry: fr}); err != nil {
 		t.Fatal(err)
@@ -237,6 +294,7 @@ func TestConnectStatusRealFixture(t *testing.T) {
 			return clients.SchemaVersion{Subject: s, Version: 1, ID: 2, Schema: v1Schema}, nil
 		},
 	}
+	guardWrites(t, fr)
 	reg := tools.NewRegistry()
 	if err := Register(reg, Deps{Connect: connect.New(srv.URL, srv.Client()), Registry: fr}); err != nil {
 		t.Fatal(err)
@@ -270,6 +328,7 @@ func TestConnectListConnectors(t *testing.T) {
 			return clients.ConnectorStatus{}, errors.New("down")
 		},
 	}
+	guardWrites(t, fc)
 	reg := tools.NewRegistry()
 	if err := Register(reg, Deps{Connect: fc}); err != nil {
 		t.Fatal(err)
@@ -290,6 +349,7 @@ func TestSchemaRegistrySubjects(t *testing.T) {
 			return []string{"pg.public.orders-value", "pg.public.orders-key", "other-value"}, nil
 		},
 	}
+	guardWrites(t, fr)
 	reg := tools.NewRegistry()
 	if err := Register(reg, Deps{Registry: fr}); err != nil {
 		t.Fatal(err)
@@ -312,6 +372,7 @@ func TestSchemaRegistryVersions(t *testing.T) {
 		},
 		compatFn: func(context.Context, string) (string, bool, error) { return "BACKWARD", true, nil },
 	}
+	guardWrites(t, fr)
 	reg := tools.NewRegistry()
 	if err := Register(reg, Deps{Registry: fr}); err != nil {
 		t.Fatal(err)

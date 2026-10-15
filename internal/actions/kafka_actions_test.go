@@ -4,16 +4,61 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"piperoom/internal/clients"
 )
 
+// errWriteRefused is returned by a fake's write method unless the test sets its
+// allowWrites flag, so a write that a test did not ask for fails loudly.
+var errWriteRefused = errors.New("fake write refused: allowWrites is off")
+
+// refuseWrite counts the refusal (so guardWrites can fail the test) and
+// returns the wrapped error.
+func refuseWrite(refusals *atomic.Int32, fake, method string) error {
+	refusals.Add(1)
+	return fmt.Errorf("%s.%s: %w", fake, method, errWriteRefused)
+}
+
+// writeCounter is implemented by every fake that has write methods.
+type writeCounter interface{ refusedWrites() int32 }
+
+// guardWrites fails the test at cleanup if any of the fakes refused a write,
+// so a path that swallows the refusal error still fails.
+func guardWrites(t *testing.T, fakes ...writeCounter) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, f := range fakes {
+			if n := f.refusedWrites(); n > 0 {
+				t.Errorf("%d write(s) refused by a fake: the test reached a write it did not opt in to", n)
+			}
+		}
+	})
+}
+
+// guardDeps runs guardWrites on every fake in d. An action must write only
+// through the client it is meant to change; a stray write to the other one
+// fails the test.
+func guardDeps(t *testing.T, d Deps) {
+	t.Helper()
+	var fakes []writeCounter
+	for _, c := range []any{d.Connect, d.Registry} {
+		if w, ok := c.(writeCounter); ok {
+			fakes = append(fakes, w)
+		}
+	}
+	guardWrites(t, fakes...)
+}
+
+// testDeps opts in to writes: the action tests that use it execute actions
+// whose whole point is a write. Read-only tests must build their own fakes.
 func testDeps() Deps {
 	return Deps{
-		Connect:  &fakeConnect{names: []string{"pg-orders-connector"}},
-		Registry: &fakeRegistry{subjects: []string{"pg.public.orders-value"}},
+		Connect:  &fakeConnect{names: []string{"pg-orders-connector"}, allowWrites: true},
+		Registry: &fakeRegistry{subjects: []string{"pg.public.orders-value"}, allowWrites: true},
 	}
 }
 
@@ -21,7 +66,13 @@ type fakeConnect struct {
 	names       []string
 	restarted   string
 	restartTask int
+	resumed     string
+	// allowWrites lets the write methods record their call. Off by default.
+	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *fakeConnect) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *fakeConnect) ListConnectors(context.Context) ([]string, error) { return f.names, nil }
 func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
@@ -29,21 +80,38 @@ func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, 
 }
 func (f *fakeConnect) Config(context.Context, string) (map[string]string, error) { return nil, nil }
 func (f *fakeConnect) RestartTask(_ context.Context, n string, task int) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "fakeConnect", "RestartTask")
+	}
 	f.restarted, f.restartTask = n, task
 	return nil
 }
 func (f *fakeConnect) RestartConnector(_ context.Context, n string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "fakeConnect", "RestartConnector")
+	}
 	f.restarted = n
 	return nil
 }
-func (f *fakeConnect) Resume(context.Context, string) error { return nil }
+func (f *fakeConnect) Resume(_ context.Context, n string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "fakeConnect", "Resume")
+	}
+	f.resumed = n
+	return nil
+}
 
 type fakeRegistry struct {
 	subjects    []string
 	compatLevel string
 	compatErr   error
 	regID       int
+	// allowWrites lets SetCompatibility and Register take effect. Off by default.
+	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *fakeRegistry) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *fakeRegistry) Subjects(context.Context) ([]string, error)      { return f.subjects, nil }
 func (f *fakeRegistry) Versions(context.Context, string) ([]int, error) { return nil, nil }
@@ -57,10 +125,18 @@ func (f *fakeRegistry) Compatibility(context.Context, string) (string, bool, err
 	return f.compatLevel, true, nil
 }
 func (f *fakeRegistry) SetCompatibility(_ context.Context, _ string, level string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "fakeRegistry", "SetCompatibility")
+	}
 	f.compatLevel = level
 	return nil
 }
-func (f *fakeRegistry) Register(context.Context, string, string) (int, error) { return f.regID, nil }
+func (f *fakeRegistry) Register(context.Context, string, string) (int, error) {
+	if !f.allowWrites {
+		return 0, refuseWrite(&f.refusals, "fakeRegistry", "Register")
+	}
+	return f.regID, nil
+}
 
 // TestInScopeSubject pins the exact-match rule: a subject is in scope only
 // when it is "<TopicPrefix>.<source_table>-key" or "-value" for one of the
@@ -164,7 +240,7 @@ func TestRestartTaskExecute(t *testing.T) {
 
 func TestRegisterSchemaExecute(t *testing.T) {
 	d := testDeps()
-	d.Registry = &fakeRegistry{regID: 42}
+	d.Registry = &fakeRegistry{regID: 42, allowWrites: true}
 	reg := NewRegistry()
 	if err := Register(reg, d); err != nil {
 		t.Fatal(err)
@@ -220,7 +296,7 @@ func TestRestartConnectorExecute(t *testing.T) {
 
 func TestSetCompatibilityExecute(t *testing.T) {
 	d := testDeps()
-	d.Registry = &fakeRegistry{compatLevel: "FULL"}
+	d.Registry = &fakeRegistry{compatLevel: "FULL", allowWrites: true}
 	reg := NewRegistry()
 	if err := Register(reg, d); err != nil {
 		t.Fatal(err)
@@ -237,7 +313,7 @@ func TestSetCompatibilityExecute(t *testing.T) {
 
 func TestSetCompatibilityReReadFails(t *testing.T) {
 	d := testDeps()
-	d.Registry = &fakeRegistry{compatErr: errors.New("registry down")}
+	d.Registry = &fakeRegistry{compatErr: errors.New("registry down"), allowWrites: true}
 	reg := NewRegistry()
 	if err := Register(reg, d); err != nil {
 		t.Fatal(err)

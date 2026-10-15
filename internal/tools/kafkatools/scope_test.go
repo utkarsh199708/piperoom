@@ -57,7 +57,7 @@ func (c *counted) has(s string) bool {
 }
 
 // scopeFakes returns fakes that serve both pipelines' objects and count every call.
-func scopeFakes() (Deps, *counted) {
+func scopeFakes(t *testing.T) (Deps, *counted) {
 	c := &counted{}
 	fc := &fakeConnect{
 		listFn: func(context.Context) ([]string, error) {
@@ -73,6 +73,7 @@ func scopeFakes() (Deps, *counted) {
 			return map[string]string{"connector.class": "x", "database.hostname": "db-of-" + n}, nil
 		},
 	}
+	guardWrites(t, fc)
 	fr := &fakeRegistry{
 		subjectsFn: func(context.Context) ([]string, error) {
 			c.add("registry.subjects")
@@ -98,6 +99,7 @@ func scopeFakes() (Deps, *counted) {
 			return "BACKWARD", true, nil
 		},
 	}
+	guardWrites(t, fr)
 	fk := &fakeKafkaConfig{
 		fakeKafka: &fakeKafka{
 			offsetsFn: func(_ context.Context, topic string) ([]clients.PartitionOffsets, error) {
@@ -162,7 +164,7 @@ var scopeCases = []struct {
 func TestScopeInScopeWorks(t *testing.T) {
 	for _, tc := range scopeCases {
 		t.Run(tc.tool, func(t *testing.T) {
-			d, c := scopeFakes()
+			d, c := scopeFakes(t)
 			if _, err := scopeTool(t, d, tc.tool).Run(roomCtx(), json.RawMessage(tc.in)); err != nil {
 				t.Fatalf("in-scope call failed: %v", err)
 			}
@@ -176,7 +178,7 @@ func TestScopeInScopeWorks(t *testing.T) {
 func TestScopeOutOfScopeRefusedWithoutClientCall(t *testing.T) {
 	for _, tc := range scopeCases {
 		t.Run(tc.tool, func(t *testing.T) {
-			d, c := scopeFakes()
+			d, c := scopeFakes(t)
 			res, err := scopeTool(t, d, tc.tool).Run(roomCtx(), json.RawMessage(tc.out))
 			if !errors.Is(err, tools.ErrOutOfScope) {
 				t.Fatalf("err = %v, want ErrOutOfScope", err)
@@ -195,7 +197,7 @@ func TestScopeOutOfScopeRefusedWithoutClientCall(t *testing.T) {
 }
 
 func TestScopePipelineIDMismatchRefused(t *testing.T) {
-	d, c := scopeFakes()
+	d, c := scopeFakes(t)
 	tool := scopeTool(t, d, "kafka_topic_config")
 	// "billing" exists in owners, but it is not this room's pipeline.
 	_, err := tool.Run(roomCtx(), json.RawMessage(`{"pipeline_id":"billing"}`))
@@ -210,7 +212,7 @@ func TestScopePipelineIDMismatchRefused(t *testing.T) {
 // A prompt-injected agent names another pipeline's connector, topic, group and
 // subject in every tool that takes a name.
 func TestScopePromptInjectionNamesOtherPipeline(t *testing.T) {
-	d, c := scopeFakes()
+	d, c := scopeFakes(t)
 	for _, tc := range scopeCases {
 		if _, err := scopeTool(t, d, tc.tool).Run(roomCtx(), json.RawMessage(tc.out)); err == nil {
 			t.Errorf("%s accepted %s", tc.tool, tc.out)
@@ -236,7 +238,7 @@ func TestScopeNoRoomRefusedByDefault(t *testing.T) {
 	}, scopeCases...)
 	for _, tc := range tl {
 		t.Run(tc.tool, func(t *testing.T) {
-			d, c := scopeFakes()
+			d, c := scopeFakes(t)
 			_, err := scopeTool(t, d, tc.tool).Run(context.Background(), json.RawMessage(tc.in))
 			if !errors.Is(err, tools.ErrNoScope) {
 				t.Fatalf("err = %v, want ErrNoScope", err)
@@ -252,7 +254,7 @@ func TestScopeOptOutKeepsOldBehaviour(t *testing.T) {
 	ctx := tools.WithUnscoped(context.Background())
 	for _, tc := range scopeCases {
 		t.Run(tc.tool, func(t *testing.T) {
-			d, _ := scopeFakes()
+			d, _ := scopeFakes(t)
 			tool := scopeTool(t, d, tc.tool)
 			for _, in := range []string{tc.in, tc.out} {
 				if _, err := tool.Run(ctx, json.RawMessage(in)); err != nil {
@@ -262,7 +264,7 @@ func TestScopeOptOutKeepsOldBehaviour(t *testing.T) {
 		})
 	}
 	// Unscoped lists are not filtered.
-	d, _ := scopeFakes()
+	d, _ := scopeFakes(t)
 	r, err := scopeTool(t, d, "kafka_list_groups").Run(ctx, json.RawMessage(`{}`))
 	if err != nil || !strings.Contains(r.Summary, "other-group") {
 		t.Fatalf("unfiltered list = %q, %v", r.Summary, err)
@@ -271,7 +273,7 @@ func TestScopeOptOutKeepsOldBehaviour(t *testing.T) {
 
 func TestScopeRoomPipelineWinsOverOptOut(t *testing.T) {
 	ctx := tools.WithUnscoped(roomCtx())
-	d, c := scopeFakes()
+	d, c := scopeFakes(t)
 	_, err := scopeTool(t, d, "connect_status").Run(ctx, json.RawMessage(`{"connector":"bill-connector"}`))
 	if !errors.Is(err, tools.ErrOutOfScope) || c.n() != 0 {
 		t.Fatalf("err = %v, calls = %v", err, c.calls)
@@ -279,7 +281,7 @@ func TestScopeRoomPipelineWinsOverOptOut(t *testing.T) {
 }
 
 func TestScopeUnknownRoomPipelineRefused(t *testing.T) {
-	d, c := scopeFakes()
+	d, c := scopeFakes(t)
 	ctx := tools.WithPipelineID(context.Background(), "no-such-pipeline")
 	_, err := scopeTool(t, d, "connect_list_connectors").Run(ctx, json.RawMessage(`{}`))
 	if !errors.Is(err, tools.ErrOutOfScope) || c.n() != 0 {
@@ -288,7 +290,7 @@ func TestScopeUnknownRoomPipelineRefused(t *testing.T) {
 }
 
 func TestScopeMissingOwnersIsAnErrorNotAPanic(t *testing.T) {
-	d, c := scopeFakes()
+	d, c := scopeFakes(t)
 	d.Owners = nil
 	_, err := scopeTool(t, d, "connect_list_connectors").Run(roomCtx(), json.RawMessage(`{}`))
 	if err == nil || c.n() != 0 {
@@ -297,7 +299,7 @@ func TestScopeMissingOwnersIsAnErrorNotAPanic(t *testing.T) {
 }
 
 func TestScopeFullPipelineInContext(t *testing.T) {
-	d, _ := scopeFakes()
+	d, _ := scopeFakes(t)
 	d.Owners = nil // not needed when the caller passes the whole pipeline
 	p, _ := scopeOwners().Pipeline("orders")
 	ctx := tools.WithPipeline(context.Background(), p)
@@ -311,7 +313,7 @@ func TestScopeFullPipelineInContext(t *testing.T) {
 
 func TestScopeListToolsAreFiltered(t *testing.T) {
 	t.Run("connect_list_connectors", func(t *testing.T) {
-		d, c := scopeFakes()
+		d, c := scopeFakes(t)
 		r, err := scopeTool(t, d, "connect_list_connectors").Run(roomCtx(), json.RawMessage(`{}`))
 		if err != nil {
 			t.Fatal(err)
@@ -324,7 +326,7 @@ func TestScopeListToolsAreFiltered(t *testing.T) {
 		}
 	})
 	t.Run("kafka_list_groups", func(t *testing.T) {
-		d, c := scopeFakes()
+		d, c := scopeFakes(t)
 		r, err := scopeTool(t, d, "kafka_list_groups").Run(roomCtx(), json.RawMessage(`{}`))
 		if err != nil {
 			t.Fatal(err)
@@ -337,7 +339,7 @@ func TestScopeListToolsAreFiltered(t *testing.T) {
 		}
 	})
 	t.Run("schema_registry_subjects", func(t *testing.T) {
-		d, _ := scopeFakes()
+		d, _ := scopeFakes(t)
 		r, err := scopeTool(t, d, "schema_registry_subjects").Run(roomCtx(), json.RawMessage(`{}`))
 		if err != nil {
 			t.Fatal(err)
@@ -366,7 +368,7 @@ func TestConnectStatusDoesNotDiffAnOutOfScopeSubject(t *testing.T) {
 	trace := `org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded
 Caused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema{"type":"record","name":"R","fields":[{"name":"id","type":"long"}]}
 Caused by: RestClientException: Schema being registered is incompatible with an earlier schema for subject "bill.public.invoices-value", error code: 409`
-	d, c := scopeFakes()
+	d, c := scopeFakes(t)
 	d.Connect.(*fakeConnect).statusFn = func(_ context.Context, n string) (clients.ConnectorStatus, error) {
 		c.add("connect.status:" + n)
 		return clients.ConnectorStatus{Name: n, Type: "source", State: "RUNNING",
@@ -387,7 +389,7 @@ Caused by: RestClientException: Schema being registered is incompatible with an 
 }
 
 func TestConnectConfigRedactsTransforms(t *testing.T) {
-	d, _ := scopeFakes()
+	d, _ := scopeFakes(t)
 	d.Connect.(*fakeConnect).configFn = func(context.Context, string) (map[string]string, error) {
 		return map[string]string{
 			"connector.class":                     "io.debezium.connector.postgresql.PostgresConnector",
