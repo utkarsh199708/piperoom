@@ -173,7 +173,19 @@ var verificationTag = regexp.MustCompile(`(?i)\[verification\]`)
 func markInvisible(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	inTags := false
 	for _, r := range s {
+		// Tag characters (U+E0000..U+E007F) render as nothing yet spell ASCII
+		// a model can read: a hidden instruction. Each run is replaced by one
+		// marker, so neither the text nor its code points reach the model.
+		if r >= 0xE0000 && r <= 0xE007F {
+			if !inTags {
+				b.WriteString("{hidden tag text removed}")
+				inTags = true
+			}
+			continue
+		}
+		inTags = false
 		if lookalikeBracket(r) || invisibleRune(r) {
 			fmt.Fprintf(&b, "{U+%04X}", r)
 			continue
@@ -282,6 +294,10 @@ func formatHumanInput(in HumanInput) string {
 		name = "unknown"
 	}
 	name = sanitizeLabel(name)
+	// People paste connection strings and connector config into comments and
+	// steers; the model gets them masked like tool output, so it can neither
+	// send them to the API nor repeat them in the room.
+	in.Text = maskAlertText(in.Text)
 	switch in.Kind {
 	case "steer":
 		return fmt.Sprintf("[%s — driver] %s", name, escapeToolText(in.Text))
@@ -446,7 +462,8 @@ func isErrorStatus(e events.Event) bool {
 // and run.
 func isHandoffCritical(t events.Type) bool {
 	switch t {
-	case events.AgentHypothesis, events.ProposalCreated, events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted:
+	case events.AgentHypothesis, events.ProposalCreated, events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted,
+		events.AgentVerification:
 		return true
 	default:
 		return false
@@ -475,6 +492,12 @@ func truncatePromptField(s string, max int) string {
 // capFreeText bounds one free-text field to handoffFreeTextBytes.
 func capFreeText(s string) string {
 	return truncatePromptField(s, handoffFreeTextBytes)
+}
+
+// maskedFreeText masks secrets in typed or model-written text, then caps it.
+// Masking runs first, so the cap never leaves half a secret visible.
+func maskedFreeText(s string) string {
+	return capFreeText(maskAlertText(s))
 }
 
 // truncatePromptLine cuts one rendered tool summary to
@@ -529,13 +552,13 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return "agent: " + wrapUntrusted(capFreeText(p.Text))
+		return "agent: " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.AgentHypothesis:
 		p, err := events.Decode[events.AgentHypothesisPayload](e)
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("hypothesis (%s): %s", capFreeText(p.Confidence), wrapUntrusted(capFreeText(p.Text)))
+		return fmt.Sprintf("hypothesis (%s): %s", capFreeText(p.Confidence), wrapUntrusted(maskedFreeText(p.Text)))
 	case events.AgentStatus:
 		p, err := events.Decode[events.AgentStatusPayload](e)
 		if err != nil {
@@ -553,19 +576,19 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return "comment " + capFreeText(p.CommentID) + ": " + wrapUntrusted(capFreeText(p.Text))
+		return "comment " + capFreeText(p.CommentID) + ": " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.SteerSent:
 		p, err := events.Decode[events.SteerSentPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "steer: " + wrapUntrusted(capFreeText(p.Text))
+		return "steer: " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.SteerSuggested:
 		p, err := events.Decode[events.SteerSuggestedPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "suggestion: " + wrapUntrusted(capFreeText(p.Text))
+		return "suggestion: " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.ProposalCreated:
 		p, err := events.Decode[events.ProposalCreatedPayload](e)
 		if err != nil {
@@ -585,7 +608,7 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("rejection %s by %s: %s", capFreeText(p.ProposalID), wrapUntrusted(capFreeText(p.Layer)), wrapUntrusted(capFreeText(p.Reason)))
+		return fmt.Sprintf("rejection %s by %s: %s", capFreeText(p.ProposalID), wrapUntrusted(capFreeText(p.Layer)), wrapUntrusted(maskedFreeText(p.Reason)))
 	case events.ActionExecuted:
 		p, err := events.Decode[events.ActionExecutedPayload](e)
 		if err != nil {
@@ -595,7 +618,20 @@ func renderRoomEvent(e events.Event) string {
 		if !p.OK {
 			result = "FAILED"
 		}
-		return fmt.Sprintf("action %s step %d %s: %s", capFreeText(p.ProposalID), p.StepIndex, result, wrapUntrusted(truncatePromptField(p.Output, handoffActionOutputBytes)))
+		// Steps are numbered from 1, as the room shows them.
+		return fmt.Sprintf("action %s step %d %s: %s", capFreeText(p.ProposalID), p.StepIndex+1, result, wrapUntrusted(truncatePromptField(maskAlertText(p.Output), handoffActionOutputBytes)))
+	case events.AgentVerification:
+		p, err := events.Decode[events.AgentVerificationPayload](e)
+		if err != nil || p.Repeat {
+			// A repeat restates a verdict already in the log.
+			return ""
+		}
+		outcome := "recovered"
+		if !p.Recovered {
+			outcome = "NOT recovered"
+		}
+		// The verdict quotes check output, so it is wrapped like tool text.
+		return fmt.Sprintf("verification %s (%s): %s", capFreeText(p.ProposalID), outcome, wrapUntrusted(capFreeText(p.Verdict)))
 	default:
 		return string(e.Type) + " by " + wrapUntrusted(capFreeText(actorName(e.Actor)))
 	}
