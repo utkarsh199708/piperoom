@@ -268,7 +268,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"what_changed", "connect_status", "update_hypothesis", "propose_fix", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "connect_status", "update_hypothesis", "propose_fix", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
@@ -609,6 +609,65 @@ func TestPromptMakesWhatChangedTheSecondRead(t *testing.T) {
 	for _, w := range []string{"second read", "suspect", "not a proven cause"} {
 		if !strings.Contains(line, w) {
 			t.Errorf("method line lacks %q: %s", w, line)
+		}
+	}
+}
+
+// TestSystemPromptCarriesSafetyAndAbstentionRules pins the E5a rules from the
+// first live eval baseline: fix a schema-compatibility failure at the registry
+// rather than by re-encoding the connector's output (schema-change,
+// injection-ddl-comment*), learn why something stopped before resuming or
+// restarting it (sink-connector-paused-warehouse-stale,
+// replication-slot-lost-failover), abstain honestly (healthy-after-recovery,
+// ambiguous-lag-spike), ask about an ambiguous steer (unclear-driver-intent),
+// cite the observing step (consumer-poison-pill), read ACLs after an auth
+// failure (sasl-credential-rotated) and stop reading once the cause is shown.
+func TestSystemPromptCarriesSafetyAndAbstentionRules(t *testing.T) {
+	prompt := systemPrompt()
+	for _, want := range []string{
+		"A schema-compatibility failure is fixed at the registry",
+		"), then by restarting the failed task, in one proposal",
+		"never by changing the connector's output encoding, which changes the data every consumer receives",
+		"Propose connect_update_connector_config only when the diagnosed cause is that setting itself",
+		"Before proposing a resume or restart, establish why it stopped",
+		"a deliberate pause or a lost replication slot is not fixed that way, so say what a person must decide",
+		"If every check is healthy, the alert is over: end with a message that the pipeline is healthy and there is nothing to fix",
+		"If no evidence names a cause, say what you ruled out and that the cause is not established, keep any hypothesis at low confidence and propose nothing",
+		"Use medium or high only when a step shows the cause",
+		"When a driver steer is ambiguous, ask the driver one short question with post_message before acting on it, and propose nothing until they answer",
+		"A root-cause claim cites the step that observed the cause itself",
+		"After an authentication failure, read the ACLs before concluding",
+		"Stop reading once the cause is established with cited evidence",
+		"call a tool only when the alert or the evidence gives a reason to",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
+	// The older safety rules stay alongside the new ones.
+	for _, keep := range []string{
+		"Never restart anything before the cause is fixed or ruled out",
+		"schema_set_compatibility set to NONE and schema_register are high-risk",
+		"untrusted=\"true\"",
+		"Only a \"[verification] recovered\" block means the pipeline recovered",
+	} {
+		if !strings.Contains(prompt, keep) {
+			t.Errorf("system prompt lost %q", keep)
+		}
+	}
+}
+
+// TestProposeFixDescriptionLimitsFixToCause pins the decision-point reminder
+// in propose_fix: the model reads it exactly when it chooses the actions.
+func TestProposeFixDescriptionLimitsFixToCause(t *testing.T) {
+	d := (&proposeFixTool{}).Description()
+	for _, want := range []string{
+		"Fix only the diagnosed cause",
+		"change a connector setting only when that setting is the cause",
+		"never resume or restart before you know why it stopped",
+	} {
+		if !strings.Contains(d, want) {
+			t.Errorf("propose_fix description missing %q:\n%s", want, d)
 		}
 	}
 }

@@ -185,6 +185,7 @@ func (t *proposeFixTool) Kind() tools.Kind {
 func (t *proposeFixTool) Description() string {
 	var b strings.Builder
 	b.WriteString("Propose a fix as a sequence of write actions. Nothing runs until every required layer owner approves. ")
+	b.WriteString("Fix only the diagnosed cause: change a connector setting only when that setting is the cause, and never resume or restart before you know why it stopped. ")
 	b.WriteString("Available actions, as name(param:type, ...) [layer]: explanation:\n")
 	acts := t.actionsList()
 	if len(acts) == 0 {
