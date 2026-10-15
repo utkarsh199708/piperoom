@@ -47,6 +47,9 @@ type roomLog struct {
 	events  []events.Event
 	bytes   int64 // sum of the stored payload sizes (the byte cap's measure)
 	subs    map[*subscriber]struct{}
+	// clientIDs maps actor id + "\x00" + client_id to the event's seq: the
+	// unique index room_events_client_id_uq of the Postgres store.
+	clientIDs map[string]int64
 }
 
 type subscriber struct {
@@ -135,6 +138,12 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 	if !s.limits.Fits(typ, actor, int64(len(log.events)), log.bytes, size) {
 		return events.Event{}, fmt.Errorf("memstore: append %s to %s (%d events, %d bytes): %w", typ, roomID, len(log.events), log.bytes, store.ErrLogFull)
 	}
+	// After the cap, in the Postgres order: its cap check is the rooms UPDATE,
+	// its key check the room_events INSERT that follows.
+	key, keyed := clientIDKey(actor, raw)
+	if _, taken := log.clientIDs[key]; keyed && taken {
+		return events.Event{}, fmt.Errorf("memstore: append %s to %s: %w", typ, roomID, store.ErrClientIDTaken)
+	}
 	log.bytes += size
 	log.lastSeq++
 	log.meta.LastSeq = log.lastSeq
@@ -147,6 +156,12 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 		At:      s.now().UTC(),
 	}
 	log.events = append(log.events, e)
+	if keyed {
+		if log.clientIDs == nil {
+			log.clientIDs = map[string]int64{}
+		}
+		log.clientIDs[key] = e.Seq
+	}
 	for sub := range log.subs {
 		// Only signal; the subscriber goroutine reads Since(lastSeq) itself,
 		// so no event is lost even if several appends coalesce one wake.
