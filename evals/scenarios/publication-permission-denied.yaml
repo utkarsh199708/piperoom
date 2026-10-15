@@ -242,7 +242,7 @@ expect:
   # "piperoom is not the owner" states the cause; the word grader reads "not
   # the owner" as a denial of "owner", so the phrase is a term of its own.
   root_cause:
-    - [owner*, permission*, privilege*, not the owner, no longer own*]
+    - [owner*, permission*, privilege*, not the owner, not the table owner, no longer own*]
     - [publication*]
   first_failing_layer: kafka-connect
   root_cause_layer: postgres
