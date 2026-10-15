@@ -169,6 +169,14 @@ func decodePastHits(data any) ([]pastHit, error) {
 	return v.Hits, nil
 }
 
+// pastScanSep joins fields and lines in the scan text. It is not only
+// whitespace, so the scanner reads each field as its own sentence, as the model
+// does with "</untrusted> · fix: <untrusted>" between them: a field ending in a
+// determiner ("cleared by the") would otherwise make the next field's leading
+// verb read as a noun and hide a request. Each field still starts a line, for
+// the line-start role and addressee rules.
+const pastScanSep = "\n·\n"
+
 // pastDrop is a hit left out because injectscan flagged its text: hit is its
 // index in the tool's hits, cross that it was flagged only next to the hits
 // already in the block. It carries finding kinds, never the text.
@@ -244,7 +252,7 @@ func layoutPastIncidents(hits []pastHit, maxBytes int, scan func(string) []injec
 				continue
 			}
 			if len(kept) > 0 {
-				if fs := scan(strings.Join(append(kept[:len(kept):len(kept)], text), "\n")); len(fs) > 0 {
+				if fs := scan(strings.Join(append(kept[:len(kept):len(kept)], text), pastScanSep)); len(fs) > 0 {
 					drops = append(drops, pastDrop{hit: c.idx, cross: true, kinds: injectscan.Kinds(fs), count: len(fs)})
 					continue
 				}
@@ -262,8 +270,8 @@ func layoutPastIncidents(hits []pastHit, maxBytes int, scan func(string) []injec
 
 // pastIncidentLine renders one hit in at most n bytes (newline included). The
 // close date and layer are short and kept whole; title, cause and fix share
-// what is left, the cause first. text is the field text the line shows, one
-// field per line in render order, unwrapped, for the scan. ok is false when
+// what is left, the cause first. text is the field text the line shows, in
+// render order joined by pastScanSep, unwrapped, for the scan. ok is false when
 // the cause cannot get pastIncidentsMinField bytes.
 func pastIncidentLine(h pastHit, n int) (line, text string, ok bool) {
 	date := clipText(h.ClosedAt, 10)
@@ -310,7 +318,7 @@ func pastIncidentLine(h pastHit, n int) (line, text string, ok bool) {
 	if len(line) > n {
 		return "", "", false
 	}
-	return line, strings.Join([]string{date, title, layer, cause, fixClip}, "\n"), true
+	return line, strings.Join([]string{date, title, layer, cause, fixClip}, pastScanSep), true
 }
 
 // cleanPastField masks secrets and folds the text to one line, so a field
