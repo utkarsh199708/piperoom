@@ -13,7 +13,7 @@ import {
   CommandList,
   CommandShortcut,
 } from '@/components/ui/command'
-import { handOverFocus, reclaimHandedOver, usable } from '@/components/room/useRestoreFocus'
+import { handOverFocus, takeHandedOver, usable } from '@/components/room/useRestoreFocus'
 import { Kbd } from '@/components/ui/kbd'
 import { isFixtures } from '@/api/client'
 import type { RoomSnapshot } from '@/api/types'
@@ -81,7 +81,7 @@ export function CommandMenu({
       flushSync(fn)
       // Nothing took the slot: the dialog was already open (⌘K from inside it), so no new dialog will
       // place focus. Put it back where it was, else on #main, never <body>.
-      if (kind === 'dialog' && reclaimHandedOver()) {
+      if (kind === 'dialog' && takeHandedOver()) {
         ;[from, document.getElementById('main')].find(usable)?.focus()
       }
     }, 0)

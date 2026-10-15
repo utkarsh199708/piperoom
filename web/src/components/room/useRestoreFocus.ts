@@ -24,20 +24,15 @@ export function handOverFocus(el: Element | null): void {
   }, 1000)
 }
 
-function takeHandedOver(): Element | null {
+/**
+ * Take the handed-over element: a dialog does this when it mounts. The palette calls it after running a
+ * dialog command, so an element no dialog took (the dialog was already open) is not left unused.
+ */
+export function takeHandedOver(): Element | null {
   const el = handedOver
   handedOver = null
   window.clearTimeout(handedOverTimer)
   return el
-}
-
-/**
- * Take back the handed-over element if no dialog mounted and took it. The palette calls this after
- * running a dialog command: when the dialog was already open nothing new mounts, and the element
- * would otherwise be dropped unused, leaving focus on <body>.
- */
-export function reclaimHandedOver(): Element | null {
-  return takeHandedOver()
 }
 
 /**
