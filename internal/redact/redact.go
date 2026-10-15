@@ -13,21 +13,38 @@
 //
 // Passwords and short values keep no characters at all.
 //
-// Values that run past a line break are followed onto the next line: a
-// quoted value to its closing quote (or, continued with a backslash, over
-// the whole line), a bare value into the next line's first token when the
-// previous line ended in a backslash or that token reads like a credential's
-// tail. A URL password may hold a raw '@' or '/'; a key/value separator may
-// be URL-encoded (password%3D...); quotes may be escaped up to three times.
+// Values that run past a line break are followed onto the next lines. A
+// quoted value continued with a backslash runs to its closing quote; one
+// without runs to its closing quote when that quote ends the value (end of
+// line, blank, or , ; } ] )) within four lines. A bare value runs into the
+// next line's first token when the previous line ended in a backslash, or
+// when that token reads like a credential's tail and is not followed by
+// more words. A value ending in "…" was truncated and is not followed. A URL
+// password may hold a raw '@' or '/', and a URL user one '@' (user@server);
+// a key/value pair may be URL-encoded once or twice (password%3D...,
+// %22password%22%3A%22...%22, password+%3D+...); quotes may carry up to three
+// backslashes (two JSON levels).
 //
-// Known gaps: an unquoted password with spaces is masked only up to its
-// first space ("password=a b" reads the same as "password=a retries=3"); a
-// password wrapped onto the next line whose tail is a plain word, a number
-// or holds ':' stays, as do tails after the first continued line of an
-// unquoted value; an unclosed quoted value is followed onto the next line
-// only when its own line holds an odd number of that quote; a URL whose path holds "@host" may lose the
-// host to the mask (over-masking, not a leak); a wrapped tail such as
-// orders_v2 after a password line is masked although it is evidence.
+// Known gaps (most also leak without the rules above):
+//   - an unquoted password with spaces is masked only up to its first
+//     space ("password=a b" reads the same as "password=a retries=3"); a
+//     bare password holding ; , ) or a backslash ends there too;
+//   - a wrapped tail stays when it is indented, a plain word, a number,
+//     hex digits and dashes, starts with - / . @ # or a bracket, holds ':'
+//     or '@', is followed by more words on its line, or is one byte long; an
+//     unquoted value is followed for one line only (backslash continuations
+//     chain); a weak-key token (token=, session=) under 12 characters split
+//     across lines is not seen as random;
+//   - a value that starts on the next line (password=\n..., YAML
+//     "password:\n  ..." or ">-") is not followed;
+//   - an unclosed quoted value is followed onto the next line only when its
+//     own line holds an odd number of that quote, and not past a lone CR;
+//   - quotes with more than three backslashes, and \\" or \\\' forms;
+//   - an encoded '&' (%26) inside a URL-encoded password ends it there;
+//   - a URL password holding '@' then '?' or '#';
+//   - over-masking, not leaks: a URL whose path holds "@host" may lose the
+//     host to the mask, and a wrapped tail such as orders_v2 after a
+//     password line is masked although it is evidence.
 package redact
 
 import (
@@ -228,12 +245,27 @@ func (r *Redactor) scan(s string) (string, Stats) {
 				lowerLine = asciiLower(line)
 			}
 		}
+		next := s[min(len(s), end+1):min(len(s), end+1+128)]
 		if end < len(s) {
-			if from := openFrom(line, s[end+1:min(len(s), end+1+128)]); from >= 0 && kvPre(line[from:], lowerLine[from:]) {
+			if from := openFrom(line, next); from >= 0 && kvPre(line[from:], lowerLine[from:]) {
 				open = openAtEOL(line[from:], lowerLine[from:], open)
 			}
 		}
 		out := r.lineFixed(line, lowerLine, &st)
+		// A rule may mask a token that had swallowed a later key; that key's
+		// value is then open only in the output, and a second pass would
+		// follow it. Decide on the output too, so one pass is enough.
+		if end < len(s) && !open.ok && out != line {
+			if from := openFrom(out, next); from >= 0 {
+				lo := asciiLower(out[from:])
+				if kvPre(out[from:], lo) {
+					open = openAtEOL(out[from:], lo, open)
+				}
+			}
+		}
+		if end < len(s) {
+			open = lookAhead(open, s[end+1:])
+		}
 		if out != s[start:end] && !changed {
 			changed = true
 			b.Grow(len(s) + 64)

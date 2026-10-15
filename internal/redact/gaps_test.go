@@ -1,6 +1,8 @@
 package redact
 
 import (
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -56,7 +58,9 @@ func TestGapExactOutput(t *testing.T) {
 		{"password%3DZx9%21hunter2-Qw7", "password%3D[redacted 24]"},
 		{"a=1&password%3DZx9%21hunter2%26next%3D%2Fhome", "a=1&password%3D[redacted 16]%26next%3D%2Fhome"},
 		{"password=Zx9!hun\nter2-Qw7", "password=[redacted 8]\n[redacted 8]"},
-		{"password=Zx9!hun\nter2-Qw7 done", "password=[redacted 8]\n[redacted 8] done"},
+		{"password=Zx9!hun\nter2-Qw7, done", "password=[redacted 8]\n[redacted 8], done"},
+		// A tail followed by more words reads as a new line of text.
+		{"password=Zx9!hun\nter2-Qw7 done", "password=[redacted 8]\nter2-Qw7 done"},
 		{"password=\"Zx9!hunter2-\\\nQw7\"", "password=\"[redacted 16]\\\n[redacted 8]\""},
 		{"postgres://app:p@ss@db/x", "postgres://app:[redacted 8]@db/x"},
 		{"postgres://app:p@ss/w0rd@db:5432/x", "postgres://app:[redacted 16]@db:5432/x"},
@@ -126,9 +130,19 @@ func TestGapIdempotent(t *testing.T) {
 	pieces := []string{
 		"password=", "password%3D", "secret: ", `"`, `'`, `\"`, `\\\"`, "\\", "\n", "\r\n", " ", "Zx9!hun", "ter2-Qw7",
 		"postgres://app:", "@", "/", "db", "p@ss", "token=", "Ab3xQ9zL7mK2", "…", "[redacted 8]", "&", "%26", ":", "=",
+		// Token-shaped values that other rules mask, glued to keys (#217
+		// review: a mask may uncover a key the token had swallowed).
+		"sk-ant-api03-" + strings.Repeat("Ab1", 12), "AKIAIOSFODNN7EXAMPLE",
+		"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlX3ZhbHVl", "%", "pass", "secret:", "client_secret=",
+		"Authorization:", "%3D", "%22", "%253D", "+", "\\\"", ":8083/", "?", "#", "ok\n",
 	}
 	g := newGen(42)
-	for range 4000 {
+	// REDACT_PROPERTY_N raises the number of random inputs for a long run.
+	n := 4000
+	if v := os.Getenv("REDACT_PROPERTY_N"); v != "" {
+		n, _ = strconv.Atoi(v)
+	}
+	for range n {
 		var b strings.Builder
 		for range 1 + g.r.IntN(10) {
 			b.WriteString(pieces[g.r.IntN(len(pieces))])
