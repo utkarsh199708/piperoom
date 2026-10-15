@@ -70,6 +70,33 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+/**
+ * Steer and comment give up after this long. A POST that never answers would otherwise keep the
+ * reconnect's copy of the words "in flight" forever, and every Retry of them would wait on it (#390).
+ * Shorter than the hook's 15 s wait, so a Retry waiting on a hung copy sees it fail and posts once.
+ */
+export const SEND_DEADLINE_MS = 12_000
+
+/**
+ * `request` with a deadline. A late answer is reported like a network failure (a TypeError), so the
+ * words are kept and retried like any other send that did not get through.
+ */
+async function requestWithin<T>(path: string, init: RequestInit, ms: number): Promise<T> {
+  const ctl = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctl.abort()
+      reject(new TypeError(`Failed to fetch: no answer within ${Math.round(ms / 1000)} s`))
+    }, ms)
+  })
+  try {
+    return await Promise.race([request<T>(path, { ...init, signal: ctl.signal }), late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export interface SessionProbe {
   /** GET /api/me answered 200: the session is valid after all. */
   valid: boolean
@@ -153,9 +180,9 @@ export const api = {
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string }) =>
-    request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
+    requestWithin<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }, SEND_DEADLINE_MS),
   steer: (roomId: string, text: string) =>
-    request<Event>(`${room(roomId)}/steer`, { method: 'POST', body: JSON.stringify({ text }) }),
+    requestWithin<Event>(`${room(roomId)}/steer`, { method: 'POST', body: JSON.stringify({ text }) }, SEND_DEADLINE_MS),
   sendSuggestion: (roomId: string, suggestionId: string) =>
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',

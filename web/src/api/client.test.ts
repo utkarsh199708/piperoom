@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiClientError, api, exportRoom, probeSession, roomWsUrl } from './client'
+import { ApiClientError, SEND_DEADLINE_MS, api, exportRoom, probeSession, roomWsUrl } from './client'
 import { onAuthProblem, setAuthEpoch } from '../lib/auth'
 import type { AuthProblem } from '../lib/auth'
 
@@ -302,5 +302,36 @@ describe('directory routes (R0)', () => {
   it('authUsers throws not_found in oidc mode, where the route is not mounted', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(404, { error: { code: 'not_found', message: 'not found' } }))
     await expect(api.authUsers()).rejects.toMatchObject({ status: 404, code: 'not_found' })
+  })
+})
+
+// #390 round 3: a steer or comment POST that never answers must settle, or its words stay
+// "in flight" and every Retry of them waits on it until reload.
+describe('steer and comment deadline', () => {
+  it.each([
+    ['steer', () => api.steer('r1', 'stop')],
+    ['comment', () => api.comment('r1', { step_id: 's1', text: 'stop' })],
+  ])('%s gives up after SEND_DEADLINE_MS with a network error and aborts the request', async (_, send) => {
+    vi.useFakeTimers()
+    try {
+      fetchMock.mockImplementation(() => new Promise(() => {}))
+      const result = send().then(
+        () => 'resolved',
+        (e: unknown) => e,
+      )
+      await vi.advanceTimersByTimeAsync(SEND_DEADLINE_MS - 1)
+      expect(lastCall().init.signal?.aborted).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      const err = await result
+      expect(err).toBeInstanceOf(TypeError)
+      expect(lastCall().init.signal?.aborted).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('an answer inside the deadline is returned as usual', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { seq: 1 }))
+    await expect(api.steer('r1', 'stop')).resolves.toEqual({ seq: 1 })
   })
 })

@@ -237,6 +237,74 @@ describe('useRoom delivered copies do not outlive their failure', () => {
     }
   })
 
+  // Round 3: a reconnect copy that never settles must not block those words until reload.
+  describe('a reconnect send that never settles', () => {
+    async function hungAfterRetry() {
+      const opened = await openRoom()
+      vi.mocked(api.steer).mockRejectedValueOnce(offline())
+      await act(async () => {
+        await opened.hook.result.current.actions.steer('stop')
+      })
+      const drain = hangingCall()
+      vi.mocked(api.steer).mockImplementationOnce(() => drain.p)
+      act(() => opened.socket.onopen?.())
+      let ok: boolean | undefined
+      act(() => {
+        void opened.hook.result.current.actions.steer('stop', { retry: true }).then((v) => (ok = v))
+      })
+      await act(async () => {
+        vi.advanceTimersByTime(15_000)
+      })
+      await waitFor(() => expect(ok).toBe(false))
+      expect(api.steer).toHaveBeenCalledTimes(2)
+      return { ...opened, drain }
+    }
+
+    it('the next Retry after the 15 s cap posts exactly once', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const { hook } = await hungAfterRetry()
+        vi.mocked(api.steer).mockResolvedValue(undefined as never)
+        let ok = false
+        await act(async () => {
+          ok = await hook.result.current.actions.steer('stop', { retry: true })
+        })
+        expect(ok).toBe(true)
+        expect(api.steer).toHaveBeenCalledTimes(3)
+        expect(hook.result.current.error).toBeNull()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('the next reconnect posts the words exactly once', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const { socket } = await hungAfterRetry()
+        vi.mocked(api.steer).mockResolvedValue(undefined as never)
+        act(() => socket.onopen?.())
+        await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(3))
+        act(() => socket.onopen?.())
+        expect(api.steer).toHaveBeenCalledTimes(3)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('a late success of the old copy takes the words out of the queue: no second post', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const { socket, drain } = await hungAfterRetry()
+        await act(async () => drain.settle().resolve())
+        vi.mocked(api.steer).mockResolvedValue(undefined as never)
+        act(() => socket.onopen?.())
+        expect(api.steer).toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
   it('a Retry waits at most 15 s for a hanging reconnect send, then reports offline without posting', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {

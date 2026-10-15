@@ -123,13 +123,19 @@ function dropDelivered(ref: { current: Delivered[] }, item: PendingSend) {
   ref.current = ref.current.filter((d) => !samePending(d.item, item))
 }
 
-/** `done`'s value, or 'timeout' when it has not settled within `ms`. */
-function within<T>(done: Promise<T>, ms: number): Promise<T | 'timeout'> {
+type Timers = Set<ReturnType<typeof setTimeout>>
+
+/** `done`'s value, or 'timeout' when it has not settled within `ms`. The timer is kept in `timers` so unmount can clear it. */
+function within<T>(done: Promise<T>, ms: number, timers: Timers): Promise<T | 'timeout'> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const late = new Promise<'timeout'>((resolve) => {
     timer = setTimeout(() => resolve('timeout'), ms)
+    timers.add(timer)
   })
-  return Promise.race([done, late]).finally(() => clearTimeout(timer))
+  return Promise.race([done, late]).finally(() => {
+    clearTimeout(timer)
+    if (timer !== undefined) timers.delete(timer)
+  })
 }
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
@@ -221,6 +227,15 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   // that message's Retry, not a new message (see DELIVERED_DEDUPE_MS / DELIVERED_KEEP_MS).
   const deliveredRef = useRef<Delivered[]>([])
   const deliveredListenersRef = useRef(new Set<DeliveredListener>())
+  // Timers of sends waiting on the reconnect's copy; cleared on unmount.
+  const waitTimersRef = useRef<Timers>(new Set())
+  useEffect(() => {
+    const timers = waitTimersRef.current
+    return () => {
+      for (const t of timers) clearTimeout(t)
+      timers.clear()
+    }
+  }, [])
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -395,6 +410,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             item,
             done: call.then(
               () => {
+                // A send that gave up waiting on this copy re-queued it: it arrived after all.
+                pendingRef.current = pendingRef.current.filter((p) => !samePending(p, item))
                 let taken = false
                 for (const l of deliveredListenersRef.current) taken = l(item) || taken
                 if (!taken) deliveredRef.current = [...deliveredRef.current, { item, at: Date.now() }].slice(-MAX_PENDING)
@@ -541,9 +558,19 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         const flying = inflightRef.current.find((f) => samePending(f.item, item))
         if (flying) {
           // The reconnect is sending these words now: wait for it rather than post a second copy.
-          const outcome = await within(flying.done, INFLIGHT_WAIT_MS)
+          const outcome = await within(flying.done, INFLIGHT_WAIT_MS, waitTimersRef.current)
           if (outcome === 'timeout') {
-            // Still unanswered: posting now could steer twice. The words stay with the caller.
+            // Still unanswered (api.steer/comment give up at SEND_DEADLINE_MS, so this is a
+            // safety net). Posting now could steer twice, so stop waiting on that copy and queue
+            // the words instead: the next Retry or reconnect posts them once, and the banner's
+            // "Retrying" is true. A late success of the old copy takes them out of the queue.
+            inflightRef.current = inflightRef.current.filter((f) => f !== flying)
+            if (
+              pendingRef.current.length < MAX_PENDING &&
+              !pendingRef.current.some((p) => samePending(p, item))
+            ) {
+              pendingRef.current.push(item)
+            }
             setError(OFFLINE_TEXT)
             return false
           }
