@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import { RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -9,9 +9,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { newClientId } from '../../lib/clientId'
 import { rollbackSteer } from '../../lib/rollback'
-import type { SendOptions } from '../../hooks/useRoom'
+import type { DeliveredListener, SendOptions } from '../../hooks/useRoom'
+import { useRetryId } from '../../hooks/useRetryId'
 import { OfflineStrip } from './OfflineStrip'
 
 // There is no rollback route: the undo goes through the same steer path as any instruction, so it
@@ -22,6 +22,7 @@ export function RollbackButton({
   rollback,
   asDriver,
   onSteer,
+  onDelivered,
 }: {
   title: string
   proposalId: string
@@ -29,23 +30,33 @@ export function RollbackButton({
   /** The driver's steer goes to the agent; a member's is a suggestion in the driver's queue. */
   asDriver: boolean
   onSteer: (text: string, opts?: SendOptions) => Promise<boolean>
+  /** RoomActions.onDelivered: a failed request that landed after all closes the dialog. */
+  onDelivered?: (listener: DeliveredListener) => () => void
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
-  // One rollback request is one action (#459): Retry keeps its client_id, so the server stores it
-  // at most once even if an earlier copy landed; the next request after a success gets a new id.
-  const clientIdRef = useRef<string | null>(null)
-  const send = async () => {
+  // One rollback request is one action (#459): only the Retry of a failed request keeps its
+  // client_id. Closing the dialog, or the request landing after all, ends that action, so the
+  // next request is a new one.
+  const retryId = useRetryId(onDelivered, () => {
+    setFailed(false)
+    setOpen(false)
+  })
+  const send = async (retry: boolean) => {
     setBusy(true)
-    const clientId = clientIdRef.current ?? newClientId()
-    clientIdRef.current = clientId
+    const clientId = retryId.next(retry)
     const ok = await onSteer(rollbackSteer(title, proposalId, rollback), { clientId })
     setBusy(false)
     setFailed(!ok)
-    if (ok) {
-      clientIdRef.current = null
-      setOpen(false)
+    retryId.settle(clientId, ok)
+    if (ok) setOpen(false)
+  }
+  const onOpenChange = (next: boolean) => {
+    setOpen(next)
+    if (!next) {
+      retryId.drop()
+      setFailed(false)
     }
   }
   return (
@@ -54,7 +65,7 @@ export function RollbackButton({
         <RotateCcw aria-hidden="true" className="!size-3.5" />
         {asDriver ? 'Roll back' : 'Suggest roll back'}
       </Button>
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{asDriver ? 'Roll back this fix?' : 'Suggest rolling back this fix?'}</DialogTitle>
@@ -66,12 +77,12 @@ export function RollbackButton({
             <span className="text-xs font-medium text-subtle-foreground">Recorded rollback: </span>
             {rollback || 'none recorded'}
           </p>
-          {failed && <OfflineStrip onRetry={() => void send()} disabled={busy} />}
+          {failed && <OfflineStrip onRetry={() => void send(true)} disabled={busy} />}
           <DialogFooter>
-            <Button variant="ghost" onClick={() => setOpen(false)}>
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" disabled={busy} onClick={() => void send()}>
+            <Button variant="destructive" disabled={busy} onClick={() => void send(failed)}>
               {asDriver ? 'Ask the agent to roll back' : 'Suggest it to the driver'}
             </Button>
           </DialogFooter>

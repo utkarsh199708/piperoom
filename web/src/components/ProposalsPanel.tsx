@@ -935,7 +935,11 @@ function Proposal({
       </div>
       <ExecutionCard
         proposal={proposal}
-        rollback={isViewer(user) ? undefined : { asDriver: nudge.isDriver, onSteer: actions.steer }}
+        rollback={
+          isViewer(user)
+            ? undefined
+            : { asDriver: nudge.isDriver, onSteer: actions.steer, onDelivered: actions.onDelivered }
+        }
       />
       {proposal.verification && <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} />}
     </article>

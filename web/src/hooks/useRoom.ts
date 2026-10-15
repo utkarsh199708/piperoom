@@ -171,9 +171,14 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
-  // Steers and comments not settled yet, keyed by client_id. Its post reads roomIdRef, so it
-  // always posts to the room on screen.
+  // Steers and comments not settled yet, keyed by client_id. Its post reads roomIdRef: the room
+  // on screen when it posts, not the room the action was typed in. Gap shared with main (pinned by
+  // a test): only App.tsx keying RoomScreen by roomId keeps a kept action from draining into
+  // another room.
   const roomIdRef = useRef(roomId)
+  // The socket is open (set by onopen/onclose, cleared on cleanup): with it open, the ledger
+  // retries kept actions itself, since no reconnect will.
+  const liveRef = useRef(false)
   useEffect(() => {
     roomIdRef.current = roomId
   }, [roomId])
@@ -186,6 +191,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             : api.comment(roomIdRef.current, { step_id: item.stepId, text: item.text, client_id: clientId }),
         setError,
         newId: newClientId,
+        isLive: () => liveRef.current,
       }),
   )
   useEffect(() => () => ledger.dispose(), [ledger])
@@ -348,6 +354,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         probed = false
         backoff = 1000
         setConn('live')
+        liveRef.current = true
         setError(ledger.banner())
         sendPresence(currentPresence())
         // Messages that did not get through: sent again, each with its own client_id, so a
@@ -381,6 +388,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       }
       sock.onclose = (ev: CloseEvent) => {
         if (cancelled) return
+        if (ws === sock) liveRef.current = false
         if (ev?.reason === 'session_expired') {
           // The server closed the socket because the session ended (auth.md 1.6).
           // Stop retrying; the login screen (or redirect) takes over.
@@ -436,6 +444,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
 
     return () => {
       cancelled = true
+      liveRef.current = false
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       if (presenceTimer !== undefined) window.clearInterval(presenceTimer)
       document.removeEventListener('visibilitychange', onVisibility)

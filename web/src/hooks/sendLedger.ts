@@ -62,8 +62,13 @@ export interface LedgerDeps {
   post: (item: SendItem, clientId: string) => Promise<Event | undefined>
   setError: (next: string | null | ((prev: string | null) => string | null)) => void
   newId: () => string
+  /** The room socket is open: then nothing reconnects, so the ledger retries kept actions itself. */
+  isLive?: () => boolean
   now?: () => number
 }
+
+/** With the socket open, kept actions are sent again after this long (no reconnect will do it). */
+export const LIVE_RETRY_MS = 5_000
 
 const BANNERS = [OFFLINE_TEXT, UNCONFIRMED_TEXT, NOT_CONFIRMED_TEXT]
 
@@ -74,6 +79,9 @@ export class SendLedger {
   private readonly landed = new Map<string, { at: number; item?: SendItem }>()
   private readonly listeners = new Set<DeliveredListener>()
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  private liveRetry: ReturnType<typeof setTimeout> | undefined
+  // The room screen is gone: answers that arrive later change nothing and arm no timer.
+  private disposed = false
   /**
    * Whether the server dedupes on client_id: true once an answer echoed it, false once one did
    * not, null before the first answer. Only true makes a retry of an unknown outcome automatic.
@@ -97,12 +105,22 @@ export class SendLedger {
     }
   }
 
-  /** The banner for what is still outstanding, or null. */
+  /**
+   * The banner for what is outstanding now, from each action's state: an action kept for a
+   * retry says "Retrying", one that may be stored says "waiting" until its window ends. An
+   * unknown action past its window was reported once ("never confirmed", by its timer) and no
+   * longer holds a banner up.
+   */
   banner(): string | null {
-    const states = [...this.actions.values()].map((a) => a.state)
-    if (states.includes('unknown')) return UNCONFIRMED_TEXT
-    if (states.includes('queued')) return OFFLINE_TEXT
+    const now = this.now()
+    const actions = [...this.actions.values()]
+    if (actions.some((a) => a.state === 'unknown' && now - a.since < UNCONFIRMED_WINDOW_MS)) return UNCONFIRMED_TEXT
+    if (actions.some((a) => a.state === 'queued')) return OFFLINE_TEXT
     return null
+  }
+
+  private setError(next: string | null | ((prev: string | null) => string | null)) {
+    if (!this.disposed) this.deps.setError(next)
   }
 
   /**
@@ -123,7 +141,7 @@ export class SendLedger {
     }
     if (a?.state === 'unknown' && this.dedupes !== true && this.now() - a.since < UNCONFIRMED_WINDOW_MS) {
       // Maybe stored, and the server may not dedupe: a second copy could double the steer.
-      this.deps.setError(UNCONFIRMED_TEXT)
+      this.setError(UNCONFIRMED_TEXT)
       return false
     }
     return (await this.post(item, clientId)) === 'ok' ? this.settled() : false
@@ -145,10 +163,13 @@ export class SendLedger {
     this.land(id, true)
   }
 
-  /** Stops the timers (the room screen is gone). */
+  /** Stops the timers (the room screen is gone); later answers no longer touch the screen. */
   dispose(): void {
+    this.disposed = true
     for (const t of this.timers) clearTimeout(t)
     this.timers.clear()
+    if (this.liveRetry !== undefined) clearTimeout(this.liveRetry)
+    this.liveRetry = undefined
   }
 
   /** `notify`: the caller is not waiting for the answer (the reconnect copy), so tell the composers. */
@@ -175,38 +196,55 @@ export class SendLedger {
       // One id, two bodies: a bug in this client. Never retried, so it cannot loop.
       console.error('piperoom: client_id_reused for', a.clientId)
       this.actions.delete(a.clientId)
-      this.deps.setError(errorText(e))
+      this.setError(errorText(e))
       return 'refused'
     }
     if (isUnconfirmed(e)) {
       if (this.dedupes === true) {
         // The server dedupes: sending it again with the same id appends nothing new.
         a.state = 'queued'
-        this.deps.setError(OFFLINE_TEXT)
+        this.setError(OFFLINE_TEXT)
+        this.retryWhileLive()
         return 'kept'
       }
       this.toUnknown(a)
       return 'unknown'
     }
     if (isNetworkError(e) && this.count('queued') < MAX_KEPT) {
+      // Gap shared with main (pinned by a test): a TypeError can also mean the request reached
+      // the server and the answer was lost; a server without #459 then stores the re-send again.
       a.state = 'queued'
-      this.deps.setError(OFFLINE_TEXT)
+      this.setError(OFFLINE_TEXT)
+      this.retryWhileLive()
       return 'kept'
     }
     // Refused (an error answer) or nothing kept: nothing was stored, the id is unused.
     this.actions.delete(a.clientId)
-    this.deps.setError(errorText(e))
+    this.setError(errorText(e))
     return 'refused'
+  }
+
+  /**
+   * With the socket open, the "Retrying" banner would otherwise be false: only a reconnect drains.
+   * One timer at a time sends the kept actions again.
+   */
+  private retryWhileLive() {
+    if (this.disposed || this.liveRetry !== undefined || !this.deps.isLive?.()) return
+    this.liveRetry = setTimeout(() => {
+      this.liveRetry = undefined
+      if (!this.disposed && this.deps.isLive?.()) this.drain()
+    }, LIVE_RETRY_MS)
   }
 
   /** Maybe stored and not safe to send again yet: say so, and say when it may be sent again. */
   private toUnknown(a: Action) {
     a.state = 'unknown'
-    this.deps.setError(UNCONFIRMED_TEXT)
+    if (this.disposed) return
+    this.setError(UNCONFIRMED_TEXT)
     const t = setTimeout(
       () => {
         this.timers.delete(t)
-        if (this.actions.get(a.clientId) === a && a.state === 'unknown') this.deps.setError(NOT_CONFIRMED_TEXT)
+        if (this.actions.get(a.clientId) === a && a.state === 'unknown') this.setError(NOT_CONFIRMED_TEXT)
       },
       Math.max(a.since + UNCONFIRMED_WINDOW_MS - this.now(), 0),
     )
@@ -232,11 +270,11 @@ export class SendLedger {
       for (const l of this.listeners) l({ clientId, ...a.item })
     }
     const next = this.banner()
-    this.deps.setError((prev) => (prev === null || BANNERS.includes(prev) ? next : prev))
+    this.setError((prev) => (prev === null || BANNERS.includes(prev) ? next : prev))
   }
 
   private settled(): true {
-    this.deps.setError(this.banner())
+    this.setError(this.banner())
     return true
   }
 
@@ -256,9 +294,14 @@ export class SendLedger {
     })
   }
 
+  /**
+   * Forgets landed actions and unknown ones (already reported "never confirmed") by age. Kept
+   * (queued) actions are never dropped by age: they are what the person sent and the reconnect
+   * still owes; MAX_KEPT bounds them.
+   */
   private prune() {
     const old = this.now() - FORGET_MS
     for (const [id, l] of this.landed) if (l.at < old) this.landed.delete(id)
-    for (const [id, a] of this.actions) if (a.state !== 'inflight' && a.since < old) this.actions.delete(id)
+    for (const [id, a] of this.actions) if (a.state === 'unknown' && a.since < old) this.actions.delete(id)
   }
 }

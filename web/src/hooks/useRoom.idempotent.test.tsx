@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
 import type { Event, RoomSnapshot } from '../api/types'
+import type { StepState } from '../state/types'
 
 // #390 / #459: the real api.steer / api.comment (12 s deadline) through the hook, over a fake
 // server. `contract` implements docs/api.md "Idempotent posts": it stores a POST when it arrives,
@@ -32,6 +33,8 @@ vi.mock('../api/client', async (importOriginal) => {
 import { SEND_DEADLINE_MS, api, openRoomWs } from '../api/client'
 import { NOT_CONFIRMED_TEXT, OFFLINE_TEXT, UNCONFIRMED_TEXT } from '../lib/errors'
 import { useRoom } from './useRoom'
+import { RollbackButton } from '../components/room/RollbackButton'
+import { Timeline } from '../components/Timeline'
 
 class FakeWebSocket {
   static CONNECTING = 0
@@ -72,7 +75,8 @@ interface Body {
 function fakeServer(mode: 'contract' | 'old') {
   const stored: Event[] = []
   const byKey = new Map<string, { route: string; body: string; ev: Event }>()
-  const state = { answerAfter: 100, offlineNext: 0 }
+  // resetAfterStore: the next POST is stored, then its connection drops (a TypeError, no answer).
+  const state = { answerAfter: 100, offlineNext: 0, resetAfterStore: 0 }
   const answer = (status: number, body: unknown, after: number) =>
     new Promise<Response>((resolve) =>
       setTimeout(
@@ -111,6 +115,10 @@ function fakeServer(mode: 'contract' | 'old') {
           }
     stored.push(ev)
     if (id !== undefined) byKey.set(id, { route, body: sameBody, ev })
+    if (state.resetAfterStore > 0) {
+      state.resetAfterStore--
+      return Promise.reject(new TypeError('Failed to fetch'))
+    }
     return answer(200, ev, state.answerAfter)
   })
   return { stored, fetchMock, state }
@@ -336,5 +344,140 @@ describe('a server without #459 (no client_id echo): never re-post an unknown ou
     await pass(500)
     expect(click()).toBe(true)
     expect(server.fetchMock).toHaveBeenCalledTimes(3)
+  })
+})
+
+// Round 6 (review of beb6a1d): a composer's kept id must not outlive its action, and nothing the
+// person sent may be dropped while it is still owed.
+describe('composers with the real hook: a new action after a delivery is stored again', () => {
+  const step: StepState = { id: 's1', title: 'Check the Debezium connector', tool_calls: [], messages: [] }
+
+  function TimelineRoom() {
+    const { actions } = useRoom('r1')
+    return (
+      <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} onDelivered={actions.onDelivered} />
+    )
+  }
+
+  function RollbackRoom() {
+    const { actions } = useRoom('r1')
+    return (
+      <RollbackButton
+        title="Restart"
+        proposalId="p1"
+        rollback="set it back"
+        asDriver
+        onSteer={actions.steer}
+        onDelivered={actions.onDelivered}
+      />
+    )
+  }
+
+  async function mount(server: Server, ui: React.ReactElement) {
+    vi.stubGlobal('fetch', server.fetchMock)
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snap)
+    vi.mocked(api.events).mockResolvedValue({ events: [], next_after: 0 } as never)
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    render(ui)
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    act(() => socket.onopen?.())
+    return socket
+  }
+
+  it('ADV-3: a step comment fails offline, the reconnect stores it, then the same words 20 minutes later: 2 stored', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <TimelineRoom />)
+    server.state.offlineNext = 1
+    fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
+    const box = screen.getByLabelText('Comment on this step')
+    fireEvent.change(box, { target: { value: 'ack' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    act(() => socket.onopen?.())
+    await pass(500)
+    // The delivery took the Retry strip down and cleared the field.
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(box).toHaveValue('')
+    await pass(20 * 60_000)
+    fireEvent.change(box, { target: { value: 'ack' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    await pass(500)
+    expect(server.stored.filter((e) => e.type === 'comment.added')).toHaveLength(2)
+  })
+
+  it('ADV-6: a rollback fails offline, is cancelled, the reconnect stores it, then Roll back 30 minutes later: 2 stored', async () => {
+    const server = fakeServer('contract')
+    const socket = await mount(server, <RollbackRoom />)
+    server.state.offlineNext = 1
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    act(() => socket.onopen?.())
+    await pass(500)
+    expect(server.stored).toHaveLength(1)
+    await pass(30 * 60_000)
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    await pass(500)
+    expect(server.stored).toHaveLength(2)
+    const ids = server.fetchMock.mock.calls
+      .slice(1)
+      .map((c) => (JSON.parse(String((c[1] as RequestInit).body)) as Body).client_id)
+    expect(new Set(ids).size).toBe(2)
+  })
+})
+
+describe('kept actions are never dropped by age', () => {
+  it('ADV-1: a steer kept for 16 minutes with the socket down still drains with the next one', async () => {
+    const server = fakeServer('contract')
+    const { hook, socket } = await openRoom(server)
+    server.state.offlineNext = 1
+    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    act(() => socket.onclose?.({ reason: '' }))
+    await pass(16 * 60_000)
+    server.state.offlineNext = 1
+    fire(() => hook.result.current.actions.steer('check lag', { clientId: 'k2' }))
+    await pass(10)
+    act(() => socket.onopen?.())
+    await pass(500)
+    expect(server.stored.map((e) => (e.payload as { text: string }).text)).toEqual(['stop', 'check lag'])
+  })
+})
+
+// Gaps shared with main (org.md §12): pinned as they are today, each with its follow-up ticket.
+describe('gap rows (today\'s behaviour, shared with main)', () => {
+  it('GAP ADV-4: a kept steer drains into the room on screen after a room switch; only App.tsx keying RoomScreen by roomId prevents it', async () => {
+    const server = fakeServer('contract')
+    vi.stubGlobal('fetch', server.fetchMock)
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snap)
+    vi.mocked(api.events).mockResolvedValue({ events: [], next_after: 0 } as never)
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const hook = renderHook(({ id }) => useRoom(id), { initialProps: { id: 'r1' } })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    act(() => socket.onopen?.())
+    server.state.offlineNext = 1
+    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    hook.rerender({ id: 'r2' })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    act(() => socket.onopen?.())
+    await pass(500)
+    expect(server.fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/rooms/r2/steer')
+  })
+
+  it('GAP ADV-5: against a server without #459, a request stored before its connection reset is re-sent on reconnect: 2 copies', async () => {
+    const server = fakeServer('old')
+    const { hook, socket } = await openRoom(server)
+    server.state.resetAfterStore = 1
+    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    expect(hook.result.current.error).toBe(OFFLINE_TEXT)
+    act(() => socket.onopen?.())
+    await pass(500)
+    expect(server.stored.filter((e) => (e.payload as { text: string }).text === 'stop')).toHaveLength(2)
   })
 })

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiClientError, SendUnconfirmedError } from '../api/client'
 import type { Event } from '../api/types'
 import { NOT_CONFIRMED_TEXT, OFFLINE_TEXT, UNCONFIRMED_TEXT } from '../lib/errors'
-import { MAX_KEPT, SendLedger, UNCONFIRMED_WINDOW_MS } from './sendLedger'
+import { LIVE_RETRY_MS, MAX_KEPT, SendLedger, UNCONFIRMED_WINDOW_MS } from './sendLedger'
 import type { SendItem } from './sendLedger'
 
 const ME = { kind: 'human' as const, id: 'arjun', name: 'Arjun' }
@@ -12,17 +12,14 @@ function event(text: string, clientId?: string, actor = ME): Event {
   return { room_id: 'r1', seq: 1, type: 'steer.sent', actor, payload: { text, client_id: clientId }, at: '' }
 }
 
-function ledger(post: (item: SendItem, id: string) => Promise<Event | undefined>) {
+function ledger(post: (item: SendItem, id: string) => Promise<Event | undefined>, live = false) {
   let error: string | null = null
   let n = 0
-  const l = new SendLedger({
-    post,
-    setError: (next) => {
-      error = typeof next === 'function' ? next(error) : next
-    },
-    newId: () => `id${++n}`,
+  const setError = vi.fn((next: string | null | ((prev: string | null) => string | null)) => {
+    error = typeof next === 'function' ? next(error) : next
   })
-  return { l, error: () => error }
+  const l = new SendLedger({ post, setError, newId: () => `id${++n}`, isLive: () => live })
+  return { l, error: () => error, setError }
 }
 
 beforeEach(() => {
@@ -106,5 +103,87 @@ describe('SendLedger', () => {
     l.dispose()
     vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
     expect(error()).toBe(UNCONFIRMED_TEXT)
+  })
+
+  // Review ADV-7: a send in flight when the room screen goes away fails later; nothing may then
+  // touch the screen or arm a timer.
+  it('a send that fails after dispose arms no timer and sets no banner', async () => {
+    let fail: (e: unknown) => void = () => {}
+    const post = vi.fn(() => new Promise<Event | undefined>((_, reject) => (fail = reject)))
+    const { l, setError } = ledger(post)
+    const sent = l.send(stop, 'k1')
+    l.dispose()
+    setError.mockClear()
+    fail(new SendUnconfirmedError(12_000))
+    expect(await sent).toBe(false)
+    expect(setError).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  // Review ADV-2: an unknown action already reported "never confirmed" holds no banner up.
+  it('an old unknown action does not bring its banner back after a later success or a reconnect', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
+    const { l, error } = ledger(post)
+    await l.send(stop, 'k1')
+    vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
+    expect(error()).toBe(NOT_CONFIRMED_TEXT)
+    post.mockResolvedValueOnce(undefined)
+    expect(await l.send({ kind: 'steer', text: 'check lag' })).toBe(true)
+    expect(error()).toBeNull()
+    vi.advanceTimersByTime(11 * 60_000)
+    expect(l.banner()).toBeNull()
+  })
+
+  // Review ADV-9: with the socket open no reconnect drains, so "Retrying" must be true by itself.
+  it('with the socket open, a kept action is sent again after LIVE_RETRY_MS', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch')).mockResolvedValue(undefined)
+    const { l, error } = ledger(post, true)
+    expect(await l.send(stop, 'k1')).toBe(false)
+    expect(error()).toBe(OFFLINE_TEXT)
+    await vi.advanceTimersByTimeAsync(LIVE_RETRY_MS)
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(post.mock.calls[1][1]).toBe('k1')
+    expect(error()).toBeNull()
+  })
+
+  it('a kept action is never dropped by age (only MAX_KEPT bounds them)', async () => {
+    const post = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    const { l } = ledger(post)
+    await l.send(stop, 'k1')
+    vi.advanceTimersByTime(20 * 60_000)
+    await l.send({ kind: 'steer', text: 'check lag' }, 'k2')
+    post.mockReset().mockResolvedValue(undefined)
+    l.drain()
+    expect(post.mock.calls.map((c) => c[1])).toEqual(['k1', 'k2'])
+  })
+})
+
+// Review nit 7: the round-4 traps X1-X3. Only the action's own client_id settles it: the same
+// words with another id, or with none, are another action (or an old server's) and settle nothing.
+describe('SendLedger never settles by words', () => {
+  it.each([
+    ['no client_id', undefined],
+    ['another client_id', 'other'],
+  ])('an own event with the same words and %s leaves an unknown action unsettled', async (_, id) => {
+    const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
+    const { l, error } = ledger(post)
+    await l.send(stop, 'k1')
+    l.onEvent(event('stop', id), 'arjun')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    expect(l.banner()).toBe(UNCONFIRMED_TEXT)
+  })
+
+  it.each([
+    ['no client_id', undefined],
+    ['another client_id', 'other'],
+  ])('an own event with the same words and %s leaves a kept action to the reconnect', async (_, id) => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post)
+    await l.send(stop, 'k1')
+    l.onEvent(event('stop', id), 'arjun')
+    post.mockResolvedValue(undefined)
+    l.drain()
+    expect(post).toHaveBeenCalledTimes(2)
+    expect(post.mock.calls[1][1]).toBe('k1')
   })
 })
