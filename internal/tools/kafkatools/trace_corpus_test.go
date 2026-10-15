@@ -97,6 +97,19 @@ func TestTraceOracleURLs(t *testing.T) {
 		{"escaped quoted user", listenerRefused + `jdbc:oracle:thin:\"Loader\"/EscU5erPw9@wh:1521:ORCL`, []string{"EscU5erPw9"}, []string{"@wh:1521:ORCL"}},
 		{"escaped quoted password in json", `org.apache.kafka.connect.errors.ConnectException: bad config: {\"connection.url\":\"jdbc:oracle:thin:loader/\"p w0rdJs0nTail\"@wh:1521:ORCL\"}`, []string{"w0rdJs0nTail"}, []string{"jdbc:oracle:thin:loader/", "@wh:1521:ORCL"}},
 		{"doubled quote in quoted password", listenerRefused + `jdbc:oracle:thin:loader/"Dq""Pw0rdTail"@wh:1521:ORCL`, []string{"Pw0rdTail"}, []string{"@wh:1521:ORCL"}},
+		// A credential after the URL on the same line (compact JSON, EZConnect
+		// Plus parameters, a JDBC property) keeps its own mask: the Oracle
+		// password must not run into it and eat its key.
+		{"json sibling password", `org.apache.kafka.connect.errors.ConnectException: bad config {"connection.url":"jdbc:oracle:thin:loader/Pw9Orc@wh:1521:ORCL","connection.password":"Sec@ret99Tail"}`, []string{"Pw9Orc", "ret99Tail"}, []string{"@wh:1521:ORCL", "connection.password"}},
+		{"escaped json sibling password", `org.apache.kafka.connect.errors.ConnectException: bad config {\"connection.url\":\"jdbc:oracle:thin:loader/Pw9Orc@wh:1521:ORCL\",\"connection.password\":\"Sec@ret99Tail\"}`, []string{"Pw9Orc", "ret99Tail"}, []string{"@wh:1521:ORCL", "connection.password"}},
+		{"json sibling token", `org.apache.kafka.connect.errors.ConnectException: bad config {"connection.url":"jdbc:oracle:thin:loader/Pw9Orc@wh:1521:ORCL","connection.token":"Tk@n9Zq8Xw7Vu6"}`, []string{"Pw9Orc", "n9Zq8Xw7Vu6"}, []string{"@wh:1521:ORCL"}},
+		{"ezconnect wallet password", listenerRefused + "jdbc:oracle:thin:loader/Pw9Orc@tcps://wh:2484/svc?wallet_location=/w&oracle.net.wallet_password=W@llT4il99", []string{"Pw9Orc", "llT4il99"}, []string{"@tcps://wh:2484/svc"}},
+		{"braced sibling password", listenerRefused + "jdbc:oracle:thin:loader/Pw9Orc@wh:1521:ORCL;password={Br@ceOrcT4il}", []string{"Pw9Orc", "Br@ce", "ceOrcT4il"}, []string{"@wh:1521:ORCL"}},
+		{"double-escaped quoted password", listenerRefused + `jdbc:oracle:thin:loader/\\"DblEsc9Pw\\"@wh:1521:ORCL`, []string{"DblEsc9Pw"}, []string{"@wh:1521:ORCL"}},
+		{"doubled quote in quoted user", listenerRefused + `jdbc:oracle:thin:"lo""ader"/NqPw66Zx@wh:1521:ORCL`, []string{"NqPw66Zx"}, []string{"@wh:1521:ORCL"}},
+		// cleanTrace masks a second time; a masked password is left alone, so
+		// the host survives even with a later '@' glued on.
+		{"second pass keeps host", `org.apache.kafka.connect.errors.ConnectException: bad config: {\"url\":\"jdbc:oracle:thin:loader/\"Ej@x EjTail\"@wh:1521:ORCL\",\"owner\":\"ops@corp\"}`, []string{"Ej@x", "EjTail"}, []string{"loader/[redacted]@wh:1521:ORCL"}},
 		// No credentials: nothing to mask, the address is the diagnosis.
 		{"no credentials, service", listenerRefused + "jdbc:oracle:thin:@//wh:1521/svc", nil, []string{"jdbc:oracle:thin:@//wh:1521/svc"}},
 		{"no credentials, sid", listenerRefused + "jdbc:oracle:thin:@wh:1521:ORCL", nil, []string{"jdbc:oracle:thin:@wh:1521:ORCL"}},
@@ -122,6 +135,8 @@ func TestTraceSQLServerBracedPassword(t *testing.T) {
 		{"database_password", nsd + "jdbc:sqlserver://wh:1433;user=loader;database_password={Us;Und3rTail}", []string{"Und3rTail"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
 		// Malformed: no closing brace; the value runs to the end of the line.
 		{"unclosed brace", nsd + "jdbc:sqlserver://wh:1433;user=loader;password={Br@ce;Unc1osedTail", []string{"Br@ce", "Unc1osedTail"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		// An empty value has nothing to hide.
+		{"empty braces", nsd + "jdbc:sqlserver://wh:1433;user=loader;password={};encrypt=true", nil, []string{"password={};encrypt=true"}},
 		// Keys that do not end in password, pwd or secret keep their values.
 		{"unrelated braced keys", nsd + "jdbc:sqlserver://wh:1433;user=loader;passwordPolicy={min=12};cwd={C:/app};encrypt=true", nil, []string{"jdbc:sqlserver://wh:1433", "user=loader", "passwordPolicy={min=12}", "cwd={C:/app}"}},
 	})
@@ -157,6 +172,9 @@ func TestTraceCredentialsBeforeRecordMasking(t *testing.T) {
 	})
 }
 
+// sqlsrv is a SQL Server driver error up to the connection properties.
+const sqlsrv = "java.sql.SQLException: No suitable driver found for jdbc:sqlserver://wh:1433;user=loader;"
+
 // TestTraceRedactGaps pins today's output for redact.Text gaps the trace path
 // exposes. They are A4's to fix (gap: redact.Text, see #455); when a row
 // changes, flip it to the masked form in the same PR.
@@ -178,6 +196,25 @@ func TestTraceRedactGaps(t *testing.T) {
 		{"gap: redact.Text, see #455: unbraced at password", "java.sql.SQLException: No suitable driver found for jdbc:sqlserver://wh:1433;user=loader;password=P@ssUnbr42Zx;encrypt=true", "@ssUnbr42Zx"},
 		// The SQL '' escape ends the quoted value early; the tail leaks.
 		{"gap: redact.Text, see #455: sql doubled quote", "Caused by: java.sql.BatchUpdateException: Batch entry 0 UPDATE \"users\" SET \"password\" = 'It''sS3cret99' WHERE \"id\" = 7 was aborted", "sS3cret99"},
+		// Braced forms main leaks the same way (#455): text glued after the
+		// closing brace, keys that do not end in password/pwd/secret, nested
+		// braces.
+		{"gap: redact.Text, see #455: glued after {noop}", sqlsrv + "password={noop}Gl0edPwTail;encrypt=true", "Gl0edPwTail"},
+		{"gap: redact.Text, see #455: glued after {bcrypt}", sqlsrv + "password={bcrypt}Bcr7ptHashTail;encrypt=true", "Bcr7ptHashTail"},
+		{"gap: redact.Text, see #455: glued after {cipher}", sqlsrv + "password={cipher}C1pherTextTail;encrypt=true", "C1pherTextTail"},
+		{"gap: redact.Text, see #455: glued after {}", sqlsrv + "password={}Gl0edEmptyTail;encrypt=true", "Gl0edEmptyTail"},
+		{"gap: redact.Text, see #455: glued after client.secret", sqlsrv + "client.secret={x}Gl0edSecTail;encrypt=true", "Gl0edSecTail"},
+		{"gap: redact.Text, see #455: secretKey braced", sqlsrv + "secretKey={Sk@y;SkKeyT4il77};encrypt=true", "SkKeyT4il77"},
+		{"gap: redact.Text, see #455: secret_key braced", sqlsrv + "secret_key={Sk@y;SkT4il77};encrypt=true", "SkT4il77"},
+		{"gap: redact.Text, see #455: nested braces", sqlsrv + "password={a{b}c;NestT4il88};encrypt=true", "NestT4il88"},
+		// Oracle forms the local mask does not cover (#449).
+		{"gap: redact.Text, see #449: unclosed quote", listenerRefused + `jdbc:oracle:thin:loader/"UnclQ UqTail5@wh:1521:ORCL`, "UqTail5"},
+		{"gap: redact.Text, see #449: unquoted space", listenerRefused + "jdbc:oracle:thin:loader/Sp Tail7Q@wh:1521:ORCL", "Tail7Q"},
+		// dlq.RedactMessage keeps identifier-shaped Key (...)=(...) values (#469).
+		{"gap: dlq.RedactMessage, see #469: identifier-shaped key value", "Caused by: org.postgresql.util.PSQLException: ERROR: insert or update violates foreign key Key (customer_ref)=(jdoe_smith) is not present in table \"customers\".", "Key (customer_ref)=(jdoe_smith)"},
+		// Known over-mask, no leak: a {{ }} template reads as a brace that
+		// '}}' escapes, so the value runs to the end of the line.
+		{"known: template over-mask", sqlsrv + "password={{ vault_db_password }};encrypt=true", "user=loader;password=[redacted]"},
 		// Not a redact gap: per-line masking cannot follow a quote opened on
 		// the line before (main's whole-text scrub did). Contrived; pinned.
 		{"known: quote across lines", "org.apache.kafka.connect.errors.ConnectException: bad jaas config: password=\"QHead99\nCaused by: QTail99Zx\";", "QTail99Zx"},
@@ -225,8 +262,10 @@ func TestTraceLargeSchemaKeepsTail(t *testing.T) {
 
 // TestTraceOracleOvermask pins a known over-mask: an unquoted Oracle password
 // runs to the last '@' of its token, so text glued after the URL up to a later
-// '@' is masked with it. Nothing leaks; the host reads wrong. Stopping earlier
-// would leak a password that holds '@' (TestTraceOracleURLs).
+// '@' is masked with it and the host reads wrong. Stopping earlier would leak
+// a password that holds '@' (TestTraceOracleURLs). A credential in that glued
+// text is masked before the Oracle pass runs, so the over-mask cannot eat its
+// key ("json sibling password" in TestTraceOracleURLs).
 func TestTraceOracleOvermask(t *testing.T) {
 	for _, line := range []string{
 		`org.apache.kafka.connect.errors.ConnectException: bad config {"url":"jdbc:oracle:thin:loader/Js0nPw9@wh:1521:ORCL","owner":"ops@corp.example"}`,

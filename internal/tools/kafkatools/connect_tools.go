@@ -171,9 +171,9 @@ var oracleThinCreds = regexp.MustCompile(`(?i)(jdbc:oracle:[a-z0-9]+:(?:\\?"(?:[
 // '@' ('}}' escapes '}'), for every key that ends in password, pwd or secret
 // (trustStorePassword, keyStoreSecret, ...). redact.Text reads such a value as
 // URL user info: it masks the port and user and leaks the tail. A brace that
-// is never closed runs to the end of the line. The key and the rest of the
-// connection string stay visible.
-var bracedPassword = regexp.MustCompile(`(?im)(\b\w*(?:password|pwd|secret)\s*=\s*)\{(?:[^}\n]|\}\})*(?:\}|$)`)
+// is never closed runs to the end of the line; an empty {} is kept. The key
+// and the rest of the connection string stay visible.
+var bracedPassword = regexp.MustCompile(`(?im)(\b\w*(?:password|pwd|secret)\s*=\s*)\{(?:[^}\n]|\}\})+(?:\}|$)`)
 
 // redactedPassword replaces a locally masked password, in redact's style.
 const redactedPassword = "[redacted]"
@@ -184,6 +184,9 @@ const redactedPassword = "[redacted]"
 func maskOracleThin(m string) string {
 	sub := oracleThinCreds.FindStringSubmatch(m)
 	head, rest := sub[1], sub[2]
+	if strings.HasPrefix(rest, redactedPassword) {
+		return m // already masked: a second pass must not move the cut
+	}
 	if strings.HasPrefix(rest, `"`) || strings.HasPrefix(rest, `\"`) {
 		return head + redactedPassword // a quoted password, host unmatched after it
 	}
@@ -201,9 +204,14 @@ func maskOracleThin(m string) string {
 // drops a quoted column name a key/value rule needs and caps a line at 300
 // runes (dlq.RedactMessage); so neither can expose a credential.
 func maskCreds(s string) string {
-	s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
+	// The Oracle mask goes last: its password runs to the last '@' of a token,
+	// and in compact JSON or URL parameters that token reaches a sibling
+	// credential ("connection.password":"Sec@ret..."). Run first, it would eat
+	// that credential's key and leave its tail; run last, the sibling is
+	// already masked and the Oracle pass can only add masks.
 	s = bracedPassword.ReplaceAllString(s, "${1}"+redactedPassword)
 	s, _ = redact.Text(s)
+	s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
 	return s
 }
 
@@ -357,17 +365,28 @@ func truncateRunes(s string, n int) string {
 // dropping stack frames and stripping embedded schema JSON blobs.
 func condenseTrace(trace string) string {
 	var out []string
+	size := 0
 	for _, line := range strings.Split(trace, "\n") {
+		// cleanTrace keeps maxTraceText bytes; masking past that (plus a margin
+		// for masks that shorten text) is work whose output is cut anyway.
+		if size > maxTraceText+condenseMargin {
+			break
+		}
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "at ") {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0 {
-			out = append(out, sanitizeTrace(trimmed))
+			kept := sanitizeTrace(trimmed)
+			out = append(out, kept)
+			size += len(kept) + 1
 		}
 	}
 	return strings.Join(out, "\n")
 }
+
+// condenseMargin is how far past maxTraceText condenseTrace keeps lines.
+const condenseMargin = 512
 
 // sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line,
 // masks credentials, and masks the failing record's values where a driver or
