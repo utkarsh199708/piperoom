@@ -50,6 +50,8 @@ type Outcome = 'ok' | 'kept' | 'unknown' | 'refused'
 interface Action {
   clientId: string
   item: SendItem
+  /** The room it was typed in: every send of it goes there, and only that room drains it (#491). */
+  room: string
   /** queued: not sent, or safe to send again; unknown: maybe stored, the server may not dedupe. */
   state: 'inflight' | 'queued' | 'unknown'
   /** When the latest send of it started. */
@@ -63,8 +65,10 @@ interface Action {
 }
 
 export interface LedgerDeps {
-  /** POSTs the action with its client_id; resolves with the server's event. */
-  post: (item: SendItem, clientId: string) => Promise<Event | undefined>
+  /** POSTs the action with its client_id to `room`; resolves with the server's event. */
+  post: (item: SendItem, clientId: string, room: string) => Promise<Event | undefined>
+  /** The room on screen: a new action belongs to it, and only its actions drain or hold the banner. */
+  room?: () => string
   setError: (next: string | null | ((prev: string | null) => string | null)) => void
   newId: () => string
   /** The room socket is open: then nothing reconnects, so the ledger retries kept actions itself. */
@@ -103,6 +107,16 @@ export class SendLedger {
     return this.deps.now ? this.deps.now() : Date.now()
   }
 
+  private room() {
+    return this.deps.room ? this.deps.room() : ''
+  }
+
+  /** The actions of the room on screen. */
+  private here(): Action[] {
+    const room = this.room()
+    return [...this.actions.values()].filter((a) => a.room === room)
+  }
+
   onDelivered(listener: DeliveredListener): () => void {
     this.listeners.add(listener)
     return () => {
@@ -118,7 +132,7 @@ export class SendLedger {
    */
   banner(): string | null {
     const now = this.now()
-    const actions = [...this.actions.values()]
+    const actions = this.here()
     if (actions.some((a) => a.state === 'unknown' && now - a.since < UNCONFIRMED_WINDOW_MS)) return UNCONFIRMED_TEXT
     if (actions.some((a) => a.state === 'queued')) return OFFLINE_TEXT
     return null
@@ -136,6 +150,8 @@ export class SendLedger {
     this.prune()
     if (this.isLanded(clientId, item)) return this.settled()
     let a = this.actions.get(clientId)
+    // A send of a held action goes to the room it was typed in, whatever room is on screen now.
+    const room = a?.room ?? this.room()
     if (a?.state === 'inflight' && a.flight) {
       // Another send of this action (the reconnect copy, or a double click) is on its way.
       const out = await this.wait(a.flight)
@@ -158,7 +174,7 @@ export class SendLedger {
       this.setError(UNCONFIRMED_TEXT)
       return false
     }
-    return (await this.post(item, clientId)) === 'ok' ? this.settled() : false
+    return (await this.post(item, clientId, room)) === 'ok' ? this.settled() : false
   }
 
   /**
@@ -186,10 +202,13 @@ export class SendLedger {
     return a !== undefined && !a.cancelled
   }
 
-  /** On reconnect: sends again every action that is safe to send again, with its own id. */
+  /**
+   * On reconnect: sends again every action of the room on screen that is safe to send again, with
+   * its own id. Another room's actions wait for that room's socket (#491).
+   */
   drain(): void {
-    for (const a of [...this.actions.values()]) {
-      if (a.state === 'queued') void this.post(a.item, a.clientId, true)
+    for (const a of this.here()) {
+      if (a.state === 'queued') void this.post(a.item, a.clientId, a.room, true)
     }
   }
 
@@ -212,10 +231,10 @@ export class SendLedger {
   }
 
   /** `notify`: the caller is not waiting for the answer (the reconnect copy), so tell the composers. */
-  private post(item: SendItem, clientId: string, notify = false): Promise<Outcome> {
-    const a: Action = { clientId, item, state: 'inflight', since: this.now() }
+  private post(item: SendItem, clientId: string, room: string, notify = false): Promise<Outcome> {
+    const a: Action = { clientId, item, room, state: 'inflight', since: this.now() }
     this.actions.set(clientId, a)
-    a.flight = this.deps.post(item, clientId).then(
+    a.flight = this.deps.post(item, clientId, room).then(
       (ev) => {
         // A server that dedupes echoes the key in the stored event (Idempotent posts, Payload).
         const echoed = (ev?.payload as { client_id?: unknown } | undefined)?.client_id

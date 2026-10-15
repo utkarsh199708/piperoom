@@ -576,10 +576,10 @@ describe('kept actions are never dropped by age', () => {
   })
 })
 
-// Gaps shared with main (org.md §12): pinned as they are today, each with its follow-up ticket
-// (#491). When a ticket is fixed, its row flips to assert the fix.
-describe('gap rows (today\'s behaviour, shared with main)', () => {
-  it('GAP ADV-4 (#491): a kept steer drains into the room on screen after a room switch; only App.tsx keying RoomScreen by roomId prevents it', async () => {
+// #491: a kept action belongs to the room it was typed in. A room switch without a remount
+// neither drains it into the new room nor shows its banner there; back in its room, it drains.
+describe('kept actions after a room switch', () => {
+  it('ADV-4 (#491): a kept steer does not drain into the room on screen after a switch; it drains into its own room', async () => {
     const server = fakeServer('contract')
     vi.stubGlobal('fetch', server.fetchMock)
     const socket = new FakeWebSocket()
@@ -595,8 +595,43 @@ describe('gap rows (today\'s behaviour, shared with main)', () => {
     hook.rerender({ id: 'r2' })
     await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
     act(() => socket.onopen?.())
+    await pass(6_000) // the reconnect and the live retry
+    const paths = () => server.fetchMock.mock.calls.map((c) => c[0])
+    expect(paths()).toEqual(['/api/rooms/r1/steer'])
+    expect(hook.result.current.error).toBeNull()
+
+    hook.rerender({ id: 'r1' })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(3))
+    act(() => socket.onopen?.())
     await pass(500)
-    expect(server.fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/rooms/r2/steer')
+    expect(paths()).toEqual(['/api/rooms/r1/steer', '/api/rooms/r1/steer'])
+    expect(server.stored).toHaveLength(1)
+  })
+
+  it('#491: a Retry of an action waiting on its flight re-posts to the action\'s room, not the one on screen', async () => {
+    const server = fakeServer('contract')
+    vi.stubGlobal('fetch', server.fetchMock)
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snap)
+    vi.mocked(api.events).mockResolvedValue({ events: [], next_after: 0 } as never)
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const hook = renderHook(({ id }) => useRoom(id), { initialProps: { id: 'r1' } })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    act(() => socket.onopen?.())
+    await warmUp(hook)
+    server.state.failAfter = 1_000
+    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    const retry = hook.result.current.actions.steer
+    hook.rerender({ id: 'r2' })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    fire(() => retry('stop', { clientId: 'k1' })) // waits on the first flight, then posts again
+    await pass(1_500)
+    expect(server.fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      '/api/rooms/r1/steer',
+      '/api/rooms/r1/steer',
+      '/api/rooms/r1/steer',
+    ])
   })
 })
 

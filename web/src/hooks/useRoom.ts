@@ -186,10 +186,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
-  // Steers and comments not settled yet, keyed by client_id. Its post reads roomIdRef: the room
-  // on screen when it posts, not the room the action was typed in. Gap shared with main (pinned by
-  // a test): only App.tsx keying RoomScreen by roomId keeps a kept action from draining into
-  // another room (#491).
+  // Steers and comments not settled yet, keyed by client_id. Each entry keeps the room it was
+  // typed in (roomIdRef when it was created) and posts only there; a reconnect drains only the
+  // entries of the room on screen (#491).
   const roomIdRef = useRef(roomId)
   // The socket is open (set by onopen/onclose, cleared on cleanup): with it open, the ledger
   // retries kept actions itself, since no reconnect will.
@@ -200,10 +199,11 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const [ledger] = useState(
     () =>
       new SendLedger({
-        post: (item, clientId) =>
+        post: (item, clientId, room) =>
           item.kind === 'steer'
-            ? api.steer(roomIdRef.current, item.text, clientId)
-            : api.comment(roomIdRef.current, { step_id: item.stepId, text: item.text, client_id: clientId }),
+            ? api.steer(room, item.text, clientId)
+            : api.comment(room, { step_id: item.stepId, text: item.text, client_id: clientId }),
+        room: () => roomIdRef.current,
         setError,
         newId: newClientId,
         isLive: () => liveRef.current,
