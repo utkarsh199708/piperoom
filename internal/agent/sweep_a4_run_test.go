@@ -85,3 +85,14 @@ func TestReadCutByDeadlineStillStoresItsResult(t *testing.T) {
 		t.Fatalf("tool_call events %d, tool_result events %d: want 1 and 1", calls, results)
 	}
 }
+
+// A price field given twice in different cases is a typo, like an exact
+// duplicate: encoding/json would keep one of them silently.
+func TestParseModelPricesRefusesCaseDuplicates(t *testing.T) {
+	if _, err := ParseModelPrices([]byte(`{"m":{"input":1,"output":2,"cache_write":3,"cache_read":4,"Input":1000}}`)); err == nil {
+		t.Fatal("a field given twice in different cases must be refused")
+	}
+	if _, err := ParseModelPrices([]byte(`{"m":{"input":1,"output":2,"cache_write":3,"cache_read":4},"M":{"input":1,"output":2,"cache_write":3,"cache_read":4}}`)); err != nil {
+		t.Fatalf("model ids are exact; two ids differing in case are two models: %v", err)
+	}
+}
