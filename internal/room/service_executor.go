@@ -131,7 +131,7 @@ func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) 
 				break
 			}
 			if err := s.executeProposal(p, true); err != nil && !errors.Is(err, context.Canceled) {
-				s.log.Warn("room: executor stopped", "room", roomID, "proposal", p.ProposalID, "err", err)
+				s.log.Warn("room: executor stopped", "room", roomID, "proposal", p.ProposalID, "err", maskExecErr(err))
 			}
 			q.done()
 		}
@@ -294,7 +294,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			if errors.Is(err, ErrStepOrder) {
 				// An earlier run started this step and never recorded its
 				// result: its outcome is unknown, and it never runs again.
-				output := fmt.Sprintf("outcome unknown: step %d was started by an earlier run that did not record its result; check the target before you retry with a new proposal", i)
+				output := fmt.Sprintf("outcome unknown: step %d was started by an earlier run that did not record its result; check the target before you retry with a new proposal", i+1)
 				s.finishOwnStep(p.ProposalID, i, output)
 				s.failProposalOutcome(p.RoomID, p.ProposalID, i, p.ParamsHash, output, true)
 				return fmt.Errorf("room: proposal %s: claim step %d: %w", p.ProposalID, i, err)
@@ -338,6 +338,9 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		if err != nil {
 			output = err.Error()
 		}
+		// Mask at the source: every later use (store, event, log) sees
+		// only the masked text.
+		output = maskExecOutput(output)
 		if err := s.finishStep(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output); err != nil {
 			if errors.Is(err, store.ErrClaimLost) {
 				// The sweep declared this run dead while the step ran and
@@ -371,7 +374,7 @@ func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output 
 		if errors.Is(err, store.ErrClaimLost) {
 			return // the sweep recorded the outcome
 		}
-		s.log.Warn("room: record step stop failed", "proposal", p.ProposalID, "step", i, "err", err)
+		s.log.Warn("room: record step stop failed", "proposal", p.ProposalID, "step", i, "err", maskExecErr(err))
 		s.finishOwnStep(p.ProposalID, i, output)
 		s.failStep(p.RoomID, p.ProposalID, i, p.ParamsHash, output)
 	}
@@ -427,7 +430,7 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 // and emits the action.executed event. The store write and the event use
 // resultCtx so they complete even while the service shuts down (review item 3).
 func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string) error {
-	output = sanitizeAgentText(output) // action output is tool text
+	output = maskExecOutput(output) // action output is tool text and may hold secrets
 	status := "done"
 	if !ok {
 		status = "failed"
@@ -444,7 +447,7 @@ func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTrack
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output, ParamsHash: paramsHash,
 	}); err != nil {
-		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
+		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}
 	return nil
 }
@@ -481,13 +484,13 @@ func (s *Service) failStep(roomID, proposalID string, i int, paramsHash, output 
 // failStepOutcome is failStep with the outcome-unknown mark
 // (events.ActionExecutedPayload.OutcomeUnknown).
 func (s *Service) failStepOutcome(roomID, proposalID string, i int, paramsHash, output string, unknown bool) {
-	output = sanitizeAgentText(output)
+	output = maskExecOutput(output)
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: false, Output: output, ParamsHash: paramsHash, OutcomeUnknown: unknown,
 	}); err != nil {
-		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
+		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}
 }
 
@@ -496,11 +499,11 @@ func (s *Service) failStepOutcome(roomID, proposalID string, i int, paramsHash, 
 // to this run but the local transition failed): ErrStepOrder simply means
 // there is no "started" row to finish. The write uses resultCtx (review item 3).
 func (s *Service) finishClaimedStep(proposalID string, i int, output string) {
-	output = sanitizeAgentText(output)
+	output = maskExecOutput(output)
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	if err := s.store.FinishProposalStep(rctx, proposalID, i, "failed", output); err != nil && !errors.Is(err, ErrStepOrder) {
-		s.log.Warn("room: finish claimed step failed", "proposal", proposalID, "step", i, "err", err)
+		s.log.Warn("room: finish claimed step failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}
 }
 
@@ -513,12 +516,12 @@ func (s *Service) finishOwnStep(proposalID string, i int, output string) {
 		s.finishClaimedStep(proposalID, i, output)
 		return
 	}
-	output = sanitizeAgentText(output)
+	output = maskExecOutput(output)
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	err := s.coord.FinishClaimedStep(rctx, proposalID, i, s.replica, "failed", output)
 	if err != nil && !errors.Is(err, ErrStepOrder) && !errors.Is(err, store.ErrClaimLost) {
-		s.log.Warn("room: finish claimed step failed", "proposal", proposalID, "step", i, "err", err)
+		s.log.Warn("room: finish claimed step failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}
 }
 

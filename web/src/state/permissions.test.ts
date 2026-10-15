@@ -96,7 +96,7 @@ describe('permissions', () => {
 
   it('only the driver can forward a suggestion', () => {
     const s = room('arjun')
-    const sug = { suggestion_id: 'g1', from: { kind: 'human' as const, id: 'kabir', name: 'Kabir' }, text: 'x' }
+    const sug = { suggestion_id: 'g1', from: { kind: 'human' as const, id: 'kabir', name: 'Kabir' }, text: 'x', status: 'pending' as const }
     expect(canSendSuggestionToAgent(s, arjun, sug)).toBe(true)
     expect(canSendSuggestionToAgent(s, kabir, sug)).toBe(false)
   })

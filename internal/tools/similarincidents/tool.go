@@ -72,6 +72,8 @@ const (
 	// Per-field caps of one hit, so one room cannot fill the answer.
 	maxTitleBytes      = 160
 	maxResolutionBytes = 400
+	// summaryResolutionBytes cuts the resolution in the summary line.
+	summaryResolutionBytes = 200
 
 	// fpExact / fpRoot are added to the BM25 score when the query's trace
 	// fingerprint equals one of the room's (whole chain / root cause only).
@@ -202,13 +204,25 @@ func (t *Tool) InputSchema() map[string]any {
 // Result.Data is stored in the new room's log, so it must not hold more past
 // text than the model sees (hand-off fields and label terms stay in the index).
 type Hit struct {
-	RoomID     string  `json:"room_id"`
-	PipelineID string  `json:"pipeline_id"`
-	Title      string  `json:"title"`
-	ClosedAt   string  `json:"closed_at"`
-	Layer      string  `json:"layer,omitempty"`
-	Resolution string  `json:"resolution"`
-	Score      float64 `json:"score"`
+	RoomID     string `json:"room_id"`
+	PipelineID string `json:"pipeline_id"`
+	Title      string `json:"title"`
+	ClosedAt   string `json:"closed_at"`
+	Layer      string `json:"layer,omitempty"`
+	Resolution string `json:"resolution"`
+	// FixThatWorked is the label's fix text, else the executed proposal's
+	// title; FixActions are the action names of that proposal's steps.
+	FixThatWorked string   `json:"fix_that_worked,omitempty"`
+	FixActions    []string `json:"fix_actions,omitempty"`
+	// Cause and LabelFix are the last room.labelled's cause and fix_that_worked, typed by a person.
+	// LabelFix is never the executed proposal's title (that fallback stays in FixThatWorked).
+	Cause    string `json:"cause,omitempty"`
+	LabelFix string `json:"label_fix,omitempty"`
+	// DurationS is room open to close in seconds; 0 = unknown.
+	DurationS int64 `json:"duration_s,omitempty"`
+	// ClosedBy is the closer's name, only when the server verified it.
+	ClosedBy string  `json:"closed_by,omitempty"`
+	Score    float64 `json:"score"`
 	// Fingerprint is "exact" (same cause chain), "root" (same root cause) or "".
 	Fingerprint string `json:"fingerprint_match,omitempty"`
 }
@@ -293,14 +307,62 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		if layer == "" {
 			layer = "unlabelled"
 		}
-		fmt.Fprintf(&sb, "\n[%d] room %s, closed %s, layer %s, score %.1f", i+1, h.RoomID, h.ClosedAt, layer, h.Score)
+		fmt.Fprintf(&sb, "\n[%d] %s %q%s", i+1, h.ClosedAt, h.Title, hitMeta(h))
+		if fix := hitFix(h); fix != "" {
+			fmt.Fprintf(&sb, " fixed by: %s", fix)
+			if h.Resolution != "" {
+				sb.WriteString(" —")
+			}
+		}
+		if h.Resolution != "" {
+			fmt.Fprintf(&sb, " %s", clipRunes(h.Resolution, summaryResolutionBytes))
+		}
+		if h.Cause != "" {
+			fmt.Fprintf(&sb, "\n    cause: %s", h.Cause)
+		}
+		if h.LabelFix != "" {
+			fmt.Fprintf(&sb, "\n    fix: %s", h.LabelFix)
+		}
+		fmt.Fprintf(&sb, "\n    room %s, layer %s, score %.1f", h.RoomID, layer, h.Score)
 		if h.Fingerprint != "" {
 			fmt.Fprintf(&sb, ", %s trace fingerprint match", h.Fingerprint)
 		}
-		fmt.Fprintf(&sb, "\n    title: %s\n    resolution: %s", h.Title, h.Resolution)
 	}
 	s, tr := tools.Truncate(sb.String())
 	return tools.Result{Summary: s, Data: data, Truncated: tr || idx.partial}, nil
+}
+
+// hitMeta is " (12 min, closed by Kabir)", or "" when neither is known.
+func hitMeta(h Hit) string {
+	var parts []string
+	if h.DurationS > 0 {
+		parts = append(parts, durationText(time.Duration(h.DurationS)*time.Second))
+	}
+	if h.ClosedBy != "" {
+		parts = append(parts, "closed by "+h.ClosedBy)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
+func durationText(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "<1 min"
+	case d < 2*time.Hour:
+		return fmt.Sprintf("%d min", int(d.Round(time.Minute)/time.Minute))
+	}
+	return fmt.Sprintf("%d h", int(d.Round(time.Hour)/time.Hour))
+}
+
+// hitFix is the "fixed by" text: the executed actions, else the labelled fix.
+func hitFix(h Hit) string {
+	if len(h.FixActions) > 0 {
+		return strings.Join(h.FixActions, ", ")
+	}
+	return h.FixThatWorked
 }
 
 func partialNote(idx *index) string {
@@ -368,6 +430,9 @@ func rank(idx *index, query string, limit int) []Hit {
 // a resolution cannot fake extra result lines or a "[verification]" block.
 func hitOf(r pastRoom, score float64, fp string) Hit {
 	h := Hit{
+		FixActions:  r.FixActions,
+		DurationS:   int64(r.Duration / time.Second),
+		ClosedBy:    r.ClosedBy,
 		RoomID:      r.RoomID,
 		PipelineID:  r.PipelineID,
 		Title:       clipRunes(oneLine(r.Title), maxTitleBytes),
@@ -377,7 +442,13 @@ func hitOf(r pastRoom, score float64, fp string) Hit {
 		Score:       math.Round(score*100) / 100,
 		Fingerprint: fp,
 	}
-	if h.Resolution == "" {
+	h.Cause = clipRunes(oneLine(r.Cause), maxResolutionBytes)
+	h.LabelFix = clipRunes(oneLine(r.FixThatWorked), maxResolutionBytes)
+	h.FixThatWorked = h.LabelFix
+	if h.FixThatWorked == "" {
+		h.FixThatWorked = clipRunes(oneLine(r.FixTitle), maxResolutionBytes)
+	}
+	if h.Resolution == "" && h.FixThatWorked == "" && len(h.FixActions) == 0 {
 		h.Resolution = "(no resolution text)"
 	}
 	return h
@@ -490,8 +561,8 @@ func fieldsOf(r pastRoom) []textsearch.Field {
 	}
 	return []textsearch.Field{
 		f(r.Title, wTitle),
-		f(strings.Join(r.Terms, " "), wLabelTerms),
-		f(r.Resolution, wResolution),
+		f(strings.Join(r.Terms, " ")+" "+r.Cause, wLabelTerms),
+		f(r.Resolution+" "+r.FixThatWorked+" "+r.FixTitle+" "+strings.ReplaceAll(strings.Join(r.FixActions, " "), "_", " "), wResolution),
 		f(strings.ReplaceAll(r.Layer, "-", " "), wLayer),
 		f(r.WhatBroke+" "+r.Why, wSummary),
 		f(strings.Join(r.Open, " ")+" "+strings.Join(r.Risks, " "), wOpenRisks),

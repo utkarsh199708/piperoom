@@ -1,10 +1,12 @@
+import { Loader2 } from 'lucide-react'
 import { useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import type { HandoffState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canAcceptHandoff } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
+import { handoffFailureText, handoffInFlight } from '@/lib/handoff'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -17,6 +19,7 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { PersonSelect } from './PersonSelect'
 import { RoomDialogClose } from './room/RoomDialogClose'
+import { useNow } from './room/useNow'
 import { useRestoreFocus } from './room/useRestoreFocus'
 
 function SummaryList({ title, items }: { title: string; items: string[] }) {
@@ -52,9 +55,12 @@ export function HandoffDialog({
   const [stay, setStay] = useState(false)
   const restoreFocus = useRestoreFocus()
   const pending = state.handoffs.find((h) => h.status === 'pending')
+  const now = useNow(5_000)
+  const inFlight = pending ? null : handoffInFlight(state, now)
+  const failure = state.handoff_failure
 
   const start = () => {
-    if (!to) return
+    if (!to || inFlight) return
     actions.handoff(to, stay)
   }
   const submit = (e: FormEvent) => {
@@ -73,7 +79,7 @@ export function HandoffDialog({
       <DialogContent
         hideClose
         className="max-h-[85vh] overflow-y-auto"
-        onKeyDown={pending ? undefined : onKeyDown}
+        onKeyDown={pending || inFlight ? undefined : onKeyDown}
         onCloseAutoFocus={restoreFocus}
       >
         <RoomDialogClose label="Close hand-off dialog" />
@@ -82,14 +88,37 @@ export function HandoffDialog({
           <DialogDescription>
             {pending
               ? `Summary prepared for ${pending.to.name}. They must accept to take over.`
-              : 'The agent writes a summary for the person who takes over. They accept it to become the driver.'}
+              : inFlight
+                ? `The agent is writing the summary for ${inFlight.to.name}.`
+                : 'The agent writes a summary for the person who takes over. They accept it to become the driver.'}
           </DialogDescription>
         </DialogHeader>
 
         {pending ? (
-          <HandoffSummary pending={pending} onClose={onClose} />
+          <HandoffSummary summary={pending.summary}>
+            <Button type="button" variant="secondary" onClick={onClose}>
+              Close
+            </Button>
+          </HandoffSummary>
+        ) : inFlight ? (
+          <div role="status" className="flex flex-col gap-3">
+            <p className="m-0 flex items-center gap-2 text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+              Writing the hand-off summary. This can take up to 3 minutes; you can close this and keep watching.
+            </p>
+            <DialogFooter>
+              <Button type="button" variant="secondary" onClick={onClose}>
+                Close
+              </Button>
+            </DialogFooter>
+          </div>
         ) : (
           <form className="flex flex-col gap-4" onSubmit={submit}>
+            {failure && (
+              <p role="alert" className="m-0 text-sm text-destructive-fg">
+                {handoffFailureText(failure.reason)}
+              </p>
+            )}
             <div className="flex flex-col gap-1.5">
               <label htmlFor="handoff-to" className="text-sm font-medium">
                 Hand off to
@@ -123,8 +152,7 @@ export function HandoffDialog({
   )
 }
 
-function HandoffSummary({ pending, onClose }: { pending: HandoffState; onClose: () => void }) {
-  const s = pending.summary
+function HandoffSummary({ summary: s, children }: { summary: HandoffState['summary']; children: ReactNode }) {
   return (
     <div className="handoff__summary flex flex-col gap-3">
       {s.what_broke && (
@@ -143,14 +171,50 @@ function HandoffSummary({ pending, onClose }: { pending: HandoffState; onClose: 
       <SummaryList title="Ruled out" items={s.ruled_out} />
       <SummaryList title="Still open" items={s.open} />
       <SummaryList title="Risks" items={s.risks} />
-      <DialogFooter>
-        <Button type="button" variant="secondary" onClick={onClose}>
-          Close
-        </Button>
-      </DialogFooter>
+      <DialogFooter>{children}</DialogFooter>
     </div>
   )
 }
+
+// What the receiver reads before taking over: the same summary the driver sees, with Accept next to it.
+function HandoffReceiveDialog({
+  handoff,
+  from,
+  onAccept,
+  onClose,
+}: {
+  handoff: HandoffState
+  from: string
+  onAccept: () => void
+  onClose: () => void
+}) {
+  const restoreFocus = useRestoreFocus()
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent hideClose className="max-h-[85vh] overflow-y-auto" onCloseAutoFocus={restoreFocus}>
+        <RoomDialogClose label="Close hand-off summary" />
+        <DialogHeader>
+          <DialogTitle>Hand-off from {from}</DialogTitle>
+          <DialogDescription>
+            Read this before you accept. Accepting makes you the driver
+            {handoff.stay_as_watcher ? `; ${from} stays in the room as a watcher.` : '.'}
+          </DialogDescription>
+        </DialogHeader>
+        <HandoffSummary summary={handoff.summary}>
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Not yet
+          </Button>
+          <Button type="button" onClick={onAccept}>
+            Accept and take over
+          </Button>
+        </HandoffSummary>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** The banner's Read summary button: a toast action clicks it through RoomCommands.readHandoff. */
+export const HANDOFF_READ_ID = 'handoff-read'
 
 export function HandoffAcceptBanner({
   state,
@@ -161,19 +225,33 @@ export function HandoffAcceptBanner({
   user: CurrentUser
   actions: RoomActions
 }) {
+  const [reading, setReading] = useState(false)
   const mine = state.handoffs.find((h) => canAcceptHandoff(user, h))
   if (!mine) return null
+  const from = state.driver?.name ?? 'Someone'
   return (
     <div
       role="status"
       className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border bg-primary-subtle px-4 py-1.5 font-medium text-primary-fg sm:px-6"
     >
       <span>
-        <strong>{state.driver?.name ?? 'Someone'}</strong> is handing the room to you.
+        <strong>{from}</strong> is handing the room to you.
       </span>
-      <Button className="ml-auto h-7 px-2.5" onClick={() => actions.acceptHandoff(mine.handoff_id)}>
-        Accept
+      {/* No blind accept: the only way to take over is through the summary dialog. */}
+      <Button id={HANDOFF_READ_ID} className="ml-auto h-7 px-2.5 coarse:h-11 coarse:px-4" onClick={() => setReading(true)}>
+        Read summary
       </Button>
+      {reading && (
+        <HandoffReceiveDialog
+          handoff={mine}
+          from={from}
+          onAccept={() => {
+            setReading(false)
+            actions.acceptHandoff(mine.handoff_id)
+          }}
+          onClose={() => setReading(false)}
+        />
+      )}
     </div>
   )
 }

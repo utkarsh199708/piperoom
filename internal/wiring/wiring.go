@@ -25,7 +25,9 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/changes"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
@@ -51,6 +53,9 @@ type Wired struct {
 	Connect       clients.ConnectClient
 	Kafka         clients.KafkaAdmin
 	Registry      clients.SchemaRegistryClient
+	// DebeziumMetrics is the parsed DEBEZIUM_METRICS_URL/_PREFIX; an empty URL
+	// leaves debezium_metrics registered but answering "not configured".
+	DebeziumMetrics config.DebeziumMetrics
 
 	// Builder derives pipeline graphs with live health from the clients above.
 	Builder topology.Builder
@@ -189,6 +194,11 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 		return nil, err
 	}
 
+	dm, err := config.ParseDebeziumMetrics(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build the A2 clients before any database ping so a bad security
 	// configuration fails Open even when no stack is reachable at all.
 	a2, err := buildA2Clients(cfg, awsCfg)
@@ -220,7 +230,9 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 	}
 	opened = append(opened, closeWh)
 
-	return assemble(o, whKind, a2, src, wh, closeOpened), nil
+	w := assemble(o, whKind, a2, src, wh, closeOpened)
+	w.DebeziumMetrics = dm
+	return w, nil
 }
 
 // assemble builds the Wired that Open returns from the clients it opened,
@@ -288,11 +300,14 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 		b = newTopologyBuilder(w)
 		w.Builder = b
 	}
-	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect, Kafka: w.Kafka}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {
 		return fmt.Errorf("wiring: register kafka tools: %w", err)
+	}
+	if err := debeziumtools.Register(reg, debeziumtools.Deps{Connect: w.Connect, Metrics: w.DebeziumMetrics, Owners: w.Owners}); err != nil {
+		return fmt.Errorf("wiring: register debezium tools: %w", err)
 	}
 	// The runbook library is embedded in the binary, so it needs no client.
 	if err := runbooks.Register(reg); err != nil {
@@ -304,6 +319,17 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 		if err := similarincidents.Register(reg, similarincidents.Deps{Source: w.Rooms, Owners: w.Owners}); err != nil {
 			return fmt.Errorf("wiring: register similar_incidents: %w", err)
 		}
+	}
+	// what_changed is always registered: the prompt names it, and the live DDL
+	// read works without the change log. The change log is the room store when
+	// it implements clients.ChangeReader (F8d); without it the tool says
+	// "change log unavailable".
+	chg := changes.Deps{Src: w.Source, Owners: w.Owners}
+	if cr, ok := w.Rooms.(clients.ChangeReader); ok {
+		chg.Changes = cr
+	}
+	if err := changes.Register(reg, chg); err != nil {
+		return fmt.Errorf("wiring: register what_changed: %w", err)
 	}
 	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)
