@@ -112,11 +112,19 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   A classic GKE Ingress `BackendConfig` and AWS target group health checks may not set the Host;
   that is fine because the probe routes accept the backend IP. No intermediary is needed just to
   satisfy the Host allow-list.
-- **Replicas.** `replicaCount` defaults to 1 (strategy `Recreate`). More replicas are safe and add
-  capacity; Postgres is the only coordination service (design: `docs/design/replicas.md`):
+- **Replicas.** `replicaCount` defaults to 1 (strategy `Recreate`). More replicas are safe (no
+  duplicate agent runs, no duplicate fix executions, no lost or reordered events in the load runs), but
+  they **do not raise the room event write rate**: it stays at the single-replica figure. They spread
+  viewers, CPU and the per-process lock. Failover (a replica killed under load) was not measured
+  (`reviews/capacity-2026-10.md` §9.2, §9.4). A first pilot should run one replica
+  ([scale statement](../../docs/pilot/setup.md#supported-scale)). Postgres is the only coordination
+  service (design: `docs/design/replicas.md`):
   - each room's agent runs on one replica, which holds a lease row renewed every 10 s (TTL 30 s).
     Steers and comments sent to any replica reach that agent through the event log. When a pod
-    stops, its rooms are handed over and stay paused until someone steers. With
+    stops, its rooms are taken over by another replica (at the next 10 s scan after a graceful stop,
+    after the 30 s lease after a crash). An open room (a shadow room excepted: its run is marked `interrupted`) is paused with a "server restarted"
+    message until a driver steers, someone mentions `@agent`, a suggestion is sent, or a member confirms
+    or disputes the hypothesis, as after a restart of a single server. With
     `PIPEROOM_RESUME_ON_TAKEOVER=1` an agent that was working resumes on another replica (a new
     run that gets the room's unanswered input and its open proposals), at most 3 times per room per
     hour;
@@ -166,7 +174,7 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
 | Value | Default | Meaning |
 |---|---|---|
 | `image.repository`, `image.tag`, `image.digest` | `piperoom`, `pilot`, empty | image to run; digest wins |
-| `replicaCount` | `1` | pods; more than 1 is safe, see above |
+| `replicaCount` | `1` | pods; more than 1 is safe but adds no write capacity, see above |
 | `rollingUpdate.maxSurge`, `.maxUnavailable` | `1`, `0` | rollout with more than one replica |
 | `podDisruptionBudget.enabled`, `.minAvailable` | `true`, `1` | PDB, rendered only with more than one replica |
 | `env.PIPEROOM_MAX_AGENTS`, `env.PIPEROOM_MAX_AGENTS_GLOBAL` | empty (3 per replica, no global cap) | agent cost caps |
