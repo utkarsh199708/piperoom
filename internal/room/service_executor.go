@@ -581,14 +581,13 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 	return nil
 }
 
-// roomPipeline returns the pipeline of a cached room ("" when unknown).
+// roomPipeline returns the pipeline of a room ("" when unknown).
 func (s *Service) roomPipeline(ctx context.Context, roomID string) string {
-	st, err := s.lockRoom(ctx, roomID)
+	p, err := s.readRoom(ctx, roomID)
 	if err != nil {
 		return ""
 	}
-	defer s.unlockRoom(st)
-	return st.snap.PipelineID
+	return p.PipelineID
 }
 
 // setProposalStatus persists a proposal status using resultCtx, so the write
@@ -632,11 +631,9 @@ func (s *Service) finishStepRow(ctx context.Context, proposalID string, i int, s
 	return s.store.FinishProposalStep(ctx, proposalID, i, status, output)
 }
 
+// isRoomOpen reports whether a cached room is open, as last published: a close
+// is published before its lock is released, so a finished close is seen.
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
-	st := s.lockCachedRoom(roomID)
-	if st == nil {
-		return false
-	}
-	defer s.unlockRoom(st)
-	return st.snap.Status == "open"
+	p := s.published(roomID)
+	return p != nil && p.Status == "open"
 }

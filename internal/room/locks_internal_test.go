@@ -215,7 +215,6 @@ func stallAppend(t *testing.T, svc *Service, st *gatedStore, roomID string) (rel
 // the room list and of the stuck room itself answer at once: from what each
 // room last published, not from behind the stuck command.
 func TestSlowAppendReadsDoNotWait(t *testing.T) {
-	t.Skip("enabled in step 3: reads answer from the published snapshot")
 	st := newGatedStore()
 	svc := newLockService(t, st)
 	ids := createRooms(t, svc, 2)
@@ -331,7 +330,6 @@ func loadedLater(t *testing.T, st *gatedStore, n int) (*Service, []string) {
 // While one room's load is stuck in the database, a cached room still reads
 // at once.
 func TestSlowLoadCachedReadsDoNotWait(t *testing.T) {
-	t.Skip("enabled in step 3: reads answer from the published snapshot")
 	st := newGatedStore()
 	svc, ids := loadedLater(t, st, 2)
 	a, b := ids[0], ids[1]

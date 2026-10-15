@@ -55,12 +55,11 @@ const handoffFailTimeout = 10 * time.Second
 // own handoff.requested append.
 func (s *Service) HandoffInFlight(ctx context.Context, roomID string) error {
 	s.syncRoom(ctx, roomID)
-	st, err := s.lockRoom(ctx, roomID)
+	p, err := s.readRoom(ctx, roomID)
 	if err != nil {
 		return nil
 	}
-	defer s.unlockRoom(st)
-	if st.snap.handoffInFlight(s.now()) {
+	if p.handoffInFlight(s.now()) {
 		return handoffInProgress()
 	}
 	return nil
@@ -251,7 +250,7 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
 	}
-	if err := s.checkVisibleLocked(ctx, user, h.RoomID); err != nil {
+	if err := s.checkVisible(ctx, user, h.RoomID); err != nil {
 		return events.Event{}, err
 	}
 	if h.Status == "voided" {

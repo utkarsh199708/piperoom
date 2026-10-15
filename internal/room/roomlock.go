@@ -10,8 +10,9 @@ import "context"
 // s.mu, then one room's mu, then s.reg and the leaf locks; nobody holds two
 // room locks at once.
 //
-// For now every room lock is taken under s.mu, so the service behaves as it
-// did with s.mu alone.
+// A read of a cached room (readRoom, published) takes no lock at all. For now
+// every room lock is still taken under s.mu, so commands on different rooms
+// wait for each other as they did with s.mu alone.
 
 // lockRoom locks roomID, loading the room into the cache first when it is
 // not cached. The caller releases it with unlockRoom.
@@ -79,4 +80,21 @@ func (s *Service) releaseRoomLocked(st *roomState) {
 func (st *roomState) publish() {
 	snap := st.snap.Clone()
 	st.pub.Store(&snap)
+}
+
+// readRoom returns roomID's snapshot for a read. A cached room answers from
+// its published snapshot without waiting for any lock, so a slow command on
+// the room, or on another one, does not hold the read up; the result is shared
+// and read-only. A room that is not cached is loaded first, under its lock.
+func (s *Service) readRoom(ctx context.Context, roomID string) (*RoomSnapshot, error) {
+	if p := s.published(roomID); p != nil {
+		return p, nil
+	}
+	st, err := s.lockRoom(ctx, roomID)
+	if err != nil {
+		return nil, err
+	}
+	snap := st.snap.Clone()
+	s.unlockRoom(st)
+	return &snap, nil
 }

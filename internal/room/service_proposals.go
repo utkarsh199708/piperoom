@@ -235,7 +235,7 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		if err != nil {
 			return mapStoreErr(err)
 		}
-		if err := s.checkVisibleLocked(ctx, user, p.RoomID); err != nil {
+		if err := s.checkVisible(ctx, user, p.RoomID); err != nil {
 			return err
 		}
 		prow = p
@@ -325,7 +325,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
 	}
-	if err := s.checkVisibleLocked(ctx, user, p.RoomID); err != nil {
+	if err := s.checkVisible(ctx, user, p.RoomID); err != nil {
 		return events.Event{}, err
 	}
 	if p.Status != "open" {

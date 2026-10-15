@@ -6,11 +6,12 @@ import (
 )
 
 // The rooms list is pushed (GET /api/rooms/ws, docs/api.md "Room list
-// socket"), not polled. A room whose snapshot changed is marked dirty when its
-// lock is released (releaseRoomLocked); one hub goroutine wakes, copies the
-// dirty rooms' snapshots and hands the copies to every subscriber. A burst of
-// events on one room between two wakes is one update. Subscribers filter by
-// tenancy and by a digest of the list-relevant fields themselves.
+// socket"), not polled. A room whose snapshot changed is published and marked
+// dirty when its lock is released (releaseRoomLocked); one hub goroutine
+// wakes, takes the dirty rooms' published snapshots, without any room lock,
+// and hands them to every subscriber. A burst of events on one room between
+// two wakes is one update. Subscribers filter by tenancy and by a digest of
+// the list-relevant fields themselves.
 
 // listSubBuffer is the updates one subscriber may have queued. A subscriber
 // that falls further behind loses its queue and gets one Resync instead.
@@ -132,18 +133,18 @@ func (s *Service) runListHub() {
 			continue
 		}
 		updates := make([]RoomUpdate, 0, len(ids))
-		s.mu.Lock()
 		for id := range ids {
-			if st := s.cached(id); st != nil {
-				s.holdRoomLocked(st)
-				snap := st.snap.Clone()
-				s.releaseRoomLocked(st)
-				updates = append(updates, RoomUpdate{Room: &snap})
-			} else {
+			st := s.cached(id)
+			if st == nil {
 				updates = append(updates, RoomUpdate{DeletedID: id})
+				continue
+			}
+			// The published snapshot is read-only, so every subscriber can
+			// share it. A room still being created is sent once published.
+			if p := st.pub.Load(); p != nil {
+				updates = append(updates, RoomUpdate{Room: p})
 			}
 		}
-		s.mu.Unlock()
 		h.publish(updates)
 	}
 }

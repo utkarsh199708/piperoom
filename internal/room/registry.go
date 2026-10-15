@@ -111,3 +111,29 @@ func (s *Service) setAlertKey(roomID string, st *roomState, key string, force bo
 		s.alertRooms[key] = roomID
 	}
 }
+
+// published returns roomID's published snapshot, nil when the room is not
+// cached or not published yet (a create in progress). It takes no room lock:
+// the snapshot is shared and read-only, so a caller that hands it out clones
+// it.
+func (s *Service) published(roomID string) *RoomSnapshot {
+	st := s.cached(roomID)
+	if st == nil {
+		return nil
+	}
+	return st.pub.Load()
+}
+
+// publishedRooms returns the published snapshot of every cached room that has
+// one, by id; shared and read-only, like published.
+func (s *Service) publishedRooms() map[string]*RoomSnapshot {
+	s.reg.Lock()
+	defer s.reg.Unlock()
+	out := make(map[string]*RoomSnapshot, len(s.rooms))
+	for id, st := range s.rooms {
+		if p := st.pub.Load(); p != nil {
+			out[id] = p
+		}
+	}
+	return out
+}

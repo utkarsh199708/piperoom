@@ -346,7 +346,7 @@ func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
 	if st == nil {
 		return "", false
 	}
-	if !s.roomOpen(st) {
+	if p := st.pub.Load(); p == nil || p.Status != "open" {
 		return "", false
 	}
 	return roomID, true
@@ -409,7 +409,8 @@ func (s *Service) indexAlertRoomLocked(roomID string, st *roomState, key string)
 
 // releaseAlertKeyLocked drops a closed room's alert key and hands it to another
 // open room that holds the same key, if there is one (only possible for rooms
-// opened before dedup existed). Caller must hold s.mu.
+// opened before dedup existed). The other rooms are judged by what they last
+// published, so no other room's lock is taken. Caller holds st's lock.
 func (s *Service) releaseAlertKeyLocked(roomID string, st *roomState) {
 	s.reg.Lock()
 	defer s.reg.Unlock()
@@ -419,7 +420,10 @@ func (s *Service) releaseAlertKeyLocked(roomID string, st *roomState) {
 	}
 	delete(s.alertRooms, key)
 	for id, other := range s.rooms {
-		if id != roomID && other.dedupKey == key && s.roomOpen(other) {
+		if id == roomID || other.dedupKey != key {
+			continue
+		}
+		if p := other.pub.Load(); p != nil && p.Status == "open" {
 			s.alertRooms[key] = id
 			return
 		}
@@ -439,31 +443,28 @@ func (s *Service) notifyRoomOpenedLocked(roomID string) {
 	}()
 }
 
-// GetRoom returns a room snapshot or a not-found error.
+// GetRoom returns a room snapshot or a not-found error. A cached room answers
+// from its published snapshot, without waiting for a command in flight.
 func (s *Service) GetRoom(ctx context.Context, roomID string) (RoomSnapshot, error) {
-	st, err := s.lockRoom(ctx, roomID)
+	p, err := s.readRoom(ctx, roomID)
 	if err != nil {
 		return RoomSnapshot{}, err
 	}
-	defer s.unlockRoom(st)
-	return st.snap.Clone(), nil
+	return p.Clone(), nil
 }
 
-// ListRooms returns every room, open rooms first.
+// ListRooms returns every room, open rooms first, as each was last published.
 func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
-	// Reads happen outside s.mu; only the folds take it (refreshAll).
+	// The store is read outside every lock; a room lock is taken only for a
+	// room that has to be loaded or folded (refreshAll).
 	if err := s.refreshAll(ctx); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	rooms := s.cachedRooms()
+	rooms := s.publishedRooms()
 	out := make([]RoomSnapshot, 0, len(rooms))
-	for _, st := range rooms {
-		s.holdRoomLocked(st)
-		out = append(out, st.snap.Clone())
-		s.releaseRoomLocked(st)
+	for _, p := range rooms {
+		out = append(out, p.Clone())
 	}
-	s.mu.Unlock()
 	sort.SliceStable(out, func(i, j int) bool {
 		if (out[i].Status == "open") != (out[j].Status == "open") {
 			return out[i].Status == "open"
@@ -475,7 +476,7 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 
 // Events returns events after afterSeq and the room's current last_seq.
 func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, int64, error) {
-	if _, err := s.GetRoom(ctx, roomID); err != nil {
+	if _, err := s.readRoom(ctx, roomID); err != nil {
 		return nil, 0, err
 	}
 	if limit <= 0 {
@@ -489,11 +490,15 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 		return nil, 0, fmt.Errorf("room: events: %w", err)
 	}
 	lastSeq := int64(0)
-	if st := s.lockCachedRoom(roomID); st != nil {
-		lastSeq = st.snap.LastSeq
-		s.unlockRoom(st)
+	if p := s.published(roomID); p != nil {
+		lastSeq = p.LastSeq
 	} else if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		lastSeq = row.LastSeq
+	}
+	// The published snapshot may trail a command whose event is already in
+	// the store: last_seq is never below an event this answer holds.
+	if n := len(evs); n > 0 {
+		lastSeq = max(lastSeq, evs[n-1].Seq)
 	}
 	return evs, lastSeq, nil
 }

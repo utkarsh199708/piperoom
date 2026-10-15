@@ -53,22 +53,17 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 		}
 		cancel()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var newest time.Time
-	found := false
-	for id, st := range s.cachedRooms() {
-		s.holdRoomLocked(st)
-		pipeline, open, openedAt := st.snap.PipelineID, s.roomOpen(st), st.snap.OpenedAt
-		s.releaseRoomLocked(st)
-		if pipeline != pipelineID || !open {
+	var newest *RoomSnapshot
+	for id, p := range s.publishedRooms() {
+		if p.PipelineID != pipelineID || p.Status != "open" {
 			continue
 		}
-		if !found || openedAt.After(newest) || (openedAt.Equal(newest) && id < roomID) {
-			found, newest, roomID = true, openedAt, id
+		if newest == nil || p.OpenedAt.After(newest.OpenedAt) ||
+			(p.OpenedAt.Equal(newest.OpenedAt) && id < roomID) {
+			newest, roomID = p, id
 		}
 	}
-	return roomID, found
+	return roomID, newest != nil
 }
 
 // lastRoomLookupTimeout bounds the store query behind LastRoomForKey, whose
@@ -110,20 +105,20 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 		closedAt = &t
 	}
 	// The event log is the source of truth. When the room is cached and its
-	// snapshot disagrees with the row (the row write after room.closed failed),
-	// the snapshot wins.
+	// published snapshot disagrees with the row (the row write after
+	// room.closed failed), the snapshot wins; a close is published before
+	// the closing call returns and runs OnRoomClosed.
 	// Shared store: fold a close another replica wrote first, reading the
-	// store before s.mu is taken. A room deleted meanwhile is evicted and
+	// store outside the room's lock. A room deleted meanwhile is evicted and
 	// simply loses the snapshot vote.
 	s.syncRoom(ctx, row.ID)
-	if st := s.lockCachedRoom(row.ID); st != nil {
-		if s.roomOpen(st) {
+	if p := s.published(row.ID); p != nil {
+		if p.Status == "open" {
 			closedAt = nil
-		} else if st.snap.ClosedAt != nil {
-			t := *st.snap.ClosedAt
+		} else if p.ClosedAt != nil {
+			t := *p.ClosedAt
 			closedAt = &t
 		}
-		s.unlockRoom(st)
 	}
 	return row.ID, closedAt, true
 }

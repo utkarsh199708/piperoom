@@ -763,16 +763,21 @@ func (s *Service) foldFetchedLocked(ctx context.Context, roomID string, st *room
 // later than the snapshot's: renewals are persisted there and only some are
 // logged. Caller holds st's lock.
 func (s *Service) adoptRowLeaseLocked(st *roomState, row store.Room) {
-	d := st.snap.Driver
-	if d == nil || row.DriverID == "" || row.DriverID != d.ID || row.DriverLeaseUntil == nil {
+	if !rowLeaseLater(&st.snap, row) {
 		return
 	}
-	if row.DriverLeaseUntil.After(d.LeaseUntil) {
-		nd := *d
-		nd.LeaseUntil = row.DriverLeaseUntil.UTC()
-		st.snap.Driver = &nd
-		st.changed = true
-	}
+	nd := *st.snap.Driver
+	nd.LeaseUntil = row.DriverLeaseUntil.UTC()
+	st.snap.Driver = &nd
+	st.changed = true
+}
+
+// rowLeaseLater reports whether the rooms row holds a later lease for the
+// snapshot's driver than the snapshot has.
+func rowLeaseLater(snap *RoomSnapshot, row store.Room) bool {
+	d := snap.Driver
+	return d != nil && row.DriverID != "" && row.DriverID == d.ID &&
+		row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(d.LeaseUntil)
 }
 
 // catchUpLocked folds every event after the snapshot. Caller holds st's lock.
@@ -908,15 +913,14 @@ func (s *Service) goneElsewhereLocked(roomID string) {
 
 // refreshAll brings the whole cache up to the store: rooms other replicas
 // opened are loaded, rooms that are behind are folded, rooms that are gone
-// are evicted. Every read happens outside s.mu (one ListRooms, then one Since
-// per room that is behind and one rebuild per new room); only the folds,
-// inserts and evictions take the lock, so a slow database never holds up
-// every room.
+// are evicted. Every read happens outside every lock (one ListRooms, then one
+// Since per room that is behind and one rebuild per new room), and what each
+// room needs is judged from what it last published, so only a room that has
+// to be folded, evicted or inserted is locked: a cache that is current costs
+// no lock at all.
 func (s *Service) refreshAll(ctx context.Context) error {
 	if s.coord == nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.ensureAllLoadedLocked(ctx, false)
+		return s.loadMissing(ctx)
 	}
 	// Only rooms cached before the list is read may be evicted for missing
 	// from it: a room opened here meanwhile is not in the list yet.
@@ -929,8 +933,12 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		st    *roomState
 		after int64
 	}
-	s.mu.Lock()
+	type leaseRow struct {
+		st  *roomState
+		row store.Room
+	}
 	stale := map[string]behind{}
+	var adopt []leaseRow
 	var missing []store.Room
 	seen := make(map[string]bool, len(rows))
 	for _, r := range rows {
@@ -942,24 +950,34 @@ func (s *Service) refreshAll(ctx context.Context) error {
 			}
 			continue
 		}
-		s.holdRoomLocked(st)
-		if r.LastSeq > st.snap.LastSeq {
-			stale[r.ID] = behind{st: st, after: st.snap.LastSeq}
+		p := st.pub.Load()
+		if p == nil {
+			continue // being opened here; it publishes itself
 		}
-		s.adoptRowLeaseLocked(st, r)
-		s.releaseRoomLocked(st)
+		if r.LastSeq > p.LastSeq {
+			stale[r.ID] = behind{st: st, after: p.LastSeq}
+		}
+		if rowLeaseLater(p, r) {
+			adopt = append(adopt, leaseRow{st, r})
+		}
 	}
 	for id, st := range before {
 		if seen[id] {
 			continue
 		}
-		s.holdRoomLocked(st)
+		s.lockState(st)
 		if !st.gone {
 			s.evictLocked(id, st)
 		}
-		s.releaseRoomLocked(st)
+		s.unlockRoom(st)
 	}
-	s.mu.Unlock()
+	for _, a := range adopt {
+		s.lockState(a.st)
+		if !a.st.gone {
+			s.adoptRowLeaseLocked(a.st, a.row)
+		}
+		s.unlockRoom(a.st)
+	}
 
 	fetched := make(map[string][]events.Event, len(stale))
 	for id, b := range stale {
@@ -980,19 +998,22 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		rebuilt[r.ID] = l
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.isClosed() {
 		return nil
 	}
 	for id, evs := range fetched {
 		st := stale[id].st
-		s.holdRoomLocked(st)
+		s.lockState(st)
 		if !st.gone {
 			s.foldFetchedLocked(ctx, id, st, evs)
 		}
-		s.releaseRoomLocked(st)
+		s.unlockRoom(st)
 	}
+	if len(rebuilt) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for id, l := range rebuilt {
 		st := l.state()
 		if !s.cacheRoom(id, st) {
@@ -1004,6 +1025,28 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		s.markListDirty(id)
 	}
 	return nil
+}
+
+// loadMissing is refreshAll with a single-process store: it loads every room
+// of the store that is not cached yet. The list is read outside every lock and
+// s.mu is taken only when a room is missing, so a current cache costs no lock.
+func (s *Service) loadMissing(ctx context.Context) error {
+	rows, err := s.store.ListRooms(ctx)
+	if err != nil {
+		return fmt.Errorf("room: load: %w", err)
+	}
+	var missing []store.Room
+	for _, r := range rows {
+		if r.LastSeq > 0 && s.cached(r.ID) == nil {
+			missing = append(missing, r)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadRowsLocked(ctx, missing, false)
 }
 
 // ---- alert dedup across replicas ----
@@ -1055,7 +1098,10 @@ func (s *Service) openAlertRoomSharedLocked(indexKey, roomID string) (string, bo
 		return "", false
 	}
 	st := s.cached(roomID)
-	if st == nil || !s.roomOpen(st) {
+	if st == nil {
+		return "", false
+	}
+	if p := st.pub.Load(); p == nil || p.Status != "open" {
 		return "", false
 	}
 	s.setAlertKey(roomID, st, indexKey, true)
