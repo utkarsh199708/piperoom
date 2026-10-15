@@ -117,23 +117,58 @@ const CONFUSABLE: Record<string, string> = {
   '\ua4e6': 'v', '\ua4f0': 'e', '\ua4e3': 'r', '\ua4f2': 'i', '\ua4dd': 'f', '\ua4d3': 'd', '\ua4f4': 'u', '\ua4e0': 'n',
   // Cherokee capitals (they lower-case to U+AB70…, so the lookup tries the raw letter first): "ᏙᎬᎡᏆᎰᏆᎬᎠ".
   '\u13d9': 'v', '\u13ac': 'e', '\u13a1': 'r', '\u13c6': 'i', '\u13b0': 'f', '\u13a0': 'd',
+  // More look-alikes: Cyrillic ғ (what "small caps generator" sites emit for f), Canadian Syllabics ᐯ,
+  // logical-or signs, ℮, Latin extended ⱱ ⱴ, Old Italic 𐌖.
+  '\u0493': 'f', '\u142f': 'v', '\u2228': 'v', '\u22c1': 'v', '\u212e': 'e', '\u2c71': 'v', '\u2c74': 'v', '\u{10316}': 'v',
 }
 
-function skeleton(word: string): string {
+/** The Latin letters (a-z) one code point reads as, or '' for a separator or anything else. */
+function foldChar(ch: string): string {
+  const cp = ch.codePointAt(0) ?? 0
+  // Negative squared / negative circled / squared capitals (U+1F130-1F189) have no NFKD mapping.
+  for (const base of [0x1f130, 0x1f150, 0x1f170]) {
+    if (cp >= base && cp < base + 26) return String.fromCharCode(97 + cp - base)
+  }
   let out = ''
-  // NFKD already turns circled and full-width letters ("ⓥⓔⓡⓘⓕⓘⓔⓓ") into plain ones.
-  for (const ch of word.normalize('NFKD')) {
-    if (/\p{M}/u.test(ch)) continue
-    const low = ch.toLowerCase()
-    out += CONFUSABLE[ch] ?? CONFUSABLE[low] ?? low
+  // NFKD already turns circled, full-width and parenthesized letters into plain ones.
+  for (const c of ch.normalize('NFKD')) {
+    if (/\p{M}/u.test(c)) continue
+    const low = c.toLowerCase()
+    // Upper-case lookup: Cherokee small letters (U+AB70-ABBF) upper-case to the capitals in the table.
+    out += CONFUSABLE[c] ?? CONFUSABLE[c.toUpperCase()] ?? CONFUSABLE[low] ?? low
   }
   return out.replace(/[^a-z]/g, '')
 }
 
-// A word that reads as "verified" (or "unverified", "verify", "verification")
-// would put a second, fake verdict next to the real badge. "l" folds to "i" in
-// the skeleton, so the pattern is written in folded form.
-const VERDICT_SKELETON = /^(un)?verif/
+// "verified", "unverified", "verify", "verification", in folded form ("l" and "1" fold to "i").
+// Anything that reads as one would put a second, fake verdict next to the real badge.
+const VERDICT = /(?:un)?verif(?:ied|y|ication)?/g
+const WORD_CHAR = /[\p{L}\p{N}\p{M}]/u
+
+/**
+ * Replaces each span that reads as "verified" with one U+FFFD. Separators do not hide it:
+ * "veri-fied", "v.e.r.i.f.i.e.d" and "VERI FIED" fold to the same letters once every
+ * non-letter is dropped. A span must start at the start of a word, so "Eve Rifkin" is left alone.
+ */
+function neutralizeVerdictWords(text: string): string {
+  const cps = Array.from(text)
+  const letters: { ch: string; at: number }[] = []
+  cps.forEach((cp, at) => {
+    for (const ch of foldChar(cp)) letters.push({ ch, at })
+  })
+  const joined = letters.map((l) => l.ch).join('')
+  const spans: [number, number][] = []
+  for (const m of joined.matchAll(VERDICT)) {
+    const first = letters[m.index].at
+    let last = letters[m.index + m[0].length - 1].at
+    if (first > 0 && WORD_CHAR.test(cps[first - 1])) continue
+    while (last + 1 < cps.length && WORD_CHAR.test(cps[last + 1])) last++
+    spans.push([first, last])
+  }
+  // Right to left, so earlier indexes stay valid.
+  for (const [a, b] of spans.reverse()) cps.splice(a, b - a + 1, '�')
+  return cps.join('')
+}
 
 /**
  * Untrusted text shown next to a badge (a person's name, an alert label), with
@@ -143,9 +178,8 @@ const VERDICT_SKELETON = /^(un)?verif/
  * plain text: no HTML or markdown is ever parsed.
  */
 export function neutralizeBadgeText(text: string): string {
-  return text
-    .replace(BADGE_LOOKALIKES, '\uFFFD')
-    .replace(MARK_PILE, '$1')
-    .replace(/[\p{L}\p{N}\p{M}\p{So}|!]+/gu, (word) => (VERDICT_SKELETON.test(skeleton(word)) ? '\uFFFD' : word))
-    .replace(/\uFFFD+/g, '\uFFFD')
+  return neutralizeVerdictWords(text.replace(BADGE_LOOKALIKES, '�').replace(MARK_PILE, '$1')).replace(
+    /�+/g,
+    '�',
+  )
 }

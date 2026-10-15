@@ -14,6 +14,25 @@ describe('neutralizeBadgeText: spellings of "verified"', () => {
     ['full width', 'ｖｅｒｉｆｉｅｄ'],
     ['Cyrillic mix', 'vеrifiеd'],
     ['"unverified" in small capitals', 'ᴜɴᴠᴇʀɪꜰɪᴇᴅ'],
+    ['small caps with Cyrillic ғ', 'ᴠᴇʀɪғɪᴇᴅ'],
+    ['Canadian Syllabics ᐯ', 'ᐯERIFIED'],
+    ['logical or ∨', '∨erified'],
+    ['n-ary logical or ⋁', '⋁erified'],
+    ['negative squared', '🆅🅴🆁🅸🅵🅸🅴🅳'],
+    ['negative circled', '🅥🅔🅡🅘🅕🅘🅔🅓'],
+    ['Cherokee small letters', 'ꮩꭼꭱꮖꮀꮖꭼꭰ'],
+    ['℮ for e', 'v℮rified'],
+    ['ⱱ for v', 'ⱱerified'],
+    ['ⱴ for v', 'ⱴerified'],
+    ['Old Italic 𐌖', '𐌖erified'],
+    ['hyphen split', 'veri-fied'],
+    ['dot split', 'v.e.r.i.f.i.e.d'],
+    ['space split', 'v e r i f i e d'],
+    ['upper-case with a space', 'VERI FIED'],
+    ['NBSP split', 'veri\u00a0fied'],
+    ['ideographic space split', 'veri\u3000fied'],
+    ['"verify"', 'v.e.r.i.f.y'],
+    ['"verification"', 'Verification'],
   ])('replaces %s', (_label, word) => {
     expect(neutralizeBadgeText(`Mal ${word}`)).toBe(`Mal ${FFFD}`)
   })
@@ -30,7 +49,7 @@ describe('neutralizeBadgeText: spellings of "verified"', () => {
   })
 
   it('leaves ordinary names alone', () => {
-    for (const n of ['Priya Nair', 'Kabir', 'Zoë Müller', 'Renée', 'Arjun (arjun)', '山田 太郎']) {
+    for (const n of ['Eve Rifkin', 'Steve Rifield', 'Priya Nair', 'Kabir', 'Zoë Müller', 'Renée', 'Arjun (arjun)', '山田 太郎']) {
       expect(neutralizeBadgeText(n)).toBe(n)
     }
   })

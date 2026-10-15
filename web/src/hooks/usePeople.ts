@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { neutralizeBadgeText } from '../lib/verification'
 import type { Person } from '../api/types'
 import { ApiClientError, api, isFixtures } from '../api/client'
 import { DEV_USERS } from '../fixtures/users'
@@ -54,5 +55,6 @@ export function usePeople(): PeopleState & { reload: () => void } {
 
 /** "Name <email>" when the server sent an email, else "Name (id)". */
 export function personLabel(p: Person): string {
-  return p.email ? `${p.name} <${p.email}>` : `${p.name} (${p.id})`
+  const name = neutralizeBadgeText(p.name)
+  return p.email ? `${name} <${p.email}>` : `${name} (${p.id})`
 }

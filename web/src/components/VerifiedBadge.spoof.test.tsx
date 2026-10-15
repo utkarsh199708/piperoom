@@ -91,5 +91,16 @@ describe('status line structure (layout regression)', () => {
     expect(tail.className).toMatch(/min-w-0/)
     expect(tail.className).toMatch(/truncate/)
     expect(tail.parentElement).toBe(status)
+    // The name keeps a floor and ellipsizes; the badge shrinks first and bottoms out at its icon.
+    const text = person.querySelector('[data-slot="person-name-text"]')!
+    expect(text.className).toMatch(/min-w-\[2ch\]/)
+    expect(text.className).toMatch(/truncate/)
+    const badge = person.querySelector('[data-slot="verified-badge"]')!
+    expect(badge.className).toMatch(/min-w-7/)
+    expect(badge.className).toMatch(/overflow-hidden/)
+    const word = badge.querySelector('[data-slot="verified-word"]')!
+    expect(word.className).toMatch(/min-w-0/)
+    // Icon-only is still readable: the screen-reader text carries the verdict and the reason.
+    expect(badge.querySelector('.sr-only')).toHaveTextContent(/^unverified: /)
   })
 })

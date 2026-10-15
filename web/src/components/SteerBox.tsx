@@ -415,12 +415,14 @@ export function SteerBox({
         </div>
       )}
 
-      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[45%] shrink-0' : 'flex-wrap')}>
+      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[55%] shrink-0 sm:max-w-[45%]' : 'flex-wrap')}>
         <StatusDot tone={noDriver || isLeaseExpired ? 'warn' : 'accent'} />
         <span
           data-slot="steer-status"
           className={cn(
             'inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground',
+            // Floor: a short name plus the icon-only badge always fit, even in the one-row idle composer on a phone.
+            idle && 'min-w-[3.5rem]',
             (leaseEnding || (isDriver && isLeaseExpired)) && 'text-warning-foreground',
           )}
           title={idle ? status : undefined}

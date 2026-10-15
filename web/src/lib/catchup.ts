@@ -1,5 +1,6 @@
 // "While you were away": a pure diff of two folded room states (like lib/attention.ts), so it is
 // tested without timers or a browser. It never reads the activity window (capped at 20).
+import { neutralizeBadgeText } from './verification'
 import type { CurrentUser } from '../state/permissions'
 import type { ProposalState, RoomState } from '../state/types'
 
@@ -62,7 +63,7 @@ export function catchUpSummary(prev: RoomState, next: RoomState, user: CurrentUs
     items.push('hand-off for you')
   }
 
-  if (next.driver && next.driver.id !== prev.driver?.id) items.push(`driver → ${next.driver.name}`)
+  if (next.driver && next.driver.id !== prev.driver?.id) items.push(`driver → ${neutralizeBadgeText(next.driver.name)}`)
   if (prev.status === 'open' && next.status === 'closed') items.push('room closed')
   if (next.agent_status.state === 'error' && prev.agent_status.state !== 'error') items.push('agent error')
 

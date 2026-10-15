@@ -28,7 +28,9 @@ export function VerifiedBadge({ verification, className }: { verification: Verif
             data-verification={verification.state}
             tabIndex={0}
             className={cn(
-              'inline-flex h-5 shrink-0 select-none items-center gap-1 rounded-full border px-1.5 text-[11px] font-semibold leading-none',
+              // Shrinks before the name does (weight 8 vs 1) and bottoms out at the icon: when space runs out the word
+              // clips away and a shield stays, so a badge is never half-drawn.
+              'inline-flex h-5 min-w-7 shrink-[8] select-none items-center gap-1 overflow-hidden rounded-full border px-1.5 text-[11px] font-semibold leading-none',
               'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
               ok
                 ? 'border-success bg-success-subtle text-success-foreground'
@@ -37,7 +39,9 @@ export function VerifiedBadge({ verification, className }: { verification: Verif
             )}
           >
             <Icon className="size-3.5 shrink-0" aria-hidden="true" strokeWidth={2.5} />
-            <span aria-hidden="true">{word}</span>
+            <span aria-hidden="true" data-slot="verified-word" className="min-w-0 truncate">
+              {word}
+            </span>
             <span className="sr-only">
               {word}: {verification.detail}
             </span>
@@ -81,7 +85,9 @@ export function PersonName({
     v.state === 'unverified' && shown !== person.id && !shown.endsWith(`(${person.id})`) && !/\([^()]*@[^()]*\)$/.test(shown)
   return (
     <span className={cn('inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden', className)} data-slot="person-name">
-      <span className={cn('min-w-0 truncate', nameClassName)}>{shown}</span>
+      <span className={cn('min-w-[2ch] truncate', nameClassName)} data-slot="person-name-text">
+        {shown}
+      </span>
       {needsId && (
         <span className="shrink-0 font-mono text-xs font-normal text-subtle-foreground">({person.id})</span>
       )}

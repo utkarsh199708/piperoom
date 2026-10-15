@@ -7,7 +7,7 @@
 //  - `canDecideLayer` is the only gate for the buttons (plus "no hash" and "busy", which only
 //    switch them off). A viewer or a non-owner gets no buttons at all.
 import { PersonName } from '@/components/VerifiedBadge'
-import { personVerification } from '@/lib/verification'
+import { neutralizeBadgeText, personVerification } from '@/lib/verification'
 import { useContext, useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
@@ -575,7 +575,7 @@ function LayerRow({
 
   const reasonText = decision?.outcome === 'rejected' ? decision.reason : undefined
   const decidedAt = decision?.at ? clockTime(decision.at) : ''
-  const decidedName = decision ? decision.by.name || decision.by.id : ''
+  const decidedName = decision ? neutralizeBadgeText(decision.by.name || decision.by.id) : ''
 
   return (
     <div

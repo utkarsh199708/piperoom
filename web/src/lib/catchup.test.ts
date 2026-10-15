@@ -67,6 +67,12 @@ describe('catchUpSummary', () => {
     expect(catchUpSummary(prev(), next, me)?.items).toEqual(['hand-off for you', 'driver → Kabir', 'room closed', 'agent error'])
   })
 
+  it('neutralizes a driver name that fakes a badge or a verdict', () => {
+    const next: RoomState = { ...prev(), driver: { id: 'u_9', name: 'Mal ✓ verified' } }
+    const [item] = catchUpSummary(prev(), next, me)?.items ?? []
+    expect(item).toBe('driver → Mal � �')
+  })
+
   it('ignores a hand-off for someone else', () => {
     const next = { ...prev(), handoffs: [{ handoff_id: 'h1', to: a, summary: {} as never, stay_as_watcher: false, status: 'pending' as const }] }
     expect(catchUpSummary(prev(), next, me)).toBeNull()
