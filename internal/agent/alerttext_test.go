@@ -170,7 +170,9 @@ func TestAlertDescriptionAndLabels(t *testing.T) {
 
 // TestFirstUserMessageNeverReadsRawBody pins that an external webhook body
 // stays out of the prompt: internal/alertin selects the alert and fills
-// Description and Labels, the agent reads those fields.
+// Description and Labels, the agent reads those fields. The one exception is a
+// watcher body (source "watcher"), whose allow-listed evidence lines are read
+// (alertevidence_test.go).
 func TestFirstUserMessageNeverReadsRawBody(t *testing.T) {
 	msg := firstUserMessage(Alert{
 		Title: "orders stale",

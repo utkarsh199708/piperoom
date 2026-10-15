@@ -14,7 +14,10 @@ import (
 // then capped and wrapped as untrusted data. Masking runs before the cap, so a
 // cut-off secret is never left half visible. The agent reads the Alert fields
 // internal/alertin selected; it never parses an external webhook body
-// (Alert.Raw) itself.
+// (Alert.Raw) itself, with one exception: a body whose source is "watcher" is
+// our own watcher's, and watcherEvidence (prompt.go) and parseWatcherBody
+// (triage_pass.go) read only its allow-listed signal fields (alertevidence.go).
+// Any other Raw body stays out of the prompt.
 
 const (
 	// alertDescriptionBytes caps the description. It is resent with the

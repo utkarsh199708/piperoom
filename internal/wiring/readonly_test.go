@@ -3,6 +3,10 @@ package wiring
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"reflect"
 	"testing"
 
 	"piperoom/internal/actions"
@@ -160,4 +164,154 @@ func TestActionsStillGetWriters(t *testing.T) {
 	if got := actionRegistry(w); got != clients.SchemaRegistryClient(sp) {
 		t.Fatalf("actionRegistry = %T, want the writing client", got)
 	}
+}
+
+// TestRegisteredToolsHoldNoWriter registers every tool over a Wired whose
+// Connect and Registry are the writing spy, then walks each tool's fields (and
+// the topology builder they reach) looking for any value that can write. The
+// spy is the only value that may carry a write method; readOnlyConnect and
+// readOnlyRegistry are the wrappers that refuse. It fails if a call site in
+// wiring.go hands the raw w.Connect / w.Registry to a tool or the builder.
+//
+// It cannot see a client captured by a closure (func values are opaque).
+func TestRegisteredToolsHoldNoWriter(t *testing.T) {
+	sp := &writeSpy{}
+	w := &Wired{Connect: sp, Registry: sp, Owners: &owners.Owners{}}
+	reg := tools.NewReadOnlyRegistry()
+	if err := RegisterTools(reg, actions.NewRegistry(), w); err != nil {
+		t.Fatalf("RegisterTools: %v", err)
+	}
+
+	connW := reflect.TypeOf((*clients.ConnectWriter)(nil)).Elem()
+	regW := reflect.TypeOf((*clients.SchemaRegistryWriter)(nil)).Elem()
+	allowed := map[reflect.Type]bool{
+		reflect.TypeOf(readOnlyConnect{}):  true,
+		reflect.TypeOf(readOnlyRegistry{}): true,
+	}
+	canWrite := func(ty reflect.Type) bool {
+		if allowed[ty] {
+			return false
+		}
+		if ty.Implements(connW) || ty.Implements(regW) {
+			return true
+		}
+		for _, m := range []string{"Resume", "UpdateConfig"} {
+			if _, ok := ty.MethodByName(m); ok {
+				return true
+			}
+		}
+		return false
+	}
+
+	seen := map[uintptr]bool{}
+	var walk func(path string, v reflect.Value, depth int)
+	walk = func(path string, v reflect.Value, depth int) {
+		if !v.IsValid() || depth > 16 {
+			return
+		}
+		if allowed[v.Type()] {
+			return // the refusing wrappers hold the writer by design
+		}
+		// An interface-typed field is judged by the value inside it: its
+		// static type (clients.ConnectClient) always has write methods.
+		if v.Kind() != reflect.Interface && canWrite(v.Type()) {
+			t.Errorf("%s holds %s, which can write", path, v.Type())
+			return
+		}
+		switch v.Kind() {
+		case reflect.Pointer:
+			if v.IsNil() || seen[v.Pointer()] {
+				return
+			}
+			seen[v.Pointer()] = true
+			walk(path, v.Elem(), depth+1)
+		case reflect.Interface:
+			if !v.IsNil() {
+				walk(path, v.Elem(), depth+1)
+			}
+		case reflect.Struct:
+			for i := 0; i < v.NumField(); i++ {
+				walk(path+"."+v.Type().Field(i).Name, v.Field(i), depth+1)
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				walk(path+"[]", v.Index(i), depth+1)
+			}
+		case reflect.Map:
+			it := v.MapRange()
+			for it.Next() {
+				walk(path+"{}", it.Value(), depth+1)
+			}
+		}
+	}
+	all := reg.All()
+	if len(all) == 0 {
+		t.Fatal("no tools registered")
+	}
+	for _, tl := range all {
+		walk("tool "+tl.Name(), reflect.ValueOf(tl), 0)
+	}
+	// The builder RegisterTools stored on w is what the db tools reach.
+	walk("builder", reflect.ValueOf(w.Builder), 0)
+}
+
+// TestToolWiringNeverNamesRawClients covers what the reflection walk cannot see:
+// dbtools keeps its Connect client in closures. RegisterTools and
+// newTopologyBuilder must reach Connect and the Schema Registry only through
+// readConnect and readRegistry, so neither function may mention w.Connect or
+// w.Registry. (actionRegistry and the actions registration legitimately do.)
+func TestToolWiringNeverNamesRawClients(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "wiring.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := map[string]bool{}
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || (fn.Name.Name != "RegisterTools" && fn.Name.Name != "newTopologyBuilder") {
+			continue
+		}
+		checked[fn.Name.Name] = true
+		ast.Inspect(fn, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || (sel.Sel.Name != "Connect" && sel.Sel.Name != "Registry") {
+				return true
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if !ok || id.Name != "w" {
+				return true
+			}
+			// The write actions are wired in RegisterTools too, and are the
+			// one place a writer is allowed: they sit inside actions.Register.
+			if fn.Name.Name == "RegisterTools" && inActionsRegister(fn, sel) {
+				return true
+			}
+			t.Errorf("%s: %s.%s names a raw client; use readConnect/readRegistry for tools",
+				fset.Position(sel.Pos()), id.Name, sel.Sel.Name)
+			return true
+		})
+	}
+	if len(checked) != 2 {
+		t.Fatalf("found %v, want RegisterTools and newTopologyBuilder", checked)
+	}
+}
+
+// inActionsRegister reports whether sel lies inside a call to actions.Register.
+func inActionsRegister(fn *ast.FuncDecl, sel *ast.SelectorExpr) bool {
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if s, ok := call.Fun.(*ast.SelectorExpr); ok {
+			if x, ok := s.X.(*ast.Ident); ok && x.Name == "actions" && s.Sel.Name == "Register" &&
+				call.Pos() <= sel.Pos() && sel.End() <= call.End() {
+				found = true
+			}
+		}
+		return true
+	})
+	return found
 }
