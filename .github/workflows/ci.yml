@@ -64,12 +64,17 @@ jobs:
       - name: eval scenarios (validate only; no model calls, no API key, no network)
         run: go run ./evals/cmd/evalrun -validate
 
-  integration:
-    name: Go integration (Postgres only)
+  fullstack:
+    name: Go integration (full dev stack)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
+    # The room-database tests (store, room, ws: migrations and hundreds of
+    # schemas) write hundreds of MB of WAL. Against the dev stack's own Postgres
+    # that WAL sits behind the Debezium slot and the smoke's devctl health
+    # rightly fails on it, so they get a separate server (host port 5433, the
+    # dev stack publishes 5432), as the old Postgres-only job had.
     services:
-      postgres:
+      roomdb:
         image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
         env:
           POSTGRES_USER: piperoom
@@ -77,14 +82,18 @@ jobs:
           POSTGRES_PASSWORD: ci-only
           POSTGRES_DB: piperoom
         ports:
-          - 5432:5432
+          - 5433:5432
         options: >-
           --health-cmd "pg_isready -U piperoom -d piperoom"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
     env:
-      PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5432/piperoom?sslmode=disable
+      # The state the integration tests expect: owner of the stack lock, so
+      # testenv.Require does not skip on a lock held by someone else.
+      PIPEROOM_STACK_OWNER: ci
+      # The default lock dir (a sibling of the checkout) does not exist on a runner.
+      PIPEROOM_STACK_LOCK: /tmp/piperoom-ci/stack.lock
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -95,31 +104,68 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Preflight, the room database answers
-        # The store and room integration tests t.Skip when Postgres is
-        # unreachable, which would turn a dead database into a green job. Fail
-        # here first, then again below if any test still skipped for that reason.
-        run: psql "$PIPEROOM_DB_URL" -v ON_ERROR_STOP=1 -c 'select 1'
-      - name: go test -tags integration (room database only)
-        # Only the room Postgres exists here. Tests that need the dev stack
-        # (Kafka, Connect, Schema Registry, source and warehouse Postgres) call
-        # testenv.Require and skip cleanly when Connect at CONNECT_URL is
-        # unreachable, so internal/store and internal/room run for real and the
-        # client/tool packages report SKIP. cmd/discover is excluded: its
-        # TestDiscoverDevStack has no skip guard and fails without the stack.
+      - name: Start the dev stack (postgres, kafka, schema registry, connect, devconsumer)
+        # No --wait: wait-for-stack.sh polls Connect's REST API itself, with a
+        # bounded timeout, and dumps the container logs when it gives up.
+        run: docker compose -f dev/docker-compose.yml up -d --build
+      - name: Wait until Connect and the Schema Registry answer
+        run: .github/scripts/wait-for-stack.sh 300
+      - name: Register the connector (devctl up is idempotent)
         run: |
-          set -o pipefail
-          pkgs="$(go list ./... | grep -v '/cmd/discover$')"
-          # shellcheck disable=SC2086
-          go test -count=1 -tags integration -v $pkgs | tee it.log
-          # These are the Skipf messages of the DB tests (internal/store
-          # store_integration_test.go, internal/room numbers_integration_test.go).
-          if grep -E 'room Postgres unreachable|cannot create schema' it.log; then
-            echo "::error::a room-database integration test skipped because Postgres was unreachable"
-            exit 1
-          fi
-          # And the DB tests must have really run, not just not skipped.
-          grep -E '^ok[[:space:]]+piperoom/internal/(store|room)[[:space:]]' it.log
+          mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
+          go run ./cmd/devctl lock --owner ci
+          go run ./cmd/devctl up --owner ci
+      - name: go test -tags integration ./internal/... ./cmd/...
+        env:
+          PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
+        run: |
+          set +e
+          go test -count=1 -timeout 25m -json -tags integration ./internal/... ./cmd/... > test.json
+          rc=$?
+          set -e
+          # Readable failures in the log: the whole output of every failed
+          # test (assertion messages included); the full stream is the artifact.
+          jq -rs '
+            ([.[] | select(.Action == "fail" and (.Test // "") != "") | "\(.Package) \(.Test)"]) as $failed
+            | .[] | select(.Action == "output" and (.Test // "") != ""
+                           and (("\(.Package) \(.Test)") as $k | $failed | index($k)))
+            | .Output' test.json | grep -v '^$' || true
+          exit "$rc"
+      - name: Skipped integration tests are failures
+        if: success() || failure()
+        run: .github/scripts/fail-on-skips.sh test.json
+      # The dev-stack smoke, on the stack that is already up (the integration
+      # tests clean up after themselves). It mirrors scenario schema-change in
+      # tasks/A1-devstack.md: break waits for task 0 FAILED, fix waits for the
+      # schema, RUNNING and compatibility BACKWARD.
+      - name: devctl status
+        if: success()
+        run: go run ./cmd/devctl status
+      - name: devctl health (healthy end to end before the break)
+        if: success()
+        run: .github/scripts/wait-healthy.sh 180
+      - name: Break and fix the schema-change scenario
+        if: success()
+        run: |
+          go run ./cmd/devctl break --owner ci schema-change
+          go run ./cmd/devctl fix --owner ci schema-change
+      - name: devctl health (rows reach the warehouse again after the fix)
+        if: success()
+        run: .github/scripts/wait-healthy.sh 180
+      - name: Dump stack logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml logs --no-color --tail=300
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fullstack-test-json
+          path: test.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Tear down
+        if: always()
+        run: docker compose -f dev/docker-compose.yml down -v --remove-orphans
 
   race:
     name: Go race detector
