@@ -109,7 +109,7 @@ func newVerifyRunner(t *testing.T, model model, inbox Inbox, sink Sink, regTools
 	r.model = model
 	r.clk = &fakeClock{} // settle and freshness waits are instant
 	if steps != nil {
-		r.proposals.record("p_1", steps)
+		r.proposals.record("p_1", steps, nil)
 	}
 	return r
 }
@@ -830,7 +830,7 @@ func TestSameBatchRecoveryAndFailedStepRunsModel(t *testing.T) {
 		waitErr: context.Canceled,
 	}
 	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
-	r.proposals.record("p_2", recoveredSteps())
+	r.proposals.record("p_2", recoveredSteps(), nil)
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -1474,7 +1474,7 @@ func TestBrokenResultClearsRecoveredIdle(t *testing.T) {
 		waitErr: context.Canceled,
 	}
 	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
-	r.proposals.record("p_2", recoveredSteps())
+	r.proposals.record("p_2", recoveredSteps(), nil)
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)

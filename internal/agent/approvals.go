@@ -24,9 +24,13 @@ import (
 // The room names the proposal, the layer and the step in HumanInput fields, so
 // nothing here parses message text. The agent compares the approved layers with
 // the layers it stored when it created the proposal. Those are the layers the
-// room requires: the union of the step layers. An input with a field missing (an
-// event replayed from before the fields existed) is ignored, and the turn then
-// starts as it always did.
+// room requires: the step layers plus the impacted layers (the proposer's and
+// each action's actions.Impact layers), the same set the server keeps as
+// RequiredLayers. Counting only the step layers made the agent think a fix was
+// fully approved, and tell the room so, while consumer and warehouse still owed
+// their approval (QA review 2, R6). An input with a field missing (an event
+// replayed from before the fields existed) is ignored, and the turn then starts
+// as it always did.
 
 // execFlow follows one proposal from its approvals to its executed steps.
 type execFlow struct {
@@ -48,14 +52,23 @@ type execFlow struct {
 	arrived map[int]bool
 }
 
-func newExecFlow(steps []events.ProposalStep) *execFlow {
+// newExecFlow starts the flow of a proposal. approvers is the full required set;
+// when it is empty the step layers are used, which is what the room requires of a
+// proposal without impacted layers.
+func newExecFlow(steps []events.ProposalStep, approvers []string) *execFlow {
 	f := &execFlow{approved: map[string]bool{}, arrived: map[int]bool{}, lastStep: len(steps) - 1}
 	seen := map[string]bool{}
-	for _, s := range steps {
-		if s.Layer != "" && !seen[s.Layer] {
-			seen[s.Layer] = true
-			f.required = append(f.required, s.Layer)
+	add := func(l string) {
+		if l != "" && !seen[l] {
+			seen[l] = true
+			f.required = append(f.required, l)
 		}
+	}
+	for _, s := range steps {
+		add(s.Layer)
+	}
+	for _, l := range approvers {
+		add(l)
 	}
 	return f
 }
@@ -69,14 +82,23 @@ func (t *proposalTracker) observe(in HumanInput) {
 	}
 	switch in.Kind {
 	case "approval_result":
-		if in.Approved == nil || !*in.Approved || in.Layer == "" || in.ProposalID == "" {
+		if in.Approved == nil || in.ProposalID == "" {
 			return
 		}
 		layer, id := in.Layer, in.ProposalID
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		f := t.flows[id]
-		if f == nil || f.complete || len(f.required) == 0 || !contains(f.required, layer) {
+		if f == nil {
+			return
+		}
+		if !*in.Approved {
+			// A rejection or a withdrawal: the executor will run nothing, so no
+			// step result is owed and a later approval must not complete it.
+			f.settled, f.waiting = true, false
+			return
+		}
+		if f.complete || f.settled || layer == "" || len(f.required) == 0 || !contains(f.required, layer) {
 			return
 		}
 		f.approved[layer] = true

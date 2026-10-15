@@ -602,9 +602,6 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("agent: create proposal: %w", err)
 	}
-	if t.track != nil {
-		t.track.record(id, steps)
-	}
 	t.own.add(id, in.Title)
 	// The room service adds the impacted layers to the required ones, so those
 	// owners are waited on as well.
@@ -630,6 +627,11 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 				approvers = append(approvers, l)
 			}
 		}
+	}
+	// The tracker waits on the same set, so it never takes the step layers'
+	// approval for a full one (QA review 2, R6).
+	if t.track != nil {
+		t.track.record(id, steps, approvers)
 	}
 	return tools.Result{
 		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(approvers, ", ")),

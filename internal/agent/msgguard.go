@@ -15,6 +15,12 @@ import (
 // "<br>", and announced the same recovery three times in 17 seconds. The guard
 // below sits in front of the room sink of one run and drops both kinds of
 // message, so a person never reads an empty line or a repeat as news.
+//
+// The repeat window ends at new human input: a steer, a comment or a new
+// incident is a fresh question, and the same words may well be the right
+// answer to it. Without the reset a second person asking the same thing got no
+// reply at all (QA review 2, R16). Inside one window the agent repeating itself
+// unprompted is still dropped, which is the QA failure the guard is for.
 
 // Why a message was not posted. The post_message tool shows these to the model.
 const (
@@ -79,12 +85,38 @@ func (g *messageGuard) verdict(p events.AgentMessagePayload) string {
 	return ""
 }
 
+// reset forgets the previous message, so the next one is never a repeat.
+func (g *messageGuard) reset() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.last, g.has = "", false
+}
+
+// endsRepeatWindow reports whether a drained batch holds new human input that
+// ends the repeat window: a steer, a comment, or an alert update that brings a
+// new incident. Approval and action results and quiet alert updates do not:
+// the agent's reaction to them is not an answer to a new question.
+func endsRepeatWindow(inputs []HumanInput) bool {
+	for _, in := range inputs {
+		switch {
+		case in.Kind == "steer", in.Kind == "comment":
+			return true
+		case in.Kind == "alert_update" && in.NewIncident:
+			return true
+		}
+	}
+	return false
+}
+
 // guardedSink wraps a Sink and keeps empty and repeated agent messages out of
 // it. Every other event type goes straight through.
 type guardedSink struct {
 	inner Sink
 	g     messageGuard
 }
+
+// reset ends the repeat window (see endsRepeatWindow).
+func (s *guardedSink) reset() { s.g.reset() }
 
 // newGuardedSink wraps inner. One guardedSink serves one run.
 func newGuardedSink(inner Sink) *guardedSink { return &guardedSink{inner: inner} }
