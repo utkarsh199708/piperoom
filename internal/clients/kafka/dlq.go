@@ -195,8 +195,10 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 
 	// Headers only leave collectPeek; the receipt holds the topic and limit.
 	pollStart := time.Now()
-	recs, err := collectPeek(ctx, cons, topic, plan, func(w map[int32]readWindow) { c.advance(ctx, topic, w) })
+	pr := c.newProber(topic)
+	recs, err := collectPeek(ctx, cons, topic, plan, func(w map[int32]readWindow) { pr.advance(ctx, w) })
 	c.record(ctx, pollStart, "kgo.PollFetches(topic, limit)", "topic="+topic, "limit="+strconv.Itoa(limit))
+	pr.record(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: peek dlq %s: %w", topic, err)
 	}

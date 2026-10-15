@@ -40,7 +40,7 @@ type Client struct {
 
 	// offs, meta, clusterFn, consumerFn and probeFn are test seams; nil means
 	// the real kadm/kgo clients. consumerFn gets the options newConsumer
-	// builds with; probeFn stands in for probeWindows.
+	// builds with; probeFn stands in for one probe round (prober.round).
 	offs       offsetLister
 	meta       metaReader
 	clusterFn  clusterAdmin
@@ -203,13 +203,13 @@ func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.Part
 	if err != nil {
 		return nil, fmt.Errorf("kafka: topic offsets %s: %w", topic, err)
 	}
-	at := map[int32]int64{}
+	at, lo := map[int32]int64{}, map[int32]int64{}
 	for _, r := range readable {
 		if r.End > r.Start {
-			at[r.Partition] = r.End - 1
+			at[r.Partition], lo[r.Partition] = r.End-1, r.Start
 		}
 	}
-	timestamps, terr := c.recordTimestamps(ctx, topic, at)
+	timestamps, terr := c.recordTimestamps(ctx, topic, at, lo)
 	if terr != nil {
 		return nil, fmt.Errorf("kafka: record timestamps %s: %w", topic, terr)
 	}
@@ -496,6 +496,8 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 		return KeyScan{}, fmt.Errorf("kafka: scan client: %w", err)
 	}
 	defer cl.Close()
+	pr := c.newProber(topic)
+	defer pr.record(ctx) // runs after the scan's receipt below
 	// One receipt for the whole scan, on every exit path. The key is a record
 	// value (it can name a customer), so it is never recorded.
 	scanStart := time.Now()
@@ -527,7 +529,7 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 		if idle {
 			// Nothing came: an aborted tail below an open transaction
 			// delivers no record (#300), so ask how far is unreadable.
-			c.advance(cctx, topic, wait)
+			pr.advance(cctx, wait)
 			for p, w := range wait {
 				if w.from >= w.end {
 					finished[p] = true
@@ -603,9 +605,11 @@ func keyScan(found []clients.RecordRef, truncated []int32) KeyScan {
 // recordTimestamps fetches one record per partition (at the given offsets) in a
 // single consumer and returns their timestamps. A transaction marker at the
 // offset counts as the record; a later record stands in when the offset
-// itself is never delivered but newer records are. A partition where nothing
-// readable is left at or after its offset (probeWindows) has no entry.
-func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int32]int64) (map[int32]time.Time, error) {
+// itself is never delivered but newer records are. When nothing readable is
+// at or after the offset (an aborted record below an open transaction, #300),
+// the newest readable record in [lo, offset) stands in; a partition with none
+// at all has no entry.
+func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[int32]int64) (map[int32]time.Time, error) {
 	if len(at) == 0 {
 		return map[int32]time.Time{}, nil
 	}
@@ -619,6 +623,8 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 	}
 	defer cl.Close()
 	rctx := ctx
+	pr := c.newProber(topic)
+	defer pr.record(rctx) // runs after the poll's receipt below
 	pollStart := time.Now()
 	defer func() { c.record(rctx, pollStart, "kgo.PollFetches(topic, offsets)", "topic="+topic) }()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -632,11 +638,19 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 		fetches, idle := pollOrIdle(ctx, cl)
 		if idle {
 			// An offset the probe passes holds no readable record (an
-			// aborted one, #300): the partition has no timestamp.
-			c.advance(ctx, topic, wait)
+			// aborted one, #300): the newest readable one below stands in.
+			pr.advance(ctx, wait)
 			for p, w := range wait {
-				if w.from >= w.end {
-					delete(wait, p)
+				if w.from < w.end {
+					continue
+				}
+				delete(wait, p)
+				ts, ok, err := pr.newestReadable(ctx, p, lo[p], at[p])
+				if err != nil {
+					return got, fmt.Errorf("newest readable record %s/%d: %w", topic, p, err)
+				}
+				if ok {
+					got[p] = ts
 				}
 			}
 			continue
