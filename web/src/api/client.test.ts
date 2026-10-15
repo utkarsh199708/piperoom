@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiClientError, api, probeSession, roomWsUrl } from './client'
+import { ApiClientError, api, exportRoom, probeSession, roomWsUrl } from './client'
 import { onAuthProblem, setAuthEpoch } from '../lib/auth'
 import type { AuthProblem } from '../lib/auth'
 
@@ -50,6 +50,7 @@ describe('request shape', () => {
     await api.comment('r_1', { text: 'hi' })
     await api.steer('r_1', 'go')
     await api.sendSuggestion('r_1', 's_1')
+    await api.declineSuggestion('r_1', 's_1', 'no')
     await api.requestControl('r_1')
     await api.grantControl('r_1', 'priya')
     await api.closeRoom('r_1', 'done')
@@ -58,7 +59,7 @@ describe('request shape', () => {
     await api.handoff('r_1', 'priya', true)
     await api.acceptHandoff('h_1')
     await api.trace('r_1', 'orders', 'k')
-    expect(fetchMock.mock.calls.length).toBe(16)
+    expect(fetchMock.mock.calls.length).toBe(17)
     for (const [url, init] of fetchMock.mock.calls as [string, RequestInit][]) {
       expect(url.startsWith('/api/')).toBe(true)
       expect(url).not.toContain('localhost')
@@ -268,5 +269,38 @@ describe('people and approve (auth PR 3)', () => {
     await api.me().catch(() => undefined)
     off()
     expect(seen.map((p) => p.kind)).toEqual([kind])
+  })
+})
+
+describe('exportRoom', () => {
+  it('returns the body text untouched and the integrity header', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('{"schema":1}', { status: 200, headers: { 'X-Piperoom-Export-SHA256': 'abc' } }),
+    )
+    await expect(exportRoom('r 1')).resolves.toEqual({ text: '{"schema":1}', sha256: 'abc' })
+    expect(lastCall().url).toBe('/api/rooms/r%201/export')
+  })
+
+  it('throws ApiClientError with the server code on 403', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(403, { error: { code: 'not_allowed', message: 'no export for you' } }))
+    await expect(exportRoom('r1')).rejects.toMatchObject({ status: 403, code: 'not_allowed' })
+  })
+})
+
+describe('directory routes (R0)', () => {
+  it('authUsers GETs /auth/users and pipelines GETs /api/pipelines', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, [{ id: 'arjun', name: 'Arjun', layers: [] }]))
+    await expect(api.authUsers()).resolves.toEqual([{ id: 'arjun', name: 'Arjun', layers: [] }])
+    expect(lastCall().url).toBe('/auth/users')
+    expect(lastCall().init.method ?? 'GET').toBe('GET')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, []))
+    await expect(api.pipelines()).resolves.toEqual([])
+    expect(lastCall().url).toBe('/api/pipelines')
+  })
+
+  it('authUsers throws not_found in oidc mode, where the route is not mounted', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(404, { error: { code: 'not_found', message: 'not found' } }))
+    await expect(api.authUsers()).rejects.toMatchObject({ status: 404, code: 'not_found' })
   })
 })

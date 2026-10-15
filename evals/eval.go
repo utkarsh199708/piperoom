@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/config"
 	"piperoom/internal/tools"
 )
 
@@ -29,8 +30,18 @@ type Config struct {
 	Parallel int
 	// Timeout bounds one run (default 15 min).
 	Timeout time.Duration
-	// Runner is the agent under test (default agent.Run). Tests replace it.
+	// Runner is the agent under test. The room service starts it exactly as
+	// it starts a production agent (room_path.go). Nil builds the production
+	// one: the Endpoint of wiring.NewAgentEndpoint, the constructor
+	// cmd/server uses, configured from the environment (config.Load). Tests
+	// pass a scripted runner or an Endpoint over a fake model server.
 	Runner agent.Runner
+	// Commit is the source revision the run was built from (evalrun fills
+	// it, see Provenance); it is copied into every result.
+	Commit string
+	// Tap, when set, is the model tap the runner's requests go through; it
+	// gives every result the models used and the prompt hash (modeltap.go).
+	Tap *ModelTap
 	// Logger receives the agent's own logs (default slog.Default()).
 	Logger *slog.Logger
 	// Judge forces the judge mode for every scenario ("terms" or "claude");
@@ -54,9 +65,6 @@ func (c Config) withDefaults() Config {
 	if c.Timeout <= 0 {
 		c.Timeout = defaultRunTimeout
 	}
-	if c.Runner == nil {
-		c.Runner = agent.Run
-	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
@@ -69,6 +77,13 @@ func (c Config) withDefaults() Config {
 // ctx's.
 func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, error) {
 	cfg = cfg.withDefaults()
+	if cfg.Runner == nil {
+		run, err := NewEndpointRunner(ctx, config.Load(), cfg.Logger)
+		if err != nil {
+			return Report{}, err
+		}
+		cfg.Runner = run
+	}
 	for _, sc := range scenarios {
 		for _, w := range sc.Warnings() {
 			cfg.Logger.Warn("evals: scenario warning", "scenario", sc.Name, "warning", w)
@@ -179,6 +194,9 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	var errs []error
 	for _, sc := range scenarios {
 		errs = append(errs, sc.Validate(toolInputs, actionNames))
+		if fe := sc.checkFixTargets(areg); len(fe) > 0 {
+			errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, errors.Join(fe...)))
+		}
 		// Malformed connect_status data would only surface mid-run otherwise.
 		if _, err := connectStatuses(sc.Recordings); err != nil {
 			errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, err))
@@ -199,70 +217,4 @@ func ToolInputs(defs []tools.Tool) map[string][]string {
 		out[d.Name()] = fields
 	}
 	return out
-}
-
-// runOne runs the agent once on sc. The returned error is a harness failure
-// (the run could not even start); agent failures are recorded in RunResult.
-func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Config) (RunResult, Transcript, error) {
-	rp, err := newScenarioReplayer(sc)
-	if err != nil {
-		return RunResult{}, Transcript{}, err
-	}
-	reg, err := rp.registry(defs)
-	if err != nil {
-		return RunResult{}, Transcript{}, err
-	}
-	live, err := LiveActions(sc.Resources, sc.Recordings)
-	if err != nil {
-		return RunResult{}, Transcript{}, err
-	}
-	attempts := &attemptLog{}
-	areg, err := attempts.wrap(live)
-	if err != nil {
-		return RunResult{}, Transcript{}, err
-	}
-	rec := newRecorder()
-	rp.events = rec.count
-	// rec is also the inbox's log: delivered steers and comments become
-	// steer.sent / comment.added, which the ask outcome reads.
-	inbox := newScenarioInbox(sc, newExecutor(sc, rec, rp), rec)
-	alert := sc.agentAlert(fmt.Sprintf("eval_%s_%d", sc.Name, run))
-
-	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel()
-	start := time.Now()
-	err = cfg.Runner(runCtx, alert, agent.Deps{
-		Tools:     reg,
-		Actions:   areg,
-		Inbox:     inbox,
-		Sink:      rec,
-		Proposals: rec,
-		Logger:    cfg.Logger.With("scenario", sc.Name, "run", run),
-	}, cfg.Options)
-	took := time.Since(start)
-	// Only this run's own deadline counts as a timeout; the caller stopping
-	// the whole evaluation does not.
-	timedOut := errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
-	if timedOut && errors.Is(err, context.DeadlineExceeded) {
-		err = nil // reported as TimedOut, not twice
-	}
-	if ctx.Err() != nil {
-		return RunResult{}, Transcript{}, ctx.Err()
-	}
-
-	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Attempts: attempts.snapshot(), Idles: inbox.idleCount(), Replay: rp.trace()}
-	res := Judge(sc, tr, err, timedOut)
-	// Nothing to grade without a hypothesis; the terms verdict already says so.
-	// Healthy, abstain and ask scenarios have no root cause for a judge.
-	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" && sc.Expect.outcome() == OutcomeDiagnose {
-		v, jerr := cfg.JudgeClient.JudgeHypothesis(ctx, sc, res.FinalHypothesis)
-		if jerr != nil {
-			return RunResult{}, Transcript{}, jerr
-		}
-		res = ApplyVerdict(sc, res, v)
-	}
-	res.Run = run
-	res.DurationMS = took.Milliseconds()
-	res = withReplayChecks(sc, tr, res)
-	return res, tr, nil
 }

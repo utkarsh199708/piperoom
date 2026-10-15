@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,11 +88,16 @@ func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][
 	defer cancel()
 
 	lister := c.lister()
+	tparam := "topics=" + strings.Join(topics, ",")
+	start := time.Now()
 	starts, err := lister.ListStartOffsets(ctx, topics...)
+	c.record(ctx, start, "kadm.ListStartOffsets(topics)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: dlq start offsets: %w", err)
 	}
+	start = time.Now()
 	ends, err := lister.ListEndOffsets(ctx, topics...)
+	c.record(ctx, start, "kadm.ListEndOffsets(topics)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: dlq end offsets: %w", err)
 	}
@@ -184,7 +190,10 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 	}
 	defer cons.Close()
 
+	// Headers only leave collectPeek; the receipt holds the topic and limit.
+	pollStart := time.Now()
 	recs, err := collectPeek(ctx, cons, topic, plan)
+	c.record(ctx, pollStart, "kgo.PollFetches(topic, limit)", "topic="+topic, "limit="+strconv.Itoa(limit))
 	if err != nil {
 		return nil, fmt.Errorf("kafka: peek dlq %s: %w", topic, err)
 	}
@@ -197,7 +206,9 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 // the transaction ends. DLQOffsets keeps the high watermark (the watcher
 // counts growth with it); only a peek needs the readable end.
 func (c *Client) clampToStable(ctx context.Context, topic string, parts []clients.PartitionOffsets) ([]clients.PartitionOffsets, error) {
+	start := time.Now()
 	lso, err := c.lister().ListCommittedOffsets(ctx, topic)
+	c.record(ctx, start, "kadm.ListCommittedOffsets(topic)", "topic="+topic)
 	if err != nil {
 		return nil, fmt.Errorf("last stable offsets: %w", err)
 	}

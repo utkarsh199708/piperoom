@@ -1,5 +1,6 @@
 // Package evals is a test harness for the investigation agent. It runs the
-// real agent loop (agent.Run, real model) against replayed tool results
+// agent through the room's own path (room.Service starting the Endpoint of
+// wiring.NewAgentEndpoint, room_path.go) against replayed tool results
 // instead of a live pipeline, scores each run against what the scenario
 // expects, and compares two reports. That makes a prompt, tool-description or
 // model change measurable: run the same scenarios before and after, compare.
@@ -42,7 +43,10 @@ type Scenario struct {
 	// checks connector and subject names against it, as the real actions do
 	// against Connect and the Schema Registry.
 	Resources Resources `yaml:"resources"`
-	Alert     Alert     `yaml:"alert"`
+	// Start says what opens the room: an alert (default) or the built-in
+	// watcher (watcher_start.go).
+	Start Start `yaml:"start"`
+	Alert Alert `yaml:"alert"`
 	// Phases name the states the recorded stack goes through, start phase
 	// first (e.g. broken, recovered). Empty means a static scenario. See
 	// phases.go.
@@ -53,14 +57,18 @@ type Scenario struct {
 	// Recordings are the replayed tool results. See Recording for matching.
 	Recordings []Recording `yaml:"recordings"`
 	// Inputs are delivered one per idle, in order: when the agent finishes a
-	// turn and waits, it gets the next one. When none are left the inbox
-	// closes and the run ends.
+	// turn and waits, the scripted person acts through the room (steer,
+	// comment, approve). When none are left the run ends there.
 	Inputs []Input `yaml:"inputs"`
 	Expect Expect  `yaml:"expect"`
 	// Judge picks how the root cause and layer are judged: "terms" (default,
 	// deterministic) or "claude" (LLM judge, see judge.go). The evalrun -judge
 	// flag overrides it.
 	Judge string `yaml:"judge"`
+
+	// pipelineYAML is the pipeline as written, for the room path's owners
+	// file; nil for a scenario built in code.
+	pipelineYAML *yaml.Node
 }
 
 // Alert is what opens the room.
@@ -109,11 +117,11 @@ type Input struct {
 	StepID    string `yaml:"step_id"`
 	CommentID string `yaml:"comment_id"`
 	Text      string `yaml:"text"`
-	// Action makes an action_result an executed fix step: the harness acts as
-	// the room and the executor, binds it to the newest proposal of this run
-	// that has a not yet executed step with this action, and delivers the
-	// approvals and step results the room would (see executor in harness.go).
-	// An input whose action was never proposed is skipped.
+	// Action makes an action_result an executed fix step: the harness
+	// approves the newest open proposal of this run that has a step with
+	// this action, as each required layer's owner, and the room's executor
+	// runs it (room_path.go). An input whose action was never proposed is
+	// skipped.
 	Action string `yaml:"action"`
 	// OK is the outcome of that step: true or false (required with Action).
 	OK *bool `yaml:"ok"`
@@ -157,6 +165,10 @@ type Expect struct {
 	// Fix action groups must all appear among the proposals' steps. Empty
 	// means the scenario expects no particular fix.
 	Fix [][]string `yaml:"fix"`
+	// FixTargets says, per action, the params a proposed step must contain
+	// (matched like a recording's input). Set, it makes the fix check
+	// strict: see fixscore.go.
+	FixTargets map[string]map[string]any `yaml:"fix_targets"`
 	// ForbiddenActions must never be proposed in this scenario.
 	ForbiddenActions []string `yaml:"forbidden_actions"`
 	// MaxVerifyCalls is the read-tool budget after the first executed fix
@@ -239,6 +251,15 @@ func ParseScenario(b []byte) (Scenario, error) {
 	var s Scenario
 	if err := dec.Decode(&s); err != nil {
 		return Scenario{}, fmt.Errorf("evals: parse scenario: %w", err)
+	}
+	var raw struct {
+		Pipeline yaml.Node `yaml:"pipeline"`
+	}
+	if err := yaml.Unmarshal(b, &raw); err != nil {
+		return Scenario{}, fmt.Errorf("evals: parse scenario: %w", err)
+	}
+	if raw.Pipeline.Kind != 0 {
+		s.pipelineYAML = &raw.Pipeline
 	}
 	return s, nil
 }
@@ -343,8 +364,18 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	if s.Pipeline.TopicPrefix == "" {
 		errs = append(errs, errors.New("pipeline.topic_prefix is empty"))
 	}
-	if strings.TrimSpace(s.Alert.Title) == "" {
+	if strings.TrimSpace(s.Alert.Title) == "" && s.Start.By != StartWatcher {
 		errs = append(errs, errors.New("alert.title is empty"))
+	}
+	errs = append(errs, s.validateStart()...)
+	// The room path loads the pipeline as an owners.yaml entry; a pipeline
+	// the server would refuse cannot be evaluated.
+	if s.Pipeline.ID != "" && s.Pipeline.TopicPrefix != "" {
+		if _, err := newRoomFixture(s); err != nil {
+			errs = append(errs, err)
+		} else if s.Pipeline.Shadow() {
+			errs = append(errs, errors.New("pipeline.shadow: evals measure live rooms; a shadow pipeline's room never shows the agent's work to anyone"))
+		}
 	}
 	errs = append(errs, s.checkOutcome()...)
 	errs = append(errs, s.checkFacts(toolInputs)...)
@@ -415,6 +446,11 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 			errs = append(errs, fmt.Errorf("inputs[%d]: text is empty", i))
 		}
 		errs = append(errs, checkExecutedInput(i, in, isAction)...)
+		// A room produces approval and action results only by executing a
+		// proposal; a bare result text would be a message no room can send.
+		if in.Kind == "approval_result" || (in.Kind == "action_result" && in.Action == "") {
+			errs = append(errs, fmt.Errorf("inputs[%d]: a %s comes from executing a proposal in a room; use kind action_result with action", i, in.Kind))
+		}
 	}
 	if s.Expect.MaxToolCalls < 0 {
 		errs = append(errs, errors.New("expect.max_tool_calls is negative"))
@@ -448,6 +484,7 @@ func (s Scenario) checkOutcome() []error {
 		"first_failing_layer":  e.FirstFailingLayer != "",
 		"root_cause_layer":     e.RootCauseLayer != "",
 		"fix":                  len(e.Fix) > 0,
+		"fix_targets":          len(e.FixTargets) > 0,
 		"claims":               len(e.Claims) > 0,
 	} {
 		if set {

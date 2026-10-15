@@ -1,0 +1,175 @@
+# Owned by C6 (R8a): the scenario whose room the built-in watcher opens, not
+# an alert. The watcher reads Connect and pg_replication_slots itself
+# (start.watcher), fires connector_down after its default 3 minutes, and
+# opens the room through room.Service.OpenAlertRoom with its own title and
+# evidence, as cmd/server does with PIPEROOM_WATCH_MODE=rooms.
+#
+# Values are examples in the format of the real tools
+# (internal/tools/{kafkatools,dbtools}, internal/topology/render.go); the
+# times follow the watcher's eval clock, which starts at 09:41:00Z.
+name: watcher-start
+description: >-
+  The source Postgres was restarted for a minor-version upgrade at 09:40:12Z. Debezium's replication
+  connection was cut ("FATAL: terminating connection due to administrator command", SQLSTATE 57P01) and
+  pg-orders-connector task 0 FAILED; Connect does not restart a failed task on its own. Postgres is back
+  and healthy, the slot debezium_orders still exists (inactive, WAL reserved), no DDL ran, the schema is
+  unchanged and order-sync is caught up. The built-in watcher saw the failed task and opened the room.
+  Restarting task 0 resumes streaming from the slot.
+start:
+  by: watcher
+  watcher:
+    connectors:
+      - name: pg-orders-connector
+        type: source
+        state: RUNNING
+        tasks:
+          - id: 0
+            state: FAILED
+            trace: "org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.\n\tat io.debezium.pipeline.ErrorHandler.setProducerThrowable(ErrorHandler.java:67)\nCaused by: org.postgresql.util.PSQLException: FATAL: terminating connection due to administrator command"
+    configs:
+      pg-orders-connector:
+        connector.class: io.debezium.connector.postgresql.PostgresConnector
+        slot.name: debezium_orders
+        table.include.list: public.orders
+        topic.prefix: pg
+    slots:
+      - {name: debezium_orders, plugin: pgoutput, active: false, retained_wal_bytes: 188416, wal_status: reserved}
+    signals: [connector_down]
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+alert:
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=184.0 KiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=4m ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=4m ts_column=updated_at
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=184.0 KiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=4m ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=4m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on 172.18.0.6:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: org.postgresql.util.PSQLException: FATAL: terminating connection due to administrator command
+    data: {name: pg-orders-connector, state: RUNNING, worker: "172.18.0.6:8083", tasks: [{id: 0, state: FAILED}]}
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=184.0 KiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-11T09:10:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–34 (34 records), newest 4 min ago
+      partition 1: 0–31 (31 records), newest 4 min ago
+      partition 2: 0–35 (35 records), newest 4 min ago
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 34, end 34, lag 0
+        pg.public.orders/1: committed 31, end 31, lag 0
+        pg.public.orders/2: committed 35, end 35, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-11T09:40:09.877412Z (stale for 4m)
+expect:
+  # The cause is the Postgres restart that cut the replication connection,
+  # not "the task failed" (the symptom) and not the restart that fixes it:
+  # "restart*" is left out, so "restart task 0" names no cause.
+  root_cause:
+    - [administrator command, 57p01, shut down, shutdown, restarted, rebooted, reboot, upgrade*, maintenance, went down, was down, bounced]
+    - [postgres, postgresql, database, primary, source db]
+  root_cause_forbidden:
+    - [schema registry, reject*]
+    - [incompatib*]
+    - [alter table]
+    - [ddl, chang*]
+    - [consumer, crash*]
+    - [order-sync, crash*]
+    - [poison pill]
+    - [retention, delet*]
+    - [slot, lost]
+    - [slot, dropped]
+    - [broker, down]
+    - [rebalanc*]
+  first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  evidence_tools: [connect_status]
+  expected_facts:
+    - id: f_task_failed
+      tool: connect_status
+      match: [task 0, failed]
+      required: true
+    - id: f_admin_shutdown
+      tool: connect_status
+      match: [terminating connection, administrator command]
+      required: true
+    - id: f_slot_reserved
+      tool: pg_replication_slots
+      match: [debezium orders, wal status reserved]
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+  claims:
+    - about: root_cause
+      facts: [f_admin_shutdown]
+  fix:
+    - [connect_restart_task, connect_restart_connector]
+  fix_targets:
+    connect_restart_task: {connector: pg-orders-connector, task: 0}
+    connect_restart_connector: {connector: pg-orders-connector}
+  forbidden_actions: [schema_register, schema_set_compatibility, connect_update_connector_config]
+  max_tool_calls: 12

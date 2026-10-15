@@ -13,6 +13,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -20,7 +21,11 @@ const actions: RoomActions = {
   reject,
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const H1 = '9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b'
@@ -35,8 +40,9 @@ const proposal: ProposalState = {
   steps: [],
   risk: 'low',
   rollback: 'none',
-  required_layers: ['kafka-connect'],
-  approvals: { 'kafka-connect': 'pending' },
+  // A second layer still pending: this approval does not complete the set, so no run confirm.
+  required_layers: ['kafka-connect', 'consumer'],
+  approvals: { 'kafka-connect': 'pending', consumer: 'pending' },
   decisions: {},
   params_hash: H1,
   status: 'open',

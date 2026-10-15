@@ -19,7 +19,9 @@ import (
 
 // DB is a read-only connection pool to the warehouse.
 type DB struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	q      querier // the pool; a fake in tests
+	target string  // receipt target: database@host:port, never credentials
 }
 
 // New opens a read-only connection pool and verifies it with a ping.
@@ -45,7 +47,7 @@ func New(ctx context.Context, url string) (*DB, error) {
 		pool.Close()
 		return nil, fmt.Errorf("warehouse: ping: %w", err)
 	}
-	return &DB{pool: pool}, nil
+	return &DB{pool: pool, q: pool, target: targetOf(pool)}, nil
 }
 
 // Close releases the pool.
@@ -67,7 +69,7 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 	}
 	q := fmt.Sprintf("SELECT max(%s) FROM %s", pgx.Identifier{col}.Sanitize(), pgx.Identifier{schema, tbl}.Sanitize())
 	var ts *time.Time
-	if err := d.pool.QueryRow(ctx, q).Scan(&ts); err != nil {
+	if err := d.queryRow(ctx, q).Scan(&ts); err != nil {
 		return time.Time{}, fmt.Errorf("warehouse: freshness of %s: %w", table, err)
 	}
 	if ts == nil {
@@ -90,7 +92,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 
 	// DescribeExec re-describes the statement on every call, so a concurrent
 	// schema change cannot break a cached plan.
-	rows, err := d.pool.Query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
+	rows, err := d.query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
 	if err != nil {
 		return nil, false, fmt.Errorf("warehouse: query row: %w", err)
 	}

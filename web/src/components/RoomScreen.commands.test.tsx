@@ -26,6 +26,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -33,7 +34,11 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const driver: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'], role: 'member' }
@@ -64,7 +69,7 @@ function registered(user: CurrentUser, state: RoomState): RoomCommands | null {
     dismissStale: vi.fn(),
     reload: vi.fn(),
   })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   let current: RoomCommands | null = null
   const registry = { get: () => current, set: (c: RoomCommands | null) => (current = c) }
   const { unmount } = render(

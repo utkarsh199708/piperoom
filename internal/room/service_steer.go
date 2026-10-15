@@ -153,9 +153,10 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return events.Event{}, notFound("suggestion not found")
 	}
 	// A second send of an already-sent suggestion is a conflict, not a missing
-	// row (docs/api.md:51).
-	if sugg.Status != "pending" {
-		return events.Event{}, alreadyDecided("suggestion already sent")
+	// row (docs/api.md:51). A declined one is decided too, and the snapshot
+	// check catches a steer.declined whose row status write was lost.
+	if sugg.Status != "pending" || !hasPendingSuggestion(st.snap, suggestionID) {
+		return events.Event{}, alreadyDecided("suggestion already decided")
 	}
 	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "sent"); err != nil {
 		return events.Event{}, err
@@ -167,13 +168,22 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		if !s.isDriver(st, user.ID) {
 			return ErrNotDriver()
 		}
+		// A decline (or send) another replica logged in between, or one
+		// whose status write failed, leaves the row pending; the log decides.
+		if !hasPendingSuggestion(st.snap, suggestionID) {
+			return alreadyDecided("suggestion already decided")
+		}
 		return nil
 	}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{
 		SuggestionID: suggestionID,
 		Text:         sugg.Text,
 	})
 	if err != nil {
-		// Revert the side-table write so the suggestion stays pending.
+		// Revert the side-table write so the suggestion stays pending, unless
+		// another decision already closed it: the row must not read pending again.
+		if isAlreadyDecided(err) {
+			return events.Event{}, err
+		}
 		if revErr := s.store.SetSuggestionStatus(ctx, suggestionID, "pending"); revErr != nil {
 			s.log.Warn("room: revert suggestion status failed", "suggestion", suggestionID, "err", revErr)
 		}

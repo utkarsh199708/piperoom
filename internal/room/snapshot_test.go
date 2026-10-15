@@ -281,3 +281,37 @@ func TestSnapshotJSONArraysNeverNull(t *testing.T) {
 		t.Fatalf("open snapshot closed_at must be null:\n%s", b)
 	}
 }
+
+// hypothesis.verdict folds per person, derives confirmed, resets on a new
+// hypothesis, ignores a verdict for a replaced hypothesis, and never mutates
+// the snapshot it was given (Apply is pure).
+func TestApplyHypothesisVerdicts(t *testing.T) {
+	kabir, priya := human("kabir", "Kabir"), human("priya", "Priya")
+	verdict := func(seq int64, a events.Actor, v string, hypSeq int64) events.Event {
+		return ev(events.HypothesisVerdict, seq, a, events.HypothesisVerdictPayload{Verdict: v, HypothesisSeq: hypSeq})
+	}
+	s0 := room.Apply(room.NewSnapshot(), ev(events.AgentHypothesis, 5, events.AgentActor, events.AgentHypothesisPayload{Text: "h", Confidence: "low", Confirmed: true}))
+	if s0.Hypothesis.Confirmed || s0.Hypothesis.Seq != 5 || s0.Hypothesis.Verdicts == nil {
+		t.Fatalf("fresh: %+v", s0.Hypothesis)
+	}
+	s1 := room.Apply(s0, verdict(6, kabir, "confirmed", 5))
+	if len(s0.Hypothesis.Verdicts) != 0 || s0.Hypothesis.Confirmed {
+		t.Fatalf("Apply mutated its input: %+v", s0.Hypothesis)
+	}
+	if !s1.Hypothesis.Confirmed {
+		t.Fatalf("confirmed not derived: %+v", s1.Hypothesis)
+	}
+	s2 := room.Apply(s1, verdict(7, priya, "disputed", 5))
+	if s2.Hypothesis.Confirmed || len(s2.Hypothesis.Verdicts) != 2 {
+		t.Fatalf("dispute: %+v", s2.Hypothesis)
+	}
+	// A stale verdict (older hypothesis seq) changes nothing.
+	if s3 := room.Apply(s2, verdict(8, kabir, "disputed", 4)); len(s3.Hypothesis.Verdicts) != 2 || s3.Hypothesis.Verdicts[0].Verdict != "confirmed" {
+		t.Fatalf("stale verdict applied: %+v", s3.Hypothesis)
+	}
+	// A new hypothesis resets.
+	s4 := room.Apply(s2, ev(events.AgentHypothesis, 9, events.AgentActor, events.AgentHypothesisPayload{Text: "h2", Confidence: "high"}))
+	if s4.Hypothesis.Confirmed || len(s4.Hypothesis.Verdicts) != 0 || s4.Hypothesis.Seq != 9 {
+		t.Fatalf("reset: %+v", s4.Hypothesis)
+	}
+}

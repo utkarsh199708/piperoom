@@ -1,4 +1,5 @@
-import { ChevronsUpDown, LogOut, Moon, Sun, User } from 'lucide-react'
+import { useState } from 'react'
+import { Bell, ChevronsUpDown, LogOut, Moon, Sun, User } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import {
@@ -10,12 +11,14 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { isFixtures } from '@/api/client'
-import { DEV_USERS } from '@/dev/users'
+import { useAuthUsers } from '@/hooks/useAuthUsers'
 import { useCurrentUser } from '@/context/user'
 import { useTheme } from '@/context/theme'
 import { isDev } from '@/lib/env'
 import { initials, personColor } from '@/lib/people'
 import { isViewer } from '@/state/permissions'
+import { notifyPermission, requestNotifyPermission } from '@/lib/notify'
+import type { NotifyPermission } from '@/lib/notify'
 
 // The signed-in person at the foot of the sidebar. The menu carries what the old
 // header switcher did: in a dev build, "switch user" (POST /auth/dev-login through
@@ -25,6 +28,8 @@ export function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
   const { user, setUserId, logout, busy } = useCurrentUser()
   const { theme, toggleTheme } = useTheme()
   const viewer = isViewer(user)
+  const [permission, setPermission] = useState<NotifyPermission>(() => notifyPermission())
+  const notifyWord = permission === 'granted' ? 'on' : permission === 'denied' ? 'blocked' : 'off'
   const role = viewer ? 'View only' : user.layers.length > 0 ? `${user.layers.join(', ')} owner` : 'member'
 
   return (
@@ -59,25 +64,32 @@ export function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
             {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
             Switch to {theme === 'dark' ? 'light' : 'dark'} theme
           </DropdownMenuItem>
+          {permission !== 'unsupported' && (
+            <DropdownMenuItem
+              disabled={permission !== 'default'}
+              title={permission === 'denied' ? 'Blocked in your browser settings' : undefined}
+              onSelect={(e) => {
+                if (permission !== 'default') return
+                e.preventDefault()
+                void requestNotifyPermission().then(setPermission)
+              }}
+            >
+              <Bell aria-hidden="true" />
+              Browser notifications · {notifyWord}
+            </DropdownMenuItem>
+          )}
           {isDev && (
             <>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>Switch user (dev)</DropdownMenuLabel>
-              {DEV_USERS.map((u) => (
-                <DropdownMenuItem
-                  key={u.id}
-                  disabled={busy || u.id === user.id}
-                  aria-label={`Switch user to ${u.name}`}
-                  onSelect={() => {
-                    setUserId(u.id)
-                    onNavigate?.()
-                  }}
-                >
-                  <User aria-hidden="true" />
-                  {u.name}
-                  {u.id === user.id && <span className="ml-auto text-xs text-subtle-foreground">you</span>}
-                </DropdownMenuItem>
-              ))}
+              <DevUserItems
+                selfId={user.id}
+                busy={busy}
+                onPick={(id) => {
+                  setUserId(id)
+                  onNavigate?.()
+                }}
+              />
             </>
           )}
           {!isFixtures() && (
@@ -92,5 +104,31 @@ export function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
+  )
+}
+
+// The dev switcher's rows come from GET /auth/users. A separate component so the fetch happens only
+// where the rows are drawn (dev builds, menu open).
+function DevUserItems({ selfId, busy, onPick }: { selfId: string; busy?: boolean; onPick: (id: string) => void }) {
+  const users = useAuthUsers()
+  if (users.status === 'loading') return <DropdownMenuLabel className="font-normal">Loading users…</DropdownMenuLabel>
+  if (users.status === 'error') {
+    return <DropdownMenuLabel className="font-normal text-destructive-fg">Could not load users</DropdownMenuLabel>
+  }
+  return (
+    <>
+      {users.data.map((u) => (
+        <DropdownMenuItem
+          key={u.id}
+          disabled={busy || u.id === selfId}
+          aria-label={`Switch user to ${u.name}`}
+          onSelect={() => onPick(u.id)}
+        >
+          <User aria-hidden="true" />
+          {u.name}
+          {u.id === selfId && <span className="ml-auto text-xs text-subtle-foreground">you</span>}
+        </DropdownMenuItem>
+      ))}
+    </>
   )
 }

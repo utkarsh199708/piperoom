@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
@@ -13,6 +15,10 @@ import (
 // login.
 const devNonLoopbackWarning = "dev auth on a non-loopback address: anyone who can reach this port can act as any user"
 
+// errDevAckMissing refuses dev auth off loopback without the written
+// acknowledgement (config.ParseDevAck).
+var errDevAckMissing = errors.New("server: dev auth on a non-loopback address also needs PIPEROOM_DEV_ACK=" + config.DevAckValue + " (dev login has no password); set it in your own deployment, or use PIPEROOM_AUTH_MODE=oidc")
+
 // authSetup parses and checks the login settings before anything else starts.
 //
 //   - PIPEROOM_AUTH_MODE must be dev or oidc; oidc needs an https
@@ -21,7 +27,12 @@ const devNonLoopbackWarning = "dev auth on a non-loopback address: anyone who ca
 //   - dev mode refuses a non-loopback PIPEROOM_HTTP_ADDR unless
 //     PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 or the deprecated --allow-remote flag
 //     is given; both start with a loud warning.
-//   - oidc mode ignores both switches, with a warning: OIDC is the guard there.
+//   - outside --demo, a dev server that does listen off loopback also needs
+//     PIPEROOM_DEV_ACK=config.DevAckValue: the image sets only the switch, so
+//     the operator states in their own deployment that dev login has no
+//     password. Any other non-empty value refuses the start.
+//   - oidc mode ignores both switches and the acknowledgement, with a
+//     warning: OIDC is the guard there.
 //   - --demo forces dev.
 func authSetup(cfg config.Config, allowRemoteFlag, demo bool, log *slog.Logger) (auth.Settings, error) {
 	if demo && strings.ToLower(strings.TrimSpace(cfg.AuthMode)) == auth.ModeOIDC {
@@ -39,15 +50,22 @@ func authSetup(cfg config.Config, allowRemoteFlag, demo bool, log *slog.Logger) 
 	}
 
 	if settings.IsOIDC() {
-		if envSwitch || allowRemoteFlag {
-			log.Warn("server: PIPEROOM_DEV_ALLOW_NONLOOPBACK and --allow-remote are ignored in oidc mode")
+		if envSwitch || allowRemoteFlag || strings.TrimSpace(cfg.DevAck) != "" {
+			log.Warn("server: PIPEROOM_DEV_ALLOW_NONLOOPBACK, PIPEROOM_DEV_ACK and --allow-remote are ignored in oidc mode")
 		}
 		return settings, nil
+	}
+	ack, err := config.ParseDevAck(cfg)
+	if err != nil {
+		return auth.Settings{}, fmt.Errorf("server: %w", err)
 	}
 
 	remote, err := checkListenAddr(cfg.HTTPAddr, envSwitch || allowRemoteFlag)
 	if err != nil {
 		return auth.Settings{}, err
+	}
+	if remote && !demo && !ack {
+		return auth.Settings{}, errDevAckMissing
 	}
 	if remote {
 		log.Warn("server: "+devNonLoopbackWarning, "addr", cfg.HTTPAddr)

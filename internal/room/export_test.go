@@ -158,6 +158,8 @@ func richRoom(t *testing.T) (*room.Service, *memstore.Store, *clock, string) {
 	if _, err := svc.CloseRoom(ctx, mustUser(t, svc, "priya"), roomID, "fixed"); err != nil {
 		t.Fatalf("close: %v", err)
 	}
+	// The closing draft event lands after room.closed; wait so the log is final.
+	waitPM(t, st, roomID)
 	return svc, st, c, roomID
 }
 
