@@ -153,7 +153,7 @@ recordings:
     input: {topic: pg.public.orders, key: '5634120'}
     summary: |-
       found 1 record(s) with key "5634120"
-        partition 1, offset 25390877, 2026-10-11T09:37:00Z
+        partition 1, offset 25389982, 2026-10-11T09:37:00Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
     summary: |-
@@ -167,7 +167,7 @@ recordings:
     summary: |
       postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
       kafka-connect pg-orders-connector: seen
-      kafka pg.public.orders: seen offset=25390877 partition=1
+      kafka pg.public.orders: seen offset=25389982 partition=1
       consumer order-sync: stopped_here committed=25377154
       warehouse analytics.orders: not_seen
       stopped at: consumer order-sync
@@ -200,7 +200,6 @@ recordings:
       warehouse analytics.orders: not_seen
   # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
   - tool: similar_incidents
-    input: {pipeline_id: "orders"}
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
   - tool: kafka_partition_rates
@@ -219,7 +218,7 @@ recordings:
     summary: |-
       pg.public.orders last 1h: 64800 records (18/s); p0 21721 (33%), p2 21637, p1 21442; median 21637, max 21721, max/median 1.0x → even
   - tool: kafka_find_by_key
-    input: {topic: "pg.public.orders", key: "4711"}
+    input: {topic: "pg.public.orders", key: "4711", since: "2026-10-10T09:40:00Z"}
     summary: |-
       not found: no record with key "4711" since 2026-10-10T09:40:00Z
   - tool: kafka_acls

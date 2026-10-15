@@ -23,8 +23,8 @@
 #     no progress between rebalances. kafka_partition_rates shows the doubling (476/s to 952/s
 #     from 10:04) and reconcile puts the missing rows on the consumer side ("topic has them"):
 #     the source is fine. reconcile's missing total (1907808, rows by updated_at) and the
-#     group's lag (1913381, change events, read a moment apart) differ by 0.3%: a row updated
-#     twice is one row and two events.
+#     group's lag (1913381, change events) differ by 5573 events, about 6 s of the 952/s the
+#     two tools were read apart.
 #   - The group is not Empty: it is PreparingRebalance with 1 member. State, not lag, is the signal.
 #   - A rebalance storm looks like a slow consumer. The member count comes from kafka_consumer_lag.
 #   - Connect, registry and slot are healthy; the 212 MiB slot is normal under load.
@@ -170,7 +170,7 @@ recordings:
     input: {topic: pg.public.orders, key: '6241377'}
     summary: |-
       found 1 record(s) with key "6241377"
-        partition 2, offset 88112904, 2026-10-13T10:11:46Z
+        partition 2, offset 87891466, 2026-10-13T10:11:46Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '6241377'}
     summary: |-
@@ -184,7 +184,7 @@ recordings:
     summary: |
       postgres public.orders: seen updated_at=2026-10-13T10:11:46.392770Z
       kafka-connect pg-orders-connector: seen
-      kafka pg.public.orders: seen offset=88112904 partition=2
+      kafka pg.public.orders: seen offset=87891466 partition=2
       consumer order-sync: stopped_here committed=87613164
       warehouse analytics.orders: not_seen
       stopped at: consumer order-sync
