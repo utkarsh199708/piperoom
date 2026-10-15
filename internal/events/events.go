@@ -368,6 +368,11 @@ func cutUTF8(s string, n int) string {
 
 // AgentMessagePayload is plain text the agent says to the room.
 // ReplyTo is set when it answers a comment.
+//
+// A new-incident note of the watcher join (system actor, Q2 F21) also carries
+// "new_incident": true and "agent_text" (the evidence as the agent reads it):
+// the replica holding the room's agent lease turns it into the waking
+// alert_update, so the log is the cross-replica inbox. Clients ignore both.
 type AgentMessagePayload struct {
 	Text    string `json:"text"`
 	StepID  string `json:"step_id,omitempty"`
@@ -655,9 +660,10 @@ type ProposalWithdrawnPayload struct {
 }
 
 // OwnerPagedPayload asks the owners of Layer to look at the room. Owners are
-// the user ids the server resolved for Layer from owners.yaml (approvers, then
-// backups), never chosen by the caller; [] when the layer has nobody, never
-// null. Reason is one line (≤ 300 chars, sanitized); agent text is untrusted
+// the principals the server resolved for Layer from owners.yaml (approvers,
+// then backups), never chosen by the caller: user ids, plus "group:<name>" for
+// a group whose members the server cannot list (Q2 F6); [] when the layer has
+// nobody, never null. Reason is one line (≤ 300 chars, sanitized); agent text is untrusted
 // and clients render it as text. ProposalID names the proposal waiting on the
 // layer, when there is one. Auto is true when the server paged on its own (no
 // driver PIPEROOM_PAGE_UNDRIVEN_AFTER after a watcher or alert room opened).

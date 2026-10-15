@@ -78,8 +78,8 @@ type ProposalWithdrawer interface {
 }
 
 // Pager asks the owners of a layer to look at the room: it writes owner.paged
-// with the agent actor and returns the user ids paged ([] when the layer has
-// no owner). proposalID may be empty. Errors are safe to show the model
+// with the agent actor and returns the principals paged (user ids, or
+// "group:<name>"; [] when the layer has no owner). proposalID may be empty. Errors are safe to show the model
 // (unknown layer, paged within the last 10 minutes, room closed). The runner
 // offers the page_owner tool only when deps.Pager is set. (Q0, QA G2)
 type Pager interface {
