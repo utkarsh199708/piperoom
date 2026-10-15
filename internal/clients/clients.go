@@ -59,6 +59,11 @@ type ConnectorStatus struct {
 	State    string       `json:"state"` // RUNNING | PAUSED | FAILED | UNASSIGNED | RESTARTING | STOPPED
 	WorkerID string       `json:"worker_id"`
 	Tasks    []TaskStatus `json:"tasks"`
+	// Trace is the connector-level stack trace Connect reports when the
+	// connector itself fails (e.g. at startup, with no tasks); empty
+	// otherwise. Untrusted text: condense and sanitize it before it reaches a
+	// summary. (#399)
+	Trace string `json:"trace,omitempty"`
 }
 
 type TaskStatus struct {
@@ -133,6 +138,10 @@ type GroupLag struct {
 	Members    int            `json:"members"`
 	TotalLag   int64          `json:"total_lag"`
 	Partitions []PartitionLag `json:"partitions"`
+	// Unknown lists the partitions whose committed offset or end could not
+	// be read; their Lag is not known and they are not in TotalLag, so a
+	// non-empty Unknown makes TotalLag a lower bound, never "no lag". (#306)
+	Unknown []PartitionLag `json:"unknown,omitempty"`
 }
 
 type PartitionLag struct {
@@ -141,6 +150,23 @@ type PartitionLag struct {
 	Committed int64  `json:"committed"` // -1 if nothing committed
 	End       int64  `json:"end"`
 	Lag       int64  `json:"lag"`
+}
+
+// KeyScan is a key scan's result: the matching records and the partitions
+// whose window the scan did not finish (maxScan, or the scan deadline after a
+// match), where newer matches may exist. (#306)
+type KeyScan struct {
+	Refs      []RecordRef `json:"records"`
+	Truncated []int32     `json:"truncated_partitions,omitempty"`
+}
+
+// KeyScanReader is FindByKey that also reports truncated partitions, so a
+// caller never reads a cut scan as "the record is not there" (optional on a
+// KafkaReader, asserted at use time). Its Refs are what FindByKey returns for
+// the same arguments; a deadline that cuts the scan before any match is still
+// an error. (#306)
+type KeyScanReader interface {
+	FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (KeyScan, error)
 }
 
 type RecordRef struct {
