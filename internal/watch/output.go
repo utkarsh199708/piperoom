@@ -45,7 +45,7 @@ type view struct {
 	sev        string // most severe of active
 	postedSev  string
 	lastPost   time.Time
-	bypass     bool             // skip the cooldown (a rise to sev1 re-opened the incident)
+	bypass     bool             // skip the cooldown (a severity rise re-opened the incident)
 	risks      []map[string]any // current config findings (codes only)
 }
 
@@ -122,24 +122,29 @@ func (w *Watcher) roomLedLocked(roomID string) bool {
 	return false
 }
 
-// reviveSev1 re-opens an acked incident once per episode when its severity has
-// risen to sev1 after the driver closed the room. The slot is really about to
-// be lost, so this skips the cooldown. Caller holds w.mu.
-func (w *Watcher) reviveSev1(id string, ps *pipeState, t target) {
-	if ps.reopened {
-		return
-	}
+// reviveWorse re-opens an acked incident when it got worse than what the
+// driver saw when they closed the room: any signal that rose to sev1 (a slot
+// about to be lost), and a connector_down that rose at all (a PAUSED
+// connector, sev3, that went FAILED or crash-loops, sev2). connector_down's
+// severity changes only with the failure class; the other signals' sev3 ->
+// sev2 follows volume or duration (a DLQ trickle, lag rising for 2×for), which
+// the driver already saw, so those stay acked. The open skips the cooldown.
+// ackSev moves to the new severity at the next close, so each level re-opens at
+// most once. Caller holds w.mu.
+func (w *Watcher) reviveWorse(id string, ps *pipeState, t target) {
 	for _, sid := range signalIDs {
 		sc := signalCfg(t.cfg, sid)
 		ss := ps.sigs[sid]
 		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom || ss.phase != phaseAcked {
 			continue
 		}
-		if ss.last.sev == "sev1" && ss.ackSev != "sev1" && ss.clearingSince.IsZero() {
+		rose := sevRank(ss.last.sev) < sevRank(ss.ackSev)
+		worse := ss.last.sev == "sev1" || sid == owners.SignalConnectorDown
+		if rose && worse && ss.clearingSince.IsZero() {
 			ss.phase, ss.notified = phaseFiring, false
-			ps.reopened, ps.bypassCooldown = true, true
-			w.log.Warn("watch: severity rose to sev1 after the room was closed, re-opening",
-				"mode", string(w.cfg.Mode), "pipeline", id, "signal", sid, "was", ss.ackSev)
+			ps.bypassCooldown = true
+			w.log.Warn("watch: severity rose after the room was closed, re-opening",
+				"mode", string(w.cfg.Mode), "pipeline", id, "signal", sid, "was", ss.ackSev, "now", ss.last.sev)
 			return
 		}
 	}
@@ -275,7 +280,7 @@ func (w *Watcher) emitPipeline(ctx context.Context, now time.Time, t target, sto
 		w.mu.Unlock()
 		return
 	}
-	w.reviveSev1(id, ps, t)
+	w.reviveWorse(id, ps, t)
 	v := w.viewOf(t, ps)
 	w.mu.Unlock()
 
@@ -595,7 +600,7 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 	ps := w.pipes[id]
 	ps.episode, ps.roomID, ps.owned, ps.follower = false, "", false, false
 	ps.postedSev, ps.lastPost = "", time.Time{}
-	ps.reopened, ps.bypassCooldown = false, false
+	ps.bypassCooldown = false
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
 	w.mu.Unlock()
 }
