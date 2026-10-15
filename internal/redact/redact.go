@@ -49,9 +49,31 @@
 //   - a Bearer token split across a line; .pgpass lines
 //     (host:5432:db:user:secret); a CLI password glued to its flag
 //     (mysql -pSecret);
+//   - command-line flags and XML elements (#372 masks the common forms;
+//     rules added for #383 run after it and only mask more): a flag after
+//     ':' or a non-ASCII blank, inside element text, quoted together with
+//     its value ('--password' 'X'), in a JSON-escaped or %q argument list
+//     or an unquoted flow list, or with its value on the next line or after
+//     a CR or --; a whole quoted "--password=X Y" (masked to its first
+//     blank); names ending in pass (-storepass, --pass) and docker login
+//     -p; -u with a quoted part ("svc user:X"), an empty user or glued to
+//     the flag; shell-escaped quotes; a \\\" opener; an XML secret in an
+//     attribute, entity- or \u003c-escaped, more than one child deep, in
+//     CDATA or text around a child, in a Hadoop <name>/<value> pair or a
+//     Maven <arg> list, in text that spans lines, after a start tag holding
+//     "/>" or "<x>", or closed by an escaped end tag of another element;
+//   - a generated lower-case token after a flag in an argument list or
+//     usage brackets (["--token", "d41d8cd98f00b204e9800998ecf8427e"]) reads
+//     as a name and is kept;
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
-//     password line is masked although it is evidence.
+//     password line is masked although it is evidence; the word after a
+//     #372 flag is masked whatever it is (--password requires an argument,
+//     --no-password orders, -u postgres:postgres; #490), and so are a $VAR,
+//     %VAR%, $(...) or db name there, a user:gid pair, and a closing
+//     backtick or tag after a bare value; the shapes read for #383 mask the
+//     same way (--db_password orders_v2, --sasl.password Required, a quoted
+//     "two words").
 package redact
 
 import (
@@ -289,7 +311,7 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	if changed {
 		s = b.String()
 	}
-	return s, st
+	return r.extend(s, &st), st
 }
 
 // lineFixed masks one line until nothing more changes.
@@ -368,6 +390,9 @@ type rule struct {
 	// find, when set, replaces re: it returns matches laid out like
 	// FindAllStringSubmatchIndex.
 	find func(s, lower string) [][]int
+	// remask lets a value that holds a mask be masked again as a whole;
+	// find has already dropped values that are a mask and nothing else.
+	remask bool
 }
 
 func (ru *rule) apply(s, lower string) (string, int) {
@@ -396,7 +421,7 @@ func (ru *rule) apply(s, lower string) (string, int) {
 		val := s[g0:g1]
 		// A one-character "value" is a parse artifact (a stray quote or
 		// backslash), never a credential worth a mask.
-		if len(val) <= 1 || isMasked(val) || isPlaceholder(val) {
+		if len(val) <= 1 || (isMasked(val) && !ru.remask) || isPlaceholder(val) {
 			continue
 		}
 		if ru.ok != nil && !ru.ok(s, m) {
