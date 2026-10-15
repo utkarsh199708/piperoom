@@ -748,3 +748,23 @@ func TestLateLabelOnSettledRoomIsPickedUp(t *testing.T) {
 		t.Fatalf("label on a settled room not found: %v", ids)
 	}
 }
+
+// TestReplacementCharQuery: a query quoting an error about corrupt bytes
+// holds U+FFFD (tool text turns bad bytes into it) and still finds the room
+// (#445). A lone surrogate escape decodes to U+FFFD the same way.
+func TestReplacementCharQuery(t *testing.T) {
+	st := seeded(t, fake.Room{ID: "r-zebra", Title: "zebrafish pipeline stalled", ClosedAt: day(9, 1), Resolution: "DataException invalid byte in key; fixed the producer encoding"})
+	tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(st)})
+	for name, in := range map[string]string{
+		"replacement char": input("zebrafish pipeline stalled: DataException: invalid byte � in key", 3),
+		"lone surrogate":   `{"query":"zebrafish pipeline stalled: invalid byte \ud800 in key","limit":3}`,
+	} {
+		res, err := run(t, tl, scoped("orders"), in)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ids := hitIDs(t, res); !slices.Equal(ids, []string{"r-zebra"}) {
+			t.Errorf("%s: hits = %v, want r-zebra", name, ids)
+		}
+	}
+}
