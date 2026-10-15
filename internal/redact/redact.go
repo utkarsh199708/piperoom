@@ -48,22 +48,36 @@
 //     (io.confluent.connect.jdbc.sink.JdbcSinkConnectorConfig.conn.password=);
 //   - a Bearer token split across a line; .pgpass lines
 //     (host:5432:db:user:secret); a CLI password glued to its flag
-//     (mysql -pSecret);
+//     (mysql -pSecret, curl -uadmin:secret);
 //   - a bare flag argument that is a plain lower-case word (psql --password
 //     hunter), a shell variable ($PGPASSWORD) or the flag's own name in
 //     capitals (an argparse metavar) is kept: "--password requires an
 //     argument" reads the same; so is a -u user:password whose password is
-//     a plain name or a number, which is docker's user:group or uid:gid; a
-//     flag argument on the next line (YAML "- --password" then "- X") or in
-//     an unquoted flow list ([--password, X]) is not followed; \"...\"
-//     inside a \"...\" flag value ends it there;
+//     a plain name or a number, which is docker's user:group or uid:gid;
+//   - flag arguments not followed: on the next line (YAML "- --password"
+//     then "- X"); in an unquoted flow list ([--password, X]), a
+//     JSON-escaped list ([\"--password\", \"X\"]) or a Go %q list
+//     ("--password" "X"); a whole quoted "--password=X Y" argument (masked
+//     to its first blank); a value holding a quote (masked to it) or
+//     starting with '-'; a \\\" opener, or \"...\" inside a \"...\" value;
+//     names ending in pass (-storepass, -keypass, --pass) and docker login
+//     -p; a -u value with a quoted part ("svc user:X", admin:"X") or an
+//     empty user (-u :X);
 //   - over-masking: a flag that takes no argument masks the next word when
-//     it is not plain (psql --password orders_v2, --password Required);
+//     it is not plain (psql --password orders_v2, --password Required, also
+//     in a list), and so does a plain word between a secret element's tags
+//     (between <password> and </password>); a ) or ] after a password is
+//     kept in it unless its opener is just before the flag;
 //   - a secret in an XML attribute (<entry key="password" value="X"/>), in
-//     an entity-escaped element (&lt;password&gt;), more than one child
-//     element deep, or in an element cut off before its end tag (an open
-//     CDATA section, or truncated output) or closed by another element's
-//     end tag;
+//     an entity-escaped element (&lt;password&gt;) or a \u003c-escaped one,
+//     more than one child element deep, in a CDATA section, comment or text
+//     around a child of a secret element, in a CDATA section continued by
+//     another, in a Hadoop <name>...password</name><value>X</value> pair or
+//     a Maven <arg>--password</arg><arg>X</arg> list; in an element cut off
+//     before its end tag (an open CDATA section, or truncated output),
+//     closed by another element's or a malformed end tag (</ password>), or
+//     whose text spans lines; a value child of a secret element whose
+//     parent is not closed;
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence.

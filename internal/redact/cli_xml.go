@@ -41,11 +41,11 @@ func endsInFlagWord(lowerName string) bool {
 }
 
 // flagBefore reports whether a flag may start at p: at the start of the
-// line, after a blank, an opening quote, bracket or backtick, a shell ; or |,
-// '=' of an environment variable holding options, or a JSON-escaped line
-// break or tab ({"cmd":"run\n--password X"}).
+// line, after a blank, an opening quote, bracket, brace or backtick, a shell
+// ; | & or <, '=' of an environment variable holding options, or a
+// JSON-escaped line break or tab ({"cmd":"run\n--password X"}).
 func flagBefore(s string, p int) bool {
-	if p == 0 || strings.IndexByte(" \t\"'[(,=`;|", s[p-1]) >= 0 {
+	if p == 0 || strings.IndexByte(" \t\"'[({,=`;|&<", s[p-1]) >= 0 {
 		return true
 	}
 	return p >= 2 && s[p-2] == '\\' && strings.IndexByte("ntr", s[p-1]) >= 0
@@ -60,6 +60,18 @@ type flagScan struct {
 	runFrom, runEnd int
 	// The first ':' in [colonFrom, colonTo) is at colonAt, -1 if none.
 	colonFrom, colonTo, colonAt int
+	// s[:tickTo] holds ticks backticks.
+	tickTo, ticks int
+}
+
+// openTick reports whether a backtick opened before p is still open.
+func (f *flagScan) openTick(p int) bool {
+	if p < f.tickTo {
+		f.tickTo, f.ticks = 0, 0
+	}
+	f.ticks += strings.Count(f.s[f.tickTo:p], "`")
+	f.tickTo = p
+	return f.ticks%2 == 1
 }
 
 // bareEnd returns the end of the bare word that starts at or covers v.
@@ -105,7 +117,7 @@ func flagFind(s, _ string) [][]int {
 			continue
 		}
 		ns := p + 1
-		if ns < len(s) && s[ns] == '-' {
+		for ns < len(s) && s[ns] == '-' {
 			ns++
 		}
 		ne := ns
@@ -113,7 +125,7 @@ func flagFind(s, _ string) [][]int {
 			ne++
 		}
 		i = max(ne, p+1)
-		if ne == ns || !isLetter(s[ns]) || ne-ns > 64 {
+		if ne == ns || !(isLetter(s[ns]) || s[ns] >= '0' && s[ns] <= '9') {
 			continue
 		}
 		if m := f.match(p, ns, ne); m != nil {
@@ -130,7 +142,7 @@ func (f *flagScan) match(p, ns, ne int) []int {
 	s := f.s
 	name := s[ns:ne]
 	lname := asciiLower(name)
-	if ns-p == 2 && (lname == "user" || lname == "proxy-user") || ns-p == 1 && lname == "u" {
+	if ns-p >= 2 && (lname == "user" || lname == "proxy-user") || ns-p == 1 && lname == "u" {
 		return f.user(p, ne)
 	}
 	if strings.HasPrefix(lname, "no-") || strings.HasPrefix(lname, "no_") {
@@ -141,29 +153,35 @@ func (f *flagScan) match(p, ns, ne int) []int {
 	if strings.TrimRight(lname, "._-") != lname || !endsInFlagWord(lname) {
 		return nil
 	}
-	strength := secretKey(name)
-	if strength == keyNone {
+	// A weak name (--token) is read like a strong one: a flag's argument
+	// is its value whatever it looks like, and the keeps below are what
+	// tells prose apart.
+	if secretKey(name) == keyNone {
 		return nil
 	}
-	v, quotedOnly := flagSep(s, ne)
+	v, listForm := flagSep(s, ne)
 	if v < 0 {
 		return nil
 	}
-	vs, ve, end, quoted := f.value(v)
-	if ve <= vs || (quotedOnly && !quoted) {
+	vs, ve, end, quoted := f.value(p, v)
+	if ve <= vs || (listForm && !quoted) {
 		return nil
 	}
 	val := s[vs:ve]
+	// In an argument list ["psql", "--password", "-h"] each item is quoted,
+	// so the next item is read like a bare word.
+	bare := !quoted || listForm
 	switch {
 	case isVarRef(val):
 		// --password $PGPASSWORD names where the secret is, not the secret.
 		return nil
-	case strength == keyWeak && !looksRandom(val[:min(len(val), 1024)], 12):
+	case listForm && val[0] == '-':
+		// The next flag: --password took no argument.
 		return nil
-	case !quoted && strength == keyStrong && plainWord(val):
+	case bare && plainWord(val):
 		// "--password requires an argument": prose, not a password.
 		return nil
-	case !quoted && val == strings.ToUpper(strings.ReplaceAll(name, "-", "_")):
+	case bare && val == strings.ToUpper(strings.ReplaceAll(name, "-", "_")):
 		// usage: tool [--password PASSWORD]: argparse's metavar.
 		return nil
 	}
@@ -199,13 +217,12 @@ func skipBlanks(s string, i int) int {
 	return i
 }
 
-// value reads one shell argument at v: \"...\" (inside a JSON string or a
-// Go %q error), "..." with backslash escapes, '...', or a bare word that does
-// not start with '-' (that is the next flag) and leaves a closing ) ] or
-// backtick of the text around it. A quote left open runs to the end of the
-// line (a truncated summary). It returns the value's bounds, the end of the
-// argument, and whether it was quoted.
-func (f *flagScan) value(v int) (vs, ve, end int, quoted bool) {
+// value reads one shell argument at v of the flag at p: \"...\" (inside a
+// JSON string or a Go %q error), "..." with backslash escapes, '...', or a
+// bare word that does not start with '-' (that is the next flag). A quote
+// left open runs to the end of the line (a truncated summary). It returns the
+// value's bounds, the end of the argument, and whether it was quoted.
+func (f *flagScan) value(p, v int) (vs, ve, end int, quoted bool) {
 	s := f.s
 	eol := len(s)
 	if strings.HasSuffix(s, "\r") {
@@ -241,11 +258,26 @@ func (f *flagScan) value(v int) (vs, ve, end int, quoted bool) {
 	case s[v] == '-':
 		return v, v, v, false
 	}
-	ve = min(f.bareEnd(v), eol)
-	for ve > v && strings.IndexByte(")]`", s[ve-1]) >= 0 {
-		ve--
-	}
+	ve = f.closerEnd(p, v, min(f.bareEnd(v), eol))
 	return v, ve, ve, false
+}
+
+// closerEnd moves a bare word's end e back over the ) or ] that closes the
+// bracket just before the flag at p, (--password X), or over a backtick that
+// closes one still open before it, `psql --password X`. Any other trailing
+// closer is part of the word: psql --password Zx9)).
+func (f *flagScan) closerEnd(p, v, e int) int {
+	s := f.s
+	if e <= v {
+		return e
+	}
+	switch c := s[e-1]; {
+	case c == ')' && p > 0 && s[p-1] == '(',
+		c == ']' && p > 0 && s[p-1] == '[',
+		c == '`' && f.openTick(p):
+		e--
+	}
+	return e
 }
 
 func isBlankOrQuote(c byte) bool {
@@ -274,7 +306,7 @@ func (f *flagScan) user(p, i int) []int {
 	if k <= v {
 		return nil
 	}
-	vs, ve := k+1, end
+	vs, ve := k+1, f.closerEnd(p, k+1, end)
 	if q != 0 {
 		ve = vs
 		for ve < len(s) && s[ve] != q && s[ve] != '\r' && s[ve] != '\n' {
@@ -309,7 +341,12 @@ func plainName(v string) bool {
 	if v == "" || !isLetter(v[0]) || !isLetter(v[len(v)-1]) {
 		return false
 	}
-	return plainWord(strings.NewReplacer("-", "", "_", "").Replace(v))
+	for i := 0; i < len(v); i++ {
+		if !(v[i] >= 'a' && v[i] <= 'z' || v[i] == '-' || v[i] == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // isVarRef reports a shell variable reference ($NAME or ${NAME}).
@@ -366,7 +403,7 @@ func xmlFind(s, _ string) [][]int {
 		ns := p + 1
 		ne := xmlName(s, ns)
 		i = max(ne, p+1)
-		if ne == ns || !(isLetter(s[ns]) || s[ns] == '_') || ne-ns > 64 {
+		if ne == ns || !(isLetter(s[ns]) || s[ns] == '_') {
 			continue
 		}
 		name := s[ns:ne]
@@ -494,21 +531,22 @@ func (c *cdataEnds) from(i int) int {
 	return c.next
 }
 
-// metaChildren name child elements that describe a secret rather than hold
-// it: <secret><key>db</key><value>X</value></secret>.
-var metaChildren = map[string]bool{
-	"key": true, "name": true, "type": true, "id": true, "label": true, "description": true,
-}
-
 // maxXMLChildren bounds how many child elements of one secret element are
 // read.
 const maxXMLChildren = 16
 
+// oneLine reports text with no line break, raw or JSON-escaped. Element text
+// that spans lines is prose between two tags, not a value: "replace <token>
+// ... </token>".
+func oneLine(t string) bool {
+	return !strings.ContainsAny(t, "\r\n") && !strings.Contains(t, `\n`) && !strings.Contains(t, `\r`)
+}
+
 // xmlContent reads the text of element name from k, after its start tag:
-// padding, then a CDATA section, plain text followed by </name>, or child
-// elements each followed by its own end tag and then </name>. It returns the
-// values to mask (none when the shape does not hold) and where the search may
-// go on.
+// padding, then a CDATA section, plain text on one line, or child elements,
+// each followed by its own end tag, and then </name>. It returns the values
+// to mask (none when the shape does not hold) and where the search may go
+// on.
 func xmlContent(s string, k int, name string, cdata *cdataEnds) ([][]int, int) {
 	pos := skipXMLSpace(s, k)
 	// "<[CDATA[" is not valid XML, but it is how the section often reaches us
@@ -517,10 +555,16 @@ func xmlContent(s string, k int, name string, cdata *cdataEnds) ([][]int, int) {
 		if strings.HasPrefix(s[pos:], open) {
 			vs := pos + len(open)
 			e := cdata.from(vs)
+			// The section counts only when the element ends right after it;
+			// an open one would otherwise run to any later "]]>".
 			if e <= vs {
 				return nil, vs
 			}
-			return [][]int{{vs, e, vs, e}}, e + 3
+			end := endTagAt(s, skipXMLSpace(s, e+3), name)
+			if end < 0 {
+				return nil, vs
+			}
+			return [][]int{{vs, e, vs, e}}, end
 		}
 	}
 	if pos+1 < len(s) && s[pos] == '<' && isLetter(s[pos+1]) {
@@ -537,35 +581,40 @@ func xmlContent(s string, k int, name string, cdata *cdataEnds) ([][]int, int) {
 		return nil, e
 	}
 	ve := trimXMLSpace(s, vs, e)
-	if ve <= vs {
+	if ve <= vs || !oneLine(s[vs:ve]) {
 		return nil, end
 	}
 	return [][]int{{vs, ve, vs, ve}}, end
 }
 
-// xmlChildren reads child elements of element name from pos, each with text
-// only, then </name>. The text of each child not named in metaChildren is a
-// value.
-func xmlChildren(s string, pos int, name string) ([][]int, int) {
+// xmlChildren reads child elements of element name from start, each with
+// one-line text only, then </name>. The text of a child named value, or one
+// whose own name ends in a secret word, is a value; <key>, <type> or
+// <expires_in> are not. When the shape does not hold, it returns start, so
+// xmlFind reads the children one by one and a secret child is still masked
+// on its own; each child is then read at most twice.
+func xmlChildren(s string, start int, name string) ([][]int, int) {
 	var ms [][]int
+	pos := start
 	for range maxXMLChildren {
 		cn := pos + 1
 		ce := xmlName(s, cn)
 		k, ok := tagEnd(s, ce)
 		if ce == cn || !ok {
-			return nil, max(pos+1, k)
+			return nil, start
 		}
 		vs := skipXMLSpace(s, k)
 		e := strings.IndexByte(s[vs:], '<')
 		if e < 0 {
-			return nil, len(s)
+			return nil, start
 		}
 		e += vs
 		next := endTagAt(s, e, s[cn:ce])
 		if next < 0 {
-			return nil, e
+			return nil, start
 		}
-		if ve := trimXMLSpace(s, vs, e); ve > vs && !metaChildren[asciiLower(localName(s[cn:ce]))] {
+		child := asciiLower(localName(s[cn:ce]))
+		if ve := trimXMLSpace(s, vs, e); ve > vs && oneLine(s[vs:ve]) && (child == "value" || endsInFlagWord(child)) {
 			ms = append(ms, []int{vs, ve, vs, ve})
 		}
 		pos = skipXMLSpace(s, next)
@@ -573,8 +622,8 @@ func xmlChildren(s string, pos int, name string) ([][]int, int) {
 			return ms, end
 		}
 		if !(pos+1 < len(s) && s[pos] == '<' && isLetter(s[pos+1])) {
-			return nil, pos
+			return nil, start
 		}
 	}
-	return nil, pos
+	return nil, start
 }
