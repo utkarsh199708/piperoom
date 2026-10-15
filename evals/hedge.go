@@ -1,6 +1,9 @@
 package evals
 
-import "slices"
+import (
+	"regexp"
+	"strings"
+)
 
 // A diagnosis that lists several candidate causes names the right one by
 // construction: the root-cause terms match whatever the truth is. Such an
@@ -40,22 +43,31 @@ var hedgeMarkers = []string{
 // other possibilities", "I ruled out the other possible causes".
 var hedgeDenials = []string{"no", "not", "t", "without", "rule out", "rules out", "ruled out", "ruling out"}
 
+// trailingEither is an "either" that closes its phrase after a word: "the
+// registry did not change either." commits; "Either the registry ... Or the
+// connector ..." and "Either:" followed by a list do not.
+var (
+	trailingEither = regexp.MustCompile(`(?i)\w\s+either\s*([.,;!)]|$)`)
+	eitherWord     = regexp.MustCompile(`(?i)\beither\b`)
+)
+
 // causeHedge reports whether text offers several causes instead of one, and the
-// first marker it found. A marker counts per clause: "either" only with an
-// "or" after it ("the registry did not change either" commits), and no marker
-// right after a denial.
+// first marker it found. An "either" that closes its phrase and a marker right
+// after an un-negated denial do not count.
 func causeHedge(text string) (string, bool) {
 	// clauseSplit, not clausesOf: a question still offers its alternatives.
 	var cls [][]string
 	for _, c := range clauseSplit.Split(text, -1) {
 		cls = append(cls, tokenize(c))
 	}
+	eitherAll := len(eitherWord.FindAllStringIndex(text, -1))
+	eitherTrailing := len(trailingEither.FindAllStringIndex(text, -1))
 	for _, m := range hedgeMarkers {
+		if m == "either" && eitherTrailing == eitherAll {
+			continue
+		}
 		for _, toks := range cls {
 			for _, i := range findTerm(toks, m) {
-				if m == "either" && !slices.Contains(toks[i+1:], "or") {
-					continue
-				}
 				if hedgeDenied(toks, i) {
 					continue
 				}
@@ -72,6 +84,10 @@ func hedgeDenied(toks []string, i int) bool {
 	for k := max(0, i-4); k < i; k++ {
 		l := phraseAt(toks, k, hedgeDenials)
 		if l == 0 || k+l > i {
+			continue
+		}
+		// "cannot rule out other possibilities" still offers them.
+		if strings.HasPrefix(toks[k], "rul") && (negatorBefore(toks, k, 2) || k > 0 && toks[k-1] == "cannot") {
 			continue
 		}
 		gap := true

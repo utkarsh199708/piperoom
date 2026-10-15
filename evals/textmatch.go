@@ -438,7 +438,10 @@ func hasFault(text string) bool {
 			}
 			// A zero count just before is no fault: "0 errors", "zero
 			// failed tasks". Only directly before: "from 0 to 500 errors" is.
-			if j > 0 && c.sub[j-1] == c.sub[j] && (c.toks[j-1] == "0" || c.toks[j-1] == "zero") {
+			// tokenize splits "10.0" into "10", "0": a zero after a number
+			// is a decimal's fraction, not a zero count.
+			if j > 0 && c.sub[j-1] == c.sub[j] && (c.toks[j-1] == "0" || c.toks[j-1] == "zero") &&
+				!(c.toks[j-1] == "0" && j > 1 && c.sub[j-2] == c.sub[j] && isDigits(c.toks[j-2])) {
 				negated = true
 			}
 			if c.toks[j] == "behind" {
@@ -454,6 +457,16 @@ func hasFault(text string) bool {
 		}
 	}
 	return false
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // isLabel reports whether toks is only a field label: the prompt asks every

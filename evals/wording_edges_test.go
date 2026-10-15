@@ -60,6 +60,14 @@ func TestCauseHedgeNeedsAlternatives(t *testing.T) {
 		"Possible causes: the amount change, a consumer crash.",
 		"The amount change; another possibility is a consumer crash.",
 		"Not sure whether the registry or the connector failed.",
+		// A negated rule-out keeps the alternatives open.
+		"I can't rule out other possibilities, but the amount column changed.",
+		"We cannot rule out another possibility: a consumer crash.",
+		"I could not rule out other possible causes.",
+		// "either" whose "or" is in a later clause or list item.
+		"Either the registry rejected the schema. Or the connector crashed.",
+		"Either the registry rejected the schema,\nor the connector crashed.",
+		"Either:\n- the registry\n- the connector",
 	} {
 		if _, h := causeHedge(text); !h {
 			t.Errorf("causeHedge(%q) = false, want a hedge", text)
@@ -78,8 +86,14 @@ func TestZeroCountIsNoFault(t *testing.T) {
 			t.Errorf("healthyVerdict(%q) = false (hasFault=%v)", text, hasFault(text))
 		}
 	}
-	if !hasFault("Healthy, but errors rose from 0 to 500 errors.") {
-		t.Error("a non-zero error count read as no fault")
+	for _, text := range []string{
+		"Healthy, but errors rose from 0 to 500 errors.",
+		"Healthy, but 10.0 errors in the connector.",
+		"Healthy, 5.0 failed tasks.",
+	} {
+		if !hasFault(text) {
+			t.Errorf("hasFault(%q) = false: a non-zero count read as no fault", text)
+		}
 	}
 }
 
