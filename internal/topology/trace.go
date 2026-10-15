@@ -42,8 +42,13 @@ type traceFacts struct {
 	topicFound     bool
 	topicOffset    int64
 	topicPartition int32
+	// scanReported: the scan went through clients.KeyScanReader, so truncated
+	// is known; without it every partition may have been cut (#306).
+	scanReported   bool
+	truncated      []int32 // partitions the key scan did not finish
 	groupErr       error
-	groupCommitted int64 // committed offset for the record's partition; -1 if unknown
+	groupCommitted int64 // committed offset for the record's partition; -1 if none
+	groupUnknown   bool  // the record's partition is in GroupLag.Unknown with no committed offset read
 	sinkErr        error
 	sinkFound      bool
 	sinkDiff       []string
@@ -131,11 +136,12 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if f.sourceTS.IsZero() {
 		since = time.Now().Add(-time.Hour)
 	}
-	refs, err := b.kafka.FindByKey(ctx, topic, key, since, maxScan)
-	f.topicErr = err
-	if err == nil && len(refs) > 0 {
+	var scan clients.KeyScan
+	scan, f.scanReported, f.topicErr = b.findByKey(ctx, topic, key, since)
+	f.truncated = scan.Truncated
+	if f.topicErr == nil && len(scan.Refs) > 0 {
 		// Use the newest matching record: the consumer commits past it.
-		last := refs[len(refs)-1]
+		last := newestRef(scan.Refs)
 		f.topicFound = true
 		f.topicOffset = last.Offset
 		f.topicPartition = last.Partition
@@ -147,12 +153,7 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if f.topicFound {
 		var lag clients.GroupLag
 		f.group, lag, f.groupErr = b.groupFor(ctx, p.ConsumerGroups, topic)
-		for _, pl := range lag.Partitions {
-			if pl.Topic == topic && pl.Partition == f.topicPartition {
-				f.groupCommitted = pl.Committed
-				break
-			}
-		}
+		f.groupCommitted, f.groupUnknown = committedFor(lag, topic, f.topicPartition)
 	}
 
 	// 5. Sink row and column diff.
@@ -166,6 +167,50 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	}
 
 	return decideTrace(f), nil
+}
+
+// findByKey scans topic for key through clients.KeyScanReader when the Kafka
+// client has it, so a cut scan is known; otherwise through FindByKey, whose
+// result the caller must treat as possibly cut (reported = false).
+func (b *builder) findByKey(ctx context.Context, topic, key string, since time.Time) (scan clients.KeyScan, reported bool, err error) {
+	if r, ok := b.kafka.(clients.KeyScanReader); ok {
+		scan, err = r.FindByKeyScan(ctx, topic, key, since, maxScan)
+		return scan, true, err
+	}
+	scan.Refs, err = b.kafka.FindByKey(ctx, topic, key, since, maxScan)
+	return scan, false, err
+}
+
+// newestRef is the newest of refs: the last of its partition (refs are in
+// offset order per partition), and across partitions the one with the latest
+// timestamp, since the last ref overall is only the highest partition's (#306).
+// A tie goes to the later ref.
+func newestRef(refs []clients.RecordRef) clients.RecordRef {
+	best := refs[0]
+	for _, r := range refs[1:] {
+		if r.Partition == best.Partition || !r.Timestamp.Before(best.Timestamp) {
+			best = r
+		}
+	}
+	return best
+}
+
+// committedFor is the group's committed offset on topic/partition (-1 when
+// the group has not committed there). A partition in lag.Unknown counts with
+// its committed offset when that was read; when not, unknown is true and the
+// consumer stage cannot be decided (#306).
+func committedFor(lag clients.GroupLag, topic string, partition int32) (committed int64, unknown bool) {
+	for _, pl := range lag.Partitions {
+		if pl.Topic == topic && pl.Partition == partition {
+			return pl.Committed, false
+		}
+	}
+	for _, pl := range lag.Unknown {
+		if pl.Topic == topic && pl.Partition == partition {
+			return pl.Committed, pl.Committed < 0
+		}
+	}
+	return -1, false
 }
 
 // connectorForTable returns the connector that streams table and its Debezium
@@ -242,7 +287,8 @@ func (b *builder) groupFor(ctx context.Context, groups []string, topic string) (
 			lastErr = err
 			continue
 		}
-		for _, pl := range lag.Partitions {
+		// A partition whose offsets could not be read is still the group's.
+		for _, pl := range slices.Concat(lag.Partitions, lag.Unknown) {
 			if pl.Topic == topic {
 				return g, lag, nil
 			}
@@ -307,22 +353,33 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	// 2. Connector. It is "seen" only when the record actually reached the
 	// topic; a non-RUNNING connector/task while the record is missing from
 	// the topic is the stuck point.
+	// A scan that may have been cut proves neither that the record is not in
+	// the topic nor that the match found is the newest (#306).
+	gap := f.scanGap()
+	missUnknown := f.topicErr == nil && !f.topicFound && gap != ""
 	connStatus := "not_seen"
 	connFacts := map[string]string{}
-	switch {
-	case f.connectorErr != nil:
-		connStatus = "unknown"
-		connFacts["error"] = "unreachable"
-	case f.topicFound:
-		connStatus = "seen"
-	case f.sourceFound && f.topicErr == nil && f.connectorStuck:
-		connStatus = "stopped_here"
+	stuckFacts := func() {
 		if f.connectorState != "" && f.connectorState != "RUNNING" {
 			connFacts["state"] = f.connectorState
 		}
 		if f.tasksFailed > 0 {
 			connFacts["tasks_failed"] = strconv.Itoa(f.tasksFailed)
 		}
+	}
+	switch {
+	case f.connectorErr != nil:
+		connStatus = "unknown"
+		connFacts["error"] = "unreachable"
+	case f.topicFound:
+		connStatus = "seen"
+	case missUnknown:
+		connStatus = "unknown"
+		connFacts["error"] = gap
+		stuckFacts()
+	case f.sourceFound && f.topicErr == nil && f.connectorStuck:
+		connStatus = "stopped_here"
+		stuckFacts()
 	}
 	stage("kafka-connect", f.connector, connStatus, connFacts)
 
@@ -336,48 +393,91 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		topicStatus = "seen"
 		topicFacts["offset"] = strconv.FormatInt(f.topicOffset, 10)
 		topicFacts["partition"] = strconv.FormatInt(int64(f.topicPartition), 10)
+		if gap != "" {
+			topicFacts["newest"] = "unknown: " + gap
+		}
+	} else if missUnknown {
+		topicStatus = "unknown"
+		topicFacts["error"] = gap
 	}
 	stage("kafka", f.topic, topicStatus, topicFacts)
 
-	// 4. Consumer group.
-	consumed := f.topicFound && f.groupErr == nil && f.groupCommitted > f.topicOffset
+	// 4. Consumer group. Committed past the match proves "consumed" only when
+	// the match is the newest; committed at or before it proves the consumer
+	// has not passed this record, newest or not (a newer match in the same
+	// partition sits at a higher offset).
+	reached := f.topicFound && f.groupErr == nil && !f.groupUnknown && f.groupCommitted > f.topicOffset
+	notConsumed := f.topicFound && f.groupErr == nil && !f.groupUnknown && !reached
+	consumed := reached && gap == ""
 	groupStatus := "not_seen"
 	groupFacts := map[string]string{}
-	if f.groupErr != nil {
+	switch {
+	case f.groupErr != nil:
 		groupStatus = "unknown"
 		groupFacts["error"] = unknownReason(f.groupErr)
-	} else if f.topicFound {
+	case f.topicFound && f.groupUnknown:
+		groupStatus = "unknown"
+		groupFacts["error"] = "partition offsets unreadable"
+	case f.topicFound:
 		if f.groupCommitted >= 0 {
 			groupFacts["committed"] = strconv.FormatInt(f.groupCommitted, 10)
 		}
 		if consumed {
 			groupStatus = "seen"
+		} else if reached {
+			groupStatus = "unknown"
+			groupFacts["error"] = gap + "; a newer match may not be consumed"
 		}
+	case missUnknown:
+		groupStatus = "unknown"
+		groupFacts["error"] = gap
 	}
 	stage("consumer", f.group, groupStatus, groupFacts)
 
-	// 5. Sink.
+	// 5. Sink. A sink row is this record's only once the record is known to
+	// be consumed; while the consumer stage is unknown so is the row's.
 	sinkStatus := "not_seen"
 	sinkFacts := map[string]string{}
-	if f.sinkErr != nil {
+	switch {
+	case f.sinkErr != nil:
 		sinkStatus = "unknown"
 		sinkFacts["error"] = unknownReason(f.sinkErr)
-	} else if consumed && f.sinkFound {
+	case consumed && f.sinkFound:
 		sinkStatus = "seen"
 		if len(f.sinkDiff) > 0 {
 			sinkFacts["diff_columns"] = strings.Join(f.sinkDiff, ",")
 		}
+	case f.sinkFound && groupStatus == "unknown":
+		sinkStatus = "unknown"
+		sinkFacts["error"] = "consumer stage unknown"
 	}
 	stage("warehouse", f.sink, sinkStatus, sinkFacts)
 
 	// Decide the single stuck point downstream of the connector.
 	switch {
-	case f.topicFound && f.groupErr == nil && !consumed:
+	case notConsumed:
 		stages[3].Status = "stopped_here"
-	case f.topicFound && f.groupErr == nil && consumed && !f.sinkFound && f.sinkErr == nil:
+	case consumed && !f.sinkFound && f.sinkErr == nil:
 		stages[4].Status = "stopped_here"
 	}
 	return stages
+}
+
+// scanGap is why the key scan may have missed matches, "" when it is known
+// complete: without clients.KeyScanReader every partition may have been cut
+// (#306).
+func (f traceFacts) scanGap() string {
+	if !f.scanReported {
+		return "key scan completeness unknown"
+	}
+	if len(f.truncated) == 0 {
+		return ""
+	}
+	parts := make([]string, len(f.truncated))
+	for i, p := range f.truncated {
+		parts[i] = strconv.FormatInt(int64(p), 10)
+	}
+	return "key scan truncated on partition(s) " + strings.Join(parts, ",")
 }
 
 // unknownReason is the error fact of a stage that could not be checked.
