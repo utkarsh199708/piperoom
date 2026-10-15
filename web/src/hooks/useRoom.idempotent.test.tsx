@@ -33,6 +33,7 @@ vi.mock('../api/client', async (importOriginal) => {
 import { SEND_DEADLINE_MS, api, openRoomWs } from '../api/client'
 import { NOT_CONFIRMED_TEXT, OFFLINE_TEXT, UNCONFIRMED_TEXT } from '../lib/errors'
 import { useRoom } from './useRoom'
+import { UNCONFIRMED_WINDOW_MS } from './sendLedger'
 import { RollbackButton } from '../components/room/RollbackButton'
 import { Timeline } from '../components/Timeline'
 
@@ -576,7 +577,7 @@ describe('kept actions are never dropped by age', () => {
 })
 
 // Gaps shared with main (org.md §12): pinned as they are today, each with its follow-up ticket
-// (#491, #492). When a ticket is fixed, its row flips to assert the fix.
+// (#491). When a ticket is fixed, its row flips to assert the fix.
 describe('gap rows (today\'s behaviour, shared with main)', () => {
   it('GAP ADV-4 (#491): a kept steer drains into the room on screen after a room switch; only App.tsx keying RoomScreen by roomId prevents it', async () => {
     const server = fakeServer('contract')
@@ -597,16 +598,28 @@ describe('gap rows (today\'s behaviour, shared with main)', () => {
     await pass(500)
     expect(server.fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/rooms/r2/steer')
   })
+})
 
-  it('GAP ADV-5 (#492): against a server without #459, a request stored before its connection reset is re-sent on reconnect: 2 copies', async () => {
+// #492 (contract #460): a server that did not echo client_id may have stored a request whose
+// connection reset (a TypeError); it is never re-sent automatically, only by a Retry click.
+describe('a TypeError against a server that does not echo client_id', () => {
+  it('ADV-5 (#492): a request stored before its connection reset is not re-sent on reconnect: 1 copy, Retry offered', async () => {
     const server = fakeServer('old')
     const { hook, socket } = await openRoom(server)
+    await warmUp(hook) // the answer has no client_id: the server does not dedupe
     server.state.resetAfterStore = 1
-    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    const sent = fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
     await pass(10)
-    expect(hook.result.current.error).toBe(OFFLINE_TEXT)
+    expect(sent()).toBe(false)
+    expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
+    act(() => socket.onclose?.({ reason: '' }))
     act(() => socket.onopen?.())
-    await pass(500)
-    expect(server.stored.filter((e) => (e.payload as { text: string }).text === 'stop')).toHaveLength(2)
+    await pass(30_000) // the reconnect and the live retry send nothing
+    const stops = () => server.stored.filter((e) => (e.payload as { text: string }).text === 'stop')
+    expect(stops()).toHaveLength(1)
+    expect(hook.result.current.actions.sends?.isPending('k1')).toBe(true) // the composer keeps Retry
+    await pass(UNCONFIRMED_WINDOW_MS)
+    expect(stops()).toHaveLength(1)
+    expect(hook.result.current.error).toBe(NOT_CONFIRMED_TEXT)
   })
 })

@@ -255,9 +255,16 @@ export class SendLedger {
       this.toUnknown(a)
       return 'unknown'
     }
+    if (isNetworkError(e) && this.dedupes === false) {
+      // A TypeError can also mean the request reached the server and the answer was lost. This
+      // server did not echo client_id, so a re-send could be stored twice (contract #460, #492):
+      // only a Retry click, after the window, sends it again.
+      this.toUnknown(a)
+      return 'unknown'
+    }
     if (isNetworkError(e) && this.count('queued') < MAX_KEPT) {
-      // Gap shared with main (pinned by a test): a TypeError can also mean the request reached
-      // the server and the answer was lost; a server without #459 then stores the re-send again (#492).
+      // Known gap: before any answer (dedupes null) the server is not known either way; the
+      // reconnect still re-sends, as a TypeError then is almost always "never left the browser".
       a.state = 'queued'
       this.setError(OFFLINE_TEXT)
       this.retryWhileLive()
