@@ -36,13 +36,13 @@ func identParts(s string) (n int, ok bool) {
 // validateSourceTable checks the spelling of a source_tables entry. A name
 // whose identifier contains '.' or '"' must be quoted (public."a.b",
 // public."a""b"); the plain form public.a.b is read as three parts and would
-// silently match no change, so it is refused here instead.
+// silently match no change, so it is refused here instead. A plain name with
+// a lone '"' (public.a"b) is not detectable as wrong and stays a known gap.
 func validateSourceTable(name string) error {
-	n, ok := identParts(name)
-	switch {
-	case !ok:
-		return fmt.Errorf("source table %q: unbalanced quote or empty name part; quote a name containing '.' or '\"' as public.\"a.b\" or public.\"a\"\"b\"", name)
-	case n > 2:
+	// A malformed entry (unbalanced quote, empty part) is left alone: the
+	// watcher still matches it by exact text, and refusing it would break
+	// files that load today. Only the unambiguous 3+ part form is refused.
+	if n, ok := identParts(name); ok && n > 2 {
 		return fmt.Errorf("source table %q has %d dot-separated parts, want schema.table; if the table name itself contains a '.', quote it: %s",
 			name, n, suggestQuoted(name))
 	}

@@ -20,9 +20,9 @@ func TestLoadSourceTableSpelling(t *testing.T) {
 		{"both quoted", `['"my.schema"."a.b"']`, ""},
 		{"unqualified", `[orders]`, ""},
 		{"plain dotted name", `[public.a.b]`, `public."a.b"`},
-		{"plain quote in name", `['public.a"b']`, "unbalanced quote"},
-		{"empty part", `['public.']`, "empty name part"},
-		{"unclosed quote", `['public."a.b']`, "unbalanced quote"},
+		// Malformed entries load as before (internal/watch matches them by text).
+		{"unbalanced quote", `['public."Mix']`, ""},
+		{"lone quote in plain name", `['public.a"b']`, ""},
 	} {
 		_, err := loadOwners(t, head+tc.tables+"\n")
 		switch {
