@@ -1,13 +1,12 @@
 # Feature board: who is building what
 
-Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-15 14:50 UTC** (task files + every PR on GitHub).
+Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-15 16:00 UTC** (task files + every PR on GitHub).
 
 ## Needs an owner, unblocking or a decision
 
 | Part | Agent | What | PR | Status | Note |
 |---|---|---|---|---|---|
-| A4-sweep | A4 | agent/wiring/redact/injectscan: evals + security + bugs | — | in progress | Session hit the usage limit at 11:23 with 7 commits pushed and no PR; restarted 14:46 to finish and open the PR |
-| small-lanes | C5 + C12 + A1 + C3 + C10 + C11 | alertin, slackbridge, dev stack, snowflake, discover, runbooks | — | in progress | Local workflow: first run lost 17 agents to the usage limit; resumed 14:46 with seeds cached |
+| small-lanes | C5 + C12 + A1 + C3 + C10 + C11 | alertin, slackbridge, dev stack, snowflake, discover, runbooks | — | in progress | Local workflow resumed 14:46 |
 | F2a | A6 | Web: pinned shift summary, export, post-mortem view | — | **NOBODY ON IT** | No PR and no web code for it on main. Nobody is working on it. |
 | F9-slack | C12 | Slack follow-up: nudges and lease-expiry paging | — | **NOBODY ON IT** | Named as a C12 follow-up in the task file and AGENTS.md (R11). No PR found. |
 | F10d | C1 | README and runbook: Slack bridge, stack lock | — | **NOBODY ON IT** | No PR, and README.md / docs/runbook.md have not changed since the F wave started. |
@@ -22,32 +21,25 @@ Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-
 
 | Part | Agent | What | PR |
 |---|---|---|---|
-| A5-sweep | A5 | room/store/httpapi/ws/auth: security + bugs | #289 |
-| A2-sweep | A2 | kafka/connect/schemareg/netsec/actions: security + bugs | #319 |
-| A7-sweep | A7 | watch/dlq: restart re-post (Q7-V1), redaction | #360 |
-| C6-sweep | C6 | evals harness: scoring, compare, evalrun CLI | #347 |
-| C7-sweep | C7 | eval scenarios: right-answer failures, scorer fit | #341 |
-| F3e | A6 | Ran receipts, citation chips, unbacked marks | #245 |
-| F3g | A6 | Structured evidence for six read tools | #247 |
-| F3-fix | LEAD-ARCH | Contract: clean hand-off keeps violations: [] | #249 |
-| R7 | C1 | Full dev-stack integration job, smoke, release image | #246 |
+| E7a | A4 | Agent prompt fixes for the remaining eval failures | #377 |
 
 ## By feature
 
-### SWEEP — Fix sweep 2026-10-15: evals, security, bugs (one PR per lane) (3/10 done)
+### SWEEP — Fix sweep 2026-10-15: evals, security, bugs (one PR per lane) (9/11 done)
 
 | Part | Agent | What | PR | Status |
 |---|---|---|---|---|
-| A5-sweep | A5 | room/store/httpapi/ws/auth: security + bugs | #289 | in review |
-| A4-sweep | A4 | agent/wiring/redact/injectscan: evals + security + bugs | — | in progress |
-| A6-sweep | A6 | web: bugs + security | #359 | done |
-| A2-sweep | A2 | kafka/connect/schemareg/netsec/actions: security + bugs | #319 | in review |
-| A3-sweep | A3 | postgres/warehouse/dbtools/topology/owners: security + bugs; makes #246 test robust | #333 | done |
-| A7-sweep | A7 | watch/dlq: restart re-post (Q7-V1), redaction | #360 | in review |
-| C6-sweep | C6 | evals harness: scoring, compare, evalrun CLI | #347 | in review |
-| C7-sweep | C7 | eval scenarios: right-answer failures, scorer fit | #341 | in review |
+| A5-sweep | A5 | room/store/httpapi/ws/auth: security + bugs | #289 | done |
+| A4-sweep | A4 | agent/wiring/redact/injectscan: evals + security + bugs | #372 | done |
+| A6-sweep | A6 | web: bugs + security | #359, #375 | done |
+| A2-sweep | A2 | kafka/connect/schemareg/netsec/actions: security + bugs | #319 | done |
+| A3-sweep | A3 | postgres/warehouse/dbtools/topology/owners: security + bugs; makes #246 test robust | #333, #365 | done |
+| A7-sweep | A7 | watch/dlq: restart re-post (Q7-V1), redaction | #360 | done |
+| C6-sweep | C6 | evals harness: scoring, compare, evalrun CLI | #347, #373, #376 | done |
+| C7-sweep | C7 | eval scenarios: right-answer failures, scorer fit | #341, #374 | done |
 | C1-sweep | C1 | CI/build/deploy: exit codes, secrets, dependency upgrades; closes #253 | #264 | done |
 | small-lanes | C5 + C12 + A1 + C3 + C10 + C11 | alertin, slackbridge, dev stack, snowflake, discover, runbooks | — | in progress |
+| E7a | A4 | Agent prompt fixes for the remaining eval failures | #377 | in review |
 
 ### F1 — Decision bar, room status, attention (4/4 done)
 
@@ -66,17 +58,17 @@ Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-
 | F2b | A5 | Post-mortem route, events, close hook, verification list | #185, #236 | done |
 | F2c | A4 | WritePostmortem closing-summary writer | #168 | done |
 
-### F3 — Evidence receipts (4/7 done)
+### F3 — Evidence receipts (7/7 done)
 
 | Part | Agent | What | PR | Status |
 |---|---|---|---|---|
 | F3b | A2 | Connect, Schema Registry, Kafka record provenance | #157 | done |
 | F3c | A3 | Postgres and warehouse record SQL provenance | #158 | done |
 | F3d | A4 | Provenance ledger, unbacked terms, hand-off check | #242, #244 | done |
-| F3e | A6 | Ran receipts, citation chips, unbacked marks | #245 | in review |
+| F3e | A6 | Ran receipts, citation chips, unbacked marks | #245 | done |
 | F3f | C3 | Snowflake records SQL provenance | #159 | done |
-| F3g | A6 | Structured evidence for six read tools | #247 | in review |
-| F3-fix | LEAD-ARCH | Contract: clean hand-off keeps violations: [] | #249 | in review |
+| F3g | A6 | Structured evidence for six read tools | #247 | done |
+| F3-fix | LEAD-ARCH | Contract: clean hand-off keeps violations: [] | #249 | done |
 
 ### F4 — Fix ceremony: preview, run, verify, roll back (5/5 done)
 
@@ -167,11 +159,11 @@ Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-
 | L1b | A4 | Past incidents as worked examples | #205 | done |
 | L1c | C1 + C6 | evals-live CI job and baseline | #208, #211, #212, #214, #215, #248 | done |
 
-### R — R wave leftovers (0/2 done)
+### R — R wave leftovers (1/2 done)
 
 | Part | Agent | What | PR | Status |
 |---|---|---|---|---|
-| R7 | C1 | Full dev-stack integration job, smoke, release image | #246 | in review |
+| R7 | C1 | Full dev-stack integration job, smoke, release image | #246 | done |
 | R10-fu | A6 | Show declined suggestions | #152 | needs your call |
 
 ### Q — QA rounds (no row in AGENTS.md) (0/3 done)

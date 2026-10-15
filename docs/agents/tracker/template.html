@@ -3,7 +3,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
 <style>
-/* Layout: a work board. Summary strip, then "needs an owner", then one block per feature with sub-task rows. */
+/* Layout: live strip (what each lane is doing now), summary tiles, "needs an owner", then one block per feature. Rows come from the shared store; the embedded snapshot is the fallback. */
 :root{
   --bg:#f5f7f7; --panel:#ffffff; --fg:#17212b; --muted:#5b6873; --line:#dde3e6; --accent:#0e6b74;
   --done:#2f7d4f; --done-bg:#e3f2e8; --review:#1f5fa8; --review-bg:#e2ecf8;
@@ -19,11 +19,17 @@
   --done:#7fd19c; --done-bg:#1c3326; --review:#8dbbf0; --review-bg:#1b2b40; --todo:#f19a92; --todo-bg:#3b1f1d;
   --blocked:#f0b765; --blocked-bg:#3a2a14; --check:#c2adf0; --check-bg:#2b2340; color-scheme:dark}
 body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;line-height:1.45}
-.wrap{max-width:1080px;margin:0 auto;padding-block:24px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:22px}
+.wrap{max-width:1120px;margin:0 auto;padding-block:24px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:22px}
 h1{font-family:var(--f-head);font-size:26px;margin:0;letter-spacing:.01em;text-wrap:balance}
 h2{font-family:var(--f-head);font-size:16px;margin:0;letter-spacing:.02em;text-transform:uppercase;color:var(--muted)}
 .sub{color:var(--muted);margin:4px 0 0}
 .mono{font-family:var(--f-mono);font-size:12.5px}
+.live{display:inline-flex;align-items:center;gap:6px;font-family:var(--f-mono);font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.live i{width:8px;height:8px;border-radius:50%;background:var(--na,#9aa6ae);display:inline-block}
+.live.on i{background:var(--done);box-shadow:0 0 0 3px var(--done-bg)}
+.live.err i{background:var(--todo)}
+@media (prefers-reduced-motion: no-preference){ .live.on i{animation:pulse 2s ease-in-out infinite} }
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
 .stat{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:grid;gap:2px;cursor:pointer;text-align:left;font:inherit;color:inherit}
 .stat:focus-visible,.chip:focus-visible,select:focus-visible,.tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -60,14 +66,38 @@ td.st{white-space:nowrap;width:1%}
 a{color:var(--accent)}
 .empty{color:var(--muted);padding:14px}
 footer{color:var(--muted);font-size:12.5px}
-@media (max-width:640px){ td{padding:8px 10px} .bar{width:80px} }
+/* live lanes */
+.lanes{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}
+.lane{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:grid;gap:5px;min-width:0}
+.lane .top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.lane .tag{font-family:var(--f-mono);font-weight:600;color:var(--accent)}
+.lane .sq{color:var(--muted);font-size:12px}
+.lane .act{font-size:13px;overflow-wrap:anywhere}
+.lane .act.idle{color:var(--muted)}
+.lane .meta{font-family:var(--f-mono);font-size:11.5px;color:var(--muted);display:flex;gap:10px;flex-wrap:wrap}
+.lane .meta b{color:var(--fg);font-weight:500}
+.feed{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 14px;display:grid;gap:4px;max-height:220px;overflow:auto}
+.feed div{font-size:12.5px;display:grid;grid-template-columns:auto auto 1fr;gap:10px;align-items:baseline}
+.feed .t{font-family:var(--f-mono);color:var(--muted);font-variant-numeric:tabular-nums}
+.feed .l{font-family:var(--f-mono);color:var(--accent)}
+@media (max-width:640px){ td{padding:8px 10px} .bar{width:80px} .feed div{grid-template-columns:auto 1fr} .feed .l{display:none} }
 </style>
 
 <div class="wrap">
   <header>
     <h1>Piperoom feature tracker</h1>
-    <p class="sub">Who is building each part of each feature, in which PR, and what has nobody on it. Snapshot <span class="mono" id="asof"></span>.</p>
+    <p class="sub">Who is building each part of each feature, in which PR, what each agent is doing right now, and what has nobody on it. <span class="live" id="liveState"><i></i><span>snapshot <span class="mono" id="asof"></span></span></span></p>
   </header>
+
+  <section>
+    <h2 style="margin-bottom:8px">Agents right now</h2>
+    <div class="lanes" id="lanes"><div class="empty">Waiting for the live store…</div></div>
+  </section>
+
+  <section>
+    <h2 style="margin-bottom:8px">Latest activity</h2>
+    <div class="feed" id="feed"><div><span class="t">—</span><span class="l"></span><span>No events yet.</span></div></div>
+  </section>
 
   <section class="stats" id="stats" aria-label="Status counts"></section>
   <section class="alert" id="alert"></section>
@@ -84,29 +114,35 @@ footer{color:var(--muted);font-size:12.5px}
 
   <section id="list" style="display:grid;gap:14px"></section>
 
-  <footer>Source: the task files in <span class="mono">tasks/</span> and every PR on GitHub. A part with no PR is "Nobody on it". Rules for tags and IDs: <span class="mono">docs/agents/org.md</span>.</footer>
+  <footer>Rows live in this page's shared store and are written by the agent sessions, the dispatcher and the reporter; the "Agents right now" strip reads each session's state through your Claude Code connector. Rules for tags and IDs: <span class="mono">docs/agents/org.md</span>.</footer>
 </div>
 
 <script>
-const DATA = __DATA__;
+const SNAPSHOT = __DATA__;
 const REPO = "https://github.com/utkarsh199708/piperoom/pull/";
 const LABEL = {done:"Done", review:"In review", wip:"In progress", todo:"Nobody on it", blocked:"Blocked", check:"Needs your call"};
 const ORDER = ["todo","blocked","check","wip","review","done"];
-const rows = DATA.features.flatMap(f => f.sub.map(s => ({...s, fid:f.id, fname:f.name})));
+const esc = t => String(t==null?"":t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const agentsOf = r => String(r.agent||"?").split(/\s*\+\s*/);
+
+// ---- state: rows (from snapshot, replaced by the store), lanes, events ----
+let rows = SNAPSHOT.features.flatMap(f => f.sub.map(s => ({...s, fid:f.id, fname:f.name})));
+let featureOrder = SNAPSHOT.features.map(f => f.id);
+let asOf = SNAPSHOT.asOf, lanes = {}, events = [], liveSessions = {};
 let state = {view:"feature", agent:"", hideDone:false, status:""};
-try { const s = JSON.parse(localStorage.getItem("pt-state")||"{}"); Object.assign(state, s); } catch(e){}
+try { Object.assign(state, JSON.parse(localStorage.getItem("pt-state")||"{}")); } catch(e){}
 const save = () => { try { localStorage.setItem("pt-state", JSON.stringify(state)); } catch(e){} };
-const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const agentsOf = r => r.agent.split(/\s*\+\s*/);
 
-document.getElementById("asof").textContent = DATA.asOf;
-
-const allAgents = [...new Set(rows.flatMap(agentsOf))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
 const sel = document.getElementById("agentSel");
-allAgents.forEach(a => { const o=document.createElement("option"); o.value=a; o.textContent=a==="?"?"No agent (?)":a; sel.appendChild(o); });
-
-function pill(s){ return `<span class="pill s-${s}">${LABEL[s]}</span>`; }
-function prs(list){ return list.length ? list.map(n=>`<a href="${REPO}${n}" target="_blank" rel="noopener">#${n}</a>`).join(" ") : "—"; }
+function fillAgents(){
+  const all = [...new Set(rows.flatMap(agentsOf))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+  const cur = sel.value; sel.innerHTML = '<option value="">All agents</option>';
+  all.forEach(a => { const o=document.createElement("option"); o.value=a; o.textContent=a==="?"?"No agent (?)":a; sel.appendChild(o); });
+  sel.value = all.includes(cur)?cur:(all.includes(state.agent)?state.agent:"");
+  return all;
+}
+function pill(s){ return `<span class="pill s-${s}">${LABEL[s]||esc(s)}</span>`; }
+function prs(list){ return (list||[]).length ? list.map(n=>`<a href="${REPO}${n}" target="_blank" rel="noopener">#${n}</a>`).join(" ") : "—"; }
 function chips(r){ return agentsOf(r).map(a=>`<button class="chip" data-agent="${esc(a)}">${esc(a)}</button>`).join(" "); }
 function rowHtml(r, showFeature){
   return `<tr><td class="id">${esc(r.id)}</td><td class="who">${chips(r)}</td>
@@ -121,23 +157,45 @@ function bar(list){
   const n=list.length||1;
   return `<span class="bar" aria-hidden="true">${ORDER.slice().reverse().map(s=>{const c=list.filter(r=>r.s===s).length;return c?`<i class="s-${s}" style="width:${c/n*100}%;background:var(--${s==="wip"?"review":s})"></i>`:""}).join("")}</span>`;
 }
+function fmtT(iso){ try{ const d=new Date(iso); return isNaN(d)?"":d.toISOString().slice(11,16)+"Z"; }catch(e){ return ""; } }
+
+function renderLanes(){
+  const el = document.getElementById("lanes");
+  const list = Object.values(lanes).sort((a,b)=>String(a.lane).localeCompare(String(b.lane),undefined,{numeric:true}));
+  if(!list.length){ el.innerHTML = `<div class="empty">No lane is active.</div>`; return; }
+  el.innerHTML = list.map(l => {
+    const live = liveSessions[l.session] || null;
+    const bucket = live ? live.bucket : (l.status||"");
+    const act = live && live.activity ? live.activity : (l.activity || "");
+    const cls = /WORKING/i.test(bucket) ? "s-wip" : /COMPLETED/i.test(bucket) ? "s-done" : /FAILED/i.test(bucket) ? "s-todo" : /BLOCKED|REVIEW/i.test(bucket) ? "s-blocked" : "s-review";
+    const label = /WORKING/i.test(bucket) ? "working" : /COMPLETED/i.test(bucket) ? "finished" : /FAILED/i.test(bucket) ? "failed" : /BLOCKED/i.test(bucket) ? "blocked" : /REVIEW/i.test(bucket) ? "awaiting review" : (bucket || l.status || "idle");
+    return `<article class="lane"><div class="top"><span class="tag">${esc(l.lane)}</span><span class="sq">${esc(l.squad||"")}</span><span class="pill ${cls}">${esc(label)}</span></div>
+      <div class="act ${act?"":"idle"}">${act?esc(act):"No activity reported yet."}</div>
+      <div class="meta">${l.pr?`<span>PR <b><a href="${REPO}${l.pr}" target="_blank" rel="noopener">#${esc(l.pr)}</a></b> ${esc(l.pr_state||"")}</span>`:""}${l.ci?`<span>CI <b>${esc(l.ci)}</b></span>`:""}${l.branch?`<span>${esc(l.branch)}</span>`:""}${live&&live.at?`<span>live ${fmtT(live.at)}</span>`:(l.updated?`<span>upd ${fmtT(l.updated)}</span>`:"")}</div></article>`;
+  }).join("");
+}
+function renderFeed(){
+  const el = document.getElementById("feed");
+  const list = events.slice().sort((a,b)=>String(b.t).localeCompare(String(a.t))).slice(0,60);
+  el.innerHTML = list.length ? list.map(e=>`<div><span class="t">${esc(fmtT(e.t)||e.t)}</span><span class="l">${esc(e.lane||"")}</span><span>${esc(e.text)}</span></div>`).join("") : `<div><span class="t">—</span><span class="l"></span><span>No events yet.</span></div>`;
+}
 function render(){
-  // stats
+  document.getElementById("asof").textContent = asOf || "";
+  const allAgents = fillAgents();
   const st = document.getElementById("stats");
   st.innerHTML = ORDER.map(s => `<button class="stat" data-status="${s}" aria-pressed="${state.status===s}"><span class="pill s-${s}" style="justify-self:start">${LABEL[s]}</span><b>${rows.filter(r=>r.s===s).length}</b></button>`).join("");
-  // alert
   const gaps = rows.filter(r => r.s==="todo" || r.s==="blocked");
-  document.getElementById("alert").innerHTML = `<h2>Needs an owner or unblocking (${gaps.length})</h2><ul>${gaps.map(r=>`<li><span class="mono">${esc(r.id)}</span> · ${esc(r.what)} — <b>${r.agent==="?"?"no agent":esc(r.agent)}</b>${r.prs.length?` (${prs(r.prs)})`:""}</li>`).join("")}</ul>`;
-  // tabs and controls
+  document.getElementById("alert").innerHTML = `<h2>Needs an owner or unblocking (${gaps.length})</h2><ul>${gaps.map(r=>`<li><span class="mono">${esc(r.id)}</span> · ${esc(r.what)} — <b>${r.agent==="?"?"no agent":esc(r.agent)}</b>${(r.prs||[]).length?` (${prs(r.prs)})`:""}</li>`).join("")}</ul>`;
   document.getElementById("tab-feature").setAttribute("aria-selected", state.view==="feature");
   document.getElementById("tab-agent").setAttribute("aria-selected", state.view==="agent");
-  sel.value = state.agent; document.getElementById("hideDone").checked = state.hideDone;
+  document.getElementById("hideDone").checked = state.hideDone;
   const list = document.getElementById("list");
   const fr = filtered();
   if(!fr.length){ list.innerHTML = `<div class="group empty">Nothing matches. Clear the agent or status filter.</div>`; return; }
   let groups;
   if(state.view==="feature"){
-    groups = DATA.features.map(f => ({id:f.id, name:f.name, all:rows.filter(r=>r.fid===f.id), rows:fr.filter(r=>r.fid===f.id), showF:false}));
+    const ids = [...new Set([...featureOrder, ...rows.map(r=>r.fid)])];
+    groups = ids.map(id => ({id, name:(rows.find(r=>r.fid===id)||{}).fname||"", all:rows.filter(r=>r.fid===id), rows:fr.filter(r=>r.fid===id), showF:false}));
   } else {
     groups = allAgents.map(a => ({id:a==="?"?"?":a, name:a==="?"?"No agent assigned":`${rows.filter(r=>agentsOf(r).includes(a)&&r.s!=="done").length} open`, all:rows.filter(r=>agentsOf(r).includes(a)), rows:fr.filter(r=>agentsOf(r).includes(a)), showF:true}));
   }
@@ -158,5 +216,58 @@ document.addEventListener("click", e => {
 });
 sel.addEventListener("change", () => { state.agent = sel.value; save(); render(); });
 document.getElementById("hideDone").addEventListener("change", e => { state.hideDone = e.target.checked; save(); render(); });
-render();
+render(); renderLanes(); renderFeed();
+
+// ---- live layer: shared store, then per-session state through the connector ----
+function setLive(mode, text){ const el=document.getElementById("liveState"); el.className="live "+(mode||""); el.querySelector("span").innerHTML = text; }
+(async () => {
+  const db = window.claude && window.claude.use ? await window.claude.use("db") : null;
+  if(!db){ setLive("", `snapshot <span class="mono">${esc(asOf||"")}</span> · live store unavailable here`); return; }
+  setLive("on", "live");
+  db.collection("rows").onSnapshot(snap => {
+    if(snap.empty && snap.metadata.fromCache) return;            // first empty page before the server answers
+    if(!snap.empty){
+      rows = snap.docs.map(d => ({...d.data(), id: d.data().id || d.id}));
+      const order = {}; rows.forEach(r => { if(r.forder!=null) order[r.fid] = Math.min(order[r.fid]??1e9, r.forder); });
+      featureOrder = Object.keys(order).sort((a,b)=>order[a]-order[b]);
+    }
+    render();
+  }, err => setLive("err", `rows: ${esc(err.code)}`));
+  db.doc("meta/board").onSnapshot(snap => { if(snap.exists){ asOf = snap.data().asOf || asOf; render(); } });
+  db.doc("meta/events").onSnapshot(snap => { if(snap.exists){ events = Array.isArray(snap.data().items) ? snap.data().items : []; renderFeed(); } });
+  db.collection("lanes").onSnapshot(snap => {
+    lanes = {}; snap.docs.forEach(d => { lanes[d.id] = {...d.data(), lane: d.data().lane || d.id}; });
+    renderLanes(); watchSessions();
+  }, err => setLive("err", `lanes: ${esc(err.code)}`));
+})();
+
+// Each lane doc names its cloud session; the page watches that session's state through the viewer's own Claude Code connector.
+const watches = {};
+let mcpP = null;
+function watchSessions(){
+  if(!mcpP) mcpP = (window.claude && window.claude.use ? window.claude.use("mcp") : Promise.resolve(null));
+  mcpP.then(mcp => {
+    if(!mcp) return;
+    const wanted = new Set(Object.values(lanes).map(l => l.session).filter(Boolean));
+    for(const id of Object.keys(watches)) if(!wanted.has(id)){ watches[id](); delete watches[id]; delete liveSessions[id]; }
+    for(const id of wanted){
+      if(watches[id] || Object.keys(watches).length >= 40) continue;
+      watches[id] = mcp.watchTool("Claude Code Remote", "get_session", {session_id: id}, ev => {
+        if(ev.type === "data"){
+          const p = ev.result && ev.result.payload; const ccr = p && (p.ccr || p);
+          if(ccr && typeof ccr === "object"){
+            const pts = ccr.post_turn_summary || (ccr.external_metadata && ccr.external_metadata.post_turn_summary) || {};
+            liveSessions[id] = { bucket: String(ccr.status_bucket||"").replace("SESSION_STATUS_BUCKET_",""),
+              activity: ccr.task_summary || (ccr.external_metadata && ccr.external_metadata.task_summary) || pts.status_detail || "",
+              at: (ev.result.cache && ev.result.cache.storedAt) ? new Date(ev.result.cache.storedAt).toISOString() : (ccr.updated_at || "") };
+            renderLanes();
+          }
+        } else if(ev.error && ["needs_reauth","server_not_connected","blocked_by_policy","approval_required","not_in_manifest","not_granted","capability_disabled"].includes(ev.error.code)){
+          delete liveSessions[id]; renderLanes();
+          if(ev.error.code==="server_not_connected" || ev.error.code==="needs_reauth") setLive("on", `live · connect <b>Claude Code Remote</b> in claude.ai Settings → Connectors to see what each agent is doing`);
+        }
+      }, { refetchInterval: 30000, cache: { staleTime: 20000 } });
+    }
+  });
+}
 </script>

@@ -45,13 +45,17 @@ Worker prompt (fill in N, LANE, FOLDERS):
 > leads approve; you never merge. If you need a file outside your folders, comment on #N and stop that part. Do not
 > ask the human anything.
 
-## 6. Board
-Rebuild `docs/agents/tracker/data.json`: keep the existing groups for merged waves, then one group per open
-`type:feature` (its sub-issues as rows: id `#N`, lane, title, PR numbers, status), plus a group "QA bugs" (open
-`type:bug`, sorted by severity) and a group "Lanes" (one row per active, surge or parked lane with its current
-ticket). Status mapping: `done`, `in-review`→review, `in-progress`→review, `ready` with no lane→todo,
-`blocked`→blocked, `proposed`→check. Then `node docs/agents/tracker/build.js "" /tmp/board.html` and publish with
-the Artifact tool to `url: https://claude.ai/artifact/Mf3MGghDsMyP1NfsCG58ME` (read it first with `action: read`).
+## 6. Board (live store)
+The tracker page (https://claude.ai/artifact/Mf3MGghDsMyP1NfsCG58ME) renders from its shared store and re-renders on
+every write, so update the store, not the HTML. With the ArtifactData tool on that url:
+- `rows/<id>`: one doc per feature part or ticket group: `{id, agent, what, prs:[n], s, note, fid, fname, forder, updated}`
+  with `s` one of done | review | wip | todo | blocked | check. Set `s: done` when its PR merges.
+- `lanes/<lane>`: one doc per active session: `{lane, squad, session, branch, pr, pr_state, ci, status, activity, updated}`.
+  Add a doc for every worker session you start (the page then shows that session's live status through the viewer's
+  Claude Code Remote connector); delete the doc of a lane that has finished and has nothing open.
+- `meta/events`: `{items:[{t, lane, text}]}`, newest 60 kept: one line per merge, new PR, dispatch or scale action.
+- `meta/board`: `{asOf}`.
+Pin every update with `if_version` from your read. Republish the HTML only when `docs/agents/tracker/template.html` changes.
 
 ## 7. Post `[DISPATCH STATE]`
 Counters, lanes and sessions, and a 5-line summary: dispatched, scaled, blocked, merged since the last run.

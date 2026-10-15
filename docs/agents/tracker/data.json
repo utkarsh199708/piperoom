@@ -1,5 +1,5 @@
 {
- "asOf": "2026-10-15 14:50 UTC",
+ "asOf": "2026-10-15 16:00 UTC",
  "features": [
   {
    "id": "SWEEP",
@@ -12,26 +12,29 @@
      "prs": [
       289
      ],
-     "s": "review",
-     "note": "Cloud session, branch claude/fix-a5-20261015"
+     "s": "done",
+     "note": "Merged 14:57"
     },
     {
      "id": "A4-sweep",
      "agent": "A4",
      "what": "agent/wiring/redact/injectscan: evals + security + bugs",
-     "prs": [],
-     "s": "wip",
-     "note": "Session hit the usage limit at 11:23 with 7 commits pushed and no PR; restarted 14:46 to finish and open the PR"
+     "prs": [
+      372
+     ],
+     "s": "done",
+     "note": "Merged 15:05 after the usage-limit restart"
     },
     {
      "id": "A6-sweep",
      "agent": "A6",
      "what": "web: bugs + security",
      "prs": [
-      359
+      359,
+      375
      ],
      "s": "done",
-     "note": "14 web fixes merged 14:43; closes #343, #345–#357, #288"
+     "note": "14 web fixes + picker follow-up"
     },
     {
      "id": "A2-sweep",
@@ -40,18 +43,19 @@
      "prs": [
       319
      ],
-     "s": "review",
-     "note": "Cloud session, branch claude/fix-a2-20261015"
+     "s": "done",
+     "note": "Merged 14:57"
     },
     {
      "id": "A3-sweep",
      "agent": "A3",
      "what": "postgres/warehouse/dbtools/topology/owners: security + bugs; makes #246 test robust",
      "prs": [
-      333
+      333,
+      365
      ],
      "s": "done",
-     "note": "Merged 14:43; session is writing failing tests for a follow-up fix"
+     "note": "Merged 14:43 and 14:57"
     },
     {
      "id": "A7-sweep",
@@ -60,28 +64,31 @@
      "prs": [
       360
      ],
-     "s": "review",
-     "note": "Cloud session, branch claude/fix-a7-20261015"
+     "s": "done",
+     "note": "Merged 14:57"
     },
     {
      "id": "C6-sweep",
      "agent": "C6",
      "what": "evals harness: scoring, compare, evalrun CLI",
      "prs": [
-      347
+      347,
+      373,
+      376
      ],
-     "s": "review",
-     "note": "Cloud session, branch claude/fix-c6-20261015"
+     "s": "done",
+     "note": "Merged 14:58–15:21"
     },
     {
      "id": "C7-sweep",
      "agent": "C7",
      "what": "eval scenarios: right-answer failures, scorer fit",
      "prs": [
-      341
+      341,
+      374
      ],
-     "s": "review",
-     "note": "Cloud session, branch claude/fix-c7-20261015"
+     "s": "done",
+     "note": "Merged 14:57 and 15:20"
     },
     {
      "id": "C1-sweep",
@@ -91,7 +98,7 @@
       264
      ],
      "s": "done",
-     "note": "Merged 14:43; closes #253, #256–#259; follow-ups #260–#263 for their owners"
+     "note": "Merged 14:43"
     },
     {
      "id": "small-lanes",
@@ -99,7 +106,17 @@
      "what": "alertin, slackbridge, dev stack, snowflake, discover, runbooks",
      "prs": [],
      "s": "wip",
-     "note": "Local workflow: first run lost 17 agents to the usage limit; resumed 14:46 with seeds cached"
+     "note": "Local workflow resumed 14:46"
+    },
+    {
+     "id": "E7a",
+     "agent": "A4",
+     "what": "Agent prompt fixes for the remaining eval failures",
+     "prs": [
+      377
+     ],
+     "s": "review",
+     "note": "Open; reviewer session checks it at 16:12"
     }
    ]
   },
@@ -217,7 +234,7 @@
      "prs": [
       245
      ],
-     "s": "review"
+     "s": "done"
     },
     {
      "id": "F3f",
@@ -235,7 +252,7 @@
      "prs": [
       247
      ],
-     "s": "review"
+     "s": "done"
     },
     {
      "id": "F3-fix",
@@ -244,7 +261,7 @@
      "prs": [
       249
      ],
-     "s": "review"
+     "s": "done"
     }
    ]
   },
@@ -681,7 +698,7 @@
      "prs": [
       246
      ],
-     "s": "review",
+     "s": "done",
      "note": "Replaces #133, which was closed."
     },
     {
