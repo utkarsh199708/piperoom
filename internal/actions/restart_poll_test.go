@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,13 +14,18 @@ import (
 
 // scriptedConnect answers Status from a script: call n returns script[n], and
 // the last entry repeats. statusErr, when set, fails every Status call, and
-// restartErr fails both restart writes.
+// restartErr fails both restart writes. Restarts are refused unless allowWrites
+// is set.
 type scriptedConnect struct {
 	script      []clients.ConnectorStatus
 	statusErr   error
 	restartErr  error
 	statusCalls int
+	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *scriptedConnect) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *scriptedConnect) ListConnectors(context.Context) ([]string, error) {
 	return []string{"pg-orders-connector"}, nil
@@ -41,9 +47,19 @@ func (f *scriptedConnect) Config(context.Context, string) (map[string]string, er
 	return nil, nil
 }
 
-func (f *scriptedConnect) RestartTask(context.Context, string, int) error { return f.restartErr }
+func (f *scriptedConnect) RestartTask(context.Context, string, int) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "scriptedConnect", "RestartTask")
+	}
+	return f.restartErr
+}
 
-func (f *scriptedConnect) RestartConnector(context.Context, string) error { return f.restartErr }
+func (f *scriptedConnect) RestartConnector(context.Context, string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "scriptedConnect", "RestartConnector")
+	}
+	return f.restartErr
+}
 
 // taskStates builds one status per state for task 0 (connector RUNNING).
 func taskStates(states ...string) []clients.ConnectorStatus {
@@ -81,8 +97,9 @@ const restartTaskIn = `{"connector":"pg-orders-connector","task":0}`
 const restartConnectorIn = `{"connector":"pg-orders-connector"}`
 
 func TestRestartTaskReportsRunningAfterPolling(t *testing.T) {
-	sc := &scriptedConnect{script: taskStates("RESTARTING", "RESTARTING", "RUNNING")}
+	sc := &scriptedConnect{allowWrites: true, script: taskStates("RESTARTING", "RESTARTING", "RUNNING")}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -102,8 +119,9 @@ func TestRestartTaskMissingFromStatusKeepsPolling(t *testing.T) {
 		{Name: "pg-orders-connector", State: "RUNNING"},
 		taskStates("RUNNING")[0],
 	}
-	sc := &scriptedConnect{script: script}
+	sc := &scriptedConnect{allowWrites: true, script: script}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -134,8 +152,9 @@ func TestRestartTaskNeverRunningTimesOut(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sc := &scriptedConnect{script: tc.script}
+			sc := &scriptedConnect{allowWrites: true, script: tc.script}
 			a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+			guardDeps(t, a.d)
 			out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartTaskIn))
 			if err != nil {
 				t.Fatalf("Execute after an accepted restart returned error: %v", err)
@@ -150,8 +169,9 @@ func TestRestartTaskNeverRunningTimesOut(t *testing.T) {
 // The restart call succeeded but the status read then fails: the action must
 // not return an error, or the agent would retry a restart that worked.
 func TestRestartTaskStatusReadFailsAfterRestart(t *testing.T) {
-	sc := &scriptedConnect{statusErr: errors.New("connect 503")}
+	sc := &scriptedConnect{allowWrites: true, statusErr: errors.New("connect 503")}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if err != nil {
 		t.Fatalf("Execute returned error after an accepted restart: %v", err)
@@ -166,8 +186,9 @@ func TestRestartTaskStatusReadFailsAfterRestart(t *testing.T) {
 // error, and the action must not poll.
 func TestRestartTaskRestartCallFails(t *testing.T) {
 	boom := errors.New("connect 500")
-	sc := &scriptedConnect{restartErr: boom, script: taskStates("RUNNING")}
+	sc := &scriptedConnect{allowWrites: true, restartErr: boom, script: taskStates("RUNNING")}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	_, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the restart error", err)
@@ -180,12 +201,13 @@ func TestRestartTaskRestartCallFails(t *testing.T) {
 // A connector that is RUNNING while its task 0 is still FAILED is not a success.
 // Success waits until the connector and every task are RUNNING.
 func TestRestartConnectorWaitsForTasksToRun(t *testing.T) {
-	sc := &scriptedConnect{script: []clients.ConnectorStatus{
+	sc := &scriptedConnect{allowWrites: true, script: []clients.ConnectorStatus{
 		connectorWithTasks("RUNNING", "FAILED"),
 		connectorWithTasks("RUNNING", "RESTARTING"),
 		connectorWithTasks("RUNNING", "RUNNING"),
 	}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -200,8 +222,9 @@ func TestRestartConnectorWaitsForTasksToRun(t *testing.T) {
 
 // Task 0 stays FAILED: the timeout result names it, and it is still not an error.
 func TestRestartConnectorTaskStaysFailedTimesOut(t *testing.T) {
-	sc := &scriptedConnect{script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "FAILED")}}
+	sc := &scriptedConnect{allowWrites: true, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "FAILED")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute after an accepted restart returned error: %v", err)
@@ -215,8 +238,9 @@ func TestRestartConnectorTaskStaysFailedTimesOut(t *testing.T) {
 // With no tasks listed, the connector cannot be confirmed as RUNNING with its
 // tasks, so the action keeps waiting and reports that no tasks are listed.
 func TestRestartConnectorNoTasksListedTimesOut(t *testing.T) {
-	sc := &scriptedConnect{script: []clients.ConnectorStatus{connectorWithTasks("RUNNING")}}
+	sc := &scriptedConnect{allowWrites: true, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -228,8 +252,9 @@ func TestRestartConnectorNoTasksListedTimesOut(t *testing.T) {
 }
 
 func TestRestartConnectorStatusReadFailsAfterRestart(t *testing.T) {
-	sc := &scriptedConnect{statusErr: errors.New("connect 503")}
+	sc := &scriptedConnect{allowWrites: true, statusErr: errors.New("connect 503")}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute returned error after an accepted restart: %v", err)
@@ -242,8 +267,9 @@ func TestRestartConnectorStatusReadFailsAfterRestart(t *testing.T) {
 
 func TestRestartConnectorRestartCallFails(t *testing.T) {
 	boom := errors.New("connect 500")
-	sc := &scriptedConnect{restartErr: boom, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "RUNNING")}}
+	sc := &scriptedConnect{allowWrites: true, restartErr: boom, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "RUNNING")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	_, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the restart error", err)
@@ -269,7 +295,7 @@ func (f *compatBeforeReadFails) Compatibility(ctx context.Context, subject strin
 }
 
 func TestSetCompatibilityReportsOldAndNewLevel(t *testing.T) {
-	fr := &fakeRegistry{compatLevel: "BACKWARD"}
+	fr := &fakeRegistry{allowWrites: true, compatLevel: "BACKWARD"}
 	d := testDeps()
 	d.Registry = fr
 	reg := NewRegistry()
@@ -289,7 +315,7 @@ func TestSetCompatibilityReportsOldAndNewLevel(t *testing.T) {
 // A failed before-read must not block the write: the old level is reported as
 // unknown and the level is still set.
 func TestSetCompatibilityBeforeReadFailsStillSets(t *testing.T) {
-	fr := &fakeRegistry{compatLevel: "BACKWARD"}
+	fr := &fakeRegistry{allowWrites: true, compatLevel: "BACKWARD"}
 	reads := &compatBeforeReadFails{fakeRegistry: fr}
 	d := testDeps()
 	d.Registry = reads
@@ -328,7 +354,7 @@ func (f *compatReReadFails) Compatibility(ctx context.Context, subject string) (
 // The re-read-failed result still reports the old level, which the agent needs
 // to restore the subject.
 func TestSetCompatibilityReReadFailsKeepsOldLevel(t *testing.T) {
-	fr := &fakeRegistry{compatLevel: "BACKWARD"}
+	fr := &fakeRegistry{allowWrites: true, compatLevel: "BACKWARD"}
 	d := testDeps()
 	d.Registry = &compatReReadFails{fakeRegistry: fr}
 	reg := NewRegistry()
@@ -358,6 +384,9 @@ type inheritedUntilSet struct {
 }
 
 func (f *inheritedUntilSet) SetCompatibility(ctx context.Context, subject, level string) error {
+	if !f.fakeRegistry.allowWrites {
+		return refuseWrite(&f.fakeRegistry.refusals, "inheritedUntilSet", "SetCompatibility")
+	}
 	f.set = true
 	return f.fakeRegistry.SetCompatibility(ctx, subject, level)
 }
@@ -370,7 +399,7 @@ func (f *inheritedUntilSet) Compatibility(ctx context.Context, subject string) (
 // A subject that only inherits the global level is marked "(global)" so the
 // agent knows the subject had no level of its own.
 func TestSetCompatibilityMarksInheritedOldLevel(t *testing.T) {
-	fr := &fakeRegistry{compatLevel: "BACKWARD"}
+	fr := &fakeRegistry{allowWrites: true, compatLevel: "BACKWARD"}
 	d := testDeps()
 	d.Registry = &inheritedUntilSet{fakeRegistry: fr}
 	reg := NewRegistry()
@@ -390,8 +419,9 @@ func TestSetCompatibilityMarksInheritedOldLevel(t *testing.T) {
 // The connector itself is not RUNNING while its task is: success is refused and
 // the timeout result names the connector.
 func TestRestartConnectorConnectorNotRunningTimesOut(t *testing.T) {
-	sc := &scriptedConnect{script: []clients.ConnectorStatus{connectorWithTasks("FAILED", "RUNNING")}}
+	sc := &scriptedConnect{allowWrites: true, script: []clients.ConnectorStatus{connectorWithTasks("FAILED", "RUNNING")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute after an accepted restart returned error: %v", err)
@@ -424,16 +454,19 @@ func TestAwaitRunningReadErrorAfterCtxEndedIsTimeout(t *testing.T) {
 // Write failures are wrapped with the action context (AGENTS.md rule 3).
 func TestWriteErrorsCarryActionContext(t *testing.T) {
 	boom := errors.New("connect 500")
-	sc := &scriptedConnect{restartErr: boom}
+	sc := &scriptedConnect{allowWrites: true, restartErr: boom}
 	task := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}}
+	guardDeps(t, task.d)
 	if _, err := task.Execute(context.Background(), json.RawMessage(restartTaskIn)); err == nil || !strings.Contains(err.Error(), "actions: restart pg-orders-connector task 0") {
 		t.Fatalf("restart task error %v", err)
 	}
 	conn := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}}
+	guardDeps(t, conn.d)
 	if _, err := conn.Execute(context.Background(), json.RawMessage(restartConnectorIn)); err == nil || !strings.Contains(err.Error(), "actions: restart pg-orders-connector") {
 		t.Fatalf("restart connector error %v", err)
 	}
-	comp := &setCompatibility{d: Deps{Connect: sc, Registry: &compatSetFails{fakeRegistry: &fakeRegistry{}, err: boom}}}
+	comp := &setCompatibility{d: Deps{Connect: sc, Registry: &compatSetFails{fakeRegistry: &fakeRegistry{allowWrites: true}, err: boom}}}
+	guardDeps(t, comp.d)
 	if _, err := comp.Execute(context.Background(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err == nil || !strings.Contains(err.Error(), "actions: set compatibility pg.public.orders-value") || !errors.Is(err, boom) {
 		t.Fatalf("set compatibility error %v", err)
 	}
@@ -446,6 +479,9 @@ type compatSetFails struct {
 }
 
 func (f *compatSetFails) SetCompatibility(context.Context, string, string) error {
+	if !f.fakeRegistry.allowWrites {
+		return refuseWrite(&f.fakeRegistry.refusals, "compatSetFails", "SetCompatibility")
+	}
 	return f.err
 }
 
