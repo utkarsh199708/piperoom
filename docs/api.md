@@ -494,7 +494,9 @@ closes; `--demo` forces it off.
   reports a connector set to drop records silently (`errors.tolerance=all` with no DLQ and no error log, or on a
   source connector) or a sink whose configured DLQ topic does not exist. Records that were in the DLQ before
   the watcher started never fire. A pipeline with no DLQ topics costs the watcher no Kafka call.
-- **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
+- **After a restart** the watcher re-attaches to its room that is still open. It asks the room service which
+  signals the room carried (Q3/Q4): a signal the room did not carry wakes the agent like any new incident, a
+  carried one is a quiet repeat. Only when the room's keys cannot be read does the re-attach stay quiet. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - **Incidents, not pipelines (Q0, QA G1; implemented by A7 and A5).** An *incident* is the set of signals a
   watcher room carried. The cooldown and the close-while-firing ack apply to that set only: a signal outside it
