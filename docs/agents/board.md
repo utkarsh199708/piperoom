@@ -1,64 +1,161 @@
-# Agent board: who is fixing what
+# Feature board: who is building what
 
-Rules and status meanings: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only.
-**Last refresh: 2026-10-15 10:10 UTC** (from the open PR list on GitHub).
+Rules: `docs/agents/org.md`. Updated by `[LEAD-ARCH]` only. **Snapshot: 2026-10-15 10:20 UTC** (task files + every PR on GitHub).
 
-## Needs a decision now
+## Needs an owner, unblocking or a decision
 
-| # | Problem | Proposed action |
-|---|---|---|
-| 1 | #243 `Claude/nice volta 752jes` and #233 `Claude/busy einstein y9dxdl` have no work ID or lane. #233 contains every commit of #243 plus `tasks/Q6`, `tasks/Q7`. Together they carry Q5 fixes across A4 (`internal/agent`), A5 (`internal/room`), N6 (`internal/injectscan`) and the Q1–Q7 task files | Close #243 as a duplicate. Split #233 into: `[Q5][A4] agent: …`, `[Q5][A5] room: …`, `[Q5][A4] injectscan: …`, plus a leads' PR `[Q][LEAD-QA] tasks: Q1–Q7 findings` |
-| 2 | #151 `QA sweep fixes …` has no ID or lane, spans A1/A2/A3/A7/C5 folders, and has had no update since 00:13 (stale) | Turn its commits into one PR per lane (`[Q2][A2] kafka: …`, `[Q2][A3] dbtools: …`, `[Q2][A7] dlq: …`, `[Q2][C5] alertin: …`, `[Q2][A1] testenv: …`); then close #151. Contract requests in its `reviews/` commits go to `LEAD-ARCH` |
-| 3 | The Q wave (QA rounds, `tasks/Q1`–`Q7`) is missing from `AGENTS.md` | Add a "Q wave" table to `AGENTS.md` §2 with `LEAD-QA` as author and the file owners as fixers |
+| Part | Agent | What | PR | Status | Note |
+|---|---|---|---|---|---|
+| F2a | A6 | Web: pinned shift summary, export, post-mortem view | — | **NOBODY ON IT** | No PR and no web code for it on main. Nobody is working on it. |
+| F9-slack | C12 | Slack follow-up: nudges and lease-expiry paging | — | **NOBODY ON IT** | Named as a C12 follow-up in the task file and AGENTS.md (R11). No PR found. |
+| F10d | C1 | README and runbook: Slack bridge, stack lock | — | **NOBODY ON IT** | No PR, and README.md / docs/runbook.md have not changed since the F wave started. |
+| F11-evals | C6 | evals/README reconciles the cost numbers | — | needs your call | No PR found. Confirm with C6 whether it is still needed. |
+| F12d | C6 + C1 | Eval baseline and regression gate | — | needs your call | No [F12d] PR. L1c's evals-live job and baseline (#215, #248) may cover it. Confirm and close. |
+| R10-fu | A6 | Show declined suggestions | #152 | needs your call | #152 was closed without merging. Decide: drop it or re-dispatch. |
+| Q2 | ? | QA sweep fixes: PII redaction, read-only transactions | #151 | **blocked** | No lane tag; touches A1, A2, A3, A7, C5 folders. Stale since 00:13. Split it per agent. |
+| Q5 | ? | Room recap, wake on executed fixes, injectscan names | #243, #233 | **blocked** | Untagged. #233 contains all of #243 plus the Q6 and Q7 task files. Close #243, split #233 per agent. |
+| Q6, Q7 | ? | QA round 3 findings | — | **NOBODY ON IT** | Task files exist only on #233's branch. No agent assigned. |
 
-## PIPE: connectors (A2, A3, A7, C3, C10)
+## In review now
 
-| ID | Lane | What | PR | Status | Waits on | Updated |
-|---|---|---|---|---|---|---|
-| Q2 | A2, A3, A7 | QA sweep fixes (kafka truncation, warehouse clock skew, DLQ redaction) | #151 (to split) | blocked | Decision 2 | 10-15 00:13 (stale) |
+| Part | Agent | What | PR |
+|---|---|---|---|
+| F3e | A6 | Ran receipts, citation chips, unbacked marks | #245 |
+| F3g | A6 | Structured evidence for six read tools | #247 |
+| F3-fix | LEAD-ARCH | Contract: clean hand-off keeps violations: [] | #249 |
+| R7 | C1 | Full dev-stack integration job, smoke, release image | #246 |
 
-## BRAIN: agent and evals (A4, C6, C7, C11)
+## By feature
 
-| ID | Lane | What | PR | Status | Waits on | Updated |
-|---|---|---|---|---|---|---|
-| F3d1 | A4 | Provenance on tool results, step ledger, `update_hypothesis` step checks | #242 | in-review | review | 10-15 10:06 |
-| F3d2 | A4 | Unbacked terms in hypotheses, hand-off check with one retry | #244 | in-review | #242 merge | 10-15 10:08 |
-| Q5 | A4 (+A5, N6 parts) | Recap-aware verify, `pg_table_activity` idle rule, injectscan tool names | #243 / #233 (to split) | blocked | Decision 1 | 10-15 10:07 |
+### F1 — Decision bar, room status, attention (4/4 done)
 
-## ROOM: backend (A5, C5, C12)
-
-| ID | Lane | What | PR | Status | Waits on | Updated |
-|---|---|---|---|---|---|---|
-| Q5 | A5 | Wake on executed fixes, room recap, change-feed wiring, post-mortem fixes | inside #233 (to split) | blocked | Decision 1 | 10-15 10:07 |
-
-## WEB: frontend (A6)
-
-| ID | Lane | What | PR | Status | Waits on | Updated |
-|---|---|---|---|---|---|---|
-| F3e | A6 | Ran receipts, citation chips, unbacked marks, hand-off checks | #245 | in-review | F3d (#242, #244) for the data it renders | 10-15 10:01 |
-| F3g | A6 | Structured evidence for six read tools | #247 | in-review | review | 10-15 10:05 |
-
-## PLATFORM: CI, deploy, dev stack (C1, A1)
-
-| ID | Lane | What | PR | Status | Waits on | Updated |
-|---|---|---|---|---|---|---|
-| R7 | C1 | Full dev-stack integration job with smoke, release image | #246 | in-review | review | 10-15 10:10 |
-| L1c | C1 | `evals-live` compares misses per run over shared scenarios | #248 | in-review | review | 10-15 10:06 |
-
-## TRUST: security and field (C4, C9, C13, C14)
-
-Nothing open.
-
-## Unowned (no lane yet)
-
-| ID | What | Next step |
-|---|---|---|
-| Q6, Q7 | QA round 3 findings (`tasks/Q6-qa-round3-findings.md`, `tasks/Q7-qa-review3-findings.md`, on #233's branch only) | `LEAD-QA` lands the task files; `LEAD-ARCH` adds one row per finding under the squad that owns the file |
-
-## Done this week (latest merges on `main`)
-
-| ID | Lane | What | PR | Merged |
+| Part | Agent | What | PR | Status |
 |---|---|---|---|---|
-| — | A5, A2 | Room cross-room passes, alert-key lock, log wins over lost status writes; kafka transactional read tests | #241 | 10-15 |
-| E6b | C6/C7 | Scenario budgets, negated causes are not claims | #239, #240 | 10-15 |
-| E6a | A4 | Prompt etiquette: pause, healthy outcome, status reads | #238 | 10-15 |
+| F1a | A6 | One derived room status for header, list, pill, ⌘K | #154 | done |
+| F1b | A6 | Sticky decision bar, run confirm, idle composer | #162 | done |
+| F1c | A6 | Kill double scroll, legacy CSS, Vite favicon | #156 | done |
+| F1d | A6 | Attention: title, favicon dot, toasts, "Needs you N" | #163 | done |
+
+### F2 — Hand-off that survives, post-mortem draft (2/3 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F2a | A6 | Web: pinned shift summary, export, post-mortem view | — | **NOBODY ON IT** |
+| F2b | A5 | Post-mortem route, events, close hook, verification list | #185, #236 | done |
+| F2c | A4 | WritePostmortem closing-summary writer | #168 | done |
+
+### F3 — Evidence receipts (4/7 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F3b | A2 | Connect, Schema Registry, Kafka record provenance | #157 | done |
+| F3c | A3 | Postgres and warehouse record SQL provenance | #158 | done |
+| F3d | A4 | Provenance ledger, unbacked terms, hand-off check | #242, #244 | done |
+| F3e | A6 | Ran receipts, citation chips, unbacked marks | #245 | in review |
+| F3f | C3 | Snowflake records SQL provenance | #159 | done |
+| F3g | A6 | Structured evidence for six read tools | #247 | in review |
+| F3-fix | LEAD-ARCH | Contract: clean hand-off keeps violations: [] | #249 | in review |
+
+### F4 — Fix ceremony: preview, run, verify, roll back (5/5 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F4b | A2 | Action preview and dry-run | #155 | done |
+| F4c | A5 | Preview proposals, store proposal.previewed | #171 | done |
+| F4d | A4 | Typed verification event and follow-ups | #234, #235 | done |
+| F4e | A6 | Blast radius and execution card | #202 | done |
+| F4f | A6 | Verification card, close nudge, roll back | #203 | done |
+
+### F5 — Suggest without a driver, activity feed (2/2 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F5a | A6 | Composer modes, chips, curated feed | #180, #195 | done |
+| F5b | A5 | Id-free agent text, suggestions with no driver | #169 | done |
+
+### F6 — Proactive triage (5/5 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F6b | A7 | Watcher: consumer-group signals, crash loops | #179 | done |
+| F6b-owners | A3 | Owners: parse new signal keys | #167 | done |
+| F6c | A4 | Agent triage pass, alert_update inputs | #178 | done |
+| F6d | A5 | First look, rooms list over WebSocket | #194, #201 | done |
+| F6e | A6 | Pushed rooms list, first-look card | #197 | done |
+
+### F7 — Lane, trace, mobile (3/3 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F7a | A6 | Compact pipeline lane | #165 | done |
+| F7b | A6 | Trace leads with the verdict | #166 | done |
+| F7c | A6 | Tabs below 1280px, bottom sheet, touch | #184, #186 | done |
+
+### F8 — What changed, similar incidents, runbook checklist (6/6 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F8b | A3 | what_changed tool, similar_incidents labels | #176 | done |
+| F8c | A7 | Watcher feeds the change log, masks secrets | #183, #200 | done |
+| F8d | A5 | Change log store, label and checklist routes | #174 | done |
+| F8e | A6 | What-changed lane, checklist, label form | #188 | done |
+| F8f | C11 | Runbook items in runbook_lookup data | #164 | done |
+| F8g | A4 | what_changed is the second read | #191 | done |
+
+### F9 — Hypothesis verdict, presence, catch-up (3/4 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F9b | A5 | Verdicts, nudges, people layers, presence | #177 | done |
+| F9c1 | A6 | Verdicts, who's-here layers, nudge | #187 | done |
+| F9c2 | A6 | Lease awareness, catch-up strip | #189 | done |
+| F9-slack | C12 | Slack follow-up: nudges and lease-expiry paging | — | **NOBODY ON IT** |
+
+### F10 — Resilience and small traps (3/4 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F10a | A6 | Dialogs per room, offline sends, lease floor | #190, #192 | done |
+| F10b | A4 | Escape driver steers, ids out of prose | #160 | done |
+| F10c | A5 | Stop retrying unretryable agent errors | #161 | done |
+| F10d | C1 | README and runbook: Slack bridge, stack lock | — | **NOBODY ON IT** |
+
+### F11 — Cost and insight (2/3 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F11a | A5 | Snapshot insight, agent-stats route | #175 | done |
+| F11b | A6 | Cost chip, first insight, track record | #198 | done |
+| F11-evals | C6 | evals/README reconciles the cost numbers | — | needs your call |
+
+### F12 — Deep signals and new scenarios (3/4 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| F12a | A2 | Cluster health, rates, ACLs, TLS expiry | #172, #182 | done |
+| F12b | A3 | Load errors, reconcile counts, Debezium metrics | #170, #173, #181 | done |
+| F12c | C7 | Four new incident scenarios | #196, #199 | done |
+| F12d | C6 + C1 | Eval baseline and regression gate | — | needs your call |
+
+### L1 — Learn from closed rooms (3/3 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| L1a | C6 | Export labelled rooms as eval cases | #207 | done |
+| L1b | A4 | Past incidents as worked examples | #205 | done |
+| L1c | C1 + C6 | evals-live CI job and baseline | #208, #211, #212, #214, #215, #248 | done |
+
+### R — R wave leftovers (0/2 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| R7 | C1 | Full dev-stack integration job, smoke, release image | #246 | in review |
+| R10-fu | A6 | Show declined suggestions | #152 | needs your call |
+
+### Q — QA rounds (no row in AGENTS.md) (0/3 done)
+
+| Part | Agent | What | PR | Status |
+|---|---|---|---|---|
+| Q2 | ? | QA sweep fixes: PII redaction, read-only transactions | #151 | **blocked** |
+| Q5 | ? | Room recap, wake on executed fixes, injectscan names | #243, #233 | **blocked** |
+| Q6, Q7 | ? | QA round 3 findings | — | **NOBODY ON IT** |
