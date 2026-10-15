@@ -2,6 +2,7 @@ package watch
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	"piperoom/internal/owners"
@@ -24,8 +25,9 @@ import (
 //     room was not told about goes through IncidentSink, which wakes the agent.
 //
 // A close the watcher did not see (the room service knows it, the watcher
-// restarted since) has an unknown incident: the whole pipeline then waits out
-// the cooldown, as before, and only an escalation cuts it short.
+// restarted since) is recovered from the room service when it can tell the
+// room's keys (ClosedRoomKeysSink); otherwise it covers only the signals that
+// were already firing at the close (QA S1).
 
 const (
 	// maxToldRooms caps the rooms a pipeline remembers telling. A room leaves
@@ -118,23 +120,26 @@ type quiet struct {
 	on   bool
 	room string
 	ago  time.Duration
-	// unknown: the closed room's incident is not known (a close from before a
-	// restart), so the cooldown covers every signal of the pipeline.
+	// unknown: the closed room's incident is not known (a close the watcher
+	// did not see and could not recover), so the cooldown covers the signals
+	// that were already firing at that close.
 	unknown bool
 }
 
-// cooldownOf decides whether pending signals with keys stay quiet. last,
+// cooldownOf decides whether the pending signals pend stay quiet. last,
 // closedAt and found are the room service's answer for the pipeline's own
-// dedup key (LastRoomForKey). Caller holds w.mu.
-func (w *Watcher) cooldownOf(now time.Time, id string, keys []string, last string, closedAt *time.Time, found bool) quiet {
+// dedup key (LastRoomForKey). Every key of every pending signal must be in a
+// closed incident for the open to wait; one outside opens at once. A close
+// the watcher did not see (and recoverClosed could not explain) covers only
+// a signal that fired at or before the close (QA S1): one that fired later,
+// such as after a restart, was not part of what the driver closed. Caller
+// holds w.mu.
+func (w *Watcher) cooldownOf(now time.Time, id string, pend []sigSnap, last string, closedAt *time.Time, found bool) quiet {
 	if found && closedAt == nil {
 		return quiet{} // the key's room is still open: it is joined, not waited out
 	}
-	if closedAt != nil && !w.closed[last] && now.Sub(*closedAt) < w.cfg.Cooldown {
-		return quiet{on: true, room: last, ago: now.Sub(*closedAt), unknown: true}
-	}
 	ps := w.pipes[id]
-	if ps == nil || len(keys) == 0 {
+	if ps == nil || len(pend) == 0 {
 		return quiet{}
 	}
 	for k, c := range ps.cooled {
@@ -142,30 +147,74 @@ func (w *Watcher) cooldownOf(now time.Time, id string, keys []string, last strin
 			delete(ps.cooled, k)
 		}
 	}
+	unseen := closedAt != nil && !w.closed[last] && now.Sub(*closedAt) < w.cfg.Cooldown
 	q := quiet{on: true}
-	for _, k := range keys {
-		c, ok := ps.cooled[k]
-		if !ok {
-			return quiet{} // a signal outside every closed incident
+	for _, s := range pend {
+		if unseen && !s.fired.IsZero() && !s.fired.After(*closedAt) {
+			if ago := now.Sub(*closedAt); q.room == "" || ago < q.ago {
+				q.room, q.ago = last, ago
+			}
+			q.unknown = true
+			continue
 		}
-		if q.room == "" || now.Sub(c.at) < q.ago {
-			q.room, q.ago = c.room, now.Sub(c.at)
+		for _, k := range s.keys {
+			c, ok := ps.cooled[k]
+			if !ok {
+				return quiet{} // a signal outside every closed incident
+			}
+			if q.room == "" || now.Sub(c.at) < q.ago {
+				q.room, q.ago = c.room, now.Sub(c.at)
+			}
 		}
 	}
 	return q
+}
+
+// recoverClosed asks the room service (ClosedRoomKeysSink) what a closed
+// watcher room the watcher did not see carried, and cools those keys from
+// its close. The room then counts as seen. A sink without the extension, or
+// a room it cannot explain, leaves the fallback rule of cooldownOf. Called
+// without w.mu.
+func (w *Watcher) recoverClosed(now time.Time, id, last string, closedAt *time.Time) {
+	ks, ok := w.rooms.(ClosedRoomKeysSink)
+	if !ok || last == "" || closedAt == nil || now.Sub(*closedAt) >= w.cfg.Cooldown {
+		return
+	}
+	w.mu.Lock()
+	seen := w.closed[last]
+	w.mu.Unlock()
+	if seen {
+		return
+	}
+	keys, ok := ks.RoomSignalKeys(last)
+	if !ok || len(keys) == 0 {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed[last] {
+		return
+	}
+	w.markClosedLocked(last)
+	w.pipe(id).cool(keys, last, *closedAt)
+	w.log.Info("watch: recovered the incident of a room closed before the watcher saw it",
+		"mode", string(w.cfg.Mode), "pipeline", id, "room", last, "keys", len(keys),
+		"closed_ago", now.Sub(*closedAt).Round(time.Second).String())
 }
 
 // inCooldown: the pending signal sig of the pipeline belongs to an incident
 // whose room closed less than the cooldown ago.
 func (w *Watcher) inCooldown(now time.Time, id, sig string) bool {
 	last, closedAt, found := w.rooms.LastRoomForKey(id, DedupKey(id))
+	w.recoverClosed(now, id, last, closedAt)
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	var keys []string
+	var pend []sigSnap
 	if ps := w.pipes[id]; ps != nil && ps.sigs[sig] != nil {
-		keys = ps.sigs[sig].keys(sig)
+		ss := ps.sigs[sig]
+		pend = []sigSnap{{id: sig, keys: ss.keys(sig), fired: ss.firedAt}}
 	}
-	return w.cooldownOf(now, id, keys, last, closedAt, found).on
+	return w.cooldownOf(now, id, pend, last, closedAt, found).on
 }
 
 // joinable applies the Q1 join rule to an open room: its newest event is
@@ -178,10 +227,26 @@ func joinable(now time.Time, info RoomInfo, maxAge time.Duration) bool {
 	return info.AlertSource != "" || (!info.OpenedAt.IsZero() && now.Sub(info.OpenedAt) < maxAge)
 }
 
+// titleFlags are the injection flags of a room's title (RoomTitleFlagsSink);
+// nil without the extension or for an unknown room.
+func (w *Watcher) titleFlags(roomID string) []string {
+	fs, ok := w.rooms.(RoomTitleFlagsSink)
+	if !ok {
+		return nil
+	}
+	flags, ok := fs.RoomTitleFlags(roomID)
+	if !ok {
+		return nil
+	}
+	return flags
+}
+
 // roomToJoin finds an open room of the pipeline that takes the evidence
 // instead of a new room (B1). With a RoomInfoSink an old room, or an old one a
 // person opened, is passed over and the watcher opens its own (QA G1: an old
-// manual room titled "test" swallowed an outage).
+// manual room titled "test" swallowed an outage); so is a room whose title is
+// flagged as a prompt injection (RoomTitleFlagsSink, QA S2). Every open goes
+// through here, an escalation's included.
 func (w *Watcher) roomToJoin(now time.Time, id string) (string, bool) {
 	ris, ok := w.rooms.(RoomInfoSink)
 	if !ok {
@@ -191,22 +256,37 @@ func (w *Watcher) roomToJoin(now time.Time, id string) (string, bool) {
 	if !ok || info.RoomID == "" {
 		return "", false
 	}
-	if joinable(now, info, w.cfg.JoinMaxAge) {
+	if w.mayJoin(now, id, info) {
 		return info.RoomID, true
 	}
-	w.once(id, func(ps *pipeState) *bool { return &ps.warnedStale }, func() {
-		by := "alert"
-		if info.AlertSource == "" {
-			by = "person"
-		}
-		args := []any{"mode", string(w.cfg.Mode), "pipeline", id, "room", info.RoomID, "opened_by", by,
-			"join_max_age", w.cfg.JoinMaxAge.String()}
-		if !info.LastEventAt.IsZero() {
-			args = append(args, "last_event_ago", now.Sub(info.LastEventAt).Round(time.Second).String())
-		}
-		w.log.Info("watch: not joining an old or manual room, opening the watcher's own", args...)
-	})
 	return "", false
+}
+
+// mayJoin applies the join rules to info and logs a refusal once per episode.
+func (w *Watcher) mayJoin(now time.Time, id string, info RoomInfo) bool {
+	if !joinable(now, info, w.cfg.JoinMaxAge) {
+		w.once(id, func(ps *pipeState) *bool { return &ps.warnedStale }, func() {
+			by := "alert"
+			if info.AlertSource == "" {
+				by = "person"
+			}
+			args := []any{"mode", string(w.cfg.Mode), "pipeline", id, "room", info.RoomID, "opened_by", by,
+				"join_max_age", w.cfg.JoinMaxAge.String()}
+			if !info.LastEventAt.IsZero() {
+				args = append(args, "last_event_ago", now.Sub(info.LastEventAt).Round(time.Second).String())
+			}
+			w.log.Info("watch: not joining an old or manual room, opening the watcher's own", args...)
+		})
+		return false
+	}
+	if flags := w.titleFlags(info.RoomID); len(flags) > 0 {
+		w.once(id, func(ps *pipeState) *bool { return &ps.warnedFlagged }, func() {
+			w.log.Warn("watch: not joining a room whose title is flagged as a possible prompt injection, opening the watcher's own",
+				"mode", string(w.cfg.Mode), "pipeline", id, "room", info.RoomID, "flags", strings.Join(flags, ","))
+		})
+		return false
+	}
+	return true
 }
 
 // Reasons an open opened nothing (pipeState.blocked), for the escalation line.
@@ -284,7 +364,7 @@ func (w *Watcher) escalateLocked(now time.Time, id string, ps *pipeState, t targ
 // layer (QA G2) without its own copy of this table.
 func SignalLayer(signal string) string {
 	switch signal {
-	case owners.SignalConnectorDown, owners.SignalConfigRisk, owners.SignalDLQGrowth:
+	case owners.SignalConnectorDown, owners.SignalConfigRisk, owners.SignalDLQGrowth, SignalConnectUnreachable:
 		return "kafka-connect"
 	case owners.SignalSlotInactive, owners.SignalSlotWAL, SignalSlotStall:
 		return "postgres"

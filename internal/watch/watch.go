@@ -194,7 +194,7 @@ const (
 var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
 	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart,
-	SignalSlotStall}
+	SignalSlotStall, SignalConnectUnreachable}
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -239,6 +239,10 @@ type pipeState struct {
 	lastStill time.Time
 	// stall is the slot_stall memory of the pipeline's slot (stall.go).
 	stall stallMem
+	// connFails counts the ticks in a row whose connector status reads all
+	// failed, since connFailSince (connect_signal.go).
+	connFails     int
+	connFailSince time.Time
 	// told lists, per room the pipeline posted into, the incident keys that
 	// room has been told about (newest last, capped). A room keeps its entry
 	// after the signals resolve, so a later close still knows its incident.
@@ -253,7 +257,7 @@ type pipeState struct {
 	// attempt opened nothing, for the escalation log line.
 	note, blocked string
 	// warned* keep "skipped" lines to one per episode.
-	warnedCooldown, warnedMax, warnedOpen, warnedResolve, warnedStale, erroredMax bool
+	warnedCooldown, warnedMax, warnedOpen, warnedResolve, warnedStale, warnedFlagged, erroredMax bool
 }
 
 func (ps *pipeState) sig(id string) *sigState {
@@ -525,7 +529,7 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string, tol
 	}
 	ps.roomID, ps.owned, ps.follower = "", false, false
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
-	ps.warnedStale, ps.erroredMax = false, false
+	ps.warnedStale, ps.warnedFlagged, ps.erroredMax = false, false, false
 }
 
 // Targets returns how many pipelines the watcher looks at: enabled, with at
