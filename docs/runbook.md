@@ -46,9 +46,13 @@ go run ./cmd/devctl unlock --owner [A2]         # release it when you're done
 ```
 
 Pass `--owner <tag>` on every mutating command, or set `PIPEROOM_STACK_OWNER=<tag>` once in
-your shell so you can drop the flag. The lock lives in a shared file (`PIPEROOM_STACK_LOCK`,
-default `C:\Users\Utkarsh\Desktop\interview\piperoom-bus\stack.lock` — change it if your repo
-layout differs) so it's visible to every agent's worktree, not just yours.
+your shell so you can drop the flag. The lock lives in a shared file so it's visible to every
+agent's worktree, not just yours. Its path is `PIPEROOM_STACK_LOCK`; when that is unset the
+default (`internal/stacklock`, used by `cmd/devctl/lock.go`) is `piperoom-bus/stack.lock` next to
+the main checkout: `<parent of the repo root>/piperoom-bus/stack.lock`, where the repo root is
+the one that holds the shared `.git` directory (`git rev-parse --git-common-dir`), so every
+worktree of one clone finds the same file. Change it (set `PIPEROOM_STACK_LOCK`) when your
+checkout lives elsewhere. Without git and without the variable, lock commands refuse to run.
 
 - A command whose `--owner` doesn't match the current holder refuses to run and names who
   holds it: `devctl: stack is locked by "[A3]" (you are "[A2]"); wait for them to run
@@ -108,10 +112,10 @@ against the cluster and only ever writes the `-out` file (`README.md` → *Pilot
 
 ## Slack bridge operations
 
-The bridge library (`internal/slackbridge`) is merged, but the server does not start it on
-`main` yet — wiring and the `SLACK_BOT_TOKEN` / `SLACK_CHANNEL_ID` / `PIPEROOM_PUBLIC_URL`
-env vars are pending in PR #24. These notes describe the library's behaviour, for when that
-lands.
+The server starts the bridge (`cmd/server/slack.go`) when `SLACK_BOT_TOKEN` and
+`SLACK_CHANNEL_ID` are both set and logs `slack bridge enabled` with the channel ID;
+`PIPEROOM_PUBLIC_URL` adds the room link to each thread. With several replicas only the
+elected leader mirrors rooms.
 
 - **Rotating the token.** The token is read once, when the bridge is built at server start;
   issue the new token in Slack, update the server's environment and restart the server. The
@@ -119,7 +123,8 @@ lands.
   event type and the Slack error code.
 - **Turning it off.** Unset both the token and the channel ID; the bridge then reports
   itself disabled and the server runs without it. Setting only one of the two is a
-  configuration error, not "off".
+  configuration error, not "off": the server refuses to start with
+  `level=ERROR msg="server: failed" err="server: slack bridge: slackbridge: token and channel id must be set together"`.
 - **`slack mirror stopped … code=not_in_channel`** (also `channel_not_found`, `is_archived`)
   — the bot is not in the channel or the channel is gone. Invite the bot / fix the channel
   ID.
@@ -128,8 +133,8 @@ lands.
   lacks `chat:write`. Rotate it as above.
 - In every such case **the room keeps working**: investigation, comments, approvals and
   hand-offs are unaffected; only that room's Slack mirror stops. Other codes are logged at
-  Warn as `slack post failed` and that one message is skipped. How a stopped mirror is
-  restarted after the fix is part of the PR #24 wiring.
+  Warn as `slack post failed` and that one message is skipped. After the fix, restart the
+  server: at start (and on a leader change) it mirrors every open room again.
 
 ## Upgrading to room limits (migration 00012)
 

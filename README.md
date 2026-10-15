@@ -125,10 +125,12 @@ writes `OWNERS_FILE` itself. Re-running it is covered in `docs/runbook.md`.
 
 ## Slack bridge
 
-**Status:** the `internal/slackbridge` library is merged; wiring it into `cmd/server` is
-pending in PR #24. On `main` today nothing reads `SLACK_BOT_TOKEN`, `SLACK_CHANNEL_ID` or
-`PIPEROOM_PUBLIC_URL`, so setting them has no effect yet. This section describes what the
-bridge does so the Slack side can be prepared.
+The server starts the bridge when `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are both set
+(`cmd/server/slack.go`, `internal/config/config.go`); with neither set it logs
+`slack bridge disabled` and runs without it. Setting only one of the two is a start-up
+error, not "off": the server exits with
+`level=ERROR msg="server: failed" err="server: slack bridge: slackbridge: token and channel id must be set together"`.
+`PIPEROOM_PUBLIC_URL`, when set, adds a link to the room in each thread's first message.
 
 The bridge mirrors each incident room into one thread in one Slack channel. It is
 **outbound only**: nothing typed in Slack reaches a room, and approvals happen only in
@@ -148,9 +150,9 @@ Slack app setup:
 3. Note the channel **ID** (like `C0123ABC`, from the channel details), not its `#name`;
    the bridge rejects names.
 
-Once PR #24 lands, the token, channel ID and public web URL will be given to the server
-through the env vars above; the token and channel must be set together. Operations
-(token rotation, turning it off, error codes) are in `docs/runbook.md`.
+Give the server the token and channel ID (and the public web URL for room links) through
+the env vars above. Operations (token rotation, turning it off, error codes) are in
+`docs/runbook.md`.
 
 ## Running a pilot (Docker, login)
 
