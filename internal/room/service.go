@@ -874,11 +874,25 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 
 // fillGapLocked folds the events between the snapshot and seq (exclusive)
 // that another replica appended. Caller holds st's lock.
+//
+// The read runs on a context detached from the caller's: our event is already
+// stored and is folded next whatever happens here, and folding it over a gap
+// skips the missing events for good (the follower and refresh see the
+// snapshot at our seq). A request whose client left right after the append
+// must not be the reason another replica's control.granted or approval is
+// lost on this one. One retry covers a dropped connection.
 func (s *Service) fillGapLocked(ctx context.Context, roomID string, st *roomState, seq int64) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coordTimeout)
+	defer cancel()
+	retried := false
 	for st.snap.LastSeq+1 < seq {
 		evs, err := s.store.Since(ctx, roomID, st.snap.LastSeq, int(min(seq-1-st.snap.LastSeq, 1000)))
+		if (err != nil || len(evs) == 0) && !retried && ctx.Err() == nil {
+			retried = true
+			continue
+		}
 		if err != nil || len(evs) == 0 {
-			s.log.Warn("room: fold events from other replicas failed", "room", roomID, "have", st.snap.LastSeq, "want", seq-1, "err", err)
+			s.log.Error("room: fold events from other replicas failed, the cached room misses them", "room", roomID, "have", st.snap.LastSeq, "want", seq-1, "err", err)
 			return
 		}
 		for _, ev := range evs {
