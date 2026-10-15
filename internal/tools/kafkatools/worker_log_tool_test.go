@@ -33,7 +33,7 @@ func logTool(t *testing.T, lines []clients.LogLine, readErr error) (tools.Tool, 
 	fl := &fakeLogReader{fn: func(context.Context, clients.WorkerLogQuery) ([]clients.LogLine, error) {
 		return lines, readErr
 	}}
-	d, _ := scopeFakes()
+	d, _ := scopeFakes(t)
 	d.ConnectLog = fl
 	d.Now = func() time.Time { return logNow }
 	return scopeTool(t, d, "connect_worker_log"), fl
@@ -336,7 +336,7 @@ func TestConnectWorkerLogReaderErrors(t *testing.T) {
 			_, deadline = ctx.Deadline()
 			return nil, ctx.Err()
 		}}
-		d, _ := scopeFakes()
+		d, _ := scopeFakes(t)
 		d.ConnectLog = fl
 		ctx, cancel := context.WithCancel(roomCtx())
 		cancel()
@@ -348,7 +348,7 @@ func TestConnectWorkerLogReaderErrors(t *testing.T) {
 }
 
 func TestConnectWorkerLogRegistration(t *testing.T) {
-	d, _ := scopeFakes()
+	d, _ := scopeFakes(t)
 	d.ConnectLog = nil
 	reg := tools.NewRegistry()
 	if err := Register(reg, d); err != nil {

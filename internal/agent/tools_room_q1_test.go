@@ -470,7 +470,25 @@ func TestNewProposeFixToolNeedsNoOwnership(t *testing.T) {
 
 // ---- propose_fix: impacted layers and risk level (G5) ----
 
-const connectorFix = `"steps":[{"action":"connect_update_connector_config","params":"{\"connector\":\"pg-orders-connector\",\"key\":\"decimal.handling.mode\",\"value\":\"double\"}","description":"use doubles"}]`
+const connectorFix = `"steps":[{"action":"connect_update_connector_config","params":"{\"connector\":\"pg-orders-connector\",\"key\":\"decimal.handling.mode\",\"value\":\"string\"}","description":"carry decimals as strings"}]`
+
+// The fixture step is one the real action registry accepts, and the action
+// itself reports consumer+warehouse at medium risk. The agent's own risk_level
+// is a separate field: the cases below pass "high" through unchanged.
+func TestConnectorFixImpactIsConsumerAndWarehouse(t *testing.T) {
+	act, ok := realActions(t).Get("connect_update_connector_config")
+	if !ok {
+		t.Fatal("connect_update_connector_config is not registered")
+	}
+	imp, ok := act.(actions.Impacting)
+	if !ok {
+		t.Fatalf("%T does not implement actions.Impacting", act)
+	}
+	got := imp.Impact(json.RawMessage(`{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"string"}`))
+	if !slices.Equal(got.Layers, []string{"consumer", "warehouse"}) || got.RiskLevel != events.RiskMedium {
+		t.Fatalf("impact = %v %q, want consumer+warehouse at medium", got.Layers, got.RiskLevel)
+	}
+}
 
 func TestProposeFixCarriesImpactedLayersAndRisk(t *testing.T) {
 	cases := []struct {
@@ -489,7 +507,7 @@ func TestProposeFixCarriesImpactedLayersAndRisk(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			store := &withdrawingProposals{}
 			tool := roomToolsWithActions(t, Deps{Proposals: store})["propose_fix"]
-			in := `{"title":"decimals as doubles",` + connectorFix + `,"risk":"precision","rollback":"set string back"` + c.extra + `}`
+			in := `{"title":"decimals as strings",` + connectorFix + `,"risk":"precision","rollback":"set precise back"` + c.extra + `}`
 			if _, err := runTool(t, tool, in); err != nil {
 				t.Fatalf("run: %v", err)
 			}

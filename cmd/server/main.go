@@ -58,6 +58,11 @@ func run() error {
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
 	showVersion := flag.Bool("version", false, "print the build version and exit")
+	var down migrateDownOpts
+	flag.IntVar(&down.n, "migrate-down", 0, "roll back the N most recent migrations of the room database and exit; a dry run unless -migrate-down-apply")
+	flag.BoolVar(&down.apply, "migrate-down-apply", false, "with -migrate-down: really roll back (needs -migrate-down-confirm)")
+	flag.StringVar(&down.confirm, "migrate-down-confirm", "", "with -migrate-down-apply: the database's current version, as the dry run printed it")
+	flag.BoolVar(&down.dropEvents, "migrate-down-drop-events", false, "with -migrate-down-apply: allow a rollback that deletes room_events data")
 	flag.Parse()
 
 	if *showVersion {
@@ -67,6 +72,17 @@ func run() error {
 	cfg := config.Load()
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
+	}
+	if down.n != 0 || down.apply || down.confirm != "" || down.dropEvents {
+		if down.n == 0 {
+			return errDownStrayFlag
+		}
+		if *demoMode {
+			return errors.New("server: -migrate-down needs the room database; it cannot run with -demo")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return migrateDownMain(ctx, cfg.RoomDBURL, down, os.Stdout)
 	}
 	// A bad PIPEROOM_LOG_LEVEL or _FORMAT stops the start before anything is
 	// logged in a format the collector would not parse.

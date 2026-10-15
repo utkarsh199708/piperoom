@@ -214,6 +214,10 @@ type Hit struct {
 	// title; FixActions are the action names of that proposal's steps.
 	FixThatWorked string   `json:"fix_that_worked,omitempty"`
 	FixActions    []string `json:"fix_actions,omitempty"`
+	// Cause and LabelFix are the last room.labelled's cause and fix_that_worked, typed by a person.
+	// LabelFix is never the executed proposal's title (that fallback stays in FixThatWorked).
+	Cause    string `json:"cause,omitempty"`
+	LabelFix string `json:"label_fix,omitempty"`
 	// DurationS is room open to close in seconds; 0 = unknown.
 	DurationS int64 `json:"duration_s,omitempty"`
 	// ClosedBy is the closer's name, only when the server verified it.
@@ -312,6 +316,12 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		}
 		if h.Resolution != "" {
 			fmt.Fprintf(&sb, " %s", clipRunes(h.Resolution, summaryResolutionBytes))
+		}
+		if h.Cause != "" {
+			fmt.Fprintf(&sb, "\n    cause: %s", h.Cause)
+		}
+		if h.LabelFix != "" {
+			fmt.Fprintf(&sb, "\n    fix: %s", h.LabelFix)
 		}
 		fmt.Fprintf(&sb, "\n    room %s, layer %s, score %.1f", h.RoomID, layer, h.Score)
 		if h.Fingerprint != "" {
@@ -432,7 +442,9 @@ func hitOf(r pastRoom, score float64, fp string) Hit {
 		Score:       math.Round(score*100) / 100,
 		Fingerprint: fp,
 	}
-	h.FixThatWorked = clipRunes(oneLine(r.FixThatWorked), maxResolutionBytes)
+	h.Cause = clipRunes(oneLine(r.Cause), maxResolutionBytes)
+	h.LabelFix = clipRunes(oneLine(r.FixThatWorked), maxResolutionBytes)
+	h.FixThatWorked = h.LabelFix
 	if h.FixThatWorked == "" {
 		h.FixThatWorked = clipRunes(oneLine(r.FixTitle), maxResolutionBytes)
 	}

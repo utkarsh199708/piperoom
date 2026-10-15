@@ -106,6 +106,10 @@ type runner struct {
 	// held are quiet inputs (alert updates) drained while the agent waited
 	// for a person: they go out with the next batch that wakes it.
 	held []HumanInput
+
+	// past is the worked-examples block of the first user turn (examples.go),
+	// "" when there is none.
+	past string
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -181,6 +185,7 @@ func (r *runner) run(ctx context.Context) error {
 	// The model reads the verdict of an early recovery in its first turn. Only
 	// an episode that ends after a recovery parks, in pauseForHumanInput.
 	initialInputs, outcome := r.handleBatch(ctx, initialInputs)
+	r.past = r.pastIncidents(ctx, pastIncidentsRunBytes, pastIncidentsTimeout)
 	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -388,7 +393,7 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 }
 
 func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
-	blocks := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(firstUserMessage(r.alert))}
+	blocks := openingBlocks(r.alert, r.past)
 	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
 	return anthropic.NewBetaUserMessage(blocks...)
 }
