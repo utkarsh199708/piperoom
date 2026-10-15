@@ -233,7 +233,10 @@ func (w *Watcher) block(id, why string) {
 // so it is posted again with a note that it kept firing after the close; the
 // open that follows skips the cooldown. The cap still holds (openRoom logs an
 // error then). Each signal escalates once per episode: closed again while it
-// fires, it stays acked until it clears. Caller holds w.mu.
+// fires, it stays acked until it clears. An escalation that was blocked by
+// the cap, a failing open or a storm wait opened nothing, so it does not spend
+// that budget: the next room that carries the signal gives it back (recordPost).
+// Caller holds w.mu.
 func (w *Watcher) escalateLocked(now time.Time, id string, ps *pipeState, t target) {
 	e := w.cfg.EscalateAfter
 	if e <= 0 {
@@ -259,6 +262,7 @@ func (w *Watcher) escalateLocked(now time.Time, id string, ps *pipeState, t targ
 			continue
 		}
 		ss.escalated = true
+		ss.escFree = ss.phase != phaseAcked && why != blockedCooldown
 		if why == "" {
 			why = "no room yet"
 		}

@@ -89,7 +89,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 	var out []target
 	for _, p := range w.own.Pipelines {
 		cfg := p.Watch()
-		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
+		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled || cfg.SlotStall.Enabled ||
 			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled || cfg.ConsumerLag.Enabled || cfg.GroupUnstable.Enabled ||
 			cfg.OffsetBelowLogStart.Enabled) {
 			continue
@@ -124,7 +124,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 // needsSlots reports whether any target reads the replication slots.
 func needsSlots(ts []target) bool {
 	for _, t := range ts {
-		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
+		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled || t.cfg.SlotStall.Enabled {
 			return true
 		}
 	}
@@ -167,7 +167,7 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 	needCfg := map[string]bool{}
 	for _, t := range ts {
 		// The slot name, the heartbeat, the DLQ topic and the risks all come from the config.
-		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled ||
+		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled || t.cfg.SlotStall.Enabled ||
 			t.cfg.DLQGrowth.Enabled || t.cfg.ConfigRisk.Enabled
 		for _, c := range t.connectors {
 			if _, ok := obs.conns[c]; !ok {

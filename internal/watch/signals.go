@@ -62,7 +62,7 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 		if t.cfg.ConnectorDown.Enabled {
 			w.apply(now, t, ps, owners.SignalConnectorDown, t.cfg.ConnectorDown, cr.reading(), fired)
 		}
-		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
+		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled || t.cfg.SlotStall.Enabled {
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
 		}
 		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
@@ -94,7 +94,9 @@ func (w *Watcher) evaluateSlot(now time.Time, t target, ps *pipeState, cr connRe
 		ss := ps.sig(owners.SignalSlotWAL)
 		r := w.slotWALReading(now, t, ps, ss, row, cr, hb)
 		w.apply(now, t, ps, owners.SignalSlotWAL, t.cfg.SlotWAL.WatchSignal, r, fired)
-		w.apply(now, t, ps, SignalSlotStall, slotStallCfg(t.cfg), slotStallReading(now, ps.slot, &ps.stall, row, hb), fired)
+	}
+	if t.cfg.SlotStall.Enabled {
+		w.apply(now, t, ps, SignalSlotStall, slotStallCfg(t.cfg), slotStallReading(now, t.cfg.SlotStall, ps.slot, &ps.stall, row, heartbeatOf(t, obs)), fired)
 	}
 }
 

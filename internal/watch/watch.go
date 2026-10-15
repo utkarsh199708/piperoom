@@ -43,6 +43,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -488,19 +489,32 @@ func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 	// followers of a storm room. A room the pipeline left when its signals
 	// cleared only cools its incident, so a flap stays quiet.
 	for id, ps := range w.pipes {
+		var told []string
+		known := false
+		if i := ps.toldIndex(roomID); i >= 0 {
+			told, known = slices.Clone(ps.told[i].keys), true
+		}
 		ps.coolRoom(roomID, now)
 		if ps.roomID == roomID {
-			w.ackLocked(id, ps, roomID)
+			w.ackLocked(id, ps, roomID, told, known)
 		}
 	}
 }
 
-// ackLocked turns firing signals into acked, puts their keys into cooldown and
-// forgets the room.
-func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
+// ackLocked turns the firing signals the closed room carried into acked, puts
+// their keys into cooldown and forgets the room. told are the keys the room was
+// told about (known is false when the watcher never recorded any, such as after
+// a restart: every notified signal is then taken as carried). A signal the room
+// never heard about stays firing and unnotified, so the next tick opens or joins
+// a room for it (QA Q2 F3). Caller holds w.mu.
+func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string, told []string, known bool) {
 	now := w.clock.Now()
 	for id, ss := range ps.sigs {
 		if ss.phase == phaseFiring {
+			if !ss.notified || (known && !carried(told, ss.keys(id))) {
+				ss.notified = false
+				continue
+			}
 			ss.phase = phaseAcked
 			ss.ackSev = ss.last.sev
 			ss.ackedAt = now
@@ -529,4 +543,14 @@ func (w *Watcher) openOwned() int {
 		}
 	}
 	return n
+}
+
+// carried reports whether every key is among told.
+func carried(told, keys []string) bool {
+	for _, k := range keys {
+		if !slices.Contains(told, k) {
+			return false
+		}
+	}
+	return true
 }
