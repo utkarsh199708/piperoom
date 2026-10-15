@@ -488,3 +488,56 @@ func TestPagingFatalSlackErrorStopsRoom(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func nudgeEvent(seq int64, proposal, layer string) events.Event {
+	return ev(seq, events.ApprovalNudged, "bo", events.ApprovalNudgedPayload{ProposalID: proposal, Layer: layer})
+}
+
+// A nudge is a thread reply for everyone and a page for the nudged layer's
+// owners only; other layers' owners, the driver and on-call are not paged.
+func TestPagingNudge(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	opts := pagingOpts()
+	opts.Layers["postgres"] = []string{owner2}
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, nudgeEvent(2, "p1", "kafka"), nudgeEvent(3, "p1", "kafka")}}, fs,
+		func(o *Options) { o.Paging = opts })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = b.Run(ctx, "r1")
+	if fs.count() != 4 { // parent, 2 notices, 1 page (repeat is not paged again)
+		t.Fatalf("requests = %d", fs.count())
+	}
+	if n, ids := mentionCount(fs.reqs); n != 1 || len(ids) != 1 || ids[owner1] == 0 {
+		t.Errorf("pages=%d ids=%v, want one page for %s only", n, ids, owner1)
+	}
+	assertOnlyTrustedMarkup(t, fs.reqs, "nudge")
+}
+
+func TestPagingNudgeUnknownLayerAndInjection(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	for _, layer := range []string{"unknown", "<@U0EVIL001>", "<!channel>"} {
+		fs := &fakeSlack{}
+		b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, nudgeEvent(2, "<!here>", layer)}}, fs,
+			func(o *Options) { o.Paging = pagingOpts() })
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_ = b.Run(ctx, "r1")
+		cancel()
+		if n, _ := mentionCount(fs.reqs); n != 0 || fs.count() != 2 {
+			t.Errorf("%q: requests=%d pages=%d", layer, fs.count(), n)
+		}
+		assertOnlyTrustedMarkup(t, fs.reqs, layer)
+	}
+}
+
+func TestNudgeWithoutPagingConfigIsReplyOnly(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, nudgeEvent(2, "p1", "kafka")}}, fs, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = b.Run(ctx, "r1")
+	if n, _ := mentionCount(fs.reqs); n != 0 || fs.count() != 2 {
+		t.Errorf("requests=%d pages=%d", fs.count(), n)
+	}
+}
