@@ -1,0 +1,78 @@
+{
+ "asOf": "2026-10-15 10:20 UTC",
+ "features": [
+  {"id":"F1","name":"Decision bar, room status, attention","sub":[
+   {"id":"F1a","agent":"A6","what":"One derived room status for header, list, pill, ⌘K","prs":[154],"s":"done"},
+   {"id":"F1b","agent":"A6","what":"Sticky decision bar, run confirm, idle composer","prs":[162],"s":"done"},
+   {"id":"F1c","agent":"A6","what":"Kill double scroll, legacy CSS, Vite favicon","prs":[156],"s":"done"},
+   {"id":"F1d","agent":"A6","what":"Attention: title, favicon dot, toasts, \"Needs you N\"","prs":[163],"s":"done"}]},
+  {"id":"F2","name":"Hand-off that survives, post-mortem draft","sub":[
+   {"id":"F2a","agent":"A6","what":"Web: pinned shift summary, export, post-mortem view","prs":[],"s":"todo","note":"No PR and no web code for it on main. Nobody is working on it."},
+   {"id":"F2b","agent":"A5","what":"Post-mortem route, events, close hook, verification list","prs":[185,236],"s":"done"},
+   {"id":"F2c","agent":"A4","what":"WritePostmortem closing-summary writer","prs":[168],"s":"done"}]},
+  {"id":"F3","name":"Evidence receipts","sub":[
+   {"id":"F3b","agent":"A2","what":"Connect, Schema Registry, Kafka record provenance","prs":[157],"s":"done"},
+   {"id":"F3c","agent":"A3","what":"Postgres and warehouse record SQL provenance","prs":[158],"s":"done"},
+   {"id":"F3d","agent":"A4","what":"Provenance ledger, unbacked terms, hand-off check","prs":[242,244],"s":"done"},
+   {"id":"F3e","agent":"A6","what":"Ran receipts, citation chips, unbacked marks","prs":[245],"s":"review"},
+   {"id":"F3f","agent":"C3","what":"Snowflake records SQL provenance","prs":[159],"s":"done"},
+   {"id":"F3g","agent":"A6","what":"Structured evidence for six read tools","prs":[247],"s":"review"},
+   {"id":"F3-fix","agent":"LEAD-ARCH","what":"Contract: clean hand-off keeps violations: []","prs":[249],"s":"review"}]},
+  {"id":"F4","name":"Fix ceremony: preview, run, verify, roll back","sub":[
+   {"id":"F4b","agent":"A2","what":"Action preview and dry-run","prs":[155],"s":"done"},
+   {"id":"F4c","agent":"A5","what":"Preview proposals, store proposal.previewed","prs":[171],"s":"done"},
+   {"id":"F4d","agent":"A4","what":"Typed verification event and follow-ups","prs":[234,235],"s":"done"},
+   {"id":"F4e","agent":"A6","what":"Blast radius and execution card","prs":[202],"s":"done"},
+   {"id":"F4f","agent":"A6","what":"Verification card, close nudge, roll back","prs":[203],"s":"done"}]},
+  {"id":"F5","name":"Suggest without a driver, activity feed","sub":[
+   {"id":"F5a","agent":"A6","what":"Composer modes, chips, curated feed","prs":[180,195],"s":"done"},
+   {"id":"F5b","agent":"A5","what":"Id-free agent text, suggestions with no driver","prs":[169],"s":"done"}]},
+  {"id":"F6","name":"Proactive triage","sub":[
+   {"id":"F6b","agent":"A7","what":"Watcher: consumer-group signals, crash loops","prs":[179],"s":"done"},
+   {"id":"F6b-owners","agent":"A3","what":"Owners: parse new signal keys","prs":[167],"s":"done"},
+   {"id":"F6c","agent":"A4","what":"Agent triage pass, alert_update inputs","prs":[178],"s":"done"},
+   {"id":"F6d","agent":"A5","what":"First look, rooms list over WebSocket","prs":[194,201],"s":"done"},
+   {"id":"F6e","agent":"A6","what":"Pushed rooms list, first-look card","prs":[197],"s":"done"}]},
+  {"id":"F7","name":"Lane, trace, mobile","sub":[
+   {"id":"F7a","agent":"A6","what":"Compact pipeline lane","prs":[165],"s":"done"},
+   {"id":"F7b","agent":"A6","what":"Trace leads with the verdict","prs":[166],"s":"done"},
+   {"id":"F7c","agent":"A6","what":"Tabs below 1280px, bottom sheet, touch","prs":[184,186],"s":"done"}]},
+  {"id":"F8","name":"What changed, similar incidents, runbook checklist","sub":[
+   {"id":"F8b","agent":"A3","what":"what_changed tool, similar_incidents labels","prs":[176],"s":"done"},
+   {"id":"F8c","agent":"A7","what":"Watcher feeds the change log, masks secrets","prs":[183,200],"s":"done"},
+   {"id":"F8d","agent":"A5","what":"Change log store, label and checklist routes","prs":[174],"s":"done"},
+   {"id":"F8e","agent":"A6","what":"What-changed lane, checklist, label form","prs":[188],"s":"done"},
+   {"id":"F8f","agent":"C11","what":"Runbook items in runbook_lookup data","prs":[164],"s":"done"},
+   {"id":"F8g","agent":"A4","what":"what_changed is the second read","prs":[191],"s":"done"}]},
+  {"id":"F9","name":"Hypothesis verdict, presence, catch-up","sub":[
+   {"id":"F9b","agent":"A5","what":"Verdicts, nudges, people layers, presence","prs":[177],"s":"done"},
+   {"id":"F9c1","agent":"A6","what":"Verdicts, who's-here layers, nudge","prs":[187],"s":"done"},
+   {"id":"F9c2","agent":"A6","what":"Lease awareness, catch-up strip","prs":[189],"s":"done"},
+   {"id":"F9-slack","agent":"C12","what":"Slack follow-up: nudges and lease-expiry paging","prs":[],"s":"todo","note":"Named as a C12 follow-up in the task file and AGENTS.md (R11). No PR found."}]},
+  {"id":"F10","name":"Resilience and small traps","sub":[
+   {"id":"F10a","agent":"A6","what":"Dialogs per room, offline sends, lease floor","prs":[190,192],"s":"done"},
+   {"id":"F10b","agent":"A4","what":"Escape driver steers, ids out of prose","prs":[160],"s":"done"},
+   {"id":"F10c","agent":"A5","what":"Stop retrying unretryable agent errors","prs":[161],"s":"done"},
+   {"id":"F10d","agent":"C1","what":"README and runbook: Slack bridge, stack lock","prs":[],"s":"todo","note":"No PR, and README.md / docs/runbook.md have not changed since the F wave started."}]},
+  {"id":"F11","name":"Cost and insight","sub":[
+   {"id":"F11a","agent":"A5","what":"Snapshot insight, agent-stats route","prs":[175],"s":"done"},
+   {"id":"F11b","agent":"A6","what":"Cost chip, first insight, track record","prs":[198],"s":"done"},
+   {"id":"F11-evals","agent":"C6","what":"evals/README reconciles the cost numbers","prs":[],"s":"check","note":"No PR found. Confirm with C6 whether it is still needed."}]},
+  {"id":"F12","name":"Deep signals and new scenarios","sub":[
+   {"id":"F12a","agent":"A2","what":"Cluster health, rates, ACLs, TLS expiry","prs":[172,182],"s":"done"},
+   {"id":"F12b","agent":"A3","what":"Load errors, reconcile counts, Debezium metrics","prs":[170,173,181],"s":"done"},
+   {"id":"F12c","agent":"C7","what":"Four new incident scenarios","prs":[196,199],"s":"done"},
+   {"id":"F12d","agent":"C6 + C1","what":"Eval baseline and regression gate","prs":[],"s":"check","note":"No [F12d] PR. L1c's evals-live job and baseline (#215, #248) may cover it. Confirm and close."}]},
+  {"id":"L1","name":"Learn from closed rooms","sub":[
+   {"id":"L1a","agent":"C6","what":"Export labelled rooms as eval cases","prs":[207],"s":"done"},
+   {"id":"L1b","agent":"A4","what":"Past incidents as worked examples","prs":[205],"s":"done"},
+   {"id":"L1c","agent":"C1 + C6","what":"evals-live CI job and baseline","prs":[208,211,212,214,215,248],"s":"done"}]},
+  {"id":"R","name":"R wave leftovers","sub":[
+   {"id":"R7","agent":"C1","what":"Full dev-stack integration job, smoke, release image","prs":[246],"s":"review","note":"Replaces #133, which was closed."},
+   {"id":"R10-fu","agent":"A6","what":"Show declined suggestions","prs":[152],"s":"check","note":"#152 was closed without merging. Decide: drop it or re-dispatch."}]},
+  {"id":"Q","name":"QA rounds (no row in AGENTS.md)","sub":[
+   {"id":"Q2","agent":"?","what":"QA sweep fixes: PII redaction, read-only transactions","prs":[151],"s":"blocked","note":"No lane tag; touches A1, A2, A3, A7, C5 folders. Stale since 00:13. Split it per agent."},
+   {"id":"Q5","agent":"?","what":"Room recap, wake on executed fixes, injectscan names","prs":[243,233],"s":"blocked","note":"Untagged. #233 contains all of #243 plus the Q6 and Q7 task files. Close #243, split #233 per agent."},
+   {"id":"Q6, Q7","agent":"?","what":"QA round 3 findings","prs":[],"s":"todo","note":"Task files exist only on #233's branch. No agent assigned."}]}
+ ]
+}

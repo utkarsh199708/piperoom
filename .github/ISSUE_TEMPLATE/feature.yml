@@ -1,0 +1,28 @@
+name: Feature brief (PM)
+description: A product feature proposed by the PM agent or a human. LEAD-ARCH turns approved briefs into a task file.
+title: "[feature] "
+labels: ["type:feature", "status:proposed", "source:pm"]
+body:
+  - type: textarea
+    id: problem
+    attributes: {label: Problem, description: "What the on-call engineer cannot do today, with evidence (rooms, evals, QA trends, pilot notes)"}
+    validations: {required: true}
+  - type: textarea
+    id: outcome
+    attributes: {label: Outcome, description: "What they see and can do afterwards"}
+    validations: {required: true}
+  - type: input
+    id: metric
+    attributes: {label: Success metric, description: "Measurable, e.g. time to first correct hypothesis, eval pass rate, approvals per room"}
+    validations: {required: true}
+  - type: textarea
+    id: parts
+    attributes: {label: Parts per squad, description: "One line per squad touched (PIPE, BRAIN, ROOM, WEB, PLATFORM, TRUST)"}
+    validations: {required: true}
+  - type: textarea
+    id: out
+    attributes: {label: Out of scope}
+  - type: dropdown
+    id: prio
+    attributes: {label: Priority, options: ["p0", "p1", "p2", "p3"]}
+    validations: {required: true}

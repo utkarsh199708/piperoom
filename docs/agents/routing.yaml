@@ -1,0 +1,65 @@
+# Path -> squad -> lane routing. QA uses it to route a finding to the owning lane; the dispatcher uses it to
+# pick a lane for a ticket. Folder ownership itself is defined in AGENTS.md §2 and wins on any conflict.
+# First match wins, so specific paths come before their parents.
+#
+# kind: qoder = local Qoder agent (dispatched through Slack / the issue, runs on the Windows dev machine)
+#       cloud = claude.ai/code session (the dispatcher starts it itself)
+
+squads:
+  PIPE:     {mission: "read-only visibility into Kafka, Connect, Debezium, Postgres, warehouses; fix actions", reviewer: LEAD-REVIEW}
+  BRAIN:    {mission: "agent finds the right cause, calibrated, with receipts, within budget", reviewer: LEAD-REVIEW}
+  ROOM:     {mission: "event log, leases, steering, approvals, executor, hand-off, alert in, Slack", reviewer: LEAD-REVIEW}
+  WEB:      {mission: "the live room UI", reviewer: LEAD-REVIEW}
+  PLATFORM: {mission: "CI, build, release, dev stack, deploy, load tests", reviewer: LEAD-CLOUD}
+  TRUST:    {mission: "security design, audits, pilot docs (no code)", reviewer: LEAD-CLOUD}
+
+routes:
+  # contracts: never routed to a worker; the dispatcher files them for LEAD-ARCH
+  - {paths: [internal/tools/tool.go, internal/events/events.go, internal/clients/clients.go, internal/actions/action.go,
+             internal/agent/contract.go, internal/topology/graph.go, internal/config/config.go, internal/version/version.go,
+             docs/api.md, AGENTS.md, tasks/**], squad: LEADS, lane: LEAD-ARCH, kind: lead}
+
+  # PIPE
+  - {paths: [internal/clients/snowflake/**], squad: PIPE, lane: C3, kind: cloud}
+  - {paths: [internal/clients/connect/**, internal/clients/schemareg/**, internal/clients/kafka/**, internal/clients/netsec/**,
+             internal/tools/kafkatools/**, internal/actions/**], squad: PIPE, lane: A2, kind: qoder}
+  - {paths: [internal/clients/postgres/**, internal/clients/warehouse/**, internal/clients/pgconv/**, internal/clients/prom/**,
+             internal/tools/dbtools/**, internal/tools/debeziumtools/**, internal/tools/changes/**, internal/tools/scope.go,
+             internal/topology/**, internal/owners/**], squad: PIPE, lane: A3, kind: qoder}
+  - {paths: [internal/watch/**, internal/dlq/**], squad: PIPE, lane: A7, kind: qoder}
+  - {paths: [cmd/discover/**, internal/discover/**], squad: PIPE, lane: C10, kind: cloud}
+
+  # BRAIN
+  - {paths: [evals/scenarios/*.yaml, evals/scenarios/README.md], squad: BRAIN, lane: C7, kind: cloud}
+  - {paths: [evals/**], squad: BRAIN, lane: C6, kind: cloud}
+  - {paths: [internal/tools/runbooks/**], squad: BRAIN, lane: C11, kind: cloud}
+  - {paths: [internal/agent/**, internal/wiring/**, cmd/investigate/**, internal/tools/similarincidents/**,
+             internal/textsearch/**, internal/textnorm/**, internal/redact/**, internal/injectscan/**], squad: BRAIN, lane: A4, kind: qoder}
+
+  # ROOM
+  - {paths: [internal/alertin/**], squad: ROOM, lane: C5, kind: cloud}
+  - {paths: [internal/slackbridge/**], squad: ROOM, lane: C12, kind: cloud}
+  - {paths: [migrations/**, internal/store/**, internal/room/**, internal/httpapi/**, internal/ws/**, cmd/server/**,
+             internal/auth/**], squad: ROOM, lane: A5, kind: qoder}
+
+  # WEB
+  - {paths: [web/**], squad: WEB, lane: A6, kind: qoder}
+
+  # PLATFORM
+  - {paths: [.github/**, Makefile, Dockerfile, deploy/**, README.md, docs/runbook.md, cmd/loadtest/**, internal/loadtest/**],
+     squad: PLATFORM, lane: C1, kind: cloud}
+  - {paths: [dev/**, cmd/devctl/**, cmd/devconsumer/**, internal/testenv/**, docs/demo/**], squad: PLATFORM, lane: A1, kind: qoder}
+
+  # TRUST
+  - {paths: [docs/security/**, docs/design/**, docs/audits/**, docs/pilot/**], squad: TRUST, lane: C9, kind: cloud}
+
+# Surge lanes: when a squad scales up, the dispatcher adds lanes by splitting a base lane's folders along these
+# lines. A surge lane owns only its split; it hands the folders back to the base lane when it is retired.
+surge_splits:
+  A5: [[internal/room/**], [internal/httpapi/**, internal/ws/**], [internal/store/**, migrations/**, internal/auth/**, cmd/server/**]]
+  # web/src/components is flat: split by layer, and a surge lane names its exact component files in the ticket
+  A6: [[web/src/components/**, web/src/index.css], [web/src/state/**, web/src/api/**, web/src/hooks/**, web/src/lib/**, web/src/context/**]]
+  A4: [[internal/agent/**], [internal/wiring/**, cmd/investigate/**], [internal/redact/**, internal/injectscan/**, internal/textnorm/**, internal/textsearch/**, internal/tools/similarincidents/**]]
+  A2: [[internal/clients/kafka/**, internal/tools/kafkatools/**], [internal/clients/connect/**, internal/clients/schemareg/**, internal/actions/**]]
+  A3: [[internal/clients/postgres/**, internal/tools/dbtools/**], [internal/topology/**, internal/owners/**, internal/tools/changes/**]]
+  C6: [[evals/*.go, evals/cmd/**], [evals/gen/**, evals/baseline*/**]]

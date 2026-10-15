@@ -1,0 +1,24 @@
+name: Bug (QA)
+description: One confirmed finding with a reproduction. Filed by QA or anyone.
+title: "[bug] "
+labels: ["type:bug", "status:ready"]
+body:
+  - type: dropdown
+    id: sev
+    attributes: {label: Severity, options: ["critical", "high", "medium", "low"]}
+    validations: {required: true}
+  - type: input
+    id: where
+    attributes: {label: Where, description: "file:line the fix must touch (routes the ticket via docs/agents/routing.yaml)"}
+    validations: {required: true}
+  - type: textarea
+    id: scenario
+    attributes: {label: Scenario, description: "What happens, step by step, and what should happen instead"}
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes: {label: Reproduction, description: "Failing test, or command plus output", render: text}
+    validations: {required: true}
+  - type: textarea
+    id: fix
+    attributes: {label: Suggested fix}

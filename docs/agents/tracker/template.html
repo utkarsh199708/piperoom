@@ -1,0 +1,162 @@
+<title>Piperoom Feature Tracker</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: a work board. Summary strip, then "needs an owner", then one block per feature with sub-task rows. */
+:root{
+  --bg:#f5f7f7; --panel:#ffffff; --fg:#17212b; --muted:#5b6873; --line:#dde3e6; --accent:#0e6b74;
+  --done:#2f7d4f; --done-bg:#e3f2e8; --review:#1f5fa8; --review-bg:#e2ecf8;
+  --todo:#b3261e; --todo-bg:#fbe6e4; --blocked:#a35a00; --blocked-bg:#fbefdc; --check:#6b4fa3; --check-bg:#eee8f8;
+  --f-body:"IBM Plex Sans",system-ui,sans-serif; --f-head:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#11171c; --panel:#182128; --fg:#e4eaee; --muted:#93a1ab; --line:#2a353d; --accent:#5cc2cb;
+  --done:#7fd19c; --done-bg:#1c3326; --review:#8dbbf0; --review-bg:#1b2b40; --todo:#f19a92; --todo-bg:#3b1f1d;
+  --blocked:#f0b765; --blocked-bg:#3a2a14; --check:#c2adf0; --check-bg:#2b2340; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#11171c; --panel:#182128; --fg:#e4eaee; --muted:#93a1ab; --line:#2a353d; --accent:#5cc2cb;
+  --done:#7fd19c; --done-bg:#1c3326; --review:#8dbbf0; --review-bg:#1b2b40; --todo:#f19a92; --todo-bg:#3b1f1d;
+  --blocked:#f0b765; --blocked-bg:#3a2a14; --check:#c2adf0; --check-bg:#2b2340; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;line-height:1.45}
+.wrap{max-width:1080px;margin:0 auto;padding-block:24px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:22px}
+h1{font-family:var(--f-head);font-size:26px;margin:0;letter-spacing:.01em;text-wrap:balance}
+h2{font-family:var(--f-head);font-size:16px;margin:0;letter-spacing:.02em;text-transform:uppercase;color:var(--muted)}
+.sub{color:var(--muted);margin:4px 0 0}
+.mono{font-family:var(--f-mono);font-size:12.5px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:grid;gap:2px;cursor:pointer;text-align:left;font:inherit;color:inherit}
+.stat:focus-visible,.chip:focus-visible,select:focus-visible,.tab:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.stat b{font-family:var(--f-mono);font-size:22px;font-variant-numeric:tabular-nums}
+.stat[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.tabs{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.tab{background:var(--panel);border:0;padding:7px 14px;font:inherit;color:var(--muted);cursor:pointer}
+.tab[aria-selected="true"]{background:var(--accent);color:var(--bg);font-weight:600}
+select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg)}
+.alert{border:1px solid var(--todo);background:var(--todo-bg);border-radius:6px;padding:12px 14px;display:grid;gap:8px}
+.alert h2{color:var(--todo)}
+.alert ul{margin:0;padding-left:18px;display:grid;gap:4px}
+.group{background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.ghead{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline;padding:10px 14px;border-bottom:1px solid var(--line)}
+.ghead .gid{font-family:var(--f-mono);font-weight:600;color:var(--accent)}
+.ghead .gname{font-weight:600;flex:1;min-width:0}
+.bar{display:flex;height:6px;width:120px;border-radius:3px;overflow:hidden;background:var(--line)}
+.bar i{display:block;height:100%}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+td{padding:8px 14px;border-top:1px solid var(--line);vertical-align:top}
+tr:first-child td{border-top:0}
+td.id{font-family:var(--f-mono);font-size:12.5px;white-space:nowrap;width:1%}
+td.who{white-space:nowrap;width:1%}
+td.prs{white-space:nowrap;width:1%;font-family:var(--f-mono);font-size:12.5px}
+td.st{white-space:nowrap;width:1%}
+.what{min-width:200px}
+.note{color:var(--muted);font-size:12.5px;margin-top:2px}
+.chip{display:inline-block;font-family:var(--f-mono);font-size:12px;padding:1px 7px;border-radius:4px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;letter-spacing:.02em}
+.s-done{color:var(--done);background:var(--done-bg)} .s-review{color:var(--review);background:var(--review-bg)}
+.s-todo{color:var(--todo);background:var(--todo-bg)} .s-blocked{color:var(--blocked);background:var(--blocked-bg)} .s-check{color:var(--check);background:var(--check-bg)}
+a{color:var(--accent)}
+.empty{color:var(--muted);padding:14px}
+footer{color:var(--muted);font-size:12.5px}
+@media (max-width:640px){ td{padding:8px 10px} .bar{width:80px} }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Piperoom feature tracker</h1>
+    <p class="sub">Who is building each part of each feature, in which PR, and what has nobody on it. Snapshot <span class="mono" id="asof"></span>.</p>
+  </header>
+
+  <section class="stats" id="stats" aria-label="Status counts"></section>
+  <section class="alert" id="alert"></section>
+
+  <section class="controls">
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" id="tab-feature" aria-selected="true">By feature</button>
+      <button class="tab" role="tab" id="tab-agent" aria-selected="false">By agent</button>
+    </div>
+    <label for="agentSel">Agent</label>
+    <select id="agentSel"><option value="">All agents</option></select>
+    <label><input type="checkbox" id="hideDone"> Hide done</label>
+  </section>
+
+  <section id="list" style="display:grid;gap:14px"></section>
+
+  <footer>Source: the task files in <span class="mono">tasks/</span> and every PR on GitHub. A part with no PR is "Nobody on it". Rules for tags and IDs: <span class="mono">docs/agents/org.md</span>.</footer>
+</div>
+
+<script>
+const DATA = __DATA__;
+const REPO = "https://github.com/utkarsh199708/piperoom/pull/";
+const LABEL = {done:"Done", review:"In review", todo:"Nobody on it", blocked:"Blocked", check:"Needs your call"};
+const ORDER = ["todo","blocked","check","review","done"];
+const rows = DATA.features.flatMap(f => f.sub.map(s => ({...s, fid:f.id, fname:f.name})));
+let state = {view:"feature", agent:"", hideDone:false, status:""};
+try { const s = JSON.parse(localStorage.getItem("pt-state")||"{}"); Object.assign(state, s); } catch(e){}
+const save = () => { try { localStorage.setItem("pt-state", JSON.stringify(state)); } catch(e){} };
+const esc = t => String(t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const agentsOf = r => r.agent.split(/\s*\+\s*/);
+
+document.getElementById("asof").textContent = DATA.asOf;
+
+const allAgents = [...new Set(rows.flatMap(agentsOf))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+const sel = document.getElementById("agentSel");
+allAgents.forEach(a => { const o=document.createElement("option"); o.value=a; o.textContent=a==="?"?"No agent (?)":a; sel.appendChild(o); });
+
+function pill(s){ return `<span class="pill s-${s}">${LABEL[s]}</span>`; }
+function prs(list){ return list.length ? list.map(n=>`<a href="${REPO}${n}" target="_blank" rel="noopener">#${n}</a>`).join(" ") : "—"; }
+function chips(r){ return agentsOf(r).map(a=>`<button class="chip" data-agent="${esc(a)}">${esc(a)}</button>`).join(" "); }
+function rowHtml(r, showFeature){
+  return `<tr><td class="id">${esc(r.id)}</td><td class="who">${chips(r)}</td>
+  <td class="what">${showFeature?`<span class="mono" style="color:var(--muted)">${esc(r.fid)}</span> `:""}${esc(r.what)}${r.note?`<div class="note">${esc(r.note)}</div>`:""}</td>
+  <td class="prs">${prs(r.prs)}</td><td class="st">${pill(r.s)}</td></tr>`;
+}
+function filtered(){
+  return rows.filter(r => (!state.agent || agentsOf(r).includes(state.agent))
+    && (!state.hideDone || r.s!=="done") && (!state.status || r.s===state.status));
+}
+function bar(list){
+  const n=list.length||1;
+  return `<span class="bar" aria-hidden="true">${ORDER.slice().reverse().map(s=>{const c=list.filter(r=>r.s===s).length;return c?`<i class="s-${s}" style="width:${c/n*100}%;background:var(--${s})"></i>`:""}).join("")}</span>`;
+}
+function render(){
+  // stats
+  const st = document.getElementById("stats");
+  st.innerHTML = ORDER.map(s => `<button class="stat" data-status="${s}" aria-pressed="${state.status===s}"><span class="pill s-${s}" style="justify-self:start">${LABEL[s]}</span><b>${rows.filter(r=>r.s===s).length}</b></button>`).join("");
+  // alert
+  const gaps = rows.filter(r => r.s==="todo" || r.s==="blocked");
+  document.getElementById("alert").innerHTML = `<h2>Needs an owner or unblocking (${gaps.length})</h2><ul>${gaps.map(r=>`<li><span class="mono">${esc(r.id)}</span> · ${esc(r.what)} — <b>${r.agent==="?"?"no agent":esc(r.agent)}</b>${r.prs.length?` (${prs(r.prs)})`:""}</li>`).join("")}</ul>`;
+  // tabs and controls
+  document.getElementById("tab-feature").setAttribute("aria-selected", state.view==="feature");
+  document.getElementById("tab-agent").setAttribute("aria-selected", state.view==="agent");
+  sel.value = state.agent; document.getElementById("hideDone").checked = state.hideDone;
+  const list = document.getElementById("list");
+  const fr = filtered();
+  if(!fr.length){ list.innerHTML = `<div class="group empty">Nothing matches. Clear the agent or status filter.</div>`; return; }
+  let groups;
+  if(state.view==="feature"){
+    groups = DATA.features.map(f => ({id:f.id, name:f.name, all:rows.filter(r=>r.fid===f.id), rows:fr.filter(r=>r.fid===f.id), showF:false}));
+  } else {
+    groups = allAgents.map(a => ({id:a==="?"?"?":a, name:a==="?"?"No agent assigned":`${rows.filter(r=>agentsOf(r).includes(a)&&r.s!=="done").length} open`, all:rows.filter(r=>agentsOf(r).includes(a)), rows:fr.filter(r=>agentsOf(r).includes(a)), showF:true}));
+  }
+  groups = groups.filter(g=>g.rows.length);
+  list.innerHTML = groups.map(g => {
+    const sorted = g.rows.slice().sort((a,b)=>ORDER.indexOf(a.s)-ORDER.indexOf(b.s));
+    const done = g.all.filter(r=>r.s==="done").length;
+    return `<article class="group"><div class="ghead"><span class="gid">${esc(g.id)}</span><span class="gname">${esc(g.name)}</span>
+      <span class="mono" style="color:var(--muted)">${done}/${g.all.length} done</span>${bar(g.all)}</div>
+      <div class="tbl"><table><tbody>${sorted.map(r=>rowHtml(r,g.showF)).join("")}</tbody></table></div></article>`;
+  }).join("");
+}
+document.addEventListener("click", e => {
+  const c = e.target.closest(".chip"); if(c){ state.agent = state.agent===c.dataset.agent?"":c.dataset.agent; save(); render(); return; }
+  const s = e.target.closest(".stat"); if(s){ state.status = state.status===s.dataset.status?"":s.dataset.status; save(); render(); return; }
+  if(e.target.id==="tab-feature"){ state.view="feature"; save(); render(); }
+  if(e.target.id==="tab-agent"){ state.view="agent"; save(); render(); }
+});
+sel.addEventListener("change", () => { state.agent = sel.value; save(); render(); });
+document.getElementById("hideDone").addEventListener("change", e => { state.hideDone = e.target.checked; save(); render(); });
+render();
+</script>

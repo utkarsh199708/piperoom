@@ -1,156 +1,133 @@
-# AI agent organisation: squads, lanes, and how to track who is fixing what
+# Autonomous agent organisation
 
-Owner: the human (Utkarsh) and `[LEAD-ARCH]`. This file sits on top of `AGENTS.md` §2 (folder ownership stays
-there and still wins) and `docs/collab.md` (Slack protocol). It answers one question at any moment:
-**which agent is working on what, in which PR, and what is it waiting for.** The live answer is
-`docs/agents/board.md`.
+How Piperoom is built without a human in the loop: a PM agent decides what to build next, a QA agent files
+bugs as it finds them, a dispatcher turns both into tickets for agent squads and grows or shrinks those squads,
+and the leads review and merge. `AGENTS.md` §2 (folder ownership) and `docs/collab.md` (Slack protocol) still
+apply and win on any conflict. The human (Utkarsh) can override anything at any time but is never waited on.
 
-## 1. Why this exists
-
-On 2026-10-15 the open PR list showed the problem:
-
-- PRs titled `Claude/nice volta 752jes` (#243), `Claude/busy einstein y9dxdl` (#233) and `QA sweep fixes …`
-  (#151) name no agent, no task and no squad.
-- A whole wave (Q1–Q7, QA findings) lives only in `tasks/Q*.md` on an unmerged branch. It is not in
-  `AGENTS.md`, so nobody can see who owns its fixes.
-- One branch merges another (#243 merges #233's commits) and the PR spans A4, A5 and N6 folders. That breaks
-  "one agent, own folders" and means nobody can review it as a unit.
-- Tags such as `A4` say who owns a folder, not what that agent is doing now, so `A4` can have two PRs open
-  (#242, #244) and nothing says which comes first.
-
-The fix: stable squads, one **work ID** on every artefact, WIP limits, and one board.
-
-## 2. Structure
+## 1. The loop
 
 ```
-                         Human owner (Utkarsh): priorities, overrides, final say
-                                          │
-              ┌───────────────────────────┴───────────────────────────┐
-              │                 COMMAND (Claude leads)                 │
-              │ LEAD-ARCH  dispatch, contracts, board, the only merger │
-              │ LEAD-REVIEW code review for Qoder (A*) PRs             │
-              │ LEAD-CLOUD  code review + status for cloud (C*) PRs    │
-              │ LEAD-QA     QA sweeps; turns findings into work items  │
-              └──┬──────────┬──────────┬──────────┬──────────┬────────┘
-                 │          │          │          │          │
-             PIPE squad  BRAIN squad ROOM squad  WEB squad  PLATFORM squad      TRUST squad
-             connectors  agent+evals backend     frontend   CI, deploy, dev     security, field
+  PM (Fable 5.1) ──feature briefs──┐                 ┌──► worker lanes (squads) ──PRs──► leads review ──► LEAD-ARCH merges
+                                   ▼                 │                                                        │
+                          GitHub Issues (one ticket = one work item) ◄── dispatcher: route, prioritise, scale ─┘
+                                   ▲                                         │
+  QA (Opus 5.5) ──bug tickets──────┘                                         └──► live board (artifact + docs/agents/board.md)
+        ▲
+        └──────────── every merge to main, plus a full sweep each night
 ```
 
-`LEAD-QA` formalises what the Q-wave sessions already do (QA rounds 1–3). It writes findings only. It never
-fixes them: each finding becomes a work item for the squad that owns the file.
+**GitHub Issues are the single source of truth.** The issue number is the work ID. Every PR title is
+`[#<issue>][<lane>] area: what` and its body says `Closes #<issue>`. Anything without an issue does not exist.
 
-### Squads
+## 2. Roles
 
-Each squad has a **squad reviewer**: the lead who code-reviews its PRs. Qoder lanes go to `LEAD-REVIEW` and
-cloud lanes go to `LEAD-CLOUD`, as in `AGENTS.md`. Squads are a grouping for tracking and planning. They do not
-change folder ownership.
-
-| Squad | Mission | Lanes (agent tags) | Folders (from `AGENTS.md` §2) | Human counterpart (when hired) |
+| Role | Model | Runs | Writes | Never |
 |---|---|---|---|---|
-| **PIPE** | Read-only visibility into Kafka, Connect, Debezium, Postgres, warehouses; fix actions | A2, A3, A7, C3, C10 | `internal/clients/**`, `internal/tools/{kafkatools,dbtools,debeziumtools,changes}/**`, `internal/tools/scope.go`, `internal/topology/**`, `internal/owners/**`, `internal/actions/**`, `internal/watch/**`, `internal/dlq/**`, `internal/discover/**`, `cmd/discover/**` | CDC / data-platform engineer |
-| **BRAIN** | The agent finds the right cause, calibrated, with receipts, within budget | A4, C6, C7, C11 | `internal/agent/**`, `internal/wiring/**`, `cmd/investigate/**`, `evals/**`, `internal/tools/runbooks/**`, `internal/tools/similarincidents/**`, `internal/textsearch/**`, `internal/textnorm/**`, `internal/redact/**`, `internal/injectscan/**` | AI / agent engineer |
-| **ROOM** | Event log, driver lease, steering, approvals, executor, hand-off, alert in, Slack | A5, C5, C12 | `migrations/**`, `internal/{store,room,httpapi,ws,auth}/**`, `cmd/server/**`, `internal/alertin/**`, `internal/slackbridge/**` | Backend lead |
-| **WEB** | The live room UI | A6 | `web/**` | Frontend engineer + designer |
-| **PLATFORM** | CI, build, release, dev stack, deploy, load tests | C1, A1 | `.github/**`, `Makefile`, `Dockerfile`, `deploy/**`, `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**`, `cmd/loadtest/**`, `internal/loadtest/**` | SRE / platform engineer |
-| **TRUST** | Security design and audits, pilot onboarding docs (no code) | C4, C9, C13, C14 | `docs/security/**`, `docs/design/**` (security sections), `docs/audits/**`, `docs/pilot/**` | Security engineer, solutions engineer |
+| **PM** | Fable 5.1 (`claude-fable-5-1`) | daily, cloud scheduled task | `type:feature` issues: problem, evidence, success metric, out of scope, parts per squad, rank | code, task files, file:line specs |
+| **QA** | Opus 5.5 | hourly on new merges; nightly full sweep | `type:bug` issues, one per confirmed finding, with a failing test as the repro | fixes; editing any file |
+| **Dispatcher** | Opus 5.5 | hourly, cloud scheduled task | labels, sub-issues, assignments; starts cloud worker sessions; scales lanes; refreshes the board | code; merging |
+| **LEAD-ARCH** | Opus 5.5 | existing | specs approved features into `tasks/` + contract PRs; **the only merger** | feature code |
+| **LEAD-REVIEW / LEAD-CLOUD** | Opus 5.5 | existing | code review verdicts | merging, feature code |
+| **Worker lanes** | per ticket: `model:sonnet` (spec is complete, mechanical) or `model:opus` (prompts, security, concurrency, approvals, contracts) | per ticket | one PR per ticket, inside the lane's folders | other lanes' folders, contract files, `main` |
 
-Packages created by the N wave (`textnorm`, `textsearch`, `similarincidents`, `redact`, `injectscan`) are listed
-under BRAIN because the agent is their only consumer. Their owning tag in `AGENTS.md` does not change. A
-follow-up in those packages is dispatched to the BRAIN lane that `[LEAD-ARCH]` names in the dispatch.
+Feature approval is autonomous: the dispatcher moves a PM brief from `status:proposed` to `status:approved` when it
+fits `docs/product/vision-2026-10.md`, has a measurable success metric and names the squads. Otherwise it comments
+why and labels it `status:rejected`. The PM can revise and re-propose once.
 
-**Retired lanes** take no work: C2 (merged `9519d23`, its folder went back to A4), C8 (merged `7c7bdac`, folders back to
-A2), and the E/T/N/S wave tags (`AGENTS.md`, "Earlier waves").
+## 3. Squads
 
-### Lane vs. session
+Routing from file paths to lanes: `docs/agents/routing.yaml`.
 
-A **lane** is a stable tag (`A4`, `C6`) that owns folders. A **session** is one run of Qoder or one claude.ai/code
-cloud session. Many sessions over time serve one lane. Tracking is by lane and work ID, never by session or
-branch name (`claude/nice-volta-752jes` tells you nothing).
-
-## 3. The work ID: one ID on everything
-
-Every unit of work has a **work ID** before anyone writes code:
-
-| Source | Work ID form | Example |
+| Squad | Base lanes | Reviewer |
 |---|---|---|
-| A wave task file | `<wave><n><sub>` | `F3d`, `R7`, `L1c` |
-| A QA finding (`LEAD-QA`) | `Q<round>-<finding>` | `Q7-V1` |
-| A review fix round on a PR | the PR's own ID plus a round number | `F3d r2` |
-| A bug or ad-hoc request from the human | `X<n>` (next free number, assigned by `LEAD-ARCH`) | `X12` |
+| PIPE (connectors) | A2, A3, A7, C3, C10 | LEAD-REVIEW (C*: LEAD-CLOUD) |
+| BRAIN (agent, evals) | A4, C6, C7, C11 | LEAD-REVIEW (C*: LEAD-CLOUD) |
+| ROOM (backend) | A5, C5, C12 | LEAD-REVIEW (C*: LEAD-CLOUD) |
+| WEB (frontend) | A6 | LEAD-REVIEW |
+| PLATFORM (CI, deploy, dev stack) | C1, A1 | LEAD-CLOUD (A1: LEAD-REVIEW) |
+| TRUST (security, pilot docs) | C9 (+ C4, C13, C14 when needed) | LEAD-CLOUD |
 
-The ID appears in every artefact:
+A **lane** is a stable tag that owns folders. A **session** is one run of an agent on one ticket. Track lanes and
+tickets, never sessions or branch names.
 
-| Artefact | Format | Example |
+## 4. Elastic scaling (dispatcher decides, every run)
+
+Inputs per squad: `ready` = open tickets labelled `status:ready` for that squad, `active` = lanes with a ticket in
+progress, `p0` = ready tickets labelled `sev:critical`.
+
+| Rule | Trigger | Action |
 |---|---|---|
-| PR title | `[<ID>][<lane>] area: what` | `[F3d][A4] agent: provenance ledger` |
-| Branch | `<lane>/<id>-<topic>`. A cloud session's own `claude/...` branch is accepted, but then the PR title is required to carry the tags | `a4/f3d1-provenance-ledger` |
-| Commit subject | `area: what` as before; the PR carries the ID | `agent: provenance ledger` |
-| Slack | `[<lane>][<ID>] STARTED / PROGRESS / BLOCKED / READY FOR REVIEW` | `[A4][F3d] READY FOR REVIEW` |
-| Review files | `reviews/<lane>-<ID>.{code,arch}.md` | `reviews/a4-f3d.code.md` |
-| GitHub labels | `squad:<name>`, `lane:<tag>`, `wave:<letter>`, `status:<state>` | `squad:brain`, `lane:a4`, `wave:f` |
+| Scale up | `ready ≥ 3 × active` for two runs in a row, or a `p0` waited more than one run with every lane busy | Add one **surge lane** (`A5s1`, `A6s2`, …) owning one split from `routing.yaml` `surge_splits`. Cloud only: the dispatcher starts it |
+| Scale down | A surge lane had no ticket for two runs | Retire it; its folders go back to the base lane |
+| Park | A base lane had no ticket for four runs | Mark it `parked` on the board; it costs nothing until a ticket arrives |
+| Reviewer span | More than 5 active lanes per reviewer | Add `LEAD-REVIEW-2` / `LEAD-CLOUD-2` as a cloud session for code review only |
+| Ceiling | Always | At most **8** concurrent cloud worker sessions and **2** open PRs per lane. Over the ceiling, tickets queue by priority |
 
-**No ID, no work.** A session that starts without one asks `[LEAD-ARCH]` for one first. A PR whose title lacks
-`[<ID>][<lane>]` is not reviewed. The reviewer replies "title" and nothing else until it is fixed.
+A surge lane never shares a folder with another active lane. If a ticket spans two splits, it goes to the base
+lane, not to a surge lane.
 
-## 4. Rules that keep the board true
+## 5. Tickets
 
-1. **One PR = one work ID = one lane = that lane's folders.** No branch merges another agent's branch. Work
-   that needs another lane's file goes through a thread (`docs/collab.md` §4) and becomes a work item for that
-   lane.
-2. **WIP limits.** A Qoder lane has at most **2** PRs open, and at most 1 of them is not yet in review. A cloud
-   lane has at most **2**. A lead dispatches nothing new to a lane at its limit.
-3. **Ordered parts.** When one work ID is split into PRs, each part takes a number (`F3d1`, `F3d2`) and the PR
-   body names its predecessor: `waits on #242`.
-4. **QA findings are dispatched, not fixed in place.** `LEAD-QA` writes `tasks/Q<n>-*.md` and opens one line per
-   finding on the board, owned by the lane of the file. A QA session never opens a fix PR across folders
-   again (see #151, #243).
-5. **Stale = escalated.** A PR without a push or a comment for 12 h is marked `stale` on the board. Its lane gets
-   one ping. After 24 h, `LEAD-ARCH` either re-dispatches it or closes it, and records which.
-6. **Status changes only through the leads.** Agents post in Slack. `LEAD-ARCH` (and `LEAD-CLOUD` for C*) moves
-   the board row. The board is never edited by a feature agent.
+Labels (created on first use):
 
-## 5. Status lifecycle
+- `type:feature` · `type:part` (sub-issue of a feature) · `type:bug` · `type:chore`
+- `squad:pipe|brain|room|web|platform|trust|leads` · `lane:<tag>` (e.g. `lane:a4`, `lane:a6s1`)
+- `status:proposed|approved|specced|ready|in-progress|in-review|blocked|done|rejected`
+- `sev:critical|high|medium|low` (bugs) · `prio:p0|p1|p2|p3` (features and parts)
+- `model:sonnet|opus` · `source:pm|qa|human|lead`
+
+Lifecycle:
 
 ```
-queued ─► started ─► in-review ─► changes-requested ─► in-review (round N) ─► approved ─► merged
-              │            │
-              └─► blocked ◄┘   (always names what it waits on: a PR, a question, the human)
+feature:  proposed ─► approved ─► specced (LEAD-ARCH task file + contract PR) ─► parts created as sub-issues
+part/bug:  ready ─► in-progress (lane assigned) ─► in-review (PR open) ─► done (PR merged, issue closed)
+                 └─► blocked (comment names what it waits on)
 ```
 
-`approved` means both approvals are in (`LEAD-REVIEW`/`LEAD-CLOUD` + `LEAD-ARCH`). `merged` rows move to the
-"Done this week" table of the board, and rows older than a week are deleted.
+Priority order for the dispatcher: `sev:critical` bugs → parts of the top-ranked feature whose predecessors merged →
+`sev:high` bugs → everything else by rank, oldest first. A QA `sev:critical` finding preempts: the lane finishes its
+current commit, then takes it.
 
-## 6. The board
+## 6. QA rules (real time)
 
-`docs/agents/board.md` is the single place to look. It has one table per squad. Each row is one work ID:
+- Trigger: every new merge to `main` (the QA run diffs `main` since its last run) and a nightly full sweep.
+- One issue per finding. Search open issues first; on a duplicate, comment the new evidence instead.
+- A finding is filed only when reproduced: a failing test, a command and its output, or a concrete trace through
+  the code with `file:line`. Speculation goes in a weekly `QA notes` issue, not as tickets.
+- Route by the file the fix must touch (`routing.yaml`) and label `squad:` and `lane:`. Set `sev:` by impact:
+  critical = data loss, security, wrong fix executed, main red; high = wrong diagnosis, broken flow; medium = degraded;
+  low = cosmetic.
+- QA never fixes. The old pattern (one QA branch fixing across five folders, #151 and #233) is not allowed.
 
-| ID | Lane | What | PR | Status | Waits on | Updated |
-|---|---|---|---|---|---|---|
+## 7. PM rules
 
-The board is updated by `LEAD-ARCH`:
+- Inputs: `docs/product/vision-2026-10.md`, merged features, the board, QA trends (which squads produce the most
+  `sev:high+` bugs), eval reports (`evals/baseline*`, the `evals-live` job), and pilot docs (`docs/pilot/**`).
+- At most 3 open `status:proposed` features at a time; one brief per issue; rank them `prio:p0..p3`.
+- A brief says what the on-call engineer sees and can do afterwards, how success is measured, and which squads
+  it touches. It does not name files or functions: that is LEAD-ARCH's spec.
 
-- at every `[LEAD-ARCH] STATUS` post (twice a day, `docs/collab.md` §4). The STATUS post links the board and
-  lists only the rows that changed;
-- at every merge (row moves to Done).
+## 8. Worker rules
 
-**Upgrade path (recommended once the human approves):** the same columns as a GitHub Project
-(table view, grouped by `squad`), fed by the labels in §3. A GitHub Action in `.github/**` (C1's folder) can
-then check every PR title against `^\[[A-Z][0-9]+[a-z0-9-]*( r[0-9]+)?\]\[(A|C)[0-9]+\]` and add the labels
-automatically. Until that lands, the markdown board is the source of truth.
+Everything in `AGENTS.md` §4–§7 plus:
 
-## 7. Daily rhythm
+- Take only tickets labelled with your lane. One ticket, one branch, one PR: `[#<issue>][<lane>] area: what`,
+  body starts with `Closes #<issue>`.
+- Move the ticket: comment `started` (dispatcher sets `status:in-progress`), open the PR (`status:in-review`),
+  `blocked: <what>` when blocked.
+- Need a file outside your lane: comment on the ticket; the dispatcher files a linked ticket for that lane.
 
-| When | Who | What |
-|---|---|---|
-| Start of day | `LEAD-ARCH` | Board refresh; dispatch to lanes under their WIP limit, highest merge-order item first |
-| Every 2 h of work | each lane | `[lane][ID] PROGRESS`: done / next / blocked |
-| Midday and end of day | `LEAD-ARCH` | `STATUS` post: changed rows, blocked rows, stale rows |
-| Each QA round | `LEAD-QA` | `tasks/Q<n>-*.md` and one board row per finding, owned by the file's lane |
-| Weekly | human + leads | Squad review: throughput per squad, longest-open PRs, lanes to add or retire |
+## 9. The board
 
-## 8. Adding or retiring a lane
+The dispatcher refreshes the live tracker each run: https://claude.ai/artifact/Mf3MGghDsMyP1NfsCG58ME
+(the markdown copy is `docs/agents/board.md`). It shows every feature with its parts, lane, PR and status, the
+lanes active, parked or surging per squad, and the tickets nobody owns.
 
-A new lane takes the next free tag (`A8`, `C15`), a squad, a task file, and a row in `AGENTS.md` §2 **and** in the
-squad table above, in the same leads' PR. A lane whose task is merged and whose folders return to another
-owner is moved to "Retired lanes" in that same PR.
+## 10. Guardrails that stay on
+
+- Only LEAD-ARCH merges, after both lead approvals (`AGENTS.md` §2). No role in this file merges.
+- Contract files change only in leads' PRs.
+- The 8-session ceiling caps cost; the dispatcher logs each scale action as a comment on a pinned `Agent ops log` issue.
+- Any agent stops and files a `sev:critical` ticket for LEAD-ARCH instead of acting when an action would write to
+  a real customer system, touch secrets, or rewrite git history.
