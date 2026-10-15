@@ -299,7 +299,7 @@ func (w *Watcher) recordConnector(ctx context.Context, now time.Time, t target, 
 				// RUNNING object is only the baseline. Any other state is
 				// recorded, so a pause from before the start still shows in
 				// what_changed (QA S8).
-				if now2.state == "RUNNING" || w.writeFirstSeen(ctx, now, t, obj, now2) {
+				if now2.state == "RUNNING" || w.storedState(ctx, t, obj) == now2.state || w.writeFirstSeen(ctx, now, t, obj, now2) {
 					cb.states[obj] = now2
 				} else {
 					ok = false
@@ -382,6 +382,37 @@ func (w *Watcher) recordConnector(ctx context.Context, now time.Time, t target, 
 		ok = false
 	}
 	return ok
+}
+
+// storedState is the state of the newest stored connector_state row of obj,
+// or ""
+// when there is none or the store cannot be read (a store without ChangeReader,
+// an error): the first sighting is then recorded as before. A restart that
+// sees the stored state again records nothing (Q6 U7).
+func (w *Watcher) storedState(ctx context.Context, t target, obj string) string {
+	r, ok := w.changes.(clients.ChangeReader)
+	if !ok {
+		return ""
+	}
+	rows, err := call(ctx, w.cfg.CheckTimeout, "list changes", func(cc context.Context) ([]clients.PipelineChange, error) {
+		return r.ListChanges(cc, t.p.ID, time.Time{}, time.Time{}, []string{clients.ChangeConnectorState}, 100)
+	})
+	if err != nil {
+		return ""
+	}
+	for _, c := range rows { // newest first
+		if c.Object != obj {
+			continue
+		}
+		var a struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal(c.After, &a) != nil {
+			return ""
+		}
+		return a.State
+	}
+	return ""
 }
 
 // writeFirstSeen records the state of an object the watcher sees for the

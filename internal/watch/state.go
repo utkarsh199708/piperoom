@@ -104,7 +104,11 @@ type sigState struct {
 	// while it still fired. escalated: it already fired EscalateAfter with no
 	// room in this episode, so it re-opened (or tried to) once.
 	firedAt, ackedAt time.Time
-	escalated        bool
+	// clearedFrom is when the signal last started to clear before it resolved;
+	// it survives the resolve, so a new breach can tell a flap from a recovery
+	// (Q6 U2).
+	clearedFrom time.Time
+	escalated   bool
 	// escFree: the escalation could not have been what opens the room (the cap,
 	// a failing open or a storm wait blocked it; no ack or cooldown to bypass).
 	// The next room that carries the signal then gives the budget back, so a
@@ -189,6 +193,7 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 		}
 		if now.Sub(s.clearingSince) >= forD {
 			s.phase = phaseOK
+			s.clearedFrom = s.clearingSince
 			s.breachingSince, s.clearingSince = time.Time{}, time.Time{}
 			s.notified, s.ackSev = false, ""
 			s.targets, s.firedAt, s.ackedAt, s.escalated, s.escFree = nil, time.Time{}, time.Time{}, false, false
