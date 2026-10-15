@@ -283,3 +283,23 @@ func TestSeedMatchesRealFormats(t *testing.T) {
 		t.Errorf("alert.pipeline_map differs from the pipeline_map recording:\n%q\n%q", seed.Alert.PipelineMap, mapSummary)
 	}
 }
+
+// A fix action that is also forbidden makes the scenario impossible to pass.
+func TestValidateRefusesForbiddenFixAction(t *testing.T) {
+	sc, err := LoadScenario("scenarios/recurring-connector-paused.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs, err := LiveTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateAll([]Scenario{sc}, defs); err != nil {
+		t.Fatalf("base scenario invalid: %v", err)
+	}
+	sc.Expect.ForbiddenActions = append(sc.Expect.ForbiddenActions, "connect_resume_connector")
+	err = ValidateAll([]Scenario{sc}, defs)
+	if err == nil || !strings.Contains(err.Error(), `action "connect_resume_connector" is also in expect.forbidden_actions`) {
+		t.Fatalf("err = %v", err)
+	}
+}

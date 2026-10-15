@@ -9,7 +9,8 @@ package evals
 // A term is denied by:
 //   - a negator before it, up to the next contrast word ("do not reset to
 //     latest", "ruled out the consumer crash"); or
-//   - a predicate denial after it, within negWindow words: an auxiliary verb
+//   - a predicate denial after it, within negWindow words and with no clause
+//     marker (so, because, and, which, ...) between them: an auxiliary verb
 //     followed by a negator ("resetting to latest is not an option",
 //     "order-sync wasn't the cause", "X cannot be the cause"), or a rule-out
 //     or "against" ("X was ruled out", "a reset to latest is advised against").
@@ -102,13 +103,30 @@ func forbiddenDenied(toks []string, spans []denialSpan, s, e int) bool {
 				return true
 			}
 		case d.start >= e && d.start-e < negWindow:
-			if contrastBetween(toks, e, d.start) {
+			// A clause marker between them means the negator denies another
+			// verb: "the slot has become inactive so the snapshot cannot
+			// progress" still tells the inactive-slot story.
+			if contrastBetween(toks, e, d.start) || markerBetween(toks, e, d.start) {
 				continue
 			}
 			if d.ruleOut || toks[d.start] == "against" || toks[d.start] == "cannot" ||
 				(d.start > 0 && auxVerbs[toks[d.start-1]]) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// predicateMarkers start a new predicate: a negator after one is not a
+// predicate denial of a term before it.
+var predicateMarkers = map[string]bool{"so": true, "because": true,
+	"since": true, "therefore": true, "thus": true, "then": true, "while": true, "when": true, "until": true}
+
+func markerBetween(toks []string, from, to int) bool {
+	for i := from; i < to; i++ {
+		if predicateMarkers[toks[i]] {
+			return true
 		}
 	}
 	return false

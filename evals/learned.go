@@ -881,7 +881,9 @@ func keptInput(raw json.RawMessage, rd Redactor) map[string]any {
 	if len(v) == 0 {
 		return nil
 	}
-	return rd.JSON(v).(map[string]any)
+	// The redactor decodes what it masked with UseNumber; plainNumbers keeps
+	// "partition: 3" a number in the YAML, or the recording never matches.
+	return plainNumbers(rd.JSON(v)).(map[string]any)
 }
 
 // keptData is the result's data when it is small and whole.
@@ -898,7 +900,7 @@ func keptData(raw json.RawMessage, rd Redactor) any {
 			return nil // events.TruncatedData: a cut preview teaches the wrong shape
 		}
 	}
-	v = rd.JSON(v)
+	v = plainNumbers(rd.JSON(v))
 	b, err := json.Marshal(v)
 	if err != nil || len(b) > maxLearnedData {
 		return nil
@@ -952,7 +954,7 @@ func buildInputs(sc *lrnScenario, f roomFacts, x roomExport, rd Redactor, text f
 			}
 			o := lrnInput{Kind: "action_result", Text: t, Action: in.action, OK: &ok}
 			if p, isMap := decodePlain(in.params).(map[string]any); isMap && len(p) > 0 {
-				o.Params = rd.JSON(p).(map[string]any)
+				o.Params = plainNumbers(rd.JSON(p)).(map[string]any)
 			}
 			sc.Inputs = append(sc.Inputs, o)
 			addResources(sc, o.Params, sc.Pipeline.Connectors)

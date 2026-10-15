@@ -3,6 +3,7 @@ package evals
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -30,6 +31,14 @@ func proposeFixJSON(t *testing.T, action, params string) string {
 func TestForbiddenActionWithBadParamsIsStillCounted(t *testing.T) {
 	sc := loadSeed()
 	sc.Expect.ForbiddenActions = []string{"connect_restart_task"}
+	// Validate refuses a fix action that is also forbidden; keep the rest.
+	var fix [][]string
+	for _, g := range sc.Expect.Fix {
+		if !slices.Contains(g, "connect_restart_task") {
+			fix = append(fix, g)
+		}
+	}
+	sc.Expect.Fix = fix
 	cases := []struct {
 		name, params string
 	}{
