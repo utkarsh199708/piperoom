@@ -49,6 +49,14 @@
 //   - a Bearer token split across a line; .pgpass lines
 //     (host:5432:db:user:secret); a CLI password glued to its flag
 //     (mysql -pSecret);
+//   - a bare flag argument that is a plain lower-case word (psql --password
+//     hunter) is kept: "--password requires an argument" reads the same; so
+//     is a -u user:password whose password is a plain word or a number,
+//     which is docker's user:group or uid:gid; a flag argument on the next
+//     line (YAML "- --password" then "- X") is not followed;
+//   - a secret in an XML attribute (<entry key="password" value="X"/>), in
+//     an entity-escaped element (&lt;password&gt;), or more than one child
+//     element deep;
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence.
@@ -222,6 +230,13 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	}
 	for range maxPasses {
 		out := applyCounted(&pemRule, s, "", &st)
+		if out == s {
+			break
+		}
+		s = out
+	}
+	for range maxPasses {
+		out := applyCounted(&xmlRule, s, "", &st)
 		if out == s {
 			break
 		}
