@@ -173,7 +173,19 @@ var verificationTag = regexp.MustCompile(`(?i)\[verification\]`)
 func markInvisible(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	inTags := false
 	for _, r := range s {
+		// Tag characters (U+E0000..U+E007F) render as nothing yet spell ASCII
+		// a model can read: a hidden instruction. Each run is replaced by one
+		// marker, so neither the text nor its code points reach the model.
+		if r >= 0xE0000 && r <= 0xE007F {
+			if !inTags {
+				b.WriteString("{hidden tag text removed}")
+				inTags = true
+			}
+			continue
+		}
+		inTags = false
 		if lookalikeBracket(r) || invisibleRune(r) {
 			fmt.Fprintf(&b, "{U+%04X}", r)
 			continue

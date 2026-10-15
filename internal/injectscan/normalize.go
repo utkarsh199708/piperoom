@@ -9,7 +9,9 @@ import (
 // normalize undoes the cheap tricks that hide an instruction from a plain
 // pattern match. The standard library has no NFKC, so this is a small, fixed
 // mapping:
-//   - format characters (Unicode Cf: zero-width space/joiners, word joiner,
+//   - Unicode tag characters that mirror ASCII (U+E0020..U+E007E) map to
+//     that ASCII, so text hidden in them is scanned like visible text;
+//   - other format characters (Unicode Cf: zero-width space/joiners, word joiner,
 //     BOM, soft hyphen, bidi embeddings/overrides/isolates) and variation
 //     selectors are dropped, and so are combining marks (Mn), so "i̇gnore"
 //     reads "ignore";
@@ -88,6 +90,10 @@ func mapRune(r rune) (rune, bool) {
 	switch {
 	case r < 0x80:
 		return r, true
+	case isTagText(r):
+		// Unicode tag characters render as nothing but spell ASCII, which a
+		// model reads: decode them so the rules see the hidden words.
+		return r - tagBase, true
 	case unicode.Is(unicode.Cf, r),
 		r >= 0xFE00 && r <= 0xFE0F, // variation selectors
 		r == 0x180E, r == 0x034F,   // Mongolian vowel separator, combining grapheme joiner
@@ -114,6 +120,56 @@ func mapRune(r rune) (rune, bool) {
 		return m, true
 	}
 	return r, true
+}
+
+// tagBase is the offset of the Unicode tag block (U+E0000..U+E007F) from ASCII.
+const tagBase = 0xE0000
+
+// isTagText reports the tag characters that mirror printable ASCII
+// (U+E0020..U+E007E). U+E0001 (language tag) and U+E007F (cancel tag) carry
+// no text and are dropped like other format characters.
+func isTagText(r rune) bool {
+	return r >= tagBase+0x20 && r <= tagBase+0x7E
+}
+
+// blackFlag (U+1F3F4) opens the one legitimate use of tag characters, a
+// subdivision flag emoji such as England's (U+1F3F4, tags "gbeng", U+E007F).
+const blackFlag = 0x1F3F4
+
+// scanHiddenTags reports each run of tag text that is not part of a flag
+// emoji: invisible in any UI, readable by a model, and so hidden text in its
+// own right whatever it says.
+func scanHiddenTags(s string) []Finding {
+	var out []Finding
+	start, inFlag := -1, false
+	var run strings.Builder
+	flush := func() {
+		if start >= 0 && run.Len() > 0 {
+			out = append(out, Finding{Kind: KindHiddenText, Offset: start, Excerpt: excerpt("tag text: " + run.String())})
+		}
+		start = -1
+		run.Reset()
+	}
+	for i, r := range s {
+		switch {
+		case r == blackFlag:
+			flush()
+			inFlag = true
+		case isTagText(r):
+			if inFlag {
+				continue
+			}
+			if start < 0 {
+				start = i
+			}
+			run.WriteRune(r - tagBase)
+		default:
+			flush()
+			inFlag = false
+		}
+	}
+	flush()
+	return out
 }
 
 // lookalikes maps Cyrillic and Greek letters that render like Latin ones.
