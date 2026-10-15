@@ -54,6 +54,11 @@ const (
 	// recoveredConfigHead opens the verdict of a proposal that only changed
 	// schema configuration. No data path was touched, so it claims no flow.
 	recoveredConfigHead = "recovered: every layer check passed. The proposal only changed schema configuration, so data flow was not part of this verdict.\n"
+	// recoveredIdleHead opens the verdict of a proposal whose layer checks all
+	// passed while the source had no new change: data flow cannot be judged.
+	recoveredIdleHead = "recovered: every layer check passed; no new source changes to confirm data flow.\n"
+	// idleDetail is the data-flow detail of that verdict.
+	idleDetail = "inconclusive: the source was idle (replication slot did not move, no new WAL), so no new rows could be expected"
 	// waitingDetail is the status detail of a recovered episode parked for input.
 	waitingDetail = "pipeline recovered; waiting for input"
 	// dataFlowInfoOnly is the data-flow detail of a verdict that did not need
@@ -74,6 +79,9 @@ type proposalRecord struct {
 	// Nil when none was taken (for example after an agent restart), and then the
 	// check window alone decides the data flow.
 	baseline map[string]time.Time
+	// topicEnds is the summed end offset of each source data topic when the
+	// proposal was made. Nil when not taken; then the check window decides.
+	topicEnds map[string]int64
 }
 
 // proposalTracker remembers the proposals the agent created during this run. It
@@ -125,6 +133,21 @@ func (t *proposalTracker) markVerified(id string, recovered bool) {
 	}
 	rec.verified = true
 	rec.recovered = recovered
+	t.byID[id] = rec
+}
+
+// setTopicEnds stores the source-topic offsets of a proposal already recorded.
+func (t *proposalTracker) setTopicEnds(id string, ends map[string]int64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.topicEnds = ends
 	t.byID[id] = rec
 }
 
@@ -504,6 +527,10 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyO
 	switch {
 	case !flow.verified:
 		out.head = "NOT recovered: data flow not verified.\n"
+	case !flow.fresh && flow.idle:
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: idleDetail}
+		out.recovered = true
+		out.head = recoveredIdleHead
 	case !flow.fresh:
 		out.head = "NOT recovered: data flow did not pass; no new rows since the fix.\n"
 	default:
@@ -700,6 +727,10 @@ type flowResult struct {
 	// sinks is the same evidence for the agent.verification event; empty when
 	// the check could not run.
 	sinks []events.SinkCheck
+	// idle is true when no sink received rows and the source slot did not move
+	// across the check, so the source had no change to replicate. The data-flow
+	// check is then inconclusive, not failed.
+	idle bool
 }
 
 // sinkTable is one warehouse table the alert's pipeline loads, with the column
@@ -815,6 +846,12 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 	}
 
 	res := flowResult{verified: true, fresh: true}
+	if wait && anyPending(states) && !anyPassed(states) {
+		// Only a failing check pays for the slot reads. Idle means every sink is
+		// stale AND the source slot did not move over one more wait: a source
+		// that wrote while the slot stood still is a real failure.
+		res.idle = r.sourceIdle(ctx, rec)
+	}
 	for _, st := range states {
 		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
 		if st.hasProposal {
@@ -843,6 +880,141 @@ func (f flowResult) event() *events.DataFlowCheck {
 		return &events.DataFlowCheck{Checked: false, Detail: detail}
 	}
 	return &events.DataFlowCheck{Checked: true, Fresh: f.fresh, Sinks: f.sinks}
+}
+
+// anyPassed reports whether some sink has passed.
+func anyPassed(states []sinkState) bool {
+	for _, st := range states {
+		if st.passed {
+			return true
+		}
+	}
+	return false
+}
+
+// sourceIdle reports whether the source had no change to replicate. The
+// signal is the source data topics, which a Debezium heartbeat does not touch
+// (heartbeats go to a separate topic, excluded here): idle means no source
+// topic gained a record since the proposal, or, with no proposal reading, over
+// one freshnessWait. When the topics cannot be read, the replication slots
+// standing still over one freshnessWait is the fallback. Any read that fails
+// means unknown, which is not idle.
+func (r *runner) sourceIdle(ctx context.Context, rec proposalRecord) bool {
+	topics, ok := r.sourceTopics(ctx, "verify")
+	if ok {
+		now, ok := r.topicEnds(ctx, "verify", topics)
+		if ok {
+			before := rec.topicEnds
+			if len(before) == 0 {
+				before = now
+				if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+					return false
+				}
+				if now, ok = r.topicEnds(ctx, "verify", topics); !ok {
+					return false
+				}
+			}
+			for _, t := range topics {
+				if b, have := before[t]; !have || now[t] != b {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	before, ok := r.readSlotPositions(ctx)
+	if !ok {
+		return false
+	}
+	if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+		return false
+	}
+	after, ok := r.readSlotPositions(ctx)
+	return ok && after == before
+}
+
+// sourceTopics returns the pipeline's source data topics from pipeline_map,
+// without heartbeat topics. ok is false when none can be named.
+func (r *runner) sourceTopics(ctx context.Context, verb string) ([]string, bool) {
+	if r.alert.PipelineID == "" {
+		return nil, false
+	}
+	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", r.alert.PipelineID))
+	if err != nil {
+		return nil, false
+	}
+	var g struct {
+		Nodes []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"nodes"`
+	}
+	if err := decodeData(res.Data, &g); err != nil {
+		return nil, false
+	}
+	var out []string
+	for _, n := range g.Nodes {
+		if n.Kind == "topic" && n.Name != "" && !strings.Contains(strings.ToLower(n.Name), "heartbeat") {
+			out = append(out, n.Name)
+		}
+	}
+	return out, len(out) > 0
+}
+
+// topicEnds reads the summed end offset of each topic with kafka_topic_offsets.
+func (r *runner) topicEnds(ctx context.Context, verb string, topics []string) (map[string]int64, bool) {
+	out := make(map[string]int64, len(topics))
+	for _, t := range topics {
+		res, err := r.runStep(ctx, verb, "kafka_topic_offsets", jsonObject("topic", t))
+		if err != nil {
+			return nil, false
+		}
+		var d struct {
+			Partitions []struct {
+				End int64 `json:"end"`
+			} `json:"partitions"`
+		}
+		if err := decodeData(res.Data, &d); err != nil || len(d.Partitions) == 0 {
+			return nil, false
+		}
+		var sum int64
+		for _, p := range d.Partitions {
+			sum += p.End
+		}
+		out[t] = sum
+	}
+	return out, true
+}
+
+// readSlotPositions reads the pipeline's replication slots with
+// pg_replication_slots and returns a comparable fingerprint of their
+// confirmed_flush_lsn, restart_lsn and retained WAL. Retained WAL grows with
+// every source write while the slot stands still, so an equal fingerprint
+// before and after the check window means the source had no change. ok is false
+// when the tool is missing, fails, or names no slot: then idleness is unknown
+// and the data-flow rule applies unchanged.
+func (r *runner) readSlotPositions(ctx context.Context) (string, bool) {
+	res, err := r.runStep(ctx, "verify", "pg_replication_slots", json.RawMessage(`{}`))
+	if err != nil {
+		return "", false
+	}
+	var slots []struct {
+		Name              string `json:"name"`
+		ConfirmedFlushLSN string `json:"confirmed_flush_lsn"`
+		RestartLSN        string `json:"restart_lsn"`
+		RetainedWALBytes  int64  `json:"retained_wal_bytes"`
+	}
+	if err := decodeData(res.Data, &slots); err != nil || len(slots) == 0 {
+		return "", false
+	}
+	var sb strings.Builder
+	for _, s := range slots {
+		if s.ConfirmedFlushLSN == "" && s.RestartLSN == "" {
+			return "", false
+		}
+		fmt.Fprintf(&sb, "%s|%s|%s|%d;", s.Name, s.ConfirmedFlushLSN, s.RestartLSN, s.RetainedWALBytes)
+	}
+	return sb.String(), true
 }
 
 // anyPending reports whether some sink has not passed yet.
@@ -882,6 +1054,13 @@ func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
 		base[s.name] = newest
 	}
 	r.proposals.setBaseline(proposalID, base)
+	// Best effort: source topic offsets at proposal time, so the idle rule can
+	// tell "no change since the fix" from "no change during the check".
+	if topics, ok := r.sourceTopics(ctx, "baseline"); ok {
+		if ends, ok := r.topicEnds(ctx, "baseline", topics); ok {
+			r.proposals.setTopicEnds(proposalID, ends)
+		}
+	}
 }
 
 // formatBaseline renders a newest-row time, or "none (empty table)" for a table
