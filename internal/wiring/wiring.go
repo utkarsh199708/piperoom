@@ -325,6 +325,9 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
+	if err := dbtools.RegisterTableActivity(reg, dbtools.Deps{Src: w.Source, Owners: w.Owners}); err != nil {
+		return fmt.Errorf("wiring: register db tools: %w", err)
+	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners, ConnectLog: w.ConnectLog}); err != nil {
 		return fmt.Errorf("wiring: register kafka tools: %w", err)
 	}
