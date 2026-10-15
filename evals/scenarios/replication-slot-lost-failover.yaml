@@ -249,7 +249,8 @@ expect:
     # phrases also pass slot-exists stories (scenario_terms_test.go).
     - [missing, 'does not exist', gone, lost, 'did not carry logical slot debezium_orders',
        'did not carry the logical slot debezium_orders', 'didn''t carry logical slot debezium_orders',
-       'didn''t carry the logical slot debezium_orders']
+       'didn''t carry the logical slot debezium_orders',
+       'doesn''t exist', 'no longer exists', 'not present']
     - [failover, promot*, standby, 'new primary']
   first_failing_layer: postgres
   root_cause_layer: postgres

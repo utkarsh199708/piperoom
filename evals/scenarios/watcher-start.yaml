@@ -137,10 +137,14 @@ recordings:
 expect:
   # The cause is the Postgres restart that cut the replication connection,
   # not "the task failed" (the symptom) and not the restart that fixes it:
-  # "restart*" is left out, so "restart task 0" names no cause.
+  # "restart*" is left out, so "restart task 0" names no cause; only the noun
+  # phrases ("Postgres restart", "restart of the source") name the cause.
+  # "PostgreSQL" tokenizes as "postgre sql", so it is listed in both spellings.
   root_cause:
-    - [administrator command, 57p01, shut down, shutdown, restarted, rebooted, reboot, upgrade*, maintenance, went down, was down, bounced]
-    - [postgres, postgresql, database, primary, source db]
+    - [administrator command, 57p01, shut down, shutdown, restarted, rebooted, reboot, upgrade*, maintenance, went down, was down, bounced,
+       'postgres restart', 'postgresql restart', 'postgre sql restart', 'database restart', 'restart of postgres',
+       'restart of the source', 'source restart']
+    - [postgres, postgresql, 'postgre sql', database, primary, source db]
   root_cause_forbidden:
     - [schema registry, reject*]
     - [incompatib*]
