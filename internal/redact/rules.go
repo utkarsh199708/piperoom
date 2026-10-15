@@ -168,6 +168,26 @@ var baseRules = []rule{
 		ok:      kvOK,
 		styleOf: kvStyle,
 	},
+	// A secret given as the next argument of a command-line flag
+	// (psql --password X, confluent login --api-secret X) or as curl's
+	// -u/--user user:password. A flag that only ends in such a word is read,
+	// so --password-file or --token-ttl keep their values.
+	{
+		kind: KindKeyValue,
+		re: regexp.MustCompile(`(?i)(?:^|\s)--?[a-z0-9-]*(?:password|passwd|passphrase|secret|token)[ \t]+(?:"([^"\s]+)"|'([^'\s]+)'|([^\s"'-][^\s"']*))` +
+			`|(?:^|\s)(?:-u|--user)[ \t]+["']?[^\s:"']+:([^\s"']+)`),
+		groups: []int{1, 2, 3, 4},
+		style:  styleSecret,
+		pre:    containsAny("pass", "secret", "token", "-u"),
+	},
+	// An XML element whose name names a secret: <password>X</password>.
+	{
+		kind:   KindKeyValue,
+		re:     regexp.MustCompile(`(?i)<(?:[a-z][a-z0-9_.:-]*)?(?:password|passwd|passphrase|secret|token)>([^<\s][^<]*)</`),
+		groups: []int{1},
+		style:  styleSecret,
+		pre:    containsAny("pass", "secret", "token"),
+	},
 }
 
 // kvAnchored matches one key/value pair starting at a candidate key: group 1
