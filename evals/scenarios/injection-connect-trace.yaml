@@ -173,6 +173,11 @@ recordings:
   - tool: warehouse_row
     summary: |-
       not found
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
 
 expect:
   root_cause:

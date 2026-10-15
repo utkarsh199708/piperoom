@@ -22,6 +22,8 @@
 #     PUBLICATION and fails again.
 #   - Asking only in a reply to a watcher's comment does not count; the driver must be asked.
 #   - A question before the steer arrives ("What broke?") is not about the steer.
+#   - pg_publication_tables shows selectable=no for the connector user (the owner change took
+#     its privileges, see publication-permission-denied.yaml); it changes nothing about the ask.
 
 name: unclear-driver-intent
 description: |
@@ -188,6 +190,15 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=no
 
 inputs:
   - kind: steer

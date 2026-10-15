@@ -102,6 +102,9 @@ type Gateway struct {
 	lists     map[*client]struct{} // room list connections (listgateway.go)
 	roomSlots map[string]int       // connections per room, held from reserve to release
 	userSlots map[string]int       // connections per user id
+	// connsChanged is closed and replaced (under mu) whenever a connection
+	// registers or leaves, so a waiter wakes on the change itself.
+	connsChanged chan struct{}
 }
 
 // NewGateway builds the gateway and starts its presence loop.
@@ -111,7 +114,7 @@ func NewGateway(svc *room.Service, st store.Store, log *slog.Logger) *Gateway {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, ctx: ctx, cancel: cancel, rooms: map[string]*roomHub{},
-		lists: map[*client]struct{}{}, roomSlots: map[string]int{}, userSlots: map[string]int{}}
+		lists: map[*client]struct{}{}, roomSlots: map[string]int{}, userSlots: map[string]int{}, connsChanged: make(chan struct{})}
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()

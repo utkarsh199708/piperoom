@@ -256,6 +256,19 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer connect-wh-orders-sink: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: dlq_peek
+    input: {connector: "wh-orders-sink"}
+    summary: |-
+      wh-orders-sink has no DLQ topic (errors.deadletterqueue.topic.name is not set)
+  - tool: debezium_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.6 s behind source, last event 1.1 s ago, queue 7/8192, 418233 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
 
 inputs:
   - kind: steer

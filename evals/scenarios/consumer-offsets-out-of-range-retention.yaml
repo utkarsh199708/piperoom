@@ -227,6 +227,15 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: warehouse_load_errors
+    input: {table: "analytics.orders"}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 30512774 rows inserted since stats reset, 18402 dead tuples, last autovacuum 2026-10-13T08:41:27Z, 0 session(s) waiting on a lock
 
 inputs:
   - kind: comment
