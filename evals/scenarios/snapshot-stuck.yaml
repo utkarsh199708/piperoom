@@ -317,9 +317,14 @@ expect:
     - [running, progress*, scanning, 'in progress', 'still', 'rows scanned', 'not finished', 'has not finished', 'not completed']
   # "The slot is inactive" is the trap story and is false here; so is a restart as the way out.
   # A negated clause ("the slot is not inactive") does not fire.
+  # Phrases for the slot: "the snapshot pins it, unlike an inactive slot" is right. A hung
+  # snapshot that never finishes is wrong too: rows scanned keep rising between reads.
   root_cause_forbidden:
-    - [slot, inactive]
+    - [slot, 'is inactive']
+    - [slot, 'went inactive']
     - [connector, crash*]
+    - [snapshot, hung]
+    - ['never finish*']
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:

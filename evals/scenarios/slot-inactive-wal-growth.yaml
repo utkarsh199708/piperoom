@@ -488,9 +488,13 @@ inputs:
 
 expect:
   root_cause:
-    - [stopped]
+    - [stop*]
     - [slot*]
     - [wal, retain*]
+  # The header's trap: no task failed; a person stopped the connector.
+  root_cause_forbidden:
+    - [task*, fail*]
+    - [task*, crash*]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:
