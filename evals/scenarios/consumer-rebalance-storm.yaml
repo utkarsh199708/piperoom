@@ -43,7 +43,7 @@
 #   needs, from the recordings above, the steer and the prompt's method:
 #     1 pipeline_map (optional re-read: the alert carries it)
 #     2 kafka_consumer_lag order-sync (PreparingRebalance, 1 member: the required fact)
-#     3 pg_long_transactions (the driver's steer asks about the bulk import first; evidence tool)
+#     3 pg_long_transactions (the driver's steer asks for the import's transaction first; evidence tool)
 #     4 kafka_partition_rates 5m and 5 kafka_partition_rates 1h (the produce rate rose, 682/s to
 #       952/s, which answers the steer and rules out a stall at the source)
 #     6 pg_recent_ddl and 7 schema_registry_versions pg.public.orders-value (what changed)
@@ -279,7 +279,11 @@ recordings:
 inputs:
   - kind: steer
     from: Priya
-    text: "A bulk import started at 10:04. Is the source producing more than the pipeline can take? Check before anything else."
+    # E7b: the steer names the read it wants (the import's open transaction on the source),
+    # not only the question: "producing more than the pipeline can take" is also answered by
+    # kafka_partition_rates, and all three live runs of 38717633575 read only that and missed
+    # the pg_long_transactions evidence tool.
+    text: "A bulk import started at 10:04. Check the import's open transaction on the source Postgres first, then tell me whether the source is producing more than the pipeline can take. Do that before anything else."
   - kind: comment
     from: Kabir
     text: |-
