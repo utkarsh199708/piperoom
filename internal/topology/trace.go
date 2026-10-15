@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
@@ -62,13 +63,19 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if len(p.ConsumerGroups) == 0 || len(p.SinkTables) == 0 {
 		return nil, fmt.Errorf("topology: pipeline %q has no consumer group or sink table", pipelineID)
 	}
+	// owners.yaml decides which tables a room may trace, whether Connect is up
+	// or not: a connector config with no table.include.list streams every
+	// table of the database, and a trace of any of them is a row-existence
+	// oracle (#381).
+	if !slices.Contains(p.SourceTables, table) {
+		return nil, fmt.Errorf("%w: table %q is not a source table of pipeline %q (only %v can be traced)", ErrBadInput, table, p.ID, p.SourceTables)
+	}
 
 	f := traceFacts{
 		table:          table,
-		group:          p.ConsumerGroups[0],
-		sink:           p.SinkTables[0],
 		groupCommitted: -1,
 	}
+	f.sink, f.sinkErr = sinkFor(table, p.SourceTables, p.SinkTables)
 
 	// Resolve the connector and topic. A Connect outage must not fail the
 	// trace: fall back to placeholder names and mark the connector unknown.
@@ -76,11 +83,6 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if cerr != nil {
 		if errors.Is(cerr, ErrBadInput) {
 			return nil, cerr
-		}
-		// No connector config to tell which tables the pipeline streams:
-		// owners.yaml decides, or any table of the database could be read.
-		if !slices.Contains(p.SourceTables, table) {
-			return nil, fmt.Errorf("%w: table %q is not a source table of pipeline %q (Connect is unreachable, so only %v can be traced)", ErrBadInput, table, p.ID, p.SourceTables)
 		}
 		conn = p.Connectors[0]
 		topic = fallbackTopic(p.TopicPrefix, table)
@@ -139,26 +141,28 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 		f.topicPartition = last.Partition
 	}
 
-	// 4. Consumer group: committed offset for the record's partition.
+	// 4. Consumer group: the one that reads the topic, and its committed
+	// offset for the record's partition.
+	f.group = strings.Join(p.ConsumerGroups, ",")
 	if f.topicFound {
-		lag, err := b.kafka.GroupLag(ctx, f.group)
-		f.groupErr = err
-		if err == nil {
-			for _, pl := range lag.Partitions {
-				if pl.Topic == topic && pl.Partition == f.topicPartition {
-					f.groupCommitted = pl.Committed
-					break
-				}
+		var lag clients.GroupLag
+		f.group, lag, f.groupErr = b.groupFor(ctx, p.ConsumerGroups, topic)
+		for _, pl := range lag.Partitions {
+			if pl.Topic == topic && pl.Partition == f.topicPartition {
+				f.groupCommitted = pl.Committed
+				break
 			}
 		}
 	}
 
 	// 5. Sink row and column diff.
-	sinkRow, found, err := b.wh.Row(ctx, f.sink, pk, key)
-	f.sinkErr = err
-	f.sinkFound = found
-	if found && f.sourceFound {
-		f.sinkDiff = diffColumns(srcRow, sinkRow)
+	if f.sinkErr == nil {
+		sinkRow, found, err := b.wh.Row(ctx, f.sink, pk, key)
+		f.sinkErr = err
+		f.sinkFound = found
+		if found && f.sourceFound {
+			f.sinkDiff = diffColumns(srcRow, sinkRow)
+		}
 	}
 
 	return decideTrace(f), nil
@@ -182,6 +186,72 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 		return "", "", fmt.Errorf("topology: connector config: %w", lastErr)
 	}
 	return "", "", fmt.Errorf("%w: no connector streams table %q in pipeline %q", ErrBadInput, table, p.ID)
+}
+
+// errNoSink means no sink table of the pipeline is clearly the one this
+// source table loads into: the warehouse stage is then unknown,
+// never another table's row.
+var errNoSink = errors.New("no sink table of the pipeline matches the source table")
+
+// errNoGroup means none of the pipeline's consumer groups has partitions of
+// the record's topic, so no committed offset tells whether it was consumed.
+var errNoGroup = errors.New("no consumer group of the pipeline reads the topic")
+
+// sinkFor picks the sink table of a source table: the only sink of a
+// pipeline with one source table, else the one sink with the same table name
+// (#401). Unlike reconcile_counts, a trace has no sink_table override, so a
+// lone sink of a pipeline with several source tables is not assumed to hold
+// every table's rows, and a name two source tables share (public.orders,
+// archive.orders) tells nothing.
+func sinkFor(source string, sources, sinks []string) (string, error) {
+	if len(sources) == 1 && len(sinks) == 1 {
+		return sinks[0], nil
+	}
+	name := source[strings.LastIndex(source, ".")+1:]
+	for _, s := range sources {
+		if s != source && s[strings.LastIndex(s, ".")+1:] == name {
+			return strings.Join(sinks, ","), errNoSink
+		}
+	}
+	var match []string
+	for _, s := range sinks {
+		if s[strings.LastIndex(s, ".")+1:] == name {
+			match = append(match, s)
+		}
+	}
+	if len(match) == 1 {
+		return match[0], nil
+	}
+	return strings.Join(sinks, ","), errNoSink
+}
+
+// groupFor returns the consumer group whose partitions include topic, with
+// its lag. A pipeline with one group keeps it, so a group that has not
+// committed on the topic yet still shows the record as not consumed. With
+// several groups, the first in owners.yaml order that reads the topic wins
+// (#401).
+func (b *builder) groupFor(ctx context.Context, groups []string, topic string) (string, clients.GroupLag, error) {
+	if len(groups) == 1 {
+		lag, err := b.kafka.GroupLag(ctx, groups[0])
+		return groups[0], lag, err
+	}
+	var lastErr error
+	for _, g := range groups {
+		lag, err := b.kafka.GroupLag(ctx, g)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for _, pl := range lag.Partitions {
+			if pl.Topic == topic {
+				return g, lag, nil
+			}
+		}
+	}
+	if lastErr != nil {
+		return strings.Join(groups, ","), clients.GroupLag{}, lastErr
+	}
+	return strings.Join(groups, ","), clients.GroupLag{}, errNoGroup
 }
 
 // fallbackTopic is used when connector config is unavailable, so the trace
@@ -275,7 +345,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	groupFacts := map[string]string{}
 	if f.groupErr != nil {
 		groupStatus = "unknown"
-		groupFacts["error"] = "unreachable"
+		groupFacts["error"] = unknownReason(f.groupErr)
 	} else if f.topicFound {
 		if f.groupCommitted >= 0 {
 			groupFacts["committed"] = strconv.FormatInt(f.groupCommitted, 10)
@@ -291,7 +361,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	sinkFacts := map[string]string{}
 	if f.sinkErr != nil {
 		sinkStatus = "unknown"
-		sinkFacts["error"] = "unreachable"
+		sinkFacts["error"] = unknownReason(f.sinkErr)
 	} else if consumed && f.sinkFound {
 		sinkStatus = "seen"
 		if len(f.sinkDiff) > 0 {
@@ -308,6 +378,17 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		stages[4].Status = "stopped_here"
 	}
 	return stages
+}
+
+// unknownReason is the error fact of a stage that could not be checked.
+func unknownReason(err error) string {
+	switch {
+	case errors.Is(err, errNoSink):
+		return "no matching sink table"
+	case errors.Is(err, errNoGroup):
+		return "no group reads the topic"
+	}
+	return "unreachable"
 }
 
 func tsFromRow(row map[string]any) time.Time {

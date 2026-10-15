@@ -57,3 +57,30 @@ func TestTraceConnectDownUsesTopicPrefix(t *testing.T) {
 		t.Fatalf("kafka stage = %+v, want pg.public.orders seen", stages[2])
 	}
 }
+
+// With Connect up, a connector config with no table.include.list streams
+// every table of the database, so the connector check alone let a trace read
+// any of them: the oracle of #381. owners.yaml's source tables decide.
+func TestTraceConnectUpStaysInScope(t *testing.T) {
+	now := time.Now().Format(time.RFC3339Nano)
+	b := NewBuilder(
+		testOwners(),
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "schema.include.list": "public"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+		},
+		&fakeKafka{},
+		&fakeSource{rows: map[string]map[string]any{
+			"public.orders|7":  {"id": "7", "updated_at": now},
+			"public.payroll|7": {"id": "7", "updated_at": now},
+		}},
+		&fakeWarehouse{},
+	)
+	stages, err := b.Trace(context.Background(), "orders", "public.payroll", "7")
+	if !errors.Is(err, ErrBadInput) {
+		t.Fatalf("out-of-pipeline table with Connect up: stages %+v, err %v; want ErrBadInput", stages, err)
+	}
+	if _, err := b.Trace(context.Background(), "orders", "public.orders", "7"); err != nil {
+		t.Fatalf("the pipeline's own table must still trace: %v", err)
+	}
+}

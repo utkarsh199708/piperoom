@@ -299,6 +299,38 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// net/http cancels around the hijacked connection); both a stuck store and
 	// a client that never reads release the goroutine within rto.
 	rctx, rcancel := context.WithTimeout(ctx, rto)
+	// A position past the log head would skip the events between; refuse it
+	// (docs/api.md, stale position). The head comes from the store row, never
+	// the cached snapshot, which can trail an append or another replica.
+	// after == 0 cannot be past the head, so a new open pays no extra read.
+	if after > 0 {
+		row, err := g.store.GetRoom(rctx, roomID)
+		switch {
+		case err != nil:
+			timedOut := rctx.Err() != nil
+			rcancel()
+			switch {
+			case timedOut:
+				c.shutdown(websocket.StatusPolicyViolation, "replay timeout")
+			case errors.Is(err, store.ErrNotFound):
+				c.shutdown(websocket.StatusNormalClosure, RoomDeletedReason)
+			default:
+				g.log.Error("ws: read room head failed", "room", roomID, "err", fmt.Errorf("ws: reading room head: %w", err))
+				c.shutdown(websocket.StatusInternalError, "replay failed")
+			}
+			return
+		case after > row.LastSeq:
+			b, _ := json.Marshal(serverMsg{Type: "error", Error: &serverError{
+				Code:    StalePositionReason,
+				Message: fmt.Sprintf("after %d is past the room's last event %d", after, row.LastSeq),
+			}})
+			// Best effort: the close reason below tells the client the same.
+			_ = c.write(rctx, b)
+			rcancel()
+			c.shutdown(websocket.StatusPolicyViolation, StalePositionReason)
+			return
+		}
+	}
 	for {
 		evs, err := g.store.Since(rctx, roomID, lastSeq, replayBatch)
 		if err != nil {

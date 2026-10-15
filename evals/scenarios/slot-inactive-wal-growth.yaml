@@ -248,11 +248,16 @@ recordings:
     phase: recovered
     summary: |
       pipeline orders
-      1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=44.1 GiB
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=44.1 GiB wal_status=extended
       2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
       3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+        from: connect:pg-orders-connector
       4 group:order-sync [consumer, owner kabir] WARN lag=859737 state=Stable
+        from: topic:pg.public.orders
       5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.3h ts_column=updated_at
+        from: group:order-sync (unconfirmed)
     data:
       edges:
         - from: pg:public.orders
@@ -262,11 +267,13 @@ recordings:
         - from: topic:pg.public.orders
           to: group:order-sync
         - from: group:order-sync
+          mapping: inferred
           to: wh:analytics.orders
       nodes:
         - facts:
             slot_active: "true"
             slot_retained: 44.1 GiB
+            wal_status: extended
           health: warn
           id: pg:public.orders
           kind: source_table

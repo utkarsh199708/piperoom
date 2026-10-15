@@ -95,10 +95,11 @@ func (s *Service) UserByEmail(email string) (User, bool) { return s.users.ByEmai
 
 // LookupPerson finds a person to give control to or to hand off to (design
 // section 2.1). users.yaml first: such a person is always a member and needs no
-// session. Otherwise the newest live session of that user id, and only when the
-// person's role for the session's groups is member. Anything else, including a
-// viewer, an auditor-only principal, a person with no live session and an
-// unknown id, is 400 validation. A group-only member must therefore have logged
+// session. Otherwise the newest usable session of that user id (Deps.SessionLive,
+// the rule every request is held to), and only when the person's role for the
+// session's groups is member. Anything else, including a viewer, an
+// auditor-only principal, a person with no usable session and an unknown id,
+// is 400 validation. A group-only member must therefore have logged
 // in recently; nobody gets the driver role without a current identity.
 func (s *Service) LookupPerson(ctx context.Context, id string) (User, error) {
 	if u, ok := s.users.Get(id); ok {
@@ -107,7 +108,7 @@ func (s *Service) LookupPerson(ctx context.Context, id string) (User, error) {
 	if s.sessions == nil || id == "" {
 		return User{}, errNotAPerson()
 	}
-	sess, err := s.sessions.LiveByUserID(ctx, id, s.now(), s.sessionIdle)
+	sess, err := s.sessions.LiveByUserID(ctx, id, s.now(), s.sessionLive)
 	if errors.Is(err, auth.ErrNotFound) {
 		return User{}, errNotAPerson()
 	}
@@ -234,7 +235,7 @@ func (s *Service) People(ctx context.Context) ([]PersonEntry, error) {
 	if s.sessions == nil {
 		return out, nil
 	}
-	live, err := s.sessions.LiveSessions(ctx, s.now(), s.sessionIdle, maxPeople)
+	live, err := s.sessions.LiveSessions(ctx, s.now(), s.sessionLive, maxPeople)
 	if err != nil {
 		return nil, fmt.Errorf("room: list people: %w", err)
 	}

@@ -252,14 +252,28 @@ func (d *DB) PublicationSourceTables(ctx context.Context, publication, role stri
 		schemas = append(schemas, schema)
 		names = append(names, tbl)
 	}
+	// Not other members: a pipeline table, its listed partition roots, and
+	// the listed partitions of a pipeline table that is a member (#400). The
+	// listed leaves of a pipeline table that is only partly published still
+	// count, as before.
 	var other int
 	if err := d.queryRow(ctx, `
-		SELECT count(*)
-		FROM pg_publication_tables pt
-		WHERE pt.pubname = $1
-		  AND NOT EXISTS (
-		      SELECT 1 FROM unnest($2::text[], $3::text[]) AS v(nsp, relname)
-		      WHERE v.nsp = pt.schemaname AND v.relname = pt.tablename)`, publication, schemas, names).Scan(&other); err != nil {
+		WITH `+publishedCTEs+`,
+		pipeline AS MATERIALIZED (
+			SELECT vc.oid
+			FROM unnest($2::text[], $3::text[]) AS v(nsp, relname)
+			JOIN pg_namespace vn ON vn.nspname = v.nsp
+			JOIN pg_class vc ON vc.relnamespace = vn.oid AND vc.relname = v.relname),
+		member AS MATERIALIZED (
+			SELECT p.oid FROM pipeline p WHERE `+publishedMember("p.oid")+`),
+		own AS MATERIALIZED (
+			SELECT oid FROM pipeline
+			UNION
+			SELECT a.relid FROM pipeline p, pg_partition_ancestors(p.oid) a
+			UNION
+			SELECT t.relid FROM member m, pg_partition_tree(m.oid) t)
+		SELECT count(*) FROM listed l
+		WHERE NOT EXISTS (SELECT 1 FROM own o WHERE o.oid = l.oid)`, publication, schemas, names).Scan(&other); err != nil {
 		return nil, 0, fmt.Errorf("postgres: count other publication %q tables: %w", publication, err)
 	}
 	return sources, other, nil

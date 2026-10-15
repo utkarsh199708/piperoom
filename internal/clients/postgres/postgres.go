@@ -5,6 +5,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -255,7 +256,12 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 
 // PrimaryKeyColumn returns the first primary key column of a table. It is an
 // optional capability used by the record trace to look up rows without the
-// caller knowing the key column name ahead of time.
+// caller knowing the key column name ahead of time. A table without a primary
+// key is clients.ErrNotFound.
+//
+// It reads pg_catalog, not information_schema: information_schema shows a
+// constraint only to the table's owner or a role with a privilege other than
+// SELECT, so the documented SELECT-only role saw no key on any table (#385).
 func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -266,16 +272,15 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 	}
 	var col string
 	err = d.queryRow(ctx, `
-		SELECT kcu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-		  ON tc.constraint_name = kcu.constraint_name
-		 AND tc.constraint_schema = kcu.constraint_schema
-		WHERE tc.constraint_type = 'PRIMARY KEY'
-		  AND tc.table_schema = $1
-		  AND tc.table_name = $2
-		ORDER BY kcu.ordinal_position
-		LIMIT 1`, schema, tbl).Scan(&col)
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
+		WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2`, schema, tbl).Scan(&col)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("postgres: primary key of %s: %w", table, clients.ErrNotFound)
+	}
 	if err != nil {
 		return "", fmt.Errorf("postgres: primary key of %s: %w", table, err)
 	}

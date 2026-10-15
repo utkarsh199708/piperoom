@@ -118,7 +118,10 @@ type sourceTable struct {
 // sourcePrivileges reports, for each table in tables, whether it is a member
 // of publication and whether role has SELECT on it. Membership is checked
 // against pg_publication_tables so FOR ALL TABLES / FOR TABLES IN SCHEMA
-// publications are handled correctly.
+// publications are handled correctly. pg_publication_tables lists only the
+// leaf partitions of a partitioned table (publish_via_partition_root = false)
+// or only its root (true), so membership is decided per leaf (#400): see
+// publishedMember.
 func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tables []string) ([]PublicationTable, error) {
 	sources := make([]sourceTable, 0, len(tables))
 	for _, t := range tables {
@@ -135,8 +138,9 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	var sb strings.Builder
 	args := []any{publication, role}
 	sb.WriteString(`
+		WITH ` + publishedCTEs + `
 		SELECT v.schemaname, v.tablename,
-		       (pt.pubname IS NOT NULL) AS in_publication,
+		       (c.oid IS NOT NULL AND ` + publishedMember("c.oid") + `) AS in_publication,
 		       (c.oid IS NOT NULL AND has_table_privilege($2::name, c.oid, 'SELECT')) AS selectable
 		FROM (VALUES `)
 	for i := range sources {
@@ -147,8 +151,6 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		args = append(args, sources[i].schema, sources[i].table)
 	}
 	sb.WriteString(`) AS v(pos, schemaname, tablename)
-		LEFT JOIN pg_publication_tables pt
-		  ON pt.pubname = $1 AND pt.schemaname = v.schemaname AND pt.tablename = v.tablename
 		LEFT JOIN pg_namespace n ON n.nspname = v.schemaname
 		LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.tablename
 		ORDER BY v.pos`)
@@ -171,4 +173,48 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		return nil, fmt.Errorf("postgres: read publication %q source privileges: %w", publication, err)
 	}
 	return out, nil
+}
+
+// publishedCTEs reads publication $1 once (#416 review: a membership check
+// per row and per leaf passed the 10 s deadline at about 150 partitions):
+//   - listed: the relations pg_publication_tables lists;
+//   - covered: the listed relations and every partition under them, so a
+//     leaf is published when it is in covered.
+//
+// pg_partition_tree is empty for a table outside a partition tree, hence the
+// union with listed itself.
+const publishedCTEs = `listed AS MATERIALIZED (
+			SELECT DISTINCT lc.oid
+			FROM pg_publication_tables lpt
+			JOIN pg_namespace ln ON ln.nspname = lpt.schemaname
+			JOIN pg_class lc ON lc.relnamespace = ln.oid AND lc.relname = lpt.tablename
+			WHERE lpt.pubname = $1),
+		covered AS MATERIALIZED (
+			SELECT oid FROM listed
+			UNION
+			SELECT t.relid FROM listed l, pg_partition_tree(l.oid) t)`
+
+// publishedMember is a boolean SQL expression over publishedCTEs: the
+// relation rel (a non-NULL oid expression, never input) is in the
+// publication. Every publishable leaf partition of rel must be covered; a
+// publication that lists only some leaves leaves the others' rows
+// unpublished, so the table is not a member (#400 review). Unlogged and
+// foreign leaves are never published, so they do not count. A table with no
+// publishable leaf (not partitioned, partitioned with no partition, every
+// leaf unlogged or foreign, or itself such a leaf) must be covered itself:
+// an empty leaf set must never make it a member of a publication that does
+// not list it (#416 review round 3). A partitioned table with no partition
+// has nothing listed under publish_via_partition_root = false and reads as
+// not a member, as before; it can hold no rows.
+func publishedMember(rel string) string {
+	publishable := `SELECT t.relid FROM pg_partition_tree(` + rel + `) t
+				JOIN pg_class tc ON tc.oid = t.relid
+				WHERE t.isleaf AND tc.relkind = 'r' AND tc.relpersistence = 'p'`
+	return `NOT EXISTS (
+			SELECT 1 FROM (
+				` + publishable + `
+				UNION ALL
+				SELECT ` + rel + ` WHERE NOT EXISTS (` + publishable + `)
+			) AS leaf(oid)
+			WHERE NOT EXISTS (SELECT 1 FROM covered cv WHERE cv.oid = leaf.oid))`
 }

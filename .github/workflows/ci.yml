@@ -36,10 +36,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: gofmt
         run: |
           fmt_out="$(gofmt -l .)"
@@ -100,10 +103,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: Start the dev stack (postgres, kafka, schema registry, connect, devconsumer)
         # No --wait: wait-for-stack.sh polls Connect's REST API itself, with a
         # bounded timeout, and dumps the container logs when it gives up.
@@ -157,7 +163,7 @@ jobs:
         run: docker compose -f dev/docker-compose.yml logs --no-color --tail=300
       - name: Upload test output
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fullstack-test-json
           path: test.json
@@ -177,10 +183,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: go test -race
         run: go test -race -count=1 ./...
 
@@ -194,10 +203,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      # setup-go (v6+) exports GOTOOLCHAIN=local to every later step: `go` never
+      # downloads another toolchain. A tool pinned below whose go.mod needs a Go
+      # newer than go.mod's here fails to install; bump the toolchain in go.mod first.
       - name: Install govulncheck (built with the same Go as the other jobs)
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       - name: govulncheck (fails on reachable findings not in the reviewed allowlist)
@@ -222,10 +237,16 @@ jobs:
       - name: No dev auth in the release image or the pilot compose default
         run: .github/scripts/check-no-dev-auth.sh
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      # setup-go (v6+) exports GOTOOLCHAIN=local to every later step: `go` never
+      # downloads another toolchain. A tool pinned below whose go.mod needs a Go
+      # newer than go.mod's here fails to install; bump the toolchain in go.mod first.
       - name: Install helm and kubeconform (pinned, built from source by the Go module proxy)
         run: |
           go install helm.sh/helm/v3/cmd/helm@v3.16.3
@@ -246,7 +267,7 @@ jobs:
             helm template piperoom deploy/helm/piperoom -f "$f" | kubeconform -strict -summary -kubernetes-version 1.30.0
           done
       - name: Set up Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: 1.9.8
           terraform_wrapper: false
@@ -273,18 +294,22 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
       - name: Run test/e2e/oidc/run.sh
         run: test/e2e/oidc/run.sh
       - name: Upload stack logs
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: oidc-e2e-logs
           path: test/e2e/oidc/.logs
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
 
@@ -300,7 +325,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm

@@ -109,3 +109,29 @@ func TestWarehouseFreshnessFutureTimestamp(t *testing.T) {
 		})
 	}
 }
+
+// A Postgres 'infinity' max arrives as a year-9999 stand-in (#422). The tool
+// must not show that made-up time or an age computed from it.
+func TestWarehouseFreshnessInfinity(t *testing.T) {
+	d := testDeps()
+	d.Wh.(*fakeWarehouse).fresh = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tt, _ := reg.Get("warehouse_freshness")
+	r, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "newest=infinity (a sentinel or bad value in updated_at): staleness cannot be judged"
+	data := r.Data.(map[string]any)
+	if r.Summary != want || data["newest"] != "infinity" || data["in_future"] != true {
+		t.Fatalf("summary %q data %v", r.Summary, data)
+	}
+	for _, k := range []string{"ahead_by", "stale_for"} {
+		if _, ok := data[k]; ok {
+			t.Errorf("data has %s: %v", k, data)
+		}
+	}
+}

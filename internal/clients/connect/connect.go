@@ -62,6 +62,7 @@ func (c *Client) Status(ctx context.Context, name string) (clients.ConnectorStat
 		Connector struct {
 			State    string `json:"state"`
 			WorkerID string `json:"worker_id"`
+			Trace    string `json:"trace"`
 		} `json:"connector"`
 		Tasks []struct {
 			ID       int    `json:"id"`
@@ -79,6 +80,7 @@ func (c *Client) Status(ctx context.Context, name string) (clients.ConnectorStat
 		Type:     raw.Type,
 		State:    raw.Connector.State,
 		WorkerID: raw.Connector.WorkerID,
+		Trace:    raw.Connector.Trace,
 	}
 	for _, t := range raw.Tasks {
 		cs.Tasks = append(cs.Tasks, clients.TaskStatus{

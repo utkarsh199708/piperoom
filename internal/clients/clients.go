@@ -59,6 +59,11 @@ type ConnectorStatus struct {
 	State    string       `json:"state"` // RUNNING | PAUSED | FAILED | UNASSIGNED | RESTARTING | STOPPED
 	WorkerID string       `json:"worker_id"`
 	Tasks    []TaskStatus `json:"tasks"`
+	// Trace is the connector-level stack trace Connect reports when the
+	// connector itself fails (e.g. at startup, with no tasks); empty
+	// otherwise. Untrusted text: condense and sanitize it before it reaches a
+	// summary or tool Data. (#399)
+	Trace string `json:"trace,omitempty"`
 }
 
 type TaskStatus struct {
@@ -110,7 +115,11 @@ type KafkaReader interface {
 	GroupLag(ctx context.Context, group string) (GroupLag, error)
 	// FindByKey scans the topic from the first offset at or after since and
 	// returns records whose key matches (string compare of the decoded key).
-	// It stops at maxScan records per partition.
+	// It stops at maxScan records per partition (<= 0 means the client
+	// default). A deadline that cuts the scan before any match is an error,
+	// never a false "not found"; a cut after a match returns the matches so
+	// far with a nil error, so the result cannot tell "no newer match" from
+	// "not scanned": a caller that must know uses KeyScanReader.
 	FindByKey(ctx context.Context, topic, key string, since time.Time, maxScan int) ([]RecordRef, error)
 }
 
@@ -133,6 +142,13 @@ type GroupLag struct {
 	Members    int            `json:"members"`
 	TotalLag   int64          `json:"total_lag"`
 	Partitions []PartitionLag `json:"partitions"`
+	// Unknown lists the partitions whose committed offset or end offset could
+	// not be read (e.g. a broker down); they are not in Partitions and not in
+	// TotalLag, so a non-empty Unknown makes TotalLag a lower bound, never
+	// "no lag". In an Unknown entry Lag is always -1, and End is -1 when the
+	// end offset could not be read; Committed is the committed offset when it
+	// was read, else -1. (#306)
+	Unknown []PartitionLag `json:"unknown,omitempty"`
 }
 
 type PartitionLag struct {
@@ -141,6 +157,28 @@ type PartitionLag struct {
 	Committed int64  `json:"committed"` // -1 if nothing committed
 	End       int64  `json:"end"`
 	Lag       int64  `json:"lag"`
+}
+
+// KeyScan is a key scan's result: the matching records and the partitions
+// whose window the scan did not finish (maxScan, or the scan deadline after a
+// match), where newer matches may exist. Refs are per partition in offset
+// order (a partition's newest match is its last), partitions ascending, so
+// the last Ref is not the newest match across partitions; Truncated is
+// ascending, without duplicates. (#306)
+type KeyScan struct {
+	Refs      []RecordRef `json:"records"`
+	Truncated []int32     `json:"truncated_partitions,omitempty"`
+}
+
+// KeyScanReader is FindByKey that also reports truncated partitions, so a
+// caller never reads a cut scan as "the record is not there" (optional on a
+// KafkaReader, asserted at use time). Its Refs are what FindByKey returns for
+// the same arguments; a deadline that cuts the scan before any match is still
+// an error. Without it (fakes, eval replay), a caller treats FindByKey's result
+// as possibly truncated: it never states "not there", "newest match" or
+// "consumed" as fact. (#306)
+type KeyScanReader interface {
+	FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (KeyScan, error)
 }
 
 type RecordRef struct {

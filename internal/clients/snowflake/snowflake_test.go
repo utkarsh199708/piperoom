@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
 
 	"piperoom/internal/clients"
 )
@@ -59,6 +59,7 @@ func (r *fakeRows) Close() error               { r.closed = true; return nil }
 // records the last query and args it was called with.
 type fakeQuerier struct {
 	rows      *fakeRows
+	showRows  *fakeRows // answer to SHOW PRIMARY KEYS, when set
 	err       error
 	lastQuery string
 	lastArgs  []any
@@ -68,6 +69,9 @@ type fakeQuerier struct {
 func (q *fakeQuerier) QueryContext(ctx context.Context, query string, args ...any) (sqlRows, error) {
 	if q.onQuery != nil {
 		q.onQuery(ctx)
+	}
+	if q.showRows != nil && strings.HasPrefix(query, "SHOW PRIMARY KEYS") {
+		return q.showRows, nil
 	}
 	q.lastQuery = query
 	q.lastArgs = args
