@@ -86,6 +86,7 @@ func TestForbiddenNegatedClauses(t *testing.T) {
 	crash := [][]string{{"consumer", "crash*"}}
 	pill := [][]string{{"poison pill"}}
 	reset := [][]string{{"reset*", "latest"}}
+	slot := [][]string{{"slot", "inactive"}}
 	tests := []struct {
 		rows [][]string
 		text string
@@ -121,6 +122,12 @@ func TestForbiddenNegatedClauses(t *testing.T) {
 		{reset, "The fix is to reset order-sync to latest, not to rewind it.", true},
 		{pill, "Not the schema but a poison pill on partition 1.", true},
 		{crash, "The schema change is not the cause; the consumer crash is.", true},
+		// A negator after a clause marker denies another verb, not the term.
+		{slot, "The slot has become inactive so the snapshot cannot progress.", true},
+		{slot, "The slot is inactive because the connector cannot reach Postgres.", true},
+		{slot, "The slot is not inactive.", false},
+		{pill, "X cannot be the cause, and a poison pill cannot be the cause either.", false},
+		{reset, "A reset to latest and a rewind are not options.", false},
 		// Unchanged from before #17.
 		{reset, "Do not reset the group to latest.", false},
 		{reset, "Resetting to latest is not an option.", false},

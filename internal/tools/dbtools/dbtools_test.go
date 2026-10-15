@@ -88,6 +88,9 @@ func (f *fakeWarehouse) Row(_ context.Context, table, _, key string) (map[string
 	row, ok := f.rows[table+"|"+key]
 	return row, ok, nil
 }
+
+// PrimaryKeyColumn reports "id", the key of every fake table.
+func (f *fakeWarehouse) PrimaryKeyColumn(context.Context, string) (string, error) { return "id", nil }
 func (f *fakeWarehouse) Freshness(context.Context, string, string) (time.Time, error) {
 	return f.fresh, nil
 }

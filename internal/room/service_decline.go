@@ -44,7 +44,8 @@ func (s *Service) DeclineSuggestion(ctx context.Context, user User, roomID, sugg
 		return events.Event{}, mapStoreErr(err)
 	}
 	if sugg.RoomID != roomID {
-		return events.Event{}, notFound("suggestion not found")
+		// Same answer as a missing id: see SendSuggestion.
+		return events.Event{}, notFound("not found")
 	}
 	if sugg.Status != "pending" {
 		return events.Event{}, alreadyDecided("suggestion already decided")

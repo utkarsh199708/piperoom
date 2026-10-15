@@ -122,6 +122,19 @@ func warehouseRowTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
+			// Only the primary key, as in pg_row: any other column (an email, a
+			// tax id) makes the tool an existence oracle for personal data.
+			// Checked when the client reports the key (the Postgres warehouse
+			// client does).
+			if pc, ok := d.Wh.(pkColumner); ok {
+				pk, err := pc.PrimaryKeyColumn(ctx, input.Table)
+				if err != nil {
+					return tools.Result{}, fmt.Errorf("dbtools: warehouse_row: %w", err)
+				}
+				if input.PKColumn != pk {
+					return tools.Result{}, fmt.Errorf("%w: pk_column must be the primary key column of %s (%q)", tools.ErrBadInput, input.Table, pk)
+				}
+			}
 			row, found, err := d.Wh.Row(ctx, input.Table, input.PKColumn, input.Key)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: warehouse_row: %w", err)

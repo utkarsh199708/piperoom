@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/dlq"
 	"piperoom/internal/tools"
 )
 
@@ -291,12 +292,32 @@ func condenseTrace(trace string) string {
 	return strings.Join(out, "\n")
 }
 
-// sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line.
+// sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line
+// and masks the failing record's values where a driver or converter quotes
+// them.
 func sanitizeTrace(s string) string {
 	s = stripSchemaAfter(s, "Error registering Avro schema")
 	s = stripOldSchema(s)
+	if recordSnippet.MatchString(s) {
+		// dlq.RedactMessage drops a "Failing row contains (...)" tuple only
+		// after a "Detail:" prefix; some drivers print it without one.
+		s = dlq.RedactMessage(failingRow.ReplaceAllString(s, "${1} "+dlq.Redacted))
+	}
 	return s
 }
+
+var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)
+
+// recordSnippet matches the places where sink drivers and converters quote
+// the failing record: JDBC batch "VALUES (...)", PostgreSQL "Detail:",
+// "Where:", "Key (...)=(...)", "Failing row contains (...)" and "invalid
+// input syntax ... \"...\"", Java's "For input string: \"...\"", Connect's
+// "Cannot parse value ...", Jackson's "[Source: ...]" snippet and
+// "Unrecognized token '...'". Such a line gets the dlq_peek redaction; other
+// lines (schema registry rejections, class names) stay whole, because their
+// wording is the diagnosis and dlq.RedactMessage would mask the quoted
+// subject in it.
+var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse`)
 
 // stripSchemaAfter replaces the balanced {…} JSON that follows marker with <schema>.
 func stripSchemaAfter(s, marker string) string {

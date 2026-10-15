@@ -121,13 +121,19 @@ func cookieHdr(c *http.Cookie) string { return "Cookie: " + c.Name + "=" + c.Val
 // seedSession stores a session directly and returns its cookie value.
 func (e *authEnv) seedSession(t *testing.T, user string, created, lastSeen, expires time.Time) (token, id string) {
 	t.Helper()
+	return e.seedSessionMethod(t, auth.MethodDev, user, created, lastSeen, expires)
+}
+
+// seedSessionMethod is seedSession with the login method stored on the row.
+func (e *authEnv) seedSessionMethod(t *testing.T, method, user string, created, lastSeen, expires time.Time) (token, id string) {
+	t.Helper()
 	token, hash, err := auth.NewToken()
 	if err != nil {
 		t.Fatalf("token: %v", err)
 	}
 	id = room.NewID("ses_")
 	err = e.sessions.Create(context.Background(), auth.Session{
-		ID: id, TokenHash: hash, UserID: user, Name: user, Method: auth.MethodDev,
+		ID: id, TokenHash: hash, UserID: user, Name: user, Method: method,
 		CreatedAt: created, LastSeenAt: lastSeen, ExpiresAt: expires,
 	})
 	if err != nil {
@@ -400,7 +406,7 @@ func TestAuthPathsAreNeverTheSPAShell(t *testing.T) {
 func TestOIDCModeReadsOnlyItsOwnCookie(t *testing.T) {
 	e := newAuthEnv(t, httpapi.WithAuth(oidcSettings()))
 	now := time.Now().UTC()
-	token, _ := e.seedSession(t, "arjun", now, now, now.Add(time.Hour))
+	token, _ := e.seedSessionMethod(t, auth.MethodOIDC, "arjun", now, now, now.Add(time.Hour))
 
 	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", "Cookie: "+auth.OIDCSessionCookie+"="+token), http.StatusOK)
 	resp := e.do(t, http.MethodGet, "/api/me", "", "Cookie: "+auth.DevSessionCookie+"="+token)

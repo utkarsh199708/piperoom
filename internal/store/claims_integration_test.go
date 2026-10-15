@@ -204,3 +204,28 @@ func TestSlackThreadCompareAndSet(t *testing.T) {
 		t.Fatalf("thread: %+v %v %v", got, ok, err)
 	}
 }
+
+// A delete is refused while any replica's executor holds a claim in the room,
+// and goes through once the proposal is no longer open.
+func TestDeleteRoomRefusedWhileClaimed(t *testing.T) {
+	s, _, _ := requireStoreSchema(t)
+	roomID := createTestRoom(t, s)
+	createTestProposal(t, s, roomID, "p_del")
+	ctx := context.Background()
+	if ok, _ := s.ClaimProposal(ctx, "p_del", "replica-a"); !ok {
+		t.Fatal("claim")
+	}
+	d := store.RoomDeletion{RoomID: roomID, DeletedBy: "ada", DeletedAt: time.Now(), Reason: "cleanup"}
+	if _, _, err := s.DeleteRoom(ctx, d, -1); !errors.Is(err, store.ErrRoomExecuting) {
+		t.Fatalf("delete while claimed: %v, want ErrRoomExecuting", err)
+	}
+	if _, err := s.GetRoom(ctx, roomID); err != nil {
+		t.Fatalf("room gone after a refused delete: %v", err)
+	}
+	if err := s.SetClaimedProposalStatus(ctx, "p_del", "replica-a", "executed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.DeleteRoom(ctx, d, -1); err != nil {
+		t.Fatalf("delete after the run: %v", err)
+	}
+}

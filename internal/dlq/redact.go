@@ -36,14 +36,19 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 //     a closer, so "can't" is not a quote;
 //  5. replace the operand after "Unrecognized token" (Jackson quotes the
 //     offending bytes there, even when they look like an identifier) and the
-//     tuples after VALUES (batch SQL with the row's values).
+//     tuples after VALUES (batch SQL with the row's values);
+//  6. replace unquoted values: e-mail addresses, Luhn-valid card numbers,
+//     SSN-like and phone-like numbers, the value after a credential key
+//     (password=, token:, api_key=, ...) and what internal/redact finds (a
+//     URL's user:password@, bearer tokens, cloud keys).
 //
 // Control characters and runs of spaces become one space. The result is at
 // most 300 runes and RedactMessage is idempotent.
 //
 // Limits: a bare identifier-shaped value in single quotes ('jane') is kept,
-// because 'amount' (a column name) looks the same. Typographic and fullwidth
-// quotes are not recognised.
+// because 'amount' (a column name) looks the same, and so is an unquoted name
+// or address ("name=Jane Doe"). Typographic and fullwidth quotes are not
+// recognised (rule 6 still masks an e-mail address inside them).
 func RedactMessage(s string) string {
 	// The first pass removes everything the rules name; the loop only runs
 	// again when a removal joined text into something a rule matches.
@@ -59,10 +64,15 @@ func RedactMessage(s string) string {
 }
 
 func redactOnce(s string) string {
-	rs := capRunes([]rune(s))
+	rs := []rune(s)
+	// A cut can drop the closing quote of a value: then an open single quote
+	// is a value, not an apostrophe (scrub).
+	cut := len(rs) > MaxMessageRunes
+	rs = capRunes(rs)
 	rs = tidy(rs)
 	rs = cutTail(rs)
-	rs = scrub(rs)
+	rs = scrub(rs, cut)
+	rs = []rune(maskUnquoted(string(rs)))
 	// Markers can make the text longer than what went in ("" -> "<redacted>"),
 	// so the cap runs again at the end.
 	return string(capRunes(tidy(rs)))
@@ -150,8 +160,10 @@ func hasPrefixFold(rs, p []rune) bool {
 }
 
 // scrub replaces quoted strings, balanced groups, the Jackson token operand
-// and VALUES tuples.
-func scrub(rs []rune) []rune {
+// and VALUES tuples. cut says the text was cut at the cap: a single quote that
+// opens a value and has no closer then takes the rest of the text, because
+// its closer was past the cut.
+func scrub(rs []rune, cut bool) []rune {
 	out := make([]rune, 0, len(rs))
 	for i := 0; i < len(rs); {
 		r := rs[i]
@@ -174,6 +186,8 @@ func scrub(rs []rune) []rune {
 		case r == '\'' && wordStart(rs, i):
 			end := apostropheEnd(rs, i)
 			switch {
+			case end < 0 && cut:
+				return append(out, redactedRunes...)
 			case end < 0:
 				out = append(out, r) // an apostrophe, not a quote
 				i++

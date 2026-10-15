@@ -76,7 +76,7 @@ func recordTasks(now time.Time, t target, ps *pipeState, obs *observation) map[s
 				h.events = append(h.events, taskEvent{at: now, state: state})
 			}
 			if state == "FAILED" {
-				if line := firstLine(tk.Trace, maxTraceChars); line != "" {
+				if line := traceLine(tk.Trace); line != "" {
 					h.lastTrace = line
 				}
 			}

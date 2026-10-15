@@ -180,6 +180,9 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, in, out any
 		}
 		body = bytes.NewReader(b)
 	}
+	if err := netsec.CheckPath(path); err != nil {
+		return fmt.Errorf("connect: %s: %w", method, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("connect: %s %s: %w", method, path, err)

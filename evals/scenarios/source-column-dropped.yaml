@@ -235,7 +235,7 @@ recordings:
 expect:
   root_cause:
     - [amount*]
-    - [drop*, removed, no longer]
+    - [drop*, remov*, delet*, no longer]
   first_failing_layer: consumer
   root_cause_layer: postgres
   expected_facts:

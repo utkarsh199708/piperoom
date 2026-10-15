@@ -9,11 +9,21 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/dlq"
 	"piperoom/internal/owners"
+	"piperoom/internal/redact"
 )
 
 // maxTraceChars caps a task trace line in the evidence (design §5, I6).
 const maxTraceChars = 300
+
+// traceLine is what the watcher keeps of a task trace: the first line, with
+// record values and credentials removed by the DLQ message rules (a Connect
+// exception message quotes the failing record and connection URLs). The line
+// is handed over longer than the cap, so RedactMessage makes the cut and
+// knows a quote's closer may lie past it; its result is at most
+// dlq.MaxMessageRunes (= maxTraceChars).
+func traceLine(s string) string { return dlq.RedactMessage(firstLine(s, 4*maxTraceChars)) }
 
 // slotNameRE is the owners rule for a slot name (the same check as watch.slot).
 var slotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
@@ -140,7 +150,9 @@ func (w *Watcher) fields(pipeline, signal string, ss *sigState, now time.Time, a
 func (w *Watcher) noteError(pipeline, signal string, ss *sigState, err error) {
 	msg := "unknown"
 	if err != nil {
-		msg = clean(err.Error(), 300)
+		// A client error can carry a response body (a Connect 500 that echoes
+		// a config value): mask credentials before it reaches a log line.
+		msg, _ = redact.Text(clean(err.Error(), 300))
 	}
 	if ss.errText == msg {
 		w.log.Debug("watch: check still failing", "pipeline", pipeline, "signal", signal, "err", msg)
@@ -260,7 +272,7 @@ func classifyOne(name string, st clients.ConnectorStatus, loops map[string]loopI
 			continue
 		}
 		te := map[string]any{"id": tk.ID, "state": clean(tk.State, 24)}
-		line := firstLine(tk.Trace, maxTraceChars)
+		line := traceLine(tk.Trace)
 		if looping {
 			te["crash_loop"] = true
 			te["restarts"] = li.restarts

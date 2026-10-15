@@ -1,5 +1,10 @@
 package evals
 
+import (
+	"regexp"
+	"strings"
+)
+
 // A diagnosis that lists several candidate causes names the right one by
 // construction: the root-cause terms match whatever the truth is. Such an
 // answer must not count as finding the cause, or a vaguer agent scores
@@ -34,16 +39,68 @@ var hedgeMarkers = []string{
 	"hard to say whether", "hard to say which",
 }
 
+// hedgeDenials just before a marker turn it into a commitment: "there are no
+// other possibilities", "I ruled out the other possible causes".
+var hedgeDenials = []string{"no", "not", "t", "without", "rule out", "rules out", "ruled out", "ruling out"}
+
+// trailingEither is an "either" that closes its phrase after a word: "the
+// registry did not change either." commits; "Either the registry ... Or the
+// connector ..." and "Either:" followed by a list do not.
+var (
+	trailingEither = regexp.MustCompile(`(?i)\w\s+either\s*([.,;!)]|$)`)
+	eitherWord     = regexp.MustCompile(`(?i)\beither\b`)
+)
+
 // causeHedge reports whether text offers several causes instead of one, and the
-// first marker it found.
+// first marker it found. An "either" that closes its phrase and a marker right
+// after an un-negated denial do not count.
 func causeHedge(text string) (string, bool) {
-	toks := tokenize(text)
+	// clauseSplit, not clausesOf: a question still offers its alternatives.
+	var cls [][]string
+	for _, c := range clauseSplit.Split(text, -1) {
+		cls = append(cls, tokenize(c))
+	}
+	eitherAll := len(eitherWord.FindAllStringIndex(text, -1))
+	eitherTrailing := len(trailingEither.FindAllStringIndex(text, -1))
 	for _, m := range hedgeMarkers {
-		if matchTerm(toks, m) {
-			return m, true
+		if m == "either" && eitherTrailing == eitherAll {
+			continue
+		}
+		for _, toks := range cls {
+			for _, i := range findTerm(toks, m) {
+				if hedgeDenied(toks, i) {
+					continue
+				}
+				return m, true
+			}
 		}
 	}
 	return "", false
+}
+
+// hedgeDenied reports whether a hedge denial ends in the four words before
+// toks[i], with only determiners or "other" between them.
+func hedgeDenied(toks []string, i int) bool {
+	for k := max(0, i-4); k < i; k++ {
+		l := phraseAt(toks, k, hedgeDenials)
+		if l == 0 || k+l > i {
+			continue
+		}
+		// "cannot rule out other possibilities" still offers them.
+		if strings.HasPrefix(toks[k], "rul") && (negatorBefore(toks, k, 2) || k > 0 && toks[k-1] == "cannot") {
+			continue
+		}
+		gap := true
+		for _, t := range toks[k+l : i] {
+			if t != "the" && t != "other" && t != "all" && t != "any" {
+				gap = false
+			}
+		}
+		if gap {
+			return true
+		}
+	}
+	return false
 }
 
 // Notes are advice about a valid scenario: what its expectations cannot

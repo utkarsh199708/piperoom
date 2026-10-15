@@ -644,3 +644,34 @@ func TestLearnedScenarioReplaysThroughTheRoomPath(t *testing.T) {
 		t.Error("a hypothesis that repeats the alert must not pass a learned scenario")
 	}
 }
+
+// When the redactor masks anything in a call's input, redact.JSONStats
+// returns a tree decoded with UseNumber, so numbers come back as json.Number.
+// yaml.v3 writes json.Number as a string, so a learned recording's numeric
+// input field ("partition: 3") is written as "3" and can no longer match the
+// model's call (3) in replay.
+func TestLearnedInputKeepsNumbersWhenRedacted(t *testing.T) {
+	rd := redact.New(redact.DefaultOptions())
+	call := json.RawMessage(`{"topic":"orders","partition":3,"key":"password=hunter2secret"}`)
+	in := keptInput(call, rd)
+	if in == nil {
+		t.Fatal("no input kept")
+	}
+	if got, _ := rd.Text("password=hunter2secret"); got == "password=hunter2secret" {
+		t.Skip("redactor did not mask the probe; pick another secret shape")
+	}
+	b, err := yaml.Marshal(Recording{Tool: "kafka_find_record", Input: in, Summary: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Recording
+	if err := yaml.Unmarshal(b, &back); err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	_ = json.Unmarshal([]byte(`{"topic":"orders","partition":3,"key":"whatever"}`), &got)
+	delete(back.Input, "key") // the masked field cannot match anyway
+	if !matches(back.Input, got) {
+		t.Fatalf("learned recording input no longer matches the same call:\n%s", b)
+	}
+}

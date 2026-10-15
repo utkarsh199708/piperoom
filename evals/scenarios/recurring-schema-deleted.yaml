@@ -234,6 +234,11 @@ expect:
     - [id 2, version 1, 40403, not found, delet*]
     # Only the closed room says how to get it back.
     - [import mode, import, original id, same id, same schema id]
+  # The poison-pill story (a stuck, crash-looping consumer) is the trap a list answer tells.
+  # Not a bare [poison pill]: "unlike a poison pill, the record is valid Avro" is right.
+  root_cause_forbidden:
+    - [poison pill, stuck]
+    - [poison pill, crash*]
   first_failing_layer: schema-registry
   root_cause_layer: schema-registry
   # The 40403 is only in Kabir's comment; the subject no longer lists

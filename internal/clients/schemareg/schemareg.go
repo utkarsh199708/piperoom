@@ -169,6 +169,9 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 }
 
 func (c *Client) roundTrip(ctx context.Context, method, path string, body io.Reader, out any) error {
+	if err := netsec.CheckPath(path); err != nil {
+		return fmt.Errorf("schemareg: %s: %w", method, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("schemareg: %s %s: %w", method, path, err)

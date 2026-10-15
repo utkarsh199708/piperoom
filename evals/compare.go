@@ -99,11 +99,13 @@ func pairRuns(base, cand Report) (b, c []bool, unmatched int) {
 	for _, r := range base.Results {
 		baseBy[runKey{r.Scenario, r.Run}] = r.Pass
 	}
-	var keys []runKey
 	candBy := map[runKey]bool{}
 	for _, r := range cand.Results {
-		k := runKey{r.Scenario, r.Run}
-		candBy[k] = r.Pass
+		candBy[runKey{r.Scenario, r.Run}] = r.Pass
+	}
+	// Keys from the map, so a run listed twice pairs once.
+	var keys []runKey
+	for k := range candBy {
 		if _, ok := baseBy[k]; ok {
 			keys = append(keys, k)
 		}

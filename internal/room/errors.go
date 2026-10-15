@@ -1,6 +1,19 @@
 package room
 
-import "errors"
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// compensateCtx is the context for undoing a side-table write whose event
+// failed to append. The usual cause of that failure is the request context
+// ending (client gone, request timeout); undoing on that same context fails at
+// once and leaves the row with no event, e.g. an approval row that answers
+// already_decided to every retry. Caller defers cancel.
+func compensateCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+}
 
 // ErrResolvedAlertNoRoom is returned by CreateRoomFromAlert for an alert the
 // source reports resolved that matches no open room. A resolved notice never
