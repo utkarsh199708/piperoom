@@ -30,6 +30,7 @@ const (
 	SignalConnectorDown       = "connector_down"
 	SignalSlotInactive        = "slot_inactive"
 	SignalSlotWAL             = "slot_wal"
+	SignalSlotStall           = "slot_stall"
 	SignalDLQGrowth           = "dlq_growth"
 	SignalConfigRisk          = "config_risk"
 	SignalConsumerLag         = "consumer_lag"
@@ -38,7 +39,7 @@ const (
 )
 
 // knownSignals lists every signal the watcher reads, for error messages.
-var knownSignals = []string{SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, SignalDLQGrowth, SignalConfigRisk,
+var knownSignals = []string{SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, SignalSlotStall, SignalDLQGrowth, SignalConfigRisk,
 	SignalConsumerLag, SignalGroupUnstable, SignalOffsetBelowLogStart}
 
 // maxFlaps bounds group_unstable.flaps: the watcher keeps the last 12 group
@@ -155,6 +156,9 @@ type signalSpec struct {
 	EtaSev1 string `yaml:"eta_sev1"`
 	Window  string `yaml:"window"` // dlq_growth, group_unstable
 
+	StallAfter string `yaml:"stall_after"` // slot_stall
+	Growth     string `yaml:"growth"`      // slot_stall
+
 	MembersExpected   *bool  `yaml:"members_expected"`   // consumer_lag
 	Flaps             string `yaml:"flaps"`              // group_unstable
 	CrashloopRestarts string `yaml:"crashloop_restarts"` // connector_down
@@ -179,6 +183,20 @@ type SlotWALSignal struct {
 	ClearBytes int64
 	// EtaSev1: a slot-invalidation estimate shorter than this makes it sev1.
 	EtaSev1 time.Duration
+}
+
+// SlotStallSignal is the slot_stall signal: a slot whose LSNs have not moved
+// for StallAfter while the WAL it holds keeps growing. It has no `for`: the
+// stall time is the hold.
+type SlotStallSignal struct {
+	WatchSignal
+	// StallAfter: neither restart_lsn nor confirmed_flush_lsn moved for this long.
+	StallAfter time.Duration
+	// FireBytes: the slot holds at least this much WAL.
+	FireBytes int64
+	// GrowthBytes: the retained WAL grew at least this much since the slot
+	// last moved (an idle server writes almost nothing).
+	GrowthBytes int64
 }
 
 // DLQSignal is the dlq_growth signal.
@@ -243,7 +261,10 @@ type WatchConfig struct {
 	ConnectorDown WatchSignal
 	SlotInactive  WatchSignal
 	SlotWAL       SlotWALSignal
-	DLQGrowth     DLQSignal
+	// SlotStall follows slot_wal's enabled and action unless its own block
+	// sets them.
+	SlotStall SlotStallSignal
+	DLQGrowth DLQSignal
 	// ConfigRisk logs by default: a bad config is a fact, not an incident.
 	ConfigRisk WatchSignal
 	// ConnectorCrashLoop is the crash-loop counter inside connector_down
@@ -273,6 +294,12 @@ func DefaultWatch() WatchConfig {
 			FireBytes:   1 << 30,   // 1 GiB, same as topology.DefaultThresholds
 			ClearBytes:  768 << 20, // 768 MiB: 75% of fire, so a hovering value does not flap
 			EtaSev1:     6 * time.Hour,
+		},
+		SlotStall: SlotStallSignal{
+			WatchSignal: WatchSignal{Enabled: true, Action: ActionRoom},
+			StallAfter:  30 * time.Minute,
+			FireBytes:   64 << 20,
+			GrowthBytes: 1 << 20,
 		},
 		DLQGrowth: DLQSignal{
 			WatchSignal: WatchSignal{Enabled: true, Action: ActionRoom, For: 5 * time.Minute},
@@ -338,6 +365,8 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 		w.DLQPeekHeaders = m
 	}
 
+	var stall signalSpec
+	hasStall := false
 	for _, name := range sortedKeys(spec.Signals) {
 		node := spec.Signals[name]
 		if slices.Contains(v2Signals, name) {
@@ -354,6 +383,8 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 		switch name {
 		case SignalSlotWAL:
 			allowed = append(allowed, "fire", "clear", "eta_sev1")
+		case SignalSlotStall:
+			allowed = []string{"enabled", "action", "stall_after", "fire", "growth"} // no `for`: stall_after is the hold
 		case SignalDLQGrowth:
 			allowed = append(allowed, "fire", "window")
 		case SignalConnectorDown:
@@ -385,6 +416,8 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			err = applySignal(&w.SlotInactive, s)
 		case SignalSlotWAL:
 			err = applySlotWAL(&w.SlotWAL, s)
+		case SignalSlotStall:
+			stall, hasStall = s, true // applied after the loop: it inherits slot_wal's settings
 		case SignalDLQGrowth:
 			err = applyDLQ(&w.DLQGrowth, s)
 		case SignalConfigRisk:
@@ -394,7 +427,46 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			return WatchConfig{}, fmt.Errorf("watch.signals.%s: %w", name, err)
 		}
 	}
+	// slot_stall used to have no block and followed slot_wal: keep that as the
+	// default, so an existing file behaves the same.
+	w.SlotStall.Enabled, w.SlotStall.Action = w.SlotWAL.Enabled, w.SlotWAL.Action
+	if hasStall {
+		if err := applySlotStall(&w.SlotStall, stall); err != nil {
+			return WatchConfig{}, fmt.Errorf("watch.signals.%s: %w", SignalSlotStall, err)
+		}
+	}
 	return w, nil
+}
+
+// applySlotStall parses the slot_stall block. `for` is not a key here.
+func applySlotStall(dst *SlotStallSignal, s signalSpec) error {
+	if err := applySignal(&dst.WatchSignal, s); err != nil {
+		return err
+	}
+	if s.StallAfter != "" {
+		d, err := ParseDuration(s.StallAfter)
+		if err != nil {
+			return fmt.Errorf("stall_after: %w", err)
+		}
+		dst.StallAfter = d
+	}
+	for _, f := range []struct {
+		name, text string
+		dst        *int64
+	}{{"fire", s.Fire, &dst.FireBytes}, {"growth", s.Growth, &dst.GrowthBytes}} {
+		if f.text == "" {
+			continue
+		}
+		n, err := ParseSize(f.text)
+		if err != nil {
+			return fmt.Errorf("%s: %w", f.name, err)
+		}
+		if n <= 0 {
+			return fmt.Errorf("%s %q: must be greater than zero", f.name, f.text)
+		}
+		*f.dst = n
+	}
+	return nil
 }
 
 func applySignal(dst *WatchSignal, s signalSpec) error {

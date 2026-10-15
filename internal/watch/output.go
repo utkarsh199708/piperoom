@@ -142,24 +142,25 @@ func (w *Watcher) roomLedLocked(roomID string) bool {
 	return false
 }
 
-// reviveSev1 re-opens an acked incident once per episode when its severity has
-// risen to sev1 after the driver closed the room. The slot is really about to
-// be lost, so this skips the cooldown. Caller holds w.mu.
+// reviveSev1 re-opens an acked incident when its severity has risen after the
+// driver closed the room: connector_down going from PAUSED (sev3) to FAILED or
+// crash-looping (sev2), or any signal rising to sev1 (the slot is really about
+// to be lost). That is a new incident, so it skips the cooldown. Rates (DLQ,
+// lag) flip between sev2 and sev3 with load, so only those two count. ackSev
+// follows each ack, so every further rise counts once, and a signal that stays
+// at the same severity does not. Caller holds w.mu.
 func (w *Watcher) reviveSev1(id string, ps *pipeState, t target) {
-	if ps.reopened {
-		return
-	}
 	for _, sid := range signalIDs {
 		sc := signalCfg(t.cfg, sid)
 		ss := ps.sigs[sid]
 		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom || ss.phase != phaseAcked {
 			continue
 		}
-		if ss.last.sev == "sev1" && ss.ackSev != "sev1" && ss.clearingSince.IsZero() {
+		if sevRank(ss.last.sev) < sevRank(ss.ackSev) && (sid == owners.SignalConnectorDown || ss.last.sev == "sev1") && ss.clearingSince.IsZero() {
 			ss.phase, ss.notified = phaseFiring, false
 			ps.reopened, ps.bypassCooldown = true, true
-			w.log.Warn("watch: severity rose to sev1 after the room was closed, re-opening",
-				"mode", string(w.cfg.Mode), "pipeline", id, "signal", sid, "was", ss.ackSev)
+			w.log.Warn("watch: severity rose after the room was closed, re-opening",
+				"mode", string(w.cfg.Mode), "pipeline", id, "signal", sid, "was", ss.ackSev, "now", ss.last.sev)
 			return
 		}
 	}
@@ -561,6 +562,9 @@ func (w *Watcher) recordPost(now time.Time, pipelineID string, v view, roomID st
 	for _, s := range v.pending() {
 		if ss := ps.sigs[s.id]; ss != nil {
 			ss.notified = true
+			if ss.escFree && !closed {
+				ss.escalated, ss.escFree = false, false
+			}
 			if closed && ss.phase == phaseFiring {
 				ss.phase, ss.ackSev, ss.ackedAt = phaseAcked, ss.last.sev, at
 			}

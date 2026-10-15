@@ -408,7 +408,7 @@ func TestSlotStallReading(t *testing.T) {
 			var r reading
 			for _, o := range tc.rows {
 				row := clients.ReplicationSlot{Name: slot, Active: !o.inactive, RestartLSN: o.restart, ConfirmedFlushLSN: o.confirmed, RetainedWALBytes: o.retained}
-				r = slotStallReading(t0.Add(o.at), slot, &m, row, tc.hb)
+				r = slotStallReading(t0.Add(o.at), owners.DefaultWatch().SlotStall, slot, &m, row, tc.hb)
 			}
 			if r.v != tc.want {
 				t.Fatalf("verdict = %v, want %v (%+v)", r.v, tc.want, r)

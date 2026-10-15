@@ -105,6 +105,11 @@ type sigState struct {
 	// room in this episode, so it re-opened (or tried to) once.
 	firedAt, ackedAt time.Time
 	escalated        bool
+	// escFree: the escalation could not have been what opens the room (the cap,
+	// a failing open or a storm wait blocked it; no ack or cooldown to bypass).
+	// The next room that carries the signal then gives the budget back, so a
+	// close while it still fires re-opens once (QA Q2 F1).
+	escFree bool
 }
 
 // maxSignalTargets caps the incident keys of one signal: a storm of a hundred
@@ -176,7 +181,7 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 			s.phase = phaseOK
 			s.breachingSince, s.clearingSince = time.Time{}, time.Time{}
 			s.notified, s.ackSev = false, ""
-			s.targets, s.firedAt, s.ackedAt, s.escalated = nil, time.Time{}, time.Time{}, false
+			s.targets, s.firedAt, s.ackedAt, s.escalated, s.escFree = nil, time.Time{}, time.Time{}, false, false
 			return tResolved
 		}
 	}
