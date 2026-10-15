@@ -126,24 +126,30 @@ var slowLines = map[string]func(n int) string{
 	"encoded-keys":  func(n int) string { return strings.Repeat("password%3Dx", n/12) },
 }
 
-// TestReviewLinearTime checks how cost grows, not a wall-clock bound, so it
-// holds under -race on a busy runner: sixteen times the input may cost at
-// most forty times as much (linear is 16x, quadratic 256x). Each size takes
-// its best of ten runs, so one descheduled run does not count.
+// TestReviewLinearTime guards against the quadratic blow-ups fixed in #217:
+// each hostile line at the scan limit must take under 200 ms, best of five
+// runs. They take ~15 ms or less; the quadratic versions took 0.85 s to
+// 12 s. A ceiling, not a ratio between sizes, because shared CI runners
+// make small timings noisy. Skipped under -race, whose slowdown is too
+// uneven; the plain "Go" CI job runs it.
 func TestReviewLinearTime(t *testing.T) {
-	best := func(s string) time.Duration {
-		d := time.Duration(1 << 62)
-		for range 10 {
+	if raceEnabled {
+		t.Skip("timing check; runs without -race")
+	}
+	const ceiling = 200 * time.Millisecond
+	for name, mk := range slowLines {
+		s := mk(MaxScan)
+		best := time.Duration(1 << 62)
+		for range 5 {
 			start := time.Now()
 			Text(s)
-			d = min(d, time.Since(start))
+			best = min(best, time.Since(start))
+			if best < ceiling/4 {
+				break
+			}
 		}
-		return d
-	}
-	for name, mk := range slowLines {
-		small, large := best(mk(MaxScan/16)), best(mk(MaxScan))
-		if large > 40*max(small, 50*time.Microsecond) {
-			t.Errorf("%s: %v for %d KiB but %v for %d KiB: superlinear", name, large, MaxScan>>10, small, MaxScan>>14)
+		if best > ceiling {
+			t.Errorf("%s: best %v for %d KiB, want under %v: superlinear?", name, best, len(s)>>10, ceiling)
 		}
 	}
 }
