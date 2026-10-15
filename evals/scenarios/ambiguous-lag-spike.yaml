@@ -241,6 +241,10 @@ expect:
       tool: kafka_consumer_lag
       match: [stable, 1 members, total lag 4826]
       required: true
+    # Required (E6b review, kept): the prompt says "before abstaining ... confirm each stage
+    # with its own status read; the pipeline map is a summary, not a status read". Connect is
+    # the stage upstream of the lag; abstaining without its status is the guess this scenario
+    # tests against. One read, inside the 14 budget.
     - id: f_connect_running
       tool: connect_status
       match: [task 0, running]

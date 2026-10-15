@@ -39,6 +39,22 @@
 #     and restarts the snapshot when the connector stops before it finished (no offset stored).
 #   - internal/tools/debeziumtools/metrics.go: the debezium_metrics summary format.
 #   - internal/topology/health.go: slot_active and slot_retained rendering.
+#
+# Tool budget (E6b review, max_tool_calls 12, unchanged): the reads a careful on-call engineer
+#   needs, from the recordings above and the prompt's method:
+#     1 pipeline_map (the prompt starts there; the alert carries it, so a re-read is optional)
+#     2 connect_status pg-orders-connector (RUNNING, task 0 RUNNING; evidence tool)
+#     3 pg_recent_ddl and 4 schema_registry_versions pg.public.orders-value (what changed: one old
+#       index, no new schema version)
+#     5 debezium_metrics (snapshot running, streaming not started: both required facts)
+#     6 debezium_metrics again (rows per read: the rate and the ETA the owner needs)
+#     7 connect_config pg-orders-connector (snapshot.mode=initial: why a restart starts from zero)
+#     8 pg_replication_slots (the competing slot_wal story: active=true, 61.4 GiB reserved)
+#     9 kafka_consumer_lag connect-wh-orders-sink (the sink keeps up, so the rows are old)
+#   That is 9 reads; 9 + 2 margin = 11 <= 12, so the budget stays. warehouse_freshness, the sink's
+#   connect_status, trace_record and reconcile repeat what the alert, the map or read 9 show. A
+#   run that names the right cause in 14 reads (E6b) spent the extra reads on such repeats; one
+#   in 36 (baseline dd87583) read nearly every recording.
 
 name: snapshot-stuck
 description: |
