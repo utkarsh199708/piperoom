@@ -454,7 +454,7 @@ func (w *Watcher) assignFollowers(now time.Time, leader, roomID string, storm ma
 			}
 			ss.notified = true
 			if w.closed[roomID] {
-				ss.phase, ss.ackSev = phaseAcked, ss.last.sev
+				ss.ack()
 				ps.lastClosed = w.clock.Now()
 				continue
 			}
@@ -523,7 +523,7 @@ func (w *Watcher) recordPost(now time.Time, pipelineID string, v view, roomID st
 		if ss := ps.sigs[s.id]; ss != nil {
 			ss.notified = true
 			if w.closed[roomID] && ss.phase == phaseFiring {
-				ss.phase, ss.ackSev = phaseAcked, ss.last.sev
+				ss.ack()
 			}
 		}
 	}

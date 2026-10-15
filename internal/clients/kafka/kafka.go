@@ -529,6 +529,8 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 
 	var found []clients.RecordRef
 	scanned := 0
+	var firstUnknown error // first key left undecoded by an unreachable registry
+	undecoded := 0
 	// cut ends the scan at the deadline: matches found so far are kept and
 	// the unfinished partitions reported, since a later match may exist
 	// there; with no match it is an error, never a false "not found".
@@ -540,6 +542,15 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 			if !finished[p] && !slices.Contains(truncated, p) {
 				truncated = append(truncated, p)
 			}
+		}
+		return keyScan(found, truncated), nil
+	}
+	// done ends a scan that read every window. Keys left undecoded by an
+	// unreachable registry (#386) make it incomplete: with no match that is
+	// an error, never "not found"; with matches the partitions are truncated.
+	done := func() (clients.KeyScan, error) {
+		if undecoded > 0 && len(found) == 0 {
+			return clients.KeyScan{}, fmt.Errorf("kafka: scan %s incomplete: %d keys could not be decoded: %w", topic, undecoded, firstUnknown)
 		}
 		return keyScan(found, truncated), nil
 	}
@@ -576,6 +587,22 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 			}
 			scanned++
 			dk, derr := c.decodeKey(cctx, r.Key)
+			if errors.Is(derr, errRegistryUnavailable) {
+				// The key may be the one we look for: this partition's
+				// scan is incomplete, whatever else it finds.
+				if cctx.Err() != nil {
+					delete(finished, r.Partition)
+					return cut(cctx.Err())
+				}
+				if firstUnknown == nil {
+					firstUnknown = derr
+				}
+				undecoded++
+				if !slices.Contains(truncated, r.Partition) {
+					truncated = append(truncated, r.Partition)
+				}
+				continue
+			}
 			if derr == nil && dk == key {
 				found = append(found, clients.RecordRef{
 					Topic:     r.Topic,
@@ -597,7 +624,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 			}
 		}
 		if len(finished) == len(stopAt) {
-			return keyScan(found, truncated), nil // scanned every window
+			return done()
 		}
 		if cctx.Err() != nil {
 			return cut(cctx.Err())
@@ -741,6 +768,11 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 	return string(b), nil
 }
 
+// errRegistryUnavailable marks a key whose schema could not be fetched for a
+// reason that is not about the key (registry 5xx, transport error, deadline).
+// FindByKeyScan treats such a key as unknown, never as a non-match.
+var errRegistryUnavailable = errors.New("kafka: schema registry unavailable")
+
 // schemaByID returns a parsed, vetted key schema, cached by id (schema ids are
 // immutable). A schema that is too large, does not parse or fails
 // checkKeySchema is refused, and the refusal is cached too so a hostile id
@@ -759,7 +791,13 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	}
 	schemaStr, err := c.sr.SchemaByID(ctx, id)
 	if err != nil {
-		return nil, err
+		// An unknown id (404) is a definite answer: the key cannot decode.
+		// Anything else (5xx, transport, deadline) says nothing about the
+		// key, so the caller must not read it as a non-match (#386).
+		if errors.Is(err, clients.ErrNotFound) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: schema %d: %w", errRegistryUnavailable, id, err)
 	}
 	var why string
 	if len(schemaStr) > maxKeySchemaBytes {

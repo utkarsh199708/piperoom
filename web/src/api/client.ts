@@ -70,6 +70,43 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+/**
+ * Steer and comment stop waiting for an answer after this long. A POST that never answers would
+ * otherwise keep the reconnect's copy of the words "in flight" forever, and every Retry of them
+ * would wait on it (#390). The server may still store the words (it gives these routes 60 s), so
+ * giving up is not a failure: see SendUnconfirmedError.
+ */
+export const SEND_DEADLINE_MS = 12_000
+
+/**
+ * The request was sent but no answer came within SEND_DEADLINE_MS. The server may or may not have
+ * stored it: only a retry with the same client_id, to a server that dedupes on it, is safe
+ * (docs/api.md, Idempotent posts). See hooks/sendLedger.ts.
+ */
+export class SendUnconfirmedError extends Error {
+  constructor(ms: number) {
+    super(`no answer from Piperoom within ${Math.round(ms / 1000)} s`)
+    this.name = 'SendUnconfirmedError'
+  }
+}
+
+/** `request` with a deadline; past it, the request is aborted and the call rejects with SendUnconfirmedError. */
+async function requestWithin<T>(path: string, init: RequestInit, ms: number): Promise<T> {
+  const ctl = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctl.abort()
+      reject(new SendUnconfirmedError(ms))
+    }, ms)
+  })
+  try {
+    return await Promise.race([request<T>(path, { ...init, signal: ctl.signal }), late])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export interface SessionProbe {
   /** GET /api/me answered 200: the session is valid after all. */
   valid: boolean
@@ -168,10 +205,14 @@ export const api = {
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
-  comment: (roomId: string, body: { step_id?: string; text: string }) =>
-    request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
-  steer: (roomId: string, text: string) =>
-    request<Event>(`${room(roomId)}/steer`, { method: 'POST', body: JSON.stringify({ text }) }),
+  comment: (roomId: string, body: { step_id?: string; text: string; client_id?: string }) =>
+    requestWithin<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }, SEND_DEADLINE_MS),
+  steer: (roomId: string, text: string, clientId?: string) =>
+    requestWithin<Event>(
+      `${room(roomId)}/steer`,
+      { method: 'POST', body: JSON.stringify({ text, client_id: clientId }) },
+      SEND_DEADLINE_MS,
+    ),
   sendSuggestion: (roomId: string, suggestionId: string) =>
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',

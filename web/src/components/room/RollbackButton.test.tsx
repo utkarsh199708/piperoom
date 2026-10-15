@@ -19,7 +19,7 @@ describe('RollbackButton', () => {
     expect(screen.getByText('This asks the agent to propose the undo; nothing runs without approvals.')).toBeInTheDocument()
     expect(screen.getByText('set it back')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
-    await waitFor(() => expect(onSteer).toHaveBeenCalledWith(rollbackSteer('Restart', 'p_1', 'set it back')))
+    await waitFor(() => expect(onSteer).toHaveBeenCalledWith(rollbackSteer('Restart', 'p_1', 'set it back'), { clientId: expect.any(String) }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 
@@ -35,5 +35,23 @@ describe('RollbackButton', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
     expect(await screen.findByRole('alert')).toBeInTheDocument()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+    // Closing withdraws the failed request (#459), and the dialog says so.
+    expect(screen.getByText('Closing discards the unsent request.')).toBeInTheDocument()
+  })
+
+  // #459: Retry is the same action, so it keeps the client_id; the next request is a new one.
+  it('Retry reuses the failed request\'s client_id; a request after a success gets a new one', async () => {
+    const onSteer = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true).mockResolvedValueOnce(true)
+    render(<RollbackButton title="t" proposalId="p" rollback="r" asDriver onSteer={onSteer} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+    await waitFor(() => expect(onSteer).toHaveBeenCalledTimes(3))
+    const ids = onSteer.mock.calls.map((c) => (c[1] as { clientId: string }).clientId)
+    expect(ids[1]).toBe(ids[0])
+    expect(ids[2]).not.toBe(ids[0])
   })
 })

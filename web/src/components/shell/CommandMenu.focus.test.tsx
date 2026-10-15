@@ -174,16 +174,55 @@ describe('⌘K: a dialog it opens returns focus to what had it before the palett
     await waitFor(() => expect(document.activeElement).toBe(item))
   })
 
-  // Known gap, #500: an action that opens no dialog (here Toggle theme) sends focus to #main, not to the
-  // opener, because a link followed or a sign-out may have removed the opener. Flip this row if a
-  // ticket changes that.
-  it('GAP #500: choosing an action that opens nothing lands on #main, not the opener', async () => {
+  // #500: an action that opens no dialog and cannot remove the opener (Toggle theme) returns focus to it.
+  it('#500: choosing Toggle theme returns focus to the opener', async () => {
     render(<Harness />)
     const item = screen.getByRole('button', { name: 'timeline item' })
     item.focus()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
     fireEvent.click(await screen.findByRole('option', { name: /Toggle theme/ }))
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(item))
+  })
+
+  it('#500: Toggle theme falls back to #main when the opener is hidden', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    item.setAttribute('hidden', '')
+    fireEvent.click(await screen.findByRole('option', { name: /Toggle theme/ }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await waitFor(() => expect(document.activeElement).toBe(document.getElementById('main')))
+  })
+
+  // Navigate and sign out can replace or remove the opener, so they must not return focus to it (#500).
+  it.each([
+    ['Go to Rooms', /Go to Rooms/],
+    ['Sign out', /Sign out/],
+  ])('%s lands on #main, not the opener', async (_name, option) => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    fireEvent.click(await screen.findByRole('option', { name: option }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('main')))
+  })
+
+  // #488: the palette opened from inside a dialog, choosing that dialog's own command. Nothing new
+  // mounts, so nothing places focus.
+  it('#488: choosing the open dialog\'s own command keeps focus inside it', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    await openFromPalette(/Trace a record/)
+    const inside = screen.getByLabelText(/^Table/)
+    inside.focus()
+    await act(async () => fireEvent.click(screen.getByText('open palette')))
+    fireEvent.click(await screen.findByRole('option', { name: /Trace a record/ }))
+    await waitFor(() => expect(document.activeElement).toBe(inside))
+    expect(document.activeElement).not.toBe(document.body)
   })
 })

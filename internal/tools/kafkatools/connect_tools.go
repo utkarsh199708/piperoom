@@ -413,14 +413,17 @@ var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)
 // "Where:", "Key (...)=(...)", "Failing row contains (...)" and "invalid
 // input syntax ... \"...\"", Java's "For input string: \"...\"", Connect's
 // "Cannot parse value ...", Jackson's "[Source: ...]" snippet and
-// "Unrecognized token '...'", MySQL's "Duplicate entry '...'", SQL Server's
+// "Unrecognized token '...'", MySQL's "Duplicate entry '...'" and "Incorrect
+// <type> value: '...'", PostgreSQL's "value \"...\" is out of range" and
+// "invalid input value for enum ...: \"...\"", Elasticsearch's "Preview of
+// field's value: '...'", SQL Server's
 // "The duplicate key value is (...)", pgjdbc's "Batch entry N UPDATE ... SET col =
 // '...'" and Connect's record dumps (SinkRecord{...}, value=Struct{...},
 // "record {...}"). Such a line gets the dlq_peek redaction; other
 // lines (schema registry rejections, class names) stay whole, because their
 // wording is the diagnosis and dlq.RedactMessage would mask the quoted
 // subject in it.
-var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse|duplicate entry|duplicate key value is|\bbatch entry \d+|\bset\s+"?\w+"?\s*=|\b(?:struct|sinkrecord|connectrecord|sourcerecord)\{|\brecord\s*\{`)
+var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse|duplicate entry|\bincorrect \w+ value|\bvalue\s+".*"\s+is out of range|invalid input value|preview of field|duplicate key value is|\bbatch entry \d+|\bset\s+"?\w+"?\s*=|\b(?:struct|sinkrecord|connectrecord|sourcerecord)\{|\brecord\s*\{`)
 
 // stripSchemaAfter replaces the balanced {…} JSON that follows marker with <schema>.
 func stripSchemaAfter(s, marker string) string {

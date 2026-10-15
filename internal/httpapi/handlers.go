@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -149,16 +150,36 @@ type eventsResponse struct {
 	LastSeq int64          `json:"last_seq"`
 }
 
+// checkClientID refuses a malformed idempotency key with 400 validation, after
+// the body is decoded and before the repeat check (docs/api.md, Idempotent
+// posts). An absent key (or JSON null) is "", no key; a present "" is
+// malformed.
+func checkClientID(id *string) (string, error) {
+	if id == nil {
+		return "", nil
+	}
+	if !room.ValidClientID(*id) {
+		return "", validation(fmt.Sprintf("client_id must be 1-%d characters of A-Z, a-z, 0-9, _ or -", room.MaxClientIDLen))
+	}
+	return *id, nil
+}
+
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		StepID string `json:"step_id"`
-		Text   string `json:"text"`
+		StepID   string  `json:"step_id"`
+		Text     string  `json:"text"`
+		ClientID *string `json:"client_id"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.AddComment(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.StepID, body.Text)
+	clientID, err := checkClientID(body.ClientID)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.AddCommentKeyed(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.StepID, body.Text, clientID)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -168,13 +189,19 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Text string `json:"text"`
+		Text     string  `json:"text"`
+		ClientID *string `json:"client_id"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.Steer(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.Text)
+	clientID, err := checkClientID(body.ClientID)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.SteerKeyed(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.Text, clientID)
 	if err != nil {
 		s.writeErr(w, err)
 		return
