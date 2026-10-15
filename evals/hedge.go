@@ -66,7 +66,7 @@ func causeHedge(text string) (string, bool) {
 	return "", false
 }
 
-// hedgeDenied reports whether a hedge denial ends in the three words before
+// hedgeDenied reports whether a hedge denial ends in the four words before
 // toks[i], with only determiners or "other" between them.
 func hedgeDenied(toks []string, i int) bool {
 	for k := max(0, i-4); k < i; k++ {
