@@ -1,30 +1,123 @@
 package redact
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
-// flagRule masks a secret given as the argument of a command-line flag
-// (psql --password X, --sasl.password "X Y", confluent login --api-secret X)
-// or as curl's -u/--user/-U/--proxy-user user:password.
-var flagRule = rule{
+// The rules of #372 (the flag and XML element entries of baseRules) run
+// first, unchanged but for mainFlagOK. The rules below run after every other
+// rule, on its output, and only add masks for the shapes #372 did not read:
+// quoted values with spaces, flag names with '_' or '.', argument lists, XML
+// attributes, CDATA and values on their own lines (#383). A value that is
+// already masked is skipped, so nothing #372 masked can come back.
+
+// addFlagRule masks a secret given as the argument of a command-line flag
+// (--sasl.password "X Y", ["--password", "X"]) or as curl's
+// -u/--user/-U/--proxy-user user:password, in the shapes the #372 rule does
+// not read. It runs one line at a time.
+var addFlagRule = rule{
 	kind:   KindKeyValue,
 	find:   flagFind,
 	groups: []int{1},
 	style:  styleSecret,
 	pre:    containsAny("pass", "secret", "token", "-u"),
+	remask: true,
 }
 
-// xmlRule masks the text of an XML element whose name ends in a secret word:
-// <password>X</password>, with attributes, CDATA, padding, the value on its
-// own lines, or in child elements (<secret><key>k</key><value>X</value>
-// </secret>). The text counts only when the element's own end tag follows
-// it. Like pemRule it runs over the whole text, since the value may sit on a
-// line of its own.
-var xmlRule = rule{
+// addXMLRule masks the text of an XML element whose name ends in a secret
+// word, in the shapes the #372 rule does not read: attributes, CDATA,
+// padding, the value on its own lines, or in child elements (<secret><key>k
+// </key><value>X</value></secret>). The text counts only when the element's
+// own end tag follows it. Like pemRule it runs over the whole text.
+var addXMLRule = rule{
 	kind:   KindKeyValue,
 	find:   xmlFind,
 	groups: []int{1},
 	style:  styleSecret,
 	pre:    func(s, _ string) bool { return strings.Contains(s, "</") || strings.Contains(s, `<\/`) },
+	remask: true,
+}
+
+// extend runs the added rules over the output of every other rule.
+func (r *Redactor) extend(s string, st *Stats) string {
+	if s == "" {
+		return s
+	}
+	lower := asciiLower(s)
+	var b strings.Builder
+	changed := false
+	for start := 0; start <= len(s); {
+		end := strings.IndexByte(s[start:], '\n')
+		if end < 0 {
+			end = len(s)
+		} else {
+			end += start
+		}
+		line := s[start:end]
+		out := applyCounted(&addFlagRule, line, lower[start:end], st)
+		if out != line && !changed {
+			changed = true
+			b.Grow(len(s) + 64)
+			b.WriteString(s[:start])
+		}
+		if changed {
+			b.WriteString(out)
+			if end < len(s) {
+				b.WriteByte('\n')
+			}
+		}
+		start = end + 1
+	}
+	if changed {
+		s = b.String()
+	}
+	for range maxPasses {
+		out := applyCounted(&addXMLRule, s, "", st)
+		if out == s {
+			break
+		}
+		s = out
+	}
+	return s
+}
+
+// maskOnly matches a value that is one mask and nothing else.
+var maskOnly = regexp.MustCompile(`^(?:[^\s…]{1,4}…)?\[redacted[^\]]*\](?:…[^\s…]{1,2})?$`)
+
+// heldMask reports whether a value already holds a mask. A value that is a
+// whole quoted argument or element text may be masked again as one when the
+// mask covers only part of it; any other value is left to the rule that
+// masked it.
+func heldMask(v string, whole bool) (skip bool) {
+	if !strings.Contains(v, marker) {
+		return false
+	}
+	return !whole || maskOnly.MatchString(strings.TrimSpace(v))
+}
+
+// mainFlagOK keeps, out of what the #372 flag rule matches, the evidence
+// #383 names: a --no-* flag (it takes no argument), a bare argument that is
+// a plain lower-case word ("--password requires an argument"), and docker's
+// -u user:group or uid:gid (postgres:postgres, 1000:1000).
+func mainFlagOK(s string, m []int) bool {
+	if m[8] >= 0 {
+		pw := s[m[8]:m[9]]
+		u := m[8] - 1
+		for u > m[0] && !isBlankOrQuote(s[u-1]) {
+			u--
+		}
+		user := s[u : m[8]-1]
+		return !(pw == user || allDigits(pw) && allDigits(user))
+	}
+	ns := m[0]
+	for ns < len(s) && (s[ns] == '-' || isBlankOrQuote(s[ns])) {
+		ns++
+	}
+	if strings.HasPrefix(asciiLower(s[ns:min(len(s), ns+3)]), "no-") {
+		return false
+	}
+	return !(m[6] >= 0 && plainWord(s[m[6]:m[7]]))
 }
 
 // flagWords end a flag or element name that names a secret. A name that only
@@ -41,11 +134,12 @@ func endsInFlagWord(lowerName string) bool {
 }
 
 // flagBefore reports whether a flag may start at p: at the start of the
-// line, after a blank, an opening quote, bracket, brace or backtick, a shell
+// line, after a blank (CR and form feed too: progress-bar output), an
+// opening quote, bracket, brace or backtick, a shell
 // ; | & or <, '=' of an environment variable holding options, or a
 // JSON-escaped line break or tab ({"cmd":"run\n--password X"}).
 func flagBefore(s string, p int) bool {
-	if p == 0 || strings.IndexByte(" \t\"'[({,=`;|&<", s[p-1]) >= 0 {
+	if p == 0 || strings.IndexByte(" \t\r\f\"'[({,=`;|&<", s[p-1]) >= 0 {
 		return true
 	}
 	return p >= 2 && s[p-2] == '\\' && strings.IndexByte("ntr", s[p-1]) >= 0
@@ -153,13 +247,7 @@ func (f *flagScan) match(p, ns, ne int) []int {
 	if strings.TrimRight(lname, "._-") != lname || !endsInFlagWord(lname) {
 		return nil
 	}
-	// A weak name (--token) is read like a strong one: a flag's argument
-	// is its value whatever it looks like, and the keeps below are what
-	// tells prose apart.
-	if secretKey(name) == keyNone {
-		return nil
-	}
-	v, listForm := flagSep(s, ne)
+	v, listForm := flagSep(s, p, ne)
 	if v < 0 {
 		return nil
 	}
@@ -168,15 +256,20 @@ func (f *flagScan) match(p, ns, ne int) []int {
 		return nil
 	}
 	val := s[vs:ve]
+	if heldMask(val, quoted) {
+		return nil
+	}
 	// In an argument list ["psql", "--password", "-h"] each item is quoted,
 	// so the next item is read like a bare word.
 	bare := !quoted || listForm
+	// Usage text: [--token TOKEN], (--password PASSWD), -W|--password.
+	usage := !quoted && p > 0 && strings.IndexByte("[(|", s[p-1]) >= 0
 	switch {
-	case isVarRef(val):
+	case isReference(val, s[v] == '\''):
 		// --password $PGPASSWORD names where the secret is, not the secret.
 		return nil
-	case listForm && val[0] == '-':
-		// The next flag: --password took no argument.
+	case listForm && (val[0] == '-' || lowerIdent(val) || strings.HasPrefix(val, "<")):
+		// The next flag, or a name: --password took no argument.
 		return nil
 	case bare && plainWord(val):
 		// "--password requires an argument": prose, not a password.
@@ -184,15 +277,48 @@ func (f *flagScan) match(p, ns, ne int) []int {
 	case bare && val == strings.ToUpper(strings.ReplaceAll(name, "-", "_")):
 		// usage: tool [--password PASSWORD]: argparse's metavar.
 		return nil
+	case usage && (capsMetavar(val) || lowerIdent(val)):
+		return nil
+	case !quoted && s[ne] == '=' && secretKey(name) == keyWeak:
+		// --token=v2 is the key/value pair token=v2, which that rule has
+		// already masked if its value looks generated.
+		return nil
 	}
 	return []int{p, end, vs, ve}
 }
 
-// flagSep returns where the argument after a flag ending at i starts: after
-// '=', after blanks, or after the closing quote and comma of an argument list
-// ("--password", "x"), where the value must be quoted too. It returns -1 when
-// no argument follows.
-func flagSep(s string, i int) (int, bool) {
+// lowerIdent reports a lower-case identifier (orders_v2, orders-db).
+func lowerIdent(v string) bool {
+	if v == "" || v[0] < 'a' || v[0] > 'z' {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// capsMetavar reports an upper-case usage placeholder (TOKEN, SASL_PASSWORD).
+func capsMetavar(v string) bool {
+	if v == "" || v[0] < 'A' || v[0] > 'Z' {
+		return false
+	}
+	for i := 0; i < len(v); i++ {
+		if c := v[i]; !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+// flagSep returns where the argument after a flag (dashes at p, name ending
+// at i) starts: after '=', after blanks, or after the closing quote and comma
+// of an argument list ("--password", "x"), where the flag is a whole quoted
+// item and the value must be quoted too. It returns -1 when no argument
+// follows.
+func flagSep(s string, p, i int) (int, bool) {
 	if i >= len(s) {
 		return -1, false
 	}
@@ -202,6 +328,9 @@ func flagSep(s string, i int) (int, bool) {
 	case ' ', '\t':
 		return skipBlanks(s, i), false
 	case '"', '\'':
+		if p == 0 || s[p-1] != s[i] {
+			return -1, false
+		}
 		j := skipBlanks(s, i+1)
 		if j < len(s) && s[j] == ',' {
 			return skipBlanks(s, j+1), true
@@ -245,6 +374,12 @@ func (f *flagScan) value(p, v int) (vs, ve, end int, quoted bool) {
 			case '\\':
 				k++
 			case '"':
+				// "Zx9\"hunter x": the #372 rule masked up to the escaped
+				// quote and took its backslash, so a mask closed by a quote
+				// that does not end the argument runs on to one that does.
+				if k+1 < eol && !argEnd(s[k+1]) && maskOnly.MatchString(s[vs:k]) {
+					continue
+				}
 				return vs, k, k + 1, true
 			}
 		}
@@ -262,10 +397,10 @@ func (f *flagScan) value(p, v int) (vs, ve, end int, quoted bool) {
 	return v, ve, ve, false
 }
 
-// closerEnd moves a bare word's end e back over the ) or ] that closes the
-// bracket just before the flag at p, (--password X), or over a backtick that
-// closes one still open before it, `psql --password X`. Any other trailing
-// closer is part of the word: psql --password Zx9)).
+// closerEnd moves a bare word's end e back over the ) ] } or > that closes
+// the bracket just before the flag at p, (--password X), or over a backtick
+// that closes one still open before it, `psql --password X`. Any other
+// trailing closer is part of the word: psql --password Zx9)).
 func (f *flagScan) closerEnd(p, v, e int) int {
 	s := f.s
 	if e <= v {
@@ -274,11 +409,17 @@ func (f *flagScan) closerEnd(p, v, e int) int {
 	switch c := s[e-1]; {
 	case c == ')' && p > 0 && s[p-1] == '(',
 		c == ']' && p > 0 && s[p-1] == '[',
+		c == '}' && p > 0 && s[p-1] == '{',
+		c == '>' && p > 0 && s[p-1] == '<',
 		c == '`' && f.openTick(p):
 		e--
 	}
 	return e
 }
+
+// argEnd reports a character that may follow a closing quote at the end of
+// an argument.
+func argEnd(c byte) bool { return strings.IndexByte(" \t\r,;)]}>&|", c) >= 0 }
 
 func isBlankOrQuote(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '"' || c == '\''
@@ -286,10 +427,11 @@ func isBlankOrQuote(c byte) bool {
 
 // user reads curl's user:password after -u/--user/-U/--proxy-user (name
 // ending at i), quoted or bare. docker's -u user:group and uid:gid look the
-// same, so a password that is a plain name or a number is kept.
+// same, so a password equal to its user, digits after a numeric user, a
+// plain word or a reference is kept.
 func (f *flagScan) user(p, i int) []int {
 	s := f.s
-	v, _ := flagSep(s, i)
+	v, _ := flagSep(s, p, i)
 	if v < 0 || v >= len(s) {
 		return nil
 	}
@@ -313,18 +455,24 @@ func (f *flagScan) user(p, i int) []int {
 			ve++
 		}
 	}
-	val := s[vs:ve]
-	if val == "" || plainName(val) || allDigits(val) || isVarRef(val) {
+	val, user := s[vs:ve], s[v:k]
+	if val == "" || heldMask(val, q != 0) || val == user || allDigits(val) && allDigits(user) ||
+		plainWord(val) || isReference(val, q == '\'') {
 		return nil
 	}
 	return []int{p, ve, vs, ve}
 }
 
-// plainWord reports a value of lower-case ASCII letters only, allowing
-// trailing punctuation ("requires", "instead."): English, not a password.
+// maxPlainWord bounds plainWord: requires, argument and deprecated fit, a
+// passphrase such as correcthorsebatterystaple does not.
+const maxPlainWord = 12
+
+// plainWord reports a value of at most maxPlainWord lower-case ASCII
+// letters, allowing trailing punctuation ("requires", "instead."): English,
+// not a password. "letmein!" is not plain.
 func plainWord(v string) bool {
-	v = strings.TrimRight(v, ".,;:!?)")
-	if v == "" {
+	v = strings.TrimRight(v, ".,;:)")
+	if v == "" || len(v) > maxPlainWord {
 		return false
 	}
 	for i := 0; i < len(v); i++ {
@@ -335,34 +483,26 @@ func plainWord(v string) bool {
 	return true
 }
 
-// plainName is plainWord that also allows '-' and '_' inside, as in a Unix
-// user or group name (www-data).
-func plainName(v string) bool {
-	if v == "" || !isLetter(v[0]) || !isLetter(v[len(v)-1]) {
-		return false
-	}
-	for i := 0; i < len(v); i++ {
-		if !(v[i] >= 'a' && v[i] <= 'z' || v[i] == '-' || v[i] == '_') {
-			return false
-		}
-	}
-	return true
-}
-
-// isVarRef reports a shell variable reference ($NAME or ${NAME}).
-func isVarRef(v string) bool {
-	if len(v) < 2 || v[0] != '$' {
+// isReference reports a value that names where a secret is rather than
+// holding it: an environment variable ($PGPASSWORD, ${API_TOKEN}; not inside
+// single quotes, where the shell expands nothing), a command substitution
+// ($(cat /run/secrets/pw), `...`) or a template ({{ .Values.token }}).
+func isReference(v string, singleQuoted bool) bool {
+	switch {
+	case strings.HasPrefix(v, "{{"), strings.HasPrefix(v, "$("), strings.HasPrefix(v, "`"):
+		return true
+	case singleQuoted || len(v) < 2 || v[0] != '$':
 		return false
 	}
 	v = v[1:]
 	if strings.HasPrefix(v, "{") && strings.HasSuffix(v, "}") {
 		v = v[1 : len(v)-1]
 	}
-	if v == "" || !(isLetter(v[0]) || v[0] == '_') {
+	if v == "" || !(v[0] >= 'A' && v[0] <= 'Z' || v[0] == '_') {
 		return false
 	}
 	for i := 0; i < len(v); i++ {
-		if !(isLetter(v[i]) || v[i] >= '0' && v[i] <= '9' || v[i] == '_') {
+		if c := v[i]; !(c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_') {
 			return false
 		}
 	}
@@ -535,11 +675,26 @@ func (c *cdataEnds) from(i int) int {
 // read.
 const maxXMLChildren = 16
 
-// oneLine reports text with no line break, raw or JSON-escaped. Element text
-// that spans lines is prose between two tags, not a value: "replace <token>
-// ... </token>".
+// oneLine reports text with no raw line break. Element text that spans
+// lines is prose between two tags, not a value: "replace <token> ...
+// </token>". JSON-escaped breaks (\n) do not count: that text is one line.
 func oneLine(t string) bool {
-	return !strings.ContainsAny(t, "\r\n") && !strings.Contains(t, `\n`) && !strings.Contains(t, `\r`)
+	return !strings.ContainsAny(t, "\r\n")
+}
+
+// padProse reports padded element text that reads as prose or a
+// placeholder: "between <password> and </password>", "<password> TODO
+// </password>". A random value stays a value however it is padded.
+func padProse(t string) bool {
+	if capsMetavar(t) {
+		return true
+	}
+	for _, w := range strings.Split(t, " ") {
+		if !plainWord(w) {
+			return false
+		}
+	}
+	return true
 }
 
 // xmlContent reads the text of element name from k, after its start tag:
@@ -564,6 +719,9 @@ func xmlContent(s string, k int, name string, cdata *cdataEnds) ([][]int, int) {
 			if end < 0 {
 				return nil, vs
 			}
+			if heldMask(s[vs:e], true) {
+				return nil, end
+			}
 			return [][]int{{vs, e, vs, e}}, end
 		}
 	}
@@ -581,7 +739,8 @@ func xmlContent(s string, k int, name string, cdata *cdataEnds) ([][]int, int) {
 		return nil, e
 	}
 	ve := trimXMLSpace(s, vs, e)
-	if ve <= vs || !oneLine(s[vs:ve]) {
+	if ve <= vs || !oneLine(s[vs:ve]) || heldMask(s[vs:ve], true) ||
+		(vs > k || ve < e) && padProse(s[vs:ve]) {
 		return nil, end
 	}
 	return [][]int{{vs, ve, vs, ve}}, end
@@ -614,7 +773,8 @@ func xmlChildren(s string, start int, name string) ([][]int, int) {
 			return nil, start
 		}
 		child := asciiLower(localName(s[cn:ce]))
-		if ve := trimXMLSpace(s, vs, e); ve > vs && oneLine(s[vs:ve]) && (child == "value" || endsInFlagWord(child)) {
+		if ve := trimXMLSpace(s, vs, e); ve > vs && oneLine(s[vs:ve]) && !heldMask(s[vs:ve], true) &&
+			(child == "value" || endsInFlagWord(child)) {
 			ms = append(ms, []int{vs, ve, vs, ve})
 		}
 		pos = skipXMLSpace(s, next)

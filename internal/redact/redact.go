@@ -48,39 +48,30 @@
 //     (io.confluent.connect.jdbc.sink.JdbcSinkConnectorConfig.conn.password=);
 //   - a Bearer token split across a line; .pgpass lines
 //     (host:5432:db:user:secret); a CLI password glued to its flag
-//     (mysql -pSecret, curl -uadmin:secret);
-//   - a bare flag argument that is a plain lower-case word (psql --password
-//     hunter), a shell variable ($PGPASSWORD) or the flag's own name in
-//     capitals (an argparse metavar) is kept: "--password requires an
-//     argument" reads the same; so is a -u user:password whose password is
-//     a plain name or a number, which is docker's user:group or uid:gid;
-//   - flag arguments not followed: on the next line (YAML "- --password"
-//     then "- X"); in an unquoted flow list ([--password, X]), a
-//     JSON-escaped list ([\"--password\", \"X\"]) or a Go %q list
-//     ("--password" "X"); a whole quoted "--password=X Y" argument (masked
-//     to its first blank); a value holding a quote (masked to it) or
-//     starting with '-'; a \\\" opener, or \"...\" inside a \"...\" value;
-//     names ending in pass (-storepass, -keypass, --pass) and docker login
-//     -p; a -u value with a quoted part ("svc user:X", admin:"X") or an
-//     empty user (-u :X);
-//   - over-masking: a flag that takes no argument masks the next word when
-//     it is not plain (psql --password orders_v2, --password Required, also
-//     in a list), and so does a plain word between a secret element's tags
-//     (between <password> and </password>); a ) or ] after a password is
-//     kept in it unless its opener is just before the flag;
-//   - a secret in an XML attribute (<entry key="password" value="X"/>), in
-//     an entity-escaped element (&lt;password&gt;) or a \u003c-escaped one,
-//     more than one child element deep, in a CDATA section, comment or text
-//     around a child of a secret element, in a CDATA section continued by
-//     another, in a Hadoop <name>...password</name><value>X</value> pair or
-//     a Maven <arg>--password</arg><arg>X</arg> list; in an element cut off
-//     before its end tag (an open CDATA section, or truncated output),
-//     closed by another element's or a malformed end tag (</ password>), or
-//     whose text spans lines; a value child of a secret element whose
-//     parent is not closed;
+//     (mysql -pSecret);
+//   - command-line flags and XML elements (#372 masks the common forms;
+//     rules added for #383 run after it and only mask more): a flag after
+//     ':' or a non-ASCII blank, inside element text, quoted together with
+//     its value ('--password' 'X'), in a JSON-escaped or %q argument list
+//     or an unquoted flow list, or with its value on the next line or after
+//     a CR or --; a whole quoted "--password=X Y" (masked to its first
+//     blank); names ending in pass (-storepass, --pass) and docker login
+//     -p; -u with a quoted part ("svc user:X"), an empty user or glued to
+//     the flag; shell-escaped quotes; a \\\" opener; an XML secret in an
+//     attribute, entity- or \u003c-escaped, more than one child deep, in
+//     CDATA or text around a child, in a Hadoop <name>/<value> pair or a
+//     Maven <arg> list, in text that spans lines, after a start tag holding
+//     "/>" or "<x>", or closed by an escaped end tag of another element;
+//   - kept as evidence on purpose (#383): a --no-* flag's next word, a bare
+//     flag argument of at most 12 lower-case letters ("--password requires
+//     an argument"), and -u user:group or uid:gid (postgres:postgres,
+//     1000:1000);
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
-//     password line is masked although it is evidence.
+//     password line is masked although it is evidence; a bare flag value
+//     that is a $VAR, %VAR%, $(...) or the db name after psql --password,
+//     a user:gid pair with a named user, and a closing backtick or tag after
+//     a bare value are masked.
 package redact
 
 import (
@@ -256,13 +247,6 @@ func (r *Redactor) scan(s string) (string, Stats) {
 		}
 		s = out
 	}
-	for range maxPasses {
-		out := applyCounted(&xmlRule, s, "", &st)
-		if out == s {
-			break
-		}
-		s = out
-	}
 
 	// Every other secret sits on one line. Running the regexps per line, and
 	// only on lines whose prefilter hits, keeps them fast: most lines of a
@@ -325,7 +309,7 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	if changed {
 		s = b.String()
 	}
-	return s, st
+	return r.extend(s, &st), st
 }
 
 // lineFixed masks one line until nothing more changes.
@@ -404,6 +388,9 @@ type rule struct {
 	// find, when set, replaces re: it returns matches laid out like
 	// FindAllStringSubmatchIndex.
 	find func(s, lower string) [][]int
+	// remask lets a value that holds a mask be masked again as a whole;
+	// find has already dropped values that are a mask and nothing else.
+	remask bool
 }
 
 func (ru *rule) apply(s, lower string) (string, int) {
@@ -432,7 +419,7 @@ func (ru *rule) apply(s, lower string) (string, int) {
 		val := s[g0:g1]
 		// A one-character "value" is a parse artifact (a stray quote or
 		// backslash), never a credential worth a mask.
-		if len(val) <= 1 || isMasked(val) || isPlaceholder(val) {
+		if len(val) <= 1 || (isMasked(val) && !ru.remask) || isPlaceholder(val) {
 			continue
 		}
 		if ru.ok != nil && !ru.ok(s, m) {

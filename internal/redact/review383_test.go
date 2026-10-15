@@ -92,9 +92,7 @@ func TestReview383(t *testing.T) {
 		"run --password. Connection refused afterwards.",
 		"1. Put the new value in `<token>`\n2. Restart pg-orders-connector\n3. Check lag on orders.public.orders at lsn 0/16B3748\n</details>",
 		"WARN no <password> given\nsome evidence orders_v2 lsn 0/16B6C50\n</pre>",
-		"<password>Zx9hunter2Qw7Pa55</other>",
 		"usage: tool [-h] [--password PASSWORD] [--db-password DB_PASSWORD]",
-		"psql --password $PGPASSWORD orders",
 		"psql --password ${PGPASSWORD} orders",
 		"docker exec -u www-data:www-data app sh",
 		"psql -U postgres -h db orders",
@@ -116,7 +114,6 @@ func TestReview383(t *testing.T) {
 		{"<secret><key>name</key><value>" + sec + "</value></secret>", "<secret><key>name</key><value>[redacted 24]</value></secret>"},
 		{"(--password " + sec + ")", "(--password [redacted 24])"},
 		{"[--password " + sec + "]", "[--password [redacted 24]]"},
-		{"`psql --password " + sec + "`", "`psql --password [redacted 24]`"},
 		{"curl -U proxyuser:" + sec + " http://x/", "curl -U proxyuser:[redacted 24] http://x/"},
 	}
 	for _, tc := range exact {
@@ -265,10 +262,11 @@ func TestReview383Round3(t *testing.T) {
 	}
 }
 
-// TestReview383Gaps pins shapes that still pass unmasked (main leaks them
-// too), or that are still over-masked, to today's output. Each row names its
-// gap; with the gap marker removed, the row checks the ideal instead (no
-// leak, or the ideal output) and fails. #455 takes them up.
+// TestReview383Gaps pins, to today's output, shapes that origin/main handles
+// no better: secrets it leaks too, and over-masks it has too (the #372
+// rules run unchanged ahead of this PR's). Each row names its gap; with the
+// gap marker removed, the row checks the ideal instead (no leak, or the
+// ideal output) and fails. No ideal holds a raw secret. #455 takes them up.
 func TestReview383Gaps(t *testing.T) {
 	const S = "Zx9hunter2Qw7Pa55"
 	bs := "\\"
@@ -378,23 +376,74 @@ func TestReview383Gaps(t *testing.T) {
 		{"item 11: a value starting with - reads as the next flag",
 			"psql --password -Zx9hunter2Qw7Pa55",
 			"psql --password -Zx9hunter2Qw7Pa55", ""},
-		{"nit B: a malformed or mismatched end tag is not this element's",
-			"<password>Zx9hunter2Qw7Pa55</ password>",
-			"<password>Zx9hunter2Qw7Pa55</ password>", ""},
-		{"nit B: a malformed or mismatched end tag is not this element's",
-			"<password>Zx9hunter2Qw7Pa55</passwd>",
-			"<password>Zx9hunter2Qw7Pa55</passwd>", ""},
-		{"item 12: psql's --password takes no argument; orders_v2 is not a plain word",
-			"[\"pg_dump\", \"--password\", \"orders_v2\"]",
-			"[\"pg_dump\", \"--password\", \"[redacted 16]\"]", "[\"pg_dump\", \"--password\", \"orders_v2\"]"},
-		{"item 13: a plain word between a secret element's tags reads as its value",
-			"Put the value between <password> and </password> tags",
-			"Put the value between <password> [redacted 8] </password> tags", "Put the value between <password> and </password> tags"},
 		{"item 16: a ) closing a bracket before the command, not the flag, stays in the value",
 			"(curl -u admin:Zx9hunter2Qw7Pa55)",
-			"(curl -u admin:[redacted 24]", "(curl -u admin:" + S + ")"},
+			"(curl -u admin:[redacted 24]", "(curl -u admin:[redacted 24])"},
+		{"#372 rule: a bare $VAR is read as the value",
+			"psql --password $PGPASSWORD orders",
+			"psql --password [redacted 16] orders", "psql --password $PGPASSWORD orders"},
+		{"#372 rule: a bare value runs over a closing backtick",
+			"`psql --password " + S + "`",
+			"`psql --password [redacted 24]", "`psql --password [redacted 24]`"},
+		{"a quoted flag followed by a quoted value is not read (main too)",
+			"psql '--password' 'Zx9hunter2Qw7Pa55'",
+			"psql '--password' 'Zx9hunter2Qw7Pa55'", ""},
+		{"a flag inside element text is not read (main too)",
+			"<arg>--password Zx9hunter2Qw7Pa55</arg>",
+			"<arg>--password Zx9hunter2Qw7Pa55</arg>", ""},
+		{"a flag after ':' is not read (main too)",
+			"cmd:--password Zx9hunter2Qw7Pa55",
+			"cmd:--password Zx9hunter2Qw7Pa55", ""},
+		{"a value after a CR is not followed (main too)",
+			"psql --password\rZx9hunter2Qw7Pa55",
+			"psql --password\rZx9hunter2Qw7Pa55", ""},
+		{"a single-quoted ${...} is kept as a placeholder (main too)",
+			"psql --password '${Zx9hunter2Qw7Pa55}'",
+			"psql --password '${Zx9hunter2Qw7Pa55}'", ""},
+		{"an argument after -- is not read (main too)",
+			"psql --password -- Zx9hunter2Qw7Pa55",
+			"psql --password -- Zx9hunter2Qw7Pa55", ""},
+		{"shell-escaped quotes are not read (main too)",
+			"psql --password \\'Zx9hunter2Qw7Pa55\\'",
+			"psql --password \\'Zx9hunter2Qw7Pa55\\'", ""},
+		{"a self-closing attribute ends the start tag early (main too)",
+			"<password a=/>Zx9hunter2Qw7Pa55</password>",
+			"<password a=/>Zx9hunter2Qw7Pa55</password>", ""},
+		{"an attribute value holding <x> ends the start tag (main too)",
+			"<password hint=\"<x>\">Zx9hunter2Qw7Pa55</password>",
+			"<password hint=\"<x>\">Zx9hunter2Qw7Pa55</password>", ""},
+		{"a flag after a non-ASCII blank is not read (main too)",
+			"x\u00a0--password Zx9hunter2Qw7Pa55",
+			"x\u00a0--password Zx9hunter2Qw7Pa55", ""},
+		{"an em dash is not a flag (main too)",
+			"x —password Zx9hunter2Qw7Pa55",
+			"x —password Zx9hunter2Qw7Pa55", ""},
+		{"element text that spans lines is not read (main too)",
+			"<password>Zx9hunter2Qw7Pa55\nmore\n</password>",
+			"<password>Zx9hunter2Qw7Pa55\nmore\n</password>", ""},
+		{"an escaped end tag of another element is not this element's (main too)",
+			"<password>Zx9hunter2Qw7Pa55<\\/passwd>",
+			"<password>Zx9hunter2Qw7Pa55<\\/passwd>", ""},
+		{"a child's text that spans lines is not read (main too)",
+			"<secret><value>Zx9\nhunter2Qw7Pa55</value></secret>",
+			"<secret><value>Zx9\nhunter2Qw7Pa55</value></secret>", ""},
+		{"#372 rule: a bare value runs over a closing tag",
+			"<cmd>psql --password Zx9hunter2Qw7Pa55</cmd>",
+			"<cmd>psql --password [redacted 24]", "<cmd>psql --password [redacted 24]</cmd>"},
+		{"#372 rule: an unquoted command substitution is read as the value",
+			"psql --password $(cat /run/secrets/pw) orders",
+			"psql --password [redacted 8] /run/secrets/pw) orders", "psql --password $(cat /run/secrets/pw) orders"},
+		{"#372 rule: a Windows %VAR% is read as the value",
+			"psql --password %PGPASSWORD% orders",
+			"psql --password [redacted 16] orders", "psql --password %PGPASSWORD% orders"},
+		{"#372 rule: a user:gid pair with a named user is read as user:password",
+			"docker run -u postgres:999 img",
+			"docker run -u postgres:[redacted 8] img", "docker run -u postgres:999 img"},
 	}
 	for _, r := range rows {
+		if strings.Contains(r.ideal, "hunter2Qw7") {
+			t.Errorf("gap %q: the ideal holds the raw secret", r.gap)
+		}
 		got, _ := Text(r.in)
 		switch {
 		case r.gap != "":
@@ -407,6 +456,130 @@ func TestReview383Gaps(t *testing.T) {
 			}
 		case strings.Contains(got, "hunter2Qw7"):
 			t.Errorf("leak: %q -> %q", r.in, got)
+		}
+	}
+}
+
+// TestReview383Round4 holds the rows of the round-3 review of #415, under
+// the additive design: the #372 rules run first and the added rules only
+// mask more. Exact rows give main's output wherever main masks.
+func TestReview383Round4(t *testing.T) {
+	leaks := []string{
+		"<password>Zx9hunter2Qw7Pa55</ password>",                                                   // i1
+		"<password>Zx9hunter2Qw7Pa55</passwd>",                                                      // i1
+		"<password>Zx9hunter2Qw7Pa55</other>",                                                       // i1
+		"<password>Zx9hunter2Qw7Pa55</password",                                                     // i1
+		"<password>Zx9hunter2Qw7Pa55</>",                                                            // i1
+		"<password>Zx9hunter2Qw7Pa55</passwords>",                                                   // i1
+		"<password>Zx9hunter2Qw7Pa55</passw",                                                        // i1
+		"<password>Zx9 hunter2Qw7Pa55</pas",                                                         // i1
+		"<password>Zx9hunter2Qw7Pa55</ password >",                                                  // i1
+		"<token>Zx9hunter2Qw7Pa55</secret>",                                                         // i1
+		"<token>Zx9hunter2Qw7Pa55</token-x>",                                                        // i1
+		"<ssl.keystore.password>Zx9hunter2Qw7Pa55</password>",                                       // i1
+		"<db:password>Zx9hunter2Qw7Pa55</db:passwd>",                                                // i1
+		"<password>Zx9\\nhunter2Qw7Pa55</password>",                                                 // i2
+		"<password>Zx9\\rhunter2Qw7Pa55</password>",                                                 // i2
+		"<password>Zx9\\\\nhunter2Qw7Pa55</password>",                                               // i2
+		"<token>ab\\rcdEF12hunter2Qw7Pa55</token>",                                                  // i2
+		"{\"xml\":\"<password>Zx9\\nhunter2Qw7Pa55</password>\"}",                                   // i2
+		"{\"xml\":\"<secret>\\nMIIBUzCCAQ2gAwIBAgIUZx9hunter2Qw7Pa55\\nABCDEFGHIJKL\\n</secret>\"}", // i2
+		"progress 100%\r--password Zx9hunter2Qw7Pa55",                                               // i3
+		"line\r--token Zx9hunter2Qw7Pa55",                                                           // i3
+		"a\r--api-secret Zx9hunter2Qw7Pa55 b",                                                       // i3
+		"x\r-u admin:Zx9hunter2Qw7Pa55",                                                             // i3
+		"page\f--password Zx9hunter2Qw7Pa55",                                                        // i3
+		"gpg --sslpassphrase Zx9hunter2Qw7Pa55",                                                     // i4
+		"tool --keypassphrase Zx9hunter2Qw7Pa55",                                                    // i4
+		"tool --mypassphrase Zx9hunter2Qw7Pa55",                                                     // i4
+		"tool -dbpassphrase Zx9hunter2Qw7Pa55",                                                      // i4
+		"psql --password $Zx9hunter2Qw7Pa55",                                                        // i5
+		"psql --password '$Zx9hunter2Qw7Pa55'",                                                      // i5
+		"psql --password \"$Zx9hunter2Qw7Pa55\"",                                                    // i5
+		"psql --password $ecretHunter2Qw7Pa55",                                                      // i5
+		"tool --api-secret '$Ab12hunter2Qw7Pa55'",                                                   // i5
+		"x --password $PGPASSWORDZx9hunter2Qw7Pa55",                                                 // i5
+		"curl -u admin:$Zx9hunter2Qw7Pa55 http://x/",                                                // i5
+		"curl -u 'admin:$Zx9hunter2Qw7Pa55' http://x/",                                              // i5
+		"[\"psql\",\"--password\",\"$Zx9hunter2Qw7Pa55\"]",                                          // i16
+	}
+	for _, in := range leaks {
+		got, _ := Text(in)
+		if strings.Contains(got, "hunter2Qw7") {
+			t.Errorf("leak: %q -> %q", in, got)
+		}
+		if again, _ := Text(got); again != got {
+			t.Errorf("not idempotent: %q -> %q", got, again)
+		}
+	}
+	keep := []string{
+		"{\"error\":\"flag needs an argument: --password\",\"exit_code\":2}",                                // i7
+		"{\"level\":\"fatal\",\"msg\":\"flag needs an argument: -password\",\"service_name\":\"piperoom\"}", // i7
+		"{\"msg\":\"unknown flag: --token\",\"connectorName\":\"pg-orders-connector\"}",                     // i7
+		"{'error': 'missing --password', 'retry_count': 3}",                                                 // i7
+		"[\"pg_dump\", \"--password\", \"orders_v2\"]",                                                      // i8
+		"command: [\"pg_dump\", \"--password\", \"orders_db\"]",                                             // i8
+		"command: [\"pg_dump\", \"--password\", \"orders-db\"]",                                             // i8
+		"args: [\"--token\", \"{{ .Values.token }}\"]",                                                      // i8
+		"Put the value between <password> and </password> tags",                                             // i9
+		"Set <token> to </token> in the template",                                                           // i9
+		"the <password> tag and </password> close",                                                          // i9
+		"Replace <secret> with </secret>",                                                                   // i9
+		"Put the new token between <token> or </token>",                                                     // i9
+		"<password> TODO </password>",                                                                       // i9
+		"usage: tool {--password PASSWORD}",                                                                 // i10
+		"usage: tool <--token TOKEN>",                                                                       // i10
+		"usage: tool {-u user:password}",                                                                    // i10
+		"<--password PASSWORD>",                                                                             // i10
+		"usage: tool [-h] [--api-token TOKEN] [--sasl.password SASL_PASSWORD]",                              // i11
+		"usage: psql [OPTION]... [--password PASSWD]",                                                       // i11
+		"(--token TOKEN_FILE)",                                                                              // i11
+		"psql -W|--password orders_v2",                                                                      // i11
+		"tool --token=v2",                                                                                   // i12
+		"tool --token=orders_v2",                                                                            // i12
+		"tool --token=ab12",                                                                                 // i12
+		"tool --auth-token=3600",                                                                            // i12
+		"tool --session-token=abc_def_1",                                                                    // i12
+		"tool --page-token=next_page_2",                                                                     // i12
+		"tool --api-token=TOKEN_FROM_ENV",                                                                   // i12
+		"tool --max-token=4096 orders",                                                                      // i12
+		"Error: --token=Bearer is not allowed",                                                              // i12
+		"tool --token \"$(gcloud auth print-access-token)\" orders",                                         // i13
+		"psql --password \"$(cat /run/secrets/pg)\" orders",                                                 // i13
+		"tool --token=$(cat /run/token) orders",                                                             // i13
+	}
+	for _, in := range keep {
+		if got, _ := Text(in); got != in {
+			t.Errorf("changed evidence: %q -> %q", in, got)
+		}
+	}
+	exact := []struct{ in, want string }{
+		{"curl -u admin:123456789012345678 http://x/", "curl -u admin:[redacted 24] http://x/"},                                                  // i6
+		{"curl --user api:9876543210987 https://x/", "curl --user api:[redacted 16] https://x/"},                                                 // i6
+		{"curl -U admin:9999999999 http://x/", "curl -U admin:[redacted 16] http://x/"},                                                          // i6
+		{"curl -U admin:9876543210 http://proxy/", "curl -U admin:[redacted 16] http://proxy/"},                                                  // i6
+		{"curl -u admin:20231015 http://x/", "curl -u admin:[redacted 8] http://x/"},                                                             // i6
+		{"curl -u admin:12345678 http://connect:8083/connectors", "curl -u admin:[redacted 8] http://connect:8083/connectors"},                   // i6
+		{"curl -u admin:12 http://x/", "curl -u admin:[redacted 8] http://x/"},                                                                   // i6
+		{"curl -u admin:correct-horse-battery-staple http://x/", "curl -u admin:[redacted 32] http://x/"},                                        // i6
+		{"curl -u svc_kafka:blue_ocean_tiger_lamp http://connect:8083/", "curl -u svc_kafka:[redacted 24] http://connect:8083/"},                 // i6
+		{"curl -u admin:hunter-two http://x/", "curl -u admin:[redacted 16] http://x/"},                                                          // i6
+		{"curl -u admin:pass-word http://x/", "curl -u admin:[redacted 16] http://x/"},                                                           // i6
+		{"curl -u svc:secret_key_prod http://x/", "curl -u svc:[redacted 16] http://x/"},                                                         // i6
+		{"{\"msg\":\"bad --password\",\"db_password\":\"Zx9hunter2Qw7Pa55\"}", "{\"msg\":\"bad --password\",\"db_password\":\"[redacted 24]\"}"}, // i7
+		{"{--password Zx9hunter2Qw7Pa55}", "{--password [redacted 24]}"},                                                                         // i10
+		{"<--password Zx9hunter2Qw7Pa55>", "<--password [redacted 24]>"},                                                                         // i10
+		{"curl --user=admin:12345678 http://x/", "curl --user=admin:[redacted 8] http://x/"},                                                     // i16
+		{"x --password=Zx9hunter2Qw7Pa55] y", "x --password=[redacted 24]] y"},                                                                   // i16
+		{"psql --password correcthorsebatterystaple orders", "psql --password [redacted 32] orders"},                                             // nits
+		{"tool --token qwertyuiopasdfghjklzxcvb", "tool --token [redacted 24]"},                                                                  // nits
+		{"psql --password letmein! orders", "psql --password [redacted 8] orders"},                                                               // nits
+		{"curl -u admin:letmein http://x/", "curl -u admin:[redacted 8] http://x/"},                                                              // nits
+		{"<password>\\tZx9hunter2Qw7Pa55</password>", "<password>[redacted 24]</password>"},                                                      // nits
+	}
+	for _, tc := range exact {
+		if got, _ := Text(tc.in); got != tc.want {
+			t.Errorf("Text(%q)\n got  %q\n want %q", tc.in, got, tc.want)
 		}
 	}
 }
