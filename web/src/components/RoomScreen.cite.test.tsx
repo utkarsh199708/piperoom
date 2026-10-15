@@ -147,4 +147,34 @@ describe('RoomScreen citation chips (F3)', () => {
     fireEvent.mouseLeave(chip)
     expect(row).not.toHaveAttribute('data-cited')
   })
+
+  it('clears a layer filter that hides the cited step, so the chip lands on its row', () => {
+    const change = {
+      id: 1, kind: 'ddl', object: 'public.orders', at: '2026-10-11T09:47:00Z', actor: 'etl', source: 'ddl_audit',
+      fingerprint: 'f', summary: 'ALTER TABLE public.orders',
+    }
+    const tc = (tool: string, data?: unknown) => ({ tool_use_id: `tu-${tool}`, tool, input: {}, summary: 'x', data })
+    show(
+      arjun,
+      room({
+        agent_status: { state: 'idle' },
+        steps: [
+          { id: 'sc', title: 'What changed', tool_calls: [tc('what_changed', { changes: [change] })], messages: [] },
+          { id: 'sp', title: 'Check the DDL', tool_calls: [tc('pg_recent_ddl')], messages: [] },
+          { id: 'sk', title: 'Check the connector', tool_calls: [tc('connect_status')], messages: [] },
+        ],
+        hypothesis: { text: 'It broke.', based_on_steps: ['sk'], confidence: 'high', confirmed: false, seq: 3, verdicts: [] },
+      }),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Show only postgres steps (ddl)' }))
+    expect(document.getElementById('step-sk')).toBeNull()
+    expect(screen.getByRole('status')).toHaveTextContent('Showing 1 step on postgres')
+
+    fireEvent.click(screen.getByRole('button', { name: /Go to step 3: Check the connector/ }))
+    const row = document.getElementById('step-sk') as HTMLElement
+    expect(row).not.toBeNull()
+    expect(row).toHaveAttribute('data-cited')
+    expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith(expect.objectContaining({ block: 'center' }))
+    expect(screen.queryByText(/Showing 1 step on postgres/)).not.toBeInTheDocument()
+  })
 })
