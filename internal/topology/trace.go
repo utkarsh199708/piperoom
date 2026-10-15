@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,6 +76,11 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if cerr != nil {
 		if errors.Is(cerr, ErrBadInput) {
 			return nil, cerr
+		}
+		// No connector config to tell which tables the pipeline streams:
+		// owners.yaml decides, or any table of the database could be read.
+		if !slices.Contains(p.SourceTables, table) {
+			return nil, fmt.Errorf("%w: table %q is not a source table of pipeline %q (Connect is unreachable, so only %v can be traced)", ErrBadInput, table, p.ID, p.SourceTables)
 		}
 		conn = p.Connectors[0]
 		topic = fallbackTopic(table)
