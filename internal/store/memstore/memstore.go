@@ -134,13 +134,15 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 	if !ok {
 		return events.Event{}, fmt.Errorf("memstore: room %q not found: %w", roomID, store.ErrNotFound)
 	}
-	key, keyed := clientIDKey(actor, raw)
-	if _, taken := log.clientIDs[key]; keyed && taken {
-		return events.Event{}, fmt.Errorf("memstore: append %s to %s: %w", typ, roomID, store.ErrClientIDTaken)
-	}
 	size := int64(len(raw))
 	if !s.limits.Fits(typ, actor, int64(len(log.events)), log.bytes, size) {
 		return events.Event{}, fmt.Errorf("memstore: append %s to %s (%d events, %d bytes): %w", typ, roomID, len(log.events), log.bytes, store.ErrLogFull)
+	}
+	// After the cap, in the Postgres order: its cap check is the rooms UPDATE,
+	// its key check the room_events INSERT that follows.
+	key, keyed := clientIDKey(actor, raw)
+	if _, taken := log.clientIDs[key]; keyed && taken {
+		return events.Event{}, fmt.Errorf("memstore: append %s to %s: %w", typ, roomID, store.ErrClientIDTaken)
 	}
 	log.bytes += size
 	log.lastSeq++

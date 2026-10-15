@@ -5,6 +5,7 @@ package room
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -78,9 +79,9 @@ func TestReplicasClientIDRace(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				if c.comment {
-					got[i], errs[i] = svc.AddCommentKeyed(ctx, u, roomID, "", "same text", c.key)
+					got[i], errs[i] = svc.AddCommentKeyed(ctx, u, roomID, "", "same text "+c.name, c.key)
 				} else {
-					got[i], errs[i] = svc.SteerKeyed(ctx, u, roomID, "same text", c.key)
+					got[i], errs[i] = svc.SteerKeyed(ctx, u, roomID, "same text "+c.name, c.key)
 				}
 			}()
 		}
@@ -96,6 +97,24 @@ func TestReplicasClientIDRace(t *testing.T) {
 		if k := countOn(t, schema, `SELECT count(*) FROM room_events WHERE room_id = $1 AND payload->>'client_id' = $2`, roomID, c.key); k != 1 {
 			t.Fatalf("%s: %d events with the key, want 1", c.name, k)
 		}
+	}
+	// The agent (on either replica) gets the driver's steer once: a loser
+	// appends nothing, so nothing is folded into an inbox twice.
+	steerSeen := func() int {
+		n := 0
+		for _, r := range []string{"r0", "r1"} {
+			for _, in := range log.inputsOf(r, roomID) {
+				if strings.Contains(in, "same text driver steer") {
+					n++
+				}
+			}
+		}
+		return n
+	}
+	eventually(t, 5*time.Second, "driver steer reaches the agent", func() bool { return steerSeen() > 0 })
+	time.Sleep(500 * time.Millisecond) // room for a second copy to arrive
+	if n := steerSeen(); n != 1 {
+		t.Fatalf("agent inputs hold the driver steer %d times, want 1", n)
 	}
 	if k := countOn(t, schema, `SELECT count(*) FROM suggestions WHERE room_id = $1`, roomID); k != 1 {
 		t.Fatalf("suggestion rows: %d, want 1 (losers compensated)", k)

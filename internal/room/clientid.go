@@ -120,23 +120,30 @@ func (s *Service) repeatOf(ctx context.Context, roomID, userID, clientID string,
 	return e, true, nil
 }
 
-// raceLoser answers a keyed append the store refused because another request
-// with the same key landed first (store.ErrClientIDTaken): as a repeat of the
-// winner. store.ErrLogFull is checked the same way: Postgres checks the cap
-// before the index, so a loser whose winner took the room's last slot sees a
-// full log. Any other error is returned as it is.
+// raceLoser answers a keyed request whose append failed. Another request
+// with the same key may have landed first: on any replica, the store refuses
+// the loser (store.ErrClientIDTaken), but the loser can also first see what
+// the winner changed (a full log the winner filled, since Postgres checks the
+// cap before the index; a room the winner's replica closed; three seq
+// conflicts on a checked append). So any failure looks the key up again and
+// answers as a repeat (docs/api.md, Idempotent posts: Race). A key nobody
+// used, or a lookup that fails, keeps the append's own answer.
 func (s *Service) raceLoser(ctx context.Context, roomID, userID, clientID string, same sameRequest, appendErr error) (events.Event, error) {
-	if clientID == "" || !(errors.Is(appendErr, store.ErrClientIDTaken) || errors.Is(appendErr, store.ErrLogFull)) {
+	if clientID == "" {
 		return events.Event{}, appendErr
 	}
 	e, done, err := s.repeatOf(ctx, roomID, userID, clientID, same)
-	if err != nil {
+	var re *Error
+	switch {
+	case !done:
+		return events.Event{}, appendErr
+	case err == nil:
+		return e, nil
+	case errors.As(err, &re) && re.Code == "client_id_reused":
 		return events.Event{}, err
-	}
-	if !done {
-		// A full log with an unused key, or a winner whose room was deleted
-		// in between: the append's own answer.
+	default:
+		// The lookup itself failed: the append's error is the better answer.
+		s.log.Warn("room: client_id lookup after a failed append", "room", roomID, "err", err)
 		return events.Event{}, appendErr
 	}
-	return e, nil
 }

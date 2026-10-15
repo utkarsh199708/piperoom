@@ -3,12 +3,19 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 
+	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/httpapi"
+	"piperoom/internal/room"
+	"piperoom/internal/store"
+	"piperoom/internal/store/memstore"
 )
 
 // postEvent posts body and returns the status and the decoded event (zero on
@@ -190,5 +197,75 @@ func TestNoClientIDStillAppendsEveryTime(t *testing.T) {
 	}
 	if n := count(); n != 4 {
 		t.Fatalf("events: %d, want 4", n)
+	}
+}
+
+// A post with a key nobody used on a full log answers 409 log_full and
+// appends nothing; the key stays unused, so its retry is a new request.
+func TestClientIDUnusedKeyOnFullLog(t *testing.T) {
+	st := memstore.New()
+	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun,
+		WriteHandoff: func(context.Context, []events.Event, agent.Options) (events.HandoffSummary, error) {
+			return events.HandoffSummary{WhatBroke: "x"}, nil
+		}})
+	srv := httptest.NewServer(httpapi.New(svc, st, nil))
+	t.Cleanup(srv.Close)
+	arjun, _ := svc.LookupUser("arjun")
+	snap, err := svc.CreateRoom(context.Background(), arjun, "t", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Human events may use the cap plus a reserve of 1: the log is full now.
+	st.SetLimits(store.Limits{MaxEvents: snap.LastSeq - 1})
+	base := srv.URL + "/api/rooms/" + snap.ID
+	for _, c := range []struct{ user, route, key string }{
+		{"priya", "/comments", "fc"}, {"priya", "/steer", "fg"}, {"arjun", "/steer", "fd"}, {"arjun", "/comments", "fa"},
+	} {
+		for range 2 { // the retry gets the same answer
+			wantHTTPError(t, doJSON(t, http.MethodPost, base+c.route, c.user, `{"text":"hi","client_id":"`+c.key+`"}`), http.StatusConflict, "log_full")
+		}
+		if _, err := st.EventByClientID(context.Background(), snap.ID, c.user, c.key); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("%s %s: key %s used: %v", c.user, c.route, c.key, err)
+		}
+	}
+	after, err := svc.GetRoom(context.Background(), snap.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastSeq != snap.LastSeq || len(after.PendingSuggestions) != 0 {
+		t.Fatalf("appended on a full log: seq %d -> %d, %d pending", snap.LastSeq, after.LastSeq, len(after.PendingSuggestions))
+	}
+}
+
+// Tenancy runs before the client_id format and the repeat check: a caller who
+// may not see the room gets 404 for a malformed key and for another user's
+// used key alike, never 400 or 200.
+func TestClientIDAfterTenancy(t *testing.T) {
+	e := newTenancyEnv(t, true)
+	rb := decodeID(t, e.mustDo(t, "bob", http.MethodPost, "/api/rooms", `{"title":"b","severity":"sev2","pipeline_id":"pb"}`, http.StatusCreated))
+	body := `{"text":"hi","client_id":"k1"}`
+	e.mustDo(t, "ben", http.MethodPost, "/api/rooms/"+rb+"/comments", body, http.StatusOK)
+	for _, b := range []string{body, `{"text":"hi","client_id":"a b"}`, `{"text":"hi","client_id":""}`} {
+		for _, route := range []string{"/comments", "/steer"} {
+			if code, out := e.do(t, "mallory", http.MethodPost, "/api/rooms/"+rb+route, b); code != http.StatusNotFound || !strings.Contains(out, "not_found") {
+				t.Fatalf("mallory %s %s: %d %s, want 404 not_found", route, b, code, out)
+			}
+		}
+	}
+	e.mustDo(t, "ben", http.MethodPost, "/api/rooms/"+rb+"/comments", body, http.StatusOK)
+}
+
+// The viewer guard runs before the client_id format.
+func TestClientIDAfterViewerGuard(t *testing.T) {
+	e := newOIDCEnv(t, oidcOpts{})
+	c := e.mustLogin(t, idpViewer)
+	for _, b := range []string{`{"text":"hi","client_id":"k1"}`, `{"text":"hi","client_id":"a b"}`} {
+		for _, route := range []string{"/api/rooms/r_x/comments", "/api/rooms/r_x/steer"} {
+			resp := e.do(t, http.MethodPost, route, b, ck(c))
+			wantStatus(t, resp, http.StatusForbidden)
+			if code, _ := errCode(t, resp); code != "viewer" {
+				t.Fatalf("%s %s: code %q, want viewer", route, b, code)
+			}
+		}
 	}
 }

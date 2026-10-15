@@ -3,7 +3,6 @@ package room_test
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,17 +22,6 @@ type raceStore struct {
 	blind   atomic.Int32
 	created atomic.Int32
 	deleted atomic.Int32
-	// fullOnTaken answers a taken key as a full log, the order Postgres
-	// checks them in when the winner took the room's last slot.
-	fullOnTaken atomic.Bool
-}
-
-func (r *raceStore) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
-	e, err := r.Store.Append(ctx, roomID, typ, actor, payload)
-	if errors.Is(err, store.ErrClientIDTaken) && r.fullOnTaken.Load() {
-		return events.Event{}, fmt.Errorf("test: %w", store.ErrLogFull)
-	}
-	return e, err
 }
 
 func (r *raceStore) EventByClientID(ctx context.Context, roomID, actorID, clientID string) (events.Event, error) {
@@ -234,18 +222,78 @@ func isCode(err error, code string) bool {
 	return errors.As(err, &re) && re.Code == code
 }
 
-// A loser that finds the log full (its winner took the last slot) answers as
-// a repeat; a full log with an unused key keeps its own answer.
+// capLog caps the room's log so that `free` more human events fit
+// (store.ReservePercent: reserve 1 under 50 events).
+func capLog(t *testing.T, svc *room.Service, st *memstore.Store, roomID string, free int64) {
+	t.Helper()
+	snap, err := svc.GetRoom(context.Background(), roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetLimits(store.Limits{MaxEvents: snap.LastSeq - 1 + free})
+}
+
+// A key nobody used on a full log is refused like any other post: 409
+// log_full, nothing appended, the key still unused. It is never answered as
+// a repeat.
+func TestKeyedUnusedKeyOnFullLog(t *testing.T) {
+	svc, st := newRaceService(t)
+	ctx := context.Background()
+	roomID := createRoom(t, svc, "arjun").ID
+	before, err := svc.GetRoom(ctx, roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capLog(t, svc, st.Store, roomID, 0)
+	for _, c := range []struct {
+		name string
+		post func() (events.Event, error)
+		user string
+	}{
+		{"comment", func() (events.Event, error) {
+			return svc.AddCommentKeyed(ctx, mustUser(t, svc, "priya"), roomID, "", "hi", "fresh-c")
+		}, "priya"},
+		{"suggestion", func() (events.Event, error) {
+			return svc.SteerKeyed(ctx, mustUser(t, svc, "priya"), roomID, "go", "fresh-g")
+		}, "priya"},
+		{"driver steer", func() (events.Event, error) {
+			return svc.SteerKeyed(ctx, mustUser(t, svc, "arjun"), roomID, "go", "fresh-d")
+		}, "arjun"},
+	} {
+		e, err := c.post()
+		if !errors.Is(err, store.ErrLogFull) || e.Seq != 0 {
+			t.Fatalf("%s: %v %+v, want log_full and no event", c.name, err, e)
+		}
+	}
+	for _, k := range [][2]string{{"priya", "fresh-c"}, {"priya", "fresh-g"}, {"arjun", "fresh-d"}} {
+		if _, err := st.EventByClientID(ctx, roomID, k[0], k[1]); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("key %v: %v, want unused", k, err)
+		}
+	}
+	after, err := svc.GetRoom(ctx, roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastSeq != before.LastSeq || len(after.PendingSuggestions) != 0 {
+		t.Fatalf("appended on a full log: seq %d -> %d, %d pending", before.LastSeq, after.LastSeq, len(after.PendingSuggestions))
+	}
+	if st.created.Load() != st.deleted.Load() {
+		t.Fatalf("suggestion rows left: %d created, %d deleted", st.created.Load(), st.deleted.Load())
+	}
+}
+
+// A loser whose winner took the log's last slot sees a full log (the store
+// checks the cap before the key, as Postgres does) and answers as a repeat.
 func TestKeyedRaceLoserOnFullLog(t *testing.T) {
 	svc, st := newRaceService(t)
 	ctx := context.Background()
 	roomID := createRoom(t, svc, "arjun").ID
 	priya := mustUser(t, svc, "priya")
+	capLog(t, svc, st.Store, roomID, 1)
 	first, err := svc.SteerKeyed(ctx, priya, roomID, "look", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.fullOnTaken.Store(true)
 	st.blind.Store(1)
 	if e, err := svc.SteerKeyed(ctx, priya, roomID, "look", "k"); err != nil || e.Seq != first.Seq {
 		t.Fatalf("loser on a full log: %v %+v", err, e)
@@ -256,5 +304,29 @@ func TestKeyedRaceLoserOnFullLog(t *testing.T) {
 	st.blind.Store(1)
 	if _, err := svc.AddCommentKeyed(ctx, priya, roomID, "", "look", "k"); !isCode(err, "client_id_reused") {
 		t.Fatalf("other route on a full log: %v", err)
+	}
+}
+
+// A loser that first sees the room the winner's replica closed answers as a
+// repeat, not room_closed.
+func TestKeyedRaceLoserOnClosedRoom(t *testing.T) {
+	svc, st := newRaceService(t)
+	ctx := context.Background()
+	roomID := createRoom(t, svc, "arjun").ID
+	arjun := mustUser(t, svc, "arjun")
+	first, err := svc.SteerKeyed(ctx, arjun, roomID, "go", "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CloseRoom(ctx, arjun, roomID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	st.blind.Store(1)
+	if e, err := svc.SteerKeyed(ctx, arjun, roomID, "go", "d"); err != nil || e.Seq != first.Seq || e.Type != events.SteerSent {
+		t.Fatalf("loser on a closed room: %v %+v", err, e)
+	}
+	// A key nobody used still gets room_closed.
+	if _, err := svc.SteerKeyed(ctx, arjun, roomID, "go", "new"); !isCode(err, "room_closed") {
+		t.Fatalf("new key on a closed room: %v", err)
 	}
 }
