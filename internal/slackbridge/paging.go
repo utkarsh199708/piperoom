@@ -311,6 +311,11 @@ func (p *pager) forgetRoom(room string) {
 			delete(p.last, k)
 		}
 	}
+	for k := range p.nudgeRoom {
+		if k[0] == room {
+			delete(p.nudgeRoom, k)
+		}
+	}
 	delete(p.roomHits, room)
 	q := p.seenQ[:0]
 	for _, k := range p.seenQ {

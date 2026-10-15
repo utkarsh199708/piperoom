@@ -597,13 +597,13 @@ func TestPagingNudgesDoNotStarveOtherPages(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	p := newPrunePager(t, &now, PagingLimits{})
 	for i := 0; i < 6; i++ {
-		// Three rooms keep each under the per-room nudge cap.
-		if !pageOnce(p, fmt.Sprintf("r%d", i%3+1), fmt.Sprintf("nudge:%d", i)) {
+		// One room each, so only the per-owner cap can deny the seventh.
+		if !pageOnce(p, fmt.Sprintf("r%d", i+1), fmt.Sprintf("nudge:%d", i)) {
 			t.Fatalf("nudge %d denied", i)
 		}
 		now = now.Add(5 * time.Minute)
 	}
-	if pageOnce(p, "r1", "nudge:99") {
+	if pageOnce(p, "r7", "nudge:99") {
 		t.Error("a seventh nudge page in the hour was allowed")
 	}
 	if !pageOnce(p, "r2", "proposal:p9") {
@@ -621,7 +621,7 @@ func TestPagingNudgesCappedPerRoom(t *testing.T) {
 		if pageOnce(p, "r1", fmt.Sprintf("nudge:%d", i)) {
 			paged++
 		}
-		now = now.Add(10*time.Minute + time.Second)
+		now = now.Add(5 * time.Minute)
 	}
 	if paged != 2 {
 		t.Errorf("room r1 nudge pages in the hour = %d, want 2", paged)
@@ -629,7 +629,7 @@ func TestPagingNudgesCappedPerRoom(t *testing.T) {
 	if !pageOnce(p, "r2", "nudge:1") {
 		t.Error("a nudge in r2 paged nobody after r1's nudges")
 	}
-	// The per-room cap keeps counting after the hour passes.
+	// The per-room cap frees up once the hour passes.
 	now = now.Add(time.Hour)
 	if !pageOnce(p, "r1", "nudge:100") {
 		t.Error("r1 nudge denied after its hour passed")
