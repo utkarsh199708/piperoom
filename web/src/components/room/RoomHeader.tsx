@@ -1,4 +1,5 @@
 import { BellRing, Check, CircleCheck, Download, Eye, Loader2, MoreHorizontal, Repeat2, UserPlus, Wrench } from 'lucide-react'
+import { plainText } from '@/lib/title'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -87,7 +88,7 @@ export function RoomHeader({
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
-        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{state.title}</h1>
+        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{plainText(state.title, 300)}</h1>
         <TitleFlagChip flags={state.title_flags} />
         <Badge variant={state.severity} className="uppercase">
           {state.severity}
