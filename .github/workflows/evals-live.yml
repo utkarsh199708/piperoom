@@ -18,9 +18,22 @@ on:
         description: "Write the report as the baseline-default artifact (commit it as evals/baseline/default.json in a later PR); no comparison"
         type: boolean
         default: false
-  schedule:
-    # Nightly: the hosted model can change without a commit.
-    - cron: "17 3 * * *"
+      only:
+        description: "Comma-separated scenario names, or all (GitHub replaces an empty value with the default)"
+        type: string
+        default: "schema-change"
+      runs:
+        description: "Runs per scenario (3 for a comparable baseline; 1 to save money)"
+        type: string
+        default: "1"
+      max_turns:
+        description: "Agent turns per episode (caps the cost of a runaway episode)"
+        type: string
+        default: "25"
+  # Nightly full run (75 episodes) is off while the API budget is small; turn it
+  # back on, or make it a cheap canary, once the cost per episode is measured.
+  # schedule:
+  #   - cron: "17 3 * * *"
   pull_request:
     paths:
       - "internal/agent/**"
@@ -40,7 +53,8 @@ jobs:
   evals-live:
     name: evals-live
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 75 episodes (25 scenarios x 3 runs) at 6 in parallel take about 40 minutes.
+    timeout-minutes: 60
     environment: evals
     # The pull_request path stays off until evals/baseline/default.json is on
     # main (tasks/L1-learn-from-rooms.md, L1c): without a baseline a PR run has
@@ -78,8 +92,27 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           MAKE_BASELINE: ${{ inputs.make_baseline }}
+          # Manual runs choose scope; the nightly run uses the full set, 3 runs.
+          ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
+          RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.runs || '3' }}
+          MAX_TURNS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_turns || '25' }}
         run: |
-          args=(-runs 3 -label ci -out cand.json)
+          case "$RUNS" in ''|*[!0-9]*) echo "::error::runs must be a whole number"; exit 1;; esac
+          case "$MAX_TURNS" in ''|*[!0-9]*) echo "::error::max_turns must be a whole number"; exit 1;; esac
+          case "$ONLY" in *[!a-z0-9,-]*) echo "::error::only takes scenario names separated by commas"; exit 1;; esac
+          # USD per million tokens (docs/design/cost.md), so the report carries
+          # cost_per_run_usd. cache_write is the 5-minute write price (1.25x input).
+          cat > "$RUNNER_TEMP/prices.json" <<'JSON'
+          {
+            "claude-opus-5-5":   {"input": 4.00, "output": 20.00, "cache_write": 5.00,  "cache_read": 0.20},
+            "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50,  "cache_read": 0.20},
+            "claude-haiku-5-5":  {"input": 0.10, "output": 0.50,  "cache_write": 0.125, "cache_read": 0.01}
+          }
+          JSON
+          # Episodes run 6 at a time with a 10-minute cap each; one at a time
+          # (the evalrun default) cannot finish 75 episodes inside the job limit.
+          args=(-runs "$RUNS" -max-turns "$MAX_TURNS" -parallel 6 -timeout 10m -prices "$RUNNER_TEMP/prices.json" -label ci -out cand.json)
+          if [ -n "$ONLY" ] && [ "$ONLY" != "all" ]; then args+=(-only "$ONLY"); fi
           if [ "$MAKE_BASELINE" = "true" ]; then
             echo "::notice::make_baseline: no comparison; the report is uploaded as baseline-default."
           elif [ -f evals/baseline/default.json ]; then

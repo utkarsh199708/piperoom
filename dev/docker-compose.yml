@@ -90,5 +90,55 @@ services:
       KAFKA_BROKERS: kafka:9092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
       WAREHOUSE_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/warehouse?sslmode=disable
+      PIPEROOM_LOG_LEVEL: ${PIPEROOM_LOG_LEVEL:-info}
+      PIPEROOM_LOG_FORMAT: ${PIPEROOM_LOG_FORMAT:-text}
       FAIL_ON_ID: ${DEVCONSUMER_FAIL_ON_ID:-0}
       DELAY: ${DEVCONSUMER_DELAY:-0s}
+
+  # Piperoom server in shadow mode, against this stack (dev/shadow.md).
+  # Profile "shadow": `devctl up` does not start it; `devctl shadow up` does.
+  # It needs ANTHROPIC_API_KEY from your environment (devctl checks it first,
+  # compose only passes it through, nothing is written to a file).
+  piperoom-shadow:
+    profiles: ["shadow"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: piperoom-dev/piperoom-shadow
+    restart: on-failure
+    depends_on:
+      postgres: { condition: service_healthy }
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_started }
+      connect: { condition: service_healthy }
+    # Host loopback only: dev login has no password.
+    ports: ["127.0.0.1:8090:8090"]
+    volumes:
+      - ./owners.shadow.yaml:/config/owners.yaml:ro
+      - ./users.yaml:/config/users.yaml:ro
+    environment:
+      PIPEROOM_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/piperoom?sslmode=disable
+      SOURCE_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/orders?sslmode=disable
+      WAREHOUSE_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/warehouse?sslmode=disable
+      KAFKA_BROKERS: kafka:9092
+      CONNECT_URL: http://connect:8083
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Pass-through; empty means the server's own default model.
+      PIPEROOM_MODEL: ${PIPEROOM_MODEL:-}
+      # Dev login (pick a user, no password) on a non-loopback address inside the container.
+      # Set here, not inherited from the image: the image will stop baking dev auth in (#127),
+      # and the server then also needs the acknowledgement below (R9). The ack is passed
+      # through from YOUR environment, never given a value here: it is a deliberate act.
+      PIPEROOM_AUTH_MODE: dev
+      PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1"
+      PIPEROOM_DEV_ACK: ${PIPEROOM_DEV_ACK:-}
+      # The watcher opens the rooms: `devctl break <scenario>` trips it within a few
+      # intervals (dev/owners.shadow.yaml has short `for:` values).
+      PIPEROOM_WATCH_MODE: rooms
+      PIPEROOM_WATCH_INTERVAL: ${PIPEROOM_WATCH_INTERVAL:-15s}
+      # Short, so a second break/fix round opens a new room (the default is 60m).
+      PIPEROOM_WATCH_COOLDOWN: ${PIPEROOM_WATCH_COOLDOWN:-5m}
+      PIPEROOM_SHADOW_GRACE: ${PIPEROOM_SHADOW_GRACE:-0}
+      PIPEROOM_SHADOW_TOKEN_BUDGET: ${PIPEROOM_SHADOW_TOKEN_BUDGET:-500000}
+      PIPEROOM_SHADOW_MAX_TURNS: ${PIPEROOM_SHADOW_MAX_TURNS:-20}
