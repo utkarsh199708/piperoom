@@ -27,7 +27,7 @@ next reset. `devctl up` with the new compose file starts `roomdb` and keeps the 
 
 ```
 go run ./cmd/devctl up --owner <tag>
-docker exec -e PGPASSWORD=piperoom-dev piperoom-dev-roomdb-1 sh -c "pg_dump -h postgres -U piperoom -d piperoom --clean --if-exists --no-owner | psql -q -v ON_ERROR_STOP=1 -U piperoom -d piperoom"
+docker exec -e PGPASSWORD=piperoom-dev piperoom-dev-roomdb-1 sh -c "pg_dump -h postgres -U piperoom -d piperoom --clean --if-exists --no-owner | psql -q -v ON_ERROR_STOP=1 -U piperoom -d piperoom >/dev/null"
 docker exec piperoom-dev-postgres-1 dropdb -U piperoom piperoom   # optional: remove the old copy
 ```
 
@@ -83,8 +83,9 @@ seed) while another database on the same server wrote about 1.4 MB of WAL every 
 
 `confirmed_flush_lsn` moves at every offset flush (60 s) and `restart_lsn` follows one step behind, so retained
 WAL saw-tooths at about one minute of the server's writes instead of growing for ever. `debezium.heartbeat.beat_at`
-shows the last beat. The `long-transaction` scenario is unchanged: a transaction left open still pins
-`restart_lsn`, as it should.
+shows the last beat. `long-transaction` still shows its symptom with the heartbeat on (observed 2026-10-15,
+50-row inserts every 25 s): retained WAL grew 44 kB → 172 kB in two minutes while the transaction was open,
+`restart_lsn` moved only 26 kB in that time, and after `devctl fix long-transaction` retained fell to 10 kB.
 
 ## Shared stack lock
 
@@ -392,6 +393,14 @@ run `dev/postgres-init/04-cdc.sql` again (a filtered-mode start that succeeded w
 table from the publication), re-register the dev connector config (`database.user=piperoom`,
 `publication.autocreate.mode=disabled`), restart task 0. The slot goes back
 `active=true` and the next insert reaches the warehouse (verified: 103 → 104 rows, stale 9 s).
+
+Observed 2026-10-15 with the worker log on the host: right after the break, Connect showed `tasks 0=RUNNING`
+while `dev/.logs/connect/connect.log` had, per retry,
+`[...] ERROR Producer failure (io.debezium.pipeline.ErrorHandler)` /
+`ConnectException: Unable to update filtered publication dbz_publication for "public"."orders"` /
+`Caused by: org.postgresql.util.PSQLException: ERROR: must be owner of table orders`. After the fix the connector
+was back on `piperoom` / `disabled`, the publication held `public.orders, debezium.heartbeat`, and a new
+order reached the warehouse.
 
 ---
 
