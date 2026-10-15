@@ -138,7 +138,7 @@ env:
 
   # --- shadow mode (docs/design/shadow.md; which pipelines are shadow is set in owners.yaml) ---
   PIPEROOM_SHADOW_GRACE: ""           # Go duration a run may continue after close; default 0 = cancel at close
-  PIPEROOM_SHADOW_TOKEN_BUDGET: ""    # tokens per shadow room; default 500000, 0 = no cap
+  PIPEROOM_SHADOW_TOKEN_BUDGET: ""    # tokens per shadow room; default 500000, 0 = use PIPEROOM_ROOM_TOKEN_BUDGET (never uncapped)
   PIPEROOM_SHADOW_MAX_TURNS: ""       # model turns per shadow run; default 20
 
   # --- Kafka security (empty protocol = PLAINTEXT) ---
