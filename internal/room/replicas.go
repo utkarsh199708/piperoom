@@ -729,7 +729,7 @@ func (s *Service) loadNewRoom(ctx context.Context, roomID string) {
 		return // loaded meanwhile; that copy may be newer
 	}
 	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-	s.rooms[roomID] = st
+	s.cacheRoomLocked(roomID, st)
 	if snap.Status == "open" {
 		s.indexAlertRoomLocked(ctx, roomID, st)
 	}
@@ -795,6 +795,9 @@ func (s *Service) catchUpLocked(ctx context.Context, roomID string, st *roomStat
 func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, e events.Event, remote bool) {
 	wasOpen := s.roomOpen(st)
 	st.snap = Apply(st.snap, e)
+	if s.rooms[roomID] == st {
+		s.countOpenChangeLocked(st, wasOpen)
+	}
 	// The store counts the same bytes (len of the payload JSON) for the
 	// room's log cap, whichever replica appended the event.
 	st.logBytes += int64(len(e.Payload))
@@ -876,7 +879,7 @@ func (s *Service) evictLocked(roomID string, st *roomState) {
 	if st.dedupKey != "" && s.alertRooms[st.dedupKey] == roomID {
 		delete(s.alertRooms, st.dedupKey)
 	}
-	delete(s.rooms, roomID)
+	s.uncacheRoomLocked(roomID)
 	s.markListDirtyLocked(roomID)
 }
 
@@ -970,7 +973,7 @@ func (s *Service) refreshAll(ctx context.Context) error {
 			continue // loaded meanwhile (a command or the follower)
 		}
 		st := &roomState{snap: b.snap, inbox: newRoomInbox(b.snap.Shadow), pending: b.pending}
-		s.rooms[id] = st
+		s.cacheRoomLocked(id, st)
 		if b.snap.Status == "open" {
 			s.indexAlertRoomLocked(ctx, id, st)
 		}
