@@ -158,3 +158,10 @@ describe('CloseRoomDialog', () => {
     })
   })
 })
+
+describe('CloseRoomDialog initialText', () => {
+  it('starts with the given resolution, so the close nudge can pre-fill it', () => {
+    render(<CloseRoomDialog actions={actions} onClose={() => {}} initialText={'Fixed by "Restart task"'} />)
+    expect(screen.getByRole('textbox')).toHaveValue('Fixed by "Restart task"')
+  })
+})

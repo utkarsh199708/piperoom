@@ -7,13 +7,18 @@
 //  - `canDecideLayer` is the only gate for the buttons (plus "no hash" and "busy", which only
 //    switch them off). A viewer or a non-owner gets no buttons at all.
 import { useContext, useEffect, useId, useRef, useState } from 'react'
-import { CircleCheck, CircleX, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
+import { Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
-import { describeIdentity, identityDetails, shortHash } from '../lib/hash'
+import { describeIdentity, identityDetails } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
+import { Clock } from './room/Clock'
+import { BlastRadius } from './room/BlastRadius'
+import { ExecutionCard } from './room/ExecutionCard'
+import { VerificationCard } from './room/VerificationCard'
+import type { CloseNudge } from './room/VerificationCard'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
@@ -22,7 +27,7 @@ import { completesSet } from '../lib/decision'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
 import { WaitingFor } from './room/WaitingFor'
-import type { Person, PresenceMember } from '../api/types'
+import type { Person, PresenceMember, Topology } from '../api/types'
 import type { NudgeState } from '../state/types'
 
 /** What a pending layer row needs to say who it waits on and to nudge them (F9). */
@@ -609,7 +614,12 @@ function LayerRow({
               <X className="size-3" aria-hidden="true" />
             )}
             {decision.outcome === 'approved' ? 'Approved' : 'Rejected'}
-            {decidedAt && ` · ${decidedAt}`}
+            {decision.at && (
+              <>
+                {' · '}
+                <Clock iso={decision.at} />
+              </>
+            )}
           </Badge>
           {reasonText && (
             <span className="basis-full text-xs text-muted-foreground" aria-hidden="true">
@@ -742,48 +752,6 @@ function LayerRow({
   )
 }
 
-function ExecutedList({ proposal }: { proposal: ProposalState }) {
-  if (proposal.executed.length === 0) return null
-  return (
-    <>
-      <Separator />
-      <ul className="flex flex-col gap-1.5 px-3.5 py-2.5 text-sm">
-        {proposal.executed.map((ex) => {
-          // The executor checked this hash before it ran the step. A different
-          // one than the card shows is flagged; an event without one is not.
-          const differs = !!ex.params_hash && !!proposal.params_hash && ex.params_hash !== proposal.params_hash
-          return (
-            <li key={ex.step_index} className="flex flex-wrap items-center gap-2">
-              {ex.ok ? (
-                <CircleCheck className="size-4 text-success-foreground" role="img" aria-label="succeeded" />
-              ) : (
-                <CircleX className="size-4 text-destructive-fg" role="img" aria-label="failed" />
-              )}
-              <span className="font-mono text-xs text-subtle-foreground">step {ex.step_index + 1}</span>
-              <span className="min-w-0 break-words">{ex.output}</span>
-              {ex.params_hash && (
-                <code
-                  className="mono exec__hash rounded-md border border-input bg-muted px-1.5 py-0.5 font-mono text-xs"
-                  data-testid={`exec-hash-${ex.step_index}`}
-                  title={ex.params_hash}
-                >
-                  {shortHash(ex.params_hash)}
-                </code>
-              )}
-              {differs && (
-                <Badge variant="destructive" title="The step ran with a different params_hash than this proposal shows">
-                  <TriangleAlert className="size-3" aria-hidden="true" />
-                  hash differs from proposal
-                </Badge>
-              )}
-            </li>
-          )
-        })}
-      </ul>
-    </>
-  )
-}
-
 function latestDecision(proposal: ProposalState): string {
   let best: { at: number; text: string } | null = null
   for (const [layer, d] of Object.entries(proposal.decisions ?? {})) {
@@ -804,7 +772,11 @@ function Proposal({
   ribbon,
   onSolo,
   waiting,
+  topology,
+  nudge,
 }: {
+  nudge: CloseNudge
+  topology: Topology | null
   proposal: ProposalState
   user: CurrentUser
   actions: RoomActions
@@ -885,12 +857,15 @@ function Proposal({
                     <span className="font-mono font-medium">{s.action}</span>
                   </div>
                   {s.description && <p className="text-xs text-muted-foreground">{s.description}</p>}
+                  {s.verify && <p className="text-xs text-muted-foreground">After it runs — {s.verify}</p>}
                   <StepParams params={s.params} />
                 </div>
               </li>
             ))}
           </ol>
         )}
+
+        <BlastRadius proposal={proposal} topology={topology} />
 
         {hashed ? (
           <ParamsHash hash={proposal.params_hash} deciding={mine.length > 0} noteId={noteId} />
@@ -941,7 +916,11 @@ function Proposal({
           />
         ))}
       </div>
-      <ExecutedList proposal={proposal} />
+      <ExecutionCard
+        proposal={proposal}
+        rollback={isViewer(user) ? undefined : { asDriver: nudge.isDriver, onSteer: actions.steer }}
+      />
+      {proposal.verification && <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} />}
     </article>
   )
 }
@@ -954,7 +933,13 @@ export function ProposalsPanel({
   ribbon = true,
   people,
   presence = [],
+  topology = null,
+  onCloseRoom,
 }: {
+  /** Opens the close dialog with the resolution filled in (the driver's "Close room" after a verified fix). */
+  onCloseRoom?: (initialText: string) => void
+  /** From useTopology: names the downstream node ids a preview lists. */
+  topology?: Topology | null
   state: RoomState
   user: CurrentUser
   actions: RoomActions
@@ -975,6 +960,12 @@ export function ProposalsPanel({
     canNudge: !isViewer(user) && state.status === 'open',
   }
   const proposals = state.proposals
+  const nudge: CloseNudge = {
+    roomOpen: state.status === 'open',
+    driverName: state.driver?.name,
+    isDriver: state.driver?.id === user.id,
+    onClose: onCloseRoom,
+  }
   // `/api/me.solo` says so up front; on an older server the first approve that
   // asks for a confirm tells us.
   const [soloSeen, setSoloSeen] = useState(false)
@@ -1020,6 +1011,8 @@ export function ProposalsPanel({
               ribbon={ribbon}
               onSolo={() => setSoloSeen(true)}
               waiting={waiting}
+              topology={topology}
+              nudge={nudge}
             />
           ))}
         </div>

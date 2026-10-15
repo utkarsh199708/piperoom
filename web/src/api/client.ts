@@ -16,6 +16,7 @@ import type {
   LabelInput,
   Me,
   Person,
+  AgentStats,
   PipelineInfo,
   RoomSnapshot,
   ShadowBlindBody,
@@ -149,6 +150,8 @@ export const api = {
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
   topology: (pipelineId: string) =>
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  agentStats: (pipelineId: string) =>
+    request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string }) =>
     request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
   steer: (roomId: string, text: string) =>
@@ -245,4 +248,14 @@ export function roomWsUrl(
 
 export function openRoomWs(roomId: string, after: number): WebSocket {
   return new WebSocket(roomWsUrl(roomId, after))
+}
+
+/** WebSocket URL of the room list push (GET /api/rooms/ws, F6): same origin, no cursor. */
+export function roomsWsUrl(loc: Pick<Location, 'protocol' | 'host'> = window.location): string {
+  const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${scheme}//${loc.host}/api/rooms/ws`
+}
+
+export function openListWs(): WebSocket {
+  return new WebSocket(roomsWsUrl())
 }

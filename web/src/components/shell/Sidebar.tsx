@@ -1,4 +1,4 @@
-import { Activity, EyeOff, Inbox, Search, Workflow } from 'lucide-react'
+import { EyeOff, Inbox, Search } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -72,23 +72,6 @@ function PipelineItem({
         <span className="sr-only">, {HEALTH_LABEL[health]}</span>
         {pipeline.open > 0 && <Count>{pipeline.open} open</Count>}
       </Link>
-    </li>
-  )
-}
-
-// Pipelines and Audit log have no screen yet; they are listed (the design has them) but off.
-function SoonItem({ icon, label }: { icon: ReactNode; label: string }) {
-  return (
-    <li>
-      <span
-        aria-disabled="true"
-        title="Not available yet"
-        className={cn(rowClass, 'cursor-not-allowed opacity-60')}
-      >
-        {icon}
-        {label}
-        <span className="sr-only">, not available yet</span>
-      </span>
     </li>
   )
 }
@@ -179,8 +162,6 @@ export function SidebarContent({
               Shadow results
             </Link>
           </li>
-          <SoonItem icon={<Workflow aria-hidden="true" />} label="Pipelines" />
-          <SoonItem icon={<Activity aria-hidden="true" />} label="Audit log" />
         </ul>
       </nav>
 

@@ -324,7 +324,7 @@ describe('applyEvent — agent.usage (cost telemetry)', () => {
     expect(after.activity).toBe(s.activity)
     expect(after.steps).toBe(s.steps)
     expect(after.messages).toBe(s.messages)
-    expect({ ...after, last_seq: s.last_seq }).toEqual(s)
+    expect({ ...after, last_seq: s.last_seq, insight: s.insight }).toEqual(s)
   })
 
   it('never takes a slot of the activity window or renders as a raw line', () => {
@@ -487,7 +487,7 @@ describe('schema-change fixture activity', () => {
       s = applyEvent(s, e)
       textBySeq.set(e.seq, s.activity[0].text)
     }
-    expect(s.last_seq).toBe(34)
+    expect(s.last_seq).toBe(36)
     expect(textBySeq.get(2)).toBe('Arjun renewed the lease')
     expect(textBySeq.get(33)).toBe('Kabir took control')
   })
@@ -770,5 +770,48 @@ describe('applyEvent — hypothesis verdicts and nudges (F9)', () => {
     expect(v.activity[0].text).toBe('Priya disputed the hypothesis: no')
     const c = applyEvent(v, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
     expect(c.activity[0].text).toBe('Kabir confirmed the hypothesis')
+  })
+})
+
+describe('applyEvent — preview and verification', () => {
+  const created = ev(1, 'proposal.created', {
+    proposal_id: 'p_1',
+    title: 'fix',
+    steps: [{ action: 'a', layer: 'kafka-connect', params: {}, description: '' }],
+    risk: 'low',
+    rollback: 'undo',
+    required_layers: ['kafka-connect'],
+  })
+  const previewed = (seq: number, current: string) =>
+    ev(seq, 'proposal.previewed', {
+      proposal_id: 'p_1',
+      at: '2026-10-11T10:00:05Z',
+      steps: [{ step_index: 0, preview: { target: 't', current, expected: 'e', reversible: true } }],
+    })
+  const verified = (seq: number, over: object) =>
+    ev(seq, 'agent.verification', { proposal_id: 'p_1', checks: [], recovered: true, verdict: 'recovered', ...over })
+
+  it('keeps the latest preview and remembers when the proposal was created', () => {
+    let s = applyEvent(base(), created)
+    expect(s.proposals[0].created_at).toBe(created.at)
+    s = applyEvent(s, previewed(2, 'one'))
+    s = applyEvent(s, previewed(3, 'two'))
+    expect(s.proposals[0].preview?.steps[0].preview?.current).toBe('two')
+  })
+  it('ignores a preview for an unknown proposal', () => {
+    const s = applyEvent(base(), previewed(1, 'x'))
+    expect(s.proposals).toHaveLength(0)
+  })
+  it('a repeat verification never overwrites a full one', () => {
+    let s = applyEvent(base(), created)
+    s = applyEvent(s, verified(2, { checks: [{ layer: 'kafka-connect', name: 'connect_status', ok: true, detail: 'RUNNING' }] }))
+    s = applyEvent(s, verified(3, { repeat: true }))
+    expect(s.proposals[0].verification?.checks).toHaveLength(1)
+    expect(s.proposals[0].verification?.repeat).toBeUndefined()
+  })
+  it('a repeat is kept when nothing fuller exists', () => {
+    let s = applyEvent(base(), created)
+    s = applyEvent(s, verified(2, { repeat: true }))
+    expect(s.proposals[0].verification?.repeat).toBe(true)
   })
 })

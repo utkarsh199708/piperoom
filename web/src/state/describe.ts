@@ -2,12 +2,14 @@
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
 import type {
   ActionExecutedPayload,
+  AgentVerificationPayload,
   AgentHypothesisPayload,
   AgentMessagePayload,
   AgentStatusPayload,
   AgentStepStartPayload,
   AgentToolCallPayload,
   AgentToolResultPayload,
+  AgentTriagePayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
   ChecklistStepDonePayload,
@@ -141,6 +143,12 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       }
       return { text: `Agent: ${clip(p.text, 120)}`, detail: p.text.length > 120 ? clip(p.text, 200) : undefined, kind: 'step' }
     }
+    case 'agent.triage': {
+      const p = as<AgentTriagePayload>(e)
+      return p.status === 'ok' && p.headline
+        ? { text: `First look: ${clip(p.headline, 120)}`, detail: p.headline.length > 120 ? clip(p.headline, 200) : undefined, kind: 'step' }
+        : { text: `First look failed (${clip(p.reason || 'unknown', 40)})`, kind: 'step' }
+    }
     case 'agent.hypothesis': {
       const p = as<AgentHypothesisPayload>(e)
       const before = ctx.confidenceBefore ? RANK[ctx.confidenceBefore] : undefined
@@ -205,6 +213,12 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)
       return { text: `Agent proposed a fix · ${clip(p.title, 80)}`, kind: 'decision' }
+    }
+    case 'proposal.previewed':
+      return { text: 'Previewed what the fix will do', kind: 'decision' }
+    case 'agent.verification': {
+      const p = as<AgentVerificationPayload>(e)
+      return { text: `Verification: ${p.recovered ? 'recovered' : 'not recovered'}`, kind: 'decision' }
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)

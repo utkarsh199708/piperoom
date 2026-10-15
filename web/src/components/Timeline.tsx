@@ -3,7 +3,6 @@ import { emptyStateFor } from '../lib/emptyState'
 import type { FormEvent } from 'react'
 import { Check, ChevronRight, X } from 'lucide-react'
 import type { AgentMessageState, ChecklistTick, CommentState, StepState, ToolCallState } from '../state/types'
-import { clockTime } from '../lib/time'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
 import { cn } from '@/lib/utils'
 import { Badge, layerVariant } from '@/components/ui/badge'
@@ -11,9 +10,11 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
+import { Clock } from './room/Clock'
 import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
+import { stepAnchor } from '@/lib/triage'
 import { Checklist } from './room/Checklist'
 import type { ChecklistAccess } from './room/Checklist'
 import type { ChecklistStepDonePayload } from '../api/types'
@@ -153,7 +154,7 @@ function CommentThread({
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
             <strong className="font-medium">{comment.author.name}</strong>
-            <span className="text-xs text-subtle-foreground">{clockTime(comment.at)}</span>
+            <Clock iso={comment.at} className="text-xs text-subtle-foreground" />
           </div>
           <p className="m-0 break-words text-muted-foreground">{comment.text}</p>
         </div>
@@ -164,7 +165,7 @@ function CommentThread({
           <div className="min-w-0">
             <div className="flex flex-wrap items-baseline gap-x-2">
               <strong className="font-medium">Agent</strong>
-              <span className="text-xs text-subtle-foreground">{clockTime(r.at)}</span>
+              <Clock iso={r.at} className="text-xs text-subtle-foreground" />
             </div>
             <p className="m-0 break-words text-muted-foreground">
               <CollapsibleText text={r.text} />
@@ -296,7 +297,7 @@ function DoneStep({
   const more = step.tool_calls.length - 1
 
   return (
-    <li className="flex flex-col gap-2">
+    <li id={stepAnchor(step.id)} className="flex flex-col gap-2 scroll-mt-4">
       <button
         type="button"
         aria-expanded={open}
@@ -363,7 +364,7 @@ function LiveStep({
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
   return (
-    <li className="flex flex-col gap-2.5 rounded-lg border border-input bg-card px-3 py-2.5">
+    <li id={stepAnchor(step.id)} className="flex scroll-mt-4 flex-col gap-2.5 rounded-lg border border-input bg-card px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
         <span
           role="img"

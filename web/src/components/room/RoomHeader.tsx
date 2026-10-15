@@ -3,7 +3,7 @@ import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
 import type { ConnState } from '@/hooks/useRoom'
-import { clockTime } from '@/lib/time'
+import { Clock } from './Clock'
 import { roomStatus, statusInputFromState } from '@/lib/roomStatus'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,8 +11,10 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Kbd } from '@/components/ui/kbd'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { AgentPill } from './AgentPill'
+import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
+import { TriageCard } from './TriageCard'
 
 export interface HeaderMember {
   id: string
@@ -184,6 +186,8 @@ export function RoomHeader({
         </div>
       </div>
 
+      <TriageCard state={state} />
+
       <p className="m-0 flex flex-wrap items-center gap-x-2.5 font-mono text-xs text-subtle-foreground">
         {state.pipeline_id && (
           <>
@@ -192,16 +196,22 @@ export function RoomHeader({
           </>
         )}
         <span className="hidden sm:inline">#{state.id}</span>
+        {!state.shadow && state.opened_at && (
+          <>
+            <Sep />
+            <CostChip state={state} />
+          </>
+        )}
         {state.opened_at && (
           <>
             <Sep />
-            <span>opened {clockTime(state.opened_at)}</span>
+            <span>opened <Clock iso={state.opened_at} /></span>
           </>
         )}
         {state.closed_at && (
           <>
             <Sep />
-            <span>closed {clockTime(state.closed_at)}</span>
+            <span>closed <Clock iso={state.closed_at} /></span>
           </>
         )}
       </p>

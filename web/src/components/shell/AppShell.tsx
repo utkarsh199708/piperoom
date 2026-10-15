@@ -46,10 +46,10 @@ export function AppShell() {
   const navigate = useNavigate()
   const { user } = useCurrentUser()
   // The one room list: the sidebar reads it here and the room list screen through RoomListContext.
-  const { rooms, loading: roomsLoading, error: roomsError, reload } = useRoomList()
+  const { rooms, loading: roomsLoading, error: roomsError, reload, mode: roomsMode, updatedAt: roomsUpdatedAt } = useRoomList()
   const roomList = useMemo(
-    () => ({ rooms, loading: roomsLoading, error: roomsError, reload }),
-    [rooms, roomsLoading, roomsError, reload],
+    () => ({ rooms, loading: roomsLoading, error: roomsError, reload, mode: roomsMode, updatedAt: roomsUpdatedAt }),
+    [rooms, roomsLoading, roomsError, reload, roomsMode, roomsUpdatedAt],
   )
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
@@ -73,8 +73,9 @@ export function AppShell() {
     setNavKey((k) => k + 1)
   }, [location.pathname])
   useEffect(() => {
-    if (navKey > 0) void reload()
-  }, [navKey, reload])
+    // A pushed list is already current; only a polled one refetches.
+    if (navKey > 0 && roomsMode === 'poll') void reload()
+  }, [navKey, reload, roomsMode])
 
   // The open room's callbacks, written by RoomScreen on every render and read by the menu.
   const roomCommands = useRef<RoomCommands | null>(null)
