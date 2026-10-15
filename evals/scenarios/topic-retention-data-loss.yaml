@@ -252,12 +252,7 @@ recordings:
 expect:
   root_cause:
     - [retention, log start, expired, aged out, deleted before]
-    # The "retention deleted ..." phrases state the deletion itself: the first
-    # live baseline said "Retention deleted the 01:00-03:00 change events before
-    # order-sync read them" (E5d). "before ... read" phrases alone also pass
-    # denials and other stages' losses (scenario_terms_test.go).
-    - [lost, loss*, skipped, gap*, never reached, retention deleted the, retention deleted change*,
-       retention deleted record*, retention deleted those, retention deleted segment*]
+    - [lost, loss*, skipped, gap*, never reached]
   # "Reset order-sync to latest" is the named trap: it skips even more.
   root_cause_forbidden:
     - [reset*, latest]
