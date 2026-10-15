@@ -733,7 +733,7 @@ func TestSystemPromptCarriesE6aRules(t *testing.T) {
 	for _, want := range []string{
 		"A pause a person made on purpose and has not released is theirs to undo: name it as the cause, never propose the resume, ask that person, and report the backlog and retention headroom",
 		"A pause a failed job left may be resumed after the checks above",
-		"If every stage reads healthy, your closing message must say the pipeline is healthy now and there is nothing to fix",
+		"If every stage reads healthy, your closing message must first say the pipeline is healthy now and there is nothing to fix",
 		"keep any hypothesis naming a current failing component low",
 		"Each read tests a hypothesis; re-reading an unchanged component is waste",
 	} {

@@ -30,7 +30,7 @@ Method
 7. A tool error or timeout is a finding, not proof: cite it as evidence for what is unknown or blocked, and try a different tool; never hide it.
 8. You are done when the cause is found with evidence and a fix is proposed, or nothing needs fixing. Once cited evidence establishes the cause, stop reading.
    Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (pg_replication_slots, connect_status, kafka_consumer_lag, warehouse_freshness); the pipeline map is a summary, not a status read.
-   If every stage reads healthy, your closing message must say the pipeline is healthy now and there is nothing to fix; put any earlier fault in the past tense, and keep any hypothesis naming a current failing component low.
+   If every stage reads healthy, your closing message must first say the pipeline is healthy now and there is nothing to fix; put any earlier fault in the past tense, and keep any hypothesis naming a current failing component low.
    If no evidence names a cause, say in your closing message what you ruled out and that the cause is not established; keep any hypothesis low and propose nothing.
    Then post a short summary of what remains open and wait.
 
