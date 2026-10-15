@@ -73,6 +73,34 @@ func (s Session) Check(now time.Time, idle time.Duration) error {
 	return nil
 }
 
+// Liveness is the one rule for whether a stored session may be used now
+// (#417): the per-request check, the presence tick, the person lookup and
+// GET /api/people all apply it, so a session that cannot act also cannot be
+// listed, given control or handed off to. Settings.Liveness builds it.
+type Liveness struct {
+	// Idle is PIPEROOM_SESSION_IDLE; 0 means no idle limit.
+	Idle time.Duration
+	// Max is the current PIPEROOM_SESSION_MAX, applied to CreatedAt: sessions
+	// outlive a restart in Postgres, so a lowered max applies to sessions made
+	// under the old, longer one. 0 means no limit beyond ExpiresAt.
+	Max time.Duration
+	// Method, when set, is the only session method accepted: MethodOIDC in
+	// oidc mode, so a dev-login row made before a switch to oidc mode, or by a
+	// dev server sharing the room DB, is not a live person.
+	Method string
+}
+
+// Usable reports whether s may be used at now under l.
+func (l Liveness) Usable(s Session, now time.Time) bool {
+	if s.Check(now, l.Idle) != nil {
+		return false
+	}
+	if l.Method != "" && s.Method != l.Method {
+		return false
+	}
+	return l.Max <= 0 || now.Before(s.CreatedAt.Add(l.Max))
+}
+
 // Store keeps sessions. (*store.PG).Sessions() and MemStore implement it.
 type Store interface {
 	// Create inserts a new session.
@@ -84,14 +112,14 @@ type Store interface {
 	// ErrNotFound. The WebSocket presence tick uses it.
 	ByID(ctx context.Context, id string) (Session, error)
 	// LiveByUserID returns the newest session of userID (by created_at) that is
-	// live at now: not revoked, before its absolute expiry and not idle for
-	// idle. ErrNotFound when there is none. Service.LookupPerson uses it to
-	// find a person who is not in users.yaml (design §2.1).
-	LiveByUserID(ctx context.Context, userID string, now time.Time, idle time.Duration) (Session, error)
+	// usable at now under live (Liveness.Usable). ErrNotFound when there is
+	// none. Service.LookupPerson uses it to find a person who is not in
+	// users.yaml (design §2.1).
+	LiveByUserID(ctx context.Context, userID string, now time.Time, live Liveness) (Session, error)
 	// LiveSessions returns the newest live session of each user (same rule as
 	// LiveByUserID), at most limit of them, ordered by user id. GET /api/people
 	// uses it.
-	LiveSessions(ctx context.Context, now time.Time, idle time.Duration, limit int) ([]Session, error)
+	LiveSessions(ctx context.Context, now time.Time, live Liveness, limit int) ([]Session, error)
 	// Touch sets last_seen_at. A missing session is not an error.
 	Touch(ctx context.Context, id string, at time.Time) error
 	// Revoke sets revoked_at if it is not set yet. It is idempotent and a
