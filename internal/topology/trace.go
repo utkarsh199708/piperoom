@@ -100,6 +100,11 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	// Primary key lookup. A failure here means the source DB is unreachable;
 	// fall back to "id" and let the source row read report the problem.
 	pk, err := b.pkColumn(ctx, table)
+	if errors.Is(err, clients.ErrNotSupported) {
+		// A composite key: the row, its Kafka key and its sink row cannot be
+		// found by one value, so no stage can be judged (#483).
+		return compositeKeyTrace(f), nil
+	}
 	if err != nil {
 		pk = "id"
 	}
@@ -340,6 +345,22 @@ func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
 		}
 	}
 	return "id", nil
+}
+
+// compositeKeyTrace is the trace of a table whose primary key has more than
+// one column: a lookup by one value would read another row (another tenant's,
+// with its timestamps), so every stage is unknown, never "seen" or "not_seen".
+func compositeKeyTrace(f traceFacts) []events.TraceStage {
+	facts := func() map[string]string {
+		return map[string]string{"error": "composite primary key: the trace needs every key column"}
+	}
+	return []events.TraceStage{
+		{Layer: "postgres", Name: f.table, Status: "unknown", Facts: facts()},
+		{Layer: "kafka-connect", Name: f.connector, Status: "unknown", Facts: facts()},
+		{Layer: "kafka", Name: f.topic, Status: "unknown", Facts: facts()},
+		{Layer: "consumer", Name: f.group, Status: "unknown", Facts: facts()},
+		{Layer: "warehouse", Name: f.sink, Status: "unknown", Facts: facts()},
+	}
 }
 
 // decideTrace maps gathered facts to one TraceStage per layer. Exactly one

@@ -4,12 +4,14 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/testenv"
 )
 
@@ -71,6 +73,30 @@ func TestPrimaryKeyColumnSelectOnlyRoleIntegration(t *testing.T) {
 	col, err := db.PrimaryKeyColumn(context.Background(), "public."+table)
 	if err != nil || col != "id" {
 		t.Fatalf("PrimaryKeyColumn as a SELECT-only role = %q, %v; want \"id\"", col, err)
+	}
+}
+
+// PRIMARY KEY (tenant_id, id): the first column alone is not one row, so the
+// key is reported as composite, not as "tenant_id" (#483).
+func TestPrimaryKeyColumnCompositeIntegration(t *testing.T) {
+	cfg := testenv.Require(t)
+	conn := writeConn(t, cfg.SourceDBURL)
+	table := testenv.Name("cpk")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "CREATE TABLE public."+table+" (tenant_id int, id int, PRIMARY KEY (tenant_id, id))"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+table)
+	})
+
+	db := selectOnlyDB(t, "public."+table)
+	col, err := db.PrimaryKeyColumn(context.Background(), "public."+table)
+	if !errors.Is(err, clients.ErrNotSupported) || col != "" {
+		t.Fatalf("PrimaryKeyColumn of a composite key = %q, %v; want clients.ErrNotSupported", col, err)
 	}
 }
 

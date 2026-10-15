@@ -3,10 +3,12 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
@@ -134,6 +136,10 @@ func warehouseRowTool(d Deps) tools.Tool {
 			// client does).
 			if pc, ok := d.Wh.(pkColumner); ok {
 				pk, err := pc.PrimaryKeyColumn(ctx, input.Table)
+				if errors.Is(err, clients.ErrNotSupported) {
+					// A composite key: one key value is not one row (#483).
+					return tools.Result{}, fmt.Errorf("%w: %s has a composite primary key; warehouse_row looks rows up by a single-column key only", tools.ErrBadInput, input.Table)
+				}
 				if err != nil {
 					return tools.Result{}, fmt.Errorf("dbtools: warehouse_row: %w", err)
 				}
