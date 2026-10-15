@@ -43,6 +43,22 @@ describe('decisionFor', () => {
     expect(decisionFor(room([prop()]), viewer)).toMatchObject({ kind: 'waiting', pending: ['kafka-connect'], approved: 1, total: 2 })
     expect(decisionFor(room([prop()]), { ...arjun, layers: ['consumer'] })?.kind).toBe('waiting')
   })
+  // Fix 1 failed (or ran), the agent proposed fix 2 that waits on someone else: the bar must say
+  // so instead of keeping fix 1's result forever.
+  it('a newer proposal waiting on others replaces a finished fix', () => {
+    const done = prop({ status: 'approved', approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' } })
+    const next = prop({ proposal_id: 'p2', required_layers: ['warehouse'], approvals: { warehouse: 'pending' } })
+    for (const executed of [[ex(0), ex(1, false)], [ex(0), ex(1)]]) {
+      expect(decisionFor(room([{ ...done, executed }, next]), arjun)).toMatchObject({
+        kind: 'waiting',
+        proposal: { proposal_id: 'p2' },
+        pending: ['warehouse'],
+      })
+    }
+    // A fix still running stays the news.
+    expect(decisionFor(room([{ ...done, executed: [ex(0)] }, next]), arjun)).toMatchObject({ kind: 'executing' })
+  })
+
   it('executing, done and failed come from the newest approved proposal', () => {
     const approved = prop({ status: 'approved', approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' } })
     expect(decisionFor(room([{ ...approved, executed: [ex(0)] }]), arjun)).toMatchObject({

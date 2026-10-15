@@ -44,14 +44,15 @@ export function DecisionBar({
   const decision = decisionFor(state, user)
   const [, bump] = useState(0)
   const memory = useRef(new Set<string>())
-  const barRef = useRef<HTMLDivElement>(null)
-  const shown = decision !== null
+  // State, not a ref: the bar also renders nothing while `decision` is set (a done fix not seen
+  // here, a dismissed rejection), so "decision !== null" does not say when the node comes back.
+  const [barEl, setBarEl] = useState<HTMLDivElement | null>(null)
   const sheet = placement === 'sheet'
   const heightVar = sheet ? '--sheet-h' : '--decision-h'
   // Publishes the bar's height so the tab list can stick right under it, or, as a sheet, so the composer
   // and <main> keep clear of it (F7c).
   useEffect(() => {
-    const el = barRef.current
+    const el = barEl
     if (!el) return
     const root = document.documentElement
     const write = () => root.style.setProperty(heightVar, `${Math.round(el.getBoundingClientRect().height)}px`)
@@ -63,7 +64,7 @@ export function DecisionBar({
       ro.disconnect()
       root.style.removeProperty(heightVar)
     }
-  }, [shown, heightVar])
+  }, [barEl, heightVar])
 
   // "done ok" shows for 3 s, and only when this screen saw the proposal in some other state first
   // (a finished fix in an old room must not flash on load).
@@ -200,7 +201,7 @@ export function DecisionBar({
   // The tints are translucent: an opaque base keeps the room from showing through the sticky bar.
   return (
     <div
-      ref={barRef}
+      ref={setBarEl}
       role="region"
       aria-label="Decision"
       data-placement={placement}

@@ -86,15 +86,15 @@ export function RoomScreen() {
       get: (): DecisionHandle | null => {
         const h = handleRef.current
         if (!h) return null
-        return {
-          ...h,
-          scrollTo: () => {
-            if (narrowRef.current) {
-              setTab('fix')
-              window.requestAnimationFrame(() => h.scrollTo())
-            } else h.scrollTo()
-          },
+        // Reject opens a reason field in the card: in a hidden Fix panel it could not take focus,
+        // and the card would then refuse every later Approve/Reject while "rejecting".
+        const onFixTab = (run: () => void) => () => {
+          if (narrowRef.current) {
+            setTab('fix')
+            window.requestAnimationFrame(run)
+          } else run()
         }
+        return { ...h, reject: onFixTab(() => h.reject()), scrollTo: onFixTab(() => h.scrollTo()) }
       },
       set: (h: DecisionHandle | null) => void (handleRef.current = h),
     }),
