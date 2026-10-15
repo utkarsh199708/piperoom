@@ -500,9 +500,12 @@ func TestOnRoomClosedIgnoresOtherRooms(t *testing.T) {
 }
 
 func TestCooldownSkipsOpening(t *testing.T) {
-	h := newHarness(t, opts{})
+	// A close from before the start whose incident the room service gives
+	// back (ClosedRoomKeysSink, QA S1): the same signal waits out the cooldown.
+	h := newHarness(t, opts{q3Sink: true})
 	closed := h.clk.Now().Add(-10 * time.Minute)
 	h.rooms.last["orders|watcher:orders"] = lastRoom{roomID: "r_old", closedAt: &closed}
+	h.q3.setKeys("r_old", "connector_down:pg-orders")
 	h.breakConnector("orders", "boom")
 	h.steps(10, time.Minute)
 	if got := len(h.rooms.created()); got != 0 {

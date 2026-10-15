@@ -367,9 +367,10 @@ func TestStormLeaderFailureDoesNotLetFollowersOpenTheirOwn(t *testing.T) {
 }
 
 func TestStormLeaderIsNotInCooldown(t *testing.T) {
-	h := newHarness(t, opts{pipes: []pipeSpec{{id: "a"}, {id: "b"}, {id: "c"}}})
+	h := newHarness(t, opts{pipes: []pipeSpec{{id: "a"}, {id: "b"}, {id: "c"}}, q3Sink: true})
 	closed := h.clk.Now().Add(-10 * time.Minute)
 	h.rooms.last["a|watcher:a"] = lastRoom{roomID: "r_old", closedAt: &closed}
+	h.q3.setKeys("r_old", "connector_down:pg-a") // recovered (QA S1)
 	h.step(0)
 	for _, p := range []string{"a", "b", "c"} {
 		h.breakConnector(p, "worker died")

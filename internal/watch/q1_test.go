@@ -320,19 +320,22 @@ func TestFlappingWithinTheCooldownStaysQuiet(t *testing.T) {
 	}
 }
 
-// A close the watcher never saw (before a restart) has no known incident: the
-// whole pipeline waits, until a signal has fired EscalateAfter.
-func TestUnknownIncidentCooldownEndsWithAnEscalation(t *testing.T) {
-	h := newHarness(t, opts{escalateAfter: 10 * time.Minute})
+// A close the watcher never saw (before a restart) whose incident the room
+// service gives back (QA S1): that incident waits, until a signal of it has
+// fired EscalateAfter. (Without the keys, a signal that fired after the close
+// opens at once: q3_test.go.)
+func TestRecoveredIncidentCooldownEndsWithAnEscalation(t *testing.T) {
+	h := newHarness(t, opts{escalateAfter: 10 * time.Minute, q3Sink: true})
 	closed := h.clk.Now().Add(-10 * time.Minute)
 	h.rooms.last["orders|watcher:orders"] = lastRoom{roomID: "r_old", closedAt: &closed}
+	h.q3.setKeys("r_old", "slot_inactive:debezium_orders")
 	h.src.update("debezium_orders", func(r *clients.ReplicationSlot) { r.Active = false })
 	h.steps(15, time.Minute) // slot_inactive fires at t0+6
 	if got := len(h.rooms.created()); got != 0 {
-		t.Fatalf("rooms = %d during an unknown incident's cooldown", got)
+		t.Fatalf("rooms = %d during a recovered incident's cooldown", got)
 	}
-	if !strings.Contains(h.logs.String(), `incident="unknown: closed before the watcher saw it"`) {
-		t.Fatalf("cooldown line does not say the incident is unknown\n%s", h.logs)
+	if !strings.Contains(h.logs.String(), `incident="same signals"`) || h.logs.count("recovered the incident") != 1 {
+		t.Fatalf("cooldown line does not name the recovered incident\n%s", h.logs)
 	}
 	h.step(time.Minute) // t0+16: fired 10 minutes ago
 	rooms := h.rooms.created()

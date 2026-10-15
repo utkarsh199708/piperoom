@@ -61,6 +61,9 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 		cr := classifyConnectors(t.connectors, obs, loops, t.cfg.ConnectorCrashLoop.Window)
 		if t.cfg.ConnectorDown.Enabled {
 			w.apply(now, t, ps, owners.SignalConnectorDown, t.cfg.ConnectorDown, cr.reading(), fired)
+			if r, ok := connectReading(now, t, ps, obs); ok {
+				w.apply(now, t, ps, SignalConnectUnreachable, connectUnreachableCfg(t.cfg), r, fired)
+			}
 		}
 		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled || t.cfg.SlotStall.Enabled {
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
@@ -355,7 +358,7 @@ func slotRow(t target, ps *pipeState, obs *observation) (clients.ReplicationSlot
 		name = ps.slot
 	}
 	if name == "" {
-		return clients.ReplicationSlot{}, fmt.Errorf("watch: pipeline %s: slot name unknown (no watch.slot and no slot.name in the connector config)", t.p.ID)
+		return clients.ReplicationSlot{}, fmt.Errorf("watch: pipeline %s: slot name unknown (no watch.slot and no slot.name in a readable connector config; set watch.slot in owners.yaml so slot signals work while Kafka Connect is down)", t.p.ID)
 	}
 	for _, r := range obs.slots {
 		if r.Name == name {

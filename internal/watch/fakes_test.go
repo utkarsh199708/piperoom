@@ -426,6 +426,42 @@ func (r q1Rooms) setInfo(p string, i RoomInfo) {
 	r.info[p] = i
 }
 
+// q3Rooms is a q1Rooms that also implements ClosedRoomKeysSink and
+// RoomTitleFlagsSink (maps guarded by fakeRooms.mu).
+type q3Rooms struct {
+	q1Rooms
+	keys  map[string][]string // room -> carried keys
+	flags map[string][]string // room -> title flags
+}
+
+func (r q3Rooms) RoomSignalKeys(roomID string) ([]string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	k, ok := r.keys[roomID]
+	return slices.Clone(k), ok
+}
+
+func (r q3Rooms) RoomTitleFlags(roomID string) ([]string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	f, ok := r.flags[roomID]
+	return slices.Clone(f), ok
+}
+
+func (r q3Rooms) setKeys(roomID string, keys ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.keys[roomID] = keys
+}
+
+func (r q3Rooms) setFlags(roomID string, flags ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.flags[roomID] = flags
+}
+
 // postsTo returns the posts into roomID.
 func (r *fakeRooms) postsTo(roomID string) []postRec {
 	r.mu.Lock()
@@ -667,6 +703,9 @@ type opts struct {
 	evidenceSink bool // Deps.Rooms also implements EvidenceSink
 	// q1Sink: Deps.Rooms is h.q1 (EvidenceSink, IncidentSink, RoomInfoSink).
 	q1Sink bool
+	// q3Sink: Deps.Rooms is h.q3 (q1Rooms plus ClosedRoomKeysSink and
+	// RoomTitleFlagsSink).
+	q3Sink bool
 	// escalateAfter and joinMaxAge go to config.Watch (0 = never and the
 	// 2 h default).
 	escalateAfter, joinMaxAge time.Duration
@@ -684,6 +723,7 @@ type harness struct {
 	logs  *logBuf
 	deps  Deps
 	q1    q1Rooms // wraps rooms; the sink when opts.q1Sink
+	q3    q3Rooms // wraps q1; the sink when opts.q3Sink
 }
 
 func newHarness(t *testing.T, o opts) *harness {
@@ -735,6 +775,10 @@ func newHarness(t *testing.T, o opts) *harness {
 	h.q1 = q1Rooms{fakeRooms: h.rooms, info: map[string]RoomInfo{}}
 	if o.q1Sink {
 		d.Rooms = h.q1
+	}
+	h.q3 = q3Rooms{q1Rooms: h.q1, keys: map[string][]string{}, flags: map[string][]string{}}
+	if o.q3Sink {
+		d.Rooms = h.q3
 	}
 	h.deps = d
 	w, err := New(d)
