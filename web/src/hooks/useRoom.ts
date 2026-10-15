@@ -15,7 +15,7 @@ import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
-import { errorText, friendlyError, isNetworkError } from '../lib/errors'
+import { OFFLINE_TEXT, errorText, friendlyError, isNetworkError } from '../lib/errors'
 import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
@@ -78,9 +78,9 @@ export interface PendingSend {
 /** How a steer or comment is sent. */
 export interface SendOptions {
   /**
-   * The person is retrying words whose send failed (the composer's Retry). If the reconnect
-   * is already sending them, or has sent them, the retry waits for that send instead of
-   * posting a second copy (#390).
+   * The caller knows this is a retry of words whose last send failed (SteerBox's Retry).
+   * Every send of words the reconnect is sending, or sent less than 2 minutes ago, is already
+   * treated as a retry; the flag stretches the second case to 15 minutes (#390).
    */
   retry?: boolean
 }
@@ -92,15 +92,44 @@ export interface SendOptions {
 export type DeliveredListener = (sent: PendingSend) => boolean
 
 const MAX_PENDING = 5
+/** A send of the same words this soon after the reconnect delivered them is a retry of them (#343). */
+const DELIVERED_DEDUPE_MS = 2 * 60_000
+/** A flagged retry still matches a delivered copy this old; older copies are dropped (#390). */
+const DELIVERED_KEEP_MS = 15 * 60_000
+/** How long a send waits for the reconnect's copy of the same words before it reports offline. */
+const INFLIGHT_WAIT_MS = 15_000
+
+interface Delivered {
+  item: PendingSend
+  at: number
+}
 
 const samePending = (a: PendingSend, b: PendingSend) => a.kind === b.kind && a.text === b.text && a.stepId === b.stepId
 
-/** Removes one delivered copy of `item`; true when there was one. */
-function takeDelivered(ref: { current: PendingSend[] }, item: PendingSend): boolean {
-  const i = ref.current.findIndex((d) => samePending(d, item))
-  if (i < 0) return false
-  ref.current = ref.current.filter((_, j) => j !== i)
-  return true
+/**
+ * Removes one delivered copy of `item` younger than `maxAge`; true when there was one.
+ * Copies older than DELIVERED_KEEP_MS are dropped on the way, so none lives forever.
+ */
+function takeDelivered(ref: { current: Delivered[] }, item: PendingSend, maxAge: number): boolean {
+  const now = Date.now()
+  const live = ref.current.filter((d) => now - d.at < DELIVERED_KEEP_MS)
+  const i = live.findIndex((d) => samePending(d.item, item) && now - d.at < maxAge)
+  ref.current = i < 0 ? live : live.filter((_, j) => j !== i)
+  return i >= 0
+}
+
+/** Forgets every delivered copy of `item`: a newer send of those words supersedes them. */
+function dropDelivered(ref: { current: Delivered[] }, item: PendingSend) {
+  ref.current = ref.current.filter((d) => !samePending(d.item, item))
+}
+
+/** `done`'s value, or 'timeout' when it has not settled within `ms`. */
+function within<T>(done: Promise<T>, ms: number): Promise<T | 'timeout'> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms)
+  })
+  return Promise.race([done, late]).finally(() => clearTimeout(timer))
 }
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
@@ -188,9 +217,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const pendingRef = useRef<PendingSend[]>([])
   // What the reconnect drain is sending now; `done` resolves true once the server took it.
   const inflightRef = useRef<{ item: PendingSend; done: Promise<boolean> }[]>([])
-  // What the drain sent and no composer has taken yet: a Retry of those words is absorbed,
-  // however late it comes, so there is no time window to outlast.
-  const deliveredRef = useRef<PendingSend[]>([])
+  // What the drain sent and no composer has taken yet: a send of those words soon after is
+  // that message's Retry, not a new message (see DELIVERED_DEDUPE_MS / DELIVERED_KEEP_MS).
+  const deliveredRef = useRef<Delivered[]>([])
   const deliveredListenersRef = useRef(new Set<DeliveredListener>())
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
@@ -353,8 +382,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         sendPresence(currentPresence())
         // Messages typed while the server was away: one retry each, in order. Success
         // emits nothing here (the event arrives over the socket); a failure shows its text.
-        // Each item is marked in flight before its request starts, so a Retry pressed
-        // meanwhile waits for this send instead of posting a second copy.
+        // Each item is marked in flight in the same tick its request starts, so a Retry
+        // pressed meanwhile waits for this send instead of posting a second copy.
         const kept = pendingRef.current
         pendingRef.current = []
         for (const item of kept) {
@@ -368,7 +397,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
               () => {
                 let taken = false
                 for (const l of deliveredListenersRef.current) taken = l(item) || taken
-                if (!taken) deliveredRef.current = [...deliveredRef.current, item].slice(-MAX_PENDING)
+                if (!taken) deliveredRef.current = [...deliveredRef.current, { item, at: Date.now() }].slice(-MAX_PENDING)
                 return true
               },
               (e: unknown) => {
@@ -506,20 +535,32 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       // A manual send replaces the queued copy, so the text is not sent twice.
       const queued = pendingRef.current.some((p) => samePending(p, item))
       pendingRef.current = pendingRef.current.filter((p) => !samePending(p, item))
-      if (opts?.retry && !queued) {
-        // The reconnect is sending these words now: wait for it rather than post a second copy.
+      // Every caller is covered, flag or not: RollbackButton and the Timeline reply boxes
+      // retry with a plain steer/comment call.
+      if (!queued) {
         const flying = inflightRef.current.find((f) => samePending(f.item, item))
-        if (flying && (await flying.done)) {
-          takeDelivered(deliveredRef, item)
-          setError(null)
-          return true
-        }
-        // The reconnect already sent them: posting again would steer the agent twice.
-        if (!flying && takeDelivered(deliveredRef, item)) {
+        if (flying) {
+          // The reconnect is sending these words now: wait for it rather than post a second copy.
+          const outcome = await within(flying.done, INFLIGHT_WAIT_MS)
+          if (outcome === 'timeout') {
+            // Still unanswered: posting now could steer twice. The words stay with the caller.
+            setError(OFFLINE_TEXT)
+            return false
+          }
+          if (outcome) {
+            takeDelivered(deliveredRef, item, DELIVERED_KEEP_MS)
+            setError(null)
+            return true
+          }
+          // The reconnect's copy failed, so this send is the one that has to reach the server.
+        } else if (takeDelivered(deliveredRef, item, opts?.retry ? DELIVERED_KEEP_MS : DELIVERED_DEDUPE_MS)) {
+          // The reconnect already sent them: posting again would steer the agent twice.
           setError(null)
           return true
         }
       }
+      // This send supersedes any older delivered copy: a Retry of it must not be answered by one.
+      dropDelivered(deliveredRef, item)
       try {
         await (item.kind === 'steer'
           ? api.steer(roomId, item.text)
@@ -527,11 +568,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         setError(null)
         return true
       } catch (e) {
-        if (isNetworkError(e) && pendingRef.current.length < MAX_PENDING) {
-          pendingRef.current.push(item)
-          // An older delivery of the same words is not what this new failure's Retry means.
-          takeDelivered(deliveredRef, item)
-        }
+        if (isNetworkError(e) && pendingRef.current.length < MAX_PENDING) pendingRef.current.push(item)
         setError(errorText(e))
         return false
       }

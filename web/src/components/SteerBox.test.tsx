@@ -113,6 +113,20 @@ describe('SteerBox composer (U3)', () => {
     expect(actions.steer).toHaveBeenNthCalledWith(2, 'look at the slot', { retry: true })
   })
 
+  it('edited words sent while the Retry strip is up are a new message, not a retry', async () => {
+    vi.mocked(actions.steer).mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={actions} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.change(box, { target: { value: 'look at the lag' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+    expect(actions.steer).toHaveBeenNthCalledWith(2, 'look at the lag')
+  })
+
   // #390 scenario B: the reconnect sent the words; the field and the Retry strip go away
   // without waiting for the person, so there is no late Retry to steer twice.
   it('clears the field and the Retry strip when the reconnect delivered the failed words', async () => {

@@ -309,9 +309,11 @@ export function SteerBox({
     // "?" alone has nothing to ask.
     if (!text.trim() || sending || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
     setSending(true)
-    // While the Retry strip is up, this send is that retry: the hook then waits for, or
-    // skips, a copy the reconnect is sending or has sent.
-    const ok = offline
+    // Only the same words as the failed send are its retry: the hook then skips a copy the
+    // reconnect sent up to 15 minutes ago. Edited words are a new message.
+    const failed = failedRef.current
+    const retry = offline && failed !== null && failed.kind === plan.send && failed.text === plan.text
+    const ok = retry
       ? plan.send === 'comment'
         ? await actions.comment(plan.text, undefined, { retry: true })
         : await actions.steer(plan.text, { retry: true })
@@ -323,9 +325,12 @@ export function SteerBox({
     failedRef.current = ok ? null : { kind: plan.send, text: plan.text, typed: text }
     if (ok) {
       writeStore('session', lastSentKey(roomId), text.trim())
-      writeStore('local', draftKey(roomId), '')
-      setText('')
-      if (ref.current) ref.current.style.height = ''
+      // Words typed while this send waited are a new draft: keep them.
+      if (textRef.current === text) {
+        writeStore('local', draftKey(roomId), '')
+        setText('')
+        if (ref.current) ref.current.style.height = ''
+      }
     } else {
       ref.current?.focus()
     }

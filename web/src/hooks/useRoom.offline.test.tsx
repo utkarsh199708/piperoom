@@ -131,7 +131,7 @@ describe('useRoom offline sends', () => {
 
     let ok = false
     await act(async () => {
-      ok = await hook.result.current.actions.steer('restart connector', { retry: true })
+      ok = await hook.result.current.actions.steer('restart connector')
     })
     expect(ok).toBe(true)
     expect(api.steer).toHaveBeenCalledTimes(2)

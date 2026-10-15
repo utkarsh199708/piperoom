@@ -1,0 +1,266 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
+import type { RoomSnapshot } from '../api/types'
+import type { StepState } from '../state/types'
+
+// #390: one Retry is one steer or comment, whatever the reconnect timing and whichever
+// component sends it. RollbackButton and the Timeline reply boxes retry with a plain
+// steer/comment call (no `retry` flag), so the hook must cover them on its own.
+
+vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { warning: vi.fn(), dismiss: vi.fn() }) }))
+vi.mock('../context/user', () => ({
+  useCurrentUser: () => ({
+    user: { id: 'arjun', name: 'Arjun', layers: ['kafka'] },
+    setUserId: vi.fn(),
+    logout: vi.fn(),
+    sessionEpoch: 0,
+  }),
+}))
+vi.mock('../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/client')>()
+  return {
+    ...actual,
+    isFixtures: () => false,
+    openRoomWs: vi.fn(),
+    api: { ...actual.api, me: vi.fn(), room: vi.fn(), events: vi.fn(), steer: vi.fn(), comment: vi.fn() },
+  }
+})
+
+import { ApiClientError, api, openRoomWs } from '../api/client'
+import { OFFLINE_TEXT } from '../lib/errors'
+import { rollbackSteer } from '../lib/rollback'
+import { RollbackButton } from '../components/room/RollbackButton'
+import { Timeline } from '../components/Timeline'
+import { useRoom } from './useRoom'
+
+class FakeWebSocket {
+  static CONNECTING = 0
+  static OPEN = 1
+  readyState = FakeWebSocket.OPEN
+  onopen: (() => void) | null = null
+  onmessage: ((m: { data: string }) => void) | null = null
+  onclose: ((ev: { reason: string }) => void) | null = null
+  onerror: (() => void) | null = null
+  send() {}
+  close() {}
+}
+
+const snap: RoomSnapshot = {
+  id: 'r1',
+  title: 'T',
+  severity: 'sev2',
+  pipeline_id: 'orders',
+  status: 'open',
+  opened_at: '2026-10-11T10:00:00Z',
+  last_seq: 0,
+  driver: null,
+  agent_status: { state: 'idle' },
+  hypothesis: null,
+  open_proposals: [],
+  pending_suggestions: [],
+  members: [],
+}
+
+const step: StepState = { id: 's1', title: 'Check the Debezium connector', tool_calls: [], messages: [] }
+const offline = () => new TypeError('Failed to fetch')
+
+function mountSocket() {
+  const socket = new FakeWebSocket()
+  vi.mocked(api.room).mockResolvedValue(snap)
+  vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+  return socket
+}
+
+/** A drain request that settles only when the test says so. */
+function hangingCall() {
+  let settle: { resolve: () => void; reject: (e: unknown) => void } = { resolve: () => {}, reject: () => {} }
+  const p = new Promise<never>((resolve, reject) => {
+    settle = { resolve: resolve as unknown as () => void, reject }
+  })
+  return { p, settle: () => settle }
+}
+
+function RollbackRoom() {
+  const { actions } = useRoom('r1')
+  return <RollbackButton title="Restart" proposalId="p1" rollback="set it back" asDriver onSteer={actions.steer} />
+}
+
+function TimelineRoom() {
+  const { actions } = useRoom('r1')
+  return <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} />
+}
+
+const ROLLBACK = rollbackSteer('Restart', 'p1', 'set it back')
+
+async function rollbackFailsOffline() {
+  const socket = mountSocket()
+  render(<RollbackRoom />)
+  await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+  vi.mocked(api.steer).mockRejectedValueOnce(offline())
+  fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
+  await screen.findByRole('button', { name: 'Retry' })
+  return socket
+}
+
+async function replyFailsOffline() {
+  const socket = mountSocket()
+  render(<TimelineRoom />)
+  await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+  vi.mocked(api.comment).mockRejectedValueOnce(offline())
+  fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
+  fireEvent.change(screen.getByLabelText('Comment on this step'), { target: { value: 'looks right' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+  await screen.findByRole('button', { name: 'Retry' })
+  return socket
+}
+
+beforeEach(() => {
+  vi.stubGlobal('WebSocket', FakeWebSocket)
+  vi.resetAllMocks()
+})
+
+describe('RollbackButton Retry with the real hook', () => {
+  it('Retry while the reconnect is sending the rollback waits for it: one more steer, not two', async () => {
+    const socket = await rollbackFailsOffline()
+    const drain = hangingCall()
+    vi.mocked(api.steer).mockImplementationOnce(() => drain.p)
+    vi.mocked(api.steer).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await act(async () => drain.settle().resolve())
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(api.steer).toHaveBeenCalledTimes(2)
+    expect(api.steer).toHaveBeenLastCalledWith('r1', ROLLBACK)
+  })
+
+  it('Retry after the reconnect delivered the rollback does not steer again', async () => {
+    const socket = await rollbackFailsOffline()
+    vi.mocked(api.steer).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+    await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(api.steer).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('Timeline step reply Retry with the real hook', () => {
+  it('Retry while the reconnect is sending the comment waits for it', async () => {
+    const socket = await replyFailsOffline()
+    const drain = hangingCall()
+    vi.mocked(api.comment).mockImplementationOnce(() => drain.p)
+    vi.mocked(api.comment).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await act(async () => drain.settle().resolve())
+    await waitFor(() => expect(screen.getByLabelText('Comment on this step')).toHaveValue(''))
+    expect(api.comment).toHaveBeenCalledTimes(2)
+    expect(api.comment).toHaveBeenLastCalledWith('r1', { step_id: 's1', text: 'looks right' })
+  })
+
+  it('Retry after the reconnect delivered the comment does not post it again', async () => {
+    const socket = await replyFailsOffline()
+    vi.mocked(api.comment).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+    await waitFor(() => expect(api.comment).toHaveBeenCalledTimes(2))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByLabelText('Comment on this step')).toHaveValue(''))
+    expect(api.comment).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('useRoom delivered copies do not outlive their failure', () => {
+  async function openRoom() {
+    const socket = mountSocket()
+    const hook = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    return { hook, socket }
+  }
+
+  // Review QA-D1: an old, untaken delivery must not answer the Retry of a newer 503.
+  it('a 503 and then Retry posts the steer, even with an older delivered copy around', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { hook, socket } = await openRoom()
+      vi.mocked(api.steer).mockRejectedValueOnce(offline())
+      await act(async () => {
+        await hook.result.current.actions.steer('pause the consumer')
+      })
+      vi.mocked(api.steer).mockResolvedValueOnce(undefined as never)
+      act(() => socket.onopen?.())
+      await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2))
+      await act(async () => {
+        vi.advanceTimersByTime(3 * 60_000)
+      })
+
+      // Later the same words again (a quick-steer chip), answered 503.
+      vi.mocked(api.steer).mockRejectedValueOnce(new ApiClientError(503, 'unavailable', 'try again'))
+      let ok = true
+      await act(async () => {
+        ok = await hook.result.current.actions.steer('pause the consumer')
+      })
+      expect(ok).toBe(false)
+      expect(api.steer).toHaveBeenCalledTimes(3)
+
+      vi.mocked(api.steer).mockResolvedValueOnce(undefined as never)
+      await act(async () => {
+        ok = await hook.result.current.actions.steer('pause the consumer', { retry: true })
+      })
+      expect(ok).toBe(true)
+      expect(api.steer).toHaveBeenCalledTimes(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a delivered copy expires: a flagged Retry 20 minutes later posts', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { hook, socket } = await openRoom()
+      vi.mocked(api.steer).mockRejectedValueOnce(offline())
+      await act(async () => {
+        await hook.result.current.actions.steer('pause the consumer')
+      })
+      vi.mocked(api.steer).mockResolvedValue(undefined as never)
+      act(() => socket.onopen?.())
+      await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2))
+      await act(async () => {
+        vi.advanceTimersByTime(20 * 60_000)
+      })
+      await act(async () => {
+        await hook.result.current.actions.steer('pause the consumer', { retry: true })
+      })
+      expect(api.steer).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a Retry waits at most 15 s for a hanging reconnect send, then reports offline without posting', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { hook, socket } = await openRoom()
+      vi.mocked(api.steer).mockRejectedValueOnce(offline())
+      await act(async () => {
+        await hook.result.current.actions.steer('pause the consumer')
+      })
+      const drain = hangingCall()
+      vi.mocked(api.steer).mockImplementationOnce(() => drain.p)
+      act(() => socket.onopen?.())
+
+      let ok: boolean | undefined
+      act(() => {
+        void hook.result.current.actions.steer('pause the consumer').then((v) => (ok = v))
+      })
+      await act(async () => {
+        vi.advanceTimersByTime(15_000)
+      })
+      await waitFor(() => expect(ok).toBe(false))
+      expect(hook.result.current.error).toBe(OFFLINE_TEXT)
+      expect(api.steer).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
