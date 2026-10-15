@@ -179,6 +179,33 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_partition_rates
+    input: {table: "public.orders", window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 41700 records (46/s); p0 13978 (33%), p2 13923, p1 13799; median 13923, max 13978, max/median 1.0x → even
+  - tool: reconcile
+    input: {table: "public.orders"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 6m0s from 2026-10-11T08:30:00Z
+      bucket | source | topic | sink | sink−source
+      08:30 | 16560 | 16560 | 16560 | +0
+      08:36 | 16858 | 16858 | 16858 | +0
+      08:42 | 16361 | 16361 | 16361 | +0
+      08:48 | 17056 | 17056 | 17056 | +0
+      08:54 | 16187 | 16187 | 16187 | +0
+      09:00 | 16709 | 16710 | 16709 | +0
+      09:06 | 16063 | 16063 | 16063 | +0
+      09:12 | 16808 | 16808 | 16808 | +0
+      09:18 | 16460 | 16460 | 16460 | +0
+      09:24 | 16982 | 16982 | 16982 | +0
+      09:30 | 16286 | 16286 | 16286 | +0
+      09:36 | 11040 | 11040 | 11007 | -33
+      verdict: the sink matches the source in every bucket (within 2%)
 
 expect:
   outcome: healthy

@@ -229,6 +229,50 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer connect-wh-orders-sink: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: dlq_peek
+    input: {connector: "wh-orders-sink"}
+    summary: |-
+      wh-orders-sink has no DLQ topic (errors.deadletterqueue.topic.name is not set)
+  - tool: reconcile
+    input: {table: "public.orders"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 25m0s from 2026-10-14T00:00:00Z
+      bucket | source | topic | sink | sink−source
+      00:00 | 69000 | 0 | 25530 | -43470
+      00:25 | 70242 | 0 | 25989 | -44253
+      00:50 | 68172 | 0 | 25223 | -42949
+      01:15 | 71070 | 0 | 26295 | -44775
+      01:40 | 67447 | 0 | 24955 | -42492
+      02:05 | 69621 | 20550000 | 0 | -69621
+      02:30 | 66930 | 20550000 | 0 | -66930
+      02:55 | 70035 | 20550000 | 0 | -70035
+      03:20 | 68586 | 20550000 | 0 | -68586
+      03:45 | 70759 | 20550000 | 0 | -70759
+      04:10 | 67861 | 20550000 | 0 | -67861
+      04:35 | 69310 | 20550000 | 0 | -69310
+      verdict: sink is missing 701041 rows in 00:00–05:00; topic has them (consumer side)
+  - tool: warehouse_load_errors
+    input: {table: "analytics.orders"}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 148201266 rows inserted since stats reset, 2310 dead tuples, last autovacuum 2026-10-14T04:41:12Z, 0 session(s) waiting on a lock
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 12330000 records (13700/s); p0 4133016 (33%), p2 4116987, p1 4079997; median 4116987, max 4133016, max/median 1.0x → even
+  - tool: kafka_acls
+    input: {principal: "User:piperoom"}
+    summary: |-
+      User:piperoom: ALLOW DESCRIBE cluster; ALLOW DESCRIBE group connect-wh-orders-sink (LITERAL); ALLOW DESCRIBE,READ topic pg.public.orders (LITERAL)
+      missing: WRITE on topic pg.public.orders for the connector principal User:piperoom
+  - tool: kafka_cluster_health
+    summary: |-
+      cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs below 85% used
+      pg.public.orders: 3 partitions, 0 under-replicated, 0 under min ISR (min 2), 0 offline, 0 reassigning
 
 inputs:
   - kind: steer

@@ -218,6 +218,41 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-10T12:30:00Z"}
+    error: "bad tool input: the window is 66h50m0s, at most 6h0m0s"
+  - tool: reconcile
+    input: {table: "public.orders"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 7m0s from 2026-10-13T06:00:00Z
+      bucket | source | topic | sink | sink−source
+      06:00 | 19320 | 19320 | 19320 | +0
+      06:07 | 19667 | 19667 | 19667 | +0
+      06:14 | 19088 | 19088 | 19088 | +0
+      06:21 | 19899 | 19899 | 19899 | +0
+      06:28 | 18885 | 18885 | 18885 | +0
+      06:35 | 19493 | 19493 | 19493 | +0
+      06:42 | 18740 | 18740 | 18740 | +0
+      06:49 | 19609 | 19609 | 19609 | +0
+      06:56 | 19204 | 4160 | 4160 | -15044
+      07:03 | 19812 | 0 | 0 | -19812
+      07:10 | 19001 | 0 | 0 | -19001
+      07:17 | 6946 | 0 | 0 | -6946
+      verdict: sink is missing 60803 rows in 06:56–07:24; topic is missing them (connector side)
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+  - tool: debezium_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: metrics found: 0 of 12 under prefix "debezium_metrics_" (set DEBEZIUM_METRICS_PREFIX, or the exporter has no samples for topic.prefix "pg")
 
 inputs:
   - kind: comment

@@ -454,6 +454,16 @@ recordings:
       - layer: warehouse
         name: analytics.orders
         status: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
 
 # The kafka-connect owner approves the resume and the executor runs it; the text is what
 # connect_resume_connector's Execute returns. If the agent never proposed the resume there is

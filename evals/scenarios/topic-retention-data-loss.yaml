@@ -248,6 +248,46 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_topic_config
+    input: {pipeline_id: "orders"}
+    summary: |-
+      pg.public.orders: retention.ms=21600000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_partition_rates
+    input: {table: "public.orders", window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 41700 records (46/s); p0 13978 (33%), p2 13923, p1 13799; median 13923, max 13978, max/median 1.0x → even
+  - tool: reconcile
+    input: {table: "public.orders"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 30m0s from 2026-10-11T00:00:00Z
+      bucket | source | topic | sink | sink−source
+      00:00 | 83000 | 0 | 83000 | +0
+      00:30 | 83000 | 0 | 83000 | +0
+      01:00 | 1975000 | 0 | 0 | -1975000
+      01:30 | 1975000 | 0 | 0 | -1975000
+      02:00 | 1975000 | 0 | 0 | -1975000
+      02:30 | 1975000 | 0 | 0 | -1975000
+      03:00 | 83000 | 0 | 0 | -83000
+      03:30 | 83000 | 61000 | 24300 | -58700
+      04:00 | 83000 | 83000 | 0 | -83000
+      04:30 | 83000 | 83000 | 0 | -83000
+      05:00 | 83000 | 83000 | 0 | -83000
+      05:30 | 83000 | 83000 | 0 | -83000
+      verdict: sink is missing 8373700 rows in 01:00–06:00; topic is missing them (connector side)
+  - tool: debezium_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.5 s behind source, last event 0.8 s ago, queue 0/8192, 8153206 events seen; snapshot running=false, completed=true, paused=false
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
 
 expect:
   root_cause:

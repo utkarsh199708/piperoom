@@ -286,6 +286,22 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_partition_rates
+    input: {table: "public.orders", window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 41700 records (46/s); p0 13978 (33%), p2 13923, p1 13799; median 13923, max 13978, max/median 1.0x → even
+  - tool: dlq_peek
+    input: {topic: "order-sync-dlq"}
+    error: "out of scope: DLQ topic \"order-sync-dlq\" is not part of this room's pipeline \"orders\" (none declared (use connector for a sink's DLQ))"
+  - tool: kafka_acls
+    summary: |-
+      User:debezium: ALLOW DESCRIBE cluster; ALLOW CREATE,DESCRIBE,WRITE topic pg. (PREFIXED)
+      User:order-sync: ALLOW READ group order-sync (LITERAL); ALLOW READ topic pg.public.orders (LITERAL)
 
 inputs:
   - kind: comment

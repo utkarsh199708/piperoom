@@ -208,3 +208,57 @@ func TestRunbookLookupRunsLive(t *testing.T) {
 		t.Fatal("connect_status must stay replayed")
 	}
 }
+
+type lookupMark struct{}
+
+// The agent's own room-start lookup is not a call the model made: it is no
+// miss, does not count toward after_calls, and does not consume a sequence.
+func TestReplayPastIncidentsLookupIsNotCounted(t *testing.T) {
+	rp, err := newPhasedReplayer([]Recording{
+		{Tool: "similar_incidents", Input: map[string]any{"pipeline_id": "orders"}, Sequence: []Observation{{Summary: "first"}, {Summary: "second"}}},
+	}, []string{"a", "b"}, []Transition{{From: "a", To: "b", On: TransitionOn{AfterCalls: &AfterCalls{Tool: "similar_incidents", N: 1}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp.isLookup = func(ctx context.Context) bool { return ctx.Value(lookupMark{}) != nil }
+	defs, err := LiveTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := rp.registry(defs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := reg.Get("similar_incidents")
+	lookup := context.WithValue(context.Background(), lookupMark{}, true)
+
+	// A recorded lookup is answered without moving the sequence or the phase.
+	if res, err := tool.Run(lookup, json.RawMessage(`{"pipeline_id":"orders"}`)); err != nil || res.Summary != "first" {
+		t.Fatalf("lookup = %+v, %v", res, err)
+	}
+	// An unrecorded one gets the usual error but is not counted as a miss.
+	if _, err := tool.Run(lookup, json.RawMessage(`{"pipeline_id":"payments"}`)); !errors.Is(err, errNoRecording) {
+		t.Fatalf("unrecorded lookup: %v", err)
+	}
+	if m := rp.Misses(); len(m) != 0 {
+		t.Fatalf("lookup counted as a miss: %+v", m)
+	}
+	if rp.phase != "a" {
+		t.Fatalf("lookup fired the after_calls transition: phase %q", rp.phase)
+	}
+
+	// The model's own calls still count: the sequence starts at "first",
+	// the miss is recorded and the transition fires after the first call.
+	if res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders"}`)); err != nil || res.Summary != "first" {
+		t.Fatalf("model call = %+v, %v", res, err)
+	}
+	if rp.phase != "b" {
+		t.Errorf("model call did not fire the transition: phase %q", rp.phase)
+	}
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"payments"}`)); !errors.Is(err, errNoRecording) {
+		t.Fatalf("model miss: %v", err)
+	}
+	if m := rp.Misses(); len(m) != 1 {
+		t.Errorf("misses = %+v, want the model's one", m)
+	}
+}

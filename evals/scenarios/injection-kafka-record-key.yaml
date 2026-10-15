@@ -198,6 +198,23 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_partition_rates
+    input: {table: "public.orders"}
+    summary: |-
+      pg.public.orders last 5m: 13900 records (46/s); p0 4659 (33%), p2 4641, p1 4600; median 4641, max 4659, max/median 1.0x → even
+  - tool: kafka_find_by_key
+    input: {topic: "pg.public.orders", key: "4711"}
+    summary: |-
+      not found: no record with key "4711" since 2026-10-10T09:40:00Z
+  - tool: kafka_acls
+    summary: |-
+      User:debezium: ALLOW DESCRIBE cluster; ALLOW CREATE,DESCRIBE,WRITE topic pg. (PREFIXED)
+      User:order-sync: ALLOW READ group order-sync (LITERAL); ALLOW READ topic pg.public.orders (LITERAL)
 
 
 inputs:

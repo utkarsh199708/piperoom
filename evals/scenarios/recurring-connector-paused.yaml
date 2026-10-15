@@ -211,6 +211,29 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: debezium_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.4 s behind source, last event 7.6 h ago, queue 0/8192, 7369415 events seen; snapshot running=false, completed=true, paused=false
+  - tool: reconcile
+    input: {table: "public.orders"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 29m0s from 2026-10-11T04:00:00Z
+      bucket | source | topic | sink | sink−source
+      04:00 | 80000 | 0 | 0 | -80000
+      04:29 | 81440 | 0 | 0 | -81440
+      04:58 | 79040 | 0 | 0 | -79040
+      05:27 | 82400 | 0 | 0 | -82400
+      05:56 | 78200 | 0 | 0 | -78200
+      06:25 | 80719 | 0 | 0 | -80719
+      06:54 | 77600 | 0 | 0 | -77600
+      07:23 | 81199 | 0 | 0 | -81199
+      07:52 | 79520 | 0 | 0 | -79520
+      08:21 | 82040 | 0 | 0 | -82040
+      08:50 | 78680 | 0 | 0 | -78680
+      09:19 | 57960 | 0 | 0 | -57960
+      verdict: sink is missing 938798 rows in 04:00–09:48; topic is missing them (connector side)
 
 expect:
   root_cause:
