@@ -152,7 +152,7 @@ type Deps struct {
 	// follower, a re-list, a command's re-read). deleted is the room.deleted
 	// frame its WebSockets get last (docs/api.md, WebSocket), or the zero
 	// Event when the room's audit row cannot be read (then only the close goes
-	// out). It never runs under the service lock and must return promptly;
+	// out). It never runs under a room's lock and must return promptly;
 	// cmd/server points it at the WebSocket gateway's CloseRoom, which is
 	// idempotent, so a room reported twice closes its sockets once. Nil means
 	// no-op.
@@ -166,7 +166,7 @@ type roomState struct {
 	// gone is set when the room leaves the cache (evicted, deleted, or a
 	// create that failed): whoever still holds the pointer finds it here.
 	gone bool
-	// pub is the snapshot as of the last unlock (releaseRoomLocked): an
+	// pub is the snapshot as of the last unlock (unlockRoom): an
 	// immutable copy that reads use without a lock. nil until the room is
 	// first published.
 	pub atomic.Pointer[RoomSnapshot]
@@ -183,7 +183,7 @@ type roomState struct {
 	execCancel      context.CancelFunc // cancels the room's executor on close
 	exec            *execQueue         // nil until the first proposal is approved
 	// dedupKey is the alert index key of an alert room; "" otherwise. It is
-	// guarded by s.reg, not s.mu: the alert index reads the keys of other
+	// guarded by s.reg, not by mu: the alert index reads the keys of other
 	// rooms (releaseAlertKeyLocked). Read it with dedupKeyOf.
 	dedupKey string
 	// alertRaw is room.created.alert, the raw alert every agent run of the
@@ -294,18 +294,22 @@ type Service struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// mu serialises the work on cached rooms: commands, folds and loads.
-	mu sync.Mutex
-
-	// reg guards the room registry (registry.go): the cache, the alert index
-	// and closed. It is a leaf lock, taken inside mu and never held across
-	// I/O, a hook or another lock.
-	reg    sync.Mutex
-	closed bool
-	rooms  map[string]*roomState
+	// reg guards the room registry (registry.go): the cache, the loads in
+	// flight, the alert index and closed. It is a leaf lock, never held
+	// across I/O, a hook or another lock. Each room has its own lock
+	// (roomlock.go).
+	reg     sync.Mutex
+	closed  bool
+	rooms   map[string]*roomState
+	loading map[string]*roomLoad
 	// alertRooms maps the dedup key of each open webhook room to that room, so
 	// a repeat of the same alert joins the room instead of opening another.
 	alertRooms map[string]string
+	// alertLocks serialise the opens of one alert key in this process
+	// (lockAlertKey): the check for an open room and the create must be one
+	// step, and no service-wide lock makes them so. Striped by key hash, so
+	// unrelated keys rarely wait for each other.
+	alertLocks [alertLockStripes]sync.Mutex
 
 	// list pushes rooms-list changes to SubscribeRooms (listhub.go).
 	list *listHub
@@ -383,6 +387,7 @@ func New(d Deps) *Service {
 		ctx:             ctx,
 		cancel:          cancel,
 		rooms:           map[string]*roomState{},
+		loading:         map[string]*roomLoad{},
 		alertRooms:      map[string]string{},
 		list:            newListHub(),
 	}
@@ -450,35 +455,31 @@ func (s *Service) Load(ctx context.Context) error {
 	if s.shadow == nil && s.owners.AnyShadow() {
 		return fmt.Errorf("room: load: owners.yaml turns shadow mode on, but the store cannot hold shadow runs")
 	}
-	s.mu.Lock()
-	err := s.ensureAllLoadedLocked(ctx, true)
-	if err == nil {
-		s.sweepShadowLocked(ctx)
-		s.sweepPostmortemsLocked()
-	}
-	s.mu.Unlock()
-	if err != nil {
+	if err := s.ensureAllLoaded(ctx, true); err != nil {
 		return err
 	}
+	s.sweepShadow(ctx)
+	s.sweepPostmortems()
 	s.startCoordination()
 	s.startLeaseExpiry()
 	return nil
 }
 
-// ensureAllLoadedLocked rebuilds every room not yet cached. restarted is true
-// only for the start-up Load: those open rooms are marked as idle after a
-// server restart. Caller must hold s.mu.
-func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) error {
+// ensureAllLoaded rebuilds every room not yet cached. restarted is true only
+// for the start-up Load: those open rooms are marked as idle after a server
+// restart.
+func (s *Service) ensureAllLoaded(ctx context.Context, restarted bool) error {
 	rooms, err := s.store.ListRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
 	}
-	return s.loadRowsLocked(ctx, rooms, restarted)
+	return s.loadRows(ctx, rooms, restarted)
 }
 
-// loadRowsLocked rebuilds the rooms among rows that are not cached yet (see
-// ensureAllLoadedLocked). Caller must hold s.mu.
-func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restarted bool) error {
+// loadRows rebuilds the rooms among rows that are not cached yet (see
+// ensureAllLoaded), each outside every lock (loadRoom); a room this call put
+// into the cache is then locked for what a load writes into it.
+func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted bool) error {
 	var leases map[string]store.RoomLease
 	if s.coord != nil && restarted {
 		var err error
@@ -500,16 +501,19 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 			}
 			continue
 		}
-		l, err := s.rebuild(ctx, r.ID)
+		// A load in flight elsewhere is not waited for: one slow room must
+		// not hold up a pass over all of them (ListRooms, the open-room
+		// limit). That load caches the room.
+		st, fresh, err := s.loadRoom(ctx, r.ID, false)
 		if err != nil {
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
-		st := l.state()
-		s.holdRoomLocked(st)
-		s.cacheRoom(r.ID, st)
-		if snap := st.snap; snap.Status == "open" {
-			s.indexAlertRoomLocked(r.ID, st, l.dedupKey)
+		if !fresh {
+			continue // a command or the follower loaded it meanwhile
+		}
+		s.lockState(st)
+		if snap := st.snap; !st.gone && snap.Status == "open" {
 			// With a shared store a proposal may be running on another
 			// replica right now; the stale-claim sweep decides instead.
 			if s.coord == nil {
@@ -524,7 +528,7 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 				}
 			}
 		}
-		s.releaseRoomLocked(st)
+		s.unlockRoom(st)
 	}
 	return nil
 }
@@ -569,7 +573,7 @@ func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *room
 // ensureAgentLocked starts the room's agent run if the room has none yet. A
 // room restored by Load has none until someone steers it or mentions the agent;
 // a room whose agent was already started is left alone. Caller holds st's lock.
-func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *roomState) {
+func (s *Service) ensureAgentLocked(roomID string, st *roomState) {
 	// A shadow run is one-shot: steers, suggestions and @agent comments are
 	// logged but never start or restart it (docs/design/shadow.md 3.3).
 	// A full log never gets its agent back: every agent event would be refused.
@@ -647,29 +651,6 @@ func (s *Service) interruptedStep(ctx context.Context, roomID string, p Proposal
 		}
 	}
 	return 0
-}
-
-// getStateLocked returns the cached room state, rebuilding it from the log if
-// the room is not cached. It does no read for a cached room: with a shared
-// store the follower keeps the cache close to the log, and a command calls
-// syncRoom (outside s.mu) before it locks. Caller must hold s.mu.
-func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState, error) {
-	if st := s.cached(roomID); st != nil {
-		return st, nil
-	}
-	if _, err := s.store.GetRoom(ctx, roomID); err != nil {
-		return nil, mapStoreErr(err)
-	}
-	l, err := s.rebuild(ctx, roomID)
-	if err != nil {
-		return nil, fmt.Errorf("room: rebuild %s: %w", roomID, err)
-	}
-	st := l.state()
-	s.cacheRoom(roomID, st)
-	if l.snap.Status == "open" {
-		s.indexAlertRoomLocked(roomID, st, l.dedupKey)
-	}
-	return st, nil
 }
 
 // loadedRoom is what rebuild reads from the store for a room that enters the
@@ -978,7 +959,13 @@ func (s *Service) knownPipeline(pipelineID string) bool {
 // so it survives a restart: a webhook room opened for an unknown pipeline
 // keeps proposals disabled after the service rebuilds from the log.
 func (s *Service) proposalsDisabled(st *roomState) bool {
-	return s.owners != nil && st.snap.PipelineID != "" && !s.knownPipeline(st.snap.PipelineID)
+	return s.pipelineProposalsDisabled(st.snap.PipelineID)
+}
+
+// pipelineProposalsDisabled is proposalsDisabled by pipeline id, for code that
+// does not hold the room's lock.
+func (s *Service) pipelineProposalsDisabled(pipelineID string) bool {
+	return s.owners != nil && pipelineID != "" && !s.knownPipeline(pipelineID)
 }
 
 // humanActor is the event actor for a person. Verified comes from users.yaml
@@ -1352,7 +1339,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				// would repeat the story the agent already told.
 				s.log.Warn("room: agent stopped (unretryable)", "room", roomID, "err", err)
 				reason := truncateDetail(err.Error())
-				if s.proposalsDisabled(st) {
+				if s.pipelineProposalsDisabled(pipelineID) {
 					reason = fmt.Sprintf("proposals are disabled in this room because pipeline %q is not configured — add it to owners.yaml and restart the server", pipelineID)
 				}
 				mctx, mcancel := context.WithTimeout(s.ctx, 5*time.Second)
@@ -1411,7 +1398,7 @@ func isUnretryable(err error) bool {
 // the supervisor's own context, called to free it either way.
 func (s *Service) releaseAgent(st *roomState, run uint64, cancel context.CancelFunc) {
 	s.lockState(st)
-	if st.agentRun == run {
+	if !st.gone && st.agentRun == run {
 		st.agentCancel = nil
 		// The room has no agent now: any replica may start the next one.
 		s.dropLeaseLocked(st.snap.ID, st)

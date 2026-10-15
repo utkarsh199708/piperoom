@@ -7,7 +7,7 @@ import (
 
 // The rooms list is pushed (GET /api/rooms/ws, docs/api.md "Room list
 // socket"), not polled. A room whose snapshot changed is published and marked
-// dirty when its lock is released (releaseRoomLocked); one hub goroutine
+// dirty when its lock is released (unlockRoom); one hub goroutine
 // wakes, takes the dirty rooms' published snapshots, without any room lock,
 // and hands them to every subscriber. A burst of events on one room between
 // two wakes is one update. Subscribers filter by tenancy and by a digest of

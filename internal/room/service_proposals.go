@@ -228,26 +228,15 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	s.syncProposalRoom(ctx, proposalID)
 
 	if err := func() error {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		p, err := s.store.GetProposal(ctx, proposalID)
+		p, st, err := s.lockProposalRoom(ctx, user, proposalID)
 		if err != nil {
-			return mapStoreErr(err)
-		}
-		if err := s.checkVisible(ctx, user, p.RoomID); err != nil {
 			return err
 		}
+		defer s.unlockRoom(st)
 		prow = p
 		if p.Status != "open" {
 			return alreadyDecided("proposal already decided")
 		}
-		st, err := s.getStateLocked(ctx, p.RoomID)
-		if err != nil {
-			return err
-		}
-		s.holdRoomLocked(st)
-		defer s.releaseRoomLocked(st)
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")
 		}
@@ -318,25 +307,14 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	// An empty params_hash is allowed only for a proposal that cannot be
 	// hashed; checkParamsHash decides once it has the row.
 	s.syncProposalRoom(ctx, proposalID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	p, err := s.store.GetProposal(ctx, proposalID)
+	p, st, err := s.lockProposalRoom(ctx, user, proposalID)
 	if err != nil {
-		return events.Event{}, mapStoreErr(err)
-	}
-	if err := s.checkVisible(ctx, user, p.RoomID); err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if p.Status != "open" {
 		return events.Event{}, alreadyDecided("proposal already decided")
 	}
-	st, err := s.getStateLocked(ctx, p.RoomID)
-	if err != nil {
-		return events.Event{}, err
-	}
-	s.holdRoomLocked(st)
-	defer s.releaseRoomLocked(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -372,6 +350,31 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	s.log.Info("room: rejection given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
 	s.afterAppend(p.RoomID, "set proposal rejected", s.store.SetProposalStatus(ctx, proposalID, "rejected"), "proposal", proposalID)
 	return ev, nil
+}
+
+// lockProposalRoom locks the room of a proposal for a decision on it. The row
+// is read first to learn the room (and to answer 404 to a person outside its
+// tenant before anything else), then read again under the room's lock: every
+// decision of the proposal is taken under that lock, so the status and the
+// params hash the caller checks are the ones its write lands on. The caller
+// releases the room with unlockRoom.
+func (s *Service) lockProposalRoom(ctx context.Context, user User, proposalID string) (store.ProposalRow, *roomState, error) {
+	p, err := s.store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return store.ProposalRow{}, nil, mapStoreErr(err)
+	}
+	if err := s.checkVisible(ctx, user, p.RoomID); err != nil {
+		return store.ProposalRow{}, nil, err
+	}
+	st, err := s.lockRoom(ctx, p.RoomID)
+	if err != nil {
+		return store.ProposalRow{}, nil, err
+	}
+	if p, err = s.store.GetProposal(ctx, proposalID); err != nil {
+		s.unlockRoom(st)
+		return store.ProposalRow{}, nil, mapStoreErr(err)
+	}
+	return p, st, nil
 }
 
 // executeProposal, finishStep, failStep, setProposalStatus, isRoomOpen and the

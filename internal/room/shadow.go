@@ -238,7 +238,7 @@ func (s *Service) markShadowStarted(ctx context.Context, roomID, pipelineID stri
 func (s *Service) beginShadowAttempt(st *roomState) bool {
 	s.lockState(st)
 	defer s.unlockRoom(st)
-	if !s.roomOpen(st) {
+	if st.gone || !s.roomOpen(st) {
 		return false
 	}
 	st.shadowInAttempt = true
@@ -254,7 +254,7 @@ func (s *Service) endShadowAttempt(st *roomState) {
 func (s *Service) shadowRoomClosed(st *roomState) bool {
 	s.lockState(st)
 	defer s.unlockRoom(st)
-	return !s.roomOpen(st)
+	return st.gone || !s.roomOpen(st)
 }
 
 // finishShadow writes the run's final status once, with tool_calls and tokens,
@@ -277,6 +277,9 @@ func (s *Service) finishShadow(roomID string, st *roomState, status string, toke
 	if st.graceTimer != nil {
 		st.graceTimer.Stop()
 		st.graceTimer = nil
+	}
+	if st.gone {
+		return // deleted: its run row went with it
 	}
 	// A shadow run is one-shot: once it has ended, the room needs no agent
 	// owner (a shadow room keeps its lease through the grace after close).
@@ -395,11 +398,11 @@ func revealPayload(openedAt, closedAt time.Time, run store.ShadowRun) events.Sha
 	}
 }
 
-// sweepShadowLocked is Load's shadow pass (design 3.7). No shadow run survives
-// a restart and none is started again: an open room without a row gets one, a
+// sweepShadow is Load's shadow pass (design 3.7). No shadow run survives a
+// restart and none is started again: an open room without a row gets one, a
 // queued or running row becomes interrupted, and every closed room whose run
-// has ended is revealed. Caller holds s.mu.
-func (s *Service) sweepShadowLocked(ctx context.Context) {
+// has ended is revealed. Each room is swept under its own lock.
+func (s *Service) sweepShadow(ctx context.Context) {
 	if s.shadow == nil {
 		return
 	}
@@ -415,31 +418,27 @@ func (s *Service) sweepShadowLocked(ctx context.Context) {
 		}
 	}
 	now := s.now().UTC()
-	for id, st := range s.cachedRooms() {
-		if _, held := leases[id]; held {
-			continue
+	s.rangeRooms(func(id string, st *roomState) {
+		if _, held := leases[id]; !held {
+			s.sweepShadowRoomLocked(ctx, id, st, now)
 		}
-		s.holdRoomLocked(st)
-		s.sweepShadowRoomLocked(ctx, id, st, now)
-		s.releaseRoomLocked(st)
-	}
+	})
 	ids, err := s.shadow.UnrevealedShadowRuns(ctx)
 	if err != nil {
 		s.log.Warn("room: shadow sweep: list unrevealed runs failed", "err", err)
 		return
 	}
 	for _, id := range ids {
-		if st := s.cached(id); st != nil {
-			s.holdRoomLocked(st)
+		if st := s.lockCachedRoom(id); st != nil {
 			if st.snap.Shadow {
 				s.revealLocked(ctx, id, st)
 			}
-			s.releaseRoomLocked(st)
+			s.unlockRoom(st)
 		}
 	}
 }
 
-// sweepShadowRoomLocked is sweepShadowLocked for one room. Caller holds st's
+// sweepShadowRoomLocked is sweepShadow for one room. Caller holds st's
 // lock.
 func (s *Service) sweepShadowRoomLocked(ctx context.Context, id string, st *roomState, now time.Time) {
 	if !st.snap.Shadow {
@@ -837,20 +836,17 @@ func (s *Service) shadowMetrics(ctx context.Context, pipelineID string, since ti
 	if keep != nil {
 		runs = slices.DeleteFunc(runs, func(r store.ShadowRunRoom) bool { return !keep(r.PipelineID) })
 	}
-	s.mu.Lock()
-	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {
-		s.mu.Unlock()
+	if err := s.ensureAllLoaded(ctx, false); err != nil {
 		return m, err
 	}
+	// The published snapshots are enough: the labels and grades are folded
+	// from the log, and no room's lock is waited for.
 	snaps := make(map[string]RoomSnapshot, len(runs))
 	for _, r := range runs {
-		if st := s.cached(r.RoomID); st != nil {
-			s.holdRoomLocked(st)
-			snaps[r.RoomID] = st.snap.Clone()
-			s.releaseRoomLocked(st)
+		if p := s.published(r.RoomID); p != nil {
+			snaps[r.RoomID] = *p
 		}
 	}
-	s.mu.Unlock()
 
 	var first, final, mttr []int64
 	for _, r := range runs {

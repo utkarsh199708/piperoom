@@ -54,7 +54,7 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 	}
 	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
 	if err == nil && payload.MentionsAgent {
-		s.ensureAgentLocked(ctx, roomID, st)
+		s.ensureAgentLocked(roomID, st)
 	}
 	return e, err
 }
@@ -96,7 +96,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{Text: text})
 		if err == nil {
 			s.touchDriverLease(ctx, st, roomID)
-			s.ensureAgentLocked(ctx, roomID, st)
+			s.ensureAgentLocked(roomID, st)
 			return e, nil
 		}
 		if !errors.Is(err, errNoLongerDriver) {
@@ -187,7 +187,7 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return events.Event{}, err
 	}
 	s.touchDriverLease(ctx, st, roomID)
-	s.ensureAgentLocked(ctx, roomID, st)
+	s.ensureAgentLocked(roomID, st)
 	return e, nil
 }
 

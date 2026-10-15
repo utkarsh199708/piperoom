@@ -171,13 +171,14 @@ func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int
 		return
 	}
 	lastSeqs := make(map[string]int64, len(ids))
-	s.mu.Lock()
 	for _, id := range ids {
-		st := s.cached(id)
+		// A load in flight read the log before the delete: it must not
+		// bring the room back.
+		s.cancelLoad(id)
+		st := s.lockCachedRoom(id)
 		if st == nil {
 			continue
 		}
-		s.holdRoomLocked(st)
 		lastSeqs[id] = st.snap.LastSeq
 		if st.agentCancel != nil {
 			st.agentCancel()
@@ -191,10 +192,9 @@ func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int
 		s.releaseAlertKeyLocked(id, st)
 		st.gone = true
 		s.uncacheRoom(id, st)
-		s.releaseRoomLocked(st)
+		s.unlockRoom(st)
 		s.markListDirty(id)
 	}
-	s.mu.Unlock()
 	for _, id := range ids {
 		s.roomDeleted(id, frame(id, lastSeqs[id]))
 	}

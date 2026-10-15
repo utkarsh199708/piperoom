@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
@@ -237,16 +238,12 @@ func (s *Service) runCoordination() {
 // renewLeases extends every lease this replica holds, in one statement. A
 // lease the store did not extend is lost: its agent stops here at once.
 func (s *Service) renewLeases() {
-	s.mu.Lock()
 	var ids []string
-	for id, st := range s.cachedRooms() {
-		s.holdRoomLocked(st)
+	s.rangeRooms(func(id string, st *roomState) {
 		if st.leased {
 			ids = append(ids, id)
 		}
-		s.releaseRoomLocked(st)
-	}
-	s.mu.Unlock()
+	})
 	if len(ids) == 0 {
 		return
 	}
@@ -287,16 +284,12 @@ func (s *Service) renewLeases() {
 // section 5). A claim that is gone is left for the executor, which re-checks it
 // before every step.
 func (s *Service) touchQueuedClaims() {
-	s.mu.Lock()
 	var ids []string
-	for _, st := range s.cachedRooms() {
-		s.holdRoomLocked(st)
+	s.rangeRooms(func(_ string, st *roomState) {
 		if st.exec != nil {
 			ids = append(ids, st.exec.queuedIDs()...)
 		}
-		s.releaseRoomLocked(st)
-	}
-	s.mu.Unlock()
+	})
 	for _, id := range ids {
 		if s.ctx.Err() != nil {
 			return
@@ -320,15 +313,11 @@ func (s *Service) runLeaseWatchdog() {
 		case <-t.C:
 		}
 		now := time.Now()
-		s.mu.Lock()
-		for id, st := range s.cachedRooms() {
-			s.holdRoomLocked(st)
+		s.rangeRooms(func(id string, st *roomState) {
 			if st.leased && now.After(st.leaseValid) {
 				s.loseLeaseLocked(id, st, "no renew confirmed the lease in time")
 			}
-			s.releaseRoomLocked(st)
-		}
-		s.mu.Unlock()
+		})
 	}
 }
 
@@ -711,34 +700,15 @@ func (s *Service) followRoom(roomID string, seq int64) {
 	}
 }
 
-// loadNewRoom rebuilds a room this replica has not cached yet, reading the
-// store outside s.mu, and caches it unless a command or another fold loaded
-// it meanwhile.
+// loadNewRoom loads a room this replica has not cached yet (loadRoom: outside
+// every lock, shared with any other load of it). A purged room is not found
+// and stays out.
 func (s *Service) loadNewRoom(ctx context.Context, roomID string) {
-	if _, err := s.store.GetRoom(ctx, roomID); err != nil {
-		if !errors.Is(err, store.ErrNotFound) && s.ctx.Err() == nil {
-			s.log.Debug("room: follow: read new room failed", "room", roomID, "err", err)
-		}
-		return
-	}
-	l, err := s.rebuild(ctx, roomID)
-	if err != nil {
-		if s.ctx.Err() == nil {
-			s.log.Debug("room: follow: load new room failed", "room", roomID, "err", err)
-		}
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.isClosed() {
 		return
 	}
-	st := l.state()
-	if !s.cacheRoom(roomID, st) {
-		return // loaded meanwhile; that copy may be newer
-	}
-	if l.snap.Status == "open" {
-		s.indexAlertRoomLocked(roomID, st, l.dedupKey)
+	if _, _, err := s.loadRoom(ctx, roomID, true); err != nil && !isNotFound(err) && s.ctx.Err() == nil {
+		s.log.Debug("room: follow: load new room failed", "room", roomID, "err", err)
 	}
 }
 
@@ -988,16 +958,6 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		}
 		fetched[id] = evs
 	}
-	rebuilt := make(map[string]loadedRoom, len(missing))
-	for _, r := range missing {
-		l, err := s.rebuild(ctx, r.ID)
-		if err != nil {
-			s.log.Warn("room: refresh: rebuild failed", "room", r.ID, "err", err)
-			continue
-		}
-		rebuilt[r.ID] = l
-	}
-
 	if s.isClosed() {
 		return nil
 	}
@@ -1009,67 +969,63 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		}
 		s.unlockRoom(st)
 	}
-	if len(rebuilt) == 0 {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, l := range rebuilt {
-		st := l.state()
-		if !s.cacheRoom(id, st) {
-			continue // loaded meanwhile (a command or the follower)
+	// New rooms are loaded outside every lock, like any load (loadRoom).
+	for _, r := range missing {
+		if _, _, err := s.loadRoom(ctx, r.ID, false); err != nil && !isNotFound(err) {
+			s.log.Warn("room: refresh: rebuild failed", "room", r.ID, "err", err)
 		}
-		if l.snap.Status == "open" {
-			s.indexAlertRoomLocked(id, st, l.dedupKey)
-		}
-		s.markListDirty(id)
 	}
 	return nil
 }
 
 // loadMissing is refreshAll with a single-process store: it loads every room
-// of the store that is not cached yet. The list is read outside every lock and
-// s.mu is taken only when a room is missing, so a current cache costs no lock.
+// of the store that is not cached yet, each outside every lock (loadRows), so
+// a current cache costs no lock.
 func (s *Service) loadMissing(ctx context.Context) error {
 	rows, err := s.store.ListRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
 	}
-	var missing []store.Room
-	for _, r := range rows {
-		if r.LastSeq > 0 && s.cached(r.ID) == nil {
-			missing = append(missing, r)
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.loadRowsLocked(ctx, missing, false)
+	return s.loadRows(ctx, rows, false)
 }
 
 // ---- alert dedup across replicas ----
 
-// lockAlertKey takes the cluster-wide lock on an alert index key, so two
-// replicas that get the same alert at once open one room. It returns a no-op
-// unlock with a single-process store or no key.
+// alertLockStripes is how many in-process alert key locks there are.
+const alertLockStripes = 64
+
+// lockAlertKey takes the lock on an alert index key, so two alerts with the
+// same key at once open one room: first this process's (striped) lock, then,
+// with a shared store, the cluster-wide one, so two replicas do not either.
+// It returns a no-op unlock for no key.
 func (s *Service) lockAlertKey(ctx context.Context, indexKey string) (func(), error) {
-	if s.coord == nil || indexKey == "" {
+	if indexKey == "" {
 		return func() {}, nil
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(indexKey))
+	mu := &s.alertLocks[h.Sum32()%alertLockStripes]
+	mu.Lock()
+	if s.coord == nil {
+		return mu.Unlock, nil
 	}
 	unlock, err := s.coord.LockKey(ctx, "alert:"+indexKey)
 	if err != nil {
+		mu.Unlock()
 		return nil, fmt.Errorf("room: lock alert key: %w", err)
 	}
-	return unlock, nil
+	return func() {
+		unlock()
+		mu.Unlock()
+	}, nil
 }
 
-// prepareAlertKeyRoom runs before OpenAlertRoom takes s.mu, with the alert
+// prepareAlertKeyRoom runs before OpenAlertRoom locks a room, with the alert
 // key lock held: it folds what other replicas appended to the room this
 // replica indexes for indexKey, and finds (and caches) the open room another
 // replica opened for it, whose id it returns ("" when there is none). Every
-// store read happens here, outside s.mu. No-op with a single-process store.
+// store read happens here, outside any room lock. No-op with a single-process
+// store.
 func (s *Service) prepareAlertKeyRoom(ctx context.Context, indexKey string) string {
 	if s.coord == nil || indexKey == "" {
 		return ""
@@ -1092,7 +1048,7 @@ func (s *Service) prepareAlertKeyRoom(ctx context.Context, indexKey string) stri
 
 // openAlertRoomSharedLocked indexes here the open room another replica opened
 // for indexKey (roomID, found by prepareAlertKeyRoom), whose own index this
-// replica may not know yet. Caller holds s.mu and the alert key lock.
+// replica may not know yet. Caller holds the alert key lock.
 func (s *Service) openAlertRoomSharedLocked(indexKey, roomID string) (string, bool) {
 	if roomID == "" {
 		return "", false
@@ -1151,12 +1107,13 @@ func (s *Service) emitCheckedLocked(ctx context.Context, st *roomState, roomID s
 }
 
 // syncRoom brings a cached room up to the log before a command, with every
-// read made outside s.mu (only the fold takes it): the room row, and the
-// missing events when the row is ahead. A room another replica's retention
-// deleted is evicted (the command then answers not found). A read error leaves
-// the cache as it is; the command's own write fails on the same outage, and a
-// checked command (emitCheckedLocked) catches up on its own conflict. GETs do
-// not call it: they answer from the cache the follower keeps.
+// read made outside the room's lock (only the fold takes it): the room row,
+// and the missing events when the row is ahead. A room another replica's
+// retention deleted is evicted (the command then answers not found). A read
+// error leaves the cache as it is; the command's own write fails on the same
+// outage, and a checked command (emitCheckedLocked) catches up on its own
+// conflict. GETs do not call it: they answer from the cache the follower
+// keeps.
 func (s *Service) syncRoom(ctx context.Context, roomID string) {
 	if s.coord == nil {
 		return

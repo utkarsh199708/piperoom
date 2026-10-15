@@ -243,15 +243,22 @@ func (s *Service) failHandoff(ctx context.Context, roomID, requestID, reason str
 // failed before handoff.accepted (the retry then finishes it).
 func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string) (events.Event, error) {
 	s.syncHandoffRoom(ctx, handoffID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	h, err := s.store.GetHandoff(ctx, handoffID)
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
 	}
 	if err := s.checkVisible(ctx, user, h.RoomID); err != nil {
 		return events.Event{}, err
+	}
+	// The row is read again under the room's lock, where every accept and
+	// void of the room's hand-offs is decided.
+	st, err := s.lockRoom(ctx, h.RoomID)
+	if err != nil {
+		return events.Event{}, err
+	}
+	defer s.unlockRoom(st)
+	if h, err = s.store.GetHandoff(ctx, handoffID); err != nil {
+		return events.Event{}, mapStoreErr(err)
 	}
 	if h.Status == "voided" {
 		// A handoff is voided when a newer one supersedes it (review item 10):
@@ -264,12 +271,6 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	if h.ToID != user.ID {
 		return events.Event{}, notRecipient("only the handoff recipient can accept")
 	}
-	st, err := s.getStateLocked(ctx, h.RoomID)
-	if err != nil {
-		return events.Event{}, err
-	}
-	s.holdRoomLocked(st)
-	defer s.releaseRoomLocked(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}

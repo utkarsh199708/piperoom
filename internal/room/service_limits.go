@@ -179,9 +179,7 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 	if s.limits.MaxOpenDays <= 0 {
 		return res, nil
 	}
-	s.mu.Lock()
-	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {
-		s.mu.Unlock()
+	if err := s.ensureAllLoaded(ctx, false); err != nil {
 		return res, fmt.Errorf("room: open-room limit: %w", err)
 	}
 	rooms := s.cachedRooms()
@@ -193,9 +191,13 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 	var expired []string
 	for _, id := range ids {
 		st := rooms[id]
-		s.holdRoomLocked(st)
-		warned, due, err := s.warnOpenLimitLocked(ctx, id, st)
-		s.releaseRoomLocked(st)
+		s.lockState(st)
+		var warned, due bool
+		var err error
+		if !st.gone {
+			warned, due, err = s.warnOpenLimitLocked(ctx, id, st)
+		}
+		s.unlockRoom(st)
 		switch {
 		case err != nil:
 			s.log.Warn("room: retention warning failed", "room", id, "err", err)
@@ -206,7 +208,6 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 			expired = append(expired, id)
 		}
 	}
-	s.mu.Unlock()
 
 	for _, id := range expired {
 		if err := ctx.Err(); err != nil {

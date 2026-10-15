@@ -131,16 +131,12 @@ func (s *Service) checkLeases(ctx context.Context) {
 	if s.isClosed() {
 		return
 	}
-	s.mu.Lock()
 	var due []string
-	for id, st := range s.cachedRooms() {
-		s.holdRoomLocked(st)
+	s.rangeRooms(func(id string, st *roomState) {
 		if _, ok := s.leaseExpiryDueLocked(st); ok {
 			due = append(due, id)
 		}
-		s.releaseRoomLocked(st)
-	}
-	s.mu.Unlock()
+	})
 	if len(due) == 0 {
 		return
 	}

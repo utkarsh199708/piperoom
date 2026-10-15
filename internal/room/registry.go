@@ -1,10 +1,11 @@
 package room
 
-// The room registry: which rooms are cached, the alert index, and whether the
-// service is closed. s.reg guards it. reg is a leaf lock: no I/O, no hook and
-// no other lock of the service is taken while it is held, so any code may
-// take it, whatever else it holds. The helpers below are the only code that
-// takes it; none of them calls back into the service.
+// The room registry: which rooms are cached or loading, the alert index, and
+// whether the service is closed. s.reg guards it. reg is a leaf lock: no I/O,
+// no hook and no other lock of the service is taken while it is held, so any
+// code may take it, whatever else it holds. The helpers below are the only
+// code that takes it; none of them calls back into the service, so none may
+// be called with reg held.
 
 // cached returns the cached state of roomID, or nil.
 func (s *Service) cached(roomID string) *roomState {
@@ -52,7 +53,70 @@ func (s *Service) uncacheRoom(roomID string, st *roomState) bool {
 		delete(s.alertRooms, st.dedupKey)
 	}
 	delete(s.rooms, roomID)
+	s.cancelLoadLocked(roomID)
 	return true
+}
+
+// cancelLoad stops a load of roomID in flight from caching the room: it was
+// deleted, and the log the load read may predate the delete.
+func (s *Service) cancelLoad(roomID string) {
+	s.reg.Lock()
+	defer s.reg.Unlock()
+	s.cancelLoadLocked(roomID)
+}
+
+func (s *Service) cancelLoadLocked(roomID string) {
+	if l := s.loading[roomID]; l != nil {
+		l.cancelled = true
+	}
+}
+
+// startLoad returns roomID's cached state, or the load of it in flight, or
+// starts one (leader: the caller loads and calls finishLoad).
+func (s *Service) startLoad(roomID string) (st *roomState, l *roomLoad, leader bool) {
+	s.reg.Lock()
+	defer s.reg.Unlock()
+	if st := s.rooms[roomID]; st != nil {
+		return st, nil, false
+	}
+	if l := s.loading[roomID]; l != nil {
+		return nil, l, false
+	}
+	l = &roomLoad{done: make(chan struct{})}
+	s.loading[roomID] = l
+	return nil, l, true
+}
+
+// finishLoad ends load l with its result and wakes its waiters. The loaded
+// state st is cached, and indexed under key ("" for none), unless the room
+// was evicted meanwhile (not found) or another state is cached already (that
+// one is the room). fresh reports whether st was cached.
+func (s *Service) finishLoad(roomID string, l *roomLoad, st *roomState, key string, err error) (cached *roomState, fresh bool, _ error) {
+	s.reg.Lock()
+	defer s.reg.Unlock()
+	if s.loading[roomID] == l {
+		delete(s.loading, roomID)
+	}
+	switch {
+	case err != nil:
+		st = nil
+	case l.cancelled:
+		st, err = nil, notFound("not found")
+	case s.rooms[roomID] != nil:
+		st = s.rooms[roomID]
+	default:
+		s.rooms[roomID] = st
+		fresh = true
+		if key != "" {
+			st.dedupKey = key
+			if _, taken := s.alertRooms[key]; !taken {
+				s.alertRooms[key] = roomID
+			}
+		}
+	}
+	l.st, l.err = st, err
+	close(l.done)
+	return st, fresh, err
 }
 
 // isClosed reports whether Close has begun.
@@ -102,7 +166,8 @@ func (s *Service) alertRoomFor(indexKey string) (string, *roomState) {
 }
 
 // setAlertKey records st's index key and, when force is true or no room holds
-// the key yet, points the index at roomID.
+// the key yet, points the index at roomID. (A loaded room is indexed by
+// finishLoad, the same way without force.)
 func (s *Service) setAlertKey(roomID string, st *roomState, key string, force bool) {
 	s.reg.Lock()
 	defer s.reg.Unlock()

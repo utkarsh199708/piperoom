@@ -45,7 +45,7 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 	}
 	if s.coord != nil {
 		// Shared store: rooms other replicas opened or closed since the last
-		// fold count too. The reads happen outside s.mu (refreshAll); a
+		// fold count too. The reads happen outside every lock (refreshAll); a
 		// failure falls back to the cache (the follower keeps it close).
 		ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
 		if err := s.refreshAll(ctx); err != nil && s.ctx.Err() == nil {

@@ -71,6 +71,6 @@ func (s *Service) DecideHypothesis(ctx context.Context, user User, roomID, verdi
 		s.touchDriverLease(ctx, st, roomID)
 	}
 	// Like an @agent comment, the verdict wakes the agent.
-	s.ensureAgentLocked(ctx, roomID, st)
+	s.ensureAgentLocked(roomID, st)
 	return e, nil
 }

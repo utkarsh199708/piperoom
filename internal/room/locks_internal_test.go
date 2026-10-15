@@ -306,7 +306,6 @@ func TestSlowAppendReadsDoNotWait(t *testing.T) {
 // While one room's append is stuck in the database, commands on other rooms
 // go through, and the room list socket hears about them.
 func TestSlowAppendOtherRoomCommandsDoNotWait(t *testing.T) {
-	t.Skip("enabled in phase B: per-room lock flip")
 	st := newGatedStore()
 	svc := newLockService(t, st)
 	ids := createRooms(t, svc, 2)
@@ -397,7 +396,6 @@ func TestSlowLoadCachedReadsDoNotWait(t *testing.T) {
 // While one room's load is stuck in the database, the room list still
 // answers.
 func TestSlowLoadListRoomsDoesNotWait(t *testing.T) {
-	t.Skip("enabled in phase B: per-room lock flip")
 	st := newGatedStore()
 	svc, ids := loadedLater(t, st, 2)
 	a, b := ids[0], ids[1]

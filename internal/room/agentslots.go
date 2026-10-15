@@ -30,7 +30,7 @@ type slotWaiter struct {
 // are released. The queue is round-robin across pipelines and FIFO within a
 // pipeline, so one pipeline with many rooms cannot starve another
 // (docs/design/replicas.md section 4.4). It never calls back into the Service,
-// so it is safe to use while holding Service.mu.
+// so it is safe to use while holding a room's lock.
 type agentSlots struct {
 	mu    sync.Mutex
 	max   int
@@ -388,7 +388,7 @@ func (g *agentGate) release() {
 func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) bool {
 	s.lockState(g.st)
 	defer s.unlockRoom(g.st)
-	if s.isClosed() || !s.roomOpen(g.st) || !waiting() {
+	if g.st.gone || s.isClosed() || !s.roomOpen(g.st) || !waiting() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
@@ -410,7 +410,7 @@ func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) b
 func (s *Service) emitSlotAcquired(ctx context.Context, g *agentGate) {
 	s.lockState(g.st)
 	defer s.unlockRoom(g.st)
-	if ctx.Err() != nil || s.isClosed() || !s.roomOpen(g.st) {
+	if g.st.gone || ctx.Err() != nil || s.isClosed() || !s.roomOpen(g.st) {
 		return
 	}
 	ectx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

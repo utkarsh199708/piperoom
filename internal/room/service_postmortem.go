@@ -20,15 +20,12 @@ const postmortemRestartWindow = 10 * time.Minute
 
 var errPostmortemDecided = errors.New("room: postmortem already drafted")
 
-// sweepPostmortemsLocked gives every room closed within the restart window that
-// has neither postmortem event the events-only draft, so a crash during the
-// drafting leaves no room without one. No model call after a restart. Caller
-// holds s.mu (Load).
-func (s *Service) sweepPostmortemsLocked() {
-	for id, st := range s.cachedRooms() {
-		s.holdRoomLocked(st)
-		sn := st.snap
-		s.releaseRoomLocked(st)
+// sweepPostmortems gives every room closed within the restart window that has
+// neither postmortem event the events-only draft, so a crash during the
+// drafting leaves no room without one. No model call after a restart (Load).
+// It reads the published snapshots: the drafter takes the room's lock itself.
+func (s *Service) sweepPostmortems() {
+	for id, sn := range s.publishedRooms() {
 		if sn.Shadow || sn.Status != "closed" || sn.Postmortem.Status != PostmortemDrafting || sn.ClosedAt == nil {
 			continue
 		}
