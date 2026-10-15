@@ -72,7 +72,7 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 		return fmt.Errorf("investigate: %w", err)
 	}
 
-	reg := tools.NewRegistry()
+	reg := tools.NewReadOnlyRegistry()
 	areg := actions.NewRegistry()
 	if fakeTools {
 		if err := fake.Register(reg); err != nil {
