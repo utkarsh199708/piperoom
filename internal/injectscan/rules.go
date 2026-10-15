@@ -18,6 +18,7 @@ var toolNames = setOf(
 	"schema_registry_versions", "schema_registry_diff", "pg_replication_slots", "pg_recent_ddl",
 	"pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row",
 	"pipeline_map", "trace_record", "runbook_lookup",
+	"page_owner", "withdraw_proposal", "connect_worker_log", "pg_table_activity",
 )
 
 // roomToolNames exist only inside the agent: operations text never tells
