@@ -127,6 +127,19 @@ export interface AgentToolCallPayload {
   input: unknown
 }
 
+/** One read a tool made against a customer system (F3): the receipt behind the summary. */
+export interface ToolCall {
+  /** "sql" | "http" | "kafka" | "registry" */
+  kind: string
+  /** The system read (host, database, brokers), never credentials. */
+  target: string
+  /** What a person would re-run: SQL with placeholders, "GET /connectors/x/status". */
+  text: string
+  params_redacted?: string[]
+  at: string
+  took_ms: number
+}
+
 export interface AgentToolResultPayload {
   step_id: string
   tool_use_id: string
@@ -136,6 +149,8 @@ export interface AgentToolResultPayload {
   is_error: boolean
   truncated?: boolean
   took_ms: number
+  /** F3: the reads behind `summary`, at most 16. Absent for replayed tools and old events. */
+  provenance?: ToolCall[]
 }
 
 export interface AgentMessagePayload {
@@ -149,6 +164,8 @@ export interface AgentHypothesisPayload {
   based_on_steps: string[]
   confidence: string // "low" | "medium" | "high"
   confirmed: boolean
+  /** F3: names and numbers in `text` that none of the cited steps show; at most 20. */
+  unbacked_terms?: string[]
 }
 
 /**
@@ -345,6 +362,18 @@ export interface HandoffSummary {
   ruled_out: string[]
   open: string[]
   risks: string[]
+  /**
+   * F3: checks the summary still fails after the agent's one correction pass.
+   * Absent on a summary written before F3, or when the server omits an empty list.
+   */
+  violations?: HandoffViolation[]
+}
+
+/** One failed hand-off check; `detail` is agent text and may quote the summary. */
+export interface HandoffViolation {
+  rule: string
+  field: string
+  detail: string
 }
 
 /** handoff.requested (R0): a hand-off is being written; in flight until created / failed / expires_at. */
@@ -448,6 +477,8 @@ export interface HypothesisSummary {
   based_on_steps: string[]
   confidence: string
   confirmed: boolean
+  /** F3: see AgentHypothesisPayload. */
+  unbacked_terms?: string[]
   /** F9: seq of the agent.hypothesis event. */
   seq?: number
   /** F9: latest verdict per person on `seq`. */

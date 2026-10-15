@@ -13,6 +13,7 @@ import type {
   ProposalStep,
   RoomLabelledPayload,
   RoomSnapshot,
+  ToolCall,
   TraceStage,
 } from '../api/types'
 
@@ -50,6 +51,8 @@ export interface HypothesisState {
   confidence: HypothesisSummary['confidence']
   /** Derived (F9): at least one confirmed and no disputed verdict on this hypothesis. */
   confirmed: boolean
+  /** F3: terms in `text` that the cited steps do not show. */
+  unbacked_terms?: string[]
   /** seq of the agent.hypothesis event; hypothesis.verdict answers it. */
   seq?: number
   /** Latest verdict per person, in the order they were given. */
@@ -90,6 +93,8 @@ export interface ToolCallState {
   is_error?: boolean
   truncated?: boolean
   took_ms?: number
+  /** F3: the reads behind the summary. */
+  provenance?: ToolCall[]
 }
 
 export interface AgentMessageState {
@@ -418,6 +423,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
           confidence: snapshot.hypothesis.confidence,
           confirmed: snapshot.hypothesis.confirmed,
+          unbacked_terms: snapshot.hypothesis.unbacked_terms ?? [],
           seq: snapshot.hypothesis.seq ?? 0,
           verdicts: [],
         }

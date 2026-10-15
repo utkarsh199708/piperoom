@@ -34,7 +34,7 @@ import { NoDriverBanner } from './NoDriverBanner'
 import { ChangesLane } from './room/ChangesLane'
 import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
-import type { ChecklistWiring } from './Timeline'
+import type { ChecklistWiring, CitedStep } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { Badge } from '@/components/ui/badge'
 import { ShadowPanel } from './shadow/ShadowPanel'
@@ -140,6 +140,17 @@ export function RoomScreen() {
     rememberRoomTitle(state?.title)
     return () => rememberRoomTitle(undefined)
   }, [state?.title])
+  const [citedStep, setCitedStep] = useState<CitedStep | null>(null)
+  const citeNonce = useRef(0)
+  // A citation chip: on the tabbed layout the steps live on the Investigation tab, so it opens first.
+  const citeStep = useCallback(
+    (id: string) => {
+      if (narrowRef.current) setTab('investigation')
+      citeNonce.current += 1
+      setCitedStep({ id, nonce: citeNonce.current })
+    },
+    [setTab],
+  )
   const [layerFilter, setLayerFilter] = useState<string | null>(null)
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
@@ -317,6 +328,7 @@ export function RoomScreen() {
       onVerdict={actions.hypothesisVerdict}
       pipelineId={state.pipeline_id}
       insight={state.insight}
+      onCite={citeStep}
     />
   ) : null
   const proposalsCard = showProposals ? (
@@ -356,6 +368,7 @@ export function RoomScreen() {
         filterLayer={layerFilter ?? undefined}
         onClearFilter={() => setLayerFilter(null)}
         shadow={state.shadow}
+        citedStep={citedStep}
       />
     </section>
     </>

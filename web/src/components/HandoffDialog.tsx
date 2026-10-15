@@ -1,4 +1,5 @@
 import { Loader2 } from 'lucide-react'
+import { HandoffChecks } from './room/HandoffChecks'
 import { useState } from 'react'
 import type { ComponentProps, FormEvent, KeyboardEvent, ReactNode } from 'react'
 import type { HandoffState, RoomState } from '../state/types'
@@ -181,6 +182,7 @@ function HandoffSummary({ summary: s, children }: { summary: HandoffState['summa
       <SummaryList title="Ruled out" items={s.ruled_out} />
       <SummaryList title="Still open" items={s.open} />
       <SummaryList title="Risks" items={s.risks} />
+      <HandoffChecks summary={s} />
       <DialogFooter>{children}</DialogFooter>
     </div>
   )
