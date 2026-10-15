@@ -1,0 +1,6 @@
+# Reviewed skips that the full-stack integration job tolerates. Format, one per line:
+#   <package> <Test> | reason | owner | review-by (YYYY-MM-DD)
+# Any other skipped test fails the job (fail-on-skips.sh), and so does an entry
+# past its review-by date. Remove an entry when its test stops skipping.
+piperoom/internal/clients/pgconv TestNumericStringZeroWithPositiveExponentIsSkipped | known bug: NumericString(Int=0, Exp=2) returns "000", want "0" (reviews/coverage-2026-10.md); the test skips itself until pgconv.go is fixed; not a stack skip | A3 | 2026-11-13
+piperoom/cmd/server TestRunHelper | subprocess helper, not a test: cmd/server re-runs the test binary with PIPEROOM_TEST_RUN=1 so run() executes in its own process; it skips in every other run (cmd/server/publicurl_test.go); not a stack skip | A5 | 2026-11-13

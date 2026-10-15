@@ -145,3 +145,19 @@ Rooms that existed before it get their byte count in the background after the se
   24 MB/s on postgres:16; see `docs/design/retention.md` section 5.2. Appends wait only for the batch of
   500 rooms being counted.
 - Rooms not yet counted: `SELECT count(*) FROM rooms WHERE byte_size IS NULL;`
+
+## CI: full-stack integration, smoke, release image
+
+| Job | When | What it needs |
+|---|---|---|
+| `Go integration (full dev stack)` (`ci.yml`) | every PR and push to `main` | nothing; starts `dev/docker-compose.yml`, polls Connect (`.github/scripts/wait-for-stack.sh`), runs `go test -tags integration ./internal/... ./cmd/...` (the room-database tests use a separate Postgres service on host port 5433, so their WAL stays out of the Debezium slot), then the dev-stack smoke on the same stack (`devctl status`, `health`, `break` + `fix schema-change`, `health` again). **Any skipped test fails the job** (`fail-on-skips.sh`), except reviewed non-stack skips in `.github/integration-skip-allow.txt` (owner and review-by date; an expired entry fails) |
+| `Release image` (`release-image.yml`) | tags `v*` push to `ghcr.io/<owner>/piperoom`; PRs touching the image inputs only build | the digest is in the job summary, the `image-digest` artifact and the job output `digest`. Deploy by digest: `ghcr.io/<owner>/piperoom@sha256:...` |
+
+Live evals are `evals-live.yml`, documented in `evals/README.md` ("CI (evals-live)").
+
+Allowlist upkeep: an entry past its review-by date fails the job for every PR, so the owner named on the line renews it
+or fixes the test before that date.
+
+Reproduce a full-stack failure locally: `go run ./cmd/devctl lock --owner me && go run ./cmd/devctl up --owner me`,
+then `PIPEROOM_STACK_OWNER=me go test -count=1 -json -tags integration ./internal/... ./cmd/... > test.json` and
+`.github/scripts/fail-on-skips.sh test.json`.
