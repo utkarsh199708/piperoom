@@ -53,8 +53,12 @@ type JudgeCacheEntry struct {
 	Hypothesis    string `json:"hypothesis"`
 	// TruthSHA256 is judgeTruthSHA of the scenario when the verdict was
 	// recorded.
-	TruthSHA256 string  `json:"truth_sha256"`
-	Verdict     Verdict `json:"verdict"`
+	TruthSHA256 string `json:"truth_sha256"`
+	// Model is the judge model that gave the verdict. It is not part of the
+	// key: a verdict stays valid across models, and the report says which
+	// model's verdicts it read.
+	Model   string  `json:"model,omitempty"`
+	Verdict Verdict `json:"verdict"`
 }
 
 // JudgeCache reads and writes recorded verdicts in one directory.
@@ -98,42 +102,49 @@ func (c *JudgeCache) path(key string) string {
 // Get returns the recorded verdict for hypothesis under sc. ok is false when
 // there is none. A stale or malformed entry is an error.
 func (c *JudgeCache) Get(sc Scenario, hypothesis string) (Verdict, bool, error) {
+	e, ok, err := c.Lookup(sc, hypothesis)
+	return e.Verdict, ok, err
+}
+
+// Lookup is Get with the whole entry (the judge model too).
+func (c *JudgeCache) Lookup(sc Scenario, hypothesis string) (JudgeCacheEntry, bool, error) {
 	key := JudgeCacheKey(JudgePromptVersion, sc.Name, hypothesis)
 	f, err := os.Open(c.path(key))
 	if errors.Is(err, fs.ErrNotExist) {
-		return Verdict{}, false, nil
+		return JudgeCacheEntry{}, false, nil
 	}
 	if err != nil {
-		return Verdict{}, false, fmt.Errorf("evals: read judge cache: %w", err)
+		return JudgeCacheEntry{}, false, fmt.Errorf("evals: read judge cache: %w", err)
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, maxJudgeCacheEntryBytes+1))
 	if err != nil {
-		return Verdict{}, false, fmt.Errorf("evals: read judge cache entry %s: %w", key, err)
+		return JudgeCacheEntry{}, false, fmt.Errorf("evals: read judge cache entry %s: %w", key, err)
 	}
 	if len(b) > maxJudgeCacheEntryBytes {
-		return Verdict{}, false, fmt.Errorf("evals: judge cache entry %s is over %d bytes", key, maxJudgeCacheEntryBytes)
+		return JudgeCacheEntry{}, false, fmt.Errorf("evals: judge cache entry %s is over %d bytes", key, maxJudgeCacheEntryBytes)
 	}
 	var e JudgeCacheEntry
 	if err := json.Unmarshal(b, &e); err != nil {
-		return Verdict{}, false, fmt.Errorf("evals: parse judge cache entry %s: %w", key, err)
+		return JudgeCacheEntry{}, false, fmt.Errorf("evals: parse judge cache entry %s: %w", key, err)
 	}
 	// The key already pins all three; a mismatch is a hand-edited or
 	// misnamed file.
 	if e.PromptVersion != JudgePromptVersion || e.Scenario != sc.Name || e.Hypothesis != hypothesis {
-		return Verdict{}, false, fmt.Errorf("evals: judge cache entry %s does not match its key", key)
+		return JudgeCacheEntry{}, false, fmt.Errorf("evals: judge cache entry %s does not match its key", key)
 	}
 	if e.TruthSHA256 != judgeTruthSHA(sc) {
-		return Verdict{}, false, fmt.Errorf("%w: entry %s for scenario %q was recorded against other ground truth (description, layers, root_cause or root_cause_forbidden changed); refill it with evalrun -judge-fill", ErrJudgeCacheStale, key, sc.Name)
+		return JudgeCacheEntry{}, false, fmt.Errorf("%w: entry %s for scenario %q was recorded against other ground truth (description, layers, root_cause or root_cause_forbidden changed); refill it with evalrun -judge-fill", ErrJudgeCacheStale, key, sc.Name)
 	}
-	return e.Verdict, true, nil
+	return e, true, nil
 }
 
-// Put records v for hypothesis under sc, replacing any earlier entry. The
-// write goes through a temporary file, so a reader never sees half an entry.
-func (c *JudgeCache) Put(sc Scenario, hypothesis string, v Verdict) error {
+// Put records v, given by the judge model model ("" when unknown), for
+// hypothesis under sc, replacing any earlier entry. The write goes through a
+// temporary file, so a reader never sees half an entry.
+func (c *JudgeCache) Put(sc Scenario, hypothesis, model string, v Verdict) error {
 	e := JudgeCacheEntry{PromptVersion: JudgePromptVersion, Scenario: sc.Name, Hypothesis: hypothesis,
-		TruthSHA256: judgeTruthSHA(sc), Verdict: v}
+		TruthSHA256: judgeTruthSHA(sc), Model: model, Verdict: v}
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return fmt.Errorf("evals: encode judge cache entry: %w", err)

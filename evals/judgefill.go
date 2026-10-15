@@ -97,14 +97,16 @@ func estimateInputTokens(sc Scenario, hypothesis string) int64 {
 	return int64(len(judgeSystem)+len(judgePrompt(sc, hypothesis))+2) / 3
 }
 
-// FillJudgeCache records a judge verdict for every manifest entry the cache
-// lacks or holds stale, at most maxCalls of them (maxCalls <= 0: none). With
-// judge nil it is a dry run: nothing is called or written, and the result
-// estimates what a fill would spend. scenarios maps the manifest's scenario
-// names (held-out ones as "heldout/<name>") to the committed scenarios; an
-// entry for any other scenario is refused, so a learned or ad-hoc scenario
-// can never put text in the public cache.
-func FillJudgeCache(ctx context.Context, cache *JudgeCache, judge HypothesisJudge, scenarios map[string]Scenario, set AmbiguousSet, maxCalls int) (FillResult, error) {
+// FillJudgeCache records a judge verdict, from the judge model model, for
+// every manifest entry the cache lacks or holds stale, at most maxCalls of
+// them (maxCalls <= 0: none). With judge nil it is a dry run: nothing is
+// called or written, and the result estimates what a fill would spend.
+// scenarios maps the manifest's scenario names (held-out ones as
+// "heldout/<name>") to the committed scenarios; an entry for any other
+// scenario, or a text the tri-state pass does not find ambiguous, is refused
+// before any call, so only the ambiguous corpus set can reach the public
+// cache.
+func FillJudgeCache(ctx context.Context, cache *JudgeCache, judge HypothesisJudge, model string, scenarios map[string]Scenario, set AmbiguousSet, maxCalls int) (FillResult, error) {
 	res := FillResult{Entries: len(set.Entries)}
 	type todo struct {
 		sc   Scenario
@@ -115,6 +117,9 @@ func FillJudgeCache(ctx context.Context, cache *JudgeCache, judge HypothesisJudg
 		sc, ok := scenarios[e.Scenario]
 		if !ok {
 			return res, fmt.Errorf("evals: ambiguous set entry %d: scenario %q is not a committed default or held-out scenario", i, e.Scenario)
+		}
+		if !ambiguityOf(sc, e.Text).Any() {
+			return res, fmt.Errorf("evals: ambiguous set entry %d (%s): the tri-state pass does not find the text ambiguous; regenerate the manifest (TestAmbiguousCorpusSet -update-ambiguous)", i, e.Scenario)
 		}
 		_, hit, err := cache.Get(sc, e.Text)
 		switch {
@@ -150,7 +155,7 @@ func FillJudgeCache(ctx context.Context, cache *JudgeCache, judge HypothesisJudg
 		if err != nil {
 			return res, err
 		}
-		if err := cache.Put(n.sc, n.text, v); err != nil {
+		if err := cache.Put(n.sc, n.text, model, v); err != nil {
 			return res, err
 		}
 		res.Filled++

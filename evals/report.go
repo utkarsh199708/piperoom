@@ -375,8 +375,16 @@ func writeJudgeLine(b *strings.Builder, j *JudgeStats) {
 	case j.MaxLiveCalls > 0:
 		limit = fmt.Sprintf("cap %d", j.MaxLiveCalls)
 	}
-	fmt.Fprintf(b, "\njudge: %d ambiguous · %d judged (%d cached, %d live) · %d ambiguous (unjudged), counted not passed · %d live call(s), %s · judge tokens %d in / %d out\n",
-		j.Ambiguous, j.Judged, j.CacheHits, j.LiveVerdicts, j.Unjudged, j.LiveCalls, limit, j.Usage.InputTokens, j.Usage.OutputTokens)
+	if j.ClaudeModeCalls > 0 {
+		// -judge claude calls have no cap; the cap is the auto mode's.
+		limit = fmt.Sprintf("%d of them -judge claude (no cap), auto %s", j.ClaudeModeCalls, limit)
+	}
+	cached := ""
+	if len(j.CacheModels) > 0 {
+		cached = " by " + strings.Join(j.CacheModels, ", ")
+	}
+	fmt.Fprintf(b, "\njudge: %d ambiguous · %d judged (%d cached%s, %d live) · %d ambiguous (unjudged), counted not passed · %d live call(s), %s · judge tokens %d in / %d out\n",
+		j.Ambiguous, j.Judged, j.CacheHits, mdCell(cached), j.LiveVerdicts, j.Unjudged, j.LiveCalls, limit, j.Usage.InputTokens, j.Usage.OutputTokens)
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {

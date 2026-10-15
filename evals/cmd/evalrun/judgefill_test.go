@@ -38,7 +38,7 @@ func TestRunJudgeFillDryRun(t *testing.T) {
 	if err != nil || code != 0 {
 		t.Fatalf("code %d err %v out %s", code, err, out.String())
 	}
-	for _, want := range []string{"0 cached, 0 stale, 0 filled", "judge call(s) needed", "tokens on m, about $", "pass -judge-max-calls"} {
+	for _, want := range []string{"model m,", "0 cached, 0 stale, 0 filled", "judge call(s) needed", "tokens on m, about $", "pass -judge-max-calls"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("dry run output lacks %q:\n%s", want, out.String())
 		}
@@ -64,8 +64,15 @@ func TestRunJudgeFillRefusals(t *testing.T) {
 		"no cache":   {func(f flags) flags { f.judgeCache = ""; return f }, "x", "needs -judge-cache"},
 		"no key":     {func(f flags) flags { return f }, "", "ANTHROPIC_API_KEY is not set"},
 		"no claude":  {func(f flags) flags { return f }, "sk-ant-test-not-real", "-tags claude"},
-		"bad file":   {func(f flags) flags { f.judgeFill = "missing.json"; return f }, "x", "read ambiguous set"},
+		"bad file":   {func(f flags) flags { f.judgeFill = "missing.json"; return f }, "x", "only the committed manifest"},
 		"dry no set": {func(f flags) flags { f.judgeFill = ""; f.dryRun = true; return f }, "x", "-dry-run goes with -judge-fill"},
+		"other manifest": {func(f flags) flags {
+			p := filepath.Join(t.TempDir(), "ambiguous.json")
+			os.WriteFile(p, []byte(`{"entries":[]}`), 0o600)
+			f.judgeFill = p
+			return f
+		}, "x", "only the committed manifest"},
+		"other scenarios": {func(f flags) flags { f.scenarios = t.TempDir(); return f }, "x", "only the committed scenarios"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -82,27 +89,48 @@ func TestRunJudgeFillRefusals(t *testing.T) {
 func TestLiveJudge(t *testing.T) {
 	auto := []evals.Scenario{{Name: "a"}}
 	claude := []evals.Scenario{{Name: "c", Judge: evals.JudgeClaude}}
-	var errOut bytes.Buffer
-	// auto without a claude build: no live judge, a note, no error.
-	j, err := liveJudge(flags{maxCalls: 50, judgeCache: "evals/judgecache"}, auto, &errOut)
-	if j != nil || err != nil || !strings.Contains(errOut.String(), "ambiguous (unjudged)") {
-		t.Errorf("auto: j=%v err=%v note %q", j, err, errOut.String())
+	// auto (the default) without a claude build would count every ambiguous
+	// live hypothesis as unjudged: refused, naming both ways out.
+	for _, f := range []flags{{maxCalls: 50, judgeCache: "evals/judgecache"}, {judge: evals.JudgeAuto, maxCalls: 50}} {
+		j, err := liveJudge(f, auto)
+		if j != nil || err == nil || !strings.Contains(err.Error(), "-tags claude") || !strings.Contains(err.Error(), "-judge terms") {
+			t.Errorf("%+v: j=%v err=%v", f, j, err)
+		}
 	}
 	// -judge claude must have one.
-	if _, err := liveJudge(flags{judge: evals.JudgeClaude, maxCalls: 50}, auto, &errOut); err == nil {
+	if _, err := liveJudge(flags{judge: evals.JudgeClaude, maxCalls: 50}, auto); err == nil {
 		t.Error("-judge claude without a claude build accepted")
 	}
-	if _, err := liveJudge(flags{maxCalls: 50}, claude, &errOut); err == nil {
+	if _, err := liveJudge(flags{maxCalls: 50}, claude); err == nil {
 		t.Error("scenario judge claude without a claude build accepted")
 	}
-	// Cache-only, no live calls, or terms: no judge is built at all.
+	// Cache-only, no live calls, or terms: no live judge is needed.
 	for _, f := range []flags{{cacheOnly: true, maxCalls: 50}, {maxCalls: 0}, {maxCalls: -1}, {judge: evals.JudgeTerms, maxCalls: 50}} {
-		errOut.Reset()
-		if j, err := liveJudge(f, auto, &errOut); j != nil || err != nil || errOut.Len() != 0 {
-			t.Errorf("%+v: j=%v err=%v note %q", f, j, err, errOut.String())
+		if j, err := liveJudge(f, auto); j != nil || err != nil {
+			t.Errorf("%+v: j=%v err=%v", f, j, err)
 		}
 	}
 	if judgeMaxCalls(0) != -1 || judgeMaxCalls(7) != 7 || judgeMaxCalls(-3) != -3 {
 		t.Error("judgeMaxCalls mapping")
+	}
+}
+
+// TestRunRefusesAutoJudgeWithoutLiveJudge: a run under the default -judge
+// auto in a build without -tags claude (as evals-live builds today) exits 1
+// before any model call, instead of grading ambiguous answers as failures.
+func TestRunRefusesAutoJudgeWithoutLiveJudge(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-not-real")
+	t.Setenv("PIPEROOM_MODEL_PROVIDER", "")
+	f, err := parseFlags([]string{"-scenarios", "../../scenarios", "-only", "schema-change", "-no-tap"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(f, &out, &out)
+	if code != 1 || err == nil || !strings.Contains(err.Error(), "build with -tags claude, or pass -judge terms") {
+		t.Fatalf("code %d err %v", code, err)
+	}
+	if strings.Contains(out.String(), "schema-change #1") {
+		t.Errorf("a run started:\n%s", out.String())
 	}
 }

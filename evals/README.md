@@ -107,8 +107,9 @@ the result (`judged`, `ambiguity`). The verdict comes from:
    `root_cause_forbidden`) is stale and an error, never a verdict. **Only synthetic texts** are cached:
    the fill reads nothing but the committed manifest, and a run never writes the cache;
 2. on a miss, the **live judge** (a `-tags claude` build), at most `-judge-max-calls` (default 50) calls
-   per run. Past the cap, or with no live judge, the ambiguous items are reported
-   **ambiguous (unjudged)** and count as **not passed**.
+   per run. Past the cap the ambiguous items are reported **ambiguous (unjudged)** and count as
+   **not passed**. evalrun **refuses to start** in `auto` mode when it may call the live judge but the
+   build has none (no `-tags claude`): build with `-tags claude`, or pass `-judge terms`.
 
 `-judge-cache-only` reads only the cache and **fails the run on a miss** (unit tests and CI replays):
 a miss never falls back to the keyword grade. `-judge terms` forces the keyword grade (the ambiguity is

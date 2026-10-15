@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -33,10 +34,14 @@ type JudgeStats struct {
 	LiveVerdicts int `json:"live_verdicts"`
 	// Unjudged counts auto-mode runs left "ambiguous (unjudged)".
 	Unjudged int `json:"unjudged"`
+	// CacheModels are the judge models of the verdicts read from the cache.
+	CacheModels []string `json:"cache_models,omitempty"`
 	// LiveCalls counts every live judge call, auto and claude mode, and
-	// MaxLiveCalls is the auto-mode cap (-1: no live calls allowed).
-	LiveCalls    int `json:"live_calls"`
-	MaxLiveCalls int `json:"max_live_calls"`
+	// MaxLiveCalls is the auto-mode cap (-1: no live calls allowed);
+	// ClaudeModeCalls of them were -judge claude calls, which have no cap.
+	LiveCalls       int `json:"live_calls"`
+	MaxLiveCalls    int `json:"max_live_calls"`
+	ClaudeModeCalls int `json:"claude_mode_calls,omitempty"`
 	// Usage is the judge's token spend over every live call (zero for a
 	// judge that does not report tokens).
 	Usage JudgeUsage `json:"usage"`
@@ -80,7 +85,8 @@ func (g *judgeGate) snapshot() *JudgeStats {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	s := g.stats
-	if s.Ambiguous == 0 && s.LiveCalls == 0 && s.Judged == 0 {
+	s.CacheModels = slices.Clone(s.CacheModels)
+	if s.Ambiguous == 0 && s.LiveCalls == 0 && s.Judged == 0 && s.CacheHits == 0 {
 		return nil
 	}
 	return &s
@@ -117,13 +123,19 @@ func (g *judgeGate) call(ctx context.Context, sc Scenario, hypothesis string) (V
 // or cache failure.
 func (g *judgeGate) settle(ctx context.Context, sc Scenario, hypothesis string) (Verdict, string, error) {
 	if g.cache != nil {
-		v, ok, err := g.cache.Get(sc, hypothesis)
+		e, ok, err := g.cache.Lookup(sc, hypothesis)
 		if err != nil {
 			return Verdict{}, "", err
 		}
 		if ok {
-			g.add(func(s *JudgeStats) { s.CacheHits++ })
-			return v, ambiguityCache, nil
+			g.add(func(s *JudgeStats) {
+				s.CacheHits++
+				if m := e.Model; m != "" && !slices.Contains(s.CacheModels, m) {
+					s.CacheModels = append(s.CacheModels, m)
+					slices.Sort(s.CacheModels)
+				}
+			})
+			return e.Verdict, ambiguityCache, nil
 		}
 	}
 	if g.cacheOnly {
@@ -171,7 +183,7 @@ func gradeFinal(ctx context.Context, cfg Config, g *judgeGate, sc Scenario, res 
 	}
 	switch mode {
 	case JudgeClaude:
-		g.add(func(s *JudgeStats) { s.LiveCalls++ })
+		g.add(func(s *JudgeStats) { s.LiveCalls++; s.ClaudeModeCalls++ })
 		v, err := g.call(ctx, sc, res.FinalHypothesis)
 		if err != nil {
 			return RunResult{}, err

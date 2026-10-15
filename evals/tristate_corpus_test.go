@@ -311,3 +311,26 @@ func TestJudgedCorpusGrades(t *testing.T) {
 	}
 	t.Logf("judged corpus: %d entries, the judge disagrees with main on %d", len(set.Entries), disagreeMain)
 }
+
+// TestScenarioNamesUniqueAcrossSets: a cache key names the scenario without
+// its set (the judge sees sc.Name), so a default and a held-out scenario of
+// one name would share recorded verdicts.
+func TestScenarioNamesUniqueAcrossSets(t *testing.T) {
+	def, err := LoadScenarios("scenarios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := LoadScenarios(heldoutDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, s := range def {
+		names[s.Name] = true
+	}
+	for _, s := range held {
+		if names[s.Name] {
+			t.Errorf("scenario %q is in both the default and the held-out set; their judge verdicts would share cache keys", s.Name)
+		}
+	}
+}

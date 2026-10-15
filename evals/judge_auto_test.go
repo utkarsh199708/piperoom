@@ -8,6 +8,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ func ambiguousSeedScript() []step {
 func TestFixtureJudgeCache(t *testing.T) {
 	c := NewJudgeCache(fixtureJudgeCache)
 	if *updateJudgeFixtures {
-		if err := c.Put(loadSeed(), ambiguousSeed, fixtureVerdict); err != nil {
+		if err := c.Put(loadSeed(), ambiguousSeed, "", fixtureVerdict); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -127,11 +128,14 @@ func TestJudgeCacheRoundTrip(t *testing.T) {
 		t.Fatalf("empty cache: ok=%v err=%v", ok, err)
 	}
 	v := Verdict{LayerCorrect: true, RootCauseCorrect: true, Reason: "r"}
-	if err := c.Put(seed, "h", v); err != nil {
+	if err := c.Put(seed, "h", "judge-model", v); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok, err := c.Get(seed, "h"); !ok || err != nil || got != v {
 		t.Fatalf("round trip: %+v ok=%v err=%v", got, ok, err)
+	}
+	if e, ok, err := c.Lookup(seed, "h"); !ok || err != nil || e.Model != "judge-model" {
+		t.Fatalf("lookup: %+v ok=%v err=%v", e, ok, err)
 	}
 	if n, _ := c.Len(); n != 1 {
 		t.Errorf("len = %d, want 1", n)
@@ -230,6 +234,16 @@ func TestJudgeGateSettle(t *testing.T) {
 	v, src, err := g.settle(ctx, seed, ambiguousSeed)
 	if err != nil || src != ambiguityCache || v != fixtureVerdict || live.calls != 0 {
 		t.Errorf("cache hit: v=%+v src=%q err=%v calls=%d", v, src, err, live.calls)
+	}
+
+	// A cache hit records the judge model of its verdict.
+	dir0 := t.TempDir()
+	if err := NewJudgeCache(dir0).Put(seed, "h0", "claude-opus-5-5", Verdict{Reason: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	g = newJudgeGate(Config{JudgeCache: dir0})
+	if _, src, err := g.settle(ctx, seed, "h0"); err != nil || src != ambiguityCache || !slices.Equal(g.snapshot().CacheModels, []string{"claude-opus-5-5"}) {
+		t.Errorf("cache model: src=%q err=%v stats=%+v", src, err, g.snapshot())
 	}
 
 	// Cache-only: a miss fails loudly, even with a live judge at hand.
@@ -398,17 +412,28 @@ func TestReportJudgeLine(t *testing.T) {
 			t.Errorf("markdown lacks %q:\n%s", want, md)
 		}
 	}
+
+	// -judge claude calls are uncapped, so the line says so beside the auto
+	// cap; cached verdicts name their judge models.
+	var line strings.Builder
+	writeJudgeLine(&line, &JudgeStats{Ambiguous: 3, Judged: 1, CacheHits: 1, CacheModels: []string{"claude-opus-5-5"},
+		LiveCalls: 70, ClaudeModeCalls: 70, MaxLiveCalls: 50})
+	if want := "1 judged (1 cached by claude-opus-5-5, 0 live) · 0 ambiguous (unjudged), counted not passed · 70 live call(s), 70 of them -judge claude (no cap), auto cap 50"; !strings.Contains(line.String(), want) {
+		t.Errorf("judge line %q lacks %q", line.String(), want)
+	}
 }
 
 func TestFillJudgeCache(t *testing.T) {
 	seed := loadSeed()
 	scs := map[string]Scenario{seed.Name: seed}
-	set := AmbiguousSet{Entries: []AmbiguousText{{Scenario: seed.Name, Text: "a"}, {Scenario: seed.Name, Text: "b"}, {Scenario: seed.Name, Text: "c"}}}
+	// Three texts the tri-state pass finds ambiguous on schema-change.
+	set := AmbiguousSet{Entries: []AmbiguousText{{Scenario: seed.Name, Text: "Order-sync did not crash."},
+		{Scenario: seed.Name, Text: "The amount column was not changed to numeric."}, {Scenario: seed.Name, Text: "It is not a Debezium problem."}}}
 	cache := NewJudgeCache(filepath.Join(t.TempDir(), "c"))
 	ctx := context.Background()
 
 	// Dry run: nothing called or written, an estimate for all three.
-	res, err := FillJudgeCache(ctx, cache, nil, scs, set, 10)
+	res, err := FillJudgeCache(ctx, cache, nil, "m", scs, set, 10)
 	if err != nil || res.Remaining != 3 || res.Filled != 0 || res.EstInputTokens < 3*int64(len(judgeSystem))/3 || res.EstOutputTokens != 3*estOutputTokensPerCall {
 		t.Fatalf("dry run: %+v %v", res, err)
 	}
@@ -418,22 +443,25 @@ func TestFillJudgeCache(t *testing.T) {
 
 	// A fill stops at the cap and resumes.
 	j := &fakeMetered{v: Verdict{RootCauseCorrect: true, Reason: "x"}, u: JudgeUsage{InputTokens: 10, OutputTokens: 1}}
-	res, err = FillJudgeCache(ctx, cache, j, scs, set, 2)
+	res, err = FillJudgeCache(ctx, cache, j, "m", scs, set, 2)
 	if err != nil || res.Filled != 2 || res.Remaining != 1 || res.Usage.InputTokens != 20 || j.calls != 2 {
 		t.Fatalf("capped fill: %+v %v", res, err)
 	}
-	res, err = FillJudgeCache(ctx, cache, j, scs, set, 10)
+	res, err = FillJudgeCache(ctx, cache, j, "m", scs, set, 10)
 	if err != nil || res.Cached != 2 || res.Filled != 1 || res.Remaining != 0 || j.calls != 3 {
 		t.Fatalf("resumed fill: %+v %v", res, err)
 	}
 	if !strings.Contains(res.String(), "3 entries: 2 cached, 0 stale, 1 filled, 0 remaining") {
 		t.Errorf("summary %q", res.String())
 	}
+	if e, ok, err := cache.Lookup(seed, set.Entries[0].Text); !ok || err != nil || e.Model != "m" {
+		t.Errorf("filled entry: %+v ok=%v err=%v", e, ok, err)
+	}
 
 	// A stale entry is refilled.
 	changed := seed
 	changed.Description += " (edited)"
-	res, err = FillJudgeCache(ctx, cache, j, map[string]Scenario{seed.Name: changed}, set, 10)
+	res, err = FillJudgeCache(ctx, cache, j, "m", map[string]Scenario{seed.Name: changed}, set, 10)
 	if err != nil || res.Stale != 3 || res.Filled != 3 {
 		t.Errorf("stale refill: %+v %v", res, err)
 	}
@@ -441,14 +469,21 @@ func TestFillJudgeCache(t *testing.T) {
 	// An entry for a scenario that is not committed is refused before any call.
 	j = &fakeMetered{}
 	bad := AmbiguousSet{Entries: []AmbiguousText{{Scenario: "learned-room-123", Text: "secret"}}}
-	if _, err := FillJudgeCache(ctx, cache, j, scs, bad, 10); err == nil || j.calls != 0 {
+	if _, err := FillJudgeCache(ctx, cache, j, "m", scs, bad, 10); err == nil || j.calls != 0 {
 		t.Errorf("unknown scenario: err=%v calls=%d", err, j.calls)
+	}
+
+	// A text the tri-state pass does not find ambiguous is refused too: only
+	// the ambiguous corpus set may reach the cache.
+	clear := AmbiguousSet{Entries: []AmbiguousText{{Scenario: seed.Name, Text: "The consumer has a bug."}}}
+	if _, err := FillJudgeCache(ctx, cache, j, "m", scs, clear, 10); err == nil || !strings.Contains(err.Error(), "does not find the text ambiguous") || j.calls != 0 {
+		t.Errorf("clear text: err=%v calls=%d", err, j.calls)
 	}
 
 	// A judge failure stops the fill with what it did so far.
 	j = &fakeMetered{err: errors.New("boom")}
 	fresh := NewJudgeCache(t.TempDir())
-	if res, err := FillJudgeCache(ctx, fresh, j, scs, set, 10); err == nil || res.Filled != 0 {
+	if res, err := FillJudgeCache(ctx, fresh, j, "m", scs, set, 10); err == nil || res.Filled != 0 {
 		t.Errorf("judge failure: %+v %v", res, err)
 	}
 }

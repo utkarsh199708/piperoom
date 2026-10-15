@@ -28,6 +28,9 @@ func runJudgeFill(f flags, stdout io.Writer) (int, error) {
 	if f.judgeCache == "" {
 		return 1, errors.New("-judge-fill needs -judge-cache")
 	}
+	if err := committedFillInputs(f.scenarios, f.judgeFill); err != nil {
+		return 1, err
+	}
 	set, err := evals.LoadAmbiguousSet(f.judgeFill)
 	if err != nil {
 		return 1, err
@@ -68,8 +71,8 @@ func runJudgeFill(f flags, stdout io.Writer) (int, error) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	res, err := evals.FillJudgeCache(ctx, cache, judge, scs, set, f.maxCalls)
-	fmt.Fprintf(stdout, "judge fill (%s, prompt %s, cache %s): %s\n", f.judgeFill, evals.JudgePromptVersion, f.judgeCache, res)
+	res, err := evals.FillJudgeCache(ctx, cache, judge, model, scs, set, f.maxCalls)
+	fmt.Fprintf(stdout, "judge fill (%s, prompt %s, model %s, cache %s): %s\n", f.judgeFill, evals.JudgePromptVersion, model, f.judgeCache, res)
 	if f.dryRun {
 		fmt.Fprintf(stdout, "dry run: %d judge call(s) needed, about %d input and %d output tokens on %s%s\n",
 			res.Remaining, res.EstInputTokens, res.EstOutputTokens, model, costNote(prices, model, res.EstInputTokens, res.EstOutputTokens))
@@ -83,6 +86,31 @@ func runJudgeFill(f flags, stdout io.Writer) (int, error) {
 		return 1, err
 	}
 	return 0, nil
+}
+
+// committedFillInputs refuses a fill from anything but the repository's own
+// inputs: the -scenarios directory must be an evals/scenarios directory and
+// the manifest its sibling judgecache/ambiguous.json, so private scenarios or
+// an ad-hoc text list can never be written to the public cache.
+// (FillJudgeCache also refuses any text the tri-state pass does not find
+// ambiguous.)
+func committedFillInputs(scenarios, manifest string) error {
+	sd, err := filepath.Abs(scenarios)
+	if err != nil {
+		return fmt.Errorf("-scenarios: %w", err)
+	}
+	md, err := filepath.Abs(manifest)
+	if err != nil {
+		return fmt.Errorf("-judge-fill: %w", err)
+	}
+	evalsDir := filepath.Dir(sd)
+	if filepath.Base(sd) != "scenarios" || filepath.Base(evalsDir) != "evals" {
+		return fmt.Errorf("-judge-fill reads only the committed scenarios (evals/scenarios), not %s", scenarios)
+	}
+	if want := filepath.Join(evalsDir, filepath.FromSlash(strings.TrimPrefix(evals.DefaultAmbiguousSetPath, "evals/"))); md != want {
+		return fmt.Errorf("-judge-fill takes only the committed manifest %s, not %s", evals.DefaultAmbiguousSetPath, manifest)
+	}
+	return nil
 }
 
 // costNote prices an estimate when the table knows the model.

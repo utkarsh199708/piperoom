@@ -269,7 +269,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if opts.Effort == "" {
 		opts.Effort = cfg.Effort
 	}
-	judgeClient, err := liveJudge(f, scenarios, stderr)
+	judgeClient, err := liveJudge(f, scenarios)
 	if err != nil {
 		return 1, err
 	}
@@ -390,22 +390,23 @@ func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 }
 
 // liveJudge builds the live LLM judge a run needs. -judge claude (or a
-// scenario's judge: claude) must have it; -judge auto uses it on a cache miss
-// when the build has it, and without it reports such a hypothesis ambiguous
-// (unjudged), with a note here, rather than failing the whole run.
-func liveJudge(f flags, scenarios []evals.Scenario, stderr io.Writer) (evals.HypothesisJudge, error) {
+// scenario's judge: claude) must have it, and so must -judge auto (the
+// default) unless it may make no live call (-judge-cache-only, or
+// -judge-max-calls 0 or less). Without it evalrun refuses to start: in a build
+// without -tags claude every ambiguous live hypothesis would otherwise count
+// as unjudged and not passed, and the run would read as a regression.
+func liveJudge(f flags, scenarios []evals.Scenario) (evals.HypothesisJudge, error) {
 	needed := f.judge == evals.JudgeClaude || (f.judge == "" && anyClaudeJudge(scenarios))
 	auto := f.judge == evals.JudgeAuto || (f.judge == "" && anyAutoJudge(scenarios))
 	if !needed && (!auto || f.cacheOnly || f.maxCalls <= 0) {
 		return nil, nil
 	}
 	j, err := newJudge(f.judgeModel)
-	if err != nil {
-		if needed {
-			return nil, err
-		}
-		fmt.Fprintf(stderr, "note: no live judge (%v): -judge auto grades ambiguous hypotheses only from %s; one without a recorded verdict is reported ambiguous (unjudged) and counts as not passed\n", err, orNone(f.judgeCache))
-		return nil, nil
+	switch {
+	case err != nil && needed:
+		return nil, err
+	case err != nil:
+		return nil, fmt.Errorf("-judge auto (the default) needs the live LLM judge for ambiguous hypotheses without a recorded verdict in %s, and this build has none (%w): build with -tags claude, or pass -judge terms for the keyword grade only (-judge-cache-only fails the run on a miss; -judge-max-calls 0 reports such hypotheses ambiguous (unjudged), not passed)", orNone(f.judgeCache), err)
 	}
 	return j, nil
 }
