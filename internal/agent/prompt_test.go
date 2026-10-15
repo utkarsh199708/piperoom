@@ -341,7 +341,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"what_changed", "update_hypothesis", "pg_replication_slots", "connect_status", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "propose_fix", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "connect_status", "update_hypothesis", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "propose_fix", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
@@ -737,6 +737,18 @@ func TestSystemPromptCarriesE6aRules(t *testing.T) {
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
+		}
+	}
+	// Method rules a trim must not drop: evidence is cited by step id (F3
+	// receipts and the eval's cited-fact checks rest on it) and a component is
+	// confirmed with its own read before it is blamed.
+	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
+	for _, want := range []string{
+		`Cite evidence by step id (e.g. "connect_status (s_3): task 0 FAILED"); do not assert what a tool did not return`,
+		"confirm a component with its own read before blaming it",
+	} {
+		if !strings.Contains(method, want) {
+			t.Errorf("method section missing %q", want)
 		}
 	}
 	// The pause rule refines the resume checks; it must not replace them.
