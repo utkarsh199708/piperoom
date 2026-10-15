@@ -57,10 +57,12 @@ func TestRowRecordsPlaceholderAndPK(t *testing.T) {
 	if _, _, err := db.Row(ctx, "analytics.orders", "id", "o-1001"); err != nil {
 		t.Fatal(err)
 	}
-	calls := rec.Calls()
-	if len(calls) != 1 {
-		t.Fatalf("calls = %+v", calls)
+	// Row first looks up the stored key name (SHOW PRIMARY KEYS), then reads.
+	all := rec.Calls()
+	if len(all) != 2 || !strings.HasPrefix(all[0].Text, "SHOW PRIMARY KEYS") {
+		t.Fatalf("calls = %+v", all)
 	}
+	calls := all[1:]
 	if calls[0].Text != `SELECT * FROM "ANALYTICS"."ORDERS" WHERE "ID" = ? LIMIT 1` || strings.Contains(calls[0].Text, "o-1001") {
 		t.Fatalf("text = %q", calls[0].Text)
 	}
