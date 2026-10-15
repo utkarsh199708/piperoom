@@ -146,3 +146,32 @@ func TestTraceGroupForErrors(t *testing.T) {
 		})
 	}
 }
+
+// Two source tables with one name in different schemas both matched the sink
+// of that name, so archive.orders read analytics.orders' row (#416 review
+// round 2). The name tells nothing then: the stage is unknown.
+func TestTraceSameNameSourcesHaveNoSink(t *testing.T) {
+	o := testOwners()
+	o.Pipelines[0].SourceTables = []string{"public.orders", "archive.orders"}
+	o.Pipelines[0].SinkTables = []string{"analytics.orders"}
+	b := NewBuilder(
+		o,
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders,archive.orders"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+		},
+		&fakeKafka{
+			findByKey: map[string][]clients.RecordRef{"pg.archive.orders": {{Key: "7", Partition: 0, Offset: 3}}},
+			lags:      map[string]clients.GroupLag{"order-sync": {State: "Stable", Partitions: []clients.PartitionLag{{Topic: "pg.archive.orders", Partition: 0, Committed: 4}}}},
+		},
+		&fakeSource{rows: map[string]map[string]any{"archive.orders|7": {"id": "7", "updated_at": time.Now().Format(time.RFC3339Nano)}}},
+		&fakeWarehouse{rows: map[string]map[string]any{"analytics.orders|7": {"id": "7"}}},
+	)
+	stages, err := b.Trace(context.Background(), "orders", "archive.orders", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := stages[4]; w.Status != "unknown" || w.Facts["error"] != "no matching sink table" {
+		t.Fatalf("warehouse stage = %+v, want unknown (no matching sink table)", w)
+	}
+}

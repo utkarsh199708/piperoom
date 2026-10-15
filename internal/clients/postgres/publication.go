@@ -138,8 +138,9 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	var sb strings.Builder
 	args := []any{publication, role}
 	sb.WriteString(`
+		WITH ` + publishedCTEs + `
 		SELECT v.schemaname, v.tablename,
-		       (` + publishedMember("c.oid") + `) AS in_publication,
+		       (c.oid IS NOT NULL AND ` + publishedMember("c.oid") + `) AS in_publication,
 		       (c.oid IS NOT NULL AND has_table_privilege($2::name, c.oid, 'SELECT')) AS selectable
 		FROM (VALUES `)
 	for i := range sources {
@@ -174,25 +175,42 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	return out, nil
 }
 
-// publishedMember is a boolean SQL expression: the relation rel (an oid
-// expression, never input) is in publication $1. Every leaf partition of rel,
-// or rel itself when it is not partitioned, must be listed in
-// pg_publication_tables, itself or through a listed partition ancestor. A
-// publication that lists only some leaves leaves the others' rows unpublished,
-// so the table is not a member (#400 review). pg_partition_tree is empty for a
-// table outside a partition tree, and pg_partition_ancestors (PG 12+) includes
-// the relation itself.
+// publishedCTEs reads publication $1 once (#416 review: a membership check
+// per row and per leaf passed the 10 s deadline at about 150 partitions):
+//   - listed: the relations pg_publication_tables lists;
+//   - covered: the listed relations and every partition under them, so a
+//     leaf is published when it is in covered.
+//
+// pg_partition_tree is empty for a table outside a partition tree, hence the
+// union with listed itself.
+const publishedCTEs = `listed AS MATERIALIZED (
+			SELECT DISTINCT lc.oid
+			FROM pg_publication_tables lpt
+			JOIN pg_namespace ln ON ln.nspname = lpt.schemaname
+			JOIN pg_class lc ON lc.relnamespace = ln.oid AND lc.relname = lpt.tablename
+			WHERE lpt.pubname = $1),
+		covered AS MATERIALIZED (
+			SELECT oid FROM listed
+			UNION
+			SELECT t.relid FROM listed l, pg_partition_tree(l.oid) t)`
+
+// publishedMember is a boolean SQL expression over publishedCTEs: the
+// relation rel (a non-NULL oid expression, never input) is in the
+// publication. Every publishable leaf partition of rel, or rel itself when it
+// has no leaf, must be covered. A publication that lists only some leaves
+// leaves the others' rows unpublished, so the table is not a member (#400
+// review). Unlogged and foreign leaves are never published, so they do not
+// count. A partitioned table with no partition has nothing listed under
+// publish_via_partition_root = false and reads as not a member, as before;
+// it can hold no rows.
 func publishedMember(rel string) string {
-	return rel + ` IS NOT NULL AND NOT EXISTS (
-		SELECT 1 FROM (
-			SELECT relid FROM pg_partition_tree(` + rel + `) WHERE isleaf
-			UNION ALL
-			SELECT ` + rel + ` WHERE NOT EXISTS (SELECT 1 FROM pg_partition_tree(` + rel + `) WHERE isleaf)
-		) AS leaf(oid)
-		WHERE NOT EXISTS (
-			SELECT 1 FROM pg_publication_tables mpt
-			JOIN pg_namespace mpn ON mpn.nspname = mpt.schemaname
-			JOIN pg_class mpc ON mpc.relnamespace = mpn.oid AND mpc.relname = mpt.tablename
-			WHERE mpt.pubname = $1
-			  AND (mpc.oid = leaf.oid OR mpc.oid IN (SELECT relid FROM pg_partition_ancestors(leaf.oid)))))`
+	return `NOT EXISTS (
+			SELECT 1 FROM (
+				SELECT t.relid FROM pg_partition_tree(` + rel + `) t
+				JOIN pg_class tc ON tc.oid = t.relid
+				WHERE t.isleaf AND tc.relkind = 'r' AND tc.relpersistence = 'p'
+				UNION ALL
+				SELECT ` + rel + ` WHERE NOT EXISTS (SELECT 1 FROM pg_partition_tree(` + rel + `) WHERE isleaf)
+			) AS leaf(oid)
+			WHERE NOT EXISTS (SELECT 1 FROM covered cv WHERE cv.oid = leaf.oid))`
 }

@@ -201,12 +201,18 @@ var errNoGroup = errors.New("no consumer group of the pipeline reads the topic")
 // pipeline with one source table, else the one sink with the same table name
 // (#401). Unlike reconcile_counts, a trace has no sink_table override, so a
 // lone sink of a pipeline with several source tables is not assumed to hold
-// every table's rows.
+// every table's rows, and a name two source tables share (public.orders,
+// archive.orders) tells nothing.
 func sinkFor(source string, sources, sinks []string) (string, error) {
 	if len(sources) == 1 && len(sinks) == 1 {
 		return sinks[0], nil
 	}
 	name := source[strings.LastIndex(source, ".")+1:]
+	for _, s := range sources {
+		if s != source && s[strings.LastIndex(s, ".")+1:] == name {
+			return strings.Join(sinks, ","), errNoSink
+		}
+	}
 	var match []string
 	for _, s := range sinks {
 		if s[strings.LastIndex(s, ".")+1:] == name {

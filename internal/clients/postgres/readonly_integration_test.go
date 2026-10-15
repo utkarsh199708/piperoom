@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -126,5 +127,94 @@ func TestPublicationPartitionedTableIntegration(t *testing.T) {
 				t.Fatalf("got %+v other=%d; want in_publication=%v other=%d", got, other, tc.member, tc.wantOther)
 			}
 		})
+	}
+}
+
+// A year of daily partitions must not time the tool out: the membership and
+// other-member queries read the publication once (#416 review round 2, where
+// a per-row membership check passed the 10 s deadline at about 150
+// partitions). Both publish_via_partition_root settings are checked, since
+// false lists every leaf.
+func TestPublicationManyPartitionsIntegration(t *testing.T) {
+	cfg := testenv.Require(t)
+	db := sourceDB(t)
+	conn := writeConn(t, cfg.SourceDBURL)
+	const partitions = 365
+	for _, viaRoot := range []string{"false", "true"} {
+		t.Run("publish_via_partition_root="+viaRoot, func(t *testing.T) {
+			table := testenv.Name("many")
+			pub := table + "_pub"
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			t.Cleanup(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_, _ = conn.Exec(ctx, "DROP PUBLICATION IF EXISTS "+pub)
+				_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+table)
+			})
+			if _, err := conn.Exec(ctx, "CREATE TABLE public."+table+" (id int, k int, PRIMARY KEY (id, k)) PARTITION BY LIST (k)"); err != nil {
+				t.Fatalf("create table: %v", err)
+			}
+			// table is testenv.Name output (it_many_<hex>): a safe identifier.
+			if _, err := conn.Exec(ctx, `DO $$ BEGIN FOR i IN 1..`+strconv.Itoa(partitions)+` LOOP
+				EXECUTE format('CREATE TABLE public.%I PARTITION OF public.%I FOR VALUES IN (%s)', '`+table+`_' || i, '`+table+`', i);
+			END LOOP; END $$`); err != nil {
+				t.Fatalf("create partitions: %v", err)
+			}
+			if _, err := conn.Exec(ctx, "CREATE PUBLICATION "+pub+" FOR TABLE public."+table+" WITH (publish_via_partition_root = "+viaRoot+")"); err != nil {
+				t.Fatalf("create publication: %v", err)
+			}
+
+			start := time.Now()
+			got, other, err := db.PublicationSourceTables(context.Background(), pub, "piperoom", []string{"public." + table})
+			took := time.Since(start)
+			if err != nil {
+				t.Fatalf("PublicationSourceTables after %s: %v", took, err)
+			}
+			t.Logf("%d partitions: PublicationSourceTables took %s", partitions, took)
+			if len(got) != 1 || !got[0].InPublication || other != 0 {
+				t.Fatalf("got %+v other=%d; want the table in the publication and no other member", got, other)
+			}
+			if took > 2*time.Second {
+				t.Fatalf("PublicationSourceTables took %s for %d partitions; want well under the 10 s deadline", took, partitions)
+			}
+		})
+	}
+}
+
+// FOR ALL TABLES never publishes an unlogged partition, so a root whose
+// other leaves are all listed is a member: it must not read as missing (and
+// lead to ALTER PUBLICATION ... ADD TABLE, which fails on such a
+// publication). #416 review round 2.
+func TestPublicationAllTablesUnloggedLeafIntegration(t *testing.T) {
+	cfg := testenv.Require(t)
+	db := sourceDB(t)
+	conn := writeConn(t, cfg.SourceDBURL)
+	table := testenv.Name("unlogged")
+	pub := table + "_pub"
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP PUBLICATION IF EXISTS "+pub)
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+table)
+	})
+	for _, stmt := range []string{
+		"CREATE TABLE public." + table + " (id int, k int, PRIMARY KEY (id, k)) PARTITION BY LIST (k)",
+		"CREATE TABLE public." + table + "_a PARTITION OF public." + table + " FOR VALUES IN (1)",
+		"CREATE UNLOGGED TABLE public." + table + "_u PARTITION OF public." + table + " FOR VALUES IN (2)",
+		"CREATE PUBLICATION " + pub + " FOR ALL TABLES",
+	} {
+		if _, err := conn.Exec(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	got, _, err := db.PublicationSourceTables(context.Background(), pub, "piperoom", []string{"public." + table})
+	if err != nil {
+		t.Fatalf("PublicationSourceTables: %v", err)
+	}
+	if len(got) != 1 || !got[0].InPublication {
+		t.Fatalf("got %+v; want the table in the publication", got)
 	}
 }
