@@ -253,6 +253,15 @@ describe('the receiver reads the summary before accepting (F2a: inline card)', (
     expect(accept).toHaveBeenCalledTimes(2)
   })
 
+  it('Not yet moves focus to the card toggle instead of dropping it to <body>', () => {
+    render(<HandoffAcceptBanner state={state} user={me} actions={actions} />)
+    const card = screen.getByRole('region', { name: /Shift 1/ })
+    const notYet = within(card).getByRole('button', { name: 'Not yet' })
+    act(() => notYet.focus())
+    fireEvent.click(notYet)
+    expect(document.activeElement).toBe(within(card).getByRole('button', { name: 'Shift 1 summary' }))
+  })
+
   it('"Read summary" focus on the card opens it again', () => {
     render(<HandoffAcceptBanner state={state} user={me} actions={actions} />)
     const card = screen.getByRole('region', { name: /Shift 1/ })

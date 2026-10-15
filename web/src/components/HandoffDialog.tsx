@@ -181,6 +181,11 @@ export function HandoffAcceptBanner({
   const [acceptingId, setAcceptingId] = useState<string | null>(null)
   if (!pending) return null
   const open = mine ? closedId !== mine.handoff_id : undefined
+  // Collapsing hides the focused button; hand focus to the card's own toggle so it is not dropped to <body>.
+  const notYet = (id: string) => {
+    setClosedId(id)
+    document.getElementById(HANDOFF_READ_ID)?.querySelector<HTMLElement>('button[aria-expanded]')?.focus()
+  }
   const accepting = !!mine && acceptingId === mine.handoff_id
   const accept = () => {
     if (!mine || accepting) return
@@ -228,7 +233,7 @@ export function HandoffAcceptBanner({
                     <PersonName person={mine.from} /> stays in the room as a watcher.
                   </p>
                 )}
-                <Button type="button" variant="ghost" onClick={() => setClosedId(mine.handoff_id)}>
+                <Button type="button" variant="ghost" onClick={() => notYet(mine.handoff_id)}>
                   Not yet
                 </Button>
                 <Button
