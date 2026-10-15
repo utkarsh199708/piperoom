@@ -70,8 +70,8 @@ alert:
     2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
     3 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
     4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
-    5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=1480221 state=Stable
-    6 wh:analytics.orders [warehouse, owner meera] WARN stale_for=41m ts_column=updated_at
+    5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=1481201 state=Stable
+    6 wh:analytics.orders [warehouse, owner meera] WARN stale_for=40m ts_column=updated_at
 
 recordings:
   - tool: pipeline_map
@@ -82,8 +82,8 @@ recordings:
       2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
       3 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
       4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
-      5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=1480221 state=Stable
-      6 wh:analytics.orders [warehouse, owner meera] WARN stale_for=41m ts_column=updated_at
+      5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=1481201 state=Stable
+      6 wh:analytics.orders [warehouse, owner meera] WARN stale_for=40m ts_column=updated_at
   - tool: connect_list_connectors
     summary: |-
       pg-orders-connector (source): RUNNING, 0 failed tasks
@@ -156,7 +156,7 @@ recordings:
   - tool: kafka_consumer_lag
     input: {group: connect-wh-orders-sink}
     summary: |-
-      connect-wh-orders-sink: Stable, 2 members, total lag 1480221
+      connect-wh-orders-sink: Stable, 2 members, total lag 1481201
         pg.public.orders/1: committed 50700011, end 51198902, lag 498891
         pg.public.orders/0: committed 50711806, end 51206447, lag 494641
         pg.public.orders/2: committed 50723691, end 51211360, lag 487669
@@ -176,7 +176,7 @@ recordings:
   - tool: warehouse_freshness
     input: {table: analytics.orders, ts_column: updated_at}
     summary: |-
-      newest=2026-10-14T10:00:12Z (stale for 41m)
+      newest=2026-10-14T10:00:12Z (stale for 40m)
   - tool: warehouse_load_errors
     input: {table: analytics.orders}
     summary: |-
@@ -241,11 +241,19 @@ inputs:
 expect:
   root_cause:
     - ['risk score', 'risk_score']
-    - [missing, absent, 'not exist*', 'invalid identifier', 'no column', 'not added', 'not applied', 'has no', lacks, unknown]
+    # Not a bare "unknown": "the converter cannot deserialize the unknown field risk_score" is
+    # the trap story.
+    - [missing, absent, 'not exist*', 'invalid identifier', 'no column', 'not added', 'not applied', 'has no', lacks, 'unknown column', 'unknown identifier', 'not have', 'does not have', "doesn't have"]
   # The trap story: an incompatible schema change. A negated clause ("the change is not
-  # incompatible") does not fire.
+  # incompatible") does not fire. Phrases, not [incompatible, schema]: "nothing incompatible in
+  # the schema" is right, and "nothing" is no negator in forbidden.go.
   root_cause_forbidden:
-    - [incompatible, schema]
+    - [schema, 'is incompatible']
+    - ['incompatible schema']
+    - ['incompatible change']
+    - ['was incompatible']
+    - ['as incompatible']
+    - ['incompatible with']
     - [breaking, schema]
   first_failing_layer: kafka-connect
   root_cause_layer: warehouse

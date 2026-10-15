@@ -262,7 +262,17 @@ expect:
     - [sink, wh-orders-sink, connector]
     # The pipeline map already says state=PAUSED, so the cause is that a
     # person paused it on purpose, not that it is paused.
-    - [deliberate*, intentional*, manual*, 'on purpose', 'paused by', 'by meera', someone, 'by a person', 'by hand', operator, maintenance, backfill, migration]
+    - [deliberate*, intentional*, manual*, 'on purpose', 'paused by', 'by meera', 'meera paused', 'she paused', someone, 'by a person', 'by hand', operator, maintenance, backfill, migration]
+  # The trap: the connector paused itself after errors. Nothing failed.
+  root_cause_forbidden:
+    - [paus*, itself]
+    - [paus*, automatic*]
+    # Phrases: "paused on purpose, with 0 errors" is right.
+    - ['paused after errors']
+    - ['paused after write errors']
+    - ['errors caused the pause']
+    - [paus*, 'because of errors']
+    - [paus*, 'due to errors']
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   # Who paused it, and why, is only in Meera's comment.

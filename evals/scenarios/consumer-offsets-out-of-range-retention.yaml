@@ -247,12 +247,18 @@ inputs:
 expect:
   root_cause:
     - [retention, 'log start', 'aged out', 'deleted by retention']
-    - [lost, loss*, deleted, 'aged out']
+    - [lost, loss*, delet*, 'aged out', expir*, purg*, removed]
   # "Set the group to start from latest" is the named trap (Kabir's comment):
   # it skips the remaining 48 h as well. A negated clause ("do not reset to
   # latest") does not fire.
+  # The header's other trap, "the schema change broke the consumer", is a wrong story a
+  # list answer would also tell.
   root_cause_forbidden:
     - [reset*, latest]
+    - [loyalty_tier, broke]
+    - [loyalty_tier, break*]
+    - ['schema change', broke]
+    - ['schema change', break*]
   first_failing_layer: kafka
   root_cause_layer: kafka
   # The log start of every partition is above order-sync's committed offset,
