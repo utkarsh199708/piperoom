@@ -61,19 +61,13 @@ func (d *DB) Close() {
 // ReplicationSlots lists replication slots with the retained WAL size and the
 // safe_wal_size left before the slot is invalidated (PG13+, like wal_status).
 // A physical slot (a standby's) is listed with an empty Plugin: it holds WAL
-// too, and its NULL plugin must not fail the whole read.
+// too, and its NULL plugin must not fail the whole read. On a hot standby the
+// retained WAL is measured from the received or replayed position (walHead).
 func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
-	rows, err := d.query(ctx, `
-		SELECT slot_name, COALESCE(plugin, ''), active,
-		       COALESCE(restart_lsn::text, ''),
-		       COALESCE(confirmed_flush_lsn::text, ''),
-		       COALESCE(wal_status, ''),
-		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0),
-		       safe_wal_size
-		FROM pg_replication_slots
+	rows, err := d.query(ctx, slotColumns+`
 		ORDER BY slot_name`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list replication slots: %w", err)
