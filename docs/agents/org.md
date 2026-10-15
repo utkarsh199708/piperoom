@@ -163,3 +163,7 @@ tokenizers change corpus-first: a regression found by example texts is fixed by 
 package's corpus or golden test, then changing rules. No such change merges if it flips a text that `main` grades
 or masks correctly; it may fix texts the corpus lists as known gaps. A ticket whose fix cannot meet that bar with
 rules alone is split out of its PR and redone after the matcher work it depends on (#384 → #332 after #395).
+Reviewers classify each finding against `main`: a defect the PR introduces blocks; a defect `main` has too is a
+known gap, which blocks only when a ticket the PR closes names that exact case, and otherwise is pinned as a gap row
+plus a follow-up ticket (#415 → #455). Negation and denial in eval answers are scored by keyword pass + LLM judge for
+the ambiguous ones, with a recorded verdict cache (#454); the hand-written negation heuristics are frozen.
