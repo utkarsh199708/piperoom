@@ -107,6 +107,9 @@ type fakeRoomSvc struct {
 	infoOK      bool
 	gotEvidence string
 	gotIncident bool
+	// Q3.
+	keys, flags     []string
+	keysOK, flagsOK bool
 }
 
 func (f *fakeRoomSvc) OpenAlertRoom(_ context.Context, a alertin.Alert) (room.RoomSnapshot, bool, error) {
@@ -431,4 +434,13 @@ func TestWatcherTargetsCountsTheWatchedPipelines(t *testing.T) {
 	if n := w.Targets(); n != 1 {
 		t.Fatalf("targets = %d, want 1", n)
 	}
+}
+
+// Q3: room keys and title flags.
+func (f *fakeRoomSvc) RoomSignalKeys(id string) ([]string, bool) {
+	return f.keys, f.keysOK && id == "r_1"
+}
+
+func (f *fakeRoomSvc) RoomTitleFlags(id string) ([]string, bool) {
+	return f.flags, f.flagsOK && id == "r_1"
 }

@@ -18,6 +18,7 @@ import (
 	"piperoom/internal/notify"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
+	"piperoom/internal/watch"
 )
 
 // Paging (Q0, QA G2): owner.paged asks the owners of one layer to look at the
@@ -132,6 +133,9 @@ type roomFacts struct {
 	// autoPaged is set by an owner.paged with auto: the server's own page is
 	// written once per room, and the log says whether it was.
 	autoPaged bool
+	// signalKeys are the sorted incident keys of the watcher evidence in
+	// room.created.alert and in the system's notes (RoomSignalKeys).
+	signalKeys []string
 }
 
 // foldRoomFacts is Apply's Q1 step: the snapshot's pages and the room facts.
@@ -144,6 +148,14 @@ func foldRoomFacts(snap *RoomSnapshot, e events.Event) {
 			snap.facts.alertLabelLayer = labelLayer(p.Alert)
 			if p.AlertSource == string(alertin.Watcher) {
 				snap.facts.alertSignal, snap.facts.alertWriters, snap.facts.alertLayer = firstWatcherSignal(p.Alert)
+				snap.facts.signalKeys = mergeKeys(snap.facts.signalKeys, watch.EvidenceKeys(p.Alert))
+			}
+		}
+	case events.AgentMessage:
+		// Only the service writes system notes, so people cannot add keys.
+		if e.Actor.Kind == events.ActorSystem {
+			if p, ok := decode[incidentNotePayload](e); ok {
+				snap.facts.signalKeys = mergeKeys(snap.facts.signalKeys, p.SignalKeys)
 			}
 		}
 	case events.OwnerPaged:
@@ -166,6 +178,16 @@ func foldRoomFacts(snap *RoomSnapshot, e events.Event) {
 	if countsAsActivity(e) {
 		snap.facts.lastActivity = e.At
 	}
+}
+
+// mergeKeys returns the sorted union of a and b in a new slice (Apply is pure).
+func mergeKeys(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	out := slices.Concat(a, b)
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // withPage returns pages with pg as the newest page of its layer, at the end

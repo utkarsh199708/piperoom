@@ -55,6 +55,8 @@ type watchRoomService interface {
 	PostRoomNote(ctx context.Context, roomID, text string) error
 	// Q1: room info, evidence and incident joins (watch_q1.go).
 	watchIncidentService
+	// Q3: room keys and title flags (watch_q3.go).
+	watchQ3Service
 }
 
 // watchRooms adapts the room service to watch.RoomSink. It only translates
