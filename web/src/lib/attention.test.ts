@@ -43,6 +43,7 @@ describe('attentionItems', () => {
       summary: { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] },
       stay_as_watcher: false,
       status: 'pending' as const,
+      from: { kind: 'human' as const, id: 'arjun', name: 'Arjun' }, created_at: '2026-10-14T10:05:00Z',
     }
     const next = { ...prev, handoffs: [h] }
     expect(attentionItems(prev, next, meera)[0]).toMatchObject({ kind: 'handoff' })

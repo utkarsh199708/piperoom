@@ -129,7 +129,7 @@ func TestFirstUserMessageTriageBlock(t *testing.T) {
 }
 
 func TestSystemPromptMentionsFirstLook(t *testing.T) {
-	if !strings.Contains(systemPrompt(), "A first look is a hint, verify it; do not repeat a read it already shows unless the numbers may have changed.") {
+	if !strings.Contains(systemPrompt(), "A first look (triage) is a hint, verify it; do not repeat a read it already shows unless the numbers may have changed.") {
 		t.Fatal("system prompt lacks the first-look line")
 	}
 }

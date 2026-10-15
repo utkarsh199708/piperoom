@@ -554,6 +554,17 @@ member; with several connections, the earliest among those in the winning state)
 `away 12m` from it, never from a client-measured time.
 Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
 
+Stale position (#287): `after` greater than the last seq of the room's stored event log would start the stream past
+the log head and skip the events in between, so the server refuses it. The server checks the store, never a cached
+room snapshot, which can trail an append in flight or another replica. It accepts the upgrade (a browser cannot read the status of a
+refused upgrade), sends one frame `{ "type": "error", "error": { "code": "stale_position", "message": "after N is past
+the room's last event M" } }` and closes with status 1008 and close reason `stale_position`. Nothing is replayed. The
+client drops its room state and reconnects with `after=0` (full replay), once, silently; the error frame is shown only
+on a second `stale_position` in a row (which `after=0` cannot cause, so it means a client bug), not retried. Clients
+tell this close apart by its reason, like `session_expired` and `room deleted`: the other 1008 closes (`replay
+timeout`, `read timeout`, `send buffer full`) keep reconnecting with the highest seen seq. `after` that is not a
+non-negative integer still answers `400 bad_request` before the upgrade.
+
 Room deleted: when an admin deletes the room, each open connection gets one last frame
 `{ "type": "event", "event": { "room_id": "r_…", "seq": <last_seq + 1>, "type": "room.deleted", "actor": <the admin>, "payload": { "reason": "…" }, "at": "…" } }`
 and is then closed with status 1000 and close reason `room deleted`. That event is never stored; a reconnect gets `404`.

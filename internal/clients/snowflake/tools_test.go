@@ -136,7 +136,7 @@ func TestWarehouseRowToolOnSnowflake(t *testing.T) {
 	fq := &fakeQuerier{rows: &fakeRows{
 		cols: []string{"ID", "AMOUNT", "UPDATED_AT"},
 		data: [][]any{{"7", "19.99", time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}},
-	}}
+	}, showRows: pkRows("ID")}
 	tt := snowflakeTool(t, fq, "warehouse_row")
 	res, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"7"}`))
 	if err != nil {
@@ -154,5 +154,29 @@ func TestWarehouseRowToolOnSnowflake(t *testing.T) {
 	}
 	if _, ok := data["amount"]; ok {
 		t.Errorf("data = %v, want non-timestamp columns dropped", data)
+	}
+}
+
+func pkRows(col string) *fakeRows {
+	return &fakeRows{
+		cols: []string{"created_on", "column_name", "key_sequence"},
+		data: [][]any{{"t", col, "1"}},
+	}
+}
+
+// Issue #364: on Snowflake warehouse_row must refuse a lookup by a column that
+// is not the primary key, and must not run the row query at all.
+func TestWarehouseRowToolRefusesNonKeyColumn(t *testing.T) {
+	fq := &fakeQuerier{
+		rows:     &fakeRows{cols: []string{"ID", "EMAIL"}, data: [][]any{{"7", "a@b.c"}}},
+		showRows: pkRows("ID"),
+	}
+	tt := snowflakeTool(t, fq, "warehouse_row")
+	_, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"analytics.orders","pk_column":"email","key":"a@b.c"}`))
+	if !errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("err = %v, want ErrBadInput", err)
+	}
+	if fq.lastQuery != "" {
+		t.Fatalf("row query reached the driver: %q", fq.lastQuery)
 	}
 }

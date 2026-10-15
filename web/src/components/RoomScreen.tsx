@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { exportRoom, isFixtures } from '../api/client'
-import { errorText } from '../lib/errors'
+import { downloadText, exportErrorText } from '../lib/postmortem'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useMediaQuery } from '../hooks/useMediaQuery'
@@ -45,7 +45,9 @@ import { HypothesisCard } from './room/HypothesisCard'
 import { usePeople } from '../hooks/usePeople'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
 import { RoomError } from './room/RoomError'
-import { RoomHeader } from './room/RoomHeader'
+import { ClosedRoomActions, RoomHeader } from './room/RoomHeader'
+import { PinnedHandoffs } from './room/PinnedHandoffs'
+import { PostmortemDialog } from './room/PostmortemDialog'
 import { RoomSkeleton } from './room/RoomSkeleton'
 import { ReplayProgress } from './room/ReplayProgress'
 import { SuggestionsPanel } from './room/SuggestionsPanel'
@@ -117,7 +119,7 @@ export function RoomScreen() {
     {
       approve: () => handleRef.current?.approve(),
       view: () => decisionRegistry.get()?.scrollTo(),
-      readHandoff: () => document.getElementById(HANDOFF_READ_ID)?.click(),
+      readHandoff: focusHandoff,
       steer: () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Steer the agent"]')?.focus(),
     },
     elsewhereNeedsMe,
@@ -159,6 +161,7 @@ export function RoomScreen() {
   const [closeOpen, setCloseOpen] = useState(false)
   const [closeText, setCloseText] = useState('')
   const [labelOpen, setLabelOpen] = useState(false)
+  const [postmortemOpen, setPostmortemOpen] = useState(false)
   // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
@@ -203,17 +206,9 @@ export function RoomScreen() {
     if (!roomId || exporting) return
     setExporting(true)
     exportRoom(roomId)
-      .then(({ text }) => {
-        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
-        const a = document.createElement('a')
-        a.href = url
-        a.download = `piperoom-${roomId}.json`
-        document.body.appendChild(a)
-        a.click()
-        a.remove()
-        URL.revokeObjectURL(url)
-      })
-      .catch((e: unknown) => toast.error(`Could not export the room: ${errorText(e)}`))
+      .then(({ text }) => downloadText(text, `piperoom-${roomId}.json`, 'application/json'))
+      // Only approvers, backups and auditors may export (not the driver): a 403 names the role, never the raw text.
+      .catch((e: unknown) => toast.error(exportErrorText(e, state?.pipeline_id ?? '')))
       .finally(() => setExporting(false))
   }
 
@@ -229,6 +224,8 @@ export function RoomScreen() {
       () => undefined,
     )
   }
+
+  const openPostmortem = () => setPostmortemOpen(true)
 
   useBreadcrumbTail(state?.pipeline_id) // shell breadcrumb: "Rooms › <pipeline>"
 
@@ -262,9 +259,9 @@ export function RoomScreen() {
           trace: openTrace,
           closeRoom: openClose,
           invite,
-          readHandoff: state.handoffs.some((h) => canAcceptHandoff(user, h))
-            ? () => document.getElementById(HANDOFF_READ_ID)?.click()
-            : undefined,
+          exportJson: isViewer(user) ? undefined : exportTranscript,
+          postmortem: isViewer(user) ? undefined : openPostmortem,
+          readHandoff: state.handoffs.some((h) => canAcceptHandoff(user, h)) ? focusHandoff : undefined,
         }
       : null,
   )
@@ -320,6 +317,7 @@ export function RoomScreen() {
       onSelectLayer={setLayerFilter}
     />
   )
+  const pinned = <PinnedHandoffs key={state.id} roomId={state.id} handoffs={state.handoffs} />
   const hypothesis = state.hypothesis ? (
     <HypothesisCard
       hypothesis={state.hypothesis}
@@ -409,16 +407,20 @@ export function RoomScreen() {
         >
           <span>Resolved</span>
           <span className="font-normal text-muted-foreground">{state.resolution}</span>
-          {state.labelled ? (
-            <span className="font-normal text-muted-foreground">· labelled</span>
-          ) : (
-            // A shadow room takes the F8 label only after the blind label (409 not_labelled).
-            !viewer && (!state.shadow || state.shadow_labelled) && (
-              <Button size="sm" variant="outline" className="ml-auto" onClick={() => setLabelOpen(true)}>
+          {state.labelled && <span className="font-normal text-muted-foreground">· labelled</span>}
+          <span className="ml-auto flex flex-wrap items-center gap-2 py-0.5">
+            {/* A shadow room takes the F8 label only after the blind label (409 not_labelled). */}
+            {!state.labelled && !viewer && (!state.shadow || state.shadow_labelled) && (
+              <Button size="sm" variant="outline" onClick={() => setLabelOpen(true)}>
                 Add label
               </Button>
-            )
-          )}
+            )}
+            <ClosedRoomActions
+              onExport={viewer ? undefined : exportTranscript}
+              onPostmortem={viewer ? undefined : openPostmortem}
+              exporting={exporting}
+            />
+          </span>
         </div>
       )}
       {state.shadow && (
@@ -453,6 +455,7 @@ export function RoomScreen() {
             onCloseRoom={() => setCloseOpen(true)}
             onInvite={invite}
             onExport={viewer ? undefined : exportTranscript}
+            onPostmortem={viewer ? undefined : openPostmortem}
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
             onCite={citeStep}
@@ -463,6 +466,7 @@ export function RoomScreen() {
           {wide ? (
             <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
               {lane}
+              {pinned}
               {hypothesis}
               {proposalsCard}
               {investigation}
@@ -488,6 +492,7 @@ export function RoomScreen() {
               {/* Every panel stays mounted (hidden) so half-written comments survive a tab change. */}
               <TabsContent value="investigation" forceMount hidden={tab !== 'investigation'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
                 {lane}
+                {pinned}
                 {hypothesis}
                 {similar}
                 {investigation}
@@ -550,12 +555,20 @@ export function RoomScreen() {
       {closeOpen && state.status === 'open' && (
         <CloseRoomDialog state={state} actions={actions} initialText={closeText} onClose={() => setCloseOpen(false)} />
       )}
+      {postmortemOpen && <PostmortemDialog state={state} onClose={() => setPostmortemOpen(false)} />}
       {labelOpen && state.status === 'closed' && !state.labelled && (
         <LabelDialog state={state} onSubmit={actions.label} onClose={() => setLabelOpen(false)} />
       )}
     </div>
     </DecisionHandleContext.Provider>
   )
+}
+
+// "Read summary" (attention toast): the pending card to me takes focus, which opens it.
+function focusHandoff() {
+  const el = document.getElementById(HANDOFF_READ_ID)
+  el?.scrollIntoView?.({ block: 'nearest' })
+  el?.focus()
 }
 
 type RoomTab = 'investigation' | 'fix' | 'people' | 'activity'
