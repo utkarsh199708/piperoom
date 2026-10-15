@@ -84,7 +84,7 @@ alert:
   pipeline_map: |
     pipeline payments
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.payments [postgres, owner nadia] OK slot_active=true slot_retained=18.4 MiB
+    1 pg:public.payments [postgres, owner nadia] OK slot_active=true slot_retained=18.4 MiB wal_status=reserved
     2 connect:pg-payments-source [kafka-connect, owner tomas] OK
       from: pg:public.payments
     3 topic:pay.public.payments [kafka, owner tomas] OK newest_record=9s ago
@@ -104,7 +104,7 @@ recordings:
     summary: |
       pipeline payments
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.payments [postgres, owner nadia] OK slot_active=true slot_retained=18.4 MiB
+      1 pg:public.payments [postgres, owner nadia] OK slot_active=true slot_retained=18.4 MiB wal_status=reserved
       2 connect:pg-payments-source [kafka-connect, owner tomas] OK
         from: pg:public.payments
       3 topic:pay.public.payments [kafka, owner tomas] OK newest_record=9s ago
@@ -139,6 +139,7 @@ recordings:
         - facts:
             slot_active: "true"
             slot_retained: 18.4 MiB
+            wal_status: reserved
           health: ok
           id: pg:public.payments
           kind: source_table
