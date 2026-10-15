@@ -136,15 +136,20 @@ func isTagText(r rune) bool {
 // subdivision flag emoji such as England's (U+1F3F4, tags "gbeng", U+E007F).
 const blackFlag = 0x1F3F4
 
+// maxFlagTags is the most tag characters a subdivision flag holds (a region
+// code and a subdivision of up to three letters); a longer run after the
+// flag is hidden text that borrowed the flag as cover.
+const maxFlagTags = 6
+
 // scanHiddenTags reports each run of tag text that is not part of a flag
 // emoji: invisible in any UI, readable by a model, and so hidden text in its
 // own right whatever it says.
 func scanHiddenTags(s string) []Finding {
 	var out []Finding
-	start, inFlag := -1, false
+	start, inFlag, flagTags := -1, false, 0
 	var run strings.Builder
 	flush := func() {
-		if start >= 0 && run.Len() > 0 {
+		if start >= 0 && run.Len() > 0 && !inFlag {
 			out = append(out, Finding{Kind: KindHiddenText, Offset: start, Excerpt: excerpt("tag text: " + run.String())})
 		}
 		start = -1
@@ -154,15 +159,17 @@ func scanHiddenTags(s string) []Finding {
 		switch {
 		case r == blackFlag:
 			flush()
-			inFlag = true
+			inFlag, flagTags = true, 0
 		case isTagText(r):
-			if inFlag {
-				continue
-			}
 			if start < 0 {
 				start = i
 			}
 			run.WriteRune(r - tagBase)
+			if inFlag {
+				if flagTags++; flagTags > maxFlagTags {
+					inFlag = false // too long for a flag: report the whole run
+				}
+			}
 		default:
 			flush()
 			inFlag = false
