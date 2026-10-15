@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"piperoom/internal/redact"
 )
 
 // Report is the result of one evaluation.
@@ -221,6 +223,44 @@ func combine(ss []Summary) Summary {
 	return out
 }
 
+// Restrict returns r limited to the named scenarios, for comparing a -only run
+// with a full baseline like with like. Overall is recomputed from the kept
+// per-scenario summaries exactly as buildReport does (each scenario weighs
+// the same), so it is not the full report's number. Fields that are not
+// per-scenario (Calibration, Evidence) are dropped rather than left covering
+// scenarios that were removed.
+func (r Report) Restrict(names []string) Report {
+	keep := make(map[string]bool, len(names))
+	for _, n := range names {
+		keep[n] = true
+	}
+	out := r
+	out.Scenarios, out.Results, out.RunUsage = nil, nil, nil
+	out.Calibration, out.Evidence = nil, nil
+	var withRuns []Summary
+	for _, s := range r.Scenarios {
+		if !keep[s.Name] {
+			continue
+		}
+		out.Scenarios = append(out.Scenarios, s)
+		if s.Runs > 0 {
+			withRuns = append(withRuns, s.Summary)
+		}
+	}
+	for _, res := range r.Results {
+		if keep[res.Scenario] {
+			out.Results = append(out.Results, res)
+		}
+	}
+	for _, u := range r.RunUsage {
+		if keep[u.Scenario] {
+			out.RunUsage = append(out.RunUsage, u)
+		}
+	}
+	out.Overall = combine(withRuns)
+	return out
+}
+
 // WriteJSON writes the report as indented JSON.
 func (r Report) WriteJSON(w io.Writer) error {
 	enc := json.NewEncoder(w)
@@ -266,6 +306,7 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	for _, res := range r.Results {
 		if !res.Pass {
 			failed = append(failed, fmt.Sprintf("- %s #%d: %s", mdCell(res.Scenario), res.Run, mdCell(strings.Join(res.Failures, "; "))))
+			failed = append(failed, failedRunDetails(res)...)
 		}
 	}
 	if len(failed) > 0 {
@@ -275,6 +316,35 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		return fmt.Errorf("evals: write report: %w", err)
 	}
 	return nil
+}
+
+// maxFailedHypothesisRunes bounds the hypothesis text printed under a failed
+// run.
+const maxFailedHypothesisRunes = 300
+
+// failedRunDetails are the lines printed under a failed run: its final
+// hypothesis (confidence, whether it named the expected layers, the first
+// 300 characters of the text), the actions it proposed and the root_cause
+// term groups the hypothesis missed. The scenarios are synthetic, and the
+// agent's text still passes through redact.Text because it is model output
+// printed in a public CI log.
+func failedRunDetails(res RunResult) []string {
+	var out []string
+	if res.FinalHypothesis != "" {
+		text, _ := redact.Text(res.FinalHypothesis)
+		if r := []rune(text); len(r) > maxFailedHypothesisRunes {
+			text = string(r[:maxFailedHypothesisRunes]) + "…"
+		}
+		out = append(out, fmt.Sprintf("  - hypothesis (confidence %s, first layer named %t, root-cause layer named %t): %s",
+			orDefault(res.Confidence), res.LayerNamed, res.RootCauseLayerNamed, mdCell(text)))
+	}
+	if len(res.ProposedActions) > 0 {
+		out = append(out, "  - proposed actions: "+mdCell(strings.Join(res.ProposedActions, ", ")))
+	}
+	for _, g := range res.MissingCauseGroups {
+		out = append(out, "  - missing "+mdCell(g))
+	}
+	return out
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {

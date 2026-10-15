@@ -22,12 +22,14 @@ func TestAlertBodyGuardOutOfRangeNumbers(t *testing.T) {
 	}
 	for name, body := range bad {
 		t.Run(name+"/webhook", func(t *testing.T) {
+			t.Parallel() // each case has its own service; assertNothingCreated waits 50 ms
 			svc, runs, hooks := guardSetup(t, memstore.New())
 			_, created, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders", json.RawMessage(body))
 			wantValidation400(t, err)
 			assertNothingCreated(t, svc, runs, hooks, created)
 		})
 		t.Run(name+"/signed", func(t *testing.T) {
+			t.Parallel() // each case has its own service; assertNothingCreated waits 50 ms
 			svc, runs, hooks := guardSetup(t, memstore.New())
 			_, created, err := svc.OpenAlertRoom(context.Background(), alertin.Alert{
 				Source: alertin.Generic, Status: alertin.StatusFiring, Title: "lag", Severity: "sev2",

@@ -78,9 +78,9 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	return s.createProposal(ctx, roomID, p, actor, nil)
 }
 
-// createProposal is CreateProposal with an optional fence, checked under s.mu
-// before anything is written: the agent's proposals refuse a run that lost its
-// lease (fenceLocked).
+// createProposal is CreateProposal with an optional fence, checked under the
+// room's lock before anything is written: the agent's proposals refuse a run
+// that lost its lease (fenceLocked).
 func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, error) {
 	p = sanitizeProposal(p)
 	if len(p.Steps) == 0 {
@@ -109,7 +109,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		if !isKnownLayer(step.Layer) {
 			return "", validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
 		}
-		if err := a.Validate(step.Params); err != nil {
+		if err := a.Validate(ctx, step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 		// Exact, case-sensitive keys only: the decoder would fold case and the
@@ -122,14 +122,13 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 	}
 
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return "", err
 	}
+	defer s.unlockRoom(st)
 	if fence != nil {
 		if err := fence(st); err != nil {
 			return "", err
@@ -222,13 +221,15 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 		return "", err
 	}
-	// Preview runs outside s.mu, on the service lifetime context; it waits for
-	// this call to release the lock before it appends anything.
-	s.wg.Add(1)
-	go func(pipelineID string, steps []events.ProposalStep) {
-		defer s.wg.Done()
-		s.previewProposal(s.ctx, roomID, pipelineID, p.ProposalID, steps)
-	}(st.snap.PipelineID, p.Steps)
+	// Preview runs outside the room's lock, on the service lifetime context;
+	// it waits for this call to release the lock before it appends anything.
+	// A closing service previews nothing.
+	if s.addWorker() {
+		go func(pipelineID string, steps []events.ProposalStep) {
+			defer s.wg.Done()
+			s.previewProposal(s.ctx, roomID, pipelineID, p.ProposalID, steps)
+		}(st.snap.PipelineID, p.Steps)
+	}
 	return p.ProposalID, nil
 }
 
@@ -258,23 +259,14 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	s.syncProposalRoom(ctx, proposalID)
 
 	if err := func() error {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		p, err := s.store.GetProposal(ctx, proposalID)
+		p, st, err := s.lockProposalRoom(ctx, user, proposalID)
 		if err != nil {
-			return mapStoreErr(err)
-		}
-		if err := s.checkVisibleLocked(ctx, user, p.RoomID); err != nil {
 			return err
 		}
+		defer s.unlockRoom(st)
 		prow = p
 		if p.Status != "open" && p.Status != store.ProposalWithdrawn {
 			return alreadyDecided("proposal already decided")
-		}
-		st, err := s.getStateLocked(ctx, p.RoomID)
-		if err != nil {
-			return err
 		}
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")
@@ -325,9 +317,8 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		s.log.Info("room: approval given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
 		if strings.HasPrefix(grant, owners.GrantBackupPrefix) {
-			if _, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)}); err != nil {
-				s.log.Warn("room: backup approval note failed", "proposal", proposalID, "err", err)
-			}
+			_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)})
+			s.afterAppend(p.RoomID, "backup approval note", err, "proposal", proposalID)
 		}
 		if allApproved(st.snap, proposalID) {
 			// Approved in full: queue the steps on the room's single executor so
@@ -352,22 +343,13 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	// An empty params_hash is allowed only for a proposal that cannot be
 	// hashed; checkParamsHash decides once it has the row.
 	s.syncProposalRoom(ctx, proposalID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	p, err := s.store.GetProposal(ctx, proposalID)
+	p, st, err := s.lockProposalRoom(ctx, user, proposalID)
 	if err != nil {
-		return events.Event{}, mapStoreErr(err)
-	}
-	if err := s.checkVisibleLocked(ctx, user, p.RoomID); err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if p.Status != "open" && p.Status != store.ProposalWithdrawn {
 		return events.Event{}, alreadyDecided("proposal already decided")
-	}
-	st, err := s.getStateLocked(ctx, p.RoomID)
-	if err != nil {
-		return events.Event{}, err
 	}
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
@@ -405,10 +387,33 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		return events.Event{}, err
 	}
 	s.log.Info("room: rejection given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
-	if err := s.store.SetProposalStatus(ctx, proposalID, "rejected"); err != nil {
-		s.log.Warn("room: set proposal rejected failed", "proposal", proposalID, "err", err)
-	}
+	s.afterAppend(p.RoomID, "set proposal rejected", s.store.SetProposalStatus(ctx, proposalID, "rejected"), "proposal", proposalID)
 	return ev, nil
+}
+
+// lockProposalRoom locks the room of a proposal for a decision on it. The row
+// is read first to learn the room (and to answer 404 to a person outside its
+// tenant before anything else), then read again under the room's lock: every
+// decision of the proposal is taken under that lock, so the status and the
+// params hash the caller checks are the ones its write lands on. The caller
+// releases the room with unlockRoom.
+func (s *Service) lockProposalRoom(ctx context.Context, user User, proposalID string) (store.ProposalRow, *roomState, error) {
+	p, err := s.store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return store.ProposalRow{}, nil, mapStoreErr(err)
+	}
+	if err := s.checkVisible(ctx, user, p.RoomID); err != nil {
+		return store.ProposalRow{}, nil, err
+	}
+	st, err := s.lockRoom(ctx, p.RoomID)
+	if err != nil {
+		return store.ProposalRow{}, nil, err
+	}
+	if p, err = s.store.GetProposal(ctx, proposalID); err != nil {
+		s.unlockRoom(st)
+		return store.ProposalRow{}, nil, mapStoreErr(err)
+	}
+	return p, st, nil
 }
 
 // executeProposal, finishStep, failStep, setProposalStatus, isRoomOpen and the

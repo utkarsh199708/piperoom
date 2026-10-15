@@ -122,8 +122,11 @@ jobs:
           fi
           # Keep the exit code so the report is uploaded even when the run
           # regressed; the Gate step fails the job. Never -learned: that set is private.
+          # Build first: `go run` reports any non-zero child exit as 1, which
+          # hid evalrun's "regressed" exit code 2 from the Gate step.
+          go build -o "$RUNNER_TEMP/evalrun" ./evals/cmd/evalrun
           set +e
-          go run ./evals/cmd/evalrun "${args[@]}"
+          "$RUNNER_TEMP/evalrun" "${args[@]}"
           echo "rc=$?" >> "$GITHUB_OUTPUT"
       - name: Upload report
         if: steps.key.outputs.run == 'true' && hashFiles('cand.json') != ''

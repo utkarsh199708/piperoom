@@ -18,7 +18,7 @@ import (
 type HumanInput struct {
 	Seq       int64        `json:"seq"` // room event seq it came from
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "comment" | "approval_result" | "action_result" | "alert_update"
+	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	// Text of an "alert_update" is the server's rendering of a re-fired or
@@ -66,6 +66,17 @@ type Proposals interface {
 	// proposal ID. It must not execute anything.
 	Create(ctx context.Context, p events.ProposalCreatedPayload) (string, error)
 }
+
+// A "room_recap" input (Q5, QA T1) is the server's recap of a room for a run
+// that resumes it (after a restart or a finished run): Text is the JSON
+// agent.RoomRecap (hypothesis, step summaries, proposals with state and
+// verdict, the last hand-off) or plain text; free text in it is untrusted.
+// The runner tells the model it is resuming and must not redo finished steps.
+//
+// A Proposals may also implement agent.ProposalLookup (internal/agent
+// resume.go): Lookup(ctx, id) returns a stored proposal of the room, so a run
+// verifies a fix an earlier run proposed. Optional; without it the run uses
+// the recap, else it records "not verified". (Q5)
 
 // ProposalWithdrawer is implemented by a Proposals that can withdraw an open
 // proposal of the room (the room service's adapter does; the CLI's need not).

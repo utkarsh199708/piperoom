@@ -55,7 +55,7 @@ func TestHeartbeatIntervalBounds(t *testing.T) {
 		}
 		t.Run("value="+name, func(t *testing.T) {
 			p := hbParams(t, "heartbeat.interval.ms", tc.value)
-			err := a.Validate(p)
+			err := a.Validate(context.Background(), p)
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("Validate refused %q: %v", tc.value, err)
@@ -109,7 +109,7 @@ func TestHeartbeatActionQueryIsHumanOnly(t *testing.T) {
 	a := &updateConnectorConfig{d: testDeps()}
 	for _, value := range []string{"INSERT INTO hb VALUES (1)", "", "0", "SELECT 1"} {
 		p := hbParams(t, "heartbeat.action.query", value)
-		for name, err := range map[string]error{"Validate": a.Validate(p), "preview": previewParse(a, p)} {
+		for name, err := range map[string]error{"Validate": a.Validate(context.Background(), p), "preview": previewParse(a, p)} {
 			if err == nil || !strings.Contains(err.Error(), "human-only") || !strings.Contains(err.Error(), "SQL on the source database") {
 				t.Errorf("%s(%q) = %v, want a human-only refusal that says it runs SQL on the source", name, value, err)
 			}
@@ -121,13 +121,13 @@ func TestHeartbeatActionQueryIsHumanOnly(t *testing.T) {
 	}
 	// Other heartbeat keys are not on the list; they get the plain refusal.
 	for _, key := range []string{"heartbeat.topics.prefix", "Heartbeat.Action.Query", "heartbeat.action.query "} {
-		err := a.Validate(hbParams(t, key, "x"))
+		err := a.Validate(context.Background(), hbParams(t, key, "x"))
 		if err == nil || !strings.Contains(err.Error(), "not allowed") {
 			t.Errorf("key %q: err = %v", key, err)
 		}
 	}
 	// The text the agent sees names whom to ask.
-	err := a.Validate(hbParams(t, "heartbeat.action.query", "SELECT 1"))
+	err := a.Validate(context.Background(), hbParams(t, "heartbeat.action.query", "SELECT 1"))
 	if !strings.Contains(err.Error(), "ask the owner of the connector") {
 		t.Errorf("err = %v", err)
 	}
@@ -158,7 +158,7 @@ func TestHeartbeatKeyIsListedEverywhere(t *testing.T) {
 		t.Error("heartbeat.interval.ms looks secret")
 	}
 	// A refused key lists the allowed ones, heartbeat included.
-	err := a.Validate(hbParams(t, "tasks.max", "4"))
+	err := a.Validate(context.Background(), hbParams(t, "tasks.max", "4"))
 	if err == nil || !strings.Contains(err.Error(), "heartbeat.interval.ms") {
 		t.Errorf("err = %v", err)
 	}
@@ -170,7 +170,7 @@ func TestHeartbeatBoundsFollowTheAllowListOverride(t *testing.T) {
 		d:     testDeps(),
 		allow: map[string]map[string]bool{"decimal.handling.mode": {"double": true}},
 	}
-	if err := a.Validate(hbParams(t, "heartbeat.interval.ms", "10000")); err == nil {
+	if err := a.Validate(context.Background(), hbParams(t, "heartbeat.interval.ms", "10000")); err == nil {
 		t.Fatal("heartbeat accepted although the list was replaced")
 	}
 	enum := a.ParamsSchema()["properties"].(map[string]any)["key"].(map[string]any)["enum"].([]string)
@@ -179,7 +179,7 @@ func TestHeartbeatBoundsFollowTheAllowListOverride(t *testing.T) {
 	}
 	// And a credential-looking key still loses to the secret check.
 	b := &updateConnectorConfig{d: testDeps(), allow: map[string]map[string]bool{"x.password": {"1": true}}}
-	if err := b.Validate(hbParams(t, "x.password", "1")); err == nil || !strings.Contains(err.Error(), "credential") {
+	if err := b.Validate(context.Background(), hbParams(t, "x.password", "1")); err == nil || !strings.Contains(err.Error(), "credential") {
 		t.Fatalf("err = %v", err)
 	}
 }

@@ -40,20 +40,20 @@ func (s *Service) usage(st *roomState) store.Usage {
 	}
 }
 
-// loadUsageLocked reads a room's byte counter from the store when the room
+// loadUsage reads a room's byte counter from the store, for a room that
 // enters the cache from the log. A store without counters, or a failed read,
-// leaves 0: the store still enforces its caps, only the warning comes late.
-func (s *Service) loadUsageLocked(ctx context.Context, roomID string, st *roomState) {
+// gives 0: the store still enforces its caps, only the warning comes late.
+func (s *Service) loadUsage(ctx context.Context, roomID string) int64 {
 	c, ok := s.store.(store.Capped)
 	if !ok {
-		return
+		return 0
 	}
 	u, err := c.RoomUsage(ctx, roomID)
 	if err != nil {
 		s.log.Warn("room: read log usage failed", "room", roomID, "err", err)
-		return
+		return 0
 	}
-	st.logBytes = u.Bytes
+	return u.Bytes
 }
 
 // ReloadUsage reads every cached room's byte counter from the store again.
@@ -61,28 +61,24 @@ func (s *Service) loadUsageLocked(ctx context.Context, roomID string, st *roomSt
 // before migration 00012, so their 90% warning and log_full stop use the
 // counted size instead of the bytes appended since the start.
 func (s *Service) ReloadUsage(ctx context.Context) {
-	s.mu.Lock()
-	ids := make([]string, 0, len(s.rooms))
-	for id := range s.rooms {
-		ids = append(ids, id)
-	}
-	s.mu.Unlock()
-	for _, id := range ids {
+	for id := range s.cachedRooms() {
 		if ctx.Err() != nil {
 			return
 		}
-		s.mu.Lock()
-		if st, ok := s.rooms[id]; ok {
-			s.loadUsageLocked(ctx, id, st)
+		// Read outside the room's lock; the count may then trail an append
+		// made in between, which is the safe side for the cap warning.
+		n := s.loadUsage(ctx, id)
+		if st := s.lockCachedRoom(id); st != nil {
+			st.logBytes = n
+			s.unlockRoom(st)
 		}
-		s.mu.Unlock()
 	}
 }
 
 // checkCapLocked reacts to the usage after an append: the one 90% warning,
 // then the stop at 100%. Both are system events, held to the reserve, and both
 // are folded into the snapshot (LogCap), so neither repeats, not even after a
-// restart. Caller holds s.mu.
+// restart. Caller holds st's lock.
 func (s *Service) checkCapLocked(ctx context.Context, st *roomState, roomID string) {
 	u := s.usage(st)
 	if u.AtWarning() && st.snap.LogCap == LogCapOK {
@@ -101,7 +97,7 @@ func (s *Service) checkCapLocked(ctx context.Context, st *roomState, roomID stri
 // cancelled and the system writes agent.status log_full once. A shadow run
 // writes to its own log, so it is left alone. If even the status cannot be
 // stored (the reserve is used up), the snapshot is still marked full so the
-// agent is not started again in this process. Caller holds s.mu.
+// agent is not started again in this process. Caller holds st's lock.
 func (s *Service) logFullLocked(ctx context.Context, st *roomState, roomID string) {
 	if st.snap.LogCap == LogCapFull {
 		return
@@ -110,6 +106,7 @@ func (s *Service) logFullLocked(ctx context.Context, st *roomState, roomID strin
 	// Marked before the status append: if that append is refused too, the
 	// refusal comes back here and must find the room already full.
 	st.snap.LogCap = LogCapFull
+	st.changed = true
 	if !st.snap.Shadow && st.agentCancel != nil {
 		st.agentCancel()
 	}
@@ -185,53 +182,35 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 	if s.limits.MaxOpenDays <= 0 {
 		return res, nil
 	}
-	s.mu.Lock()
-	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {
-		s.mu.Unlock()
+	if err := s.ensureAllLoaded(ctx, false); err != nil {
 		return res, fmt.Errorf("room: open-room limit: %w", err)
 	}
-	ids := make([]string, 0, len(s.rooms))
-	for id := range s.rooms {
+	rooms := s.cachedRooms()
+	ids := make([]string, 0, len(rooms))
+	for id := range rooms {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids) // a stable order for logs and tests
 	var expired []string
 	for _, id := range ids {
-		st := s.rooms[id]
-		if st.deleting {
-			continue
+		st := rooms[id]
+		s.lockState(st)
+		var warned, due bool
+		var err error
+		if !st.gone {
+			warned, due, err = s.warnOpenLimitLocked(ctx, id, st)
 		}
-		d, ok := s.deadline(st.snap)
-		if !ok {
-			continue
-		}
-		// Per room: a pass over many rooms (each warning is a write) must not
-		// judge the last room by the time the pass started.
-		now := s.now().UTC()
-		if d.warned {
-			if !now.Before(d.closeAt) {
-				expired = append(expired, id)
-			}
-			continue
-		}
-		if now.Before(d.due.Add(-retentionWarnLead)) {
-			continue
-		}
-		// The warning names the close time, which is at least 24 h away.
-		closeAt := d.due
-		if lead := now.Add(retentionWarnLead); closeAt.Before(lead) {
-			closeAt = lead
-		}
-		if _, err := s.emitLocked(ctx, st, id, events.RoomRetentionWarning, systemActor, events.RoomRetentionWarningPayload{
-			CloseAt: closeAt, OpenDays: openDays(st.snap.OpenedAt, closeAt),
-		}); err != nil {
+		s.unlockRoom(st)
+		switch {
+		case err != nil:
 			s.log.Warn("room: retention warning failed", "room", id, "err", err)
 			res.Failed++
-			continue
+		case warned:
+			res.Warned++
+		case due:
+			expired = append(expired, id)
 		}
-		res.Warned++
 	}
-	s.mu.Unlock()
 
 	for _, id := range expired {
 		if err := ctx.Err(); err != nil {
@@ -248,6 +227,39 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 		}
 	}
 	return res, nil
+}
+
+// warnOpenLimitLocked gives an open room its retention warning when its
+// deadline is within a day (warned), or reports it due to close (due) when it
+// was warned and its close time has passed. Caller holds st's lock.
+func (s *Service) warnOpenLimitLocked(ctx context.Context, roomID string, st *roomState) (warned, due bool, err error) {
+	if st.deleting {
+		return false, false, nil
+	}
+	d, ok := s.deadline(st.snap)
+	if !ok {
+		return false, false, nil
+	}
+	// Per room: a pass over many rooms (each warning is a write) must not
+	// judge the last room by the time the pass started.
+	now := s.now().UTC()
+	if d.warned {
+		return false, !now.Before(d.closeAt), nil
+	}
+	if now.Before(d.due.Add(-retentionWarnLead)) {
+		return false, false, nil
+	}
+	// The warning names the close time, which is at least 24 h away.
+	closeAt := d.due
+	if lead := now.Add(retentionWarnLead); closeAt.Before(lead) {
+		closeAt = lead
+	}
+	if _, err := s.emitLocked(ctx, st, roomID, events.RoomRetentionWarning, systemActor, events.RoomRetentionWarningPayload{
+		CloseAt: closeAt, OpenDays: openDays(st.snap.OpenedAt, closeAt),
+	}); err != nil {
+		return false, false, err
+	}
+	return true, false, nil
 }
 
 // openDays is the whole number of days from opened to deadline.
@@ -282,12 +294,11 @@ var errNotDue = errors.New("room: not due")
 // ExtendRoom is POST /api/rooms/{id}/extend: the driver moves the open-room
 // deadline by PIPEROOM_MAX_OPEN_DAYS days, once per room.
 func (s *Service) ExtendRoom(ctx context.Context, user User, roomID string) (events.Event, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}

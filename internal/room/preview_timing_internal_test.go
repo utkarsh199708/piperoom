@@ -25,7 +25,7 @@ func (a *previewStub) Name() string                                             
 func (a *previewStub) Layer() string                                            { return "kafka-connect" }
 func (a *previewStub) Describe() string                                         { return a.name }
 func (a *previewStub) ParamsSchema() map[string]any                             { return map[string]any{"type": "object"} }
-func (a *previewStub) Validate(json.RawMessage) error                           { return nil }
+func (a *previewStub) Validate(context.Context, json.RawMessage) error          { return nil }
 func (a *previewStub) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
 func (a *previewStub) CheckScope(owners.Pipeline, json.RawMessage) error        { return nil }
 func (a *previewStub) Preview(ctx context.Context, _ json.RawMessage) (actions.PreviewResult, error) {

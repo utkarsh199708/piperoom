@@ -11,7 +11,9 @@ FROM node:24-alpine AS web
 WORKDIR /app
 # Dependencies first, so the layer is reused until the lockfile changes.
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+# Same as CI: no install scripts except esbuild's; see README.md "Web tooling".
+RUN npm ci --ignore-scripts \
+ && node node_modules/esbuild/install.js
 COPY web/ ./
 # VITE_API_BASE is deliberately NOT set: the built UI then calls the API and the
 # WebSocket on the origin that served it (see web/src/api/client.ts).

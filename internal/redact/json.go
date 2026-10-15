@@ -79,7 +79,14 @@ func (r *Redactor) walk(v any, secret bool, st *Stats) any {
 		return t
 	case map[string]any:
 		out := make(map[string]any, len(t))
+		// Kafka Connect's REST form {"name":"database.password","value":...}:
+		// the sibling "name" is the key of "value".
+		name, _ := t["name"].(string)
 		for k, x := range t {
+			if k == "value" && name != "" && secretKey(name) != keyNone {
+				out[k] = r.walkField(name, x, secret, st)
+				continue
+			}
 			out[k] = r.walkField(k, x, secret, st)
 		}
 		return out

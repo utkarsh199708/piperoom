@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -119,6 +120,10 @@ func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tool
 
 // ---- schema_registry_diff ----
 
+// maxSchemaVersion is the highest version Schema Registry can hold (a Java
+// int). Versions are ids, not amounts: one past it is refused, not clamped.
+const maxSchemaVersion = math.MaxInt32
+
 type registryDiff struct{ d Deps }
 
 func (t *registryDiff) Name() string     { return "schema_registry_diff" }
@@ -126,8 +131,8 @@ func (t *registryDiff) Kind() tools.Kind { return tools.KindRead }
 func (t *registryDiff) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"subject":      strProp("subject name"),
-		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from"},
-		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest)"},
+		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (at most 2147483647)"},
+		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest; at most 2147483647)"},
 		"schema":       strProp("optional raw Avro schema JSON; when set, diffs it against to_version (default latest) instead of from_version"),
 	}, "subject")
 }
@@ -144,6 +149,9 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
 		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
+	}
+	if p.FromVersion > maxSchemaVersion || p.ToVersion > maxSchemaVersion {
+		return tools.Result{}, fmt.Errorf("%w: from_version and to_version must be at most %d", tools.ErrBadInput, maxSchemaVersion)
 	}
 	if t.d.Registry == nil {
 		return notConfigured(), nil

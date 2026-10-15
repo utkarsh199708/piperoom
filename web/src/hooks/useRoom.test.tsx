@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, renderHook, screen, waitFor, fireEvent } from '@testing-library/react'
 import { toast } from 'sonner'
 import type { Event, EventsPage, RoomSnapshot } from '../api/types'
@@ -105,6 +105,8 @@ function wsMessage(event: Event) {
   return { data: JSON.stringify({ type: 'event', event }) }
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
 beforeEach(() => {
   vi.stubGlobal('WebSocket', FakeWebSocket)
   vi.resetAllMocks()
@@ -155,6 +157,79 @@ describe('useRoom transport', () => {
 
     await waitFor(() => expect(socket.closed).toBe(true))
     expect(result.current.state?.last_seq).toBe(0)
+  })
+
+  it('replaces the socket a failed gap fetch closed with exactly one fresh socket, resuming from lastSeq', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(api.events).mockRejectedValue(new Error('boom'))
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    await act(async () => {
+      s1.onmessage?.(wsMessage(ev(1)))
+      // Two events behind a hole: both gap fetches fail, only one reconnect may follow.
+      s1.onmessage?.(wsMessage(ev(3)))
+      s1.onmessage?.(wsMessage(ev(4)))
+    })
+    await waitFor(() => expect(s1.closed).toBe(true))
+    expect(result.current.state?.last_seq).toBe(1)
+
+    act(() => {
+      s1.onclose?.({ reason: '' }) // the browser reports the close
+    })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
+    expect(openRoomWs).toHaveBeenNthCalledWith(2, 'r1', 1)
+    s2.onopen?.()
+    await sleep(100)
+    expect(s2.closed).toBe(false)
+    expect(openRoomWs).toHaveBeenCalledTimes(2)
+  })
+
+  it('a gap fetch that fails after a reconnect closes the socket the event came from, not the new one', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    let failFetch!: (e: Error) => void
+    vi.mocked(api.events).mockReturnValue(
+      new Promise<EventsPage>((_, reject) => {
+        failFetch = reject
+      }),
+    )
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    await act(async () => {
+      s1.onmessage?.(wsMessage(ev(3)))
+    })
+    await waitFor(() => expect(api.events).toHaveBeenCalledTimes(1))
+
+    // The server drops s1 while its gap fetch is still pending; the hook opens s2.
+    act(() => {
+      s1.readyState = FakeWebSocket.CLOSED
+      s1.onclose?.({ reason: '' })
+    })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
+    act(() => {
+      s2.onopen?.()
+    })
+
+    await act(async () => {
+      failFetch(new Error('boom'))
+    })
+    expect(s1.closed).toBe(true)
+    expect(s2.closed).toBe(false) // the healthy new connection is left alone
+    await sleep(100)
+    expect(openRoomWs).toHaveBeenCalledTimes(2)
   })
 
   it('serializes two messages that arrive during one gap fetch', async () => {
@@ -478,8 +553,6 @@ describe('the stale note through a real room reload', () => {
   })
 })
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-
 describe('useRoom session epochs and reconnects', () => {
   it('an epoch bump closes the old socket and opens exactly one new socket with after=0', async () => {
     const s1 = new FakeWebSocket()
@@ -618,5 +691,77 @@ describe('useRoom session epochs and reconnects', () => {
     })
     await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
     expect(openRoomWs).toHaveBeenNthCalledWith(2, 'r1', 1)
+  })
+})
+
+describe('useRoom reconnect jitter', () => {
+  let sockets: FakeWebSocket[]
+
+  beforeEach(async () => {
+    // Only the timers the hook uses: waitFor and React keep their own.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    sockets = []
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(api.me).mockResolvedValue({ id: 'arjun', name: 'Arjun', layers: [] })
+    vi.mocked(openRoomWs).mockImplementation(() => {
+      const s = new FakeWebSocket()
+      sockets.push(s)
+      return s as unknown as WebSocket
+    })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  async function mount(random: () => number) {
+    renderHook(() => useRoom('r1', random))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0) // the snapshot loads and the first socket opens
+    })
+    expect(sockets).toHaveLength(1)
+  }
+
+  // Never-opened sockets, so the backoff keeps growing instead of resetting on open.
+  function dropLatest() {
+    const s = sockets[sockets.length - 1]
+    act(() => {
+      s.readyState = FakeWebSocket.CLOSED
+      s.onclose?.({ reason: '' })
+    })
+  }
+
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms)
+    })
+  }
+
+  it.each([
+    [0, 500],
+    [0.5, 750],
+    [1, 1000],
+  ])('with random %s the first retry waits %s ms', async (r, wait) => {
+    await mount(() => r)
+    dropLatest()
+    await advance(wait - 1)
+    expect(sockets).toHaveLength(1)
+    await advance(1)
+    expect(sockets).toHaveLength(2)
+  })
+
+  it('draws a new delay for every retry, from a ceiling that doubles up to 10 s', async () => {
+    // Retry n waits between ceiling/2 and ceiling; the ceilings are 1, 2, 4, 8, 10, 10 s.
+    const draws = [1, 0, 1, 0, 1, 0]
+    const waits = [1000, 1000, 4000, 4000, 10000, 5000]
+    let i = 0
+    await mount(() => draws[i++])
+    for (let n = 0; n < waits.length; n++) {
+      dropLatest()
+      await advance(waits[n] - 1)
+      expect(sockets).toHaveLength(n + 1)
+      await advance(1)
+      expect(sockets).toHaveLength(n + 2)
+    }
   })
 })

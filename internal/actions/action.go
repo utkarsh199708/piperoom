@@ -27,8 +27,10 @@ type Action interface {
 	// ParamsSchema is a JSON Schema object for Params.
 	ParamsSchema() map[string]any
 	// Validate checks params without side effects. Called when a proposal is
-	// created and again right before Execute.
-	Validate(params json.RawMessage) error
+	// created and again right before Execute. It may read from the target, so
+	// it takes a context: the implementation bounds it with its own deadline
+	// and stops when ctx ends.
+	Validate(ctx context.Context, params json.RawMessage) error
 	// Execute performs the write and returns a short human-readable result.
 	Execute(ctx context.Context, params json.RawMessage) (string, error)
 }

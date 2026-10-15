@@ -1,10 +1,12 @@
 import { createContext, Fragment, useContext, useMemo, type ReactNode } from 'react'
-import { splitStepRefs, stepNumbers, type StepNumbers } from '@/lib/stepRefs'
-import { goToStep, stepAnchor } from '@/lib/triage'
+import { splitProposalRefs, splitStepRefs, stepNumbers, type StepNumbers } from '@/lib/stepRefs'
+import { goToProposal, goToStep, proposalCardAnchor, stepAnchor } from '@/lib/triage'
 import type { StepState } from '@/state/types'
 
 const NO_STEPS: StepNumbers = new Map()
 const StepNumbersContext = createContext<StepNumbers>(NO_STEPS)
+const NO_PROPOSALS: readonly string[] = []
+const ProposalIdsContext = createContext<readonly string[]>(NO_PROPOSALS)
 const StepFollowContext = createContext<(() => void) | undefined>(undefined)
 
 /**
@@ -15,17 +17,22 @@ const StepFollowContext = createContext<(() => void) | undefined>(undefined)
  */
 export function StepNumbersProvider({
   steps,
+  proposalIds,
   onFollow,
   children,
 }: {
   steps: readonly StepState[]
+  /** Proposal ids of the room, in creation order: a raw id in the prose becomes a "proposal N" link (T12). */
+  proposalIds?: readonly string[]
   onFollow?: () => void
   children: ReactNode
 }) {
   const numbers = useMemo(() => stepNumbers(steps), [steps])
   return (
     <StepNumbersContext.Provider value={numbers}>
-      <StepFollowContext.Provider value={onFollow}>{children}</StepFollowContext.Provider>
+      <ProposalIdsContext.Provider value={proposalIds ?? NO_PROPOSALS}>
+        <StepFollowContext.Provider value={onFollow}>{children}</StepFollowContext.Provider>
+      </ProposalIdsContext.Provider>
     </StepNumbersContext.Provider>
   )
 }
@@ -47,11 +54,32 @@ function followStep(stepId: string, onFollow: (() => void) | undefined): void {
 export function AgentText({ text }: { text: string }) {
   const numbers = useContext(StepNumbersContext)
   const onFollow = useContext(StepFollowContext)
+  const proposalIds = useContext(ProposalIdsContext)
+  const link = 'rounded-sm font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
   return (
     <>
       {splitStepRefs(text, numbers).map((part, i) =>
         typeof part === 'string' ? (
-          <Fragment key={i}>{part}</Fragment>
+          <Fragment key={i}>
+            {splitProposalRefs(part, proposalIds).map((q, j) =>
+              typeof q === 'string' ? (
+                <Fragment key={j}>{q}</Fragment>
+              ) : (
+                <a
+                  key={j}
+                  href={`#${proposalCardAnchor(q.proposalId)}`}
+                  onClick={(e) => {
+                    e.preventDefault()
+                    onFollow?.()
+                    goToProposal(q.proposalId)
+                  }}
+                  className={link}
+                >
+                  proposal {q.n}
+                </a>
+              ),
+            )}
+          </Fragment>
         ) : (
           <a
             key={i}
@@ -60,7 +88,7 @@ export function AgentText({ text }: { text: string }) {
               e.preventDefault()
               followStep(part.id, onFollow)
             }}
-            className="rounded-sm font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className={link}
           >
             step {part.n}
           </a>

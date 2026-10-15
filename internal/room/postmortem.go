@@ -241,12 +241,12 @@ func (f *pmFold) add(e events.Event) error {
 			f.row(e, "verification: "+t)
 		}
 	case events.AgentVerification:
-		// A repeated last-step result ran no check: it adds no record.
+		// A repeat carries no new check, only the first verdict again.
 		if p, ok := decode[events.AgentVerificationPayload](e); ok && f.props[p.ProposalID] != nil {
 			f.props[p.ProposalID].verified = true
 		}
 		if p, ok := decode[events.AgentVerificationPayload](e); ok && !p.Repeat {
-			t := mdCode(p.ProposalID) + ": " + mdTextN(p.Verdict, pmLineMax)
+			t := verificationLine(p)
 			f.verification = append(f.verification, t)
 			f.row(e, "verification: "+t)
 		}
@@ -910,4 +910,48 @@ func (f *pmFold) outcome(p *pmProposal) string {
 func durationText(d time.Duration) string {
 	d = max(d, 0)
 	return fmt.Sprintf("%d min %d s", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+// verificationLine renders one agent.verification as a single escaped line:
+// the verdict, then each failed layer check and the data-flow sinks. Every
+// string is untrusted tool output, so it goes through mdTextN.
+func verificationLine(p events.AgentVerificationPayload) string {
+	res := "not recovered"
+	if p.Recovered {
+		res = "recovered"
+	}
+	parts := []string{mdCode(p.ProposalID) + " " + res}
+	if p.Verdict != "" {
+		parts = append(parts, mdTextN(p.Verdict, pmLineMax))
+	}
+	for _, c := range p.Checks {
+		if !c.OK {
+			parts = append(parts, fmt.Sprintf("failed %s/%s: %s", mdTextN(c.Layer, 40), mdTextN(c.Name, 60), mdTextN(c.Detail, pmLineMax)))
+		}
+	}
+	if d := p.DataFlow; d != nil {
+		switch {
+		case !d.Checked:
+			parts = append(parts, "data flow not checked: "+mdTextN(d.Detail, pmLineMax))
+		default:
+			fresh := "stale"
+			if d.Fresh {
+				fresh = "fresh"
+			}
+			sinks := make([]string, 0, len(d.Sinks))
+			for _, s := range d.Sinks {
+				r := "failed"
+				if s.Passed {
+					r = "passed"
+				}
+				sinks = append(sinks, mdTextN(s.Table, 60)+" "+r)
+			}
+			line := "data flow " + fresh
+			if len(sinks) > 0 {
+				line += " (" + strings.Join(sinks, ", ") + ")"
+			}
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "; ")
 }

@@ -173,7 +173,8 @@ func TestAgentSlotsGlobalCap(t *testing.T) {
 	s := New(Deps{Store: st, Users: DefaultUsers(), Run: run, MaxAgents: 5})
 	t.Cleanup(s.Close)
 	g := &fakeGlobal{max: 1, held: map[string]bool{}}
-	s.global = g // the cap across replicas; local slots stay plentiful
+	s.global = g                          // the cap across replicas; local slots stay plentiful
+	s.globalRetry = 10 * time.Millisecond // the cap-full retry; 1 s in production
 	arjun, _ := s.LookupUser("arjun")
 
 	// The runner looks its channels up by room id, which CreateRoom picks:
@@ -211,10 +212,28 @@ func TestAgentSlotsGlobalCap(t *testing.T) {
 		t.Fatalf("room %s status %+v, want %s %q", room, snap.AgentStatus, state, detail)
 	}
 	waitStatus(r2, "queued", "all 1 across the servers")
+	// r2 keeps asking and keeps being refused: wait out several refused
+	// retries, then check it never ran.
+	g.mu.Lock()
+	before := g.takes
+	g.mu.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		g.mu.Lock()
+		n := g.takes - before
+		g.mu.Unlock()
+		if n >= 5 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("r2 retried the global slot %d times in 5 s, want 5", n)
+		}
+		time.Sleep(time.Millisecond)
+	}
 	select {
 	case <-started[r2]:
 		t.Fatal("second room ran while the global cap was full")
-	case <-time.After(2 * globalSlotRetry):
+	default:
 	}
 	if inUse, _ := s.slots.stats(); inUse != 2 {
 		t.Fatalf("local slots in use = %d, want 2 (the cap that binds is the global one)", inUse)
@@ -230,7 +249,7 @@ func TestAgentSlotsGlobalCap(t *testing.T) {
 		t.Fatalf("global slots held = %d, want 1", n)
 	}
 	close(finish[r2])
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for g.holding() != 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -280,16 +299,50 @@ func TestAgentGateRefusesOnClosingService(t *testing.T) {
 	}
 	// Close has begun (closed is set) but no context is cancelled yet: r1
 	// finishes and gives its slot to the queued r2.
-	s.mu.Lock()
+	s.reg.Lock()
 	s.closed = true
-	s.mu.Unlock()
+	s.reg.Unlock()
 	close(release)
-	time.Sleep(300 * time.Millisecond)
+	// r1's slot passes straight to r2 (the counts never read 0 and 0 in
+	// between), and r2 hands it back. A run r2 started would have counted
+	// itself before its slot came back.
+	waitFor(func() bool { inUse, q := s.slots.stats(); return inUse == 0 && q == 0 })
 	s.cancel()
 	s.wg.Wait()
 	mu.Lock()
 	defer mu.Unlock()
 	if started[r2.ID] != 0 {
 		t.Fatal("a room started a run on a closing service")
+	}
+}
+
+// Close cancels the running agents, and each cancel releases a slot. A
+// shut-down slot set must not hand that slot to a queued room (the cause of
+// TestAgentCapServiceCloseWithQueuedRooms seeing a second run start).
+func TestAgentSlotsShutdownGrantsNothing(t *testing.T) {
+	a := newAgentSlots(1)
+	running, _ := a.request("orders")
+	if !running.granted {
+		t.Fatal("first request not granted")
+	}
+	q1, _ := a.request("orders")
+	q2, _ := a.request("billing")
+	a.shutdown()
+	a.release() // the running agent stops
+	for name, w := range map[string]*slotWaiter{"q1": q1, "q2": q2} {
+		select {
+		case <-w.ready:
+			t.Fatalf("%s granted a slot after shutdown", name)
+		default:
+		}
+	}
+	if fresh, _ := a.request("orders"); fresh.granted {
+		t.Fatal("a new request was granted after shutdown")
+	}
+	// Queued rooms still leave cleanly when their context ends.
+	a.cancel(q1)
+	a.cancel(q2)
+	if inUse, queued := a.stats(); inUse != 0 || queued != 1 {
+		t.Fatalf("stats = %d in use, %d queued; want 0, 1 (the fresh request)", inUse, queued)
 	}
 }

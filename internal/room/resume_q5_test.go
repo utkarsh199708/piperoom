@@ -124,7 +124,7 @@ func TestExecutedAfterRestartWakesAgentWithRecap(t *testing.T) {
 		return false
 	})
 	first := got[0]
-	if first.Kind != "comment" || first.Actor.Kind != events.ActorSystem || first.Actor.ID != "system" {
+	if first.Kind != "room_recap" || first.Actor.Kind != events.ActorSystem || first.Actor.ID != "system" {
 		t.Fatalf("first input = %+v, want the system recap", first)
 	}
 	var rc room.Recap
@@ -210,6 +210,9 @@ func TestResumedRunGetsRecap(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := drainUntil(t, nextDeps(t, deps2), func(in []agent.HumanInput) bool { return len(in) >= 2 })
+	if got[0].Kind != "room_recap" {
+		t.Fatalf("first input kind = %q, want room_recap", got[0].Kind)
+	}
 	var rc room.Recap
 	if err := json.Unmarshal([]byte(got[0].Text), &rc); err != nil || rc.Hypothesis == nil || rc.Hypothesis.Text != "slot inactive" {
 		t.Fatalf("first input = %+v (err %v), want the recap", got[0], err)

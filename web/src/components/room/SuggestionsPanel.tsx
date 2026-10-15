@@ -1,6 +1,7 @@
 import type { SuggestionState, SuggestionStatus } from '../../state/types'
 import { Clock } from './Clock'
 import { Badge } from '@/components/ui/badge'
+import { PersonName } from '@/components/VerifiedBadge'
 import { PersonAvatar } from './PersonAvatar'
 
 const SHOW_RESOLVED = 5
@@ -34,7 +35,7 @@ export function SuggestionsPanel({ suggestions }: { suggestions: SuggestionState
             <PersonAvatar actor={s.from} size={20} className="mt-0.5" />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-                <strong className="font-medium">{s.from.name}</strong>
+                <PersonName person={s.from} nameClassName="font-medium" />
                 <Badge variant={VARIANT[s.status]}>{LABEL[s.status]}</Badge>
                 {s.at && <Clock iso={s.at} className="font-mono text-xs text-subtle-foreground" />}
               </div>

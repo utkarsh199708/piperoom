@@ -186,7 +186,7 @@ func (a *gatedAction) Describe() string { return "a fix the test releases" }
 func (a *gatedAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}
 }
-func (a *gatedAction) Validate(json.RawMessage) error                    { return nil }
+func (a *gatedAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *gatedAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *gatedAction) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	select {

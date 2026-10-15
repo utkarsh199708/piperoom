@@ -1,6 +1,6 @@
 import { Loader2 } from 'lucide-react'
 import { useState } from 'react'
-import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
+import type { ComponentProps, FormEvent, KeyboardEvent, ReactNode } from 'react'
 import type { HandoffState, RoomState, StepState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canAcceptHandoff } from '../state/permissions'
@@ -18,11 +18,15 @@ import {
 } from '@/components/ui/dialog'
 import { Kbd } from '@/components/ui/kbd'
 import { PersonSelect } from './PersonSelect'
+import { PersonName } from './VerifiedBadge'
 import { AgentText, StepNumbersProvider } from './room/AgentText'
 import { RoomDialogClose } from './room/RoomDialogClose'
 import { SummaryFields } from './room/SummaryFields'
 import { useNow } from './room/useNow'
 import { useFollowClose, useRestoreFocus } from './room/useRestoreFocus'
+
+/** The handing-off driver as the badge reads it: server-set fields only. */
+type FromPerson = ComponentProps<typeof PersonName>['person']
 
 function SummaryList({ title, items }: { title: string; items: string[] }) {
   if (!items || items.length === 0) return null
@@ -115,19 +119,25 @@ export function HandoffDialog({
         <DialogHeader>
           <DialogTitle>{mode === 'manual' && !pending && !inFlight ? 'Write the hand-off summary' : 'Hand off the room'}</DialogTitle>
           <DialogDescription>
-            {pending
-              ? `Summary prepared for ${pending.to.name}. They must accept to take over.`
-              : inFlight
-                ? `The agent is writing the summary for ${inFlight.to.name}.`
-                : mode === 'manual'
-                  ? 'You write what the agent would have written. The person who takes over sees that you wrote it.'
-                  : 'The agent writes a summary for the person who takes over. They accept it to become the driver.'}
+            {pending ? (
+              <>
+                Summary prepared for <PersonName person={pending.to} />. They must accept to take over.
+              </>
+            ) : inFlight ? (
+              <>
+                The agent is writing the summary for <PersonName person={inFlight.to} />.
+              </>
+            ) : mode === 'manual' ? (
+              'You write what the agent would have written. The person who takes over sees that you wrote it.'
+            ) : (
+              'The agent writes a summary for the person who takes over. They accept it to become the driver.'
+            )}
           </DialogDescription>
         </DialogHeader>
 
         {pending ? (
-          <StepNumbersProvider steps={state.steps} onFollow={follow.onFollow}>
-            <HandoffSummary summary={pending.summary} writtenBy={pending.manual ? (pending.written_by?.name ?? 'the driver') : undefined}>
+          <StepNumbersProvider steps={state.steps} proposalIds={state.proposals.map((x) => x.proposal_id)} onFollow={follow.onFollow}>
+            <HandoffSummary summary={pending.summary} manual={pending.manual} writtenBy={pending.written_by}>
               <Button type="button" variant="secondary" onClick={onClose}>
                 Close
               </Button>
@@ -221,17 +231,24 @@ export function HandoffDialog({
 
 function HandoffSummary({
   summary: s,
+  manual = false,
   writtenBy,
   children,
 }: {
   summary: HandoffState['summary']
-  /** Set when the driver wrote the summary instead of the agent (Q0, G4). */
-  writtenBy?: string
+  /** The driver wrote the summary instead of the agent (Q0, G4). */
+  manual?: boolean
+  /** With manual: who wrote it, shown with their badge; "the driver" when the log does not say. */
+  writtenBy?: FromPerson | null
   children: ReactNode
 }) {
   return (
     <div className="handoff__summary flex flex-col gap-3">
-      {writtenBy && <p className="m-0 text-xs font-medium text-muted-foreground">Written by {writtenBy}, not by the agent.</p>}
+      {manual && (
+        <p className="m-0 text-xs font-medium text-muted-foreground">
+          Written by {writtenBy ? <PersonName person={writtenBy} /> : 'the driver'}, not by the agent.
+        </p>
+      )}
       {s.what_broke && (
         <div className="flex flex-col gap-1">
           <h4 className="text-xs font-medium text-muted-foreground">What broke</h4>
@@ -266,7 +283,7 @@ function HandoffReceiveDialog({
   onClose,
 }: {
   handoff: HandoffState
-  from: string
+  from: FromPerson | null
   steps: StepState[]
   onAccept: () => void
   onClose: () => void
@@ -278,14 +295,22 @@ function HandoffReceiveDialog({
       <DialogContent hideClose className="max-h-[85vh] overflow-y-auto" onCloseAutoFocus={follow.onCloseAutoFocus}>
         <RoomDialogClose label="Close hand-off summary" />
         <DialogHeader>
-          <DialogTitle>Hand-off from {from}</DialogTitle>
+          <DialogTitle>
+            Hand-off from {from ? <PersonName person={from} /> : 'Someone'}
+          </DialogTitle>
           <DialogDescription>
             Read this before you accept. Accepting makes you the driver
-            {handoff.stay_as_watcher ? `; ${from} stays in the room as a watcher.` : '.'}
+            {handoff.stay_as_watcher ? (
+              <>
+                ; {from ? <PersonName person={from} /> : 'Someone'} stays in the room as a watcher.
+              </>
+            ) : (
+              '.'
+            )}
           </DialogDescription>
         </DialogHeader>
         <StepNumbersProvider steps={steps} onFollow={follow.onFollow}>
-          <HandoffSummary summary={handoff.summary} writtenBy={handoff.manual ? (handoff.written_by?.name ?? from) : undefined}>
+          <HandoffSummary summary={handoff.summary} manual={handoff.manual} writtenBy={handoff.written_by ?? from}>
             <Button type="button" variant="ghost" onClick={onClose}>
               Not yet
             </Button>
@@ -314,14 +339,15 @@ export function HandoffAcceptBanner({
   const [reading, setReading] = useState(false)
   const mine = state.handoffs.find((h) => canAcceptHandoff(user, h))
   if (!mine) return null
-  const from = state.driver?.name ?? 'Someone'
+  const fromPerson: FromPerson | null = state.driver ? { ...state.driver, kind: 'human' } : null
   return (
     <div
       role="status"
       className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border bg-primary-subtle px-4 py-1.5 font-medium text-primary-fg sm:px-6"
     >
       <span>
-        <strong>{from}</strong> is handing the room to you.
+        {fromPerson ? <PersonName person={fromPerson} nameClassName="font-semibold" /> : <strong>Someone</strong>}{' '}
+        is handing the room to you.
       </span>
       {/* No blind accept: the only way to take over is through the summary dialog. */}
       <Button id={HANDOFF_READ_ID} className="ml-auto h-7 px-2.5 coarse:h-11 coarse:px-4" onClick={() => setReading(true)}>
@@ -330,7 +356,7 @@ export function HandoffAcceptBanner({
       {reading && (
         <HandoffReceiveDialog
           handoff={mine}
-          from={from}
+          from={fromPerson}
           steps={state.steps}
           onAccept={() => {
             setReading(false)

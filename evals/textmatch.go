@@ -330,9 +330,10 @@ var shortDurations = []string{"1 minute", "1 min", "2 minutes", "2 min", "1m", "
 var faultNegators = []string{"not", "t", "no", "never", "no longer", "nothing", "none", "without", "nobody"}
 
 // pastMarkers in a fault's sub make it history, not a current fault: "order-sync
-// was stuck until 09:24", "task 0 failed earlier and was restarted".
+// was stuck until 09:24", "task 0 failed earlier and was restarted",
+// "transient lag during a pod crash-loop" (transient: it did not last).
 var pastMarkers = []string{"was", "were", "had", "earlier", "before", "until", "previously", "ago",
-	"recovered", "resolved", "fixed"}
+	"recovered", "resolved", "fixed", "transient*"}
 
 // saysHealthy reports whether text says the pipeline is healthy or that there
 // is nothing to fix: a healthy phrase, not in a question, with no negator
@@ -395,7 +396,7 @@ func bareNo(c clauseToks) bool {
 func hasFault(text string) bool {
 	for _, c := range clausesOf(text) {
 		for j := range c.toks {
-			if phraseAt(c.toks, j, faultTerms) == 0 {
+			if phraseAt(c.toks, j, faultTerms) == 0 || isLabel(subToks(c, j)) {
 				continue
 			}
 			negated := false
@@ -426,6 +427,29 @@ func hasFault(text string) bool {
 		}
 	}
 	return false
+}
+
+// isLabel reports whether toks is only a field label: the prompt asks every
+// hypothesis to name the "failing component" (internal/agent/prompt.go), so
+// "Failing component: order-sync, caught up" names a slot, not a fault. The
+// label must be a sub of its own (it ends at ":" or ","); "the failing
+// component is order-sync" is still a fault.
+func isLabel(toks []string) bool {
+	return phraseAt(toks, 0, faultLabels) == len(toks) && len(toks) > 0
+}
+
+// faultLabels are the hypothesis field labels that contain a fault word.
+var faultLabels = []string{"first failing component", "failing component", "first failing layer", "failing layer"}
+
+// subToks returns the tokens of the sub that holds token j.
+func subToks(c clauseToks, j int) []string {
+	var out []string
+	for i := range c.toks {
+		if c.sub[i] == c.sub[j] {
+			out = append(out, c.toks[i])
+		}
+	}
+	return out
 }
 
 // healthyVerdict reports whether text calls the pipeline healthy and states

@@ -32,8 +32,8 @@ var knownConnectErrorHeaders = map[string]bool{
 	connectErrorsPrefix + "stage":                true,
 	connectErrorsPrefix + "class.name":           true,
 	connectErrorsPrefix + "exception.class.name": true,
-	headerMessage:    true,
-	headerStacktrace: true,
+	headerMessage:                                true,
+	headerStacktrace:                             true,
 }
 
 const (
@@ -53,16 +53,19 @@ const (
 	dlqCallTimeout = 10 * time.Second
 )
 
-// offsetLister is the part of *kadm.Client that DLQOffsets uses; a seam so
-// unit tests can count requests without a broker.
+// offsetLister is the part of *kadm.Client that the offset listings
+// (DLQOffsets, TopicOffsets, FindByKey) use; a seam so unit tests can count
+// requests without a broker.
 type offsetLister interface {
 	ListStartOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error)
 	ListEndOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error)
 	ListCommittedOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error)
+	ListOffsetsAfterMilli(ctx context.Context, millisecond int64, topics ...string) (kadm.ListedOffsets, error)
 }
 
-// dlqConsumer is the part of *kgo.Client that PeekDLQ uses.
-type dlqConsumer interface {
+// pollConsumer is the part of *kgo.Client that the record reads (PeekDLQ,
+// TopicOffsets, FindByKey) use.
+type pollConsumer interface {
 	PollFetches(ctx context.Context) kgo.Fetches
 	Close()
 }
@@ -184,7 +187,7 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 	for _, pl := range plan {
 		startAt[pl.partition] = kgo.NewOffset().At(pl.from)
 	}
-	cons, err := c.newDLQConsumer(map[string]map[int32]kgo.Offset{topic: startAt})
+	cons, err := c.newConsumer(map[string]map[int32]kgo.Offset{topic: startAt})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: peek dlq %s: consumer: %w", topic, err)
 	}
@@ -200,11 +203,11 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 	return mergeNewest(recs, limit), nil
 }
 
-// clampToStable lowers each partition's End from the high watermark to the
-// last stable offset. A transaction left open at the tail would otherwise
-// make a ReadCommitted consumer wait for offsets that are not readable until
-// the transaction ends. DLQOffsets keeps the high watermark (the watcher
-// counts growth with it); only a peek needs the readable end.
+// clampToStable lowers each partition's End to the last stable offset. A
+// transaction left open at the tail would otherwise make a ReadCommitted
+// consumer wait for offsets that are not readable until the transaction
+// ends. DLQOffsets and TopicOffsets keep the high watermark (the watcher
+// counts growth with it); only a record read needs the readable end.
 func (c *Client) clampToStable(ctx context.Context, topic string, parts []clients.PartitionOffsets) ([]clients.PartitionOffsets, error) {
 	start := time.Now()
 	lso, err := c.lister().ListCommittedOffsets(ctx, topic)
@@ -308,7 +311,7 @@ func planPeek(parts []clients.PartitionOffsets, limit int) []peekPart {
 // partition done when they sit at its last offset, but are never returned or
 // counted. Only DLQRecords come out: each *kgo.Record is dropped after its
 // iteration.
-func collectPeek(ctx context.Context, cons dlqConsumer, topic string, plan []peekPart) ([]clients.DLQRecord, error) {
+func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []peekPart) ([]clients.DLQRecord, error) {
 	ends := map[int32]int64{}
 	for _, pl := range plan {
 		ends[pl.partition] = pl.end
@@ -500,17 +503,24 @@ func (c *Client) lister() offsetLister {
 	return c.adm
 }
 
-// newDLQConsumer opens a short-lived consumer on exactly the given
-// partitions with bounded fetch sizes; the caller closes it.
-func (c *Client) newDLQConsumer(parts map[string]map[int32]kgo.Offset) (dlqConsumer, error) {
-	if c.consumerFn != nil {
-		return c.consumerFn(parts)
-	}
-	return c.newKgo(
+// newConsumer opens a short-lived consumer on exactly the given partitions
+// with bounded fetch sizes; the caller closes it. Every record read of this
+// client uses it, so all of them follow one transaction rule: only committed
+// records are read, and transaction markers are delivered. A read plans an
+// end offset (clamped to the last stable offset, see clampToStable) and a
+// marker can sit right there; kgo drops markers by default, and the read
+// would then wait for a record that never comes. No reader returns a marker
+// as data.
+func (c *Client) newConsumer(parts map[string]map[int32]kgo.Offset) (pollConsumer, error) {
+	opts := []kgo.Opt{
 		kgo.ConsumePartitions(parts),
-		kgo.FetchMaxBytes(4<<20),
-		kgo.FetchMaxPartitionBytes(1<<20),
+		kgo.FetchMaxBytes(4 << 20),
+		kgo.FetchMaxPartitionBytes(1 << 20),
 		kgo.KeepControlRecords(),
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
-	)
+	}
+	if c.consumerFn != nil {
+		return c.consumerFn(opts)
+	}
+	return c.newKgo(opts...)
 }

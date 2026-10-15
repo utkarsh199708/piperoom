@@ -206,7 +206,7 @@ func TestValidateUnknownConnector(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := reg.Get("connect_restart_task")
-	if err := a.Validate(json.RawMessage(`{"connector":"nope","task":0}`)); err == nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"connector":"nope","task":0}`)); err == nil {
 		t.Fatal("want error for unknown connector")
 	}
 }
@@ -217,7 +217,7 @@ func TestValidateBadLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := reg.Get("schema_set_compatibility")
-	if err := a.Validate(json.RawMessage(`{"subject":"pg.public.orders-value","level":"BOGUS"}`)); err == nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"BOGUS"}`)); err == nil {
 		t.Fatal("want error for bad level")
 	}
 }
@@ -261,7 +261,7 @@ func TestSchemaRegisterRejectsBadJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := reg.Get("schema_register")
-	if err := a.Validate(json.RawMessage(`{"subject":"x","schema":"not json"}`)); err == nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"subject":"x","schema":"not json"}`)); err == nil {
 		t.Fatal("want error for invalid schema JSON")
 	}
 }
@@ -273,7 +273,7 @@ func TestSchemaRegisterRejectsNonAvro(t *testing.T) {
 	}
 	a, _ := reg.Get("schema_register")
 	// Valid JSON but not a valid Avro schema.
-	if err := a.Validate(json.RawMessage(`{"subject":"x","schema":"{\"foo\": 1}"}`)); err == nil {
+	if err := a.Validate(t.Context(), json.RawMessage(`{"subject":"x","schema":"{\"foo\": 1}"}`)); err == nil {
 		t.Fatal("want error for non-Avro schema")
 	}
 }

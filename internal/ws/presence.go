@@ -32,6 +32,10 @@ type client struct {
 	// on their way, so a logout and the register-time check never both send
 	// them.
 	sessionEnded bool
+	// roomDeleted is set (under Gateway.mu) once the room-deleted frames are
+	// on their way, so the room service's hook, the HTTP delete handler and
+	// an ended feed send them once.
+	roomDeleted bool
 }
 
 // roomHub is the set of connections for one room.
@@ -80,6 +84,7 @@ func (g *Gateway) addClient(roomID string, c *client) {
 	}
 	hub.conns[c] = struct{}{}
 	g.broadcastLocked(roomID)
+	g.connsChangedLocked()
 }
 
 func (g *Gateway) removeClient(roomID string, c *client) {
@@ -94,6 +99,14 @@ func (g *Gateway) removeClient(roomID string, c *client) {
 		delete(g.rooms, roomID)
 	}
 	g.broadcastLocked(roomID)
+	g.connsChangedLocked()
+}
+
+// connsChangedLocked wakes everyone waiting on a registry change. Caller holds
+// g.mu.
+func (g *Gateway) connsChangedLocked() {
+	close(g.connsChanged)
+	g.connsChanged = make(chan struct{})
 }
 
 func (g *Gateway) setPresence(roomID string, c *client, state string) {
@@ -215,19 +228,35 @@ func (g *Gateway) CloseSession(sessionID string) {
 	}
 }
 
+// Connections is how many connections the gateway has registered across all
+// rooms plus the room-list sockets (the /metrics gauge).
+func (g *Gateway) Connections() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.connectionsLocked()
+}
+
+func (g *Gateway) connectionsLocked() int {
+	n := 0
+	for _, hub := range g.rooms {
+		n += len(hub.conns)
+	}
+	return n + len(g.lists)
+}
+
 // RoomDeletedReason is the close reason of a deleted room's connections
 // (docs/api.md, WebSocket).
 const RoomDeletedReason = "room deleted"
 
 // CloseRoom ends every connection to a deleted room: the room.deleted event
 // (never stored) as the last frame, then a normal close with the reason "room
-// deleted". It returns at once; the frames go out on their own goroutines.
+// deleted". With the zero deleted (who deleted the room is not known) only the
+// close goes out. It is idempotent: a connection already closing for its
+// room's deletion is left alone, so the room service's OnRoomDeleted hook and
+// the HTTP delete handler may both call it. It returns at once; the frames go
+// out on their own goroutines.
 func (g *Gateway) CloseRoom(roomID string, deleted events.Event) {
-	b, err := json.Marshal(serverMsg{Type: "event", Event: &deleted})
-	if err != nil {
-		g.log.Error("ws: encode room.deleted", "room", roomID, "err", err)
-		b = nil
-	}
+	frame := g.deletedFrame(roomID, deleted)
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	hub := g.rooms[roomID]
@@ -235,16 +264,31 @@ func (g *Gateway) CloseRoom(roomID string, deleted events.Event) {
 		return
 	}
 	for c := range hub.conns {
-		g.spawnRoomDeleted(c, b)
+		g.spawnRoomDeleted(c, frame)
 	}
 }
 
-// spawnRoomDeleted writes the last frame and closes, on its own goroutine.
-// Caller holds g.mu (see spawnShutdown for why that keeps wg safe).
+// deletedFrame encodes the room.deleted frame; nil for the zero Event.
+func (g *Gateway) deletedFrame(roomID string, deleted events.Event) []byte {
+	if deleted.Type == "" {
+		return nil
+	}
+	b, err := json.Marshal(serverMsg{Type: "event", Event: &deleted})
+	if err != nil {
+		g.log.Error("ws: encode room.deleted", "room", roomID, "err", err)
+		return nil
+	}
+	return b
+}
+
+// spawnRoomDeleted writes the last frame and closes, on its own goroutine,
+// once per connection. Caller holds g.mu (see spawnShutdown for why that
+// keeps wg safe).
 func (g *Gateway) spawnRoomDeleted(c *client, frame []byte) {
-	if g.closed {
+	if g.closed || c.roomDeleted {
 		return
 	}
+	c.roomDeleted = true
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()

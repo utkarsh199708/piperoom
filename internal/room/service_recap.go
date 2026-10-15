@@ -18,17 +18,17 @@ import (
 // from the log: the newest hypothesis, the step summaries so far, every
 // proposal with its steps and status, and the newest hand-off summary.
 //
-// The recap travels as an agent.HumanInput of Kind "comment" from the system
-// actor (the actor openProposalsInput used before; no person can write a
-// system input) whose Text is the Recap as one JSON object. The runner already
-// renders a comment as untrusted data, which is right: the recap quotes tool
-// summaries, titles and agent text. The agent package reads the JSON back to
-// track the proposals of earlier runs, so it can verify one that executes.
-// See the Contract change request in the Q5 report for a typed field instead.
+// The recap travels as an agent.HumanInput of Kind "room_recap" (the Q5
+// contract, internal/agent/contract.go) from the system actor, whose Text is
+// the Recap as one JSON object. Free text in it (tool summaries, titles,
+// agent text) is untrusted. The agent package reads the JSON back to track
+// the proposals of earlier runs, so it can verify one that executes.
 
-// RecapKind is Recap.Kind: the agent tells the recap from a comment by it,
-// together with the system actor.
+// RecapKind is Recap.Kind, the JSON's own type mark.
 const RecapKind = "piperoom.room_recap"
+
+// recapInputKind is the agent.HumanInput Kind of the recap (contract.go).
+const recapInputKind = "room_recap"
 
 const (
 	// recapMaxSteps is how many step summaries the recap keeps, newest last.
@@ -276,7 +276,7 @@ func (f *recapFold) done() (Recap, bool) {
 }
 
 // buildRecap reads the room log and returns the recap input, or nil when the
-// log holds no agent work yet. It reads the store: call it outside s.mu.
+// log holds no agent work yet. It reads the store: call it without holding the room's lock.
 func (s *Service) buildRecap(ctx context.Context, roomID string) (*agent.HumanInput, error) {
 	f := newRecapFold(roomID)
 	after := int64(0)
@@ -301,5 +301,5 @@ func (s *Service) buildRecap(ctx context.Context, roomID string) (*agent.HumanIn
 	if err != nil {
 		return nil, fmt.Errorf("room: recap %s: encode: %w", roomID, err)
 	}
-	return &agent.HumanInput{Seq: rc.AsOfSeq, Actor: systemActor, Kind: "comment", Text: string(b)}, nil
+	return &agent.HumanInput{Seq: rc.AsOfSeq, Actor: systemActor, Kind: recapInputKind, Text: string(b)}, nil
 }

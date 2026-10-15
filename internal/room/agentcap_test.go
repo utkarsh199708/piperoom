@@ -27,6 +27,9 @@ type capRunner struct {
 	count   map[string]int // run starts per room
 	release map[string]chan struct{}
 	failing map[string]string // room id -> "error" | "panic": fail its first run
+	// startCh, when set, receives the room id of every run start, so a test
+	// waits on the start itself instead of polling.
+	startCh chan string
 }
 
 func newCapRunner() *capRunner {
@@ -67,7 +70,16 @@ func (c *capRunner) run(ctx context.Context, alert agent.Alert, _ agent.Deps, _ 
 		mode = c.failing[id]
 	}
 	ch := c.releaseCh(id)
+	notify := c.startCh
 	c.mu.Unlock()
+	if notify != nil {
+		// Non-blocking so a start the test no longer reads (buffer full)
+		// cannot block the runner; startedIDs() still records it.
+		select {
+		case notify <- id:
+		default:
+		}
+	}
 	defer func() {
 		c.mu.Lock()
 		c.cur--
@@ -367,6 +379,21 @@ func TestAgentCapFailedRunReleasesSlot(t *testing.T) {
 				return cr.run(ctx, a, d, o)
 			}
 			svc, _ := newCapService(t, 1, runFirstFails)
+			// r1's retry backoff stays open until the test ends it, so r2
+			// can only get the slot by r1's failure releasing it, never by
+			// out-waiting a short backoff (which raced r2's creation).
+			backoffDone := make(chan struct{})
+			var endBackoff sync.Once
+			release := func() { endBackoff.Do(func() { close(backoffDone) }) }
+			t.Cleanup(release)
+			room.SetRetryAfterForTest(svc, func(time.Duration) <-chan time.Time {
+				c := make(chan time.Time, 1)
+				go func() {
+					<-backoffDone
+					c <- time.Now()
+				}()
+				return c
+			})
 
 			r1 := createRoom(t, svc, "arjun").ID
 			cr.waitStarted(t, 1)
@@ -381,6 +408,7 @@ func TestAgentCapFailedRunReleasesSlot(t *testing.T) {
 			if m := cr.maxConcurrent(); m != 1 {
 				t.Fatalf("max concurrent runs = %d, want 1", m)
 			}
+			release()
 
 			// r1's retry queues behind r2 and runs once r2 is done.
 			cr.finish(r2)
@@ -487,12 +515,17 @@ func TestAgentCapIdleAgentGivesUpSlotAndRequeuesOnInput(t *testing.T) {
 
 func TestAgentCapServiceCloseWithQueuedRooms(t *testing.T) {
 	cr := newCapRunner()
-	svc, _ := newCapService(t, 1, cr.run)
-	createRoom(t, svc, "arjun")
-	cr.waitStarted(t, 1)
+	// Buffered past every possible start, so a wrong start never blocks the
+	// runner and is still counted below.
+	cr.startCh = make(chan string, 16)
+	svc, st := newCapService(t, 1, cr.run)
+	first := createRoom(t, svc, "arjun").ID
+	if got := <-cr.startCh; got != first {
+		t.Fatalf("first run started for %s, want %s", got, first)
+	}
 	for i := 0; i < 5; i++ {
 		r := createRoom(t, svc, "arjun").ID
-		waitQueued(t, svc, r)
+		waitQueuedEvent(t, st, r)
 	}
 	done := make(chan struct{})
 	go func() { svc.Close(); close(done) }()
@@ -501,7 +534,70 @@ func TestAgentCapServiceCloseWithQueuedRooms(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close hung with queued rooms")
 	}
+	// Close waited for every supervisor, so any run that started is already
+	// in the channel.
+	// Drain without closing: a send on a closed channel panics even inside a
+	// select, so closing would defeat the non-blocking send in run.
+drain:
+	for {
+		select {
+		case id := <-cr.startCh:
+			t.Errorf("run started for queued room %s during Close", id)
+		default:
+			break drain
+		}
+	}
 	if n := len(cr.startedIDs()); n != 1 {
 		t.Fatalf("%d runs started, want 1", n)
+	}
+}
+
+// waitQueuedEvent blocks until the room's log holds agent.status "queued",
+// reading the store's subscription rather than polling the snapshot.
+func waitQueuedEvent(t *testing.T, st *memstore.Store, roomID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch, err := st.Subscribe(ctx, roomID, 0)
+	if err != nil {
+		t.Fatalf("subscribe %s: %v", roomID, err)
+	}
+	for e := range ch {
+		if e.Type != events.AgentStatus {
+			continue
+		}
+		var p events.AgentStatusPayload
+		if json.Unmarshal(e.Payload, &p) == nil && p.State == "queued" {
+			return
+		}
+	}
+	t.Fatalf("room %s: no queued agent.status before %v", roomID, ctx.Err())
+}
+
+// AgentSlotStats and OpenRooms feed the /metrics gauges: one run holding the only
+// slot, one room queued behind it, two open rooms; closing the queued room
+// takes it out of both.
+func TestAgentSlotStatsAndOpenRooms(t *testing.T) {
+	cr := newCapRunner()
+	cr.startCh = make(chan string, 4)
+	svc, st := newCapService(t, 1, cr.run)
+	if n := svc.OpenRooms(); n != 0 {
+		t.Fatalf("OpenRooms = %d before any room", n)
+	}
+	createRoom(t, svc, "arjun")
+	<-cr.startCh
+	queued := createRoom(t, svc, "arjun").ID
+	waitQueuedEvent(t, st, queued)
+	if inUse, q := svc.AgentSlotStats(); inUse != 1 || q != 1 {
+		t.Fatalf("AgentSlotStats = %d in use, %d queued; want 1, 1", inUse, q)
+	}
+	if n := svc.OpenRooms(); n != 2 {
+		t.Fatalf("OpenRooms = %d, want 2", n)
+	}
+	if _, err := svc.CloseRoom(context.Background(), mustUser(t, svc, "arjun"), queued, "dup"); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if n := svc.OpenRooms(); n != 1 {
+		t.Fatalf("OpenRooms after close = %d, want 1", n)
 	}
 }

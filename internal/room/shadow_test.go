@@ -150,6 +150,8 @@ type shadowEnv struct {
 	run   *scriptRunner
 	deps  room.Deps
 	users *room.Users
+	// retryAfter is shadowCfg.retryAfter, applied again on restart.
+	retryAfter func(d time.Duration) <-chan time.Time
 }
 
 type shadowCfg struct {
@@ -158,6 +160,17 @@ type shadowCfg struct {
 	maxAgents int
 	solo      string
 	st        *shadowStore
+	// retryAfter replaces the backoff between failed attempts; nil waits
+	// 1/100 of the production backoff (fastRetry).
+	retryAfter func(d time.Duration) <-chan time.Time
+}
+
+func (e *shadowEnv) setRetry(svc *room.Service) {
+	if e.retryAfter != nil {
+		room.SetRetryAfterForTest(svc, e.retryAfter)
+		return
+	}
+	fastRetry(svc)
 }
 
 func loadShadowFixtures(t *testing.T) (*owners.Owners, *room.Users) {
@@ -205,7 +218,9 @@ func newShadowEnv(t *testing.T, cfg shadowCfg) *shadowEnv {
 	}
 	svc := room.New(deps)
 	t.Cleanup(svc.Close)
-	return &shadowEnv{svc: svc, st: st, clk: c, run: r, deps: deps, users: users}
+	env := &shadowEnv{svc: svc, st: st, clk: c, run: r, deps: deps, users: users, retryAfter: cfg.retryAfter}
+	env.setRetry(svc)
+	return env
 }
 
 // restart builds a second service on the same store and loads it.
@@ -214,6 +229,7 @@ func (e *shadowEnv) restart(t *testing.T) *room.Service {
 	e.svc.Close()
 	svc := room.New(e.deps)
 	t.Cleanup(svc.Close)
+	e.setRetry(svc)
 	if err := svc.Load(context.Background()); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -543,7 +559,7 @@ func TestBudgetStopIsNotRetried(t *testing.T) {
 	if r := env.waitFinished(t, snap.ID); r.Status != store.ShadowBudget {
 		t.Fatalf("status %q, want budget", r.Status)
 	}
-	time.Sleep(1500 * time.Millisecond) // longer than the first retry backoff
+	time.Sleep(150 * time.Millisecond) // many times the first retry backoff (fastRetry)
 	if env.run.Calls() != 1 {
 		t.Fatalf("shadow calls = %d, want 1", env.run.Calls())
 	}
@@ -564,8 +580,9 @@ func TestBudgetStopIsNotRetried(t *testing.T) {
 			return fmt.Errorf("wrapped: %w", &agent.BudgetError{Used: 10, Limit: 10})
 		}})
 	t.Cleanup(svc.Close)
+	fastRetry(svc)
 	live := createRoom(t, svc, "arjun")
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond) // many times the first retry backoff
 	if liveCalls.Load() != 1 {
 		t.Fatalf("live calls = %d, want 1", liveCalls.Load())
 	}
@@ -696,7 +713,7 @@ func TestShadowFailureAfterCloseNotRetried(t *testing.T) {
 	env.close(t, snap.ID, "fixed")
 	close(m.release)
 	r := env.waitFinished(t, snap.ID)
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond) // many times the first retry backoff (fastRetry)
 	if r.Status != store.ShadowInterrupted || env.run.Calls() != 1 {
 		t.Fatalf("status %q after %d calls, want interrupted after 1", r.Status, env.run.Calls())
 	}

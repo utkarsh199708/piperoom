@@ -38,7 +38,7 @@ beforeEach(() => {
 describe('pending layer row (F9)', () => {
   it('names the owner with presence', () => {
     render(<ProposalsPanel state={room()} user={priya} actions={actions} people={people} presence={[{ id: 'arjun', name: 'Arjun', state: 'away', since: since() }]} />)
-    expect(screen.getByText(/Waiting for Arjun · away 12m/)).toBeInTheDocument()
+    expect(screen.getByText(/Waiting for/)).toHaveTextContent(/Waiting for Arjun.* · away 12m/)
   })
 
   it('falls back to "a kafka-connect owner" when nobody in the list owns it', () => {

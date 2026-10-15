@@ -141,9 +141,15 @@ func TestTriageWaitIsBounded(t *testing.T) {
 	tr := &fakeTriager{block: make(chan struct{})}
 	defer close(tr.block)
 	svc, runs := newTriageService(t, 2, tr, nil)
+	// The wait is TriagePassTimeout 1 s + the 5 s margin; the test then
+	// shortens it so it need not sit out six seconds.
+	if got := room.TriageWaitForTest(svc); got != 6*time.Second {
+		t.Fatalf("triage wait = %s, want 6s", got)
+	}
+	room.SetTriageWaitForTest(svc, 100*time.Millisecond)
 	snap, _ := openGeneric(t, svc, "a", nil)
-	// TriagePassTimeout 1 s + 5 s margin: the run starts without the pass.
-	waitFor(t, 8*time.Second, func() bool { _, _, ok := runs.get(snap.ID); return ok })
+	// The run starts without the pass once the wait is over.
+	waitFor(t, 5*time.Second, func() bool { _, _, ok := runs.get(snap.ID); return ok })
 	if a, _, _ := runs.get(snap.ID); a.Triage != nil {
 		t.Fatalf("run got a first look that never finished: %+v", a.Triage)
 	}

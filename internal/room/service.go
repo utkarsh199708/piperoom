@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"piperoom/internal/actions"
@@ -135,7 +136,7 @@ type Deps struct {
 
 	// OnRoomClosed, when set, is called once per room closed by CloseRoom, after
 	// room.closed is appended, the alert key released and the close persisted,
-	// and after s.mu is released. It runs on the closing request, before
+	// and after the room's lock is released. It runs on the closing request, before
 	// CloseRoom returns, with the service lifetime ctx, so a caller that closes
 	// a room and then asks the hook's owner about it sees the hook already ran.
 	// The hook must be fast and must not call back into a method that waits for
@@ -145,6 +146,18 @@ type Deps struct {
 	// alert with no key. Nil means no-op.
 	OnRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
 
+	// OnRoomDeleted, when set, is called once per room this replica forgets
+	// because it is gone from the store: deleted here (DeleteRoom), purged
+	// here by retention, or deleted by another replica and noticed here (the
+	// follower, a re-list, a command's re-read). deleted is the room.deleted
+	// frame its WebSockets get last (docs/api.md, WebSocket), or the zero
+	// Event when the room's audit row cannot be read (then only the close goes
+	// out). It never runs under a room's lock and must return promptly;
+	// cmd/server points it at the WebSocket gateway's CloseRoom, which is
+	// idempotent, so a room reported twice closes its sockets once. Nil means
+	// no-op.
+	OnRoomDeleted func(roomID string, deleted events.Event)
+
 	// Paging is owner.paged delivery and the automatic page of an undriven
 	// alert room (service_page.go, QA G2). The zero value pages in-app only
 	// and never pages on its own.
@@ -152,6 +165,19 @@ type Deps struct {
 }
 
 type roomState struct {
+	// mu is the room's lock (roomlock.go). It guards every field below but
+	// pub, which is atomic, and dedupKey, which is the registry's.
+	mu sync.Mutex
+	// gone is set when the room leaves the cache (evicted, deleted, or a
+	// create that failed): whoever still holds the pointer finds it here.
+	gone bool
+	// pub is the snapshot as of the last unlock (unlockRoom): an
+	// immutable copy that reads use without a lock. nil until the room is
+	// first published.
+	pub atomic.Pointer[RoomSnapshot]
+	// changed says snap changed since it was last published.
+	changed bool
+
 	snap RoomSnapshot
 	// leaseLogFullFor is the logged lease whose control.lease_expired a full
 	// room log refused (lease_expiry.go); the check skips it from then on.
@@ -162,7 +188,19 @@ type roomState struct {
 	agentDone       uint64             // agentRun of a run that ended on its own (markAgentDone); a new incident restarts it
 	execCancel      context.CancelFunc // cancels the room's executor on close
 	exec            *execQueue         // nil until the first proposal is approved
-	dedupKey        string             // alert index key of an alert room; "" otherwise
+	// dedupKey is the alert index key of an alert room; "" otherwise. It is
+	// guarded by s.reg, not by mu: the alert index reads the keys of other
+	// rooms (releaseAlertKeyLocked). Read it with dedupKeyOf.
+	dedupKey string
+	// alertRaw is room.created.alert, the raw alert every agent run of the
+	// room starts from; nil for a room opened by hand.
+	alertRaw json.RawMessage
+	// openingFor is the pipeline of a room opened in this process, set before
+	// it is cached and never changed: a registry mirror that tells lookups by
+	// pipeline about a room whose create has not published it yet
+	// (OpenRoomForPipeline). "" for a room loaded from the log, which is
+	// published from the start.
+	openingFor string
 	// firstLook is set on a room opened in this process until its agent
 	// starts: only such a room gets the triage pass (service_triage.go).
 	firstLook bool
@@ -178,12 +216,17 @@ type roomState struct {
 	graceTimer      *time.Timer
 
 	// Multi-replica state (replicas.go). leased: this replica owns the room's
-	// agent lease, so it runs the agent and feeds its inbox; leaseValid is the
-	// local deadline after which the agent stops unless a renew confirmed the
-	// lease. pending is the human input logged after the agent's last own
-	// event, which primes the inbox of a replica that becomes the owner.
+	// agent lease, so it runs the agent and feeds its inbox; it is changed
+	// only by setLeased, which mirrors it in leasedHint for the lease loops,
+	// which read it without the room's lock. leaseValid (Unix ns) is the local
+	// deadline after which the agent stops unless a renew confirmed the lease;
+	// the renew loop moves it without the lock, so a room stuck in a slow
+	// call keeps a lease the store still confirms. pending is the human input
+	// logged after the agent's last own event, which primes the inbox of a
+	// replica that becomes the owner.
 	leased     bool
-	leaseValid time.Time
+	leasedHint atomic.Bool
+	leaseValid atomic.Int64
 	pending    []agent.HumanInput
 
 	// shadowLogFull is set when the shadow log reached the room's cap: the
@@ -227,6 +270,7 @@ type Service struct {
 	now             func() time.Time
 	onRoomOpened    func(ctx context.Context, roomID string)
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
+	onRoomDeleted   func(roomID string, deleted events.Event)
 	slots           *agentSlots // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store
@@ -255,6 +299,12 @@ type Service struct {
 	leaseOnce     sync.Once
 	leaseTickDone func()
 
+	// retryAfter, when set (tests only), replaces time.After for the wait
+	// between failed agent and shadow attempts, so tests need not sit out the
+	// production backoff. globalRetry is globalSlotRetry; tests shorten it.
+	retryAfter  func(d time.Duration) <-chan time.Time
+	globalRetry time.Duration
+
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
 	// waits.
@@ -262,12 +312,22 @@ type Service struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	closed bool
-	rooms  map[string]*roomState
+	// reg guards the room registry (registry.go): the cache, the loads in
+	// flight, the alert index and closed. It is a leaf lock, never held
+	// across I/O, a hook or another lock. Each room has its own lock
+	// (roomlock.go).
+	reg     sync.Mutex
+	closed  bool
+	rooms   map[string]*roomState
+	loading map[string]*roomLoad
 	// alertRooms maps the dedup key of each open webhook room to that room, so
 	// a repeat of the same alert joins the room instead of opening another.
 	alertRooms map[string]string
+	// alertLocks serialise the opens of one alert key in this process
+	// (lockAlertKey): the check for an open room and the create must be one
+	// step, and no service-wide lock makes them so. Striped by key hash, so
+	// unrelated keys rarely wait for each other.
+	alertLocks [alertLockStripes]sync.Mutex
 
 	// list pushes rooms-list changes to SubscribeRooms (listhub.go).
 	list *listHub
@@ -329,6 +389,7 @@ func New(d Deps) *Service {
 		triage:          d.Triage,
 		triageWait:      triageWaitFor(d.TriagePassTimeout),
 		triageSem:       make(chan struct{}, maxTriagePasses),
+		globalRetry:     globalSlotRetry,
 		opts:            d.Options,
 		shadowOpts:      d.ShadowOptions,
 		shadowGrace:     d.ShadowGrace,
@@ -337,6 +398,7 @@ func New(d Deps) *Service {
 		now:             now,
 		onRoomOpened:    d.OnRoomOpened,
 		onRoomClosed:    d.OnRoomClosed,
+		onRoomDeleted:   d.OnRoomDeleted,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,
@@ -348,6 +410,7 @@ func New(d Deps) *Service {
 		ctx:             ctx,
 		cancel:          cancel,
 		rooms:           map[string]*roomState{},
+		loading:         map[string]*roomLoad{},
 		alertRooms:      map[string]string{},
 		list:            newListHub(),
 		paging:          newPagingState(d.Paging),
@@ -372,13 +435,18 @@ func New(d Deps) *Service {
 // started (agent supervisors, executor queues) to stop. It is idempotent and
 // returns promptly once all of them have exited.
 func (s *Service) Close() {
-	s.mu.Lock()
+	// closed is set under reg, where addWorker checks it, so no goroutine is
+	// added to wg once Wait may have started.
+	s.reg.Lock()
 	if s.closed {
-		s.mu.Unlock()
+		s.reg.Unlock()
 		return
 	}
 	s.closed = true
-	s.mu.Unlock()
+	s.reg.Unlock()
+	// Before the cancel: cancelling the running agents frees their slots, and
+	// a slot granted then would start a queued room on a closing service.
+	s.slots.shutdown()
 	s.cancel()
 	s.wg.Wait()
 	if s.coord != nil {
@@ -414,36 +482,32 @@ func (s *Service) Load(ctx context.Context) error {
 	if s.shadow == nil && s.owners.AnyShadow() {
 		return fmt.Errorf("room: load: owners.yaml turns shadow mode on, but the store cannot hold shadow runs")
 	}
-	s.mu.Lock()
-	err := s.ensureAllLoadedLocked(ctx, true)
-	if err == nil {
-		s.sweepShadowLocked(ctx)
-		s.sweepPostmortemsLocked()
-	}
-	s.mu.Unlock()
-	if err != nil {
+	if err := s.ensureAllLoaded(ctx, true); err != nil {
 		return err
 	}
+	s.sweepShadow(ctx)
+	s.sweepPostmortems()
 	s.startCoordination()
 	s.startLeaseExpiry()
 	s.startAutoPage()
 	return nil
 }
 
-// ensureAllLoadedLocked rebuilds every room not yet cached. restarted is true
-// only for the start-up Load: those open rooms are marked as idle after a
-// server restart. Caller must hold s.mu.
-func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) error {
+// ensureAllLoaded rebuilds every room not yet cached. restarted is true only
+// for the start-up Load: those open rooms are marked as idle after a server
+// restart.
+func (s *Service) ensureAllLoaded(ctx context.Context, restarted bool) error {
 	rooms, err := s.store.ListRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
 	}
-	return s.loadRowsLocked(ctx, rooms, restarted)
+	return s.loadRows(ctx, rooms, restarted)
 }
 
-// loadRowsLocked rebuilds the rooms among rows that are not cached yet (see
-// ensureAllLoadedLocked). Caller must hold s.mu.
-func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restarted bool) error {
+// loadRows rebuilds the rooms among rows that are not cached yet (see
+// ensureAllLoaded), each outside every lock (loadRoom); a room this call put
+// into the cache is then locked for what a load writes into it.
+func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted bool) error {
 	var leases map[string]store.RoomLease
 	if s.coord != nil && restarted {
 		var err error
@@ -452,7 +516,7 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 		}
 	}
 	for _, r := range rooms {
-		if _, ok := s.rooms[r.ID]; ok {
+		if s.cached(r.ID) != nil {
 			continue
 		}
 		if r.LastSeq == 0 {
@@ -465,16 +529,19 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 			}
 			continue
 		}
-		snap, pending, err := s.rebuild(ctx, r.ID)
+		// A load in flight elsewhere is not waited for: one slow room must
+		// not hold up a pass over all of them (ListRooms, the open-room
+		// limit). That load caches the room.
+		st, fresh, err := s.loadRoom(ctx, r.ID, false)
 		if err != nil {
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
-		st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-		s.rooms[r.ID] = st
-		s.loadUsageLocked(ctx, r.ID, st)
-		if snap.Status == "open" {
-			s.indexAlertRoomLocked(ctx, r.ID, st)
+		if !fresh {
+			continue // a command or the follower loaded it meanwhile
+		}
+		s.lockState(st)
+		if snap := st.snap; !st.gone && snap.Status == "open" {
 			// With a shared store a proposal may be running on another
 			// replica right now; the stale-claim sweep decides instead.
 			if s.coord == nil {
@@ -489,6 +556,7 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 				}
 			}
 		}
+		s.unlockRoom(st)
 	}
 	return nil
 }
@@ -514,7 +582,7 @@ const restartDetail = "server restarted"
 // noteRestartLocked tells the room that the server restarted: the agent is idle
 // and paused until someone steers or mentions it. It writes agent.status idle and
 // a system message to the log, unless the room already shows that state. Caller
-// must hold s.mu.
+// holds st's lock.
 func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *roomState) error {
 	if st.snap.AgentStatus.State == "idle" && st.snap.AgentStatus.Detail == restartDetail {
 		return nil
@@ -537,15 +605,15 @@ const restartNoticeText = "server restarted — the agent is paused; the driver 
 
 // ensureAgentLocked starts the room's agent run if the room has none yet. A
 // room restored by Load has none until someone steers it or mentions the agent;
-// a room whose agent was already started is left alone. Caller must hold s.mu.
-func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *roomState) {
+// a room whose agent was already started is left alone. Caller holds st's lock.
+func (s *Service) ensureAgentLocked(roomID string, st *roomState) {
 	// A shadow run is one-shot: steers, suggestions and @agent comments are
 	// logged but never start or restart it (docs/design/shadow.md 3.3).
 	// A full log never gets its agent back: every agent event would be refused.
 	if st.snap.Shadow || st.agentCancel != nil || !s.roomOpen(st) || st.snap.LogCap == LogCapFull || st.deleting {
 		return
 	}
-	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
+	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, st.alertRaw, st)
 }
 
 // interruptStaleProposalsLocked records the outcome of proposals that were
@@ -553,7 +621,7 @@ func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *room
 // without it they would stay "open" forever in the snapshot. For each stale
 // proposal it finishes every claimed store step (best effort), emits one
 // action.executed with OK=false naming the step that was in flight, and sets
-// the proposal status to "failed". Caller must hold s.mu.
+// the proposal status to "failed". Caller holds st's lock.
 func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID string, st *roomState) {
 	for _, p := range append([]Proposal{}, st.snap.OpenProposals...) {
 		if !fullyApproved(p) {
@@ -618,59 +686,58 @@ func (s *Service) interruptedStep(ctx context.Context, roomID string, p Proposal
 	return 0
 }
 
-func (s *Service) rawAlert(ctx context.Context, roomID string) json.RawMessage {
-	p, _ := s.roomCreated(ctx, roomID)
-	return p.Alert
+// loadedRoom is what rebuild reads from the store for a room that enters the
+// cache.
+type loadedRoom struct {
+	snap RoomSnapshot
+	// pending is the human input logged after the agent's last own event
+	// (trackPending).
+	pending []agent.HumanInput
+	// logBytes is the store's byte count of the log (loadUsage).
+	logBytes int64
+	// dedupKey is the alert index key from room.created (alertIndexKeyOf); ""
+	// for a room no alert opened.
+	dedupKey string
+	// alertRaw is room.created.alert.
+	alertRaw json.RawMessage
 }
 
-// roomCreated returns the payload of a room's room.created event.
-func (s *Service) roomCreated(ctx context.Context, roomID string) (events.RoomCreatedPayload, bool) {
-	first, err := s.store.Since(ctx, roomID, 0, 1)
-	if err != nil || len(first) == 0 || first[0].Type != events.RoomCreated {
-		return events.RoomCreatedPayload{}, false
+// state returns a new cache entry for the loaded room, published.
+func (l loadedRoom) state() *roomState {
+	st := &roomState{
+		snap: l.snap, inbox: newRoomInbox(l.snap.Shadow), pending: l.pending,
+		logBytes: l.logBytes, alertRaw: l.alertRaw,
 	}
-	return decode[events.RoomCreatedPayload](first[0])
-}
-
-// getStateLocked returns the cached room state, rebuilding it from the log if
-// the room is not cached. It does no read for a cached room: with a shared
-// store the follower keeps the cache close to the log, and a command calls
-// syncRoom (outside s.mu) before it locks. Caller must hold s.mu.
-func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState, error) {
-	if st, ok := s.rooms[roomID]; ok {
-		return st, nil
-	}
-	if _, err := s.store.GetRoom(ctx, roomID); err != nil {
-		return nil, mapStoreErr(err)
-	}
-	snap, pending, err := s.rebuild(ctx, roomID)
-	if err != nil {
-		return nil, fmt.Errorf("room: rebuild %s: %w", roomID, err)
-	}
-	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-	s.rooms[roomID] = st
-	s.loadUsageLocked(ctx, roomID, st)
-	if snap.Status == "open" {
-		s.indexAlertRoomLocked(ctx, roomID, st)
-	}
-	return st, nil
+	st.publish()
+	return st
 }
 
 // rebuild folds the whole log into a snapshot, then refreshes the driver lease
-// from the rooms row (renewals are persisted there, not in the log). pending is
-// the human input logged after the agent's last own event (trackPending).
-func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []agent.HumanInput, error) {
+// from the rooms row (renewals are persisted there, not in the log) and reads
+// the log's byte count. The room.created it folds gives the alert key and the
+// raw alert, so nothing reads that event again.
+func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error) {
+	// The byte count is read before the log: an event appended meanwhile is
+	// then folded (and counted by foldLocked) but not in the count, which can
+	// trail the store, never count an event twice.
+	logBytes := s.loadUsage(ctx, roomID)
 	st := &roomState{snap: NewSnapshot()}
+	var created *events.RoomCreatedPayload
 	after := int64(0)
 	for {
 		evs, err := s.store.Since(ctx, roomID, after, 1000)
 		if err != nil {
-			return st.snap, nil, err
+			return loadedRoom{}, err
 		}
 		if len(evs) == 0 {
 			break
 		}
 		for _, e := range evs {
+			if after == 0 && e.Type == events.RoomCreated {
+				if p, ok := decode[events.RoomCreatedPayload](e); ok {
+					created = &p
+				}
+			}
 			st.snap = Apply(st.snap, e)
 			trackPending(st, e)
 			after = e.Seq
@@ -696,7 +763,12 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 			snap.Driver.LeaseUntil = row.DriverLeaseUntil.UTC()
 		}
 	}
-	return snap, st.pending, nil
+	l := loadedRoom{snap: snap, pending: st.pending, logBytes: logBytes}
+	if created != nil {
+		l.dedupKey = alertIndexKeyOf(*created, snap.PipelineID)
+		l.alertRaw = created.Alert
+	}
+	return l, nil
 }
 
 // emitLocked appends one event, folds it into the cached snapshot and feeds
@@ -705,8 +777,8 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 // so no agent text, status or error reaches the room log, the WebSocket, the
 // Slack mirror or the export before the reveal. This is the one place that
 // decides it. With a shared store, events other replicas appended since the
-// last fold are folded first, so the snapshot never skips a seq. Caller must
-// hold s.mu.
+// last fold are folded first, so the snapshot never skips a seq. Caller holds
+// st's lock.
 //
 // It also applies the room log caps (docs/design/retention.md section 5.3):
 // the store refuses an event over the cap with store.ErrLogFull, and after
@@ -742,7 +814,7 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 }
 
 // fillGapLocked folds the events between the snapshot and seq (exclusive)
-// that another replica appended. Caller must hold s.mu.
+// that another replica appended. Caller holds st's lock.
 func (s *Service) fillGapLocked(ctx context.Context, roomID string, st *roomState, seq int64) {
 	for st.snap.LastSeq+1 < seq {
 		evs, err := s.store.Since(ctx, roomID, st.snap.LastSeq, int(min(seq-1-st.snap.LastSeq, 1000)))
@@ -800,12 +872,11 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 			return err
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.rooms[roomID]
-	if !ok {
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
 		return fmt.Errorf("room: agent emit on unknown room %q", roomID)
 	}
+	defer s.unlockRoom(st)
 	if run != outsideRun {
 		if err := s.fenceLocked(roomID, st, run); err != nil {
 			return err
@@ -819,7 +890,7 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 // the room (docs/design/replicas.md 4.1): with a shared store only the lease
 // owner's current run may write, and only before the lease's local deadline, so
 // a run whose lease is lost (or about to be) writes nothing even before its
-// context cancellation reaches it. Caller holds s.mu.
+// context cancellation reaches it. Caller holds st's lock.
 func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 	if s.coord == nil {
 		return nil
@@ -829,7 +900,7 @@ func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 		return fmt.Errorf("room: agent write on %s: %w", roomID, store.ErrLeaseLost)
 	case run != st.agentRun:
 		return fmt.Errorf("room: agent write on %s from a replaced run: %w", roomID, store.ErrLeaseLost)
-	case time.Now().After(st.leaseValid):
+	case time.Now().After(st.leaseDeadline()):
 		return fmt.Errorf("room: agent write on %s after the lease deadline: %w", roomID, store.ErrLeaseLost)
 	}
 	return nil
@@ -851,12 +922,11 @@ func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Ty
 	}
 	// Mask before the cap: a cap must not cut a secret in two.
 	p.Output = s.capOutput(maskExecOutput(p.Output))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.rooms[roomID]
-	if !ok {
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
 		return fmt.Errorf("room: emit on unknown room %q", roomID)
 	}
+	defer s.unlockRoom(st)
 	if _, err := s.emitLocked(ctx, st, roomID, typ, executorActor, p); err != nil {
 		return err
 	}
@@ -865,7 +935,7 @@ func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Ty
 }
 
 // wakeForResultLocked starts a run for an action result when the room has no
-// live one (see executorEmit). Caller holds s.mu.
+// live one (see executorEmit). Caller holds st's lock.
 func (s *Service) wakeForResultLocked(ctx context.Context, roomID string, st *roomState) {
 	if st.agentCancel != nil && st.agentDone != st.agentRun {
 		return // a live run reads the result from its inbox
@@ -876,12 +946,11 @@ func (s *Service) wakeForResultLocked(ctx context.Context, roomID string, st *ro
 }
 
 func (s *Service) emitAs(ctx context.Context, roomID string, actor events.Actor, typ events.Type, payload any) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.rooms[roomID]
-	if !ok {
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
 		return fmt.Errorf("room: emit on unknown room %q", roomID)
 	}
+	defer s.unlockRoom(st)
 	_, err := s.emitLocked(ctx, st, roomID, typ, actor, payload)
 	return err
 }
@@ -906,7 +975,7 @@ func (s *Service) leaseExpired(st *roomState) bool {
 // written to the log as control.granted with the same driver and the new
 // lease_until; since the renewal resets the lease to a full 30 minutes, that
 // test by construction logs at most one such event per 5 minutes (review item
-// 11). Caller must hold s.mu.
+// 11). Caller holds st's lock.
 func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID string) {
 	d := st.snap.Driver
 	if d == nil {
@@ -916,6 +985,7 @@ func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID st
 	lease := now.Add(DriverLease)
 	remaining := d.LeaseUntil.Sub(now)
 	st.snap.Driver.LeaseUntil = lease
+	st.changed = true
 	if err := s.store.UpdateDriver(ctx, roomID, d.ID, d.Name, lease); err != nil {
 		s.log.Warn("room: persist driver lease failed", "room", roomID, "err", err)
 	}
@@ -953,7 +1023,13 @@ func (s *Service) knownPipeline(pipelineID string) bool {
 // so it survives a restart: a webhook room opened for an unknown pipeline
 // keeps proposals disabled after the service rebuilds from the log.
 func (s *Service) proposalsDisabled(st *roomState) bool {
-	return s.owners != nil && st.snap.PipelineID != "" && !s.knownPipeline(st.snap.PipelineID)
+	return s.pipelineProposalsDisabled(st.snap.PipelineID)
+}
+
+// pipelineProposalsDisabled is proposalsDisabled by pipeline id, for code that
+// does not hold the room's lock.
+func (s *Service) pipelineProposalsDisabled(pipelineID string) bool {
+	return s.owners != nil && pipelineID != "" && !s.knownPipeline(pipelineID)
 }
 
 // humanActor is the event actor for a person. Verified comes from users.yaml
@@ -1109,7 +1185,7 @@ func (in *inbox) reset(items []agent.HumanInput) {
 // feedInbox pushes the agent input an event carries into the room's inbox.
 // With a shared store only the replica that owns the room's agent lease feeds
 // it: another replica's inbox would only collect input no run here reads.
-// Caller holds s.mu.
+// Caller holds st's lock.
 func (s *Service) feedInbox(st *roomState, e events.Event) {
 	if st.inbox == nil || st.snap.Shadow {
 		return
@@ -1131,6 +1207,13 @@ func inputFor(e events.Event) *agent.HumanInput {
 		p, ok := decode[events.SteerSentPayload](e)
 		if !ok {
 			return nil
+		}
+		// A forwarded suggestion is its author's words, not the driver's:
+		// the agent wraps it as untrusted data under the suggester's name.
+		// One logged before From existed has no author to name, so it keeps
+		// the old steer shape.
+		if p.SuggestionID != "" && p.From != nil {
+			return &agent.HumanInput{Seq: e.Seq, Actor: *p.From, Kind: "suggestion", Text: p.Text}
 		}
 		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "steer", Text: p.Text}
 	case events.CommentAdded:
@@ -1236,18 +1319,21 @@ const (
 )
 
 // startAgentLocked starts the supervisor for an open room's agent. Caller holds
-// s.mu. It does nothing after Close, so a shutting-down service never adds
+// st's lock. It does nothing after Close, so a shutting-down service never adds
 // goroutines. The supervisor first waits for a global agent slot (agentSlots).
 // The room counts as having a run from this call on, so more steers or
 // mentions while it is queued do not queue it again.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
-	if s.closed {
+	// The supervisor's place in wg is reserved first, so nothing below
+	// happens (no lease taken, no run counted) once Close has begun.
+	if !s.addWorker() {
 		return
 	}
 	// With a shared store only the lease owner runs the room's agent; when
 	// another replica owns it, that replica reads this room's input from the
 	// log (docs/design/replicas.md section 4).
 	if !s.claimLeaseLocked(roomID, st) {
+		s.wg.Done()
 		return
 	}
 	if st.snap.Shadow {
@@ -1269,7 +1355,6 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	// every other run resumes an investigation and gets the recap (Q5 T1).
 	fresh := st.firstLook
 	st.firstLook = false
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		// However the supervisor ends, its slot or queue entry goes back.
@@ -1339,7 +1424,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				// would repeat the story the agent already told.
 				s.log.Warn("room: agent stopped (unretryable)", "room", roomID, "err", err)
 				reason := truncateDetail(err.Error())
-				if s.proposalsDisabled(st) {
+				if s.pipelineProposalsDisabled(pipelineID) {
 					reason = fmt.Sprintf("proposals are disabled in this room because pipeline %q is not configured — add it to owners.yaml and restart the server", pipelineID)
 				}
 				mctx, mcancel := context.WithTimeout(s.ctx, 5*time.Second)
@@ -1356,7 +1441,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-s.backoffAfter(backoff):
 			}
 			backoff *= 2
 		}
@@ -1382,6 +1467,14 @@ func (s *Service) primeRecap(ctx context.Context, roomID string, st *roomState) 
 	if in != nil {
 		st.inbox.pushFront([]agent.HumanInput{*in})
 	}
+}
+
+// backoffAfter is time.After for the retry backoff, or the test's replacement.
+func (s *Service) backoffAfter(d time.Duration) <-chan time.Time {
+	if s.retryAfter != nil {
+		return s.retryAfter(d)
+	}
+	return time.After(d)
 }
 
 // runGuarded calls the agent runner and turns a panic into an error, so a bug
@@ -1418,13 +1511,13 @@ func isUnretryable(err error) bool {
 // already been taken by a newer run (run is stale) releases nothing. cancel is
 // the supervisor's own context, called to free it either way.
 func (s *Service) releaseAgent(st *roomState, run uint64, cancel context.CancelFunc) {
-	s.mu.Lock()
-	if st.agentRun == run {
+	s.lockState(st)
+	if !st.gone && st.agentRun == run {
 		st.agentCancel = nil
 		// The room has no agent now: any replica may start the next one.
 		s.dropLeaseLocked(st.snap.ID, st)
 	}
-	s.mu.Unlock()
+	s.unlockRoom(st)
 	cancel()
 }
 

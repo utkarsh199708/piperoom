@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
 )
@@ -130,7 +131,11 @@ func (s *Service) purge(ctx context.Context, q store.PurgeQuery) (store.PurgeRes
 	}
 	for {
 		res, err := p.PurgeClosed(ctx, q)
-		s.evictRooms(res.RoomIDs)
+		// The store's audit row of each room is the one q describes; the
+		// event count is the last seq this replica folded.
+		s.evictRooms(res.RoomIDs, func(id string, lastSeq int64) events.Event {
+			return s.deletedEvent(q.Audit(id, "", lastSeq, s.now))
+		})
 		total.Add(res)
 		for _, f := range res.Failed {
 			// The room id is an opaque identifier, not content.
@@ -157,18 +162,24 @@ func (s *Service) purge(ctx context.Context, q store.PurgeQuery) (store.PurgeRes
 }
 
 // evictRooms forgets deleted rooms: the cache entry, the alert key, and any
-// agent, executor or shadow grace timer still running for them.
-func (s *Service) evictRooms(ids []string) {
+// agent, executor or shadow grace timer still running for them. Then, outside
+// every lock, it hands each room's room.deleted frame to the OnRoomDeleted hook, so
+// its WebSockets close; frame builds it from the last seq this replica had
+// folded (0 for a room it had not cached).
+func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int64) events.Event) {
 	if len(ids) == 0 {
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	lastSeqs := make(map[string]int64, len(ids))
 	for _, id := range ids {
-		st, ok := s.rooms[id]
-		if !ok {
+		// A load in flight read the log before the delete: it must not
+		// bring the room back.
+		s.cancelLoad(id)
+		st := s.lockCachedRoom(id)
+		if st == nil {
 			continue
 		}
+		lastSeqs[id] = st.snap.LastSeq
 		if st.agentCancel != nil {
 			st.agentCancel()
 		}
@@ -179,10 +190,12 @@ func (s *Service) evictRooms(ids []string) {
 			st.graceTimer.Stop()
 		}
 		s.releaseAlertKeyLocked(id, st)
-		if st.dedupKey != "" && s.alertRooms[st.dedupKey] == id {
-			delete(s.alertRooms, st.dedupKey)
-		}
-		delete(s.rooms, id)
-		s.markListDirtyLocked(id)
+		st.gone = true
+		s.uncacheRoom(id, st)
+		s.unlockRoom(st)
+		s.markListDirty(id)
+	}
+	for _, id := range ids {
+		s.roomDeleted(id, frame(id, lastSeqs[id]))
 	}
 }

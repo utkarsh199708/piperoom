@@ -222,18 +222,48 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 
 // ---- kafka_find_by_key ----
 
+const (
+	findDefaultMaxScan = 5000
+	// findMaxScan is the client's cap too: the scan runs under the tool's
+	// 10 s deadline, and a larger window rarely finishes inside it.
+	findMaxScan = 20000
+)
+
 type findByKey struct{ d Deps }
 
 func (t *findByKey) Name() string     { return "kafka_find_by_key" }
 func (t *findByKey) Kind() tools.Kind { return tools.KindRead }
 func (t *findByKey) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
-		"topic":    strProp("topic name"),
-		"key":      strProp("key to find (string form)"),
-		"since":    strProp("RFC 3339 timestamp; scan from here"),
-		"max_scan": map[string]any{"type": "integer", "description": "max records per partition (default 5000)"},
+		"topic": strProp("topic name"),
+		"key":   strProp("key to find (string form)"),
+		"since": strProp("RFC 3339 timestamp; scan from here"),
+		// The range is in the description: strict tool use rejects
+		// minimum/maximum, so findBounds enforces it.
+		"max_scan": map[string]any{
+			"type":        "integer",
+			"description": "max records per partition, 1 to 20000; default 5000",
+		},
 	}, "topic", "key", "since")
 }
+
+// findBounds validates the model's numbers the way dlq_peek does: max_scan
+// absent means the default, below 1 is bad input, above the cap is cut to
+// it. A since before the Unix epoch becomes the epoch: Kafka reads the
+// negative timestamps -1 and -2 as "latest" and "earliest".
+func findBounds(maxScan *int, since time.Time) (int, time.Time, error) {
+	if since.Before(time.Unix(0, 0)) {
+		since = time.Unix(0, 0).UTC()
+	}
+	if maxScan == nil {
+		return findDefaultMaxScan, since, nil
+	}
+	if *maxScan < 1 {
+		return 0, since, fmt.Errorf("%w: max_scan must be between 1 and %d", tools.ErrBadInput, findMaxScan)
+	}
+	return min(*maxScan, findMaxScan), since, nil
+}
+
 func (t *findByKey) Description() string {
 	return "Finds records whose decoded key matches, scanning from the first offset at or after 'since'. Returns where each was found."
 }
@@ -243,7 +273,7 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 		Topic   string `json:"topic"`
 		Key     string `json:"key"`
 		Since   string `json:"since"`
-		MaxScan int    `json:"max_scan"`
+		MaxScan *int   `json:"max_scan"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Topic == "" || p.Key == "" || p.Since == "" {
 		return tools.Result{}, fmt.Errorf("%w: topic, key and since are required", tools.ErrBadInput)
@@ -251,6 +281,10 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	since, err := time.Parse(time.RFC3339, p.Since)
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("%w: since must be RFC 3339: %v", tools.ErrBadInput, err)
+	}
+	maxScan, since, err := findBounds(p.MaxScan, since)
+	if err != nil {
+		return tools.Result{}, err
 	}
 	sc, err := t.d.scope(ctx)
 	if err != nil {
@@ -261,7 +295,7 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	refs, err := t.d.Kafka.FindByKey(cctx, p.Topic, p.Key, since, p.MaxScan)
+	refs, err := t.d.Kafka.FindByKey(cctx, p.Topic, p.Key, since, maxScan)
 	if err != nil {
 		return tools.Result{}, err
 	}
