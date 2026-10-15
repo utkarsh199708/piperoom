@@ -883,3 +883,41 @@ describe('applyEvent — bidi controls in typed text', () => {
     expect(fromSnapshot(snap).title).toBe('ab')
   })
 })
+
+// The server voids a hand-off once a newer one exists, its creator stops driving or the room
+// closes (409 stale_handoff / room_closed): the UI must not keep offering it.
+describe('applyEvent — stale hand-offs', () => {
+  const summary = { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] }
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+  const meera = { kind: 'human' as const, id: 'meera', name: 'Meera' }
+  const lease = '2026-10-11T11:00:00Z'
+  const driving = () =>
+    applyEvent(base(), ev(1, 'control.granted', { to: human, lease_until: lease }, human))
+  const created = (seq: number, id: string, to: typeof kabir) =>
+    ev(seq, 'handoff.created', { handoff_id: id, to, summary, stay_as_watcher: false }, human)
+
+  it('a newer hand-off voids the older pending one', () => {
+    let s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, created(3, 'h2', meera))
+    expect(s.handoffs.map((h) => h.status)).toEqual(['voided', 'pending'])
+  })
+
+  it('a driver change voids it, but the receiver accepting it does not', () => {
+    let s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, ev(3, 'control.granted', { to: meera, lease_until: lease }, meera))
+    expect(s.handoffs[0].status).toBe('voided')
+
+    s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, ev(3, 'control.granted', { to: human, lease_until: lease }, human))
+    expect(s.handoffs[0].status).toBe('pending') // a renewal by the same driver
+    s = applyEvent(s, ev(4, 'control.granted', { to: kabir, lease_until: lease }, kabir))
+    s = applyEvent(s, ev(5, 'handoff.accepted', { handoff_id: 'h1' }, kabir))
+    expect(s.handoffs[0].status).toBe('accepted')
+  })
+
+  it('closing the room voids it', () => {
+    let s = applyEvent(driving(), created(2, 'h1', kabir))
+    s = applyEvent(s, ev(3, 'room.closed', { resolution: 'fixed' }, human))
+    expect(s.handoffs[0].status).toBe('voided')
+  })
+})

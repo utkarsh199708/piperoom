@@ -166,6 +166,12 @@ function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: n
   return null
 }
 
+function voidPending(handoffs: RoomState['handoffs'], when: (h: RoomState['handoffs'][number]) => boolean) {
+  return handoffs.some((h) => h.status === 'pending' && when(h))
+    ? handoffs.map((h) => (h.status === 'pending' && when(h) ? { ...h, status: 'voided' as const } : h))
+    : handoffs
+}
+
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
   const next = applyCore(state, event)
@@ -227,6 +233,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         status: 'closed',
         closed_at: event.at,
         resolution: p.resolution,
+        handoffs: voidPending(state.handoffs, () => true),
       }
       break
     }
@@ -479,6 +486,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
         driver: { id: p.to.id, name: p.to.name, verified: p.to.verified === true, lease_until: p.lease_until },
         members,
         control_requests: state.control_requests.filter((r) => r.from.id !== p.to.id),
+        // A hand-off is accepted only while its creator drives (409 stale_handoff). The receiver's
+        // own grant comes just before handoff.accepted, which then marks theirs accepted.
+        handoffs: voidPending(state.handoffs, (h) => h.from_id !== p.to.id),
       }
       break
     }
@@ -652,14 +662,16 @@ function applyCore(state: RoomState, event: Event): RoomState {
         handoff_request:
           !p.request_id || state.handoff_request?.request_id === p.request_id ? null : state.handoff_request,
         handoff_failure: null,
+        // A newer hand-off voids the older ones: the driver can redo a hand-off to someone else.
         handoffs: [
-          ...state.handoffs,
+          ...voidPending(state.handoffs, () => true),
           {
             handoff_id: p.handoff_id,
             to: p.to,
             summary: p.summary,
             stay_as_watcher: p.stay_as_watcher,
             status: 'pending' as const,
+            from_id: state.driver?.id,
           },
         ],
       }

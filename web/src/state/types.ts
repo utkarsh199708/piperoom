@@ -200,7 +200,10 @@ export interface HandoffState {
   to: Actor
   summary: HandoffSummary
   stay_as_watcher: boolean
-  status: 'pending' | 'accepted'
+  /** voided: the server no longer accepts it (a newer hand-off, the driver changed, the room closed). */
+  status: 'pending' | 'accepted' | 'voided'
+  /** The driver when it was created; the server voids it once someone else drives. */
+  from_id?: string
 }
 
 /** A hand-off the agent is still writing the summary for (handoff.requested, R0). */
