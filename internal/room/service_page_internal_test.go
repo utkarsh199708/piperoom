@@ -569,7 +569,7 @@ func TestPageDeliveryBoundedAndStopsAtClose(t *testing.T) {
 	}
 	time.Sleep(30 * time.Millisecond)
 	if c := n.calls.Load(); c != maxPageDeliveries {
-		t.Fatalf("deliveries started = %d, want %d (the page past the cap is not sent)", c, maxPageDeliveries)
+		t.Fatalf("deliveries started = %d, want %d (the page past the cap waits in the queue)", c, maxPageDeliveries)
 	}
 	done := make(chan struct{})
 	go func() { svc.Close(); close(done) }()

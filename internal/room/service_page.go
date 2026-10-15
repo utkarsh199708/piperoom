@@ -42,8 +42,13 @@ const (
 	// autoPageCheckTimeout bounds one pass of the check.
 	autoPageCheckTimeout = 30 * time.Second
 	// maxPageDeliveries caps webhook deliveries in flight; a page past it
-	// is not delivered by webhook (it is still in the room and in Slack).
+	// waits in a queue of maxPageQueue (QA R3).
 	maxPageDeliveries = 8
+	// maxPageQueue bounds the pages waiting for a delivery slot: an alert
+	// storm of a few hundred rooms still fits. A page past it is not
+	// delivered by webhook (it is still in the room and in Slack) and is
+	// logged as a WARN.
+	maxPageQueue = 512
 	// pageDeliveryTimeout bounds one delivery: the contact lookups, two
 	// attempts of notify.DefaultTimeout and the pause between them.
 	pageDeliveryTimeout = 30 * time.Second
@@ -72,9 +77,11 @@ type Paging struct {
 
 // pagingState is the service's paging runtime.
 type pagingState struct {
-	cfg  Paging
-	sem  chan struct{} // webhook deliveries in flight
-	once sync.Once     // the auto-page loop starts once
+	cfg Paging
+	// queue holds written pages waiting for one of maxPageDeliveries workers.
+	queue   chan pageJob
+	workers sync.Once // the delivery workers start with the first page
+	once    sync.Once // the auto-page loop starts once
 	// tickDone, when set (tests only), runs after each check of the loop.
 	tickDone func()
 	// noOwners marks rooms whose automatic page found nobody to page, so the
@@ -83,7 +90,7 @@ type pagingState struct {
 }
 
 func newPagingState(p Paging) *pagingState {
-	return &pagingState{cfg: p, sem: make(chan struct{}, maxPageDeliveries), noOwners: map[string]bool{}}
+	return &pagingState{cfg: p, queue: make(chan pageJob, maxPageQueue), noOwners: map[string]bool{}}
 }
 
 // Page is one entry of the snapshot's pages (docs/api.md, Q-wave snapshot
@@ -312,11 +319,13 @@ func labelLayer(raw json.RawMessage) string {
 }
 
 // fallbackLayer picks the layer to page when neither the watcher nor triage
-// named one: the alert's layer label, else the first layer of events.Layers
+// named one: the alert's layer label if someone owns it, else the first layer of events.Layers
 // (the pipeline's flow order; owners.yaml keeps layers in a map) that has
 // someone to page. "" when nobody can be paged.
 func (s *Service) fallbackLayer(ctx context.Context, pipelineID, label string) string {
-	if label != "" {
+	// A label nobody owns would end in errNobodyToPage on every check, so it
+	// is skipped like an empty one (QA R4).
+	if label != "" && len(s.pageOwners(ctx, pipelineID, label)) > 0 {
 		return label
 	}
 	for _, l := range events.Layers {
@@ -617,38 +626,60 @@ func (s *Service) pageCandidates(ctx context.Context) []User {
 
 // ---- delivery ----
 
-// notifyPageLocked hands a written page to the notifier on a goroutine of the
-// service (s.wg, s.ctx), so the page never waits on the webhook and Close
-// waits for, and cancels, deliveries in flight. At most maxPageDeliveries run
-// at once; a page past that is logged and not delivered by webhook. Caller
-// holds s.mu.
+// pageJob is one written page waiting for a webhook delivery.
+type pageJob struct {
+	body notify.OwnerPaged
+	ids  []string
+}
+
+// notifyPageLocked queues a written page for the notifier, so the page never
+// waits on the webhook. maxPageDeliveries workers of the service (s.wg, s.ctx)
+// deliver from the queue; Close cancels them and waits. A page is dropped only
+// when maxPageQueue pages already wait, and that is logged as a WARN. Delivery
+// is best effort: the page event is what is written once (the auto page is
+// spent by that event, not by a delivery), and a queued page is lost if the
+// process stops before it is sent. Caller holds s.mu.
 func (s *Service) notifyPageLocked(st *roomState, e events.Event, p events.OwnerPagedPayload) {
 	n := s.paging.cfg.Notifier
 	if n == nil || s.closed {
 		return
 	}
+	s.paging.workers.Do(func() {
+		for i := 0; i < maxPageDeliveries; i++ {
+			s.wg.Add(1)
+			go s.pageWorker(n, s.paging.queue)
+		}
+	})
+	job := pageJob{
+		body: notify.OwnerPaged{
+			RoomID: e.RoomID, RoomTitle: st.snap.Title, PipelineID: st.snap.PipelineID, Layer: p.Layer,
+			Reason: p.Reason, ProposalID: p.ProposalID, Auto: p.Auto, At: e.At, Seq: e.Seq,
+		},
+		ids: append([]string(nil), p.Owners...),
+	}
 	select {
-	case s.paging.sem <- struct{}{}:
+	case s.paging.queue <- job:
 	default:
-		s.log.Warn("room: page not sent to the webhook: too many deliveries in flight", "room", e.RoomID, "layer", p.Layer, "seq", e.Seq)
-		return
+		s.log.Warn("room: page not sent to the webhook: the delivery queue is full", "room", e.RoomID, "layer", p.Layer, "seq", e.Seq)
 	}
-	body := notify.OwnerPaged{
-		RoomID: e.RoomID, RoomTitle: st.snap.Title, PipelineID: st.snap.PipelineID, Layer: p.Layer,
-		Reason: p.Reason, ProposalID: p.ProposalID, Auto: p.Auto, At: e.At, Seq: e.Seq,
+}
+
+// pageWorker delivers queued pages until the service closes.
+func (s *Service) pageWorker(n PageNotifier, queue <-chan pageJob) {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case job := <-queue:
+			ctx, cancel := context.WithTimeout(s.ctx, pageDeliveryTimeout)
+			job.body.Owners = s.pageContacts(ctx, job.ids)
+			// The notifier logs a failure itself (status code only); a failed
+			// delivery never fails the page.
+			_ = n.Deliver(ctx, job.body)
+			cancel()
+		}
 	}
-	ids := append([]string(nil), p.Owners...)
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		defer func() { <-s.paging.sem }()
-		ctx, cancel := context.WithTimeout(s.ctx, pageDeliveryTimeout)
-		defer cancel()
-		body.Owners = s.pageContacts(ctx, ids)
-		// The notifier logs a failure itself (status code only); a failed
-		// delivery never fails the page.
-		_ = n.Deliver(ctx, body)
-	}()
 }
 
 // pageContacts names the paged people for the webhook: users.yaml first,
