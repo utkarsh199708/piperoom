@@ -212,7 +212,7 @@ export class SendLedger {
     }
     if (isNetworkError(e) && this.count('queued') < MAX_KEPT) {
       // Gap shared with main (pinned by a test): a TypeError can also mean the request reached
-      // the server and the answer was lost; a server without #459 then stores the re-send again.
+      // the server and the answer was lost; a server without #459 then stores the re-send again (#492).
       a.state = 'queued'
       this.setError(OFFLINE_TEXT)
       this.retryWhileLive()

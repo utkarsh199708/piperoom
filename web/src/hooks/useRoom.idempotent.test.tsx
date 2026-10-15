@@ -447,9 +447,10 @@ describe('kept actions are never dropped by age', () => {
   })
 })
 
-// Gaps shared with main (org.md §12): pinned as they are today, each with its follow-up ticket.
+// Gaps shared with main (org.md §12): pinned as they are today, each with its follow-up ticket
+// (#491, #492). When a ticket is fixed, its row flips to assert the fix.
 describe('gap rows (today\'s behaviour, shared with main)', () => {
-  it('GAP ADV-4: a kept steer drains into the room on screen after a room switch; only App.tsx keying RoomScreen by roomId prevents it', async () => {
+  it('GAP ADV-4 (#491): a kept steer drains into the room on screen after a room switch; only App.tsx keying RoomScreen by roomId prevents it', async () => {
     const server = fakeServer('contract')
     vi.stubGlobal('fetch', server.fetchMock)
     const socket = new FakeWebSocket()
@@ -469,7 +470,7 @@ describe('gap rows (today\'s behaviour, shared with main)', () => {
     expect(server.fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/rooms/r2/steer')
   })
 
-  it('GAP ADV-5: against a server without #459, a request stored before its connection reset is re-sent on reconnect: 2 copies', async () => {
+  it('GAP ADV-5 (#492): against a server without #459, a request stored before its connection reset is re-sent on reconnect: 2 copies', async () => {
     const server = fakeServer('old')
     const { hook, socket } = await openRoom(server)
     server.state.resetAfterStore = 1

@@ -174,7 +174,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   // Steers and comments not settled yet, keyed by client_id. Its post reads roomIdRef: the room
   // on screen when it posts, not the room the action was typed in. Gap shared with main (pinned by
   // a test): only App.tsx keying RoomScreen by roomId keeps a kept action from draining into
-  // another room.
+  // another room (#491).
   const roomIdRef = useRef(roomId)
   // The socket is open (set by onopen/onclose, cleared on cleanup): with it open, the ledger
   // retries kept actions itself, since no reconnect will.
