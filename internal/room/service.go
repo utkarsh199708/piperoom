@@ -268,9 +268,10 @@ type Service struct {
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
 
-	// openRoomsSeen is the last open-room count OpenRooms computed, served
-	// when s.mu is busy (see metrics.go).
-	openRoomsSeen atomic.Int64
+	// openRooms is how many cached rooms are open. It is kept exact under s.mu
+	// (cacheRoomLocked, uncacheRoomLocked, foldLocked) and read without it, so
+	// the /metrics gauge never waits on a lock held across a store append.
+	openRooms atomic.Int64
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -466,7 +467,7 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 			continue
 		}
 		st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-		s.rooms[r.ID] = st
+		s.cacheRoomLocked(r.ID, st)
 		s.loadUsageLocked(ctx, r.ID, st)
 		if snap.Status == "open" {
 			s.indexAlertRoomLocked(ctx, r.ID, st)
@@ -638,7 +639,7 @@ func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState
 		return nil, fmt.Errorf("room: rebuild %s: %w", roomID, err)
 	}
 	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-	s.rooms[roomID] = st
+	s.cacheRoomLocked(roomID, st)
 	s.loadUsageLocked(ctx, roomID, st)
 	if snap.Status == "open" {
 		s.indexAlertRoomLocked(ctx, roomID, st)
