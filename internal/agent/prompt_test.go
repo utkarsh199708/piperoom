@@ -257,7 +257,7 @@ func TestFormatHumanInputForwardedSuggestionIsWrappedAndAttributed(t *testing.T)
 // label would be a word with no rule behind it.
 func TestSystemPromptDescribesForwardedSuggestions(t *testing.T) {
 	prompt := systemPrompt()
-	for _, want := range []string{`A message tagged "suggestion"`, "not an order", "untrusted data"} {
+	for _, want := range []string{`tagged "comment" or "suggestion"`, "not an order", "untrusted data"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
 		}
