@@ -3,16 +3,19 @@ package agent
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"piperoom/internal/config"
 	"piperoom/internal/events"
 )
 
@@ -43,12 +46,40 @@ func (p Prices) Has(model string) bool {
 	return ok
 }
 
-// LoadModelPrices reads the PIPEROOM_MODEL_PRICES file. An empty path means no
-// table (nil, nil). A file that is not a valid table is an error, so a typo
-// cannot silently drop or zero a price.
+// builtinPricesJSON is the list-price table behind PIPEROOM_MODEL_PRICES's
+// default (QA G14), in the same format as a price file. USD per million tokens
+// as of 2026-10; cache_write is the 5-minute write, 1.25x input.
+//
+// claude-haiku-5-5 is listed at its price for prompts up to 100K tokens. A
+// longer prompt costs more ($0.50 input, $2.50 output), so the estimate is a
+// lower bound for such a request. Only undated ids exactly as a request names
+// them are priced: a Bedrock or Vertex id needs a price file.
+//
+//go:embed prices_builtin.json
+var builtinPricesJSON []byte
+
+// LoadModelPrices returns the price table named by the typed
+// config.Cost.PricesFile:
+//
+//   - config.BuiltinModelPrices ("builtin", the default of an unset
+//     PIPEROOM_MODEL_PRICES): the table built into this package;
+//   - "" (and "off", for a caller that did not go through config.ParseCost):
+//     no table (nil, nil), so every cost is omitted, never guessed;
+//   - anything else: the path of a JSON price file.
+//
+// A file that is not a valid table is an error, so a typo cannot silently drop
+// or zero a price. Every call returns a table of its own.
 func LoadModelPrices(path string) (Prices, error) {
-	if path == "" {
+	path = strings.TrimSpace(path)
+	switch strings.ToLower(path) {
+	case "", "off":
 		return nil, nil
+	case config.BuiltinModelPrices:
+		p, err := ParseModelPrices(builtinPricesJSON)
+		if err != nil {
+			return nil, fmt.Errorf("agent: built-in model prices: %w", err)
+		}
+		return p, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
