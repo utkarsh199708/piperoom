@@ -87,7 +87,7 @@ func TestValidateReturnsDeadlineErrorWhenTargetNeverAnswers(t *testing.T) {
 type pausedConnect struct{ fakeConnect }
 
 func (*pausedConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
-	return clients.ConnectorStatus{Name: "pg-orders-connector", State: "PAUSED"}, nil
+	return clients.ConnectorStatus{Name: "pg-orders-connector", State: "PAUSED", Tasks: []clients.TaskStatus{{ID: 0, State: "PAUSED"}}}, nil
 }
 
 // The injected deadline must not change the outcome for a target that answers.

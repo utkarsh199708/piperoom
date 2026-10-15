@@ -239,7 +239,21 @@ func (a *restartTask) Validate(ctx context.Context, raw json.RawMessage) error {
 	}
 	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
-	return a.d.connectorExists(ctx, p.Connector)
+	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
+		return err
+	}
+	// A task id the connector does not list would pass approval and then fail
+	// with a 404 (Q6 U6). The status read is the same one Preview makes.
+	st, err := a.d.Connect.Status(ctx, p.Connector)
+	if err != nil {
+		return fmt.Errorf("actions: read %s status: %w", p.Connector, err)
+	}
+	for _, t := range st.Tasks {
+		if t.ID == p.Task {
+			return nil
+		}
+	}
+	return fmt.Errorf("actions: connector %q has no task %d", p.Connector, p.Task)
 }
 
 func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {

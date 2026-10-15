@@ -151,7 +151,7 @@ func TestPostmortemExecutedButNotVerified(t *testing.T) {
 		}, "- `p_1`: not verified: no verification was written within 15 min of its last step"},
 		{"verified", func(a appendFn, c *clock) {
 			a(events.AgentVerification, events.AgentActor, events.AgentVerificationPayload{ProposalID: "p_1", Recovered: true, Verdict: "recovered: every layer check passed"})
-		}, "- `p_1` recovered; recovered: every layer check passed"},
+		}, "- `p_1` recovered: every layer check passed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, st, c := newTestService(t)
