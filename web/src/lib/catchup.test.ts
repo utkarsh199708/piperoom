@@ -33,7 +33,7 @@ describe('catchUpSummary', () => {
   })
 
   it('counts one step in the singular', () => {
-    expect(catchUpSummary(prev(), { ...prev(), steps: [step('a')] }, me)).toEqual({ items: ['1 step'], target: 'steps' })
+    expect(catchUpSummary(prev(), { ...prev(), steps: [step('a')] }, me)).toEqual({ items: ['1 step'], target: 'steps', lastStepId: 'a' })
   })
 
   it('tells a changed hypothesis from a new confidence', () => {

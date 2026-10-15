@@ -12,7 +12,7 @@ const CAUGHT_UP_MS = 2_000
 export type CatchUpStrip =
   | { kind: 'reconnecting'; text: string }
   | { kind: 'caught_up'; text: string }
-  | { kind: 'away'; text: string; target: CatchUpTarget }
+  | { kind: 'away'; text: string; target: CatchUpTarget; stepId?: string }
 
 interface Away {
   at: number
@@ -41,7 +41,14 @@ export function useCatchUp(state: RoomState | null, conn: ConnState, user: Curre
   }, [])
 
   useEffect(() => {
-    if (!state) return
+    // A reload (state null, then a fresh snapshot with last_seq 0) makes the old baseline wrong.
+    if (!state || (away && state.last_seq < away.snapshot.last_seq)) {
+      if (away) setAway(null)
+      return
+    }
+    // Replay is not over until last_seq reaches the snapshot's: a half-replayed state is no baseline
+    // (it would count the room's whole history as news).
+    if (state.last_seq < state.replay_target) return
     const out = hidden || conn === 'reconnecting'
     if (out && (!away || away.backAt !== undefined)) setAway({ at: Date.now(), snapshot: state })
     else if (!out && away && away.backAt === undefined) setAway({ ...away, backAt: Date.now() })
@@ -70,7 +77,7 @@ export function useCatchUp(state: RoomState | null, conn: ConnState, user: Curre
     const gone = away.backAt - away.at
     const summary = gone >= AWAY_MIN_MS ? catchUpSummary(away.snapshot, state, user) : null
     if (summary) {
-      strip = { kind: 'away', text: `While you were away (${awayLabel(gone)}): ${summary.items.join(' · ')}`, target: summary.target }
+      strip = { kind: 'away', text: `While you were away (${awayLabel(gone)}): ${summary.items.join(' · ')}`, target: summary.target, stepId: summary.lastStepId }
     }
   }
   return { strip, dismiss }

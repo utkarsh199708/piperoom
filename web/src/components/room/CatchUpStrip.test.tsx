@@ -41,6 +41,7 @@ describe('useCatchUp', () => {
       kind: 'away',
       text: 'While you were away (1m): 3 steps · hypothesis → high',
       target: 'hypothesis',
+      stepId: 'c',
     })
   })
 
@@ -79,6 +80,41 @@ describe('useCatchUp', () => {
     expect(result.current.strip?.text).toBe('While you were away (2m): 1 step')
   })
 
+  it('takes no baseline from a half-replayed state (a room opened in a background tab)', () => {
+    setHidden(true)
+    const replaying = { ...emptyRoomState('r1'), last_seq: 0, replay_target: 40 }
+    const { result, rerender } = setup(replaying)
+    act(() => void vi.advanceTimersByTime(120_000))
+    // The whole log replays: that history is not news.
+    const replayed = { ...replaying, last_seq: 40, steps: Array.from({ length: 37 }, (_, i) => step(`s${i}`)) }
+    rerender({ state: replayed, conn: 'live' })
+    act(() => void vi.advanceTimersByTime(1_000))
+    act(() => setHidden(false))
+    expect(result.current.strip).toBeNull()
+  })
+
+  it('counts what arrives after the replay while the tab stays hidden', () => {
+    setHidden(true)
+    const replayed = { ...emptyRoomState('r1'), last_seq: 40, replay_target: 40, steps: [step('a')] }
+    const { result, rerender } = setup(replayed)
+    act(() => void vi.advanceTimersByTime(90_000))
+    rerender({ state: { ...replayed, last_seq: 41, steps: [step('a'), step('b')] }, conn: 'live' })
+    act(() => setHidden(false))
+    expect(result.current.strip?.text).toBe('While you were away (2m): 1 step')
+  })
+
+  it('drops the baseline when a reload while hidden starts the state over', () => {
+    const full = { ...emptyRoomState('r1'), last_seq: 40, replay_target: 40, steps: [step('a')] }
+    const { result, rerender } = setup(full)
+    act(() => setHidden(true))
+    act(() => void vi.advanceTimersByTime(90_000))
+    // reload(): the snapshot lands with last_seq 0, then the log replays.
+    rerender({ state: { ...emptyRoomState('r1'), last_seq: 0, replay_target: 40 }, conn: 'live' })
+    rerender({ state: { ...full, steps: [step('a'), step('b'), step('c')] }, conn: 'live' })
+    act(() => setHidden(false))
+    expect(result.current.strip).toBeNull()
+  })
+
   it('shows the pending reconnect with the last seq, then "Caught up" for 2 s', () => {
     const start = { ...emptyRoomState('r1'), last_seq: 31 }
     const { result, rerender } = setup(start)
@@ -112,6 +148,26 @@ describe('CatchUpStrip', () => {
     fireEvent.keyDown(strip, { key: 'Escape' })
     expect(onDismiss).toHaveBeenCalledTimes(2)
     target.remove()
+  })
+
+  it('Show me for steps lands on the newest step, and on the heading when it is not there', () => {
+    const step = document.createElement('li')
+    step.id = 'step-s3'
+    step.scrollIntoView = vi.fn()
+    const heading = document.createElement('h2')
+    heading.id = 'investigation-heading'
+    heading.scrollIntoView = vi.fn()
+    document.body.append(step, heading)
+    const strip = { kind: 'away' as const, text: 'While you were away (2m): 1 step', target: 'steps' as const, stepId: 's3' }
+    const { rerender } = render(<CatchUpStrip strip={strip} onDismiss={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show me' }))
+    expect(step.scrollIntoView).toHaveBeenCalled()
+    expect(heading.scrollIntoView).not.toHaveBeenCalled()
+    rerender(<CatchUpStrip strip={{ ...strip, stepId: undefined }} onDismiss={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show me' }))
+    expect(heading.scrollIntoView).toHaveBeenCalled()
+    step.remove()
+    heading.remove()
   })
 
   it('has no buttons for the reconnect text', () => {

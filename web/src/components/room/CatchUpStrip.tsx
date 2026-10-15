@@ -2,6 +2,7 @@ import { X } from 'lucide-react'
 import type { CatchUpStrip as Strip } from '@/hooks/useCatchUp'
 import type { CatchUpTarget } from '@/lib/catchup'
 import { Button } from '@/components/ui/button'
+import { stepAnchor } from '@/lib/triage'
 import { PROPOSAL_ANCHOR } from './ProposalsSummary'
 
 const TARGET_ID: Record<CatchUpTarget, string> = {
@@ -10,8 +11,12 @@ const TARGET_ID: Record<CatchUpTarget, string> = {
   steps: 'investigation-heading',
 }
 
-function showMe(target: CatchUpTarget) {
-  const el = document.getElementById(TARGET_ID[target]) ?? document.getElementById(TARGET_ID.steps)
+// The steps target lands on the newest step, with the investigation heading when there is none.
+function showMe(target: CatchUpTarget, stepId?: string) {
+  const el =
+    (target === 'steps' && stepId ? document.getElementById(stepAnchor(stepId)) : null) ??
+    document.getElementById(TARGET_ID[target]) ??
+    document.getElementById(TARGET_ID.steps)
   const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
   el?.scrollIntoView?.({ behavior: calm ? 'auto' : 'smooth', block: 'start' })
 }
@@ -31,7 +36,7 @@ export function CatchUpStrip({ strip, onDismiss }: { strip: Strip | null; onDism
       <span className="min-w-0 flex-1">{strip.text}</span>
       {strip.kind === 'away' && (
         <>
-          <Button variant="ghost" size="sm" onClick={() => showMe(strip.target)}>
+          <Button variant="ghost" size="sm" onClick={() => showMe(strip.target, strip.stepId)}>
             Show me
           </Button>
           <Button variant="ghost" size="sm" aria-label="Dismiss" onClick={onDismiss}>

@@ -45,6 +45,13 @@ describe('SteerBox lease awareness (F9)', () => {
     expect(screen.queryByTestId('lease-bar')).not.toBeInTheDocument()
   })
 
+  it('in the last minute of a live lease says so, instead of the plain lease text', () => {
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: new Date(Date.now() + 30_000).toISOString() } }
+    render(<SteerBox state={state} user={arjun} actions={actions} />)
+    expect(screen.getByText('Lease ends in under a minute — any action renews')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Renew' })).toBeInTheDocument()
+  })
+
   it('non-drivers keep "lease 24m left"', () => {
     render(<SteerBox state={room(24)} user={kabir} actions={actions} />)
     expect(screen.getByText(/Arjun is driving · lease 24m left/)).toBeInTheDocument()

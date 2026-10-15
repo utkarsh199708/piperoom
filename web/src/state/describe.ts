@@ -208,7 +208,7 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'control.lease_expired': {
       const p = as<ControlLeaseExpiredPayload>(e)
-      return { text: `${p.driver?.name || 'The driver'}'s lease expired · anyone can take control`, kind: 'control' }
+      return { text: `${p.driver?.name || 'The driver'}'s lease expired · no one is driving`, kind: 'control' }
     }
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)

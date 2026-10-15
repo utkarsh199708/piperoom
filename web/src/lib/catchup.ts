@@ -9,6 +9,8 @@ export type CatchUpTarget = 'proposal' | 'hypothesis' | 'steps'
 export interface CatchUpSummary {
   items: string[]
   target: CatchUpTarget
+  /** The newest step's id: where "Show me" lands for the steps target. */
+  lastStepId?: string
 }
 
 function mine(p: ProposalState, user: CurrentUser): boolean {
@@ -65,7 +67,7 @@ export function catchUpSummary(prev: RoomState, next: RoomState, user: CurrentUs
   if (next.agent_status.state === 'error' && prev.agent_status.state !== 'error') items.push('agent error')
 
   if (items.length === 0) return null
-  return { items, target: target ?? 'steps' }
+  return { items, target: target ?? 'steps', lastStepId: next.steps[next.steps.length - 1]?.id }
 }
 
 /** "12m" for the "(12m)" in the strip; whole minutes, at least 1. */

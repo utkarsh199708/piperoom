@@ -304,7 +304,7 @@ export function SteerBox({
   }
 
   // The server's lease signal (control.lease_expired) or, before it arrives, a clock that has run out
-  // (minutesLeft is 0 only once the lease has run out; it rounds up while time remains).
+  // (minutesLeft rounds down, so it is 0 for the last minute of a live lease: `expired` tells those apart).
   const signalled = state.driver?.lease_expired === true
   const isLeaseExpired = signalled || expired
   const leaseEnding = isDriver && !signalled && !expired && left != null && left <= LEASE_WARN_MIN
@@ -312,8 +312,10 @@ export function SteerBox({
   if (isDriver) {
     status = signalled
       ? 'Your lease expired — you still drive until someone takes over'
-      : leaseEnding && left != null && left > 0
-        ? `Lease ends in ${left}m — any action renews`
+      : leaseEnding && left != null
+        ? left > 0
+          ? `Lease ends in ${left}m — any action renews`
+          : 'Lease ends in under a minute — any action renews'
         : leaseText
           ? `You are driving · ${leaseText}`
           : 'You are driving'

@@ -48,7 +48,7 @@ describe('describeEvent', () => {
     ['control.granted renew', ev('control.granted', { to: arjun, lease_until: 'x', stages: [] }), { text: 'Arjun renewed the lease', kind: 'system' }],
     ['control.granted take', ev('control.granted', { to: { id: 'kabir', name: 'Kabir' }, lease_until: 'x' }, { kind: 'human', id: 'kabir', name: 'Kabir' }), { text: 'Kabir took control', kind: 'control' }],
     ['control.granted hand', ev('control.granted', { to: { id: 'kabir', name: 'Kabir' }, lease_until: 'x' }), { text: 'Arjun handed control to Kabir', kind: 'control' }],
-    ['control.lease_expired', ev('control.lease_expired', { driver: arjun, lease_until: 'x' }, system), { text: "Arjun's lease expired · anyone can take control", kind: 'control' }],
+    ['control.lease_expired', ev('control.lease_expired', { driver: arjun, lease_until: 'x' }, system), { text: "Arjun's lease expired · no one is driving", kind: 'control' }],
     ['proposal.created', ev('proposal.created', { proposal_id: 'p_01M4ABCDEFGHJKMNPQRSTVWXYZ', title: 'Set compat', steps: [], risk: 'low', rollback: '', required_layers: [] }, agent), { text: 'Agent proposed a fix · Set compat', kind: 'decision' }],
     ['approval.given', ev('approval.given', { proposal_id: 'p_1', layer: 'kafka-connect' }), { text: 'Arjun approved kafka-connect', kind: 'decision' }],
     ['approval.rejected', ev('approval.rejected', { proposal_id: 'p_1', layer: 'kafka-connect', reason: 'risky' }), { text: 'Arjun rejected kafka-connect', detail: 'risky', kind: 'decision' }],
