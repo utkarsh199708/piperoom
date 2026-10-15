@@ -444,12 +444,14 @@ type CommentAddedPayload struct {
 	StepID        string `json:"step_id,omitempty"`
 	Text          string `json:"text"`
 	MentionsAgent bool   `json:"mentions_agent"`
+	ClientID      string `json:"client_id,omitempty"` // the request's idempotency key (docs/api.md, Idempotent posts; #459)
 }
 
 // SteerSuggestedPayload is a non-driver's suggestion waiting for the driver.
 type SteerSuggestedPayload struct {
 	SuggestionID string `json:"suggestion_id"`
 	Text         string `json:"text"`
+	ClientID     string `json:"client_id,omitempty"` // the steer request's idempotency key (#459)
 }
 
 // SteerSentPayload is an instruction delivered to the agent by the driver.
@@ -461,6 +463,7 @@ type SteerSentPayload struct {
 	SuggestionID string `json:"suggestion_id,omitempty"` // set when forwarding a suggestion
 	From         *Actor `json:"from,omitempty"`          // the suggester; set only with SuggestionID
 	Text         string `json:"text"`
+	ClientID     string `json:"client_id,omitempty"` // the steer request's idempotency key (#459); none on a forward: the forward is the driver's action, not the suggester's request
 }
 
 // SteerDeclinedPayload closes a pending suggestion (steer.suggested) without
