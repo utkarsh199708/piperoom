@@ -122,6 +122,24 @@ func TestRedactMessageCapNeverSplitsAValue(t *testing.T) {
 	}
 }
 
+// A URL whose password the e-mail rule could read as "<tail>@host" is cut
+// out whole at the cap; cutting at that e-mail's start kept "postgres://app:
+// S3cr!" (round 3 of #435). From pad 266 the URL always reaches the cap; a
+// URL that fits before it is the uncut gap in TestRedactCorpus.
+func TestRedactMessageCapNeverSplitsAURLPassword(t *testing.T) {
+	for _, v := range []struct{ text, leak string }{
+		{"postgres://app:S3cr!t@db.example.com/x", "S3cr!"},
+		{"mysql://root:pa$$w0rd@mysql.example.net:3306/shop", "pa$$"},
+	} {
+		for pad := 266; pad <= 300; pad++ {
+			in := strings.Repeat("x", pad-1) + " " + v.text + " and the rest of the message"
+			if got := RedactMessage(in); strings.Contains(got, v.leak) {
+				t.Errorf("pad %d: RedactMessage kept %q: ...%q", pad, v.leak, got[max(0, len(got)-40):])
+			}
+		}
+	}
+}
+
 // The safe cut keeps ordinary evidence at the cap: an offset, an LSN and a
 // timestamp that straddle it are not taken for a value and lose only the
 // word that was split, and a very long word is cut where the cap falls.
@@ -160,67 +178,67 @@ func TestRedactCorpus(t *testing.T) {
 	tests := []struct {
 		kind, in string
 		gone     string // mask: the part that must be gone
-		want     string // gap: today's output
+		want     string // mask, gap: the exact output (main's, for mask rows)
 		why      string // gap: the ticket
 	}{
-		{kind: "mask", in: "call 555 123 4567 now", gone: "555 123"},
-		{kind: "mask", in: "phone.offset: 555-123-4567", gone: "555-123"},
-		{kind: "mask", in: "call +1 2 3 4 5 555-123-4567 now", gone: "123-4567"},
-		{kind: "mask", in: "authorization=Basic dXNlcjpwYXNz retry", gone: "dXNlcjpwYXNz"},
+		{kind: "mask", in: "call 555 123 4567 now", gone: "555 123", want: "call <redacted> now"},
+		{kind: "mask", in: "phone.offset: 555-123-4567", gone: "555-123", want: "phone.offset: <redacted>"},
+		{kind: "mask", in: "call +1 2 3 4 5 555-123-4567 now", gone: "123-4567", want: "call +1 2 3 4 5 <redacted> now"},
+		{kind: "mask", in: "authorization=Basic dXNlcjpwYXNz retry", gone: "dXNlcjpwYXNz", want: "authorization=Basic <redacted> retry"},
 		// Cards main masks: 2-series and Mir, and every Luhn-valid grouping,
 		// dash-joined halves included.
-		{kind: "mask", in: "card 2223 0031 2200 3222 declined", gone: "2223"},
-		{kind: "mask", in: "card 2223-0031-2200-3222 declined", gone: "2223"},
-		{kind: "mask", in: "card 2221 0000 0000 0009 rejected", gone: "2221"},
-		{kind: "mask", in: "card 2720 9900 0000 0007 declined", gone: "2720"},
-		{kind: "mask", in: "card 2200 0000 0000 0004 rejected", gone: "2200"},
-		{kind: "mask", in: "card 4111 11111111 1111 declined", gone: "4111"},
-		{kind: "mask", in: "card 41111111 11111111 declined", gone: "41111111"},
-		{kind: "mask", in: "card 41 11 11 11 11 11 11 11 declined", gone: "41 11"},
-		{kind: "mask", in: "card 41 1111 1111 1111 11 rejected", gone: "1111"},
-		{kind: "mask", in: "card 3782 8224 6310 005 rejected", gone: "3782"},
-		{kind: "mask", in: "card 3782-8224-6310-005 rejected", gone: "3782"},
-		{kind: "mask", in: "card 3056 9309 0259 04 rejected", gone: "3056"},
-		{kind: "mask", in: "card 4222 2222 2222 2 rejected", gone: "4222"},
-		{kind: "mask", in: "card 3782 822463 10005 ok", gone: "822463"},
-		{kind: "mask", in: "ids 1234 5678 9012 3452", gone: "1234"},
-		{kind: "mask", in: "card 41111111-11111111 declined", gone: "41111111-11111111"},
-		{kind: "mask", in: "pan=41111111-11111111", gone: "41111111-11111111"},
-		{kind: "mask", in: "card 411111-1111111111 declined", gone: "411111-1111111111"},
-		{kind: "mask", in: "card 4111111111-111111 declined", gone: "4111111111-111111"},
-		{kind: "mask", in: "card 4111111-111111111 declined", gone: "4111111-111111111"},
-		{kind: "mask", in: "card 378282-246310005 declined", gone: "378282-246310005"},
-		{kind: "mask", in: "pan 378282-246310005 rejected", gone: "378282-246310005"},
-		{kind: "mask", in: "card 5555555555-554444 declined", gone: "5555555555-554444"},
-		{kind: "mask", in: "card 555555-5555554444 declined", gone: "555555-5555554444"},
-		{kind: "mask", in: "card 55555555-55554444 declined", gone: "55555555-55554444"},
-		{kind: "mask", in: "card 222300-3122003222 declined", gone: "222300-3122003222"},
-		{kind: "mask", in: "card 22230031-22003222 x", gone: "22230031-22003222"},
-		{kind: "mask", in: "card 6011000990-139424 declined", gone: "6011000990-139424"},
-		{kind: "mask", in: "card 601111-1111111117 declined", gone: "601111-1111111117"},
-		{kind: "mask", in: "pan 4222222-222222 rejected", gone: "4222222-222222"},
+		{kind: "mask", in: "card 2223 0031 2200 3222 declined", gone: "2223", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 2223-0031-2200-3222 declined", gone: "2223", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 2221 0000 0000 0009 rejected", gone: "2221", want: "card <redacted> rejected"},
+		{kind: "mask", in: "card 2720 9900 0000 0007 declined", gone: "2720", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 2200 0000 0000 0004 rejected", gone: "2200", want: "card <redacted> rejected"},
+		{kind: "mask", in: "card 4111 11111111 1111 declined", gone: "4111", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 41111111 11111111 declined", gone: "41111111", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 41 11 11 11 11 11 11 11 declined", gone: "41 11", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 41 1111 1111 1111 11 rejected", gone: "1111", want: "card <redacted> rejected"},
+		{kind: "mask", in: "card 3782 8224 6310 005 rejected", gone: "3782", want: "card <redacted> rejected"},
+		{kind: "mask", in: "card 3782-8224-6310-005 rejected", gone: "3782", want: "card <redacted> rejected"},
+		{kind: "mask", in: "card 3056 9309 0259 04 rejected", gone: "3056", want: "card <redacted> rejected"},
+		{kind: "mask", in: "card 4222 2222 2222 2 rejected", gone: "4222", want: "card <redacted> rejected"},
+		{kind: "mask", in: "card 3782 822463 10005 ok", gone: "822463", want: "card <redacted> ok"},
+		{kind: "mask", in: "ids 1234 5678 9012 3452", gone: "1234", want: "ids <redacted>"},
+		{kind: "mask", in: "card 41111111-11111111 declined", gone: "41111111-11111111", want: "card <redacted> declined"},
+		{kind: "mask", in: "pan=41111111-11111111", gone: "41111111-11111111", want: "pan=<redacted>"},
+		{kind: "mask", in: "card 411111-1111111111 declined", gone: "411111-1111111111", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 4111111111-111111 declined", gone: "4111111111-111111", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 4111111-111111111 declined", gone: "4111111-111111111", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 378282-246310005 declined", gone: "378282-246310005", want: "card <redacted> declined"},
+		{kind: "mask", in: "pan 378282-246310005 rejected", gone: "378282-246310005", want: "pan <redacted> rejected"},
+		{kind: "mask", in: "card 5555555555-554444 declined", gone: "5555555555-554444", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 555555-5555554444 declined", gone: "555555-5555554444", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 55555555-55554444 declined", gone: "55555555-55554444", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 222300-3122003222 declined", gone: "222300-3122003222", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 22230031-22003222 x", gone: "22230031-22003222", want: "card <redacted> x"},
+		{kind: "mask", in: "card 6011000990-139424 declined", gone: "6011000990-139424", want: "card <redacted> declined"},
+		{kind: "mask", in: "card 601111-1111111117 declined", gone: "601111-1111111117", want: "card <redacted> declined"},
+		{kind: "mask", in: "pan 4222222-222222 rejected", gone: "4222222-222222", want: "pan <redacted> rejected"},
 		// A credential value that starts with ':' is still a value.
-		{kind: "mask", in: "token=:xyz789", gone: "xyz789"},
-		{kind: "mask", in: "token: :xyz789 rejected", gone: "xyz789"},
-		{kind: "mask", in: "token = :xyz789 rejected", gone: "xyz789"},
-		{kind: "mask", in: "auth_token=:abc123 rejected", gone: "abc123"},
-		{kind: "mask", in: "access_token = :Zx9 failed", gone: "Zx9"},
-		{kind: "mask", in: "access_token=:s3cr3t", gone: "s3cr3t"},
-		{kind: "mask", in: "api_token: :s3cr3t99", gone: "s3cr3t99"},
-		{kind: "mask", in: "session_token=:a1b2c3 failed", gone: "a1b2c3"},
-		{kind: "mask", in: "refresh_token=:abc failed", gone: "abc"},
-		{kind: "mask", in: "x-api-token=:k3y", gone: "k3y"},
-		{kind: "mask", in: "token=::abc123def", gone: "abc123def"},
-		{kind: "mask", in: "token: ::eyJabc", gone: "eyJabc"},
-		{kind: "mask", in: "token: Bearer :abc123def", gone: "abc123def"},
-		{kind: "mask", in: "token=Basic :dXNlcjpw", gone: "dXNlcjpw"},
+		{kind: "mask", in: "token=:xyz789", gone: "xyz789", want: "token=<redacted>"},
+		{kind: "mask", in: "token: :xyz789 rejected", gone: "xyz789", want: "token: <redacted> rejected"},
+		{kind: "mask", in: "token = :xyz789 rejected", gone: "xyz789", want: "token = <redacted> rejected"},
+		{kind: "mask", in: "auth_token=:abc123 rejected", gone: "abc123", want: "auth_token=<redacted> rejected"},
+		{kind: "mask", in: "access_token = :Zx9 failed", gone: "Zx9", want: "access_token = <redacted> failed"},
+		{kind: "mask", in: "access_token=:s3cr3t", gone: "s3cr3t", want: "access_token=<redacted>"},
+		{kind: "mask", in: "api_token: :s3cr3t99", gone: "s3cr3t99", want: "api_token: <redacted>"},
+		{kind: "mask", in: "session_token=:a1b2c3 failed", gone: "a1b2c3", want: "session_token=<redacted> failed"},
+		{kind: "mask", in: "refresh_token=:abc failed", gone: "abc", want: "refresh_token=<redacted> failed"},
+		{kind: "mask", in: "x-api-token=:k3y", gone: "k3y", want: "x-api-token=<redacted>"},
+		{kind: "mask", in: "token=::abc123def", gone: "abc123def", want: "token=<redacted>"},
+		{kind: "mask", in: "token: ::eyJabc", gone: "eyJabc", want: "token: <redacted>"},
+		{kind: "mask", in: "token: Bearer :abc123def", gone: "abc123def", want: "token: <redacted>"},
+		{kind: "mask", in: "token=Basic :dXNlcjpw", gone: "dXNlcjpw", want: "token=<redacted>"},
 		// Phone formats after a position word.
-		{kind: "mask", in: "partition (555) 123-4567", gone: "(555) 123-4567"},
-		{kind: "mask", in: "partition: (555) 123-4567 owner", gone: "(555) 123-4567"},
-		{kind: "mask", in: "customer at offset (555) 123-4567", gone: "(555) 123-4567"},
-		{kind: "mask", in: "offset (555) 123-4567", gone: "(555) 123-4567"},
-		{kind: "mask", in: "offsets: 555.123.4567", gone: "555.123.4567"},
-		{kind: "mask", in: "offsets 555.123.4567", gone: "555.123.4567"},
+		{kind: "mask", in: "partition (555) 123-4567", gone: "(555) 123-4567", want: "partition <redacted>"},
+		{kind: "mask", in: "partition: (555) 123-4567 owner", gone: "(555) 123-4567", want: "partition: <redacted> owner"},
+		{kind: "mask", in: "customer at offset (555) 123-4567", gone: "(555) 123-4567", want: "customer at offset <redacted>"},
+		{kind: "mask", in: "offset (555) 123-4567", gone: "(555) 123-4567", want: "offset <redacted>"},
+		{kind: "mask", in: "offsets: 555.123.4567", gone: "555.123.4567", want: "offsets: <redacted>"},
+		{kind: "mask", in: "offsets 555.123.4567", gone: "555.123.4567", want: "offsets <redacted>"},
 		// Prose and counts main keeps.
 		{kind: "keep", in: "offsets 123456789-123456999 skipped"},
 		{kind: "keep", in: "bearer token expired"},
@@ -264,14 +282,15 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "gap", in: "card 4111 1111 1111 1111 2 items", want: "card 4111 1111 1111 1111 2 items", why: "#469"},
 		{kind: "gap", in: "phone+44 20 7946 0958", want: "phone+44 20 7946 0958", why: "#469"},
 		{kind: "gap", in: "bearer=abc123def456 rejected", want: "bearer=abc123def456 rejected", why: "#469"},
+		{kind: "gap", in: "connect to postgres://app:S3cr!t@db.example.com/x failed", want: "connect to postgres://app:S3cr!<redacted>/x failed", why: "#469"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.kind+" "+tt.in, func(t *testing.T) {
 			got := RedactMessage(tt.in)
 			switch tt.kind {
 			case "mask":
-				if strings.Contains(got, tt.gone) || !strings.Contains(got, Redacted) {
-					t.Errorf("RedactMessage(%q) = %q, %q must be masked", tt.in, got, tt.gone)
+				if strings.Contains(tt.want, tt.gone) || got != tt.want {
+					t.Errorf("RedactMessage(%q) = %q, want %q (%q masked)", tt.in, got, tt.want, tt.gone)
 				}
 			case "keep":
 				if got != tt.in {

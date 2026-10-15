@@ -161,6 +161,40 @@ func TestOneLineCorpus(t *testing.T) {
 			t.Errorf("oneLine(%q) = %q, still has %q", in, got, gone)
 		}
 	}
+	// URL userinfo is internal/redact's: the password goes whole, as on main,
+	// and the e-mail mask never takes the '@' (round 3 of #435).
+	for in, want := range map[string]string{
+		"ALTER TABLE public.t ADD COLUMN backup_dsn text DEFAULT 'postgres://app:S3cr!t@db.example.com:5432/orders'": "ALTER TABLE public.t ADD COLUMN backup_dsn text DEFAULT 'postgres://app:[redacted 8]@db.example.com:5432/orders'",
+		"x mysql://root:pa$$w0rd@mysql.example.net:3306/shop":                                                        "x mysql://root:[redacted 8]@mysql.example.net:3306/shop",
+		"ALTER SUBSCRIPTION s CONNECTION 'postgresql://rep:Tr0ub4dor&3@primary.example.com/orders'":                  "ALTER SUBSCRIPTION s CONNECTION 'postgresql://rep:[redacted 16]@primary.example.com/orders'",
+		"CREATE SUBSCRIPTION s CONNECTION 'postgresql://rep:Xy7*q9@primary.example.com:5432/orders' PUBLICATION p":   "CREATE SUBSCRIPTION s CONNECTION 'postgresql://rep:[redacted 8]@primary.example.com:5432/orders' PUBLICATION p",
+		"COMMENT ON TABLE t IS 'source mysql://root:pa$$w0rd@mysql.example.net:3306/shop'":                           "COMMENT ON TABLE t IS 'source mysql://root:[redacted 8]@mysql.example.net:3306/shop'",
+		"ALTER TABLE t ADD COLUMN u text DEFAULT 'https://user:p4ss#w0rd@api.example.com/x'":                         "ALTER TABLE t ADD COLUMN u text DEFAULT 'https://user:[redacted 16]@api.example.com/x'",
+		"ALTER TABLE t ADD COLUMN u text DEFAULT 'amqp://guest:g^uest@rabbit.example.io/'":                           "ALTER TABLE t ADD COLUMN u text DEFAULT 'amqp://guest:[redacted 8]@rabbit.example.io/'",
+		"ALTER TABLE t ADD COLUMN u text DEFAULT 'redis://:p!ss@cache.example.com:6379'":                             "ALTER TABLE t ADD COLUMN u text DEFAULT 'redis://:[redacted 8]@cache.example.com:6379'",
+		"ALTER SERVER fdw OPTIONS (SET dsn 'postgres://app:S3cr!t@db.example.com/x')":                                "ALTER SERVER fdw OPTIONS (SET dsn 'postgres://app:[redacted 8]@db.example.com/x')",
+		"postgres://app:hunter2@db.example.com/orders":                                                               "postgres://app:[redacted 8]@db.example.com/orders",
+		"mongodb://app:a.b.c@mongo.example.com/db":                                                                   "mongodb://app:[redacted 8]@mongo.example.com/db",
+		"postgres://app:p%40ss@db.example.com/x contact jane.doe@example.com":                                        "postgres://app:[redacted 8]@db.example.com/x contact <redacted>",
+	} {
+		if got := oneLine(in); got != want {
+			t.Errorf("oneLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Numeric literals the PII masks take for a phone, card or SSN: main
+	// kept them. Pinned at today's output (no name or type is hidden); see
+	// "Not done" in #435.
+	for in, want := range map[string]string{
+		"ALTER TABLE public.t ADD CONSTRAINT c CHECK (amount < 555-123-4567)": "ALTER TABLE public.t ADD CONSTRAINT c CHECK (amount < <redacted>)",
+		"ALTER TABLE public.t ALTER COLUMN n SET DEFAULT 4111111111111111":    "ALTER TABLE public.t ALTER COLUMN n SET DEFAULT <redacted>",
+		"CREATE SEQUENCE public.s START WITH 4111111111111111":                "CREATE SEQUENCE public.s START WITH <redacted>",
+		"ALTER TABLE public.t ALTER COLUMN c SET DEFAULT '202-61-0150'":       "ALTER TABLE public.t ALTER COLUMN c SET DEFAULT '<redacted>'",
+		"ALTER TABLE public.t ADD CONSTRAINT c CHECK (n IN (555.123.4567))":   "ALTER TABLE public.t ADD CONSTRAINT c CHECK (n IN <redacted>))",
+	} {
+		if got := oneLine(in); got != want {
+			t.Errorf("known over-mask changed: oneLine(%q) = %q, want %q", in, got, want)
+		}
+	}
 	// #426 is split out of #435 (org.md §12): international phones are kept,
 	// as on main.
 	gap := "ALTER TABLE public.t ADD CONSTRAINT c CHECK (phone <> '+44 20 7946 0958')"

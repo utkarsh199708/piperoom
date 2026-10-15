@@ -91,10 +91,14 @@ func luhn(digits string) bool {
 // numbers, with the same rules as RedactMessage, and nothing else: no
 // credential-key rule (in SQL, "token = NULL" or "token::text" is not a
 // key and value), no cap, no quote or group rules. It is for text that must
-// keep its shape, such as a DDL statement in the watcher's change log; the
-// caller still runs internal/redact for credentials.
+// keep its shape, such as a DDL statement in the watcher's change log, and it
+// runs on internal/redact's output: it also masks the "[redacted N]@domain"
+// that internal/redact leaves of an e-mail address. A match inside URL
+// userinfo ("postgres://app:pw@db.example.com") is left alone: there the
+// "@" belongs to internal/redact's user:password rule.
 func MaskPII(s string) string {
-	s = emailRe.ReplaceAllString(s, Redacted)
+	s = maskOutsideUserinfo(s, emailRe)
+	s = maskOutsideUserinfo(s, redactedEmailRe)
 	s = ssnRe.ReplaceAllString(s, Redacted)
 	s = cardRe.ReplaceAllStringFunc(s, func(m string) string {
 		if looksLikeCard(m) {
@@ -105,6 +109,33 @@ func MaskPII(s string) string {
 	return phoneRe.ReplaceAllString(s, Redacted)
 }
 
+// redactedEmailRe is what internal/redact leaves of an e-mail address.
+var redactedEmailRe = regexp.MustCompile(`\[redacted \d+\]@(?:[\p{L}\p{N}-]+\.)+\p{L}{2,24}`)
+
+// maskOutsideUserinfo replaces re's matches with Redacted, except a match that
+// starts inside URL userinfo.
+func maskOutsideUserinfo(s string, re *regexp.Regexp) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range re.FindAllStringIndex(s, -1) {
+		if inURLUserinfo(s, m[0]) {
+			continue
+		}
+		b.WriteString(s[last:m[0]])
+		b.WriteString(Redacted)
+		last = m[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// inURLUserinfo reports whether byte i of s lies between a URL's "://" and the
+// end of its authority: no white space, '/' or '@' since the "://".
+func inURLUserinfo(s string, i int) bool {
+	j := strings.LastIndex(s[:i], "://")
+	return j > 0 && !strings.ContainsAny(s[j+3:i], " \t\n/@'\"")
+}
+
 // piiSpans returns the byte spans of the values maskUnquoted masks with its
 // own patterns (not what internal/redact finds). The cap uses them so that it
 // never cuts such a value in half.
@@ -113,7 +144,13 @@ func piiSpans(s string) [][]int {
 	for _, m := range kvSecretRe.FindAllStringSubmatchIndex(s, -1) {
 		spans = append(spans, m[6:8])
 	}
-	spans = append(spans, emailRe.FindAllStringIndex(s, -1)...)
+	// An e-mail match inside URL userinfo is the end of a password: cutting
+	// there would keep its start and drop the "@" internal/redact needs.
+	for _, m := range emailRe.FindAllStringIndex(s, -1) {
+		if !inURLUserinfo(s, m[0]) {
+			spans = append(spans, m)
+		}
+	}
 	spans = append(spans, ssnRe.FindAllStringIndex(s, -1)...)
 	for _, m := range cardRe.FindAllStringIndex(s, -1) {
 		if looksLikeCard(s[m[0]:m[1]]) {

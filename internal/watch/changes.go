@@ -132,11 +132,11 @@ func fingerprint(parts ...string) string {
 // oneLine removes control characters, masks secrets (internal/redact) and PII
 // (e-mail, card, SSN, phone: a DDL statement can hold them as literals) in
 // text that came from a customer system, and only then cuts to changeTextCap
-// runes, so the cut never leaves part of a value unmasked. The PII masks run
-// first: internal/redact keeps an e-mail's domain.
+// runes, so the cut never leaves part of a value unmasked. internal/redact
+// runs first, as on main; the PII masks only add to its output.
 func oneLine(s string) string {
-	s, _ = redact.Text(dlq.MaskPII(clean(s, 4*changeTextCap)))
-	return clean(s, changeTextCap)
+	s, _ = redact.Text(clean(s, 4*changeTextCap))
+	return clean(dlq.MaskPII(s), changeTextCap)
 }
 
 // readChanges is the registry and DDL part of observeSet: one Versions call per
