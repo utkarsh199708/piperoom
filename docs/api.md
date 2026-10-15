@@ -362,8 +362,8 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
-| POST | `/api/rooms/{id}/comments` | `{step_id?, text, client_id?}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation` |
-| POST | `/api/rooms/{id}/steer` | `{text, client_id?}` | `Event` | driver → `steer.sent`; others (also when no one drives or the lease expired) → `steer.suggested`, kept for the next driver (F5, implemented by A5; existing behaviour: a suggestion stays in `pending_suggestions` across `control.granted` and never wakes the agent; viewers `403 viewer`, closed rooms `409 room_closed`). R4: `text` at most 4000 characters (code points), else `400 validation` |
+| POST | `/api/rooms/{id}/comments` | `{step_id?, text, client_id?}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation`. `client_id`: optional idempotency key, see Idempotent posts (`409 client_id_reused`) |
+| POST | `/api/rooms/{id}/steer` | `{text, client_id?}` | `Event` | driver → `steer.sent`; others (also when no one drives or the lease expired) → `steer.suggested`, kept for the next driver (F5, implemented by A5; existing behaviour: a suggestion stays in `pending_suggestions` across `control.granted` and never wakes the agent; viewers `403 viewer`, closed rooms `409 room_closed`). R4: `text` at most 4000 characters (code points), else `400 validation`. `client_id`: optional idempotency key, see Idempotent posts (`409 client_id_reused`) |
 | POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` and `from` (the suggester's actor; the event's actor is the driver). The agent reads a forwarded suggestion as the suggester's words, wrapped as untrusted data, not as a driver instruction |
 | POST | `/api/rooms/{id}/suggestions/{sid}/decline` | `{reason?}` | `Event` (`steer.declined`) | R0; server R11. Driver only (`403 not_driver`); open rooms only (`409 room_closed`); unknown `sid`, or one of another room, `404 not_found`; a suggestion that is no longer pending (sent or declined) `409 already_decided`, the same answer as a second `send`, so a retry after a lost response is safe to treat as done. `reason` optional, at most 500 characters, typed-text rule above (else `400 validation`). The suggestion leaves `pending_suggestions`; the agent never sees it |
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
@@ -528,26 +528,36 @@ never shows shadow output.
   `<dir>/<pipeline_id>/<room_id>.json`, mode `0600`. If that write fails the room is not deleted: retention logs
   the error and tries again on its next run; `DELETE …&archive=true` answers `500 archive_failed`.
 
-### Idempotent posts (#459)
+### Idempotent posts (#459; server A5, web A6)
 
 `POST /api/rooms/{id}/comments` and `POST /api/rooms/{id}/steer` take an optional `client_id`: an idempotency key
 the client generates once per user action (a UUID v4 is recommended) and sends again, unchanged, on every retry of
-that action. It is 1–64 characters of `[A-Za-z0-9_-]`, else `400 validation`. It must not be derived from user data.
+that action. It is 1–64 characters of `[A-Za-z0-9_-]`, compared exactly (case-sensitive), else `400 validation`. It
+must not be derived from user data: it is visible to everyone who can read the room (event payload, WebSocket,
+export). Another user's request with the same value is a different key.
 
 - **Key.** `(room, the caller's user id, client_id)`, across both routes, for the life of the room. The server enforces
   it in the store, so it holds with several replicas and for two requests racing each other: exactly one event is
   appended.
-- **Repeat.** A request whose key was already used, with the same route and the same body (`text`, `step_id`), appends
-  nothing, wakes nothing and answers `200` with the original `Event` (same `seq`; the first answer was `201`). The
-  repeat check runs after authentication, tenancy and the viewer check, and before every other check, so the retry of
-  an action that landed still answers `200` after the room closed or the driver changed (a steer that landed as
-  `steer.sent` stays that event).
+- **Order.** Authentication, viewer, tenancy; then the JSON body and the `client_id` format (`400 validation`); then
+  the repeat check; then the route's own checks (text required, typed-text rule, 4000 characters, `room_closed`,
+  `log_full`, driver). So a used key answers `200` or `409 client_id_reused` even when its new body would fail
+  validation, and the retry of an action that landed still answers `200` after the room closed, the log filled or the
+  driver changed (a steer that landed as `steer.sent` stays that event).
+- **Repeat.** A request whose key was already used, with the same route and the same body, appends nothing, wakes
+  nothing, renews no lease and answers `200` (the same status as the first answer) with the original `Event` as
+  stored: same `room_id`, `seq`, `type` and payload values; compare by `seq`, not by bytes. Same body means `text`
+  equal byte for byte (no trimming or normalisation) and the same `step_id` (absent and `""` are the same).
 - **Reuse.** The same key with another route or another body answers `409 client_id_reused` and appends nothing.
-- **Payload.** The event carries the key: `comment.added`, `steer.suggested` and `steer.sent` have
-  `client_id` (omitted when the request had none; a `steer.sent` that forwards a suggestion has none). Clients
-  reconcile their pending copies by it, never by matching text.
-- Without `client_id` nothing changes: every request appends, so a client that cannot tell whether a request landed
-  must not re-send it without a key.
+- **Race.** The request that loses the race answers as a repeat: `200` with the winner's event, or
+  `409 client_id_reused` if its body differs. A refused request (any error, nothing appended) uses no key; its retry
+  is checked as a new request.
+- **Payload.** The event carries the key: `comment.added`, `steer.suggested` and `steer.sent` have `client_id`
+  (omitted when the request had none; a `steer.sent` that forwards a suggestion has none, because the forward is the
+  driver's action, not the suggester's request). Clients reconcile their pending copies by it, never by matching text.
+- **Without a key** nothing changes: every request appends, so a client that cannot tell whether a request landed
+  must not re-send it without a key. A server without this feature ignores the field, so a client retries
+  automatically only when the answer's event carries `client_id`.
 
 ## WebSocket
 
