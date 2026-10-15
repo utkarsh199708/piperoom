@@ -27,7 +27,7 @@ func accessService(t *testing.T, ownersYAML, solo string, sessions auth.Store) *
 			{ID: "priya", Name: "Priya", Layers: []string{"postgres"}},
 		}),
 		Owners: own, ViewerGroups: []string{"viewers"}, SoloUser: solo,
-		Sessions: sessions, SessionIdle: time.Hour,
+		Sessions: sessions, SessionLive: auth.Liveness{Idle: time.Hour},
 		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
 			<-ctx.Done()
 			return nil
@@ -208,7 +208,7 @@ func TestLookupPersonRules(t *testing.T) {
 		}
 	}
 	// Idle expiry: the session counts only while it is within the idle limit.
-	late := New(Deps{Store: memstore.New(), Users: mustUsers(nil), Owners: svc.owners, Sessions: sessions, SessionIdle: time.Minute,
+	late := New(Deps{Store: memstore.New(), Users: mustUsers(nil), Owners: svc.owners, Sessions: sessions, SessionLive: auth.Liveness{Idle: time.Minute},
 		Now: func() time.Time { return now.Add(10 * time.Minute) }})
 	t.Cleanup(late.Close)
 	if _, err := late.LookupPerson(ctx, "u_member"); err == nil {

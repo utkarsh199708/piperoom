@@ -207,23 +207,23 @@ func TestSessionsLiveByUserID(t *testing.T) {
 		}
 		return id
 	}
-	idle := time.Hour
-	if _, err := sess.LiveByUserID(ctx, user, now, idle); !errors.Is(err, auth.ErrNotFound) {
+	live := auth.Liveness{Idle: time.Hour}
+	if _, err := sess.LiveByUserID(ctx, user, now, live); !errors.Is(err, auth.ErrNotFound) {
 		t.Fatalf("no sessions: %v", err)
 	}
 	add(now.Add(-5*time.Hour), now.Add(-4*time.Hour), now.Add(time.Hour), false) // idle too long
 	add(now.Add(-4*time.Hour), now, now.Add(-time.Minute), false)                // past the absolute cap
 	add(now.Add(-3*time.Hour), now, now.Add(time.Hour), true)                    // revoked
-	if _, err := sess.LiveByUserID(ctx, user, now, idle); !errors.Is(err, auth.ErrNotFound) {
+	if _, err := sess.LiveByUserID(ctx, user, now, live); !errors.Is(err, auth.ErrNotFound) {
 		t.Fatalf("only dead sessions: %v, want ErrNotFound", err)
 	}
 	older := add(now.Add(-2*time.Hour), now.Add(-time.Minute), now.Add(time.Hour), false)
 	newer := add(now.Add(-time.Hour), now.Add(-time.Minute), now.Add(time.Hour), false)
-	got, err := sess.LiveByUserID(ctx, user, now, idle)
+	got, err := sess.LiveByUserID(ctx, user, now, live)
 	if err != nil || got.ID != newer {
 		t.Fatalf("live = %q, %v; want the newest live session %q (older %q)", got.ID, err, newer, older)
 	}
-	if _, err := sess.LiveByUserID(ctx, testenv.Name("user"), now, idle); !errors.Is(err, auth.ErrNotFound) {
+	if _, err := sess.LiveByUserID(ctx, testenv.Name("user"), now, live); !errors.Is(err, auth.ErrNotFound) {
 		t.Fatalf("other user: %v", err)
 	}
 }

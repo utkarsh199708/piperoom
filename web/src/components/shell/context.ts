@@ -21,7 +21,11 @@ export interface RoomCommands {
   trace?: () => void
   closeRoom?: () => void
   invite?: () => void
-  /** Opens the hand-off summary dialog of a hand-off to me (the banner's Read summary). */
+  /** Download the room's export document (F2). Absent for viewers. */
+  exportJson?: () => void
+  /** Open the post-mortem draft (F2). Absent for viewers. */
+  postmortem?: () => void
+  /** Focuses (and so opens) the inline card of a pending hand-off to me; the attention toast's Read summary. */
   readHandoff?: () => void
 }
 

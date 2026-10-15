@@ -65,12 +65,12 @@ func (m *MemStore) ByID(_ context.Context, id string) (Session, error) {
 }
 
 // LiveByUserID implements Store.
-func (m *MemStore) LiveByUserID(_ context.Context, userID string, now time.Time, idle time.Duration) (Session, error) {
+func (m *MemStore) LiveByUserID(_ context.Context, userID string, now time.Time, live Liveness) (Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var best *Session
 	for _, s := range m.byID {
-		if s.UserID != userID || s.Check(now, idle) != nil {
+		if s.UserID != userID || !live.Usable(*s, now) {
 			continue
 		}
 		if best == nil || s.CreatedAt.After(best.CreatedAt) {
@@ -84,12 +84,12 @@ func (m *MemStore) LiveByUserID(_ context.Context, userID string, now time.Time,
 }
 
 // LiveSessions implements Store.
-func (m *MemStore) LiveSessions(_ context.Context, now time.Time, idle time.Duration, limit int) ([]Session, error) {
+func (m *MemStore) LiveSessions(_ context.Context, now time.Time, live Liveness, limit int) ([]Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	newest := map[string]*Session{}
 	for _, s := range m.byID {
-		if s.Check(now, idle) != nil {
+		if !live.Usable(*s, now) {
 			continue
 		}
 		if cur := newest[s.UserID]; cur == nil || s.CreatedAt.After(cur.CreatedAt) {

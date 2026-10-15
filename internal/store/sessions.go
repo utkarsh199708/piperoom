@@ -59,16 +59,29 @@ func (t *Sessions) ByID(ctx context.Context, id string) (auth.Session, error) {
 	return t.one(ctx, `id = $1`, id)
 }
 
-// LiveByUserID implements auth.Store. idle is added to last_seen_at in SQL with
-// make_interval so the same rule as auth.Session.Check applies.
-func (t *Sessions) LiveByUserID(ctx context.Context, userID string, now time.Time, idle time.Duration) (auth.Session, error) {
-	return t.one(ctx, `user_id = $1 AND revoked_at IS NULL AND expires_at > $2
- AND ($3::float8 <= 0 OR last_seen_at + make_interval(secs => $3::float8) > $2)
- ORDER BY created_at DESC LIMIT 1`, userID, now.UTC(), idle.Seconds())
+// liveWhere is auth.Liveness.Usable in SQL, over $1 now, $2 idle seconds, $3
+// max seconds and $4 method (empty: any). Idle and max are added with
+// make_interval so the same instants as the Go rule apply.
+const liveWhere = `revoked_at IS NULL AND expires_at > $1
+ AND ($2::float8 <= 0 OR last_seen_at + make_interval(secs => $2::float8) > $1)
+ AND ($3::float8 <= 0 OR created_at + make_interval(secs => $3::float8) > $1)
+ AND ($4::text = '' OR method = $4::text)`
+
+// liveArgs are liveWhere's arguments.
+func liveArgs(now time.Time, live auth.Liveness) []any {
+	return []any{now.UTC(), live.Idle.Seconds(), live.Max.Seconds(), live.Method}
+}
+
+// LiveByUserID implements auth.Store.
+func (t *Sessions) LiveByUserID(ctx context.Context, userID string, now time.Time, live auth.Liveness) (auth.Session, error) {
+	return t.one(ctx, liveWhere+` AND user_id = $5 ORDER BY created_at DESC LIMIT 1`, append(liveArgs(now, live), userID)...)
 }
 
 // LiveSessions implements auth.Store: the newest live session of each user,
-// ordered by user id, with the same liveness rule as LiveByUserID.
+// ordered by user id, with the same liveness rule as LiveByUserID. The rule is
+// in the WHERE, so a session that is not usable (a dev row in oidc mode, one
+// past the current max) neither shadows an older usable one nor takes a place
+// under the LIMIT.
 //
 // The LIMIT applies here, before the role filter in room.Service.People. The
 // role depends on the session's groups and on owners.yaml, which SQL cannot
@@ -77,16 +90,15 @@ func (t *Sessions) LiveByUserID(ctx context.Context, userID string, now time.Tim
 // pilot has far fewer than 1000 people signed in at once; if that stops being
 // true the filter has to move into the query (for example by storing the role
 // on the session at login).
-func (t *Sessions) LiveSessions(ctx context.Context, now time.Time, idle time.Duration, limit int) ([]auth.Session, error) {
+func (t *Sessions) LiveSessions(ctx context.Context, now time.Time, live auth.Liveness, limit int) ([]auth.Session, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
 	ctx, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
 	rows, err := t.pool.Query(ctx, `SELECT DISTINCT ON (user_id) `+sessionCols+` FROM sessions
- WHERE revoked_at IS NULL AND expires_at > $1
- AND ($2::float8 <= 0 OR last_seen_at + make_interval(secs => $2::float8) > $1)
- ORDER BY user_id, created_at DESC LIMIT $3`, now.UTC(), idle.Seconds(), limit)
+ WHERE `+liveWhere+`
+ ORDER BY user_id, created_at DESC LIMIT $5`, append(liveArgs(now, live), limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("store: live sessions: %w", err)
 	}

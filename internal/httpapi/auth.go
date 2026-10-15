@@ -366,21 +366,13 @@ func (s *Server) sessionFromToken(ctx context.Context, token string) (auth.Sessi
 }
 
 // sessionUsable is the per-request and presence-tick check of a stored
-// session. Besides revocation and the idle and absolute expiry, it holds the
-// row to the server's current settings: sessions outlive a restart in
-// Postgres, so a dev-login session (no IdP, no sub: pin) made before a switch
-// to oidc mode, or a row minted by a dev server sharing the room DB, must not
-// act in oidc mode; and a lowered PIPEROOM_SESSION_MAX applies to sessions
-// made under the old, longer one.
+// session: auth.Liveness under the server's current settings, the same rule
+// the room's person lookup applies. Besides revocation and the idle and
+// absolute expiry, a dev-login session (no IdP, no sub: pin) does not act in
+// oidc mode, and a lowered PIPEROOM_SESSION_MAX applies to sessions made under
+// the old, longer one.
 func (s *Server) sessionUsable(sess auth.Session) bool {
-	now := s.now()
-	if sess.Check(now, s.authSettings.Idle) != nil {
-		return false
-	}
-	if s.authSettings.IsOIDC() && sess.Method != auth.MethodOIDC {
-		return false
-	}
-	return s.authSettings.Max <= 0 || now.Before(sess.CreatedAt.Add(s.authSettings.Max))
+	return s.authSettings.Liveness().Usable(sess, s.now())
 }
 
 // touch writes last_seen_at at most once a minute. A failure only means the

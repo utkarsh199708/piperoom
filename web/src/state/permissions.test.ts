@@ -108,6 +108,7 @@ describe('permissions', () => {
       summary: { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] },
       stay_as_watcher: false,
       status: 'pending' as const,
+      from: { kind: 'human' as const, id: 'arjun', name: 'Arjun' }, created_at: '2026-10-14T10:05:00Z',
     }
     expect(canAcceptHandoff(kabir, handoff)).toBe(true)
     expect(canAcceptHandoff(arjun, handoff)).toBe(false)

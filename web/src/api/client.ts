@@ -147,8 +147,23 @@ export interface ApproveExtras {
  * saved file is byte-for-byte what the server hashed; `sha256` is the X-Piperoom-Export-SHA256 header.
  */
 export async function exportRoom(roomId: string): Promise<{ text: string; sha256?: string }> {
+  const res = await fetchText(`/api/rooms/${encodeURIComponent(roomId)}/export`)
+  return { text: await res.text(), sha256: res.headers.get('X-Piperoom-Export-SHA256') ?? undefined }
+}
+
+/**
+ * The room as a post-mortem draft (GET /api/rooms/{id}/postmortem.md, F2). Markdown as plain text:
+ * the caller shows it as text, never as HTML.
+ */
+export async function postmortemMarkdown(roomId: string): Promise<string> {
+  const res = await fetchText(`/api/rooms/${encodeURIComponent(roomId)}/postmortem.md`, 'text/markdown')
+  return res.text()
+}
+
+// A GET whose body is not JSON. An error answer is still the JSON error envelope.
+async function fetchText(url: string, accept?: string): Promise<Response> {
   const epoch = getAuthEpoch()
-  const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/export`, { credentials: 'same-origin' })
+  const res = await fetch(url, { credentials: 'same-origin', headers: accept ? { Accept: accept } : undefined })
   if (!res.ok) {
     let code = 'unknown'
     let message = res.statusText
@@ -163,13 +178,14 @@ export async function exportRoom(roomId: string): Promise<{ text: string; sha256
     if (problem) reportAuthProblem({ ...problem, epoch })
     throw new ApiClientError(res.status, code, message)
   }
-  return { text: await res.text(), sha256: res.headers.get('X-Piperoom-Export-SHA256') ?? undefined }
+  return res
 }
 
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
 export const api = {
   me: () => request<Me>('/api/me'),
+  postmortem: (roomId: string) => postmortemMarkdown(roomId),
   // Members only (a viewer gets 403 viewer): who a driver may grant control or hand off to.
   people: () => request<Person[]>('/api/people'),
   // Dev mode only: issues the piperoom_session cookie for a users.yaml user.
