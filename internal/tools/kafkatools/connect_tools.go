@@ -403,7 +403,279 @@ func sanitizeTrace(s string) string {
 		// after a "Detail:" prefix; some drivers print it without one.
 		s = dlq.RedactMessage(failingRow.ReplaceAllString(s, "${1} "+dlq.Redacted))
 	}
-	return s
+	// Runs on the output of the masks above and only adds masks (org.md §12).
+	return maskSinkValues(s)
+}
+
+// sinkOpeners are the category words after which PostgreSQL, Elasticsearch,
+// Joda and java.time quote the failing value (#505): PostgreSQL's "date/time
+// field value out of range: \"...\"", "malformed array literal: \"...\""
+// and kin, Joda's "Invalid format: \"...\" is malformed at \"...\"",
+// Elasticsearch's "failed to parse date field [...]" and java.time's "Text
+// '...' could not be parsed". The words stay (they are the diagnosis); the
+// value after them is masked. Such lines do not match recordSnippet, so the
+// dlq_peek redaction, which would mask the quoted words too, never sees them.
+// Phrases are lower case and matched case-insensitively at a word start.
+var sinkOpeners = []struct {
+	phrase string
+	after  byte // ':' needs optional spaces, a colon and spaces; ' ' needs spaces; 0 nothing
+}{
+	{"date/time field value out of range", ':'},
+	{"interval field value out of range", ':'},
+	{"date out of range", ':'},
+	{"timestamp out of range", ':'},
+	{"time zone displacement out of range", ':'},
+	{"malformed array literal", ':'},
+	{"malformed record literal", ':'},
+	{"malformed range literal", ':'},
+	{"malformed multirange literal", ':'},
+	{"invalid format", ':'},
+	{"is malformed at", ' '},
+	{"failed to parse date field [", 0},
+	{"text '", 0},
+}
+
+// sinkFollowers end an unquoted value on the same line when whitespace comes
+// before them: PostgreSQL's DETAIL/HINT/WHERE/POSITION fields as pgjdbc joins
+// them, pgjdbc's batch hint, and the tail of Joda's message.
+var sinkFollowers = []string{"detail:", "hint:", "where:", "position:", "call getnextexception", "is malformed at"}
+
+// esFormatMarker ends an Elasticsearch date value; parseMarker a java.time one.
+const (
+	esFormatMarker = "] with format ["
+	parseMarker    = "' could not be parsed"
+)
+
+// maskSinkValues masks the value after each sinkOpeners match with
+// dlq.Redacted. A quoted value is masked up to its last closing quote before
+// the end of its field; an unquoted one to the end of the field (a follower
+// or the end of the line). It finds phrases with strings.Index over an
+// ASCII-lowered copy, not a case-insensitive regexp (several times slower on
+// a 64 KiB line), and looks field ends and markers up in position lists built
+// once per line, so a hostile line stays linear.
+func maskSinkValues(s string) string {
+	low := asciiLower(s)
+	spans := findSinkOpeners(low, 0, len(low))
+	if len(spans) == 0 {
+		return s
+	}
+	sc := newSinkScan(low)
+	var b strings.Builder
+	last := 0 // s[:last] is written to b
+	for _, m := range spans {
+		if m[0] < last {
+			continue
+		}
+		start := m[1]
+		end := -1
+		switch {
+		case strings.HasPrefix(low[m[0]:], "failed to parse date field"):
+			field := sc.fieldEnd(start, true)
+			if i := sc.next(sc.formats, start); i >= 0 && i < field {
+				end = i
+			} else {
+				// No format named in this field: the value runs to its last
+				// ']' before the end of the JSON string or the line.
+				end = sc.closeBefore(start, field, "]", false)
+			}
+		case strings.HasPrefix(low[m[0]:], "text '"):
+			// "Text '" alone is too common a phrase to mask after: only
+			// java.time's "Text '...' could not be parsed" is masked.
+			i := sc.next(sc.parses, start)
+			if i < 0 {
+				continue
+			}
+			if nl := sc.next(sc.newlines, start); nl >= 0 && nl < i {
+				continue
+			}
+			end = i
+		case strings.HasPrefix(s[start:], `\"`): // inside a JSON string
+			end = sc.closeBefore(start+2, sc.fieldEnd(start+2, true), `\"`, true)
+		case strings.HasPrefix(s[start:], `"`):
+			end = sc.closeBefore(start+1, sc.fieldEnd(start+1, false), `"`, true)
+		default:
+			end = sc.fieldEnd(start, false)
+		}
+		if end <= start {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(dlq.Redacted)
+		last = end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// asciiLower lowers ASCII letters only, so byte offsets in the result are
+// offsets in s.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// findSinkOpeners returns the [start, value start) spans of the sinkOpeners
+// in low[from:to], in order and without overlaps.
+func findSinkOpeners(low string, from, to int) [][2]int {
+	var spans [][2]int
+	for _, o := range sinkOpeners {
+		for i := from; i < to; {
+			j := strings.Index(low[i:to], o.phrase)
+			if j < 0 {
+				break
+			}
+			at := i + j
+			i = at + len(o.phrase)
+			if at > 0 && isWordByte(low[at-1]) {
+				continue
+			}
+			end, ok := i, true
+			switch o.after {
+			case ':':
+				end = skipSpaces(low, end, to)
+				if ok = end < to && low[end] == ':'; ok {
+					end = skipSpaces(low, end+1, to)
+				}
+			case ' ':
+				end = skipSpaces(low, end, to)
+				ok = end > i
+			}
+			if ok {
+				spans = append(spans, [2]int{at, end})
+			}
+		}
+	}
+	sort.Slice(spans, func(a, b int) bool { return spans[a][0] < spans[b][0] })
+	out := spans[:0]
+	for _, sp := range spans {
+		if len(out) > 0 && sp[0] < out[len(out)-1][1] {
+			continue
+		}
+		out = append(out, sp)
+	}
+	return out
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z'
+}
+
+func isSpace(c byte) bool { return c == ' ' || c == '\t' }
+
+// skipSpaces returns the first index at or after i (before to) that is not a
+// space or tab.
+func skipSpaces(s string, i, to int) int {
+	for i < to && isSpace(s[i]) {
+		i++
+	}
+	return i
+}
+
+// sinkScan holds, for one lowered line, the sorted positions maskSinkValues
+// looks field ends and markers up in.
+type sinkScan struct {
+	low        string
+	newlines   []int // '\n'
+	jsonQuotes []int // '"' not escaped by a backslash
+	followers  []int // start of the whitespace before a sinkFollowers phrase
+	formats    []int // esFormatMarker
+	parses     []int // parseMarker
+}
+
+func newSinkScan(low string) *sinkScan {
+	sc := &sinkScan{low: low}
+	for i := 0; i < len(low); i++ {
+		switch low[i] {
+		case '\n':
+			sc.newlines = append(sc.newlines, i)
+		case '"':
+			if i == 0 || low[i-1] != '\\' {
+				sc.jsonQuotes = append(sc.jsonQuotes, i)
+			}
+		}
+	}
+	for _, f := range sinkFollowers {
+		for _, at := range indexAll(low, f) {
+			if at > 0 && isSpace(low[at-1]) {
+				for at > 0 && isSpace(low[at-1]) {
+					at--
+				}
+				sc.followers = append(sc.followers, at)
+			}
+		}
+	}
+	sort.Ints(sc.followers)
+	sc.formats = indexAll(low, esFormatMarker)
+	sc.parses = indexAll(low, parseMarker)
+	return sc
+}
+
+// indexAll returns the positions of the non-overlapping occurrences of sub.
+func indexAll(s, sub string) []int {
+	var out []int
+	for i := 0; ; {
+		j := strings.Index(s[i:], sub)
+		if j < 0 {
+			return out
+		}
+		out = append(out, i+j)
+		i += j + len(sub)
+	}
+}
+
+// next returns the first position in list at or after i, or -1.
+func (sc *sinkScan) next(list []int, i int) int {
+	if k := sort.SearchInts(list, i); k < len(list) {
+		return list[k]
+	}
+	return -1
+}
+
+// fieldEnd returns where the field starting at start ends: at the end of the
+// line, at whitespace before a sinkFollowers phrase, and with inJSON at the
+// first unescaped '"'.
+func (sc *sinkScan) fieldEnd(start int, inJSON bool) int {
+	end := len(sc.low)
+	lists := [][]int{sc.newlines, sc.followers}
+	if inJSON {
+		lists = append(lists, sc.jsonQuotes)
+	}
+	for _, l := range lists {
+		if i := sc.next(l, start); i >= 0 && i < end {
+			end = i
+		}
+	}
+	return end
+}
+
+// closeBefore returns where a value whose text starts at from ends: at the
+// last closer before end (just past it when inclusive). With no closer, or
+// when that closer may open another opener's value, the value runs to end: a
+// missing or misplaced close never leaves value text unmasked.
+func (sc *sinkScan) closeBefore(from, end int, closer string, inclusive bool) int {
+	if from >= end {
+		return end
+	}
+	i := strings.LastIndex(sc.low[from:end], closer)
+	if i < 0 {
+		return end
+	}
+	c := from + i
+	if spans := findSinkOpeners(sc.low, from, end); len(spans) > 0 && spans[len(spans)-1][1] >= c {
+		return end
+	}
+	if inclusive {
+		return c + len(closer)
+	}
+	return c
 }
 
 var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)

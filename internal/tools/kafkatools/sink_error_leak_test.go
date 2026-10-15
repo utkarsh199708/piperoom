@@ -1,6 +1,10 @@
 package kafkatools
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 // TestTraceSinkErrorsMaskRecordValues (#382): MySQL, PostgreSQL and
 // Elasticsearch sink errors quote the failing value in wordings that are not
@@ -145,5 +149,67 @@ func TestTraceSinkValueMaskKeepsCategories(t *testing.T) {
 		if got := sanitizeTrace(line); got != line {
 			t.Errorf("sanitizeTrace(%q) = %q, want unchanged", line, got)
 		}
+	}
+}
+
+// TestTraceSinkValueMaskHostile: maskSinkValues on a 64 KiB line of repeated
+// openers stays linear, and a value after the last opener is still masked.
+// (sanitizeTrace as a whole is dominated by main's passes, about 45 ms for
+// any 64 KiB line, so the budget is on this pass.)
+func TestTraceSinkValueMaskHostile(t *testing.T) {
+	for _, tt := range []struct {
+		unit   string
+		opener bool // the unit ends in an opener, so the trailing "Leak" is a value
+	}{
+		{"malformed array literal: \"", true},
+		{"malformed array literal: \\\"", true},
+		{"\"x\" date/time field value out of range: ", true},
+		{"date/time field value out of range: ", true},
+		{"failed to parse date field [", true},
+		{"] failed to parse date field [", true},
+		{"Invalid format: \"x\" is malformed at ", true},
+		{"failed to parse date field [x] with format [", false},
+		{"Text '", false},
+		{"Text 'x' could not be parsed ", false},
+		{"malformed array literal: \"x\"  Hint: ", false},
+		{"\"Text 'x\", ", false},
+	} {
+		line := "Caused by: x: " + strings.Repeat(tt.unit, (64<<10)/len(tt.unit)) + "Leak"
+		start := time.Now()
+		got := maskSinkValues(line)
+		if d := time.Since(start); d > 50*time.Millisecond {
+			t.Errorf("%q x 64 KiB took %v, want < 50ms", tt.unit, d)
+		}
+		if tt.opener && strings.Contains(got, "Leak") {
+			t.Errorf("%q: the value after the last opener is not masked: ...%s", tt.unit, got[max(0, len(got)-80):])
+		}
+	}
+}
+
+// TestTraceSinkErrorsKnownGaps pins sink wordings that still carry part of
+// the record, on main and here: they have another shape than the #505 forms
+// (the value comes before the words, or is a key or raw bytes): known gaps,
+// follow-up #527. When one is masked, move its row to a must-mask test.
+func TestTraceSinkErrorsKnownGaps(t *testing.T) {
+	for _, tt := range []struct{ name, line, leak string }{
+		{"postgres to_date invalid value",
+			"Caused by: org.postgresql.util.PSQLException: ERROR: invalid value \"Leakwood\" for \"YYYY\"",
+			"Leakwood"},
+		{"postgres invalid byte sequence",
+			"Caused by: org.postgresql.util.PSQLException: ERROR: invalid byte sequence for encoding \"UTF8\": 0x4c 0x65",
+			"0x4c 0x65"},
+		{"elasticsearch document id without preview",
+			"Caused by: org.apache.kafka.connect.errors.ConnectException: Bulk request failed: [{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [age] of type [long] in document with id 'Leakwood-42'\"}]",
+			"Leakwood-42"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for path, got := range bothPaths(t, tt.line) {
+				for i, where := range []string{"summary", "data error"} {
+					if !strings.Contains(got[i], tt.leak) {
+						t.Errorf("%s path, %s no longer carries %q: move the row to a must-mask test:\n%s", path, where, tt.leak, got[i])
+					}
+				}
+			}
+		})
 	}
 }
