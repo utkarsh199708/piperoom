@@ -155,3 +155,33 @@ func TestVerificationNoteCarriesCitableStepIDs(t *testing.T) {
 		}
 	}
 }
+
+// Secrets people paste into comments, steers and rejection reasons are masked
+// before the model, or the hand-off model, reads them.
+func TestHumanTextIsMaskedForTheModel(t *testing.T) {
+	const sec = "Zx9hunter2Qw7Pa55"
+	dsn := "sink uses postgres://app:" + sec + "@db:5432/orders"
+	for _, kind := range []string{"steer", "suggestion", "comment"} {
+		got := formatHumanInput(HumanInput{Actor: events.Actor{Name: "bob"}, Kind: kind, Text: dsn})
+		if strings.Contains(got, sec) {
+			t.Fatalf("%s leaks the password: %q", kind, got)
+		}
+	}
+	evs := []events.Event{
+		mustEvent(t, 1, events.CommentAdded, events.CommentAddedPayload{CommentID: "c_1", Text: "password=" + sec}),
+		mustEvent(t, 2, events.SteerSent, events.SteerSentPayload{Text: dsn}),
+		mustEvent(t, 3, events.ApprovalRejected, events.ApprovalRejectedPayload{ProposalID: "p_1", Layer: "kafka-connect", Reason: "the config has password=" + sec}),
+	}
+	if out := renderRoomEvents(evs); strings.Contains(out, sec) {
+		t.Fatalf("hand-off input leaks the password:\n%s", out)
+	}
+}
+
+func mustEvent(t *testing.T, seq int64, typ events.Type, payload any) events.Event {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return events.Event{Seq: seq, Type: typ, Payload: raw}
+}

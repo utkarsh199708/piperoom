@@ -294,6 +294,10 @@ func formatHumanInput(in HumanInput) string {
 		name = "unknown"
 	}
 	name = sanitizeLabel(name)
+	// People paste connection strings and connector config into comments and
+	// steers; the model gets them masked like tool output, so it can neither
+	// send them to the API nor repeat them in the room.
+	in.Text = maskAlertText(in.Text)
 	switch in.Kind {
 	case "steer":
 		return fmt.Sprintf("[%s — driver] %s", name, escapeToolText(in.Text))
@@ -490,6 +494,12 @@ func capFreeText(s string) string {
 	return truncatePromptField(s, handoffFreeTextBytes)
 }
 
+// maskedFreeText masks secrets in typed or model-written text, then caps it.
+// Masking runs first, so the cap never leaves half a secret visible.
+func maskedFreeText(s string) string {
+	return capFreeText(maskAlertText(s))
+}
+
 // truncatePromptLine cuts one rendered tool summary to
 // handoffToolSummaryBytes without splitting a UTF-8 rune.
 func truncatePromptLine(s string) string {
@@ -542,13 +552,13 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return "agent: " + wrapUntrusted(capFreeText(p.Text))
+		return "agent: " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.AgentHypothesis:
 		p, err := events.Decode[events.AgentHypothesisPayload](e)
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("hypothesis (%s): %s", capFreeText(p.Confidence), wrapUntrusted(capFreeText(p.Text)))
+		return fmt.Sprintf("hypothesis (%s): %s", capFreeText(p.Confidence), wrapUntrusted(maskedFreeText(p.Text)))
 	case events.AgentStatus:
 		p, err := events.Decode[events.AgentStatusPayload](e)
 		if err != nil {
@@ -566,19 +576,19 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return "comment " + capFreeText(p.CommentID) + ": " + wrapUntrusted(capFreeText(p.Text))
+		return "comment " + capFreeText(p.CommentID) + ": " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.SteerSent:
 		p, err := events.Decode[events.SteerSentPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "steer: " + wrapUntrusted(capFreeText(p.Text))
+		return "steer: " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.SteerSuggested:
 		p, err := events.Decode[events.SteerSuggestedPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "suggestion: " + wrapUntrusted(capFreeText(p.Text))
+		return "suggestion: " + wrapUntrusted(maskedFreeText(p.Text))
 	case events.ProposalCreated:
 		p, err := events.Decode[events.ProposalCreatedPayload](e)
 		if err != nil {
@@ -598,7 +608,7 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("rejection %s by %s: %s", capFreeText(p.ProposalID), wrapUntrusted(capFreeText(p.Layer)), wrapUntrusted(capFreeText(p.Reason)))
+		return fmt.Sprintf("rejection %s by %s: %s", capFreeText(p.ProposalID), wrapUntrusted(capFreeText(p.Layer)), wrapUntrusted(maskedFreeText(p.Reason)))
 	case events.ActionExecuted:
 		p, err := events.Decode[events.ActionExecutedPayload](e)
 		if err != nil {
@@ -609,7 +619,7 @@ func renderRoomEvent(e events.Event) string {
 			result = "FAILED"
 		}
 		// Steps are numbered from 1, as the room shows them.
-		return fmt.Sprintf("action %s step %d %s: %s", capFreeText(p.ProposalID), p.StepIndex+1, result, wrapUntrusted(truncatePromptField(p.Output, handoffActionOutputBytes)))
+		return fmt.Sprintf("action %s step %d %s: %s", capFreeText(p.ProposalID), p.StepIndex+1, result, wrapUntrusted(truncatePromptField(maskAlertText(p.Output), handoffActionOutputBytes)))
 	case events.AgentVerification:
 		p, err := events.Decode[events.AgentVerificationPayload](e)
 		if err != nil || p.Repeat {
