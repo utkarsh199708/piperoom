@@ -23,7 +23,7 @@ Status: closed
 | 10:03:30 | +03:30 | proposal `p_2` proposed: Reset the consumer offsets |
 | 10:04:00 | +04:00 | approval given for `p_1`: Arjun (user:arjun, dev) (kafka-connect) |
 | 10:04:30 | +04:30 | `p_1` step 1 ok |
-| 10:05:30 | +05:30 | verification: `p_1` recovered; recovered: every layer check passed and data is flowing again |
+| 10:05:30 | +05:30 | verification: `p_1` recovered: every layer check passed and data is flowing again |
 | 10:06:30 | +06:30 | hand-off requested by Arjun to Priya |
 | 10:07:00 | +07:00 | hand-off `h_1` created: Arjun to Priya |
 | 10:07:30 | +07:30 | room closed by Priya |
@@ -64,7 +64,7 @@ Outcome: withdrawn (room closed)
 
 ## Verification
 
-- `p_1` recovered; recovered: every layer check passed and data is flowing again
+- `p_1` recovered: every layer check passed and data is flowing again
 
 ## Still open
 

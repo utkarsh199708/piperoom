@@ -348,7 +348,7 @@ func TestPostmortemVerificationSection(t *testing.T) {
 				Checks: []events.VerificationCheck{{Layer: "kafka", Name: "connect_status", OK: true, Detail: "RUNNING"}},
 				DataFlow: &events.DataFlowCheck{Checked: true, Fresh: true,
 					Sinks: []events.SinkCheck{{Table: "orders", Newest: now, Passed: true}}}}},
-			want:    []string{"- `p_1` recovered; recovered: all good; data flow fresh (orders passed)"},
+			want:    []string{"- `p_1` recovered: all good; data flow fresh (orders passed)"},
 			notWant: []string{"No verification recorded", "failed kafka"},
 		},
 		{

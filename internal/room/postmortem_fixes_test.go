@@ -202,7 +202,7 @@ func TestPostmortemFixedByProposal(t *testing.T) {
 	for _, want := range []string{
 		"Outcome: executed",
 		"Outcome: withdrawn (room closed)",
-		"- `p_1` recovered; recovered: every layer check passed and data is flowing again",
+		"- `p_1` recovered: every layer check passed and data is flowing again",
 		"- watch the lag for an hour",
 		"- a second failure needs a schema check",
 		"cost: $0.12",

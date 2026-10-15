@@ -203,6 +203,31 @@ describe('ProposalsSummary', () => {
     expect(screen.getByText('2 of 2')).toBeInTheDocument()
   })
 
+  describe('after approval (Q6 U4)', () => {
+    const steps = [
+      { action: 'a', layer: 'kafka-connect', params: {} },
+      { action: 'b', layer: 'kafka-connect', params: {} },
+    ] as ProposalState['steps']
+    const approved = (over: Partial<ProposalState>) =>
+      proposal({ status: 'approved', approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' }, steps, ...over })
+    const ran = (i: number, ok = true, extra = {}) => ({ proposal_id: 'p1', step_index: i, ok, output: '', ...extra })
+    const verdict = (recovered: boolean, text: string) => ({ proposal_id: 'p1', checks: [], recovered, verdict: text })
+    const cases: [string, Partial<ProposalState>, string][] = [
+      ['executing', { executed: [ran(0)] }, 'Executing'],
+      ['executed ok', { executed: [ran(0), ran(1)] }, 'Executed'],
+      ['a step failed', { executed: [ran(0), ran(1, false)] }, 'Step 2 failed'],
+      ['outcome unknown', { executed: [ran(0, false, { outcome_unknown: true })] }, 'Outcome unknown'],
+      ['recovered', { executed: [ran(0), ran(1)], verification: verdict(true, 'recovered: ok') }, 'Verified recovered'],
+      ['NOT recovered', { executed: [ran(0), ran(1)], verification: verdict(false, 'NOT recovered: lag') }, 'NOT recovered'],
+      ['inconclusive', { executed: [ran(0), ran(1)], verification: verdict(false, 'inconclusive: idle') }, 'Verification inconclusive'],
+    ]
+    it.each(cases)('%s', (_n, over, word) => {
+      render(<ProposalsSummary proposals={[approved(over)]} />)
+      expect(screen.getByText(word)).toBeInTheDocument()
+      expect(screen.queryByText('Approved')).not.toBeInTheDocument()
+    })
+  })
+
   it('jumps to the proposal on the page without touching the hash route', () => {
     const target = document.createElement('div')
     target.id = PROPOSAL_ANCHOR

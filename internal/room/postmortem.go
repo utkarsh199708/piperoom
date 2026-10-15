@@ -30,9 +30,11 @@ type pmProposal struct {
 	ran       map[int]bool // step index -> ok
 	// lastOKAt is the time of the newest successful step; verified is set by
 	// an agent.verification for the proposal (Q5 T1c).
-	lastOKAt  time.Time
-	verified  bool
-	failed    bool
+	lastOKAt time.Time
+	verified bool
+	failed   bool
+	// unknown is set when a step's outcome is unknown (it may have run).
+	unknown   bool
 	withdrawn bool
 	// withdrawReason is the withdrawer's one line (proposal.withdrawn.reason).
 	withdrawReason string
@@ -225,6 +227,13 @@ func (f *pmFold) add(e events.Event) error {
 				case takeoverNoticeText:
 					f.restartAt = e.At
 					f.row(e, "the agent's server stopped; the agent resumed on another server")
+				default:
+					// Watcher joins and all-clear notes: first line only, the
+					// evidence body is in the log (Q6 U3).
+					if strings.HasPrefix(p.Text, "watcher: ") || (strings.HasPrefix(p.Text, "alert ") && strings.HasSuffix(p.Text, resolvedJoinSuffix)) {
+						line, _, _ := strings.Cut(p.Text, "\n")
+						f.row(e, mdTextN(line, pmLineMax))
+					}
 				}
 			}
 		}
@@ -295,6 +304,7 @@ func (f *pmFold) add(e events.Event) error {
 				pr.ran[p.StepIndex] = p.OK
 				if !p.OK {
 					pr.failed = true
+					pr.unknown = pr.unknown || p.OutcomeUnknown
 				} else {
 					pr.lastOKAt = e.At
 				}
@@ -892,6 +902,8 @@ func (f *pmFold) outcome(p *pmProposal) string {
 	switch {
 	case p.rejected:
 		return "rejected"
+	case p.unknown:
+		return "unknown — the step may or may not have run; check the target"
 	case p.failed:
 		return "a step failed"
 	case len(p.ev.Steps) > 0 && len(p.ran) >= len(p.ev.Steps):
@@ -920,9 +932,16 @@ func verificationLine(p events.AgentVerificationPayload) string {
 	if p.Recovered {
 		res = "recovered"
 	}
+	// The verdict line usually starts with the word already ("recovered: …");
+	// say it once (Q6 U3).
 	parts := []string{mdCode(p.ProposalID) + " " + res}
 	if p.Verdict != "" {
-		parts = append(parts, mdTextN(p.Verdict, pmLineMax))
+		v := mdTextN(p.Verdict, pmLineMax)
+		if lv := strings.ToLower(v); strings.HasPrefix(lv, "recovered") || strings.HasPrefix(lv, "not recovered") {
+			parts = []string{mdCode(p.ProposalID) + " " + v}
+		} else {
+			parts = append(parts, v)
+		}
 	}
 	for _, c := range p.Checks {
 		if !c.OK {
