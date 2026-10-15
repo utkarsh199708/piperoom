@@ -376,7 +376,7 @@ func run() error {
 		topo = sets
 	}
 
-	svc := newRoomService(room.Deps{
+	svc := newRoomService(withRoomAuth(room.Deps{
 		Store:             st,
 		Actions:           acts,
 		Tools:             toolsReg,
@@ -398,14 +398,12 @@ func run() error {
 		MaxAgentsGlobal:   maxAgentsGlobal,
 		ResumeOnTakeover:  resumeOnTakeover,
 		Sessions:          sessions,
-		SessionLive:       authSettings.Liveness(),
-		ViewerGroups:      authSettings.ViewerGroups,
 		SoloUser:          soloUser,
 		Limits:            limits,
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,
 		OnRoomDeleted:     deletedHook.onDeleted,
-	}, usage)
+	}, authSettings), usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
 	loadErr := svc.Load(loadCtx)
