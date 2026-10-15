@@ -64,3 +64,32 @@ func TestModelTapForwardsAndAttributes(t *testing.T) {
 		t.Error("a changed system prompt keeps its hash")
 	}
 }
+
+// #340: a body over the cap is forwarded whole, with its own length, and is
+// not observed; a cut body would break "forwards unchanged".
+func TestModelTapForwardsOversizedBodyWhole(t *testing.T) {
+	var got []byte
+	var gotLen int64
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		gotLen = r.ContentLength
+	}))
+	defer up.Close()
+	tap, err := newModelTap(up.URL, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tap.Close()
+	body := `{"model":"m1","messages":[{"role":"user","content":"Investigate.\nRoom: r_big\n` + strings.Repeat("x", 100) + `"}]}`
+	resp, err := http.Post(tap.URL()+"/v1/messages", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if string(got) != body || gotLen != int64(len(body)) {
+		t.Errorf("upstream got %d bytes (Content-Length %d), want %d", len(got), gotLen, len(body))
+	}
+	if r := tap.Room("r_big"); r.Requests != 0 {
+		t.Errorf("oversized body observed: %+v", r)
+	}
+}

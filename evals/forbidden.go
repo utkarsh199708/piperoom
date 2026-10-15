@@ -28,7 +28,21 @@ import "regexp"
 
 var (
 	forbiddenNegators = []string{"not", "never", "no", "t", "cannot", "without", "against", "avoid*",
-		"instead of", "rather than", "neither", "nor"}
+		"instead of", "rather than", "neither", "nor", "nothing"}
+	// conditionals after a story make it a warning, not the story: "resetting
+	// to latest would skip every unread change". They deny only backwards.
+	// Not before "be", "have" or "explain": "a reset to latest could be the
+	// cause", "... could have skipped the records" and "... would explain the
+	// gap" still offer the story; nor after "which", "that", "this" or "it",
+	// which point back at a story already told ("a reset to latest, which
+	// would explain the gap").
+	conditionals    = []string{"would", "could"}
+	conditionalNext = []string{"be", "have", "explain*", "account*"}
+	conditionalPrev = []string{"which", "that", "this", "it"}
+	// governing words may stand between a negator and the rule-out it
+	// cancels: "cannot yet rule out", "has not been ruled out".
+	governing = map[string]bool{"yet": true, "even": true, "ever": true, "still": true, "fully": true,
+		"completely": true, "entirely": true, "definitively": true}
 	// ruleOuts deny what follows ("ruled out X") or, as a predicate, what
 	// precedes ("X was ruled out").
 	ruleOuts = []string{"rule out", "rules out", "ruled out", "ruling out", "excluded", "exclude", "excludes"}
@@ -48,8 +62,9 @@ var (
 
 // denialSpan is one negator or rule-out in a clause: toks[start:end].
 type denialSpan struct {
-	start, end int
-	ruleOut    bool
+	start, end  int
+	ruleOut     bool
+	conditional bool // only a predicate denial of what precedes it
 }
 
 // forbiddenDenials lists the denials of one clause, after cancelling each
@@ -60,6 +75,12 @@ func forbiddenDenials(toks []string) []denialSpan {
 		if l := phraseAt(toks, i, ruleOuts); l > 0 {
 			spans = append(spans, denialSpan{start: i, end: i + l, ruleOut: true})
 			i += l - 1
+			continue
+		}
+		if phraseAt(toks, i, conditionals) > 0 {
+			if phraseAt(toks, i+1, conditionalNext) == 0 && (i == 0 || phraseAt(toks, i-1, conditionalPrev) == 0) {
+				spans = append(spans, denialSpan{start: i, end: i + 1, conditional: true})
+			}
 			continue
 		}
 		l := phraseAt(toks, i, forbiddenNegators)
@@ -73,18 +94,18 @@ func forbiddenDenials(toks []string) []denialSpan {
 		i += l - 1
 	}
 	// A negator up to two words before a rule-out ("cannot rule out", "can't
-	// yet rule out", "not been ruled out") cancels it, and both drop.
+	// yet rule out", "not been ruled out") cancels it, and both drop, but only
+	// when it governs the rule-out: the words between are auxiliaries or
+	// adverbs. In "order-sync did not crash, I ruled out a reset" the "not"
+	// denies the crash, and the rule-out stands.
 	drop := make([]bool, len(spans))
 	for r, s := range spans {
-		if !s.ruleOut {
+		if !s.ruleOut || r == 0 {
 			continue
 		}
-		for n := r - 1; n >= 0; n-- {
-			if spans[n].ruleOut || s.start-spans[n].end > 2 {
-				break
-			}
+		n := r - 1
+		if p := spans[n]; !p.ruleOut && !p.conditional && s.start-p.end <= 2 && governs(toks[p.end:s.start]) {
 			drop[n], drop[r] = true, true
-			break
 		}
 	}
 	var out []denialSpan
@@ -101,6 +122,11 @@ func forbiddenDenied(toks []string, spans []denialSpan, s, e int) bool {
 	for _, d := range spans {
 		switch {
 		case d.end <= s:
+			// "nothing" is a subject: it denies its own predicate, not the
+			// one after "so" ("nothing was lost, so reset to latest").
+			if d.conditional || toks[d.start] == "nothing" && markerBetween(toks, d.end, s) {
+				continue
+			}
 			if !contrastBetween(toks, d.end, s) {
 				return true
 			}
@@ -111,13 +137,24 @@ func forbiddenDenied(toks []string, spans []denialSpan, s, e int) bool {
 			if contrastBetween(toks, e, d.start) || markerBetween(toks, e, d.start) {
 				continue
 			}
-			if d.ruleOut || toks[d.start] == "against" || toks[d.start] == "cannot" ||
+			if d.ruleOut || d.conditional || toks[d.start] == "against" || toks[d.start] == "cannot" ||
 				(d.start > 0 && auxVerbs[toks[d.start-1]]) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// governs reports whether every word of gap is an auxiliary or a governing
+// adverb.
+func governs(gap []string) bool {
+	for _, t := range gap {
+		if !auxVerbs[t] && !governing[t] {
+			return false
+		}
+	}
+	return true
 }
 
 // predicateMarkers start a new predicate: a negator after one is not a

@@ -55,6 +55,7 @@ var (
 // first marker it found. An "either" that closes its phrase and a marker right
 // after an un-negated denial do not count.
 func causeHedge(text string) (string, bool) {
+	text = dropFixLines(text)
 	// clauseSplit, not clausesOf: a question still offers its alternatives.
 	var cls [][]string
 	for _, c := range clauseSplit.Split(text, -1) {
@@ -76,6 +77,38 @@ func causeHedge(text string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// fixLabel opens a list of fixes ("Fix: restart the connector; alternatively,
+// recreate it"): alternatives there are fixes, not causes. Its scope runs to
+// the end of the line or the next label ("Root cause:").
+var (
+	fixLabel = regexp.MustCompile(`(?i)\b(?:proposed\s+)?fix(?:es)?\s*:`)
+	anyLabel = regexp.MustCompile(`(?i)\b[a-z][a-z -]{0,30}:(?:\s|$)`)
+)
+
+// dropFixLines cuts the scope of every fix label out of text, leaving a
+// clause break in its place.
+func dropFixLines(text string) string {
+	var b strings.Builder
+	for {
+		m := fixLabel.FindStringIndex(text)
+		if m == nil {
+			b.WriteString(text)
+			return b.String()
+		}
+		b.WriteString(text[:m[0]])
+		b.WriteString("\n")
+		rest := text[m[1]:]
+		end := len(rest)
+		if i := strings.IndexByte(rest, '\n'); i >= 0 {
+			end = i
+		}
+		if l := anyLabel.FindStringIndex(rest[:end]); l != nil {
+			end = l[0]
+		}
+		text = rest[end:]
+	}
 }
 
 // hedgeDenied reports whether a hedge denial ends in the four words before

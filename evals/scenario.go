@@ -394,7 +394,25 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 		errs = append(errs, fmt.Errorf("expect.root_cause_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
 	}
 
+	recKeys := map[string]int{}
 	for i, r := range s.Recordings {
+		// Replay breaks a tie for the earlier recording, so a later one with
+		// the same tool, input and phase never answers (shadow.go drops such
+		// duplicates for the same reason).
+		in := r.Input
+		if len(in) == 0 {
+			in = nil
+		}
+		if key, err := json.Marshal(struct {
+			T, P string
+			I    map[string]any
+		}{r.Tool, r.Phase, in}); err == nil {
+			if j, dup := recKeys[string(key)]; dup {
+				errs = append(errs, fmt.Errorf("recordings[%d] (%s): never matches: recordings[%d] has the same tool, input and phase and wins every tie", i, r.Tool, j))
+			} else {
+				recKeys[string(key)] = i
+			}
+		}
 		fields, isTool := toolInputs[r.Tool]
 		if !isTool {
 			errs = append(errs, fmt.Errorf("recordings[%d]: unknown tool %q", i, r.Tool))

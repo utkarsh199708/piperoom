@@ -163,7 +163,11 @@ func denied(c clauseToks, layers bool) []bool {
 				neg[i] = true
 			}
 		}
-		if l := forwardDenial(c.toks, j); l > 0 {
+		l := forwardDenial(c.toks, j)
+		if l == 0 {
+			l = contrastNot(c, j)
+		}
+		if l > 0 {
 			for i := j + l; i < n && c.sub[i] == c.sub[j]; i++ {
 				neg[i] = true
 			}
@@ -206,6 +210,33 @@ func forwardDenial(toks []string, j int) int {
 	}
 	return l
 }
+
+// contrastNot returns the length of a weak negator that opens a short sub
+// after a comma or "and" in its back segment ("dropped by a DBA, not
+// Debezium"), or 0. Such a "not" contrasts a bare name with what came before;
+// a longer sub is more likely a verb phrase that describes the failure ("task
+// 0 failed, not able to read the replication slot").
+func contrastNot(c clauseToks, j int) int {
+	if j == 0 || c.sub[j-1] == c.sub[j] || c.back[j-1] != c.back[j] {
+		return 0
+	}
+	l := phraseAt(c.toks, j, weakNegators)
+	if l == 0 {
+		return 0
+	}
+	end := j + l
+	for end < len(c.toks) && c.sub[end] == c.sub[j] {
+		end++
+	}
+	if end == j+l || end-(j+l) > contrastNotMax {
+		return 0
+	}
+	return l
+}
+
+// contrastNotMax is the longest sub, in tokens after the negator, that
+// contrastNot reads as a name: "pg-payments-connector" is three.
+const contrastNotMax = 3
 
 // affirmsDoubt reports whether toks[j] starts "no doubt", "without doubt" or
 // "no question": they affirm what follows ("there is no doubt the slot was
@@ -277,11 +308,14 @@ var layerTerms = map[string][]string{
 	"postgres": {"postgres*", "replication slot", "source table", "source db", "source database", "transaction*",
 		"ddl", "alter table", "drop column", "migration*", "publication*", "table owner*", "wal",
 		"postgre sql"}, // tokenize splits "PostgreSQL" into "postgre sql"
-	"kafka-connect":   {"connect", "connector*", "debezium"},
+	// An SMT runs inside a Connect task.
+	"kafka-connect":   {"connect", "connector*", "debezium", "smt", "smts", "single message transform*"},
 	"schema-registry": {"schema registry", "registry", "subject*"},
-	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
-	"consumer":        {"consumer*"},
-	"warehouse":       {"warehouse*", "sink table"},
+	// SASL and SCRAM are Kafka's own login; "kafka user" is the principal
+	// it checks.
+	"kafka":     {"topic*", "broker*", "partition*", "retention", "log start", "sasl", "scram", "kafka user*"},
+	"consumer":  {"consumer*"},
+	"warehouse": {"warehouse*", "sink table"},
 }
 
 // layerTermsFor adds the pipeline's own names to a layer's words: its

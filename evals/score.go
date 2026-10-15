@@ -610,7 +610,8 @@ func rootCauseMatches(e Expect, text string) bool {
 // punctuation; "res<ZWSP>et" is two words and matches nothing): on every character that
 // is not a letter or digit, between a lower-case letter or digit and an
 // upper-case letter (PreparingRebalance -> preparing rebalance), and before
-// the last capital of an acronym (HTTPServer -> http server). Digits stay
+// the last capital of an acronym (HTTPServer -> http server; not before a
+// plural "s": ACLs -> acls). Digits stay
 // attached to the letters they touch (int4, v3), and "25377154" is one token.
 func tokenize(s string) []string {
 	var toks []string
@@ -629,7 +630,9 @@ func tokenize(s string) []string {
 		}
 		if unicode.IsUpper(r) && len(cur) > 0 {
 			prev := rs[i-1]
-			nextLower := i+1 < len(rs) && unicode.IsLower(rs[i+1])
+			// A plural "s" after an acronym belongs to it: ACLs -> acls, not
+			// ac ls.
+			nextLower := i+1 < len(rs) && unicode.IsLower(rs[i+1]) && !pluralS(rs, i+1)
 			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
 				flush()
 			}
@@ -638,6 +641,11 @@ func tokenize(s string) []string {
 	}
 	flush()
 	return toks
+}
+
+// pluralS reports whether rs[i] is a lone "s" that ends a word.
+func pluralS(rs []rune, i int) bool {
+	return rs[i] == 's' && (i+1 == len(rs) || !unicode.IsLower(rs[i+1]) && !unicode.IsDigit(rs[i+1]))
 }
 
 // termTokens splits a scenario term into its tokens and reports whether it
