@@ -1,0 +1,177 @@
+name: evals-live
+
+# Live agent evals against the hosted model (evals/README.md, "CI (evals-live)").
+# This repository is public, so:
+#  - never pull_request_target: a PR must not run with the secret on code the
+#    base branch has not reviewed;
+#  - PR runs only for branches of this repository (a fork gets no secret and
+#    must not spend ours);
+#  - the secret lives in the GitHub Environment "evals" with required reviewers,
+#    so no PR run spends money without approval;
+#  - only the report of the committed synthetic scenarios is uploaded. The
+#    learned set stays in a private store and is never passed with -learned.
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_baseline:
+        description: "Write the report as the baseline-default artifact (commit it as evals/baseline/default.json in a later PR); no comparison"
+        type: boolean
+        default: false
+      only:
+        description: "Comma-separated scenario names, or all (GitHub replaces an empty value with the default)"
+        type: string
+        default: "schema-change"
+      runs:
+        description: "Runs per scenario (3 for a comparable baseline; 1 to save money)"
+        type: string
+        default: "1"
+      max_turns:
+        description: "Agent turns per episode (caps the cost of a runaway episode)"
+        type: string
+        default: "25"
+  # Nightly full run (75 episodes) is off while the API budget is small; turn it
+  # back on, or make it a cheap canary, once the cost per episode is measured.
+  # schedule:
+  #   - cron: "17 3 * * *"
+  pull_request:
+    paths:
+      - "internal/agent/**"
+      - "internal/wiring/model.go"
+      - "internal/config/config.go"
+      - "evals/scenarios/**"
+
+permissions:
+  contents: read
+
+# A second push to the same ref cancels the running eval.
+concurrency:
+  group: evals-live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals-live:
+    name: evals-live
+    runs-on: ubuntu-latest
+    # 75 episodes (25 scenarios x 3 runs) at 6 in parallel take about 40 minutes.
+    timeout-minutes: 60
+    environment: evals
+    # The pull_request path stays off until evals/baseline/default.json is on
+    # main (tasks/L1-learn-from-rooms.md, L1c): without a baseline a PR run has
+    # nothing to compare with and would only spend money. A later C1 PR removes
+    # the `false &&`.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (false && github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - name: Check for the API key
+        id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::ANTHROPIC_API_KEY is not set in the evals environment; skipping the live evals."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout
+        if: steps.key.outputs.run == 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        if: steps.key.outputs.run == 'true'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run evals
+        id: run
+        if: steps.key.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MAKE_BASELINE: ${{ inputs.make_baseline }}
+          # Manual runs choose scope; the nightly run uses the full set, 3 runs.
+          ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.only || '' }}
+          RUNS: ${{ github.event_name == 'workflow_dispatch' && inputs.runs || '3' }}
+          MAX_TURNS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_turns || '25' }}
+        run: |
+          case "$RUNS" in ''|*[!0-9]*) echo "::error::runs must be a whole number"; exit 1;; esac
+          case "$MAX_TURNS" in ''|*[!0-9]*) echo "::error::max_turns must be a whole number"; exit 1;; esac
+          case "$ONLY" in *[!a-z0-9,-]*) echo "::error::only takes scenario names separated by commas"; exit 1;; esac
+          # USD per million tokens (docs/design/cost.md), so the report carries
+          # cost_per_run_usd. cache_write is the 5-minute write price (1.25x input).
+          cat > "$RUNNER_TEMP/prices.json" <<'JSON'
+          {
+            "claude-opus-5-5":   {"input": 4.00, "output": 20.00, "cache_write": 5.00,  "cache_read": 0.20},
+            "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_write": 2.50,  "cache_read": 0.20},
+            "claude-haiku-5-5":  {"input": 0.10, "output": 0.50,  "cache_write": 0.125, "cache_read": 0.01}
+          }
+          JSON
+          # Episodes run 6 at a time with a 10-minute cap each; one at a time
+          # (the evalrun default) cannot finish 75 episodes inside the job limit.
+          args=(-runs "$RUNS" -max-turns "$MAX_TURNS" -parallel 6 -timeout 10m -prices "$RUNNER_TEMP/prices.json" -label ci -out cand.json)
+          if [ -n "$ONLY" ] && [ "$ONLY" != "all" ]; then args+=(-only "$ONLY"); fi
+          if [ "$MAKE_BASELINE" = "true" ]; then
+            echo "::notice::make_baseline: no comparison; the report is uploaded as baseline-default."
+          elif [ -f evals/baseline/default.json ]; then
+            args+=(-baseline evals/baseline/default.json -fail-on-regression)
+          else
+            echo "::notice::evals/baseline/default.json does not exist yet; running without a comparison."
+          fi
+          # Keep the exit code so the report is uploaded even when the run
+          # regressed; the Gate step fails the job. Never -learned: that set is private.
+          # Build first: `go run` reports any non-zero child exit as 1, which
+          # hid evalrun's "regressed" exit code 2 from the Gate step.
+          go build -o "$RUNNER_TEMP/evalrun" ./evals/cmd/evalrun
+          set +e
+          "$RUNNER_TEMP/evalrun" "${args[@]}"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+      - name: Upload report
+        if: steps.key.outputs.run == 'true' && hashFiles('cand.json') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cand
+          path: cand.json
+          retention-days: 14
+      - name: Upload baseline candidate
+        if: steps.key.outputs.run == 'true' && inputs.make_baseline == true && hashFiles('cand.json') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: baseline-default
+          path: cand.json
+          retention-days: 14
+      - name: Gate
+        if: steps.key.outputs.run == 'true'
+        env:
+          RC: ${{ steps.run.outputs.rc }}
+          MAKE_BASELINE: ${{ inputs.make_baseline }}
+        run: |
+          if [ "$RC" = "2" ]; then
+            echo "::error::A scenario regressed against evals/baseline/default.json (see the comparison above)."
+            exit 1
+          elif [ "$RC" != "0" ]; then
+            echo "::error::evalrun failed (exit ${RC:-unknown}) before it could compare."
+            exit 1
+          fi
+          if [ "$MAKE_BASELINE" = "true" ] || [ ! -f evals/baseline/default.json ]; then
+            exit 0
+          fi
+          # Misses (tool calls the scenario had no recording for) growing means
+          # the agent left the recorded path; fail on that. Cost is only printed.
+          base_miss="$(jq '.overall.misses // 0' evals/baseline/default.json)"
+          cand_miss="$(jq '.overall.misses // 0' cand.json)"
+          base_cost="$(jq '.overall.usage.cost_per_run_usd.mean // empty' evals/baseline/default.json)"
+          cand_cost="$(jq '.overall.usage.cost_per_run_usd.mean // empty' cand.json)"
+          echo "misses: baseline ${base_miss}, candidate ${cand_miss}"
+          if [ -n "$base_cost" ] && [ -n "$cand_cost" ]; then
+            jq -n --argjson b "$base_cost" --argjson c "$cand_cost" \
+              '"cost per run: baseline $\($b), candidate $\($c), delta $\($c - $b) (informational; cost alone never fails the job)"' -r
+          else
+            echo "cost per run: not priced in one of the reports (set PIPEROOM_MODEL_PRICES to see it)"
+          fi
+          if [ "$cand_miss" -gt "$base_miss" ]; then
+            echo "::error::misses grew from ${base_miss} to ${cand_miss}."
+            exit 1
+          fi

@@ -100,3 +100,49 @@ func TestHitFixThatWorked(t *testing.T) {
 		t.Errorf("shadow room agent text returned: %+v", h)
 	}
 }
+
+func TestHitCauseAndLabelFix(t *testing.T) {
+	tests := []struct {
+		name                       string
+		room                       fake.Room
+		wantCause, wantLabel, want string
+	}{
+		{"labelled", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped", FixThatWorked: "recreated slot"}},
+			"slot dropped", "recreated slot", "recreated slot"},
+		{"unlabelled", fake.Room{}, "", "", ""},
+		{"executed proposal only", fake.Room{Label: &events.RoomLabelledPayload{Cause: "slot dropped"},
+			Fix: &fake.Fix{ProposalID: "p", Title: "Proposal title", Actions: []string{"connect_restart_task"}}},
+			"slot dropped", "", "Proposal title"},
+		{"secret masked", fake.Room{Label: &events.RoomLabelledPayload{Cause: "bad dsn postgres://u:hunter2@h/db\nline2", FixThatWorked: "x"}},
+			"", "x", "x"},
+		{"relabel uses last", fake.Room{Label: &events.RoomLabelledPayload{Cause: "first", FixThatWorked: "old fix"},
+			Relabels: []events.RoomLabelledPayload{{Cause: "second", FixThatWorked: "new fix"}}},
+			"second", "new fix", "new fix"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := tc.room
+			r.ID, r.Title, r.ClosedAt, r.Resolution = "r-1", "zebrafish pipeline stalled", day(9, 30), "x"
+			hits, summary := hitsOf(t, r)
+			if len(hits) != 1 {
+				t.Fatalf("hits = %d", len(hits))
+			}
+			h := hits[0]
+			if tc.name == "secret masked" {
+				if strings.Contains(h.Cause, "hunter2") || strings.Contains(summary, "hunter2") || strings.Contains(h.Cause, "\n") || h.Cause == "" {
+					t.Errorf("cause = %q, summary = %q", h.Cause, summary)
+				}
+				return
+			}
+			if h.Cause != tc.wantCause || h.LabelFix != tc.wantLabel || h.FixThatWorked != tc.want {
+				t.Errorf("hit = cause %q labelfix %q fix %q", h.Cause, h.LabelFix, h.FixThatWorked)
+			}
+			if (tc.wantCause != "") != strings.Contains(summary, "cause: "+tc.wantCause) {
+				t.Errorf("summary cause mismatch: %q", summary)
+			}
+			if (tc.wantLabel != "") != strings.Contains(summary, "fix: "+tc.wantLabel) {
+				t.Errorf("summary fix mismatch: %q", summary)
+			}
+		})
+	}
+}

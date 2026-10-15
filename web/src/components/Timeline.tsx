@@ -1,3 +1,4 @@
+import { PersonName } from '@/components/VerifiedBadge'
 import { useId, useState } from 'react'
 import { emptyStateFor } from '../lib/emptyState'
 import type { FormEvent } from 'react'
@@ -153,7 +154,7 @@ function CommentThread({
         <PersonAvatar actor={comment.author} size={20} className="mt-px" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <strong className="font-medium">{comment.author.name}</strong>
+            <PersonName person={comment.author} nameClassName="font-medium" />
             <Clock iso={comment.at} className="text-xs text-subtle-foreground" />
           </div>
           <p className="m-0 break-words text-muted-foreground">{comment.text}</p>
@@ -402,6 +403,7 @@ export function Timeline({
   checklist,
   filterLayer,
   onClearFilter,
+  shadow = false,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
@@ -420,10 +422,12 @@ export function Timeline({
   /** Show only steps that called a tool of this layer (the live step is always kept). */
   filterLayer?: string
   onClearFilter?: () => void
+  /** Shadow room: the agent works silently, so the empty state neither reports it nor offers a steer. */
+  shadow?: boolean
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
-    const empty = emptyStateFor(agent)
+    const empty = emptyStateFor(agent, shadow)
     return (
       <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">
         <PersonAvatar actor={AGENT} size={28} className={empty.busy ? 'animate-pulse' : 'opacity-70'} />

@@ -5,9 +5,10 @@
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
-//	devctl demo [--fix] <scenario>
+//	devctl demo [--fix] <scenario> | devctl demo --rehearse [scenario]
 //	devctl identities unbind <user>   move a user to a new IdP account
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
+//	devctl shadow up|down|status|env   Piperoom server in shadow mode (dev/shadow.md)
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
 // slot-inactive, consumer-lag, connector-auth.
@@ -19,11 +20,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
+
+	"piperoom/internal/config"
 )
 
 const usage = `devctl — local pipeline control
@@ -37,11 +39,13 @@ const usage = `devctl — local pipeline control
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
   devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
+  devctl demo --rehearse    run the schema-change demo once against the server (reset, break, wait for room, reset)
   devctl lock --owner <tag> take the shared stack lock
   devctl unlock --owner <tag>  release the shared stack lock
   devctl lock status        show who holds the lock
   devctl identities unbind <user>   delete the user's IdP binding (room database)
   devctl rooms delete <id> --reason <text> --as <admin> [--archive]   erase one room through the running server (admin only; --archive keeps a copy)
+  devctl shadow up|down|status|env   run the server in shadow mode on this stack (dev/shadow.md)
   devctl lock --steal       steal a stale (>15m) lock
 
 up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
@@ -51,7 +55,7 @@ scenarios: %s
 `
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log := newLogger(os.Stderr, config.Load())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -176,6 +180,8 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return identitiesCmd(ctx, st, args, os.Stdout)
 	case "rooms":
 		return roomsCmd(ctx, st, args, os.Stdout)
+	case "shadow":
+		return shadowCmd(ctx, st, args, os.Stdout)
 	}
 	return fmt.Errorf("unknown command %q", cmd)
 }

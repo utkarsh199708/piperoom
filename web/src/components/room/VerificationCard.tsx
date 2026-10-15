@@ -5,12 +5,14 @@ import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
+import { PersonName } from '@/components/VerifiedBadge'
 import { clockTime } from '../../lib/time'
 
 export interface CloseNudge {
   /** The room is open, so closing it is still possible. */
   roomOpen: boolean
-  driverName?: string
+  /** The driver, as the server reports them. */
+  driver?: { id: string; name?: string; verified?: boolean }
   isDriver: boolean
   /** Opens the close dialog with the resolution filled in. */
   onClose?: (initialText: string) => void
@@ -109,8 +111,10 @@ export function VerificationCard({
                 C
               </Kbd>
             </Button>
-          ) : nudge.driverName ? (
-            <span className="text-xs text-muted-foreground">{nudge.driverName} can close the room</span>
+          ) : nudge.driver ? (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <PersonName person={{ ...nudge.driver, kind: 'human' }} /> can close the room
+            </span>
           ) : (
             <span className="text-xs text-muted-foreground">Take control to close</span>
           )}

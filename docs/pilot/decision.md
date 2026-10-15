@@ -104,13 +104,13 @@ approvers have used phase 2.
 
 **Go-live gates for phase 1** (each is a PR, owner in brackets):
 
-| Gate | What | Owner |
-|---|---|---|
-| G1 | Pin `go 1.27.2` in `go.mod` and `FROM golang:1.27.2-alpine`; CI green on it | C1, in R6 (#127, open) |
-| G2 | Replace hamba/avro with the maintained fork (`github.com/iskorotkov/avro/v2` v2.33.0, `Config.MaxMapAllocSize` set), per the vuln report | A2 |
-| G3 | Web "unverified" badge for IdP-only people (A-ID-2), since the pilot runs OIDC | A6, in R3 (#135, open) |
-| G4 | Dev mode cannot be exposed by accident: `PIPEROOM_DEV_ACK` (R0 #138 item 6) enforced, and no dev auth baked into the image | A5 (R9, #145) + C1 (R6, #127) |
-| G5 | Pilot docs: fix the six disagreements in 2.4, add a shadow-rooms page and the 2.3 scale statement | C14 + leads |
+| Gate | What | Owner | Status (2026-10-15) |
+|---|---|---|---|
+| G1 | Pin `go 1.27.2` in `go.mod` and `FROM golang:1.27.2-alpine`; CI green on it | C1, in R6 (#127) | done (a64382a) |
+| G2 | Make GO-2026-5046/5047/5048 unreachable from untrusted Kafka record keys, per the vuln report | A2 | done in code (#222): `decodeKey` refuses keys over 64 KiB and key schemas with arrays, maps, recursion, large `fixed`, wide decimals, more than about 1,000 nodes or 32 levels, or schema text over 64 KiB; decodes with a frozen bounded config; recovers panics. hamba/avro v2.31.0 stays: moving to the `iskorotkov/avro` fork is a new third-party dependency and is the owner's call (section 5) |
+| G3 | Web "unverified" badge for IdP-only people (A-ID-2), since the pilot runs OIDC | A6, in R3 (#135) | done (#135): every rendered person name and avatar goes through the badge and name neutralizer |
+| G4 | Dev mode cannot be exposed by accident: `PIPEROOM_DEV_ACK` (R0 #138 item 6) enforced, and no dev auth baked into the image | A5 (R9, #145) + C1 (R6, #127) | done (eeeeb66, a64382a) |
+| G5 | Pilot docs: fix the six disagreements in 2.4, add a shadow-rooms page and the 2.3 scale statement | C14 + leads | done (#219) |
 
 Not gates for phase 1, but due before phase 2: the managed-Postgres capacity re-run (capacity §8.2), capacity
 6.3 (so the pool can be sized), and a Snowflake decision if the customer's warehouse is Snowflake (GO-2026-6665;
@@ -148,5 +148,7 @@ For us:
 ## 6. What happens after this is decided
 
 `[LEAD-ARCH]` turns the chosen option's gates into dispatch messages (one per owner, `docs/collab.md` §4). G4 is
-already in the R wave (R9 #145, R6 #127), and so are G1 (R6 #127) and G3 (R3 #135). G2 and G5 are new tasks. This page is updated to **decided** with the date and the
+already in the R wave (R9 #145, R6 #127), and so are G1 (R6 #127) and G3 (R3 #135). G2 and G5 are new tasks. As of 2026-10-15 all five
+gates are merged (see the Status column). One owner decision stays open: whether to move from hamba/avro to the
+`iskorotkov/avro` fork (G2 closed the advisories in our own code instead). This page is updated to **decided** with the date and the
 option. It does not change any setting by itself.

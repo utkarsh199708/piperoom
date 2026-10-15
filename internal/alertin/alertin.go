@@ -25,6 +25,7 @@ package alertin
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -70,11 +71,22 @@ const (
 
 // Limits.
 const (
-	// MaxBodyBytes is the largest body Ingest accepts. The HTTP layer should cap
-	// its read at the same size (http.MaxBytesReader).
+	// MaxBodyBytes is the largest body Ingest and Parse accept. The HTTP layer
+	// should cap its read at the same size (http.MaxBytesReader).
 	MaxBodyBytes = 1 << 20
 	// MaxTitleRunes caps the normalized title.
 	MaxTitleRunes = 200
+	// MaxMatchTextRunes caps each title, summary and description scanned for
+	// pipeline names. Names sit near the start of alert text, and the scan costs
+	// time in proportion to its length. A name past the cut is not matched.
+	MaxMatchTextRunes = 2000
+	// MaxLabelValues caps how many label, tag and field values one alert
+	// contributes to pipeline matching. A 1 MB body can hold thousands of labels.
+	// Explicit pipeline labels are read directly and are not affected by this cap.
+	MaxLabelValues = 256
+	// MaxLabelRunes caps each label value. Pipeline names are far shorter, so a
+	// cut value does not turn into a false match.
+	MaxLabelRunes = 256
 	// DefaultSeverity is used when the source gives no usable severity.
 	DefaultSeverity = "sev3"
 )
@@ -204,6 +216,28 @@ func cleanTitle(s string, fallback string) string {
 		return out
 	}
 	return fallback
+}
+
+// checkSize rejects a body over MaxBodyBytes. It runs before parsing and before
+// authentication, so an oversized request costs one length check.
+func checkSize(body []byte) error {
+	if len(body) > MaxBodyBytes {
+		return fmt.Errorf("%w: %d bytes, limit %d", ErrTooLarge, len(body), MaxBodyBytes)
+	}
+	return nil
+}
+
+// truncateRunes returns s cut to at most n runes. The cut is on a rune
+// boundary, so the result is valid UTF-8 when s is. encoding/json output always is.
+func truncateRunes(s string, n int) string {
+	i := 0
+	for pos := range s {
+		if i == n {
+			return s[:pos]
+		}
+		i++
+	}
+	return s
 }
 
 // firstNonEmpty returns the first non-blank string, trimmed.

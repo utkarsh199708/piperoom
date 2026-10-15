@@ -5,6 +5,8 @@ import { ageLabel } from './time'
 export interface Owner {
   id: string
   name: string
+  /** Server-set, from GET /api/people. */
+  verified?: boolean
   /** here | away 12m | not here */
   presence: string
 }
@@ -23,7 +25,7 @@ export function presenceWord(m: PresenceMember | undefined, now: number): string
 export function ownersOf(layer: string, people: Person[] | undefined, presence: PresenceMember[], now: number): Owner[] {
   return (people ?? [])
     .filter((p) => p.layers?.includes(layer))
-    .map((p) => ({ id: p.id, name: p.name, presence: presenceWord(presence.find((m) => m.id === p.id), now) }))
+    .map((p) => ({ id: p.id, name: p.name, verified: p.verified, presence: presenceWord(presence.find((m) => m.id === p.id), now) }))
 }
 
 /** The title is untrusted text: no quotes, no newlines, a bounded length. */

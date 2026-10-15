@@ -42,8 +42,8 @@ const actions: RoomActions = {
 const reload = vi.fn()
 
 const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'], role: 'member' }
-const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member' }
-const vera: CurrentUser = { id: 'vera', name: 'Vera', layers: [], role: 'viewer' }
+const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member', verified: true }
+const vera: CurrentUser = { id: 'vera', name: 'Vera', layers: [], role: 'viewer', verified: true }
 
 function room(over: Partial<RoomState> = {}): RoomState {
   return {
@@ -52,15 +52,15 @@ function room(over: Partial<RoomState> = {}): RoomState {
     severity: 'sev2',
     pipeline_id: 'orders',
     opened_at: '2026-10-11T10:00:00Z',
-    driver: { id: 'kabir', name: 'Kabir', lease_until: new Date(Date.now() + 3_600_000).toISOString() },
+    driver: { id: 'kabir', name: 'Kabir', verified: true, lease_until: new Date(Date.now() + 3_600_000).toISOString() },
     agent_status: { state: 'working', detail: 'step 2' },
     steps: [
       { id: 's1', title: 'Check the connector', tool_calls: [], messages: [] },
       { id: 's2', title: 'Check the DDL log', tool_calls: [], messages: [] },
     ],
     members: [
-      { id: 'kabir', name: 'Kabir', role: 'driver' },
-      { id: 'arjun', name: 'Arjun', role: 'watching' },
+      { id: 'kabir', name: 'Kabir', role: 'driver', verified: true },
+      { id: 'arjun', name: 'Arjun', role: 'watching', verified: true },
     ],
     ...over,
   }
@@ -119,8 +119,17 @@ describe('RoomScreen header', () => {
     show(arjun, room())
     const people = screen.getByRole('list', { name: 'People in the room' })
     expect(within(people).getByRole('img', { name: 'Kabir · driving' })).toBeInTheDocument()
-    expect(screen.getByText('Kabir is driving')).toBeInTheDocument()
+    const driving = screen.getAllByText(/^\s*is driving$/).find((el) => within(el).queryByText('Kabir'))
+    expect(driving).toBeDefined()
     expect(screen.getByText('2 here')).toBeInTheDocument()
+  })
+
+  it('marks an unverified person in the people stack with their id', () => {
+    show(arjun, room({ members: [{ id: 'kabir', name: 'Kabir', role: 'driver', verified: true }, { id: 'u_9', name: 'Arjun ✓', role: 'watching' }] }))
+    const people = screen.getByRole('list', { name: 'People in the room' })
+    const img = within(people).getByRole('img', { name: 'Arjun \uFFFD (u_9) · unverified' })
+    expect(img.closest('li')).toHaveAttribute('data-verification', 'unverified')
+    expect(within(people).getByRole('img', { name: 'Kabir · driving' }).closest('li')).toHaveAttribute('data-verification', 'verified')
   })
 
   it('the driver sees Hand off with its key; others do not', () => {

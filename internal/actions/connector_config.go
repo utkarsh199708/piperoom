@@ -26,7 +26,7 @@ import (
 // so nothing can mutate the list at run time.
 func defaultConnectorConfigAllowList() map[string]map[string]bool {
 	return map[string]map[string]bool{
-		"decimal.handling.mode": {"precise": true, "double": true, "string": true},
+		"decimal.handling.mode": {"precise": true, "string": true},
 		"time.precision.mode":   {"adaptive": true, "adaptive_time_microseconds": true, "connect": true},
 		"tombstones.on.delete":  {"true": true, "false": true},
 		// Visibility only; "true" is the only value offered (see above).
@@ -98,7 +98,7 @@ func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
+	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|string (double is not offered: it loses precision); time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
 }
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 	// propose_fix no longer inlines this schema into the strict request (the
@@ -137,6 +137,9 @@ func (a *updateConnectorConfig) parseParams(raw json.RawMessage) (updateConnecto
 		return p, fmt.Errorf("actions: key %q is not allowed; allowed keys: %s", p.Key, strings.Join(sortedKeys(allow), ", "))
 	}
 	if !values[p.Value] {
+		if p.Key == "decimal.handling.mode" && p.Value == "double" {
+			return p, fmt.Errorf("actions: value %q is not allowed for %s: double loses precision for money values; allowed values: precise, string", p.Value, p.Key)
+		}
 		return p, fmt.Errorf("actions: value %q is not allowed for %s", p.Value, p.Key)
 	}
 	return p, nil

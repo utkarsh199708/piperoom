@@ -209,6 +209,20 @@ func TestPreviewRegisterSchemaDryRun(t *testing.T) {
 	}
 }
 
+// A stored value the allow-list no longer offers (double) cannot be restored
+// by an action, so the preview must not promise a rollback.
+func TestPreviewUpdateConfigStoredDoubleNotReversible(t *testing.T) {
+	fc := &pvConnect{cfg: map[string]string{"connector.class": "io.debezium.X", "decimal.handling.mode": "double"}}
+	a := &updateConnectorConfig{d: Deps{Connect: fc}}
+	res, err := a.Preview(context.Background(), raw(t, map[string]any{"connector": "c", "key": "decimal.handling.mode", "value": "precise"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reversible || res.Rollback != "" {
+		t.Fatalf("want no rollback for a stored double: %+v", res)
+	}
+}
+
 func TestPreviewUpdateConfigDryRun(t *testing.T) {
 	cfg := map[string]string{"connector.class": "io.debezium.X", "decimal.handling.mode": "precise", "topic.prefix": "pg"}
 	fc := &pvConnect{cfg: cfg, vres: connect.ValidateResult{ErrorCount: 2,

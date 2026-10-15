@@ -806,17 +806,34 @@ func TestLogoutClosesWebSocket(t *testing.T) {
 		t.Fatalf("error frame = %v, want code session_expired", frames[0])
 	}
 
-	// Arjun's connection is still up: a read times out instead of closing.
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Arjun's connection is still up: it is sent the member list without
+	// priya, which the gateway broadcasts only once her connection has left.
+	// Receiving it proves the connection is open without a read deadline
+	// standing in for "nothing happened".
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for {
-		_, _, err := aConn.Read(ctx)
-		if err == nil {
-			continue // replay and presence frames
+		_, data, err := aConn.Read(ctx)
+		if err != nil {
+			t.Fatalf("other user's connection closed or got no presence update: %v", err)
 		}
-		if websocket.CloseStatus(err) != -1 {
-			t.Fatalf("other user's connection was closed: %v", err)
+		var m struct {
+			Type    string `json:"type"`
+			Members []struct {
+				ID string `json:"id"`
+			} `json:"members"`
 		}
-		break
+		if json.Unmarshal(data, &m) != nil || m.Type != "presence" {
+			continue
+		}
+		gone := true
+		for _, x := range m.Members {
+			if x.ID == "priya" {
+				gone = false
+			}
+		}
+		if gone {
+			break
+		}
 	}
 }

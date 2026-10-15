@@ -432,6 +432,9 @@ func (s *Service) Close() {
 	}
 	s.closed = true
 	s.reg.Unlock()
+	// Before the cancel: cancelling the running agents frees their slots, and
+	// a slot granted then would start a queued room on a closing service.
+	s.slots.shutdown()
 	s.cancel()
 	s.wg.Wait()
 	if s.coord != nil {

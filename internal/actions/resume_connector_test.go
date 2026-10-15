@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,20 +234,35 @@ func TestResumeConnectorOutOfScope(t *testing.T) {
 // noResumeConnect implements clients.ConnectClient but not the local
 // connectorResumer adapter: the action must refuse it with a clear error.
 type noResumeConnect struct {
-	names []string
+	names       []string
+	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *noResumeConnect) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *noResumeConnect) ListConnectors(context.Context) ([]string, error) { return f.names, nil }
 func (f *noResumeConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
 	return clients.ConnectorStatus{Name: "pg-orders-connector", State: "RUNNING"}, nil
 }
 func (f *noResumeConnect) Config(context.Context, string) (map[string]string, error) { return nil, nil }
-func (f *noResumeConnect) RestartTask(context.Context, string, int) error            { return nil }
-func (f *noResumeConnect) RestartConnector(context.Context, string) error            { return nil }
+func (f *noResumeConnect) RestartTask(context.Context, string, int) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "noResumeConnect", "RestartTask")
+	}
+	return nil
+}
+func (f *noResumeConnect) RestartConnector(context.Context, string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "noResumeConnect", "RestartConnector")
+	}
+	return nil
+}
 
 func TestResumeConnectorUnsupportedClient(t *testing.T) {
 	d := testDeps()
 	d.Connect = &noResumeConnect{names: []string{"pg-orders-connector"}}
+	guardDeps(t, d)
 	reg := resumeRegistry(t, d)
 	a := mustGet(t, reg, "connect_resume_connector")
 	_, err := a.Execute(context.Background(), json.RawMessage(`{"connector":"pg-orders-connector"}`))

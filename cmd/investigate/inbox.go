@@ -20,6 +20,7 @@ type stdinInbox struct {
 	lines  []agent.HumanInput
 	notify chan struct{}
 	eof    bool
+	holds  int // running auto-executions; the inbox stays open for their results
 }
 
 func newStdinInbox() *stdinInbox {
@@ -89,7 +90,10 @@ func (in *stdinInbox) Wait(ctx context.Context) error {
 		if pending {
 			return nil
 		}
-		if eof {
+		in.mu.Lock()
+		held := in.holds > 0
+		in.mu.Unlock()
+		if eof && !held {
 			return agent.ErrInboxClosed
 		}
 		select {
@@ -99,4 +103,26 @@ func (in *stdinInbox) Wait(ctx context.Context) error {
 			// Re-check lines and EOF; a stale token wakes us without input.
 		}
 	}
+}
+
+// push adds an input as if a person had typed it.
+func (in *stdinInbox) push(h agent.HumanInput) {
+	in.mu.Lock()
+	in.lines = append(in.lines, h)
+	in.mu.Unlock()
+	in.signal()
+}
+
+// hold keeps Wait from reporting a closed inbox until release is called.
+func (in *stdinInbox) hold() {
+	in.mu.Lock()
+	in.holds++
+	in.mu.Unlock()
+}
+
+func (in *stdinInbox) release() {
+	in.mu.Lock()
+	in.holds--
+	in.mu.Unlock()
+	in.signal()
 }

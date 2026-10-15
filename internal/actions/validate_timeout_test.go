@@ -86,7 +86,7 @@ func TestValidateReturnsDeadlineErrorWhenTargetNeverAnswers(t *testing.T) {
 // pausedConnect reports every connector as PAUSED, so resume validates.
 type pausedConnect struct{ fakeConnect }
 
-func (pausedConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
+func (*pausedConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
 	return clients.ConnectorStatus{Name: "pg-orders-connector", State: "PAUSED"}, nil
 }
 

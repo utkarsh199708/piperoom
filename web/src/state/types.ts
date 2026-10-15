@@ -23,7 +23,13 @@ export type ApprovalValue = 'approved' | 'rejected' | 'pending'
 export interface DriverInfo {
   id: string
   name: string
+  verified?: boolean
   lease_until?: string
+  /**
+   * Folded from control.lease_expired whose lease_until equals this lease_until (docs/api.md,
+   * Lease expiry). The driver stays the driver; the next control.granted clears it.
+   */
+  lease_expired?: boolean
 }
 
 export interface AgentStatusState {
@@ -169,6 +175,8 @@ export interface ProposalState {
 export interface MemberState {
   id: string
   name: string
+  /** Server-set, from the latest event or snapshot that named this person. */
+  verified?: boolean
   role: string
 }
 
@@ -206,8 +214,10 @@ export interface HandoffFailureState {
 
 /** The alert that opened the room, from room.created's `alert` webhook body. */
 export interface AlertInfo {
-  /** Best-effort source inferred from the raw body shape; null when unknown. */
+  /** Best-effort source inferred from the raw body shape; null when unknown. Untrusted: never a badge input. */
   source: string | null
+  /** Server-set room.created.alert_source: the only input to the alert's verified badge. */
+  alert_source?: string
 }
 
 /** What the agent has cost in this room, folded from agent.usage (F11; same rules as the server's insight). */
@@ -319,7 +329,11 @@ export interface RoomState {
   /** Ticked runbook items; the last event per key wins and an untick removes the key. */
   checklist_done: Record<string, ChecklistTick>
   activity: ActivityEntry[]
-  /** Shadow room: no cost chip until its numbers are revealed. */
+  /** Set by shadow.revealed: the run has ended and its result exists (grading may start). */
+  shadow_revealed?: boolean
+  /** Set by shadow.labelled: the blind label exists, so the F8 label may follow. */
+  shadow_labelled?: boolean
+  /** Shadow room: no cost chip until its numbers are revealed; the shadow panel replaces steering once closed. */
   shadow: boolean
   insight: InsightState
 }
@@ -378,7 +392,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
     last_seq: 0,
-    shadow: snapshot.shadow ?? false,
+    shadow: snapshot.shadow === true,
     replay_target: snapshot.last_seq ?? 0,
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
@@ -386,13 +400,19 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
         .map((p) => [p.proposal_id, p.params_hash as string]),
     ),
     driver: snapshot.driver
-      ? { id: snapshot.driver.id, name: snapshot.driver.name, lease_until: snapshot.driver.lease_until }
+      ? {
+          id: snapshot.driver.id,
+          name: snapshot.driver.name,
+          verified: snapshot.driver.verified === true,
+          lease_until: snapshot.driver.lease_until,
+        }
       : null,
     agent_status: {
       state: snapshot.agent_status.state,
       detail: snapshot.agent_status.detail,
     },
-    hypothesis: snapshot.hypothesis
+    // A shadow room shows no agent output, not even on the first render.
+    hypothesis: snapshot.hypothesis && snapshot.shadow !== true
       ? {
           text: snapshot.hypothesis.text,
           based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
@@ -402,7 +422,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           verdicts: [],
         }
       : null,
-    triage: snapshot.triage
+    triage: snapshot.triage && snapshot.shadow !== true
       ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
   }

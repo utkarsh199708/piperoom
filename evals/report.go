@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"piperoom/internal/redact"
 )
 
 // Report is the result of one evaluation.
@@ -266,6 +268,7 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	for _, res := range r.Results {
 		if !res.Pass {
 			failed = append(failed, fmt.Sprintf("- %s #%d: %s", mdCell(res.Scenario), res.Run, mdCell(strings.Join(res.Failures, "; "))))
+			failed = append(failed, failedRunDetails(res)...)
 		}
 	}
 	if len(failed) > 0 {
@@ -275,6 +278,35 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		return fmt.Errorf("evals: write report: %w", err)
 	}
 	return nil
+}
+
+// maxFailedHypothesisRunes bounds the hypothesis text printed under a failed
+// run.
+const maxFailedHypothesisRunes = 300
+
+// failedRunDetails are the lines printed under a failed run: its final
+// hypothesis (confidence, whether it named the expected layers, the first
+// 300 characters of the text), the actions it proposed and the root_cause
+// term groups the hypothesis missed. The scenarios are synthetic, and the
+// agent's text still passes through redact.Text because it is model output
+// printed in a public CI log.
+func failedRunDetails(res RunResult) []string {
+	var out []string
+	if res.FinalHypothesis != "" {
+		text, _ := redact.Text(res.FinalHypothesis)
+		if r := []rune(text); len(r) > maxFailedHypothesisRunes {
+			text = string(r[:maxFailedHypothesisRunes]) + "…"
+		}
+		out = append(out, fmt.Sprintf("  - hypothesis (confidence %s, first layer named %t, root-cause layer named %t): %s",
+			orDefault(res.Confidence), res.LayerNamed, res.RootCauseLayerNamed, mdCell(text)))
+	}
+	if len(res.ProposedActions) > 0 {
+		out = append(out, "  - proposed actions: "+mdCell(strings.Join(res.ProposedActions, ", ")))
+	}
+	for _, g := range res.MissingCauseGroups {
+		out = append(out, "  - missing "+mdCell(g))
+	}
+	return out
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {

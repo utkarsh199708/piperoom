@@ -253,12 +253,13 @@ var adminRoutes = []string{
 	"DELETE /api/rooms/{id}",
 }
 
-// publicRoutes hold no tenant's data: probes, login, the caller's own
-// identity, and the people list (global by design: docs/design/tenancy.md
-// section 8).
+// publicRoutes hold no tenant's data: probes, the metrics scrape (counts per
+// route pattern for the whole process), login, the caller's own identity, and
+// the people list (global by design: docs/design/tenancy.md section 8).
 var publicRoutes = []string{
 	"GET /healthz",
 	"GET /readyz",
+	"GET /metrics",
 	"POST /auth/logout",
 	"POST /auth/dev-login",
 	"GET /auth/users",

@@ -84,6 +84,7 @@ func (g *Gateway) addClient(roomID string, c *client) {
 	}
 	hub.conns[c] = struct{}{}
 	g.broadcastLocked(roomID)
+	g.connsChangedLocked()
 }
 
 func (g *Gateway) removeClient(roomID string, c *client) {
@@ -98,6 +99,14 @@ func (g *Gateway) removeClient(roomID string, c *client) {
 		delete(g.rooms, roomID)
 	}
 	g.broadcastLocked(roomID)
+	g.connsChangedLocked()
+}
+
+// connsChangedLocked wakes everyone waiting on a registry change. Caller holds
+// g.mu.
+func (g *Gateway) connsChangedLocked() {
+	close(g.connsChanged)
+	g.connsChanged = make(chan struct{})
 }
 
 func (g *Gateway) setPresence(roomID string, c *client, state string) {
@@ -217,6 +226,22 @@ func (g *Gateway) CloseSession(sessionID string) {
 			g.spawnSessionEnd(c)
 		}
 	}
+}
+
+// Connections is how many connections the gateway has registered across all
+// rooms plus the room-list sockets (the /metrics gauge).
+func (g *Gateway) Connections() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.connectionsLocked()
+}
+
+func (g *Gateway) connectionsLocked() int {
+	n := 0
+	for _, hub := range g.rooms {
+		n += len(hub.conns)
+	}
+	return n + len(g.lists)
 }
 
 // RoomDeletedReason is the close reason of a deleted room's connections

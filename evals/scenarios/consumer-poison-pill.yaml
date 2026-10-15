@@ -21,7 +21,7 @@
 #   consumer-groups --reset-offsets --group order-sync --topic pg.public.orders:1 --to-
 #   offset 25377155 --execute`), start order-sync, and check that lag drains. Follow-up:
 #   make the consumer send undecodable records to a dead-letter topic, and lock down produce
-#   ACLs on CDC topics.
+#   ACLs on CDC topics (kafka_acls: the shared User:ops-admin holds ALL on pg.).
 #
 # Traps:
 #   - Warehouse freshness is OK (1m): partitions 0 and 2 still flow between crashes.
@@ -42,8 +42,9 @@
 
 name: consumer-poison-pill
 description: |
-  At 09:02 UTC an engineer testing a replay script ran kafka-console-producer against the
-  production CDC topic and wrote one plain-JSON record (key "4711") to pg.public.orders
+  At 09:02 UTC an engineer testing a replay script ran kafka-console-producer (with the shared
+  User:ops-admin credentials, which kafka_acls shows with ALL on pg.) against the production
+  CDC topic and wrote one plain-JSON record (key "4711") to pg.public.orders
   partition 1, offset 25377154. It is not in the Confluent wire format (no magic byte 0 +
   schema id), so order-sync fails to decode its key, exits without committing, restarts, and
   reads the same record again. The group flaps Empty / PreparingRebalance (as observed for the
@@ -241,7 +242,7 @@ recordings:
     input: {topic: pg.public.orders, key: '5634120'}
     summary: |-
       found 1 record(s) with key "5634120"
-        partition 1, offset 25390877, 2026-10-11T09:37:00Z
+        partition 1, offset 25389982, 2026-10-11T09:37:00Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
     summary: |-
@@ -255,7 +256,7 @@ recordings:
     summary: |
       postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
       kafka-connect pg-orders-connector: seen
-      kafka pg.public.orders: seen offset=25390877 partition=1
+      kafka pg.public.orders: seen offset=25389982 partition=1
       consumer order-sync: stopped_here committed=25377154
       warehouse analytics.orders: not_seen
       stopped at: consumer order-sync
@@ -286,6 +287,33 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_partition_rates
+    summary: |-
+      pg.public.orders last 5m: 5400 records (18/s); p0 1810 (33%), p2 1803, p1 1787; median 1803, max 1810, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 16200 records (18/s); p0 5430 (33%), p2 5409, p1 5361; median 5409, max 5430, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "30m"}
+    summary: |-
+      pg.public.orders last 30m: 32400 records (18/s); p0 10860 (33%), p2 10819, p1 10721; median 10819, max 10860, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 64800 records (18/s); p0 21721 (33%), p2 21637, p1 21442; median 21637, max 21721, max/median 1.0x → even
+  - tool: dlq_peek
+    input: {topic: "order-sync-dlq"}
+    error: "out of scope: DLQ topic \"order-sync-dlq\" is not part of this room's pipeline \"orders\" (none declared (use connector for a sink's DLQ))"
+  - tool: kafka_acls
+    summary: |-
+      User:debezium: ALLOW DESCRIBE cluster; ALLOW CREATE,DESCRIBE,WRITE topic pg. (PREFIXED)
+      User:ops-admin: ALLOW ALL cluster; ALLOW ALL topic pg. (PREFIXED)
+      User:order-sync: ALLOW READ group order-sync (LITERAL); ALLOW READ topic pg.public.orders (LITERAL)
 
 inputs:
   - kind: comment

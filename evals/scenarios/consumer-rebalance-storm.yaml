@@ -20,7 +20,11 @@
 # Traps:
 #   - A bulk import (pg_long_transactions, an INSERT writer for 26 min) doubled the produce rate:
 #     it is tempting to call this "a source spike". Lag is only high because the group makes almost
-#     no progress between rebalances.
+#     no progress between rebalances. kafka_partition_rates shows the doubling (476/s to 952/s
+#     from 10:04) and reconcile puts the missing rows on the consumer side ("topic has them"):
+#     the source is fine. reconcile's missing total (1907808, rows by updated_at) and the
+#     group's lag (1913381, change events) differ by 5573 events, about 6 s of the 952/s the
+#     two tools were read apart.
 #   - The group is not Empty: it is PreparingRebalance with 1 member. State, not lag, is the signal.
 #   - A rebalance storm looks like a slow consumer. The member count comes from kafka_consumer_lag.
 #   - Connect, registry and slot are healthy; the 212 MiB slot is normal under load.
@@ -166,7 +170,7 @@ recordings:
     input: {topic: pg.public.orders, key: '6241377'}
     summary: |-
       found 1 record(s) with key "6241377"
-        partition 2, offset 88112904, 2026-10-13T10:11:46Z
+        partition 2, offset 87891466, 2026-10-13T10:11:46Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '6241377'}
     summary: |-
@@ -180,7 +184,7 @@ recordings:
     summary: |
       postgres public.orders: seen updated_at=2026-10-13T10:11:46.392770Z
       kafka-connect pg-orders-connector: seen
-      kafka pg.public.orders: seen offset=88112904 partition=2
+      kafka pg.public.orders: seen offset=87891466 partition=2
       consumer order-sync: stopped_here committed=87613164
       warehouse analytics.orders: not_seen
       stopped at: consumer order-sync
@@ -211,6 +215,51 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_partition_rates
+    summary: |-
+      pg.public.orders last 5m: 285600 records (952/s); p0 95733 (33%), p2 95362, p1 94505; median 95362, max 95733, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 856800 records (952/s); p0 287199 (33%), p2 286086, p1 283515; median 286086, max 287199, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "30m"}
+    summary: |-
+      pg.public.orders last 30m: 1599360 records (889/s); p0 536105 (33%), p2 534027, p1 529228; median 534027, max 536105, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 2456160 records (682/s); p0 823305 (33%), p2 820112, p1 812743; median 820112, max 823305, max/median 1.0x → even
+  - tool: kafka_cluster_health
+    summary: |-
+      cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs below 85% used
+      pg.public.orders: 3 partitions, 0 under-replicated, 0 under min ISR (min 2), 0 offline, 0 reassigning
+  - tool: debezium_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.7 s behind source, last event 0.4 s ago, queue 41/8192, 8904517 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-13T09:00:00Z"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 8m0s from 2026-10-13T09:00:00Z
+      bucket | source | topic | sink | sink−source
+      09:00 | 228480 | 228480 | 228480 | +0
+      09:08 | 228480 | 228480 | 228480 | +0
+      09:16 | 228480 | 228480 | 228480 | +0
+      09:24 | 228480 | 228480 | 228480 | +0
+      09:32 | 228480 | 228480 | 228480 | +0
+      09:40 | 228480 | 228480 | 228480 | +0
+      09:48 | 228480 | 228480 | 34272 | -194208
+      09:56 | 228480 | 228480 | 0 | -228480
+      10:04 | 456960 | 456960 | 0 | -456960
+      10:12 | 456960 | 456960 | 0 | -456960
+      10:20 | 456960 | 456960 | 0 | -456960
+      10:28 | 114240 | 114240 | 0 | -114240
+      verdict: sink is missing 1907808 rows in 09:48–10:36; topic has them (consumer side)
 
 inputs:
   - kind: steer
