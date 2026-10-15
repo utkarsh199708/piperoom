@@ -170,6 +170,9 @@ func (b *Bridge) Run(ctx context.Context, roomID string) error {
 			}
 			th = next
 			if e.Type == events.RoomClosed {
+				if b.pager != nil {
+					b.pager.forgetRoom(roomID) // a closed room pages no more
+				}
 				return nil
 			}
 		}
