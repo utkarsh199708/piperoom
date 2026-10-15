@@ -1,6 +1,7 @@
 package dlq
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -88,6 +89,10 @@ func redactOnce(s string) string {
 	return string(capRunes(tidy(rs)))
 }
 
+// urlTokenRe is a URL as safeCut cuts it: the scheme and everything up to the
+// next white space or quote.
+var urlTokenRe = regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s'"]*`)
+
 // Look-ahead of safeCut past the cap: enough for the longest value a mask
 // rule matches (a 128-rune e-mail local part plus its domain).
 const (
@@ -100,8 +105,8 @@ const (
 
 // safeCut makes the first cut of rs (len(rs) > MaxMessageRunes). A cut value
 // no longer matches its mask ("jane.doe@exam", "123-45-678") and went out in
-// part. So a value that maskUnquoted's own patterns match and that straddles
-// the cap (also one with spaces, "4111 1111 1111 1111") is replaced by
+// part. So a value that maskUnquoted's own patterns match, or a URL, and that
+// straddles the cap (also one with spaces, "4111 1111 1111 1111") is replaced by
 // Redacted from its start; otherwise the cut moves back to the start of a word
 // that straddles the cap. The values are found in the tidied window, as the
 // masks see it ("555\t123\t4567" is a phone), and mapped back to rs. The word
@@ -119,7 +124,11 @@ func safeCut(rs []rune) []rune {
 	}
 	win := string(tw)
 	capByte := len(string(tw[:capT]))
-	for _, sp := range piiSpans(win) {
+	// A URL is one value from its scheme to the next white space or quote:
+	// internal/redact allows '/', '@', '?', '#' and ':' in its password, so no
+	// split inside it is safe ("postgres://app:S3cr/t9x@db..." cut after "/").
+	spans := append(piiSpans(win), urlTokenRe.FindAllStringIndex(win, -1)...)
+	for _, sp := range spans {
 		if sp[0] < capByte && sp[1] > capByte {
 			at = min(at, raw[utf8.RuneCountInString(win[:sp[0]])])
 		}

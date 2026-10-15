@@ -122,14 +122,23 @@ func TestRedactMessageCapNeverSplitsAValue(t *testing.T) {
 	}
 }
 
-// A URL whose password the e-mail rule could read as "<tail>@host" is cut
-// out whole at the cap; cutting at that e-mail's start kept "postgres://app:
-// S3cr!" (round 3 of #435). From pad 266 the URL always reaches the cap; a
-// URL that fits before it is the uncut gap in TestRedactCorpus.
+// A URL that straddles the cap is cut out whole, whatever its password
+// holds ('!', '/', '?', '#', ':'). Cutting at an e-mail-like "<tail>@host"
+// inside it kept "postgres://app:S3cr!" or "postgres://app:S3cr/" (rounds 3
+// and 4 of #435). The sweep checks that no part of the password survives;
+// it starts at pad 266 because from there every URL below reaches the cap,
+// and a URL that ends before the cap is the uncut gap pinned in
+// TestRedactCorpus (#469).
 func TestRedactMessageCapNeverSplitsAURLPassword(t *testing.T) {
 	for _, v := range []struct{ text, leak string }{
 		{"postgres://app:S3cr!t@db.example.com/x", "S3cr!"},
 		{"mysql://root:pa$$w0rd@mysql.example.net:3306/shop", "pa$$"},
+		{"postgres://app:S3cr/t9x@db.example.com/orders", "S3cr/"},
+		{"mysql://root:pa/ss9@mysql.example.net:3306/shop", "pa/"},
+		{"redis://:Abc/def123@cache.example.com:6379", "Abc/"},
+		{"postgres://app:Qq?w9x7@db.example.com/orders", "Qq?"},
+		{"postgres://app:Hh#k2m8@db.example.com/orders", "Hh#"},
+		{"postgres://app:Zz:p4r6@db.example.com/orders", "Zz:"},
 	} {
 		for pad := 266; pad <= 300; pad++ {
 			in := strings.Repeat("x", pad-1) + " " + v.text + " and the rest of the message"
@@ -283,6 +292,7 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "gap", in: "phone+44 20 7946 0958", want: "phone+44 20 7946 0958", why: "#469"},
 		{kind: "gap", in: "bearer=abc123def456 rejected", want: "bearer=abc123def456 rejected", why: "#469"},
 		{kind: "gap", in: "connect to postgres://app:S3cr!t@db.example.com/x failed", want: "connect to postgres://app:S3cr!<redacted>/x failed", why: "#469"},
+		{kind: "gap", in: "connect to postgres://app:S3cr/t9x@db.example.com/orders failed", want: "connect to postgres://app:S3cr/<redacted>/orders failed", why: "redact urlFind password with raw '/'; #469"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.kind+" "+tt.in, func(t *testing.T) {

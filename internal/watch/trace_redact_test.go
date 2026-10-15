@@ -176,6 +176,10 @@ func TestOneLineCorpus(t *testing.T) {
 		"postgres://app:hunter2@db.example.com/orders":                                                               "postgres://app:[redacted 8]@db.example.com/orders",
 		"mongodb://app:a.b.c@mongo.example.com/db":                                                                   "mongodb://app:[redacted 8]@mongo.example.com/db",
 		"postgres://app:p%40ss@db.example.com/x contact jane.doe@example.com":                                        "postgres://app:[redacted 8]@db.example.com/x contact <redacted>",
+		"smtp://jane.doe@example.com:SmtpPw1@mail.example.com:587":                                                   "smtp://jane.doe@example.com:[redacted 8]@mail.example.com:587",
+		"imaps://jane@example.com:ImapPw2@imap.example.com":                                                          "imaps://jane@example.com:[redacted 8]@imap.example.com",
+		"https://api.example.com?u=jane@example.com&k=v":                                                             "https://api.example.com?u=<redacted>&k=v",
+		"see http://a.example.com/ email:jane@example.com":                                                           "see http://a.example.com/ email:<redacted>",
 	} {
 		if got := oneLine(in); got != want {
 			t.Errorf("oneLine(%q) = %q, want %q", in, got, want)
@@ -190,6 +194,10 @@ func TestOneLineCorpus(t *testing.T) {
 		"CREATE SEQUENCE public.s START WITH 4111111111111111":                "CREATE SEQUENCE public.s START WITH <redacted>",
 		"ALTER TABLE public.t ALTER COLUMN c SET DEFAULT '202-61-0150'":       "ALTER TABLE public.t ALTER COLUMN c SET DEFAULT '<redacted>'",
 		"ALTER TABLE public.t ADD CONSTRAINT c CHECK (n IN (555.123.4567))":   "ALTER TABLE public.t ADD CONSTRAINT c CHECK (n IN <redacted>))",
+		// The host after a userinfo that is itself an e-mail, or that
+		// internal/redact masked with a space in it: no secret, a host lost.
+		"postgres://jane.doe@example.com@db.example.com/x":                                                "postgres://[redacted 8]@<redacted>/x",
+		"s3://AKIA" + "IOSFODNN7EXAMPLE:wJalr" + "XUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY@bucket.example.com/x": "s3://AKIA…[redacted 24]…LE:<redacted>/x",
 	} {
 		if got := oneLine(in); got != want {
 			t.Errorf("known over-mask changed: oneLine(%q) = %q, want %q", in, got, want)

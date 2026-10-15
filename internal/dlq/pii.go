@@ -130,10 +130,19 @@ func maskOutsideUserinfo(s string, re *regexp.Regexp) string {
 }
 
 // inURLUserinfo reports whether byte i of s lies between a URL's "://" and the
-// end of its authority: no white space, '/' or '@' since the "://".
+// end of its authority: no white space, quote, '/', '?', '#' or '@' since the
+// "://". A match right after "user:" (s[i-1] is ':') is the password
+// internal/redact masked; the host after its '@' stays, as on main.
 func inURLUserinfo(s string, i int) bool {
 	j := strings.LastIndex(s[:i], "://")
-	return j > 0 && !strings.ContainsAny(s[j+3:i], " \t\n/@'\"")
+	if j <= 0 {
+		return false
+	}
+	seg := s[j+3 : i]
+	if strings.ContainsAny(seg, " \t\n'\"") {
+		return false // not the same URL
+	}
+	return !strings.ContainsAny(seg, "/?#@") || s[i-1] == ':'
 }
 
 // piiSpans returns the byte spans of the values maskUnquoted masks with its
