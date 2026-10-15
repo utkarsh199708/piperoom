@@ -553,8 +553,9 @@ expect:
   # The root cause is the subject-level override, not the DDL (unlike source-column-dropped,
   # where the DDL is): the hypothesis must name compatibility NONE as an override.
   root_cause:
-    - [compatibility none, compatibility level none, compatibility override none, compatibility to none, compatibility set to none, compatibility is none, compatibility was none, compatibility is set to none, compatibility was set to none, compatibility level is none, none compatibility, none override, override to none, override none, override is none, value is none, value was set to none, level none, from backward to none]
+    - [compatibility none, compatibility level none, compatibility override none, compatibility to none, compatibility set to none, compatibility is none, compatibility was none, compatibility is set to none, compatibility was set to none, compatibility level is none, none compatibility, none override, override to none, override is none, override set to none, users value is none, users value was set to none]
     - [loyalty_tier]
+  root_cause_forbidden: [[ddl in postgres broke], [ddl broke]]
   first_failing_layer: consumer
   root_cause_layer: schema-registry
   evidence_tools: [schema_registry_versions, kafka_consumer_lag]

@@ -1,0 +1,343 @@
+# Right and wrong root-cause wordings for the three held-out scenarios whose term rows #332 rewrote
+# (#427). The test in evals/heldout_corpus_test.go runs every entry through rootCauseMatches against
+# the scenario's expect and, for want_root_cause: true, through one full evalOnce.
+#
+# scenario        held-out scenario name
+# text            the hypothesis wording, with reviewers' elisions filled in neutrally
+# want_root_cause what the scorer must return for this text (for main_wrong entries: the CURRENT grade)
+# main_wrong      true if origin/main's rows grade this text the same wrong way (a known gap)
+# source          '#332' ticket, 'r1'..'r3' [LEAD-REVIEW] rounds 1..3 on PR #384
+# gap             only on main_wrong entries: what the desired grade is and why it is not met
+#
+# Add a reviewer's new text here FIRST, then change the rows.
+entries:
+  - scenario: users-compat-none-consumer
+    text: "A NONE compatibility override on usr.public.users-value let schema v4 with loyalty_tier register."
+    want_root_cause: true
+    main_wrong: false
+    source: "#332"
+  - scenario: users-compat-none-consumer
+    text: "usr.public.users-value has compatibility level NONE, so schema v4 with loyalty_tier registered."
+    want_root_cause: true
+    main_wrong: false
+    source: "#332"
+  - scenario: users-compat-none-consumer
+    text: "Compatibility for usr.public.users-value was set to NONE, so schema v4 with loyalty_tier registered."
+    want_root_cause: true
+    main_wrong: false
+    source: "#332"
+  - scenario: users-compat-none-consumer
+    text: "The registry compatibility for usr.public.users-value is NONE, so schema v4 with loyalty_tier registered."
+    want_root_cause: true
+    main_wrong: false
+    source: "#332"
+  - scenario: users-compat-none-consumer
+    text: "Compatibility on usr.public.users-value is NONE (subject override), so schema v4 with loyalty_tier registered."
+    want_root_cause: true
+    main_wrong: false
+    source: "r1"
+  - scenario: users-compat-none-consumer
+    text: "The usr.public.users-value subject compatibility is BACKWARD, not NONE; the loyalty_tier DDL in Postgres broke the user-profile-sync consumer."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: users-compat-none-consumer
+    text: "The usr.public.users-value subject compatibility is BACKWARD compatible, so the v4 loyalty_tier change was checked; user-profile-sync has a bug and none of its pods start."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: users-compat-none-consumer
+    text: "The loyalty_tier change is not backward compatible; none of the user-profile-sync pods start."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: users-compat-none-consumer
+    text: "The loyalty_tier DDL in Postgres broke the consumer."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: users-compat-none-consumer
+    text: "usr.public.users-value has no subject-level compatibility override; there is none, the registry's global BACKWARD level applies. The loyalty_tier DDL in Postgres broke user-profile-sync."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: users-compat-none-consumer
+    text: "I checked Schema Registry for a compatibility override on usr.public.users-value and there was none. The loyalty_tier int to string DDL broke the user-profile-sync consumer."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: users-compat-none-consumer
+    text: "user-profile-sync crash-loops on the loyalty_tier change because its auto.offset.reset is set to none."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: users-compat-none-consumer
+    text: "usr.public.users-value is set to NONE compatibility, so schema v4 with loyalty_tier registered."
+    want_root_cause: true
+    main_wrong: false
+    source: "r2"
+  - scenario: users-compat-none-consumer
+    text: "The subject went from BACKWARD to NONE, so schema v4 with loyalty_tier registered."
+    want_root_cause: false
+    main_wrong: true
+    source: "r2"
+    gap: "Desired: pass. The term 'from backward to none' was dropped in round 4 because it also passed 'never changed from BACKWARD to NONE ... DDL broke' (a regression against main); main rejects both."
+  - scenario: users-compat-none-consumer
+    text: "Subject override: none. Global compatibility: BACKWARD. The loyalty_tier DDL in Postgres broke user-profile-sync."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The subject override is none, so the global BACKWARD level applies and the loyalty_tier DDL broke user-profile-sync."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "v4 registered in Schema Registry, but the loyalty_tier DDL in Postgres broke user-profile-sync: for existing rows the loyalty_tier value is none, which the consumer cannot parse."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The subject was not switched from BACKWARD to NONE. The loyalty_tier DDL in Postgres broke the user-profile-sync consumer."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The subject was never changed from BACKWARD to NONE, so the loyalty_tier DDL in Postgres broke the user-profile-sync consumer."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "usr.public.users-value stayed on BACKWARD with no compatibility override NONE; the loyalty_tier DDL broke user-profile-sync."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The consumer crash-loops because the loyalty_tier value is none for some rows after the DDL broke the schema contract."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "Level none was never set; the registry kept BACKWARD and the loyalty_tier DDL broke the user-profile-sync consumer."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The override is none on this subject and the loyalty_tier DDL in Postgres broke user-profile-sync."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The loyalty_tier DDL broke user-profile-sync; no compatibility override NONE exists on the subject."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "usr.public.users-value has a subject-level compatibility override NONE; schema v4 with loyalty_tier registered and the consumer cannot read it."
+    want_root_cause: true
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The subject-level override NONE is unrelated; the loyalty_tier DDL in Postgres broke user-profile-sync."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: users-compat-none-consumer
+    text: "The subject-level override NONE let v4 with loyalty_tier register."
+    want_root_cause: false
+    main_wrong: true
+    source: "r3"
+    gap: "Desired: pass. 'subject-level override NONE' tokenizes like the trap 'Subject override: none', so it is rejected; main rejects it too."
+  - scenario: ledger-producer-timeout-recovery
+    text: "pg-ledger-connector task 0 failed with a producer timeout because the Kafka brokers are down."
+    want_root_cause: false
+    main_wrong: false
+    source: "#332"
+  - scenario: ledger-producer-timeout-recovery
+    text: "pg-ledger-connector task 0 failed with a producer timeout because Kafka is still down."
+    want_root_cause: false
+    main_wrong: false
+    source: "#332"
+  - scenario: ledger-producer-timeout-recovery
+    text: "pg-ledger-connector task 0 failed with a producer timeout while the Kafka brokers were down for a rolling restart."
+    want_root_cause: true
+    main_wrong: false
+    source: "#332"
+  - scenario: ledger-producer-timeout-recovery
+    text: "pg-ledger-connector is still down: task 0 FAILED on a Kafka producer TimeoutException (412 records expired during the broker restart)."
+    want_root_cause: true
+    main_wrong: false
+    source: "r1"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector is down after a producer timeout; Kafka itself is healthy again."
+    want_root_cause: true
+    main_wrong: false
+    source: "r1"
+  - scenario: ledger-producer-timeout-recovery
+    text: "task 0 failed with a producer timeout because Kafka is unavailable."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector failed with a producer timeout: producer sends expire when the brokers are down longer than delivery.timeout.ms, which happened during the 09:10 rolling restart."
+    want_root_cause: true
+    main_wrong: false
+    source: "r2"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout, the error a Connect task gets when Kafka is down for longer than delivery.timeout.ms."
+    want_root_cause: true
+    main_wrong: false
+    source: "r2"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout; Kafka is currently down."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout; the brokers remain down."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout; the Kafka cluster is still down."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout; the brokers are unavailable."
+    want_root_cause: true
+    main_wrong: true
+    source: "r2"
+    gap: "Desired: fail (it blames a live outage). The r3 rows dropped the bare 'brokers are unavailable' row, so a standalone '; the brokers are unavailable.' passes; main passes it too."
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector FAILED on a producer TimeoutException: producer sends expire when the brokers are unavailable longer than delivery.timeout.ms, which happened during the 09:10 rolling restart."
+    want_root_cause: true
+    main_wrong: false
+    source: "r3"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector FAILED on a producer TimeoutException when the brokers are unreachable for longer than delivery.timeout.ms, as during the 09:10 rolling restart."
+    want_root_cause: true
+    main_wrong: false
+    source: "r3"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout because the Kafka cluster is down."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout because the brokers are unreachable."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout because Kafka is unreachable."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout because the Kafka brokers are unavailable."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 failed with a producer timeout that expired 412 records while Kafka was unavailable during the 09:10 rolling restart."
+    want_root_cause: true
+    main_wrong: false
+    source: "r1"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector timed out because of a Kafka outage."
+    want_root_cause: true
+    main_wrong: true
+    source: "r3"
+    gap: "Desired: fail. 'a Kafka outage' has no row; main passes it too (round-1 optional text)."
+  - scenario: payments-sink-dlq
+    text: "the v4 records are incompatible with analytics.payments, which lacks the risk_score column, so jdbc-payments-sink fails every write and errors.tolerance=all sends them to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r1"
+  - scenario: payments-sink-dlq
+    text: "The sink jdbc-payments-sink rejects records with the new risk_score column that Schema Registry accepted in v4, and errors.tolerance=all sends them to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r1"
+  - scenario: payments-sink-dlq
+    text: "Schema Registry did not reject v4; analytics.payments lacks the risk_score column, so jdbc-payments-sink fails and errors.tolerance=all sends records to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r1"
+  - scenario: payments-sink-dlq
+    text: "The registry rejected v4 with risk_score, so jdbc-payments-sink sends every record to the dead-letter queue."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: payments-sink-dlq
+    text: "Schema Registry rejected schema v4 with risk_score, so jdbc-payments-sink sends every record to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: payments-sink-dlq
+    text: "Schema v4 with risk_score is an incompatible change that broke jdbc-payments-sink, so every record goes to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: payments-sink-dlq
+    text: "risk_score was rejected by the schema registry, so every record goes to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r1"
+  - scenario: payments-sink-dlq
+    text: "Schema Registry accepted v4, but the analytics.payments table schema is incompatible with the new risk_score field, so jdbc-payments-sink fails every insert and errors.tolerance=all sends the records to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r2"
+  - scenario: payments-sink-dlq
+    text: "jdbc-payments-sink gets records with an incompatible schema for analytics.payments (it lacks the risk_score column), and errors.tolerance=all sends them to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r2"
+  - scenario: payments-sink-dlq
+    text: "The registry has rejected v4 with risk_score, so records go to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: payments-sink-dlq
+    text: "v4 is not backward compatible, so Schema Registry refused it; risk_score records go to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r2"
+  - scenario: payments-sink-dlq
+    text: "Schema v4 is incompatible with the analytics.payments table, which lacks the risk_score column, so jdbc-payments-sink fails every insert and errors.tolerance=all sends the records to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r3"
+  - scenario: payments-sink-dlq
+    text: "Schema Registry accepted v4 because adding risk_score is BACKWARD compatible, but for the warehouse it is an incompatible change: analytics.payments lacks the column, so jdbc-payments-sink fails and errors.tolerance=all sends records to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r3"
+  - scenario: payments-sink-dlq
+    text: "The registry rejected nothing: v4 registered fine; jdbc-payments-sink cannot write risk_score to analytics.payments, and errors.tolerance=all sends the records to the DLQ."
+    want_root_cause: true
+    main_wrong: false
+    source: "r3"
+  - scenario: payments-sink-dlq
+    text: "The registry rejected schema v4 with risk_score, so every record goes to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: payments-sink-dlq
+    text: "The registry rejected it: v4 with risk_score is incompatible with v3, so records go to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: payments-sink-dlq
+    text: "The Schema Registry blocked v4 with risk_score, so jdbc-payments-sink sends every record to the DLQ."
+    want_root_cause: false
+    main_wrong: false
+    source: "r3"
+  - scenario: payments-sink-dlq
+    text: "The registry has blocked v4 with risk_score, so every record goes to the DLQ."
+    want_root_cause: true
+    main_wrong: true
+    source: "r3"
+    gap: "Desired: fail. The optional row [registry has blocked] is not committed; main passes it too."
