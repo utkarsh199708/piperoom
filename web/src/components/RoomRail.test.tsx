@@ -179,6 +179,12 @@ describe('ProposalsSummary', () => {
     expect(screen.getByText(/No fix proposed yet/)).toBeInTheDocument()
   })
 
+  it('in a shadow room says the agent proposes no fix (it never will)', () => {
+    render(<ProposalsSummary proposals={[]} shadow />)
+    expect(screen.getByText(/Shadow room: the agent proposes no fix/)).toBeInTheDocument()
+    expect(screen.queryByText(/No fix proposed yet/)).not.toBeInTheDocument()
+  })
+
   it('summarises an open proposal: who we wait for and how many approved', () => {
     render(<ProposalsSummary proposals={[proposal()]} />)
     expect(screen.getByText('1 open')).toBeInTheDocument()

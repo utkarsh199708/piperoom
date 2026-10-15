@@ -20,6 +20,8 @@ export function agentPill(state: RoomState): AgentPillInfo {
   // What the room is really doing outranks the agent's last status event (the agent keeps
   // saying "waiting for approval" after the fix ran, after a rejection and on a closed room).
   if (state.status !== 'open') return { tone: 'muted', text: 'Agent stopped', title: detail }
+  // A shadow room's log holds no agent events, so agent_status would read "idle" while the run works.
+  if (state.shadow) return { tone: 'agent', text: 'Shadow · agent works silently' }
   const derived = roomStatus(statusInputFromState(state))
   if (derived.kind === 'fixed') return { tone: 'ok', text: 'Fix ran · verifying', title: detail }
   if (derived.kind === 'fix-failed') return { tone: 'fail', text: derived.label, title: detail }
