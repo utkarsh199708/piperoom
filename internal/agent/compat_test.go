@@ -166,7 +166,7 @@ func newCompatRunner(t *testing.T, model model, inbox Inbox, sink Sink, steps []
 	}
 	r.model = model
 	r.clk = &fakeClock{}
-	r.proposals.record("p_1", steps)
+	r.proposals.record("p_1", steps, nil)
 	return r, proposals
 }
 
@@ -797,7 +797,7 @@ func TestPendingRestoreStatusIsNotOverwritten(t *testing.T) {
 	model := &scriptedModel{}
 	// p_1 recovers and parks; then p_2 leaves a subject at NONE while parked.
 	r, _ := newCompatRunner(t, model, inbox, sink, recoveredSteps(), compatEnv{level: "NONE"})
-	r.proposals.record("p_2", compatSteps("NONE"))
+	r.proposals.record("p_2", compatSteps("NONE"), nil)
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)

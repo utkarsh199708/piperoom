@@ -25,7 +25,11 @@ export function NoDriverBanner({
   if (state.status !== 'open' || state.driver !== null || isViewer(user)) return null
   const age = state.opened_at ? ageLabel(state.opened_at) : ''
   // Q0 (G2): say that someone was told, so a watcher or alert room does not look unnoticed.
-  const paged = [...new Set(state.pages.map((p) => p.layer))]
+  // QA R5 (G2): a page with no owner listed only says the layer was paged; it did not reach anyone.
+  const withOwner = [...new Set(state.pages.filter((p) => p.owners.length > 0).map((p) => p.layer))]
+  const noOwner = [...new Set(state.pages.filter((p) => p.owners.length === 0).map((p) => p.layer))].filter(
+    (l) => !withOwner.includes(l),
+  )
   return (
     <div
       role="status"
@@ -38,11 +42,16 @@ export function NoDriverBanner({
           : 'No one is driving — take control to steer the agent.'}
       </span>
       {age && <span className="text-xs font-normal text-muted-foreground">opened {age} ago</span>}
-      {paged.length > 0 && (
+      {withOwner.length > 0 && (
         <span className="text-xs font-normal text-muted-foreground">
-          Owners paged: {paged.map((l) => plainText(l, 40)).join(', ')}
+          Owners paged: {withOwner.map((l) => plainText(l, 40)).join(', ')}
         </span>
       )}
+      {noOwner.map((l) => (
+        <span key={l} className="text-xs font-normal text-muted-foreground">
+          {plainText(l, 40)} paged, no owner listed
+        </span>
+      ))}
       <Button
         className="ml-auto h-7 px-2.5 coarse:h-11 coarse:px-4"
         aria-keyshortcuts="T"

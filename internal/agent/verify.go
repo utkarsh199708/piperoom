@@ -58,7 +58,14 @@ const (
 	// passed while the source had no new change: data flow cannot be judged.
 	recoveredIdleHead = "recovered: every layer check passed; no new source changes to confirm data flow.\n"
 	// idleDetail is the data-flow detail of that verdict.
-	idleDetail = "inconclusive: the source was idle (replication slot did not move, no new WAL), so no new rows could be expected"
+	idleDetail = "inconclusive: the source was idle (the replication slots show no WAL the connector did not consume), so no new rows could be expected"
+	// inconclusiveHead opens the verdict of a proposal whose layer checks all
+	// passed while the sinks got no rows and the data topics did not grow, but
+	// the source side could not prove it was idle: the connector may not be
+	// capturing. Neither recovered nor NOT recovered (see the idle-source rule).
+	inconclusiveHead = "inconclusive: no source changes observed; connector may not be capturing. Every layer check passed, but no new rows reached the sinks and the source could not be shown to be idle.\n"
+	// inconclusiveDetail is the data-flow detail of that verdict.
+	inconclusiveDetail = "inconclusive: no source changes observed; connector may not be capturing"
 	// waitingDetail is the status detail of a recovered episode parked for input.
 	waitingDetail = "pipeline recovered; waiting for input"
 	// dataFlowInfoOnly is the data-flow detail of a verdict that did not need
@@ -82,6 +89,12 @@ type proposalRecord struct {
 	// topicEnds is the summed end offset of each source data topic when the
 	// proposal was made. Nil when not taken; then the check window decides.
 	topicEnds map[string]int64
+	// slots is the replication slots when the proposal was made, for the
+	// source side of the idle-source rule. Nil when not taken.
+	slots []slotPosition
+	// verdict names the verdict once verified: "recovered", "NOT recovered" or
+	// "inconclusive". A repeated last-step result repeats it.
+	verdict string
 }
 
 // proposalTracker remembers the proposals the agent created during this run. It
@@ -100,14 +113,18 @@ func newProposalTracker() *proposalTracker {
 	return &proposalTracker{byID: map[string]proposalRecord{}, flows: map[string]*execFlow{}}
 }
 
-func (t *proposalTracker) record(id string, steps []events.ProposalStep) {
+// record remembers a proposal the agent created. approvers is every layer the
+// room requires for it: the step layers plus the impacted ones (the proposer's
+// and each action's Impact layers), the same set the server stores as
+// RequiredLayers. Nil falls back to the step layers alone.
+func (t *proposalTracker) record(id string, steps []events.ProposalStep, approvers []string) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.byID[id] = proposalRecord{id: id, steps: steps}
-	t.flows[id] = newExecFlow(steps)
+	t.flows[id] = newExecFlow(steps, approvers)
 }
 
 func (t *proposalTracker) get(id string) (proposalRecord, bool) {
@@ -120,8 +137,9 @@ func (t *proposalTracker) get(id string) (proposalRecord, bool) {
 	return rec, ok
 }
 
-// markVerified stores the verdict for a proposal's last step.
-func (t *proposalTracker) markVerified(id string, recovered bool) {
+// markVerified stores the verdict for a proposal's last step; word names it
+// (see verdictWord).
+func (t *proposalTracker) markVerified(id string, recovered bool, word string) {
 	if t == nil {
 		return
 	}
@@ -133,6 +151,7 @@ func (t *proposalTracker) markVerified(id string, recovered bool) {
 	}
 	rec.verified = true
 	rec.recovered = recovered
+	rec.verdict = word
 	t.byID[id] = rec
 }
 
@@ -148,6 +167,21 @@ func (t *proposalTracker) setTopicEnds(id string, ends map[string]int64) {
 		return
 	}
 	rec.topicEnds = ends
+	t.byID[id] = rec
+}
+
+// setSlots stores the proposal-time slot readings of a proposal already recorded.
+func (t *proposalTracker) setSlots(id string, slots []slotPosition) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.slots = slots
 	t.byID[id] = rec
 }
 
@@ -259,7 +293,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		// done again and never announces a second verdict: it gets the Repeat
 		// form of agent.verification, which clients keep from overwriting the
 		// full one. The model hears the verdict already reached.
-		repeat := "already verified: " + verdictWord(rec.recovered) + "; no checks were run again"
+		repeat := "already verified: " + verdictWord(rec) + "; no checks were run again"
 		r.emit(ctx, events.AgentVerification, events.AgentVerificationPayload{
 			ProposalID: id,
 			Checks:     []events.VerificationCheck{},
@@ -286,7 +320,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		followUp = compatFollowUp(rec.steps)
 	}
 	r.announceVerdict(ctx, id, v, followUp)
-	r.proposals.markVerified(id, recovered)
+	r.proposals.markVerified(id, recovered, v.word())
 	if recovered {
 		r.trackNoneSubjects(rec.steps)
 	}
@@ -426,11 +460,26 @@ func (r *runner) emitWaiting(ctx context.Context) {
 }
 
 // verdictWord names a stored verdict for the model.
-func verdictWord(recovered bool) string {
-	if recovered {
+func verdictWord(rec proposalRecord) string {
+	if rec.verdict != "" {
+		return rec.verdict
+	}
+	if rec.recovered {
 		return "recovered"
 	}
 	return "NOT recovered"
+}
+
+// word names the verdict: "recovered", "NOT recovered" or "inconclusive".
+func (v verifyOutcome) word() string {
+	switch {
+	case v.recovered:
+		return "recovered"
+	case v.inconclusive:
+		return "inconclusive"
+	default:
+		return "NOT recovered"
+	}
 }
 
 // failedStepText tells the room a fix step did not succeed. Recovery is not
@@ -462,6 +511,9 @@ type verifyOutcome struct {
 	// checks and flow are the structured form of the evidence, for the event.
 	checks []events.VerificationCheck
 	flow   *events.DataFlowCheck
+	// inconclusive is set, with recovered false, when the layers passed and the
+	// sinks got no rows while the source could not be shown to be idle.
+	inconclusive bool
 	// aborted is true when ctx ended before a verdict: nothing is announced and
 	// the proposal stays unverified, so a replayed result can verify it.
 	aborted bool
@@ -528,10 +580,14 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyO
 	switch {
 	case !flow.verified:
 		out.head = "NOT recovered: data flow not verified.\n"
-	case !flow.fresh && flow.idle:
+	case !flow.fresh && flow.source == sourceQuiet:
 		out.flow = &events.DataFlowCheck{Checked: false, Detail: idleDetail}
 		out.recovered = true
 		out.head = recoveredIdleHead
+	case !flow.fresh && flow.source == sourceUnproven:
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: inconclusiveDetail}
+		out.inconclusive = true
+		out.head = inconclusiveHead
 	case !flow.fresh:
 		out.head = "NOT recovered: data flow did not pass; no new rows since the fix.\n"
 	default:
@@ -728,10 +784,12 @@ type flowResult struct {
 	// sinks is the same evidence for the agent.verification event; empty when
 	// the check could not run.
 	sinks []events.SinkCheck
-	// idle is true when no sink received rows and the source slot did not move
-	// across the check, so the source had no change to replicate. The data-flow
-	// check is then inconclusive, not failed.
-	idle bool
+	// source is the idle-source judgement, read only when no sink received
+	// rows: quiet makes the data-flow check inconclusive with the layers
+	// deciding, unproven makes the whole verdict inconclusive, active keeps the
+	// failure. sourceLine is its evidence.
+	source     sourceState
+	sourceLine string
 	// detail is the reason the flow was not verified, without the evidence prefix.
 	detail string
 }
@@ -855,10 +913,9 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 
 	res := flowResult{verified: true, fresh: true}
 	if wait && anyPending(states) && !anyPassed(states) {
-		// Only a failing check pays for the slot reads. Idle means every sink is
-		// stale AND the source slot did not move over one more wait: a source
-		// that wrote while the slot stood still is a real failure.
-		res.idle = r.sourceIdle(ctx, rec)
+		// Only a failing check pays for the source reads (the idle-source rule
+		// above sourceIdle).
+		res.source, res.sourceLine = r.sourceIdle(ctx, rec)
 	}
 	for _, st := range states {
 		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
@@ -872,6 +929,9 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		}
 		res.fresh = false
 		res.lines = append(res.lines, fmt.Sprintf("data flow %s: no new rows since the fix (%s); last read %s", st.table.name, st.readings(), clipLine(st.lastSummary)))
+	}
+	if res.sourceLine != "" {
+		res.lines = append(res.lines, res.sourceLine)
 	}
 	return res
 }
@@ -895,45 +955,141 @@ func anyPassed(states []sinkState) bool {
 	return false
 }
 
-// sourceIdle reports whether the source had no change to replicate. The
-// signal is the source data topics, which a Debezium heartbeat does not touch
-// (heartbeats go to a separate topic, excluded here): idle means no source
-// topic gained a record since the proposal, or, with no proposal reading, over
-// one freshnessWait. When the topics cannot be read, the replication slots
-// standing still over one freshnessWait is the fallback. Any read that fails
-// means unknown, which is not idle.
-func (r *runner) sourceIdle(ctx context.Context, rec proposalRecord) bool {
+// sourceState is what the source side says about a check whose sinks got no
+// new rows.
+type sourceState int
+
+const (
+	// sourceActive: the source changed, or nothing is known about it. Stale
+	// sinks are then a data-flow failure: NOT recovered.
+	sourceActive sourceState = iota
+	// sourceQuiet: proven on the source side that there was no change to
+	// replicate. Data flow cannot be judged; the verdict rests on the layers.
+	sourceQuiet
+	// sourceUnproven: the data topics did not grow, but the source side could
+	// not prove it was quiet. Inconclusive: neither recovered nor NOT recovered.
+	sourceUnproven
+)
+
+// The idle-source rule (QA review 2, R15 and R20).
+//
+// Flat source data topics are not proof that the source was idle: a connector
+// that reads RUNNING but captures nothing (it loops on a decoding error, or
+// never streams) also writes nothing to them, while the source keeps taking
+// writes. So idleness must be proven on the source side as well, and the proof
+// must survive Debezium heartbeats, which move the slot without any data change
+// (they write only the heartbeat topic, which sourceTopics leaves out).
+//
+// No read tool exposes per-table change counts (pg_stat_user_tables), so the
+// source-side signal is the replication slots (pg_replication_slots), read at
+// proposal time when that reading exists, else at both ends of one
+// freshnessWait:
+//
+//   - data topics grew: the source changed. Active.
+//   - data topics flat, and for every slot confirmed_flush_lsn moved: the
+//     connector consumed and acknowledged WAL and emitted no data record from
+//     it, so the WAL held no change of the pipeline's tables (a heartbeat).
+//     Quiet.
+//   - data topics flat, and every slot stood still with retained WAL unchanged:
+//     the server wrote no WAL at all. Quiet.
+//   - data topics flat, a slot's confirmed_flush_lsn stood still and its
+//     retained WAL grew: WAL was written that the connector did not consume.
+//     That is the stuck connector. Active. (A healthy connector without
+//     heartbeats on a server whose other tables write looks the same; NOT
+//     recovered keeps the agent looking, which is the safe side.)
+//   - data topics flat, slots unreadable or not comparable: unproven. The
+//     verdict says "inconclusive", never "recovered", and never "NOT
+//     recovered" for a pure idle doubt.
+//
+// When the topics cannot be read at all, the old slot-only fallback applies: an
+// unchanged slot fingerprint over one freshnessWait is quiet, anything else
+// (including no reading) is active.
+
+// sourceIdle judges the source for a check whose sinks got no new rows, and
+// returns an evidence line saying why.
+func (r *runner) sourceIdle(ctx context.Context, rec proposalRecord) (sourceState, string) {
 	topics, ok := r.sourceTopics(ctx, "verify")
 	if ok {
+		slotsBefore, slotsOK := rec.slots, len(rec.slots) > 0
+		if !slotsOK {
+			slotsBefore, slotsOK = r.readSlots(ctx, "verify")
+		}
 		now, ok := r.topicEnds(ctx, "verify", topics)
 		if ok {
 			before := rec.topicEnds
+			waited := false
 			if len(before) == 0 {
 				before = now
 				if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
-					return false
+					return sourceActive, ""
 				}
+				waited = true
 				if now, ok = r.topicEnds(ctx, "verify", topics); !ok {
-					return false
+					return sourceActive, ""
 				}
 			}
 			for _, t := range topics {
 				if b, have := before[t]; !have || now[t] != b {
-					return false
+					return sourceActive, "source: the data topics grew, so the source changed"
 				}
 			}
-			return true
+			if !slotsOK {
+				return sourceUnproven, "source: the data topics did not grow; the replication slots could not be read to prove the source was idle"
+			}
+			if len(rec.slots) == 0 && !waited {
+				// The slot reading must span a window, like the topic reading.
+				if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+					return sourceActive, ""
+				}
+			}
+			slotsAfter, ok := r.readSlots(ctx, "verify")
+			if !ok {
+				return sourceUnproven, "source: the data topics did not grow; the replication slots could not be read again to prove the source was idle"
+			}
+			return judgeSlots(slotsBefore, slotsAfter)
 		}
 	}
-	before, ok := r.readSlotPositions(ctx)
+	before, ok := r.readSlots(ctx, "verify")
 	if !ok {
-		return false
+		return sourceActive, ""
 	}
 	if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
-		return false
+		return sourceActive, ""
 	}
-	after, ok := r.readSlotPositions(ctx)
-	return ok && after == before
+	after, ok := r.readSlots(ctx, "verify")
+	if ok && slotFingerprint(after) == slotFingerprint(before) {
+		return sourceQuiet, "source: the replication slots did not move and no WAL was written"
+	}
+	return sourceActive, ""
+}
+
+// judgeSlots applies the slot part of the idle-source rule to two readings
+// taken while the data topics stayed flat.
+func judgeSlots(before, after []slotPosition) (sourceState, string) {
+	if len(before) != len(after) {
+		return sourceUnproven, "source: the data topics did not grow; the replication slots changed between readings, so idleness is not proven"
+	}
+	prev := make(map[string]slotPosition, len(before))
+	for _, s := range before {
+		prev[s.name] = s
+	}
+	consumed := false
+	for _, a := range after {
+		b, ok := prev[a.name]
+		if !ok {
+			return sourceUnproven, "source: the data topics did not grow; the replication slots changed between readings, so idleness is not proven"
+		}
+		switch {
+		case a.confirmedFlush != b.confirmedFlush:
+			consumed = true
+		case a.retainedWAL > b.retainedWAL:
+			return sourceActive, fmt.Sprintf("source: slot %s did not move while its retained WAL grew from %d to %d bytes: the source wrote changes the connector did not capture", a.name, b.retainedWAL, a.retainedWAL)
+		}
+	}
+	if consumed {
+		return sourceQuiet, "source: the data topics did not grow while the connector consumed WAL (heartbeats), so the source had no change to replicate"
+	}
+	return sourceQuiet, "source: the data topics did not grow and the replication slots show no new WAL"
 }
 
 // sourceTopics returns the pipeline's source data topics from pipeline_map,
@@ -989,17 +1145,23 @@ func (r *runner) topicEnds(ctx context.Context, verb string, topics []string) (m
 	return out, true
 }
 
-// readSlotPositions reads the pipeline's replication slots with
-// pg_replication_slots and returns a comparable fingerprint of their
-// confirmed_flush_lsn, restart_lsn and retained WAL. Retained WAL grows with
-// every source write while the slot stands still, so an equal fingerprint
-// before and after the check window means the source had no change. ok is false
-// when the tool is missing, fails, or names no slot: then idleness is unknown
-// and the data-flow rule applies unchanged.
-func (r *runner) readSlotPositions(ctx context.Context) (string, bool) {
-	res, err := r.runStep(ctx, "verify", "pg_replication_slots", json.RawMessage(`{}`))
+// slotPosition is one replication slot as pg_replication_slots reports it.
+type slotPosition struct {
+	name           string
+	confirmedFlush string
+	restart        string
+	retainedWAL    int64
+}
+
+// readSlots reads the pipeline's replication slots with pg_replication_slots.
+// Retained WAL grows with every source write while the slot stands still, and
+// confirmed_flush_lsn moves when the connector acknowledges WAL. ok is false
+// when the tool is missing, fails, or names no slot: then the source side is
+// unknown.
+func (r *runner) readSlots(ctx context.Context, verb string) ([]slotPosition, bool) {
+	res, err := r.runStep(ctx, verb, "pg_replication_slots", json.RawMessage(`{}`))
 	if err != nil {
-		return "", false
+		return nil, false
 	}
 	var slots []struct {
 		Name              string `json:"name"`
@@ -1008,16 +1170,25 @@ func (r *runner) readSlotPositions(ctx context.Context) (string, bool) {
 		RetainedWALBytes  int64  `json:"retained_wal_bytes"`
 	}
 	if err := decodeData(res.Data, &slots); err != nil || len(slots) == 0 {
-		return "", false
+		return nil, false
 	}
-	var sb strings.Builder
+	out := make([]slotPosition, 0, len(slots))
 	for _, s := range slots {
 		if s.ConfirmedFlushLSN == "" && s.RestartLSN == "" {
-			return "", false
+			return nil, false
 		}
-		fmt.Fprintf(&sb, "%s|%s|%s|%d;", s.Name, s.ConfirmedFlushLSN, s.RestartLSN, s.RetainedWALBytes)
+		out = append(out, slotPosition{name: s.Name, confirmedFlush: s.ConfirmedFlushLSN, restart: s.RestartLSN, retainedWAL: s.RetainedWALBytes})
 	}
-	return sb.String(), true
+	return out, true
+}
+
+// slotFingerprint renders slot readings as one comparable string.
+func slotFingerprint(slots []slotPosition) string {
+	var sb strings.Builder
+	for _, s := range slots {
+		fmt.Fprintf(&sb, "%s|%s|%s|%d;", s.name, s.confirmedFlush, s.restart, s.retainedWAL)
+	}
+	return sb.String()
 }
 
 // anyPending reports whether some sink has not passed yet.
@@ -1062,6 +1233,12 @@ func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
 	if topics, ok := r.sourceTopics(ctx, "baseline"); ok {
 		if ends, ok := r.topicEnds(ctx, "baseline", topics); ok {
 			r.proposals.setTopicEnds(proposalID, ends)
+			// The slots at the same moment: the idle-source rule then sees a
+			// source write anywhere since the proposal, not only inside the
+			// check window.
+			if slots, ok := r.readSlots(ctx, "baseline"); ok {
+				r.proposals.setSlots(proposalID, slots)
+			}
 		}
 	}
 }

@@ -200,7 +200,22 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	}); err != nil {
 		return "", err
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p); err != nil {
+	// Checked append: with a shared store another replica may have closed the
+	// room since the check above, and a proposal.created after room.closed
+	// would never be withdrawn (QA R7). A refused append removes the row below.
+	// A shadow room's agent events go to its own log (emitLocked).
+	emit := func() (events.Event, error) {
+		return s.emitCheckedLocked(ctx, st, roomID, func() error {
+			if !s.roomOpen(st) {
+				return roomClosed("room is closed")
+			}
+			return nil
+		}, events.ProposalCreated, actor, p)
+	}
+	if st.snap.Shadow {
+		emit = func() (events.Event, error) { return s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p) }
+	}
+	if _, err := emit(); err != nil {
 		if delErr := s.store.DeleteProposal(ctx, p.ProposalID); delErr != nil {
 			s.log.Warn("room: compensate failed proposal row", "proposal", p.ProposalID, "err", delErr)
 		}

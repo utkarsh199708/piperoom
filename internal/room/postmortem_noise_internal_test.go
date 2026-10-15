@@ -34,6 +34,13 @@ func TestIsHandoffNoise(t *testing.T) {
 		{"handoff_log table truncated", false},
 		{"Summaries were truncated", true},
 		{"The closing summary was truncated", true},
+		// QA R10: a sentence may end with the process word and a period.
+		{"Tool output was truncated in the hand-off.", true},
+		{"Retry the failed handoff.", true},
+		{"Tool output was truncated in the summary.", true},
+		{"summary.orders was truncated", false},
+		{"orders.summary was truncated by the failed reload", false},
+		{"The summary table was truncated by the failed reload.", false},
 	}
 	for _, c := range cases {
 		if got := isHandoffNoise(c.line); got != c.want {

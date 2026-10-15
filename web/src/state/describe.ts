@@ -258,6 +258,8 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'agent.verification': {
       const p = as<AgentVerificationPayload>(e)
+      // QA R14 (G6): a repeat says the verdict was already recorded; it is not a second announcement.
+      if (p.repeat) return { text: 'Verification already recorded', kind: 'system' }
       return { text: `Verification: ${p.recovered ? 'recovered' : 'not recovered'}`, kind: 'decision' }
     }
     case 'approval.given': {
