@@ -19,6 +19,7 @@ import type {
   ChecklistStepDonePayload,
   CommentAddedPayload,
   ControlGrantedPayload,
+  ControlLeaseExpiredPayload,
   Event,
   HandoffAcceptedPayload,
   HandoffCreatedPayload,
@@ -471,6 +472,15 @@ function applyCore(state: RoomState, event: Event): RoomState {
         members,
         control_requests: state.control_requests.filter((r) => r.from.id !== p.to.id),
       }
+      break
+    }
+
+    case 'control.lease_expired': {
+      const p = as<ControlLeaseExpiredPayload>(event)
+      const d = state.driver
+      // Only the signal for the lease the driver holds now counts; a stale one is history.
+      if (!d || !d.lease_until || Date.parse(p.lease_until) !== Date.parse(d.lease_until)) break
+      next = { ...state, driver: { ...d, lease_expired: true } }
       break
     }
 

@@ -20,6 +20,11 @@ import { PersonAvatar } from './room/PersonAvatar'
 import { StatusDot } from './room/StatusDot'
 import { leaseExpired, minutesLeft, useNow } from './room/useNow'
 
+// The driver lease is 30 minutes (docs/api.md); the bar shows what is left of it, and from
+// LEASE_WARN_MIN minutes on the status line turns amber and offers Renew.
+const LEASE_MIN = 30
+const LEASE_WARN_MIN = 5
+
 // Driver only: give control to anyone GET /api/people lists. Loads the list on open.
 function GrantPicker({
   user,
@@ -298,15 +303,30 @@ export function SteerBox({
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`
   }
 
+  // The server's lease signal (control.lease_expired) or, before it arrives, a clock that has run out
+  // (minutesLeft rounds down, so it is 0 for the last minute of a live lease: `expired` tells those apart).
+  const signalled = state.driver?.lease_expired === true
+  const isLeaseExpired = signalled || expired
+  const leaseEnding = isDriver && !signalled && !expired && left != null && left <= LEASE_WARN_MIN
   let status: string
   if (isDriver) {
-    status = leaseText ? `You are driving · ${leaseText}` : 'You are driving'
+    status = signalled
+      ? 'Your lease expired — you still drive until someone takes over'
+      : leaseEnding && left != null
+        ? left > 0
+          ? `Lease ends in ${left}m — any action renews`
+          : 'Lease ends in under a minute — any action renews'
+        : leaseText
+          ? `You are driving · ${leaseText}`
+          : 'You are driving'
   } else if (noDriver) {
     status = 'No driver · your suggestion is queued for whoever takes control'
   } else {
     const name = state.driver?.name ?? 'Someone'
     const lease = leaseText ? ` · ${leaseText.replace(/^lease (\d+m)$/, 'lease $1 left')}` : ''
-    status = `${name} is driving${lease} · your message goes to ${name}'s queue`
+    status = signalled
+      ? `${name}'s lease expired · anyone can take control`
+      : `${name} is driving${lease} · your message goes to ${name}'s queue`
   }
 
   // Empty and not focused: one row (status, then the field as a placeholder). It grows on focus or text.
@@ -353,11 +373,34 @@ export function SteerBox({
         </ul>
       )}
 
+      {isDriver && left != null && (
+        <div className="absolute inset-x-0 top-0 h-0.5 bg-muted" aria-hidden="true">
+          <div
+            className="h-full bg-primary"
+            data-testid="lease-bar"
+            style={{ width: `${Math.min(100, Math.round((left / LEASE_MIN) * 100))}%` }}
+          />
+        </div>
+      )}
+
       <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[45%] shrink-0' : 'flex-wrap')}>
-        <StatusDot tone={noDriver ? 'warn' : 'accent'} />
-        <span className={cn('text-xs text-muted-foreground', idle && 'truncate')} title={idle ? status : undefined}>
+        <StatusDot tone={noDriver || isLeaseExpired ? 'warn' : 'accent'} />
+        <span
+          className={cn(
+            'text-xs text-muted-foreground',
+            (leaseEnding || (isDriver && isLeaseExpired)) && 'text-warning-foreground',
+            idle && 'truncate',
+          )}
+          title={idle ? status : undefined}
+          aria-live="polite"
+        >
           {status}
         </span>
+        {isDriver && (leaseEnding || isLeaseExpired) && (
+          <Button variant="ghost" className="h-7" onClick={() => actions.grantControl(user.id)}>
+            Renew
+          </Button>
+        )}
         <div className="ml-auto flex items-center gap-1">
           {isDriver && (
             <Button variant="ghost" className="h-7 coarse:h-11" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>

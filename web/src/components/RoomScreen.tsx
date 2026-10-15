@@ -11,6 +11,8 @@ import { useMediaQuery } from '../hooks/useMediaQuery'
 import { rememberRoomTitle } from '../lib/signinNotice'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
 import { useRoomAttention } from '../hooks/useRoomAttention'
+import { useCatchUp } from '../hooks/useCatchUp'
+import { CatchUpStrip } from './room/CatchUpStrip'
 import { useCurrentUser } from '../context/user'
 import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
@@ -119,6 +121,7 @@ export function RoomScreen() {
     },
     elsewhereNeedsMe,
   )
+  const catchUp = useCatchUp(state, conn, user)
   const { sentinelRef, unseen, jump } = useJumpToLatest(state?.activity ?? [], replaying)
   // One topology refetch per executed action, plus the hook's 30 s refresh
   // while the room is open (stops once closed).
@@ -430,6 +433,7 @@ export function RoomScreen() {
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
+          <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
 
           {wide ? (

@@ -24,6 +24,11 @@ export interface DriverInfo {
   id: string
   name: string
   lease_until?: string
+  /**
+   * Folded from control.lease_expired whose lease_until equals this lease_until (docs/api.md,
+   * Lease expiry). The driver stays the driver; the next control.granted clears it.
+   */
+  lease_expired?: boolean
 }
 
 export interface AgentStatusState {
