@@ -24,3 +24,9 @@ func TestSubscribeEndsOnDelete(t *testing.T) {
 	s := openReplica(t, schema, store.Options{PollInterval: 50 * time.Millisecond, SafetyPoll: 100 * time.Millisecond})
 	storetest.RunSubscribeEndsOnDelete(t, s, 10*time.Second)
 }
+
+// The client_id unique index of migration 00016, against Postgres.
+func TestClientIDUniqueConformance(t *testing.T) {
+	s, _ := requireStore(t)
+	storetest.RunClientIDUnique(t, s)
+}
