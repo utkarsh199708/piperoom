@@ -12,6 +12,7 @@ import {
   CommandList,
   CommandShortcut,
 } from '@/components/ui/command'
+import { handOverFocus } from '@/components/room/useRestoreFocus'
 import { Kbd } from '@/components/ui/kbd'
 import { isFixtures } from '@/api/client'
 import type { RoomSnapshot } from '@/api/types'
@@ -44,13 +45,14 @@ export function CommandMenu({
   const navigate = useNavigate()
   const { user, logout, busy } = useCurrentUser()
   const { theme, toggleTheme } = useTheme()
-  // What closed the menu: null = Esc or a click outside (focus goes back where it was),
+  // What closed the menu: null = Esc or a click outside (Radix then focuses the dialog's trigger,
+  // and there is none, so focus drops to <body>: a known gap, pinned in CommandMenu.focus.test.tsx),
   // 'dialog' = an action that opens a dialog (it keeps the focus), 'other' = anything else.
   const closedBy = useRef<'dialog' | 'other' | null>(null)
   const mod = modKeyLabel()
   // What had focus before the palette opened. Read while rendering the opening frame, before
-  // Radix moves focus into the palette. Dialogs note document.activeElement when they mount, and
-  // the palette is gone by then, so run() puts the focus back here first.
+  // Radix moves focus into the palette. A dialog notes document.activeElement when it mounts, and
+  // the palette is gone by then, so run() hands this element over (without focusing it).
   const opener = useRef<Element | null>(null)
   if (!open) opener.current = null
   else if (opener.current === null && typeof document !== 'undefined') opener.current = document.activeElement
@@ -65,11 +67,8 @@ export function CommandMenu({
     onOpenChange(false)
     // After the menu has closed, so a dialog it opens (hand-off, trace) keeps the focus.
     window.setTimeout(() => {
-      // The dialog records the focused element when it mounts: make that the pre-palette one.
-      // A gone or hidden element is skipped, so the dialog falls back to #main.
-      if (opensDialog && from instanceof HTMLElement && from.isConnected && !from.closest('[hidden]')) {
-        from.focus({ preventScroll: true })
-      }
+      // The dialog returns focus to it on close, if it is still usable then, else to #main.
+      if (opensDialog) handOverFocus(from)
       fn()
     }, 0)
   }
@@ -81,9 +80,9 @@ export function CommandMenu({
         if (next) closedBy.current = null
         onOpenChange(next)
       }}
-      // Esc or a click outside returns focus to where it was. After a hand-off or trace the
-      // new dialog keeps it; after any other action the page content gets it, because the
-      // thing that opened the menu may be gone (a link followed, a theme switched).
+      // After a dialog action the new dialog keeps focus; after any other action the page content
+      // gets it, because the thing that opened the menu may be gone (a link followed, a theme
+      // switched). Esc or a click outside falls through to Radix's default (see closedBy).
       onCloseAutoFocus={(e) => {
         if (closedBy.current === null) return
         e.preventDefault()

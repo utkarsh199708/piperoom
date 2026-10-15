@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { api } from '@/api/client'
 import type { RoomActions } from '@/hooks/useRoom'
 import { CloseRoomDialog } from '../CloseRoomDialog'
+import { TracePanel } from '../TracePanel'
 import { PostmortemDialog } from '../room/PostmortemDialog'
 import type { RoomCommands } from './context'
 
@@ -27,7 +28,7 @@ beforeEach(() => {
   vi.spyOn(api, 'postmortem').mockResolvedValue('# draft')
 })
 
-type Which = 'postmortem' | 'close'
+type Which = 'postmortem' | 'close' | 'trace'
 const actions = { close: vi.fn() } as unknown as RoomActions
 
 // Like AppShell + RoomScreen: a timeline item inside <main id="main">, the palette, and the
@@ -39,6 +40,7 @@ function Harness() {
     title: 'Orders stale',
     postmortem: () => setDialog('postmortem'),
     closeRoom: () => setDialog('close'),
+    trace: () => setDialog('trace'),
   }
   const registry = { get: () => commands, set: () => undefined }
   return (
@@ -54,6 +56,7 @@ function Harness() {
           onClose={() => setDialog(null)}
         />
       )}
+      {dialog === 'trace' && <TracePanel trace={null} actions={actions} onClose={() => setDialog(null)} />}
       {dialog === 'close' && <CloseRoomDialog actions={actions} onClose={() => setDialog(null)} />}
     </MemoryRouter>
   )
@@ -67,6 +70,9 @@ async function openFromPalette(option: RegExp) {
 const dismissals: [string, Which, RegExp, () => void][] = [
   ['Escape', 'postmortem', /Post-mortem draft/, () => fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })],
   ['the close button', 'postmortem', /Post-mortem draft/, () => fireEvent.click(screen.getByRole('button', { name: 'Close post-mortem draft' }))],
+  ['the footer Close', 'postmortem', /Post-mortem draft/, () => fireEvent.click(screen.getByRole('button', { name: /^Close$/ }))],
+  ['Escape', 'trace', /Trace a record/, () => fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })],
+  ['the close button', 'trace', /Trace a record/, () => fireEvent.click(screen.getByRole('button', { name: 'Close trace panel' }))],
   ['Escape', 'close', /Close the room/, () => fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })],
   ['the close button', 'close', /Close the room/, () => fireEvent.click(screen.getByRole('button', { name: 'Cancel closing the room' }))],
   ['the footer Cancel', 'close', /Close the room/, () => fireEvent.click(screen.getByRole('button', { name: /^Cancel$/ }))],
@@ -83,15 +89,52 @@ describe('⌘K: a dialog it opens returns focus to what had it before the palett
     await waitFor(() => expect(document.activeElement).toBe(item))
   })
 
-  it('falls back to #main when that element is gone, never <body>', async () => {
+  it('hands the opener over without focusing it: no focus or blur while the dialog opens', async () => {
     render(<Harness />)
     const item = screen.getByRole('button', { name: 'timeline item' })
     item.focus()
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
-    // the palette recorded the opener on opening; now hide it
+    const seen = vi.fn()
+    for (const type of ['focus', 'focusin', 'blur', 'focusout']) item.addEventListener(type, seen)
+    await openFromPalette(/Post-mortem draft/)
+    expect(seen).not.toHaveBeenCalled()
+  })
+
+  it('regression for #452: an opener hidden before the action falls back to #main', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
     item.setAttribute('hidden', '')
     await openFromPalette(/Post-mortem draft/)
     fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
     await waitFor(() => expect(document.activeElement).toBe(document.getElementById('main')))
+  })
+
+  it.each([
+    ['removed', (el: HTMLElement) => el.remove()],
+    ['hidden', (el: HTMLElement) => el.setAttribute('hidden', '')],
+  ])('an opener %s while the dialog is open falls back to #main, never <body>', async (_how, change) => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    await openFromPalette(/Post-mortem draft/)
+    change(item)
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' })
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('main')))
+  })
+
+  // Known gap, #466 (also on main): closing the palette without choosing anything leaves focus on
+  // <body>, because Radix tries the dialog's Trigger and CommandDialog has none. Flip this row to
+  // expect the timeline item when #466 is fixed.
+  it('GAP #466: Escape on the palette itself lands on <body>', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    fireEvent.keyDown(await screen.findByRole('dialog'), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(document.body))
   })
 })
