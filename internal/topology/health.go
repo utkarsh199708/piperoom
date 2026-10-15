@@ -238,12 +238,22 @@ func topicHealth(err error, newest, now time.Time) (Health, map[string]string) {
 	return HealthOK, map[string]string{"newest_record": HumanAge(now.Sub(newest)) + " ago"}
 }
 
+// FutureSkew is how far ahead of this server's clock a newest timestamp may
+// be and still read as "now". Beyond it the clocks disagree (skew, a
+// timestamp without time zone written in another zone) or the row is bad:
+// the age is then unknown, and clamping it to 0s would show a stale table as
+// fresh.
+const FutureSkew = time.Minute
+
 // sinkHealth decides a sink table's health from its newest row timestamp.
 func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 	if ts.IsZero() {
 		return HealthWarn, map[string]string{"stale_for": "never"}
 	}
 	stale := now.Sub(ts)
+	if -stale > FutureSkew {
+		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": HumanAge(-stale) + " ahead"}
+	}
 	facts := map[string]string{"stale_for": HumanAge(stale)}
 	switch {
 	case stale > t.SinkStaleFail:
