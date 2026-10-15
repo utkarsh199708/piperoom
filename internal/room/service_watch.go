@@ -148,7 +148,7 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 // The text is made storable first, so evidence is kept rather than refused:
 // NUL bytes and invalid UTF-8 become U+FFFD (Postgres text and jsonb hold
 // neither; Connect trace text can carry them), and bidi controls are dropped
-// (rejectUnstorable). Then it is trimmed and cut so
+// (stripBidi), not refused as in typed text. Then it is trimmed and cut so
 // that the stored note, ellipsis included, is at most 4096 bytes, on a UTF-8
 // boundary.
 func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {

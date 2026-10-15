@@ -355,3 +355,38 @@ func TestBidiControlsRefusedInTypedTextStrippedFromAlertTitles(t *testing.T) {
 		t.Fatalf("alert title = %q, want the bidi controls dropped", snap.Title)
 	}
 }
+
+// A watcher note is evidence, not typed text: bidi controls are dropped and
+// the note is kept (#358).
+func TestRoomNoteDropsBidiControls(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+	if err := svc.PostRoomNote(ctx, roomID, "lag ‮gal‬ on ⁦orders⁩"); err != nil {
+		t.Fatalf("post note: %v", err)
+	}
+	msgs := eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)
+	if len(msgs) == 0 || msgs[len(msgs)-1].Text != "lag gal on orders" {
+		t.Fatalf("notes = %+v, want the last one %q", msgs, "lag gal on orders")
+	}
+}
+
+// The label form is pre-filled from the agent's hypothesis, which may carry
+// bidi controls: they are dropped from cause and fix, not refused (#358).
+func TestLabelDropsBidiControlsFromAgentText(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _ := newTestService(t)
+	arjun := mustUser(t, svc, "arjun")
+	roomID := createRoom(t, svc, "arjun").ID
+	if _, err := svc.CloseRoom(ctx, arjun, roomID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := svc.Label(ctx, arjun, roomID, room.LabelInput{Cause: "column ⁦amount⁩ dropped", FixThatWorked: "‪restart‬"})
+	if err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	p, err := events.Decode[events.RoomLabelledPayload](ev)
+	if err != nil || p.Cause != "column amount dropped" || p.FixThatWorked != "restart" {
+		t.Fatalf("label = %+v, %v; want the controls dropped", p, err)
+	}
+}

@@ -807,7 +807,7 @@ func (s *Service) followRoom(roomID string, seq int64) {
 		return
 	}
 	if st.stale.Load() {
-		s.rebuildStale(ctx, roomID, st, seq)
+		s.rebuildStale(ctx, roomID, st, seq, false)
 		return
 	}
 	if seq <= p.LastSeq {
@@ -868,45 +868,114 @@ func (s *Service) rebuildLater(roomID string, seq int64) {
 
 // rebuildStale replaces the snapshot of a stale room (fillGapLocked) with one
 // folded from the whole log, as a restart would. The log is read outside the
-// lock; a failed read or a busy lock is tried again later. Events folded by
-// the rebuild do not feed the agent inbox: the pending input it carries is
-// what the next agent run starts from, as for a room loaded from the log.
-func (s *Service) rebuildStale(ctx context.Context, roomID string, st *roomState, seq int64) {
-	l, err := s.rebuild(ctx, roomID)
+// lock, and only after the lock was seen free: a room in the middle of a
+// command is not read (followRoom's rule). A busy lock, a failed read or a
+// lock taken during the read is tried again after rebuildRetry. wait takes
+// the lock instead of trying it, for a command that must run on the rebuilt
+// snapshot. It reports busy when the lock was taken.
+//
+// The human input the snapshot never folded (in the skipped gaps, and after
+// the snapshot's last seq) is fed to the agent inbox as the follower would
+// have fed it; events this replica folded already are applied again without
+// feeding.
+func (s *Service) rebuildStale(ctx context.Context, roomID string, st *roomState, seq int64, wait bool) (busy bool) {
+	lock := func() bool {
+		if wait {
+			s.lockState(st)
+			return true
+		}
+		return st.mu.TryLock()
+	}
+	if !lock() {
+		s.rebuildLater(roomID, seq)
+		return true
+	}
+	skip := st.gone || s.isClosed() || !st.stale.Load()
+	s.unlockRoom(st)
+	if skip {
+		return false
+	}
+	var inputs []agent.HumanInput
+	l, err := s.rebuildWith(ctx, roomID, func(e events.Event) {
+		if in := inputFor(e); in != nil {
+			inputs = append(inputs, *in)
+		}
+	})
 	if errors.Is(err, store.ErrNotFound) {
-		return // deleted; the follower's next read or refresh evicts it
+		// Deleted by another replica: evict, as followRoom would.
+		if !lock() {
+			s.rebuildLater(roomID, seq)
+			return true
+		}
+		if !st.gone && !s.isClosed() {
+			s.evictLocked(roomID, st)
+		}
+		s.unlockRoom(st)
+		return false
 	}
 	if err != nil {
 		if s.ctx.Err() == nil {
 			s.log.Warn("room: rebuild stale room failed; trying again", "room", roomID, "err", err)
 			s.rebuildLater(roomID, seq)
 		}
-		return
+		return false
 	}
-	if !st.mu.TryLock() {
-		s.followLater(roomID, seq)
-		return
+	if !lock() {
+		s.rebuildLater(roomID, seq)
+		return true
 	}
 	defer s.unlockRoom(st)
-	if st.gone || s.isClosed() {
-		return
+	if st.gone || s.isClosed() || !st.stale.Load() {
+		return false
 	}
-	if l.snap.LastSeq < st.snap.LastSeq {
-		// Read before an append of ours that the snapshot already has.
-		s.followLater(roomID, seq)
-		return
+	if !s.swapRebuiltLocked(ctx, roomID, st, l, inputs) {
+		s.rebuildLater(roomID, seq)
 	}
+	return false
+}
+
+// swapRebuiltLocked installs a rebuilt room in st (rebuildStale). Events this
+// replica appended while the log was read are read again and applied without
+// feeding the inbox (they were fed when folded); false when that read fails,
+// and st is left as it was. Caller holds st's lock.
+func (s *Service) swapRebuiltLocked(ctx context.Context, roomID string, st *roomState, l loadedRoom, inputs []agent.HumanInput) bool {
+	old := st.snap.LastSeq
+	tmp := &roomState{snap: l.snap, pending: l.pending, logBytes: l.logBytes}
+	for tmp.snap.LastSeq < old {
+		evs, err := s.store.Since(ctx, roomID, tmp.snap.LastSeq, int(min(old-tmp.snap.LastSeq, 1000)))
+		if err != nil || len(evs) == 0 {
+			s.log.Warn("room: rebuild stale room: read the tail failed; trying again", "room", roomID, "err", err)
+			return false
+		}
+		for _, e := range evs {
+			if e.Seq != tmp.snap.LastSeq+1 || e.Seq > old {
+				return false
+			}
+			tmp.snap = Apply(tmp.snap, e)
+			tmp.logBytes += int64(len(e.Payload))
+			trackPending(tmp, e)
+		}
+	}
+	s.setDeadline(&tmp.snap)
 	wasOpen := s.roomOpen(st)
 	full := st.snap.LogCap == LogCapFull
-	st.snap, st.pending, st.logBytes = l.snap, l.pending, l.logBytes
+	gaps := st.staleGaps
+	st.snap, st.pending, st.logBytes = tmp.snap, tmp.pending, tmp.logBytes
 	if full {
 		st.snap.LogCap = LogCapFull // the in-process stop of logFullLocked
 	}
-	st.changed = true
+	st.staleGaps = nil
 	st.stale.Store(false)
+	st.changed = true
+	for _, in := range inputs {
+		if in.Seq > old || gaps.contains(in.Seq) {
+			s.feedInput(st, in)
+		}
+	}
 	if wasOpen && !s.roomOpen(st) {
 		s.closedElsewhereLocked(ctx, roomID, st)
 	}
+	return true
 }
 
 // loadNewRoom loads a room this replica has not cached yet (loadRoom: outside
@@ -1414,10 +1483,10 @@ func (s *Service) syncRoomWith(ctx context.Context, roomID string, try bool) (bu
 	}
 	if st.stale.Load() {
 		// Rebuilt before the command rather than folded: the snapshot
-		// skipped events (fillGapLocked).
+		// skipped events (fillGapLocked). A command waits for the lock, so
+		// it runs on the rebuilt snapshot.
 		s.unlockRoom(st)
-		s.rebuildStale(ctx, roomID, st, row.LastSeq)
-		return busy
+		return s.rebuildStale(ctx, roomID, st, row.LastSeq, !try) || busy
 	}
 	s.adoptRowLeaseLocked(st, row)
 	after := st.snap.LastSeq

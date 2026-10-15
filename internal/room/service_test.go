@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
@@ -2326,6 +2330,49 @@ func TestAgentSupervisorStopsOnUnretryable(t *testing.T) {
 	msgs := eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)
 	if len(msgs) != 1 || !strings.HasPrefix(msgs[0].Text, "The agent stopped:") {
 		t.Fatalf("agent messages = %+v, want one starting with %q", msgs, "The agent stopped:")
+	}
+}
+
+// A model request the API refuses (a bad key) stops the supervisor after one
+// run, and in a room whose pipeline is unknown the message names the model
+// error, not the owners.yaml hint meant for a refused proposal (#370).
+func TestAgentSupervisorModelRefusalInUnknownPipelineRoom(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	var runs atomic.Int32
+	svc := room.New(room.Deps{
+		Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(context.Context, agent.Alert, agent.Deps, agent.Options) error {
+			runs.Add(1)
+			return fmt.Errorf("agent: model turn: %w", &anthropic.Error{
+				StatusCode: http.StatusUnauthorized,
+				Request:    httptest.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil),
+				Response:   &http.Response{StatusCode: http.StatusUnauthorized},
+			})
+		},
+	})
+	t.Cleanup(svc.Close)
+	fastRetry(svc)
+	snap, _, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders-2", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := func() []events.AgentMessagePayload {
+		var out []events.AgentMessagePayload
+		for _, m := range eventsOf[events.AgentMessagePayload](t, svc, snap.ID, events.AgentMessage) {
+			if strings.HasPrefix(m.Text, "The agent stopped:") {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	waitFor(t, 5*time.Second, func() bool { return len(stopped()) >= 1 })
+	time.Sleep(150 * time.Millisecond) // many backoffs (fastRetry) for a retry to show up
+	if n := runs.Load(); n != 1 {
+		t.Fatalf("runs = %d, want 1", n)
+	}
+	msgs := stopped()
+	if len(msgs) != 1 || strings.Contains(msgs[0].Text, "owners.yaml") || !strings.Contains(msgs[0].Text, "401") {
+		t.Fatalf("stop messages = %+v, want one naming the 401, not owners.yaml", msgs)
 	}
 }
 

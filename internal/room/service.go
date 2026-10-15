@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,8 +179,10 @@ type roomState struct {
 	// stale is set when an append of ours landed after events of other
 	// replicas that could not be read (fillGapLocked): the snapshot skipped
 	// them, so the follower rebuilds it from the log (rebuildStale). Atomic
-	// so the follower can check it without the lock.
-	stale atomic.Bool
+	// so the follower can check it without the lock. staleGaps are the
+	// skipped seqs, whose human input the rebuild feeds to the inbox.
+	stale     atomic.Bool
+	staleGaps seqGaps
 
 	snap RoomSnapshot
 	// leaseLogFullFor is the logged lease whose control.lease_expired a full
@@ -783,6 +786,12 @@ func (l loadedRoom) state() *roomState {
 // the log's byte count. The room.created it folds gives the alert key and the
 // raw alert, so nothing reads that event again.
 func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error) {
+	return s.rebuildWith(ctx, roomID, nil)
+}
+
+// rebuildWith is rebuild that also hands every event read to visit (nil for
+// none), in log order.
+func (s *Service) rebuildWith(ctx context.Context, roomID string, visit func(events.Event)) (loadedRoom, error) {
 	// The byte count is read before the log: an event appended meanwhile is
 	// then folded (and counted by foldLocked) but not in the count, which can
 	// trail the store, never count an event twice.
@@ -806,6 +815,9 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error
 			}
 			st.snap = Apply(st.snap, e)
 			trackPending(st, e)
+			if visit != nil {
+				visit(e)
+			}
 			after = e.Seq
 		}
 		if len(evs) < 1000 {
@@ -903,17 +915,45 @@ func (s *Service) fillGapLocked(ctx context.Context, roomID string, st *roomStat
 		}
 		if err != nil || len(evs) == 0 {
 			s.log.Error("room: fold events from other replicas failed; the cached room is rebuilt from the log", "room", roomID, "have", st.snap.LastSeq, "want", seq-1, "err", err)
-			st.stale.Store(true)
-			s.rebuildLater(roomID, seq)
+			s.markStaleLocked(roomID, st, seq)
 			return
 		}
 		for _, ev := range evs {
 			if ev.Seq != st.snap.LastSeq+1 || ev.Seq >= seq {
+				s.log.Error("room: events from other replicas do not continue the cached room; it is rebuilt from the log", "room", roomID, "have", st.snap.LastSeq, "got", ev.Seq, "want", seq-1)
+				s.markStaleLocked(roomID, st, seq)
 				return
 			}
 			s.foldLocked(ctx, roomID, st, ev, true)
 		}
 	}
+}
+
+// markStaleLocked records that the seqs between the snapshot and seq
+// (exclusive) were skipped, and queues the rebuild (rebuildStale). Caller
+// holds st's lock.
+func (s *Service) markStaleLocked(roomID string, st *roomState, seq int64) {
+	if st.snap.LastSeq+1 >= seq {
+		return
+	}
+	st.staleGaps = append(st.staleGaps, seqGap{after: st.snap.LastSeq, before: seq})
+	st.stale.Store(true)
+	s.rebuildLater(roomID, seq)
+}
+
+// seqGap is the seqs strictly between after and before.
+type seqGap struct{ after, before int64 }
+
+// seqGaps are the seqs a stale snapshot skipped.
+type seqGaps []seqGap
+
+func (g seqGaps) contains(seq int64) bool {
+	for _, r := range g {
+		if seq > r.after && seq < r.before {
+			return true
+		}
+	}
+	return false
 }
 
 // agentEventTypes is the set of event types the investigation agent may append
@@ -1083,6 +1123,22 @@ func (s *Service) proposalsDisabled(st *roomState) bool {
 	return s.pipelineProposalsDisabled(st.snap.PipelineID)
 }
 
+// proposalsDisabledMsg ends the validation error of a proposal in a room
+// whose pipeline is unknown (errProposalsDisabled).
+const proposalsDisabledMsg = "proposals are disabled for this room"
+
+// errProposalsDisabled is the refusal of a proposal in a room whose pipeline
+// is unknown.
+func errProposalsDisabled(pipelineID string) *Error {
+	return validation(fmt.Sprintf("pipeline %q is unknown; %s", pipelineID, proposalsDisabledMsg))
+}
+
+// isProposalsDisabled reports whether err is errProposalsDisabled.
+func isProposalsDisabled(err error) bool {
+	var re *Error
+	return errors.As(err, &re) && re.Code == codeValidation && strings.HasSuffix(re.Msg, proposalsDisabledMsg)
+}
+
 // pipelineProposalsDisabled is proposalsDisabled by pipeline id, for code that
 // does not hold the room's lock.
 func (s *Service) pipelineProposalsDisabled(pipelineID string) bool {
@@ -1244,15 +1300,21 @@ func (in *inbox) reset(items []agent.HumanInput) {
 // it: another replica's inbox would only collect input no run here reads.
 // Caller holds st's lock.
 func (s *Service) feedInbox(st *roomState, e events.Event) {
+	if input := inputFor(e); input != nil {
+		s.feedInput(st, *input)
+	}
+}
+
+// feedInput pushes one human input to the room's agent inbox, when this
+// replica runs the room's agent. Caller holds st's lock.
+func (s *Service) feedInput(st *roomState, in agent.HumanInput) {
 	if st.inbox == nil || st.snap.Shadow {
 		return
 	}
 	if s.coord != nil && !st.leased {
 		return
 	}
-	if input := inputFor(e); input != nil {
-		st.inbox.push(*input)
-	}
+	st.inbox.push(in)
 }
 
 // inputFor converts an event into the agent.HumanInput it carries, or nil.
@@ -1467,7 +1529,9 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				// would repeat the story the agent already told.
 				s.log.Warn("room: agent stopped (unretryable)", "room", roomID, "err", err)
 				reason := truncateDetail(err.Error())
-				if s.pipelineProposalsDisabled(pipelineID) {
+				// Only the proposal refusal gets the owners.yaml hint: a
+				// model error in the same room is about the key or model.
+				if isProposalsDisabled(err) && s.pipelineProposalsDisabled(pipelineID) {
 					reason = fmt.Sprintf("proposals are disabled in this room because pipeline %q is not configured — add it to owners.yaml and restart the server", pipelineID)
 				}
 				mctx, mcancel := context.WithTimeout(s.ctx, 5*time.Second)
@@ -1519,22 +1583,35 @@ func isBudgetStop(err error) bool {
 }
 
 // isUnretryable reports an error a second attempt cannot cure: bad input, a
-// validation failure, a closed room, or a model request the API refused (a
-// 4xx other than 408, 409 and 429: a bad key or an unknown model fails every
-// run the same way, and the SDK has already retried the transient ones).
+// validation failure, a closed room, or a model request the API refused
+// (modelRefused).
 func isUnretryable(err error) bool {
 	if errors.Is(err, tools.ErrBadInput) || errors.Is(err, topology.ErrBadInput) {
 		return true
 	}
 	var apiErr *anthropic.Error
-	if errors.As(err, &apiErr) {
-		c := apiErr.StatusCode
-		if c >= 400 && c < 500 && c != http.StatusRequestTimeout && c != http.StatusConflict && c != http.StatusTooManyRequests {
-			return true
-		}
+	if errors.As(err, &apiErr) && modelRefused(apiErr) {
+		return true
 	}
 	var re *Error
 	return errors.As(err, &re) && (re.Code == codeValidation || re.Code == codeRoomClosed)
+}
+
+// modelRefused reports a model error every run repeats: a 4xx (a bad key, an
+// unknown model) other than 408, 409 and 429, which the SDK already retried.
+// A 413, or a 400 saying the prompt is too long, is about one run's history
+// (as internal/agent's triage reads it): a fresh run starts from one message,
+// so it is retried.
+func modelRefused(apiErr *anthropic.Error) bool {
+	switch c := apiErr.StatusCode; {
+	case c < 400 || c >= 500:
+		return false
+	case c == http.StatusRequestTimeout, c == http.StatusConflict, c == http.StatusTooManyRequests, c == http.StatusRequestEntityTooLarge:
+		return false
+	case c == http.StatusBadRequest:
+		return !strings.Contains(strings.ToLower(apiErr.RawJSON()), "too long")
+	}
+	return true
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the
