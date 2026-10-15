@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -225,5 +226,35 @@ func TestReconcileInputErrors(t *testing.T) {
 	res, err := rcRun(t, Deps{Src: &fakeSource{}, Wh: &fakeWarehouse{}, Builder: &fakeBuilder{}, Owners: d.Owners}, "orders", rcIn)
 	if err != nil || !strings.Contains(res.Summary, "not supported") {
 		t.Errorf("unsupported: %q %v", res.Summary, err)
+	}
+}
+
+// A healthy pipeline whose newest bucket is still being delivered must not be
+// reported as losing rows (#421); a real loss in an older bucket still is.
+func TestReconcileNewestBucketInFlight(t *testing.T) {
+	now := time.Now()
+	since := now.Add(-59 * time.Minute) // 12 buckets of 5 min
+	in := fmt.Sprintf(`{"table":"public.orders","since":%q}`, since.Format(time.RFC3339Nano))
+	run := func(snk []int64) tools.Result {
+		src := &countSrc{counts: []int64{60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60}}
+		res, err := rcRun(t, rcDeps(src, &countWh{counts: snk}, nil), "orders", in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	res := run([]int64{60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 40})
+	if strings.Contains(res.Summary, "missing") || !strings.Contains(res.Summary, "in flight") {
+		t.Errorf("healthy pipeline, newest bucket short:\n%s", res.Summary)
+	}
+	rows := res.Data.([]ReconcileRow)
+	if !rows[11].InFlight || rows[10].InFlight {
+		t.Errorf("in flight = %v (last), %v (previous)", rows[11].InFlight, rows[10].InFlight)
+	}
+
+	res = run([]int64{60, 60, 60, 20, 60, 60, 60, 60, 60, 60, 60, 40})
+	if !strings.Contains(res.Summary, "sink is missing 40 rows") || !strings.Contains(res.Summary, "in flight") {
+		t.Errorf("real loss in an older bucket:\n%s", res.Summary)
 	}
 }

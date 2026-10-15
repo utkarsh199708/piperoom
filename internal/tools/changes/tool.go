@@ -355,8 +355,8 @@ func asciiLower(s string) string {
 // object_identity text; owners.yaml names and tool inputs are parsed as SQL
 // identifiers without folding (fold false), so their case is kept. A table
 // name that contains '.' or '"' must therefore be written quoted in owners.yaml
-// (public."a.b"); the plain form public.a.b is read as three parts and matches
-// nothing (gap: see #461). A quoted part always keeps its case, // so "Orders" and orders stay two tables. ok is false for an unbalanced quote
+// (public."a.b"); owners.Load refuses the plain form public.a.b (#461). A
+// quoted part always keeps its case, so "Orders" and orders stay two tables. ok is false for an unbalanced quote
 // or an empty part.
 func splitIdent(s string, fold bool) (parts []string, ok bool) {
 	var cur strings.Builder
