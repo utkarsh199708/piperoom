@@ -246,7 +246,7 @@ func TestApprovalFullNoResultsBeforeTimeoutGetsPendingNote(t *testing.T) {
 		t.Fatalf("want exactly one pending note, got %d in:\n%s", n, text)
 	}
 	note := noteLine(text)
-	for _, want := range []string{"proposal p_1 (missing: steps 0, 1)", "the wait limit of 45s was reached"} {
+	for _, want := range []string{"proposal p_1 (missing: steps 1, 2)", "the wait limit of 45s was reached"} {
 		if !strings.Contains(note, want) {
 			t.Fatalf("the note must contain %q, got %q", want, note)
 		}
@@ -262,9 +262,11 @@ func TestApprovalFullNoResultsBeforeTimeoutGetsPendingNote(t *testing.T) {
 }
 
 // Some results arrive and the last step is late: the note names only the steps
-// still missing and does not contradict the results shown with it.
+// still missing and does not contradict the results shown with it. The result
+// is in the room's format: StepIndex 0, text "step 1: ..." (#423).
 func TestApprovalPartialResultsThenTimeoutNamesMissingStepsOnly(t *testing.T) {
-	first := actionInput("proposal p_1 step 0: "+resultSetNoneFromGlobal, okPtr(true))
+	idx := 0
+	first := HumanInput{Kind: "action_result", ProposalID: "p_1", StepIndex: &idx, OK: okPtr(true), Text: "step 1: " + resultSetNoneFromGlobal}
 	inbox := &pushInbox{pending: append(bothApprove("p_1"), first)}
 	model := &scriptedModel{}
 	r, clk, _ := waitRunner(t, model, inbox)
@@ -274,14 +276,14 @@ func TestApprovalPartialResultsThenTimeoutNamesMissingStepsOnly(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	text := requestText(model.calls[0])
-	if !strings.Contains(text, "proposal p_1 step 0:") {
-		t.Fatalf("the step 0 result must reach the model, got:\n%s", text)
+	if !strings.Contains(text, "step 1: "+resultSetNoneFromGlobal) {
+		t.Fatalf("the step 1 result must reach the model, got:\n%s", text)
 	}
 	note := noteLine(text)
-	if !strings.Contains(note, "proposal p_1 (missing: step 1)") {
-		t.Fatalf("the note must name step 1 as missing, got %q", note)
+	if !strings.Contains(note, "proposal p_1 (missing: step 2)") {
+		t.Fatalf("the note must name step 2 as missing, got %q", note)
 	}
-	if strings.Contains(note, "step 0") || strings.Contains(note, "steps 0") {
+	if strings.Contains(note, "step 1") || strings.Contains(note, "steps 1") {
 		t.Fatalf("the note must not mention the step that arrived, got %q", note)
 	}
 	if strings.Contains(note, "Do not say that any step ran") {
@@ -303,7 +305,7 @@ func TestApprovalTwoProposalsOneSettlesOneTimesOut(t *testing.T) {
 	}
 	text := requestText(model.calls[0])
 	note := noteLine(text)
-	if !strings.Contains(note, "proposal p_2 (missing: steps 0, 1)") {
+	if !strings.Contains(note, "proposal p_2 (missing: steps 1, 2)") {
 		t.Fatalf("the note must name p_2, got %q", note)
 	}
 	if strings.Contains(note, "p_1") {
@@ -785,5 +787,22 @@ func TestCompatTrackNoneSubjects(t *testing.T) {
 	}
 	if r.restoresTrackedSubjects(nil) {
 		t.Fatal("an empty proposal must not qualify")
+	}
+}
+
+// missingSteps numbers steps from 1, as the room's action results do.
+func TestMissingStepsIsOneBased(t *testing.T) {
+	cases := map[string]struct {
+		in   []int
+		want string
+	}{
+		"one":      {[]int{0}, "missing: step 1"},
+		"two":      {[]int{0, 1}, "missing: steps 1, 2"},
+		"overflow": {[]int{0, 1, 2, 3, 4, 5, 6, 7}, "missing: steps 1, 2, 3, 4, 5, 6 and 2 more"},
+	}
+	for name, c := range cases {
+		if got := missingSteps(c.in); got != c.want {
+			t.Errorf("%s: missingSteps(%v) = %q, want %q", name, c.in, got, c.want)
+		}
 	}
 }

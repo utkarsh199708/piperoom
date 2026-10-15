@@ -27,6 +27,29 @@ func mentionsAgent(text string) bool {
 
 // AddComment posts a comment; "@agent" in the text sets mentions_agent.
 func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, text string) (events.Event, error) {
+	return s.AddCommentKeyed(ctx, user, roomID, stepID, text, "")
+}
+
+// AddCommentKeyed is AddComment with the request's idempotency key
+// (docs/api.md, Idempotent posts); "" is no key. A key the caller already used
+// in the room answers the stored event, or 409 client_id_reused for another
+// body, before any other check.
+func (s *Service) AddCommentKeyed(ctx context.Context, user User, roomID, stepID, text, clientID string) (events.Event, error) {
+	if err := checkClientID(clientID); err != nil {
+		return events.Event{}, err
+	}
+	same := sameComment(stepID, text)
+	if e, done, err := s.repeatOf(ctx, roomID, user.ID, clientID, same); done {
+		return e, err
+	}
+	e, err := s.addComment(ctx, user, roomID, stepID, text, clientID)
+	if err != nil {
+		return s.raceLoser(ctx, roomID, user.ID, clientID, same, err)
+	}
+	return e, nil
+}
+
+func (s *Service) addComment(ctx context.Context, user User, roomID, stepID, text, clientID string) (events.Event, error) {
 	if strings.TrimSpace(text) == "" {
 		return events.Event{}, validation("text is required")
 	}
@@ -51,6 +74,7 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 		StepID:        stepID,
 		Text:          text,
 		MentionsAgent: mentionsAgent(text),
+		ClientID:      clientID,
 	}
 	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
 	if err == nil && payload.MentionsAgent {
@@ -62,6 +86,31 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 // Steer sends an instruction. The driver's steer goes straight to the agent
 // (steer.sent); anyone else's becomes a pending suggestion (steer.suggested).
 func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (events.Event, error) {
+	return s.SteerKeyed(ctx, user, roomID, text, "")
+}
+
+// SteerKeyed is Steer with the request's idempotency key, under the rules of
+// AddCommentKeyed. The key spans both routes. A repeat appends nothing, wakes
+// nothing and renews no lease; a steer that landed as steer.sent stays that
+// event even after the driver changed.
+func (s *Service) SteerKeyed(ctx context.Context, user User, roomID, text, clientID string) (events.Event, error) {
+	if err := checkClientID(clientID); err != nil {
+		return events.Event{}, err
+	}
+	same := sameSteer(text)
+	if e, done, err := s.repeatOf(ctx, roomID, user.ID, clientID, same); done {
+		return e, err
+	}
+	e, err := s.steer(ctx, user, roomID, text, clientID)
+	if err != nil {
+		// A lost race on a suggestion has already removed its row (the
+		// compensation in steer).
+		return s.raceLoser(ctx, roomID, user.ID, clientID, same, err)
+	}
+	return e, nil
+}
+
+func (s *Service) steer(ctx context.Context, user User, roomID, text, clientID string) (events.Event, error) {
 	if strings.TrimSpace(text) == "" {
 		return events.Event{}, validation("text is required")
 	}
@@ -93,7 +142,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 				return errNoLongerDriver
 			}
 			return nil
-		}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{Text: text})
+		}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{Text: text, ClientID: clientID})
 		if err == nil {
 			s.touchDriverLease(ctx, st, roomID)
 			s.ensureAgentLocked(roomID, st)
@@ -117,6 +166,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 	e, err := s.emitLocked(ctx, st, roomID, events.SteerSuggested, s.humanActor(user), events.SteerSuggestedPayload{
 		SuggestionID: suggestionID,
 		Text:         text,
+		ClientID:     clientID,
 	})
 	if err != nil {
 		dctx, cancel := compensateCtx(ctx)

@@ -40,14 +40,22 @@ together:
 | Item | Severity | Source | Blocks |
 |---|---|---|---|
 | hamba/avro GO-2026-5046/5047/5048, **reachable in production** through the Kafka key decode; `go.mod` still `v2.31.0` | medium–high | `reviews/vuln-report-2026-10.md` §Summary, §avro | any pilot that reads the customer's Kafka |
-| Go toolchain: 13 stdlib findings are cleared only by `go 1.27.2` in `go.mod` and `FROM golang:1.27.2-alpine`; `main` has `go 1.27.0` | per finding | same, §Go toolchain | any pilot |
-| gosnowflake GO-2026-6665 (v1, fix only in v2); no `ParseDSN` mitigation applied | — | same, §Summary | a Snowflake warehouse pilot |
-| Dev mode: "any client that can reach the API can act as any user, including a layer owner". The image bakes in `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (R6 #127 removes it) | F1 open in dev mode | `docs/pilot/README.md` F1; `Dockerfile` | any pilot on a shared network, until OIDC; `PIPEROOM_DEV_ACK` (R0 #138, server R9) makes it an explicit act |
-| A-ID-2 display-name impersonation: the server marks `verified`, the **web badge is pending** | Medium | `docs/api.md` Verified people; audit §A-ID-2 | OIDC pilots with IdP-only (group) members |
+| Dev mode: "any client that can reach the API can act as any user, including a layer owner". The image no longer bakes in dev auth (`Dockerfile:65`); `PIPEROOM_DEV_ACK` makes dev mode an explicit act (`internal/config/config.go:219`) | F1 open in dev mode | `docs/pilot/README.md` F1 | any pilot on a shared network, until OIDC |
+| A-ID-2 display-name impersonation: the server marks `verified`; the web badge merged with #135 (`7a8f90f`, gate G3) | Medium, mitigated | `docs/api.md` Verified people; audit §A-ID-2 | OIDC pilots with IdP-only (group) members: check the badge in the pilot UI |
 | Capacity 6.1 (`Service.mu` held across every append, the write ceiling), 6.3 (`pool_max_conns` in the URL stops the server, so the pool cannot be raised), 6.4 (join-storm replay cliff) | HIGH, HIGH, MEDIUM | `reviews/capacity-2026-10.md` §6 | nothing at pilot scale; they bound it (2.3) |
 | Numbers measured on a **shared 4-vCPU VM with loopback Postgres**; the managed-Postgres re-run ("most important") and a multi-hour soak are not done; replica **failover not tested under load** | — | same, §8, §9.4 | the scale we may promise, not the start |
 | F7: one set of connection settings per process (tenancy splits it in-process; one deployment per customer is the only hard boundary) | open | `docs/pilot/README.md` F7; `docs/pilot/setup.md` §2a | multi-team pilots in one process |
 | Coverage is low where pilot data flows: `internal/store` 8.3%, `clients/postgres` 7.8%, `clients/warehouse` 10.5%, `clients/kafka` 20.2% | — | `reviews/coverage-2026-10.md` | nothing; risk to watch |
+
+Resolved since the 2026-10-14 draft (each checked against `main`, 2026-10-15):
+
+- **Go toolchain.** `go 1.27.2` at `go.mod:3`; `FROM golang:1.27.2-alpine` at `Dockerfile:23` and
+  `cmd/devconsumer/Dockerfile:2`. This is gate G1.
+- **gosnowflake GO-2026-6665.** `go.mod:16` has `github.com/snowflakedb/gosnowflake/v2 v2.3.0` (the fix is in v2.2.0;
+  migration in `9a4fa1e`, #436). `55850be` (#475) removed the allowlist entry: `.github/govulncheck-allow.txt` now lists
+  only GO-2026-5046/5047/5048. The `govulncheck` job passed on the latest completed `main` CI run, 38812713239 (head
+  `a53b497`, which contains both commits). No `ParseDSN` mitigation is needed. `reviews/vuln-report-2026-10.md` stays
+  as the dated record.
 
 ### 2.3 Supported scale we can state
 
@@ -112,9 +120,8 @@ approvers have used phase 2.
 | G4 | Dev mode cannot be exposed by accident: `PIPEROOM_DEV_ACK` (R0 #138 item 6) enforced, and no dev auth baked into the image | A5 (R9, #145) + C1 (R6, #127) | done (eeeeb66, a64382a) |
 | G5 | Pilot docs: fix the six disagreements in 2.4, add a shadow-rooms page and the 2.3 scale statement | C14 + leads | done (#219) |
 
-Not gates for phase 1, but due before phase 2: the managed-Postgres capacity re-run (capacity §8.2), capacity
-6.3 (so the pool can be sized), and a Snowflake decision if the customer's warehouse is Snowflake (GO-2026-6665;
-upgrade to gosnowflake v2, or apply the vuln report's mitigation).
+Not gates for phase 1, but due before phase 2: the managed-Postgres capacity re-run (capacity §8.2) and capacity
+6.3 (so the pool can be sized). The Snowflake item (GO-2026-6665) is closed: see 2.2.
 
 ## 5. Open questions
 

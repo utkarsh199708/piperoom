@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/auth"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
@@ -131,9 +132,10 @@ func (u *usageRelay) emit(ctx context.Context, roomID string, p events.AgentUsag
 }
 
 // newRoomService builds the room service and points the usage relay at it, so
-// the hand-off's agent.usage events reach the room log.
-func newRoomService(d room.Deps, usage *usageRelay) *room.Service {
-	svc := room.New(d)
+// the hand-off's agent.usage events reach the room log. The auth settings
+// are required: they give the room its session liveness rule (withRoomAuth).
+func newRoomService(d room.Deps, authSettings auth.Settings, usage *usageRelay) *room.Service {
+	svc := room.New(withRoomAuth(d, authSettings))
 	usage.set(svc)
 	return svc
 }

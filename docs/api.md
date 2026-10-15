@@ -132,7 +132,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
 
-Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
+Every text field a person types (for example titles, comments, steers, resolutions, trace keys, labels, verdict notes, decline and delete reasons, checklist notes, shadow grades, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Such text that contains a bidirectional control character (U+202A–U+202E, U+2066–U+2069) is refused the same way with `400 validation` ("text contains bidirectional control characters (U+202A-U+202E, U+2066-U+2069)") (#358). Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD, bidirectional control characters are dropped). Alert room titles, watcher notes, a label's `cause` and `fix_that_worked`, and a close resolution (which the web app pre-fills from agent text) have bidirectional control characters dropped instead of refused.
 
 `lease_held`: `control/grant` called by a non-driver while another user's lease is still live. All other
 driver-only endpoints answer `403 not_driver`. `stale_handoff`: the hand-off's creator is no longer the driver,
@@ -554,7 +554,7 @@ export). Another user's request with the same value is a different key.
   is checked as a new request.
 - **Payload.** The event carries the key: `comment.added`, `steer.suggested` and `steer.sent` have `client_id`
   (omitted when the request had none; a `steer.sent` that forwards a suggestion has none, because the forward is the
-  driver's action, not the suggester's request). Clients reconcile their pending copies by it, never by matching text.
+  driver's action, not the suggester's request). Clients reconcile their pending copies by `(actor.id, client_id)`, the event's actor being the caller, never by `client_id` alone (every room reader sees it, so another user can send the same value) and never by matching text.
 - **Without a key** nothing changes: every request appends, so a client that cannot tell whether a request landed
   must not re-send it without a key. A server without this feature ignores the field, so a client retries
   automatically only when the answer's event carries `client_id`.

@@ -470,6 +470,10 @@ func (s *PG) RoomUsage(ctx context.Context, roomID string) (Usage, error) {
 // passes a cap. Agent events stop at the cap, human and system events at the
 // cap plus ReservePercent, room.closed never (classOf). A refused event wraps
 // ErrLogFull and uses no seq. The bytes counted are len(Event.Payload).
+//
+// A payload with a client_id the same actor already used in the room is
+// refused by the unique index room_events_client_id_uq: it wraps
+// ErrClientIDTaken and, like a refused cap, uses no seq.
 func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	return s.appendEvent(ctx, roomID, -1, typ, actor, payload)
 }
@@ -540,7 +544,7 @@ func (s *PG) appendEvent(ctx context.Context, roomID string, expectSeq int64, ty
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO room_events (room_id, seq, type, actor, payload, at) VALUES ($1, $2, $3, $4, $5, $6)`,
 			roomID, seq, string(typ), actorJSON, payloadJSON, at); err != nil {
-			return fmt.Errorf("store: insert event %s/%d: %w", roomID, seq, classify(err))
+			return fmt.Errorf("store: insert event %s/%d: %w", roomID, seq, classifyEventInsert(err))
 		}
 		if _, err := tx.Exec(ctx,
 			`SELECT pg_notify('room_events', $1)`, roomID+":"+strconv.FormatInt(seq, 10)); err != nil {

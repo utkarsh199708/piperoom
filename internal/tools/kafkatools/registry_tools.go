@@ -131,9 +131,9 @@ func (t *registryDiff) Kind() tools.Kind { return tools.KindRead }
 func (t *registryDiff) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"subject":      strProp("subject name"),
-		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (at most 2147483647)"},
-		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest; at most 2147483647)"},
-		"schema":       strProp("optional raw Avro schema JSON; when set, diffs it against to_version (default latest) instead of from_version"),
+		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (at most 2147483647); with schema, the registered side of the diff"},
+		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest; at most 2147483647); with schema and no from_version, the registered side of the diff"},
+		"schema":       strProp("optional raw candidate Avro schema JSON; when set, it is the to side: the registered version (from_version, else to_version, else latest) is diffed to it, so a field the candidate adds shows as added. Reported as to_version 0"),
 	}, "subject")
 }
 func (t *registryDiff) Description() string {
@@ -179,11 +179,21 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 		return tools.Result{}, err
 	}
 
-	var fromSchema string
-	fromVersion := p.FromVersion
+	// The registered version is always the "from" side when a raw schema is
+	// given: the raw schema is the candidate, so what it adds shows as added.
+	fromSchema, toSchema := "", to.Schema
+	fromVersion, outTo := p.FromVersion, toVersion
 	if p.Schema != "" {
-		fromSchema = p.Schema
-		fromVersion = 0 // 0 = raw schema, not a registered version
+		// from_version names the registered side; else to_version, else latest.
+		regVersion, reg := toVersion, to
+		if p.FromVersion > 0 {
+			regVersion = p.FromVersion
+			if reg, err = t.d.Registry.Schema(cctx, p.Subject, regVersion); err != nil {
+				return tools.Result{}, err
+			}
+		}
+		fromSchema, toSchema = reg.Schema, p.Schema
+		fromVersion, outTo = regVersion, 0 // 0 = raw schema, not a registered version
 	} else {
 		if p.FromVersion <= 0 {
 			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
@@ -195,12 +205,12 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 		fromSchema = from.Schema
 	}
 
-	changes, err := diffFields(fromSchema, to.Schema)
+	changes, err := diffFields(fromSchema, toSchema)
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("diff schemas: %w", err)
 	}
 	return res(formatChanges(changes), map[string]any{
-		"subject": p.Subject, "from_version": fromVersion, "to_version": toVersion, "changes": changes,
+		"subject": p.Subject, "from_version": fromVersion, "to_version": outTo, "changes": changes,
 	}), nil
 }
 

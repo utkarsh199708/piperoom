@@ -27,9 +27,15 @@ type Error struct {
 	Status int    // HTTP status
 	Code   string // machine code, e.g. "not_driver"
 	Msg    string // human message
+	// kind marks an Error that code must tell apart without reading Msg
+	// (errors.Is); nil for most.
+	kind error
 }
 
 func (e *Error) Error() string { return e.Msg }
+
+// Unwrap returns the Error's kind marker, if any.
+func (e *Error) Unwrap() error { return e.kind }
 
 // Error codes from docs/api.md.
 const (
