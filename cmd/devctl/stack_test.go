@@ -141,6 +141,9 @@ func TestComposeFile(t *testing.T) {
 	if roomDBVolume != "piperoom-dev_roomdb" {
 		t.Errorf("roomDBVolume = %q, want the compose project's name for the roomdb volume", roomDBVolume)
 	}
+	// The default, not this process's environment: CI's integration job points
+	// PIPEROOM_DB_URL at its own Postgres on :5432 (config treats "" as unset).
+	t.Setenv("PIPEROOM_DB_URL", "")
 	u, err := url.Parse(config.Load().RoomDBURL)
 	if err != nil {
 		t.Fatal(err)
