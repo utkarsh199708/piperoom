@@ -162,4 +162,28 @@ describe('⌘K: a dialog it opens returns focus to what had it before the palett
     await escapePalette()
     await waitFor(() => expect(document.activeElement).toBe(item))
   })
+
+  it('a pointer-down outside the palette returns focus to the timeline item', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    await screen.findByRole('dialog')
+    fireEvent.pointerDown(document.body)
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(item))
+  })
+
+  // Known gap: an action that opens no dialog (here Toggle theme) sends focus to #main, not to the
+  // opener, because a link followed or a sign-out may have removed the opener. Flip this row if a
+  // ticket changes that.
+  it('GAP: choosing an action that opens nothing lands on #main, not the opener', async () => {
+    render(<Harness />)
+    const item = screen.getByRole('button', { name: 'timeline item' })
+    item.focus()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'open palette' })))
+    fireEvent.click(await screen.findByRole('option', { name: /Toggle theme/ }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(document.activeElement).toBe(document.getElementById('main')))
+  })
 })
