@@ -476,9 +476,17 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 		}
 		return
 	}
-	// What the room knew before this open: nothing after a restart (the
-	// watcher cannot tell what it carried), its keys when it is our room that
-	// stayed open after its signals cleared.
+	// What the room knew before this open: its keys when it is our room that
+	// stayed open after its signals cleared. After a restart the watcher has
+	// no told list; the room service's log says what the room carried (QA Q4
+	// R2), so a key it never carried is a new incident that wakes the agent.
+	stale := false
+	w.mu.Lock()
+	_, inProcess := w.pipes[id].untold(roomID, nil)
+	w.mu.Unlock()
+	if !created {
+		stale = w.seedFromRoom(now, id, roomID)
+	}
 	w.mu.Lock()
 	fresh, known := w.pipes[id].untold(roomID, v.keys())
 	w.mu.Unlock()
@@ -491,10 +499,12 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 		// is not woken, docs/api.md); in-process, keys the room has not seen
 		// are a new incident.
 		how := "re-attached after a restart"
-		if known {
+		if inProcess {
 			how = "fired again in the open room"
 		}
-		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, how, ev), ev, known && len(fresh) > 0)
+		// A room that fails the join rules (old, flagged title) is a new
+		// incident for whoever is in it, whatever it carried before.
+		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, how, ev), ev, (known && len(fresh) > 0) || stale)
 	}
 	w.assignFollowers(now, id, roomID, storm, led)
 	if len(affected) > 1 {
@@ -502,6 +512,37 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 	}
 	w.log.Info("watch: room "+map[bool]string{true: "opened", false: "joined"}[created],
 		"mode", string(w.cfg.Mode), "pipeline", id, "room", roomID, "severity", v.sev)
+}
+
+// seedFromRoom learns what the watcher's own open room carried when the
+// pipeline has no told list for it (a restart, a leadership change): the
+// keys come from ClosedRoomKeysSink, which reads any room, open or not. It
+// also reports whether the room fails the join rules (JoinMaxAge, flagged
+// title), so the post wakes the agent even for a repeated key. Called
+// without w.mu.
+func (w *Watcher) seedFromRoom(now time.Time, id, roomID string) (stale bool) {
+	if ris, ok := w.rooms.(RoomInfoSink); ok {
+		if info, ok := ris.OpenRoomInfo(id); ok && info.RoomID == roomID &&
+			(!joinable(now, info, w.cfg.JoinMaxAge) || len(w.titleFlags(roomID)) > 0) {
+			stale = true
+			w.log.Info("watch: re-attached room is old or flagged, telling the agent as a new incident",
+				"mode", string(w.cfg.Mode), "pipeline", id, "room", roomID)
+		}
+	}
+	w.mu.Lock()
+	seeded := w.pipes[id].toldIndex(roomID) >= 0
+	w.mu.Unlock()
+	if seeded {
+		return stale
+	}
+	if ks, ok := w.rooms.(ClosedRoomKeysSink); ok {
+		if keys, ok := ks.RoomSignalKeys(roomID); ok && len(keys) > 0 {
+			w.mu.Lock()
+			w.pipes[id].tell(roomID, keys)
+			w.mu.Unlock()
+		}
+	}
+	return stale
 }
 
 // assignFollowers puts the other members of a storm into the leader's room

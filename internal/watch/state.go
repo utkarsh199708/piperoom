@@ -117,14 +117,16 @@ type sigState struct {
 const maxSignalTargets = 16
 
 // addTargets merges the targets of a breach reading.
-func (s *sigState) addTargets(ts []string) {
+func (s *sigState) addTargets(ts []string) (grew bool) {
 	for _, t := range ts {
 		if t == "" || slices.Contains(s.targets, t) || len(s.targets) >= maxSignalTargets {
 			continue
 		}
 		s.targets = append(s.targets, t)
+		grew = true
 	}
 	slices.Sort(s.targets)
+	return grew
 }
 
 // keys are the signal's incident keys: "connector_down:pg-orders" per target,
@@ -151,7 +153,15 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 	switch r.v {
 	case vBreach, vBreachNow:
 		s.clearingSince = time.Time{}
-		s.addTargets(r.targets)
+		grew := s.addTargets(r.targets)
+		if s.phase == phaseAcked && grew {
+			// A target the closed incident did not carry (a second connector,
+			// group or DLQ topic) is a different incident: post it at once,
+			// whatever escalation did before (QA Q4 R1). Its key is not in
+			// the cooldown, so the open is not held back.
+			s.phase, s.notified = phaseFiring, false
+			return tNone
+		}
 		if s.phase != phaseOK {
 			return tNone
 		}

@@ -663,14 +663,20 @@ func (l *logBuf) count(s string) int {
 type pipeSpec struct {
 	id    string
 	watch string // already indented under the pipeline (4 spaces)
+	// extraConn are connectors besides pg-<id> (Q4).
+	extraConn []string
 }
 
 func ownersYAML(ps ...pipeSpec) string {
 	var b strings.Builder
 	b.WriteString("pipelines:\n")
 	for _, p := range ps {
-		fmt.Fprintf(&b, "  - id: %s\n    title: %s\n    topic_prefix: %s\n    source_tables: [public.t]\n    connectors: [pg-%s]\n    consumer_groups: [g-%s]\n",
-			p.id, p.id, p.id, p.id, p.id)
+		extra := ""
+		for _, c := range p.extraConn {
+			extra += ", " + c
+		}
+		fmt.Fprintf(&b, "  - id: %s\n    title: %s\n    topic_prefix: %s\n    source_tables: [public.t]\n    connectors: [pg-%s%s]\n    consumer_groups: [g-%s]\n",
+			p.id, p.id, p.id, p.id, extra, p.id)
 		b.WriteString(p.watch)
 	}
 	return b.String()
