@@ -239,7 +239,19 @@ func (a *restartTask) Validate(ctx context.Context, raw json.RawMessage) error {
 	}
 	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
-	return a.d.connectorExists(ctx, p.Connector)
+	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
+		return err
+	}
+	// A task the connector does not list would pass approval and fail at
+	// Execute with Connect's 404.
+	st, err := a.d.Connect.Status(ctx, p.Connector)
+	if err != nil {
+		return fmt.Errorf("actions: status of %s: %w", p.Connector, err)
+	}
+	if taskState(st, p.Task) == "" {
+		return fmt.Errorf("actions: %s has no task %d (it lists %d task(s))", p.Connector, p.Task, len(st.Tasks))
+	}
+	return nil
 }
 
 func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
@@ -578,7 +590,10 @@ func (a *registerSchema) Validate(ctx context.Context, raw json.RawMessage) erro
 	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" || p.Schema == "" {
 		return fmt.Errorf("actions: subject and schema are required")
 	}
-	if _, err := avro.Parse(p.Schema); err != nil {
+	// A fresh cache per call: avro.Parse shares a process-wide cache, so a
+	// name defined by an earlier Validate (any room) would satisfy a
+	// reference this schema never defines.
+	if _, err := avro.ParseWithCache(p.Schema, "", &avro.SchemaCache{}); err != nil {
 		return fmt.Errorf("actions: schema is not valid Avro: %v", err)
 	}
 	ctx, cancel := a.d.validateContext(ctx)

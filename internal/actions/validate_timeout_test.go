@@ -24,6 +24,7 @@ var validateCases = []struct {
 	hangPath string
 }{
 	{"connect_restart_task", `{"connector":"pg-orders-connector","task":0}`, ""},
+	{"connect_restart_task", `{"connector":"pg-orders-connector","task":0}`, "/connectors/pg-orders-connector/status"},
 	{"connect_restart_connector", `{"connector":"pg-orders-connector"}`, ""},
 	{"connect_resume_connector", `{"connector":"pg-orders-connector"}`, ""},
 	{"connect_resume_connector", `{"connector":"pg-orders-connector"}`, "/connectors/pg-orders-connector/status"},
@@ -83,11 +84,12 @@ func TestValidateReturnsDeadlineErrorWhenTargetNeverAnswers(t *testing.T) {
 	}
 }
 
-// pausedConnect reports every connector as PAUSED, so resume validates.
+// pausedConnect reports every connector as PAUSED with task 0, so resume
+// and restart_task validate.
 type pausedConnect struct{ fakeConnect }
 
 func (*pausedConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
-	return clients.ConnectorStatus{Name: "pg-orders-connector", State: "PAUSED"}, nil
+	return clients.ConnectorStatus{Name: "pg-orders-connector", State: "PAUSED", Tasks: []clients.TaskStatus{{ID: 0, State: "PAUSED"}}}, nil
 }
 
 // The injected deadline must not change the outcome for a target that answers.
