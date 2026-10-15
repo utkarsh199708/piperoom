@@ -24,6 +24,8 @@ package evals
 // so anything the pre-#17 rule skipped because of a negator in scope is still
 // skipped; only negators that do not reach the term stopped counting.
 
+import "regexp"
+
 var (
 	forbiddenNegators = []string{"not", "never", "no", "t", "cannot", "without", "against", "avoid*",
 		"instead of", "rather than", "neither", "nor"}
@@ -141,19 +143,49 @@ func contrastBetween(toks []string, from, to int) bool {
 	return false
 }
 
-// termAsserted reports whether term occurs in toks at a position no denial in
-// spans covers.
-func termAsserted(toks []string, spans []denialSpan, term string) bool {
+// termAsserted reports whether term occurs in toks inside comma part p (see
+// commaParts) at a position no denial in spans covers.
+func termAsserted(toks []string, part []int, p int, spans []denialSpan, term string) bool {
 	want, _, ok := termTokens(term)
 	if !ok {
 		return false
 	}
 	for _, at := range findTerm(toks, term) {
-		if !forbiddenDenied(toks, spans, at, at+len(want)) {
+		if part[at] == p && part[at+len(want)-1] == p && !forbiddenDenied(toks, spans, at, at+len(want)) {
 			return true
 		}
 	}
 	return false
+}
+
+// partSplit is a comma that ends a part of a clause; "1,000" is one number.
+var partSplit = regexp.MustCompile(`,(\s|$)`)
+
+// commaParts tokenises a clause and numbers each token's comma part. A comma
+// ends a part only after a predicate of its own (an auxiliary verb: "nothing
+// is lost, the slot is still there"); after a bare noun phrase it is a list
+// or an aside ("order-sync, Connect and the registry crashed", "the
+// consumer, which many suspected, crashed") and the part goes on. The tokens
+// are tokenize(clause): a comma never joins two tokens.
+func commaParts(clause string) (toks []string, part []int, n int) {
+	cur := 0
+	for _, p := range partSplit.Split(clause, -1) {
+		pt := tokenize(p)
+		for _, t := range pt {
+			toks = append(toks, t)
+			part = append(part, cur)
+		}
+		for _, t := range pt {
+			if auxVerbs[t] {
+				cur++
+				break
+			}
+		}
+	}
+	if len(part) > 0 {
+		n = part[len(part)-1] + 1
+	}
+	return toks, part, n
 }
 
 // matchForbidden reports whether text tells one of the forbidden stories: a
@@ -162,24 +194,30 @@ func termAsserted(toks []string, spans []denialSpan, term string) bool {
 // another still fires.
 func matchForbidden(rows [][]string, text string) bool {
 	for _, clause := range clauseSplit.Split(text, -1) {
-		toks := tokenize(clause)
+		toks, part, n := commaParts(clause)
 		if len(toks) == 0 {
 			continue
 		}
+		// Denials reach across commas ("no lag, so reset to latest" tells
+		// no story), but a row's terms must share one comma part:
+		// "nothing is lost, the slot is still there" does not say "lost the
+		// slot".
 		spans := forbiddenDenials(toks)
 		for _, row := range rows {
 			if len(row) == 0 {
 				continue
 			}
-			all := true
-			for _, term := range row {
-				if !termAsserted(toks, spans, term) {
-					all = false
-					break
+			for p := 0; p < n; p++ {
+				all := true
+				for _, term := range row {
+					if !termAsserted(toks, part, p, spans, term) {
+						all = false
+						break
+					}
 				}
-			}
-			if all {
-				return true
+				if all {
+					return true
+				}
 			}
 		}
 	}

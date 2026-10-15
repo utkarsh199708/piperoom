@@ -38,6 +38,23 @@
 #   - Schema Registry DELETE /subjects/{subject}/versions/{version}?permanent=true hard-deletes a version
 #     and its id; IMPORT mode is the way to re-register a schema under a given id.
 #   - Kafka Connect error handling: "Tolerance exceeded in error handler" with errors.tolerance=none.
+#
+# Tool budget (E7b review, max_tool_calls 16, unchanged): the reads a careful on-call engineer
+#   needs to reach the cause with evidence, from the recordings above, the steer and the prompt:
+#     1 connect_status wh-orders-sink (task 0 FAILED, "Schema 7 not found; error code: 40403":
+#       required fact, evidence tool)
+#     2 schema_registry_versions pg.public.orders-value (versions [1 2], latest id 5: version 3 is
+#       gone; required fact, evidence tool)
+#     3 pg_recent_ddl (the 08:12 ADD COLUMN discount_code: version 3 existed)
+#     4 schema_registry_diff pg.public.orders-value (the surviving versions differ by nothing:
+#       rules out the "schema change broke the sink" trap with one read)
+#     5 connect_status pg-orders-connector (RUNNING: the producer still writes id 7)
+#     6 kafka_consumer_lag connect-wh-orders-sink (Empty, lag 347879: the impact)
+#   The steer ("who touched the registry?") is answered by Arjun's audit-log comment; no tool
+#   reads the registry audit log. pipeline_map is optional (the alert carries it). That is 6
+#   reads; 6 + 2 = 8 <= 16, so the budget stays. The live runs of 38717633575 used 19-21 reads
+#   (eight schema_registry_diff variants are recorded because runs walk every version pair);
+#   that is redundant reading, which A4's E7a addresses in the prompt, not a budget defect.
 
 name: avro-schema-id-deleted-sink-failed
 description: |
