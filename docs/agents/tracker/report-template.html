@@ -1,0 +1,124 @@
+<title>Piperoom Daily Report</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: date strip, five stat tiles, flags first, then one table per squad. Same tokens as the tracker page. */
+:root{
+  --bg:#f5f7f7; --panel:#ffffff; --fg:#17212b; --muted:#5b6873; --line:#dde3e6; --accent:#0e6b74;
+  --ok:#2f7d4f; --ok-bg:#e3f2e8; --warn:#a35a00; --warn-bg:#fbefdc; --bad:#b3261e; --bad-bg:#fbe6e4; --na:#6b7680; --na-bg:#eceff1; --info:#1f5fa8; --info-bg:#e2ecf8;
+  --f-body:"IBM Plex Sans",system-ui,sans-serif; --f-head:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif; --f-mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#11171c; --panel:#182128; --fg:#e4eaee; --muted:#93a1ab; --line:#2a353d; --accent:#5cc2cb;
+  --ok:#7fd19c; --ok-bg:#1c3326; --warn:#f0b765; --warn-bg:#3a2a14; --bad:#f19a92; --bad-bg:#3b1f1d; --na:#9aa6ae; --na-bg:#222c33; --info:#8dbbf0; --info-bg:#1b2b40; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#11171c; --panel:#182128; --fg:#e4eaee; --muted:#93a1ab; --line:#2a353d; --accent:#5cc2cb;
+  --ok:#7fd19c; --ok-bg:#1c3326; --warn:#f0b765; --warn-bg:#3a2a14; --bad:#f19a92; --bad-bg:#3b1f1d; --na:#9aa6ae; --na-bg:#222c33; --info:#8dbbf0; --info-bg:#1b2b40; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;line-height:1.45}
+.wrap{max-width:1120px;margin:0 auto;padding-block:24px 48px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:grid;gap:20px}
+h1{font-family:var(--f-head);font-size:26px;margin:0;text-wrap:balance}
+h2{font-family:var(--f-head);font-size:15px;margin:0;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)}
+.sub{color:var(--muted);margin:4px 0 0}
+.mono{font-family:var(--f-mono);font-size:12.5px}
+.days{display:flex;flex-wrap:wrap;gap:6px}
+.day{font:inherit;font-family:var(--f-mono);font-size:12.5px;padding:5px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--fg);cursor:pointer}
+.day[aria-pressed="true"]{background:var(--accent);color:var(--bg);border-color:var(--accent);font-weight:600}
+.day:focus-visible,.tog:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:grid;gap:2px}
+.stat span{color:var(--muted);font-size:12.5px}
+.stat b{font-family:var(--f-mono);font-size:22px;font-variant-numeric:tabular-nums}
+.flags{border:1px solid var(--warn);background:var(--warn-bg);border-radius:6px;padding:12px 14px;display:grid;gap:8px}
+.flags h2{color:var(--warn)}
+.flags ul{margin:0;padding-left:18px;display:grid;gap:4px}
+.flags.none{border-color:var(--ok);background:var(--ok-bg)} .flags.none h2{color:var(--ok)}
+.group{background:var(--panel);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.ghead{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline;padding:10px 14px;border-bottom:1px solid var(--line)}
+.ghead .gid{font-family:var(--f-mono);font-weight:600;color:var(--accent)}
+.ghead .n{color:var(--muted);font-family:var(--f-mono);font-size:12.5px}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-weight:500;color:var(--muted);font-size:12px;letter-spacing:.03em;text-transform:uppercase;padding:8px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:9px 12px;border-top:1px solid var(--line);vertical-align:top}
+tbody tr:first-child td{border-top:0}
+td.id{font-family:var(--f-mono);font-size:12.5px;white-space:nowrap;width:1%}
+td.lane{white-space:nowrap;width:1%}
+.what{min-width:220px}
+.why{color:var(--muted);font-size:12.5px;margin-top:2px}
+.cell{display:grid;gap:3px;min-width:150px}
+.pill{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 7px;border-radius:999px;letter-spacing:.02em;white-space:nowrap}
+.ok{color:var(--ok);background:var(--ok-bg)} .warn{color:var(--warn);background:var(--warn-bg)} .bad{color:var(--bad);background:var(--bad-bg)} .na{color:var(--na);background:var(--na-bg)} .info{color:var(--info);background:var(--info-bg)}
+.kv{font-size:12.5px;color:var(--muted)} .kv b{color:var(--fg);font-weight:500}
+.tog{font:inherit;background:none;border:0;color:var(--accent);cursor:pointer;padding:0;font-size:12.5px}
+.detail{display:none;margin-top:6px;font-size:12.5px;color:var(--muted);font-family:var(--f-mono);white-space:pre-wrap;word-break:break-word}
+.detail.open{display:block}
+a{color:var(--accent)}
+footer{color:var(--muted);font-size:12.5px}
+@media (max-width:640px){ td,th{padding:8px 10px} }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Piperoom daily report</h1>
+    <p class="sub">What each squad worked on, how it was tested, whether it opened anything new, and whether the right agent had it. Window ends <span class="mono" id="until"></span>.</p>
+  </header>
+  <nav class="days" id="days" aria-label="Report days"></nav>
+  <section class="stats" id="stats" aria-label="Day summary"></section>
+  <section class="flags" id="flags"></section>
+  <section id="list" style="display:grid;gap:14px"></section>
+  <footer>Built from the <span class="mono">[REPORT]</span> comments on the <a href="https://github.com/utkarsh199708/piperoom/issues/255" target="_blank" rel="noopener">Daily reports</a> issue. Rules: <span class="mono">docs/agents/roles/reporter.md</span>.</footer>
+</div>
+
+<script>
+const REPORTS = __REPORTS__; // newest first
+const REPO = "https://github.com/utkarsh199708/piperoom/";
+const esc = t => String(t==null?"":t).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let cur = 0;
+try { const d = localStorage.getItem("rep-day"); const i = REPORTS.findIndex(r=>r.date===d); if(i>=0) cur=i; } catch(e){}
+
+const T = {pass:"ok", green:"ok", clean:"ok", right:"ok", merged:"ok",
+           fail:"bad", red:"bad", regressed:"bad", under:"bad", blocked:"bad",
+           claimed:"warn", over:"warn", unknown:"warn", "in-review":"info", "in-progress":"info", open:"info",
+           none:"na", "n/a":"na"};
+const pill = v => `<span class="pill ${T[v]||"na"}">${esc(v)}</span>`;
+const link = id => { const m = /^#(\d+)$/.exec(id); return m ? `<a href="${REPO}pull/${m[1]}" target="_blank" rel="noopener">${esc(id)}</a>` : esc(id); };
+
+function testsCell(t){
+  const parts = ["unit","integration","web","ci"].filter(k=>t[k] && t[k]!=="none" && t[k]!=="n/a").map(k=>`<span class="kv">${k} ${pill(t[k])}</span>`);
+  return `<div class="cell">${parts.length?parts.join(""):`<span class="kv">${pill("none")}</span>`}${t.evidence?`<button class="tog" data-tog>evidence</button><div class="detail">${esc(t.evidence)}</div>`:""}</div>`;
+}
+function regCell(r){
+  const qa = (r.qa_issues||[]).length ? ` <span class="kv">opened ${r.qa_issues.map(n=>`<a href="${REPO}issues/${String(n).replace("#","")}" target="_blank" rel="noopener">#${String(n).replace("#","")}</a>`).join(", ")}</span>` : "";
+  return `<div class="cell">${pill(r.verdict||"unknown")}${qa}<span class="kv">main ${pill(r.ci_main||"n/a")}${r.evals&&r.evals!=="n/a"?` evals ${pill(r.evals)}`:""}</span></div>`;
+}
+function asgCell(a){
+  const lane = a.lane_right===false ? `<span class="kv">lane ${pill("breach")}</span>` : (a.lane_right===true?`<span class="kv">lane ${pill("right")}</span>`:"");
+  const ff = (a.foreign_files||[]).length ? `<div class="detail">${esc(a.foreign_files.join("\n"))}</div>` : "";
+  return `<div class="cell">${pill(a.verdict||"unknown")}<span class="kv">${esc(a.complexity||"?")} on <b>${esc(a.model_used||"unknown")}</b></span>${lane}${a.why?`<button class="tog" data-tog>why</button><div class="detail">${esc(a.why)}${ff?"\n"+esc((a.foreign_files||[]).join("\n")):""}</div>`:ff}</div>`;
+}
+function render(){
+  const R = REPORTS[cur]; if(!R){ document.getElementById("list").innerHTML = `<div class="group" style="padding:14px;color:var(--muted)">No report yet.</div>`; return; }
+  document.getElementById("until").textContent = R.until || R.date;
+  document.getElementById("days").innerHTML = REPORTS.map((r,i)=>`<button class="day" data-i="${i}" aria-pressed="${i===cur}">${esc(r.date)}</button>`).join("");
+  const s = R.summary||{};
+  const hv = s.main_health||"unknown";
+  document.getElementById("stats").innerHTML = [["Merged",s.merged],["PRs opened",s.opened],["Bugs filed",s.bugs_filed],["Bugs closed",s.bugs_closed]].map(([k,v])=>`<div class="stat"><span>${k}</span><b>${v==null?"–":esc(v)}</b></div>`).join("")
+    + `<div class="stat"><span>main health</span><b>${pill(hv)}</b>${s.main_health_note?`<span class="mono">${esc(s.main_health_note)}</span>`:""}</div>`;
+  const F = R.flags||[];
+  const fl = document.getElementById("flags"); fl.className = "flags"+(F.length?"":" none");
+  fl.innerHTML = `<h2>${F.length?`Flags (${F.length})`:"No flags"}</h2>${F.length?`<ul>${F.map(f=>`<li>${esc(f)}</li>`).join("")}</ul>`:""}`;
+  document.getElementById("list").innerHTML = (R.squads||[]).filter(g=>(g.items||[]).length).map(g=>`<article class="group">
+    <div class="ghead"><span class="gid">${esc(g.squad)}</span><span class="n">${g.items.length} item${g.items.length===1?"":"s"} · ${g.items.filter(i=>i.status==="merged").length} merged</span></div>
+    <div class="tbl"><table><thead><tr><th>Item</th><th>Lane · model</th><th>Status</th><th>Tests</th><th>Regression</th><th>Assignment</th></tr></thead><tbody>
+    ${g.items.map(i=>`<tr><td class="id">${link(i.id)}<div class="what" style="font-family:var(--f-body);font-size:14px;white-space:normal;margin-top:2px">${esc(i.title)}</div>${i.kind?`<div class="why">${esc(i.kind)}</div>`:""}</td>
+      <td class="lane">${esc(i.lane)}<div class="why">${esc(i.model||"")}</div></td><td>${pill(i.status)}</td>
+      <td>${testsCell(i.tests||{})}</td><td>${regCell(i.regression||{})}</td><td>${asgCell(i.assignment||{})}</td></tr>`).join("")}
+    </tbody></table></div></article>`).join("");
+}
+document.addEventListener("click", e => {
+  const d = e.target.closest(".day"); if(d){ cur = +d.dataset.i; try{localStorage.setItem("rep-day",REPORTS[cur].date)}catch(x){} render(); return; }
+  const t = e.target.closest("[data-tog]"); if(t){ const n = t.nextElementSibling; n.classList.toggle("open"); }
+});
+render();
+</script>

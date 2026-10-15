@@ -27,6 +27,7 @@ apply and win on any conflict. The human (Utkarsh) can override anything at any 
 | **PM** | Fable 5.1 (`claude-fable-5-1`) | daily, cloud scheduled task | `type:feature` issues: problem, evidence, success metric, out of scope, parts per squad, rank | code, task files, file:line specs |
 | **QA** | Opus 5.5 | hourly on new merges; nightly full sweep | `type:bug` issues, one per confirmed finding, with a failing test as the repro | fixes; editing any file |
 | **Dispatcher** | Opus 5.5 | hourly, cloud scheduled task | labels, sub-issues, assignments; starts cloud worker sessions; scales lanes; refreshes the board | code; merging |
+| **Reporter** | Opus 5.5 | daily, end of day | the `[REPORT]` comment on issue #255 and the report page: per squad, what was worked on, how it was tested, whether it opened new issues, whether the right agent had it (`roles/reporter.md`) | code; tickets; changing anything |
 | **LEAD-ARCH** | Opus 5.5 | existing | specs approved features into `tasks/` + contract PRs; **the only merger** | feature code |
 | **LEAD-REVIEW / LEAD-CLOUD** | Opus 5.5 | existing | code review verdicts | merging, feature code |
 | **Worker lanes** | per ticket: `model:sonnet` (spec is complete, mechanical) or `model:opus` (prompts, security, concurrency, approvals, contracts) | per ticket | one PR per ticket, inside the lane's folders | other lanes' folders, contract files, `main` |
@@ -139,6 +140,10 @@ lanes active, parked or surging per squad, and the tickets nobody owns.
 | QA | every hour at :24 | Opus 5.5 | `trig_01UgELZvZyhH1vUPonA46Pq5` |
 | Dispatcher | every hour at :54 (after QA, so new tickets are routed the same hour) | Opus 5.5 | `trig_01NWKMCX4G5JahG18YwtYWar` |
 | PM | daily 08:47 | Fable 5.1 | `trig_01VdaXpKTkaRA85EFhp8j64U` |
+| Reporter | daily 18:36 (push + email notification) | Opus 5.5 | `trig_01TqVi3pEBthNuhTXhGmVvwt` |
+
+Pages: tracker (who is on what) https://claude.ai/artifact/Mf3MGghDsMyP1NfsCG58ME · daily report
+https://claude.ai/artifact/1HWHJXz1Y4bzw3MRt45f7J · ops log issue #250 · daily reports issue #255.
 
 Each run is a fresh cloud session that reads its role file and the ops log issue #250. Seed tickets: #251 (F2a),
 #252 (F9 Slack), #253 (F10d), #254 (split the untagged QA PRs).
