@@ -526,20 +526,22 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 			}
 		}
 		for _, r := range fetches.Records() {
-			if r.Offset >= stopAt[r.Partition] {
-				continue
-			}
-			if cctx.Err() != nil {
-				// Check between records so a batch of slow keys cannot run past the scan deadline.
-				return cut(cctx.Err())
-			}
 			// As in collectPeek: a transaction marker can be the last offset
 			// of the window, and it finishes the partition but is no match.
+			// So does a record past the window: compaction or an aborted
+			// transaction can leave no record at the last offset.
 			if r.Offset+1 >= stopAt[r.Partition] {
 				finished[r.Partition] = true
 			}
-			if r.Attrs.IsControl() {
+			if r.Offset >= stopAt[r.Partition] || r.Attrs.IsControl() {
 				continue
+			}
+			if cctx.Err() != nil {
+				// Check between records so a batch of slow keys cannot run
+				// past the scan deadline. This record is not checked, so its
+				// partition is not finished.
+				delete(finished, r.Partition)
+				return cut(cctx.Err())
 			}
 			scanned++
 			dk, derr := c.decodeKey(cctx, r.Key)

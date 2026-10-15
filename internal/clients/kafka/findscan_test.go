@@ -123,3 +123,23 @@ func TestFindByKeyOrdersByOffset(t *testing.T) {
 		t.Fatalf("order = %v, want %v", order, want)
 	}
 }
+
+// TestFindByKeyGapAtWindowEnd: compaction or an aborted transaction can leave
+// no record at the window's last offset; the next record delivered lies past
+// the window. It must still finish the partition, or the scan spins to its
+// deadline and an absent key reads as "scan incomplete".
+func TestFindByKeyGapAtWindowEnd(t *testing.T) {
+	l := &fakeLister{
+		starts: merge(listed("t", map[int32]int64{0: 0})),
+		ends:   merge(listed("t", map[int32]int64{0: 10})),
+	}
+	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("t", data(0, 0, "a"), data(0, 1, "b"), data(0, 5, "c"))}}
+	var got KeyScan
+	quick(t, func(ctx context.Context) (err error) {
+		got, err = clientWith(l, cons).FindByKeyReport(ctx, "t", "k", epoch, 3)
+		return err
+	})
+	if len(got.Refs) != 0 || !reflect.DeepEqual(got.Truncated, []int32{0}) {
+		t.Fatalf("got %+v, want not found with partition 0 cut by max_scan", got)
+	}
+}
