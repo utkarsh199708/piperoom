@@ -196,7 +196,15 @@ func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evid
 	if !s.roomOpen(st) {
 		return roomClosed("room already closed")
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text})
+	var payload any = events.AgentMessagePayload{Text: text}
+	if newIncident {
+		in := incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, NewIncident: true}
+		if len(evidence) > 0 {
+			in.AgentText = agent.AlertEvidenceText(evidence)
+		}
+		payload = in
+	}
+	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, payload)
 	if err != nil {
 		// A full log cannot take more evidence; retrying would not help, so
 		// the note is dropped with a log line instead of an error the watcher
@@ -209,20 +217,70 @@ func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evid
 	}
 	switch {
 	case newIncident:
-		s.newIncidentLocked(ctx, roomID, st, e.Seq, text, evidence)
+		s.newIncidentLocked(ctx, roomID, st, evidence)
 	case len(evidence) > 0:
 		s.alertUpdateLocked(roomID, st, e.Seq, evidence)
 	}
 	return nil
 }
 
-// newIncidentLocked gives the room's agent a new incident: it starts a run
-// when the room has none and queues a waking "alert_update" with NewIncident
-// set. With a shared store only the lease owner's inbox takes it. Caller holds
-// s.mu.
-func (s *Service) newIncidentLocked(ctx context.Context, roomID string, st *roomState, seq int64, note string, raw json.RawMessage) {
-	if st.snap.Shadow || st.inbox == nil || st.deleting || !s.roomOpen(st) {
+// incidentNotePayload is the agent.message a new-incident join writes: the
+// note, plus the mark and the text the agent gets (QA F21). The log is the
+// store-backed inbox (docs/design/replicas.md section 4): whichever replica
+// holds the room's agent lease folds this event and inputFor turns it into
+// the waking "alert_update" with NewIncident set, so the watcher's leader
+// need not be the lease owner. Only the service writes system messages, so
+// the mark cannot come from a person. Readers of AgentMessagePayload ignore
+// the extra fields.
+type incidentNotePayload struct {
+	events.AgentMessagePayload
+	NewIncident bool `json:"new_incident,omitempty"`
+	// AgentText is the evidence as the agent reads it
+	// (agent.AlertEvidenceText); "" means the note text.
+	AgentText string `json:"agent_text,omitempty"`
+}
+
+// incidentInput is the agent input of a new-incident note, or nil for any
+// other agent.message.
+func incidentInput(e events.Event) *agent.HumanInput {
+	if e.Type != events.AgentMessage || e.Actor.Kind != events.ActorSystem {
+		return nil
+	}
+	p, ok := decode[incidentNotePayload](e)
+	if !ok || !p.NewIncident {
+		return nil
+	}
+	text := p.AgentText
+	if text == "" {
+		text = p.Text
+	}
+	return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "alert_update", Text: text, NewIncident: true}
+}
+
+// newIncidentLocked gives the room's agent a new incident on the replica
+// that wrote the note: the note's fold already queued the waking input
+// (inputFor) for the lease owner, so this only starts a run when the room
+// has none, and re-runs an old first look. Caller holds s.mu.
+func (s *Service) newIncidentLocked(ctx context.Context, roomID string, st *roomState, raw json.RawMessage) {
+	if !s.wakeForIncidentLocked(ctx, roomID, st) {
+		// Not started here (log full, service closing, another replica holds
+		// the room): the lease owner reads the incident from the log.
+		s.log.Info("room: new incident joined; the agent runs elsewhere or not at all", "room", roomID)
 		return
+	}
+	if len(raw) > 0 {
+		s.refireTriageLocked(roomID, st, raw)
+	}
+}
+
+// wakeForIncidentLocked makes sure the room has an agent run here to read a
+// new incident: a run that ended on its own is freed and a new one started,
+// the way a steer starts one (agent slots, and with a shared store the room
+// lease). A lease taken here primes the inbox with the pending input, the
+// incident included. It reports whether a run is here. Caller holds s.mu.
+func (s *Service) wakeForIncidentLocked(ctx context.Context, roomID string, st *roomState) bool {
+	if st.snap.Shadow || st.inbox == nil || st.deleting || !s.roomOpen(st) {
+		return false
 	}
 	if st.agentCancel != nil && st.agentDone == st.agentRun {
 		// The run ended on its own and its supervisor is gone: free the room
@@ -231,21 +289,7 @@ func (s *Service) newIncidentLocked(ctx context.Context, roomID string, st *room
 		st.agentCancel = nil
 	}
 	s.ensureAgentLocked(ctx, roomID, st)
-	if st.agentCancel == nil || (s.coord != nil && !st.leased) {
-		// Not started here (log full, service closing, another replica holds
-		// the room): the note is in the room for the people.
-		s.log.Info("room: new incident joined; no agent run here to tell", "room", roomID)
-		return
-	}
-	text := note
-	if len(raw) > 0 {
-		text = agent.AlertEvidenceText(raw)
-	}
-	// After ensureAgentLocked: a lease taken there resets the inbox.
-	st.inbox.push(agent.HumanInput{Seq: seq, Actor: systemActor, Kind: "alert_update", Text: text, NewIncident: true})
-	if len(raw) > 0 {
-		s.refireTriageLocked(roomID, st, raw)
-	}
+	return st.agentCancel != nil && (s.coord == nil || st.leased)
 }
 
 // markAgentDone records that run ended on its own (Run returned nil while the

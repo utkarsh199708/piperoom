@@ -1095,6 +1095,8 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 // inputFor converts an event into the agent.HumanInput it carries, or nil.
 func inputFor(e events.Event) *agent.HumanInput {
 	switch e.Type {
+	case events.AgentMessage:
+		return incidentInput(e) // service_watch.go; nil for other messages
 	case events.SteerSent:
 		p, ok := decode[events.SteerSentPayload](e)
 		if !ok {
