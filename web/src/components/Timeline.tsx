@@ -1,3 +1,4 @@
+import { PersonName } from '@/components/VerifiedBadge'
 import { useId, useState } from 'react'
 import { emptyStateFor } from '../lib/emptyState'
 import type { FormEvent } from 'react'
@@ -153,7 +154,7 @@ function CommentThread({
         <PersonAvatar actor={comment.author} size={20} className="mt-px" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <strong className="font-medium">{comment.author.name}</strong>
+            <PersonName person={comment.author} nameClassName="font-medium" />
             <Clock iso={comment.at} className="text-xs text-subtle-foreground" />
           </div>
           <p className="m-0 break-words text-muted-foreground">{comment.text}</p>

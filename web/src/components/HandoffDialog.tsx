@@ -1,6 +1,6 @@
 import { Loader2 } from 'lucide-react'
 import { useState } from 'react'
-import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
+import type { ComponentProps, FormEvent, KeyboardEvent, ReactNode } from 'react'
 import type { HandoffState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canAcceptHandoff } from '../state/permissions'
@@ -18,9 +18,13 @@ import {
 } from '@/components/ui/dialog'
 import { Kbd } from '@/components/ui/kbd'
 import { PersonSelect } from './PersonSelect'
+import { PersonName } from './VerifiedBadge'
 import { RoomDialogClose } from './room/RoomDialogClose'
 import { useNow } from './room/useNow'
 import { useRestoreFocus } from './room/useRestoreFocus'
+
+/** The handing-off driver as the badge reads it: server-set fields only. */
+type FromPerson = ComponentProps<typeof PersonName>['person']
 
 function SummaryList({ title, items }: { title: string; items: string[] }) {
   if (!items || items.length === 0) return null
@@ -86,11 +90,17 @@ export function HandoffDialog({
         <DialogHeader>
           <DialogTitle>Hand off the room</DialogTitle>
           <DialogDescription>
-            {pending
-              ? `Summary prepared for ${pending.to.name}. They must accept to take over.`
-              : inFlight
-                ? `The agent is writing the summary for ${inFlight.to.name}.`
-                : 'The agent writes a summary for the person who takes over. They accept it to become the driver.'}
+            {pending ? (
+              <>
+                Summary prepared for <PersonName person={pending.to} />. They must accept to take over.
+              </>
+            ) : inFlight ? (
+              <>
+                The agent is writing the summary for <PersonName person={inFlight.to} />.
+              </>
+            ) : (
+              'The agent writes a summary for the person who takes over. They accept it to become the driver.'
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -184,7 +194,7 @@ function HandoffReceiveDialog({
   onClose,
 }: {
   handoff: HandoffState
-  from: string
+  from: FromPerson | null
   onAccept: () => void
   onClose: () => void
 }) {
@@ -194,10 +204,18 @@ function HandoffReceiveDialog({
       <DialogContent hideClose className="max-h-[85vh] overflow-y-auto" onCloseAutoFocus={restoreFocus}>
         <RoomDialogClose label="Close hand-off summary" />
         <DialogHeader>
-          <DialogTitle>Hand-off from {from}</DialogTitle>
+          <DialogTitle>
+            Hand-off from {from ? <PersonName person={from} /> : 'Someone'}
+          </DialogTitle>
           <DialogDescription>
             Read this before you accept. Accepting makes you the driver
-            {handoff.stay_as_watcher ? `; ${from} stays in the room as a watcher.` : '.'}
+            {handoff.stay_as_watcher ? (
+              <>
+                ; {from ? <PersonName person={from} /> : 'Someone'} stays in the room as a watcher.
+              </>
+            ) : (
+              '.'
+            )}
           </DialogDescription>
         </DialogHeader>
         <HandoffSummary summary={handoff.summary}>
@@ -228,14 +246,15 @@ export function HandoffAcceptBanner({
   const [reading, setReading] = useState(false)
   const mine = state.handoffs.find((h) => canAcceptHandoff(user, h))
   if (!mine) return null
-  const from = state.driver?.name ?? 'Someone'
+  const fromPerson: FromPerson | null = state.driver ? { ...state.driver, kind: 'human' } : null
   return (
     <div
       role="status"
       className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border bg-primary-subtle px-4 py-1.5 font-medium text-primary-fg sm:px-6"
     >
       <span>
-        <strong>{from}</strong> is handing the room to you.
+        {fromPerson ? <PersonName person={fromPerson} nameClassName="font-semibold" /> : <strong>Someone</strong>}{' '}
+        is handing the room to you.
       </span>
       {/* No blind accept: the only way to take over is through the summary dialog. */}
       <Button id={HANDOFF_READ_ID} className="ml-auto h-7 px-2.5 coarse:h-11 coarse:px-4" onClick={() => setReading(true)}>
@@ -244,7 +263,7 @@ export function HandoffAcceptBanner({
       {reading && (
         <HandoffReceiveDialog
           handoff={mine}
-          from={from}
+          from={fromPerson}
           onAccept={() => {
             setReading(false)
             actions.acceptHandoff(mine.handoff_id)

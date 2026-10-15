@@ -25,6 +25,7 @@ import { Timeline } from './Timeline'
 import { SteerBox } from './SteerBox'
 import { ProposalsPanel } from './ProposalsPanel'
 import { PresencePanel } from './PresencePanel'
+import { allVerified } from '@/lib/verification'
 import { ActivityFeed } from './ActivityFeed'
 import { TracePanel } from './TracePanel'
 import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
@@ -159,25 +160,31 @@ export function RoomScreen() {
 
   const headerMembers = useMemo(() => {
     const ids = new Set<string>()
-    const rows: { id: string; name: string }[] = []
+    const rows: { id: string; name: string; verified: boolean }[] = []
+    // Verified only when every server report on the person agrees (presence, event log, /api/me).
+    const reports = (id: string) => [
+      presence.find((p) => p.id === id)?.verified,
+      state?.members.find((m) => m.id === id)?.verified,
+      id === user.id ? user.verified : undefined,
+    ]
     for (const p of presence) {
       if (!ids.has(p.id)) {
         ids.add(p.id)
-        rows.push({ id: p.id, name: p.name })
+        rows.push({ id: p.id, name: p.name, verified: allVerified(...reports(p.id)) })
       }
     }
     if (state) {
       for (const m of state.members) {
         if (!ids.has(m.id)) {
           ids.add(m.id)
-          rows.push({ id: m.id, name: m.name })
+          rows.push({ id: m.id, name: m.name, verified: allVerified(...reports(m.id)) })
         }
       }
     }
     // You are here too, even before the server has reported you.
-    if (!ids.has(user.id)) rows.push({ id: user.id, name: user.name })
+    if (!ids.has(user.id)) rows.push({ id: user.id, name: user.name, verified: allVerified(...reports(user.id)) })
     return rows
-  }, [presence, state, user.id, user.name])
+  }, [presence, state, user.id, user.name, user.verified])
 
   const exportTranscript = () => {
     if (!roomId || exporting) return
@@ -361,6 +368,7 @@ export function RoomScreen() {
       selfId={user.id}
       selfName={user.name}
       selfIsViewer={viewer}
+      selfVerified={user.verified}
       people={peopleList}
     />
   )

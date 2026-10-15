@@ -4,6 +4,8 @@ import { Clock } from './room/Clock'
 import { clockTime } from '../lib/time'
 import { Button } from '@/components/ui/button'
 import { PersonAvatar } from './room/PersonAvatar'
+import { VerifiedBadge } from './VerifiedBadge'
+import { personVerification } from '@/lib/verification'
 
 const SHOW_ALL_KEY = 'piperoom.activity.all'
 const HOUR_MS = 60 * 60 * 1000
@@ -70,6 +72,9 @@ export function ActivityFeed({ activity, openedAt }: { activity: ActivityEntry[]
               )}
               <li className="flex min-h-6 items-start gap-2">
                 <PersonAvatar actor={a.actor} size={20} className="mt-0.5" />
+                {/* A person's row gets their server-set badge. Names inside the sentence were neutralized
+                    where describe.ts built it; the person's own words stay as written. */}
+                {a.actor.kind === 'human' && <VerifiedBadge verification={personVerification(a.actor)} className="mt-0.5" />}
                 <Line entry={a} />
                 <Clock iso={a.at} className="ml-auto shrink-0 font-mono text-xs tabular-nums text-subtle-foreground" />
               </li>

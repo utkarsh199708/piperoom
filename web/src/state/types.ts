@@ -23,6 +23,7 @@ export type ApprovalValue = 'approved' | 'rejected' | 'pending'
 export interface DriverInfo {
   id: string
   name: string
+  verified?: boolean
   lease_until?: string
   /**
    * Folded from control.lease_expired whose lease_until equals this lease_until (docs/api.md,
@@ -174,6 +175,8 @@ export interface ProposalState {
 export interface MemberState {
   id: string
   name: string
+  /** Server-set, from the latest event or snapshot that named this person. */
+  verified?: boolean
   role: string
 }
 
@@ -211,8 +214,10 @@ export interface HandoffFailureState {
 
 /** The alert that opened the room, from room.created's `alert` webhook body. */
 export interface AlertInfo {
-  /** Best-effort source inferred from the raw body shape; null when unknown. */
+  /** Best-effort source inferred from the raw body shape; null when unknown. Untrusted: never a badge input. */
   source: string | null
+  /** Server-set room.created.alert_source: the only input to the alert's verified badge. */
+  alert_source?: string
 }
 
 /** What the agent has cost in this room, folded from agent.usage (F11; same rules as the server's insight). */
@@ -395,7 +400,12 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
         .map((p) => [p.proposal_id, p.params_hash as string]),
     ),
     driver: snapshot.driver
-      ? { id: snapshot.driver.id, name: snapshot.driver.name, lease_until: snapshot.driver.lease_until }
+      ? {
+          id: snapshot.driver.id,
+          name: snapshot.driver.name,
+          verified: snapshot.driver.verified === true,
+          lease_until: snapshot.driver.lease_until,
+        }
       : null,
     agent_status: {
       state: snapshot.agent_status.state,

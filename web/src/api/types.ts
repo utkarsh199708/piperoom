@@ -9,6 +9,11 @@ export interface Actor {
   kind: ActorKind
   id: string
   name: string
+  /**
+   * Server-set (events.Actor.Verified): true when the server vouches for id and name.
+   * Omitted when false; missing means false. The only input to the verified badge.
+   */
+  verified?: boolean
 }
 
 // ---- event log ----
@@ -94,6 +99,9 @@ export interface RoomCreatedPayload {
   severity: string // "sev1".."sev4"
   pipeline_id: string
   alert?: unknown
+  /** Server-set route that opened the room: "webhook", a signed source name, or "watcher". */
+  alert_source?: string
+  dedup_key?: string
   /** The pipeline had shadow mode on when the room opened (docs/design/shadow.md); the agent runs silently and its numbers are revealed after close. */
   shadow?: boolean
 }
@@ -412,19 +420,21 @@ export interface ProposalSummary {
 
 export interface SuggestionSummary {
   suggestion_id: string
-  from: { id: string; name: string }
+  from: { id: string; name: string; verified?: boolean }
   text: string
 }
 
 export interface MemberSummary {
   id: string
   name: string
+  verified?: boolean
   role: string
 }
 
 export interface DriverSummary {
   id: string
   name: string
+  verified?: boolean
   lease_until?: string
 }
 
@@ -563,6 +573,7 @@ export interface Topology {
 export interface Me {
   id: string
   name: string
+  verified?: boolean
   layers: string[]
   /** After auth PR 3; absent on an older server (treated as member). */
   role?: 'member' | 'viewer'
@@ -590,6 +601,7 @@ export interface PipelineInfo {
 export interface Person {
   id: string
   name: string
+  verified?: boolean
   /** Only for IdP users with a verified email. */
   email?: string
   /** F9: the layers the person may approve; absent from an old server. */
@@ -599,6 +611,7 @@ export interface Person {
 export interface PresenceMember {
   id: string
   name: string
+  verified?: boolean
   state: 'viewing' | 'away'
   /** F9: when the member entered `state`, RFC 3339 UTC; absent from an old server. */
   since?: string
