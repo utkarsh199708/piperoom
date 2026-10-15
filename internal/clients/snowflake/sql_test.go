@@ -25,10 +25,15 @@ func TestFreshnessSQL(t *testing.T) {
 }
 
 func TestRowSQL(t *testing.T) {
-	got, err := rowSQL("analytics.orders", "id")
-	want := `SELECT * FROM "ANALYTICS"."ORDERS" WHERE "ID" = ? LIMIT 1`
-	if err != nil || got != want {
-		t.Fatalf("rowSQL = %q, %v; want %q", got, err, want)
+	// The column is quoted as given; Row resolves its stored spelling first.
+	for col, want := range map[string]string{
+		"id": `SELECT * FROM "ANALYTICS"."ORDERS" WHERE "id" = ? LIMIT 1`,
+		"ID": `SELECT * FROM "ANALYTICS"."ORDERS" WHERE "ID" = ? LIMIT 1`,
+	} {
+		got, err := rowSQL("analytics.orders", col)
+		if err != nil || got != want {
+			t.Fatalf("rowSQL(%q) = %q, %v; want %q", col, got, err, want)
+		}
 	}
 }
 

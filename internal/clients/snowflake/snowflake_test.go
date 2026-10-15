@@ -70,8 +70,15 @@ func (q *fakeQuerier) QueryContext(ctx context.Context, query string, args ...an
 	if q.onQuery != nil {
 		q.onQuery(ctx)
 	}
-	if q.showRows != nil && strings.HasPrefix(query, "SHOW PRIMARY KEYS") {
-		return q.showRows, nil
+	if strings.HasPrefix(query, "SHOW PRIMARY KEYS") {
+		if q.showRows != nil {
+			return q.showRows, nil
+		}
+		// Row tests that give no key answer: a table without a declared key,
+		// unless rows is itself a SHOW result (PrimaryKeyColumn tests).
+		if q.rows != nil && !hasCol(q.rows.cols, "column_name") && q.err == nil {
+			return &fakeRows{cols: []string{"column_name", "key_sequence"}}, nil
+		}
 	}
 	q.lastQuery = query
 	q.lastArgs = args
@@ -278,4 +285,13 @@ func TestWrapQueryErrGeneric(t *testing.T) {
 	if !strings.Contains(err.Error(), "boom") || !strings.Contains(err.Error(), "public.orders") {
 		t.Fatalf("error lost context: %v", err)
 	}
+}
+
+func hasCol(cols []string, want string) bool {
+	for _, c := range cols {
+		if strings.EqualFold(c, want) {
+			return true
+		}
+	}
+	return false
 }
