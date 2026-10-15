@@ -630,6 +630,9 @@ type ProposalCreatedPayload struct {
 	// an unknown or empty proposer value counts as "medium". Derived from the
 	// hashed steps, so not hashed itself. Empty on events written before Q0. (Q0)
 	RiskLevel string `json:"risk_level,omitempty"`
+	// ImpactReasons are the actions.Impact reasons of the steps (≤ 8, each ≤ 300
+	// chars), in step order, for approvers. Server-written; not hashed. (Q0)
+	ImpactReasons []string `json:"impact_reasons,omitempty"`
 }
 
 // Risk levels of ProposalCreatedPayload.RiskLevel and actions.Impact. (Q0)

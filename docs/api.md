@@ -239,7 +239,7 @@ Additive like the F-wave events: unknown types are ignored, new fields are omitt
   secret is set, `X-Piperoom-Event: owner.paged`, `Content-Type: application/json`. `room_url` is
   `PIPEROOM_PUBLIC_URL` + `/rooms/{id}`, absent when that is unset; `email` only when users.yaml or the IdP has
   one. A failed delivery is logged (status code only, never the body or secret) and never fails the page.
-- **Impact on proposals (QA G5).** `proposal.created` gains `impacted_layers` and `risk_level` (see
+- **Impact on proposals (QA G5).** `proposal.created` gains `impacted_layers`, `risk_level` and `impact_reasons` (see
   `ProposalCreatedPayload`). The agent's `propose_fix` takes `impacted_layers` and `risk_level`.
 - **Manual hand-off (QA G4).** `handoff.created` gains `manual: true` when the driver wrote the summary.
 - **Fix notes (QA G10).** `comment.added` gains `kind: "fix_note"`.
@@ -326,8 +326,8 @@ as its empty value. The shapes are fixed here.
 ```
 - `open_proposals[]` (Q0): a withdrawn proposal (`proposal.withdrawn`) leaves the list, as an executed one does; a
   closed room has none (the close withdraws them). `impacted_layers`, `risk_level` are copied from
-  `proposal.created`; `impact_reasons` are the `actions.Impact` reasons of its steps (server-derived, not in the
-  event; `[]` when none).
+  `proposal.created`, and so are `impact_reasons` (the `actions.Impact` reasons of its steps, written by the
+  server; `[]` when none).
 - `pages` (Q0): open rooms only, the newest `owner.paged` per layer, in seq order; `[]` on closed rooms. `GET
   /api/rooms` rows carry it, so the room list socket tells a client that its user was paged: the web app shows a
   banner (and a browser notification when allowed) when the user's id is in `owners` of a page newer than they saw.
