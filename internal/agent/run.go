@@ -435,7 +435,14 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 }
 
 // takeHeld returns the held quiet inputs followed by inputs, and forgets them.
+// Every drained batch passes through here, so it is also where new human input
+// ends the message guard's repeat window.
 func (r *runner) takeHeld(inputs []HumanInput) []HumanInput {
+	if endsRepeatWindow(inputs) {
+		if g, ok := r.deps.Sink.(*guardedSink); ok {
+			g.reset()
+		}
+	}
 	if len(r.held) == 0 {
 		return inputs
 	}
