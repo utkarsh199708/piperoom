@@ -115,10 +115,18 @@ func TestPurgeTellsOnRoomDeleted(t *testing.T) {
 	day := 24 * time.Hour
 	old := createRoom(t, svc, "arjun")
 	kept := createRoom(t, svc, "arjun")
-	closed, err := svc.CloseRoom(ctx, mustUser(t, svc, "arjun"), old.ID, "fixed")
-	if err != nil {
+	if _, err := svc.CloseRoom(ctx, mustUser(t, svc, "arjun"), old.ID, "fixed"); err != nil {
 		t.Fatalf("close: %v", err)
 	}
+	// The close drafts its postmortem in the background; it is in the log
+	// before the purge, so the frame's seq does not depend on which comes
+	// first.
+	var last room.RoomSnapshot
+	waitFor(t, 5*time.Second, func() bool {
+		snap, err := svc.GetRoom(ctx, old.ID)
+		last = snap
+		return err == nil && snap.Postmortem.Status == room.PostmortemDrafted
+	})
 	c.Advance(40 * day)
 	if _, err := svc.PurgeExpired(ctx, c.Now().Add(-30*day)); err != nil {
 		t.Fatalf("purge: %v", err)
@@ -128,7 +136,7 @@ func TestPurgeTellsOnRoomDeleted(t *testing.T) {
 		t.Fatalf("hook calls = %+v, want one for %s (not %s)", calls, old.ID, kept.ID)
 	}
 	ev := calls[0].ev
-	if ev.Type != events.RoomDeleted || ev.Seq != closed.Seq+1 || ev.Actor.Kind != events.ActorSystem ||
+	if ev.Type != events.RoomDeleted || ev.Seq != last.LastSeq+1 || ev.Actor.Kind != events.ActorSystem ||
 		ev.Actor.ID != "system" || !ev.At.Equal(c.Now()) || deletedReason(t, ev) != "retention: closed 30 days" {
 		t.Fatalf("frame = %+v (%s)", ev, ev.Payload)
 	}
