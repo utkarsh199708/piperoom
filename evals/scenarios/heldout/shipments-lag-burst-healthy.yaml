@@ -54,7 +54,7 @@ alert:
   pipeline_map: |
     pipeline shipments
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.shipments [postgres, owner nadia] OK slot_active=true slot_retained=9.6 MiB
+    1 pg:public.shipments [postgres, owner nadia] OK slot_active=true slot_retained=9.6 MiB wal_status=reserved
     2 connect:pg-shipments-connector [kafka-connect, owner tomas] OK
       from: pg:public.shipments
     3 topic:shp.public.shipments [kafka, owner tomas] OK newest_record=4s ago
@@ -70,7 +70,7 @@ recordings:
     summary: |
       pipeline shipments
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.shipments [postgres, owner nadia] OK slot_active=true slot_retained=9.6 MiB
+      1 pg:public.shipments [postgres, owner nadia] OK slot_active=true slot_retained=9.6 MiB wal_status=reserved
       2 connect:pg-shipments-connector [kafka-connect, owner tomas] OK
         from: pg:public.shipments
       3 topic:shp.public.shipments [kafka, owner tomas] OK newest_record=4s ago
@@ -94,6 +94,7 @@ recordings:
         - facts:
             slot_active: "true"
             slot_retained: 9.6 MiB
+            wal_status: reserved
           health: ok
           id: pg:public.shipments
           kind: source_table

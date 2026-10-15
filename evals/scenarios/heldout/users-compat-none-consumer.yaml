@@ -70,7 +70,7 @@ alert:
   pipeline_map: |
     pipeline users
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.users [postgres, owner nadia] OK slot_active=true slot_retained=22.3 MiB
+    1 pg:public.users [postgres, owner nadia] OK slot_active=true slot_retained=22.3 MiB wal_status=reserved
     2 connect:pg-users-connector [kafka-connect, owner tomas] OK
       from: pg:public.users
     3 topic:usr.public.users [kafka, owner tomas] OK newest_record=6s ago
@@ -86,7 +86,7 @@ recordings:
     summary: |
       pipeline users
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.users [postgres, owner nadia] OK slot_active=true slot_retained=22.3 MiB
+      1 pg:public.users [postgres, owner nadia] OK slot_active=true slot_retained=22.3 MiB wal_status=reserved
       2 connect:pg-users-connector [kafka-connect, owner tomas] OK
         from: pg:public.users
       3 topic:usr.public.users [kafka, owner tomas] OK newest_record=6s ago
@@ -110,6 +110,7 @@ recordings:
         - facts:
             slot_active: "true"
             slot_retained: 22.3 MiB
+            wal_status: reserved
           health: ok
           id: pg:public.users
           kind: source_table
