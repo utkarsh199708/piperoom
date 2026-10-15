@@ -455,6 +455,7 @@ export function RoomScreen() {
             onExport={viewer ? undefined : exportTranscript}
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
+            onCite={citeStep}
           />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
