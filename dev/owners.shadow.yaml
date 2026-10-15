@@ -14,6 +14,7 @@ pipelines:
     # 0.8-1.1 MB under load (dev/scenarios.md), so any small fire would warn forever.
     watch:
       enabled: true
+      slot: debezium_orders
       signals:
         connector_down: {for: 30s}
         slot_inactive: {for: 30s}
