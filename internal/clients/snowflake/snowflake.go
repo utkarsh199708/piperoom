@@ -9,12 +9,14 @@
 // docs/pilot/permissions.md for the exact grants). The driver has no session-level read-only switch, so a
 // role with write grants could still write; keep this role SELECT-only.
 //
-// Driver logging (GO-2026-6665): gosnowflake v1 logs session tokens when its
-// level is raised, and New pins it to error and refuses the tracing and
-// clientConfigFile DSN parameters. The driver's easy logging can still read
-// a client config file on the first connection, so deployments must keep
-// SF_CLIENT_CONFIG_FILE unset and must not place sf_client_config.json in the
-// executable's or the home directory. Remove this once on gosnowflake v2.
+// Driver logging (GO-2026-6665): gosnowflake v1 logged session tokens when its
+// level was raised; v2 fixes that at the source (secret masking in the driver
+// logger). As defence in depth New still pins the driver logger to error and
+// refuses the tracing and clientConfigFile DSN parameters, so a debug-level
+// driver log can never be switched on through the DSN. The driver's easy
+// logging can still read a client config file on the first connection, so
+// deployments should keep SF_CLIENT_CONFIG_FILE unset and not place
+// sf_client_config.json in the executable's or the home directory.
 package snowflake
 
 import (
@@ -26,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/snowflakedb/gosnowflake" // registers the "snowflake" sql.DB driver on import
+	"github.com/snowflakedb/gosnowflake/v2" // registers the "snowflake" sql.DB driver on import
 
 	"piperoom/internal/clients"
 )
@@ -66,9 +68,9 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	return &DB{db: db, q: dbQuerier{db: db}, target: targetFromDSN(dsn)}, nil
 }
 
-// hardenedConfig is the mitigation for GO-2026-6665 (gosnowflake v1 logs
-// session tokens and response bodies once its log level is raised; the fix is
-// only in v2). It pins the driver logger to error, refuses the DSN parameters
+// hardenedConfig is defence in depth after the GO-2026-6665 fix (gosnowflake
+// v1 logged session tokens and response bodies once its log level was
+// raised; v2 masks secrets in the driver logger). It pins the driver logger to error, refuses the DSN parameters
 // that raise the level or load a client config file (easy logging, which can
 // also raise it on the first connection), and returns the parsed config to
 // open through NewConnector. The logger is pinned even when the DSN is

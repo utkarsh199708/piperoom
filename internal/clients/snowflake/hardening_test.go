@@ -6,12 +6,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
 
 	"piperoom/internal/clients"
 )
 
-// GO-2026-6665: gosnowflake v1 logs session tokens once its level is raised.
+// GO-2026-6665: gosnowflake v1 logged session tokens once its level was raised;
+// v2 masks them, and these checks stay as defence in depth. v2 reports the
+// level upper-case ("ERROR"), v1 lower-case, so the level is compared folded.
 // hardenedConfig must refuse the DSN knobs that raise it and pin the level to
 // error. It is tested directly so no case can reach PingContext (no network).
 func TestHardenedConfigRefusesLogLevelKnobs(t *testing.T) {
@@ -35,7 +37,7 @@ func TestHardenedConfigRefusesLogLevelKnobs(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.wantMsg) {
 				t.Errorf("error %q does not name %s", err, tc.wantMsg)
 			}
-			if got := gosnowflake.GetLogger().GetLogLevel(); got != "error" {
+			if got := gosnowflake.GetLogger().GetLogLevel(); !strings.EqualFold(got, "error") {
 				t.Errorf("driver log level = %q after refusal, want error", got)
 			}
 		})
@@ -55,7 +57,7 @@ func TestHardenedConfigAcceptsCleanDSN(t *testing.T) {
 	if cfg.Database != "db" || cfg.Schema != "sch" || cfg.Warehouse != "wh" {
 		t.Errorf("config = %+v", cfg)
 	}
-	if got := gosnowflake.GetLogger().GetLogLevel(); got != "error" {
+	if got := gosnowflake.GetLogger().GetLogLevel(); !strings.EqualFold(got, "error") {
 		t.Errorf("driver log level = %q, want error", got)
 	}
 }
