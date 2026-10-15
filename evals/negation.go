@@ -8,13 +8,12 @@ import (
 // Negation for agreement scoring. One place holds the negators, the words
 // that end a negation's reach, the words that clear a term, and the window.
 //
-// score.go's matchForbidden (#94, approved) stays clause-scoped on purpose
-// and does not call this: it asks "is this wrong story told?" and a skipped
-// clause is the safe answer, so it uses a coarse clause-wide negator list
-// (where "no longer" IS a negator). Agreement asks "is this label term
-// stated?", where a missed negation is the unsafe error, so it looks at the
-// words around each term and reads "no longer carry amount" as a fact.
-// Changing matchForbidden would change #94's scoring; its tests pin it.
+// forbidden.go's matchForbidden does not call this: it asks "is this wrong
+// story told?", where a false yes fails a correct run, so it keeps "no longer"
+// as a negator and lets a negator reach to the next contrast word, not a
+// fixed window. Agreement asks "is this label term stated?", where a missed
+// negation is the unsafe error, so it looks at the words around each term and
+// reads "no longer carry amount" as a fact.
 
 // clauseSplitFine adds commas and dashes to score.go's clause split, so a
 // denial can stay in its own clause: "not the importer, it is the poll timeout".
