@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,7 +12,10 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/anthropics/anthropic-sdk-go"
+
 	"piperoom/internal/events"
+	"piperoom/internal/tools"
 )
 
 // quotedOfLen returns a JSON string literal whose encoded size is exactly n.
@@ -97,28 +101,140 @@ func TestToolDataMultiByteCut(t *testing.T) {
 	}
 }
 
-// A tool whose MarshalJSON panics must not take the run down: the data is
-// dropped and the panic is logged.
-func TestToolDataPanicRecovered(t *testing.T) {
-	var logs bytes.Buffer
-	r := &runner{log: slog.New(slog.NewJSONHandler(&logs, nil))}
-	out, cut := r.toolDataJSON("t", panicMarshaler{})
-	if out != nil || cut {
-		t.Fatalf("out=%s cut=%v, want dropped", out, cut)
+// A tool whose Data has a panicking MarshalJSON must not take the run down: the
+// panic is masked and becomes a tool error, and the run goes on.
+func TestToolDataPanicBecomesToolError(t *testing.T) {
+	for _, path := range []string{"run", "verify"} {
+		t.Run(path, func(t *testing.T) {
+			rec := &recordingTool{name: "connect_status", schema: testSchema("connector"),
+				result: tools.Result{Summary: "ok", Data: panicMarshaler{}}}
+			sink := &fakeSink{}
+			var model *scriptedModel
+			if path == "run" {
+				model = &scriptedModel{turns: []anthropic.BetaMessage{
+					mustMessage(t, `{"stop_reason":"tool_use","content":[
+						{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"read","connector":"pg"}}
+					]}`),
+				}}
+			} else {
+				model = &scriptedModel{}
+			}
+			r := newTestRunner(t, model, &fakeInbox{waitErr: context.Canceled}, sink, rec, Options{MaxTurns: 3})
+			if path == "run" {
+				if err := r.run(context.Background()); err != nil {
+					t.Fatalf("run: %v (a panicking MarshalJSON must not end the run)", err)
+				}
+			} else {
+				r.toolList = buildToolList(r.deps.Tools, nil)
+				_, err := r.runStep(context.Background(), "verify", "connect_status", json.RawMessage(`{"connector":"pg"}`))
+				if err == nil || !strings.Contains(err.Error(), "could not be encoded") {
+					t.Fatalf("runStep err = %v, want an encode error", err)
+				}
+			}
+			results := sink.ofType(events.AgentToolResult)
+			if len(results) != 1 {
+				t.Fatalf("tool_result events = %d, want 1", len(results))
+			}
+			var p events.AgentToolResultPayload
+			if err := json.Unmarshal(results[0].payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if !p.IsError || p.Data != nil || !strings.Contains(p.Summary, "could not be encoded") {
+				t.Fatalf("payload = %+v, want an error result without data", p)
+			}
+		})
 	}
-	if !strings.Contains(logs.String(), "tool data marshal failed") {
-		t.Fatalf("panic was not logged: %s", logs.String())
+}
+
+// The emitted tool_result carries the cap: Truncated and the TruncatedData
+// shape when Data is over it, untouched when it is not. Both read-tool paths
+// (run and verify) are covered, since each sets Truncated from the cut.
+func TestEmittedToolResultHonoursCap(t *testing.T) {
+	tests := []struct {
+		name     string
+		maxBytes int64
+		size     int // encoded JSON bytes of Data
+		wantCut  bool
+	}{
+		{name: "configured 1024 at cap", maxBytes: 1024, size: 1024},
+		{name: "configured 1024 over cap", maxBytes: 1024, size: 1025, wantCut: true},
+		{name: "default at 65536", maxBytes: 0, size: 65536},
+		{name: "default over 65536", maxBytes: 0, size: 65537, wantCut: true},
+	}
+	for _, tt := range tests {
+		for _, path := range []string{"run", "verify"} {
+			t.Run(tt.name+"/"+path, func(t *testing.T) {
+				data := json.RawMessage(`"` + strings.Repeat("a", tt.size-2) + `"`)
+				rec := &recordingTool{name: "connect_status", schema: testSchema("connector"),
+					result: tools.Result{Summary: "ok", Data: data}}
+				sink := &fakeSink{}
+				model := &scriptedModel{}
+				if path == "run" {
+					model = &scriptedModel{turns: []anthropic.BetaMessage{
+						mustMessage(t, `{"stop_reason":"tool_use","content":[
+							{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"read","connector":"pg"}}
+						]}`),
+					}}
+				}
+				r := newTestRunner(t, model, &fakeInbox{waitErr: context.Canceled}, sink, rec,
+					Options{MaxTurns: 3, MaxToolDataBytes: tt.maxBytes})
+				if path == "run" {
+					if err := r.run(context.Background()); err != nil {
+						t.Fatalf("run: %v", err)
+					}
+				} else {
+					r.toolList = buildToolList(r.deps.Tools, nil)
+					if _, err := r.runStep(context.Background(), "verify", "connect_status", json.RawMessage(`{"connector":"pg"}`)); err != nil {
+						t.Fatalf("runStep: %v", err)
+					}
+				}
+				results := sink.ofType(events.AgentToolResult)
+				if len(results) != 1 {
+					t.Fatalf("tool_result events = %d, want 1", len(results))
+				}
+				var p events.AgentToolResultPayload
+				if err := json.Unmarshal(results[0].payload, &p); err != nil {
+					t.Fatal(err)
+				}
+				if p.Truncated != tt.wantCut {
+					t.Fatalf("Truncated = %v, want %v", p.Truncated, tt.wantCut)
+				}
+				limit := int(tt.maxBytes)
+				if limit == 0 {
+					limit = 64 << 10
+				}
+				if len(p.Data) > limit {
+					t.Fatalf("emitted Data is %d bytes, cap %d", len(p.Data), limit)
+				}
+				if !tt.wantCut {
+					if !bytes.Equal(p.Data, data) {
+						t.Fatalf("data under the cap changed (%d bytes)", len(p.Data))
+					}
+					return
+				}
+				var td events.TruncatedData
+				if err := json.Unmarshal(p.Data, &td); err != nil || !td.Truncated || td.OriginalBytes != int64(tt.size) || td.Preview == "" {
+					t.Fatalf("data = %.80s..., want TruncatedData with original_bytes %d (err %v)", p.Data, tt.size, err)
+				}
+			})
+		}
 	}
 }
 
 func TestEncodeToolDataErrors(t *testing.T) {
 	tests := []struct {
-		name    string
-		v       any
-		wantErr any
+		name  string
+		v     any
+		check func(error) bool // reports whether err wraps the expected cause
 	}{
-		{name: "channel", v: make(chan int), wantErr: &json.UnsupportedTypeError{}},
-		{name: "NaN", v: math.NaN(), wantErr: &json.UnsupportedValueError{}},
+		{name: "channel", v: make(chan int), check: func(err error) bool {
+			var e *json.UnsupportedTypeError
+			return errors.As(err, &e)
+		}},
+		{name: "NaN", v: math.NaN(), check: func(err error) bool {
+			var e *json.UnsupportedValueError
+			return errors.As(err, &e)
+		}},
 		{name: "panicking marshaler", v: panicMarshaler{}},
 	}
 	for _, tt := range tests {
@@ -130,10 +246,8 @@ func TestEncodeToolDataErrors(t *testing.T) {
 			if !strings.HasPrefix(err.Error(), "agent: encode tool data") {
 				t.Fatalf("error not wrapped with the package prefix: %v", err)
 			}
-			if tt.wantErr != nil {
-				if !errors.As(err, &tt.wantErr) {
-					t.Fatalf("error %v does not wrap %T", err, tt.wantErr)
-				}
+			if tt.check != nil && !tt.check(err) {
+				t.Fatalf("error %v does not wrap the encoder's error", err)
 			}
 		})
 	}

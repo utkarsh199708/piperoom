@@ -786,7 +786,10 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	res, err := entry.tool.Run(tctx, cleaned)
 	took := time.Since(start).Milliseconds()
 
-	res = r.scrubToolResult(u.name, res)
+	res, scrubErr := r.scrubToolResult(u.name, res)
+	if err == nil {
+		err = scrubErr
+	}
 	data, dataCut := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
