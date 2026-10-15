@@ -228,7 +228,9 @@ func (r *runner) run(ctx context.Context) error {
 				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 					return err
 				}
-			} else if recovered && !outcome.statusSet {
+			} else if !outcome.statusSet {
+				// The run leaves the idle (or done) status it paused on; the
+				// room's failover and the hand-off check read the last status.
 				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 			}
 			continue
@@ -522,7 +524,10 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 		}
 		return r.holdAfterRecovery(ctx, messages, turns)
 	}
-	if recovered && !outcome.statusSet {
+	if !outcome.statusSet {
+		// The model runs again: leave the idle (or done) status, so the room
+		// does not show an idle agent writing steps, and failover sees a
+		// working run to resume.
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 	}
 	return false, nil
