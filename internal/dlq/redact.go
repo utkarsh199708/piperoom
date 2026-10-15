@@ -1,7 +1,6 @@
 package dlq
 
 import (
-	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -89,9 +88,33 @@ func redactOnce(s string) string {
 	return string(capRunes(tidy(rs)))
 }
 
-// urlTokenRe is a URL as safeCut cuts it: the scheme and everything up to the
-// next white space or quote.
-var urlTokenRe = regexp.MustCompile(`\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s'"]*`)
+// urlTokenSpans are the URLs as safeCut cuts them, found by the literal
+// "://" alone (no scheme rule: "my_postgres://" and a scheme glued to a long
+// word are URLs too): each runs from the last white space, quote or bracket
+// before the "://" (or the start) to the next white space or quote after it.
+func urlTokenSpans(s string) [][]int {
+	var spans [][]int
+	for off := 0; ; {
+		k := strings.Index(s[off:], "://")
+		if k < 0 {
+			return spans
+		}
+		k += off
+		start := strings.LastIndexAny(s[:k], urlTokenStops+"([{<") + 1
+		end := len(s)
+		if e := strings.IndexAny(s[k:], urlTokenStops); e >= 0 {
+			end = k + e
+		}
+		spans = append(spans, []int{start, end})
+		off = end
+		if off <= k {
+			off = k + 3
+		}
+	}
+}
+
+// urlTokenStops end a URL token: white space and quotes.
+const urlTokenStops = " \t\n\r\v\f'\""
 
 // Look-ahead of safeCut past the cap: enough for the longest value a mask
 // rule matches (a 128-rune e-mail local part plus its domain).
@@ -127,7 +150,7 @@ func safeCut(rs []rune) []rune {
 	// A URL is one value from its scheme to the next white space or quote:
 	// internal/redact allows '/', '@', '?', '#' and ':' in its password, so no
 	// split inside it is safe ("postgres://app:S3cr/t9x@db..." cut after "/").
-	spans := append(piiSpans(win), urlTokenRe.FindAllStringIndex(win, -1)...)
+	spans := append(piiSpans(win), urlTokenSpans(win)...)
 	for _, sp := range spans {
 		if sp[0] < capByte && sp[1] > capByte {
 			at = min(at, raw[utf8.RuneCountInString(win[:sp[0]])])

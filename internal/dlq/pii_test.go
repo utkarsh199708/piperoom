@@ -139,12 +139,28 @@ func TestRedactMessageCapNeverSplitsAURLPassword(t *testing.T) {
 		{"postgres://app:Qq?w9x7@db.example.com/orders", "Qq?"},
 		{"postgres://app:Hh#k2m8@db.example.com/orders", "Hh#"},
 		{"postgres://app:Zz:p4r6@db.example.com/orders", "Zz:"},
+		// A scheme glued to '_' or to a long word (round 5 of #435).
+		{"my_postgres://app:Zq9/Wk7x@db.example.com/x", "Zq9/"},
+		{"x_mysql+srv://app:Zq9/Wk7x@db.example.com/x", "Zq9/"},
+		{"jdbcpostgresql://app:Zq9/Wk7x@db.example.com/x", "Zq9/"},
+		{"postgres_ro://app:Zq9/Wk7x@db.example.com/x", "Zq9/"},
+		{strings.Repeat("w", 40) + "postgres://app:Zq9/Wk7x@db.example.com/x", "Zq9/"},
 	} {
 		for pad := 266; pad <= 300; pad++ {
 			in := strings.Repeat("x", pad-1) + " " + v.text + " and the rest of the message"
 			if got := RedactMessage(in); strings.Contains(got, v.leak) {
 				t.Errorf("pad %d: RedactMessage kept %q: ...%q", pad, v.leak, got[max(0, len(got)-40):])
 			}
+		}
+	}
+}
+
+// The same URL glued to the padding, with no space before it.
+func TestRedactMessageCapNeverSplitsAGluedURL(t *testing.T) {
+	for pad := 266; pad <= 300; pad++ {
+		in := strings.Repeat("x", pad) + "postgres://app:Zq9/Wk7x@db.example.com/x and the rest of it"
+		if got := RedactMessage(in); strings.Contains(got, "Zq9/") {
+			t.Errorf("pad %d: RedactMessage kept %q: ...%q", pad, "Zq9/", got[max(0, len(got)-40):])
 		}
 	}
 }
