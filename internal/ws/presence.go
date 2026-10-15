@@ -248,6 +248,10 @@ func (g *Gateway) connectionsLocked() int {
 // (docs/api.md, WebSocket).
 const RoomDeletedReason = "room deleted"
 
+// StalePositionReason is the error code and close reason for an `after` past
+// the room's last stored event (docs/api.md, stale position).
+const StalePositionReason = "stale_position"
+
 // CloseRoom ends every connection to a deleted room: the room.deleted event
 // (never stored) as the last frame, then a normal close with the reason "room
 // deleted". With the zero deleted (who deleted the room is not known) only the
