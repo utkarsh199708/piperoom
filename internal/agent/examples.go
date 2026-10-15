@@ -24,7 +24,8 @@ import (
 // of them goes through wrapUntrusted. The lookup runs the tool directly, not
 // as a step: an example is history, not evidence about this room, so nothing
 // in it may become a citable step or a backed term (F3 grounding). A hit whose
-// text injectscan flags is left out (screenPastHits).
+// rendered text injectscan flags, alone or next to the hits rendered before it,
+// is left out (renderPastIncidents).
 
 const (
 	// pastIncidentsMax is how many examples the block shows.
@@ -100,31 +101,13 @@ func (r *runner) pastIncidents(ctx context.Context, maxBytes int, timeout time.D
 		r.log.Debug("agent: past incidents result unreadable", "room", r.alert.RoomID, "err", err)
 		return ""
 	}
-	return renderPastIncidents(r.screenPastHits(hits), maxBytes)
-}
-
-// screenPastHits drops every hit whose text injectscan flags, and logs the
-// finding kinds as wrapReadToolOutput does (never the text). Dropping, rather
-// than marking as a tool_output is marked, is deliberate: the block is put in
-// front of every later room as a worked example whose fix the model is told
-// to name, so a flagged example would be one to copy. A model that calls
-// similar_incidents itself still sees the hit, flagged.
-func (r *runner) screenPastHits(hits []pastHit) []pastHit {
-	kept := hits[:0:0]
-	for i, h := range hits {
-		var findings []injectscan.Finding
-		for _, f := range []string{h.Title, h.ClosedAt, h.Layer, h.Cause, h.LabelFix} {
-			findings = append(findings, injectscan.Scan(f)...)
-		}
-		if len(findings) > 0 {
-			r.log.Warn("agent: past incident left out of the opening block: instruction-like text",
-				"tool", similarincidents.ToolName, "room", r.alert.RoomID, "hit", i,
-				"kinds", injectscan.Kinds(findings), "count", len(findings))
-			continue
-		}
-		kept = append(kept, h)
+	block, drops := renderPastIncidents(hits, maxBytes)
+	for _, d := range drops {
+		r.log.Warn("agent: past incident left out of the opening block: instruction-like text",
+			"tool", similarincidents.ToolName, "room", r.alert.RoomID, "hit", d.hit, "with_earlier_hits", d.cross,
+			"kinds", d.kinds, "count", d.count)
 	}
-	return kept
+	return block
 }
 
 // pastLookupKey marks the context of the room-start lookup.
@@ -186,13 +169,42 @@ func decodePastHits(data any) ([]pastHit, error) {
 	return v.Hits, nil
 }
 
+// pastDrop is a hit left out because injectscan flagged its text: hit is its
+// index in the tool's hits, cross that it was flagged only next to the hits
+// already in the block. It carries finding kinds, never the text.
+type pastDrop struct {
+	hit   int
+	cross bool
+	kinds []string
+	count int
+}
+
 // renderPastIncidents renders up to three hits that have a typed cause as one
-// block of at most maxBytes, or "" when none fits. Every field is masked,
-// folded to one line and wrapped as untrusted text; a free-text field is
-// clipped so its line fits its share of the cap.
-func renderPastIncidents(hits []pastHit, maxBytes int) string {
-	var use []pastHit
-	for _, h := range hits {
+// block of at most maxBytes, or "" when none fits, leaving out each hit whose
+// text injectscan flags. drops says which hits were left out and why.
+//
+// Each line is scanned as a similar_incidents result is (wrapReadToolOutput),
+// but on the field text the line renders (after cleaning and clipping), joined
+// in render order: alone, then after the field text of the lines already kept,
+// so an addressee in one field or hit and a request in another are seen
+// together. The wrapper tags are not scanned: they are the agent's and would
+// trip wrapper_tag. A flagged line is left out rather than marked: the block is
+// a worked example the model is told to copy.
+func renderPastIncidents(hits []pastHit, maxBytes int) (block string, drops []pastDrop) {
+	return layoutPastIncidents(hits, maxBytes, injectscan.Scan)
+}
+
+// layoutPastIncidents lays out the block. Every field is masked, folded to one
+// line and wrapped as untrusted text; a free-text field is clipped so its line
+// fits its share of the cap. scan screens each line as renderPastIncidents
+// says; nil keeps every line (layout tests only).
+func layoutPastIncidents(hits []pastHit, maxBytes int, scan func(string) []injectscan.Finding) (string, []pastDrop) {
+	type candidate struct {
+		h   pastHit
+		idx int
+	}
+	var use []candidate
+	for i, h := range hits {
 		h = pastHit{
 			Title:    cleanPastField(h.Title),
 			ClosedAt: cleanPastField(h.ClosedAt),
@@ -203,39 +215,57 @@ func renderPastIncidents(hits []pastHit, maxBytes int) string {
 		if h.Cause == "" {
 			continue
 		}
-		use = append(use, h)
-		if len(use) == pastIncidentsMax {
-			break
-		}
+		use = append(use, candidate{h, i})
 	}
 	room := maxBytes - len(pastIncidentsHeader)
 	if len(use) == 0 || room <= 0 {
-		return ""
+		return "", nil
 	}
-	var lines []string
+	var (
+		lines []string
+		kept  []string // field text of the kept lines, for the joint scan
+		drops []pastDrop
+	)
 	used := 0
-	for i, h := range use {
+	for i, c := range use {
+		if len(lines) == pastIncidentsMax {
+			break
+		}
 		// Each line gets an even share of what is left, so an early long
 		// line cannot crowd out the rest.
-		share := (room - used) / (len(use) - i)
-		line, ok := pastIncidentLine(h, share)
+		share := (room - used) / min(len(use)-i, pastIncidentsMax-len(lines))
+		line, text, ok := pastIncidentLine(c.h, share)
 		if !ok {
 			continue
 		}
+		if scan != nil {
+			if fs := scan(text); len(fs) > 0 {
+				drops = append(drops, pastDrop{hit: c.idx, kinds: injectscan.Kinds(fs), count: len(fs)})
+				continue
+			}
+			if len(kept) > 0 {
+				if fs := scan(strings.Join(append(kept[:len(kept):len(kept)], text), "\n")); len(fs) > 0 {
+					drops = append(drops, pastDrop{hit: c.idx, cross: true, kinds: injectscan.Kinds(fs), count: len(fs)})
+					continue
+				}
+			}
+		}
 		lines = append(lines, line)
+		kept = append(kept, text)
 		used += len(line)
 	}
 	if len(lines) == 0 {
-		return ""
+		return "", drops
 	}
-	return pastIncidentsHeader + strings.Join(lines, "")
+	return pastIncidentsHeader + strings.Join(lines, ""), drops
 }
 
 // pastIncidentLine renders one hit in at most n bytes (newline included). The
 // close date and layer are short and kept whole; title, cause and fix share
-// what is left, the cause first. ok is false when the cause cannot get
-// pastIncidentsMinField bytes.
-func pastIncidentLine(h pastHit, n int) (string, bool) {
+// what is left, the cause first. text is the field text the line shows, one
+// field per line in render order, unwrapped, for the scan. ok is false when
+// the cause cannot get pastIncidentsMinField bytes.
+func pastIncidentLine(h pastHit, n int) (line, text string, ok bool) {
 	date := clipText(h.ClosedAt, 10)
 	layer := clipText(h.Layer, 24)
 	if layer == "" {
@@ -255,7 +285,7 @@ func pastIncidentLine(h pastHit, n int) (string, bool) {
 	fixed := len(build("", "", ""))
 	avail := n - fixed
 	if avail < pastIncidentsMinField {
-		return "", false
+		return "", "", false
 	}
 	// The cause gets half, the fix a third, the title the rest; what one
 	// field does not use goes to the others.
@@ -273,13 +303,14 @@ func pastIncidentLine(h pastHit, n int) (string, bool) {
 		fixN = fixN + extra
 	}
 	if causeN < min(pastIncidentsMinField, escapedLen(h.Cause)) {
-		return "", false
+		return "", "", false
 	}
-	line := build(fitEscaped(h.Title, titleN), fitEscaped(h.Cause, causeN), fitEscaped(fix, fixN))
+	title, cause, fixClip := fitEscaped(h.Title, titleN), fitEscaped(h.Cause, causeN), fitEscaped(fix, fixN)
+	line = build(title, cause, fixClip)
 	if len(line) > n {
-		return "", false
+		return "", "", false
 	}
-	return line, true
+	return line, strings.Join([]string{date, title, layer, cause, fixClip}, "\n"), true
 }
 
 // cleanPastField masks secrets and folds the text to one line, so a field
