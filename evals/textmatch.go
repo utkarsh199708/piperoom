@@ -119,7 +119,9 @@ var (
 	clauseExtenders = []string{"because", "due", "caused", "the case", "a case", "that"}
 	// strongNegators deny the rest of their sub: "no amount change", "nobody
 	// touched amount", "instead of the connector".
-	strongNegators = []string{"no", "nobody", "neither", "nor", "instead of", "rather than"}
+	// "ruled out the registry" too: backDenials only reach backwards.
+	strongNegators = []string{"no", "nobody", "neither", "nor", "instead of", "rather than",
+		"rule out", "rules out", "ruled out", "ruling out"}
 	// weakNegators deny the rest of their sub only when a noun phrase or "be"
 	// follows ("not a Connect problem", "it can't be amount"); before a verb
 	// they describe the failure ("cannot register the schema", "can't decode
@@ -151,7 +153,7 @@ func denied(c clauseToks, layers bool) []bool {
 		}
 	}
 	for j := 0; j < n; j++ {
-		if l := phraseAt(c.toks, j, clauseDenials); l > 0 {
+		if l := phraseAt(c.toks, j, clauseDenials); l > 0 && !(j > 0 && affirmsDoubt(c.toks, j-1)) {
 			for i := j + l; i < n; i++ {
 				neg[i] = true
 			}
@@ -183,7 +185,11 @@ func denied(c clauseToks, layers bool) []bool {
 // or 0. "no longer" and "not only/just" are not denials.
 func forwardDenial(toks []string, j int) int {
 	if l := phraseAt(toks, j, strongNegators); l > 0 {
-		if toks[j] == "no" && j+1 < len(toks) && toks[j+1] == "longer" {
+		if toks[j] == "no" && j+1 < len(toks) && toks[j+1] == "longer" || affirmsDoubt(toks, j) {
+			return 0
+		}
+		// "cannot rule out the registry" keeps it a candidate.
+		if strings.HasPrefix(toks[j], "rul") && (negatorBefore(toks, j, 2) || j > 0 && toks[j-1] == "cannot") {
 			return 0
 		}
 		return l
@@ -199,6 +205,17 @@ func forwardDenial(toks []string, j int) int {
 		}
 	}
 	return l
+}
+
+// affirmsDoubt reports whether toks[j] starts "no doubt", "without doubt" or
+// "no question": they affirm what follows ("there is no doubt the slot was
+// dropped"), they do not deny it.
+func affirmsDoubt(toks []string, j int) bool {
+	if j+1 >= len(toks) || (toks[j] != "no" && toks[j] != "without") {
+		return false
+	}
+	next := toks[j+1]
+	return strings.HasPrefix(next, "doubt") || (toks[j] == "no" && next == "question")
 }
 
 // negatorBefore reports whether a negator (not, n't, no, never) sits in the
@@ -238,6 +255,10 @@ func occursUndenied(cls []clauseToks, terms []string, layers bool) bool {
 		neg := denied(c, layers)
 		for _, term := range terms {
 			for _, i := range findTerm(c.toks, term) {
+				// The verb ("could not connect to the broker") is no Kafka Connect.
+				if term == "connect" && i+1 < len(c.toks) && c.toks[i+1] == "to" {
+					continue
+				}
 				if !neg[i] {
 					return true
 				}
@@ -254,7 +275,8 @@ func occursUndenied(cls []clauseToks, terms []string, layers bool) bool {
 // publications, table ownership, WAL).
 var layerTerms = map[string][]string{
 	"postgres": {"postgres*", "replication slot", "source table", "source db", "source database", "transaction*",
-		"ddl", "alter table", "drop column", "migration*", "publication*", "table owner*", "wal"},
+		"ddl", "alter table", "drop column", "migration*", "publication*", "table owner*", "wal",
+		"postgre sql"}, // tokenize splits "PostgreSQL" into "postgre sql"
 	"kafka-connect":   {"connect", "connector*", "debezium"},
 	"schema-registry": {"schema registry", "registry", "subject*"},
 	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
@@ -413,6 +435,11 @@ func hasFault(text string) bool {
 				if c.sub[i] == c.sub[j] && phraseAt(c.toks, i, alertWords) > 0 {
 					alert = true
 				}
+			}
+			// A zero count just before is no fault: "0 errors", "zero
+			// failed tasks". Only directly before: "from 0 to 500 errors" is.
+			if j > 0 && c.sub[j-1] == c.sub[j] && (c.toks[j-1] == "0" || c.toks[j-1] == "zero") {
+				negated = true
 			}
 			if c.toks[j] == "behind" {
 				for i := max(0, j-3); i < j; i++ {

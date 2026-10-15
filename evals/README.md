@@ -252,11 +252,13 @@ question (a sentence that ends in `?`). Text is cut into clauses (`; !`, newline
 before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`, `although`, `though`,
 `however`), and inside a fragment at `,`, `and`, `so`, `which`. The denials (`textmatch.go`):
 
-- **to the end of the clause**: `doubt`, `unlikely`, `don't think`/`believe`, and `not`/`n't`/`no`/`never`
+- **to the end of the clause**: `doubt` (not `no doubt`/`without doubt`, which affirm), `unlikely`, `don't think`/`believe`, and `not`/`n't`/`no`/`never`
   directly followed by `because`, `due`, `caused`, `the case`, `a case` or `that` ("it is not because
   ...", "it is not the case that ...", "not a case where ...", "I doubt that ...");
 - **forward to the next `,` / `and` / `so` / `which`**: `no`, `nobody`, `neither`, `nor`, `instead of`,
-  `rather than` always ("no amount change"); `not`, `n't`, `never`, `cannot` only before a noun phrase
+  `rather than` always ("no amount change"; not `no doubt`/`no question`); `rule out`/`rules`/`ruled`/
+  `ruling out` unless a negator stands up to two words before ("ruled out the registry", but "cannot
+  rule out the registry" keeps it); `not`, `n't`, `never`, `cannot` only before a noun phrase
   or `be` ("not a Connect problem", "it can't be amount"), not before a verb ("cannot register the
   schema", "can't decode the record", "is not active") or a passive ("cannot be read as numeric");
 - **backward over the same part of the fragment** (a plain comma list stays one part): `ruled out`,
@@ -326,7 +328,7 @@ expect:
 | outcome | a run passes the outcome when |
 |---|---|
 | `diagnose` | root cause, both layers, claims and fix as above |
-| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind") |
+| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck") or counted as zero right before ("0 errors", "zero failed tasks"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind") |
 | `abstain` | no proposal, and no hypothesis or a final one at low confidence. Known gap: a cause claimed only in a message, with no hypothesis, is not seen |
 | `ask` | after the first steer or comment reached the agent, an agent message to the room (not a reply to a watcher's comment) has a sentence that ends in `?` (a `?` inside a URL does not count), and the run proposes **nothing**: the run ends without an answer, so a proposal acts on an unanswered question. The scenario needs a `steer` or `comment` input (validation checks): the harness logs each delivered one as `steer.sent` / `comment.added`, and only questions after the first count, so "What broke?" before the steer is not asking. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
 
@@ -750,8 +752,10 @@ With `fix_targets` set (`fixscore.go`):
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from
 counting (`hedge.go`):
-- **Hedge words** (every scenario): `either`, `or possibly`, `could also be`, `possible causes`, `one of
-  these`, `not sure whether` and similar make the root cause wrong (`hedged`, `hedged_on`). The LLM
+- **Hedge words** (every scenario): `either` (only with an `or` later in its clause), `or possibly`,
+  `could also be`, `possible causes`, `one of these`, `not sure whether` and similar make the root cause
+  wrong (`hedged`, `hedged_on`), unless a denial stands just before them ("there are no other
+  possibilities", "I ruled out the other possible causes"). The LLM
   judge's verdict cannot undo this.
 - **`root_cause_forbidden`** (per scenario): a plain list ("amount changed; order-sync crashed;
   retention deleted records") has no hedge words; only the scenario's wrong-story rows catch it. Name
