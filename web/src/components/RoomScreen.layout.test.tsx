@@ -202,7 +202,8 @@ describe('RoomScreen rail and column', () => {
     )
     expect(screen.getByText('high confidence')).toBeInTheDocument()
     expect(screen.getByText('A schema change broke the connector.')).toBeInTheDocument()
-    expect(screen.getByText('based on steps 2, 1')).toBeInTheDocument()
+    const chips = within(screen.getByTestId('citations')).getAllByRole('button')
+    expect(chips.map((c) => c.textContent)).toEqual(['step 2', 'step 1'])
   })
 
   it('the viewer view is read-only: no composer, Hand off, Trace or Take control', () => {
