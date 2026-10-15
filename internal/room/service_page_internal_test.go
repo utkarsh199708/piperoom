@@ -19,6 +19,7 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
+	"piperoom/internal/watch"
 )
 
 var pageT0 = time.Date(2026, 10, 15, 4, 0, 0, 0, time.UTC)
@@ -319,22 +320,42 @@ func TestFirstWatcherSignalAndLayer(t *testing.T) {
 		{"dlq with odd writers", `{"signals":[{"signal":"dlq_growth","writers":"x"}]}`, "dlq_growth", "kafka-connect"},
 		{"config risk", `{"signals":[{"signal":"config_risk"}]}`, "config_risk", "kafka-connect"},
 		{"offsets", `{"signals":[{"signal":"offset_below_log_start"}]}`, "offset_below_log_start", "consumer"},
+		{"slot stall (QA F22)", `{"source":"watcher","signals":[{"signal":"slot_stall","layer":"postgres"}]}`, "slot_stall", "postgres"},
+		{"evidence layer of a signal this table does not know", `{"signals":[{"signal":"future_thing","layer":"warehouse"}]}`, "future_thing", "warehouse"},
+		{"evidence layer that is not a layer", `{"signals":[{"signal":"future_thing","layer":"moon"},{"signal":"slot_wal"}]}`, "slot_wal", "postgres"},
 		{"no signals", `{"source":"watcher","signals":[]}`, "", ""},
 		{"not JSON", `not json`, "", ""},
 		{"empty", ``, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sig, writers := firstWatcherSignal(json.RawMessage(tc.raw))
+			sig, writers, evLayer := firstWatcherSignal(json.RawMessage(tc.raw))
 			if sig != tc.signal {
 				t.Fatalf("signal = %q, want %q", sig, tc.signal)
 			}
 			if sig == "" {
 				return
 			}
-			if l := svc.signalLayer("orders", sig, writers); l != tc.layer {
+			if l := svc.signalLayer("orders", sig, writers, evLayer); l != tc.layer {
 				t.Fatalf("layer = %q, want %q", l, tc.layer)
 			}
 		})
+	}
+}
+
+// TestSignalLayersMatchWatcher: every signal the watcher can open a room on
+// has a layer here, the same one watch.SignalLayer gives (QA F22: slot_stall
+// was missing, so an undriven slot_stall room was never auto-paged).
+func TestSignalLayersMatchWatcher(t *testing.T) {
+	for _, sig := range []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
+		owners.SignalDLQGrowth, owners.SignalConfigRisk, owners.SignalConsumerLag, owners.SignalGroupUnstable,
+		owners.SignalOffsetBelowLogStart, watch.SignalSlotStall} {
+		want := watch.SignalLayer(sig)
+		if want == "" {
+			t.Fatalf("watch.SignalLayer(%q) is empty", sig)
+		}
+		if got := signalLayers[sig]; got != want {
+			t.Errorf("signalLayers[%q] = %q, want %q (watch.SignalLayer)", sig, got, want)
+		}
 	}
 }
 

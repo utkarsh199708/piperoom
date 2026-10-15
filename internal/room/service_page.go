@@ -114,9 +114,11 @@ type roomFacts struct {
 	// alertSource is room.created.alert_source ("" for a room a person opened).
 	alertSource string
 	// alertSignal is the first watcher signal in room.created.alert with a
-	// known layer (signalLayers), and alertWriters its DLQ writers.
+	// known layer (signalLayers, or the "layer" its evidence carries),
+	// alertWriters its DLQ writers and alertLayer that evidence layer.
 	alertSignal  string
 	alertWriters []string
+	alertLayer   string
 	// lastActivity is the time of the newest event that is room activity
 	// (countsAsActivity).
 	lastActivity time.Time
@@ -133,7 +135,7 @@ func foldRoomFacts(snap *RoomSnapshot, e events.Event) {
 		if p, ok := decode[events.RoomCreatedPayload](e); ok {
 			snap.facts.alertSource = p.AlertSource
 			if p.AlertSource == string(alertin.Watcher) {
-				snap.facts.alertSignal, snap.facts.alertWriters = firstWatcherSignal(p.Alert)
+				snap.facts.alertSignal, snap.facts.alertWriters, snap.facts.alertLayer = firstWatcherSignal(p.Alert)
 			}
 		}
 	case events.OwnerPaged:
@@ -201,39 +203,64 @@ var signalLayers = map[string]string{
 	owners.SignalConsumerLag:         "consumer",
 	owners.SignalGroupUnstable:       "consumer",
 	owners.SignalOffsetBelowLogStart: "consumer",
+	signalSlotStall:                  "postgres",
 }
 
+// signalSlotStall is watch.SignalSlotStall (QA G18), named here so the room
+// package does not import the watcher; a test checks every watcher signal
+// has the layer watch.SignalLayer gives it.
+const signalSlotStall = "slot_stall"
+
 // firstWatcherSignal reads the watcher evidence of room.created.alert
-// (internal/watch compose: {"source":"watcher","signals":[{"signal":...}]})
-// and returns its first signal with a known layer, and that signal's DLQ
-// writers. An older body with one top-level "signal" is read too.
-func firstWatcherSignal(raw json.RawMessage) (string, []string) {
+// (internal/watch compose: {"source":"watcher","signals":[{"signal":...,
+// "layer":...}]}) and returns its first signal with a known layer, that
+// signal's DLQ writers and the layer its evidence names ("" when none or not
+// one of events.Layers). A signal this package has no table entry for still
+// counts when its evidence names a layer, so a new watcher signal pages
+// without a room-side change (QA F22). An older body with one top-level
+// "signal" is read too.
+func firstWatcherSignal(raw json.RawMessage) (string, []string, string) {
 	var body struct {
 		Signal  string `json:"signal"`
 		Signals []struct {
-			Signal  string          `json:"signal"`
-			Writers json.RawMessage `json:"writers"`
+			Signal   string          `json:"signal"`
+			Layer    string          `json:"layer"`
+			Writers  json.RawMessage `json:"writers"`
+			Evidence struct {
+				Layer string `json:"layer"`
+			} `json:"evidence"`
 		} `json:"signals"`
 	}
 	if len(raw) == 0 || json.Unmarshal(raw, &body) != nil {
-		return "", nil
+		return "", nil, ""
 	}
 	for _, sg := range body.Signals {
-		if _, ok := signalLayers[sg.Signal]; ok {
+		evLayer := sg.Layer
+		if evLayer == "" {
+			evLayer = sg.Evidence.Layer
+		}
+		if !slices.Contains(events.Layers, evLayer) {
+			evLayer = ""
+		}
+		if _, ok := signalLayers[sg.Signal]; ok || (sg.Signal != "" && evLayer != "") {
 			var writers []string
 			_ = json.Unmarshal(sg.Writers, &writers) // absent or odd: no writers
-			return sg.Signal, writers
+			return sg.Signal, writers, evLayer
 		}
 	}
 	if _, ok := signalLayers[body.Signal]; ok {
-		return body.Signal, nil
+		return body.Signal, nil, ""
 	}
-	return "", nil
+	return "", nil, ""
 }
 
-// signalLayer is the layer of a watcher signal in pipelineID.
-func (s *Service) signalLayer(pipelineID, signal string, writers []string) string {
-	layer := signalLayers[signal]
+// signalLayer is the layer of a watcher signal in pipelineID; evLayer is the
+// layer the signal's evidence named, used when this table has none.
+func (s *Service) signalLayer(pipelineID, signal string, writers []string, evLayer string) string {
+	layer, known := signalLayers[signal]
+	if !known {
+		return evLayer
+	}
 	if signal != owners.SignalDLQGrowth || len(writers) == 0 || s.owners == nil {
 		return layer
 	}
@@ -697,7 +724,7 @@ func (s *Service) autoPageDueLocked(roomID string, st *roomState) (layer, reason
 	}
 	waited := fmtWait(after)
 	if sig := st.snap.facts.alertSignal; sig != "" {
-		layer = s.signalLayer(st.snap.PipelineID, sig, st.snap.facts.alertWriters)
+		layer = s.signalLayer(st.snap.PipelineID, sig, st.snap.facts.alertWriters, st.snap.facts.alertLayer)
 		reason = fmt.Sprintf("nobody has taken the driver role %s after this room opened; the watcher's first signal (%s) points at %s", waited, sig, layer)
 	} else if t := st.snap.Triage; t != nil && slices.Contains(events.Layers, t.SuspectedLayer) {
 		layer = t.SuspectedLayer
