@@ -477,6 +477,18 @@ func pgRowTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
+			// Only the primary key: a lookup by any other column (an email,
+			// a tax id, ctid) makes the tool an existence oracle for personal
+			// data and puts the probed value in the room log.
+			if pc, ok := d.Src.(pkColumner); ok {
+				pk, err := pc.PrimaryKeyColumn(ctx, input.Table)
+				if err != nil {
+					return tools.Result{}, fmt.Errorf("dbtools: pg_row: %w", err)
+				}
+				if input.PKColumn != pk {
+					return tools.Result{}, fmt.Errorf("%w: pk_column must be the primary key column of %s (%q)", tools.ErrBadInput, input.Table, pk)
+				}
+			}
 			row, found, err := d.Src.Row(ctx, input.Table, input.PKColumn, input.Key)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_row: %w", err)
@@ -488,6 +500,12 @@ func pgRowTool(d Deps) tools.Tool {
 			return tools.Result{Summary: summary, Data: redactRow(row, input.PKColumn), Truncated: truncated}, nil
 		},
 	}
+}
+
+// pkColumner is implemented by SourceDB implementations that report a
+// table's primary key column (the postgres client does).
+type pkColumner interface {
+	PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 }
 
 // redactRow returns the same values rowSummary exposes: the primary-key and
