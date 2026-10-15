@@ -224,14 +224,14 @@ type fieldChange struct {
 
 // diffFields compares two Avro record schemas field by field.
 func diffFields(fromSchema, toSchema string) ([]fieldChange, error) {
-	fromFields, err := recordFields(fromSchema)
-	if err != nil {
+	var fromRoot, toRoot any
+	if err := json.Unmarshal([]byte(fromSchema), &fromRoot); err != nil {
 		return nil, err
 	}
-	toFields, err := recordFields(toSchema)
-	if err != nil {
+	if err := json.Unmarshal([]byte(toSchema), &toRoot); err != nil {
 		return nil, err
 	}
+	fromFields, toFields := recordFields(fromRoot), recordFields(toRoot)
 	var changes []fieldChange
 	for name, toType := range toFields {
 		fromType, ok := fromFields[name]
@@ -247,11 +247,7 @@ func diffFields(fromSchema, toSchema string) ([]fieldChange, error) {
 			changes = append(changes, fieldChange{Field: name, Kind: "removed", From: fromType})
 		}
 	}
-	enumChanges, err := diffEnumSymbols(fromSchema, toSchema)
-	if err != nil {
-		return nil, err
-	}
-	changes = append(changes, enumChanges...)
+	changes = append(changes, diffEnumSymbols(schemaEnums(fromRoot), schemaEnums(toRoot))...)
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Field < changes[j].Field })
 	return changes, nil
 }
@@ -278,15 +274,11 @@ func formatChanges(changes []fieldChange) string {
 	return sb.String()
 }
 
-// recordFields flattens every record field in an Avro schema into name→canonical type.
-func recordFields(schema string) (map[string]string, error) {
-	var root any
-	if err := json.Unmarshal([]byte(schema), &root); err != nil {
-		return nil, err
-	}
+// recordFields flattens every record field in a decoded Avro schema into name→canonical type.
+func recordFields(root any) map[string]string {
 	out := map[string]string{}
 	walkFields(root, out)
-	return out, nil
+	return out
 }
 
 func walkFields(node any, out map[string]string) {
@@ -451,7 +443,7 @@ func canonElem(t any) string {
 		var add func(members []any)
 		add = func(members []any) {
 			for _, m := range members {
-				if inner, ok := m.([]any); ok {
+				if inner, ok := unionMembers(m); ok {
 					add(inner)
 					continue
 				}
@@ -466,6 +458,21 @@ func canonElem(t any) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return fmt.Sprint(t)
+}
+
+// unionMembers returns the members of a union given bare or object-wrapped
+// at any depth ({"type":[...]}, {"type":{"type":[...]}}).
+func unionMembers(t any) ([]any, bool) {
+	for {
+		switch v := t.(type) {
+		case []any:
+			return v, true
+		case map[string]any:
+			t = v["type"]
+		default:
+			return nil, false
+		}
+	}
 }
 
 // shortName drops the namespace from a dotted Avro name.
@@ -484,15 +491,7 @@ const maxSymbolsShown = 10
 // keyed by full name. An enum defined on one side only is not reported: the
 // field that holds it already has its own added/removed line. Reordering is
 // not a change: readers resolve enum symbols by name.
-func diffEnumSymbols(fromSchema, toSchema string) ([]fieldChange, error) {
-	from, err := schemaEnums(fromSchema)
-	if err != nil {
-		return nil, err
-	}
-	to, err := schemaEnums(toSchema)
-	if err != nil {
-		return nil, err
-	}
+func diffEnumSymbols(from, to map[string][]string) []fieldChange {
 	var changes []fieldChange
 	for full, toSyms := range to {
 		fromSyms, ok := from[full]
@@ -509,7 +508,7 @@ func diffEnumSymbols(fromSchema, toSchema string) ([]fieldChange, error) {
 		}
 		changes = append(changes, fieldChange{Field: "enum " + label, Kind: "changed", From: "symbols", To: delta})
 	}
-	return changes, nil
+	return changes
 }
 
 // uniqueShort reports whether short names exactly one enum across both schemas.
@@ -560,17 +559,13 @@ func symbolDelta(from, to []string) string {
 	return strings.Join(parts, " ")
 }
 
-// schemaEnums maps the full name of every enum defined in a schema to its
-// symbols. A full name defined twice with different symbols maps to nil
+// schemaEnums maps the full name of every enum defined in a decoded schema to
+// its symbols. A full name defined twice with different symbols maps to nil
 // (invalid Avro, so no symbol verdict is given for it).
-func schemaEnums(schema string) (map[string][]string, error) {
-	var root any
-	if err := json.Unmarshal([]byte(schema), &root); err != nil {
-		return nil, err
-	}
+func schemaEnums(root any) map[string][]string {
 	out := map[string][]string{}
 	collectEnums(root, "", out)
-	return out, nil
+	return out
 }
 
 // fullName applies Avro's namespace rules: a dotted name is already full, else
