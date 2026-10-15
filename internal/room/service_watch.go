@@ -192,7 +192,7 @@ func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evid
 		text = text[:cut] + "…"
 	}
 	// Backstop: the steps above leave nothing for this to refuse.
-	if err := rejectUnstorable(text); err != nil {
+	if err := checkStorable(text); err != nil {
 		return err
 	}
 	// Shared store: fold what other replicas wrote, reading outside the lock.
@@ -208,14 +208,22 @@ func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evid
 	// The note keeps the evidence's incident keys, so RoomSignalKeys can tell
 	// after a restart which signals the room carried (Q3, QA S1).
 	keys := watch.EvidenceKeys(evidence)
+	state := ""
+	switch {
+	case len(evidence) > 0:
+		state = alertFiring
+	case isAllClearNote(text):
+		state = alertResolved
+	}
 	var payload any = events.AgentMessagePayload{Text: text}
-	if len(keys) > 0 {
-		payload = incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, SignalKeys: keys}
+	if len(keys) > 0 || state != "" {
+		payload = incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, SignalKeys: keys, AlertState: state}
 	}
 	if newIncident {
-		in := incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, NewIncident: true, SignalKeys: keys}
+		in := incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, NewIncident: true, SignalKeys: keys, AlertState: state}
 		if len(evidence) > 0 {
 			in.AgentText = agent.AlertEvidenceText(evidence)
+			in.Signal, in.Writers, in.Layer = firstWatcherSignal(evidence)
 		}
 		payload = in
 	}
@@ -256,6 +264,55 @@ type incidentNotePayload struct {
 	// SignalKeys are the incident keys of the note's watcher evidence
 	// (watch.EvidenceKeys), kept so RoomSignalKeys works from the log.
 	SignalKeys []string `json:"signal_keys,omitempty"`
+	// AlertState is what the note says about the room's alert: alertFiring
+	// (evidence, a firing repeat) or alertResolved (the source's resolved
+	// report, the watcher's all-clear); "" says nothing. The post-mortem
+	// reads it to tell a close while firing from a fix (Q5 T4).
+	AlertState string `json:"alert_state,omitempty"`
+	// Signal, Writers and Layer are a new incident's first watcher signal
+	// with a known layer (firstWatcherSignal), so the room pages that
+	// layer's owners too (Q5 T3). Empty for other notes.
+	Signal  string   `json:"signal,omitempty"`
+	Writers []string `json:"writers,omitempty"`
+	Layer   string   `json:"layer,omitempty"`
+}
+
+// Alert states of incidentNotePayload.AlertState.
+const (
+	alertFiring   = "firing"
+	alertResolved = "resolved"
+)
+
+// allClearSuffix ends the watcher's all-clear note in a room it only joined
+// (internal/watch resolve: "watcher: <pipeline>: all watcher signals are
+// clear"). The watcher posts it without evidence, so its text is the only
+// mark; only the watcher writes system notes through postWatcherNote.
+const allClearSuffix = ": all watcher signals are clear"
+
+func isAllClearNote(text string) bool {
+	return strings.HasPrefix(text, "watcher: ") && strings.HasSuffix(text, allClearSuffix)
+}
+
+// resolvedJoinSuffix ends the note a resolved repeat writes (joinAlertRoomLocked).
+const resolvedJoinSuffix = "reported resolved at its source; the room stays open until the driver closes it"
+
+// noteAlertState is the alert state a system agent.message records (see
+// incidentNotePayload.AlertState); a note written before the field existed is
+// read from the service's own fixed wording. Caller checks the actor.
+func noteAlertState(e events.Event) string {
+	p, ok := decode[incidentNotePayload](e)
+	if !ok {
+		return ""
+	}
+	switch {
+	case p.AlertState != "":
+		return p.AlertState
+	case isAllClearNote(p.Text), strings.HasPrefix(p.Text, "alert ") && strings.HasSuffix(p.Text, resolvedJoinSuffix):
+		return alertResolved
+	case len(p.SignalKeys) > 0 || p.NewIncident:
+		return alertFiring
+	}
+	return ""
 }
 
 // incidentInput is the agent input of a new-incident note, or nil for any

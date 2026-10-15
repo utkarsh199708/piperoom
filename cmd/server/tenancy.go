@@ -95,7 +95,25 @@ func watchClients(st stackFinder) func(pipelineID string) watch.PipelineClients 
 			if l, ok := s.Clients.Kafka.(watch.LagReader); ok {
 				pc.Lag = l
 			}
+			// The change feed (F8, Q5 T2): subject versions from the set's
+			// registry and DDL audit rows from its source. Without them
+			// pipeline_changes never gets a schema or DDL row.
+			if s.Clients.Registry != nil {
+				pc.Registry = s.Clients.Registry
+			}
+			if d, ok := s.Clients.Source.(watch.DDLReader); ok {
+				pc.DDL = d
+			}
 		}
 		return pc
+	}
+}
+
+// wireWatchChanges turns the watcher's change feed on when the room store can
+// hold pipeline_changes rows (Q5 T2): without it what_changed reads an empty
+// log and says "no recorded change", which misleads.
+func wireWatchChanges(d *watch.Deps, st any) {
+	if w, ok := st.(clients.ChangeWriter); ok {
+		d.Changes = w
 	}
 }

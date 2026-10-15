@@ -55,9 +55,13 @@ type Owner struct {
 // OwnerPaged is the webhook body of one owner.paged event (docs/api.md).
 // Deliver sets Type and RoomURL; the caller fills the rest from the event.
 type OwnerPaged struct {
-	Type       string    `json:"type"`
-	RoomID     string    `json:"room_id"`
-	RoomTitle  string    `json:"room_title"`
+	Type      string `json:"type"`
+	RoomID    string `json:"room_id"`
+	RoomTitle string `json:"room_title"`
+	// TitleFlags are the room's title_flags (injectscan kinds of the title):
+	// a flagged title is sent as it is, so the relay must see the flag before
+	// it shows the title. [] when clean, never null. (Q5 T9)
+	TitleFlags []string  `json:"title_flags"`
 	RoomURL    string    `json:"room_url,omitempty"`
 	PipelineID string    `json:"pipeline_id"`
 	Layer      string    `json:"layer"`
@@ -148,6 +152,9 @@ func (w *Webhook) Deliver(ctx context.Context, p OwnerPaged) error {
 	p.Type = EventOwnerPaged
 	if p.Owners == nil {
 		p.Owners = []Owner{}
+	}
+	if p.TitleFlags == nil {
+		p.TitleFlags = []string{}
 	}
 	p.RoomURL = ""
 	if w.publicURL != "" && p.RoomID != "" {

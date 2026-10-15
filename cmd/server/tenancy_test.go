@@ -12,6 +12,7 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
+	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
 	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
@@ -167,5 +168,45 @@ func TestTenancySetup(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+type stubRegistry struct{ clients.SchemaRegistryClient }
+
+// TestWatchClientsFeedChanges (Q5 T2): the change feed reads subject versions
+// from the set's registry and DDL rows from its source; the empty set has
+// neither.
+func TestWatchClientsFeedChanges(t *testing.T) {
+	src := &stubSource{}
+	reg := &stubRegistry{}
+	a := &wiring.Stack{Name: "pipeline pa", Tools: tools.NewRegistry(), Actions: actions.NewRegistry(),
+		Clients: &wiring.Wired{Source: src, Registry: reg}}
+	none := &wiring.Stack{Name: wiring.NoStack, Tools: tools.NewRegistry(), Actions: actions.NewRegistry()}
+	wc := watchClients(fakeFinder{"pa": a, "": none})
+	got := wc("pa")
+	if got.Registry != clients.SchemaRegistryReader(reg) {
+		t.Fatalf("Registry = %v, want the set's registry", got.Registry)
+	}
+	if got.DDL != watch.DDLReader(src) {
+		t.Fatalf("DDL = %v, want the set's source", got.DDL)
+	}
+	if got := wc("zz"); got.Registry != nil || got.DDL != nil {
+		t.Fatalf("empty set = %+v, want no change readers", got)
+	}
+}
+
+// TestWatchDepsChanges (Q5 T2): the watcher records changes into the room
+// store when it can hold them, and the feed is off otherwise.
+func TestWatchDepsChanges(t *testing.T) {
+	ms := memstore.New()
+	var d watch.Deps
+	wireWatchChanges(&d, ms)
+	if d.Changes != clients.ChangeWriter(ms) {
+		t.Fatalf("Changes = %v, want the room store", d.Changes)
+	}
+	var off watch.Deps
+	wireWatchChanges(&off, struct{}{})
+	if off.Changes != nil {
+		t.Fatalf("Changes = %v for a store without a change log, want nil", off.Changes)
 	}
 }
