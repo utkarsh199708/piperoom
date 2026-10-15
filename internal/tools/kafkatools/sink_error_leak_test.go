@@ -1,6 +1,9 @@
 package kafkatools
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestTraceSinkErrorsMaskRecordValues (#382): MySQL, PostgreSQL and
 // Elasticsearch sink errors quote the failing value in wordings that are not
@@ -33,4 +36,29 @@ func TestTraceSinkErrorsMaskRecordValues(t *testing.T) {
 			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=mapper_parsing_exception, reason=failed to parse field [age] of type [long] in document with id 'k1'. Preview of field's value: '" + value + "']",
 			[]string{"Leakwood"}, []string{"ElasticsearchException"}},
 	})
+}
+
+// TestTraceSinkErrorsKnownGaps pins sink wordings that still carry the record
+// value, on main and here: known gaps, not in #382's list, follow-up #505.
+// When #505 masks one, move its row to TestTraceSinkErrorsMaskRecordValues.
+func TestTraceSinkErrorsKnownGaps(t *testing.T) {
+	const value = "Alice Leakwood 42"
+	for _, tt := range []struct{ name, line string }{
+		{"postgres date/time field value out of range",
+			"Caused by: org.postgresql.util.PSQLException: ERROR: date/time field value out of range: \"" + value + "\""},
+		{"postgres malformed array literal",
+			"Caused by: org.postgresql.util.PSQLException: ERROR: malformed array literal: \"" + value + "\""},
+		{"elasticsearch failed to parse date field",
+			"Caused by: org.apache.kafka.connect.errors.ConnectException: Bulk request failed: [{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]\"}]"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for path, got := range bothPaths(t, tt.line) {
+				for i, where := range []string{"summary", "data error"} {
+					if !strings.Contains(got[i], "Leakwood") {
+						t.Errorf("%s path, %s no longer carries the value: #505 fixed it? move the row to the must-mask test:\n%s", path, where, got[i])
+					}
+				}
+			}
+		})
+	}
 }

@@ -3,6 +3,8 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -163,35 +165,48 @@ func TestFindByKeyWithoutScanReader(t *testing.T) {
 // TestFindByKeyManyMatchesKeepsNote (#424): with ~170+ matches the list used
 // to fill MaxSummaryBytes, so the cut dropped the truncation note and the
 // newest offsets. The note must come before the list, the list must show the
-// newest matches and say how many it left out, and Data keeps them all.
+// newest findMaxListed matches and count the rest, and Data keeps them all.
 func TestFindByKeyManyMatchesKeepsNote(t *testing.T) {
 	at := time.Date(2026, 10, 15, 16, 0, 0, 0, time.UTC)
-	refs := make([]clients.RecordRef, 300)
-	for i := range refs {
-		refs[i] = clients.RecordRef{Topic: "t", Partition: 0, Offset: int64(i), Timestamp: at.Add(time.Duration(i) * time.Second), Key: "k"}
-	}
-	fk := &reportingKafka{fakeKafka: &fakeKafka{}, scan: clients.KeyScan{Refs: refs, Truncated: []int32{0}}}
-	reg := tools.NewRegistry()
-	if err := Register(reg, Deps{Kafka: fk}); err != nil {
-		t.Fatal(err)
-	}
-	tool, _ := reg.Get("kafka_find_by_key")
-	r := runTool(t, tool, `{"topic":"t","key":"k","since":"2026-10-11T00:00:00Z"}`)
-	if r.Truncated {
-		t.Errorf("summary cut at %d bytes; the list must fit", len(r.Summary))
-	}
-	for _, want := range []string{"found 300 record(s)", "the scan stopped", "offset 299,", "older match(es) not listed"} {
-		if !strings.Contains(r.Summary, want) {
-			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
-		}
-	}
-	if strings.Contains(r.Summary, "offset 0,") {
-		t.Errorf("summary lists the oldest match instead of the newest:\n%s", r.Summary)
-	}
-	if n := strings.Index(r.Summary, "the scan stopped"); n > strings.Index(r.Summary, "\n  partition") {
-		t.Errorf("truncation note comes after the list:\n%s", r.Summary)
-	}
-	if got := r.Data.(map[string]any)["records"].([]clients.RecordRef); len(got) != 300 {
-		t.Errorf("data records = %d, want all 300", len(got))
+	for _, n := range []int{100, 101, 169, 170, 171, 300} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			refs := make([]clients.RecordRef, n)
+			for i := range refs {
+				refs[i] = clients.RecordRef{Topic: "t", Partition: 0, Offset: int64(i), Timestamp: at.Add(time.Duration(i) * time.Second), Key: "k"}
+			}
+			fk := &reportingKafka{fakeKafka: &fakeKafka{}, scan: clients.KeyScan{Refs: refs, Truncated: []int32{0}}}
+			reg := tools.NewRegistry()
+			if err := Register(reg, Deps{Kafka: fk}); err != nil {
+				t.Fatal(err)
+			}
+			tool, _ := reg.Get("kafka_find_by_key")
+			r := runTool(t, tool, `{"topic":"t","key":"k","since":"2026-10-11T00:00:00Z"}`)
+			if r.Truncated {
+				t.Errorf("summary cut at %d bytes; the list must fit", len(r.Summary))
+			}
+			for _, want := range []string{fmt.Sprintf("found %d record(s)", n), "the scan stopped", fmt.Sprintf("offset %d,", n-1)} {
+				if !strings.Contains(r.Summary, want) {
+					t.Errorf("summary lacks %q:\n%s", want, r.Summary)
+				}
+			}
+			if listed := strings.Count(r.Summary, "\n  partition "); listed != min(n, findMaxListed) {
+				t.Errorf("listed %d matches, want %d", listed, min(n, findMaxListed))
+			}
+			older := fmt.Sprintf("\n%d older match(es) not listed", n-findMaxListed)
+			if got := strings.Contains(r.Summary, "older match(es) not listed"); got != (n > findMaxListed) {
+				t.Errorf("older line present = %v, want %v:\n%s", got, n > findMaxListed, r.Summary)
+			} else if got && !strings.Contains(r.Summary, older) {
+				t.Errorf("summary lacks %q:\n%s", older, r.Summary)
+			}
+			if oldestShown := strings.Contains(r.Summary, "offset 0,"); oldestShown != (n <= findMaxListed) {
+				t.Errorf("oldest match listed = %v, want %v (newest first, cap %d):\n%s", oldestShown, n <= findMaxListed, findMaxListed, r.Summary)
+			}
+			if strings.Index(r.Summary, "the scan stopped") > strings.Index(r.Summary, "\n  partition") {
+				t.Errorf("truncation note comes after the list:\n%s", r.Summary)
+			}
+			if got := r.Data.(map[string]any)["records"].([]clients.RecordRef); len(got) != n {
+				t.Errorf("data records = %d, want all %d", len(got), n)
+			}
+		})
 	}
 }

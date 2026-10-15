@@ -379,9 +379,9 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	return res(sb.String(), data), nil
 }
 
-// findMaxListed caps the matches kafka_find_by_key lists in Summary: about 45
-// bytes each, so the list stays well inside tools.MaxSummaryBytes. Data keeps
-// every match.
+// findMaxListed caps the matches kafka_find_by_key lists in Summary: 45 to
+// about 70 bytes each (long offsets, a non-UTC zone), so the list stays well
+// inside tools.MaxSummaryBytes. Data keeps every match.
 const findMaxListed = 100
 
 // writeNewestRefs lists at most findMaxListed matches, newest first: a hot
