@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,39 +75,55 @@ func TestPrimaryKeyColumnSelectOnlyRoleIntegration(t *testing.T) {
 
 // A partitioned table's publication lists its leaf partitions only
 // (publish_via_partition_root = false), and the table read as not in the
-// publication, with its own partition counted as another member (#400).
+// publication, with its own partition counted as another member (#400). A
+// publication of only some leaves leaves the other leaves' rows unpublished:
+// the table is then not a member, and the listed leaf still counts as another
+// member (#400 review).
 func TestPublicationPartitionedTableIntegration(t *testing.T) {
 	cfg := testenv.Require(t)
 	db := sourceDB(t)
 	conn := writeConn(t, cfg.SourceDBURL)
-	table := testenv.Name("part")
-	for _, viaRoot := range []string{"false", "true"} {
-		t.Run("publish_via_partition_root="+viaRoot, func(t *testing.T) {
-			pub := table + "_pub_" + viaRoot
+	cases := []struct {
+		name      string
+		publish   string // FOR TABLE list; %s is the partitioned table
+		with      string
+		member    bool
+		wantOther int
+	}{
+		{"root, via leaves", "public.%s", "publish_via_partition_root = false", true, 0},
+		{"root, via root", "public.%s", "publish_via_partition_root = true", true, 0},
+		{"every leaf", "public.%s_a, public.%s_b", "publish_via_partition_root = false", true, 0},
+		{"one leaf of two", "public.%s_a", "publish_via_partition_root = false", false, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			table := testenv.Name("part")
+			pub := table + "_pub"
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			for _, stmt := range []string{
-				"CREATE TABLE IF NOT EXISTS public." + table + " (id int, created date, PRIMARY KEY (id, created)) PARTITION BY RANGE (created)",
-				"CREATE TABLE IF NOT EXISTS public." + table + "_2026 PARTITION OF public." + table + " FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')",
-				"CREATE PUBLICATION " + pub + " FOR TABLE public." + table + " WITH (publish_via_partition_root = " + viaRoot + ")",
-			} {
-				if _, err := conn.Exec(ctx, stmt); err != nil {
-					t.Fatalf("%s: %v", stmt, err)
-				}
-			}
 			t.Cleanup(func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				_, _ = conn.Exec(ctx, "DROP PUBLICATION IF EXISTS "+pub)
 				_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+table)
 			})
+			for _, stmt := range []string{
+				"CREATE TABLE public." + table + " (id int, k int, PRIMARY KEY (id, k)) PARTITION BY LIST (k)",
+				"CREATE TABLE public." + table + "_a PARTITION OF public." + table + " FOR VALUES IN (1)",
+				"CREATE TABLE public." + table + "_b PARTITION OF public." + table + " FOR VALUES IN (2)",
+				"CREATE PUBLICATION " + pub + " FOR TABLE " + strings.ReplaceAll(tc.publish, "%s", table) + " WITH (" + tc.with + ")",
+			} {
+				if _, err := conn.Exec(ctx, stmt); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+			}
 
 			got, other, err := db.PublicationSourceTables(context.Background(), pub, "piperoom", []string{"public." + table})
 			if err != nil {
 				t.Fatalf("PublicationSourceTables: %v", err)
 			}
-			if len(got) != 1 || !got[0].InPublication || other != 0 {
-				t.Fatalf("got %+v other=%d; want the table in the publication and no other member", got, other)
+			if len(got) != 1 || got[0].InPublication != tc.member || other != tc.wantOther {
+				t.Fatalf("got %+v other=%d; want in_publication=%v other=%d", got, other, tc.member, tc.wantOther)
 			}
 		})
 	}

@@ -75,7 +75,7 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 		table:          table,
 		groupCommitted: -1,
 	}
-	f.sink, f.sinkErr = sinkFor(table, p.SinkTables)
+	f.sink, f.sinkErr = sinkFor(table, p.SourceTables, p.SinkTables)
 
 	// Resolve the connector and topic. A Connect outage must not fail the
 	// trace: fall back to placeholder names and mark the connector unknown.
@@ -188,8 +188,8 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 	return "", "", fmt.Errorf("%w: no connector streams table %q in pipeline %q", ErrBadInput, table, p.ID)
 }
 
-// errNoSink means the pipeline has several sink tables and none is clearly
-// the one this source table loads into: the warehouse stage is then unknown,
+// errNoSink means no sink table of the pipeline is clearly the one this
+// source table loads into: the warehouse stage is then unknown,
 // never another table's row.
 var errNoSink = errors.New("no sink table of the pipeline matches the source table")
 
@@ -197,10 +197,13 @@ var errNoSink = errors.New("no sink table of the pipeline matches the source tab
 // the record's topic, so no committed offset tells whether it was consumed.
 var errNoGroup = errors.New("no consumer group of the pipeline reads the topic")
 
-// sinkFor picks the sink table of a source table the way reconcile_counts
-// does: the only one, or the one with the same table name (#401).
-func sinkFor(source string, sinks []string) (string, error) {
-	if len(sinks) == 1 {
+// sinkFor picks the sink table of a source table: the only sink of a
+// pipeline with one source table, else the one sink with the same table name
+// (#401). Unlike reconcile_counts, a trace has no sink_table override, so a
+// lone sink of a pipeline with several source tables is not assumed to hold
+// every table's rows.
+func sinkFor(source string, sources, sinks []string) (string, error) {
+	if len(sources) == 1 && len(sinks) == 1 {
 		return sinks[0], nil
 	}
 	name := source[strings.LastIndex(source, ".")+1:]

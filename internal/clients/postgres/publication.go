@@ -120,8 +120,8 @@ type sourceTable struct {
 // against pg_publication_tables so FOR ALL TABLES / FOR TABLES IN SCHEMA
 // publications are handled correctly. pg_publication_tables lists only the
 // leaf partitions of a partitioned table (publish_via_partition_root = false)
-// or only its root (true), so a table is a member when a listed relation is
-// the table, one of its partitions or one of its partition ancestors (#400).
+// or only its root (true), so membership is decided per leaf (#400): see
+// publishedMember.
 func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tables []string) ([]PublicationTable, error) {
 	sources := make([]sourceTable, 0, len(tables))
 	for _, t := range tables {
@@ -139,7 +139,7 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	args := []any{publication, role}
 	sb.WriteString(`
 		SELECT v.schemaname, v.tablename,
-		       EXISTS (` + publishedRelative("c.oid") + `) AS in_publication,
+		       (` + publishedMember("c.oid") + `) AS in_publication,
 		       (c.oid IS NOT NULL AND has_table_privilege($2::name, c.oid, 'SELECT')) AS selectable
 		FROM (VALUES `)
 	for i := range sources {
@@ -174,17 +174,25 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	return out, nil
 }
 
-// publishedRelative is a subquery with a row for each relation that
-// publication $1 lists (pg_publication_tables) and that is the relation rel,
-// one of its partitions, or one of its partition ancestors.
-// pg_partition_ancestors (PG 12+) is empty for a table that is not in a
-// partition tree, hence the plain equality.
-func publishedRelative(rel string) string {
-	return `SELECT 1 FROM pg_publication_tables pt
-		JOIN pg_namespace pn ON pn.nspname = pt.schemaname
-		JOIN pg_class pc ON pc.relnamespace = pn.oid AND pc.relname = pt.tablename
-		WHERE pt.pubname = $1
-		  AND (pc.oid = ` + rel + `
-		       OR ` + rel + ` IN (SELECT relid FROM pg_partition_ancestors(pc.oid))
-		       OR pc.oid IN (SELECT relid FROM pg_partition_ancestors(` + rel + `)))`
+// publishedMember is a boolean SQL expression: the relation rel (an oid
+// expression, never input) is in publication $1. Every leaf partition of rel,
+// or rel itself when it is not partitioned, must be listed in
+// pg_publication_tables, itself or through a listed partition ancestor. A
+// publication that lists only some leaves leaves the others' rows unpublished,
+// so the table is not a member (#400 review). pg_partition_tree is empty for a
+// table outside a partition tree, and pg_partition_ancestors (PG 12+) includes
+// the relation itself.
+func publishedMember(rel string) string {
+	return rel + ` IS NOT NULL AND NOT EXISTS (
+		SELECT 1 FROM (
+			SELECT relid FROM pg_partition_tree(` + rel + `) WHERE isleaf
+			UNION ALL
+			SELECT ` + rel + ` WHERE NOT EXISTS (SELECT 1 FROM pg_partition_tree(` + rel + `) WHERE isleaf)
+		) AS leaf(oid)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM pg_publication_tables mpt
+			JOIN pg_namespace mpn ON mpn.nspname = mpt.schemaname
+			JOIN pg_class mpc ON mpc.relnamespace = mpn.oid AND mpc.relname = mpt.tablename
+			WHERE mpt.pubname = $1
+			  AND (mpc.oid = leaf.oid OR mpc.oid IN (SELECT relid FROM pg_partition_ancestors(leaf.oid)))))`
 }

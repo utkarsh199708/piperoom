@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -74,5 +75,74 @@ func TestTraceUnknownSinkAndGroup(t *testing.T) {
 	}
 	if stages[3].Facts["error"] != "no group reads the topic" || stages[4].Facts["error"] != "no matching sink table" {
 		t.Fatalf("unknown reasons: %+v / %+v", stages[3].Facts, stages[4].Facts)
+	}
+}
+
+// One sink, several source tables: the lone sink was used for every table,
+// so a customers row read analytics.orders and got "stopped_here" (#401
+// review). The warehouse stage is unknown unless the names match.
+func TestTraceSingleSinkSeveralSources(t *testing.T) {
+	lags := map[string]clients.GroupLag{"customer-sync": {State: "Stable", Partitions: []clients.PartitionLag{{Topic: "pg.public.customers", Partition: 0, Committed: 4}}}}
+
+	b := twoTableBuilder(twoTableOwners([]string{"customer-sync"}, []string{"analytics.orders"}), lags)
+	stages, err := b.Trace(context.Background(), "orders", "public.customers", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := stages[4]; w.Status != "unknown" || w.Facts["error"] != "no matching sink table" {
+		t.Fatalf("warehouse stage = %+v, want unknown (no matching sink table)", w)
+	}
+
+	b = twoTableBuilder(twoTableOwners([]string{"customer-sync"}, []string{"analytics.customers"}), lags)
+	stages, err = b.Trace(context.Background(), "orders", "public.customers", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := stages[4]; w.Name != "analytics.customers" || w.Status != "seen" {
+		t.Fatalf("warehouse stage = %+v, want analytics.customers seen", w)
+	}
+}
+
+// groupFor with several groups: a group whose lag cannot be read is skipped
+// when another reads the topic; when every read fails the stage is unknown
+// as unreachable.
+func TestTraceGroupForErrors(t *testing.T) {
+	reads := map[string]clients.GroupLag{"g2": {State: "Stable", Partitions: []clients.PartitionLag{{Topic: "pg.public.customers", Partition: 0, Committed: 4}}}}
+	cases := []struct {
+		name       string
+		errs       map[string]error
+		wantName   string
+		wantStatus string
+		wantError  string
+	}{
+		{"one group down, the other reads the topic", map[string]error{"group:g1": errors.New("down")}, "g2", "seen", ""},
+		{"every group down", map[string]error{"group:g1": errors.New("down"), "group:g2": errors.New("down")}, "g1,g2", "unknown", "unreachable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := twoTableOwners([]string{"g1", "g2"}, []string{"analytics.orders", "analytics.customers"})
+			b := NewBuilder(
+				o,
+				&fakeConnect{
+					config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders,public.customers"}},
+					status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+				},
+				&fakeKafka{
+					findByKey: map[string][]clients.RecordRef{"pg.public.customers": {{Key: "7", Partition: 0, Offset: 3}}},
+					lags:      reads,
+					err:       tc.errs,
+				},
+				&fakeSource{rows: map[string]map[string]any{"public.customers|7": {"id": "7", "updated_at": time.Now().Format(time.RFC3339Nano)}}},
+				&fakeWarehouse{rows: map[string]map[string]any{"analytics.customers|7": {"id": "7"}}},
+			)
+			stages, err := b.Trace(context.Background(), "orders", "public.customers", "7")
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := stages[3]
+			if g.Name != tc.wantName || g.Status != tc.wantStatus || g.Facts["error"] != tc.wantError {
+				t.Fatalf("consumer stage = %+v, want %s %s error=%q", g, tc.wantName, tc.wantStatus, tc.wantError)
+			}
+		})
 	}
 }

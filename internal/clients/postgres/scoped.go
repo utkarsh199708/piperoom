@@ -252,8 +252,10 @@ func (d *DB) PublicationSourceTables(ctx context.Context, publication, role stri
 		schemas = append(schemas, schema)
 		names = append(names, tbl)
 	}
-	// A partition (or partition root) of a pipeline table is that table, not
-	// another member (#400).
+	// A listed partition root of a pipeline table publishes that table, and a
+	// listed partition of a pipeline table that is a member is part of it: not
+	// another member (#400). The listed leaves of a pipeline table that is
+	// only partly published still count, as before.
 	var other int
 	if err := d.queryRow(ctx, `
 		SELECT count(*)
@@ -266,8 +268,9 @@ func (d *DB) PublicationSourceTables(ctx context.Context, publication, role stri
 		      JOIN pg_namespace vn ON vn.nspname = v.nsp
 		      JOIN pg_class vc ON vc.relnamespace = vn.oid AND vc.relname = v.relname
 		      WHERE vc.oid = pc.oid
-		         OR vc.oid IN (SELECT relid FROM pg_partition_ancestors(pc.oid))
-		         OR pc.oid IN (SELECT relid FROM pg_partition_ancestors(vc.oid)))`, publication, schemas, names).Scan(&other); err != nil {
+		         OR pc.oid IN (SELECT relid FROM pg_partition_ancestors(vc.oid))
+		         OR (vc.oid IN (SELECT relid FROM pg_partition_ancestors(pc.oid))
+		             AND `+publishedMember("vc.oid")+`))`, publication, schemas, names).Scan(&other); err != nil {
 		return nil, 0, fmt.Errorf("postgres: count other publication %q tables: %w", publication, err)
 	}
 	return sources, other, nil
