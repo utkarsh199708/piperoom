@@ -281,6 +281,31 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "keep", in: "retry +1 2026-10-15 scheduled"},
 		{kind: "keep", in: "retry +1 2 3 times"},
 		{kind: "keep", in: "lag +12 at 10:00"},
+		// #440: PostgreSQL unique, foreign-key and exclusion "Key (cols)=(values)"
+		// details without a "Detail:" label. The values go, the columns stay.
+		{kind: "mask", in: `ERROR: duplicate key value violates unique constraint "u_name" Key (full_name)=(Jane Doe) already exists.`, gone: "Jane", want: "ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists."},
+		{kind: "mask", in: `duplicate key value violates unique constraint "u_tax" Key (tax_id, region)=(AB123456, EU) already exists.`, gone: "AB123456", want: "duplicate key value violates unique constraint <redacted> Key (tax_id, region)=<redacted> already exists."},
+		{kind: "mask", in: `insert or update on table "orders" violates foreign key constraint "fk_c" Key (customer_name)=(Jane Doe) is not present in table "customers".`, gone: "Jane", want: "insert or update on table <redacted> violates foreign key constraint <redacted> Key (customer_name)=<redacted> is not present in table <redacted>."},
+		{kind: "mask", in: `update or delete on table "customers" violates foreign key constraint "fk_c" on table "orders" Key (id)=(42) is still referenced from table "orders".`, gone: "42", want: "update or delete on table <redacted> violates foreign key constraint <redacted> on table <redacted> Key (id)=<redacted> is still referenced from table <redacted>."},
+		{kind: "mask", in: "Key (customer_ref)=(jdoe_smith) is not present in table customers.", gone: "jdoe_smith", want: "Key (customer_ref)=<redacted> is not present in table customers."},
+		// A quoted column name is main's quote rule's: it goes too.
+		{kind: "mask", in: `Key ("Full Name")=(Jane Doe) already exists.`, gone: "Jane", want: "Key (<redacted>)=<redacted> already exists."},
+		{kind: "mask", in: "Key (full_name, city)=(Doe, Jane, Paris) already exists.", gone: "Paris", want: "Key (full_name, city)=<redacted> already exists."},
+		{kind: "mask", in: "Key (note)=(a) b, c) already exists.", gone: "b, c", want: "Key (note)=<redacted> already exists."},
+		{kind: "mask", in: "Key (note)=(x) already exists y) already exists.", gone: "x) already exists y", want: "Key (note)=<redacted> already exists."},
+		{kind: "mask", in: "Key (lower(email::text))=(Jane Doe) already exists.", gone: "Jane", want: "Key (lower(email::text))=<redacted> already exists."},
+		{kind: "mask", in: "(full_name)=(Jane Doe) already exists", gone: "Jane", want: "(full_name)=<redacted> already exists"},
+		{kind: "mask", in: "key (full_name)=(Jane Doe) ALREADY EXISTS", gone: "Jane", want: "key (full_name)=<redacted> ALREADY EXISTS"},
+		{kind: "mask", in: "Key (full_name)=(Jane\n Doe) already exists.", gone: "Jane", want: "Key (full_name)=<redacted> already exists."},
+		{kind: "mask", in: "Key (full_name)=(Jane Doe", gone: "Jane", want: "Key (full_name)=<redacted>"},
+		{kind: "mask", in: "Key (full_name)=(Jane Doe) was rejected", gone: "Jane", want: "Key (full_name)=<redacted>"},
+		{kind: "mask", in: `conflicting key value violates exclusion constraint "no_overlap" Key (room, during)=(101, [2026-01-01,2026-01-02)) conflicts with existing key (room, during)=(101, [2026-01-01,2026-01-03)).`, gone: "101", want: "conflicting key value violates exclusion constraint <redacted> Key (room, during)=<redacted>"},
+		{kind: "mask", in: "Key (room)=(101) conflicts with existing key (room)=(102).", gone: "102", want: "Key (room)=<redacted> conflicts with existing key (room)=<redacted>"},
+		// Two details: the values of both go, and the prose between (over-mask).
+		{kind: "mask", in: "Key (a)=(Jane) already exists. Key (b)=(Doe) is not present in table t.", gone: "Doe", want: "Key (a)=<redacted> is not present in table t."},
+		{kind: "mask", in: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint \"u\"\n  Key (full_name)=(Jane Doe) already exists.  Call getNextException to see other errors in the batch.", gone: "Jane", want: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists. Call getNextException to see other errors in the batch."},
+		{kind: "keep", in: "Key (full_name) already exists"},
+		{kind: "keep", in: "retry=(3) backoff=(500ms)"},
 		// #426 is split out of #435 (org.md §12): main's output, pinned.
 		{kind: "gap", in: "phone +44 20 7946 0958 now", want: "phone +44 20 7946 0958 now", why: "#426, split out"},
 		{kind: "gap", in: "phone +15551234567 now", want: "phone +15551234567 now", why: "#426, split out"},
@@ -376,6 +401,29 @@ func TestMaskPIIKeepsShape(t *testing.T) {
 	} {
 		if got := MaskPII(keep); got != keep {
 			t.Errorf("MaskPII(%q) = %q, want it unchanged", keep, got)
+		}
+	}
+}
+
+// #440 at the cap: wherever the cut falls in a "Key (...)=(...)" detail, no
+// part of the values goes out.
+func TestRedactMessageCapNeverSplitsAKeyValue(t *testing.T) {
+	for _, detail := range []string{
+		"Key (full_name)=(Zqxw Vbnm) already exists.",
+		"Key (tax_id, region)=(Zqxw12, Vbnm) already exists.",
+		"Key (customer_name)=(Zqxw, Vbnm) is not present in table customers.",
+	} {
+		for pad := 250; pad <= 300; pad++ {
+			in := strings.Repeat("x", pad-1) + " " + detail + " and the rest of the message"
+			got := RedactMessage(in)
+			for _, leak := range []string{"Zq", "qx", "xw", "Vb", "bn", "nm"} {
+				if strings.Contains(got, leak) {
+					t.Errorf("pad %d: RedactMessage kept %q: ...%q", pad, leak, got[max(0, len(got)-60):])
+				}
+			}
+			if again := RedactMessage(got); again != got {
+				t.Errorf("pad %d: not idempotent: %q -> %q", pad, got, again)
+			}
 		}
 	}
 }
