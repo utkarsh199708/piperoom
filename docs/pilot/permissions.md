@@ -158,6 +158,19 @@ Do **not** grant `Write`, `Create`, `Delete`, `Alter`, `AlterConfigs`, `ClusterA
 on groups (that would allow committing offsets). Do not grant `Read` on topics outside the
 pipeline: record values may contain customer data (see [data-handling.md](data-handling.md)).
 
+**"Read-only" does not mean the read tools are safe against a hostile record key.** `kafka_find_by_key`
+and `trace_record` decode the **keys** of records on the pipeline's topics, and the key can name its own
+Avro schema id. The Avro library that does this, `github.com/hamba/avro/v2` v2.31.0, has three open
+advisories that are reachable from these tools: GO-2026-5046 (one key can keep a CPU core busy and the
+decode ignores the tool's deadline), GO-2026-5047 (a key can make the decoder panic) and GO-2026-5048
+(unbounded memory use). Anyone who can produce to a pipeline topic controls those bytes. The effect is
+denial of service (a stuck or failed investigation, possibly memory pressure on the server), not a write
+to your systems: the Kafka principal is still read-only. `go.mod` on `main` still lists
+`hamba/avro/v2 v2.31.0`. The fix, pilot gate G2, is a separate change, "[G2] kafka: decode keys with the
+maintained avro fork" (`github.com/iskorotkov/avro/v2` v2.33.0, with size limits set). Until it is
+merged and in your build, limit who can produce to the pipeline's topics, and keep the principal's
+`Read` to those topics. Sources: `reviews/vuln-report-2026-10.md` (§Summary, §avro),
+`docs/pilot/decision.md` §2.2 and §4 (G2), `internal/clients/kafka/kafka.go` (`decodeKey`).
 Use TLS and SASL on the listener if your cluster has them. The settings exist
 (`KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_*`, `KAFKA_TLS_*`, and the same for Schema Registry
 and Connect; see [setup.md](setup.md#1-configure-the-environment)), and `internal/wiring`

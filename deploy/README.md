@@ -54,9 +54,10 @@ So:
   rewrites `Host`, for example an SSH tunnel to `localhost:9000`, or a name the VPN uses
   for the machine. Signed alert routes `POST /api/alerts/{source}` and `GET /healthz`,
   `GET /readyz` skip this check. The unsigned dev webhook does not.
-- **Export.** Today a member may export a room, and a viewer may export only if named in
-  `auditors:` (see [Identity and rights](#identity-and-rights)). From auth PR 4, members
-  who are not owners, backups or auditors cannot export and must be added to `auditors:`.
+- **Export.** Only an approver or backup for a layer of the room's pipeline, or someone named in
+  `auditors:`, may export a room (see [Identity and rights](#identity-and-rights)). A plain member,
+  the driver as such and a viewer who is not in `auditors:` get `403 not_allowed`
+  (`CheckExportAccess`, `internal/room/access.go`).
 
 More limits: [docs/pilot/README.md](../docs/pilot/README.md#read-this-first-pilot-limits).
 
@@ -383,7 +384,7 @@ auditors: [group:security, user:meera]   # may export; see Roles
 - A fix needs the approval of **every** layer it touches. Each layer needs one approver (or backup).
 - A backup is a full approver and may approve at once. The server log records the grant as
   `backup:...`, and an approval by a backup adds a system message to the room naming the backup.
-  (Storing the grant on the approval event itself comes with auth PR 4.)
+  (The approval event also carries the grant in `identity.grant`: `internal/events/events.go`, `Identity`.)
 - In `layers:`, a layer whose principals are all `user:` must name `users.yaml` users. To give a
   layer to a person with no `users.yaml` entry, use a `group:`, or put the `user:u_...` in a
   pipeline `owners:` block (these are not checked against `users.yaml`).
@@ -405,9 +406,9 @@ tell the two apart.
 | **viewer** | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` or `auditors:` | read and watch: every `GET` except export and `GET /api/people` (`403 viewer`), and the live WebSocket. **Every non-GET under `/api` answers `403 viewer`**, including accepting a hand-off. A viewer can still log out |
 | **auditor** | named in `auditors:`, any role | export a room. `auditors:` **never makes a member**: a person who is only in `auditors:` is a viewer who can also export |
 
-Today a **member can still export** too. From auth PR 4 a member who is not an approver, a backup
-or an auditor will get `403 not_allowed` on export. Add them to `auditors:` before you rely on it. A viewer
-who is not in `auditors:` gets `403 not_allowed` on export now.
+A member who is not an approver, a backup or an auditor gets `403 not_allowed` on export, and so does a
+viewer who is not in `auditors:` (`CheckExportAccess`, `internal/room/access.go`). Add the people who
+should be able to export to `auditors:`.
 
 Some actions need a person the server can look up. To **give control** to someone or **hand off** to
 someone, the target must be a `users.yaml` user, or a member who is signed in right now (a
@@ -438,7 +439,7 @@ For one data engineer who owns every layer. Set `PIPEROOM_SOLO_USER=<users.yaml 
 - each approval must also send `confirm: "<pipeline_id>/<layer>"`, typed by hand, for example
   `"orders/kafka"`. Without it the answer is `400 validation`. The web app asks for it when the
   server says a solo confirm is needed; through the API, send `confirm` in the approve body;
-- the server log records the grant as `solo` (storing it on the approval event comes with auth PR 4).
+- the server log records the grant as `solo`, and so does the approval event (`identity.grant`).
 
 The typed text is a speed bump, not a control. So **the server refuses to start** when the solo
 user is not in `users.yaml`, or when `owners.yaml` names **anyone else**, in `layers:`, a pipeline
@@ -592,14 +593,13 @@ The export carries a SHA-256 over the JCS (RFC 8785) form of the room with the t
 `sha256sum` of the file will not match it. Use it to check later that the file was not changed.
 In `oidc` mode a request needs a session cookie, not `X-User`: export from the browser, or send
 a cookie. Today a member may export, and a viewer may export only if named in `auditors:`.
-From auth PR 4, members who are not owners, backups or auditors cannot export and must be added
-to `auditors:`.
+A member who is not an owner, backup or auditor cannot export; add them to `auditors:`.
 
 ## Watcher
 
 The built-in watcher is live. The four `PIPEROOM_WATCH_*` settings are passed through to the server.
-Empty means the default, which is mode `log` (shadow mode: it only writes log lines and opens no
-room). Set `PIPEROOM_WATCH_MODE=rooms` to let it open rooms. A bad value stops the server at start
+Empty means the default, which is mode `log` (it only writes log lines and opens no room). This is
+not the same thing as [shadow rooms](../docs/pilot/shadow-rooms.md), which are blind agent rooms. Set `PIPEROOM_WATCH_MODE=rooms` to let it open rooms. A bad value stops the server at start
 with an error that names the variable. `--demo` always runs with the watcher off. The source database
 URL must point at the primary, PostgreSQL 13 or newer. See
 [setup.md](../docs/pilot/setup.md#1-configure-the-environment).
@@ -658,9 +658,12 @@ docker compose -f deploy/docker-compose.pilot.yml down            # stop; data s
 docker compose -f deploy/docker-compose.pilot.yml down -v         # stop AND delete the room database
 ```
 
-On a restart the server rebuilds every room from its log and starts a new agent for each open
-room. A fix that was approved but not finished is marked failed, not re-run
-([setup.md](../docs/pilot/setup.md#what-happens-on-a-restart)).
+On a restart the server rebuilds every room from its log. It does **not** start an agent for the
+open rooms: each one comes back with the agent idle (a "server restarted" message), and the agent runs
+again only when a driver steers, someone mentions `@agent`, or a suggestion is sent. A fix that was
+approved but not finished is marked failed, not re-run
+([setup.md](../docs/pilot/setup.md#what-happens-on-a-restart), checked against
+`internal/room/service.go`, `noteRestartLocked`).
 
 ## Troubleshooting
 
@@ -689,9 +692,9 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | No agent answer | the model provider's credentials are missing, or egress to its API is blocked (behind a proxy, set `HTTPS_PROXY` and `NO_PROXY`) |
 | Exits at start with an error about the model provider, region, project or credentials | see [Model provider](#model-provider); the error names the setting |
 | A password with `$` is cut short | write `$` as `$$` in `deploy/.env` |
-| `login_expired` (`400` at `/auth/callback`; today the browser shows this JSON, after auth PR 4 the "sign-in expired" page) | the login cookie or its row is gone. A login lasts **10 minutes**; the person took longer, or opened `/auth/login` a second time (a second tab) so the first tab's login was replaced, or pressed back and sent the same callback twice (each login works once), or opened the callback in another browser. Also check that people open the exact `PIPEROOM_PUBLIC_URL` address (the cookie belongs to that host). Fix: start again from the site address, in one tab |
-| `unauthenticated` (`401` at `/auth/callback`; today JSON in the browser, after auth PR 4 a sign-in failed page) | `state` did not match (log `auth: callback state mismatch`); the IdP refused the login, for example `access_denied` (log `auth: the identity provider refused the login`); the token endpoint said no, for example `invalid_grant`, which a redirect URI that does not match the one registered at the IdP also gives (log `auth: login refused: token endpoint said 400 invalid_grant`); or the ID token failed a check: signature, issuer, audience, expiry, nonce, or `azp` not equal to our client id (log `auth: login refused ...`). A token endpoint that answers 5xx gives `503 idp_unavailable` instead. Check `PIPEROOM_OIDC_ISSUER` and `PIPEROOM_OIDC_CLIENT_ID`, and the server clock (use NTP) |
-| `not_provisioned` (`403` at login; today JSON in the browser, after auth PR 4 a "not set up" page) | the IdP login was fine but the gate says no: the person is not in `users.yaml`, not named in `owners.yaml` (`layers:`, a pipeline `owners:` block, `auditors:`), and not in `PIPEROOM_AUTH_VIEWER_GROUPS`. Find their id in the log (`auth: login refused by the gate`, `user=...`), add them, restart. Two other texts mean a **recycled or moved account**. "this email is already linked to a different account; ask an admin to unbind it" has two causes: the user is already bound to another IdP account (run `devctl identities unbind <user>`, see [Moving a person](#moving-a-person-to-a-new-idp-account)), or the email belongs to a `users.yaml` user who has a `sub:` pin and this account is not that `sub` (unbind does not help: fix the `sub:` in `users.yaml`, or the login is right to be refused). "this account is not the one pinned for <user>" is the same pin problem: fix the `sub:` |
+| `login_expired` (at `/auth/callback`, the browser is redirected to `/?login_error=login_expired`, which shows the "sign-in expired" page) | the login cookie or its row is gone. A login lasts **10 minutes**; the person took longer, or opened `/auth/login` a second time (a second tab) so the first tab's login was replaced, or pressed back and sent the same callback twice (each login works once), or opened the callback in another browser. Also check that people open the exact `PIPEROOM_PUBLIC_URL` address (the cookie belongs to that host). Fix: start again from the site address, in one tab |
+| `unauthenticated` (at `/auth/callback`, the browser is redirected to `/?login_error=unauthenticated` and shows a sign-in failed page) | `state` did not match (log `auth: callback state mismatch`); the IdP refused the login, for example `access_denied` (log `auth: the identity provider refused the login`); the token endpoint said no, for example `invalid_grant`, which a redirect URI that does not match the one registered at the IdP also gives (log `auth: login refused: token endpoint said 400 invalid_grant`); or the ID token failed a check: signature, issuer, audience, expiry, nonce, or `azp` not equal to our client id (log `auth: login refused ...`). A token endpoint that answers 5xx gives `503 idp_unavailable` instead. Check `PIPEROOM_OIDC_ISSUER` and `PIPEROOM_OIDC_CLIENT_ID`, and the server clock (use NTP) |
+| `not_provisioned` (at login, the browser is redirected to `/?login_error=not_provisioned` and shows a "not set up" page) | the IdP login was fine but the gate says no: the person is not in `users.yaml`, not named in `owners.yaml` (`layers:`, a pipeline `owners:` block, `auditors:`), and not in `PIPEROOM_AUTH_VIEWER_GROUPS`. Find their id in the log (`auth: login refused by the gate`, `user=...`), add them, restart. Two other texts mean a **recycled or moved account**. "this email is already linked to a different account; ask an admin to unbind it" has two causes: the user is already bound to another IdP account (run `devctl identities unbind <user>`, see [Moving a person](#moving-a-person-to-a-new-idp-account)), or the email belongs to a `users.yaml` user who has a `sub:` pin and this account is not that `sub` (unbind does not help: fix the `sub:` in `users.yaml`, or the login is right to be refused). "this account is not the one pinned for <user>" is the same pin problem: fix the `sub:` |
 | `session_expired` (`401`) after a good login | the idle (`PIPEROOM_SESSION_IDLE`) or maximum (`PIPEROOM_SESSION_MAX`) time ran out, or the person was removed from `users.yaml`, `owners.yaml` or the viewer groups ("this user is no longer allowed to sign in") |
 | `rate_limited` (`429` on `/auth/login`) | more than 300 logins a minute from one client address. Behind a proxy this usually means everyone shares the proxy's address: set `PIPEROOM_TRUSTED_PROXIES`, and make the proxy send plain addresses (no port) in `X-Forwarded-For`. Wait a minute (`Retry-After: 60`) |
 | `idp_unavailable` (`503`) | the server has not reached the IdP (discovery is retried in the background, 1 s up to 30 s apart, and is not fatal), or the IdP's token endpoint was down during the login. Check `PIPEROOM_OIDC_ISSUER`, DNS, firewall and `HTTPS_PROXY`/`NO_PROXY` (see [Outbound proxy](#outbound-proxy)); watch for `auth: oidc discovery succeeded`. People already signed in are not affected |
