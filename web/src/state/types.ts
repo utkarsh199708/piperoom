@@ -319,7 +319,11 @@ export interface RoomState {
   /** Ticked runbook items; the last event per key wins and an untick removes the key. */
   checklist_done: Record<string, ChecklistTick>
   activity: ActivityEntry[]
-  /** Shadow room: no cost chip until its numbers are revealed. */
+  /** Set by shadow.revealed: the run has ended and its result exists (grading may start). */
+  shadow_revealed?: boolean
+  /** Set by shadow.labelled: the blind label exists, so the F8 label may follow. */
+  shadow_labelled?: boolean
+  /** Shadow room: no cost chip until its numbers are revealed; the shadow panel replaces steering once closed. */
   shadow: boolean
   insight: InsightState
 }
@@ -378,7 +382,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
     last_seq: 0,
-    shadow: snapshot.shadow ?? false,
+    shadow: snapshot.shadow === true,
     replay_target: snapshot.last_seq ?? 0,
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
@@ -392,7 +396,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
       state: snapshot.agent_status.state,
       detail: snapshot.agent_status.detail,
     },
-    hypothesis: snapshot.hypothesis
+    // A shadow room shows no agent output, not even on the first render.
+    hypothesis: snapshot.hypothesis && snapshot.shadow !== true
       ? {
           text: snapshot.hypothesis.text,
           based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
@@ -402,7 +407,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           verdicts: [],
         }
       : null,
-    triage: snapshot.triage
+    triage: snapshot.triage && snapshot.shadow !== true
       ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
   }

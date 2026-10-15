@@ -175,6 +175,11 @@ function applyCore(state: RoomState, event: Event): RoomState {
   // take a slot of the 50-entry activity window or show up as a raw line.
   if (event.type === 'agent.usage') return { ...state, last_seq: event.seq }
 
+  // A shadow room's log holds no agent events (the server keeps them in a separate log until
+  // the reveal). If one arrives anyway, a bug or an older server, showing it would un-blind
+  // the labeller, so only the seq moves on.
+  if (state.shadow && event.type.startsWith('agent.')) return { ...state, last_seq: event.seq }
+
   let next: RoomState = state
 
   switch (event.type) {
@@ -703,6 +708,14 @@ function applyCore(state: RoomState, event: Event): RoomState {
       }
       break
     }
+
+    case 'shadow.revealed':
+      next = { ...state, shadow_revealed: true }
+      break
+
+    case 'shadow.labelled':
+      next = { ...state, shadow_labelled: true }
+      break
 
     default:
       break

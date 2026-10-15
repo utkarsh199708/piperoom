@@ -28,7 +28,7 @@ function jumpToProposal() {
 
 // The rail's Proposals block: a count and one small card per proposal. The proposal itself
 // (steps, approvals, buttons) is the ProposalsPanel in the main column.
-export function ProposalsSummary({ proposals }: { proposals: ProposalState[] }) {
+export function ProposalsSummary({ proposals, shadow = false }: { proposals: ProposalState[]; shadow?: boolean }) {
   const open = proposals.filter((p) => p.status === 'open').length
   return (
     <section aria-labelledby="proposals-summary-heading" className="flex flex-col gap-2.5 px-4 py-3.5">
@@ -40,8 +40,9 @@ export function ProposalsSummary({ proposals }: { proposals: ProposalState[] }) 
       </h2>
       {proposals.length === 0 ? (
         <p className="m-0 text-muted-foreground">
-          No fix proposed yet. The agent proposes once the hypothesis is confident; each layer owner approves their
-          part.
+          {shadow
+            ? 'Shadow room: the agent proposes no fix here.'
+            : 'No fix proposed yet. The agent proposes once the hypothesis is confident; each layer owner approves their part.'}
         </p>
       ) : (
         <ul className="m-0 flex list-none flex-col gap-2 p-0">
