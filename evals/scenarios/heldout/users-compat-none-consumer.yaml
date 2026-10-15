@@ -69,22 +69,32 @@ alert:
   title: 'user-profile-sync lag 9812 and rising on usr.public.users; consumer pods in CrashLoopBackOff'
   pipeline_map: |
     pipeline users
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
     1 pg:public.users [postgres, owner nadia] OK slot_active=true slot_retained=22.3 MiB
     2 connect:pg-users-connector [kafka-connect, owner tomas] OK
+      from: pg:public.users
     3 topic:usr.public.users [kafka, owner tomas] OK newest_record=6s ago
+      from: connect:pg-users-connector
     4 group:user-profile-sync [consumer, owner lena] WARN lag=9812 state=Empty
+      from: topic:usr.public.users
     5 wh:analytics.user_profiles [warehouse, owner omar] FAIL stale_for=1.2h ts_column=updated_at
+      from: group:user-profile-sync (unconfirmed)
 
 recordings:
   - tool: pipeline_map
     input: {pipeline_id: users}
     summary: |
       pipeline users
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
       1 pg:public.users [postgres, owner nadia] OK slot_active=true slot_retained=22.3 MiB
       2 connect:pg-users-connector [kafka-connect, owner tomas] OK
+        from: pg:public.users
       3 topic:usr.public.users [kafka, owner tomas] OK newest_record=6s ago
+        from: connect:pg-users-connector
       4 group:user-profile-sync [consumer, owner lena] WARN lag=9812 state=Empty
+        from: topic:usr.public.users
       5 wh:analytics.user_profiles [warehouse, owner omar] FAIL stale_for=1.2h ts_column=updated_at
+        from: group:user-profile-sync (unconfirmed)
     data:
       edges:
         - from: pg:public.users
@@ -94,6 +104,7 @@ recordings:
         - from: topic:usr.public.users
           to: group:user-profile-sync
         - from: group:user-profile-sync
+          mapping: inferred
           to: wh:analytics.user_profiles
       nodes:
         - facts:
@@ -412,8 +423,11 @@ recordings:
         username: app_migrator
   - tool: pg_long_transactions
     summary: |
-      (no long transactions)
-    data: []
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
   - tool: pg_publication_tables
     input: {pipeline_id: users}
     summary: |
@@ -492,6 +506,7 @@ recordings:
       key: "1"
       records: null
       topic: usr.public.users
+      truncated: false
   - tool: pg_row
     summary: |-
       not found

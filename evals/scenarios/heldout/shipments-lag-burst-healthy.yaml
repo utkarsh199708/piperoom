@@ -53,22 +53,32 @@ alert:
   title: 'shipment-tracker consumer lag 48210 > 25000 on shp.public.shipments (KafkaConsumerLagHigh)'
   pipeline_map: |
     pipeline shipments
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
     1 pg:public.shipments [postgres, owner nadia] OK slot_active=true slot_retained=9.6 MiB
     2 connect:pg-shipments-connector [kafka-connect, owner tomas] OK
+      from: pg:public.shipments
     3 topic:shp.public.shipments [kafka, owner tomas] OK newest_record=4s ago
+      from: connect:pg-shipments-connector
     4 group:shipment-tracker [consumer, owner lena] WARN lag=48210 state=Stable
+      from: topic:shp.public.shipments
     5 wh:analytics.shipments [warehouse, owner omar] OK stale_for=6m ts_column=updated_at
+      from: group:shipment-tracker (unconfirmed)
 
 recordings:
   - tool: pipeline_map
     input: {pipeline_id: shipments}
     summary: |
       pipeline shipments
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
       1 pg:public.shipments [postgres, owner nadia] OK slot_active=true slot_retained=9.6 MiB
       2 connect:pg-shipments-connector [kafka-connect, owner tomas] OK
+        from: pg:public.shipments
       3 topic:shp.public.shipments [kafka, owner tomas] OK newest_record=4s ago
+        from: connect:pg-shipments-connector
       4 group:shipment-tracker [consumer, owner lena] WARN lag=48210 state=Stable
+        from: topic:shp.public.shipments
       5 wh:analytics.shipments [warehouse, owner omar] OK stale_for=6m ts_column=updated_at
+        from: group:shipment-tracker (unconfirmed)
     data:
       edges:
         - from: pg:public.shipments
@@ -78,6 +88,7 @@ recordings:
         - from: topic:shp.public.shipments
           to: group:shipment-tracker
         - from: group:shipment-tracker
+          mapping: inferred
           to: wh:analytics.shipments
       nodes:
         - facts:
@@ -381,8 +392,11 @@ recordings:
       (no DDL since 2026-10-10T09:40:00Z)
   - tool: pg_long_transactions
     summary: |
-      (no long transactions)
-    data: []
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
   - tool: pg_publication_tables
     input: {pipeline_id: shipments}
     summary: |
@@ -435,6 +449,7 @@ recordings:
       key: "1"
       records: null
       topic: shp.public.shipments
+      truncated: false
   - tool: pg_row
     summary: |-
       not found
