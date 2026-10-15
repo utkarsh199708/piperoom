@@ -206,13 +206,66 @@ func assertNoConsecutiveUsers(t *testing.T, msgs []anthropic.BetaMessageParam) {
 	}
 }
 
+// messageTexts is what the room shows as the agent's words, in order: every
+// agent.message, and every full verdict (agent.verification, which replaced the
+// plain-text verdict message) rendered as its verdict line followed by one line
+// per check and per sink. A Repeat is not an announcement and is left out.
 func messageTexts(s *fakeSink) []string {
+	s.mu.Lock()
+	evs := append([]sinkEvent(nil), s.events...)
+	s.mu.Unlock()
 	var out []string
-	for _, e := range s.ofType(events.AgentMessage) {
-		var p events.AgentMessagePayload
-		if json.Unmarshal(e.payload, &p) == nil {
-			out = append(out, p.Text)
+	for _, e := range evs {
+		switch e.typ {
+		case events.AgentMessage:
+			var p events.AgentMessagePayload
+			if json.Unmarshal(e.payload, &p) == nil {
+				out = append(out, p.Text)
+			}
+		case events.AgentVerification:
+			var p events.AgentVerificationPayload
+			if json.Unmarshal(e.payload, &p) == nil && !p.Repeat {
+				out = append(out, verdictText(p))
+			}
 		}
+	}
+	return out
+}
+
+// verdictText renders a full agent.verification as text for assertions.
+func verdictText(p events.AgentVerificationPayload) string {
+	var b strings.Builder
+	b.WriteString(p.Verdict + "\n")
+	for _, c := range p.Checks {
+		b.WriteString(c.Name + ": " + c.Detail + "\n")
+	}
+	if f := p.DataFlow; f != nil {
+		if !f.Checked {
+			b.WriteString("data flow not verified: " + f.Detail + "\n")
+		} else if f.Detail == dataFlowInfoOnly {
+			b.WriteString("data flow (" + f.Detail + "):\n")
+		}
+		for _, s := range f.Sinks {
+			if s.Passed {
+				b.WriteString("data flow " + s.Table + ": " + s.PassedBy + "\n")
+			} else {
+				b.WriteString("data flow " + s.Table + ": no new rows since the fix\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+// verifications returns the agent.verification events of a sink, in order.
+func verifications(t *testing.T, s *fakeSink) []events.AgentVerificationPayload {
+	t.Helper()
+	var out []events.AgentVerificationPayload
+	for _, e := range s.ofType(events.AgentVerification) {
+		var p events.AgentVerificationPayload
+		if err := json.Unmarshal(e.payload, &p); err != nil {
+			t.Fatalf("bad agent.verification payload: %v", err)
+		}
+		out = append(out, p)
 	}
 	return out
 }
@@ -896,7 +949,9 @@ func TestModelSeesUnknownOutcome(t *testing.T) {
 }
 
 // The connector must still be RUNNING after the settle wait: a recovery needs two
-// reads, and a second read that fails is not a recovery.
+// reads, and a second read that fails is not a recovery. A connector that stays
+// FAILED is read until the failure is confirmed (connectFailConfirm rounds in a
+// row), then the verdict is NOT recovered.
 func TestConnectSettlesBeforeRecovery(t *testing.T) {
 	var reads int
 	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), runFn: func() (tools.Result, error) {
@@ -927,8 +982,10 @@ func TestConnectSettlesBeforeRecovery(t *testing.T) {
 	if hasStatus(sink, "done") {
 		t.Fatal("a connector that fails on the second read must not be recovered")
 	}
-	if reads != 2 {
-		t.Fatalf("connect_status must be read twice, got %d", reads)
+	// Round 1: the passing read and its settle read (which fails); then one read
+	// per round until the failure was confirmed.
+	if want := 2 + (connectFailConfirm - 1); reads != want {
+		t.Fatalf("connect_status reads = %d, want %d", reads, want)
 	}
 	var slept bool
 	for _, d := range clk.durations() {
@@ -1442,7 +1499,8 @@ func TestBrokenResultClearsRecoveredIdle(t *testing.T) {
 // and does not run the checks again.
 func TestRepeatedNotRecoveredCountsAsBroken(t *testing.T) {
 	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectBrokenResult()}
-	r := newVerifyRunner(t, &scriptedModel{}, &fakeInbox{}, &fakeSink{}, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+	sink := &fakeSink{}
+	r := newVerifyRunner(t, &scriptedModel{}, &fakeInbox{}, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
 	r.toolList = buildToolList(r.deps.Tools, nil)
 	ctx := context.Background()
 	text := "proposal p_1 step 1: backfilled analytics.orders"
@@ -1455,6 +1513,10 @@ func TestRepeatedNotRecoveredCountsAsBroken(t *testing.T) {
 	if r.recoveredIdle {
 		t.Fatal("a NOT recovered verdict must clear recoveredIdle")
 	}
+	readsForVerdict := connect.calls
+	if readsForVerdict != connectFailConfirm {
+		t.Fatalf("a FAILED connector is read until the failure is confirmed (%d), got %d reads", connectFailConfirm, readsForVerdict)
+	}
 
 	r.recoveredIdle = true
 	second := r.handleActionResults(ctx, lastActionResult(text))
@@ -1464,11 +1526,19 @@ func TestRepeatedNotRecoveredCountsAsBroken(t *testing.T) {
 	if r.recoveredIdle {
 		t.Fatal("a repeated NOT recovered verdict must clear recoveredIdle")
 	}
-	if connect.calls != 1 {
-		t.Fatalf("the repeat must not run the checks again, got %d reads", connect.calls)
+	if connect.calls != readsForVerdict {
+		t.Fatalf("the repeat must not run the checks again, got %d reads after %d", connect.calls, readsForVerdict)
 	}
 	if len(second.notes) != 1 || !strings.Contains(second.notes[0], "already verified: NOT recovered") {
 		t.Fatalf("the repeat must say the verdict was already NOT recovered: %q", second.notes)
+	}
+	// One full verdict, then the Repeat form with no checks.
+	got := verifications(t, sink)
+	if len(got) != 2 || got[0].Repeat || got[0].Recovered || len(got[0].Checks) == 0 {
+		t.Fatalf("want a full NOT recovered verdict first, got %+v", got)
+	}
+	if !got[1].Repeat || got[1].Recovered || len(got[1].Checks) != 0 || got[1].ProposalID != "p_1" {
+		t.Fatalf("want the Repeat form second, got %+v", got[1])
 	}
 }
 
@@ -1688,14 +1758,14 @@ func TestCreationBaselinePassesOnRowsSinceProposal(t *testing.T) {
 			t.Fatalf("no freshness wait is needed, slept %v", clk.durations())
 		}
 	}
-	var evidence bool
-	for _, m := range messageTexts(sink) {
-		if strings.Contains(m, "rows since proposal") && strings.Contains(m, "proposal baseline") {
-			evidence = true
-		}
+	// The verdict event carries the proposal baseline and the newest row seen.
+	v := verifications(t, sink)
+	if len(v) != 1 || v[0].DataFlow == nil || len(v[0].DataFlow.Sinks) != 1 {
+		t.Fatalf("want one verdict with one sink, got %+v", v)
 	}
-	if !evidence {
-		t.Fatalf("the evidence must show the proposal baseline and rows since proposal: %q", messageTexts(sink))
+	s := v[0].DataFlow.Sinks[0]
+	if !s.Passed || s.PassedBy != "rows since proposal" || !s.Baseline.Equal(base) || !s.Newest.After(base) {
+		t.Fatalf("the sink must show rows since the proposal baseline %s, got %+v", base, s)
 	}
 }
 
@@ -1738,14 +1808,13 @@ func TestCreationBaselineWindowPathWhenNoRowsSinceProposal(t *testing.T) {
 	if waits != 1 {
 		t.Fatalf("expected one window wait, slept %v", clk.durations())
 	}
-	var evidence bool
-	for _, m := range messageTexts(sink) {
-		if strings.Contains(m, "rows during check") && strings.Contains(m, "proposal baseline") && strings.Contains(m, "check baseline") {
-			evidence = true
-		}
+	v := verifications(t, sink)
+	if len(v) != 1 || v[0].DataFlow == nil || len(v[0].DataFlow.Sinks) != 1 {
+		t.Fatalf("want one verdict with one sink, got %+v", v)
 	}
-	if !evidence {
-		t.Fatalf("the evidence must show both readings and rows during check: %q", messageTexts(sink))
+	s := v[0].DataFlow.Sinks[0]
+	if !s.Passed || s.PassedBy != "rows during check" || !s.Baseline.Equal(base) || !s.Newest.Equal(base.Add(time.Second)) {
+		t.Fatalf("the sink must show the proposal baseline and the newer row read during the check, got %+v", s)
 	}
 }
 
