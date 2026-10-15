@@ -32,8 +32,8 @@ var knownConnectErrorHeaders = map[string]bool{
 	connectErrorsPrefix + "stage":                true,
 	connectErrorsPrefix + "class.name":           true,
 	connectErrorsPrefix + "exception.class.name": true,
-	headerMessage:    true,
-	headerStacktrace: true,
+	headerMessage:                                true,
+	headerStacktrace:                             true,
 }
 
 const (
