@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"piperoom/internal/dlq"
@@ -43,6 +45,71 @@ func sortedKeys(allow map[string]map[string]bool) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// wholeRange bounds a setting whose value is a whole number, not one of a few
+// strings. (Q1, QA G13)
+type wholeRange struct {
+	min, max int64
+	// zeroOK allows 0 as well, for a setting where 0 means "off".
+	zeroOK bool
+}
+
+// defaultConnectorConfigBounds returns the allowed numeric settings. A
+// function, like the string allow-list, so nothing can mutate it.
+//
+// heartbeat.interval.ms: 0 turns Debezium's heartbeat off; otherwise a record
+// every N ms makes the replication slot advance on a table that has no
+// changes, which is how a slot stuck on a quiet table (retained WAL growing
+// while the connector is RUNNING) is fixed. One second is the floor so a
+// proposal cannot flood the heartbeat topic; one hour is the ceiling because a
+// longer interval does not help the slot in time. The value is exactly "0" or
+// plain digits: no sign, no spaces, no leading zeros, nothing else.
+func defaultConnectorConfigBounds() map[string]wholeRange {
+	return map[string]wholeRange{
+		"heartbeat.interval.ms": {min: 1000, max: 3_600_000, zeroOK: true},
+	}
+}
+
+// humanOnlyKeys are settings an agent must never propose, with the reason
+// shown to it. They are refused with this reason instead of the generic
+// "not allowed", so the agent tells the room whom to ask.
+var humanOnlyKeys = map[string]string{
+	"heartbeat.action.query": "Debezium runs it as SQL on the source database",
+}
+
+// wholeNumberRE is a canonical non-negative whole number of at most ten digits.
+var wholeNumberRE = regexp.MustCompile(`^(0|[1-9][0-9]{0,9})$`)
+
+// check reports whether v is a value of key within r.
+func (r wholeRange) check(key, v string) error {
+	if !wholeNumberRE.MatchString(v) {
+		return fmt.Errorf("actions: value %q is not allowed for %s: want a whole number of milliseconds written in plain digits", shortValue(v), key)
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fmt.Errorf("actions: value %q is not allowed for %s: %w", shortValue(v), key, err)
+	}
+	if n == 0 && r.zeroOK {
+		return nil
+	}
+	if n < r.min || n > r.max {
+		want := fmt.Sprintf("%d to %d", r.min, r.max)
+		if r.zeroOK {
+			want = "0 (off) or " + want
+		}
+		return fmt.Errorf("actions: value %s is not allowed for %s: want %s", v, key, want)
+	}
+	return nil
+}
+
+// shortValue cuts a value echoed in an error: it is agent text.
+func shortValue(v string) string {
+	const max = 40
+	if len(v) <= max {
+		return v
+	}
+	return strings.ToValidUTF8(v[:max], "") + "…"
 }
 
 // secretSubstrings are fragments that mark a config key as a credential.
@@ -95,10 +162,38 @@ func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
 	return defaultConnectorConfigAllowList()
 }
 
+// bounds returns the numeric settings in force. A test that swaps the string
+// allow-list swaps this one out too, so its list is the whole list.
+func (a *updateConnectorConfig) bounds() map[string]wholeRange {
+	if a.allow != nil {
+		return nil
+	}
+	return defaultConnectorConfigBounds()
+}
+
+// allowedKeys lists every key the action may change, sorted.
+func (a *updateConnectorConfig) allowedKeys() []string {
+	keys := sortedKeys(a.allowList())
+	for k := range a.bounds() {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// valueAllowed reports whether v is an accepted value of key, for the string
+// lists and the numeric bounds alike.
+func (a *updateConnectorConfig) valueAllowed(key, v string) bool {
+	if r, ok := a.bounds()[key]; ok {
+		return r.check(key, v) == nil
+	}
+	return a.allowList()[key][v]
+}
+
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
+	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Also heartbeat.interval.ms: 0 (off) or a whole number of milliseconds from 1000 to 3600000, written in plain digits; Debezium then emits a heartbeat so the replication slot advances on a table with no changes, which stops WAL piling up behind a quiet table. heartbeat.action.query is human-only (it runs SQL on the source database) and is refused. Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
 }
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 	// propose_fix no longer inlines this schema into the strict request (the
@@ -109,7 +204,7 @@ func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 	// enforces the pair.
 	return objectSchema(map[string]any{
 		"connector": map[string]any{"type": "string"},
-		"key":       map[string]any{"type": "string", "enum": sortedKeys(a.allowList())},
+		"key":       map[string]any{"type": "string", "enum": a.allowedKeys()},
 		"value":     map[string]any{"type": "string"},
 	}, "connector", "key", "value")
 }
@@ -131,10 +226,16 @@ func (a *updateConnectorConfig) parseParams(raw json.RawMessage) (updateConnecto
 	if looksSecret(p.Key) {
 		return p, fmt.Errorf("actions: key %q looks like a credential and cannot be changed", p.Key)
 	}
+	if why, human := humanOnlyKeys[p.Key]; human {
+		return p, fmt.Errorf("actions: key %q is human-only: %s, so an agent cannot propose it; ask the owner of the connector to set it", p.Key, why)
+	}
+	if r, ok := a.bounds()[p.Key]; ok {
+		return p, r.check(p.Key, p.Value)
+	}
 	allow := a.allowList()
 	values, ok := allow[p.Key]
 	if !ok {
-		return p, fmt.Errorf("actions: key %q is not allowed; allowed keys: %s", p.Key, strings.Join(sortedKeys(allow), ", "))
+		return p, fmt.Errorf("actions: key %q is not allowed; allowed keys: %s", p.Key, strings.Join(a.allowedKeys(), ", "))
 	}
 	if !values[p.Value] {
 		return p, fmt.Errorf("actions: value %q is not allowed for %s", p.Value, p.Key)

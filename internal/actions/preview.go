@@ -85,10 +85,13 @@ func (a *restartTask) Preview(ctx context.Context, raw json.RawMessage) (Preview
 			break
 		}
 	}
+	// ~60 s, not ~20: Connect applies a restart asynchronously, and a read taken
+	// sooner raced it in the QA run (G6). There is no dry run for a restart:
+	// DryRun stays nil.
 	return PreviewResult{
 		Target:     fmt.Sprintf("connector %s task %d", p.Connector, p.Task),
 		Current:    cur,
-		Expected:   "RUNNING within ~20 s; the task fails again if its cause is still there",
+		Expected:   fmt.Sprintf("task %d restarts and should be RUNNING within ~60 s; it fails again if its cause is still there", p.Task),
 		Reversible: false,
 	}, nil
 }
@@ -153,7 +156,7 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 	}
 	// Undo needs a stored value the allow-list would accept again; an unset
 	// key (or a value we truncated or do not offer) cannot be restored by an action.
-	if cur, set := cfg[p.Key]; set && a.allowList()[p.Key][cur] {
+	if cur, set := cfg[p.Key]; set && a.valueAllowed(p.Key, cur) {
 		res.Reversible = true
 		res.Rollback = rollbackText(a.Name(), map[string]string{"connector": p.Connector, "key": p.Key, "value": cur})
 	}
