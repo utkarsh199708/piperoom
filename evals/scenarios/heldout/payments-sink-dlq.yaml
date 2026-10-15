@@ -28,9 +28,9 @@
 #   - Both connectors are RUNNING, no task FAILED, consumer lag ~0, slot active: connect_status
 #     and the lag read look green. Only warehouse freshness, the DLQ node of the pipeline map
 #     (WARN, records=18204, config_risk=dlq_no_log) and the DDL show the problem.
-#   - The DLQ topic is not a pipeline topic, so the Kafka tools refuse to read it (scope) and
-#     no dlq_peek is recorded: the agent reasons from the map, the alert, the DDL and
-#     freshness, not from the dead-lettered records.
+#   - No dlq_peek is recorded (evals/gen/heldout.go paymentsSpec and the gen fake do not
+#     serve one), so the agent reasons from the map, the alert, the DDL and freshness, not
+#     from the dead-lettered records. A dlq_peek call is a replay miss, not a scope refusal.
 #   - The DDL and schema v4 look like the schema-change seed, but v4 registered fine (adding
 #     an optional field is BACKWARD compatible) and the source connector never failed.
 #   - The tools now show the DLQ: the pipeline map lists the DLQ node (config_risk=dlq_no_log)
@@ -608,7 +608,7 @@ expect:
   root_cause:
     - [risk_score]
     - [dead letter, dead-letter, dlq, errors.tolerance]
-  root_cause_forbidden: [[incompatible change], [incompatible schema], [schema, is incompatible], [registry reject*], [rejected by the registry], [rejected by schema registry], [rejected by the schema registry]]
+  root_cause_forbidden: [[incompatible change], [backward incompatible], [not backward compatible], [v4 is incompatible], [registry reject*], [registry has rejected], [registry refused], [registry blocked], [rejected by the registry], [rejected by schema registry], [rejected by the schema registry], [failed the compatibility check], [failed the registry compatibility check]]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   evidence_tools: [connect_status, warehouse_freshness]
