@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -101,11 +103,11 @@ func (r *runner) pastIncidents(ctx context.Context, maxBytes int, timeout time.D
 		r.log.Debug("agent: past incidents result unreadable", "room", r.alert.RoomID, "err", err)
 		return ""
 	}
-	block, drops := renderPastIncidents(hits, maxBytes)
+	block, drops := renderPastIncidents(hits, toolEntries(res.Summary, len(hits)), maxBytes)
 	for _, d := range drops {
 		r.log.Warn("agent: past incident left out of the opening block: instruction-like text",
 			"tool", similarincidents.ToolName, "room", r.alert.RoomID, "hit", d.hit, "with_earlier_hits", d.cross,
-			"kinds", d.kinds, "count", d.count)
+			"tool_text", d.toolText, "kinds", d.kinds, "count", d.count)
 	}
 	return block
 }
@@ -179,17 +181,55 @@ const pastScanSep = "\n·\n"
 
 // pastDrop is a hit left out because injectscan flagged its text: hit is its
 // index in the tool's hits, cross that it was flagged only next to the hits
-// already in the block. It carries finding kinds, never the text.
+// already in the block, toolText that the flag came from the hit's entry in
+// the tool's Summary rather than from the text the block shows. It carries
+// finding kinds, never the text.
 type pastDrop struct {
-	hit   int
-	cross bool
-	kinds []string
-	count int
+	hit      int
+	cross    bool
+	toolText bool
+	kinds    []string
+	count    int
+}
+
+// toolEntryStart opens a hit's entry in the similar_incidents Summary:
+// "\n[1] 2026-09-30 ...".
+var toolEntryStart = regexp.MustCompile(`\n\[[0-9]+\] `)
+
+// toolEntries cuts the tool's Summary into one entry per hit, in hit order, so
+// the block can scan each hit exactly as the tool path shows it. A Summary cut
+// by tools.Truncate yields fewer entries (the last one maybe partial); hits
+// past the end have none. Entries must be numbered [1]..[k] with k <= n: if a
+// field the tool prints unfolded (closed by, layer) forges an entry start, the
+// split cannot be trusted, and every hit gets the whole Summary instead, so
+// the block stays at least as strict as the tool path.
+func toolEntries(summary string, n int) []string {
+	starts := toolEntryStart.FindAllStringIndex(summary, -1)
+	entries := make([]string, len(starts))
+	ok := len(starts) <= n
+	for i, st := range starts {
+		end := len(summary)
+		if i+1 < len(starts) {
+			end = starts[i+1][0]
+		}
+		entries[i] = summary[st[0]+1 : end]
+		ok = ok && strings.HasPrefix(entries[i], "["+strconv.Itoa(i+1)+"] ")
+	}
+	if !ok {
+		whole := make([]string, n)
+		for i := range whole {
+			whole[i] = summary
+		}
+		return whole
+	}
+	return entries
 }
 
 // renderPastIncidents renders up to three hits that have a typed cause as one
 // block of at most maxBytes, or "" when none fits, leaving out each hit whose
-// text injectscan flags. drops says which hits were left out and why.
+// text injectscan flags. toolText holds each hit's entry in the tool's Summary
+// (toolEntries), nil when there is none. drops says which hits were left out
+// and why.
 //
 // Each line is scanned as a similar_incidents result is (wrapReadToolOutput),
 // but on the field text the line renders (after cleaning and clipping), joined
@@ -198,15 +238,21 @@ type pastDrop struct {
 // together. The wrapper tags are not scanned: they are the agent's and would
 // trip wrapper_tag. A flagged line is left out rather than marked: the block is
 // a worked example the model is told to copy.
-func renderPastIncidents(hits []pastHit, maxBytes int) (block string, drops []pastDrop) {
-	return layoutPastIncidents(hits, maxBytes, injectscan.Scan)
+//
+// The same two scans also run on the hit's entries in the tool's Summary, so
+// the block is at least as strict as the similar_incidents result, which
+// orders fields differently (its "fixed by:" follows the title, before the
+// cause) and also shows fields the block leaves out. A line is left out when
+// either text is flagged.
+func renderPastIncidents(hits []pastHit, toolText []string, maxBytes int) (block string, drops []pastDrop) {
+	return layoutPastIncidents(hits, toolText, maxBytes, injectscan.Scan)
 }
 
 // layoutPastIncidents lays out the block. Every field is masked, folded to one
 // line and wrapped as untrusted text; a free-text field is clipped so its line
 // fits its share of the cap. scan screens each line as renderPastIncidents
 // says; nil keeps every line (layout tests only).
-func layoutPastIncidents(hits []pastHit, maxBytes int, scan func(string) []injectscan.Finding) (string, []pastDrop) {
+func layoutPastIncidents(hits []pastHit, toolText []string, maxBytes int, scan func(string) []injectscan.Finding) (string, []pastDrop) {
 	type candidate struct {
 		h   pastHit
 		idx int
@@ -230,9 +276,10 @@ func layoutPastIncidents(hits []pastHit, maxBytes int, scan func(string) []injec
 		return "", nil
 	}
 	var (
-		lines []string
-		kept  []string // field text of the kept lines, for the joint scan
-		drops []pastDrop
+		lines    []string
+		kept     []string // field text of the kept lines, for the joint scan
+		keptTool []string // their tool Summary entries, likewise
+		drops    []pastDrop
 	)
 	used := 0
 	for i, c := range use {
@@ -246,26 +293,48 @@ func layoutPastIncidents(hits []pastHit, maxBytes int, scan func(string) []injec
 		if !ok {
 			continue
 		}
+		tool := ""
+		if c.idx < len(toolText) {
+			tool = toolText[c.idx]
+		}
 		if scan != nil {
-			if fs := scan(text); len(fs) > 0 {
-				drops = append(drops, pastDrop{hit: c.idx, kinds: injectscan.Kinds(fs), count: len(fs)})
+			if d, bad := screenPastLine(scan, c.idx, kept, text, false); bad {
+				drops = append(drops, d)
 				continue
 			}
-			if len(kept) > 0 {
-				if fs := scan(strings.Join(append(kept[:len(kept):len(kept)], text), pastScanSep)); len(fs) > 0 {
-					drops = append(drops, pastDrop{hit: c.idx, cross: true, kinds: injectscan.Kinds(fs), count: len(fs)})
-					continue
-				}
+			if d, bad := screenPastLine(scan, c.idx, keptTool, tool, true); bad {
+				drops = append(drops, d)
+				continue
 			}
 		}
 		lines = append(lines, line)
 		kept = append(kept, text)
+		if tool != "" {
+			keptTool = append(keptTool, tool)
+		}
 		used += len(line)
 	}
 	if len(lines) == 0 {
 		return "", drops
 	}
 	return pastIncidentsHeader + strings.Join(lines, ""), drops
+}
+
+// screenPastLine scans text alone, then after the kept texts. text "" (no
+// tool entry) passes. toolText marks the drop as coming from the tool's text.
+func screenPastLine(scan func(string) []injectscan.Finding, hit int, kept []string, text string, toolText bool) (pastDrop, bool) {
+	if text == "" {
+		return pastDrop{}, false
+	}
+	if fs := scan(text); len(fs) > 0 {
+		return pastDrop{hit: hit, toolText: toolText, kinds: injectscan.Kinds(fs), count: len(fs)}, true
+	}
+	if len(kept) > 0 {
+		if fs := scan(strings.Join(append(kept[:len(kept):len(kept)], text), pastScanSep)); len(fs) > 0 {
+			return pastDrop{hit: hit, cross: true, toolText: toolText, kinds: injectscan.Kinds(fs), count: len(fs)}, true
+		}
+	}
+	return pastDrop{}, false
 }
 
 // pastIncidentLine renders one hit in at most n bytes (newline included). The
