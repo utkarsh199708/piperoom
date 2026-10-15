@@ -74,6 +74,14 @@ const replacementChar = string(rune(0xFFFD))
 // screen than in the log, the export or the agent's prompt. Machine text (an
 // alert title, watcher evidence) goes through checkStorable instead and is
 // flagged, not refused (title_flags, injectscan.KindBidi).
+//
+// Hidden text is refused the same way (Q6 U1): Unicode tag characters
+// (U+E0000–U+E007F), zero-width spaces and non-joiners, a zero-width joiner
+// outside an emoji sequence, the word joiner and invisible operators, soft
+// hyphen runs and a U+FEFF inside the text (injectscan.HasHiddenText). They
+// show nothing on screen but reach the model and the log, so a comment could
+// carry an instruction nobody in the room can read. A ZWJ inside an emoji
+// sequence stays allowed.
 func rejectUnstorable(fields ...string) error {
 	if err := checkStorable(fields...); err != nil {
 		return err
@@ -81,6 +89,9 @@ func rejectUnstorable(fields ...string) error {
 	for _, f := range fields {
 		if injectscan.HasBidiOverride(f) {
 			return validation(bidiTextMsg)
+		}
+		if injectscan.HasHiddenText(f) {
+			return validation(hiddenTextMsg)
 		}
 	}
 	return nil
@@ -97,6 +108,9 @@ func checkStorable(fields ...string) error {
 
 // bidiTextMsg is the 400 message for typed text with a bidi control.
 const bidiTextMsg = "text contains bidirectional control characters (U+202A–U+202E, U+2066–U+2069); remove them and send again"
+
+// hiddenTextMsg is the 400 message for typed text with invisible characters.
+const hiddenTextMsg = "text contains invisible characters (Unicode tag characters U+E0000–U+E007F, zero-width spaces or joiners, word joiner, U+FEFF); remove them and send again"
 
 // sanitizeAgentText is the policy for text a model or a tool produced (agent
 // steps, hypothesis, proposal fields, hand-off summary, action output): NUL and

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"piperoom/internal/events"
-	"piperoom/internal/injectscan"
 	"piperoom/internal/tools/runbooks"
 )
 
@@ -229,7 +228,7 @@ func formatRecap(in HumanInput) string {
 				text = "error: " + text
 			}
 			w := wrapToolOutput(sanitizeLabel(s.Tool), s.StepID, text)
-			if s.Tool != runbooks.ToolName && len(injectscan.Scan(s.Summary)) > 0 {
+			if s.Tool != runbooks.ToolName && len(instructionFindings(s.Summary)) > 0 {
 				w = markSuspected(w)
 			}
 			b.WriteString(w)
