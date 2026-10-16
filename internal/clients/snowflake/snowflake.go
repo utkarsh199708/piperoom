@@ -341,11 +341,12 @@ func (d *DB) resolveKeyColumn(ctx context.Context, table, pkColumn string) (stri
 
 var _ clients.Warehouse = (*DB)(nil)
 
-// PrimaryKeyColumn returns the first primary key column of table
-// ("schema.table" or "db.schema.table"), spelled exactly as Snowflake stores
-// it: ID for a column created unquoted, id for one created as "id". Row
-// quotes that spelling as is, so the two never get mixed up. A table without
-// a primary key is clients.ErrNotFound. warehouse_row uses it to refuse
+// PrimaryKeyColumn returns the primary key column of table ("schema.table"
+// or "db.schema.table"), spelled exactly as Snowflake stores it: ID for a
+// column created unquoted, id for one created as "id". Row quotes that
+// spelling as is, so the two never get mixed up. A table without a primary
+// key is clients.ErrNotFound; a composite key is clients.ErrNotSupported,
+// since no single column names one row. warehouse_row uses it to refuse
 // lookups by any other column, which would make the tool an existence oracle
 // for personal data. Snowflake does not enforce primary keys, but the
 // declared key is what the pipeline owners maintain.
@@ -353,6 +354,11 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 	keys, err := d.primaryKeys(ctx, table)
 	if err != nil {
 		return "", err
+	}
+	// A lookup by the first column of a composite key reads whichever row
+	// shares it (another tenant's, with its timestamps): refuse it (#531).
+	if len(keys) > 1 {
+		return "", fmt.Errorf("snowflake: primary key of %s is composite (%d columns): a lookup by %q alone is not one row: %w", table, len(keys), keys[0], clients.ErrNotSupported)
 	}
 	return keys[0], nil
 }
