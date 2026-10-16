@@ -1,6 +1,9 @@
 package dlq
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // #440: PostgreSQL prints the key of a unique, foreign-key or exclusion
 // violation as "Key (full_name)=(Jane Doe) already exists.". Behind a
@@ -24,9 +27,9 @@ var keyEnds = [][]rune{
 
 // maskKeyValues replaces the values of every "(cols)=(values)" with Redacted.
 // The values are unquoted and may hold ")" or ", ", so each tuple ends at the
-// last keyEnds phrase before the next ")=(" (the next detail's columns stay
-// visible). Without such a phrase it runs to the next ")=(", or to the end of
-// the text, as in the "Failing row contains" rule.
+// last keyEnds phrase before the next ")=(". Without such a phrase it ends
+// before the next detail's column list, or at the end of the text as in the
+// "Failing row contains" rule. Every detail's columns stay visible.
 func maskKeyValues(s string) string {
 	if !strings.Contains(s, keyValueSep) {
 		return s
@@ -45,10 +48,47 @@ func maskKeyValues(s string) string {
 		last = window
 		if end := lastKeyEnd(rs[:window], open+1); end >= 0 {
 			last = end + 1 // the phrase's ")" closes the masked tuple
+		} else if next >= 0 {
+			if cols := nextColumnList(rs, open+1, next); cols >= 0 {
+				// No phrase: the tuple ends before the next detail's
+				// column list, which stays visible.
+				last = cols
+				if cols > 0 && unicode.IsSpace(rs[cols-1]) {
+					out = append(out, ' ')
+				}
+			}
 		}
 		i = next
 	}
 	return string(append(out, rs[last:]...))
+}
+
+var keyWord = []rune("key ")
+
+// nextColumnList returns where the column list that ends at the separator
+// at sep starts: its balanced "(" (columns may be expressions such as
+// lower(email)), and the "Key " before it if there is one; or -1 when that
+// "(" is not after from. A value that holds " (x)=(" shows "(x" here, which
+// main's output showed already: the pass only adds masks.
+func nextColumnList(rs []rune, from, sep int) int {
+	depth := 0
+	for k := sep; k > from; k-- {
+		switch rs[k] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		}
+		if depth != 0 {
+			continue
+		}
+		start := k
+		if start-len(keyWord) >= from && hasPrefixFold(rs[start-len(keyWord):], keyWord) {
+			start -= len(keyWord)
+		}
+		return start
+	}
+	return -1
 }
 
 var sepRunes = []rune(keyValueSep)
