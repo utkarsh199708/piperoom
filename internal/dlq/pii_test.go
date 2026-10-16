@@ -320,6 +320,36 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "mask", in: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint \"u\"\n  Key (full_name)=(Jane Doe) already exists.  Call getNextException to see other errors in the batch.", gone: "Jane", want: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists. Call getNextException to see other errors in the batch."},
 		{kind: "keep", in: "Key (full_name) already exists"},
 		{kind: "keep", in: "retry=(3) backoff=(500ms)"},
+		// #544: MySQL and SQL Server key details, and PostgreSQL details with
+		// "= (" or "＝（": the value goes, column and key names stay.
+		{kind: "mask", in: "Violation of PRIMARY KEY constraint 'PK_users'. Cannot insert duplicate key in object 'dbo.users'. The duplicate key value is (jdoe_smith). The statement has been terminated.", gone: "jdoe_smith", want: "Violation of PRIMARY KEY constraint 'PK_users'. Cannot insert duplicate key in object 'dbo.users'. The duplicate key value is <redacted>. The statement has been terminated."},
+		{kind: "mask", in: "com.microsoft.sqlserver.jdbc.SQLServerException: Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_name'. The duplicate key value is (Doe, Jane (Paris), 42).", gone: "Paris", want: "com.microsoft.sqlserver.jdbc.SQLServerException: Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_name'. The duplicate key value is <redacted>."},
+		{kind: "mask", in: "The duplicate key value is (a) b). The statement has been terminated.", gone: "a) b", want: "The duplicate key value is <redacted>. The statement has been terminated."},
+		{kind: "mask", in: "The duplicate key value is (Jane Doe", gone: "Jane", want: "The duplicate key value is <redacted>"},
+		{kind: "mask", in: "java.sql.SQLIntegrityConstraintViolationException: Duplicate entry 'jdoe_smith' for key 'users.ux_login'", gone: "jdoe_smith", want: "java.sql.SQLIntegrityConstraintViolationException: Duplicate entry <redacted> for key 'users.ux_login'"},
+		{kind: "mask", in: "Duplicate entry 'a' b' for key 'PRIMARY'", gone: "a' b", want: "Duplicate entry <redacted> for key 'PRIMARY'"},
+		{kind: "mask", in: "Duplicate entry 'jdoe-42' for key 'users.ux_login_tenant'", gone: "jdoe-42", want: "Duplicate entry <redacted> for key 'users.ux_login_tenant'"},
+		{kind: "mask", in: "Duplicate entry 'jdoe_smith", gone: "jdoe_smith", want: "Duplicate entry <redacted>"},
+		{kind: "mask", in: "Duplicate entry 'xa' for key 'a1' Duplicate entry 'yb' for key 'b2'", gone: "yb", want: "Duplicate entry <redacted> for key 'a1' Duplicate entry <redacted> for key 'b2'"},
+		{kind: "mask", in: "Key (id)=（jdoe_smith） already exists.", gone: "jdoe_smith", want: "Key (id)=<redacted> already exists."},
+		{kind: "mask", in: "Key (a) = (Jane) already exists. Key (b) = (Bob) is not present in table t.", gone: "Bob", want: "Key (a) = <redacted> already exists. Key (b) = <redacted> is not present in table t."},
+		{kind: "mask", in: "Key (a) = (Jane) was bad and Key (b) = (Bob) already exists", gone: "Jane", want: "Key (a) = <redacted> Key (b) = <redacted> already exists"},
+		{kind: "mask", in: "Key (a) = (Jane) Key (b)=(Bob) already exists", gone: "Jane", want: "Key (a) = <redacted> Key (b)=<redacted> already exists"},
+		{kind: "mask", in: "Key (lower(email::text)) = (Jane Doe) already exists.", gone: "Jane", want: "Key (lower(email::text)) = <redacted> already exists."},
+		{kind: "mask", in: "Key (full_name) = (Jane Doe", gone: "Jane", want: "Key (full_name) = <redacted>"},
+		{kind: "keep", in: "f(x) = (y) holds"},
+		{kind: "keep", in: "the duplicate key value is unknown"},
+		{kind: "keep", in: "Duplicate entry found for key users.ux_login"},
+		// #532 round-3 review texts: the values stay masked and every column
+		// list main shows stays.
+		{kind: "mask", in: "Key (a)=((f)=(x) already exists", gone: "(f", want: "Key (a)=<redacted> already exists"},
+		{kind: "mask", in: "Key (b))=(Zq9) already exists", gone: "Zq9", want: "Key (b))=<redacted> already exists"},
+		{kind: "mask", in: "Key (a)=(x) already exists. Key Cq2)=(Zq9) already exists", gone: "Zq9", want: "Key (a)=<redacted> already exists. Key Cq2)=<redacted> already exists"},
+		// main masks a phraseless tuple to the end of the text (#532 round 3),
+		// and the next detail with it when only its separator is a variant;
+		// un-masking is not additive (org.md §12), so both stay.
+		{kind: "gap", in: "Key (room)=(101) conflicts with existing key (room)=(102).\n\tat org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse(QueryExecutorImpl.java:2725)", want: "Key (room)=<redacted> conflicts with existing key (room)=<redacted>", why: "main's phraseless-tuple over-mask; not additive to undo"},
+		{kind: "gap", in: "Key (a)=(Jane) Key (b) = (Bob) already exists", want: "Key (a)=<redacted> already exists", why: "main's phraseless-tuple over-mask; not additive to undo"},
 		// A value that holds both a keyEnds phrase and ")=(" reads as two details:
 		// the text between them stays ("y"). main keeps the whole value.
 		{kind: "gap", in: "Key (a)=(x) already exists y)=(z) already exists.", want: "Key (a)=<redacted> already exists y)=<redacted> already exists.", why: "a value holding a keyEnds phrase and ')=(' reads as two details; #544"},
@@ -451,6 +481,38 @@ func TestRedactMessageCapNeverSplitsAKeyValue(t *testing.T) {
 			if again := RedactMessage(got); again != got {
 				t.Errorf("pad %d: not idempotent: %q -> %q", pad, got, again)
 			}
+		}
+	}
+}
+
+// #539: a URL that straddles the cut and carries no credential is cut by the
+// word rule, so the class and the path before the cut stay (main replaced it
+// from its token start, down to the whole message). A URL that may carry a
+// credential (userinfo '@', a credential key, "sig=", or an '@' past the
+// look-ahead) is still replaced whole, from its scheme on.
+func TestRedactMessageCutURLKeepsPath(t *testing.T) {
+	glued := "java.lang.IllegalArgumentException:url=http://connect:8083/connectors/pg-orders/" + strings.Repeat("a", 400)
+	subject := "Schema Registry GET https://registry.example.com/subjects/orders.public.items-value/versions/latest?" + strings.Repeat("q=1&", 70) + " failed: 404 topic …"
+	for _, tt := range []struct{ in, want string }{
+		{glued, glued[:MaxMessageRunes]},
+		{subject, strings.TrimSuffix(subject[:MaxMessageRunes], "q")},
+		{strings.Repeat("x", 280) + " GET http://connect:8083/connectors/pg-orders/status failed", strings.Repeat("x", 280) + " GET"},
+		{"jdbc:postgresql://app:Zq9/Wk7x@db.example.com/orders" + strings.Repeat("a", 300), "jdbc:" + Redacted},
+		{"url=postgres://app:Zq9/Wk7x@db.example.com/x" + strings.Repeat("a", 300), "url=" + Redacted},
+		{"jane@x.com=postgres://app:Zq9/Wk7x@db.example.com/orders" + strings.Repeat("a", 300), Redacted},
+		{strings.Repeat("x", 250) + " postgres://app:Zq" + strings.Repeat("p", 400) + "@db/x", strings.Repeat("x", 250) + " " + Redacted},
+		{strings.Repeat("x", 250) + " https://acct.blob.core.windows.net/c/b?sv=2024&sig=Zq9AbCdEfGhIjKlMnOpQrStUvWx failed", strings.Repeat("x", 250) + " " + Redacted},
+		{strings.Repeat("x", 260) + " https://h.example.com/a?token=Zq9AbCdEfGhIjKlMnOp failed", strings.Repeat("x", 260) + " " + Redacted},
+	} {
+		got := RedactMessage(tt.in)
+		if got != tt.want {
+			t.Errorf("RedactMessage(%.50q...) = %q, want %q", tt.in, got, tt.want)
+		}
+		if strings.Contains(got, "Zq") {
+			t.Errorf("RedactMessage(%.50q...) kept a credential: %q", tt.in, got)
+		}
+		if again := RedactMessage(got); again != got {
+			t.Errorf("not idempotent: %q -> %q", got, again)
 		}
 	}
 }
