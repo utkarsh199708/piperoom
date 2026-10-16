@@ -324,12 +324,32 @@ func TestTraceSinkErrorsMaskValueForms(t *testing.T) {
 // javaTimeNewline is the #560 gap text (PR #555 review round 2).
 const javaTimeNewline = "org.apache.kafka.connect.errors.DataException: Text 'Jane\nCaused by: LeakT' could not be parsed at index 0"
 
-// TestTraceJavaTimeNewlineGapOutput pins today's condenseTrace output for
-// the #560 gap text: the input, unchanged (main gives the same).
-func TestTraceJavaTimeNewlineGapOutput(t *testing.T) {
-	if got := condenseTrace(javaTimeNewline); got != javaTimeNewline {
-		t.Fatalf("condenseTrace changed the #560 gap text: move it to a must-mask test:\n%q", got)
-	}
+// TestTraceJavaTimeNewlineMasked (#560): a java.time Text '...' value that
+// spans lines is masked from its first byte; the lines up to the one holding
+// the parse marker are value, and java.time's own words after the last marker
+// stay.
+func TestTraceJavaTimeNewlineMasked(t *testing.T) {
+	const ex = "org.apache.kafka.connect.errors.DataException: "
+	checkRows(t, []traceRow{
+		{"java.time text value with a newline",
+			javaTimeNewline,
+			[]string{"LeakT", "Jane"}, []string{"DataException", "could not be parsed at index 0"}},
+		{"java.time text value over three lines",
+			ex + "Text 'Jane\nat LeakU\nCaused by: LeakV' could not be parsed at index 0\nCaused by: java.io.IOException: next cause",
+			[]string{"LeakU", "LeakV", "Jane"}, []string{"DataException", "could not be parsed at index 0", "Caused by: java.io.IOException: next cause"}},
+		{"java.time text value, blank line inside",
+			ex + "Text 'Jane\n\nLeakW' could not be parsed at index 0",
+			[]string{"LeakW", "Jane"}, []string{"could not be parsed at index 0"}},
+		{"java.time text value, marker inside the value",
+			ex + "Text 'Jane\nLeakX' could not be parsed at index 0' could not be parsed at index 3",
+			[]string{"LeakX", "Jane"}, []string{"could not be parsed at index 3"}},
+		{"java.time text value in a cause",
+			"Caused by: java.time.format.DateTimeParseException: Text 'Jane\nCaused by: LeakY' could not be parsed at index 0",
+			[]string{"LeakY", "Jane"}, []string{"DateTimeParseException", "could not be parsed at index 0"}},
+		{"plain text quote and no marker stays",
+			ex + "Plain text 'mode' unsupported\nCaused by: java.io.IOException: next cause",
+			nil, []string{"Plain text 'mode' unsupported", "Caused by: java.io.IOException: next cause"}},
+	})
 }
 
 // TestTraceSinkErrorsKnownGaps pins sink wordings that still carry part of
@@ -342,12 +362,6 @@ func TestTraceSinkErrorsKnownGaps(t *testing.T) {
 		{"postgres character with no equivalent",
 			"Caused by: org.postgresql.util.PSQLException: ERROR: character with byte sequence 0xe2 0x80 0x9c in encoding \"UTF8\" has no equivalent in encoding \"LATIN1\"",
 			"0xe2 0x80 0x9c"},
-		// java.time Text '…' value with a newline: neither line masked
-		// (#560). The opener holds the quote, so openQuote does not see one,
-		// and the parse marker is on the second line.
-		{"java.time text value with a newline",
-			javaTimeNewline,
-			"LeakT"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			for path, got := range bothPaths(t, tt.line) {
