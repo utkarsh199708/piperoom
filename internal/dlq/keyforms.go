@@ -34,7 +34,7 @@ func nextVariantSep(rs []rune, from, floor int) int {
 		if j >= len(rs) || (rs[j] != '(' && rs[j] != '（') {
 			continue
 		}
-		if paren := columnParen(rs, floor, k); paren >= 0 && hasKeyWord(rs, paren) {
+		if paren := columnParen(rs, floor, k); paren >= 0 && keyWordBefore(rs, paren, 0) >= 0 {
 			return j
 		}
 	}
@@ -57,9 +57,10 @@ func nextDetail(rs []rune, from int, forKey bool) int {
 			(k+len(forKeyWords) == len(rs) || !isWordRune(rs[k+len(forKeyWords)])) {
 			return k
 		}
-		if wordStart(rs, k) && hasPrefixFold(rs[k:], keyWord) && k+len(keyWord) < len(rs) &&
-			rs[k+len(keyWord)] == '(' && cutColumnList(rs, k+len(keyWord)) {
-			return k
+		if wordStart(rs, k) && hasPrefixFold(rs[k:], keyWord[:3]) {
+			if j := skipSpace(rs, k+3); j < len(rs) && rs[j] == '(' && cutColumnList(rs, j) {
+				return k
+			}
 		}
 		if rs[k] != ')' {
 			continue
@@ -68,8 +69,8 @@ func nextDetail(rs []rune, from int, forKey bool) int {
 			continue
 		}
 		if p := columnParen(rs, from-1, k); p >= 0 {
-			if p-len(keyWord) >= from && hasKeyWord(rs, p) {
-				return p - len(keyWord)
+			if kw := keyWordBefore(rs, p, from); kw >= 0 {
+				return kw
 			}
 			return p
 		}
@@ -139,9 +140,19 @@ func columnParen(rs []rune, floor, at int) int {
 	return -1
 }
 
-// hasKeyWord reports whether "key " (any case) ends just before index p.
-func hasKeyWord(rs []rune, p int) bool {
-	return p-len(keyWord) >= 0 && hasPrefixFold(rs[p-len(keyWord):], keyWord)
+// keyWordBefore returns where the word "key" (any case) starts when it ends,
+// with or without white space, just before index p and starts at or after
+// floor ("Key (id)", "Key(id)"), or -1.
+func keyWordBefore(rs []rune, p, floor int) int {
+	k := p
+	for k > 0 && unicode.IsSpace(rs[k-1]) {
+		k--
+	}
+	k -= 3
+	if k < floor || k < 0 || !wordStart(rs, k) || !hasPrefixFold(rs[k:], keyWord[:3]) {
+		return -1
+	}
+	return k
 }
 
 // lastKeyEndWide is lastKeyEnd that also takes a fullwidth '）' as the

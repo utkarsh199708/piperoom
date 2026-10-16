@@ -517,18 +517,21 @@ func TestRedactMessageCapNeverSplitsAKeyValue(t *testing.T) {
 	}
 }
 
-// #539: a URL that straddles the cut and carries no credential is cut by the
-// word rule, so the class and the path before the cut stay (main replaced it
-// from its token start, down to the whole message). A URL that may carry a
-// credential (userinfo '@', a credential key, "sig=", or an '@' past the
-// look-ahead) is still replaced whole from its token start, as on main: the
-// text glued before its scheme ("url=", "jdbc:") may be a value main masks.
+// #539: a URL that straddles the cut and is plainly credential-free (no '@',
+// no '?' or '#', nothing main's masks change in it, all of it in the
+// look-ahead) is cut by the word rule, so the class and the path before the
+// cut stay (main replaced it from its token start, down to the whole
+// message). Any other URL is still replaced whole from its token start, as on
+// main: the text glued before its scheme ("url=", "jdbc:") may be a value
+// main masks.
 func TestRedactMessageCutURLKeepsPath(t *testing.T) {
 	glued := "java.lang.IllegalArgumentException:url=http://connect:8083/connectors/pg-orders/" + strings.Repeat("a", 400)
 	subject := "Schema Registry GET https://registry.example.com/subjects/orders.public.items-value/versions/latest?" + strings.Repeat("q=1&", 70) + " failed: 404 topic …"
 	for _, tt := range []struct{ in, want string }{
 		{glued, glued[:MaxMessageRunes]},
-		{subject, strings.TrimSuffix(subject[:MaxMessageRunes], "q")},
+		// A query string may carry a signature or a code (#562 round 1): the
+		// URL is replaced whole, as on main.
+		{subject, "Schema Registry GET " + Redacted},
 		{strings.Repeat("x", 280) + " GET http://connect:8083/connectors/pg-orders/status failed", strings.Repeat("x", 280) + " GET"},
 		{"jdbc:postgresql://app:Zq9/Wk7x@db.example.com/orders" + strings.Repeat("a", 300), Redacted},
 		{"url=postgres://app:Zq9/Wk7x@db.example.com/x" + strings.Repeat("a", 300), Redacted},

@@ -118,12 +118,13 @@ func redactOnce(s string) string {
 // "://" alone (no scheme rule: "my_postgres://" and a scheme glued to a long
 // word are URLs too): each runs from the last white space, quote or bracket
 // before the "://" (or the start) to the next white space or quote after it.
-// #539: only a URL that may carry a credential is a span: one
-// with an '@' after its "://" (userinfo; internal/redact allows '/', '?', '#'
-// and ':' in the password, so no split inside it is safe), a credential key
-// or "sig=" in it, or one that runs to the end of s when open says s was cut
-// short (its '@' may come later). A credential-free URL is cut by the word
-// rule, so its path stays.
+// #539: a URL leaves this set, so the word rule cuts it and its path stays,
+// only when it is plainly credential-free: no '@' after its "://" (userinfo;
+// internal/redact allows '/', '?', '#' and ':' in the password), no '?' or
+// '#' (signed and OAuth query parameters), the whole token is in s (open says
+// s was cut short), and neither internal/redact nor maskUnquoted changes the
+// whole token (provider tokens and webhook paths). Anything else is replaced
+// whole, as on main.
 func urlTokenSpans(s string, open bool) [][]int {
 	var spans [][]int
 	for off := 0; ; {
@@ -137,9 +138,7 @@ func urlTokenSpans(s string, open bool) [][]int {
 		if e := strings.IndexAny(s[k:], urlTokenStops); e >= 0 {
 			end = k + e
 		}
-		tok := s[k:end]
-		if strings.Contains(tok, "@") || kvSecretRe.MatchString(tok) ||
-			strings.Contains(strings.ToLower(tok), "sig=") || open && end == len(s) {
+		if !credentialFreeURL(s[start:end], s[k:end], open && end == len(s)) {
 			spans = append(spans, []int{start, end})
 		}
 		off = end
@@ -147,6 +146,13 @@ func urlTokenSpans(s string, open bool) [][]int {
 			off = k + 3
 		}
 	}
+}
+
+// credentialFreeURL reports whether the URL token tok (rest: from its "://")
+// can be cut like a word; cut says the token may go on past the window.
+func credentialFreeURL(tok, rest string, cut bool) bool {
+	// maskUnquoted runs internal/redact on top of its own patterns.
+	return !cut && !strings.ContainsAny(rest, "@?#") && maskUnquoted(tok) == tok
 }
 
 // urlTokenStops end a URL token: white space and quotes.
