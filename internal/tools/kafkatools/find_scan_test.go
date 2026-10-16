@@ -258,6 +258,9 @@ func TestFindByKeyUndecodedIsNotAMaxScanCut(t *testing.T) {
 			if data["truncated"] != true || data["undecoded_keys"] != 1 {
 				t.Errorf("data %+v: want truncated and undecoded_keys 1", data)
 			}
+			if cut, _ := data["cut_partitions"].([]int32); len(cut) != len(tt.cut) {
+				t.Errorf("data cut_partitions = %v, want %v", data["cut_partitions"], tt.cut)
+			}
 		})
 	}
 }

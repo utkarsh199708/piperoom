@@ -383,6 +383,9 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 		data["truncated_partitions"] = scan.Truncated
 		data["undecoded_keys"] = undec.Undecoded
 		data["undecoded_partitions"] = undec.Partitions
+		// truncated_partitions also holds the undecoded ones; these are the
+		// partitions max_scan or the time limit really cut.
+		data["cut_partitions"] = undec.Cut
 	case len(scan.Truncated) > 0:
 		// Matches past the cut would be newer than any listed: say so before
 		// the list can be read as complete.

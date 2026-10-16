@@ -446,7 +446,9 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 var _ clients.KeyScanReader = (*Client)(nil)
 
 // FindByKeyScan is FindByKey that also reports the partitions whose window the
-// scan did not finish (clients.KeyScanReader).
+// scan did not finish (clients.KeyScanReader). Matches found while the schema
+// registry was unavailable for some Avro keys come back inside an
+// *UndecodedKeysError, with a zero KeyScan (so FindByKey returns no refs).
 func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (clients.KeyScan, error) {
 	maxScan = normalizeMaxScan(maxScan)
 	ms, err := afterMilli(since)
