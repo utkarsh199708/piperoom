@@ -369,18 +369,20 @@ func truncateRunes(s string, n int) string {
 func condenseTrace(trace string) string {
 	var out []string
 	size := 0
-	inValue := false // inside a quoted sink value that holds a newline
+	var inValue byte // the quote of a sink value that holds a newline, while inside it
 	for _, line := range strings.Split(trace, "\n") {
 		// cleanTrace keeps maxTraceText bytes; masking past that (plus a margin
 		// for masks that shorten text) is work whose output is cut anyway.
 		if size > maxTraceText+condenseMargin {
 			break
 		}
-		if inValue {
+		if inValue != 0 {
 			// The value's lines go, a "Caused by:" one too: sanitizeTrace
 			// masked the value from its first line to that line's end, and
 			// the rest up to the closing quote is the record's (#527).
-			inValue = !strings.Contains(line, `"`)
+			if strings.IndexByte(line, inValue) >= 0 {
+				inValue = 0
+			}
 			continue
 		}
 		trimmed := strings.TrimSpace(line)
@@ -392,7 +394,7 @@ func condenseTrace(trace string) string {
 			out = append(out, kept)
 			size += len(kept) + 1
 		}
-		inValue = opensQuotedValue(trimmed)
+		inValue = openQuote(trimmed)
 	}
 	return strings.Join(out, "\n")
 }
@@ -723,17 +725,17 @@ func closingBracket(low string, open, to int) int {
 	return -1
 }
 
-// opensQuotedValue reports whether line has a sinkOpeners value that opens
-// with '"' and holds no closing quote on the line: a value with a newline,
-// whose next lines are value too (#527).
-func opensQuotedValue(line string) bool {
+// openQuote returns the quote byte, double or single, of a sinkOpeners
+// value on line that holds no closing quote on the line, or 0: a value with
+// a newline, whose next lines up to the closing quote are value too (#527).
+func openQuote(line string) byte {
 	low := asciiLower(line)
 	for _, m := range findSinkOpeners(low, 0, len(low)) {
-		if v := low[m[1]:]; strings.HasPrefix(v, `"`) && !strings.Contains(v[1:], `"`) {
-			return true
+		if v := low[m[1]:]; v != "" && (v[0] == '"' || v[0] == '\'') && strings.IndexByte(v[1:], v[0]) < 0 {
+			return v[0]
 		}
 	}
-	return false
+	return 0
 }
 
 func isWordByte(c byte) bool {
