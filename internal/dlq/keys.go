@@ -1,5 +1,7 @@
 package dlq
 
+import "strings"
+
 // #440: PostgreSQL prints the key of a unique, foreign-key or exclusion
 // violation as "Key (full_name)=(Jane Doe) already exists.". Behind a
 // "Detail:" label the tail rule drops it, but some drivers print it without
@@ -7,7 +9,7 @@ package dlq
 // masks): the column list stays, which the agent needs, and the values go.
 
 // keyValueSep is what PostgreSQL prints between a key's columns and its values.
-var keyValueSep = []rune(")=(")
+const keyValueSep = ")=("
 
 // keyEnds are the phrases PostgreSQL prints after the values, from the ')'
 // that closes them.
@@ -16,37 +18,53 @@ var keyEnds = [][]rune{
 	[]rune(") is not present in table"),
 	[]rune(") is still referenced from table"),
 	[]rune(") conflicts with existing key"),
+	[]rune(") conflicts with key"),
+	[]rune(") is duplicated"),
 }
 
 // maskKeyValues replaces the values of every "(cols)=(values)" with Redacted.
-// The values are unquoted and may hold ")" or ", ", so they end at the last
-// keyEnds phrase after them; without one they run to the end of the text, as
-// in the "Failing row contains" rule. A second detail before that last phrase
-// is masked with the first (over-mask, never a leak).
+// The values are unquoted and may hold ")" or ", ", so each tuple ends at the
+// last keyEnds phrase before the next ")=(" (the next detail's columns stay
+// visible). Without such a phrase it runs to the next ")=(", or to the end of
+// the text, as in the "Failing row contains" rule.
 func maskKeyValues(s string) string {
+	if !strings.Contains(s, keyValueSep) {
+		return s
+	}
 	rs := []rune(s)
 	var out []rune
 	last := 0
-	for i := 0; i+len(keyValueSep) <= len(rs); i++ {
-		if string(rs[i:i+len(keyValueSep)]) != string(keyValueSep) {
-			continue
-		}
-		open := i + len(keyValueSep) - 1
+	for i := nextKeySep(rs, 0); i >= 0; {
+		open := i + len(sepRunes) - 1
 		out = append(append(out, rs[last:open]...), redactedRunes...)
-		end := lastKeyEnd(rs, open+1)
-		if end < 0 {
-			return string(out)
+		next := nextKeySep(rs, open)
+		window := len(rs)
+		if next >= 0 {
+			window = next
 		}
-		last, i = end+1, end
-	}
-	if out == nil {
-		return s
+		last = window
+		if end := lastKeyEnd(rs[:window], open+1); end >= 0 {
+			last = end + 1 // the phrase's ")" closes the masked tuple
+		}
+		i = next
 	}
 	return string(append(out, rs[last:]...))
 }
 
+var sepRunes = []rune(keyValueSep)
+
+// nextKeySep returns the index of the next ")=(" at or after from, or -1.
+func nextKeySep(rs []rune, from int) int {
+	for k := from; k+len(sepRunes) <= len(rs); k++ {
+		if rs[k] == sepRunes[0] && rs[k+1] == sepRunes[1] && rs[k+2] == sepRunes[2] {
+			return k
+		}
+	}
+	return -1
+}
+
 // lastKeyEnd returns the index of the ')' that starts the last keyEnds phrase
-// at or after from, or -1.
+// in rs at or after from, or -1.
 func lastKeyEnd(rs []rune, from int) int {
 	for k := len(rs) - 1; k >= from; k-- {
 		if rs[k] != ')' {

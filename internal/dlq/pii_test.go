@@ -312,6 +312,9 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "mask", in: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint \"u\"\n  Key (full_name)=(Jane Doe) already exists.  Call getNextException to see other errors in the batch.", gone: "Jane", want: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists. Call getNextException to see other errors in the batch."},
 		{kind: "keep", in: "Key (full_name) already exists"},
 		{kind: "keep", in: "retry=(3) backoff=(500ms)"},
+		// A value that holds both a keyEnds phrase and ")=(" reads as two details:
+		// the text between them stays ("y"). main keeps the whole value.
+		{kind: "gap", in: "Key (a)=(x) already exists y)=(z) already exists.", want: "Key (a)=<redacted> already exists y)=<redacted> already exists.", why: "value holding ') already exists ... )=(' (window rule from the #532 review); #544"},
 		// Separator variants and non-PostgreSQL key details main keeps too: #544.
 		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
 		{kind: "gap", in: "Key (id) = (jdoe_smith) already exists.", want: "Key (id) = (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
