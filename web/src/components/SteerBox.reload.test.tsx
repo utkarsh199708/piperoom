@@ -68,21 +68,21 @@ const snap: RoomSnapshot = {
   members: [],
 }
 
-function status(seq: number): Event {
-  return {
-    room_id: 'r1',
-    seq,
-    type: 'agent.status',
-    actor: { kind: 'agent', id: 'agent', name: 'Agent' },
-    payload: { state: 'working' },
-    at: `2026-10-11T10:00:${String(seq).padStart(2, '0')}Z`,
-  }
+// Another member's keyed comment: a server with #459 puts client_id in the payload, so a replay
+// that holds one tells the ledger this server dedupes before its own first answer (#551).
+const keyedComment: Event = {
+  room_id: 'r1',
+  seq: 1,
+  type: 'comment.added',
+  actor: { kind: 'human', id: 'priya', name: 'Priya' },
+  payload: { comment_id: 'c1', text: 'looking at the connector', mentions_agent: false, client_id: 'priya-1' },
+  at: '2026-10-11T10:00:01Z',
 }
 
 function fakeServer() {
   const server = {
     /** The room log the socket replays. */
-    log: [status(1)] as Event[],
+    log: [keyedComment] as Event[],
     /** The steer texts the server stored, in order. */
     steers: [] as string[],
     opens: [] as number[],
@@ -150,9 +150,10 @@ function fakeServer() {
 }
 
 // The screen the ticket describes: RoomScreen renders the skeleton while the state is null.
-function Room() {
+// `hidden` unmounts the composer by hand, for any other remount.
+function Room({ hidden = false }: { hidden?: boolean }) {
   const { state, actions, conn } = useRoom('r1')
-  return state ? <SteerBox state={state} user={ARJUN_USER} actions={actions} conn={conn} /> : <p>loading</p>
+  return state && !hidden ? <SteerBox state={state} user={ARJUN_USER} actions={actions} conn={conn} /> : <p>loading</p>
 }
 
 /** Advances the clock in 50 ms steps, so each answer and render runs in its own step. */
@@ -227,9 +228,9 @@ describe('SteerBox across a silent stale_position reload (#550)', () => {
     expect(server.steers).toEqual(['stop the connector'])
   })
 
-  it('scenario A, the drained copy lands while only the skeleton is on screen: the next composer starts empty', async () => {
+  it('a kept steer whose drained copy lands while no composer is mounted: the next composer starts empty', async () => {
     const server = fakeServer()
-    render(<Room />)
+    const view = render(<Room />)
     await pass(200)
     act(() => server.sockets[0].drop())
     server.offline = true
@@ -237,17 +238,16 @@ describe('SteerBox across a silent stale_position reload (#550)', () => {
     await pass(400) // past the draft's 300 ms debounce: the words are in localStorage
     expect(retry()).toBeInTheDocument()
 
+    // The composer goes away (a reload's skeleton, or any remount) before the reconnect drains it.
+    view.rerender(<Room hidden />)
+    expect(screen.queryByLabelText('Steer the agent')).toBeNull()
     server.offline = false
-    server.log = []
     server.answerAfter = 100
-    server.roomAfter = 1_000
-    // Up to the reconnect (its backoff has jitter), then the reload's skeleton.
-    for (let t = 0; t < 5_000 && screen.queryByText('loading') === null; t += 50) await pass(50)
+    for (let t = 0; t < 5_000 && server.steers.length === 0; t += 50) await pass(50)
     await pass(300)
-    expect(screen.queryByLabelText('Steer the agent')).toBeNull() // still the skeleton
-    expect(server.steers).toEqual(['stop the connector']) // and the drained copy was answered
-    await pass(1_500)
+    expect(server.steers).toEqual(['stop the connector']) // the drained copy was answered
 
+    view.rerender(<Room />)
     expect(field().value).toBe('')
     expect(retry()).not.toBeInTheDocument()
     await sendWhatIsThere()
