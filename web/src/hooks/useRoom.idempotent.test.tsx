@@ -36,6 +36,7 @@ import { useRoom } from './useRoom'
 import { UNCONFIRMED_WINDOW_MS } from './sendLedger'
 import { RollbackButton } from '../components/room/RollbackButton'
 import { Timeline } from '../components/Timeline'
+import { SteerBox } from '../components/SteerBox'
 
 class FakeWebSocket {
   static CONNECTING = 0
@@ -657,4 +658,61 @@ describe('a TypeError against a server that does not echo client_id', () => {
     expect(stops()).toHaveLength(1)
     expect(hook.result.current.error).toBe(NOT_CONFIRMED_TEXT)
   })
+})
+
+// #535: the steer composer follows the same rule as the reply boxes. An edit, or a new send, while
+// an entry is kept cancels it first, so the stale words never reach the agent after the new ones.
+describe('the steer composer with the real hook (#535)', () => {
+  const arjun = { id: 'arjun', name: 'Arjun', layers: ['kafka'] }
+
+  function SteerRoom() {
+    const { state, actions, conn } = useRoom('r1')
+    if (!state) return null
+    return <SteerBox state={state} user={arjun} actions={actions} conn={conn} />
+  }
+
+  async function mountSteer(server: Server) {
+    vi.stubGlobal('fetch', server.fetchMock)
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snap)
+    vi.mocked(api.events).mockResolvedValue({ events: [], next_after: 0 } as never)
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    render(<SteerRoom />)
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    act(() => socket.onopen?.())
+    const box = await screen.findByLabelText('Steer the agent')
+    return { socket, box }
+  }
+
+  const steers = (server: Server) =>
+    server.stored.filter((e) => e.type === 'steer.sent').map((e) => (e.payload as { text: string }).text)
+
+  async function failThenCorrect(server: Server, box: HTMLElement) {
+    server.state.offlineNext = 1
+    fireEvent.change(box, { target: { value: 'restart the connector' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.change(box, { target: { value: 'do NOT restart the connector' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await pass(500)
+  }
+
+  it('a steer edited after a failed send: the live retry never sends the old words: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const { box } = await mountSteer(server)
+    await failThenCorrect(server, box)
+    await pass(6_000) // past LIVE_RETRY_MS
+    expect(steers(server)).toEqual(['do NOT restart the connector'])
+  })
+
+  it('the same through a reconnect: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const { socket, box } = await mountSteer(server)
+    await failThenCorrect(server, box)
+    act(() => socket.onclose?.({ reason: '' }))
+    act(() => socket.onopen?.())
+    await pass(6_000)
+    expect(steers(server)).toEqual(['do NOT restart the connector'])
+  })
+
 })

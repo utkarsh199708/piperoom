@@ -7,8 +7,8 @@ import type { RoomState, SuggestionState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
 import type { ConnState, RoomActions } from '../hooks/useRoom'
+import { useRetryId } from '../hooks/useRetryId'
 import { modKeyLabel } from '@/lib/envLabel'
-import { newClientId } from '@/lib/clientId'
 import { planComposer, quickSteers, sendLabel } from '@/lib/composer'
 import { clockTime } from '@/lib/time'
 import { cn } from '@/lib/utils'
@@ -236,32 +236,35 @@ export function SteerBox({
   const ref = useRef<HTMLTextAreaElement>(null)
   const now = useNow()
   const roomId = state.id
-  // The send that failed (the Retry strip is up for it): its client_id, so a Retry is the same
-  // action (#459), and the field as it is now, for the listener below, which runs outside render.
-  const failedRef = useRef<{ clientId: string; kind: 'steer' | 'comment'; text: string; typed: string } | null>(null)
+  // What the composer's current action said (#459): a Retry while the Retry strip is up is that
+  // action only if it still says the same; `typed` is the field as it was sent.
+  const sentRef = useRef<{ kind: 'steer' | 'comment'; text: string; typed: string } | null>(null)
   const textRef = useRef(text)
   useEffect(() => {
     textRef.current = text
   }, [text])
-  // The failed send landed after all (the reconnect copy, or its event): take the Retry strip
-  // down and clear the field if it still holds those words (#390).
-  const onDelivered = actions.onDelivered
+  // The action's id belongs to its ledger entry until it lands, is refused or is cancelled; an edit
+  // cancels it, so a kept copy is never sent after the corrected words (#535). When it lands after
+  // all (the reconnect copy, or its event), the Retry strip goes and the field clears if it still
+  // holds those words (#390).
+  const retryId = useRetryId(actions.sends, () => {
+    setOffline(false)
+    const sent = sentRef.current
+    if (sent && textRef.current === sent.typed) {
+      writeStore('session', lastSentKey(roomId), sent.typed.trim())
+      writeStore('local', draftKey(roomId), '')
+      setText('')
+      if (ref.current) ref.current.style.height = ''
+    }
+  })
+  // A prefill replaces the words, like an edit.
   useEffect(() => {
-    if (!onDelivered) return
-    return onDelivered((sent) => {
-      const failed = failedRef.current
-      if (!failed || sent.clientId !== failed.clientId) return false
-      failedRef.current = null
-      setOffline(false)
-      if (textRef.current === failed.typed) {
-        writeStore('session', lastSentKey(roomId), failed.typed.trim())
-        writeStore('local', draftKey(roomId), '')
-        setText('')
-        if (ref.current) ref.current.style.height = ''
-      }
-      return true
-    })
-  }, [onDelivered, roomId])
+    if (seenPrefill > 0) retryId.drop()
+  }, [seenPrefill, retryId])
+  const edit = (next: string) => {
+    setText(next)
+    retryId.drop()
+  }
   // Debounced so typing is not a storage write per key; a send clears it at once (see send).
   useEffect(() => {
     const t = setTimeout(() => writeStore('local', draftKey(roomId), text), 300)
@@ -311,18 +314,19 @@ export function SteerBox({
     if (!text.trim() || sending || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
     setSending(true)
     // One submit is one action with one client_id. The same words while the Retry strip is up
-    // are that action's retry and keep its id, so the server stores them at most once; edited
-    // words, or any send after a success, are a new action.
-    const failed = failedRef.current
-    const retry = offline && failed !== null && failed.kind === plan.send && failed.text === plan.text
-    const clientId = retry ? failed.clientId : newClientId()
+    // are that action's retry and keep its id, so the server stores them at most once; anything
+    // else is a new action, and the one it replaces is cancelled first (useRetryId.next).
+    const sent = sentRef.current
+    const retry = offline && sent !== null && sent.kind === plan.send && sent.text === plan.text
+    const clientId = retryId.next(retry)
+    sentRef.current = { kind: plan.send, text: plan.text, typed: text }
     const ok =
       plan.send === 'comment'
         ? await actions.comment(plan.text, undefined, { clientId })
         : await actions.steer(plan.text, { clientId })
     setSending(false)
     setOffline(!ok)
-    failedRef.current = ok ? null : { clientId, kind: plan.send, text: plan.text, typed: text }
+    retryId.settle(clientId, ok)
     if (ok) {
       writeStore('session', lastSentKey(roomId), text.trim())
       // Words typed while this send waited are a new draft: keep them.
@@ -347,12 +351,12 @@ export function SteerBox({
       const last = readStore('session', lastSentKey(roomId))
       if (last) {
         e.preventDefault()
-        setText(last)
+        edit(last)
       }
     }
   }
   const pick = (chip: string) => {
-    setText(chip)
+    edit(chip)
     ref.current?.focus()
   }
   // Grow with the text, up to about six lines.
@@ -518,7 +522,7 @@ export function SteerBox({
           ref={ref}
           value={text}
           onChange={(e) => {
-            setText(e.target.value)
+            edit(e.target.value) // edited words: the failed action is cancelled, the next send is new
             grow(e.currentTarget)
           }}
           onKeyDown={onKeyDown}
@@ -553,7 +557,12 @@ export function SteerBox({
           </div>
         )}
       </form>
-      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+      {offline && (
+        <div>
+          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+          <p className="m-0 text-xs text-muted-foreground">Editing discards the unsent message.</p>
+        </div>
+      )}
       {!offline && conn === 'reconnecting' && (
         <p className="m-0 text-xs text-muted-foreground">Reconnecting — messages are kept until the room is back</p>
       )}

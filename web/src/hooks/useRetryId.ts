@@ -7,7 +7,8 @@ import type { SendControls } from './useRoom'
  * the send ledger until that entry ends; the composer may only send it again (Retry) or cancel it:
  *
  * - `next(retry)`: the id for a send. A Retry of the composer's still-owed action keeps its id;
- *   anything else starts a new action with a new id.
+ *   anything else starts a new action with a new id, and cancels the composer's previous action
+ *   first, so a kept copy of it is never sent after the new one (#535).
  * - `settle(id, ok)`: after the send. The id stays for a Retry only while the ledger still owes
  *   it (kept or unknown) and nothing was cancelled since the send began; a refused send (an error
  *   answer, 409) is no longer owed, so its id is not kept.
@@ -25,6 +26,11 @@ export function useRetryId(sends: SendControls | undefined, onLanded: () => void
   useEffect(() => {
     landed.current = onLanded
   }, [onLanded])
+  // The ledger is replaced when the user or session changes (#536): read the current one.
+  const sendsRef = useRef(sends)
+  useEffect(() => {
+    sendsRef.current = sends
+  }, [sends])
   useEffect(() => {
     if (!sends) return
     return sends.onDelivered((sent) => {
@@ -36,7 +42,11 @@ export function useRetryId(sends: SendControls | undefined, onLanded: () => void
   }, [sends])
   const [api] = useState(() => ({
     next: (retry: boolean): string => {
-      const reuse = retry && owned.current !== null && (sends?.isPending(owned.current) ?? true)
+      const reuse = retry && owned.current !== null && (sendsRef.current?.isPending(owned.current) ?? true)
+      if (!reuse && owned.current !== null) {
+        sendsRef.current?.cancel(owned.current)
+        generation.current += 1
+      }
       const id = reuse && owned.current !== null ? owned.current : newClientId()
       owned.current = id
       startedAt.current.set(id, generation.current)
@@ -47,10 +57,10 @@ export function useRetryId(sends: SendControls | undefined, onLanded: () => void
       startedAt.current.delete(clientId)
       // Given up while it was on the wire: the composer no longer owns it, so its id is not kept.
       if (started !== generation.current || owned.current !== clientId) return
-      owned.current = !ok && (sends?.isPending(clientId) ?? true) ? clientId : null
+      owned.current = !ok && (sendsRef.current?.isPending(clientId) ?? true) ? clientId : null
     },
     drop: () => {
-      if (owned.current !== null) sends?.cancel(owned.current)
+      if (owned.current !== null) sendsRef.current?.cancel(owned.current)
       owned.current = null
       generation.current += 1
     },

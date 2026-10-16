@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SteerBox } from './SteerBox'
-import type { DeliveredListener, RoomActions } from '../hooks/useRoom'
+import type { DeliveredListener, RoomActions, SendControls } from '../hooks/useRoom'
+import type { Sent } from '../hooks/sendLedger'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
 
@@ -133,20 +134,30 @@ describe('SteerBox composer (U3)', () => {
     expect(second[1]?.clientId).not.toBe(first[1]?.clientId)
   })
 
-  // #390 scenario B: the failed send landed (reconnect copy or its event); the field and the Retry
-  // strip go away without waiting for the person.
-  it('clears the field and the Retry strip when its failed send landed', async () => {
+  // A fake ledger handle: one listener (the composer's), every action still owed unless cancelled.
+  function fakeSends() {
     let listener: DeliveredListener | null = null
-    const withSignal: RoomActions = {
-      ...actions,
-      steer: vi.fn().mockResolvedValue(false),
+    const cancelled: string[] = []
+    const sends: SendControls = {
       onDelivered: (l) => {
         listener = l
         return () => {
           listener = null
         }
       },
+      cancel: (id) => {
+        cancelled.push(id)
+      },
+      isPending: (id) => !cancelled.includes(id),
     }
+    return { sends, cancelled, deliver: (sent: Sent) => listener!(sent) }
+  }
+
+  // #390 scenario B: the failed send landed (reconnect copy or its event); the field and the Retry
+  // strip go away without waiting for the person.
+  it('clears the field and the Retry strip when its failed send landed', async () => {
+    const fake = fakeSends()
+    const withSignal: RoomActions = { ...actions, steer: vi.fn().mockResolvedValue(false), sends: fake.sends }
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={arjun} actions={withSignal} />)
     const box = screen.getByLabelText('Steer the agent')
@@ -157,11 +168,11 @@ describe('SteerBox composer (U3)', () => {
     // Another action is not the composer's, even with the same words.
     let taken = true
     act(() => {
-      taken = listener!({ clientId: 'other', kind: 'steer', text: 'look at the slot' })
+      taken = fake.deliver({ clientId: 'other', kind: 'steer', text: 'look at the slot' })
     })
     expect(taken).toBe(false)
     act(() => {
-      taken = listener!({ clientId, kind: 'steer', text: 'look at the slot' })
+      taken = fake.deliver({ clientId, kind: 'steer', text: 'look at the slot' })
     })
     expect(taken).toBe(true)
     expect(box).toHaveValue('')
@@ -169,29 +180,63 @@ describe('SteerBox composer (U3)', () => {
     expect(withSignal.steer).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps edited words when the reconnect delivered the old ones', async () => {
-    let listener: DeliveredListener | null = null
-    const withSignal: RoomActions = {
-      ...actions,
-      steer: vi.fn().mockResolvedValue(false),
-      onDelivered: (l) => {
-        listener = l
-        return () => {}
-      },
-    }
+  // #535: an edit gives up on the failed action. It is cancelled in the ledger at once, so no
+  // Retry, reconnect or live retry sends the old words after the new ones.
+  it('an edit after a failed send cancels it; the edited words are kept', async () => {
+    const fake = fakeSends()
+    const withSignal: RoomActions = { ...actions, steer: vi.fn().mockResolvedValue(false), sends: fake.sends }
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={arjun} actions={withSignal} />)
     const box = screen.getByLabelText('Steer the agent')
-    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.change(box, { target: { value: 'restart the connector' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
     await screen.findByRole('button', { name: 'Retry' })
-    fireEvent.change(box, { target: { value: 'look at the slot and the lag' } })
+    expect(screen.getByText('Editing discards the unsent message.')).toBeInTheDocument()
     const clientId = vi.mocked(withSignal.steer).mock.calls[0][1]!.clientId!
+    fireEvent.change(box, { target: { value: 'do NOT restart the connector' } })
+    expect(fake.cancelled).toEqual([clientId])
+    // Had it been on the wire and landed anyway, it is no longer the composer's.
+    let taken = true
     act(() => {
-      listener!({ clientId, kind: 'steer', text: 'look at the slot' })
+      taken = fake.deliver({ clientId, kind: 'steer', text: 'restart the connector' })
     })
-    expect(box).toHaveValue('look at the slot and the lag')
-    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(taken).toBe(false)
+    expect(box).toHaveValue('do NOT restart the connector')
+  })
+
+  it('a prefill ("Ask the agent") while the Retry strip is up cancels the failed send too', async () => {
+    const fake = fakeSends()
+    const withSignal: RoomActions = { ...actions, steer: vi.fn().mockResolvedValue(false), sends: fake.sends }
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    const { rerender } = render(<SteerBox state={state} user={arjun} actions={withSignal} />)
+    fireEvent.change(screen.getByLabelText('Steer the agent'), { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    const clientId = vi.mocked(withSignal.steer).mock.calls[0][1]!.clientId!
+    expect(fake.cancelled).toEqual([])
+    rerender(<SteerBox state={state} user={arjun} actions={withSignal} prefill={{ text: 'check the lag', n: 1 }} />)
+    expect(screen.getByLabelText('Steer the agent')).toHaveValue('check the lag')
+    expect(fake.cancelled).toEqual([clientId])
+  })
+
+  // #535 (low): after 409 client_id_reused the ledger has dropped the entry, so a Retry of the same
+  // id could only be refused again; it starts a new action instead.
+  it('a Retry of an action the ledger no longer owes gets a new client_id', async () => {
+    const fake = fakeSends()
+    const withSignal: RoomActions = {
+      ...actions,
+      steer: vi.fn().mockResolvedValue(false),
+      sends: { ...fake.sends, isPending: () => false },
+    }
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={withSignal} />)
+    fireEvent.change(screen.getByLabelText('Steer the agent'), { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(withSignal.steer).toHaveBeenCalledTimes(2))
+    const [first, second] = vi.mocked(withSignal.steer).mock.calls
+    expect(second[0]).toBe('look at the slot')
+    expect(second[1]?.clientId).not.toBe(first[1]?.clientId)
   })
 
   it('says messages are kept while the socket reconnects', () => {
