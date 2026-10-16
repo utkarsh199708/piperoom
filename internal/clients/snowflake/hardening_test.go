@@ -446,3 +446,34 @@ func TestHardenedConfigWorkloadIdentityHostMustBeHTTPS(t *testing.T) {
 		})
 	}
 }
+
+// A raw "/" in a parameter value makes ParseDSN read everything before it as
+// the database name: earlier parameters (protocol=http, authenticator=) are
+// dropped and the query string, secrets included, lands in the receipt target
+// (#514). hardenedConfig must refuse it without naming the value.
+func TestHardenedConfigRefusesParamsFoldedIntoPath(t *testing.T) {
+	for _, dsn := range []string{
+		"svc:pw@acct/ANALYTICS/PUBLIC?warehouse=WH&passcode=SECRET/12",
+		"svc:pw@acct/ANALYTICS/PUBLIC?protocol=http&warehouse=WH&privateKey=abcSECRETtok/xyz",
+		"svc:pw@acct/ANALYTICS?warehouse=WH&passcode=SECRET/12",
+	} {
+		cfg, err := hardenedConfig(dsn)
+		if err == nil || cfg != nil {
+			t.Errorf("hardenedConfig(%q) accepted (err %v); want a refusal", dsn, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "URL-encode") {
+			t.Errorf("error %q does not say to URL-encode values", err)
+		}
+		for _, s := range []string{"SECRET", "pw@"} {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("error %q leaks %q", err, s)
+			}
+		}
+	}
+	// Encoded, the same value is accepted and stays out of the path.
+	cfg, err := hardenedConfig("svc:pw@acct/ANALYTICS/PUBLIC?warehouse=WH&passcode=SECRET%2F12")
+	if err != nil || cfg.Database != "ANALYTICS" || cfg.Schema != "PUBLIC" {
+		t.Fatalf("encoded value: %+v, %v", cfg, err)
+	}
+}

@@ -117,6 +117,14 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("snowflake: parse dsn: %w", err)
 	}
+	// ParseDSN splits database/schema at the last "/", so a raw "/" in a
+	// parameter value folds the query string before it into the path: those
+	// parameters (protocol=http, authenticator=) are silently dropped and the
+	// rest, secrets included, becomes the database name in receipts (#514).
+	// The message names neither the value nor the DSN.
+	if strings.ContainsAny(cfg.Database, "?&=") || strings.ContainsAny(cfg.Schema, "?&=") {
+		return nil, errors.New("snowflake: dsn database or schema holds query parameters: a parameter value has an unencoded \"/\"; URL-encode every parameter value (\"/\" as %2F); refused")
+	}
 	if cfg.Tracing != "" {
 		return nil, errors.New("snowflake: dsn parameter tracing is not allowed: it raises the driver log level; refused as defence in depth (GO-2026-6665)")
 	}
