@@ -1104,11 +1104,9 @@ var review547Keep = []string{
 	"<password> and </password>",
 	"<password>\tand\t</password>",
 	"<password> see docs </password>",
-	// Nit 6: a name= attribute on a schema element names a column or field,
-	// not a secret.
-	"<column name=\"password\">\n  VARCHAR\n</column>",
-	"<field name=\"secret\">\n  SerializationException\n</field>",
-	"<field name=\"password\">varchar(255) NOT NULL</field>",
+	// Nit 6: a name= attribute on a schema element names a column or field.
+	// Its text is masked like any secret element's since round 4 (the
+	// column-type over-mask is pinned in TestReview547Round4, #573).
 	`<attribute name="token" type="string"/>`,
 }
 
@@ -1175,9 +1173,6 @@ func TestReview547Round2(t *testing.T) {
 		{"padded lone secret", "<password> secret </password>", []string{"> secret <"}},
 	})
 	checkKeep(t, []string{
-		"<column name=\"password\">\n  VARCHAR\n</column>",
-		"<field name=\"secret\">\n  SerializationException\n</field>",
-		"<field name=\"password\">varchar(255) NOT NULL</field>",
 		`<attribute name="token" type="string"/>`,
 		"<column name=\"username\" value=\"admin\"/>",
 		"<password> <password> </password>",
@@ -1205,12 +1200,6 @@ func TestReview547Round3(t *testing.T) {
 		{"real deal", "<column name=\"password\">real deal 99</column>", []string{"real deal 99"}},
 	})
 	checkKeep(t, []string{
-		"<column name=\"password\">\n  VARCHAR\n</column>",
-		"<column name=\"password\">TEXT</column>",
-		"<field name=\"password\">varchar(255) NOT NULL</field>",
-		"<column name=\"secret\">VARCHAR(64) NOT NULL DEFAULT ''</column>",
-		"<field name=\"secret\">\n  SerializationException\n</field>",
-		"<field name=\"token\">org.apache.kafka.common.errors.SerializationException</field>",
 		`<attribute name="token" type="string"/>`,
 	})
 	rows := []struct{ gap, in, now string }{
@@ -1223,4 +1212,103 @@ func TestReview547Round3(t *testing.T) {
 			t.Errorf("gap %q moved: Text(%q)\n got  %q\n pinned %q", r.gap, r.in, got, r.now)
 		}
 	}
+}
+
+// TestReview547Round4 holds the rows of the round-4 review of #547. Each
+// want is 0a4b8f8's output for the text, so the PR keeps every mask
+// 0a4b8f8 wrote: a schema element named by a secret word has all its text
+// masked, column types included (an over-mask, #573), and function words
+// and the round-1 placeholder words are kept only where 0a4b8f8 kept them,
+// in lower-case text padded on one line.
+func TestReview547Round4(t *testing.T) {
+	checkExact(t, []struct{ in, want string }{
+		{"<column name=\"password\">VARCHAR(64) DEFAULT 'Hunter2Qw7Pa'</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">TEXT NOT NULL DEFAULT 'Hunter2Qw7Pa'</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">VARCHAR(64) NOT NULL DEFAULT 'Zx9hunter2Qw7'</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">VARCHAR(64) DEFAULT 'changeit'</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">VARCHAR DEFAULT 'debezium'</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">TEXT DEFAULT 'hunter2'</column>",
+			"<column name=\"password\">[redacted 24]</column>"},
+		{"<column name=\"password\">CHAR(8) DEFAULT 's3cr3t!!'</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<field name=\"secret\">VARCHAR DEFAULT 'Hunter2Qw7Pa'</field>",
+			"<field name=\"secret\">[redacted 32]</field>"},
+		{"<attribute name=\"token\">CHAR(12) DEFAULT 'Hunter2Qw7Pa'</attribute>",
+			"<attribute name=\"token\">[redacted 32]</attribute>"},
+		{"<column name=\"pin_password\">INT DEFAULT 88124431</column>",
+			"<column name=\"pin_password\">[redacted 24]</column>"},
+		{"<column name=\"password\">INT DEFAULT -12345678</column>",
+			"<column name=\"password\">[redacted 24]</column>"},
+		{"<column name=\"password\">\n  VARCHAR DEFAULT 'Hunter2Qw7Pa'\n</column>",
+			"<column name=\"password\">\n  [redacted 32]\n</column>"},
+		{"<column name=\"password\">\n  VARCHAR(64) DEFAULT 'changeit'\n</column>",
+			"<column name=\"password\">\n  [redacted 32]\n</column>"},
+		{"<column name=\"password\">Hunter2Qw7Pa.SerializationException</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">Zx9hunter2Qw7Pa55.SerializationException</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">Hunter2Qw7Pa.OutOfMemoryError</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">x.Hunter2Qw7Pa.OutOfMemoryError</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">HunterException</column>",
+			"<column name=\"password\">[redacted 16]</column>"},
+		{"<password>\n  enter\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  value\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  set\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  insert value\n</password>",
+			"<password>\n  [redacted 16]\n</password>"},
+		{"<password>\n  enter here\n</password>",
+			"<password>\n  [redacted 16]\n</password>"},
+		{"<password>\n  and\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  no\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<entry key=\"jdbc.password\">\n  me\n</entry>",
+			"<entry key=\"jdbc.password\">\n  [redacted 8]\n</entry>"},
+		{"<password> ENTER </password>",
+			"<password> [redacted 8] </password>"},
+		{"<password>\tVALUE\t</password>",
+			"<password>\t[redacted 8]\t</password>"},
+		{"<password> AND </password>",
+			"<password> [redacted 8] </password>"},
+		{"<password>\n  here\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  it\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\tis\t</password>",
+			"<password>\tis\t</password>"},
+		{"<password> SEE </password>",
+			"<password> [redacted 8] </password>"},
+		{"<password>\n  NIL\n</password>",
+			"<password>\n  NIL\n</password>"},
+		{"<password>\tAND\t</password>",
+			"<password>\t[redacted 8]\t</password>"},
+		{"<column name=\"password\">\n  VARCHAR\n</column>",
+			"<column name=\"password\">\n  [redacted 8]\n</column>"},
+		{"<column name=\"password\">TEXT</column>",
+			"<column name=\"password\">[redacted 8]</column>"},
+		{"<field name=\"password\">varchar(255) NOT NULL</field>",
+			"<field name=\"password\">[redacted 24]</field>"},
+		{"<column name=\"secret\">VARCHAR(64) NOT NULL DEFAULT ''</column>",
+			"<column name=\"secret\">[redacted 32]</column>"},
+		{"<field name=\"secret\">\n  SerializationException\n</field>",
+			"<field name=\"secret\">\n  [redacted 24]\n</field>"},
+		{"<field name=\"token\">org.apache.kafka.common.errors.SerializationException</field>",
+			"<field name=\"token\">[redacted 64]</field>"},
+		{"<password>\tand\t</password>",
+			"<password>\tand\t</password>"},
+		{"<password> and </password>",
+			"<password> and </password>"},
+		{"<password> see docs </password>",
+			"<password> see docs </password>"},
+	})
 }
