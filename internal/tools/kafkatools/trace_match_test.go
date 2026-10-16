@@ -72,11 +72,14 @@ func TestMatchesRecordSnippetIsTheRegexp(t *testing.T) {
 	}
 }
 
-// TestSanitizeTraceHostileSpeed: #533. A 64 KiB line of any repeated unit
-// stays inside the budget (28-44 ms on main). The slowest lines here (4-6
-// ms) are the ones redact.Text and dlq.RedactMessage really mask; the time
-// is the thread's work (workTime), since CI runs packages in parallel.
-// Under -race everything is several times slower, so the budget is wider.
+// TestSanitizeTraceHostileSpeed: #533. On a 64 KiB line of any repeated
+// unit, sanitizeTrace's own passes take under 10 ms (28-44 ms on main). The
+// budget is 10 ms on top of what redact.Text and dlq.RedactMessage, main's
+// passes from other packages, take on the same line on the same machine:
+// on lines they really mask (URLs, Oracle, "Key (a)=(") they are most of the
+// time, about 2-5 ms here and twice that on a CI runner. Time is the
+// thread's work (workTime), since CI runs packages in parallel. Under -race
+// everything is several times slower, so the budget is wider.
 func TestSanitizeTraceHostileSpeed(t *testing.T) {
 	budget := 10 * time.Millisecond
 	if raceEnabled {
@@ -91,16 +94,23 @@ func TestSanitizeTraceHostileSpeed(t *testing.T) {
 		"invalid byte sequence for encoding \"", "Got VALUE_", "invalid value \"",
 	} {
 		line := "Caused by: x: " + strings.Repeat(unit, (64<<10)/len(unit)) + "Leak"
+		other := bestWorkTime(func() { redact.Text(line) }) + bestWorkTime(func() { dlq.RedactMessage(line) })
 		for name, f := range map[string]func(string) string{"sanitizeTrace": sanitizeTrace, "condenseTrace": condenseTrace} {
-			best := time.Hour
-			for range 5 { // the best of five, so one GC pause is not a failure
-				best = min(best, workTime(func() { f(line) }))
-			}
-			if best > budget {
-				t.Errorf("%s: %q x 64 KiB took %v, want < %v", name, unit, best, budget)
+			if took := bestWorkTime(func() { f(line) }); took > budget+other {
+				t.Errorf("%s: %q x 64 KiB took %v, want < %v (+ %v in redact.Text and dlq.RedactMessage)", name, unit, took, budget, other)
 			}
 		}
 	}
+}
+
+// bestWorkTime is the best of five workTime runs, so one GC pause is not a
+// failure.
+func bestWorkTime(f func()) time.Duration {
+	best := time.Hour
+	for range 5 {
+		best = min(best, workTime(f))
+	}
+	return best
 }
 
 // regexpSanitizeTrace is sanitizeTrace with main's regexps in place of the
