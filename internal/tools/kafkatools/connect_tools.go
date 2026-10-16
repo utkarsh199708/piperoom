@@ -209,10 +209,21 @@ func maskCreds(s string) string {
 	// credential ("connection.password":"Sec@ret..."). Run first, it would eat
 	// that credential's key and leave its tail; run last, the sibling is
 	// already masked and the Oracle pass can only add masks.
-	s = bracedPassword.ReplaceAllString(s, "${1}"+redactedPassword)
+	// The regexps cost about 10 ms each on a 64 KiB line (#533):
+	// maskBracedPasswords is bracedPassword's replacement without one, and
+	// the Oracle regexp runs only when the text holds its literal prefix.
+	s = maskBracedPasswords(s)
 	s, _ = redact.Text(s)
-	s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
+	if mayHoldOracleThin(s) {
+		s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
+	}
 	return s
+}
+
+// mayHoldOracleThin is false only when oracleThinCreds cannot match s. None
+// of the letters of "jdbc:oracle:" folds to a non-ASCII rune.
+func mayHoldOracleThin(s string) bool {
+	return strings.Contains(asciiLower(s), "jdbc:oracle:")
 }
 
 // cleanTrace masks credentials in a condensed trace and caps it. condenseTrace
@@ -398,7 +409,7 @@ func sanitizeTrace(s string) string {
 	s = stripSchemaAfter(s, "Error registering Avro schema")
 	s = stripOldSchema(s)
 	s = maskCreds(s)
-	if recordSnippet.MatchString(s) {
+	if matchesRecordSnippet(s) {
 		// dlq.RedactMessage drops a "Failing row contains (...)" tuple only
 		// after a "Detail:" prefix; some drivers print it without one.
 		s = dlq.RedactMessage(failingRow.ReplaceAllString(s, "${1} "+dlq.Redacted))
@@ -469,15 +480,21 @@ func maskSinkValues(s string) string {
 	var b strings.Builder
 	last := 0     // s[:last] is written to b
 	parseAt := -1 // the first parseMarker at or after the last search, or len(low) for none
+	lineEnd := -1 // the first '\n' at or after the last search, or len(low) for none
 	for k, m := range spans {
 		if m[0] < last {
 			continue
 		}
 		start := m[1]
-		end := len(low)
-		if i := strings.IndexByte(low[start:], '\n'); i >= 0 {
-			end = start + i
+		if lineEnd < start {
+			// Cached like parseAt: searched per opener, a line of many
+			// openers and no newline costs quadratic time (#533).
+			lineEnd = len(low)
+			if i := strings.IndexByte(low[start:], '\n'); i >= 0 {
+				lineEnd = start + i
+			}
 		}
+		end := lineEnd
 		if strings.HasPrefix(low[m[0]:], "text '") {
 			if parseAt < start {
 				parseAt = len(low)

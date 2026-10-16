@@ -196,8 +196,8 @@ func TestTraceSinkValueMaskKeepsCategories(t *testing.T) {
 
 // TestTraceSinkValueMaskHostile: maskSinkValues on a 64 KiB line of repeated
 // openers stays linear, and a value after the last opener is still masked.
-// The budget is on this pass: sanitizeTrace as a whole is dominated by main's
-// passes (32-56 ms for any 64 KiB line, about 600 ms under -race), #533.
+// The budget is on this pass; TestSanitizeTraceHostileSpeed times
+// sanitizeTrace as a whole (#533).
 func TestTraceSinkValueMaskHostile(t *testing.T) {
 	for _, tt := range []struct {
 		unit   string
