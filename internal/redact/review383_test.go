@@ -1146,15 +1146,17 @@ func TestReview547Round1(t *testing.T) {
 	}
 }
 
-// TestReview547CutProse: prose that names a secret element near the scan
-// limit does not move the cut (nit 8); a start tag that opens its line does.
+// TestReview547CutProse pins the cut's handling of prose that names a
+// secret element near the limit: since round 3 it moves the cut back to
+// that line like any open secret element (0a4b8f8's handling), an
+// over-mask of at most 4 KiB instead of a leak risk.
 func TestReview547CutProse(t *testing.T) {
 	line := "evidence lsn 0/16B3748 topic orders.public.orders\n"
 	tail := "WARN no <password> given for pg-orders-connector\n"
 	fill := strings.Repeat(line, (MaxScan-2000)/len(line))
 	in := fill + tail + strings.Repeat(line, 4000/len(line))
-	if got := scanCut(in); got < len(fill)+len(tail) {
-		t.Errorf("cut moved to %d, before the prose line ends at %d", got, len(fill)+len(tail))
+	if got := scanCut(in); got != len(fill) {
+		t.Errorf("cut at %d, want the start of the prose line at %d", got, len(fill))
 	}
 }
 

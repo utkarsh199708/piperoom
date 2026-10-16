@@ -114,18 +114,127 @@ var columnTypes = map[string]bool{
 	"short": true, "byte": true,
 }
 
-// typeLike reports text that names a type rather than holding a value: a
-// column type (VARCHAR, varchar(255) NOT NULL) or an exception class.
+// knownErrors are JVM error classes a schema element may name.
+var knownErrors = map[string]bool{
+	"OutOfMemoryError": true, "StackOverflowError": true, "NoClassDefFoundError": true, "AssertionError": true,
+	"LinkageError": true, "InternalError": true, "UnsatisfiedLinkError": true, "ExceptionInInitializerError": true,
+}
+
+// typeLike reports text that is, as a whole, a column type or an exception
+// class rather than a value:
+//   - a type word, in capitals when it stands alone (VARCHAR, TEXT; a lone
+//     "real" or "text" is a value), then an optional (n) or (n,m), then
+//     only constraints: NOT NULL, NULL, PRIMARY KEY, UNIQUE, DEFAULT and a
+//     literal (varchar(255) NOT NULL);
+//   - one Java or .NET class name ending in Exception, maybe dotted, with
+//     letters only in its last part (SerializationException), or a known
+//     JVM error (OutOfMemoryError).
+//
+// Anything else in a schema element named by a secret word is masked.
 func typeLike(t string) bool {
 	t = strings.TrimSpace(t)
-	if strings.HasSuffix(t, "Exception") || strings.HasSuffix(t, "Error") {
+	if exceptionName(t) || knownErrors[t[strings.LastIndexByte(t, '.')+1:]] && !strings.ContainsAny(t, " \t") {
 		return true
 	}
 	w := t
-	if i := strings.IndexAny(w, " (\t"); i >= 0 {
-		w = w[:i]
+	rest := ""
+	if i := strings.IndexAny(t, " \t("); i >= 0 {
+		w, rest = t[:i], t[i:]
 	}
-	return columnTypes[asciiLower(w)]
+	if !columnTypes[asciiLower(w)] {
+		return false
+	}
+	rest = strings.TrimLeft(rest, " \t")
+	if strings.HasPrefix(rest, "(") {
+		e := strings.IndexByte(rest, ')')
+		if e < 0 || !sizeArgs(rest[1:e]) {
+			return false
+		}
+		rest = rest[e+1:]
+	} else if rest == "" && w != strings.ToUpper(w) {
+		return false
+	}
+	return constraintsOnly(strings.Fields(rest))
+}
+
+// sizeArgs reports "n" or "n,m" with digits and optional blanks.
+func sizeArgs(a string) bool {
+	parts := strings.Split(a, ",")
+	if len(parts) > 2 {
+		return false
+	}
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p == "" || !allDigits(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// constraintsOnly reports words that are only SQL column constraints.
+func constraintsOnly(ws []string) bool {
+	for i := 0; i < len(ws); i++ {
+		switch asciiLower(ws[i]) {
+		case "null", "unique":
+		case "not":
+			if i+1 >= len(ws) || asciiLower(ws[i+1]) != "null" {
+				return false
+			}
+			i++
+		case "primary":
+			if i+1 >= len(ws) || asciiLower(ws[i+1]) != "key" {
+				return false
+			}
+			i++
+		case "default":
+			if i+1 >= len(ws) || !sqlLiteral(ws[i+1]) {
+				return false
+			}
+			i++
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// sqlLiteral reports a DEFAULT literal: digits, an empty or short quoted
+// string, true, false, null or current_timestamp.
+func sqlLiteral(v string) bool {
+	switch asciiLower(v) {
+	case "true", "false", "null", "current_timestamp", "now()":
+		return true
+	}
+	if allDigits(strings.TrimPrefix(v, "-")) && v != "-" {
+		return true
+	}
+	return len(v) >= 2 && len(v) <= 16 && v[0] == '\'' && v[len(v)-1] == '\''
+}
+
+// exceptionName reports one class name ending in Exception, maybe dotted
+// (org.apache.kafka.common.errors.SerializationException), whose last part
+// is letters only and starts with a capital.
+func exceptionName(t string) bool {
+	last := t[strings.LastIndexByte(t, '.')+1:]
+	if !strings.HasSuffix(last, "Exception") || last[0] < 'A' || last[0] > 'Z' {
+		return false
+	}
+	for i := 0; i < len(last); i++ {
+		if !isLetter(last[i]) {
+			return false
+		}
+	}
+	for _, part := range strings.Split(t, ".") {
+		if part == "" {
+			return false
+		}
+		for i := 0; i < len(part); i++ {
+			if !isKeyChar(part[i]) || part[i] == '-' || part[i] == '.' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func attrNamed(attrs []xmlAttr, name string) (xmlAttr, bool) {
@@ -204,8 +313,9 @@ func readAttrs(s string, i int, attrs []xmlAttr) ([]xmlAttr, int, bool, bool) {
 // without the end tag that lets addXMLRule read it. The cut goes to the
 // start of the start tag's line, so every line left in the head is whole,
 // or to the tag itself when that line starts before the window. The text
-// it drops from the head lands in the overflow mask. Only a start tag in an
-// XML context counts (xmlContext), not prose such as "no <password> given".
+// it drops from the head lands in the overflow mask. Prose that names a
+// secret element ("no <password> given") moves the cut too: an over-mask of
+// at most 4 KiB, never a leak.
 func openTagCut(s string, cut int) int {
 	lo := max(0, cut-4096)
 	win := s[lo:cut]
@@ -241,8 +351,7 @@ func openTagCut(s string, cut int) int {
 		var selfClosing, ok bool
 		attrs, k, selfClosing, ok = readAttrs(win, ne, attrs[:0])
 		i = max(i, k)
-		if ok && !selfClosing && xmlContext(s, lo+p, lo+k) &&
-			(endsInFlagWord(asciiLower(win[ns:ne])) || namedSecret(win, attrs)) {
+		if ok && !selfClosing && (endsInFlagWord(asciiLower(win[ns:ne])) || namedSecret(win, attrs)) {
 			starts = append(starts, startTag{p, localName(asciiLower(win[ns:ne]))})
 		}
 	}
@@ -256,22 +365,4 @@ func openTagCut(s string, cut int) int {
 		return lo + st.at
 	}
 	return cut
-}
-
-// xmlContext reports whether the start tag at p, ending at k, reads as XML
-// rather than prose: it opens its line (after blanks) or follows another
-// tag's '>', or nothing but blanks or another tag follows it on its line
-// (config: <password>, the value on the next line). Prose such as
-// "no <password> given" goes on after the tag.
-func xmlContext(s string, p, k int) bool {
-	for p > 0 && (s[p-1] == ' ' || s[p-1] == '\t') {
-		p--
-	}
-	if p == 0 || s[p-1] == '\n' || s[p-1] == '>' {
-		return true
-	}
-	for k < len(s) && (s[k] == ' ' || s[k] == '\t' || s[k] == '\r') {
-		k++
-	}
-	return k >= len(s) || s[k] == '\n' || s[k] == '<'
 }
