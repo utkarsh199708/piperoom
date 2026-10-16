@@ -49,6 +49,10 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 //     (password=, token:, api_key=, ...) and what internal/redact finds (a
 //     URL's user:password@, bearer tokens, cloud keys).
 //
+// Then, on that output, the values of a PostgreSQL "Key (cols)=(values)"
+// detail without a "Detail:" label are replaced (maskKeyValues); the column
+// list stays.
+//
 // Control characters and runs of spaces become one space. The result is at
 // most 300 runes and RedactMessage is idempotent.
 //
@@ -57,10 +61,30 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 // or address ("name=Jane Doe"). Typographic and fullwidth quotes are not
 // recognised (rule 6 still masks an e-mail address inside them).
 func RedactMessage(s string) string {
+	out := redactRules(s)
+	// Additive passes (docs/agents/org.md §12): they only add masks on the
+	// output of the rules above, which then run again on the result.
+	for i := 0; i < maxRedactRounds; i++ {
+		next := redactRules(string(capRunes(tidy([]rune(maskKeyValues(out))))))
+		if next == out {
+			break
+		}
+		out = next
+	}
+	return out
+}
+
+// maxRedactRounds bounds both fixed-point loops. Each round only removes text
+// or replaces it with Redacted, so one or two rounds settle real messages.
+const maxRedactRounds = 8
+
+// redactRules is main's RedactMessage, unchanged: the additive passes build on
+// its output, so a new rule can over-mask but never undo what it masks.
+func redactRules(s string) string {
 	// The first pass removes everything the rules name; the loop only runs
 	// again when a removal joined text into something a rule matches.
 	out := s
-	for i := 0; i < 8; i++ {
+	for i := 0; i < maxRedactRounds; i++ {
 		next := redactOnce(out)
 		if next == out {
 			break

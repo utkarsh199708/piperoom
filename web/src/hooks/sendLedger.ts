@@ -73,6 +73,11 @@ export interface LedgerDeps {
   newId: () => string
   /** The room socket is open: then nothing reconnects, so the ledger retries kept actions itself. */
   isLive?: () => boolean
+  /**
+   * The browser's session is still the one this ledger was made for. False from the moment a
+   * login or logout starts (before the cookie changes): from then on nothing is posted (#536).
+   */
+  sameSession?: () => boolean
   now?: () => number
 }
 
@@ -105,6 +110,10 @@ export class SendLedger {
 
   private now() {
     return this.deps.now ? this.deps.now() : Date.now()
+  }
+
+  private sameSession() {
+    return this.deps.sameSession ? this.deps.sameSession() : true
   }
 
   private room() {
@@ -207,6 +216,7 @@ export class SendLedger {
    * its own id. Another room's actions wait for that room's socket (#491).
    */
   drain(): void {
+    if (this.disposed || !this.sameSession()) return
     for (const a of this.here()) {
       if (a.state === 'queued') void this.post(a.item, a.clientId, a.room, true)
     }
@@ -221,9 +231,24 @@ export class SendLedger {
     this.land(id, true)
   }
 
-  /** Stops the timers (the room screen is gone); later answers no longer touch the screen. */
+  /**
+   * The screen holds this ledger (again): React StrictMode runs an effect's cleanup and setup once
+   * more on mount, and a ledger disposed then would never retry or report anything.
+   */
+  attach(): void {
+    this.disposed = false
+  }
+
+  /**
+   * Stops the timers (the room screen is gone, or the user or session changed); later answers no
+   * longer touch the screen. Kept and unknown actions are dropped and nothing drains any more:
+   * they were typed by this ledger's user, and must never be posted under another session (#536).
+   * One on the wire cannot be called back; its answer only ends it.
+   */
   dispose(): void {
     this.disposed = true
+    for (const a of this.actions.values()) a.cancelled = true
+    this.actions.clear()
     for (const t of this.timers) clearTimeout(t)
     this.timers.clear()
     if (this.liveRetry !== undefined) clearTimeout(this.liveRetry)
@@ -232,6 +257,12 @@ export class SendLedger {
 
   /** `notify`: the caller is not waiting for the answer (the reconnect copy), so tell the composers. */
   private post(item: SendItem, clientId: string, room: string, notify = false): Promise<Outcome> {
+    if (!this.sameSession()) {
+      // Typed under a session that is ending: never posted under the next one. Dropped, not kept.
+      this.actions.delete(clientId)
+      this.setError(this.banner())
+      return Promise.resolve('refused')
+    }
     const a: Action = { clientId, item, room, state: 'inflight', since: this.now() }
     this.actions.set(clientId, a)
     a.flight = this.deps.post(item, clientId, room).then(

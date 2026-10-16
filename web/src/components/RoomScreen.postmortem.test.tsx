@@ -27,7 +27,8 @@ import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { RoomScreen } from './RoomScreen'
 
-const actions = new Proxy({} as RoomActions, { get: () => vi.fn() })
+// `sends` is the ledger handle (an object, not a function): the hook is mocked, so there is none.
+const actions = new Proxy({} as RoomActions, { get: (_, key) => (key === 'sends' ? undefined : vi.fn()) })
 
 const member: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member' }
 const viewer: CurrentUser = { id: 'vera', name: 'Vera', layers: [], role: 'viewer' }
