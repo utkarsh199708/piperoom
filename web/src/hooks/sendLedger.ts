@@ -207,6 +207,7 @@ export class SendLedger {
    * its own id. Another room's actions wait for that room's socket (#491).
    */
   drain(): void {
+    if (this.disposed) return
     for (const a of this.here()) {
       if (a.state === 'queued') void this.post(a.item, a.clientId, a.room, true)
     }
@@ -221,9 +222,24 @@ export class SendLedger {
     this.land(id, true)
   }
 
-  /** Stops the timers (the room screen is gone); later answers no longer touch the screen. */
+  /**
+   * The screen holds this ledger (again): React StrictMode runs an effect's cleanup and setup once
+   * more on mount, and a ledger disposed then would never retry or report anything.
+   */
+  attach(): void {
+    this.disposed = false
+  }
+
+  /**
+   * Stops the timers (the room screen is gone, or the user or session changed); later answers no
+   * longer touch the screen. Kept and unknown actions are dropped and nothing drains any more:
+   * they were typed by this ledger's user, and must never be posted under another session (#536).
+   * One on the wire cannot be called back; its answer only ends it.
+   */
   dispose(): void {
     this.disposed = true
+    for (const a of this.actions.values()) a.cancelled = true
+    this.actions.clear()
     for (const t of this.timers) clearTimeout(t)
     this.timers.clear()
     if (this.liveRetry !== undefined) clearTimeout(this.liveRetry)

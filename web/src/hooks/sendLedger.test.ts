@@ -120,6 +120,31 @@ describe('SendLedger', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  // #536: a ledger is one user's session. Disposed, it owes nothing: its kept actions are never
+  // drained, retried live, or offered for a Retry under whoever comes next.
+  it('dispose drops kept actions: nothing drains and none is pending', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, true)
+    expect(await l.send(stop, 'k1')).toBe(false)
+    expect(l.isPending('k1')).toBe(true)
+    l.dispose()
+    expect(l.isPending('k1')).toBe(false)
+    l.drain()
+    vi.advanceTimersByTime(LIVE_RETRY_MS * 2)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('attach after dispose (React StrictMode remounts an effect) works again', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
+    const { l, error } = ledger(post)
+    l.dispose()
+    l.attach()
+    await l.send(stop, 'k1')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
+    expect(error()).toBe(NOT_CONFIRMED_TEXT)
+  })
+
   // Review ADV-2: an unknown action already reported "never confirmed" holds no banner up.
   it('an old unknown action does not bring its banner back after a later success or a reconnect', async () => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))

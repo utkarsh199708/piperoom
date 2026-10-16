@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type {
   ChecklistStepDonePayload,
   Event,
@@ -201,20 +201,33 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   useEffect(() => {
     roomIdRef.current = roomId
   }, [roomId])
-  const [ledger] = useState(
-    () =>
-      new SendLedger({
-        post: (item, clientId, room) =>
-          item.kind === 'steer'
-            ? api.steer(room, item.text, clientId)
-            : api.comment(room, { step_id: item.stepId, text: item.text, client_id: clientId }),
-        room: () => roomIdRef.current,
-        setError,
-        newId: newClientId,
-        isLive: () => liveRef.current,
-      }),
-  )
-  useEffect(() => () => ledger.dispose(), [ledger])
+  // One ledger per user and session (#536): a dev "Switch user" or a new session changes them
+  // without a remount, and the previous user's kept actions must never be posted under the new
+  // session. The old ledger is disposed (its entries dropped) by the effect below.
+  const session = `${user.id}|${sessionEpoch}`
+  const newLedger = () =>
+    new SendLedger({
+      post: (item, clientId, room) =>
+        item.kind === 'steer'
+          ? api.steer(room, item.text, clientId)
+          : api.comment(room, { step_id: item.stepId, text: item.text, client_id: clientId }),
+      room: () => roomIdRef.current,
+      setError,
+      newId: newClientId,
+      isLive: () => liveRef.current,
+    })
+  const [held, setHeld] = useState(() => ({ session, ledger: newLedger() }))
+  let ledger = held.ledger
+  if (held.session !== session) {
+    // Set during render (React's derived-state pattern), so no effect of this render sees the old one.
+    const next = { session, ledger: newLedger() }
+    setHeld(next)
+    ledger = next.ledger
+  }
+  useEffect(() => {
+    ledger.attach()
+    return () => ledger.dispose()
+  }, [ledger])
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -517,11 +530,14 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   )
 
   const onDelivered = useCallback((listener: DeliveredListener) => ledger.onDelivered(listener), [ledger])
-  const [sends] = useState<SendControls>(() => ({
-    onDelivered: (listener) => ledger.onDelivered(listener),
-    cancel: (clientId) => ledger.cancel(clientId),
-    isPending: (clientId) => ledger.isPending(clientId),
-  }))
+  const sends = useMemo<SendControls>(
+    () => ({
+      onDelivered: (listener) => ledger.onDelivered(listener),
+      cancel: (clientId) => ledger.cancel(clientId),
+      isPending: (clientId) => ledger.isPending(clientId),
+    }),
+    [ledger],
+  )
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
