@@ -114,7 +114,7 @@ func (s *Store) AppendShadow(ctx context.Context, roomID string, typ events.Type
 	}
 	s.shadowBytes[roomID] += size
 	run.LastSeq++
-	e := events.Event{RoomID: roomID, Seq: run.LastSeq, Type: typ, Actor: actor, Payload: raw, At: s.now().UTC()}
+	e := events.Event{RoomID: roomID, Seq: run.LastSeq, Type: typ, Actor: actor, Payload: raw, At: s.now().UTC().Truncate(time.Microsecond)}
 	s.shadowEvents[roomID] = append(s.shadowEvents[roomID], e)
 	if typ == events.AgentHypothesis {
 		at := e.At

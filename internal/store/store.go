@@ -512,7 +512,9 @@ func (s *PG) appendEvent(ctx context.Context, roomID string, expectSeq int64, ty
 	l := s.currentLimits()
 	maxEvents, maxBytes := l.bounds(classOf(typ, actor))
 	size := int64(len(payloadJSON))
-	at := s.now().UTC()
+	// timestamptz keeps microseconds: return what is stored, so the first
+	// answer equals a client_id repeat and a read-back.
+	at := s.now().UTC().Truncate(time.Microsecond)
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
