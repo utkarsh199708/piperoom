@@ -117,6 +117,14 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("snowflake: parse dsn: %w", err)
 	}
+	// ParseDSN splits database/schema at the last "/", so a raw "/" in a
+	// parameter value folds the query string before it into the path: those
+	// parameters (protocol=http, authenticator=) are silently dropped and the
+	// rest, secrets included, becomes the database name in receipts (#514).
+	// The message names neither the value nor the DSN.
+	if strings.ContainsAny(cfg.Database, "?&=") || strings.ContainsAny(cfg.Schema, "?&=") {
+		return nil, errors.New("snowflake: dsn database or schema holds query parameters: a parameter value has an unencoded \"/\"; URL-encode every parameter value (\"/\" as %2F); refused")
+	}
 	if cfg.Tracing != "" {
 		return nil, errors.New("snowflake: dsn parameter tracing is not allowed: it raises the driver log level; refused as defence in depth (GO-2026-6665)")
 	}
@@ -308,8 +316,9 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 // trace passes the source Postgres key ("id") for the sink table. A name that
 // equals a declared key column exactly is used as is; otherwise one that
 // matches a single key column ignoring case is mapped to it, so "id" reaches
-// an unquoted ID key. A table without a declared key, or a name that is not
-// its key, keeps the old behaviour (fold to upper case, as for an unquoted
+// an unquoted ID key. A composite key is clients.ErrNotSupported, whatever
+// the name. A table without a declared key, or a name that is not its key,
+// keeps the old behaviour (fold to upper case, as for an unquoted
 // identifier) so lookups that worked before still do.
 func (d *DB) resolveKeyColumn(ctx context.Context, table, pkColumn string) (string, error) {
 	if _, err := validateIdent(pkColumn); err != nil {
@@ -323,6 +332,11 @@ func (d *DB) resolveKeyColumn(ctx context.Context, table, pkColumn string) (stri
 			return strings.ToUpper(pkColumn), nil
 		}
 		return "", err
+	}
+	// No single column of a composite key names one row: a lookup by ID of
+	// PRIMARY KEY (TENANT_ID, ID) reads another tenant's row (#531).
+	if len(keys) > 1 {
+		return "", fmt.Errorf("snowflake: primary key of %s is composite (%d columns): a lookup by %q alone is not one row: %w", table, len(keys), pkColumn, clients.ErrNotSupported)
 	}
 	var folded []string
 	for _, k := range keys {
@@ -341,11 +355,12 @@ func (d *DB) resolveKeyColumn(ctx context.Context, table, pkColumn string) (stri
 
 var _ clients.Warehouse = (*DB)(nil)
 
-// PrimaryKeyColumn returns the first primary key column of table
-// ("schema.table" or "db.schema.table"), spelled exactly as Snowflake stores
-// it: ID for a column created unquoted, id for one created as "id". Row
-// quotes that spelling as is, so the two never get mixed up. A table without
-// a primary key is clients.ErrNotFound. warehouse_row uses it to refuse
+// PrimaryKeyColumn returns the primary key column of table ("schema.table"
+// or "db.schema.table"), spelled exactly as Snowflake stores it: ID for a
+// column created unquoted, id for one created as "id". Row quotes that
+// spelling as is, so the two never get mixed up. A table without a primary
+// key is clients.ErrNotFound; a composite key is clients.ErrNotSupported,
+// since no single column names one row. warehouse_row uses it to refuse
 // lookups by any other column, which would make the tool an existence oracle
 // for personal data. Snowflake does not enforce primary keys, but the
 // declared key is what the pipeline owners maintain.
@@ -353,6 +368,11 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 	keys, err := d.primaryKeys(ctx, table)
 	if err != nil {
 		return "", err
+	}
+	// A lookup by the first column of a composite key reads whichever row
+	// shares it (another tenant's, with its timestamps): refuse it (#531).
+	if len(keys) > 1 {
+		return "", fmt.Errorf("snowflake: primary key of %s is composite (%d columns): a lookup by %q alone is not one row: %w", table, len(keys), keys[0], clients.ErrNotSupported)
 	}
 	return keys[0], nil
 }
