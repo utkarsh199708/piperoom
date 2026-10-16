@@ -68,21 +68,19 @@ const snap: RoomSnapshot = {
   members: [],
 }
 
-// Another member's keyed comment: a server with #459 puts client_id in the payload, so a replay
-// that holds one tells the ledger this server dedupes before its own first answer (#551).
-const keyedComment: Event = {
+const status1: Event = {
   room_id: 'r1',
   seq: 1,
-  type: 'comment.added',
-  actor: { kind: 'human', id: 'priya', name: 'Priya' },
-  payload: { comment_id: 'c1', text: 'looking at the connector', mentions_agent: false, client_id: 'priya-1' },
+  type: 'agent.status',
+  actor: { kind: 'agent', id: 'agent', name: 'Agent' },
+  payload: { state: 'working' },
   at: '2026-10-11T10:00:01Z',
 }
 
 function fakeServer() {
   const server = {
     /** The room log the socket replays. */
-    log: [keyedComment] as Event[],
+    log: [status1] as Event[],
     /** The steer texts the server stored, in order. */
     steers: [] as string[],
     opens: [] as number[],
@@ -177,6 +175,21 @@ async function typeAndSend(text: string) {
   })
 }
 
+/**
+ * One earlier steer by this client, answered with its client_id echoed: the ledger then knows the
+ * server dedupes from a real answer (docs/api.md, Idempotent posts), so a TypeError keeps the next
+ * steer for the reconnect (#551). The warm-up is not counted in `server.steers`.
+ */
+async function warmUp(server: ReturnType<typeof fakeServer>) {
+  const after = server.answerAfter
+  server.answerAfter = 50
+  await typeAndSend('hello')
+  await pass(200)
+  expect(field().value).toBe('')
+  server.answerAfter = after
+  server.steers.length = 0
+}
+
 /** The person presses Send on whatever the field holds, if anything. */
 async function sendWhatIsThere() {
   if (!field().value.trim()) return
@@ -205,6 +218,7 @@ describe('SteerBox across a silent stale_position reload (#550)', () => {
     render(<Room />)
     await pass(200)
     expect(server.opens).toEqual([0])
+    await warmUp(server)
 
     // The socket drops; the steer fails with a TypeError, so it is kept and the Retry strip shows.
     act(() => server.sockets[0].drop())
@@ -232,6 +246,7 @@ describe('SteerBox across a silent stale_position reload (#550)', () => {
     const server = fakeServer()
     const view = render(<Room />)
     await pass(200)
+    await warmUp(server)
     act(() => server.sockets[0].drop())
     server.offline = true
     await typeAndSend('stop the connector')
@@ -258,6 +273,7 @@ describe('SteerBox across a silent stale_position reload (#550)', () => {
     const server = fakeServer()
     render(<Room />)
     await pass(200)
+    await warmUp(server)
     act(() => server.sockets[0].drop())
     server.offline = true
     await typeAndSend('stop the connector')
