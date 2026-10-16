@@ -12,13 +12,20 @@ function event(text: string, clientId?: string, actor = ME): Event {
   return { room_id: 'r1', seq: 1, type: 'steer.sent', actor, payload: { text, client_id: clientId }, at: '' }
 }
 
-function ledger(post: (item: SendItem, id: string) => Promise<Event | undefined>, live = false) {
+// Most rows are about a server known to dedupe (an earlier answer echoed client_id), the only
+// one whose network failures are kept and re-sent; `dedupes` null is a ledger before any answer.
+function ledger(
+  post: (item: SendItem, id: string) => Promise<Event | undefined>,
+  live = false,
+  dedupes: boolean | null = true,
+) {
   let error: string | null = null
   let n = 0
   const setError = vi.fn((next: string | null | ((prev: string | null) => string | null)) => {
     error = typeof next === 'function' ? next(error) : next
   })
   const l = new SendLedger({ post, setError, newId: () => `id${++n}`, isLive: () => live })
+  l.dedupes = dedupes
   return { l, error: () => error, setError }
 }
 
@@ -84,7 +91,7 @@ describe('SendLedger', () => {
 
   it('without a deduping server, an unknown outcome waits out the window, then says "not confirmed"', async () => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
-    const { l, error } = ledger(post)
+    const { l, error } = ledger(post, false, null)
     expect(await l.send(stop, 'k1')).toBe(false)
     expect(error()).toBe(UNCONFIRMED_TEXT)
     l.drain()
@@ -98,7 +105,7 @@ describe('SendLedger', () => {
 
   it('dispose clears its timers', async () => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
-    const { l, error } = ledger(post)
+    const { l, error } = ledger(post, false, null)
     await l.send(stop, 'k1')
     l.dispose()
     vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
@@ -110,7 +117,7 @@ describe('SendLedger', () => {
   it('a send that fails after dispose arms no timer and sets no banner', async () => {
     let fail: (e: unknown) => void = () => {}
     const post = vi.fn(() => new Promise<Event | undefined>((_, reject) => (fail = reject)))
-    const { l, setError } = ledger(post)
+    const { l, setError } = ledger(post, false, null)
     const sent = l.send(stop, 'k1')
     l.dispose()
     setError.mockClear()
@@ -150,6 +157,7 @@ describe('SendLedger', () => {
         isLive: () => live,
         sameSession: () => same,
       })
+      l.dedupes = true // a kept action: only a server known to dedupe keeps one
       return { l, post, end: () => (same = false), error: () => error }
     }
 
@@ -184,7 +192,7 @@ describe('SendLedger', () => {
 
   it('attach after dispose (React StrictMode remounts an effect) works again', async () => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
-    const { l, error } = ledger(post)
+    const { l, error } = ledger(post, false, null)
     l.dispose()
     l.attach()
     await l.send(stop, 'k1')
@@ -196,7 +204,7 @@ describe('SendLedger', () => {
   // Review ADV-2: an unknown action already reported "never confirmed" holds no banner up.
   it('an old unknown action does not bring its banner back after a later success or a reconnect', async () => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
-    const { l, error } = ledger(post)
+    const { l, error } = ledger(post, false, null)
     await l.send(stop, 'k1')
     vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
     expect(error()).toBe(NOT_CONFIRMED_TEXT)
@@ -239,7 +247,7 @@ describe('SendLedger never settles by words', () => {
     ['another client_id', 'other'],
   ])('an own event with the same words and %s leaves an unknown action unsettled', async (_, id) => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
-    const { l, error } = ledger(post)
+    const { l, error } = ledger(post, false, null)
     await l.send(stop, 'k1')
     l.onEvent(event('stop', id), 'arjun')
     expect(error()).toBe(UNCONFIRMED_TEXT)
@@ -376,5 +384,143 @@ describe('a waiter on a cancelled entry', () => {
     land(event('stop', 'k1'))
     expect(await retry).toBe(true)
     expect(post).toHaveBeenCalledTimes(2)
+  })
+})
+
+// #551, #545: a ledger is new on every room visit, so before its first answer it cannot know
+// whether the server dedupes. A TypeError then may mean the request was stored and its answer
+// lost: it is never re-sent automatically, only by a Retry click after the window.
+describe('a TypeError before the first answer (dedupes null)', () => {
+  // A server without #459: it stores every POST and ignores client_id.
+  function oldServer() {
+    const stored: string[] = []
+    let lose = 0
+    const post = vi.fn(async (item: SendItem) => {
+      stored.push(item.text)
+      if (lose > 0) {
+        lose--
+        throw new TypeError('Failed to fetch') // stored, then the connection reset
+      }
+      return event(item.text)
+    })
+    return { post, stored, loseNext: () => (lose = 1) }
+  }
+
+  it('#551: a cold ledger against an old server stores the steer once; Retry is offered, not a re-send', async () => {
+    const server = oldServer()
+    const { l, error } = ledger(server.post, false, null)
+    server.loseNext()
+    expect(await l.send(stop, 'k1')).toBe(false)
+    expect(l.dedupes).toBeNull()
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    expect(l.isPending('k1')).toBe(true) // the Retry strip stays: the action is still owed
+    l.drain()
+    expect(await l.send(stop, 'k1')).toBe(false) // a Retry inside the window posts nothing
+    expect(server.stored).toEqual(['stop'])
+    vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
+    expect(error()).toBe(NOT_CONFIRMED_TEXT)
+    l.drain()
+    expect(server.stored).toEqual(['stop'])
+  })
+
+  it('#551: the live retry does not re-send it either', async () => {
+    const server = oldServer()
+    const { l } = ledger(server.post, true, null)
+    server.loseNext()
+    await l.send(stop, 'k1')
+    vi.advanceTimersByTime(LIVE_RETRY_MS * 3)
+    expect(server.stored).toEqual(['stop'])
+  })
+
+  it('#545: the first keyed post to a new server fails: no automatic re-send; a Retry after the window lands once', async () => {
+    const stored: string[] = []
+    const post = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockImplementation(async (item: SendItem, id: string) => {
+        stored.push(id)
+        return event(item.text, id)
+      })
+    const { l, error } = ledger(post, true, null)
+    expect(await l.send(stop, 'k1')).toBe(false)
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    l.drain()
+    vi.advanceTimersByTime(LIVE_RETRY_MS * 3)
+    expect(post).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
+    expect(await l.send(stop, 'k1')).toBe(true) // the click, same id
+    expect(stored).toEqual(['k1'])
+    expect(l.dedupes).toBe(true)
+    expect(error()).toBeNull()
+  })
+
+  // Review of #559: only this ledger's own answers say whether the server dedupes (docs/api.md,
+  // Idempotent posts). Another member's keyed event in the stream proves nothing about the replica
+  // that answers this client, and a learned false is never overridden.
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('another member\'s keyed event leaves dedupes %s: the TypeError is not re-sent', async (_, before) => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post, true, before)
+    l.onEvent(event('earlier', 'theirs', { kind: 'human', id: 'kabir', name: 'Kabir' }), 'arjun')
+    expect(l.dedupes).toBe(before)
+    await l.send(stop, 'k1')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    l.drain()
+    vi.advanceTimersByTime(LIVE_RETRY_MS * 3)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('an own event with a client_id settles, but does not set dedupes: only an answer does', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, false, null)
+    await l.send(stop, 'k1')
+    l.onEvent(event('stop', 'k1'), 'arjun')
+    expect(l.isPending('k1')).toBe(false)
+    expect(l.dedupes).toBeNull()
+  })
+
+  it('a learned false stays false after a later answer that echoes', async () => {
+    const post = vi
+      .fn()
+      .mockImplementationOnce(async (item: SendItem) => event(item.text)) // no echo
+      .mockImplementationOnce(async (item: SendItem, id: string) => event(item.text, id))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post, false, null)
+    await l.send({ kind: 'steer', text: 'a' })
+    expect(l.dedupes).toBe(false)
+    await l.send({ kind: 'steer', text: 'b' })
+    expect(l.dedupes).toBe(false)
+    await l.send(stop, 'k1')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    l.drain()
+    expect(post).toHaveBeenCalledTimes(3)
+  })
+
+  it('this ledger\'s own echoed answer makes it known to dedupe: a later TypeError is kept and drained', async () => {
+    const post = vi
+      .fn()
+      .mockImplementationOnce(async (item: SendItem, id: string) => event(item.text, id))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post, false, null)
+    await l.send({ kind: 'steer', text: 'hello' })
+    expect(l.dedupes).toBe(true)
+    await l.send(stop, 'k1')
+    expect(error()).toBe(OFFLINE_TEXT)
+    post.mockResolvedValue(undefined)
+    l.drain()
+    expect(post.mock.calls.map((c) => c[1])).toEqual(['id1', 'k1', 'k1'])
+  })
+
+  it('an event without client_id says nothing: still treated as not deduping', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post, false, null)
+    l.onEvent(event('earlier'), 'arjun')
+    expect(l.dedupes).toBeNull()
+    await l.send(stop, 'k1')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    l.drain()
+    expect(post).toHaveBeenCalledTimes(1)
   })
 })

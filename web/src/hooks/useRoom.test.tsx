@@ -509,10 +509,10 @@ describe('the stale note through a real room reload', () => {
     return <ProposalsPanel state={state} user={user} actions={actions} stale={stale} />
   }
 
-  it('the panel is unmounted by the reload, and the note is back when the new hash arrives', async () => {
+  it('the panel stays mounted through the reload (#550), and the note is there when the new hash arrives', async () => {
     const s1 = new FakeWebSocket()
     const s2 = new FakeWebSocket()
-    // The second snapshot is held back, so "Loading room…" can be seen.
+    // The second snapshot is held back, so the screen between the 409 and the new state can be seen.
     let releaseSnapshot: (s: RoomSnapshot) => void = () => undefined
     vi.mocked(api.room)
       .mockResolvedValueOnce(snapshot('r1'))
@@ -535,10 +535,11 @@ describe('the stale note through a real room reload', () => {
 
     fireEvent.click(approveButton)
     fireEvent.click(await screen.findByRole('button', { name: 'Approve and run' })) // completes the set
-    // The reload takes the panel away ...
-    await waitFor(() => expect(screen.getByText('Loading room…')).toBeInTheDocument())
-    expect(screen.queryByRole('region', { name: 'Proposals' })).not.toBeInTheDocument()
-    // ... and brings it back with the server's hash, plus what the person looked at.
+    // The reload of the same room keeps the old state on screen until the new snapshot (#550) ...
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
+    expect(screen.queryByText('Loading room…')).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Proposals' })).toBeInTheDocument()
+    // ... which brings the server's hash, plus what the person looked at.
     await act(async () => releaseSnapshot(snapshot('r1')))
     await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
     act(() => s2.onopen?.())
