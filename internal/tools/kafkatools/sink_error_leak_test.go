@@ -166,6 +166,11 @@ func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 		{"elasticsearch date field then nested reason",
 			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=illegal_argument_exception, reason=failed to parse date field [" + value + "]]; nested: Elasticsearch exception [type=date_time_parse_exception, reason=Text '" + value + "' could not be parsed at index 0]",
 			[]string{"Leakwood"}, []string{"ElasticsearchException", "failed to parse date field"}},
+		// PR #528 review round 2: an earlier, unrelated "text '" must not
+		// open the mask.
+		{"java.time after an unrelated text quote",
+			"ConnectException: Plain text 'mode' unsupported; Text 'Leakwood' could not be parsed at index 0",
+			[]string{"Leakwood"}, []string{"Plain text 'mode' unsupported;", "could not be parsed at index 0"}},
 	})
 }
 
@@ -235,6 +240,12 @@ func TestTraceSinkErrorsKnownGaps(t *testing.T) {
 		{"postgres invalid byte sequence",
 			"Caused by: org.postgresql.util.PSQLException: ERROR: invalid byte sequence for encoding \"UTF8\": 0x4c 0x65",
 			"0x4c 0x65"},
+		// The newline is the mask's only terminator, and condenseTrace keeps a
+		// "Caused by:" line, so a quoted value holding a newline and
+		// "Caused by:" keeps its tail (PR #528 review round 2).
+		{"postgres value with a newline and caused by",
+			"Caused by: org.postgresql.util.PSQLException: ERROR: malformed array literal: \"Alice\nCaused by: Leakwood 42\"",
+			"Leakwood"},
 		{"elasticsearch document id without preview",
 			"Caused by: org.apache.kafka.connect.errors.ConnectException: Bulk request failed: [{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [age] of type [long] in document with id 'Leakwood-42'\"}]",
 			"Leakwood-42"},
