@@ -337,6 +337,18 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "mask", in: "Key (a) = (Jane) Key (b)=(Bob) already exists", gone: "Jane", want: "Key (a) = <redacted> Key (b)=<redacted> already exists"},
 		{kind: "mask", in: "Key (lower(email::text)) = (Jane Doe) already exists.", gone: "Jane", want: "Key (lower(email::text)) = <redacted> already exists."},
 		{kind: "mask", in: "Key (full_name) = (Jane Doe", gone: "Jane", want: "Key (full_name) = <redacted>"},
+		// The new tuples stop at the next detail, also one the cut left
+		// without its "=" or a MySQL "for key" whose name main shows (found
+		// by the differential against main).
+		{kind: "mask", in: "Key (a) = (Zq1) Duplicate entry 'Zq2' for key 'ux_b'", gone: "Zq", want: "Key (a) = <redacted> Duplicate entry <redacted> for key 'ux_b'"},
+		{kind: "mask", in: "Key (a) = (Zq1 x). Key (b, c", gone: "Zq1", want: "Key (a) = <redacted> Key (b, c"},
+		{kind: "mask", in: "Key (a) = (Zq1 x). key (lower(b::text))", gone: "Zq1", want: "Key (a) = <redacted> key (lower(b::text))"},
+		{kind: "mask", in: "Key (a) = (Zq1' for key 'Zq2) is duplicated. Duplicate entry 'Zq3' for key 'ux_k'", gone: "Zq1", want: "Key (a) = <redacted> for key <redacted> for key 'ux_k'"},
+		{kind: "mask", in: "The duplicate key value is (Zq1). Key (b) = (Zq2) already exists", gone: "Zq", want: "The duplicate key value is <redacted>. Key (b) = <redacted> already exists"},
+		{kind: "mask", in: "Duplicate entry 'Zq1'. x (c1, c2", gone: "Zq1", want: "Duplicate entry <redacted>. x (c1, c2"},
+		// A bare "(cols) = (" without "Key" only ends the tuple before it; its
+		// value stays as main shows it ("f(x) = (y)" is prose as often).
+		{kind: "mask", in: "KEY (a)=（Zq1 (Zq2) was rejected (b) = (Zq3). x y)=(Zq4)", gone: "Zq1", want: "KEY (a)=<redacted> (b) = (Zq3). x y)=<redacted>"},
 		{kind: "keep", in: "f(x) = (y) holds"},
 		{kind: "keep", in: "the duplicate key value is unknown"},
 		{kind: "keep", in: "Duplicate entry found for key users.ux_login"},
@@ -492,7 +504,8 @@ func TestRedactMessageCapNeverSplitsAKeyValue(t *testing.T) {
 // word rule, so the class and the path before the cut stay (main replaced it
 // from its token start, down to the whole message). A URL that may carry a
 // credential (userinfo '@', a credential key, "sig=", or an '@' past the
-// look-ahead) is still replaced whole, from its scheme on.
+// look-ahead) is still replaced whole from its token start, as on main: the
+// text glued before its scheme ("url=", "jdbc:") may be a value main masks.
 func TestRedactMessageCutURLKeepsPath(t *testing.T) {
 	glued := "java.lang.IllegalArgumentException:url=http://connect:8083/connectors/pg-orders/" + strings.Repeat("a", 400)
 	subject := "Schema Registry GET https://registry.example.com/subjects/orders.public.items-value/versions/latest?" + strings.Repeat("q=1&", 70) + " failed: 404 topic …"
@@ -500,8 +513,8 @@ func TestRedactMessageCutURLKeepsPath(t *testing.T) {
 		{glued, glued[:MaxMessageRunes]},
 		{subject, strings.TrimSuffix(subject[:MaxMessageRunes], "q")},
 		{strings.Repeat("x", 280) + " GET http://connect:8083/connectors/pg-orders/status failed", strings.Repeat("x", 280) + " GET"},
-		{"jdbc:postgresql://app:Zq9/Wk7x@db.example.com/orders" + strings.Repeat("a", 300), "jdbc:" + Redacted},
-		{"url=postgres://app:Zq9/Wk7x@db.example.com/x" + strings.Repeat("a", 300), "url=" + Redacted},
+		{"jdbc:postgresql://app:Zq9/Wk7x@db.example.com/orders" + strings.Repeat("a", 300), Redacted},
+		{"url=postgres://app:Zq9/Wk7x@db.example.com/x" + strings.Repeat("a", 300), Redacted},
 		{"jane@x.com=postgres://app:Zq9/Wk7x@db.example.com/orders" + strings.Repeat("a", 300), Redacted},
 		{strings.Repeat("x", 250) + " postgres://app:Zq" + strings.Repeat("p", 400) + "@db/x", strings.Repeat("x", 250) + " " + Redacted},
 		{strings.Repeat("x", 250) + " https://acct.blob.core.windows.net/c/b?sv=2024&sig=Zq9AbCdEfGhIjKlMnOpQrStUvWx failed", strings.Repeat("x", 250) + " " + Redacted},

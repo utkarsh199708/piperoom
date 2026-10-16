@@ -118,9 +118,7 @@ func redactOnce(s string) string {
 // "://" alone (no scheme rule: "my_postgres://" and a scheme glued to a long
 // word are URLs too): each runs from the last white space, quote or bracket
 // before the "://" (or the start) to the next white space or quote after it.
-// The start never goes before the scheme past a '=' or a ':' not followed by
-// '/' ("url=http://", "jdbc:postgresql://") unless the text it would skip
-// holds an '@'. #539: only a URL that may carry a credential is a span: one
+// #539: only a URL that may carry a credential is a span: one
 // with an '@' after its "://" (userinfo; internal/redact allows '/', '?', '#'
 // and ':' in the password, so no split inside it is safe), a credential key
 // or "sig=" in it, or one that runs to the end of s when open says s was cut
@@ -135,14 +133,6 @@ func urlTokenSpans(s string, open bool) [][]int {
 		}
 		k += off
 		start := strings.LastIndexAny(s[:k], urlTokenStops+"([{<") + 1
-		for m := k - 1; m >= start; m-- {
-			if s[m] == '=' || s[m] == ':' && s[m+1] != '/' {
-				if !strings.Contains(s[start:m+1], "@") {
-					start = m + 1
-				}
-				break
-			}
-		}
 		end := len(s)
 		if e := strings.IndexAny(s[k:], urlTokenStops); e >= 0 {
 			end = k + e
