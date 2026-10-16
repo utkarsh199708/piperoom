@@ -225,7 +225,7 @@ func TestTraceNewestTieIsUnknown(t *testing.T) {
 		testOwners(),
 		&fakeConnect{
 			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}},
-			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{
 			findByKey: map[string][]clients.RecordRef{"pg.public.orders": {

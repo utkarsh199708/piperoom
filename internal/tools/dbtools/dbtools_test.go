@@ -116,8 +116,8 @@ func (f *fakeBuilder) LayerOwner(string, string) (string, bool) { return "", fal
 func testOwners() *owners.Owners {
 	return &owners.Owners{
 		Pipelines: []owners.Pipeline{
-			{ID: "orders", SourceTables: []string{"public.orders"}, SinkTables: []string{"analytics.orders"}, Connectors: []string{"pg-orders-connector"}},
-			{ID: "payments", SourceTables: []string{"public.payments"}, SinkTables: []string{"analytics.payments"}, Connectors: []string{"pg-payments-connector"}},
+			{ID: "orders", SourceTables: []string{"public.orders"}, SinkTables: []string{"analytics.orders"}, SinkTSColumn: "updated_at", Connectors: []string{"pg-orders-connector"}},
+			{ID: "payments", SourceTables: []string{"public.payments"}, SinkTables: []string{"analytics.payments"}, SinkTSColumn: "updated_at", Connectors: []string{"pg-payments-connector"}},
 		},
 	}
 }

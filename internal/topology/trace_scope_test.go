@@ -67,7 +67,7 @@ func TestTraceConnectUpStaysInScope(t *testing.T) {
 		testOwners(),
 		&fakeConnect{
 			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "schema.include.list": "public"}},
-			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{},
 		&fakeSource{rows: map[string]map[string]any{

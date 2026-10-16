@@ -62,7 +62,7 @@ alert:
   pipeline_map: |
     pipeline billing
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.invoices [postgres, owner nadia] UNKNOWN slot=unknown
+    1 pg:public.invoices [postgres, owner nadia] WARN slot_active=true slot_retained=2.4 GiB wal_status=extended
     2 connect:pg-billing-connector [kafka-connect, owner tomas] UNKNOWN error=unreachable
       from: pg:public.invoices (unconfirmed)
     3 topic:public.invoices [kafka, owner tomas] UNKNOWN error=unreachable
@@ -78,7 +78,7 @@ recordings:
     summary: |
       pipeline billing
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.invoices [postgres, owner nadia] UNKNOWN slot=unknown
+      1 pg:public.invoices [postgres, owner nadia] WARN slot_active=true slot_retained=2.4 GiB wal_status=extended
       2 connect:pg-billing-connector [kafka-connect, owner tomas] UNKNOWN error=unreachable
         from: pg:public.invoices (unconfirmed)
       3 topic:public.invoices [kafka, owner tomas] UNKNOWN error=unreachable
@@ -103,8 +103,10 @@ recordings:
           to: wh:analytics.invoices
       nodes:
         - facts:
-            slot: unknown
-          health: unknown
+            slot_active: "true"
+            slot_retained: 2.4 GiB
+            wal_status: extended
+          health: warn
           id: pg:public.invoices
           kind: source_table
           layer: postgres
