@@ -956,6 +956,21 @@ var slowLines510 = map[string]func(n int) string{
 	"cut-open-tags":     func(n int) string { return strings.Repeat("<password>\n", n/11+1000) },
 	"cut-attr-tags":     func(n int) string { return strings.Repeat("<entry key=\"a.password\">\n", n/25+1000) },
 	"cut-end-tags":      func(n int) string { return strings.Repeat("<password></password>", n/21+1000) },
+	// #511: shell words that never close or glue many runs, and many
+	// masks for project to place.
+	"shell-ansi-open":    func(n int) string { return strings.Repeat("--password $'", n/13) },
+	"shell-blanks":       func(n int) string { return "--password " + strings.Repeat(`a\ `, n/3) },
+	"shell-glued":        func(n int) string { return "--password " + strings.Repeat(`'a'"b"`, n/6) },
+	"shell-flags-glued":  func(n int) string { return strings.Repeat(`--password 'a''b' `, n/18) },
+	"shell-typographic":  func(n int) string { return strings.Repeat("--password “", n/14) },
+	"shell-set-lines":    func(n int) string { return strings.Repeat("set PGPASSWORD=Zx9 hunter2Qw7\n", n/30) },
+	"shell-many-masks":   func(n int) string { return strings.Repeat("password=Zx9hunter2Qw7 --password $'a b' ", n/41) },
+	"shell-masks-repeat": func(n int) string { return strings.Repeat("password=Zx9hunter2Qw7 x ", n/25) + "--password $'a b'" },
+	// #534: braces that never close, escapes, and many short values.
+	"braced-open":    func(n int) string { return strings.Repeat("password={", n/10) },
+	"braced-escapes": func(n int) string { return "pwd={" + strings.Repeat("}}", n/2) },
+	"braced-many":    func(n int) string { return strings.Repeat("Pwd={a;b};", n/10) },
+	"braced-url":     func(n int) string { return strings.Repeat("jdbc:sqlserver://db:1433;password={B@c;d};", n/43) },
 }
 
 // TestReview510LinearTime: every hostile 64 KiB line runs in under 50 ms.
