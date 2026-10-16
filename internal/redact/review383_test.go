@@ -874,18 +874,43 @@ var review510Cut = []string{
 	// line, the value on the next lines.
 	"config: <password>\n  Zx9hunter2Qw7Pa55\n</password>",
 	"db: <password><![CDATA[\nZx9hunter2Qw7Pa55\n]]></password>",
+	// Round 3: the value starts on the tag's line, the end tag is on a later
+	// line, and text comes before the tag.
+	"config: <password>Zx9hunter2Qw7Pa55\n</password>",
+	"config: <password> Zx9hunter2Qw7Pa55\n</password>",
+	"x <entry key=\"jdbc.password\">Zx9hunter2Qw7Pa55\n</entry>",
+	"config: <entry key=\"jdbc.password\">Zx9hunter2Qw7Pa55\n</entry>",
+	"x <password>Zx9 hunter2Qw7Pa55 more\n</password>",
+	"x <add key=\"DbPassword\">Zx9hunter2Qw7Pa55\n</add>",
+	"x <password>Zx9hunter2Qw7Pa55\n  \n</password>",
+}
+
+// review510CutSpans are straddle shapes whose text spans lines. Element
+// text over several lines is prose to the #383 rule (a gap main has too),
+// so they leak when the whole element lies in the head; across the cut,
+// the overflow mask must hide them.
+var review510CutSpans = []string{
+	"config: <password>Zx9hunter2Qw7Pa55\n  more\n</password>",
+	"config: <password>  # db\n  Zx9hunter2Qw7Pa55\n</password>",
 }
 
 // TestReview510ScanCut: no part of an element's secret passes in the head
 // when the element straddles the scan limit, at every offset around it.
 func TestReview510ScanCut(t *testing.T) {
 	line := "evidence lsn 0/16B3748 topic orders.public.orders\n"
-	for _, el := range review510Cut {
+	spans := map[string]bool{}
+	for _, el := range review510CutSpans {
+		spans[el] = true
+	}
+	for _, el := range append(append([]string{}, review510Cut...), review510CutSpans...) {
 		for d := 1; d <= len(el)+8; d++ {
 			fill := strings.Repeat(line, (MaxScan-d-1)/len(line))
 			fill += strings.Repeat("x", MaxScan-d-len(fill)-1) + "\n"
 			in := fill + el + "\nafter\n"
 			got, _ := Text(in)
+			if spans[el] && (len(in) <= MaxScan || scanCut(in) >= len(fill)+len(el)) {
+				continue // whole element in the head: the spans-lines gap
+			}
 			for _, sec := range []string{"hunter2Qw7", "debezium"} {
 				if strings.Contains(got[len(fill)-1:], sec) {
 					t.Errorf("offset %d: %q leaks %q: tail %q", d, el, sec, got[len(fill)-1:])
@@ -1161,4 +1186,39 @@ func TestReview547Round2(t *testing.T) {
 		{"<column name=\"password\">debezium</column>", "<column name=\"password\">[redacted 8]</column>"},
 		{"<password> secret </password>", "<password> [redacted 8] </password>"},
 	})
+}
+
+// TestReview547Round3 holds the rows of the round-3 review of #547: text of
+// a schema element named by name= is kept only when the whole value is a
+// column type, and an XML comment inside a secret element is a gap.
+func TestReview547Round3(t *testing.T) {
+	checkSecretRows(t, []secretRow{
+		{"text then secret", "<column name=\"password\">text Zx9hunter2Qw7Pa55</column>", []string{"hunter2Qw7"}},
+		{"date then secret", "<field name=\"password\">\n  date 2019 Zx9hunter2Qw7Pa55\n</field>", []string{"hunter2Qw7"}},
+		{"error-like token", "<column name=\"password\">Hunter2Error</column>", []string{"Hunter2Error"}},
+		{"lone type word", "<column name=\"password\">real</column>", []string{">real<"}},
+		{"type then digits", "<column name=\"password\">Long 8812</column>", []string{"Long 8812"}},
+		{"Text then secret", "<column name=\"password\">Text hunter2Qw7</column>", []string{"hunter2Qw7"}},
+		{"text me", "<field name=\"password\">text me</field>", []string{"text me"}},
+		{"real deal", "<column name=\"password\">real deal 99</column>", []string{"real deal 99"}},
+	})
+	checkKeep(t, []string{
+		"<column name=\"password\">\n  VARCHAR\n</column>",
+		"<column name=\"password\">TEXT</column>",
+		"<field name=\"password\">varchar(255) NOT NULL</field>",
+		"<column name=\"secret\">VARCHAR(64) NOT NULL DEFAULT ''</column>",
+		"<field name=\"secret\">\n  SerializationException\n</field>",
+		"<field name=\"token\">org.apache.kafka.common.errors.SerializationException</field>",
+		`<attribute name="token" type="string"/>`,
+	})
+	rows := []struct{ gap, in, now string }{
+		{"an XML comment inside a secret element hides its text from the rules (main too; #561)",
+			"<password> <!-- c -->\n  Zx9hunter2Qw7Pa55\n</password>",
+			"<password> <!-- c -->\n  Zx9hunter2Qw7Pa55\n</password>"},
+	}
+	for _, r := range rows {
+		if got, _ := Text(r.in); got != r.now {
+			t.Errorf("gap %q moved: Text(%q)\n got  %q\n pinned %q", r.gap, r.in, got, r.now)
+		}
+	}
 }
