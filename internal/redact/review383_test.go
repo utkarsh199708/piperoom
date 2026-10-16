@@ -870,6 +870,10 @@ var review510Cut = []string{
 	"<secret>\n<value>Zx9hunter2Qw7Pa55</value>\n</secret>",
 	"<entry key=\"jdbc.password\">\n  Zx9hunter2Qw7Pa55\n</entry>",
 	"<password>\n  debezium\n</password>",
+	// Round 2 of the #547 review: a start tag with text before it on its
+	// line, the value on the next lines.
+	"config: <password>\n  Zx9hunter2Qw7Pa55\n</password>",
+	"db: <password><![CDATA[\nZx9hunter2Qw7Pa55\n]]></password>",
 }
 
 // TestReview510ScanCut: no part of an element's secret passes in the head
@@ -1092,8 +1096,10 @@ var review547Exact = []struct{ in, want string }{
 	// Nit 6: elements other than schema ones take a name= secret, so a
 	// constant in a param is masked too: <param name="password"> is a real
 	// config shape.
+	// (pin: 0a4b8f8 already does this)
 	{"<param name=\"token\">\n  TOPIC_ORDERS\n</param>", "<param name=\"token\">\n  [redacted 16]\n</param>"},
 	// Nit 7: cmd's set takes the whole rest of the line, so the mask does.
+	// (pin: 0a4b8f8 already does this)
 	{"set API_TOKEN=see the vault entry for orders.public.orders, then SerializationException",
 		"set API_TOKEN=[redacted 128]"},
 }
@@ -1125,4 +1131,34 @@ func TestReview547CutProse(t *testing.T) {
 	if got := scanCut(in); got < len(fill)+len(tail) {
 		t.Errorf("cut moved to %d, before the prose line ends at %d", got, len(fill)+len(tail))
 	}
+}
+
+// TestReview547Round2 holds the rows of the round-2 review of #547: a
+// secret named by name= on a schema element still has its value= (or a
+// password-like text) masked, and a lone secret word is a value.
+func TestReview547Round2(t *testing.T) {
+	checkSecretRows(t, []secretRow{
+		{"liquibase seed", "<insert tableName=\"users\">\n  <column name=\"username\" value=\"admin\"/>\n  <column name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>\n</insert>", []string{"hunter2Qw7"}},
+		{"column db_password value", "<column name=\"db_password\" value=\"debezium\"/>", []string{"debezium"}},
+		{"field value", "<field name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>", []string{"hunter2Qw7"}},
+		{"attribute value", "<attribute name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>", []string{"hunter2Qw7"}},
+		{"column text", "<column name=\"password\">debezium</column>", []string{"debezium"}},
+		// Nit 3: password and secret are real default passwords.
+		{"own line lone password", "<password>\n  password\n</password>", []string{"\n  password\n"}},
+		{"padded lone secret", "<password> secret </password>", []string{"> secret <"}},
+	})
+	checkKeep(t, []string{
+		"<column name=\"password\">\n  VARCHAR\n</column>",
+		"<field name=\"secret\">\n  SerializationException\n</field>",
+		"<field name=\"password\">varchar(255) NOT NULL</field>",
+		`<attribute name="token" type="string"/>`,
+		"<column name=\"username\" value=\"admin\"/>",
+		"<password> <password> </password>",
+		"<password> YOUR_PASSWORD </password>",
+	})
+	checkExact(t, []struct{ in, want string }{
+		{"<column name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>", "<column name=\"password\" value=\"[redacted 24]\"/>"},
+		{"<column name=\"password\">debezium</column>", "<column name=\"password\">[redacted 8]</column>"},
+		{"<password> secret </password>", "<password> [redacted 8] </password>"},
+	})
 }
