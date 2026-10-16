@@ -62,7 +62,7 @@ import { useRoomShortcuts } from './room/useRoomShortcuts'
 export function RoomScreen() {
   const { roomId = '' } = useParams()
   const [searchParams] = useSearchParams()
-  const { user } = useCurrentUser()
+  const { user, sessionEpoch } = useCurrentUser()
   const handleRef = useRef<DecisionHandle | null>(null)
   // Below 1280px the rail becomes tabs; the chosen one is remembered per room for this visit.
   const wide = useMediaQuery('(min-width: 1280px)')
@@ -111,13 +111,28 @@ export function RoomScreen() {
   // A reload of this room (stale_position, 409 params_mismatch, Reload) passes through a null
   // state until the new snapshot arrives. Keep drawing the last state of the same room for the
   // same user meanwhile, so the composer and open dialogs stay mounted and keep what they hold
-  // (#550). Another room, another user, or a failed load still shows the skeleton or the error.
-  const heldRef = useRef<{ roomId: string; userId: string; state: NonNullable<typeof liveState> } | null>(null)
-  if (liveState) heldRef.current = { roomId, userId: user.id, state: liveState }
+  // (#550). Another room, another user or session, or a failed load still shows the skeleton or
+  // the error.
+  //
+  // The held state belongs to the session that loaded it. On a user or session change, useRoom
+  // still returns the old session's state for a render (its reset runs in an effect), so nothing
+  // is held from then until the hook has gone through null once: the next state is the new
+  // session's own (#536).
+  const session = `${user.id}|${sessionEpoch}`
+  const heldRef = useRef<{ roomId: string; session: string; state: NonNullable<typeof liveState> } | null>(null)
+  const sessionRef = useRef(session)
+  const switchingRef = useRef(false)
+  if (sessionRef.current !== session) {
+    sessionRef.current = session
+    heldRef.current = null
+    switchingRef.current = true
+  }
+  if (!liveState) switchingRef.current = false
+  else if (!switchingRef.current) heldRef.current = { roomId, session, state: liveState }
   const held = heldRef.current
   const state =
     liveState ??
-    (held && held.roomId === roomId && held.userId === user.id && conn !== 'error' && conn !== 'not_found'
+    (held && held.roomId === roomId && held.session === session && conn !== 'error' && conn !== 'not_found'
       ? held.state
       : null)
   // R10: the first replay is done once the log has been folded up to the snapshot's last_seq.

@@ -10,7 +10,7 @@ import { emptyRoomState } from '../state/types'
 // SteerBox is not unmounted and keeps its field and Retry strip.
 
 vi.mock('../context/user', () => ({
-  useCurrentUser: () => ({ user: currentUser, setUserId: vi.fn(), logout: vi.fn(), sessionEpoch: 0 }),
+  useCurrentUser: () => ({ user: currentUser, setUserId: vi.fn(), logout: vi.fn(), sessionEpoch: currentEpoch }),
 }))
 vi.mock('../hooks/useRoom', () => ({ useRoom: vi.fn() }))
 vi.mock('../hooks/useTopology', () => ({ useTopology: vi.fn() }))
@@ -20,6 +20,7 @@ import { useTopology } from '../hooks/useTopology'
 import { RoomScreen } from './RoomScreen'
 
 let currentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka'] }
+let currentEpoch = 0
 
 const actions: RoomActions = {
   comment: vi.fn(),
@@ -68,6 +69,7 @@ function screenAt(path: string) {
 beforeEach(() => {
   vi.resetAllMocks()
   currentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka'] }
+  currentEpoch = 0
   vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
 })
 
@@ -99,7 +101,37 @@ describe('RoomScreen across a reload of the same room (#550)', () => {
     expect(screen.getByText(/boom/)).toBeInTheDocument()
   })
 
-  it('another user does not see the previous user\'s room state while theirs loads', () => {
+  // #536: on a user switch, useRoom still returns the old user's state for one render (its reset
+  // runs in an effect), then null until the new user's snapshot arrives.
+  it("after a user switch, the previous user's room state is not held while the new one loads", () => {
+    hookReturns(room('r1'))
+    const view = render(screenAt('/rooms/r1'))
+    currentUser = { id: 'priya', name: 'Priya', layers: ['kafka'] }
+    view.rerender(screenAt('/rooms/r1')) // the hook has not reset yet: arjun's state, priya's render
+    hookReturns(null, 'connecting')
+    view.rerender(screenAt('/rooms/r1'))
+    expect(screen.queryByText('Room r1')).toBeNull()
+    expect(screen.queryByLabelText('Steer the agent')).toBeNull()
+    // Priya's own snapshot is held across her next reload as usual.
+    hookReturns(room('r1'))
+    view.rerender(screenAt('/rooms/r1'))
+    hookReturns(null, 'connecting')
+    view.rerender(screenAt('/rooms/r1'))
+    expect(screen.getByLabelText('Steer the agent')).toBeInTheDocument()
+  })
+
+  it('the same user in a new session does not see the old session\'s room state while it loads', () => {
+    hookReturns(room('r1'))
+    const view = render(screenAt('/rooms/r1'))
+    currentEpoch = 1
+    view.rerender(screenAt('/rooms/r1'))
+    hookReturns(null, 'connecting')
+    view.rerender(screenAt('/rooms/r1'))
+    expect(screen.queryByText('Room r1')).toBeNull()
+    expect(screen.queryByLabelText('Steer the agent')).toBeNull()
+  })
+
+  it('another user does not see the previous user\'s room state when the hook resets at once', () => {
     hookReturns(room('r1'))
     const view = render(screenAt('/rooms/r1'))
     currentUser = { id: 'priya', name: 'Priya', layers: ['kafka'] }

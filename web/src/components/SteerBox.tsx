@@ -225,7 +225,7 @@ export function SteerBox({
   // A reload of the room remounts this box (#550): take over the action the previous one left
   // in the ledger, or start empty if that action landed while no box was mounted.
   const [takeOver] = useState(() =>
-    takeOverSteerAction(state.id, actions.sends, readStore('local', draftKey(state.id))),
+    takeOverSteerAction(state.id, user.id, actions.sends, readStore('local', draftKey(state.id))),
   )
   const [text, setText] = useState(() => (takeOver.clearDraft ? '' : readStore('local', draftKey(state.id))))
   const [sending, setSending] = useState(takeOver.owed?.phase === 'sending')
@@ -312,6 +312,12 @@ export function SteerBox({
     actions.sends?.cancel(ad.clientId)
     updateSteerAction(roomId, ad.clientId, null)
   }
+  // An edit gives up on the composer's action, adopted or its own: its record goes too, so no box
+  // takes it over and its delivery watcher stops (a cancelled id never lands).
+  const dropRecord = () => {
+    const a = readSteerAction(roomId)
+    if (a && a.userId === user.id && a.phase !== 'delivered') writeSteerAction(roomId, null)
+  }
   // The action's id belongs to its ledger entry until it lands, is refused or is cancelled; an edit
   // cancels it, so a kept copy is never sent after the corrected words (#535). When it lands after
   // all (the reconnect copy, or its event), the Retry strip goes and the field clears if it still
@@ -333,13 +339,15 @@ export function SteerBox({
     if (seenPrefill > 0) {
       retryId.drop()
       dropAdopted()
+      dropRecord()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- dropAdopted reads refs only
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dropAdopted and dropRecord read refs and storage only
   }, [seenPrefill, retryId])
   const edit = (next: string) => {
     setText(next)
     retryId.drop()
     dropAdopted()
+    dropRecord()
   }
   // Debounced so typing is not a storage write per key; a send clears it at once (see send).
   useEffect(() => {
@@ -399,7 +407,7 @@ export function SteerBox({
     if (!retryAdopted) dropAdopted()
     const clientId = retryAdopted ? ad.clientId : retryId.next(retry)
     sentRef.current = { kind: plan.send, text: plan.text, typed: text }
-    const action = { clientId, kind: plan.send, text: plan.text, typed: text }
+    const action = { clientId, userId: user.id, kind: plan.send, text: plan.text, typed: text }
     // Recorded for a box that a reload mounts while this send is out (#550).
     writeSteerAction(roomId, { ...action, phase: 'sending' })
     watchSteerDelivery(roomId, clientId, actions.sends)

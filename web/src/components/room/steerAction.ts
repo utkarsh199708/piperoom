@@ -11,6 +11,8 @@ import type { SendControls } from '../../hooks/useRoom'
 /** What the composer sent, and how far it got. */
 export interface SteerAction {
   clientId: string
+  /** Who sent it: another user's record is never taken over, even in the same tab (#536). */
+  userId: string
   kind: 'steer' | 'comment'
   /** The words as sent (after the composer's prefix handling). */
   text: string
@@ -31,6 +33,7 @@ function isAction(v: unknown): v is SteerAction {
     !!a &&
     typeof a.clientId === 'string' &&
     a.clientId !== '' &&
+    typeof a.userId === 'string' &&
     (a.kind === 'steer' || a.kind === 'comment') &&
     typeof a.text === 'string' &&
     typeof a.typed === 'string' &&
@@ -111,15 +114,18 @@ export function watchSteerDelivery(roomId: string, clientId: string, sends: Send
  * What a SteerBox mounting in `roomId` takes over from the record: the action still owed (on the
  * wire or kept), or, for one that landed while no SteerBox heard, whether the restored draft is
  * still its words (then the field starts empty). A record for an action the ledger no longer owes
- * (refused, cancelled, or another ledger after a page load) is not taken over.
+ * (refused, cancelled, or another ledger after a page load) is not taken over, and neither is
+ * one sent by another user: it is dropped without touching the field.
  */
 export function takeOverSteerAction(
   roomId: string,
+  userId: string,
   sends: SendControls | undefined,
   draft: string,
 ): { owed: SteerAction | null; clearDraft: boolean; drop: boolean } {
   const a = readSteerAction(roomId)
   if (!a) return { owed: null, clearDraft: false, drop: false }
+  if (a.userId !== userId) return { owed: null, clearDraft: false, drop: true }
   if (a.phase === 'delivered') return { owed: null, clearDraft: draft === a.typed, drop: true }
   if (sends?.isPending(a.clientId)) return { owed: a, clearDraft: false, drop: false }
   return { owed: null, clearDraft: false, drop: true }
