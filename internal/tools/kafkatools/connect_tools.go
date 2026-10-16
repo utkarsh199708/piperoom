@@ -443,7 +443,8 @@ var sinkOpeners = []struct {
 const parseMarker = "' could not be parsed"
 
 // maskSinkValues masks each sinkOpeners value with dlq.Redacted, from the
-// value's start to the end of its line. A value may hold any end marker a
+// value's start to the end of its line (a java.time value: to the line's last
+// parseMarker). A value may hold any end marker a
 // rule could stop at (a quote, "  Hint: ", "] with format [", parseMarker),
 // so stopping early can leak its tail; the category words come before the
 // value, so masking the rest of the line over-masks only what follows it.
@@ -457,10 +458,18 @@ func maskSinkValues(s string) string {
 	if len(spans) == 0 {
 		return s
 	}
+	// nextText[k] is the index of the first "text '" span after spans[k], or -1.
+	nextText := make([]int, len(spans))
+	for k, nt := len(spans)-1, -1; k >= 0; k-- {
+		nextText[k] = nt
+		if strings.HasPrefix(low[spans[k][0]:], "text '") {
+			nt = k
+		}
+	}
 	var b strings.Builder
 	last := 0     // s[:last] is written to b
 	parseAt := -1 // the first parseMarker at or after the last search, or len(low) for none
-	for _, m := range spans {
+	for k, m := range spans {
 		if m[0] < last {
 			continue
 		}
@@ -479,6 +488,15 @@ func maskSinkValues(s string) string {
 			if parseAt >= end {
 				continue
 			}
+			// Only the last "Text '" before the marker opens the value: an
+			// earlier one ("Plain text 'mode' unsupported") is other text.
+			if nt := nextText[k]; nt >= 0 && spans[nt][0] < parseAt {
+				continue
+			}
+			// The value runs to the line's last marker, so a value holding
+			// the marker is still masked; java.time's own words after the
+			// last marker ("at index 0") stay.
+			end = start + strings.LastIndex(low[start:end], parseMarker)
 		}
 		if end <= start {
 			continue

@@ -215,6 +215,7 @@ func TestTraceSinkValueMaskHostile(t *testing.T) {
 		{"Text 'x' could not be parsed ", false},
 		{"malformed array literal: \"x\"  Hint: ", false},
 		{"\"Text 'x\", ", false},
+		{"plain text 'a' Text '", false},
 	} {
 		line := "Caused by: x: " + strings.Repeat(tt.unit, (64<<10)/len(tt.unit)) + "Leak"
 		start := time.Now()
