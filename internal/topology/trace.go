@@ -359,22 +359,16 @@ func (b *builder) checkSinkKey(ctx context.Context, sink, pk string) error {
 	case errors.Is(err, clients.ErrNotSupported):
 		return fmt.Errorf("%w: composite primary key", errSinkKey)
 	case err != nil:
-		return fmt.Errorf("%w: sink key unknown: %s", errSinkKey, shortErr(err))
+		// Driver errors can carry host, user or SQL: the trace shows a fixed
+		// phrase and the raw error goes to the debug log only.
+		b.log.DebugContext(ctx, "topology: sink key lookup failed", "sink", sink, "err", err)
+		return fmt.Errorf("%w: sink key lookup failed", errSinkKey)
 	case col == "":
 		return fmt.Errorf("%w: sink key unknown: empty key column", errSinkKey)
 	case !strings.EqualFold(col, pk):
 		return fmt.Errorf("%w: sink key %q, source key %q", errSinkKey, col, pk)
 	}
 	return nil
-}
-
-// shortErr is err's text cut to a short, single-line reason.
-func shortErr(err error) string {
-	msg := strings.Join(strings.Fields(err.Error()), " ")
-	if len(msg) > 120 {
-		msg = msg[:120] + "..."
-	}
-	return msg
 }
 
 func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {

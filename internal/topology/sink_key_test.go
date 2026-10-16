@@ -92,6 +92,7 @@ func TestTraceSinkKeyLookupFailsClosed(t *testing.T) {
 		{"permission denied", "", fmt.Errorf("warehouse: permission denied for table orders")},
 		{"table missing", "", fmt.Errorf("warehouse: %w", clients.ErrNotFound)},
 		{"empty column", "", nil},
+		{"error with connection details", "", fmt.Errorf("dial tcp host=db.internal user=svc: connection refused")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,11 +102,18 @@ func TestTraceSinkKeyLookupFailsClosed(t *testing.T) {
 				err:           tc.err,
 			}
 			status, facts := traceWithSink(t, wh)
-			if status != "unknown" || !strings.Contains(facts["error"], "sink key unknown") {
-				t.Fatalf("warehouse = %s %v, want unknown with 'sink key unknown'", status, facts)
+			if status != "unknown" || !(strings.Contains(facts["error"], "sink key lookup failed") || strings.Contains(facts["error"], "sink key unknown")) {
+				t.Fatalf("warehouse = %s %v, want unknown with a fixed sink-key reason", status, facts)
 			}
 			if wh.rowCalls != 0 {
 				t.Fatalf("read %d sink row(s) with an unknown sink key", wh.rowCalls)
+			}
+			if tc.err != nil {
+				for _, secret := range []string{"db.internal", "svc", tc.err.Error()} {
+					if strings.Contains(fmt.Sprint(facts), secret) {
+						t.Fatalf("trace facts leak %q: %v", secret, facts)
+					}
+				}
 			}
 		})
 	}
