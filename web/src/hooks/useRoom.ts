@@ -190,6 +190,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   // before it refuses the position.
   const staleRoomRef = useRef<string | null>(null)
   const stateRef = useRef<RoomState | null>(null)
+  // The room and session whose state is on screen: a reload of that same room keeps it (#550).
+  const shownRef = useRef<{ roomId: string; session: string } | null>(null)
   const localIdRef = useRef(0)
   // Steers and comments not settled yet, keyed by client_id. Each entry keeps the room it was
   // typed in (roomIdRef when it was created) and posts only there; a reconnect drains only the
@@ -251,7 +253,13 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     let reconnectTimer: number | undefined
     let replayTimer: number | undefined
 
-    dispatch({ type: 'reset' })
+    const shown = `${user.id}|${sessionEpoch}`
+    const sameRoom = shownRef.current?.roomId === roomId && shownRef.current.session === shown
+    shownRef.current = { roomId, session: shown }
+    // A reload of the room on screen (stale_position, 409 params_mismatch, Reload) keeps the old
+    // state until the new snapshot's init replaces it, so nothing on screen unmounts (#550).
+    // Another room or another session starts empty.
+    if (!sameRoom) dispatch({ type: 'reset' })
     lastSeqRef.current = 0
     setError(null)
     setPresence([])
@@ -385,6 +393,10 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       ws = sock
       firstConnect = false
       let opened = false
+      // This socket sent a stale_position frame: its close takes the stale path even when the
+      // reason is lost (a 1006, or a proxy that drops it), or it would reconnect with the same
+      // stale seq forever (#550).
+      let staleFrame = false
       sock.onopen = () => {
         if (cancelled) return
         opened = true
@@ -420,6 +432,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             msg.error.message,
           )
           if (problem) reportAuthProblem({ ...problem, epoch: sessionEpoch })
+          if (msg.error.code === 'stale_position') staleFrame = true
           // The first stale_position is handled silently by a reload (see onclose).
           if (msg.error.code === 'stale_position' && staleRoomRef.current !== roomId) return
           setError(friendlyError(msg.error.code, msg.error.message))
@@ -435,7 +448,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setConn('error')
           return
         }
-        if (ev?.reason === 'stale_position') {
+        if (ev?.reason === 'stale_position' || staleFrame) {
           if (staleRoomRef.current === roomId) {
             // A second one in a row: after=0 cannot cause it, so it is a client bug. The error
             // frame is on screen; retrying would only repeat it.

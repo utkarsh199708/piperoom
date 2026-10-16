@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import type { RoomSnapshot } from '../api/types'
+import type { Event, RoomSnapshot } from '../api/types'
 
 vi.mock('sonner', () => ({ toast: Object.assign(vi.fn(), { warning: vi.fn(), dismiss: vi.fn() }) }))
 vi.mock('../context/user', () => ({
@@ -56,12 +56,31 @@ const snap: RoomSnapshot = {
   members: [],
 }
 
+// Only a server known to dedupe keeps a failed send for the reconnect (#545, #551): the room's
+// log shows one, a keyed post of another member, before the first send.
+const KEYED: Event = {
+  room_id: 'r1',
+  seq: 1,
+  type: 'comment.added',
+  actor: { kind: 'human', id: 'kabir', name: 'Kabir' },
+  payload: { comment_id: 'c0', text: 'earlier', mentions_agent: false, client_id: 'theirs' },
+  at: '2026-10-11T10:00:01Z',
+}
+
+async function knownToDedupe(socket: FakeWebSocket) {
+  await act(async () => {
+    socket.onmessage?.({ data: JSON.stringify({ type: 'event', event: KEYED }) })
+    await Promise.resolve()
+  })
+}
+
 async function openRoom() {
   const socket = new FakeWebSocket()
   vi.mocked(api.room).mockResolvedValue(snap)
   vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
   const hook = renderHook(() => useRoom('r1'))
   await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+  await knownToDedupe(socket)
   return { hook, socket }
 }
 

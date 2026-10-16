@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { StrictMode } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import type { RoomSnapshot } from '../api/types'
+import type { Event, RoomSnapshot } from '../api/types'
 
 // #536: the send ledger belongs to one user's session. A dev "Switch user" changes user.id and
 // the session epoch without remounting the room, and a kept steer of the previous user must never
@@ -67,6 +67,24 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
+// Only a server known to dedupe keeps a failed send for the reconnect (#545, #551): the room's
+// log shows one, a keyed post of another member, before the first send.
+const KEYED: Event = {
+  room_id: 'r1',
+  seq: 1,
+  type: 'comment.added',
+  actor: { kind: 'human', id: 'kabir', name: 'Kabir' },
+  payload: { comment_id: 'c0', text: 'earlier', mentions_agent: false, client_id: 'theirs' },
+  at: '2026-10-11T10:00:01Z',
+}
+
+async function knownToDedupe(socket: FakeWebSocket) {
+  await act(async () => {
+    socket.onmessage?.({ data: JSON.stringify({ type: 'event', event: KEYED }) })
+    await Promise.resolve()
+  })
+}
+
 async function pass(ms: number) {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(ms)
@@ -97,6 +115,7 @@ describe('a dev user switch (#536)', () => {
     const hook = renderHook(() => useRoom('r1'))
     await waitFor(() => expect(sockets).toHaveLength(1))
     act(() => sockets[0].onopen?.())
+    await knownToDedupe(sockets[0])
     act(() => sockets[0].onclose?.({ reason: '' })) // arjun goes offline
     let ok: boolean | undefined
     act(() => {
@@ -143,6 +162,7 @@ describe('a dev user switch (#536)', () => {
     await waitFor(() => expect(sockets.length).toBeGreaterThan(0))
     const last = () => sockets[sockets.length - 1]
     act(() => last().onopen?.())
+    await knownToDedupe(last())
     act(() => last().onclose?.({ reason: '' }))
     act(() => {
       void hook.result.current.actions.steer('stop', { clientId: 'k1' })

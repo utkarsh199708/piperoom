@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import type { Event, RoomSnapshot } from '../api/types'
+import type { RoomState } from '../state/types'
 
 // #464 (the web half of #287): a fake server implementing docs/api.md "Stale position". A socket
 // opened with `after` past the stored log gets one `stale_position` error frame and a 1008 close
@@ -81,6 +82,8 @@ function fakeServer() {
     log: [] as Event[],
     /** Refuse every `after`, even 0: the client bug a second stale_position in a row stands for. */
     alwaysStale: false,
+    /** The close reason after the frame: '' stands for a 1006, or a proxy that drops the reason (#550). */
+    staleReason: 'stale_position',
     opens: [] as number[],
     sockets: [] as FakeWebSocket[],
   }
@@ -96,7 +99,7 @@ function fakeServer() {
       if (server.alwaysStale || after > last) {
         const message = `after ${after} is past the room's last event ${last}`
         sock.onmessage?.({ data: JSON.stringify({ type: 'error', error: { code: 'stale_position', message } }) })
-        sock.drop('stale_position')
+        sock.drop(server.staleReason)
         return
       }
       for (const e of server.log) {
@@ -207,5 +210,92 @@ describe('stale_position (#464)', () => {
     await pass(15_000)
     expect(server.opens).toEqual([0, 2])
     expect(api.room).toHaveBeenCalledTimes(1)
+  })
+
+  // #550: a reload of the room on screen keeps the old state until the new snapshot's init
+  // replaces it, so nothing that renders from it unmounts (a composer, an open dialog).
+  it('#550: state never goes null through a stale_position reload of the same room', async () => {
+    const server = fakeServer()
+    server.log = [ev(1)]
+    const seen: (RoomState | null)[] = []
+    const hook = renderHook(() => {
+      const r = useRoom('r1')
+      seen.push(r.state)
+      return r
+    })
+    await waitFor(() => expect(hook.result.current.state?.last_seq).toBe(1))
+    const first = seen.findIndex((x) => x !== null)
+    server.log = []
+    act(() => server.sockets[0].drop())
+    await pass(15_000)
+    expect(server.opens).toEqual([0, 1, 0])
+    expect(api.room).toHaveBeenCalledTimes(2)
+    expect(seen.slice(first).every((x) => x !== null)).toBe(true)
+    expect(hook.result.current.conn).toBe('live')
+    expect(hook.result.current.error).toBeNull()
+  })
+
+  it('#550: the same through a Reload click', async () => {
+    const server = fakeServer()
+    server.log = [ev(1), ev(2)]
+    const seen: (RoomState | null)[] = []
+    const hook = renderHook(() => {
+      const r = useRoom('r1')
+      seen.push(r.state)
+      return r
+    })
+    await waitFor(() => expect(hook.result.current.state?.last_seq).toBe(2))
+    const first = seen.findIndex((x) => x !== null)
+    act(() => hook.result.current.reload())
+    await pass(1_000)
+    expect(server.opens).toEqual([0, 0])
+    expect(seen.slice(first).every((x) => x !== null)).toBe(true)
+    expect(hook.result.current.state?.last_seq).toBe(2)
+  })
+
+  it('#550: another room still starts empty: no state of the old room is shown under the new id', async () => {
+    const server = fakeServer()
+    server.log = [ev(1)]
+    const hook = renderHook(({ id }) => useRoom(id), { initialProps: { id: 'r1' } })
+    await waitFor(() => expect(hook.result.current.state?.last_seq).toBe(1))
+    let release: (s: RoomSnapshot) => void = () => {}
+    vi.mocked(api.room).mockImplementation(() => new Promise((resolve) => (release = resolve)))
+    hook.rerender({ id: 'r2' })
+    expect(hook.result.current.state).toBeNull()
+    await act(async () => release({ ...snap, id: 'r2' }))
+    await waitFor(() => expect(hook.result.current.state?.id).toBe('r2'))
+  })
+
+  // #550: the frame itself marks the socket stale, so a close without the reason (a 1006, or a
+  // proxy that drops it) takes the stale path too, instead of reconnecting with the stale seq.
+  it('#550: a stale_position frame then a close with no reason reloads once with after=0, not a loop', async () => {
+    const server = fakeServer()
+    server.staleReason = ''
+    server.log = [ev(1), ev(2)]
+    const hook = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(hook.result.current.state?.last_seq).toBe(2))
+    server.log = [ev(1, 'idle')]
+    act(() => server.sockets[0].drop())
+    await pass(15_000)
+    expect(server.opens).toEqual([0, 2, 0])
+    await pass(60_000)
+    expect(server.opens).toEqual([0, 2, 0])
+    expect(hook.result.current.error).toBeNull()
+    expect(hook.result.current.conn).toBe('live')
+    expect(hook.result.current.state?.agent_status.state).toBe('idle')
+  })
+
+  it('#550: with no close reason, a second stale_position frame in a row still stops with the error', async () => {
+    const server = fakeServer()
+    server.staleReason = ''
+    server.alwaysStale = true
+    server.log = [ev(1)]
+    const hook = renderHook(() => useRoom('r1'))
+    await pass(15_000)
+    expect(server.opens).toEqual([0, 0])
+    expect(hook.result.current.error).toBe("after 0 is past the room's last event 1")
+    expect(hook.result.current.conn).toBe('error')
+    await pass(60_000)
+    expect(server.opens).toEqual([0, 0])
   })
 })

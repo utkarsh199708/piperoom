@@ -97,8 +97,9 @@ export class SendLedger {
   // The room screen is gone: answers that arrive later change nothing and arm no timer.
   private disposed = false
   /**
-   * Whether the server dedupes on client_id: true once an answer echoed it, false once one did
-   * not, null before the first answer. Only true makes a retry of an unknown outcome automatic.
+   * Whether the server dedupes on client_id: true once an answer echoed it or an event of the
+   * room carried one, false once an answer did not, null before either. Only true makes a
+   * re-send automatic; null is treated like false (#545, #551).
    */
   dedupes: boolean | null = null
 
@@ -224,10 +225,13 @@ export class SendLedger {
 
   /** Every event goes through here: the current user's event with a known client_id settles it. */
   onEvent(ev: Event, userId: string): void {
-    if (ev.actor?.kind !== 'human' || ev.actor.id !== userId) return
     const id = (ev.payload as { client_id?: unknown } | null)?.client_id
     if (typeof id !== 'string' || id === '') return
-    this.dedupes = true // only a server with #459 puts it in the payload
+    // Only a server with #459 puts client_id in the payload (docs/api.md, Idempotent posts), so
+    // any member's keyed post in the replay says this server dedupes, before this ledger's first
+    // answer (#551). Settling stays with the caller's own events: (actor.id, client_id).
+    this.dedupes = true
+    if (ev.actor?.kind !== 'human' || ev.actor.id !== userId) return
     this.land(id, true)
   }
 
@@ -305,16 +309,18 @@ export class SendLedger {
       this.toUnknown(a)
       return 'unknown'
     }
-    if (isNetworkError(e) && this.dedupes === false) {
-      // A TypeError can also mean the request reached the server and the answer was lost. This
-      // server did not echo client_id, so a re-send could be stored twice (contract #460, #492):
-      // only a Retry click, after the window, sends it again.
+    if (isNetworkError(e) && this.dedupes !== true) {
+      // A TypeError can also mean the request reached the server and the answer was lost. Unless
+      // client_id has been seen (an answer's echo, or a keyed event in the room's log), the server
+      // may not dedupe, and a re-send could be stored twice (contract #460, #492). That holds
+      // before the first answer too (#545, #551): every room visit starts a new ledger, and
+      // neither /healthz nor the snapshot says whether the server dedupes. Only a Retry click,
+      // after the window, sends it again.
       this.toUnknown(a)
       return 'unknown'
     }
     if (isNetworkError(e) && this.count('queued') < MAX_KEPT) {
-      // Known gap: before any answer (dedupes null) the server is not known either way; the
-      // reconnect still re-sends, as a TypeError then is almost always "never left the browser".
+      // The server dedupes: the reconnect sends it again under the same id.
       a.state = 'queued'
       this.setError(OFFLINE_TEXT)
       this.retryWhileLive()
