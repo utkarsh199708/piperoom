@@ -261,10 +261,21 @@ func TestSchemaAndBadInput(t *testing.T) {
 	for _, in := range []string{
 		``, `  `, `null`, `{}`, `{"query":"   "}`, `{"query":"slot","extra":1}`, `{"query":5}`,
 		`{"query":"slot","max_results":"3"}`, `{"query":"slot","max_results":-1}`, string(long),
-		`{"query":"\ud800"}`, "{\"query\":\"slot \xff\"}",
+		"{\"query\":\"slot \xff\"}", "{\"query\":\"invalid byte \xc3\x28 in key\"}",
 	} {
 		if _, err := tl.Run(context.Background(), json.RawMessage(in)); !errors.Is(err, tools.ErrBadInput) {
 			t.Errorf("%q: err = %v, want ErrBadInput", in, err)
+		}
+	}
+	// U+FFFD is what docs/api.md says bad bytes in tool text become, so a pasted
+	// error carrying it is a valid query (#552). Only invalid raw bytes are refused.
+	for _, in := range []string{
+		"{\"query\":\"DataException: invalid byte \ufffd in key\"}",
+		`{"query":"DataException: invalid byte \ufffd in key"}`,
+		`{"query":"slot \ud800"}`,
+	} {
+		if _, err := tl.Run(context.Background(), json.RawMessage(in)); err != nil {
+			t.Errorf("%q: err = %v, want accepted", in, err)
 		}
 	}
 	_, hits := lookup(t, tl, `{"query":"slot wal connector consumer schema retention","max_results":0}`)
