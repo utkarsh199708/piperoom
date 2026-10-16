@@ -166,6 +166,9 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 
 	// 5. Sink row and column diff.
 	if f.sinkErr == nil {
+		f.sinkErr = b.checkSinkKey(ctx, f.sink, pk)
+	}
+	if f.sinkErr == nil {
 		sinkRow, found, err := b.wh.Row(ctx, f.sink, pk, key)
 		f.sinkErr = err
 		f.sinkFound = found
@@ -332,6 +335,34 @@ func fallbackTopic(prefix, table string) string {
 		return table
 	}
 	return prefix + "." + table
+}
+
+// errSinkKey means the sink's primary key cannot be looked up with the source
+// key: it is composite, or its column differs from the source's. A lookup by
+// the source column would read another row (another tenant's), so the
+// warehouse stage is unknown (#537).
+var errSinkKey = errors.New("topology: sink key does not match the source key")
+
+// checkSinkKey asks the warehouse for sink's key column, as the source is
+// asked, and returns errSinkKey when pk cannot find that table's row. A
+// warehouse that cannot report its key, or a failed key query, leaves the
+// lookup to Row, which reports an unreachable warehouse itself.
+func (b *builder) checkSinkKey(ctx context.Context, sink, pk string) error {
+	d, ok := b.wh.(pkColumner)
+	if !ok {
+		return nil
+	}
+	col, err := d.PrimaryKeyColumn(ctx, sink)
+	if errors.Is(err, clients.ErrNotSupported) {
+		return fmt.Errorf("%w: composite primary key", errSinkKey)
+	}
+	if err != nil || col == "" {
+		return nil
+	}
+	if !strings.EqualFold(col, pk) {
+		return fmt.Errorf("%w: sink key %q, source key %q", errSinkKey, col, pk)
+	}
+	return nil
 }
 
 func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
@@ -543,6 +574,8 @@ func unknownReason(err error) string {
 		return "no matching sink table"
 	case errors.Is(err, errNoGroup):
 		return "no group reads the topic"
+	case errors.Is(err, errSinkKey):
+		return "sink primary key is composite or differs from the source key: the trace cannot look up its row"
 	}
 	return "unreachable"
 }
