@@ -211,7 +211,7 @@ func TestTraceRedactGaps(t *testing.T) {
 		{"gap: redact.Text, see #449: unclosed quote", listenerRefused + `jdbc:oracle:thin:loader/"UnclQ UqTail5@wh:1521:ORCL`, "UqTail5"},
 		{"gap: redact.Text, see #449: unquoted space", listenerRefused + "jdbc:oracle:thin:loader/Sp Tail7Q@wh:1521:ORCL", "Tail7Q"},
 		// dlq.RedactMessage keeps identifier-shaped Key (...)=(...) values (#469).
-		{"gap: dlq.RedactMessage, see #469: identifier-shaped key value", "Caused by: org.postgresql.util.PSQLException: ERROR: insert or update violates foreign key Key (customer_ref)=(jdoe_smith) is not present in table \"customers\".", "Key (customer_ref)=(jdoe_smith)"},
+		{"gap: dlq.RedactMessage, see #469: identifier-shaped key value", "Caused by: org.postgresql.util.PSQLException: ERROR: insert or update violates foreign key Key (customer_ref)=(jdoe_smith) is not present in table \"customers\".", "Key (customer_ref)=<redacted> is not present in table"},
 		// Known over-mask, no leak: a {{ }} template reads as a brace that
 		// '}}' escapes, so the value runs to the end of the line.
 		{"known: template over-mask", sqlsrv + "password={{ vault_db_password }};encrypt=true", "user=loader;password=[redacted]"},
