@@ -156,6 +156,10 @@ func (c *Client) Register(ctx context.Context, subject, schema string) (int, err
 // Non-2xx responses are parsed into a typed *Error; 404 additionally wraps ErrNotFound.
 // It records one provenance call per request (method and path, never the body).
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
+	// A refused path is never sent, so it gets no receipt (#446).
+	if err := netsec.CheckPath(path); err != nil {
+		return fmt.Errorf("schemareg: %s: %w", method, err)
+	}
 	start := time.Now()
 	err := c.roundTrip(ctx, method, path, body, out)
 	tools.Record(ctx, tools.Call{
@@ -169,9 +173,6 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 }
 
 func (c *Client) roundTrip(ctx context.Context, method, path string, body io.Reader, out any) error {
-	if err := netsec.CheckPath(path); err != nil {
-		return fmt.Errorf("schemareg: %s: %w", method, err)
-	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("schemareg: %s %s: %w", method, path, err)
