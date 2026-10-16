@@ -794,7 +794,7 @@ var review510Leaks = []secretRow{
 	{"padded capitals", "<password> HUNTER2 </password>", []string{"HUNTER2"}},
 	{"own line tab", "<password>\n\tdebezium\n</password>", []string{"debezium"}},
 	{"own line CRLF", "<password>\r\n  debezium\r\n</password>", []string{"debezium"}},
-	{"own line JSON-escaped", `<password>\n  debezium\n</password>`, []string{"debezium"}},
+	{"own line JSON-escaped (guard: main masks it too)", `<password>\n  debezium\n</password>`, []string{"debezium"}},
 	{"own line dotted name", "<db.password>\n  postgres\n</db.password>", []string{"postgres"}},
 	{"own line namespace", "<ns:password>\n  debezium\n</ns:password>", []string{"debezium"}},
 	{"own line attribute", "<password type=\"plain\">\n  debezium\n</password>", []string{"debezium"}},
@@ -1017,5 +1017,104 @@ func TestReview510LinearTime(t *testing.T) {
 		if best > ceiling {
 			t.Errorf("%s: best %v for %d KiB, want under %v", name, best, len(s)>>10, ceiling)
 		}
+	}
+}
+
+// review547Leaks are the texts of the round-1 review of #547 (LEAD-REVIEW,
+// 0a4b8f8): own-line or padded values that only contain a placeholder word,
+// one-line plain words padded with blanks or tabs (must-fix 1 and 2), and
+// the shapes of nits 3 to 5.
+var review547Leaks = []secretRow{
+	// Must-fix 1: a placeholder word inside a real value is not a placeholder.
+	{"own line changeit", "<password>\n  changeit\n</password>", []string{"changeit"}},
+	{"entry own line changeit", "<entry key=\"ssl.truststore.password\">\n  changeit\n</entry>", []string{"changeit"}},
+	{"own line supersecret", "<password>\n  supersecret\n</password>", []string{"supersecret"}},
+	{"own line mypassword", "<password>\n  mypassword\n</password>", []string{"mypassword"}},
+	{"own line yourmom", "<password>\n  yourmom\n</password>", []string{"yourmom"}},
+	{"own line tokenring", "<password>\n  tokenring\n</password>", []string{"tokenring"}},
+	{"padded CHANGEIT", "<password> CHANGEIT </password>", []string{"CHANGEIT"}},
+	{"padded MYSECRET1", "<password> MYSECRET1 </password>", []string{"MYSECRET1"}},
+	{"padded XXXHUNTER", "<password> XXXHUNTER </password>", []string{"XXXHUNTER"}},
+	{"padded NULLHUNTER9", "<password> NULLHUNTER9 </password>", []string{"NULLHUNTER9"}},
+	// Must-fix 2: a one-line plain word padded with blanks or tabs.
+	{"padded debezium", "<password> debezium </password>", []string{"debezium"}},
+	{"tab-padded postgres", "<password>\tpostgres\t</password>", []string{"postgres"}},
+	{"padded secret element", "<secret> debezium </secret>", []string{"debezium"}},
+	{"entry padded debezium", "<entry key=\"jdbc.password\">  debezium  </entry>", []string{"debezium"}},
+	// Nit 3: more quote styles, and an apostrophe inside typographic quotes.
+	{"low-high quotes", "psql --password „Zx9 hunter2Qw7Pa55“", []string{"hunter2Qw7"}},
+	{"guillemets", "psql --password «Zx9 hunter2Qw7Pa55»", []string{"hunter2Qw7"}},
+	{"fullwidth quotes", "psql --password ＂Zx9 hunter2Qw7Pa55＂", []string{"hunter2Qw7"}},
+	{"apostrophe inside typographic quotes", "psql --password ‘Zx9 it’s hunter2Qw7Pa55’", []string{"hunter2Qw7"}},
+	// Nit 4: a quoted key before a braced value.
+	{"quoted braced key", "Server=db;\"Password\"={Br@ce;Pw42x};", []string{"Pw42x"}},
+	// Nit 5: value= after many attributes, and unquoted attributes.
+	{"value after 16 attributes", "<add a1=\"1\" a2=\"2\" a3=\"3\" a4=\"4\" a5=\"5\" a6=\"6\" a7=\"7\" a8=\"8\" a9=\"9\" a10=\"10\" a11=\"11\" a12=\"12\" a13=\"13\" a14=\"14\" a15=\"15\" a16=\"16\" key=\"DbPassword\" value=\"Zx9hunter2Qw7Pa55\"/>", []string{"hunter2Qw7"}},
+	{"unquoted attributes", "<add key=DbPassword value=Zx9hunter2Qw7Pa55 />", []string{"hunter2Qw7"}},
+}
+
+var review547Keep = []string{
+	"<password>\n  TODO\n</password>",
+	"<password> TODO </password>",
+	"<password>\n  CHANGE_ME\n</password>",
+	"<password> CHANGE_ME </password>",
+	"<password>\n  ${DB_PASSWORD}\n</password>",
+	"<password> ${DB_PASSWORD} </password>",
+	"<password> YOUR_PASSWORD </password>",
+	"<password>\n  changeme\n</password>",
+	"<password> <REPLACE_ME> </password>",
+	"<password> xxx </password>",
+	"<password> and </password>",
+	"<password>\tand\t</password>",
+	"<password> see docs </password>",
+	// Nit 6: a name= attribute on a schema element names a column or field,
+	// not a secret.
+	"<column name=\"password\">\n  VARCHAR\n</column>",
+	"<field name=\"secret\">\n  SerializationException\n</field>",
+	"<field name=\"password\">varchar(255) NOT NULL</field>",
+	`<attribute name="token" type="string"/>`,
+}
+
+var review547Exact = []struct{ in, want string }{
+	{"<password> debezium </password>", "<password> [redacted 8] </password>"},
+	{"<password>\tpostgres\t</password>", "<password>\t[redacted 8]\t</password>"},
+	{"<password>\n  changeit\n</password>", "<password>\n  [redacted 8]\n</password>"},
+	{"psql --password „Zx9 hunter2Qw7Pa55“ orders", "psql --password [redacted 24] orders"},
+	{"Server=db;\"Password\"={Br@ce;Pw42x};", "Server=db;\"Password\"=[redacted 16];"},
+	// Nit 6: elements other than schema ones take a name= secret, so a
+	// constant in a param is masked too: <param name="password"> is a real
+	// config shape.
+	{"<param name=\"token\">\n  TOPIC_ORDERS\n</param>", "<param name=\"token\">\n  [redacted 16]\n</param>"},
+	// Nit 7: cmd's set takes the whole rest of the line, so the mask does.
+	{"set API_TOKEN=see the vault entry for orders.public.orders, then SerializationException",
+		"set API_TOKEN=[redacted 128]"},
+}
+
+// TestReview547Round1 holds the rows of the round-1 review of #547.
+func TestReview547Round1(t *testing.T) {
+	checkSecretRows(t, review547Leaks)
+	checkKeep(t, review547Keep)
+	checkExact(t, review547Exact)
+	rows := []struct{ gap, in, now string }{
+		{"a password glued to its flag (mysql -p'X') is not read (main too)",
+			"mysql -p'Zx9'\"hunter2Qw7Pa55\"",
+			"mysql -p'Zx9'\"hunter2Qw7Pa55\""},
+	}
+	for _, r := range rows {
+		if got, _ := Text(r.in); got != r.now {
+			t.Errorf("gap %q moved: Text(%q)\n got  %q\n pinned %q", r.gap, r.in, got, r.now)
+		}
+	}
+}
+
+// TestReview547CutProse: prose that names a secret element near the scan
+// limit does not move the cut (nit 8); a start tag that opens its line does.
+func TestReview547CutProse(t *testing.T) {
+	line := "evidence lsn 0/16B3748 topic orders.public.orders\n"
+	tail := "WARN no <password> given for pg-orders-connector\n"
+	fill := strings.Repeat(line, (MaxScan-2000)/len(line))
+	in := fill + tail + strings.Repeat(line, 4000/len(line))
+	if got := scanCut(in); got < len(fill)+len(tail) {
+		t.Errorf("cut moved to %d, before the prose line ends at %d", got, len(fill)+len(tail))
 	}
 }

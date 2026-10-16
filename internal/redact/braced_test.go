@@ -27,10 +27,10 @@ var bracedLeaks = []secretRow{
 	{"blanks", "Password = {Sp ace;Pw42x}", []string{"Pw42x", "ace"}},
 	{"unclosed at end of line", "password={Br@ce;Pw42x", []string{"Pw42x"}},
 	{"unclosed then next line", "password={Br@ce;Pw42x\nnext line orders", []string{"Pw42x"}},
-	{"at only", "Password={Pw@42xQz}", []string{"42xQz"}},
+	{"at only (guard: main masks it too)", "Password={Pw@42xQz}", []string{"42xQz"}},
 	{"leading semicolon", "Password={;Pw42xQz}", []string{"Pw42xQz"}},
 	{"in error text", "Login failed for user 'sa'. ConnectionString: Server=db;Pwd={Br@ce;Pw42x}; (SQLSTATE 28000)", []string{"Pw42x"}},
-	{"oracle sibling", "jdbc:oracle:thin:loader/Pw9Orc@wh:1521:ORCL;password={Br@ceOrcT4il}", []string{"Pw9Orc", "OrcT4il"}},
+	{"oracle sibling (guard: main masks it too)", "jdbc:oracle:thin:loader/Pw9Orc@wh:1521:ORCL;password={Br@ceOrcT4il}", []string{"Pw9Orc", "OrcT4il"}},
 	{"two values", "Pwd={Ab;Cd9x};Server=db;Password={Ef@Gh7y}", []string{"Cd9x", "Gh7y"}},
 	{"camel key", "dbPassword={Br@ce;Pw42x}", []string{"Pw42x"}},
 }
