@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -120,5 +123,85 @@ func TestFindByKeyBare404IsUnavailable(t *testing.T) {
 				t.Fatalf("got %+v, %v; want an incomplete-scan error", scan, err)
 			}
 		})
+	}
+}
+
+// TestFindByKeyRegistryDownAsksOnce: #538. After the first
+// registry-unavailable answer the scan sends the registry nothing more,
+// whatever the schema ids of later keys, and still reports them undecoded.
+func TestFindByKeyRegistryDownAsksOnce(t *testing.T) {
+	var hits atomic.Int32
+	recs := make([]*kgo.Record, 0, 200)
+	for i := range 200 {
+		r := avroKeyRec(0, int64(i))
+		r.Key[4] = byte(1 + i%3) // three schema ids
+		recs = append(recs, r)
+	}
+	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, `{"error_code":50301,"message":"down"}`, http.StatusServiceUnavailable)
+	}, recs...)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
+	if err == nil || !errors.Is(err, errRegistryUnavailable) {
+		t.Fatalf("got %+v, %v; want an incomplete-scan error", scan, err)
+	}
+	if !strings.Contains(err.Error(), "200 keys could not be decoded") {
+		t.Errorf("err = %v, want all 200 keys counted undecoded", err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("registry got %d requests, want 1", n)
+	}
+}
+
+// TestFindByKeyRegistryDownWithMatchAsksOnce: #538 with a raw match. The
+// match is kept, the partition reported truncated as in #516, and the
+// registry asked once.
+func TestFindByKeyRegistryDownWithMatchAsksOnce(t *testing.T) {
+	var hits atomic.Int32
+	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Error(w, `{"error_code":50301,"message":"down"}`, http.StatusServiceUnavailable)
+	}, data(0, 0, "k"), avroKeyRec(0, 1), avroKeyRec(0, 2), data(0, 3, "k"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
+	if err != nil || len(scan.Refs) != 2 || !slices.Equal(scan.Truncated, []int32{0}) {
+		t.Fatalf("got %+v, %v; want two refs and partition 0 truncated", scan, err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("registry got %d requests, want 1", n)
+	}
+}
+
+// TestFindByKeyRegistryDownIsPerScan: the "registry down" state belongs to
+// one scan. The next scan asks again, and decodes once the registry is back.
+func TestFindByKeyRegistryDownIsPerScan(t *testing.T) {
+	var up atomic.Bool
+	var hits atomic.Int32
+	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if !up.Load() {
+			http.Error(w, `{"error_code":50301,"message":"down"}`, http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"schema":"{\"type\":\"record\",\"name\":\"K\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"}]}"}`))
+	}, avroKeyRec(0, 0))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0); err == nil {
+		t.Fatal("first scan: want an incomplete-scan error")
+	}
+	up.Store(true)
+	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("t", avroKeyRec(0, 0))}}
+	c.consumerFn = func([]kgo.Opt) (pollConsumer, error) { return cons, nil }
+	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
+	if err != nil || len(scan.Refs) != 1 {
+		t.Fatalf("second scan: got %+v, %v; want the key decoded and matched", scan, err)
+	}
+	if n := hits.Load(); n != 2 {
+		t.Errorf("registry got %d requests over two scans, want 2", n)
 	}
 }

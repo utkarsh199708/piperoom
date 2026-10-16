@@ -531,6 +531,10 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 	scanned := 0
 	var firstUnknown error // first key left undecoded by an unreachable registry
 	undecoded := 0
+	// registryDown is set by the first registry-unavailable fetch. After it
+	// the scan asks the registry nothing more (#538): a failing registry
+	// would otherwise get one request per Avro key, up to maxScan of them.
+	var registryDown error
 	// cut ends the scan at the deadline: matches found so far are kept and
 	// the unfinished partitions reported, since a later match may exist
 	// there; with no match it is an error, never a false "not found".
@@ -586,7 +590,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 				return cut(cctx.Err())
 			}
 			scanned++
-			dk, derr := c.decodeKey(cctx, r.Key)
+			dk, derr := c.decodeKeyIn(cctx, r.Key, &registryDown)
 			if errors.Is(derr, errRegistryUnavailable) {
 				// The key may be the one we look for: this partition's
 				// scan is incomplete, whatever else it finds.
@@ -723,7 +727,15 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[
 // decoder panic becomes an error. Decode takes no context, so these limits,
 // not a deadline, are what bound its time and memory; FindByKey also checks
 // its deadline between records.
-func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err error) {
+func (c *Client) decodeKey(ctx context.Context, key []byte) (string, error) {
+	return c.decodeKeyIn(ctx, key, nil)
+}
+
+// decodeKeyIn is decodeKey for one scan. down, when not nil, carries the
+// scan's first registry-unavailable error: once it is set, a schema id that
+// is not cached is not fetched and the key is reported undecoded with that
+// cause (#538).
+func (c *Client) decodeKeyIn(ctx context.Context, key []byte, down *error) (out string, err error) {
 	// Without a Schema Registry (SCHEMA_REGISTRY_URL empty or off) no key is
 	// Avro-decoded: a key that merely starts with 0x00 is compared raw.
 	if c.sr == nil || len(key) < 5 || key[0] != 0x00 {
@@ -738,7 +750,7 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 		}
 	}()
 	id := int(binary.BigEndian.Uint32(key[1:5]))
-	schema, err := c.schemaByID(ctx, id)
+	schema, err := c.schemaByID(ctx, id, down)
 	if err != nil {
 		return "", err
 	}
@@ -784,8 +796,9 @@ func schemaNotFound(err error) bool {
 // immutable). A schema that is too large, does not parse or fails
 // checkKeySchema is refused, and the refusal is cached too so a hostile id
 // costs one fetch and parse, not one per key. Both caches stop growing at
-// maxSchemaCache entries.
-func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
+// maxSchemaCache entries. down is decodeKeyIn's per-scan registry state
+// (nil outside a scan).
+func (c *Client) schemaByID(ctx context.Context, id int, down *error) (avro.Schema, error) {
 	c.srMu.Lock()
 	if why := c.keyRefused[id]; why != "" {
 		c.srMu.Unlock()
@@ -795,6 +808,9 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	c.srMu.Unlock()
 	if ok {
 		return s, nil
+	}
+	if down != nil && *down != nil {
+		return nil, fmt.Errorf("kafka: schema %d not fetched: %w", id, *down)
 	}
 	schemaStr, err := c.sr.SchemaByID(ctx, id)
 	if err != nil {
@@ -806,7 +822,11 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 		if schemaNotFound(err) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: schema %d: %w", errRegistryUnavailable, id, err)
+		err = fmt.Errorf("%w: schema %d: %w", errRegistryUnavailable, id, err)
+		if down != nil {
+			*down = err
+		}
+		return nil, err
 	}
 	var why string
 	if len(schemaStr) > maxKeySchemaBytes {
