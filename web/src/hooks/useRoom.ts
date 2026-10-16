@@ -11,7 +11,7 @@ import type {
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
 import type { ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
-import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
+import { classifyAuthProblem, getSessionChanges, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
@@ -205,8 +205,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   // without a remount, and the previous user's kept actions must never be posted under the new
   // session. The old ledger is disposed (its entries dropped) by the effect below.
   const session = `${user.id}|${sessionEpoch}`
-  const newLedger = () =>
-    new SendLedger({
+  const newLedger = () => {
+    const changes = getSessionChanges()
+    return new SendLedger({
       post: (item, clientId, room) =>
         item.kind === 'steer'
           ? api.steer(room, item.text, clientId)
@@ -215,7 +216,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       setError,
       newId: newClientId,
       isLive: () => liveRef.current,
+      sameSession: () => getSessionChanges() === changes,
     })
+  }
   const [held, setHeld] = useState(() => ({ session, ledger: newLedger() }))
   let ledger = held.ledger
   if (held.session !== session) {

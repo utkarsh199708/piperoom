@@ -12,6 +12,7 @@ import type { SendControls } from './useRoom'
  * - `settle(id, ok)`: after the send. The id stays for a Retry only while the ledger still owes
  *   it (kept or unknown) and nothing was cancelled since the send began; a refused send (an error
  *   answer, 409) is no longer owed, so its id is not kept.
+ * - `owns(id)`: the composer still holds this action for a Retry (after `settle`).
  * - `drop()`: the person gave up on the action (edited the words, closed the dialog). It is
  *   cancelled in the ledger before any new action starts, so it is never sent again: a kept or
  *   unknown entry is removed, and one on the wire lands if it succeeds and is dropped if not.
@@ -59,6 +60,7 @@ export function useRetryId(sends: SendControls | undefined, onLanded: () => void
       if (started !== generation.current || owned.current !== clientId) return
       owned.current = !ok && (sendsRef.current?.isPending(clientId) ?? true) ? clientId : null
     },
+    owns: (clientId: string) => owned.current === clientId,
     drop: () => {
       if (owned.current !== null) sendsRef.current?.cancel(owned.current)
       owned.current = null

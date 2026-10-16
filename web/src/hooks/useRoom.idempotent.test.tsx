@@ -714,5 +714,4 @@ describe('the steer composer with the real hook (#535)', () => {
     await pass(6_000)
     expect(steers(server)).toEqual(['do NOT restart the connector'])
   })
-
 })

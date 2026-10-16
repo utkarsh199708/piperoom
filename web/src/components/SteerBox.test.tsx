@@ -219,9 +219,9 @@ describe('SteerBox composer (U3)', () => {
     expect(fake.cancelled).toEqual([clientId])
   })
 
-  // #535 (low): after 409 client_id_reused the ledger has dropped the entry, so a Retry of the same
-  // id could only be refused again; it starts a new action instead.
-  it('a Retry of an action the ledger no longer owes gets a new client_id', async () => {
+  // #535 (low): after 409 client_id_reused the ledger has dropped the entry, so the same id could
+  // only be refused again. No Retry strip is offered for it, and the next send is a new action.
+  it('an action the ledger no longer owes gets no Retry strip; sending again uses a new client_id', async () => {
     const fake = fakeSends()
     const withSignal: RoomActions = {
       ...actions,
@@ -232,11 +232,27 @@ describe('SteerBox composer (U3)', () => {
     render(<SteerBox state={state} user={arjun} actions={withSignal} />)
     fireEvent.change(screen.getByLabelText('Steer the agent'), { target: { value: 'look at the slot' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(withSignal.steer).toHaveBeenCalledTimes(1))
+    await act(async () => {})
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
     await waitFor(() => expect(withSignal.steer).toHaveBeenCalledTimes(2))
     const [first, second] = vi.mocked(withSignal.steer).mock.calls
     expect(second[0]).toBe('look at the slot')
     expect(second[1]?.clientId).not.toBe(first[1]?.clientId)
+  })
+
+  // Review nit 3 (#536): a new ledger (another user or session) takes the old Retry strip down.
+  it('a replaced send ledger takes the Retry strip down', async () => {
+    const fake = fakeSends()
+    const withSignal: RoomActions = { ...actions, steer: vi.fn().mockResolvedValue(false), sends: fake.sends }
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    const { rerender } = render(<SteerBox state={state} user={arjun} actions={withSignal} />)
+    fireEvent.change(screen.getByLabelText('Steer the agent'), { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    rerender(<SteerBox state={state} user={arjun} actions={{ ...withSignal, sends: fakeSends().sends }} />)
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 
   it('says messages are kept while the socket reconnects', () => {

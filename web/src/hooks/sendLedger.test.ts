@@ -134,6 +134,54 @@ describe('SendLedger', () => {
     expect(post).toHaveBeenCalledTimes(1)
   })
 
+  // Review of 3d17a65: a login or logout has started (the cookie may already be the next user's)
+  // but this ledger is not replaced yet. Each path that could post refuses.
+  describe('once the session it was made for is ending', () => {
+    function ending(live: boolean) {
+      let same = true
+      const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      let error: string | null = null
+      const l = new SendLedger({
+        post,
+        setError: (next) => {
+          error = typeof next === 'function' ? next(error) : next
+        },
+        newId: () => 'new',
+        isLive: () => live,
+        sameSession: () => same,
+      })
+      return { l, post, end: () => (same = false), error: () => error }
+    }
+
+    it('a reconnect drains nothing', async () => {
+      const { l, post, end } = ending(false)
+      await l.send(stop, 'k1')
+      end()
+      l.drain()
+      expect(post).toHaveBeenCalledTimes(1)
+    })
+
+    it('the live retry sends nothing', async () => {
+      const { l, post, end } = ending(true)
+      await l.send(stop, 'k1')
+      end()
+      vi.advanceTimersByTime(LIVE_RETRY_MS * 3)
+      expect(post).toHaveBeenCalledTimes(1)
+    })
+
+    it('a Retry posts nothing, drops the action and its banner', async () => {
+      const { l, post, end, error } = ending(false)
+      await l.send(stop, 'k1')
+      expect(error()).toBe(OFFLINE_TEXT)
+      end()
+      expect(await l.send(stop, 'k1')).toBe(false)
+      expect(await l.send({ kind: 'steer', text: 'new words' })).toBe(false)
+      expect(post).toHaveBeenCalledTimes(1)
+      expect(l.isPending('k1')).toBe(false)
+      expect(error()).toBeNull()
+    })
+  })
+
   it('attach after dispose (React StrictMode remounts an effect) works again', async () => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
     const { l, error } = ledger(post)

@@ -31,7 +31,7 @@ vi.mock('../api/client', async (importOriginal) => {
 })
 
 import { ApiClientError, api, probeSession } from '../api/client'
-import { getAuthEpoch, reportAuthProblem, redirectToLogin } from '../lib/auth'
+import { getAuthEpoch, getSessionChanges, reportAuthProblem, redirectToLogin } from '../lib/auth'
 import { UserProvider } from './UserContext'
 import { useCurrentUser } from './user'
 
@@ -104,6 +104,25 @@ describe('UserProvider (live mode)', () => {
     expect(api.devLogin).toHaveBeenCalledWith('priya')
     expect(screen.getByTestId('epoch')).toHaveTextContent('1')
     expect(getAuthEpoch()).toBe(1)
+  })
+
+  // #536: the old session's queued sends stop when the switch STARTS, before the cookie changes;
+  // a failed switch still moves to a new epoch, so a fresh send ledger replaces the stopped one.
+  it('marks the session change before dev-login, and bumps the epoch even when dev-login fails', async () => {
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    let fail: (e: unknown) => void = () => {}
+    vi.mocked(api.devLogin).mockReturnValue(new Promise<void>((_, reject) => (fail = reject)))
+    renderProvider()
+    await screen.findByTestId('who')
+    const changes = getSessionChanges()
+    const epoch = Number(screen.getByTestId('epoch').textContent)
+    fireEvent.click(screen.getByText('as priya'))
+    expect(getSessionChanges()).toBe(changes + 1) // before dev-login has answered
+    await act(async () => {
+      fail(new TypeError('Failed to fetch'))
+    })
+    await waitFor(() => expect(screen.getByTestId('epoch')).toHaveTextContent(String(epoch + 1)))
+    expect(screen.getByTestId('who')).toHaveTextContent('arjun')
   })
 
   it('goes to the IdP login when the server says oidc', async () => {

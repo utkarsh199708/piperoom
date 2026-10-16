@@ -257,6 +257,12 @@ export function SteerBox({
       if (ref.current) ref.current.style.height = ''
     }
   })
+  // A new send ledger (another user or session, #536) owes nothing of the old one: no Retry strip.
+  const [ledgerSeen, setLedgerSeen] = useState(actions.sends)
+  if (ledgerSeen !== actions.sends) {
+    setLedgerSeen(actions.sends)
+    setOffline(false)
+  }
   // A prefill replaces the words, like an edit.
   useEffect(() => {
     if (seenPrefill > 0) retryId.drop()
@@ -325,8 +331,10 @@ export function SteerBox({
         ? await actions.comment(plan.text, undefined, { clientId })
         : await actions.steer(plan.text, { clientId })
     setSending(false)
-    setOffline(!ok)
     retryId.settle(clientId, ok)
+    // The Retry strip is for an action still owed: one cancelled on the wire (an edit) or refused
+    // is not, and a Retry would only be a new action.
+    setOffline(!ok && retryId.owns(clientId))
     if (ok) {
       writeStore('session', lastSentKey(roomId), text.trim())
       // Words typed while this send waited are a new draft: keep them.

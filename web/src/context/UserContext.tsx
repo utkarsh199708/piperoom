@@ -7,6 +7,7 @@ import { DEFAULT_USER_ID, findUser } from '../fixtures/users'
 import type { CurrentUser } from '../state/permissions'
 import { ApiClientError, api, isFixtures, probeSession } from '../api/client'
 import {
+  beginSessionChange,
   loginRedirectUrl,
   onAuthProblem,
   redirectToLogin,
@@ -193,14 +194,21 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
     (id: string) => {
       transition.current = true
       setBusy(true)
+      beginSessionChange() // before the cookie changes: the old session's queued sends stop (#536)
       void (async () => {
+        let bumped = false
         try {
           await api.devLogin(id)
-          if (await loadMe()) bumpEpoch() // reload data, reconnect the WebSocket
-          else setFailure((f) => f ?? 'Could not sign in.')
+          if (await loadMe()) {
+            bumpEpoch() // reload data, reconnect the WebSocket
+            bumped = true
+          } else setFailure((f) => f ?? 'Could not sign in.')
         } catch (e) {
           setFailure(errorText(e))
         } finally {
+          // Who the cookie belongs to is unknown after a failure: start over under a new epoch
+          // (a fresh send ledger) rather than leave the stopped one in place.
+          if (!bumped) bumpEpoch()
           transition.current = false
           setBusy(false)
         }
@@ -212,6 +220,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     transition.current = true
     setBusy(true)
+    beginSessionChange()
     void (async () => {
       try {
         try {
