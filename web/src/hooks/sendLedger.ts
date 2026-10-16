@@ -50,6 +50,8 @@ type Outcome = 'ok' | 'kept' | 'unknown' | 'refused'
 interface Action {
   clientId: string
   item: SendItem
+  /** The room it was typed in: every send of it goes there, and only that room drains it (#491). */
+  room: string
   /** queued: not sent, or safe to send again; unknown: maybe stored, the server may not dedupe. */
   state: 'inflight' | 'queued' | 'unknown'
   /** When the latest send of it started. */
@@ -63,8 +65,10 @@ interface Action {
 }
 
 export interface LedgerDeps {
-  /** POSTs the action with its client_id; resolves with the server's event. */
-  post: (item: SendItem, clientId: string) => Promise<Event | undefined>
+  /** POSTs the action with its client_id to `room`; resolves with the server's event. */
+  post: (item: SendItem, clientId: string, room: string) => Promise<Event | undefined>
+  /** The room on screen: a new action belongs to it, and only its actions drain or hold the banner. */
+  room?: () => string
   setError: (next: string | null | ((prev: string | null) => string | null)) => void
   newId: () => string
   /** The room socket is open: then nothing reconnects, so the ledger retries kept actions itself. */
@@ -103,6 +107,16 @@ export class SendLedger {
     return this.deps.now ? this.deps.now() : Date.now()
   }
 
+  private room() {
+    return this.deps.room ? this.deps.room() : ''
+  }
+
+  /** The actions of the room on screen. */
+  private here(): Action[] {
+    const room = this.room()
+    return [...this.actions.values()].filter((a) => a.room === room)
+  }
+
   onDelivered(listener: DeliveredListener): () => void {
     this.listeners.add(listener)
     return () => {
@@ -118,7 +132,7 @@ export class SendLedger {
    */
   banner(): string | null {
     const now = this.now()
-    const actions = [...this.actions.values()]
+    const actions = this.here()
     if (actions.some((a) => a.state === 'unknown' && now - a.since < UNCONFIRMED_WINDOW_MS)) return UNCONFIRMED_TEXT
     if (actions.some((a) => a.state === 'queued')) return OFFLINE_TEXT
     return null
@@ -136,14 +150,22 @@ export class SendLedger {
     this.prune()
     if (this.isLanded(clientId, item)) return this.settled()
     let a = this.actions.get(clientId)
+    // A send of a held action goes to the room it was typed in, whatever room is on screen now.
+    const room = a?.room ?? this.room()
     if (a?.state === 'inflight' && a.flight) {
       // Another send of this action (the reconnect copy, or a double click) is on its way.
       const out = await this.wait(a.flight)
       if (out === 'ok' || this.isLanded(clientId, item)) return this.settled()
-      if (out === 'timeout' && this.actions.get(clientId) === a && a.state === 'inflight') {
-        if (a.cancelled) this.actions.delete(clientId) // given up on: dropped, not kept as unknown
-        else this.toUnknown(a)
+      if (a.cancelled) {
+        // The person gave up on the action this send waited on (#519): it ends with that entry,
+        // and is never posted again.
+        if (this.actions.get(clientId) === a) {
+          this.actions.delete(clientId)
+          this.setError(this.banner())
+        }
+        return false
       }
+      if (out === 'timeout' && this.actions.get(clientId) === a && a.state === 'inflight') this.toUnknown(a)
       a = this.actions.get(clientId)
       if (a?.state === 'inflight') return false
     }
@@ -152,7 +174,7 @@ export class SendLedger {
       this.setError(UNCONFIRMED_TEXT)
       return false
     }
-    return (await this.post(item, clientId)) === 'ok' ? this.settled() : false
+    return (await this.post(item, clientId, room)) === 'ok' ? this.settled() : false
   }
 
   /**
@@ -160,8 +182,8 @@ export class SendLedger {
    * unknown entry is removed, so no Retry, reconnect or live retry sends it. An entry on the wire
    * cannot be called back, so it is marked: if it lands, it lands; if it fails or gets no
    * answer, it is dropped instead of kept. Either way it is never sent again, so the composer
-   * may start a new action with a new id at once. Known gap (#519, shared with main): a send()
-   * already waiting on that flight posts the action again once the flight fails.
+   * may start a new action with a new id at once; a send() already waiting on that flight ends
+   * with it (#519).
    */
   cancel(clientId: string): void {
     const a = this.actions.get(clientId)
@@ -180,10 +202,13 @@ export class SendLedger {
     return a !== undefined && !a.cancelled
   }
 
-  /** On reconnect: sends again every action that is safe to send again, with its own id. */
+  /**
+   * On reconnect: sends again every action of the room on screen that is safe to send again, with
+   * its own id. Another room's actions wait for that room's socket (#491).
+   */
   drain(): void {
-    for (const a of [...this.actions.values()]) {
-      if (a.state === 'queued') void this.post(a.item, a.clientId, true)
+    for (const a of this.here()) {
+      if (a.state === 'queued') void this.post(a.item, a.clientId, a.room, true)
     }
   }
 
@@ -206,10 +231,10 @@ export class SendLedger {
   }
 
   /** `notify`: the caller is not waiting for the answer (the reconnect copy), so tell the composers. */
-  private post(item: SendItem, clientId: string, notify = false): Promise<Outcome> {
-    const a: Action = { clientId, item, state: 'inflight', since: this.now() }
+  private post(item: SendItem, clientId: string, room: string, notify = false): Promise<Outcome> {
+    const a: Action = { clientId, item, room, state: 'inflight', since: this.now() }
     this.actions.set(clientId, a)
-    a.flight = this.deps.post(item, clientId).then(
+    a.flight = this.deps.post(item, clientId, room).then(
       (ev) => {
         // A server that dedupes echoes the key in the stored event (Idempotent posts, Payload).
         const echoed = (ev?.payload as { client_id?: unknown } | undefined)?.client_id
@@ -249,9 +274,16 @@ export class SendLedger {
       this.toUnknown(a)
       return 'unknown'
     }
+    if (isNetworkError(e) && this.dedupes === false) {
+      // A TypeError can also mean the request reached the server and the answer was lost. This
+      // server did not echo client_id, so a re-send could be stored twice (contract #460, #492):
+      // only a Retry click, after the window, sends it again.
+      this.toUnknown(a)
+      return 'unknown'
+    }
     if (isNetworkError(e) && this.count('queued') < MAX_KEPT) {
-      // Gap shared with main (pinned by a test): a TypeError can also mean the request reached
-      // the server and the answer was lost; a server without #459 then stores the re-send again (#492).
+      // Known gap: before any answer (dedupes null) the server is not known either way; the
+      // reconnect still re-sends, as a TypeError then is almost always "never left the browser".
       a.state = 'queued'
       this.setError(OFFLINE_TEXT)
       this.retryWhileLive()

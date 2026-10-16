@@ -33,6 +33,7 @@ vi.mock('../api/client', async (importOriginal) => {
 import { SEND_DEADLINE_MS, api, openRoomWs } from '../api/client'
 import { NOT_CONFIRMED_TEXT, OFFLINE_TEXT, UNCONFIRMED_TEXT } from '../lib/errors'
 import { useRoom } from './useRoom'
+import { UNCONFIRMED_WINDOW_MS } from './sendLedger'
 import { RollbackButton } from '../components/room/RollbackButton'
 import { Timeline } from '../components/Timeline'
 
@@ -575,10 +576,10 @@ describe('kept actions are never dropped by age', () => {
   })
 })
 
-// Gaps shared with main (org.md §12): pinned as they are today, each with its follow-up ticket
-// (#491, #492). When a ticket is fixed, its row flips to assert the fix.
-describe('gap rows (today\'s behaviour, shared with main)', () => {
-  it('GAP ADV-4 (#491): a kept steer drains into the room on screen after a room switch; only App.tsx keying RoomScreen by roomId prevents it', async () => {
+// #491: a kept action belongs to the room it was typed in. A room switch without a remount
+// neither drains it into the new room nor shows its banner there; back in its room, it drains.
+describe('kept actions after a room switch', () => {
+  it('ADV-4 (#491): a kept steer does not drain into the room on screen after a switch; it drains into its own room', async () => {
     const server = fakeServer('contract')
     vi.stubGlobal('fetch', server.fetchMock)
     const socket = new FakeWebSocket()
@@ -594,19 +595,66 @@ describe('gap rows (today\'s behaviour, shared with main)', () => {
     hook.rerender({ id: 'r2' })
     await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
     act(() => socket.onopen?.())
-    await pass(500)
-    expect(server.fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/rooms/r2/steer')
-  })
+    await pass(6_000) // the reconnect and the live retry
+    const paths = () => server.fetchMock.mock.calls.map((c) => c[0])
+    expect(paths()).toEqual(['/api/rooms/r1/steer'])
+    expect(hook.result.current.error).toBeNull()
 
-  it('GAP ADV-5 (#492): against a server without #459, a request stored before its connection reset is re-sent on reconnect: 2 copies', async () => {
-    const server = fakeServer('old')
-    const { hook, socket } = await openRoom(server)
-    server.state.resetAfterStore = 1
-    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
-    await pass(10)
-    expect(hook.result.current.error).toBe(OFFLINE_TEXT)
+    hook.rerender({ id: 'r1' })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(3))
     act(() => socket.onopen?.())
     await pass(500)
-    expect(server.stored.filter((e) => (e.payload as { text: string }).text === 'stop')).toHaveLength(2)
+    expect(paths()).toEqual(['/api/rooms/r1/steer', '/api/rooms/r1/steer'])
+    expect(server.stored).toHaveLength(1)
+  })
+
+  it('#491: a Retry of an action waiting on its flight re-posts to the action\'s room, not the one on screen', async () => {
+    const server = fakeServer('contract')
+    vi.stubGlobal('fetch', server.fetchMock)
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snap)
+    vi.mocked(api.events).mockResolvedValue({ events: [], next_after: 0 } as never)
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const hook = renderHook(({ id }) => useRoom(id), { initialProps: { id: 'r1' } })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    act(() => socket.onopen?.())
+    await warmUp(hook)
+    server.state.failAfter = 1_000
+    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    const retry = hook.result.current.actions.steer
+    hook.rerender({ id: 'r2' })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    fire(() => retry('stop', { clientId: 'k1' })) // waits on the first flight, then posts again
+    await pass(1_500)
+    expect(server.fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      '/api/rooms/r1/steer',
+      '/api/rooms/r1/steer',
+      '/api/rooms/r1/steer',
+    ])
+  })
+})
+
+// #492 (contract #460): a server that did not echo client_id may have stored a request whose
+// connection reset (a TypeError); it is never re-sent automatically, only by a Retry click.
+describe('a TypeError against a server that does not echo client_id', () => {
+  it('ADV-5 (#492): a request stored before its connection reset is not re-sent on reconnect: 1 copy, Retry offered', async () => {
+    const server = fakeServer('old')
+    const { hook, socket } = await openRoom(server)
+    await warmUp(hook) // the answer has no client_id: the server does not dedupe
+    server.state.resetAfterStore = 1
+    const sent = fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    expect(sent()).toBe(false)
+    expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
+    act(() => socket.onclose?.({ reason: '' }))
+    act(() => socket.onopen?.())
+    await pass(30_000) // the reconnect and the live retry send nothing
+    const stops = () => server.stored.filter((e) => (e.payload as { text: string }).text === 'stop')
+    expect(stops()).toHaveLength(1)
+    expect(hook.result.current.actions.sends?.isPending('k1')).toBe(true) // the composer keeps Retry
+    await pass(UNCONFIRMED_WINDOW_MS)
+    expect(stops()).toHaveLength(1)
+    expect(hook.result.current.error).toBe(NOT_CONFIRMED_TEXT)
   })
 })
