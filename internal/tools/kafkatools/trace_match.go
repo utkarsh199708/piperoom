@@ -1,6 +1,9 @@
 package kafkatools
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Literal matchers for the regexps on sanitizeTrace's hot path (#533). Each
 // gives exactly the answer of the regexp it stands in for. Go's (?i) folds
@@ -343,8 +346,37 @@ func maskBracedPasswords(s string) string {
 	return b.String()
 }
 
-// mayHoldOracleThin is false only when oracleThinCreds cannot match s. None
-// of the letters of "jdbc:oracle:" folds to a non-ASCII rune.
-func mayHoldOracleThin(s string) bool {
-	return strings.Contains(asciiLower(s), "jdbc:oracle:")
+// oracleThinAt is oracleThinCreds anchored at the start of its input.
+var oracleThinAt = regexp.MustCompile(`^` + oracleThinCreds.String())
+
+// maskOracleThinCreds is oracleThinCreds.ReplaceAllStringFunc(s,
+// maskOracleThin) (#533). Every match starts with jdbc:oracle: (none of
+// whose letters folds to a non-ASCII rune), so the leftmost match at or
+// after a point is the anchored match at the first such prefix that has
+// one; the regexp then runs only from those prefixes, not over the line.
+func maskOracleThinCreds(s string) string {
+	low := asciiLower(s)
+	var b strings.Builder
+	last := 0 // s[:last] is written to b
+	for i := 0; ; {
+		j := strings.Index(low[i:], "jdbc:oracle:")
+		if j < 0 {
+			break
+		}
+		at := i + j
+		loc := oracleThinAt.FindStringIndex(s[at:])
+		if loc == nil {
+			i = at + 1
+			continue
+		}
+		b.WriteString(s[last:at])
+		b.WriteString(maskOracleThin(s[at : at+loc[1]]))
+		last = at + loc[1]
+		i = last
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
 }

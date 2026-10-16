@@ -55,8 +55,8 @@ func TestMatchesRecordSnippetIsTheRegexp(t *testing.T) {
 		if got, want := maskBracedPasswords(s), bracedPassword.ReplaceAllString(s, "${1}"+redactedPassword); got != want {
 			t.Fatalf("maskBracedPasswords(%q) = %q, regexp gives %q", s, got, want)
 		}
-		if oracleThinCreds.MatchString(s) && !mayHoldOracleThin(s) {
-			t.Fatalf("mayHoldOracleThin(%q) = false, but the regexp matches", s)
+		if got, want := maskOracleThinCreds(s), oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin); got != want {
+			t.Fatalf("maskOracleThinCreds(%q) = %q, regexp gives %q", s, got, want)
 		}
 	}
 	for _, s := range rows {
@@ -73,8 +73,10 @@ func TestMatchesRecordSnippetIsTheRegexp(t *testing.T) {
 }
 
 // TestSanitizeTraceHostileSpeed: #533. A 64 KiB line of any repeated unit
-// stays well inside the budget (32-56 ms on main). Under -race everything is
-// several times slower, so the budget there is wider.
+// stays inside the budget (28-44 ms on main). The slowest lines here (4-6
+// ms) are the ones redact.Text and dlq.RedactMessage really mask; the time
+// is the thread's work (workTime), since CI runs packages in parallel.
+// Under -race everything is several times slower, so the budget is wider.
 func TestSanitizeTraceHostileSpeed(t *testing.T) {
 	budget := 10 * time.Millisecond
 	if raceEnabled {
@@ -91,10 +93,8 @@ func TestSanitizeTraceHostileSpeed(t *testing.T) {
 		line := "Caused by: x: " + strings.Repeat(unit, (64<<10)/len(unit)) + "Leak"
 		for name, f := range map[string]func(string) string{"sanitizeTrace": sanitizeTrace, "condenseTrace": condenseTrace} {
 			best := time.Hour
-			for range 3 { // the best of three, so one GC pause is not a failure
-				start := time.Now()
-				f(line)
-				best = min(best, time.Since(start))
+			for range 5 { // the best of five, so one GC pause is not a failure
+				best = min(best, workTime(func() { f(line) }))
 			}
 			if best > budget {
 				t.Errorf("%s: %q x 64 KiB took %v, want < %v", name, unit, best, budget)

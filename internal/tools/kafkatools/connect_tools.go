@@ -211,12 +211,10 @@ func maskCreds(s string) string {
 	// already masked and the Oracle pass can only add masks.
 	// The regexps cost about 10 ms each on a 64 KiB line (#533):
 	// maskBracedPasswords is bracedPassword's replacement without one, and
-	// the Oracle regexp runs only when the text holds its literal prefix.
+	// maskOracleThinCreds runs the Oracle regexp only where a match can start.
 	s = maskBracedPasswords(s)
 	s, _ = redact.Text(s)
-	if mayHoldOracleThin(s) {
-		s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
-	}
+	s = maskOracleThinCreds(s)
 	return s
 }
 
