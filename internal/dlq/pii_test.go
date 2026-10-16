@@ -349,6 +349,23 @@ func TestRedactCorpus(t *testing.T) {
 		// A bare "(cols) = (" without "Key" only ends the tuple before it; its
 		// value stays as main shows it ("f(x) = (y)" is prose as often).
 		{kind: "mask", in: "KEY (a)=（Zq1 (Zq2) was rejected (b) = (Zq3). x y)=(Zq4)", gone: "Zq1", want: "KEY (a)=<redacted> (b) = (Zq3). x y)=<redacted>"},
+		// #544 review round 1 on #562: "Key(" with no space before the column
+		// list, spaces or tabs around "=", and fullwidth separators.
+		{kind: "mask", in: "Key(id) = (jdoe_smith) already exists.", gone: "jdoe_smith", want: "Key(id) = <redacted> already exists."},
+		{kind: "mask", in: "Key(id)\t=\t(jdoe_smith) already exists.", gone: "jdoe_smith", want: "Key(id) = <redacted> already exists."},
+		{kind: "mask", in: "Key(id)＝（jdoe_smith） already exists.", gone: "jdoe_smith", want: "Key(id)＝<redacted> already exists."},
+		{kind: "mask", in: "KEY(a, b) = (Zq1, Zq2) is not present in table t.", gone: "Zq", want: "KEY(a, b) = <redacted> is not present in table t."},
+		// #539 review round 1 on #562: URLs longer than the word rule that
+		// straddle the cut and carry a signature, an OAuth code or a provider
+		// token without a userinfo '@' are replaced whole, as on main.
+		{kind: "mask", in: "x" + strings.Repeat(" word", 27) + " my_postgres://hadp.example.com/mjegbppbnbcpked?" + strings.Repeat("q=1&", 19) + "X-Amz-Signature=ZQlkfdlcjckjhnfklehckdfohjhmheekodpmi&z=pjhjhki", gone: "ZQlk", want: "x" + strings.Repeat(" word", 27) + " <redacted>"},
+		{kind: "mask", in: "x" + strings.Repeat(" word", 27) + " my_postgres://hadp.example.com/mjegbppbnbcpked?" + strings.Repeat("q=1&", 19) + "X-Goog-Signature=ZQlkfdlcjckjhnfklehckdfohjhmheekodpmi&z=pjhjhki", gone: "ZQlk", want: "x" + strings.Repeat(" word", 27) + " <redacted>"},
+		{kind: "mask", in: "x" + strings.Repeat(" word", 27) + " my_postgres://hadp.example.com/mjegbppbnbcpked?" + strings.Repeat("q=1&", 19) + "Signature=ZQlkfdlcjckjhnfklehckdfohjhmheekodpmi&z=pjhjhki", gone: "ZQlk", want: "x" + strings.Repeat(" word", 27) + " <redacted>"},
+		{kind: "mask", in: "x" + strings.Repeat(" word", 27) + " my_postgres://hadp.example.com/mjegbppbnbcpked?" + strings.Repeat("q=1&", 19) + "code=ZQlkfdlcjckjhnfklehckdfohjhmheekodpmi&z=pjhjhki", gone: "ZQlk", want: "x" + strings.Repeat(" word", 27) + " <redacted>"},
+		{kind: "mask", in: strings.Repeat("x", 60) + " GET https://maps.googleapis.com/maps/api/geocode/json?a=" + strings.Repeat("b", 162) + "&key=AIzaSyZq9xAbCdEfGhIjKlMnOpQrStUvWx12345&z=b end", gone: "AIza", want: strings.Repeat("x", 60) + " GET <redacted>"},
+		{kind: "mask", in: strings.Repeat("x", 20) + " POST https://api.example.com/v1/x/" + strings.Repeat("d", 244) + "/sk-ant-api03-Zq9AbCdEfGhIjKlMnOpQrStUvWx12345 failed", gone: "api.example", want: strings.Repeat("x", 20) + " POST <redacted>"},
+		{kind: "mask", in: strings.Repeat("x", 71) + " GET https://app.example.com/cb?a=" + strings.Repeat("b", 130) + "&jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJqYW5lIiwicm9sZSI6ImFkbWluIn0.Zq9AbCdEfGhIjKlMnOpQrStUvWxyz0123456789 failed", gone: "eyJ", want: strings.Repeat("x", 71) + " GET <redacted>"},
+		{kind: "mask", in: strings.Repeat("x", 17) + " POST https://hooks.slack.com/services/T0ABCDEFG/B0ABCDEFG/Zq9AbCdEfGhIjKlMnOpQrStUv" + strings.Repeat("w", 200) + " failed", gone: "B0ABCDEFG", want: strings.Repeat("x", 17) + " POST <redacted>"},
 		{kind: "keep", in: "f(x) = (y) holds"},
 		{kind: "keep", in: "the duplicate key value is unknown"},
 		{kind: "keep", in: "Duplicate entry found for key users.ux_login"},
