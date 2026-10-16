@@ -206,6 +206,10 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 	} else {
 		msg, ok, err = r.reply(e)
 	}
+	if ok && e.Type == events.ApprovalNudged && b.pager != nil && b.pager.nudgeLimited(e) {
+		// Do not let the reply imply the owners were asked when no page goes out.
+		msg.Blocks = append(msg.Blocks, section(":no_bell: owner not paged: hourly nudge limit reached"))
+	}
 	if err != nil {
 		b.log.Warn("slack render failed", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type), "err", err)
 	}

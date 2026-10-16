@@ -155,6 +155,31 @@ type pageKey struct{ room, user, reason string }
 // per-user-per-room gap and have their own hourly bucket.
 func (k pageKey) isNudge() bool { return strings.HasPrefix(k.reason, "nudge:") }
 
+// nudgeLimited reports whether e is a nudge whose layer has owners, none of
+// whom would be paged now only because of the hourly nudge limits. A nudge
+// already paged (redelivery) or for a layer with no owners is not "limited".
+func (p *pager) nudgeLimited(e events.Event) bool {
+	pl, err := events.Decode[events.ApprovalNudgedPayload](e)
+	if err != nil {
+		return false
+	}
+	limited := false
+	for _, id := range p.layers[pl.Layer] {
+		k := pageKey{e.RoomID, id, "nudge:" + strconv.FormatInt(e.Seq, 10)}
+		p.mu.Lock()
+		_, dup := p.seen[k]
+		p.mu.Unlock()
+		if dup {
+			return false
+		}
+		if p.check(k, nil) {
+			return false
+		}
+		limited = true
+	}
+	return limited
+}
+
 // check reports whether key may be paged now, counting the pages already
 // planned in the same message. It records nothing; call record once Slack
 // accepted the post. The first rule that fails wins: a repeated reason is
@@ -177,8 +202,19 @@ func (p *pager) check(key pageKey, planned []pageKey) bool {
 			}
 		}
 		rk := [2]string{key.room, key.user}
-		return len(recent(p.nudgeHits[key.user], now))+planned1 < p.lim.UserPerHour &&
-			len(recent(p.nudgeRoom[rk], now))+plannedRoom < p.lim.NudgeRoomPerHour
+		roomHits := len(recent(p.nudgeRoom[rk], now)) + plannedRoom
+		if roomHits >= p.lim.NudgeRoomPerHour {
+			return false
+		}
+		// The last slot of the owner's budget is kept for a room that has not
+		// nudged this owner yet: repeat nudges stop one short of UserPerHour, so
+		// a busy hour in a few rooms cannot leave a new room unpaged. The total
+		// across rooms stays capped at UserPerHour.
+		total := len(recent(p.nudgeHits[key.user], now)) + planned1
+		if roomHits == 0 {
+			return total < p.lim.UserPerHour
+		}
+		return total < p.lim.UserPerHour-1
 	}
 	if t, ok := p.last[[2]string{key.room, key.user}]; ok && now.Sub(t)+gapSlack < p.lim.UserRoomInterval {
 		return false
