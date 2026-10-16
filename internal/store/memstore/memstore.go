@@ -153,7 +153,7 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 		Type:    typ,
 		Actor:   actor,
 		Payload: raw,
-		At:      s.now().UTC(),
+		At:      s.now().UTC().Truncate(time.Microsecond), // as Postgres stores it
 	}
 	log.events = append(log.events, e)
 	if keyed {

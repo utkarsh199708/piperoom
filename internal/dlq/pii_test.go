@@ -281,6 +281,58 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "keep", in: "retry +1 2026-10-15 scheduled"},
 		{kind: "keep", in: "retry +1 2 3 times"},
 		{kind: "keep", in: "lag +12 at 10:00"},
+		// #440: PostgreSQL unique, foreign-key and exclusion "Key (cols)=(values)"
+		// details without a "Detail:" label. The values go, the columns stay.
+		{kind: "mask", in: `ERROR: duplicate key value violates unique constraint "u_name" Key (full_name)=(Jane Doe) already exists.`, gone: "Jane", want: "ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists."},
+		{kind: "mask", in: `duplicate key value violates unique constraint "u_tax" Key (tax_id, region)=(AB123456, EU) already exists.`, gone: "AB123456", want: "duplicate key value violates unique constraint <redacted> Key (tax_id, region)=<redacted> already exists."},
+		{kind: "mask", in: `insert or update on table "orders" violates foreign key constraint "fk_c" Key (customer_name)=(Jane Doe) is not present in table "customers".`, gone: "Jane", want: "insert or update on table <redacted> violates foreign key constraint <redacted> Key (customer_name)=<redacted> is not present in table <redacted>."},
+		{kind: "mask", in: `update or delete on table "customers" violates foreign key constraint "fk_c" on table "orders" Key (id)=(42) is still referenced from table "orders".`, gone: "42", want: "update or delete on table <redacted> violates foreign key constraint <redacted> on table <redacted> Key (id)=<redacted> is still referenced from table <redacted>."},
+		{kind: "mask", in: "Key (customer_ref)=(jdoe_smith) is not present in table customers.", gone: "jdoe_smith", want: "Key (customer_ref)=<redacted> is not present in table customers."},
+		// A quoted column name is main's quote rule's: it goes too.
+		{kind: "mask", in: `Key ("Full Name")=(Jane Doe) already exists.`, gone: "Jane", want: "Key (<redacted>)=<redacted> already exists."},
+		{kind: "mask", in: "Key (full_name, city)=(Doe, Jane, Paris) already exists.", gone: "Paris", want: "Key (full_name, city)=<redacted> already exists."},
+		{kind: "mask", in: "Key (note)=(a) b, c) already exists.", gone: "b, c", want: "Key (note)=<redacted> already exists."},
+		{kind: "mask", in: "Key (note)=(x) already exists y) already exists.", gone: "x) already exists y", want: "Key (note)=<redacted> already exists."},
+		{kind: "mask", in: "Key (lower(email::text))=(Jane Doe) already exists.", gone: "Jane", want: "Key (lower(email::text))=<redacted> already exists."},
+		{kind: "mask", in: "(full_name)=(Jane Doe) already exists", gone: "Jane", want: "(full_name)=<redacted> already exists"},
+		{kind: "mask", in: "key (full_name)=(Jane Doe) ALREADY EXISTS", gone: "Jane", want: "key (full_name)=<redacted> ALREADY EXISTS"},
+		{kind: "mask", in: "Key (full_name)=(Jane\n Doe) already exists.", gone: "Jane", want: "Key (full_name)=<redacted> already exists."},
+		{kind: "mask", in: "Key (full_name)=(Jane Doe", gone: "Jane", want: "Key (full_name)=<redacted>"},
+		{kind: "mask", in: "Key (full_name)=(Jane Doe) was rejected", gone: "Jane", want: "Key (full_name)=<redacted>"},
+		{kind: "mask", in: `conflicting key value violates exclusion constraint "no_overlap" Key (room, during)=(101, [2026-01-01,2026-01-02)) conflicts with existing key (room, during)=(101, [2026-01-01,2026-01-03)).`, gone: "101", want: "conflicting key value violates exclusion constraint <redacted> Key (room, during)=<redacted>"},
+		{kind: "mask", in: "Key (room)=(101) conflicts with existing key (room)=(102).", gone: "102", want: "Key (room)=<redacted> conflicts with existing key (room)=<redacted>"},
+		// Two details: both values go, both column lists stay (LEAD-REVIEW on #532).
+		{kind: "mask", in: "Key (a)=(Jane) already exists. Key (b)=(Doe) is not present in table t.", gone: "Doe", want: "Key (a)=<redacted> already exists. Key (b)=<redacted> is not present in table t."},
+		{kind: "mask", in: "Key (a)=(Jane) already exists Key (b)=(Bob) is not present in table x", gone: "Bob", want: "Key (a)=<redacted> already exists Key (b)=<redacted> is not present in table x"},
+		{kind: "mask", in: `Key (id)=(S1) already exists. Key (email2)=(S2) is not present in table "t".`, gone: "S2", want: "Key (id)=<redacted> already exists. Key (email2)=<redacted> is not present in table <redacted>."},
+		{kind: "mask", in: "Key (a)=(S1) already exists. Key (b)=(S2) already exists. tail", gone: "S1", want: "Key (a)=<redacted> already exists. Key (b)=<redacted> already exists. tail"},
+		// A tuple with no phrase after it ends before the next detail's column
+		// list (round 2 of the #532 review): every column stays visible.
+		{kind: "mask", in: "ERROR: x Key (a)=(S1q) conflicts with existing key (a)=(S2q). Key (c)=(S3q) already exists", gone: "S2q", want: "ERROR: x Key (a)=<redacted> conflicts with existing key (a)=<redacted> Key (c)=<redacted> already exists"},
+		{kind: "mask", in: "Key (a)=(Jane) was bad and Key (b)=(Bob) already exists", gone: "Jane", want: "Key (a)=<redacted> Key (b)=<redacted> already exists"},
+		{kind: "mask", in: "Key (a)=(x) Key (b)=(Yy) already exists", gone: "Yy", want: "Key (a)=<redacted> Key (b)=<redacted> already exists"},
+		{kind: "mask", in: "Key (colA)=(S1x) was rejected. Key (colB)=(S2x) already exists.", gone: "S1x", want: "Key (colA)=<redacted> Key (colB)=<redacted> already exists."},
+		{kind: "mask", in: "(colA)=(S1x) and (colB)=(S2x)", gone: "S1x", want: "(colA)=<redacted> (colB)=<redacted>"},
+		{kind: "mask", in: "Key (a)=(x y) was bad KEY (lower(b::text))=(Yy) already exists", gone: "x y", want: "Key (a)=<redacted> KEY (lower(b::text))=<redacted> already exists"},
+		// A unique index build and an exclusion constraint's second key.
+		{kind: "mask", in: "could not create unique index \"ux\" Key (email)=(jane) is duplicated.", gone: "jane", want: "could not create unique index <redacted> Key (email)=<redacted> is duplicated."},
+		{kind: "mask", in: "Key (room)=(101) conflicts with key (room)=(102).", gone: "101", want: "Key (room)=<redacted> conflicts with key (room)=<redacted>"},
+		{kind: "mask", in: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint \"u\"\n  Key (full_name)=(Jane Doe) already exists.  Call getNextException to see other errors in the batch.", gone: "Jane", want: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists. Call getNextException to see other errors in the batch."},
+		{kind: "keep", in: "Key (full_name) already exists"},
+		{kind: "keep", in: "retry=(3) backoff=(500ms)"},
+		// A value that holds both a keyEnds phrase and ")=(" reads as two details:
+		// the text between them stays ("y"). main keeps the whole value.
+		{kind: "gap", in: "Key (a)=(x) already exists y)=(z) already exists.", want: "Key (a)=<redacted> already exists y)=<redacted> already exists.", why: "a value holding a keyEnds phrase and ')=(' reads as two details; #544"},
+		{kind: "gap", in: "Key (n)=(Jane) Key (Doe)=(x) already exists.", want: "Key (n)=<redacted> Key (Doe)=<redacted> already exists.", why: "a value holding ') Key (...)=(' reads as a second detail's column list; #544"},
+		// Separator variants and non-PostgreSQL key details main keeps too: #544.
+		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id) = (jdoe_smith) already exists.", want: "Key (id) = (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)=\t(jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)=\n(jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)＝（jdoe_smith） already exists.", want: "Key (id)＝（jdoe_smith） already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is (jdoe_smith).", want: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is (jdoe_smith).", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Duplicate entry 'jdoe_smith' for key 'users.ux_login'", want: "Duplicate entry 'jdoe_smith' for key 'users.ux_login'", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
 		// #426 is split out of #435 (org.md §12): main's output, pinned.
 		{kind: "gap", in: "phone +44 20 7946 0958 now", want: "phone +44 20 7946 0958 now", why: "#426, split out"},
 		{kind: "gap", in: "phone +15551234567 now", want: "phone +15551234567 now", why: "#426, split out"},
@@ -376,6 +428,29 @@ func TestMaskPIIKeepsShape(t *testing.T) {
 	} {
 		if got := MaskPII(keep); got != keep {
 			t.Errorf("MaskPII(%q) = %q, want it unchanged", keep, got)
+		}
+	}
+}
+
+// #440 at the cap: wherever the cut falls in a "Key (...)=(...)" detail, no
+// part of the values goes out.
+func TestRedactMessageCapNeverSplitsAKeyValue(t *testing.T) {
+	for _, detail := range []string{
+		"Key (full_name)=(Zqxw Vbnm) already exists.",
+		"Key (tax_id, region)=(Zqxw12, Vbnm) already exists.",
+		"Key (customer_name)=(Zqxw, Vbnm) is not present in table customers.",
+	} {
+		for pad := 250; pad <= 300; pad++ {
+			in := strings.Repeat("x", pad-1) + " " + detail + " and the rest of the message"
+			got := RedactMessage(in)
+			for _, leak := range []string{"Zq", "qx", "xw", "Vb", "bn", "nm"} {
+				if strings.Contains(got, leak) {
+					t.Errorf("pad %d: RedactMessage kept %q: ...%q", pad, leak, got[max(0, len(got)-60):])
+				}
+			}
+			if again := RedactMessage(got); again != got {
+				t.Errorf("pad %d: not idempotent: %q -> %q", pad, got, again)
+			}
 		}
 	}
 }

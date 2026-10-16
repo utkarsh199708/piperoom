@@ -97,7 +97,8 @@ func TestRedactMessage(t *testing.T) {
 		{"unbalanced opener takes the rest", "got {a=1, b=secret and more", "got <redacted>"},
 		{"unterminated quote takes the rest", `got "secret and more`, "got <redacted>"},
 		{"stray closers are dropped", "a ] b } c", "a b c"},
-		{"stray closers do not fuse words", "Det}ail: Key (id)=(5)", "Det ail: Key (id)=(5)"},
+		// The closer breaks the "Detail:" label, so the #440 key rule masks the value.
+		{"stray closers do not fuse words", "Det}ail: Key (id)=(5)", "Det ail: Key (id)=<redacted>"},
 		{"control characters and runs of spaces", "a\x00b\tc\r\n  d​e", "ab c de"},
 		{"bidi override is dropped", "abc‮def", "abcdef"},
 		{"empty quotes and braces", `x "" {} [] y`, "x <redacted> <redacted> <redacted> y"},

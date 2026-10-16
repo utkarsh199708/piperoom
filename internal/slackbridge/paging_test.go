@@ -674,3 +674,53 @@ func TestPagingNudgeRoomMapBounded(t *testing.T) {
 		t.Errorf("nudgeRoom has %d entries after an idle hour, want 1", n)
 	}
 }
+
+// #541: two nudges in each of r1-r3 must leave a page for a new room r4, while
+// repeat nudges and a flood across new rooms stay capped.
+func TestPagingNudgesKeepPageForNewRoom(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := newPrunePager(t, &now, PagingLimits{})
+	paged := 0
+	for _, room := range []string{"r1", "r2", "r3"} {
+		for i := 0; i < 2; i++ {
+			if pageOnce(p, room, fmt.Sprintf("nudge:%s-%d", room, i)) {
+				paged++
+			}
+			now = now.Add(time.Minute)
+		}
+	}
+	if paged != 5 {
+		t.Errorf("r1-r3 paged %d, want 5 (the last slot is kept for a new room)", paged)
+	}
+	if !pageOnce(p, "r4", "nudge:r4") {
+		t.Error("nudges in r1-r3 starve r4")
+	}
+	if pageOnce(p, "r5", "nudge:r5") {
+		t.Error("a seventh page in the hour was allowed")
+	}
+}
+
+// #541: a nudge that is not paged says so in the thread reply.
+func TestNudgeReplyAdmitsUnpagedNudge(t *testing.T) {
+	evs := []events.Event{ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})}
+	for i := int64(0); i < 3; i++ {
+		evs = append(evs, nudgeEvent(2+i, fmt.Sprintf("p%d", i), "kafka"))
+	}
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+	now := time.Unix(1700000000, 0)
+	b.pager.now = func() time.Time { return now }
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = b.Run(ctx, "r1")
+	const note = "owner not paged: hourly nudge limit reached"
+	got := 0
+	for _, r := range fs.reqs {
+		if strings.Contains(fmt.Sprint(r), note) {
+			got++
+		}
+	}
+	if got != 1 {
+		t.Errorf("replies with the not-paged note = %d, want 1 (third nudge in the room)", got)
+	}
+}

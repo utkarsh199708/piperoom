@@ -3,6 +3,7 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -118,5 +119,34 @@ func TestDiffCorpus(t *testing.T) {
 				t.Errorf("got %q, want %q (main: %q)", got, v.want, v.main)
 			}
 		})
+	}
+}
+
+// A long enum that drops a symbol prints a short delta, so the real cause in
+// the same diff still fits a capped summary (connect_status caps each task).
+func TestEnumDeltaIsCompact(t *testing.T) {
+	syms := make([]string, 600)
+	for i := range syms {
+		syms[i] = fmt.Sprintf("S%03d", i)
+	}
+	enum := func(s []string) string {
+		return `{"type":"enum","name":"E","symbols":["` + strings.Join(s, `","`) + `"]}`
+	}
+	v1 := `{"type":"record","name":"Value","fields":[{"name":"st","type":` + enum(syms) + `},{"name":"amount","type":"int"}]}`
+	v2 := `{"type":"record","name":"Value","fields":[{"name":"st","type":` + enum(syms[1:]) +
+		`},{"name":"amount","type":{"type":"bytes","logicalType":"decimal","precision":12,"scale":2}}]}`
+	ch, err := diffFields(v1, v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := formatChanges(ch)
+	want := "Value.amount: int → bytes(decimal 12,2)\nenum E: symbols → -S000"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// Many symbols on one side are capped.
+	ch, _ = diffFields(v1, `{"type":"record","name":"Value","fields":[{"name":"st","type":`+enum(syms[:500])+`},{"name":"amount","type":"int"}]}`)
+	if got := formatChanges(ch); len(got) > 200 || !strings.Contains(got, "(90 more -)") {
+		t.Errorf("not capped: %d bytes: %.200q", len(got), got)
 	}
 }

@@ -2,7 +2,9 @@ package storetest
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -56,6 +58,25 @@ func RunClientIDUnique(t *testing.T, s KeyedStore) {
 	got, err := s.EventByClientID(ctx, r1, "priya", "k")
 	if err != nil || got.Seq != first.Seq || got.Type != events.CommentAdded || got.Actor.ID != "priya" {
 		t.Fatalf("lookup: %v %+v, want seq %d", err, got, first.Seq)
+	}
+	// The repeat answers the original event as stored: field for field, At
+	// included (Postgres keeps microseconds). JSON fields are compared by
+	// value because jsonb re-spaces them.
+	if got.RoomID != first.RoomID || got.Seq != first.Seq || got.Type != first.Type || !got.At.Equal(first.At) {
+		t.Fatalf("repeat %+v differs from first answer %+v", got, first)
+	}
+	if got.Actor != first.Actor {
+		t.Fatalf("repeat actor %+v, first %+v", got.Actor, first.Actor)
+	}
+	var gp, fp any
+	if err := json.Unmarshal(got.Payload, &gp); err != nil {
+		t.Fatalf("repeat payload: %v", err)
+	}
+	if err := json.Unmarshal(first.Payload, &fp); err != nil {
+		t.Fatalf("first payload: %v", err)
+	}
+	if !reflect.DeepEqual(gp, fp) {
+		t.Fatalf("repeat payload %s, first %s", got.Payload, first.Payload)
 	}
 	for _, c := range [][3]string{{r1, "priya", "nope"}, {r1, "nobody", "k"}, {"r_missing", "priya", "k"}} {
 		if _, err := s.EventByClientID(ctx, c[0], c[1], c[2]); !errors.Is(err, store.ErrNotFound) {
