@@ -998,6 +998,14 @@ var slowLines510 = map[string]func(n int) string{
 	"braced-escapes": func(n int) string { return "pwd={" + strings.Repeat("}}", n/2) },
 	"braced-many":    func(n int) string { return strings.Repeat("Pwd={a;b};", n/10) },
 	"braced-url":     func(n int) string { return strings.Repeat("jdbc:sqlserver://db:1433;password={B@c;d};", n/43) },
+	// Round 1 of the #547 review: unbounded and bare attributes, more quote
+	// styles, apostrophes, and quoted braced keys.
+	"attr-bare-many":  func(n int) string { return "<add " + strings.Repeat("b=c ", n/4) },
+	"attr-key-bare":   func(n int) string { return strings.Repeat("<add key=DbPassword value=", n/26) },
+	"typo-open":       func(n int) string { return strings.Repeat("--password „", n/14) },
+	"typo-apostrophe": func(n int) string { return "--password ‘" + strings.Repeat("it’s ", n/7) },
+	"braced-quoted":   func(n int) string { return strings.Repeat("\"Password\"={", n/13) },
+	"padded-words":    func(n int) string { return strings.Repeat("<password> debezium </password>", n/31) },
 }
 
 // TestReview510LinearTime: every hostile 64 KiB line runs in under 50 ms.

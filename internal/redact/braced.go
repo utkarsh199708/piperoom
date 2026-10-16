@@ -56,7 +56,8 @@ func bracedSpans(s string) []span {
 }
 
 // bracedKeyBefore reports whether the '{' at open follows key=, blanks
-// allowed around '=', where the key's word characters end in a bracedWord.
+// allowed around '=' and the key maybe quoted, where the key's word
+// characters end in a bracedWord.
 func bracedKeyBefore(s string, open int) bool {
 	j := open
 	for j > 0 && (s[j-1] == ' ' || s[j-1] == '\t') {
@@ -67,6 +68,10 @@ func bracedKeyBefore(s string, open int) bool {
 	}
 	j--
 	for j > 0 && (s[j-1] == ' ' || s[j-1] == '\t') {
+		j--
+	}
+	// A quoted key: "Password"={...}.
+	if j > 0 && (s[j-1] == '"' || s[j-1] == '\'') {
 		j--
 	}
 	ke := j

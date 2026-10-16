@@ -19,9 +19,6 @@ var addXMLAttrRule = rule{
 	remask: true,
 }
 
-// maxXMLAttrs bounds how many attributes of one start tag are read.
-const maxXMLAttrs = 16
-
 // xmlAttr is one attribute of a start tag: its name and the bounds of its
 // value inside the quotes.
 type xmlAttr struct {
@@ -52,7 +49,7 @@ func xmlAttrFind(s, _ string) [][]int {
 		var selfClosing, ok bool
 		attrs, k, selfClosing, ok = readAttrs(s, ne, attrs[:0])
 		i = max(i, k)
-		if !ok || !namedSecret(s, attrs) {
+		if !ok || !namedSecret(s, s[ns:ne], attrs) {
 			continue
 		}
 		if a, found := attrNamed(attrs, "value"); found {
@@ -71,10 +68,20 @@ func xmlAttrFind(s, _ string) [][]int {
 	return out
 }
 
+// schemaElements name a column or field with name=, not a setting:
+// <column name="password">VARCHAR</column> holds the column's type.
+var schemaElements = map[string]bool{
+	"column": true, "col": true, "field": true, "attribute": true, "attr": true, "element": true, "member": true,
+}
+
 // namedSecret reports whether a key= or name= attribute ends in a secret
-// word, or in pwd (.NET appSettings keys such as DbPwd).
-func namedSecret(s string, attrs []xmlAttr) bool {
+// word, or in pwd (.NET appSettings keys such as DbPwd). On a schema
+// element (column, field, ...) name= does not count.
+func namedSecret(s, elem string, attrs []xmlAttr) bool {
 	for _, n := range []string{"key", "name"} {
+		if n == "name" && schemaElements[asciiLower(localName(elem))] {
+			continue
+		}
 		if a, ok := attrNamed(attrs, n); ok && (endsInFlagWord(asciiLower(s[a.vs:a.ve])) ||
 			strings.HasSuffix(asciiLower(s[a.vs:a.ve]), "pwd")) {
 			return true
@@ -92,12 +99,14 @@ func attrNamed(attrs []xmlAttr, name string) (xmlAttr, bool) {
 	return xmlAttr{}, false
 }
 
-// readAttrs reads the quoted attributes of a start tag whose name ends at
-// i, up to its '>'. It returns them, the index after the '>' (or where the
-// scan stopped), whether the tag closes itself, and whether the tag was
-// read whole. An attribute value may not hold '<', so the scan stops there.
+// readAttrs reads the attributes of a start tag whose name ends at i, up to
+// its '>', and keeps those named key, name or value. It returns them, the
+// index after the '>' (or where the scan stopped), whether the tag closes
+// itself, and whether the tag was read whole. A value may be quoted or bare
+// (key=DbPassword); none may hold '<', so the scan stops there. Each step
+// moves forward, so a tag costs time linear in its length.
 func readAttrs(s string, i int, attrs []xmlAttr) ([]xmlAttr, int, bool, bool) {
-	for range maxXMLAttrs + 1 {
+	for {
 		i = skipXMLSpace(s, i)
 		switch {
 		case i >= len(s):
@@ -118,22 +127,37 @@ func readAttrs(s string, i int, attrs []xmlAttr) ([]xmlAttr, int, bool, bool) {
 			return attrs, i, false, false
 		}
 		i = skipXMLSpace(s, i+1)
-		if i >= len(s) || s[i] != '"' && s[i] != '\'' {
+		if i >= len(s) {
 			return attrs, i, false, false
 		}
-		q := s[i]
-		vs := i + 1
-		ve := vs
-		for ve < len(s) && s[ve] != q && s[ve] != '<' {
-			ve++
+		var vs, ve int
+		if q := s[i]; q == '"' || q == '\'' {
+			vs = i + 1
+			ve = vs
+			for ve < len(s) && s[ve] != q && s[ve] != '<' {
+				ve++
+			}
+			if ve >= len(s) || s[ve] != q {
+				return attrs, ve, false, false
+			}
+			i = ve + 1
+		} else {
+			vs = i
+			ve = vs
+			for ve < len(s) && !isXMLSpace(s[ve]) && s[ve] != '>' && s[ve] != '<' && s[ve] != '"' && s[ve] != '\'' &&
+				!strings.HasPrefix(s[ve:], "/>") {
+				ve++
+			}
+			if ve == vs {
+				return attrs, ve, false, false
+			}
+			i = ve
 		}
-		if ve >= len(s) || s[ve] != q {
-			return attrs, ve, false, false
+		switch asciiLower(localName(name)) {
+		case "key", "name", "value":
+			attrs = append(attrs, xmlAttr{name: name, vs: vs, ve: ve})
 		}
-		attrs = append(attrs, xmlAttr{name: name, vs: vs, ve: ve})
-		i = ve + 1
 	}
-	return attrs, i, false, false
 }
 
 // openTagCut moves a scan cut back before a secret-named XML element whose
@@ -142,7 +166,8 @@ func readAttrs(s string, i int, attrs []xmlAttr) ([]xmlAttr, int, bool, bool) {
 // without the end tag that lets addXMLRule read it. The cut goes to the
 // start of the start tag's line, so every line left in the head is whole,
 // or to the tag itself when that line starts before the window. The text
-// it drops from the head lands in the overflow mask.
+// it drops from the head lands in the overflow mask. Only a start tag in an
+// XML context counts (xmlContext), not prose such as "no <password> given".
 func openTagCut(s string, cut int) int {
 	lo := max(0, cut-4096)
 	win := s[lo:cut]
@@ -178,7 +203,8 @@ func openTagCut(s string, cut int) int {
 		var selfClosing, ok bool
 		attrs, k, selfClosing, ok = readAttrs(win, ne, attrs[:0])
 		i = max(i, k)
-		if ok && !selfClosing && (endsInFlagWord(asciiLower(win[ns:ne])) || namedSecret(win, attrs)) {
+		if ok && !selfClosing && xmlContext(s, lo+p) &&
+			(endsInFlagWord(asciiLower(win[ns:ne])) || namedSecret(win, win[ns:ne], attrs)) {
 			starts = append(starts, startTag{p, localName(asciiLower(win[ns:ne]))})
 		}
 	}
@@ -192,4 +218,13 @@ func openTagCut(s string, cut int) int {
 		return lo + st.at
 	}
 	return cut
+}
+
+// xmlContext reports whether the start tag at p opens its line (after
+// blanks) or follows another tag's '>'.
+func xmlContext(s string, p int) bool {
+	for p > 0 && (s[p-1] == ' ' || s[p-1] == '\t') {
+		p--
+	}
+	return p == 0 || s[p-1] == '\n' || s[p-1] == '>'
 }

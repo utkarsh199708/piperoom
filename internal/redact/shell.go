@@ -97,13 +97,9 @@ type shellWord struct {
 	quoted, special bool
 }
 
-// Typographic quotes, as chat clients rewrite straight ones.
-const (
-	ldquo = "“"
-	rdquo = "”"
-	lsquo = "‘"
-	rsquo = "’"
-)
+// typoQuotes are the quote pairs chat clients and other locales put in
+// place of straight ones: English, German „“, guillemets and fullwidth.
+var typoQuotes = [][2]string{{"“", "”"}, {"‘", "’"}, {"„", "“"}, {"«", "»"}, {"‹", "›"}, {"＂", "＂"}}
 
 // readShellWord reads the shell argument at v up to an unescaped blank. A
 // quote left open runs to the end of the line (a truncated summary). Quote
@@ -114,7 +110,8 @@ func readShellWord(s string, v int) *shellWord {
 	w := &shellWord{}
 	k := v
 	// closeAt reads a quoted run from k up to the closer; esc allows
-	// backslash escapes inside it. It reports whether the closer came.
+	// backslash escapes inside it. It reports whether the closer came. A ’
+	// followed by a letter is an apostrophe (it’s), not the closer.
 	closeAt := func(closer string, esc bool) bool {
 		for k < len(s) && s[k] != '\r' {
 			switch {
@@ -122,7 +119,8 @@ func readShellWord(s string, v int) *shellWord {
 				w.val.WriteByte(s[k+1])
 				k += 2
 				continue
-			case strings.HasPrefix(s[k:], closer):
+			case strings.HasPrefix(s[k:], closer) &&
+				!(closer == "’" && k+len(closer) < len(s) && isLetter(s[k+len(closer)])):
 				k += len(closer)
 				return true
 			}
@@ -178,15 +176,10 @@ func readShellWord(s string, v int) *shellWord {
 				w.end = k
 				return w
 			}
-		case strings.HasPrefix(s[k:], ldquo):
-			k += len(ldquo)
-			if !quote(at, rdquo, false, true) {
-				w.end = k
-				return w
-			}
-		case strings.HasPrefix(s[k:], lsquo):
-			k += len(lsquo)
-			if !quote(at, rsquo, false, true) {
+		case c >= 0x80 && typoOpen(s[k:]) >= 0:
+			q := typoQuotes[typoOpen(s[k:])]
+			k += len(q[0])
+			if !quote(at, q[1], false, true) {
 				w.end = k
 				return w
 			}
@@ -205,6 +198,17 @@ func readShellWord(s string, v int) *shellWord {
 	}
 	w.end = k
 	return w
+}
+
+// typoOpen returns the index in typoQuotes of the pair whose opener starts
+// s, or -1.
+func typoOpen(s string) int {
+	for i, q := range typoQuotes {
+		if strings.HasPrefix(s, q[0]) {
+			return i
+		}
+	}
+	return -1
 }
 
 // winSet matches cmd's "set NAME=value" (or set "NAME=value") at the start
