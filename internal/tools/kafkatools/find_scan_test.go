@@ -3,6 +3,7 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/kafka"
 	"piperoom/internal/tools"
 )
 
@@ -208,5 +210,68 @@ func TestFindByKeyManyMatchesKeepsNote(t *testing.T) {
 				t.Errorf("data records = %d, want all %d", len(got), n)
 			}
 		})
+	}
+}
+
+// TestFindByKeyUndecodedIsNotAMaxScanCut: #538 scenario 2. Matches at
+// offsets 0 and 2 and an Avro key at 1 the registry could not decode: the
+// matches are listed, the note names the undecoded key and the registry,
+// and it never advises a larger max_scan, which cannot help.
+func TestFindByKeyUndecodedIsNotAMaxScanCut(t *testing.T) {
+	at := time.Date(2026, 10, 11, 1, 0, 0, 0, time.UTC)
+	refs := []clients.RecordRef{
+		{Topic: "t", Partition: 0, Offset: 0, Timestamp: at, Key: "k"},
+		{Topic: "t", Partition: 0, Offset: 2, Timestamp: at.Add(time.Second), Key: "k"},
+	}
+	for _, tt := range []struct {
+		name    string
+		cut     []int32
+		wantCut bool
+	}{
+		{"read to the end", nil, false},
+		{"also cut", []int32{1}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ue := &kafka.UndecodedKeysError{
+				Topic: "t", Scan: clients.KeyScan{Refs: refs, Truncated: append([]int32{0}, tt.cut...)},
+				Undecoded: 1, Partitions: []int32{0}, Cut: tt.cut, Cause: errors.New("registry down"),
+			}
+			fk := &reportingKafka{fakeKafka: &fakeKafka{}, err: ue}
+			reg := tools.NewRegistry()
+			if err := Register(reg, Deps{Kafka: fk}); err != nil {
+				t.Fatal(err)
+			}
+			tool, _ := reg.Get("kafka_find_by_key")
+			r := runTool(t, tool, `{"topic":"t","key":"k","since":"2026-10-11T00:00:00Z","max_scan":10}`)
+			for _, want := range []string{"found 2 record(s)", "1 key(s) in partition(s) [0] could not be decoded (schema registry unavailable)", "a larger max_scan cannot help"} {
+				if !strings.Contains(r.Summary, want) {
+					t.Errorf("summary %q: want %q", r.Summary, want)
+				}
+			}
+			if strings.Contains(r.Summary, "use a later since or a larger max_scan") {
+				t.Errorf("summary %q advises a larger max_scan", r.Summary)
+			}
+			if got := strings.Contains(r.Summary, "before the end of partition(s) [1]"); got != tt.wantCut {
+				t.Errorf("summary %q: cut line present = %v, want %v", r.Summary, got, tt.wantCut)
+			}
+			data, _ := r.Data.(map[string]any)
+			if data["truncated"] != true || data["undecoded_keys"] != 1 {
+				t.Errorf("data %+v: want truncated and undecoded_keys 1", data)
+			}
+		})
+	}
+}
+
+// TestFindByKeyUndecodedWithoutMatchIsAnError: with no match, undecoded keys
+// stay an error (#386), never "not found".
+func TestFindByKeyUndecodedWithoutMatchIsAnError(t *testing.T) {
+	fk := &reportingKafka{fakeKafka: &fakeKafka{}, err: &kafka.UndecodedKeysError{Topic: "t", Undecoded: 3, Partitions: []int32{0}, Cause: errors.New("registry down")}}
+	reg := tools.NewRegistry()
+	if err := Register(reg, Deps{Kafka: fk}); err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := reg.Get("kafka_find_by_key")
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"topic":"t","key":"k","since":"2026-10-11T00:00:00Z"}`)); err == nil {
+		t.Fatal("want an error")
 	}
 }

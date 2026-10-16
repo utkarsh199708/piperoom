@@ -54,8 +54,19 @@ func TestFindByKeyRegistryDownIsNotNotFound(t *testing.T) {
 	}
 }
 
-// TestFindByKeyRegistryDownWithMatch: a raw-key match is kept and the
-// partition with undecodable keys is reported truncated.
+// undecodedErr returns err as an *UndecodedKeysError, or fails the test.
+func undecodedErr(t *testing.T, scan clients.KeyScan, err error) *UndecodedKeysError {
+	t.Helper()
+	var ue *UndecodedKeysError
+	if !errors.As(err, &ue) || !errors.Is(err, errRegistryUnavailable) {
+		t.Fatalf("got %+v, %v; want an *UndecodedKeysError wrapping the registry failure", scan, err)
+	}
+	return ue
+}
+
+// TestFindByKeyRegistryDownWithMatch: a raw-key match is kept, inside the
+// error (#538): the partition with undecodable keys is incomplete in a way
+// max_scan cannot fix, so the scan is not a plain cut with a nil error.
 func TestFindByKeyRegistryDownWithMatch(t *testing.T) {
 	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error_code":50301,"message":"down"}`, http.StatusServiceUnavailable)
@@ -63,8 +74,33 @@ func TestFindByKeyRegistryDownWithMatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
-	if err != nil || len(scan.Refs) != 1 || len(scan.Truncated) != 1 {
-		t.Fatalf("got %+v, %v; want one ref and partition 0 truncated", scan, err)
+	ue := undecodedErr(t, scan, err)
+	if len(ue.Scan.Refs) != 1 || !slices.Equal(ue.Scan.Truncated, []int32{0}) || ue.Undecoded != 1 {
+		t.Fatalf("got %+v; want one ref, partition 0 truncated, 1 key undecoded", ue)
+	}
+}
+
+// TestFindByKeyOlderUndecodedIsNotACut: #538 scenario 2 (the ticket's
+// TestQAOlderUndecoded). Raw matches at offsets 0 and 2 and an Avro key at
+// 1 with the registry down: the scan read to the end, so no partition was
+// cut, and the scan is an error that names the undecoded key, not refs with
+// Truncated:[0] and a nil error that read as a max_scan cut.
+func TestFindByKeyOlderUndecodedIsNotACut(t *testing.T) {
+	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error_code":50301,"message":"down"}`, http.StatusServiceUnavailable)
+	}, data(0, 0, "k"), avroKeyRec(0, 1), data(0, 2, "k"))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
+	ue := undecodedErr(t, scan, err)
+	if len(ue.Scan.Refs) != 2 || ue.Undecoded != 1 || !slices.Equal(ue.Partitions, []int32{0}) || len(ue.Cut) != 0 {
+		t.Fatalf("got %+v; want refs at 0 and 2, 1 undecoded key in partition 0, nothing cut", ue)
+	}
+	if !strings.Contains(err.Error(), "1 keys could not be decoded") {
+		t.Errorf("err = %v", err)
+	}
+	if refs, err := c.FindByKey(ctx, "t", "k", epoch, 0); err == nil {
+		t.Errorf("FindByKey = %+v, nil error; want the scan's error", refs)
 	}
 }
 
@@ -155,9 +191,8 @@ func TestFindByKeyRegistryDownAsksOnce(t *testing.T) {
 	}
 }
 
-// TestFindByKeyRegistryDownWithMatchAsksOnce: #538 with a raw match. The
-// match is kept, the partition reported truncated as in #516, and the
-// registry asked once.
+// TestFindByKeyRegistryDownWithMatchAsksOnce: #538 with raw matches. The
+// matches are kept in the error and the registry is asked once.
 func TestFindByKeyRegistryDownWithMatchAsksOnce(t *testing.T) {
 	var hits atomic.Int32
 	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -167,8 +202,8 @@ func TestFindByKeyRegistryDownWithMatchAsksOnce(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
-	if err != nil || len(scan.Refs) != 2 || !slices.Equal(scan.Truncated, []int32{0}) {
-		t.Fatalf("got %+v, %v; want two refs and partition 0 truncated", scan, err)
+	if ue := undecodedErr(t, scan, err); len(ue.Scan.Refs) != 2 || !slices.Equal(ue.Scan.Truncated, []int32{0}) || ue.Undecoded != 2 {
+		t.Fatalf("got %+v; want two refs, partition 0 truncated, 2 keys undecoded", ue)
 	}
 	if n := hits.Load(); n != 1 {
 		t.Errorf("registry got %d requests, want 1", n)

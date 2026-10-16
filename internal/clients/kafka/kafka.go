@@ -531,10 +531,35 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 	scanned := 0
 	var firstUnknown error // first key left undecoded by an unreachable registry
 	undecoded := 0
+	var undecodedParts []int32 // partitions holding undecoded keys
 	// registryDown is set by the first registry-unavailable fetch. After it
 	// the scan asks the registry nothing more (#538): a failing registry
 	// would otherwise get one request per Avro key, up to maxScan of them.
 	var registryDown error
+	// done ends a scan. Keys left undecoded by an unreachable registry (#386)
+	// make it incomplete in a way max_scan cannot fix, so the scan is an
+	// error, never "not found" and never a plain cut (#538): with matches the
+	// error is an *UndecodedKeysError that carries them.
+	done := func() (clients.KeyScan, error) {
+		if undecoded > 0 && len(found) == 0 {
+			return clients.KeyScan{}, fmt.Errorf("kafka: scan %s incomplete: %d keys could not be decoded: %w", topic, undecoded, firstUnknown)
+		}
+		if undecoded > 0 {
+			all := slices.Clone(truncated)
+			for _, p := range undecodedParts {
+				if !slices.Contains(all, p) {
+					all = append(all, p)
+				}
+			}
+			slices.Sort(undecodedParts)
+			slices.Sort(truncated)
+			return clients.KeyScan{}, &UndecodedKeysError{
+				Topic: topic, Scan: keyScan(found, all), Undecoded: undecoded,
+				Partitions: undecodedParts, Cut: truncated, Cause: firstUnknown,
+			}
+		}
+		return keyScan(found, truncated), nil
+	}
 	// cut ends the scan at the deadline: matches found so far are kept and
 	// the unfinished partitions reported, since a later match may exist
 	// there; with no match it is an error, never a false "not found".
@@ -547,16 +572,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 				truncated = append(truncated, p)
 			}
 		}
-		return keyScan(found, truncated), nil
-	}
-	// done ends a scan that read every window. Keys left undecoded by an
-	// unreachable registry (#386) make it incomplete: with no match that is
-	// an error, never "not found"; with matches the partitions are truncated.
-	done := func() (clients.KeyScan, error) {
-		if undecoded > 0 && len(found) == 0 {
-			return clients.KeyScan{}, fmt.Errorf("kafka: scan %s incomplete: %d keys could not be decoded: %w", topic, undecoded, firstUnknown)
-		}
-		return keyScan(found, truncated), nil
+		return done()
 	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -602,8 +618,8 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 					firstUnknown = derr
 				}
 				undecoded++
-				if !slices.Contains(truncated, r.Partition) {
-					truncated = append(truncated, r.Partition)
+				if !slices.Contains(undecodedParts, r.Partition) {
+					undecodedParts = append(undecodedParts, r.Partition)
 				}
 				continue
 			}
@@ -779,6 +795,27 @@ func (c *Client) decodeKeyIn(ctx context.Context, key []byte, down *error) (out 
 	}
 	return string(b), nil
 }
+
+// UndecodedKeysError is FindByKeyScan's error when it found matches but the
+// schema registry was unavailable for some Avro keys (#538): one of those
+// keys may be a match, older or newer than the ones found, and a larger
+// max_scan cannot help. Scan is what the scan found, with every partition
+// holding an undecoded key in Truncated; a caller that cannot say why a
+// scan is incomplete reads the error, one that can uses the fields.
+type UndecodedKeysError struct {
+	Topic      string
+	Scan       clients.KeyScan
+	Undecoded  int     // keys left undecoded
+	Partitions []int32 // partitions holding them, ascending
+	Cut        []int32 // partitions max_scan or the deadline cut, ascending
+	Cause      error   // the first registry failure (wraps errRegistryUnavailable)
+}
+
+func (e *UndecodedKeysError) Error() string {
+	return fmt.Sprintf("kafka: scan %s incomplete: %d keys could not be decoded: %v", e.Topic, e.Undecoded, e.Cause)
+}
+
+func (e *UndecodedKeysError) Unwrap() error { return e.Cause }
 
 // errRegistryUnavailable marks a key whose schema could not be fetched for a
 // reason that is not about the key (registry 5xx, transport error, deadline).
