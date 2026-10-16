@@ -161,6 +161,10 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 // one provenance call per request, on success and on error. The call holds the
 // method and path only: a request body can carry a config value.
 func (c *Client) doBody(ctx context.Context, method, path string, in, out any) error {
+	// A refused path is never sent, so it gets no receipt (#446).
+	if err := netsec.CheckPath(path); err != nil {
+		return fmt.Errorf("connect: %s: %w", method, err)
+	}
 	start := time.Now()
 	err := c.roundTrip(ctx, method, path, in, out)
 	tools.Record(ctx, tools.Call{
@@ -181,9 +185,6 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, in, out any
 			return fmt.Errorf("connect: %s %s: encode body: %w", method, path, err)
 		}
 		body = bytes.NewReader(b)
-	}
-	if err := netsec.CheckPath(path); err != nil {
-		return fmt.Errorf("connect: %s: %w", method, err)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {

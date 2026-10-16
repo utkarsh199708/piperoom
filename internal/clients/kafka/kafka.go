@@ -446,7 +446,9 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 var _ clients.KeyScanReader = (*Client)(nil)
 
 // FindByKeyScan is FindByKey that also reports the partitions whose window the
-// scan did not finish (clients.KeyScanReader).
+// scan did not finish (clients.KeyScanReader). Matches found while the schema
+// registry was unavailable for some Avro keys come back inside an
+// *UndecodedKeysError, with a zero KeyScan (so FindByKey returns no refs).
 func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (clients.KeyScan, error) {
 	maxScan = normalizeMaxScan(maxScan)
 	ms, err := afterMilli(since)
@@ -531,6 +533,35 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 	scanned := 0
 	var firstUnknown error // first key left undecoded by an unreachable registry
 	undecoded := 0
+	var undecodedParts []int32 // partitions holding undecoded keys
+	// registryDown is set by the first registry-unavailable fetch. After it
+	// the scan asks the registry nothing more (#538): a failing registry
+	// would otherwise get one request per Avro key, up to maxScan of them.
+	var registryDown error
+	// done ends a scan. Keys left undecoded by an unreachable registry (#386)
+	// make it incomplete in a way max_scan cannot fix, so the scan is an
+	// error, never "not found" and never a plain cut (#538): with matches the
+	// error is an *UndecodedKeysError that carries them.
+	done := func() (clients.KeyScan, error) {
+		if undecoded > 0 && len(found) == 0 {
+			return clients.KeyScan{}, fmt.Errorf("kafka: scan %s incomplete: %d keys could not be decoded: %w", topic, undecoded, firstUnknown)
+		}
+		if undecoded > 0 {
+			all := slices.Clone(truncated)
+			for _, p := range undecodedParts {
+				if !slices.Contains(all, p) {
+					all = append(all, p)
+				}
+			}
+			slices.Sort(undecodedParts)
+			slices.Sort(truncated)
+			return clients.KeyScan{}, &UndecodedKeysError{
+				Topic: topic, Scan: keyScan(found, all), Undecoded: undecoded,
+				Partitions: undecodedParts, Cut: truncated, Cause: firstUnknown,
+			}
+		}
+		return keyScan(found, truncated), nil
+	}
 	// cut ends the scan at the deadline: matches found so far are kept and
 	// the unfinished partitions reported, since a later match may exist
 	// there; with no match it is an error, never a false "not found".
@@ -543,16 +574,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 				truncated = append(truncated, p)
 			}
 		}
-		return keyScan(found, truncated), nil
-	}
-	// done ends a scan that read every window. Keys left undecoded by an
-	// unreachable registry (#386) make it incomplete: with no match that is
-	// an error, never "not found"; with matches the partitions are truncated.
-	done := func() (clients.KeyScan, error) {
-		if undecoded > 0 && len(found) == 0 {
-			return clients.KeyScan{}, fmt.Errorf("kafka: scan %s incomplete: %d keys could not be decoded: %w", topic, undecoded, firstUnknown)
-		}
-		return keyScan(found, truncated), nil
+		return done()
 	}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -586,7 +608,7 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 				return cut(cctx.Err())
 			}
 			scanned++
-			dk, derr := c.decodeKey(cctx, r.Key)
+			dk, derr := c.decodeKeyIn(cctx, r.Key, &registryDown)
 			if errors.Is(derr, errRegistryUnavailable) {
 				// The key may be the one we look for: this partition's
 				// scan is incomplete, whatever else it finds.
@@ -598,8 +620,8 @@ func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since tim
 					firstUnknown = derr
 				}
 				undecoded++
-				if !slices.Contains(truncated, r.Partition) {
-					truncated = append(truncated, r.Partition)
+				if !slices.Contains(undecodedParts, r.Partition) {
+					undecodedParts = append(undecodedParts, r.Partition)
 				}
 				continue
 			}
@@ -723,7 +745,15 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[
 // decoder panic becomes an error. Decode takes no context, so these limits,
 // not a deadline, are what bound its time and memory; FindByKey also checks
 // its deadline between records.
-func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err error) {
+func (c *Client) decodeKey(ctx context.Context, key []byte) (string, error) {
+	return c.decodeKeyIn(ctx, key, nil)
+}
+
+// decodeKeyIn is decodeKey for one scan. down, when not nil, carries the
+// scan's first registry-unavailable error: once it is set, a schema id that
+// is not cached is not fetched and the key is reported undecoded with that
+// cause (#538).
+func (c *Client) decodeKeyIn(ctx context.Context, key []byte, down *error) (out string, err error) {
 	// Without a Schema Registry (SCHEMA_REGISTRY_URL empty or off) no key is
 	// Avro-decoded: a key that merely starts with 0x00 is compared raw.
 	if c.sr == nil || len(key) < 5 || key[0] != 0x00 {
@@ -738,7 +768,7 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 		}
 	}()
 	id := int(binary.BigEndian.Uint32(key[1:5]))
-	schema, err := c.schemaByID(ctx, id)
+	schema, err := c.schemaByID(ctx, id, down)
 	if err != nil {
 		return "", err
 	}
@@ -768,17 +798,46 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 	return string(b), nil
 }
 
+// UndecodedKeysError is FindByKeyScan's error when it found matches but the
+// schema registry was unavailable for some Avro keys (#538): one of those
+// keys may be a match, older or newer than the ones found, and a larger
+// max_scan cannot help. Scan is what the scan found, with every partition
+// holding an undecoded key in Truncated; a caller that cannot say why a
+// scan is incomplete reads the error, one that can uses the fields.
+type UndecodedKeysError struct {
+	Topic      string
+	Scan       clients.KeyScan
+	Undecoded  int     // keys left undecoded
+	Partitions []int32 // partitions holding them, ascending
+	Cut        []int32 // partitions max_scan or the deadline cut, ascending
+	Cause      error   // the first registry failure (wraps errRegistryUnavailable)
+}
+
+func (e *UndecodedKeysError) Error() string {
+	return fmt.Sprintf("kafka: scan %s incomplete: %d keys could not be decoded: %v", e.Topic, e.Undecoded, e.Cause)
+}
+
+func (e *UndecodedKeysError) Unwrap() error { return e.Cause }
+
 // errRegistryUnavailable marks a key whose schema could not be fetched for a
 // reason that is not about the key (registry 5xx, transport error, deadline).
 // FindByKeyScan treats such a key as unknown, never as a non-match.
 var errRegistryUnavailable = errors.New("kafka: schema registry unavailable")
 
+// schemaNotFound reports whether err is the registry's structured "schema
+// not found" answer (HTTP 404 with error_code 40403).
+func schemaNotFound(err error) bool {
+	var serr *schemareg.Error
+	return errors.Is(err, clients.ErrNotFound) && errors.As(err, &serr) && serr.Code == 40403
+}
+
 // schemaByID returns a parsed, vetted key schema, cached by id (schema ids are
 // immutable). A schema that is too large, does not parse or fails
 // checkKeySchema is refused, and the refusal is cached too so a hostile id
 // costs one fetch and parse, not one per key. Both caches stop growing at
-// maxSchemaCache entries.
-func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
+// maxSchemaCache entries. down is decodeKeyIn's per-scan registry state
+// (nil outside a scan).
+func (c *Client) schemaByID(ctx context.Context, id int, down *error) (avro.Schema, error) {
 	c.srMu.Lock()
 	if why := c.keyRefused[id]; why != "" {
 		c.srMu.Unlock()
@@ -789,15 +848,24 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	if ok {
 		return s, nil
 	}
+	if down != nil && *down != nil {
+		return nil, fmt.Errorf("kafka: schema %d not fetched: %w", id, *down)
+	}
 	schemaStr, err := c.sr.SchemaByID(ctx, id)
 	if err != nil {
-		// An unknown id (404) is a definite answer: the key cannot decode.
-		// Anything else (5xx, transport, deadline) says nothing about the
-		// key, so the caller must not read it as a non-match (#386).
-		if errors.Is(err, clients.ErrNotFound) {
+		// Only the registry's own "schema not found" (error_code 40403) is
+		// a definite answer: the key cannot decode. Anything else (5xx,
+		// transport, deadline, or a bare 404 from a proxy or a wrong URL
+		// path, #520) says nothing about the key, so the caller must not
+		// read it as a non-match (#386).
+		if schemaNotFound(err) {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: schema %d: %w", errRegistryUnavailable, id, err)
+		err = fmt.Errorf("%w: schema %d: %w", errRegistryUnavailable, id, err)
+		if down != nil {
+			*down = err
+		}
+		return nil, err
 	}
 	var why string
 	if len(schemaStr) > maxKeySchemaBytes {
