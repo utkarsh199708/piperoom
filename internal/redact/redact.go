@@ -229,8 +229,14 @@ func (r *Redactor) Text(s string) (string, Stats) {
 // it goes after the last line break in the final 4 KiB before the limit, else
 // after the last whitespace or delimiter there, so the partial token at the
 // limit lands in the overflow mask. Only a single token longer than 4 KiB is
-// cut inside, at a rune boundary.
+// cut inside, at a rune boundary. A secret XML element left open at the cut
+// moves it back before the element (openTagCut).
 func scanCut(s string) int {
+	return openTagCut(s, lineCut(s))
+}
+
+// lineCut is scanCut without the XML check.
+func lineCut(s string) int {
 	win := s[MaxScan-4096 : MaxScan]
 	if i := strings.LastIndexByte(win, '\n'); i >= 0 {
 		return MaxScan - 4096 + i + 1
@@ -251,6 +257,7 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	if s == "" {
 		return s, st
 	}
+	orig := s
 	for range maxPasses {
 		out := applyCounted(&pemRule, s, "", &st)
 		if out == s {
@@ -320,8 +327,10 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	if changed {
 		s = b.String()
 	}
-	// The Oracle pass goes last and only adds masks (oracleRule).
-	return maskOracle(r.extend(s, &st), &st), st
+	// The Oracle pass goes last of the rules above and only adds masks
+	// (oracleRule); the passes in more.go run on its output and only add
+	// masks too.
+	return more(orig, maskOracle(r.extend(s, &st), &st), &st), st
 }
 
 // lineFixed masks one line until nothing more changes.

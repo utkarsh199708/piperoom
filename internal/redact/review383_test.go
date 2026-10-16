@@ -875,7 +875,7 @@ func TestReview510ScanCut(t *testing.T) {
 	line := "evidence lsn 0/16B3748 topic orders.public.orders\n"
 	for _, el := range review510Cut {
 		for d := 1; d <= len(el)+8; d++ {
-			fill := strings.Repeat(line, (MaxScan-d)/len(line))
+			fill := strings.Repeat(line, (MaxScan-d-1)/len(line))
 			fill += strings.Repeat("x", MaxScan-d-len(fill)-1) + "\n"
 			in := fill + el + "\nafter\n"
 			got, _ := Text(in)
@@ -884,7 +884,10 @@ func TestReview510ScanCut(t *testing.T) {
 					t.Errorf("offset %d: %q leaks %q: tail %q", d, el, sec, got[len(fill)-1:])
 				}
 			}
-			if again, _ := Text(got); again != got {
+			// A mask longer than its value can push an input of exactly
+			// MaxScan past the limit, and the second call then caps it; main
+			// does the same for any value masked there.
+			if again, _ := Text(got); again != got && len(in) > MaxScan {
 				t.Errorf("offset %d: %q not idempotent", d, el)
 			}
 		}
@@ -939,4 +942,38 @@ func TestReview511(t *testing.T) {
 	checkSecretRows(t, review511Leaks)
 	checkKeep(t, review511Keep)
 	checkExact(t, review511Exact)
+}
+
+// slowLines510 are hostile inputs for the passes of #510, #511 and #534.
+// Each is checked at 64 KiB, and the cut ones past MaxScan.
+var slowLines510 = map[string]func(n int) string{
+	"attr-open-values":  func(n int) string { return strings.Repeat(`<add key="DbPassword" value="`, n/30) },
+	"attr-named-tags":   func(n int) string { return strings.Repeat(`<entry key="jdbc.password">`, n/27) },
+	"attr-many":         func(n int) string { return "<a " + strings.Repeat(`b="c" `, n/6) },
+	"attr-no-close":     func(n int) string { return strings.Repeat(`<add key="token" `, n/17) },
+	"attr-entry-text":   func(n int) string { return strings.Repeat("<entry key=\"x.token\">\n  a\n", n/26) },
+	"own-line-elements": func(n int) string { return strings.Repeat("<password>\n  debezium\n", n/22) },
+	"cut-open-tags":     func(n int) string { return strings.Repeat("<password>\n", n/11+1000) },
+	"cut-attr-tags":     func(n int) string { return strings.Repeat("<entry key=\"a.password\">\n", n/25+1000) },
+	"cut-end-tags":      func(n int) string { return strings.Repeat("<password></password>", n/21+1000) },
+}
+
+// TestReview510LinearTime: every hostile 64 KiB line runs in under 50 ms.
+func TestReview510LinearTime(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing check; runs without -race")
+	}
+	const ceiling = 50 * time.Millisecond
+	for name, mk := range slowLines510 {
+		s := mk(MaxScan)
+		best := time.Duration(1 << 62)
+		for range 5 {
+			start := time.Now()
+			Text(s)
+			best = min(best, time.Since(start))
+		}
+		if best > ceiling {
+			t.Errorf("%s: best %v for %d KiB, want under %v", name, best, len(s)>>10, ceiling)
+		}
+	}
 }

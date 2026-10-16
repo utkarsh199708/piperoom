@@ -691,6 +691,36 @@ func padProse(t string) bool {
 	return true
 }
 
+// padValue reports padded text that padProse took for prose but that is a
+// value all the same (#510): text on its own line ("<password>\n  debezium
+// \n</password>"; prose that spans lines fails oneLine), or capitals
+// between blanks (HUNTER2), unless it is a placeholder. It only narrows
+// padProse, so the text it lets through is masked on top of the #383 rule.
+func padValue(pad, t string) bool {
+	if placeholderText(t) {
+		return false
+	}
+	return strings.ContainsAny(pad, "\r\n") || strings.Contains(pad, `\n`) || strings.Contains(pad, `\r`) || capsMetavar(t)
+}
+
+// placeholderWords mark element text that stands in for a secret.
+var placeholderWords = []string{
+	"todo", "tbd", "fixme", "change", "replace", "placeholder", "password", "passwd", "secret", "token",
+	"redacted", "hidden", "masked", "xxx", "your", "setme", "set_me", "unset", "notset", "none", "null", "empty", "example",
+}
+
+// placeholderText reports text that names a missing secret: TODO,
+// CHANGE_ME, YOUR_PASSWORD, changeme.
+func placeholderText(t string) bool {
+	l := asciiLower(t)
+	for _, w := range placeholderWords {
+		if strings.Contains(l, w) {
+			return true
+		}
+	}
+	return false
+}
+
 // xmlContent reads the text of element name from k, after its start tag:
 // padding, then a CDATA section, plain text on one line, or child elements,
 // each followed by its own end tag, and then </name>. It returns the values
@@ -734,7 +764,7 @@ func xmlContent(s string, k int, name string, cdata *cdataEnds) ([][]int, int) {
 	}
 	ve := trimXMLSpace(s, vs, e)
 	if ve <= vs || !oneLine(s[vs:ve]) || heldMask(s[vs:ve], true) ||
-		(vs > k || ve < e) && padProse(s[vs:ve]) {
+		(vs > k || ve < e) && padProse(s[vs:ve]) && !padValue(s[k:vs]+s[ve:e], s[vs:ve]) {
 		return nil, end
 	}
 	return [][]int{{vs, ve, vs, ve}}, end
