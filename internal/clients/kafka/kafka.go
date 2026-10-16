@@ -773,6 +773,13 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 // FindByKeyScan treats such a key as unknown, never as a non-match.
 var errRegistryUnavailable = errors.New("kafka: schema registry unavailable")
 
+// schemaNotFound reports whether err is the registry's structured "schema
+// not found" answer (HTTP 404 with error_code 40403).
+func schemaNotFound(err error) bool {
+	var serr *schemareg.Error
+	return errors.Is(err, clients.ErrNotFound) && errors.As(err, &serr) && serr.Code == 40403
+}
+
 // schemaByID returns a parsed, vetted key schema, cached by id (schema ids are
 // immutable). A schema that is too large, does not parse or fails
 // checkKeySchema is refused, and the refusal is cached too so a hostile id
@@ -791,10 +798,12 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	}
 	schemaStr, err := c.sr.SchemaByID(ctx, id)
 	if err != nil {
-		// An unknown id (404) is a definite answer: the key cannot decode.
-		// Anything else (5xx, transport, deadline) says nothing about the
-		// key, so the caller must not read it as a non-match (#386).
-		if errors.Is(err, clients.ErrNotFound) {
+		// Only the registry's own "schema not found" (error_code 40403) is
+		// a definite answer: the key cannot decode. Anything else (5xx,
+		// transport, deadline, or a bare 404 from a proxy or a wrong URL
+		// path, #520) says nothing about the key, so the caller must not
+		// read it as a non-match (#386).
+		if schemaNotFound(err) {
 			return nil, err
 		}
 		return nil, fmt.Errorf("%w: schema %d: %w", errRegistryUnavailable, id, err)

@@ -96,18 +96,29 @@ func TestFindByKeyUnknownSchemaIsNonMatch(t *testing.T) {
 var _ = avro.Schema(nil)
 var _ clients.KeyScan
 
-// GAP (follow-up #520, same on main): a bare 404 from the registry, with no
-// Confluent error body (a proxy, a wrong URL path), is read as "unknown schema
-// id" and the key as a definite non-match, so the scan reads as complete. This
-// pins today's behaviour; when #520 lands, flip it to expect an incomplete scan.
-func TestGapFindByKeyBare404IsNonMatch(t *testing.T) {
-	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
-		http.NotFound(w, r)
-	}, avroKeyRec(0, 0))
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
-	if err != nil || len(scan.Refs) != 0 || len(scan.Truncated) != 0 {
-		t.Fatalf("got %+v, %v; the pinned gap behaviour changed (see #520)", scan, err)
+// TestFindByKeyBare404IsUnavailable: #520. A bare 404 from the registry,
+// with no Confluent error body (a proxy, a wrong URL path), says nothing
+// about the key: only error_code 40403 is "schema not found". The scan is
+// incomplete, never a complete "not found".
+func TestFindByKeyBare404IsUnavailable(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"bare": func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) },
+		"other code": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"error_code":40401,"message":"x"}`, http.StatusNotFound)
+		},
+		"html proxy": func(w http.ResponseWriter, r *http.Request) { http.Error(w, `<html>nginx</html>`, http.StatusNotFound) },
+		"zero code": func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, `{"message":"no route"}`, http.StatusNotFound)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := registryClient(t, h, avroKeyRec(0, 0))
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
+			if err == nil || !errors.Is(err, errRegistryUnavailable) {
+				t.Fatalf("got %+v, %v; want an incomplete-scan error", scan, err)
+			}
+		})
 	}
 }
