@@ -692,18 +692,42 @@ func padProse(t string) bool {
 }
 
 // padValue reports padded text that padProse took for prose but that is a
-// value all the same (#510): text on its own line or padded with tabs
-// ("<password>\n  debezium\n</password>"; prose that spans lines fails
-// oneLine), capitals between blanks (HUNTER2), or a single plain word
-// between blanks (<password> debezium </password>). A placeholder (TODO,
-// CHANGE_ME) or a function word (and, the) stays prose. It only narrows
-// padProse, so the text it lets through is masked on top of the #383 rule.
+// value all the same (#510). Text on its own line or in capitals between
+// blanks (HUNTER2) is a value unless it is a placeholder by both
+// placeholderText and the substring list 0a4b8f8 used (oldPlaceholder), so
+// nothing 0a4b8f8 masked is kept. Lower-case text padded on one line is a
+// value when it is tab-padded or a single plain word
+// (<password> debezium </password>), unless it is a placeholder or a
+// function word (and, the). It only narrows padProse, so the text it lets
+// through is masked on top of the #383 rule.
 func padValue(pad, t string) bool {
+	lineBreak := strings.ContainsAny(pad, "\r\n") || strings.Contains(pad, `\n`) || strings.Contains(pad, `\r`)
+	if lineBreak || capsMetavar(t) {
+		return !(placeholderText(t) && oldPlaceholder(t))
+	}
 	if placeholderText(t) || functionWords[asciiLower(t)] {
 		return false
 	}
-	return strings.ContainsAny(pad, "\r\n\t") || strings.Contains(pad, `\n`) || strings.Contains(pad, `\r`) ||
-		strings.Contains(pad, `\t`) || capsMetavar(t) || !strings.ContainsAny(t, " \t") && plainWord(t)
+	tab := strings.ContainsAny(pad, "\t") || strings.Contains(pad, `\t`)
+	return tab || !strings.ContainsAny(t, " \t") && plainWord(t)
+}
+
+// oldPlaceholderWords is 0a4b8f8's placeholder list, matched as
+// substrings. Own-line and capitals text counts as a placeholder only when
+// it matches this too.
+var oldPlaceholderWords = []string{
+	"todo", "tbd", "fixme", "change", "replace", "placeholder", "password", "passwd", "secret", "token",
+	"redacted", "hidden", "masked", "xxx", "your", "setme", "set_me", "unset", "notset", "none", "null", "empty", "example",
+}
+
+func oldPlaceholder(t string) bool {
+	l := asciiLower(t)
+	for _, w := range oldPlaceholderWords {
+		if strings.Contains(l, w) {
+			return true
+		}
+	}
+	return false
 }
 
 // placeholderWords make up element text that stands in for a secret.

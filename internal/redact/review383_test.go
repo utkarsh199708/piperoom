@@ -1147,7 +1147,7 @@ func TestReview547Round1(t *testing.T) {
 // TestReview547CutProse pins the cut's handling of prose that names a
 // secret element near the limit: since round 3 it moves the cut back to
 // that line like any open secret element (0a4b8f8's handling), an
-// over-mask of at most 4 KiB instead of a leak risk.
+// over-mask of at most 4 KiB instead of a leak risk (#573).
 func TestReview547CutProse(t *testing.T) {
 	line := "evidence lsn 0/16B3748 topic orders.public.orders\n"
 	tail := "WARN no <password> given for pg-orders-connector\n"
