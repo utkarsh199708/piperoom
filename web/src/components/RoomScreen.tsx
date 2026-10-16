@@ -107,7 +107,19 @@ export function RoomScreen() {
     () => (roomList?.rooms ?? []).some((r) => r.id !== roomId && needsYou(r, user)),
     [roomList, roomId, user],
   )
-  const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
+  const { state: liveState, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
+  // A reload of this room (stale_position, 409 params_mismatch, Reload) passes through a null
+  // state until the new snapshot arrives. Keep drawing the last state of the same room for the
+  // same user meanwhile, so the composer and open dialogs stay mounted and keep what they hold
+  // (#550). Another room, another user, or a failed load still shows the skeleton or the error.
+  const heldRef = useRef<{ roomId: string; userId: string; state: NonNullable<typeof liveState> } | null>(null)
+  if (liveState) heldRef.current = { roomId, userId: user.id, state: liveState }
+  const held = heldRef.current
+  const state =
+    liveState ??
+    (held && held.roomId === roomId && held.userId === user.id && conn !== 'error' && conn !== 'not_found'
+      ? held.state
+      : null)
   // R10: the first replay is done once the log has been folded up to the snapshot's last_seq.
   const replayTarget = state?.replay_target ?? 0
   const replaying =
