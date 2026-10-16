@@ -301,11 +301,26 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "mask", in: "Key (full_name)=(Jane Doe) was rejected", gone: "Jane", want: "Key (full_name)=<redacted>"},
 		{kind: "mask", in: `conflicting key value violates exclusion constraint "no_overlap" Key (room, during)=(101, [2026-01-01,2026-01-02)) conflicts with existing key (room, during)=(101, [2026-01-01,2026-01-03)).`, gone: "101", want: "conflicting key value violates exclusion constraint <redacted> Key (room, during)=<redacted>"},
 		{kind: "mask", in: "Key (room)=(101) conflicts with existing key (room)=(102).", gone: "102", want: "Key (room)=<redacted> conflicts with existing key (room)=<redacted>"},
-		// Two details: the values of both go, and the prose between (over-mask).
-		{kind: "mask", in: "Key (a)=(Jane) already exists. Key (b)=(Doe) is not present in table t.", gone: "Doe", want: "Key (a)=<redacted> is not present in table t."},
+		// Two details: both values go, both column lists stay (LEAD-REVIEW on #532).
+		{kind: "mask", in: "Key (a)=(Jane) already exists. Key (b)=(Doe) is not present in table t.", gone: "Doe", want: "Key (a)=<redacted> already exists. Key (b)=<redacted> is not present in table t."},
+		{kind: "mask", in: "Key (a)=(Jane) already exists Key (b)=(Bob) is not present in table x", gone: "Bob", want: "Key (a)=<redacted> already exists Key (b)=<redacted> is not present in table x"},
+		{kind: "mask", in: `Key (id)=(S1) already exists. Key (email2)=(S2) is not present in table "t".`, gone: "S2", want: "Key (id)=<redacted> already exists. Key (email2)=<redacted> is not present in table <redacted>."},
+		{kind: "mask", in: "Key (a)=(S1) already exists. Key (b)=(S2) already exists. tail", gone: "S1", want: "Key (a)=<redacted> already exists. Key (b)=<redacted> already exists. tail"},
+		// A unique index build and an exclusion constraint's second key.
+		{kind: "mask", in: "could not create unique index \"ux\" Key (email)=(jane) is duplicated.", gone: "jane", want: "could not create unique index <redacted> Key (email)=<redacted> is duplicated."},
+		{kind: "mask", in: "Key (room)=(101) conflicts with key (room)=(102).", gone: "101", want: "Key (room)=<redacted> conflicts with key (room)=<redacted>"},
 		{kind: "mask", in: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint \"u\"\n  Key (full_name)=(Jane Doe) already exists.  Call getNextException to see other errors in the batch.", gone: "Jane", want: "org.apache.kafka.connect.errors.ConnectException: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO orders was aborted: ERROR: duplicate key value violates unique constraint <redacted> Key (full_name)=<redacted> already exists. Call getNextException to see other errors in the batch."},
 		{kind: "keep", in: "Key (full_name) already exists"},
 		{kind: "keep", in: "retry=(3) backoff=(500ms)"},
+		// Separator variants and non-PostgreSQL key details main keeps too: #544.
+		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id) = (jdoe_smith) already exists.", want: "Key (id) = (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)=\t(jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)=\n(jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Key (id)＝（jdoe_smith） already exists.", want: "Key (id)＝（jdoe_smith） already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is (jdoe_smith).", want: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is (jdoe_smith).", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		{kind: "gap", in: "Duplicate entry 'jdoe_smith' for key 'users.ux_login'", want: "Duplicate entry 'jdoe_smith' for key 'users.ux_login'", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
 		// #426 is split out of #435 (org.md §12): main's output, pinned.
 		{kind: "gap", in: "phone +44 20 7946 0958 now", want: "phone +44 20 7946 0958 now", why: "#426, split out"},
 		{kind: "gap", in: "phone +15551234567 now", want: "phone +15551234567 now", why: "#426, split out"},
