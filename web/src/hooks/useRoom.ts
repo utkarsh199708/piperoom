@@ -190,8 +190,6 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   // before it refuses the position.
   const staleRoomRef = useRef<string | null>(null)
   const stateRef = useRef<RoomState | null>(null)
-  // The room and session whose state is on screen: a reload of that same room keeps it (#550).
-  const shownRef = useRef<{ roomId: string; session: string } | null>(null)
   const localIdRef = useRef(0)
   // Steers and comments not settled yet, keyed by client_id. Each entry keeps the room it was
   // typed in (roomIdRef when it was created) and posts only there; a reconnect drains only the
@@ -233,6 +231,14 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     ledger.attach()
     return () => ledger.dispose()
   }, [ledger])
+  // Another room or another session starts empty, reset during render (like the ledger above) so
+  // not one render shows the old room under the new id, or one user's room to the next (#536).
+  const view = `${roomId}|${session}`
+  const [shownView, setShownView] = useState(view)
+  if (shownView !== view) {
+    setShownView(view)
+    dispatch({ type: 'reset' })
+  }
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -253,13 +259,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     let reconnectTimer: number | undefined
     let replayTimer: number | undefined
 
-    const shown = `${user.id}|${sessionEpoch}`
-    const sameRoom = shownRef.current?.roomId === roomId && shownRef.current.session === shown
-    shownRef.current = { roomId, session: shown }
-    // A reload of the room on screen (stale_position, 409 params_mismatch, Reload) keeps the old
-    // state until the new snapshot's init replaces it, so nothing on screen unmounts (#550).
-    // Another room or another session starts empty.
-    if (!sameRoom) dispatch({ type: 'reset' })
+    // No reset here: a reload of the room on screen (stale_position, 409 params_mismatch, Reload)
+    // keeps the old state until the new snapshot's init replaces it, so nothing on screen
+    // unmounts (#550). Another room or session was reset during render, above.
     lastSeqRef.current = 0
     setError(null)
     setPresence([])

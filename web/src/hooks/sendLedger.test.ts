@@ -454,16 +454,63 @@ describe('a TypeError before the first answer (dedupes null)', () => {
     expect(error()).toBeNull()
   })
 
-  it('#551: a keyed event of any member in the room log says the server dedupes: the TypeError is kept for the reconnect', async () => {
+  // Review of #559: only this ledger's own answers say whether the server dedupes (docs/api.md,
+  // Idempotent posts). Another member's keyed event in the stream proves nothing about the replica
+  // that answers this client, and a learned false is never overridden.
+  it.each([
+    ['null', null],
+    ['false', false],
+  ])('another member\'s keyed event leaves dedupes %s: the TypeError is not re-sent', async (_, before) => {
     const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
-    const { l, error } = ledger(post, false, null)
+    const { l, error } = ledger(post, true, before)
     l.onEvent(event('earlier', 'theirs', { kind: 'human', id: 'kabir', name: 'Kabir' }), 'arjun')
+    expect(l.dedupes).toBe(before)
+    await l.send(stop, 'k1')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    l.drain()
+    vi.advanceTimersByTime(LIVE_RETRY_MS * 3)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  it('an own event with a client_id settles, but does not set dedupes: only an answer does', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, false, null)
+    await l.send(stop, 'k1')
+    l.onEvent(event('stop', 'k1'), 'arjun')
+    expect(l.isPending('k1')).toBe(false)
+    expect(l.dedupes).toBeNull()
+  })
+
+  it('a learned false stays false after a later answer that echoes', async () => {
+    const post = vi
+      .fn()
+      .mockImplementationOnce(async (item: SendItem) => event(item.text)) // no echo
+      .mockImplementationOnce(async (item: SendItem, id: string) => event(item.text, id))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post, false, null)
+    await l.send({ kind: 'steer', text: 'a' })
+    expect(l.dedupes).toBe(false)
+    await l.send({ kind: 'steer', text: 'b' })
+    expect(l.dedupes).toBe(false)
+    await l.send(stop, 'k1')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    l.drain()
+    expect(post).toHaveBeenCalledTimes(3)
+  })
+
+  it('this ledger\'s own echoed answer makes it known to dedupe: a later TypeError is kept and drained', async () => {
+    const post = vi
+      .fn()
+      .mockImplementationOnce(async (item: SendItem, id: string) => event(item.text, id))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l, error } = ledger(post, false, null)
+    await l.send({ kind: 'steer', text: 'hello' })
     expect(l.dedupes).toBe(true)
     await l.send(stop, 'k1')
     expect(error()).toBe(OFFLINE_TEXT)
     post.mockResolvedValue(undefined)
     l.drain()
-    expect(post.mock.calls.map((c) => c[1])).toEqual(['k1', 'k1'])
+    expect(post.mock.calls.map((c) => c[1])).toEqual(['id1', 'k1', 'k1'])
   })
 
   it('an event without client_id says nothing: still treated as not deduping', async () => {

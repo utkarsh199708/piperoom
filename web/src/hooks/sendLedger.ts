@@ -97,9 +97,9 @@ export class SendLedger {
   // The room screen is gone: answers that arrive later change nothing and arm no timer.
   private disposed = false
   /**
-   * Whether the server dedupes on client_id: true once an answer echoed it or an event of the
-   * room carried one, false once an answer did not, null before either. Only true makes a
-   * re-send automatic; null is treated like false (#545, #551).
+   * Whether the server dedupes on client_id, from this ledger's own answers: true once one echoed
+   * it, false (for good) once one did not, null before the first. Only true makes a re-send
+   * automatic; null is treated like false (#545, #551).
    */
   dedupes: boolean | null = null
 
@@ -225,13 +225,11 @@ export class SendLedger {
 
   /** Every event goes through here: the current user's event with a known client_id settles it. */
   onEvent(ev: Event, userId: string): void {
+    if (ev.actor?.kind !== 'human' || ev.actor.id !== userId) return
     const id = (ev.payload as { client_id?: unknown } | null)?.client_id
     if (typeof id !== 'string' || id === '') return
-    // Only a server with #459 puts client_id in the payload (docs/api.md, Idempotent posts), so
-    // any member's keyed post in the replay says this server dedupes, before this ledger's first
-    // answer (#551). Settling stays with the caller's own events: (actor.id, client_id).
-    this.dedupes = true
-    if (ev.actor?.kind !== 'human' || ev.actor.id !== userId) return
+    // Settles only. Whether the server dedupes is learned from this ledger's own answers alone
+    // (docs/api.md, Idempotent posts: "only when the answer's event carries client_id").
     this.land(id, true)
   }
 
@@ -273,7 +271,9 @@ export class SendLedger {
       (ev) => {
         // A server that dedupes echoes the key in the stored event (Idempotent posts, Payload).
         const echoed = (ev?.payload as { client_id?: unknown } | undefined)?.client_id
-        if (ev) this.dedupes = echoed === clientId
+        // Only an answer to this ledger's own POST says whether the server dedupes, and a server
+        // seen not to echo stays so: a later echo may come from another replica (#551).
+        if (ev && this.dedupes !== false) this.dedupes = echoed === clientId
         this.land(clientId, notify)
         return 'ok' as const
       },
@@ -311,11 +311,10 @@ export class SendLedger {
     }
     if (isNetworkError(e) && this.dedupes !== true) {
       // A TypeError can also mean the request reached the server and the answer was lost. Unless
-      // client_id has been seen (an answer's echo, or a keyed event in the room's log), the server
-      // may not dedupe, and a re-send could be stored twice (contract #460, #492). That holds
-      // before the first answer too (#545, #551): every room visit starts a new ledger, and
-      // neither /healthz nor the snapshot says whether the server dedupes. Only a Retry click,
-      // after the window, sends it again.
+      // an answer echoed client_id, the server may not dedupe, and a re-send could be stored
+      // twice (contract #460, #492). That holds before the first answer too (#545, #551): every
+      // room visit starts a new ledger, and neither /healthz nor the snapshot says whether the
+      // server dedupes. Only a Retry click, after the window, sends it again.
       this.toUnknown(a)
       return 'unknown'
     }

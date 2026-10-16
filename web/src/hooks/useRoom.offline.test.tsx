@@ -56,22 +56,27 @@ const snap: RoomSnapshot = {
   members: [],
 }
 
-// Only a server known to dedupe keeps a failed send for the reconnect (#545, #551): the room's
-// log shows one, a keyed post of another member, before the first send.
-const KEYED: Event = {
-  room_id: 'r1',
-  seq: 1,
-  type: 'comment.added',
-  actor: { kind: 'human', id: 'kabir', name: 'Kabir' },
-  payload: { comment_id: 'c0', text: 'earlier', mentions_agent: false, client_id: 'theirs' },
-  at: '2026-10-11T10:00:01Z',
-}
-
-async function knownToDedupe(socket: FakeWebSocket) {
+/**
+ * Only a server known to dedupe keeps a failed send for the reconnect (#545, #551), and only this
+ * client's own answer that echoes client_id says so. One answered comment, then forgotten by the
+ * mock, so the rows count only what they send.
+ */
+async function knownToDedupe(actions: ReturnType<typeof useRoom>['actions']) {
+  vi.mocked(api.comment).mockImplementationOnce(
+    async (room, body) =>
+      ({
+        room_id: room,
+        seq: 0,
+        type: 'comment.added',
+        actor: { kind: 'human', id: 'arjun', name: 'Arjun' },
+        payload: { comment_id: 'c0', text: body.text, mentions_agent: false, client_id: body.client_id },
+        at: '',
+      }) as Event,
+  )
   await act(async () => {
-    socket.onmessage?.({ data: JSON.stringify({ type: 'event', event: KEYED }) })
-    await Promise.resolve()
+    expect(await actions.comment('warm-up', undefined, { clientId: 'warm-up' })).toBe(true)
   })
+  vi.mocked(api.comment).mockClear()
 }
 
 async function openRoom() {
@@ -80,7 +85,7 @@ async function openRoom() {
   vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
   const hook = renderHook(() => useRoom('r1'))
   await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
-  await knownToDedupe(socket)
+  await knownToDedupe(hook.result.current.actions)
   return { hook, socket }
 }
 

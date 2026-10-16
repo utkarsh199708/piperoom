@@ -64,22 +64,30 @@ const snap: RoomSnapshot = {
 const step: StepState = { id: 's1', title: 'Check the Debezium connector', tool_calls: [], messages: [] }
 const offline = () => new TypeError('Failed to fetch')
 
-// Only a server known to dedupe keeps a failed send for the reconnect (#545, #551): the room's
-// log shows one, a keyed post of another member, before the first send.
-const KEYED: Event = {
-  room_id: 'r1',
-  seq: 1,
-  type: 'comment.added',
-  actor: { kind: 'human', id: 'kabir', name: 'Kabir' },
-  payload: { comment_id: 'c0', text: 'earlier', mentions_agent: false, client_id: 'theirs' },
-  at: '2026-10-11T10:00:01Z',
-}
+// The actions of the room a rendered component uses, so a test can make the warm-up POST below.
+const exposed: { actions?: ReturnType<typeof useRoom>['actions'] } = {}
 
-async function knownToDedupe(socket: FakeWebSocket) {
+/**
+ * Only a server known to dedupe keeps a failed send for the reconnect (#545, #551), and only this
+ * client's own answer that echoes client_id says so. One answered comment, then forgotten by the
+ * mock, so the rows count only what they send.
+ */
+async function knownToDedupe(actions = exposed.actions) {
+  vi.mocked(api.comment).mockImplementationOnce(
+    async (room, body) =>
+      ({
+        room_id: room,
+        seq: 0,
+        type: 'comment.added',
+        actor: { kind: 'human', id: 'arjun', name: 'Arjun' },
+        payload: { comment_id: 'c0', text: body.text, mentions_agent: false, client_id: body.client_id },
+        at: '',
+      }) as Event,
+  )
   await act(async () => {
-    socket.onmessage?.({ data: JSON.stringify({ type: 'event', event: KEYED }) })
-    await Promise.resolve()
+    expect(await actions!.comment('warm-up', undefined, { clientId: 'warm-up' })).toBe(true)
   })
+  vi.mocked(api.comment).mockClear()
 }
 
 function mountSocket() {
@@ -100,11 +108,13 @@ function hangingCall() {
 
 function RollbackRoom() {
   const { actions } = useRoom('r1')
+  exposed.actions = actions
   return <RollbackButton title="Restart" proposalId="p1" rollback="set it back" asDriver onSteer={actions.steer} />
 }
 
 function TimelineRoom() {
   const { actions } = useRoom('r1')
+  exposed.actions = actions
   return <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} />
 }
 
@@ -114,7 +124,7 @@ async function rollbackFailsOffline() {
   const socket = mountSocket()
   render(<RollbackRoom />)
   await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
-  await knownToDedupe(socket)
+  await knownToDedupe()
   vi.mocked(api.steer).mockRejectedValueOnce(offline())
   fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
   fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -126,7 +136,7 @@ async function replyFailsOffline() {
   const socket = mountSocket()
   render(<TimelineRoom />)
   await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
-  await knownToDedupe(socket)
+  await knownToDedupe()
   vi.mocked(api.comment).mockRejectedValueOnce(offline())
   fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
   fireEvent.change(screen.getByLabelText('Comment on this step'), { target: { value: 'looks right' } })
@@ -191,12 +201,12 @@ describe('Timeline step reply Retry with the real hook', () => {
 })
 
 describe('useRoom: actions are told apart by client_id, never by their words', () => {
-  /** `dedupes` false: no answer and no keyed event seen yet, so nothing is re-sent on its own. */
+  /** `dedupes` false: no answer seen yet, so nothing is re-sent on its own. */
   async function openRoom(dedupes = true) {
     const socket = mountSocket()
     const hook = renderHook(() => useRoom('r1'))
     await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
-    if (dedupes) await knownToDedupe(socket)
+    if (dedupes) await knownToDedupe(hook.result.current.actions)
     return { hook, socket }
   }
 

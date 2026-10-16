@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { StrictMode } from 'react'
+import { StrictMode, useEffect } from 'react'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import type { Event, RoomSnapshot } from '../api/types'
+import type { RoomState } from '../state/types'
 
 // #536: the send ledger belongs to one user's session. A dev "Switch user" changes user.id and
 // the session epoch without remounting the room, and a kept steer of the previous user must never
@@ -67,22 +68,23 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-// Only a server known to dedupe keeps a failed send for the reconnect (#545, #551): the room's
-// log shows one, a keyed post of another member, before the first send.
-const KEYED: Event = {
-  room_id: 'r1',
-  seq: 1,
-  type: 'comment.added',
-  actor: { kind: 'human', id: 'kabir', name: 'Kabir' },
-  payload: { comment_id: 'c0', text: 'earlier', mentions_agent: false, client_id: 'theirs' },
-  at: '2026-10-11T10:00:01Z',
+// The server's answer to a POST: the stored event, echoing client_id like a server with #459.
+function answer(init: RequestInit) {
+  const { client_id } = JSON.parse(String(init.body)) as { client_id?: string }
+  const actor = { kind: 'human' as const, id: who.user.id, name: who.user.name }
+  const ev: Event = { room_id: 'r1', seq: 1, type: 'comment.added', actor, payload: { client_id }, at: '' }
+  return Promise.resolve(new Response(JSON.stringify(ev), { status: 200 }))
 }
 
-async function knownToDedupe(socket: FakeWebSocket) {
+/**
+ * Only a server known to dedupe keeps a failed send for the reconnect (#545, #551), and only this
+ * client's own answer that echoes client_id says so. One answered comment, then forgotten.
+ */
+async function knownToDedupe(actions: ReturnType<typeof useRoom>['actions'], posts: unknown[]) {
   await act(async () => {
-    socket.onmessage?.({ data: JSON.stringify({ type: 'event', event: KEYED }) })
-    await Promise.resolve()
+    expect(await actions.comment('warm-up', undefined, { clientId: 'warm-up' })).toBe(true)
   })
+  posts.length = 0
 }
 
 async function pass(ms: number) {
@@ -95,13 +97,13 @@ describe('a dev user switch (#536)', () => {
   it("drops the previous user's kept steer: nothing is posted under the new user's session", async () => {
     // The session the browser's cookie belongs to when each POST goes out.
     const posts: { as: string; body: string }[] = []
-    let offline = true
+    let offline = false
     vi.stubGlobal(
       'fetch',
       vi.fn((_path: string, init: RequestInit) => {
         posts.push({ as: who.user.id, body: String(init.body) })
         if (offline) return Promise.reject(new TypeError('Failed to fetch'))
-        return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }))
+        return answer(init)
       }),
     )
     const sockets: FakeWebSocket[] = []
@@ -115,7 +117,8 @@ describe('a dev user switch (#536)', () => {
     const hook = renderHook(() => useRoom('r1'))
     await waitFor(() => expect(sockets).toHaveLength(1))
     act(() => sockets[0].onopen?.())
-    await knownToDedupe(sockets[0])
+    await knownToDedupe(hook.result.current.actions, posts)
+    offline = true
     act(() => sockets[0].onclose?.({ reason: '' })) // arjun goes offline
     let ok: boolean | undefined
     act(() => {
@@ -141,13 +144,13 @@ describe('a dev user switch (#536)', () => {
 
   it('the same user keeps the ledger across rerenders, under StrictMode too: a kept steer drains on reconnect', async () => {
     const posts: string[] = []
-    let offline = true
+    let offline = false
     vi.stubGlobal(
       'fetch',
       vi.fn((_path: string, init: RequestInit) => {
         posts.push(String(init.body))
         if (offline) return Promise.reject(new TypeError('Failed to fetch'))
-        return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }))
+        return answer(init)
       }),
     )
     const sockets: FakeWebSocket[] = []
@@ -162,7 +165,8 @@ describe('a dev user switch (#536)', () => {
     await waitFor(() => expect(sockets.length).toBeGreaterThan(0))
     const last = () => sockets[sockets.length - 1]
     act(() => last().onopen?.())
-    await knownToDedupe(last())
+    await knownToDedupe(hook.result.current.actions, posts)
+    offline = true
     act(() => last().onclose?.({ reason: '' }))
     act(() => {
       void hook.result.current.actions.steer('stop', { clientId: 'k1' })
@@ -174,5 +178,43 @@ describe('a dev user switch (#536)', () => {
     act(() => last().onopen?.())
     await pass(100)
     expect(posts).toEqual([JSON.stringify({ text: 'stop', client_id: 'k1' }), JSON.stringify({ text: 'stop', client_id: 'k1' })])
+  })
+})
+
+// #550 keeps the state through a reload of the same room, but only for the same session: what one
+// user saw of a room is never shown to the next one, even for a moment while their snapshot loads.
+describe('the room state across a session change in the same room (#536, #550)', () => {
+  it.each([
+    ['a user switch', { id: 'priya', name: 'Priya', layers: ['postgres'] }],
+    ['a new session of the same user', { id: 'arjun', name: 'Arjun', layers: ['kafka'] }],
+  ])('%s resets the state: the old session\'s room is never shown', async (_, next) => {
+    let release: (s: RoomSnapshot) => void = () => {}
+    vi.mocked(api.room)
+      .mockResolvedValueOnce({ ...snap, title: 'as seen by arjun, epoch 0' })
+      .mockImplementationOnce(() => new Promise((resolve) => (release = resolve)))
+    vi.mocked(openRoomWs).mockImplementation(() => new FakeWebSocket() as unknown as WebSocket)
+    // The state of each committed render: what a screen drew.
+    const seen: (RoomState | null)[] = []
+    const hook = renderHook(() => {
+      const r = useRoom('r1')
+      useEffect(() => {
+        seen.push(r.state)
+      })
+      return r
+    })
+    await waitFor(() => expect(hook.result.current.state?.title).toBe('as seen by arjun, epoch 0'))
+
+    who.user = next
+    who.sessionEpoch = 1
+    const from = seen.length
+    hook.rerender()
+    await pass(100)
+    expect(api.room).toHaveBeenCalledTimes(2)
+    expect(seen.slice(from).length).toBeGreaterThan(0)
+    expect(seen.slice(from).every((st) => st === null)).toBe(true)
+    expect(hook.result.current.state).toBeNull()
+
+    await act(async () => release({ ...snap, title: 'the new session' }))
+    await waitFor(() => expect(hook.result.current.state?.title).toBe('the new session'))
   })
 })

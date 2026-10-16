@@ -171,23 +171,28 @@ async function push(socket: FakeWebSocket, ev: Event) {
   })
 }
 
-// Only a server known to dedupe keeps a failed send for the reconnect (#545, #551). The rows
-// below about kept actions first see the room's log show a keyed post of another member.
-const KEYED: Event = {
-  room_id: 'r1',
-  seq: 1,
-  type: 'comment.added',
-  actor: { kind: 'human', id: 'kabir', name: 'Kabir' },
-  payload: { comment_id: 'c0', text: 'earlier', mentions_agent: false, client_id: 'theirs' },
-  at: '',
-}
-const knownToDedupe = (socket: FakeWebSocket) => push(socket, KEYED)
 
 /** One quick exchange, so the hook has seen whether the server echoes client_id. */
 async function warmUp(hook: { result: { current: ReturnType<typeof useRoom> } }) {
   const ok = fire(() => hook.result.current.actions.steer('hello', { clientId: 'warm' }))
   await pass(200)
   expect(ok()).toBe(true)
+}
+
+// The actions of the room a rendered composer uses, so a test can make the warm-up POST below.
+const exposed: { actions?: ReturnType<typeof useRoom>['actions'] } = {}
+
+/**
+ * Only a server known to dedupe keeps a failed send for the reconnect (#545, #551), and only this
+ * client's own answer that echoes client_id says so. One answered comment, then the fake server's
+ * counters forget it, so the rows below count only what they send.
+ */
+async function knownToDedupe(server: Server, actions = exposed.actions) {
+  const ok = fire(() => actions!.comment('warm-up', undefined, { clientId: 'warm-up' }))
+  await pass(200)
+  expect(ok()).toBe(true)
+  server.stored.length = 0
+  server.fetchMock.mockClear()
 }
 
 beforeEach(() => {
@@ -376,6 +381,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
 
   function TimelineRoom() {
     const { actions } = useRoom('r1')
+    exposed.actions = actions
     return (
       <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} sends={actions.sends} />
     )
@@ -383,6 +389,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
 
   function RollbackRoom() {
     const { actions } = useRoom('r1')
+    exposed.actions = actions
     return (
       <RollbackButton
         title="Restart"
@@ -410,7 +417,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-3: a step comment fails offline, the reconnect stores it, then the same words 20 minutes later: 2 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
-    await knownToDedupe(socket)
+    await knownToDedupe(server)
     server.state.offlineNext = 1
     fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
     const box = screen.getByLabelText('Comment on this step')
@@ -432,7 +439,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-6: a failed rollback is withdrawn when its dialog closes; Roll back 30 minutes later is a new request: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <RollbackRoom />)
-    await knownToDedupe(socket)
+    await knownToDedupe(server)
     server.state.offlineNext = 1
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -466,7 +473,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('X1/Z2: a step comment fails, the words are edited and changed back, then Retry: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
-    await knownToDedupe(socket)
+    await knownToDedupe(server)
     const box = await failComment(server, socket, 'ack')
     fireEvent.change(box, { target: { value: 'ack!' } })
     fireEvent.change(box, { target: { value: 'ack' } })
@@ -480,7 +487,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('X3: the same while still offline, then the reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
-    await knownToDedupe(socket)
+    await knownToDedupe(server)
     const box = await failComment(server, socket, 'ack')
     fireEvent.change(box, { target: { value: 'ack!' } })
     fireEvent.change(box, { target: { value: 'ack' } })
@@ -495,7 +502,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('X2/Z3: a rollback fails offline, the dialog is cancelled, then asked again before the reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <RollbackRoom />)
-    await knownToDedupe(socket)
+    await knownToDedupe(server)
     server.state.offlineNext = 1
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -514,7 +521,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-A: a step comment is edited away and back while on the wire, the send fails, Retry, reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
-    await knownToDedupe(socket)
+    await knownToDedupe(server)
     server.state.failAfter = 2_000
     fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
     const box = screen.getByLabelText('Comment on this step')
@@ -534,7 +541,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-B: a rollback\'s dialog is cancelled while it is on the wire, the send fails, asked again, reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <RollbackRoom />)
-    await knownToDedupe(socket)
+    await knownToDedupe(server)
     server.state.failAfter = 2_000
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -582,7 +589,7 @@ describe('kept actions are never dropped by age', () => {
   it('ADV-1: a steer kept for 16 minutes with the socket down still drains with the next one', async () => {
     const server = fakeServer('contract')
     const { hook, socket } = await openRoom(server)
-    await knownToDedupe(socket)
+    await knownToDedupe(server, hook.result.current.actions)
     server.state.offlineNext = 1
     fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
     await pass(10)
@@ -610,7 +617,7 @@ describe('kept actions after a room switch', () => {
     const hook = renderHook(({ id }) => useRoom(id), { initialProps: { id: 'r1' } })
     await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
     act(() => socket.onopen?.())
-    await knownToDedupe(socket)
+    await knownToDedupe(server, hook.result.current.actions)
     server.state.offlineNext = 1
     fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
     await pass(10)
@@ -734,6 +741,7 @@ describe('the steer composer with the real hook (#535)', () => {
 
   function SteerRoom() {
     const { state, actions, conn } = useRoom('r1')
+    exposed.actions = actions
     if (!state) return null
     return <SteerBox state={state} user={arjun} actions={actions} conn={conn} />
   }
@@ -747,8 +755,8 @@ describe('the steer composer with the real hook (#535)', () => {
     render(<SteerRoom />)
     await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
     act(() => socket.onopen?.())
-    await knownToDedupe(socket) // the failed send is kept: an edit must cancel it
     const box = await screen.findByLabelText('Steer the agent')
+    await knownToDedupe(server) // the failed send is kept: an edit must cancel it
     return { socket, box }
   }
 
