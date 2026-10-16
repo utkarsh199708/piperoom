@@ -350,19 +350,22 @@ func TestRedactCorpus(t *testing.T) {
 		// un-masking is not additive (org.md §12), so both stay.
 		{kind: "gap", in: "Key (room)=(101) conflicts with existing key (room)=(102).\n\tat org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse(QueryExecutorImpl.java:2725)", want: "Key (room)=<redacted> conflicts with existing key (room)=<redacted>", why: "main's phraseless-tuple over-mask; not additive to undo"},
 		{kind: "gap", in: "Key (a)=(Jane) Key (b) = (Bob) already exists", want: "Key (a)=<redacted> already exists", why: "main's phraseless-tuple over-mask; not additive to undo"},
-		// A value that holds both a keyEnds phrase and ")=(" reads as two details:
-		// the text between them stays ("y"). main keeps the whole value.
-		{kind: "gap", in: "Key (a)=(x) already exists y)=(z) already exists.", want: "Key (a)=<redacted> already exists y)=<redacted> already exists.", why: "a value holding a keyEnds phrase and ')=(' reads as two details; #544"},
-		{kind: "gap", in: "Key (n)=(Jane) Key (Doe)=(x) already exists.", want: "Key (n)=<redacted> Key (Doe)=<redacted> already exists.", why: "a value holding ') Key (...)=(' reads as a second detail's column list; #544"},
-		// Separator variants and non-PostgreSQL key details main keeps too: #544.
-		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
-		{kind: "gap", in: "Key (id) = (jdoe_smith) already exists.", want: "Key (id) = (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
-		{kind: "gap", in: "Key (id)=\t(jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
-		{kind: "gap", in: "Key (id)=\n(jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
-		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
-		{kind: "gap", in: "Key (id)＝（jdoe_smith） already exists.", want: "Key (id)＝（jdoe_smith） already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
-		{kind: "gap", in: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is (jdoe_smith).", want: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is (jdoe_smith).", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
-		{kind: "gap", in: "Duplicate entry 'jdoe_smith' for key 'users.ux_login'", want: "Duplicate entry 'jdoe_smith' for key 'users.ux_login'", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
+		// #544, flipped: a value that holds a keyEnds phrase and ")=(" is one
+		// value (no column list between them), and the separator variants and
+		// non-PostgreSQL details mask their values.
+		{kind: "mask", in: "Key (a)=(x) already exists y)=(z) already exists.", gone: "exists y", want: "Key (a)=<redacted> already exists."},
+		{kind: "mask", in: "Key (id)= (jdoe_smith) already exists.", gone: "jdoe_smith", want: "Key (id)= <redacted> already exists."},
+		{kind: "mask", in: "Key (id) = (jdoe_smith) already exists.", gone: "jdoe_smith", want: "Key (id) = <redacted> already exists."},
+		{kind: "mask", in: "Key (id)=\t(jdoe_smith) already exists.", gone: "jdoe_smith", want: "Key (id)= <redacted> already exists."},
+		{kind: "mask", in: "Key (id)=\n(jdoe_smith) already exists.", gone: "jdoe_smith", want: "Key (id)= <redacted> already exists."},
+		{kind: "mask", in: "Key (id)=\u00a0(jdoe_smith) already exists.", gone: "jdoe_smith", want: "Key (id)= <redacted> already exists."},
+		{kind: "mask", in: "Key (id)＝（jdoe_smith） already exists.", gone: "jdoe_smith", want: "Key (id)＝<redacted> already exists."},
+		{kind: "mask", in: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is (jdoe_smith).", gone: "jdoe_smith", want: "Cannot insert duplicate key row in object 'dbo.users' with unique index 'ux_login'. The duplicate key value is <redacted>."},
+		{kind: "mask", in: "Duplicate entry 'jdoe_smith' for key 'users.ux_login'", gone: "jdoe_smith", want: "Duplicate entry <redacted> for key 'users.ux_login'"},
+		// A value that holds ") Key (...)=(" has the same shape as two details,
+		// "Key (a)=(x) Key (b)=(Yy) already exists", whose column b must stay
+		// (#532 round 2): masking "Doe" would hide b.
+		{kind: "gap", in: "Key (n)=(Jane) Key (Doe)=(x) already exists.", want: "Key (n)=<redacted> Key (Doe)=<redacted> already exists.", why: "same shape as a real second detail; #558"},
 		// #426 is split out of #435 (org.md §12): main's output, pinned.
 		{kind: "gap", in: "phone +44 20 7946 0958 now", want: "phone +44 20 7946 0958 now", why: "#426, split out"},
 		{kind: "gap", in: "phone +15551234567 now", want: "phone +15551234567 now", why: "#426, split out"},

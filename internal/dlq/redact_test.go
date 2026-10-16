@@ -256,7 +256,11 @@ func TestRedactMessageRealTexts(t *testing.T) {
 // column name and is kept, and typographic/fullwidth quotes are not
 // recognised. This test pins both so a change is a conscious one.
 func TestRedactMessageKnownResidual(t *testing.T) {
-	if got := RedactMessage("Duplicate entry 'jane' for key 'users.email'"); got != "Duplicate entry 'jane' for key 'users.email'" {
+	// #544: MySQL's "Duplicate entry" value goes even when identifier-shaped.
+	if got := RedactMessage("Duplicate entry 'jane' for key 'users.email'"); got != "Duplicate entry <redacted> for key 'users.email'" {
+		t.Fatalf("MySQL duplicate entry value kept: %q", got)
+	}
+	if got := RedactMessage("Incorrect value 'jane' for column 'users.email'"); got != "Incorrect value 'jane' for column 'users.email'" {
 		t.Fatalf("identifier-shaped value changed: %q", got)
 	}
 	if got := RedactMessage("bad \u201cjane doe\u201d here"); !strings.Contains(got, "jane doe") {
