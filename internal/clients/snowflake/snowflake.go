@@ -316,8 +316,9 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 // trace passes the source Postgres key ("id") for the sink table. A name that
 // equals a declared key column exactly is used as is; otherwise one that
 // matches a single key column ignoring case is mapped to it, so "id" reaches
-// an unquoted ID key. A table without a declared key, or a name that is not
-// its key, keeps the old behaviour (fold to upper case, as for an unquoted
+// an unquoted ID key. A composite key is clients.ErrNotSupported, whatever
+// the name. A table without a declared key, or a name that is not its key,
+// keeps the old behaviour (fold to upper case, as for an unquoted
 // identifier) so lookups that worked before still do.
 func (d *DB) resolveKeyColumn(ctx context.Context, table, pkColumn string) (string, error) {
 	if _, err := validateIdent(pkColumn); err != nil {
@@ -331,6 +332,11 @@ func (d *DB) resolveKeyColumn(ctx context.Context, table, pkColumn string) (stri
 			return strings.ToUpper(pkColumn), nil
 		}
 		return "", err
+	}
+	// No single column of a composite key names one row: a lookup by ID of
+	// PRIMARY KEY (TENANT_ID, ID) reads another tenant's row (#531).
+	if len(keys) > 1 {
+		return "", fmt.Errorf("snowflake: primary key of %s is composite (%d columns): a lookup by %q alone is not one row: %w", table, len(keys), pkColumn, clients.ErrNotSupported)
 	}
 	var folded []string
 	for _, k := range keys {

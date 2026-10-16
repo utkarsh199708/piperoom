@@ -26,3 +26,21 @@ func TestPrimaryKeyColumnComposite(t *testing.T) {
 		t.Fatalf("single key: %q, %v; want ID", col, err)
 	}
 }
+
+// Row must not read by one column of a composite key either: the topology
+// trace passes the source key ("id") for the sink table, which would match ID
+// of PRIMARY KEY (TENANT_ID, ID) and read another tenant's row (#531). It is
+// refused before any SELECT runs, for every requested column.
+func TestRowRefusesCompositeKey(t *testing.T) {
+	for _, pk := range []string{"id", "ID", "TENANT_ID", "other"} {
+		fq := &fakeQuerier{rows: &fakeRows{cols: []string{"ID"}, data: [][]any{{"1"}}}, showRows: pkShow("TENANT_ID", "ID")}
+		d := &DB{q: fq}
+		row, found, err := d.Row(context.Background(), "analytics.orders", pk, "1")
+		if !errors.Is(err, clients.ErrNotSupported) || found || row != nil {
+			t.Errorf("Row(pk=%q) = %v, %v, %v; want clients.ErrNotSupported", pk, row, found, err)
+		}
+		if strings.HasPrefix(fq.lastQuery, "SELECT") {
+			t.Errorf("Row(pk=%q) ran %q; want no SELECT", pk, fq.lastQuery)
+		}
+	}
+}
