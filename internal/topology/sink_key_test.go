@@ -3,6 +3,7 @@ package topology
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"piperoom/internal/clients"
@@ -76,5 +77,36 @@ func TestTraceSinkKeyMatchingReadsRow(t *testing.T) {
 	traceWithSink(t, wh)
 	if wh.rowCalls != 1 {
 		t.Fatalf("rowCalls = %d, want 1", wh.rowCalls)
+	}
+}
+
+// A failed or empty sink-key lookup leaves the key unknown: the stage is
+// unknown and no sink row is read by the source key (#537 review).
+func TestTraceSinkKeyLookupFailsClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		col  string
+		err  error
+	}{
+		{"timeout", "", context.DeadlineExceeded},
+		{"permission denied", "", fmt.Errorf("warehouse: permission denied for table orders")},
+		{"table missing", "", fmt.Errorf("warehouse: %w", clients.ErrNotFound)},
+		{"empty column", "", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			wh := &keyedWarehouse{
+				fakeWarehouse: &fakeWarehouse{rows: map[string]map[string]any{"analytics.orders|7": {"tenant_id": 2, "id": 7}}},
+				col:           tc.col,
+				err:           tc.err,
+			}
+			status, facts := traceWithSink(t, wh)
+			if status != "unknown" || !strings.Contains(facts["error"], "sink key unknown") {
+				t.Fatalf("warehouse = %s %v, want unknown with 'sink key unknown'", status, facts)
+			}
+			if wh.rowCalls != 0 {
+				t.Fatalf("read %d sink row(s) with an unknown sink key", wh.rowCalls)
+			}
+		})
 	}
 }
