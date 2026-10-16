@@ -120,6 +120,79 @@ describe('SendLedger', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
+  // #536: a ledger is one user's session. Disposed, it owes nothing: its kept actions are never
+  // drained, retried live, or offered for a Retry under whoever comes next.
+  it('dispose drops kept actions: nothing drains and none is pending', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { l } = ledger(post, true)
+    expect(await l.send(stop, 'k1')).toBe(false)
+    expect(l.isPending('k1')).toBe(true)
+    l.dispose()
+    expect(l.isPending('k1')).toBe(false)
+    l.drain()
+    vi.advanceTimersByTime(LIVE_RETRY_MS * 2)
+    expect(post).toHaveBeenCalledTimes(1)
+  })
+
+  // Review of 3d17a65: a login or logout has started (the cookie may already be the next user's)
+  // but this ledger is not replaced yet. Each path that could post refuses.
+  describe('once the session it was made for is ending', () => {
+    function ending(live: boolean) {
+      let same = true
+      const post = vi.fn().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      let error: string | null = null
+      const l = new SendLedger({
+        post,
+        setError: (next) => {
+          error = typeof next === 'function' ? next(error) : next
+        },
+        newId: () => 'new',
+        isLive: () => live,
+        sameSession: () => same,
+      })
+      return { l, post, end: () => (same = false), error: () => error }
+    }
+
+    it('a reconnect drains nothing', async () => {
+      const { l, post, end } = ending(false)
+      await l.send(stop, 'k1')
+      end()
+      l.drain()
+      expect(post).toHaveBeenCalledTimes(1)
+    })
+
+    it('the live retry sends nothing', async () => {
+      const { l, post, end } = ending(true)
+      await l.send(stop, 'k1')
+      end()
+      vi.advanceTimersByTime(LIVE_RETRY_MS * 3)
+      expect(post).toHaveBeenCalledTimes(1)
+    })
+
+    it('a Retry posts nothing, drops the action and its banner', async () => {
+      const { l, post, end, error } = ending(false)
+      await l.send(stop, 'k1')
+      expect(error()).toBe(OFFLINE_TEXT)
+      end()
+      expect(await l.send(stop, 'k1')).toBe(false)
+      expect(await l.send({ kind: 'steer', text: 'new words' })).toBe(false)
+      expect(post).toHaveBeenCalledTimes(1)
+      expect(l.isPending('k1')).toBe(false)
+      expect(error()).toBeNull()
+    })
+  })
+
+  it('attach after dispose (React StrictMode remounts an effect) works again', async () => {
+    const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
+    const { l, error } = ledger(post)
+    l.dispose()
+    l.attach()
+    await l.send(stop, 'k1')
+    expect(error()).toBe(UNCONFIRMED_TEXT)
+    vi.advanceTimersByTime(UNCONFIRMED_WINDOW_MS)
+    expect(error()).toBe(NOT_CONFIRMED_TEXT)
+  })
+
   // Review ADV-2: an unknown action already reported "never confirmed" holds no banner up.
   it('an old unknown action does not bring its banner back after a later success or a reconnect', async () => {
     const post = vi.fn().mockRejectedValueOnce(new SendUnconfirmedError(12_000))
