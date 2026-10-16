@@ -1,6 +1,13 @@
 package redact
 
-import "testing"
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"strconv"
+	"testing"
+)
 
 // Corpus for #534: MS SQL Server ODBC/ADO.NET/JDBC braced values,
 // password={...}, which may hold ';', '@', blanks and '}}' (an escaped '}').
@@ -48,4 +55,42 @@ func TestBraced534(t *testing.T) {
 	checkSecretRows(t, bracedLeaks)
 	checkKeep(t, bracedKeep)
 	checkExact(t, bracedExact)
+}
+
+// TestCorpusIdempotent checks Text(Text(x)) == Text(x) over every string
+// literal in the package's test files, alone and with a secret appended.
+func TestCorpusIdempotent(t *testing.T) {
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sec = "Zx9hunter2Qw7Pa55"
+	n := 0
+	for _, name := range files {
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(f, func(node ast.Node) bool {
+			lit, ok := node.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				return true
+			}
+			for _, in := range []string{v, v + " " + sec, "password=" + v} {
+				n++
+				once, _ := Text(in)
+				if twice, _ := Text(once); twice != once {
+					t.Errorf("%s: not idempotent: %q\n once  %q\n twice %q", name, in, once, twice)
+				}
+			}
+			return true
+		})
+	}
+	if n < 3000 {
+		t.Fatalf("only %d inputs", n)
+	}
 }

@@ -70,8 +70,14 @@
 //     as a name and is kept;
 //   - an Oracle JDBC password with an unquoted blank, or an unclosed quote,
 //     is masked only up to the blank (jdbc:oracle:thin:u/a b@host); a
-//     misspelt scheme (jdbc:oralce:); an MS SQL Server braced value holding
-//     ';' or '@' (password={a;b}) leaks its tail;
+//     misspelt scheme (jdbc:oralce:); an MS SQL Server braced value split
+//     across lines (password={a\n;b});
+//   - an environment assignment with ANSI-C quoting
+//     (export PGPASSWORD=$'a b'); passes added for #510, #511 and #534 run
+//     after every other rule and only add masks (more.go): XML text on its
+//     own line, secrets named by key= or name= attributes, shell-quoted
+//     flag values ($'...', a\ b, glued quote runs, typographic quotes),
+//     Windows "set NAME=a b" and braced values (password={a;b});
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence; the word after a

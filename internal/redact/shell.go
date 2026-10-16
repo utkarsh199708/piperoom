@@ -133,36 +133,63 @@ func readShellWord(s string, v int) *shellWord {
 	}
 	// bare is set while the last run read is bare text.
 	bare, closedRuns := false, 0
-	quote := func(closer string, esc, special bool) {
-		w.quoted = true
-		w.special = w.special || special
+	// quote reads a quoted run whose opener starts at at. A run that never
+	// closes ends the word at its opener when text came before it: the
+	// quote belongs to what follows ("X”"} in JSON), not to the value.
+	quote := func(at int, closer string, esc, special bool) bool {
 		if closeAt(closer, esc) {
+			w.quoted = true
+			w.special = w.special || special
 			closedRuns++
 			w.special = w.special || bare || closedRuns > 1
+			bare = false
+			return true
 		}
-		bare = false
+		if bare || closedRuns > 0 {
+			k = at
+			return false
+		}
+		w.quoted = true
+		w.special = w.special || special
+		return true
 	}
 	for k < len(s) {
 		c := s[k]
+		at := k
 		switch {
 		case c == ' ' || c == '\t' || c == '\r':
 			w.end = k
 			return w
 		case c == '$' && k+1 < len(s) && s[k+1] == '\'':
 			k += 2
-			quote("'", true, true)
+			if !quote(at, "'", true, true) {
+				w.end = k
+				return w
+			}
 		case c == '\'':
 			k++
-			quote("'", false, false)
+			if !quote(at, "'", false, false) {
+				w.end = k
+				return w
+			}
 		case c == '"':
 			k++
-			quote(`"`, true, false)
+			if !quote(at, `"`, true, false) {
+				w.end = k
+				return w
+			}
 		case strings.HasPrefix(s[k:], ldquo):
 			k += len(ldquo)
-			quote(rdquo, false, true)
+			if !quote(at, rdquo, false, true) {
+				w.end = k
+				return w
+			}
 		case strings.HasPrefix(s[k:], lsquo):
 			k += len(lsquo)
-			quote(rsquo, false, true)
+			if !quote(at, rsquo, false, true) {
+				w.end = k
+				return w
+			}
 		case c == '\\' && k+1 < len(s) && s[k+1] != '\r':
 			if s[k+1] == ' ' || s[k+1] == '\t' {
 				w.special = true
@@ -181,8 +208,8 @@ func readShellWord(s string, v int) *shellWord {
 }
 
 // winSet matches cmd's "set NAME=value" (or set "NAME=value") at the start
-// of a line.
-var winSet = regexp.MustCompile(`(?i)^[ \t]*set[ \t]+("?)([A-Za-z_][A-Za-z0-9_.]*)=`)
+// of a line, after a prompt such as C:\>.
+var winSet = regexp.MustCompile(`(?i)^[ \t]*(?:[a-z]:\\[^>\n]*>[ \t]*)?set[ \t]+("?)([A-Za-z_][A-Za-z0-9_.]*)=`)
 
 // winSetSpan returns the value of a Windows set command whose name ends in
 // a secret word: the rest of the line, or up to the closing quote of the

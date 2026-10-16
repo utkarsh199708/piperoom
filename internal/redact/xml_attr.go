@@ -72,10 +72,11 @@ func xmlAttrFind(s, _ string) [][]int {
 }
 
 // namedSecret reports whether a key= or name= attribute ends in a secret
-// word.
+// word, or in pwd (.NET appSettings keys such as DbPwd).
 func namedSecret(s string, attrs []xmlAttr) bool {
 	for _, n := range []string{"key", "name"} {
-		if a, ok := attrNamed(attrs, n); ok && endsInFlagWord(asciiLower(s[a.vs:a.ve])) {
+		if a, ok := attrNamed(attrs, n); ok && (endsInFlagWord(asciiLower(s[a.vs:a.ve])) ||
+			strings.HasSuffix(asciiLower(s[a.vs:a.ve]), "pwd")) {
 			return true
 		}
 	}

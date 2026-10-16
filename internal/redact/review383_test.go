@@ -850,6 +850,9 @@ var review510Exact = []struct{ in, want string }{
 	{`<add key="DbPassword" value="Zx9hunter2Qw7Pa55"/>`, `<add key="DbPassword" value="[redacted 24]"/>`},
 	{`<property name="hibernate.connection.password" value="Zx9hunter2Qw7Pa55"/>`, `<property name="hibernate.connection.password" value="[redacted 24]"/>`},
 	{`<Parameter name="password" value="Zx9hunter2Qw7Pa55" override="false"/>`, `<Parameter name="password" value="[redacted 24]" override="false"/>`},
+	{`<add key="DbPwd" value="Zx9hunter2Qw7Pa55"/>`, `<add key="DbPwd" value="[redacted 24]"/>`},
+	{`<entry key="jdbc.password"><![CDATA[Zx9hunter2Qw7Pa55]]></entry>`, `<entry key="jdbc.password"><![CDATA[[redacted 24]]]></entry>`},
+	{`<entry key="jdbc.password">Zx9hunter2Qw7Pa55</entry> <entry key="jdbc.user">loader</entry>`, `<entry key="jdbc.password">[redacted 24]</entry> <entry key="jdbc.user">loader</entry>`},
 }
 
 // TestReview510 covers #510 items 1 and 2.
@@ -935,6 +938,30 @@ var review511Exact = []struct{ in, want string }{
 	{"psql --password \"Zx9\"'hunter2Qw7Pa55' orders", "psql --password [redacted 24] orders"},
 	{"psql --password “Zx9 hunter2Qw7Pa55” orders", "psql --password [redacted 24] orders"},
 	{"set PGPASSWORD=Zx9 hunter2Qw7Pa55", "set PGPASSWORD=[redacted 24]"},
+	{`set "PGPASSWORD=Zx9 hunter2Qw7Pa55"`, `set "PGPASSWORD=[redacted 24]"`},
+	{`C:\> set PGPASSWORD=Zx9 hunter2Qw7Pa55`, `C:\> set PGPASSWORD=[redacted 24]`},
+	// A quote that never closes after the value belongs to the JSON around
+	// the command, not to the value.
+	{`{"cmd":"psql --password “Zx9 hunter2Qw7Pa55”"}`, `{"cmd":"psql --password [redacted 24]"}`},
+	{`{"cmd":"psql --password 'Zx9'\''hunter2Qw7Pa55'"}`, `{"cmd":"psql --password [redacted 24]"}`},
+}
+
+// TestReview511Gaps pins shapes next to #511 that stay open; each row
+// gives today's output.
+func TestReview511Gaps(t *testing.T) {
+	rows := []struct{ gap, in, now string }{
+		{"an environment assignment (not a flag) with ANSI-C quoting (main too)",
+			"export PGPASSWORD=$'Zx9 hunter2Qw7Pa55'",
+			"export PGPASSWORD=$'Zx9 hunter2Qw7Pa55'"},
+		{"a braced SQL Server value split across lines (main too)",
+			"password = {Br@ce\n;Pw42x}",
+			"password = [redacted 8]\n;Pw42x}"},
+	}
+	for _, r := range rows {
+		if got, _ := Text(r.in); got != r.now {
+			t.Errorf("gap %q moved: Text(%q)\n got  %q\n pinned %q", r.gap, r.in, got, r.now)
+		}
+	}
 }
 
 // TestReview511 covers #511.
