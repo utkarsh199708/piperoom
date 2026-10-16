@@ -342,3 +342,9 @@ func maskBracedPasswords(s string) string {
 	b.WriteString(s[last:])
 	return b.String()
 }
+
+// mayHoldOracleThin is false only when oracleThinCreds cannot match s. None
+// of the letters of "jdbc:oracle:" folds to a non-ASCII rune.
+func mayHoldOracleThin(s string) bool {
+	return strings.Contains(asciiLower(s), "jdbc:oracle:")
+}

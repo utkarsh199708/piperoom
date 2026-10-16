@@ -85,16 +85,20 @@ func TestSanitizeTraceHostileSpeed(t *testing.T) {
 		"detail: ", "record ", "Key (", "ſet x ", "password={", "Password={x", "jdbc:oracle:thin:a/", "jdbc:oracle:thin:a/b@",
 		"oldSchema: '", "Error registering Avro schema{", "{\"a\":", "Text '", "Text 'x' could not be parsed ",
 		"malformed array literal: \"", "failed to parse date field [", "postgresql://u:p@h/", "Failing row contains (",
+		"Not in union [", "Not in union [\"a\"]: ", "in document with id '", "\"reason\":\"in document with id '",
+		"invalid byte sequence for encoding \"", "Got VALUE_", "invalid value \"",
 	} {
 		line := "Caused by: x: " + strings.Repeat(unit, (64<<10)/len(unit)) + "Leak"
-		best := time.Hour
-		for range 3 { // the best of three, so one GC pause is not a failure
-			start := time.Now()
-			sanitizeTrace(line)
-			best = min(best, time.Since(start))
-		}
-		if best > budget {
-			t.Errorf("%q x 64 KiB took %v, want < %v", unit, best, budget)
+		for name, f := range map[string]func(string) string{"sanitizeTrace": sanitizeTrace, "condenseTrace": condenseTrace} {
+			best := time.Hour
+			for range 3 { // the best of three, so one GC pause is not a failure
+				start := time.Now()
+				f(line)
+				best = min(best, time.Since(start))
+			}
+			if best > budget {
+				t.Errorf("%s: %q x 64 KiB took %v, want < %v", name, unit, best, budget)
+			}
 		}
 	}
 }

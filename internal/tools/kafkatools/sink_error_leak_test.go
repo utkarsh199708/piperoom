@@ -178,7 +178,6 @@ func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 // but no value to mask keep their text.
 func TestTraceSinkValueMaskKeepsCategories(t *testing.T) {
 	for _, line := range []string{
-		"failed to parse field [created] of type [date] in document with id 'k1'",
 		"date/time field value out of range",
 		"Schema being registered is incompatible with an earlier schema for subject \"orders-value\"",
 		// PR #528 review: "Invalid format" and "is malformed at" outside
@@ -187,6 +186,15 @@ func TestTraceSinkValueMaskKeepsCategories(t *testing.T) {
 		"DataException: Invalid format: expected Avro, got JSON",
 		"SerializationException: Invalid format: magic byte 0x7b  Hint: check the producer's serializer",
 		"JSON is malformed at line 3 column 5",
+		// #527 openers whose wording names no value.
+		"ERROR: invalid value for parameter \"TimeZone\": \"Mars/Base\"",
+		"Invalid date format in column created",
+		"Invalid timestamp precision 12",
+		"failed to parse field [age] of type [long] in document with id [k1]",
+		"AvroTypeException: Expected start-union. Got END_OBJECT",
+		"UnresolvedUnionException: Not in union",
+		"Numeric value out of range",
+		"ERROR: invalid byte sequence for encoding UTF8",
 	} {
 		if got := sanitizeTrace(line); got != line {
 			t.Errorf("sanitizeTrace(%q) = %q, want unchanged", line, got)
@@ -216,6 +224,13 @@ func TestTraceSinkValueMaskHostile(t *testing.T) {
 		{"malformed array literal: \"x\"  Hint: ", false},
 		{"\"Text 'x\", ", false},
 		{"plain text 'a' Text '", false},
+		{"Not in union [", true},
+		{"Not in union [\"a\"]: ", true},
+		{"not in union [[", true},
+		{"\"reason\":\"in document with id '", true},
+		{"in document with id '", true},
+		{"invalid byte sequence for encoding \"", false},
+		{"Got VALUE_", false},
 	} {
 		line := "Caused by: x: " + strings.Repeat(tt.unit, (64<<10)/len(tt.unit)) + "Leak"
 		start := time.Now()
@@ -229,27 +244,80 @@ func TestTraceSinkValueMaskHostile(t *testing.T) {
 	}
 }
 
+// TestTraceSinkErrorsMaskValueForms (#527): sink wordings with the value
+// before the category words (PostgreSQL to_date, Snowflake), after a token
+// that stays (the encoding, Avro's Jackson token, the union), as raw bytes,
+// or as an Elasticsearch document id (the record key). The words stay; the
+// value is masked to the end of its line, except that a document id in a
+// raw JSON reason ends with that string, so a nested reason after it keeps
+// its words.
+func TestTraceSinkErrorsMaskValueForms(t *testing.T) {
+	const value = "Alice Leakwood 42"
+	const pg = "Caused by: org.postgresql.util.PSQLException: ERROR: "
+	const bulk = "Caused by: org.apache.kafka.connect.errors.ConnectException: Bulk request failed: "
+	checkRows(t, []traceRow{
+		{"postgres to_date invalid value",
+			pg + "invalid value \"" + value + "\" for \"YYYY\"",
+			[]string{"Leakwood"}, []string{"PSQLException", "invalid value"}},
+		{"postgres to_date invalid value with detail",
+			pg + "invalid value \"" + value + "\" for \"YYYY\"  Detail: Field requires 4 characters, but only 2 could be parsed.",
+			[]string{"Leakwood"}, []string{"PSQLException"}},
+		{"postgres invalid byte sequence",
+			pg + "invalid byte sequence for encoding \"UTF8\": 0x4c 0x65",
+			[]string{"0x4c 0x65"}, []string{"PSQLException", "invalid byte sequence for encoding \"UTF8\""}},
+		{"postgres value with a newline and caused by",
+			pg + "malformed array literal: \"Alice\nCaused by: Leakwood 42\"",
+			[]string{"Leakwood"}, []string{"PSQLException", "malformed array literal"}},
+		{"postgres value over three lines",
+			pg + "malformed array literal: \"Alice\nat Leakwood\nCaused by: Leakwood 42\"\nCaused by: java.io.IOException: next cause",
+			[]string{"Leakwood"}, []string{"malformed array literal", "Caused by: java.io.IOException: next cause"}},
+		{"elasticsearch document id without preview",
+			bulk + "[{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [age] of type [long] in document with id 'Leakwood-42'\"}]",
+			[]string{"Leakwood-42"}, []string{"mapper_parsing_exception", "failed to parse field [age] of type [long] in document with id"}},
+		{"elasticsearch document id holding a quote",
+			bulk + "[{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [age] of type [long] in document with id 'a\\\"Leakwood'\",\"caused_by\":{\"type\":\"json_parse_exception\",\"reason\":\"Unexpected character\"}}]",
+			[]string{"Leakwood"}, []string{"failed to parse field [age]", "json_parse_exception"}},
+		{"elasticsearch exception document id",
+			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=mapper_parsing_exception, reason=failed to parse field [age] of type [long] in document with id 'Leakwood-42']",
+			[]string{"Leakwood-42"}, []string{"ElasticsearchException", "in document with id"}},
+		{"elasticsearch plain document id",
+			"failed to parse field [created] of type [date] in document with id 'Leakwood-42'",
+			[]string{"Leakwood-42"}, []string{"failed to parse field [created] of type [date] in document with id"}},
+		// From the #527 QA comment.
+		{"avro got value_string",
+			"Caused by: org.apache.avro.AvroTypeException: Expected int. Got VALUE_STRING: {\"name\":\"Jane Leakwood 221B\"}",
+			[]string{"Leakwood"}, []string{"AvroTypeException: Expected int. Got VALUE_STRING"}},
+		{"avro not in union",
+			"Caused by: org.apache.avro.UnresolvedUnionException: Not in union [\"null\",\"int\"]: Jane Leakwood 221B",
+			[]string{"Leakwood"}, []string{"UnresolvedUnionException: Not in union [\"null\",\"int\"]"}},
+		{"avro not in union of records",
+			"Caused by: org.apache.avro.UnresolvedUnionException: Not in union [\"null\",{\"type\":\"record\",\"name\":\"A\",\"fields\":[{\"name\":\"x\",\"type\":\"string\"}]}]: {\"x\": \"Jane Leakwood\"}",
+			[]string{"Leakwood"}, []string{"Not in union [\"null\",{\"type\":\"record\""}},
+		{"avro not in union, list never closed",
+			"Caused by: org.apache.avro.UnresolvedUnionException: Not in union [\"null\",\"int\": Jane Leakwood 221B",
+			[]string{"Leakwood"}, []string{"UnresolvedUnionException: Not in union"}},
+		{"snowflake numeric value",
+			"Caused by: net.snowflake.client.jdbc.SnowflakeSQLException: Numeric value 'Jane Leakwood 221B' is not recognized",
+			[]string{"Leakwood"}, []string{"SnowflakeSQLException: Numeric value"}},
+		{"bigquery invalid date",
+			"Caused by: com.google.cloud.bigquery.BigQueryException: Invalid date: 'Jane Leakwood 221B'",
+			[]string{"Leakwood"}, []string{"BigQueryException: Invalid date"}},
+		{"bigquery invalid timestamp",
+			"Caused by: com.google.cloud.bigquery.BigQueryException: Invalid timestamp: \"Jane Leakwood 221B\"",
+			[]string{"Leakwood"}, []string{"BigQueryException: Invalid timestamp"}},
+	})
+}
+
 // TestTraceSinkErrorsKnownGaps pins sink wordings that still carry part of
-// the record, on main and here: they have another shape than the #505 forms
-// (the value comes before the words, or is a key or raw bytes): known gaps,
-// follow-up #527. When one is masked, move its row to a must-mask test.
+// the record, on main and here. When one is masked, move its row to a
+// must-mask test.
 func TestTraceSinkErrorsKnownGaps(t *testing.T) {
 	for _, tt := range []struct{ name, line, leak string }{
-		{"postgres to_date invalid value",
-			"Caused by: org.postgresql.util.PSQLException: ERROR: invalid value \"Leakwood\" for \"YYYY\"",
-			"Leakwood"},
-		{"postgres invalid byte sequence",
-			"Caused by: org.postgresql.util.PSQLException: ERROR: invalid byte sequence for encoding \"UTF8\": 0x4c 0x65",
-			"0x4c 0x65"},
-		// The newline is the mask's only terminator, and condenseTrace keeps a
-		// "Caused by:" line, so a quoted value holding a newline and
-		// "Caused by:" keeps its tail (PR #528 review round 2).
-		{"postgres value with a newline and caused by",
-			"Caused by: org.postgresql.util.PSQLException: ERROR: malformed array literal: \"Alice\nCaused by: Leakwood 42\"",
-			"Leakwood"},
-		{"elasticsearch document id without preview",
-			"Caused by: org.apache.kafka.connect.errors.ConnectException: Bulk request failed: [{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [age] of type [long] in document with id 'Leakwood-42'\"}]",
-			"Leakwood-42"},
+		// The bytes of a character that has no equivalent come before the
+		// category words, unquoted; not in #527's list.
+		{"postgres character with no equivalent",
+			"Caused by: org.postgresql.util.PSQLException: ERROR: character with byte sequence 0xe2 0x80 0x9c in encoding \"UTF8\" has no equivalent in encoding \"LATIN1\"",
+			"0xe2 0x80 0x9c"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			for path, got := range bothPaths(t, tt.line) {
