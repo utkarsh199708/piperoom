@@ -21,5 +21,5 @@ func more(orig, out string, st *Stats) string {
 
 // origSpans finds the spans of the passes that read the original text.
 func origSpans(s string) []span {
-	return shellSpans(s)
+	return append(shellSpans(s), bracedSpans(s)...)
 }
