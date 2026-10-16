@@ -426,13 +426,7 @@ func canonElem(t any) string {
 				return "map<" + canonElem(v["values"]) + ">"
 			}
 			// A primitive ignores any "name" property: it is not a named type.
-			if lt, ok := v["logicalType"].(string); ok {
-				if vt == "bytes" && lt == "decimal" {
-					return fmt.Sprintf("bytes(decimal %v,%v)", v["precision"], v["scale"])
-				}
-				return vt + "(" + lt + ")"
-			}
-			return vt
+			return vt + elemLogical(v, vt)
 		}
 		return "record"
 	case []any:
@@ -460,8 +454,53 @@ func canonElem(t any) string {
 	return fmt.Sprint(t)
 }
 
+// avroLogicalBase maps each logical type the Avro spec defines (on a
+// primitive) to the only primitive it may annotate. decimal and duration on a
+// fixed never reach here: a fixed renders by name.
+var avroLogicalBase = map[string]string{
+	"decimal": "bytes", "uuid": "string", "date": "int",
+	"time-millis": "int", "time-micros": "long",
+	"timestamp-millis": "long", "timestamp-micros": "long",
+	"local-timestamp-millis": "long", "local-timestamp-micros": "long",
+}
+
+// elemLogical renders the logical-type suffix of a primitive in item/value
+// position, e.g. "(uuid)" or "(decimal 10,2)". Readers ignore a logical type
+// that is unknown, on the wrong primitive or with invalid decimal parameters,
+// so those render as the bare primitive. A missing decimal scale is 0.
+func elemLogical(v map[string]any, vt string) string {
+	lt, _ := v["logicalType"].(string)
+	if base, ok := avroLogicalBase[lt]; !ok || base != vt {
+		return ""
+	}
+	if lt != "decimal" {
+		return "(" + lt + ")"
+	}
+	precision, ok := avroInt(v["precision"])
+	if !ok || precision <= 0 {
+		return ""
+	}
+	scale := int64(0)
+	if raw, present := v["scale"]; present {
+		if scale, ok = avroInt(raw); !ok || scale < 0 || scale > precision {
+			return ""
+		}
+	}
+	return fmt.Sprintf("(decimal %d,%d)", precision, scale)
+}
+
+// avroInt reads a JSON number that holds a whole number.
+func avroInt(x any) (int64, bool) {
+	f, ok := x.(float64)
+	if !ok || f != math.Trunc(f) || math.Abs(f) > 1<<53 {
+		return 0, false
+	}
+	return int64(f), true
+}
+
 // unionMembers returns the members of a union given bare or object-wrapped
-// at any depth ({"type":[...]}, {"type":{"type":[...]}}).
+// at any depth ({"type":[...]}, {"type":{"type":[...]}}). Other properties on
+// a wrapper are ignored: a union cannot carry any.
 func unionMembers(t any) ([]any, bool) {
 	for {
 		switch v := t.(type) {
