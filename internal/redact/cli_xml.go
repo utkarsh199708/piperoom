@@ -715,6 +715,9 @@ var placeholderWords = map[string]bool{
 	"example": true, "insert": true, "enter": true, "value": true,
 }
 
+// secretWords name a secret; alone they are a value, not a placeholder.
+var secretWords = map[string]bool{"password": true, "passwd": true, "pwd": true, "secret": true, "token": true}
+
 // functionWords are English words that read as prose between two tags.
 var functionWords = map[string]bool{
 	"a": true, "an": true, "and": true, "or": true, "the": true, "to": true, "of": true, "in": true, "on": true,
@@ -735,8 +738,15 @@ func placeholderText(t string) bool {
 			break
 		}
 	}
+	wrapped := l != asciiLower(strings.TrimSpace(t))
 	words := strings.FieldsFunc(l, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == ' ' || r == '\t' })
 	if len(words) == 0 {
+		return false
+	}
+	// password, secret and token alone are common real passwords; they are
+	// placeholders only when wrapped (<password>) or joined to another
+	// placeholder word (YOUR_PASSWORD).
+	if len(words) == 1 && !wrapped && secretWords[words[0]] {
 		return false
 	}
 	for _, w := range words {

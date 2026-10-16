@@ -49,7 +49,7 @@ func xmlAttrFind(s, _ string) [][]int {
 		var selfClosing, ok bool
 		attrs, k, selfClosing, ok = readAttrs(s, ne, attrs[:0])
 		i = max(i, k)
-		if !ok || !namedSecret(s, s[ns:ne], attrs) {
+		if !ok || !namedSecret(s, attrs) {
 			continue
 		}
 		if a, found := attrNamed(attrs, "value"); found {
@@ -62,32 +62,70 @@ func xmlAttrFind(s, _ string) [][]int {
 			continue
 		}
 		ms, end := xmlContent(s, k, s[ns:ne], &cdata)
-		out = append(out, ms...)
+		schema := schemaElements[asciiLower(localName(s[ns:ne]))] && !keyNamed(s, attrs)
+		for _, m := range ms {
+			// <column name="password">VARCHAR</column> holds the column's
+			// type, not its value.
+			if !schema || !typeLike(s[m[2]:m[3]]) {
+				out = append(out, m)
+			}
+		}
 		i = max(i, end)
 	}
 	return out
 }
 
-// schemaElements name a column or field with name=, not a setting:
-// <column name="password">VARCHAR</column> holds the column's type.
+// schemaElements name a column or field with name=: their text may be the
+// column's type rather than a value.
 var schemaElements = map[string]bool{
 	"column": true, "col": true, "field": true, "attribute": true, "attr": true, "element": true, "member": true,
 }
 
 // namedSecret reports whether a key= or name= attribute ends in a secret
-// word, or in pwd (.NET appSettings keys such as DbPwd). On a schema
-// element (column, field, ...) name= does not count.
-func namedSecret(s, elem string, attrs []xmlAttr) bool {
+// word, or in pwd (.NET appSettings keys such as DbPwd).
+func namedSecret(s string, attrs []xmlAttr) bool {
 	for _, n := range []string{"key", "name"} {
-		if n == "name" && schemaElements[asciiLower(localName(elem))] {
-			continue
-		}
-		if a, ok := attrNamed(attrs, n); ok && (endsInFlagWord(asciiLower(s[a.vs:a.ve])) ||
-			strings.HasSuffix(asciiLower(s[a.vs:a.ve]), "pwd")) {
+		if a, ok := attrNamed(attrs, n); ok && secretAttrValue(s[a.vs:a.ve]) {
 			return true
 		}
 	}
 	return false
+}
+
+// keyNamed reports whether a key= attribute ends in a secret word.
+func keyNamed(s string, attrs []xmlAttr) bool {
+	a, ok := attrNamed(attrs, "key")
+	return ok && secretAttrValue(s[a.vs:a.ve])
+}
+
+func secretAttrValue(v string) bool {
+	l := asciiLower(v)
+	return endsInFlagWord(l) || strings.HasSuffix(l, "pwd")
+}
+
+// columnTypes are SQL and schema type names that a schema element's text
+// may hold.
+var columnTypes = map[string]bool{
+	"varchar": true, "nvarchar": true, "char": true, "nchar": true, "character": true, "text": true, "clob": true,
+	"blob": true, "int": true, "integer": true, "bigint": true, "smallint": true, "tinyint": true, "boolean": true,
+	"bool": true, "bit": true, "date": true, "time": true, "timestamp": true, "timestamptz": true, "datetime": true,
+	"uuid": true, "bytea": true, "binary": true, "varbinary": true, "numeric": true, "decimal": true, "float": true,
+	"double": true, "real": true, "json": true, "jsonb": true, "string": true, "number": true, "long": true,
+	"short": true, "byte": true,
+}
+
+// typeLike reports text that names a type rather than holding a value: a
+// column type (VARCHAR, varchar(255) NOT NULL) or an exception class.
+func typeLike(t string) bool {
+	t = strings.TrimSpace(t)
+	if strings.HasSuffix(t, "Exception") || strings.HasSuffix(t, "Error") {
+		return true
+	}
+	w := t
+	if i := strings.IndexAny(w, " (\t"); i >= 0 {
+		w = w[:i]
+	}
+	return columnTypes[asciiLower(w)]
 }
 
 func attrNamed(attrs []xmlAttr, name string) (xmlAttr, bool) {
@@ -203,8 +241,8 @@ func openTagCut(s string, cut int) int {
 		var selfClosing, ok bool
 		attrs, k, selfClosing, ok = readAttrs(win, ne, attrs[:0])
 		i = max(i, k)
-		if ok && !selfClosing && xmlContext(s, lo+p) &&
-			(endsInFlagWord(asciiLower(win[ns:ne])) || namedSecret(win, win[ns:ne], attrs)) {
+		if ok && !selfClosing && xmlContext(s, lo+p, lo+k) &&
+			(endsInFlagWord(asciiLower(win[ns:ne])) || namedSecret(win, attrs)) {
 			starts = append(starts, startTag{p, localName(asciiLower(win[ns:ne]))})
 		}
 	}
@@ -220,11 +258,20 @@ func openTagCut(s string, cut int) int {
 	return cut
 }
 
-// xmlContext reports whether the start tag at p opens its line (after
-// blanks) or follows another tag's '>'.
-func xmlContext(s string, p int) bool {
+// xmlContext reports whether the start tag at p, ending at k, reads as XML
+// rather than prose: it opens its line (after blanks) or follows another
+// tag's '>', or nothing but blanks or another tag follows it on its line
+// (config: <password>, the value on the next line). Prose such as
+// "no <password> given" goes on after the tag.
+func xmlContext(s string, p, k int) bool {
 	for p > 0 && (s[p-1] == ' ' || s[p-1] == '\t') {
 		p--
 	}
-	return p == 0 || s[p-1] == '\n' || s[p-1] == '>'
+	if p == 0 || s[p-1] == '\n' || s[p-1] == '>' {
+		return true
+	}
+	for k < len(s) && (s[k] == ' ' || s[k] == '\t' || s[k] == '\r') {
+		k++
+	}
+	return k >= len(s) || s[k] == '\n' || s[k] == '<'
 }
