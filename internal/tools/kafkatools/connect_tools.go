@@ -403,7 +403,183 @@ func sanitizeTrace(s string) string {
 		// after a "Detail:" prefix; some drivers print it without one.
 		s = dlq.RedactMessage(failingRow.ReplaceAllString(s, "${1} "+dlq.Redacted))
 	}
-	return s
+	// Runs on the output of the masks above and only adds masks (org.md §12).
+	return maskSinkValues(s)
+}
+
+// sinkOpeners are the category words after which PostgreSQL, Elasticsearch,
+// Joda and java.time quote the failing value (#505): PostgreSQL's "date/time
+// field value out of range: \"...\"", "malformed array literal: \"...\""
+// and kin, Joda's "Invalid format: \"...\" is malformed at \"...\"",
+// Elasticsearch's "failed to parse date field [...]" and java.time's "Text
+// '...' could not be parsed". The words stay (they are the diagnosis); the
+// value after them is masked. Such lines do not match recordSnippet, so the
+// dlq_peek redaction, which would mask the quoted words too, never sees them.
+// Phrases are lower case and matched case-insensitively at a word start.
+var sinkOpeners = []struct {
+	phrase string
+	after  byte // ':' needs optional spaces, a colon and spaces; ' ' needs spaces; 0 nothing
+	quoted bool // the value must open with '"' or '\"'
+}{
+	{"date/time field value out of range", ':', false},
+	{"interval field value out of range", ':', false},
+	{"date out of range", ':', false},
+	{"timestamp out of range", ':', false},
+	{"time zone displacement out of range", ':', false},
+	{"malformed array literal", ':', false},
+	{"malformed record literal", ':', false},
+	{"malformed range literal", ':', false},
+	{"malformed multirange literal", ':', false},
+	// Unquoted, these are other diagnoses ("Invalid format: magic byte
+	// 0x07", "JSON is malformed at line 3"); Joda always quotes the value.
+	{"invalid format", ':', true},
+	{"is malformed at", ' ', true},
+	{"failed to parse date field [", 0, false},
+	{"text '", 0, false},
+}
+
+// parseMarker follows a java.time value; without it "Text '" is too common a
+// phrase to mask after.
+const parseMarker = "' could not be parsed"
+
+// maskSinkValues masks each sinkOpeners value with dlq.Redacted, from the
+// value's start to the end of its line (a java.time value: to the line's last
+// parseMarker). A value may hold any end marker a
+// rule could stop at (a quote, "  Hint: ", "] with format [", parseMarker),
+// so stopping early can leak its tail; the category words come before the
+// value, so masking the rest of the line over-masks only what follows it.
+// Phrases are found with strings.Index over an ASCII-lowered copy, not a
+// case-insensitive regexp (several times slower on a 64 KiB line, far more
+// under -race), and each search resumes past the last mask or cached
+// result, so a hostile line stays linear.
+func maskSinkValues(s string) string {
+	low := asciiLower(s)
+	spans := findSinkOpeners(low, 0, len(low))
+	if len(spans) == 0 {
+		return s
+	}
+	// nextText[k] is the index of the first "text '" span after spans[k], or -1.
+	nextText := make([]int, len(spans))
+	for k, nt := len(spans)-1, -1; k >= 0; k-- {
+		nextText[k] = nt
+		if strings.HasPrefix(low[spans[k][0]:], "text '") {
+			nt = k
+		}
+	}
+	var b strings.Builder
+	last := 0     // s[:last] is written to b
+	parseAt := -1 // the first parseMarker at or after the last search, or len(low) for none
+	for k, m := range spans {
+		if m[0] < last {
+			continue
+		}
+		start := m[1]
+		end := len(low)
+		if i := strings.IndexByte(low[start:], '\n'); i >= 0 {
+			end = start + i
+		}
+		if strings.HasPrefix(low[m[0]:], "text '") {
+			if parseAt < start {
+				parseAt = len(low)
+				if i := strings.Index(low[start:], parseMarker); i >= 0 {
+					parseAt = start + i
+				}
+			}
+			if parseAt >= end {
+				continue
+			}
+			// Only the last "Text '" before the marker opens the value: an
+			// earlier one ("Plain text 'mode' unsupported") is other text.
+			if nt := nextText[k]; nt >= 0 && spans[nt][0] < parseAt {
+				continue
+			}
+			// The value runs to the line's last marker, so a value holding
+			// the marker is still masked; java.time's own words after the
+			// last marker ("at index 0") stay.
+			end = start + strings.LastIndex(low[start:end], parseMarker)
+		}
+		if end <= start {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(dlq.Redacted)
+		last = end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// asciiLower lowers ASCII letters only, so byte offsets in the result are
+// offsets in s.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// findSinkOpeners returns the [start, value start) spans of the sinkOpeners
+// in low[from:to], in order and without overlaps.
+func findSinkOpeners(low string, from, to int) [][2]int {
+	var spans [][2]int
+	for _, o := range sinkOpeners {
+		for i := from; i < to; {
+			j := strings.Index(low[i:to], o.phrase)
+			if j < 0 {
+				break
+			}
+			at := i + j
+			i = at + len(o.phrase)
+			if at > 0 && isWordByte(low[at-1]) {
+				continue
+			}
+			end, ok := i, true
+			switch o.after {
+			case ':':
+				end = skipSpaces(low, end, to)
+				if ok = end < to && low[end] == ':'; ok {
+					end = skipSpaces(low, end+1, to)
+				}
+			case ' ':
+				end = skipSpaces(low, end, to)
+				ok = end > i
+			}
+			if ok && o.quoted {
+				ok = strings.HasPrefix(low[end:to], `"`) || strings.HasPrefix(low[end:to], `\"`)
+			}
+			if ok {
+				spans = append(spans, [2]int{at, end})
+			}
+		}
+	}
+	sort.Slice(spans, func(a, b int) bool { return spans[a][0] < spans[b][0] })
+	out := spans[:0]
+	for _, sp := range spans {
+		if len(out) > 0 && sp[0] < out[len(out)-1][1] {
+			continue
+		}
+		out = append(out, sp)
+	}
+	return out
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z'
+}
+
+// skipSpaces returns the first index at or after i (before to) that is not a
+// space or tab.
+func skipSpaces(s string, i, to int) int {
+	for i < to && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
 }
 
 var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)
