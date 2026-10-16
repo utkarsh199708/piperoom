@@ -170,7 +170,7 @@ func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 		// open the mask.
 		{"java.time after an unrelated text quote",
 			"ConnectException: Plain text 'mode' unsupported; Text 'Leakwood' could not be parsed at index 0",
-			[]string{"Leakwood"}, []string{"Plain text 'mode' unsupported;", "could not be parsed at index 0"}},
+			[]string{"Leakwood"}, []string{"Plain text 'mode' unsupported;", "could not be parsed"}},
 	})
 }
 
@@ -326,26 +326,26 @@ const javaTimeNewline = "org.apache.kafka.connect.errors.DataException: Text 'Ja
 
 // TestTraceJavaTimeNewlineMasked (#560): a java.time Text '...' value that
 // spans lines is masked from its first byte; the lines up to the one holding
-// the parse marker are value, and java.time's own words after the last marker
-// stay.
+// the parse marker are value, and so is the text after the marker on that
+// line; the marker itself stays as the diagnosis.
 func TestTraceJavaTimeNewlineMasked(t *testing.T) {
 	const ex = "org.apache.kafka.connect.errors.DataException: "
 	checkRows(t, []traceRow{
 		{"java.time text value with a newline",
 			javaTimeNewline,
-			[]string{"LeakT", "Jane"}, []string{"DataException", "could not be parsed at index 0"}},
+			[]string{"LeakT", "Jane"}, []string{"DataException", "could not be parsed"}},
 		{"java.time text value over three lines",
 			ex + "Text 'Jane\nat LeakU\nCaused by: LeakV' could not be parsed at index 0\nCaused by: java.io.IOException: next cause",
-			[]string{"LeakU", "LeakV", "Jane"}, []string{"DataException", "could not be parsed at index 0", "Caused by: java.io.IOException: next cause"}},
+			[]string{"LeakU", "LeakV", "Jane"}, []string{"DataException", "could not be parsed", "Caused by: java.io.IOException: next cause"}},
 		{"java.time text value, blank line inside",
 			ex + "Text 'Jane\n\nLeakW' could not be parsed at index 0",
-			[]string{"LeakW", "Jane"}, []string{"could not be parsed at index 0"}},
+			[]string{"LeakW", "Jane"}, []string{"could not be parsed"}},
 		{"java.time text value, marker inside the value",
 			ex + "Text 'Jane\nLeakX' could not be parsed at index 0' could not be parsed at index 3",
-			[]string{"LeakX", "Jane"}, []string{"could not be parsed at index 3"}},
+			[]string{"LeakX", "Jane"}, []string{"could not be parsed"}},
 		{"java.time text value in a cause",
 			"Caused by: java.time.format.DateTimeParseException: Text 'Jane\nCaused by: LeakY' could not be parsed at index 0",
-			[]string{"LeakY", "Jane"}, []string{"DateTimeParseException", "could not be parsed at index 0"}},
+			[]string{"LeakY", "Jane"}, []string{"DateTimeParseException", "could not be parsed"}},
 		{"plain text quote and no marker stays",
 			ex + "Plain text 'mode' unsupported\nCaused by: java.io.IOException: next cause",
 			nil, []string{"Plain text 'mode' unsupported", "Caused by: java.io.IOException: next cause"}},

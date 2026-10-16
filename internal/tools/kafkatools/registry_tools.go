@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 )
 
@@ -166,43 +167,49 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 
-	toVersion := p.ToVersion
-	if toVersion <= 0 {
-		latest, err := t.d.Registry.Schema(cctx, p.Subject, -1)
+	// fetch reads a version; 0 or less means the latest. It returns the version read.
+	fetch := func(version int) (int, clients.SchemaVersion, error) {
+		if version <= 0 {
+			version = -1
+		}
+		sv, err := t.d.Registry.Schema(cctx, p.Subject, version)
+		if err != nil {
+			return 0, sv, err
+		}
+		return sv.Version, sv, nil
+	}
+
+	var fromSchema, toSchema string
+	var fromVersion, outTo int
+	if p.Schema != "" {
+		// The raw schema is the candidate (the to side), so what it adds shows
+		// as added. The registered side is from_version, else to_version, else
+		// latest; only that version is fetched, so a to_version that from_version
+		// outranks need not exist (#538).
+		regVersion := p.FromVersion
+		if regVersion <= 0 {
+			regVersion = p.ToVersion
+		}
+		v, reg, err := fetch(regVersion)
 		if err != nil {
 			return tools.Result{}, err
 		}
-		toVersion = latest.Version
-	}
-	to, err := t.d.Registry.Schema(cctx, p.Subject, toVersion)
-	if err != nil {
-		return tools.Result{}, err
-	}
-
-	// The registered version is always the "from" side when a raw schema is
-	// given: the raw schema is the candidate, so what it adds shows as added.
-	fromSchema, toSchema := "", to.Schema
-	fromVersion, outTo := p.FromVersion, toVersion
-	if p.Schema != "" {
-		// from_version names the registered side; else to_version, else latest.
-		regVersion, reg := toVersion, to
-		if p.FromVersion > 0 {
-			regVersion = p.FromVersion
-			if reg, err = t.d.Registry.Schema(cctx, p.Subject, regVersion); err != nil {
-				return tools.Result{}, err
-			}
-		}
 		fromSchema, toSchema = reg.Schema, p.Schema
-		fromVersion, outTo = regVersion, 0 // 0 = raw schema, not a registered version
+		fromVersion, outTo = v, 0 // 0 = raw schema, not a registered version
 	} else {
 		if p.FromVersion <= 0 {
 			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
+		}
+		v, to, err := fetch(p.ToVersion)
+		if err != nil {
+			return tools.Result{}, err
 		}
 		from, err := t.d.Registry.Schema(cctx, p.Subject, p.FromVersion)
 		if err != nil {
 			return tools.Result{}, err
 		}
-		fromSchema = from.Schema
+		fromSchema, toSchema = from.Schema, to.Schema
+		fromVersion, outTo = p.FromVersion, v
 	}
 
 	changes, err := diffFields(fromSchema, toSchema)
