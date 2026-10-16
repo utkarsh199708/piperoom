@@ -306,6 +306,14 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "mask", in: "Key (a)=(Jane) already exists Key (b)=(Bob) is not present in table x", gone: "Bob", want: "Key (a)=<redacted> already exists Key (b)=<redacted> is not present in table x"},
 		{kind: "mask", in: `Key (id)=(S1) already exists. Key (email2)=(S2) is not present in table "t".`, gone: "S2", want: "Key (id)=<redacted> already exists. Key (email2)=<redacted> is not present in table <redacted>."},
 		{kind: "mask", in: "Key (a)=(S1) already exists. Key (b)=(S2) already exists. tail", gone: "S1", want: "Key (a)=<redacted> already exists. Key (b)=<redacted> already exists. tail"},
+		// A tuple with no phrase after it ends before the next detail's column
+		// list (round 2 of the #532 review): every column stays visible.
+		{kind: "mask", in: "ERROR: x Key (a)=(S1q) conflicts with existing key (a)=(S2q). Key (c)=(S3q) already exists", gone: "S2q", want: "ERROR: x Key (a)=<redacted> conflicts with existing key (a)=<redacted> Key (c)=<redacted> already exists"},
+		{kind: "mask", in: "Key (a)=(Jane) was bad and Key (b)=(Bob) already exists", gone: "Jane", want: "Key (a)=<redacted> Key (b)=<redacted> already exists"},
+		{kind: "mask", in: "Key (a)=(x) Key (b)=(Yy) already exists", gone: "Yy", want: "Key (a)=<redacted> Key (b)=<redacted> already exists"},
+		{kind: "mask", in: "Key (colA)=(S1x) was rejected. Key (colB)=(S2x) already exists.", gone: "S1x", want: "Key (colA)=<redacted> Key (colB)=<redacted> already exists."},
+		{kind: "mask", in: "(colA)=(S1x) and (colB)=(S2x)", gone: "S1x", want: "(colA)=<redacted> (colB)=<redacted>"},
+		{kind: "mask", in: "Key (a)=(x y) was bad KEY (lower(b::text))=(Yy) already exists", gone: "x y", want: "Key (a)=<redacted> KEY (lower(b::text))=<redacted> already exists"},
 		// A unique index build and an exclusion constraint's second key.
 		{kind: "mask", in: "could not create unique index \"ux\" Key (email)=(jane) is duplicated.", gone: "jane", want: "could not create unique index <redacted> Key (email)=<redacted> is duplicated."},
 		{kind: "mask", in: "Key (room)=(101) conflicts with key (room)=(102).", gone: "101", want: "Key (room)=<redacted> conflicts with key (room)=<redacted>"},
@@ -314,7 +322,8 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "keep", in: "retry=(3) backoff=(500ms)"},
 		// A value that holds both a keyEnds phrase and ")=(" reads as two details:
 		// the text between them stays ("y"). main keeps the whole value.
-		{kind: "gap", in: "Key (a)=(x) already exists y)=(z) already exists.", want: "Key (a)=<redacted> already exists y)=<redacted> already exists.", why: "value holding ') already exists ... )=(' (window rule from the #532 review); #544"},
+		{kind: "gap", in: "Key (a)=(x) already exists y)=(z) already exists.", want: "Key (a)=<redacted> already exists y)=<redacted> already exists.", why: "a value holding a keyEnds phrase and ')=(' reads as two details; #544"},
+		{kind: "gap", in: "Key (n)=(Jane) Key (Doe)=(x) already exists.", want: "Key (n)=<redacted> Key (Doe)=<redacted> already exists.", why: "a value holding ') Key (...)=(' reads as a second detail's column list; #544"},
 		// Separator variants and non-PostgreSQL key details main keeps too: #544.
 		{kind: "gap", in: "Key (id)= (jdoe_smith) already exists.", want: "Key (id)= (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
 		{kind: "gap", in: "Key (id) = (jdoe_smith) already exists.", want: "Key (id) = (jdoe_smith) already exists.", why: "separator variants / non-Postgres forms not covered, follow-up #544"},
