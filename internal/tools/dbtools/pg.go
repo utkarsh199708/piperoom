@@ -482,6 +482,10 @@ func pgRowTool(d Deps) tools.Tool {
 			// data and puts the probed value in the room log.
 			if pc, ok := d.Src.(pkColumner); ok {
 				pk, err := pc.PrimaryKeyColumn(ctx, input.Table)
+				if errors.Is(err, clients.ErrNotSupported) {
+					// A composite key: one key value is not one row (#483).
+					return tools.Result{}, fmt.Errorf("%w: %s has a composite primary key; pg_row looks rows up by a single-column key only", tools.ErrBadInput, input.Table)
+				}
 				if err != nil {
 					return tools.Result{}, fmt.Errorf("dbtools: pg_row: %w", err)
 				}

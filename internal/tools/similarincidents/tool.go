@@ -260,7 +260,10 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		return tools.Result{}, fmt.Errorf("%w: query is required", tools.ErrBadInput)
 	case len(p.Query) > maxQueryBytes:
 		return tools.Result{}, fmt.Errorf("%w: query is %d bytes, more than %d", tools.ErrBadInput, len(p.Query), maxQueryBytes)
-	case !utf8.ValidString(p.Query) || strings.ContainsRune(p.Query, utf8.RuneError):
+	// U+FFFD is valid text: tool text carries it for bad bytes (docs/api.md),
+	// so a quoted error about corrupt bytes holds it, and so does a lone
+	// surrogate escape once decoded. It tokenises as a separator (#445).
+	case !utf8.ValidString(p.Query):
 		return tools.Result{}, fmt.Errorf("%w: query is not valid UTF-8", tools.ErrBadInput)
 	case p.Limit < 0:
 		return tools.Result{}, fmt.Errorf("%w: limit must be 1-5", tools.ErrBadInput)

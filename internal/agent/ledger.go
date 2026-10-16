@@ -10,6 +10,15 @@ import (
 // second bound so the ledger's size does not depend on a tool's discipline.
 const maxLedgerSummaryBytes = 8000
 
+// maxLedgerSteps caps the steps a ledger keeps besides the triage seeds; the
+// oldest go first (#447). The runner lives across episodes, so without a cap
+// a long room grows by up to 16 KB a read for its whole life. 256 is several
+// times the reads one episode makes (defaultMaxTurns turns, a few reads
+// each), so a step the model saw recently is still known; an evicted
+// citation gets the "not a step of this run" refusal, which tells the model
+// to re-read. Worst case about 4 MB a room.
+const maxLedgerSteps = 256
+
 // stepLedger remembers the steps this run opened, so update_hypothesis can
 // check the steps a hypothesis cites. It holds no room state: after a restart
 // it is empty and the model must re-read, which is the intended behaviour.
@@ -17,6 +26,9 @@ type stepLedger struct {
 	mu    sync.Mutex
 	steps map[string]stepFact
 	order []string // step ids, oldest first
+	// pinned are the triage seeds: the first message tells the model to cite
+	// them for the whole room, so they are never evicted.
+	pinned map[string]bool
 	// background is the text the model was given up front (alert, pipeline map),
 	// lower-cased once. A term in it needs no step to back it (see groundTerms).
 	background string
@@ -31,7 +43,7 @@ type stepFact struct {
 }
 
 func newStepLedger() *stepLedger {
-	return &stepLedger{steps: map[string]stepFact{}}
+	return &stepLedger{steps: map[string]stepFact{}, pinned: map[string]bool{}}
 }
 
 // add records a step with no input. A nil ledger ignores it.
@@ -42,6 +54,12 @@ func (l *stepLedger) add(stepID, tool, summary string, isError bool) {
 // addWithInput records a step and the input its tool was called with. A name the
 // model typed into the input (a connector, a topic) is backed by the step it ran in.
 func (l *stepLedger) addWithInput(stepID, tool, input, summary string, isError bool) {
+	l.put(stepID, tool, input, summary, isError, false)
+}
+
+// put records a step, pinned or not, and evicts the oldest unpinned steps
+// past maxLedgerSteps.
+func (l *stepLedger) put(stepID, tool, input, summary string, isError, pin bool) {
 	if l == nil || stepID == "" {
 		return
 	}
@@ -61,6 +79,24 @@ func (l *stepLedger) addWithInput(stepID, tool, input, summary string, isError b
 		input = cutBytes(input, maxLedgerSummaryBytes)
 	}
 	l.steps[stepID] = stepFact{tool: tool, input: input, summary: summary, isError: isError}
+	if pin {
+		l.pinned[stepID] = true
+	}
+	for len(l.order)-len(l.pinned) > maxLedgerSteps {
+		l.evictOldest()
+	}
+}
+
+// evictOldest drops the oldest unpinned step. The caller holds mu.
+func (l *stepLedger) evictOldest() {
+	for i, id := range l.order {
+		if l.pinned[id] {
+			continue
+		}
+		delete(l.steps, id)
+		l.order = append(l.order[:i], l.order[i+1:]...)
+		return
+	}
 }
 
 // get returns the step's fact.
@@ -105,7 +141,7 @@ func (l *stepLedger) seedTriage(t *TriageResult) {
 		if s.IsError && !strings.HasPrefix(text, "error: ") {
 			text = "error: " + text
 		}
-		l.add(s.StepID, s.Tool, text, s.IsError)
+		l.put(s.StepID, s.Tool, "", text, s.IsError, true)
 	}
 }
 

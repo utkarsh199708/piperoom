@@ -25,6 +25,9 @@
 // %22password%22%3A%22...%22, password+%3D+...); quotes may carry up to three
 // backslashes (two JSON levels). In Kafka Connect's REST form
 // {"name":"database.password","value":"..."} the sibling name is the key.
+// An Oracle JDBC password (jdbc:oracle:thin:user/password@host, the user or
+// password maybe quoted) runs to the last '@' of its token and is masked
+// after every other rule, so it cannot eat a sibling credential's key.
 //
 // Known gaps (most also leak without the rules above):
 //   - an unquoted password with spaces is masked only up to its first
@@ -65,6 +68,10 @@
 //   - a generated lower-case token after a flag in an argument list or
 //     usage brackets (["--token", "d41d8cd98f00b204e9800998ecf8427e"]) reads
 //     as a name and is kept;
+//   - an Oracle JDBC password with an unquoted blank, or an unclosed quote,
+//     is masked only up to the blank (jdbc:oracle:thin:u/a b@host); a
+//     misspelt scheme (jdbc:oralce:); an MS SQL Server braced value holding
+//     ';' or '@' (password={a;b}) leaks its tail;
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence; the word after a
@@ -73,7 +80,9 @@
 //     %VAR%, $(...) or db name there, a user:gid pair, and a closing
 //     backtick or tag after a bare value; the shapes read for #383 mask the
 //     same way (--db_password orders_v2, --sasl.password Required, a quoted
-//     "two words").
+//     "two words"); text glued after an Oracle JDBC URL up to a later '@'
+//     ({"url":"jdbc:oracle:thin:u/p@h:1521:S","owner":"ops@corp"}) is masked
+//     with the password.
 package redact
 
 import (
@@ -311,7 +320,8 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	if changed {
 		s = b.String()
 	}
-	return r.extend(s, &st), st
+	// The Oracle pass goes last and only adds masks (oracleRule).
+	return maskOracle(r.extend(s, &st), &st), st
 }
 
 // lineFixed masks one line until nothing more changes.
@@ -457,6 +467,10 @@ const (
 	styleSecret
 	// styleWhole replaces the value with a fixed label (private keys).
 	styleWhole
+	// styleBare replaces the value with the marker alone, "[redacted]": the
+	// form the local Oracle mask in internal/tools/kafkatools writes and
+	// skips, so that pass stays a no-op on this package's output.
+	styleBare
 )
 
 const marker = "[redacted"
@@ -489,6 +503,8 @@ func mask(v string, style maskStyle) string {
 	switch style {
 	case styleWhole:
 		return marker + " private key " + cls + "]"
+	case styleBare:
+		return marker + "]"
 	case styleToken:
 		if n >= 20 {
 			return headRunes(v, 4) + "…" + marker + " " + cls + "]…" + tailRunes(v, 2)

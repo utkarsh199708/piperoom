@@ -597,15 +597,80 @@ func TestPagingNudgesDoNotStarveOtherPages(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	p := newPrunePager(t, &now, PagingLimits{})
 	for i := 0; i < 6; i++ {
-		if !pageOnce(p, "r1", fmt.Sprintf("nudge:%d", i)) {
+		// One room each, so only the per-owner cap can deny the seventh.
+		if !pageOnce(p, fmt.Sprintf("r%d", i+1), fmt.Sprintf("nudge:%d", i)) {
 			t.Fatalf("nudge %d denied", i)
 		}
 		now = now.Add(5 * time.Minute)
 	}
-	if pageOnce(p, "r1", "nudge:99") {
+	if pageOnce(p, "r7", "nudge:99") {
 		t.Error("a seventh nudge page in the hour was allowed")
 	}
 	if !pageOnce(p, "r2", "proposal:p9") {
 		t.Error("nudges used up the owner's budget for a proposal page in another room")
+	}
+}
+
+// One room's nudges must not use up an owner's nudge budget for other rooms
+// (#509), and a burst of nudges in one room in the same second is capped too.
+func TestPagingNudgesCappedPerRoom(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := newPrunePager(t, &now, PagingLimits{})
+	paged := 0
+	for i := 0; i < 6; i++ {
+		if pageOnce(p, "r1", fmt.Sprintf("nudge:%d", i)) {
+			paged++
+		}
+		now = now.Add(5 * time.Minute)
+	}
+	if paged != 2 {
+		t.Errorf("room r1 nudge pages in the hour = %d, want 2", paged)
+	}
+	if !pageOnce(p, "r2", "nudge:1") {
+		t.Error("a nudge in r2 paged nobody after r1's nudges")
+	}
+	// The per-room cap frees up once the hour passes.
+	now = now.Add(time.Hour)
+	if !pageOnce(p, "r1", "nudge:100") {
+		t.Error("r1 nudge denied after its hour passed")
+	}
+}
+
+// Several nudges in one message count against the same per-room cap.
+func TestPagingNudgeBurstInOneMessage(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := newPrunePager(t, &now, PagingLimits{})
+	var planned []pageKey
+	for i := 0; i < 6; i++ {
+		k := pageKey{room: "r1", user: owner1, reason: fmt.Sprintf("nudge:p%d", i)}
+		if p.check(k, planned) {
+			planned = append(planned, k)
+		}
+	}
+	if len(planned) != 2 {
+		t.Errorf("burst planned %d nudge pages, want 2", len(planned))
+	}
+}
+
+// Many rooms cannot grow the per-room nudge map without bound.
+func TestPagingNudgeRoomMapBounded(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := newPrunePager(t, &now, PagingLimits{UserPerHour: 1 << 30})
+	for i := 0; i < maxTrackedRooms+10; i++ {
+		pageOnce(p, fmt.Sprintf("room%d", i), "nudge:1")
+	}
+	p.mu.Lock()
+	n := len(p.nudgeRoom)
+	p.mu.Unlock()
+	if n > maxTrackedRooms {
+		t.Errorf("nudgeRoom has %d entries, cap %d", n, maxTrackedRooms)
+	}
+	now = now.Add(2 * time.Hour)
+	pageOnce(p, "late", "nudge:1")
+	p.mu.Lock()
+	n = len(p.nudgeRoom)
+	p.mu.Unlock()
+	if n != 1 {
+		t.Errorf("nudgeRoom has %d entries after an idle hour, want 1", n)
 	}
 }
