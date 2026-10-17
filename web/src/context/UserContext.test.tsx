@@ -34,6 +34,7 @@ import { ApiClientError, api, probeSession } from '../api/client'
 import { getAuthEpoch, getSessionChanges, reportAuthProblem, redirectToLogin } from '../lib/auth'
 import { UserProvider } from './UserContext'
 import { useCurrentUser } from './user'
+import { GROUPS_MISSING_TEXT } from '../components/GroupsMissingNotice'
 
 function Who() {
   const { user, setUserId, logout, sessionEpoch, busy } = useCurrentUser()
@@ -133,6 +134,19 @@ describe('UserProvider (live mode)', () => {
     renderProvider()
     await waitFor(() => expect(redirectToLogin).toHaveBeenCalledTimes(1))
     expect(screen.queryByText('Sign in')).not.toBeInTheDocument()
+  })
+
+  it('draws the app in grey while /api/me is pending, then the failure as a notice with Reload', async () => {
+    let fail: (e: unknown) => void = () => undefined
+    vi.mocked(api.me).mockReturnValue(new Promise((_, reject) => (fail = reject)))
+    renderProvider()
+    expect(screen.getByRole('status', { name: 'Loading your account' })).toBeInTheDocument()
+    expect(screen.queryByText(/Loading user/)).not.toBeInTheDocument()
+    await act(async () => fail(new ApiClientError(500, 'internal', 'boom')))
+    expect(await screen.findByRole('heading', { name: 'Could not load your account' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reload' })).toBeInTheDocument()
+    // The failure is said once, in the notice, not again in a banner above it.
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
   })
 
   it('shows the Sign in link instead of redirecting when the loop guard says no', async () => {
@@ -268,7 +282,7 @@ describe('UserProvider (live mode)', () => {
 })
 
 describe('UserProvider: roles, groups notice, switcher, login errors', () => {
-  const NOTICE = 'Your sign-in had no groups claim; group-based rights are not available (IdP overage?)'
+  const NOTICE = GROUPS_MISSING_TEXT
 
   function Role() {
     const { user } = useCurrentUser()

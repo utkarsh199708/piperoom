@@ -140,13 +140,13 @@ describe('the approval moment', () => {
   it('the approval matrix shows who decided, grant, method and time; pending rows say pending', () => {
     show(arjun)
     const done = screen.getByTestId('decision-schema-registry')
-    expect(done).toHaveTextContent(/approved by Priya \(user:priya, oidc\) at \d/)
+    expect(done).toHaveTextContent(/approved by Priya \(named owner, SSO\) at \d/)
     const row = done.closest('[data-layer]') as HTMLElement
-    expect(within(row).getByText('user:priya')).toBeInTheDocument()
+    expect(within(row).getByText('named owner')).toBeInTheDocument()
     const mine = screen.getAllByRole('button', { name: 'Approve' })[0].closest('[data-layer]') as HTMLElement
     expect(mine).toHaveAttribute('data-layer', 'kafka-connect')
     expect(within(mine).getByText('pending · your layer')).toBeInTheDocument()
-    expect(within(mine).getByText('user:arjun')).toBeInTheDocument()
+    expect(within(mine).queryByText('user:arjun')).not.toBeInTheDocument()
   })
 
   it('the full hash is inside a details element and the copy button copies it', async () => {
@@ -396,7 +396,7 @@ describe('executed steps', () => {
     }
     show(kabir, run)
     expect(screen.getByTestId('exec-hash-0')).toHaveTextContent(HASH.slice(0, 12))
-    expect(screen.getAllByText('hash differs from proposal')).toHaveLength(1)
+    expect(screen.getAllByText('fingerprint differs from proposal')).toHaveLength(1)
   })
 })
 
