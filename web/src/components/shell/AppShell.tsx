@@ -10,6 +10,7 @@ import { useTheme } from '@/context/theme'
 import { useCurrentUser } from '@/context/user'
 import { roomsNeedingYou, useListAttention } from '@/hooks/useListAttention'
 import { useRoomList } from '@/hooks/useRoomList'
+import { pageTitle } from '@/lib/title'
 import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, RoomListContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
 import { isEditableTarget } from './keys'
@@ -130,7 +131,7 @@ export function AppShell() {
   const needsYouCount = useMemo(() => roomsNeedingYou(rooms, user).length, [rooms, user])
   const roomId = location.pathname.startsWith('/rooms/') ? safeDecode(location.pathname.split('/')[2] ?? '') : ''
   const currentPipelineId = rooms.find((r) => r.id === roomId)?.pipeline_id
-  useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`))
+  useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`), pageTitle(location.pathname))
 
   return (
     <InShellContext.Provider value>
