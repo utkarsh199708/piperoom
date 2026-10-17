@@ -691,6 +691,96 @@ func padProse(t string) bool {
 	return true
 }
 
+// padValue reports padded text that padProse took for prose but that is a
+// value all the same (#510). Text on its own line or in capitals between
+// blanks (HUNTER2) is a value unless it is a placeholder by both
+// placeholderText and the substring list 0a4b8f8 used (oldPlaceholder), so
+// nothing 0a4b8f8 masked is kept. Lower-case text padded on one line is a
+// value when it is tab-padded or a single plain word
+// (<password> debezium </password>), unless it is a placeholder or a
+// function word (and, the). It only narrows padProse, so the text it lets
+// through is masked on top of the #383 rule.
+func padValue(pad, t string) bool {
+	lineBreak := strings.ContainsAny(pad, "\r\n") || strings.Contains(pad, `\n`) || strings.Contains(pad, `\r`)
+	if lineBreak || capsMetavar(t) {
+		return !(placeholderText(t) && oldPlaceholder(t))
+	}
+	if placeholderText(t) || functionWords[asciiLower(t)] {
+		return false
+	}
+	tab := strings.ContainsAny(pad, "\t") || strings.Contains(pad, `\t`)
+	return tab || !strings.ContainsAny(t, " \t") && plainWord(t)
+}
+
+// oldPlaceholderWords is 0a4b8f8's placeholder list, matched as
+// substrings. Own-line and capitals text counts as a placeholder only when
+// it matches this too.
+var oldPlaceholderWords = []string{
+	"todo", "tbd", "fixme", "change", "replace", "placeholder", "password", "passwd", "secret", "token",
+	"redacted", "hidden", "masked", "xxx", "your", "setme", "set_me", "unset", "notset", "none", "null", "empty", "example",
+}
+
+func oldPlaceholder(t string) bool {
+	l := asciiLower(t)
+	for _, w := range oldPlaceholderWords {
+		if strings.Contains(l, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// placeholderWords make up element text that stands in for a secret.
+var placeholderWords = map[string]bool{
+	"todo": true, "tbd": true, "fixme": true, "change": true, "changeme": true, "me": true, "replace": true,
+	"replaceme": true, "placeholder": true, "password": true, "passwd": true, "pwd": true, "secret": true,
+	"token": true, "redacted": true, "hidden": true, "masked": true, "your": true, "here": true, "setme": true,
+	"set": true, "unset": true, "notset": true, "none": true, "null": true, "nil": true, "empty": true,
+	"example": true, "insert": true, "enter": true, "value": true,
+}
+
+// secretWords name a secret; alone they are a value, not a placeholder.
+var secretWords = map[string]bool{"password": true, "passwd": true, "pwd": true, "secret": true, "token": true}
+
+// functionWords are English words that read as prose between two tags.
+var functionWords = map[string]bool{
+	"a": true, "an": true, "and": true, "or": true, "the": true, "to": true, "of": true, "in": true, "on": true,
+	"at": true, "by": true, "is": true, "it": true, "be": true, "see": true, "not": true, "no": true, "with": true,
+	"for": true, "from": true, "as": true,
+}
+
+// placeholderText reports text that names a missing secret: made only of
+// placeholder words joined by '_', '-', '.' or blanks (TODO, CHANGE_ME,
+// YOUR_PASSWORD, changeme), maybe in <...>, ${...} or %...%, or a run of x
+// or '*'. A real value that only contains such a word (changeit,
+// supersecret, MYSECRET1) is not one.
+func placeholderText(t string) bool {
+	l := asciiLower(strings.TrimSpace(t))
+	for _, w := range [][2]string{{"<", ">"}, {"${", "}"}, {"%", "%"}} {
+		if len(l) > len(w[0])+len(w[1]) && strings.HasPrefix(l, w[0]) && strings.HasSuffix(l, w[1]) {
+			l = l[len(w[0]) : len(l)-len(w[1])]
+			break
+		}
+	}
+	wrapped := l != asciiLower(strings.TrimSpace(t))
+	words := strings.FieldsFunc(l, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == ' ' || r == '\t' })
+	if len(words) == 0 {
+		return false
+	}
+	// password, secret and token alone are common real passwords; they are
+	// placeholders only when wrapped (<password>) or joined to another
+	// placeholder word (YOUR_PASSWORD).
+	if len(words) == 1 && !wrapped && secretWords[words[0]] {
+		return false
+	}
+	for _, w := range words {
+		if !placeholderWords[w] && !(len(w) >= 3 && strings.Trim(w, "x") == "") && strings.Trim(w, "*") != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // xmlContent reads the text of element name from k, after its start tag:
 // padding, then a CDATA section, plain text on one line, or child elements,
 // each followed by its own end tag, and then </name>. It returns the values
@@ -734,7 +824,7 @@ func xmlContent(s string, k int, name string, cdata *cdataEnds) ([][]int, int) {
 	}
 	ve := trimXMLSpace(s, vs, e)
 	if ve <= vs || !oneLine(s[vs:ve]) || heldMask(s[vs:ve], true) ||
-		(vs > k || ve < e) && padProse(s[vs:ve]) {
+		(vs > k || ve < e) && padProse(s[vs:ve]) && !padValue(s[k:vs]+s[ve:e], s[vs:ve]) {
 		return nil, end
 	}
 	return [][]int{{vs, ve, vs, ve}}, end
