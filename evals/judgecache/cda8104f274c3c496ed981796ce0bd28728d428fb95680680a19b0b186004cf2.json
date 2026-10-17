@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "users-compat-none-consumer",
+  "hypothesis": "For old rows the usr.public.users value is NONE for loyalty_tier, and user-profile-sync cannot parse the null.",
+  "truth_sha256": "6dcefdc8be68957aee5732cdac9d2fce27c4d4229315ef4f697be66829df020b",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis blames null loyalty_tier values in old rows, not the subject-level compatibility override set to NONE that let an incompatible schema register. It does name user-profile-sync, so the consumer is the first failing layer, but the root cause sits in the data, not in schema-registry."
+  }
+}

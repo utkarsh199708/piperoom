@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "publication-permission-denied",
+  "hypothesis": "Root cause: the table owner changed, so Debezium's role owns tables, not publications.",
+  "truth_sha256": "e3ce5f6d07dbc19a4f485ef94406fa5a01495f02fa8aeabf321512474a40f1d0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis mentions the ownership change and publications but garbles the mechanism. It never commits to the connector user losing table ownership, which is what makes ALTER PUBLICATION fail on restart. It also names no failing layer."
+  }
+}

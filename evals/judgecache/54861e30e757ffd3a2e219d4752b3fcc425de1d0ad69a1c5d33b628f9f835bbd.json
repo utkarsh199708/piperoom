@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "topic-retention-data-loss",
+  "hypothesis": "Retention is 6 h and records were lost. We can't yet, however, rule out a reset to latest.",
+  "truth_sha256": "0e5446ae78df3d5ef4c5c5093ec58df1a1c6e1d8dd571dc0398cef302c7c5a11",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names retention and lost records, but it hedges by keeping a reset to latest open, which is the listed wrong story, so it does not commit to the root cause. It implicitly places the failure in Kafka retention."
+  }
+}

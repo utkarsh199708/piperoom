@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "ledger-producer-timeout-recovery",
+  "hypothesis": "Kafka is still down? No: the topic is readable again; task 0 of pg-ledger-connector failed on a producer timeout during the 08:52 restart.",
+  "truth_sha256": "bf133c3e2deea4e2534d0718f7a34229cb7ac444cb55d35149d43ffcbe1de337",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis says task 0 of pg-ledger-connector failed on a producer timeout during the 08:52 broker restart, which matches the ground-truth cause. It puts the failure at the Connect task and the cause in the Kafka restart."
+  }
+}

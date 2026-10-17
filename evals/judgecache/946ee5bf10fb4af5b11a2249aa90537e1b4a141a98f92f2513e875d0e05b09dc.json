@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "snowflake-sink-column-missing",
+  "hypothesis": "The wh-orders-sink connector failed on task 0: every load into Snowflake fails with invalid identifier 'RISK_SCORE', because the sink table has no risk_score column that schema version 4 added.",
+  "truth_sha256": "a64ff10591c1a72eb0c6fc144d9e778bbba9e3c1ebf5926ab9bb2023618d8cbd",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the missing risk_score column in the Snowflake sink table, added in schema v4, as the cause of the load failures. It places the first failure at the sink connector task (kafka-connect) and the cause in the warehouse table, and it does not claim the schema was incompatible."
+  }
+}

@@ -269,9 +269,10 @@ func TestTriStateNoFlip(t *testing.T) {
 }
 
 // TestJudgedCorpusGrades checks every recorded verdict of the ambiguous set
-// against the corpus label. Until the owner approves the paid fill the cache
-// is empty and this skips; once any verdict is recorded, every entry must have
-// one (a miss fails), and a judged grade that differs from the label fails:
+// against the corpus label. The cache holds one verdict per manifest entry
+// (the owner-approved calibration fill, #454), so a cache with fewer verdicts
+// than the manifest has entries fails: an emptied or partly deleted cache must
+// not pass CI silently. A judged grade that differs from the label fails too:
 // either the label is wrong and is corrected, or the judge prompt is.
 func TestJudgedCorpusGrades(t *testing.T) {
 	cache := NewJudgeCache("judgecache")
@@ -279,13 +280,16 @@ func TestJudgedCorpusGrades(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n == 0 {
-		t.Skip("judge cache is empty: the owner-approved calibration fill (go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json, #454) has not run, so the judged grades of the ambiguous set are unchecked")
-	}
 	scs := tristateScenarios(t)
 	set, err := LoadAmbiguousSet(filepath.FromSlash(ambiguousSetFile))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(set.Entries) == 0 {
+		t.Fatal("the ambiguous-set manifest has no entries")
+	}
+	if n < len(set.Entries) {
+		t.Fatalf("judge cache holds %d verdict(s) for %d manifest entries: refill with go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json (paid, needs the owner's approval, #454)", n, len(set.Entries))
 	}
 	cfg := Config{DefaultJudge: JudgeAuto, JudgeCache: "judgecache", JudgeCacheOnly: true}
 	g := newJudgeGate(cfg)

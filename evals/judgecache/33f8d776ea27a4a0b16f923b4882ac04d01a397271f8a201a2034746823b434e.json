@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "snapshot-stuck",
+  "hypothesis": "analytics.orders is stale because the wh-orders-sink connector is not consuming from Kafka.",
+  "truth_sha256": "19f341180f6f2d37742ea7aa8650e8056fe813201dffad9438924b2273cdda6d",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis blames the sink connector for not consuming, which places the failure in the consumer layer and contradicts the ground truth that the sink keeps up. The actual cause is the source connector's initial snapshot, which is still in progress in kafka-connect."
+  }
+}

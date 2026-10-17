@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "users-compat-none-consumer",
+  "hypothesis": "The loyalty_tier DDL broke nothing on its own; the subject-level compatibility override NONE on usr.public.users-value let v4 register, and user-profile-sync cannot read it.",
+  "truth_sha256": "6dcefdc8be68957aee5732cdac9d2fce27c4d4229315ef4f697be66829df020b",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the subject-level NONE compatibility override that let the incompatible loyalty_tier v4 schema register, so it places the root cause in schema-registry. It also has user-profile-sync failing to read v4, which puts the first failing layer at the consumer."
+  }
+}

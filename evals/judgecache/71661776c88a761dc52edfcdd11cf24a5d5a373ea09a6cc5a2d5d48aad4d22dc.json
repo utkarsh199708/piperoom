@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "consumer-poison-pill",
+  "hypothesis": "Root cause: a poison pill on partition 1 that order-sync cannot deserialize. Fix: move partition 1 past the record; alternatively the consumer has a deserializer bug.",
+  "truth_sha256": "c6a77c8dcccbb721ae884ad8f94c38e7466a3fd40b8441a4996ea9c93c950a09",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis names a poison pill on partition 1 that cannot be deserialized, which matches the ground truth. It hedges with \"the consumer has a deserializer bug\" as an alternative, though. That hedge leaves the root-cause layer ambiguous between kafka (the bad record) and consumer (a code bug), so it is not committed to the kafka layer."
+  }
+}

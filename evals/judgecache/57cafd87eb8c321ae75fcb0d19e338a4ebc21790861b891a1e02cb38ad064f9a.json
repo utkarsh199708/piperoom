@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "snapshot-stuck",
+  "hypothesis": "pg-orders-connector (Kafka Connect) is still in its initial snapshot of public.orders: debezium_metrics shows snapshot running=true, rows scanned rising from 148 M to 149 M, and streaming has not started. Nothing failed. The slot debezium_orders is active and retains WAL until the snapshot ends; a restart would start the snapshot again from zero.",
+  "truth_sha256": "19f341180f6f2d37742ea7aa8650e8056fe813201dffad9438924b2273cdda6d",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis correctly says the connector is still in its initial snapshot with progress rising, places this at kafka-connect, and tells none of the wrong stories."
+  }
+}

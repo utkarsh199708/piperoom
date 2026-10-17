@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "schema-change",
+  "hypothesis": "Root cause: a DBA altered orders.amount from integer to numeric(12,2). Debezium's new value schema for amount is bytes, not backward compatible.",
+  "truth_sha256": "28b40a04cd675e6242339dca297be7d482b2f920ba69ffd83226c869efc1b34c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the amount column type change to numeric and the non-backward-compatible Debezium schema (bytes), so the root cause is correct and sits in postgres. It never states the first failing layer (the connector task failing on the registry rejection), so layer_correct is false."
+  }
+}

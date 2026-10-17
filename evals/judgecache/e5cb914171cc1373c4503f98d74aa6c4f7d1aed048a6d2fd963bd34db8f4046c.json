@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "publication-permission-denied",
+  "hypothesis": "Root cause: the table owner changed, so Debezium's user has REPLICATION, not publication ownership.",
+  "truth_sha256": "e3ce5f6d07dbc19a4f485ef94406fa5a01495f02fa8aeabf321512474a40f1d0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis does say that table ownership changed and that this hits publication ownership. However, it never says Debezium alters the publication on task start, and it names no failing layer."
+  }
+}

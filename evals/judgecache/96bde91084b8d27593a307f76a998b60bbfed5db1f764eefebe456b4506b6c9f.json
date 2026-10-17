@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "ledger-producer-timeout-recovery",
+  "hypothesis": "Task 0 timed out because the brokers are unavailable for longer than delivery.timeout.ms during a rolling restart, and Connect never restarts a failed task.",
+  "truth_sha256": "bf133c3e2deea4e2534d0718f7a34229cb7ac444cb55d35149d43ffcbe1de337",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names task 0 timing out on delivery.timeout.ms during the broker rolling restart and staying failed because Connect does not restart it, which matches the ground truth. The first failing layer is implicitly Connect, and the root cause sits with the Kafka brokers."
+  }
+}
