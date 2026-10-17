@@ -195,19 +195,31 @@ func sourceHealth(slot clients.ReplicationSlot, t Thresholds) (Health, map[strin
 	return HealthOK, facts
 }
 
-// connectorHealth decides a connector's health from its status.
+// connectorHealth decides a connector's health from its status, by the
+// watcher's connector_down rule (classifyOne, devctl): healthy is RUNNING with
+// at least one task and every task RUNNING. Anything else is not OK:
+//   - FAILED connector or task: Fail;
+//   - RUNNING with no tasks: Fail with tasks "none" (the connector moves no
+//     data; the watcher opens a sev2 room for it);
+//   - any other connector or task state (PAUSED, UNASSIGNED, STOPPED,
+//     RESTARTING, one this code does not know): Warn, with the state or a
+//     count of the tasks that are not running.
 func connectorHealth(s clients.ConnectorStatus) (Health, map[string]string) {
 	facts := map[string]string{}
 	failed := s.State == "FAILED"
 	failedTasks := 0
 	pausedTasks := 0
+	otherTasks := 0
 	for _, task := range s.Tasks {
 		switch task.State {
+		case "RUNNING":
 		case "FAILED":
 			failed = true
 			failedTasks++
 		case "PAUSED", "UNASSIGNED", "STOPPED":
 			pausedTasks++
+		default:
+			otherTasks++
 		}
 	}
 	if failed {
@@ -217,16 +229,34 @@ func connectorHealth(s clients.ConnectorStatus) (Health, map[string]string) {
 		}
 		return HealthFail, facts
 	}
-	switch s.State {
-	case "PAUSED", "UNASSIGNED", "STOPPED":
-		facts["state"] = s.State
+	if s.State != "RUNNING" {
+		facts["state"] = truncFact(s.State)
 		return HealthWarn, facts
+	}
+	if len(s.Tasks) == 0 {
+		facts["tasks"] = "none"
+		return HealthFail, facts
 	}
 	if pausedTasks > 0 {
 		facts["tasks_paused"] = strconv.Itoa(pausedTasks)
+	}
+	if otherTasks > 0 {
+		facts["tasks_not_running"] = strconv.Itoa(otherTasks)
+	}
+	if pausedTasks > 0 || otherTasks > 0 {
 		return HealthWarn, facts
 	}
 	return HealthOK, facts
+}
+
+// truncFact caps a state string from Connect before it becomes a fact: the
+// state is untrusted text, and a fact is shown to the model and the room.
+func truncFact(s string) string {
+	const max = 24
+	if r := []rune(s); len(r) > max {
+		return string(r[:max])
+	}
+	return s
 }
 
 // groupHealth decides a consumer group's health from its lag.

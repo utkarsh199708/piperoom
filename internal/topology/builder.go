@@ -263,7 +263,13 @@ func (b *builder) sourceNode(p owners.Pipeline, tbl string, info *collected) Nod
 		n.Facts = map[string]string{"error": "unreachable"}
 		return n
 	}
-	slotName := b.slotName(p, tbl, info)
+	slotName, err := b.slotName(p, tbl, info)
+	if err != nil {
+		// A broken slot.name never falls back to the default slot, which can
+		// be another pipeline's: the slot is unknown, not someone else's.
+		n.Facts = map[string]string{"slot": "invalid"}
+		return n
+	}
 	if slotName == "" {
 		n.Facts = map[string]string{"slot": "unknown"}
 		return n
@@ -283,18 +289,29 @@ func (b *builder) sourceNode(p owners.Pipeline, tbl string, info *collected) Nod
 	return n
 }
 
-// slotName finds the replication slot name for the connector that streams tbl.
-// info.matchers holds only readable source connectors: a sink has no include
-// list, which would read as "streams every table" and lend the table the
-// default slot name.
-func (b *builder) slotName(p owners.Pipeline, tbl string, info *collected) string {
+// slotName finds the replication slot that streams tbl, by the rule of
+// tools.Scope.Slots and the watcher (owners.ConnectorSlot), so the map and
+// pg_replication_slots name the same slot:
+//   - owners.yaml watch.slot, when set, is the answer and needs no Connect
+//     call, so the slot stays visible while Connect is down;
+//   - otherwise the slot of the connector that streams tbl. info.matchers
+//     holds only readable source connectors: a sink has no include list,
+//     which would read as "streams every table" and lend the table a slot.
+//
+// "" with a nil error means no slot is known (Connect down, or the streaming
+// connector is not a Debezium Postgres source). A present but invalid
+// slot.name is an error.
+func (b *builder) slotName(p owners.Pipeline, tbl string, info *collected) (string, error) {
+	if declared := p.Watch().Slot; declared != "" {
+		return declared, nil
+	}
 	for _, cn := range p.Connectors {
 		m, ok := info.matchers[cn]
 		if ok && m.streams(tbl) {
-			return slotNameFor(cn, info.connect[cn].config)
+			return owners.ConnectorSlot(info.connect[cn].config)
 		}
 	}
-	return ""
+	return "", nil
 }
 
 func (b *builder) connectorNode(p owners.Pipeline, cn string, info *collected) Node {
@@ -592,13 +609,6 @@ func (m streamMatcher) exact() bool { return m.tables.exact && m.schemas.exact }
 // non-nil, receives invalid list entries for reporting.
 func streamsTable(cfg map[string]string, tbl string, warn func(string)) bool {
 	return newStreamMatcher(cfg, warn).streams(tbl)
-}
-
-func slotNameFor(_ string, cfg map[string]string) string {
-	if n := cfg["slot.name"]; n != "" {
-		return n
-	}
-	return "debezium"
 }
 
 // fallbackTopics returns placeholder topic names when connector config is

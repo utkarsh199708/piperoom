@@ -33,7 +33,7 @@ func twoLaneConnect() *fakeConnect {
 			"c1": {"topic.prefix": "p1", "table.include.list": "public.a", "slot.name": "s1"},
 			"c2": {"topic.prefix": "p2", "table.include.list": "public.b", "slot.name": "s2"},
 		},
-		status: map[string]clients.ConnectorStatus{"c1": {State: "RUNNING"}, "c2": {State: "RUNNING"}},
+		status: map[string]clients.ConnectorStatus{"c1": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}, "c2": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 	}
 }
 
@@ -239,7 +239,7 @@ func TestBuildSinkConnectorEdges(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := &fakeConnect{
 				config: map[string]map[string]string{"orders-sink": tc.sink, "pg-orders-connector": src},
-				status: map[string]clients.ConnectorStatus{"orders-sink": {State: "RUNNING"}, "pg-orders-connector": {State: "RUNNING"}},
+				status: map[string]clients.ConnectorStatus{"orders-sink": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}, "pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 			}
 			b := newBuilder(sinkOwners(), c, &fakeKafka{lags: map[string]clients.GroupLag{"order-sync": lagOn("pg.public.orders")}},
 				&fakeSource{slots: []clients.ReplicationSlot{{Name: "real_slot", Active: true}, {Name: "debezium", Active: false}}}, &fakeWarehouse{}, nil)
@@ -292,7 +292,7 @@ func TestIsSinkConnector(t *testing.T) {
 	}
 	c := &fakeConnect{
 		config: map[string]map[string]string{"orders-sink": {"connector.class": "com.example.Writer"}, "pg-orders-connector": {"topic.prefix": "pg"}},
-		status: map[string]clients.ConnectorStatus{"orders-sink": {Type: "sink", State: "RUNNING"}, "pg-orders-connector": {Type: "source", State: "RUNNING"}},
+		status: map[string]clients.ConnectorStatus{"orders-sink": {Type: "sink", State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}, "pg-orders-connector": {Type: "source", State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 	}
 	g := buildWith(t, sinkOwners(), c, &fakeKafka{})
 	if got := edgeStrings(g.Edges); slices.Contains(got, "pg:public.orders>connect:orders-sink") || slices.Contains(got, "pg:public.orders>connect:orders-sink ~") {
@@ -491,7 +491,7 @@ func TestBuildSingleLaneMappings(t *testing.T) {
 	now := time.Now()
 	c := &fakeConnect{
 		config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}},
-		status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+		status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 	}
 	g := buildWith(t, testOwners(), c, &fakeKafka{
 		lags:    map[string]clients.GroupLag{"order-sync": lagOn("pg.public.orders")},

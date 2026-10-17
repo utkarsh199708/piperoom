@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -356,14 +355,6 @@ type ConfigReader interface {
 	Config(ctx context.Context, name string) (map[string]string, error)
 }
 
-// defaultSlot is the slot a Debezium Postgres connector uses when its config
-// has no slot.name.
-const defaultSlot = "debezium"
-
-// slotNameRE is Postgres's rule for a replication slot name, the same rule as
-// owners.yaml watch.slot.
-var slotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
-
 // Slots returns the replication slots that belong to the room's pipeline, by
 // the watcher's rule:
 //   - owners.yaml watch.slot, when set. It is the whole answer and needs no
@@ -395,14 +386,9 @@ func (s Scope) Slots(ctx context.Context, cr ConfigReader) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tools: pipeline %q: read connector %q config to find its slot (set watch.slot in owners.yaml to name it without Connect): %w", s.p.ID, name, err)
 		}
-		slot := ""
-		if n, present := cfg["slot.name"]; present {
-			if !slotNameRE.MatchString(n) {
-				return nil, fmt.Errorf("tools: pipeline %q: connector %q has an invalid slot.name %q", s.p.ID, name, shorten(n))
-			}
-			slot = n
-		} else if strings.Contains(cfg["connector.class"], "PostgresConnector") {
-			slot = defaultSlot
+		slot, err := owners.ConnectorSlot(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("tools: pipeline %q: connector %q has an invalid slot.name %q: %w", s.p.ID, name, shorten(cfg["slot.name"]), err)
 		}
 		if slot != "" && !contains(out, slot) {
 			out = append(out, slot)
