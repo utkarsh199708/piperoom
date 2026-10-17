@@ -88,7 +88,7 @@ func TestSanitizeTraceHostileSpeed(t *testing.T) {
 	for _, unit := range []string{
 		"x", "a b c d ", "key (", "Key (a)=(", "value \"", "value \"x\" ", "set ", "set x ", "incorrect x ", "values ",
 		"detail: ", "record ", "Key (", "ſet x ", "password={", "Password={x", "jdbc:oracle:thin:a/", "jdbc:oracle:thin:a/b@",
-		"oldSchema: '", "Error registering Avro schema{", "{\"a\":", "Text '", "Text 'x' could not be parsed ",
+		"oldSchema: '", "Error registering Avro schema{", "{\"a\":", "Text '", "Text 'x' could not be parsed ", "Text '\n",
 		"malformed array literal: \"", "failed to parse date field [", "postgresql://u:p@h/", "Failing row contains (",
 		"Not in union [", "Not in union [\"a\"]: ", "in document with id '", "\"reason\":\"in document with id '",
 		"invalid byte sequence for encoding \"", "Got VALUE_", "invalid value \"",

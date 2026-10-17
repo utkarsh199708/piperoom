@@ -370,11 +370,31 @@ func condenseTrace(trace string) string {
 	var out []string
 	size := 0
 	var inValue byte // the quote of a sink value that holds a newline, while inside it
-	for _, line := range strings.Split(trace, "\n") {
+	// A java.time Text '...' value that holds a newline (#560): its opener
+	// carries the quote, so openQuote does not see it, and its parseMarker is on
+	// a later line. inText is set from the opener's line to the marker's line.
+	inText, textKept := false, false
+	markerAt := -1 // the first line after the current one that holds parseMarker, or len(lines)
+	lines := strings.Split(trace, "\n")
+	for i, line := range lines {
 		// cleanTrace keeps maxTraceText bytes; masking past that (plus a margin
 		// for masks that shorten text) is work whose output is cut anyway.
 		if size > maxTraceText+condenseMargin {
 			break
+		}
+		if inText {
+			// Every line up to the marker's is the record's, and so is the text
+			// after the marker on it: main drops such a line, and the words
+			// java.time puts there ("at index 0") are not worth a leak. Only
+			// the marker itself is kept, as the diagnosis.
+			if strings.Contains(line, parseMarker) {
+				inText = false
+				if textKept {
+					out[len(out)-1] += parseMarker
+					size += len(parseMarker)
+				}
+			}
+			continue
 		}
 		if inValue != 0 {
 			// The value's lines go, a "Caused by:" one too: sanitizeTrace
@@ -389,14 +409,55 @@ func condenseTrace(trace string) string {
 		if trimmed == "" || strings.HasPrefix(trimmed, "at ") {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0 {
-			kept := sanitizeTrace(trimmed)
-			out = append(out, kept)
-			size += len(kept) + 1
+		text := trimmed
+		isKept := strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0
+		if isKept {
+			text = sanitizeTrace(trimmed)
 		}
-		inValue = openQuote(trimmed)
+		// Only a marker on a later line makes the opener a multi-line value;
+		// without one, "Text '" is other text and stays as main leaves it.
+		if v := openTextValue(text); v >= 0 {
+			if markerAt <= i {
+				markerAt = len(lines)
+				for j := i + 1; j < len(lines); j++ {
+					if strings.Contains(lines[j], parseMarker) {
+						markerAt = j
+						break
+					}
+				}
+			}
+			if markerAt < len(lines) {
+				text = text[:v] + dlq.Redacted
+				inText, textKept = true, isKept
+			}
+		}
+		if isKept {
+			out = append(out, text)
+			size += len(text) + 1
+		}
+		if !inText {
+			inValue = openQuote(trimmed)
+		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// openTextValue returns the index in s where the value of its last java.time
+// "Text '" opener starts, when no parseMarker follows that opener on the line,
+// or -1. It runs findSinkOpeners once, so a hostile line stays linear.
+func openTextValue(s string) int {
+	low := asciiLower(s)
+	spans := findSinkOpeners(low, 0, len(low))
+	for k := len(spans) - 1; k >= 0; k-- {
+		m := spans[k]
+		if strings.HasPrefix(low[m[0]:], "text '") {
+			if strings.Contains(low[m[1]:], parseMarker) {
+				return -1
+			}
+			return m[1]
+		}
+	}
+	return -1
 }
 
 // condenseMargin is how far past maxTraceText condenseTrace keeps lines.
