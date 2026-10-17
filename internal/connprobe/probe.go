@@ -128,3 +128,8 @@ func step(fn func() Check) Check {
 func skipped(id, why string) Check {
 	return Check{ID: id, Status: StatusSkip, Detail: why}
 }
+
+// notImplemented is the result of a placeholder probe.
+func notImplemented(k Kind) Result {
+	return Result{Kind: k, Checks: []Check{{ID: "probe", Status: StatusSkip, Detail: "probe not implemented yet"}}}
+}
