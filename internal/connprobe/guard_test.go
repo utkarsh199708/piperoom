@@ -131,8 +131,10 @@ func TestRunUnknownKindAndOK(t *testing.T) {
 	if r.OK || len(r.Checks) != 1 || r.Checks[0].Status != StatusFail {
 		t.Fatalf("unknown kind: %+v", r)
 	}
+	// A probe's failed check makes the result not ok; Run fills the kind.
+	// (TestConnectOK covers ok = true.)
 	r = Run(context.Background(), Target{Kind: KindConnect}, nil)
-	if !r.OK || r.Kind != KindConnect {
-		t.Fatalf("stub probe: %+v", r)
+	if r.OK || r.Kind != KindConnect || len(r.Checks) == 0 {
+		t.Fatalf("connect probe without settings: %+v", r)
 	}
 }
