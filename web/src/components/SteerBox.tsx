@@ -21,6 +21,8 @@ import { PersonSelect } from './PersonSelect'
 import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { StatusDot } from './room/StatusDot'
+import type { SteerAction } from './room/steerAction'
+import { subscribeSteerAction, readSteerAction, takeOverSteerAction, updateSteerAction, watchSteerDelivery, writeSteerAction } from './room/steerAction'
 import { leaseExpired, minutesLeft, useNow } from './room/useNow'
 
 // The driver lease is 30 minutes (docs/api.md); the bar shows what is left of it, and from
@@ -220,9 +222,14 @@ export function SteerBox({
   /** Text to put in the field ("Ask the agent" on a checklist item); `n` makes the same text count again. */
   prefill?: { text: string; n: number }
 }) {
-  const [text, setText] = useState(() => readStore('local', draftKey(state.id)))
-  const [sending, setSending] = useState(false)
-  const [offline, setOffline] = useState(false)
+  // A reload of the room remounts this box (#550): take over the action the previous one left
+  // in the ledger, or start empty if that action landed while no box was mounted.
+  const [takeOver] = useState(() =>
+    takeOverSteerAction(state.id, user.id, actions.sends, readStore('local', draftKey(state.id))),
+  )
+  const [text, setText] = useState(() => (takeOver.clearDraft ? '' : readStore('local', draftKey(state.id))))
+  const [sending, setSending] = useState(takeOver.owed?.phase === 'sending')
+  const [offline, setOffline] = useState(takeOver.owed?.phase === 'kept')
   const [seenPrefill, setSeenPrefill] = useState(0)
   // Set during render (React's derived-state pattern), so the field is filled before it paints.
   if (prefill && prefill.n !== seenPrefill) {
@@ -238,38 +245,109 @@ export function SteerBox({
   const roomId = state.id
   // What the composer's current action said (#459): a Retry while the Retry strip is up is that
   // action only if it still says the same; `typed` is the field as it was sent.
-  const sentRef = useRef<{ kind: 'steer' | 'comment'; text: string; typed: string } | null>(null)
+  const sentRef = useRef<{ kind: 'steer' | 'comment'; text: string; typed: string } | null>(takeOver.owed)
   const textRef = useRef(text)
   useEffect(() => {
     textRef.current = text
   }, [text])
+  // The action taken over at mount (#550). Its id is not useRetryId's: a Retry of it reuses it
+  // here, an edit or a new action cancels it, and the record says how it ends.
+  const adoptedRef = useRef<SteerAction | null>(takeOver.owed)
+  // The words of a landed action leave the field, and the Retry strip goes (#390).
+  const landed = (typed: string) => {
+    setOffline(false)
+    if (textRef.current === typed) {
+      writeStore('session', lastSentKey(roomId), typed.trim())
+      writeStore('local', draftKey(roomId), '')
+      setText('')
+      if (ref.current) ref.current.style.height = ''
+    }
+  }
+  const landedRef = useRef(landed)
+  useEffect(() => {
+    landedRef.current = landed
+  })
+  // Whether this box is mounted: a send that ends after a reload unmounted it leaves its outcome
+  // in the room's action record for the box that replaced it (#550).
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+  useEffect(() => {
+    if (takeOver.clearDraft) {
+      writeStore('local', draftKey(roomId), '')
+      const a = readSteerAction(roomId)
+      if (a) writeStore('session', lastSentKey(roomId), a.typed.trim())
+    }
+    if (takeOver.drop) writeSteerAction(roomId, null)
+  }, [takeOver, roomId])
+  // Follow the record for the taken-over action: the send of the box that unmounted, or the
+  // ledger's delivery report (watchSteerDelivery), settles it.
+  useEffect(
+    () =>
+      subscribeSteerAction(roomId, () => {
+        const ad = adoptedRef.current
+        if (!ad) return
+        const a = readSteerAction(roomId)
+        const same = a !== null && a.clientId === ad.clientId
+        if (same && a.phase === 'sending') return
+        adoptedRef.current = same && a.phase === 'kept' ? ad : null
+        setSending(false)
+        if (same && a.phase === 'delivered') {
+          writeSteerAction(roomId, null)
+          landedRef.current(ad.typed)
+        } else {
+          setOffline(same && a.phase === 'kept')
+        }
+      }),
+    [roomId],
+  )
+  const dropAdopted = () => {
+    const ad = adoptedRef.current
+    if (!ad) return
+    adoptedRef.current = null
+    actions.sends?.cancel(ad.clientId)
+    updateSteerAction(roomId, ad.clientId, null)
+  }
+  // An edit gives up on the composer's action, adopted or its own: its record goes too, so no box
+  // takes it over and its delivery watcher stops (a cancelled id never lands).
+  const dropRecord = () => {
+    const a = readSteerAction(roomId)
+    if (a && a.userId === user.id && a.phase !== 'delivered') writeSteerAction(roomId, null)
+  }
   // The action's id belongs to its ledger entry until it lands, is refused or is cancelled; an edit
   // cancels it, so a kept copy is never sent after the corrected words (#535). When it lands after
   // all (the reconnect copy, or its event), the Retry strip goes and the field clears if it still
   // holds those words (#390).
   const retryId = useRetryId(actions.sends, () => {
-    setOffline(false)
     const sent = sentRef.current
-    if (sent && textRef.current === sent.typed) {
-      writeStore('session', lastSentKey(roomId), sent.typed.trim())
-      writeStore('local', draftKey(roomId), '')
-      setText('')
-      if (ref.current) ref.current.style.height = ''
-    }
+    setOffline(false)
+    if (sent) landedRef.current(sent.typed)
   })
   // A new send ledger (another user or session, #536) owes nothing of the old one: no Retry strip.
   const [ledgerSeen, setLedgerSeen] = useState(actions.sends)
   if (ledgerSeen !== actions.sends) {
     setLedgerSeen(actions.sends)
     setOffline(false)
+    adoptedRef.current = null
   }
   // A prefill replaces the words, like an edit.
   useEffect(() => {
-    if (seenPrefill > 0) retryId.drop()
+    if (seenPrefill > 0) {
+      retryId.drop()
+      dropAdopted()
+      dropRecord()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dropAdopted and dropRecord read refs and storage only
   }, [seenPrefill, retryId])
   const edit = (next: string) => {
     setText(next)
     retryId.drop()
+    dropAdopted()
+    dropRecord()
   }
   // Debounced so typing is not a storage write per key; a send clears it at once (see send).
   useEffect(() => {
@@ -324,8 +402,15 @@ export function SteerBox({
     // else is a new action, and the one it replaces is cancelled first (useRetryId.next).
     const sent = sentRef.current
     const retry = offline && sent !== null && sent.kind === plan.send && sent.text === plan.text
-    const clientId = retryId.next(retry)
+    const ad = adoptedRef.current
+    const retryAdopted = retry && ad !== null && (actions.sends?.isPending(ad.clientId) ?? true)
+    if (!retryAdopted) dropAdopted()
+    const clientId = retryAdopted ? ad.clientId : retryId.next(retry)
     sentRef.current = { kind: plan.send, text: plan.text, typed: text }
+    const action = { clientId, userId: user.id, kind: plan.send, text: plan.text, typed: text }
+    // Recorded for a box that a reload mounts while this send is out (#550).
+    writeSteerAction(roomId, { ...action, phase: 'sending' })
+    watchSteerDelivery(roomId, clientId, actions.sends)
     const ok =
       plan.send === 'comment'
         ? await actions.comment(plan.text, undefined, { clientId })
@@ -334,7 +419,14 @@ export function SteerBox({
     retryId.settle(clientId, ok)
     // The Retry strip is for an action still owed: one cancelled on the wire (an edit) or refused
     // is not, and a Retry would only be a new action.
-    setOffline(!ok && retryId.owns(clientId))
+    const owed = !ok && (retryAdopted ? (actions.sends?.isPending(clientId) ?? true) : retryId.owns(clientId))
+    setOffline(owed)
+    // Unmounted meanwhile: the box that replaced this one learns the outcome from the record.
+    updateSteerAction(
+      roomId,
+      clientId,
+      ok ? (mountedRef.current ? null : { ...action, phase: 'delivered' }) : owed ? { ...action, phase: 'kept' } : null,
+    )
     if (ok) {
       writeStore('session', lastSentKey(roomId), text.trim())
       // Words typed while this send waited are a new draft: keep them.
