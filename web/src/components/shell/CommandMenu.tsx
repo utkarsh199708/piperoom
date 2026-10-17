@@ -2,7 +2,7 @@ import { useRef } from 'react'
 import { flushSync } from 'react-dom'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CircleCheck, Copy, Download, FileText, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Sun, UserCheck } from 'lucide-react'
+import { CircleCheck, Copy, Download, FileText, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Settings, Sun, UserCheck } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import {
   CommandDialog,
@@ -230,6 +230,12 @@ export function CommandMenu({
             <Inbox aria-hidden="true" />
             Go to Rooms
           </CommandItem>
+          {user.admin === true && (
+            <CommandItem value="go to settings connections" keywords={['admin', 'config', 'pipelines', 'people']} onSelect={() => run(() => navigate('/settings'))}>
+              <Settings aria-hidden="true" />
+              Go to Settings
+            </CommandItem>
+          )}
         </CommandGroup>
 
         <CommandGroup heading="Account">
