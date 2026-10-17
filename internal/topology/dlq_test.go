@@ -60,8 +60,8 @@ func (f dlqFixture) build(t *testing.T) Graph {
 	connect := &fakeConnect{
 		config: map[string]map[string]string{"pg-orders-connector": src, "pg-orders-sink": f.sinkCfg},
 		status: map[string]clients.ConnectorStatus{
-			"pg-orders-connector": {State: "RUNNING"},
-			"pg-orders-sink":      {State: "RUNNING"},
+			"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}},
+			"pg-orders-sink":      {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}},
 		},
 	}
 	if f.sinkCfgErr != nil {

@@ -50,7 +50,7 @@ pipelines:
 		},
 		status: map[string]clients.ConnectorStatus{
 			"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "FAILED"}}},
-			"orders-sink":         {State: "RUNNING"},
+			"orders-sink":         {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}},
 		},
 	}
 	k := &fakeKafka{

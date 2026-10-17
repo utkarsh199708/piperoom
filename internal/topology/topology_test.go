@@ -209,11 +209,39 @@ func TestConnectorHealth(t *testing.T) {
 		{"unassigned", clients.ConnectorStatus{State: "UNASSIGNED"}, HealthWarn},
 		{"task paused", clients.ConnectorStatus{State: "RUNNING", Tasks: []clients.TaskStatus{{State: "PAUSED"}}}, HealthWarn},
 		{"task unassigned", clients.ConnectorStatus{State: "RUNNING", Tasks: []clients.TaskStatus{{State: "UNASSIGNED"}}}, HealthWarn},
+		// #566: the watcher's connector_down fires on each of these.
+		{"running, no tasks", clients.ConnectorStatus{State: "RUNNING"}, HealthFail},
+		{"task restarting", clients.ConnectorStatus{State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}, {State: "RESTARTING"}}}, HealthWarn},
+		{"connector restarting", clients.ConnectorStatus{State: "RESTARTING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}, HealthWarn},
+		{"connector restarting, no tasks", clients.ConnectorStatus{State: "RESTARTING"}, HealthWarn},
+		{"unknown state", clients.ConnectorStatus{State: "DESTROYED"}, HealthWarn},
+		{"blank state", clients.ConnectorStatus{}, HealthWarn},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got, _ := connectorHealth(tc.st); got != tc.want {
 				t.Fatalf("health = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// #566: each not-OK connector says why in its facts.
+func TestConnectorHealthFacts(t *testing.T) {
+	cases := []struct {
+		name      string
+		st        clients.ConnectorStatus
+		key, want string
+	}{
+		{"no tasks", clients.ConnectorStatus{State: "RUNNING"}, "tasks", "none"},
+		{"task restarting", clients.ConnectorStatus{State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RESTARTING"}}}, "tasks_not_running", "1"},
+		{"connector restarting", clients.ConnectorStatus{State: "RESTARTING"}, "state", "RESTARTING"},
+		{"long state capped", clients.ConnectorStatus{State: "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"}, "state", "XXXXXXXXXXXXXXXXXXXXXXXX"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, facts := connectorHealth(tc.st); facts[tc.key] != tc.want {
+				t.Fatalf("facts = %v, want %s=%q", facts, tc.key, tc.want)
 			}
 		})
 	}
@@ -476,14 +504,14 @@ func TestBuild(t *testing.T) {
 	b := NewBuilder(
 		testOwners(),
 		&fakeConnect{
-			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "pg-orders-connector"}},
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "pg_orders_slot"}},
 			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{
 			lags:    map[string]clients.GroupLag{"order-sync": {State: "Stable", TotalLag: 0}},
 			offsets: map[string][]clients.PartitionOffsets{"pg.public.orders": {{Partition: 0, LastTimestamp: now.Add(-time.Minute)}}},
 		},
-		&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg-orders-connector", Active: true, RetainedWALBytes: 10}}},
+		&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg_orders_slot", Active: true, RetainedWALBytes: 10}}},
 		&fakeWarehouse{fresh: map[string]time.Time{"analytics.orders": now.Add(-time.Minute)}},
 	)
 
@@ -540,7 +568,7 @@ func TestBuildRegexIncludeList(t *testing.T) {
 	b := NewBuilder(
 		o,
 		&fakeConnect{
-			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.order.*", "slot.name": "pg-orders-connector"}},
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.order.*", "slot.name": "pg_orders_slot"}},
 			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{
@@ -550,7 +578,7 @@ func TestBuildRegexIncludeList(t *testing.T) {
 				"pg.public.order_items": {{Partition: 0, LastTimestamp: now.Add(-time.Minute)}},
 			},
 		},
-		&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg-orders-connector", Active: true, RetainedWALBytes: 10}}},
+		&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg_orders_slot", Active: true, RetainedWALBytes: 10}}},
 		&fakeWarehouse{fresh: map[string]time.Time{"analytics.orders": now.Add(-time.Minute)}},
 	)
 
@@ -589,7 +617,7 @@ func TestTraceRegexIncludeList(t *testing.T) {
 	b := NewBuilder(
 		o,
 		&fakeConnect{
-			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": `public\.order.*`, "slot.name": "pg-orders-connector"}},
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": `public\.order.*`, "slot.name": "pg_orders_slot"}},
 			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{},
@@ -929,15 +957,6 @@ func TestTraceSourceReadError(t *testing.T) {
 	}
 }
 
-func TestSlotNameFor(t *testing.T) {
-	if got := slotNameFor("c1", map[string]string{}); got != "debezium" {
-		t.Fatalf("default slot = %q, want debezium", got)
-	}
-	if got := slotNameFor("c1", map[string]string{"slot.name": "custom_slot"}); got != "custom_slot" {
-		t.Fatalf("slot = %q, want custom_slot", got)
-	}
-}
-
 func TestBuildConnectorMissing(t *testing.T) {
 	b := NewBuilder(
 		testOwners(),
@@ -988,14 +1007,14 @@ func TestSinkNodeCarriesTSColumn(t *testing.T) {
 			b := NewBuilder(
 				testOwners(),
 				&fakeConnect{
-					config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "pg-orders-connector"}},
+					config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "pg_orders_slot"}},
 					status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 				},
 				&fakeKafka{
 					lags:    map[string]clients.GroupLag{"order-sync": {State: "Stable", TotalLag: 0}},
 					offsets: map[string][]clients.PartitionOffsets{"pg.public.orders": {{Partition: 0, LastTimestamp: now.Add(-time.Minute)}}},
 				},
-				&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg-orders-connector", Active: true, RetainedWALBytes: 10}}},
+				&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg_orders_slot", Active: true, RetainedWALBytes: 10}}},
 				wh,
 			)
 			g, err := b.Build(context.Background(), "orders")

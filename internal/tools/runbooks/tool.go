@@ -163,9 +163,6 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		return tools.Result{}, fmt.Errorf("%w: query is required", tools.ErrBadInput)
 	case len(p.Query) > maxQueryBytes:
 		return tools.Result{}, fmt.Errorf("%w: query is %d bytes, more than %d", tools.ErrBadInput, len(p.Query), maxQueryBytes)
-	case !utf8.ValidString(p.Query) || strings.ContainsRune(p.Query, utf8.RuneError):
-		// encoding/json turns invalid sequences and lone surrogates into U+FFFD.
-		return tools.Result{}, fmt.Errorf("%w: query is not valid UTF-8", tools.ErrBadInput)
 	case p.MaxResults < 0:
 		return tools.Result{}, fmt.Errorf("%w: max_results must be 1-5", tools.ErrBadInput)
 	}

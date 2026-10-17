@@ -33,8 +33,10 @@ vi.mock('../api/client', async (importOriginal) => {
 import { SEND_DEADLINE_MS, api, openRoomWs } from '../api/client'
 import { NOT_CONFIRMED_TEXT, OFFLINE_TEXT, UNCONFIRMED_TEXT } from '../lib/errors'
 import { useRoom } from './useRoom'
+import { UNCONFIRMED_WINDOW_MS } from './sendLedger'
 import { RollbackButton } from '../components/room/RollbackButton'
 import { Timeline } from '../components/Timeline'
+import { SteerBox } from '../components/SteerBox'
 
 class FakeWebSocket {
   static CONNECTING = 0
@@ -169,11 +171,28 @@ async function push(socket: FakeWebSocket, ev: Event) {
   })
 }
 
+
 /** One quick exchange, so the hook has seen whether the server echoes client_id. */
 async function warmUp(hook: { result: { current: ReturnType<typeof useRoom> } }) {
   const ok = fire(() => hook.result.current.actions.steer('hello', { clientId: 'warm' }))
   await pass(200)
   expect(ok()).toBe(true)
+}
+
+// The actions of the room a rendered composer uses, so a test can make the warm-up POST below.
+const exposed: { actions?: ReturnType<typeof useRoom>['actions'] } = {}
+
+/**
+ * Only a server known to dedupe keeps a failed send for the reconnect (#545, #551), and only this
+ * client's own answer that echoes client_id says so. One answered comment, then the fake server's
+ * counters forget it, so the rows below count only what they send.
+ */
+async function knownToDedupe(server: Server, actions = exposed.actions) {
+  const ok = fire(() => actions!.comment('warm-up', undefined, { clientId: 'warm-up' }))
+  await pass(200)
+  expect(ok()).toBe(true)
+  server.stored.length = 0
+  server.fetchMock.mockClear()
 }
 
 beforeEach(() => {
@@ -362,6 +381,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
 
   function TimelineRoom() {
     const { actions } = useRoom('r1')
+    exposed.actions = actions
     return (
       <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} sends={actions.sends} />
     )
@@ -369,6 +389,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
 
   function RollbackRoom() {
     const { actions } = useRoom('r1')
+    exposed.actions = actions
     return (
       <RollbackButton
         title="Restart"
@@ -396,6 +417,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-3: a step comment fails offline, the reconnect stores it, then the same words 20 minutes later: 2 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
+    await knownToDedupe(server)
     server.state.offlineNext = 1
     fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
     const box = screen.getByLabelText('Comment on this step')
@@ -417,6 +439,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-6: a failed rollback is withdrawn when its dialog closes; Roll back 30 minutes later is a new request: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <RollbackRoom />)
+    await knownToDedupe(server)
     server.state.offlineNext = 1
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -450,6 +473,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('X1/Z2: a step comment fails, the words are edited and changed back, then Retry: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
+    await knownToDedupe(server)
     const box = await failComment(server, socket, 'ack')
     fireEvent.change(box, { target: { value: 'ack!' } })
     fireEvent.change(box, { target: { value: 'ack' } })
@@ -463,6 +487,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('X3: the same while still offline, then the reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
+    await knownToDedupe(server)
     const box = await failComment(server, socket, 'ack')
     fireEvent.change(box, { target: { value: 'ack!' } })
     fireEvent.change(box, { target: { value: 'ack' } })
@@ -477,6 +502,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('X2/Z3: a rollback fails offline, the dialog is cancelled, then asked again before the reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <RollbackRoom />)
+    await knownToDedupe(server)
     server.state.offlineNext = 1
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -495,6 +521,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-A: a step comment is edited away and back while on the wire, the send fails, Retry, reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <TimelineRoom />)
+    await knownToDedupe(server)
     server.state.failAfter = 2_000
     fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
     const box = screen.getByLabelText('Comment on this step')
@@ -514,6 +541,7 @@ describe('composers with the real hook: a new action after a delivery is stored 
   it('ADV-B: a rollback\'s dialog is cancelled while it is on the wire, the send fails, asked again, reconnect: 1 stored', async () => {
     const server = fakeServer('contract')
     const socket = await mount(server, <RollbackRoom />)
+    await knownToDedupe(server)
     server.state.failAfter = 2_000
     fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
     fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -561,6 +589,7 @@ describe('kept actions are never dropped by age', () => {
   it('ADV-1: a steer kept for 16 minutes with the socket down still drains with the next one', async () => {
     const server = fakeServer('contract')
     const { hook, socket } = await openRoom(server)
+    await knownToDedupe(server, hook.result.current.actions)
     server.state.offlineNext = 1
     fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
     await pass(10)
@@ -575,10 +604,10 @@ describe('kept actions are never dropped by age', () => {
   })
 })
 
-// Gaps shared with main (org.md §12): pinned as they are today, each with its follow-up ticket
-// (#491, #492). When a ticket is fixed, its row flips to assert the fix.
-describe('gap rows (today\'s behaviour, shared with main)', () => {
-  it('GAP ADV-4 (#491): a kept steer drains into the room on screen after a room switch; only App.tsx keying RoomScreen by roomId prevents it', async () => {
+// #491: a kept action belongs to the room it was typed in. A room switch without a remount
+// neither drains it into the new room nor shows its banner there; back in its room, it drains.
+describe('kept actions after a room switch', () => {
+  it('ADV-4 (#491): a kept steer does not drain into the room on screen after a switch; it drains into its own room', async () => {
     const server = fakeServer('contract')
     vi.stubGlobal('fetch', server.fetchMock)
     const socket = new FakeWebSocket()
@@ -588,25 +617,177 @@ describe('gap rows (today\'s behaviour, shared with main)', () => {
     const hook = renderHook(({ id }) => useRoom(id), { initialProps: { id: 'r1' } })
     await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
     act(() => socket.onopen?.())
+    await knownToDedupe(server, hook.result.current.actions)
     server.state.offlineNext = 1
     fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
     await pass(10)
     hook.rerender({ id: 'r2' })
     await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
     act(() => socket.onopen?.())
+    await pass(6_000) // the reconnect and the live retry
+    const paths = () => server.fetchMock.mock.calls.map((c) => c[0])
+    expect(paths()).toEqual(['/api/rooms/r1/steer'])
+    expect(hook.result.current.error).toBeNull()
+
+    hook.rerender({ id: 'r1' })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(3))
+    act(() => socket.onopen?.())
     await pass(500)
-    expect(server.fetchMock.mock.calls.at(-1)?.[0]).toBe('/api/rooms/r2/steer')
+    expect(paths()).toEqual(['/api/rooms/r1/steer', '/api/rooms/r1/steer'])
+    expect(server.stored).toHaveLength(1)
   })
 
-  it('GAP ADV-5 (#492): against a server without #459, a request stored before its connection reset is re-sent on reconnect: 2 copies', async () => {
+  it('#491: a Retry of an action waiting on its flight re-posts to the action\'s room, not the one on screen', async () => {
+    const server = fakeServer('contract')
+    vi.stubGlobal('fetch', server.fetchMock)
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snap)
+    vi.mocked(api.events).mockResolvedValue({ events: [], next_after: 0 } as never)
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const hook = renderHook(({ id }) => useRoom(id), { initialProps: { id: 'r1' } })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    act(() => socket.onopen?.())
+    await warmUp(hook)
+    server.state.failAfter = 1_000
+    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    const retry = hook.result.current.actions.steer
+    hook.rerender({ id: 'r2' })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    fire(() => retry('stop', { clientId: 'k1' })) // waits on the first flight, then posts again
+    await pass(1_500)
+    expect(server.fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      '/api/rooms/r1/steer',
+      '/api/rooms/r1/steer',
+      '/api/rooms/r1/steer',
+    ])
+  })
+})
+
+// #492 (contract #460): a server that did not echo client_id may have stored a request whose
+// connection reset (a TypeError); it is never re-sent automatically, only by a Retry click.
+describe('a TypeError against a server that does not echo client_id', () => {
+  it('ADV-5 (#492): a request stored before its connection reset is not re-sent on reconnect: 1 copy, Retry offered', async () => {
+    const server = fakeServer('old')
+    const { hook, socket } = await openRoom(server)
+    await warmUp(hook) // the answer has no client_id: the server does not dedupe
+    server.state.resetAfterStore = 1
+    const sent = fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    expect(sent()).toBe(false)
+    expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
+    act(() => socket.onclose?.({ reason: '' }))
+    act(() => socket.onopen?.())
+    await pass(30_000) // the reconnect and the live retry send nothing
+    const stops = () => server.stored.filter((e) => (e.payload as { text: string }).text === 'stop')
+    expect(stops()).toHaveLength(1)
+    expect(hook.result.current.actions.sends?.isPending('k1')).toBe(true) // the composer keeps Retry
+    await pass(UNCONFIRMED_WINDOW_MS)
+    expect(stops()).toHaveLength(1)
+    expect(hook.result.current.error).toBe(NOT_CONFIRMED_TEXT)
+  })
+
+  // #551: every room visit starts a new ledger, so the first send meets dedupes === null. Its
+  // TypeError follows the same rule: no automatic re-send, Retry offered.
+  it('#551: the first send of a room visit, stored before its connection reset: 1 copy, Retry offered', async () => {
     const server = fakeServer('old')
     const { hook, socket } = await openRoom(server)
     server.state.resetAfterStore = 1
-    fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    const sent = fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
     await pass(10)
-    expect(hook.result.current.error).toBe(OFFLINE_TEXT)
+    expect(sent()).toBe(false)
+    expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
+    act(() => socket.onclose?.({ reason: '' }))
     act(() => socket.onopen?.())
+    await pass(30_000) // the reconnect and the live retry send nothing
+    expect(server.stored).toHaveLength(1)
+    expect(hook.result.current.actions.sends?.isPending('k1')).toBe(true) // the composer keeps Retry
+    await pass(UNCONFIRMED_WINDOW_MS)
+    expect(server.stored).toHaveLength(1)
+    expect(hook.result.current.error).toBe(NOT_CONFIRMED_TEXT)
+  })
+
+  // #545: the same before the first answer from a server that does dedupe: the client cannot know
+  // that yet, so it waits for the click; the click (same id) lands the action once.
+  it('#545: the first keyed post to a new server fails with a TypeError: no automatic re-send; Retry after the window: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const { hook, socket } = await openRoom(server)
+    server.state.offlineNext = 1
+    const sent = fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    expect(sent()).toBe(false)
+    expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
+    act(() => socket.onclose?.({ reason: '' }))
+    act(() => socket.onopen?.())
+    await pass(30_000)
+    expect(server.fetchMock).toHaveBeenCalledTimes(1)
+    const early = fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(10)
+    expect(early()).toBe(false) // inside the window a Retry posts nothing
+    expect(server.fetchMock).toHaveBeenCalledTimes(1)
+    await pass(UNCONFIRMED_WINDOW_MS)
+    const retry = fire(() => hook.result.current.actions.steer('stop', { clientId: 'k1' }))
+    await pass(200)
+    expect(retry()).toBe(true)
+    expect(server.stored).toHaveLength(1)
+    expect(hook.result.current.error).toBeNull()
+  })
+})
+
+// #535: the steer composer follows the same rule as the reply boxes. An edit, or a new send, while
+// an entry is kept cancels it first, so the stale words never reach the agent after the new ones.
+describe('the steer composer with the real hook (#535)', () => {
+  const arjun = { id: 'arjun', name: 'Arjun', layers: ['kafka'] }
+
+  function SteerRoom() {
+    const { state, actions, conn } = useRoom('r1')
+    exposed.actions = actions
+    if (!state) return null
+    return <SteerBox state={state} user={arjun} actions={actions} conn={conn} />
+  }
+
+  async function mountSteer(server: Server) {
+    vi.stubGlobal('fetch', server.fetchMock)
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snap)
+    vi.mocked(api.events).mockResolvedValue({ events: [], next_after: 0 } as never)
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    render(<SteerRoom />)
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    act(() => socket.onopen?.())
+    const box = await screen.findByLabelText('Steer the agent')
+    await knownToDedupe(server) // the failed send is kept: an edit must cancel it
+    return { socket, box }
+  }
+
+  const steers = (server: Server) =>
+    server.stored.filter((e) => e.type === 'steer.sent').map((e) => (e.payload as { text: string }).text)
+
+  async function failThenCorrect(server: Server, box: HTMLElement) {
+    server.state.offlineNext = 1
+    fireEvent.change(box, { target: { value: 'restart the connector' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.change(box, { target: { value: 'do NOT restart the connector' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
     await pass(500)
-    expect(server.stored.filter((e) => (e.payload as { text: string }).text === 'stop')).toHaveLength(2)
+  }
+
+  it('a steer edited after a failed send: the live retry never sends the old words: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const { box } = await mountSteer(server)
+    await failThenCorrect(server, box)
+    await pass(6_000) // past LIVE_RETRY_MS
+    expect(steers(server)).toEqual(['do NOT restart the connector'])
+  })
+
+  it('the same through a reconnect: 1 stored', async () => {
+    const server = fakeServer('contract')
+    const { socket, box } = await mountSteer(server)
+    await failThenCorrect(server, box)
+    act(() => socket.onclose?.({ reason: '' }))
+    act(() => socket.onopen?.())
+    await pass(6_000)
+    expect(steers(server)).toEqual(['do NOT restart the connector'])
   })
 })

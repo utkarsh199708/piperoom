@@ -61,6 +61,9 @@ type PagingLimits struct {
 	UserRoomInterval time.Duration // min gap between pages of one user in one room (default 10m)
 	UserPerHour      int           // pages of one user across all rooms (default 6)
 	RoomPerHour      int           // user-pages in one room (default 20)
+	// NudgeRoomPerHour caps nudge pages of one user in one room (default 2), inside
+	// the UserPerHour nudge budget, so one room cannot use up the owner's budget for others.
+	NudgeRoomPerHour int
 }
 
 // PagingOptions is the allow-list. Paging is off while both maps are empty.
@@ -87,6 +90,8 @@ type pager struct {
 	// nudgeHits counts person-triggered nudge pages per user, apart from userHits,
 	// so a room member's nudges cannot use up an owner's budget for agent pages.
 	nudgeHits map[string][]time.Time
+	// nudgeRoom counts the same pages per (room, user); bounded like roomHits.
+	nudgeRoom map[[2]string][]time.Time
 	roomHits  map[string][]time.Time
 	seen      map[pageKey]struct{}
 	seenQ     []pageKey // insertion order of seen, oldest first
@@ -101,14 +106,17 @@ func newPager(o PagingOptions) (*pager, error) {
 	p := &pager{
 		layers: map[string][]string{}, users: map[string]string{}, lim: o.Limits, now: time.Now,
 		last: map[[2]string]time.Time{}, userHits: map[string][]time.Time{},
-		nudgeHits: map[string][]time.Time{},
-		roomHits:  map[string][]time.Time{}, seen: map[pageKey]struct{}{},
+		nudgeHits: map[string][]time.Time{}, nudgeRoom: map[[2]string][]time.Time{},
+		roomHits: map[string][]time.Time{}, seen: map[pageKey]struct{}{},
 	}
 	if p.lim.UserRoomInterval <= 0 {
 		p.lim.UserRoomInterval = 10 * time.Minute
 	}
 	if p.lim.UserPerHour <= 0 {
 		p.lim.UserPerHour = 6
+	}
+	if p.lim.NudgeRoomPerHour <= 0 {
+		p.lim.NudgeRoomPerHour = 2
 	}
 	if p.lim.RoomPerHour <= 0 {
 		p.lim.RoomPerHour = 20
@@ -147,6 +155,31 @@ type pageKey struct{ room, user, reason string }
 // per-user-per-room gap and have their own hourly bucket.
 func (k pageKey) isNudge() bool { return strings.HasPrefix(k.reason, "nudge:") }
 
+// nudgeLimited reports whether e is a nudge whose layer has owners, none of
+// whom would be paged now only because of the hourly nudge limits. A nudge
+// already paged (redelivery) or for a layer with no owners is not "limited".
+func (p *pager) nudgeLimited(e events.Event) bool {
+	pl, err := events.Decode[events.ApprovalNudgedPayload](e)
+	if err != nil {
+		return false
+	}
+	limited := false
+	for _, id := range p.layers[pl.Layer] {
+		k := pageKey{e.RoomID, id, "nudge:" + strconv.FormatInt(e.Seq, 10)}
+		p.mu.Lock()
+		_, dup := p.seen[k]
+		p.mu.Unlock()
+		if dup {
+			return false
+		}
+		if p.check(k, nil) {
+			return false
+		}
+		limited = true
+	}
+	return limited
+}
+
 // check reports whether key may be paged now, counting the pages already
 // planned in the same message. It records nothing; call record once Slack
 // accepted the post. The first rule that fails wins: a repeated reason is
@@ -159,13 +192,29 @@ func (p *pager) check(key pageKey, planned []pageKey) bool {
 	}
 	now := p.now()
 	if key.isNudge() {
-		var planned1 int
+		var planned1, plannedRoom int
 		for _, k := range planned {
 			if k.isNudge() && k.user == key.user {
 				planned1++
+				if k.room == key.room {
+					plannedRoom++
+				}
 			}
 		}
-		return len(recent(p.nudgeHits[key.user], now))+planned1 < p.lim.UserPerHour
+		rk := [2]string{key.room, key.user}
+		roomHits := len(recent(p.nudgeRoom[rk], now)) + plannedRoom
+		if roomHits >= p.lim.NudgeRoomPerHour {
+			return false
+		}
+		// The last slot of the owner's budget is kept for a room that has not
+		// nudged this owner yet: repeat nudges stop one short of UserPerHour, so
+		// a busy hour in a few rooms cannot leave a new room unpaged. The total
+		// across rooms stays capped at UserPerHour.
+		total := len(recent(p.nudgeHits[key.user], now)) + planned1
+		if roomHits == 0 {
+			return total < p.lim.UserPerHour
+		}
+		return total < p.lim.UserPerHour-1
 	}
 	if t, ok := p.last[[2]string{key.room, key.user}]; ok && now.Sub(t)+gapSlack < p.lim.UserRoomInterval {
 		return false
@@ -202,6 +251,8 @@ func (p *pager) record(keys []pageKey) {
 		}
 		if k.isNudge() {
 			p.nudgeHits[k.user] = append(recent(p.nudgeHits[k.user], now), now)
+			rk := [2]string{k.room, k.user}
+			p.nudgeRoom[rk] = append(recent(p.nudgeRoom[rk], now), now)
 			continue
 		}
 		p.last[[2]string{k.room, k.user}] = now
@@ -229,6 +280,20 @@ func (p *pager) prune(now time.Time) {
 				p.roomHits[room] = hits
 			}
 		}
+		for rk, hits := range p.nudgeRoom {
+			if hits = recent(hits, now); len(hits) == 0 {
+				delete(p.nudgeRoom, rk)
+			} else {
+				p.nudgeRoom[rk] = hits
+			}
+		}
+		for user, hits := range p.nudgeHits {
+			if hits = recent(hits, now); len(hits) == 0 {
+				delete(p.nudgeHits, user)
+			} else {
+				p.nudgeHits[user] = hits
+			}
+		}
 		for user, hits := range p.userHits {
 			if hits = recent(hits, now); len(hits) == 0 {
 				delete(p.userHits, user)
@@ -242,6 +307,9 @@ func (p *pager) prune(now time.Time) {
 	}
 	if len(p.roomHits) > maxTrackedRooms {
 		evictOldest(p.roomHits, maxTrackedRooms*3/4, func(ts []time.Time) time.Time { return ts[len(ts)-1] })
+	}
+	if len(p.nudgeRoom) > maxTrackedRooms {
+		evictOldest(p.nudgeRoom, maxTrackedRooms*3/4, func(ts []time.Time) time.Time { return ts[len(ts)-1] })
 	}
 	if len(p.seenQ) > maxSeenPages {
 		drop := len(p.seenQ) - maxSeenPages
@@ -277,6 +345,11 @@ func (p *pager) forgetRoom(room string) {
 	for k := range p.last {
 		if k[0] == room {
 			delete(p.last, k)
+		}
+	}
+	for k := range p.nudgeRoom {
+		if k[0] == room {
+			delete(p.nudgeRoom, k)
 		}
 	}
 	delete(p.roomHits, room)

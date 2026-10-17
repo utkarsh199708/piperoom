@@ -80,15 +80,15 @@ func TestNewRefusesTracingWithoutNetwork(t *testing.T) {
 
 func TestPrimaryKeyColumn(t *testing.T) {
 	cols := []string{"created_on", "database_name", "schema_name", "table_name", "column_name", "key_sequence", "constraint_name"}
-	t.Run("lowest key_sequence wins", func(t *testing.T) {
+	t.Run("composite key is refused, naming the lowest key_sequence", func(t *testing.T) {
 		q := &fakeQuerier{rows: &fakeRows{cols: cols, data: [][]any{
 			{"t", "DB", "ANALYTICS", "ORDERS", "TENANT_ID", "2", "pk"},
 			{"t", "DB", "ANALYTICS", "ORDERS", "ORDER_ID", "1", "pk"},
 		}}}
 		d := &DB{q: q}
 		got, err := d.PrimaryKeyColumn(context.Background(), "analytics.orders")
-		if err != nil || got != "ORDER_ID" {
-			t.Fatalf("got %q, %v; want ORDER_ID", got, err)
+		if !errors.Is(err, clients.ErrNotSupported) || got != "" || !strings.Contains(err.Error(), `"ORDER_ID"`) {
+			t.Fatalf("got %q, %v; want ErrNotSupported naming ORDER_ID", got, err)
 		}
 		if want := `SHOW PRIMARY KEYS IN TABLE "ANALYTICS"."ORDERS"`; q.lastQuery != want {
 			t.Errorf("query = %q, want %q", q.lastQuery, want)
@@ -444,5 +444,36 @@ func TestHardenedConfigWorkloadIdentityHostMustBeHTTPS(t *testing.T) {
 				t.Errorf("WorkloadIdentityHost = %q; want %q kept as written", cfg.WorkloadIdentityHost, tc.value)
 			}
 		})
+	}
+}
+
+// A raw "/" in a parameter value makes ParseDSN read everything before it as
+// the database name: earlier parameters (protocol=http, authenticator=) are
+// dropped and the query string, secrets included, lands in the receipt target
+// (#514). hardenedConfig must refuse it without naming the value.
+func TestHardenedConfigRefusesParamsFoldedIntoPath(t *testing.T) {
+	for _, dsn := range []string{
+		"svc:pw@acct/ANALYTICS/PUBLIC?warehouse=WH&passcode=SECRET/12",
+		"svc:pw@acct/ANALYTICS/PUBLIC?protocol=http&warehouse=WH&privateKey=abcSECRETtok/xyz",
+		"svc:pw@acct/ANALYTICS?warehouse=WH&passcode=SECRET/12",
+	} {
+		cfg, err := hardenedConfig(dsn)
+		if err == nil || cfg != nil {
+			t.Errorf("hardenedConfig(%q) accepted (err %v); want a refusal", dsn, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "URL-encode") {
+			t.Errorf("error %q does not say to URL-encode values", err)
+		}
+		for _, s := range []string{"SECRET", "pw@"} {
+			if strings.Contains(err.Error(), s) {
+				t.Errorf("error %q leaks %q", err, s)
+			}
+		}
+	}
+	// Encoded, the same value is accepted and stays out of the path.
+	cfg, err := hardenedConfig("svc:pw@acct/ANALYTICS/PUBLIC?warehouse=WH&passcode=SECRET%2F12")
+	if err != nil || cfg.Database != "ANALYTICS" || cfg.Schema != "PUBLIC" {
+		t.Fatalf("encoded value: %+v, %v", cfg, err)
 	}
 }

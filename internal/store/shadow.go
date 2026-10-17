@@ -191,7 +191,7 @@ func (s *PG) AppendShadow(ctx context.Context, roomID string, typ events.Type, a
 	// rooms row: the event count is last_seq.
 	maxEvents, maxBytes := s.currentLimits().bounds(classOf(typ, actor))
 	size := int64(len(payloadJSON))
-	at := s.now().UTC()
+	at := s.now().UTC().Truncate(time.Microsecond) // as stored (timestamptz)
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,

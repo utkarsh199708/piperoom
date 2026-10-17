@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
-import type { RoomSnapshot } from '../api/types'
+import type { Event, RoomSnapshot } from '../api/types'
 import type { StepState } from '../state/types'
 
 // #390: one Retry is one steer or comment, whatever the reconnect timing and whichever
@@ -64,6 +64,32 @@ const snap: RoomSnapshot = {
 const step: StepState = { id: 's1', title: 'Check the Debezium connector', tool_calls: [], messages: [] }
 const offline = () => new TypeError('Failed to fetch')
 
+// The actions of the room a rendered component uses, so a test can make the warm-up POST below.
+const exposed: { actions?: ReturnType<typeof useRoom>['actions'] } = {}
+
+/**
+ * Only a server known to dedupe keeps a failed send for the reconnect (#545, #551), and only this
+ * client's own answer that echoes client_id says so. One answered comment, then forgotten by the
+ * mock, so the rows count only what they send.
+ */
+async function knownToDedupe(actions = exposed.actions) {
+  vi.mocked(api.comment).mockImplementationOnce(
+    async (room, body) =>
+      ({
+        room_id: room,
+        seq: 0,
+        type: 'comment.added',
+        actor: { kind: 'human', id: 'arjun', name: 'Arjun' },
+        payload: { comment_id: 'c0', text: body.text, mentions_agent: false, client_id: body.client_id },
+        at: '',
+      }) as Event,
+  )
+  await act(async () => {
+    expect(await actions!.comment('warm-up', undefined, { clientId: 'warm-up' })).toBe(true)
+  })
+  vi.mocked(api.comment).mockClear()
+}
+
 function mountSocket() {
   const socket = new FakeWebSocket()
   vi.mocked(api.room).mockResolvedValue(snap)
@@ -82,11 +108,13 @@ function hangingCall() {
 
 function RollbackRoom() {
   const { actions } = useRoom('r1')
+  exposed.actions = actions
   return <RollbackButton title="Restart" proposalId="p1" rollback="set it back" asDriver onSteer={actions.steer} />
 }
 
 function TimelineRoom() {
   const { actions } = useRoom('r1')
+  exposed.actions = actions
   return <Timeline steps={[step]} messages={[]} comments={[]} onComment={actions.comment} />
 }
 
@@ -96,6 +124,7 @@ async function rollbackFailsOffline() {
   const socket = mountSocket()
   render(<RollbackRoom />)
   await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+  await knownToDedupe()
   vi.mocked(api.steer).mockRejectedValueOnce(offline())
   fireEvent.click(screen.getByRole('button', { name: 'Roll back' }))
   fireEvent.click(screen.getByRole('button', { name: 'Ask the agent to roll back' }))
@@ -107,6 +136,7 @@ async function replyFailsOffline() {
   const socket = mountSocket()
   render(<TimelineRoom />)
   await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+  await knownToDedupe()
   vi.mocked(api.comment).mockRejectedValueOnce(offline())
   fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
   fireEvent.change(screen.getByLabelText('Comment on this step'), { target: { value: 'looks right' } })
@@ -171,10 +201,12 @@ describe('Timeline step reply Retry with the real hook', () => {
 })
 
 describe('useRoom: actions are told apart by client_id, never by their words', () => {
-  async function openRoom() {
+  /** `dedupes` false: no answer seen yet, so nothing is re-sent on its own. */
+  async function openRoom(dedupes = true) {
     const socket = mountSocket()
     const hook = renderHook(() => useRoom('r1'))
     await waitFor(() => expect(openRoomWs).toHaveBeenCalled())
+    if (dedupes) await knownToDedupe(hook.result.current.actions)
     return { hook, socket }
   }
 
@@ -231,17 +263,17 @@ describe('useRoom: actions are told apart by client_id, never by their words', (
     expect(api.steer).toHaveBeenLastCalledWith('r1', 'pause the consumer', 'k2')
   })
 
-  // Round 3: a reconnect copy that never settles must not block those words until reload.
-  describe('a reconnect send that never settles', () => {
+  // Round 3: a copy that never settles must not block those words until reload. Before any answer
+  // the server is not known to dedupe (#545, #551), so the copy that hangs is the first send itself
+  // (a failed one is not re-sent by the reconnect), and a Retry waits on it.
+  describe('a send that never settles, before the server is known to dedupe', () => {
     async function hungAfterRetry() {
-      const opened = await openRoom()
-      vi.mocked(api.steer).mockRejectedValueOnce(offline())
-      await act(async () => {
-        await opened.hook.result.current.actions.steer('stop', { clientId: 'k1' })
-      })
+      const opened = await openRoom(false)
       const drain = hangingCall()
       vi.mocked(api.steer).mockImplementationOnce(() => drain.p)
-      act(() => opened.socket.onopen?.())
+      act(() => {
+        void opened.hook.result.current.actions.steer('stop', { clientId: 'k1' })
+      })
       let ok: boolean | undefined
       act(() => {
         void opened.hook.result.current.actions.steer('stop', { clientId: 'k1' }).then((v) => (ok = v))
@@ -250,7 +282,7 @@ describe('useRoom: actions are told apart by client_id, never by their words', (
         vi.advanceTimersByTime(15_000)
       })
       await waitFor(() => expect(ok).toBe(false))
-      expect(api.steer).toHaveBeenCalledTimes(2)
+      expect(api.steer).toHaveBeenCalledTimes(1)
       return { ...opened, drain }
     }
 
@@ -270,7 +302,7 @@ describe('useRoom: actions are told apart by client_id, never by their words', (
         await act(async () => {
           await Promise.resolve()
         })
-        expect(api.steer).toHaveBeenCalledTimes(2)
+        expect(api.steer).toHaveBeenCalledTimes(1)
       } finally {
         vi.useRealTimers()
       }
@@ -284,14 +316,14 @@ describe('useRoom: actions are told apart by client_id, never by their words', (
           vi.advanceTimersByTime(65_000)
         })
         expect(hook.result.current.error).toBe(NOT_CONFIRMED_TEXT)
-        expect(api.steer).toHaveBeenCalledTimes(2)
+        expect(api.steer).toHaveBeenCalledTimes(1)
         vi.mocked(api.steer).mockResolvedValue(undefined as never)
         let ok = false
         await act(async () => {
           ok = await hook.result.current.actions.steer('stop', { clientId: 'k1' })
         })
         expect(ok).toBe(true)
-        expect(api.steer).toHaveBeenCalledTimes(3)
+        expect(api.steer).toHaveBeenCalledTimes(2)
         expect(hook.result.current.error).toBeNull()
       } finally {
         vi.useRealTimers()
@@ -311,24 +343,22 @@ describe('useRoom: actions are told apart by client_id, never by their words', (
           ok = await hook.result.current.actions.steer('stop', { clientId: 'k1' })
         })
         expect(ok).toBe(true)
-        expect(api.steer).toHaveBeenCalledTimes(2)
+        expect(api.steer).toHaveBeenCalledTimes(1)
       } finally {
         vi.useRealTimers()
       }
     })
   })
 
-  it('a Retry waits at most 15 s for a hanging reconnect send, then reports it unconfirmed without posting', async () => {
+  it('a Retry waits at most 15 s for a hanging send, then reports it unconfirmed without posting', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
-      const { hook, socket } = await openRoom()
-      vi.mocked(api.steer).mockRejectedValueOnce(offline())
-      await act(async () => {
-        await hook.result.current.actions.steer('pause the consumer', { clientId: 'k1' })
-      })
+      const { hook } = await openRoom(false)
       const drain = hangingCall()
       vi.mocked(api.steer).mockImplementationOnce(() => drain.p)
-      act(() => socket.onopen?.())
+      act(() => {
+        void hook.result.current.actions.steer('pause the consumer', { clientId: 'k1' })
+      })
 
       let ok: boolean | undefined
       act(() => {
@@ -339,7 +369,7 @@ describe('useRoom: actions are told apart by client_id, never by their words', (
       })
       await waitFor(() => expect(ok).toBe(false))
       expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
-      expect(api.steer).toHaveBeenCalledTimes(2)
+      expect(api.steer).toHaveBeenCalledTimes(1)
     } finally {
       vi.useRealTimers()
     }

@@ -100,6 +100,11 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	// Primary key lookup. A failure here means the source DB is unreachable;
 	// fall back to "id" and let the source row read report the problem.
 	pk, err := b.pkColumn(ctx, table)
+	if errors.Is(err, clients.ErrNotSupported) {
+		// A composite key: the row, its Kafka key and its sink row cannot be
+		// found by one value, so no stage can be judged (#483).
+		return compositeKeyTrace(f), nil
+	}
 	if err != nil {
 		pk = "id"
 	}
@@ -160,6 +165,9 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	}
 
 	// 5. Sink row and column diff.
+	if f.sinkErr == nil {
+		f.sinkErr = b.checkSinkKey(ctx, f.sink, pk)
+	}
 	if f.sinkErr == nil {
 		sinkRow, found, err := b.wh.Row(ctx, f.sink, pk, key)
 		f.sinkErr = err
@@ -329,6 +337,40 @@ func fallbackTopic(prefix, table string) string {
 	return prefix + "." + table
 }
 
+// errSinkKey means the sink's primary key cannot be looked up with the source
+// key: it is composite, or its column differs from the source's. A lookup by
+// the source column would read another row (another tenant's), so the
+// warehouse stage is unknown (#537).
+var errSinkKey = errors.New("topology: sink key does not match the source key")
+
+// checkSinkKey asks the warehouse for sink's key column, as the source is
+// asked, and returns errSinkKey when pk cannot find that table's row. It fails
+// closed: a failed key lookup or an empty column leaves the sink's key unknown,
+// and a lookup by the source key could then read another tenant's row. Only a
+// warehouse client without the key lookup at all keeps the source side's
+// fallback (the source key), as pkColumn does for the source.
+func (b *builder) checkSinkKey(ctx context.Context, sink, pk string) error {
+	d, ok := b.wh.(pkColumner)
+	if !ok {
+		return nil
+	}
+	col, err := d.PrimaryKeyColumn(ctx, sink)
+	switch {
+	case errors.Is(err, clients.ErrNotSupported):
+		return fmt.Errorf("%w: composite primary key", errSinkKey)
+	case err != nil:
+		// Driver errors can carry host, user or SQL: the trace shows a fixed
+		// phrase and the raw error goes to the debug log only.
+		b.log.DebugContext(ctx, "topology: sink key lookup failed", "sink", sink, "err", err)
+		return fmt.Errorf("%w: sink key lookup failed", errSinkKey)
+	case col == "":
+		return fmt.Errorf("%w: sink key unknown: empty key column", errSinkKey)
+	case !strings.EqualFold(col, pk):
+		return fmt.Errorf("%w: sink key %q, source key %q", errSinkKey, col, pk)
+	}
+	return nil
+}
+
 func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
 	if d, ok := b.src.(pkColumner); ok {
 		col, err := d.PrimaryKeyColumn(ctx, table)
@@ -340,6 +382,22 @@ func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
 		}
 	}
 	return "id", nil
+}
+
+// compositeKeyTrace is the trace of a table whose primary key has more than
+// one column: a lookup by one value would read another row (another tenant's,
+// with its timestamps), so every stage is unknown, never "seen" or "not_seen".
+func compositeKeyTrace(f traceFacts) []events.TraceStage {
+	facts := func() map[string]string {
+		return map[string]string{"error": "composite primary key: the trace needs every key column"}
+	}
+	return []events.TraceStage{
+		{Layer: "postgres", Name: f.table, Status: "unknown", Facts: facts()},
+		{Layer: "kafka-connect", Name: f.connector, Status: "unknown", Facts: facts()},
+		{Layer: "kafka", Name: f.topic, Status: "unknown", Facts: facts()},
+		{Layer: "consumer", Name: f.group, Status: "unknown", Facts: facts()},
+		{Layer: "warehouse", Name: f.sink, Status: "unknown", Facts: facts()},
+	}
 }
 
 // decideTrace maps gathered facts to one TraceStage per layer. Exactly one
@@ -460,6 +518,9 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	case f.sinkErr != nil:
 		sinkStatus = "unknown"
 		sinkFacts["error"] = unknownReason(f.sinkErr)
+		if errors.Is(f.sinkErr, errSinkKey) {
+			sinkFacts["error"] = f.sinkErr.Error()
+		}
 	case consumed && f.sinkFound:
 		sinkStatus = "seen"
 		if len(f.sinkDiff) > 0 {
@@ -522,6 +583,8 @@ func unknownReason(err error) string {
 		return "no matching sink table"
 	case errors.Is(err, errNoGroup):
 		return "no group reads the topic"
+	case errors.Is(err, errSinkKey):
+		return "sink primary key is composite or differs from the source key: the trace cannot look up its row"
 	}
 	return "unreachable"
 }

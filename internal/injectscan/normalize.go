@@ -179,6 +179,79 @@ func scanHiddenTags(s string) []Finding {
 	return out
 }
 
+// cancelTag (U+E007F) closes the tag sequence of a flag emoji.
+const cancelTag = tagBase + 0x7F
+
+// rgiFlags are the tag sequences (cancel tag included) of the only
+// subdivision flags Unicode recommends for interchange: England, Scotland
+// and Wales. No platform draws any other tag sequence as a flag, so its tags
+// are as invisible as any other hidden text.
+var rgiFlags = [...]string{tagSeq("gbeng"), tagSeq("gbsct"), tagSeq("gbwls")}
+
+// tagSeq writes code in tag characters and closes it with a cancel tag.
+func tagSeq(code string) string {
+	var b strings.Builder
+	for _, r := range code {
+		b.WriteRune(tagBase + r)
+	}
+	b.WriteRune(cancelTag)
+	return b.String()
+}
+
+// rgiFlagLen returns the byte length of the flag tag sequence s starts
+// with, or 0 when it starts with none.
+func rgiFlagLen(s string) int {
+	for _, f := range rgiFlags {
+		if strings.HasPrefix(s, f) {
+			return len(f)
+		}
+	}
+	return 0
+}
+
+// scanStrayTags reports every run of tag characters (U+E0000..U+E007F)
+// outside a real flag emoji (#443). It runs after scanHiddenTags and only
+// adds findings: that scan lets any run of up to maxFlagTags tag characters
+// after a black flag pass, so text split into such runs, one flag each, went
+// unreported. Here a black flag that does not open a real flag sequence
+// does not end a run, so the pieces join into one finding, and runs of
+// characters scanHiddenTags drops (cancel, language tag, U+E0000) count too.
+func scanStrayTags(s string) []Finding {
+	var out []Finding
+	start := -1
+	var run strings.Builder
+	flush := func() {
+		if start >= 0 {
+			out = append(out, Finding{Kind: KindHiddenText, Offset: start, Excerpt: excerpt("tag text: " + run.String())})
+		}
+		start = -1
+		run.Reset()
+	}
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == blackFlag:
+			if k := rgiFlagLen(s[i+n:]); k > 0 {
+				flush()
+				i += n + k
+				continue
+			}
+		case r >= tagBase && r <= cancelTag:
+			if start < 0 {
+				start = i
+			}
+			if isTagText(r) {
+				run.WriteRune(r - tagBase)
+			}
+		default:
+			flush()
+		}
+		i += n
+	}
+	flush()
+	return out
+}
+
 // lookalikes maps Cyrillic and Greek letters that render like Latin ones.
 var lookalikes = map[rune]rune{
 	// Cyrillic lower case

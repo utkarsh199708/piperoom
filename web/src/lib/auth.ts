@@ -37,6 +37,16 @@ export const setAuthEpoch = (n: number): void => {
   currentEpoch = n
 }
 
+// Bumped by the UserProvider when a login or logout STARTS, before the cookie changes; the
+// session epoch above only moves once /api/me has answered. Whatever was queued under the old
+// session (the room's send ledger, #536) checks it, so nothing of the previous user's is posted
+// under the next one in between.
+let sessionChanges = 0
+export const getSessionChanges = (): number => sessionChanges
+export const beginSessionChange = (): void => {
+  sessionChanges += 1
+}
+
 /**
  * Map an HTTP status + error code to an auth problem, or null when the error
  * is an ordinary one that the caller shows itself.

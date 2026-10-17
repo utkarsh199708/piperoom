@@ -3,6 +3,7 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -118,5 +119,56 @@ func TestDiffCorpus(t *testing.T) {
 				t.Errorf("got %q, want %q (main: %q)", got, v.want, v.main)
 			}
 		})
+	}
+}
+
+// A long enum that drops a symbol prints a short delta, so the real cause in
+// the same diff still fits a capped summary (connect_status caps each task).
+func TestEnumDeltaIsCompact(t *testing.T) {
+	syms := make([]string, 600)
+	for i := range syms {
+		syms[i] = fmt.Sprintf("S%03d", i)
+	}
+	enum := func(s []string) string {
+		return `{"type":"enum","name":"E","symbols":["` + strings.Join(s, `","`) + `"]}`
+	}
+	v1 := `{"type":"record","name":"Value","fields":[{"name":"st","type":` + enum(syms) + `},{"name":"amount","type":"int"}]}`
+	v2 := `{"type":"record","name":"Value","fields":[{"name":"st","type":` + enum(syms[1:]) +
+		`},{"name":"amount","type":{"type":"bytes","logicalType":"decimal","precision":12,"scale":2}}]}`
+	ch, err := diffFields(v1, v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := formatChanges(ch)
+	want := "Value.amount: int → bytes(decimal 12,2)\nenum E: symbols → -S000"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	// Many symbols on one side are capped.
+	ch, _ = diffFields(v1, `{"type":"record","name":"Value","fields":[{"name":"st","type":`+enum(syms[:500])+`},{"name":"amount","type":"int"}]}`)
+	if got := formatChanges(ch); len(got) > 200 || !strings.Contains(got, "(90 more -)") {
+		t.Errorf("not capped: %d bytes: %.200q", len(got), got)
+	}
+}
+
+// #538: with schema set, from_version names the registered side, so a
+// to_version that does not exist is never fetched and must not fail the call.
+func TestDiffRawSchemaSkipsUnusedToVersion(t *testing.T) {
+	var asked []int
+	reg := &fakeRegistry{schemaFn: func(_ context.Context, _ string, v int) (clients.SchemaVersion, error) {
+		asked = append(asked, v)
+		if v == 1 {
+			return clients.SchemaVersion{Version: 1, Schema: diffV1}, nil
+		}
+		return clients.SchemaVersion{}, fmt.Errorf("version %d not found", v)
+	}}
+	esc, _ := json.Marshal(diffV2)
+	r, err := (&registryDiff{d: Deps{Registry: reg}}).Run(tools.WithUnscoped(context.Background()),
+		json.RawMessage(`{"subject":"s","from_version":1,"to_version":3,"schema":`+string(esc)+`}`))
+	if err != nil {
+		t.Fatalf("missing unused to_version failed the call: %v", err)
+	}
+	if r.Summary != "+ Value.risk_score: double" || len(asked) != 1 || asked[0] != 1 {
+		t.Errorf("summary=%q fetched=%v, want only version 1", r.Summary, asked)
 	}
 }

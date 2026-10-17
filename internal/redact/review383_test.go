@@ -737,3 +737,578 @@ func TestReview383Idempotent(t *testing.T) {
 		t.Fatalf("only %d inputs", n)
 	}
 }
+
+// secretRow is one leak row: the parts of the secret listed must not survive.
+type secretRow struct {
+	name, in string
+	secrets  []string
+}
+
+// checkSecretRows runs leak rows through Text and checks idempotence.
+func checkSecretRows(t *testing.T, rows []secretRow) {
+	t.Helper()
+	for _, tc := range rows {
+		got, _ := Text(tc.in)
+		for _, s := range tc.secrets {
+			if strings.Contains(got, s) {
+				t.Errorf("%s: leak of %q: %q -> %q", tc.name, s, tc.in, got)
+			}
+		}
+		if again, _ := Text(got); again != got {
+			t.Errorf("%s: not idempotent: %q -> %q -> %q", tc.name, tc.in, got, again)
+		}
+	}
+}
+
+// checkExact pins whole outputs, so a fix cannot pass by masking far more
+// than the secret.
+func checkExact(t *testing.T, rows []struct{ in, want string }) {
+	t.Helper()
+	for _, tc := range rows {
+		if got, _ := Text(tc.in); got != tc.want {
+			t.Errorf("Text(%q)\n got  %q\n want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// checkKeep holds evidence that only looks like a secret form unchanged.
+func checkKeep(t *testing.T, rows []string) {
+	t.Helper()
+	for _, in := range rows {
+		if got, _ := Text(in); got != in {
+			t.Errorf("changed evidence: %q -> %q", in, got)
+		}
+	}
+}
+
+// review510Leaks are the texts of #510 and variants of them: XML secrets
+// padded or on their own line with a plain-word value, and secrets named by
+// a key= or name= attribute. debezium and postgres are this stack's default
+// passwords.
+var review510Leaks = []secretRow{
+	// Item 1: padded or own-line plain words and short capitals.
+	{"own line debezium", "<password>\n  debezium\n</password>", []string{"debezium"}},
+	{"own line postgres", "<password>\n    postgres\n  </password>", []string{"postgres"}},
+	{"own line correcthorse", "<password>\n  correcthorse\n</password>", []string{"correcthorse"}},
+	{"own line capitals", "<password>\n  ORACLE19C\n</password>", []string{"ORACLE19C"}},
+	{"padded capitals", "<password> HUNTER2 </password>", []string{"HUNTER2"}},
+	{"own line tab", "<password>\n\tdebezium\n</password>", []string{"debezium"}},
+	{"own line CRLF", "<password>\r\n  debezium\r\n</password>", []string{"debezium"}},
+	{"own line JSON-escaped (guard: main masks it too)", `<password>\n  debezium\n</password>`, []string{"debezium"}},
+	{"own line dotted name", "<db.password>\n  postgres\n</db.password>", []string{"postgres"}},
+	{"own line namespace", "<ns:password>\n  debezium\n</ns:password>", []string{"debezium"}},
+	{"own line attribute", "<password type=\"plain\">\n  debezium\n</password>", []string{"debezium"}},
+	{"own line token capitals", "<token>\n  ABCXYZ\n</token>", []string{"ABCXYZ"}},
+	{"own line two words", "<password>\n  correct horse\n</password>", []string{"correct horse"}},
+	{"padded capitals with digits", "<secret> QW7PA55 </secret>", []string{"QW7PA55"}},
+	{"break before only", "<password>\n  debezium</password>", []string{"debezium"}},
+	{"break after only", "<password>debezium\n</password>", []string{"debezium"}},
+	// Item 2: a secret named by an attribute.
+	{"properties entry", `<entry key="jdbc.password">Zx9hunter2Qw7Pa55</entry>`, []string{"hunter2Qw7"}},
+	{"appSettings add", `<add key="DbPassword" value="Zx9hunter2Qw7Pa55"/>`, []string{"hunter2Qw7"}},
+	{"hibernate property", `<property name="hibernate.connection.password" value="Zx9hunter2Qw7Pa55"/>`, []string{"hunter2Qw7"}},
+	{"tomcat parameter", `<Parameter name="password" value="Zx9hunter2Qw7Pa55" override="false"/>`, []string{"hunter2Qw7"}},
+	{"single quotes", `<add key='DbPassword' value='Zx9hunter2Qw7Pa55'/>`, []string{"hunter2Qw7"}},
+	{"value before key", `<add value="Zx9hunter2Qw7Pa55" key="DbPassword"/>`, []string{"hunter2Qw7"}},
+	{"blanks around =", `<add key = "DbPassword" value = "Zx9hunter2Qw7Pa55" />`, []string{"hunter2Qw7"}},
+	{"upper-case attribute names", `<add KEY="DbPassword" VALUE="Zx9hunter2Qw7Pa55"/>`, []string{"hunter2Qw7"}},
+	{"entry padded", `<entry key="sasl.token"> Zx9hunter2Qw7Pa55 </entry>`, []string{"hunter2Qw7"}},
+	{"entry plain word", `<entry key="db.password">debezium</entry>`, []string{"debezium"}},
+	{"property text", `<property name="password">Zx9hunter2Qw7Pa55</property>`, []string{"hunter2Qw7"}},
+	{"client secret", `<add key="ClientSecret" value="Zx9hunter2Qw7Pa55"/>`, []string{"hunter2Qw7"}},
+	{"param token", `<param name="api.token" value="Zx9hunter2Qw7Pa55"/>`, []string{"hunter2Qw7"}},
+	{"value with blanks", `<add key="DbPassword" value="Zx9 hunter2Qw7Pa55"/>`, []string{"hunter2Qw7"}},
+	{"attributes over lines", "<add key=\"DbPassword\"\n     value=\"Zx9hunter2Qw7Pa55\"/>", []string{"hunter2Qw7"}},
+	{"after other XML", `<appSettings><add key="DbPassword" value="Zx9hunter2Qw7Pa55"/></appSettings>`, []string{"hunter2Qw7"}},
+	{"entry own line", "<entry key=\"jdbc.password\">\n  postgres\n</entry>", []string{"postgres"}},
+}
+
+var review510Keep = []string{
+	`<entry key="jdbc.url">jdbc:postgresql://db:5432/orders</entry>`,
+	`<add key="DbPassword" value=""/>`,
+	`<add key="DbPassword" value="${DB_PASSWORD}"/>`,
+	`<property name="hibernate.connection.password" value="${db.password}"/>`,
+	`<property name="password.policy" value="strict"/>`,
+	`<entry key="jdbc.password"/>`,
+	`<entry key="topics">orders.public.orders</entry>`,
+	`<add key="TokenTtl" value="3600"/>`,
+	"<password>\n  TODO\n</password>",
+	"<password>\n  CHANGE_ME\n</password>",
+	"<password>\n  changeme\n</password>",
+	"<password> CHANGE_ME </password>",
+	"<password> YOUR_PASSWORD </password>",
+	"<password> and </password>",
+	"between <password> and </password>",
+	"<token>\n  replace with the vault token\n  and restart\n</token>",
+}
+
+var review510Exact = []struct{ in, want string }{
+	{"<password>\n  debezium\n</password>", "<password>\n  [redacted 8]\n</password>"},
+	{"<password>\n    postgres\n  </password>", "<password>\n    [redacted 8]\n  </password>"},
+	{"<password> HUNTER2 </password>", "<password> [redacted 8] </password>"},
+	{`<entry key="jdbc.password">Zx9hunter2Qw7Pa55</entry>`, `<entry key="jdbc.password">[redacted 24]</entry>`},
+	{`<add key="DbPassword" value="Zx9hunter2Qw7Pa55"/>`, `<add key="DbPassword" value="[redacted 24]"/>`},
+	{`<property name="hibernate.connection.password" value="Zx9hunter2Qw7Pa55"/>`, `<property name="hibernate.connection.password" value="[redacted 24]"/>`},
+	{`<Parameter name="password" value="Zx9hunter2Qw7Pa55" override="false"/>`, `<Parameter name="password" value="[redacted 24]" override="false"/>`},
+	{`<add key="DbPwd" value="Zx9hunter2Qw7Pa55"/>`, `<add key="DbPwd" value="[redacted 24]"/>`},
+	{`<entry key="jdbc.password"><![CDATA[Zx9hunter2Qw7Pa55]]></entry>`, `<entry key="jdbc.password"><![CDATA[[redacted 24]]]></entry>`},
+	{`<entry key="jdbc.password">Zx9hunter2Qw7Pa55</entry> <entry key="jdbc.user">loader</entry>`, `<entry key="jdbc.password">[redacted 24]</entry> <entry key="jdbc.user">loader</entry>`},
+}
+
+// TestReview510 covers #510 items 1 and 2.
+func TestReview510(t *testing.T) {
+	checkSecretRows(t, review510Leaks)
+	checkKeep(t, review510Keep)
+	checkExact(t, review510Exact)
+}
+
+// review510Cut are the #510 item 3 shapes: an element whose text sits on
+// its own line, placed so that it straddles the MaxScan cut.
+var review510Cut = []string{
+	"<password>\n  Zx9hunter2Qw7Pa55\n</password>",
+	"<password><![CDATA[\nZx9hunter2Qw7Pa55\n]]></password>",
+	"<secret>\n<value>Zx9hunter2Qw7Pa55</value>\n</secret>",
+	"<entry key=\"jdbc.password\">\n  Zx9hunter2Qw7Pa55\n</entry>",
+	"<password>\n  debezium\n</password>",
+	// Round 2 of the #547 review: a start tag with text before it on its
+	// line, the value on the next lines.
+	"config: <password>\n  Zx9hunter2Qw7Pa55\n</password>",
+	"db: <password><![CDATA[\nZx9hunter2Qw7Pa55\n]]></password>",
+	// Round 3: the value starts on the tag's line, the end tag is on a later
+	// line, and text comes before the tag.
+	"config: <password>Zx9hunter2Qw7Pa55\n</password>",
+	"config: <password> Zx9hunter2Qw7Pa55\n</password>",
+	"x <entry key=\"jdbc.password\">Zx9hunter2Qw7Pa55\n</entry>",
+	"config: <entry key=\"jdbc.password\">Zx9hunter2Qw7Pa55\n</entry>",
+	"x <password>Zx9 hunter2Qw7Pa55 more\n</password>",
+	"x <add key=\"DbPassword\">Zx9hunter2Qw7Pa55\n</add>",
+	"x <password>Zx9hunter2Qw7Pa55\n  \n</password>",
+}
+
+// review510CutSpans are straddle shapes whose text spans lines. Element
+// text over several lines is prose to the #383 rule (a gap main has too),
+// so they leak when the whole element lies in the head; across the cut,
+// the overflow mask must hide them.
+var review510CutSpans = []string{
+	"config: <password>Zx9hunter2Qw7Pa55\n  more\n</password>",
+	"config: <password>  # db\n  Zx9hunter2Qw7Pa55\n</password>",
+}
+
+// TestReview510ScanCut: no part of an element's secret passes in the head
+// when the element straddles the scan limit, at every offset around it.
+func TestReview510ScanCut(t *testing.T) {
+	line := "evidence lsn 0/16B3748 topic orders.public.orders\n"
+	spans := map[string]bool{}
+	for _, el := range review510CutSpans {
+		spans[el] = true
+	}
+	for _, el := range append(append([]string{}, review510Cut...), review510CutSpans...) {
+		for d := 1; d <= len(el)+8; d++ {
+			fill := strings.Repeat(line, (MaxScan-d-1)/len(line))
+			fill += strings.Repeat("x", MaxScan-d-len(fill)-1) + "\n"
+			in := fill + el + "\nafter\n"
+			got, _ := Text(in)
+			if spans[el] && (len(in) <= MaxScan || scanCut(in) >= len(fill)+len(el)) {
+				continue // whole element in the head: the spans-lines gap
+			}
+			for _, sec := range []string{"hunter2Qw7", "debezium"} {
+				if strings.Contains(got[len(fill)-1:], sec) {
+					t.Errorf("offset %d: %q leaks %q: tail %q", d, el, sec, got[len(fill)-1:])
+				}
+			}
+			// A mask longer than its value can push an input of exactly
+			// MaxScan past the limit, and the second call then caps it; main
+			// does the same for any value masked there.
+			if again, _ := Text(got); again != got && len(in) > MaxScan {
+				t.Errorf("offset %d: %q not idempotent", d, el)
+			}
+		}
+	}
+}
+
+// review511Leaks are the texts of #511 and variants: shell-quoted flag
+// values.
+var review511Leaks = []secretRow{
+	{"ansi-c quoted with blank", "psql --password $'Zx9 hunter2Qw7Pa55' orders", []string{"hunter2Qw7", "Zx9"}},
+	{"ansi-c quoted", "kcat --sasl.password $'Zx9hunter2Qw7Pa55'", []string{"hunter2Qw7"}},
+	{"backslash-escaped blank", "psql --password Zx9\\ hunter2Qw7Pa55 orders", []string{"hunter2Qw7"}},
+	{"glued quote runs", "psql --password 'Zx9'\\''hunter2Qw7Pa55'", []string{"hunter2Qw7"}},
+	{"double then single quotes", "psql --password \"Zx9\"'hunter2Qw7Pa55'", []string{"hunter2Qw7"}},
+	{"typographic double quotes", "psql --password “Zx9 hunter2Qw7Pa55”", []string{"hunter2Qw7"}},
+	{"ansi-c escaped quote", "psql --password $'Zx9\\'hunter2Qw7Pa55' orders", []string{"hunter2Qw7"}},
+	{"ansi-c after =", "psql --password=$'Zx9hunter2Qw7Pa55'", []string{"hunter2Qw7"}},
+	{"ansi-c single dash", "tool -password $'Zx9 hunter2Qw7Pa55'", []string{"hunter2Qw7"}},
+	{"two escaped blanks", "kcat --sasl.password Zx9\\ hunter2Qw7Pa55\\ x -b k:9092", []string{"hunter2Qw7"}},
+	{"three glued runs", "psql --password \"Zx9\"'hunter2Qw7Pa55'\"x\"", []string{"hunter2Qw7"}},
+	{"single then double quotes", "psql --password 'Zx9'\"hunter2Qw7Pa55\"", []string{"hunter2Qw7"}},
+	{"bare then quoted", "psql --password Zx9'hunter2Qw7Pa55'", []string{"hunter2Qw7"}},
+	{"typographic single quotes", "psql --password ‘Zx9 hunter2Qw7Pa55’", []string{"hunter2Qw7"}},
+	{"typographic after =", "psql --password=“Zx9 hunter2Qw7Pa55”", []string{"hunter2Qw7"}},
+	{"typographic in prose", "I ran psql --password “Zx9 hunter2Qw7Pa55” and it failed", []string{"hunter2Qw7"}},
+	{"windows set", "set PGPASSWORD=Zx9 hunter2Qw7Pa55", []string{"hunter2Qw7"}},
+	{"windows SET", "SET DB_PASSWORD=Zx9 hunter2Qw7Pa55", []string{"hunter2Qw7"}},
+}
+
+var review511Keep = []string{
+	"psql --password ${PGPASSWORD} orders",
+	"echo $'\\n' --password-file x",
+	"set PATH=C:\\tools",
+	"pg_dump --password-file /etc/pg/pass orders",
+	"run --secret-name orders-db",
+	"psql -U postgres -h db orders",
+	"it’s the “orders” topic, see --token-ttl",
+	"set PGHOST=db",
+}
+
+var review511Exact = []struct{ in, want string }{
+	{"psql --password $'Zx9 hunter2Qw7Pa55' orders", "psql --password [redacted 24] orders"},
+	{"psql --password Zx9\\ hunter2Qw7Pa55 orders", "psql --password [redacted 24] orders"},
+	{"psql --password 'Zx9'\\''hunter2Qw7Pa55' orders", "psql --password [redacted 24] orders"},
+	{"psql --password \"Zx9\"'hunter2Qw7Pa55' orders", "psql --password [redacted 24] orders"},
+	{"psql --password “Zx9 hunter2Qw7Pa55” orders", "psql --password [redacted 24] orders"},
+	{"set PGPASSWORD=Zx9 hunter2Qw7Pa55", "set PGPASSWORD=[redacted 24]"},
+	{`set "PGPASSWORD=Zx9 hunter2Qw7Pa55"`, `set "PGPASSWORD=[redacted 24]"`},
+	{`C:\> set PGPASSWORD=Zx9 hunter2Qw7Pa55`, `C:\> set PGPASSWORD=[redacted 24]`},
+	// A quote that never closes after the value belongs to the JSON around
+	// the command, not to the value.
+	{`{"cmd":"psql --password “Zx9 hunter2Qw7Pa55”"}`, `{"cmd":"psql --password [redacted 24]"}`},
+	{`{"cmd":"psql --password 'Zx9'\''hunter2Qw7Pa55'"}`, `{"cmd":"psql --password [redacted 24]"}`},
+}
+
+// TestReview511Gaps pins shapes next to #511 that stay open; each row
+// gives today's output.
+func TestReview511Gaps(t *testing.T) {
+	rows := []struct{ gap, in, now string }{
+		{"an environment assignment (not a flag) with ANSI-C quoting (main too)",
+			"export PGPASSWORD=$'Zx9 hunter2Qw7Pa55'",
+			"export PGPASSWORD=$'Zx9 hunter2Qw7Pa55'"},
+		{"a braced SQL Server value split across lines (main too)",
+			"password = {Br@ce\n;Pw42x}",
+			"password = [redacted 8]\n;Pw42x}"},
+	}
+	for _, r := range rows {
+		if got, _ := Text(r.in); got != r.now {
+			t.Errorf("gap %q moved: Text(%q)\n got  %q\n pinned %q", r.gap, r.in, got, r.now)
+		}
+	}
+}
+
+// TestReview511 covers #511.
+func TestReview511(t *testing.T) {
+	checkSecretRows(t, review511Leaks)
+	checkKeep(t, review511Keep)
+	checkExact(t, review511Exact)
+}
+
+// slowLines510 are hostile inputs for the passes of #510, #511 and #534.
+// Each is checked at 64 KiB, and the cut ones past MaxScan.
+var slowLines510 = map[string]func(n int) string{
+	"attr-open-values":  func(n int) string { return strings.Repeat(`<add key="DbPassword" value="`, n/30) },
+	"attr-named-tags":   func(n int) string { return strings.Repeat(`<entry key="jdbc.password">`, n/27) },
+	"attr-many":         func(n int) string { return "<a " + strings.Repeat(`b="c" `, n/6) },
+	"attr-no-close":     func(n int) string { return strings.Repeat(`<add key="token" `, n/17) },
+	"attr-entry-text":   func(n int) string { return strings.Repeat("<entry key=\"x.token\">\n  a\n", n/26) },
+	"own-line-elements": func(n int) string { return strings.Repeat("<password>\n  debezium\n", n/22) },
+	"cut-open-tags":     func(n int) string { return strings.Repeat("<password>\n", n/11+1000) },
+	"cut-attr-tags":     func(n int) string { return strings.Repeat("<entry key=\"a.password\">\n", n/25+1000) },
+	"cut-end-tags":      func(n int) string { return strings.Repeat("<password></password>", n/21+1000) },
+	// #511: shell words that never close or glue many runs, and many
+	// masks for project to place.
+	"shell-ansi-open":    func(n int) string { return strings.Repeat("--password $'", n/13) },
+	"shell-blanks":       func(n int) string { return "--password " + strings.Repeat(`a\ `, n/3) },
+	"shell-glued":        func(n int) string { return "--password " + strings.Repeat(`'a'"b"`, n/6) },
+	"shell-flags-glued":  func(n int) string { return strings.Repeat(`--password 'a''b' `, n/18) },
+	"shell-typographic":  func(n int) string { return strings.Repeat("--password “", n/14) },
+	"shell-set-lines":    func(n int) string { return strings.Repeat("set PGPASSWORD=Zx9 hunter2Qw7\n", n/30) },
+	"shell-many-masks":   func(n int) string { return strings.Repeat("password=Zx9hunter2Qw7 --password $'a b' ", n/41) },
+	"shell-masks-repeat": func(n int) string { return strings.Repeat("password=Zx9hunter2Qw7 x ", n/25) + "--password $'a b'" },
+	// #534: braces that never close, escapes, and many short values.
+	"braced-open":    func(n int) string { return strings.Repeat("password={", n/10) },
+	"braced-escapes": func(n int) string { return "pwd={" + strings.Repeat("}}", n/2) },
+	"braced-many":    func(n int) string { return strings.Repeat("Pwd={a;b};", n/10) },
+	"braced-url":     func(n int) string { return strings.Repeat("jdbc:sqlserver://db:1433;password={B@c;d};", n/43) },
+	// Round 1 of the #547 review: unbounded and bare attributes, more quote
+	// styles, apostrophes, and quoted braced keys.
+	"attr-bare-many":  func(n int) string { return "<add " + strings.Repeat("b=c ", n/4) },
+	"attr-key-bare":   func(n int) string { return strings.Repeat("<add key=DbPassword value=", n/26) },
+	"typo-open":       func(n int) string { return strings.Repeat("--password „", n/14) },
+	"typo-apostrophe": func(n int) string { return "--password ‘" + strings.Repeat("it’s ", n/7) },
+	"braced-quoted":   func(n int) string { return strings.Repeat("\"Password\"={", n/13) },
+	"padded-words":    func(n int) string { return strings.Repeat("<password> debezium </password>", n/31) },
+}
+
+// TestReview510LinearTime: every hostile 64 KiB line runs in under 50 ms.
+func TestReview510LinearTime(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing check; runs without -race")
+	}
+	const ceiling = 50 * time.Millisecond
+	for name, mk := range slowLines510 {
+		s := mk(MaxScan)
+		best := time.Duration(1 << 62)
+		for range 5 {
+			start := time.Now()
+			Text(s)
+			best = min(best, time.Since(start))
+		}
+		if best > ceiling {
+			t.Errorf("%s: best %v for %d KiB, want under %v", name, best, len(s)>>10, ceiling)
+		}
+	}
+}
+
+// review547Leaks are the texts of the round-1 review of #547 (LEAD-REVIEW,
+// 0a4b8f8): own-line or padded values that only contain a placeholder word,
+// one-line plain words padded with blanks or tabs (must-fix 1 and 2), and
+// the shapes of nits 3 to 5.
+var review547Leaks = []secretRow{
+	// Must-fix 1: a placeholder word inside a real value is not a placeholder.
+	{"own line changeit", "<password>\n  changeit\n</password>", []string{"changeit"}},
+	{"entry own line changeit", "<entry key=\"ssl.truststore.password\">\n  changeit\n</entry>", []string{"changeit"}},
+	{"own line supersecret", "<password>\n  supersecret\n</password>", []string{"supersecret"}},
+	{"own line mypassword", "<password>\n  mypassword\n</password>", []string{"mypassword"}},
+	{"own line yourmom", "<password>\n  yourmom\n</password>", []string{"yourmom"}},
+	{"own line tokenring", "<password>\n  tokenring\n</password>", []string{"tokenring"}},
+	{"padded CHANGEIT", "<password> CHANGEIT </password>", []string{"CHANGEIT"}},
+	{"padded MYSECRET1", "<password> MYSECRET1 </password>", []string{"MYSECRET1"}},
+	{"padded XXXHUNTER", "<password> XXXHUNTER </password>", []string{"XXXHUNTER"}},
+	{"padded NULLHUNTER9", "<password> NULLHUNTER9 </password>", []string{"NULLHUNTER9"}},
+	// Must-fix 2: a one-line plain word padded with blanks or tabs.
+	{"padded debezium", "<password> debezium </password>", []string{"debezium"}},
+	{"tab-padded postgres", "<password>\tpostgres\t</password>", []string{"postgres"}},
+	{"padded secret element", "<secret> debezium </secret>", []string{"debezium"}},
+	{"entry padded debezium", "<entry key=\"jdbc.password\">  debezium  </entry>", []string{"debezium"}},
+	// Nit 3: more quote styles, and an apostrophe inside typographic quotes.
+	{"low-high quotes", "psql --password „Zx9 hunter2Qw7Pa55“", []string{"hunter2Qw7"}},
+	{"guillemets", "psql --password «Zx9 hunter2Qw7Pa55»", []string{"hunter2Qw7"}},
+	{"fullwidth quotes", "psql --password ＂Zx9 hunter2Qw7Pa55＂", []string{"hunter2Qw7"}},
+	{"apostrophe inside typographic quotes", "psql --password ‘Zx9 it’s hunter2Qw7Pa55’", []string{"hunter2Qw7"}},
+	// Nit 4: a quoted key before a braced value.
+	{"quoted braced key", "Server=db;\"Password\"={Br@ce;Pw42x};", []string{"Pw42x"}},
+	// Nit 5: value= after many attributes, and unquoted attributes.
+	{"value after 16 attributes", "<add a1=\"1\" a2=\"2\" a3=\"3\" a4=\"4\" a5=\"5\" a6=\"6\" a7=\"7\" a8=\"8\" a9=\"9\" a10=\"10\" a11=\"11\" a12=\"12\" a13=\"13\" a14=\"14\" a15=\"15\" a16=\"16\" key=\"DbPassword\" value=\"Zx9hunter2Qw7Pa55\"/>", []string{"hunter2Qw7"}},
+	{"unquoted attributes", "<add key=DbPassword value=Zx9hunter2Qw7Pa55 />", []string{"hunter2Qw7"}},
+}
+
+var review547Keep = []string{
+	"<password>\n  TODO\n</password>",
+	"<password> TODO </password>",
+	"<password>\n  CHANGE_ME\n</password>",
+	"<password> CHANGE_ME </password>",
+	"<password>\n  ${DB_PASSWORD}\n</password>",
+	"<password> ${DB_PASSWORD} </password>",
+	"<password> YOUR_PASSWORD </password>",
+	"<password>\n  changeme\n</password>",
+	"<password> <REPLACE_ME> </password>",
+	"<password> xxx </password>",
+	"<password> and </password>",
+	"<password>\tand\t</password>",
+	"<password> see docs </password>",
+	// Nit 6: a name= attribute on a schema element names a column or field.
+	// Its text is masked like any secret element's since round 4 (the
+	// column-type over-mask is pinned in TestReview547Round4, #573).
+	`<attribute name="token" type="string"/>`,
+}
+
+var review547Exact = []struct{ in, want string }{
+	{"<password> debezium </password>", "<password> [redacted 8] </password>"},
+	{"<password>\tpostgres\t</password>", "<password>\t[redacted 8]\t</password>"},
+	{"<password>\n  changeit\n</password>", "<password>\n  [redacted 8]\n</password>"},
+	{"psql --password „Zx9 hunter2Qw7Pa55“ orders", "psql --password [redacted 24] orders"},
+	{"Server=db;\"Password\"={Br@ce;Pw42x};", "Server=db;\"Password\"=[redacted 16];"},
+	// Nit 6: elements other than schema ones take a name= secret, so a
+	// constant in a param is masked too: <param name="password"> is a real
+	// config shape.
+	// (pin: 0a4b8f8 already does this)
+	{"<param name=\"token\">\n  TOPIC_ORDERS\n</param>", "<param name=\"token\">\n  [redacted 16]\n</param>"},
+	// Nit 7: cmd's set takes the whole rest of the line, so the mask does.
+	// (pin: 0a4b8f8 already does this)
+	{"set API_TOKEN=see the vault entry for orders.public.orders, then SerializationException",
+		"set API_TOKEN=[redacted 128]"},
+}
+
+// TestReview547Round1 holds the rows of the round-1 review of #547.
+func TestReview547Round1(t *testing.T) {
+	checkSecretRows(t, review547Leaks)
+	checkKeep(t, review547Keep)
+	checkExact(t, review547Exact)
+	rows := []struct{ gap, in, now string }{
+		{"a password glued to its flag (mysql -p'X') is not read (main too)",
+			"mysql -p'Zx9'\"hunter2Qw7Pa55\"",
+			"mysql -p'Zx9'\"hunter2Qw7Pa55\""},
+	}
+	for _, r := range rows {
+		if got, _ := Text(r.in); got != r.now {
+			t.Errorf("gap %q moved: Text(%q)\n got  %q\n pinned %q", r.gap, r.in, got, r.now)
+		}
+	}
+}
+
+// TestReview547CutProse pins the cut's handling of prose that names a
+// secret element near the limit: since round 3 it moves the cut back to
+// that line like any open secret element (0a4b8f8's handling), an
+// over-mask of at most 4 KiB instead of a leak risk (#573).
+func TestReview547CutProse(t *testing.T) {
+	line := "evidence lsn 0/16B3748 topic orders.public.orders\n"
+	tail := "WARN no <password> given for pg-orders-connector\n"
+	fill := strings.Repeat(line, (MaxScan-2000)/len(line))
+	in := fill + tail + strings.Repeat(line, 4000/len(line))
+	if got := scanCut(in); got != len(fill) {
+		t.Errorf("cut at %d, want the start of the prose line at %d", got, len(fill))
+	}
+}
+
+// TestReview547Round2 holds the rows of the round-2 review of #547: a
+// secret named by name= on a schema element still has its value= (or a
+// password-like text) masked, and a lone secret word is a value.
+func TestReview547Round2(t *testing.T) {
+	checkSecretRows(t, []secretRow{
+		{"liquibase seed", "<insert tableName=\"users\">\n  <column name=\"username\" value=\"admin\"/>\n  <column name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>\n</insert>", []string{"hunter2Qw7"}},
+		{"column db_password value", "<column name=\"db_password\" value=\"debezium\"/>", []string{"debezium"}},
+		{"field value", "<field name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>", []string{"hunter2Qw7"}},
+		{"attribute value", "<attribute name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>", []string{"hunter2Qw7"}},
+		{"column text", "<column name=\"password\">debezium</column>", []string{"debezium"}},
+		// Nit 3: password and secret are real default passwords.
+		{"own line lone password", "<password>\n  password\n</password>", []string{"\n  password\n"}},
+		{"padded lone secret", "<password> secret </password>", []string{"> secret <"}},
+	})
+	checkKeep(t, []string{
+		`<attribute name="token" type="string"/>`,
+		"<column name=\"username\" value=\"admin\"/>",
+		"<password> <password> </password>",
+		"<password> YOUR_PASSWORD </password>",
+	})
+	checkExact(t, []struct{ in, want string }{
+		{"<column name=\"password\" value=\"Zx9hunter2Qw7Pa55\"/>", "<column name=\"password\" value=\"[redacted 24]\"/>"},
+		{"<column name=\"password\">debezium</column>", "<column name=\"password\">[redacted 8]</column>"},
+		{"<password> secret </password>", "<password> [redacted 8] </password>"},
+	})
+}
+
+// TestReview547Round3 holds the rows of the round-3 review of #547: text of
+// a schema element named by name= is kept only when the whole value is a
+// column type, and an XML comment inside a secret element is a gap.
+func TestReview547Round3(t *testing.T) {
+	checkSecretRows(t, []secretRow{
+		{"text then secret", "<column name=\"password\">text Zx9hunter2Qw7Pa55</column>", []string{"hunter2Qw7"}},
+		{"date then secret", "<field name=\"password\">\n  date 2019 Zx9hunter2Qw7Pa55\n</field>", []string{"hunter2Qw7"}},
+		{"error-like token", "<column name=\"password\">Hunter2Error</column>", []string{"Hunter2Error"}},
+		{"lone type word", "<column name=\"password\">real</column>", []string{">real<"}},
+		{"type then digits", "<column name=\"password\">Long 8812</column>", []string{"Long 8812"}},
+		{"Text then secret", "<column name=\"password\">Text hunter2Qw7</column>", []string{"hunter2Qw7"}},
+		{"text me", "<field name=\"password\">text me</field>", []string{"text me"}},
+		{"real deal", "<column name=\"password\">real deal 99</column>", []string{"real deal 99"}},
+	})
+	checkKeep(t, []string{
+		`<attribute name="token" type="string"/>`,
+	})
+	rows := []struct{ gap, in, now string }{
+		{"an XML comment inside a secret element hides its text from the rules (main too; #561)",
+			"<password> <!-- c -->\n  Zx9hunter2Qw7Pa55\n</password>",
+			"<password> <!-- c -->\n  Zx9hunter2Qw7Pa55\n</password>"},
+	}
+	for _, r := range rows {
+		if got, _ := Text(r.in); got != r.now {
+			t.Errorf("gap %q moved: Text(%q)\n got  %q\n pinned %q", r.gap, r.in, got, r.now)
+		}
+	}
+}
+
+// TestReview547Round4 holds the rows of the round-4 review of #547. Each
+// want is 0a4b8f8's output for the text, so the PR keeps every mask
+// 0a4b8f8 wrote: a schema element named by a secret word has all its text
+// masked, column types included (an over-mask, #573), and function words
+// and the round-1 placeholder words are kept only where 0a4b8f8 kept them,
+// in lower-case text padded on one line.
+func TestReview547Round4(t *testing.T) {
+	checkExact(t, []struct{ in, want string }{
+		{"<column name=\"password\">VARCHAR(64) DEFAULT 'Hunter2Qw7Pa'</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">TEXT NOT NULL DEFAULT 'Hunter2Qw7Pa'</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">VARCHAR(64) NOT NULL DEFAULT 'Zx9hunter2Qw7'</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">VARCHAR(64) DEFAULT 'changeit'</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">VARCHAR DEFAULT 'debezium'</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">TEXT DEFAULT 'hunter2'</column>",
+			"<column name=\"password\">[redacted 24]</column>"},
+		{"<column name=\"password\">CHAR(8) DEFAULT 's3cr3t!!'</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<field name=\"secret\">VARCHAR DEFAULT 'Hunter2Qw7Pa'</field>",
+			"<field name=\"secret\">[redacted 32]</field>"},
+		{"<attribute name=\"token\">CHAR(12) DEFAULT 'Hunter2Qw7Pa'</attribute>",
+			"<attribute name=\"token\">[redacted 32]</attribute>"},
+		{"<column name=\"pin_password\">INT DEFAULT 88124431</column>",
+			"<column name=\"pin_password\">[redacted 24]</column>"},
+		{"<column name=\"password\">INT DEFAULT -12345678</column>",
+			"<column name=\"password\">[redacted 24]</column>"},
+		{"<column name=\"password\">\n  VARCHAR DEFAULT 'Hunter2Qw7Pa'\n</column>",
+			"<column name=\"password\">\n  [redacted 32]\n</column>"},
+		{"<column name=\"password\">\n  VARCHAR(64) DEFAULT 'changeit'\n</column>",
+			"<column name=\"password\">\n  [redacted 32]\n</column>"},
+		{"<column name=\"password\">Hunter2Qw7Pa.SerializationException</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">Zx9hunter2Qw7Pa55.SerializationException</column>",
+			"<column name=\"password\">[redacted 48]</column>"},
+		{"<column name=\"password\">Hunter2Qw7Pa.OutOfMemoryError</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">x.Hunter2Qw7Pa.OutOfMemoryError</column>",
+			"<column name=\"password\">[redacted 32]</column>"},
+		{"<column name=\"password\">HunterException</column>",
+			"<column name=\"password\">[redacted 16]</column>"},
+		{"<password>\n  enter\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  value\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  set\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  insert value\n</password>",
+			"<password>\n  [redacted 16]\n</password>"},
+		{"<password>\n  enter here\n</password>",
+			"<password>\n  [redacted 16]\n</password>"},
+		{"<password>\n  and\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  no\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<entry key=\"jdbc.password\">\n  me\n</entry>",
+			"<entry key=\"jdbc.password\">\n  [redacted 8]\n</entry>"},
+		{"<password> ENTER </password>",
+			"<password> [redacted 8] </password>"},
+		{"<password>\tVALUE\t</password>",
+			"<password>\t[redacted 8]\t</password>"},
+		{"<password> AND </password>",
+			"<password> [redacted 8] </password>"},
+		{"<password>\n  here\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\n  it\n</password>",
+			"<password>\n  [redacted 8]\n</password>"},
+		{"<password>\tis\t</password>",
+			"<password>\tis\t</password>"},
+		{"<password> SEE </password>",
+			"<password> [redacted 8] </password>"},
+		{"<password>\n  NIL\n</password>",
+			"<password>\n  NIL\n</password>"},
+		{"<password>\tAND\t</password>",
+			"<password>\t[redacted 8]\t</password>"},
+		{"<column name=\"password\">\n  VARCHAR\n</column>",
+			"<column name=\"password\">\n  [redacted 8]\n</column>"},
+		{"<column name=\"password\">TEXT</column>",
+			"<column name=\"password\">[redacted 8]</column>"},
+		{"<field name=\"password\">varchar(255) NOT NULL</field>",
+			"<field name=\"password\">[redacted 24]</field>"},
+		{"<column name=\"secret\">VARCHAR(64) NOT NULL DEFAULT ''</column>",
+			"<column name=\"secret\">[redacted 32]</column>"},
+		{"<field name=\"secret\">\n  SerializationException\n</field>",
+			"<field name=\"secret\">\n  [redacted 24]\n</field>"},
+		{"<field name=\"token\">org.apache.kafka.common.errors.SerializationException</field>",
+			"<field name=\"token\">[redacted 64]</field>"},
+		{"<password>\tand\t</password>",
+			"<password>\tand\t</password>"},
+		{"<password> and </password>",
+			"<password> and </password>"},
+		{"<password> see docs </password>",
+			"<password> see docs </password>"},
+	})
+}

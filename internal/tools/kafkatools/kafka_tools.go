@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -337,6 +338,15 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	scan, reported, err := findKey(cctx, t.d.Kafka, p.Topic, p.Key, since, maxScan)
+	// Matches with keys the registry could not decode (#538): the matches
+	// are listed, and the note says why the scan is incomplete, since a
+	// larger max_scan cannot help there.
+	var undec *kafka.UndecodedKeysError
+	if errors.As(err, &undec) && len(undec.Scan.Refs) > 0 {
+		scan, err = undec.Scan, nil
+	} else {
+		undec = nil
+	}
 	if err != nil {
 		return tools.Result{}, err
 	}
@@ -364,6 +374,18 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 		}
 		fmt.Fprintf(&sb, "\nthis client cannot report whether the scan was cut (max_scan %d or the time limit): %smatches may exist past the scanned window", maxScan, newer)
 		data["truncation_unknown"] = true
+	case undec != nil:
+		if len(undec.Cut) > 0 {
+			fmt.Fprintf(&sb, "\nthe scan stopped (max_scan %d or the time limit) before the end of partition(s) %v: newer matches may exist there", maxScan, undec.Cut)
+		}
+		fmt.Fprintf(&sb, "\n%d key(s) in partition(s) %v could not be decoded (schema registry unavailable): a match, older or newer than those listed, may be among them; a larger max_scan cannot help, retry when the registry is reachable", undec.Undecoded, undec.Partitions)
+		data["truncated"] = true
+		data["truncated_partitions"] = scan.Truncated
+		data["undecoded_keys"] = undec.Undecoded
+		data["undecoded_partitions"] = undec.Partitions
+		// truncated_partitions also holds the undecoded ones; these are the
+		// partitions max_scan or the time limit really cut.
+		data["cut_partitions"] = undec.Cut
 	case len(scan.Truncated) > 0:
 		// Matches past the cut would be newer than any listed: say so before
 		// the list can be read as complete.

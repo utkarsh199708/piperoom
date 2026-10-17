@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type {
   ChecklistStepDonePayload,
   Event,
@@ -11,7 +11,7 @@ import type {
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
 import type { ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
-import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
+import { classifyAuthProblem, getSessionChanges, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
@@ -184,12 +184,16 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const [reloadKey, setReloadKey] = useState(0)
 
   const lastSeqRef = useRef(0)
+  // The room whose socket last closed with stale_position, until an event arrives (docs/api.md,
+  // Stale position; #464). Outlives the reload that the close starts, so a second stale_position
+  // in a row is told apart from the first. Not cleared on open: the server accepts the upgrade
+  // before it refuses the position.
+  const staleRoomRef = useRef<string | null>(null)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
-  // Steers and comments not settled yet, keyed by client_id. Its post reads roomIdRef: the room
-  // on screen when it posts, not the room the action was typed in. Gap shared with main (pinned by
-  // a test): only App.tsx keying RoomScreen by roomId keeps a kept action from draining into
-  // another room (#491).
+  // Steers and comments not settled yet, keyed by client_id. Each entry keeps the room it was
+  // typed in (roomIdRef when it was created) and posts only there; a reconnect drains only the
+  // entries of the room on screen (#491).
   const roomIdRef = useRef(roomId)
   // The socket is open (set by onopen/onclose, cleared on cleanup): with it open, the ledger
   // retries kept actions itself, since no reconnect will.
@@ -197,19 +201,44 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   useEffect(() => {
     roomIdRef.current = roomId
   }, [roomId])
-  const [ledger] = useState(
-    () =>
-      new SendLedger({
-        post: (item, clientId) =>
-          item.kind === 'steer'
-            ? api.steer(roomIdRef.current, item.text, clientId)
-            : api.comment(roomIdRef.current, { step_id: item.stepId, text: item.text, client_id: clientId }),
-        setError,
-        newId: newClientId,
-        isLive: () => liveRef.current,
-      }),
-  )
-  useEffect(() => () => ledger.dispose(), [ledger])
+  // One ledger per user and session (#536): a dev "Switch user" or a new session changes them
+  // without a remount, and the previous user's kept actions must never be posted under the new
+  // session. The old ledger is disposed (its entries dropped) by the effect below.
+  const session = `${user.id}|${sessionEpoch}`
+  const newLedger = () => {
+    const changes = getSessionChanges()
+    return new SendLedger({
+      post: (item, clientId, room) =>
+        item.kind === 'steer'
+          ? api.steer(room, item.text, clientId)
+          : api.comment(room, { step_id: item.stepId, text: item.text, client_id: clientId }),
+      room: () => roomIdRef.current,
+      setError,
+      newId: newClientId,
+      isLive: () => liveRef.current,
+      sameSession: () => getSessionChanges() === changes,
+    })
+  }
+  const [held, setHeld] = useState(() => ({ session, ledger: newLedger() }))
+  let ledger = held.ledger
+  if (held.session !== session) {
+    // Set during render (React's derived-state pattern), so no effect of this render sees the old one.
+    const next = { session, ledger: newLedger() }
+    setHeld(next)
+    ledger = next.ledger
+  }
+  useEffect(() => {
+    ledger.attach()
+    return () => ledger.dispose()
+  }, [ledger])
+  // Another room or another session starts empty, reset during render (like the ledger above) so
+  // not one render shows the old room under the new id, or one user's room to the next (#536).
+  const view = `${roomId}|${session}`
+  const [shownView, setShownView] = useState(view)
+  if (shownView !== view) {
+    setShownView(view)
+    dispatch({ type: 'reset' })
+  }
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -230,7 +259,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     let reconnectTimer: number | undefined
     let replayTimer: number | undefined
 
-    dispatch({ type: 'reset' })
+    // No reset here: a reload of the room on screen (stale_position, 409 params_mismatch, Reload)
+    // keeps the old state until the new snapshot's init replaces it, so nothing on screen
+    // unmounts (#550). Another room or session was reset during render, above.
     lastSeqRef.current = 0
     setError(null)
     setPresence([])
@@ -303,6 +334,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
 
     const applyEventSeq = (ev: Event) => {
       if (ev.seq <= lastSeqRef.current) return
+      staleRoomRef.current = null
       dispatch({ type: 'event', event: ev })
       lastSeqRef.current = ev.seq
       // The stream settles a send by its client_id (an answer may have been lost).
@@ -363,6 +395,10 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       ws = sock
       firstConnect = false
       let opened = false
+      // This socket sent a stale_position frame: its close takes the stale path even when the
+      // reason is lost (a 1006, or a proxy that drops it), or it would reconnect with the same
+      // stale seq forever (#550).
+      let staleFrame = false
       sock.onopen = () => {
         if (cancelled) return
         opened = true
@@ -398,6 +434,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             msg.error.message,
           )
           if (problem) reportAuthProblem({ ...problem, epoch: sessionEpoch })
+          if (msg.error.code === 'stale_position') staleFrame = true
+          // The first stale_position is handled silently by a reload (see onclose).
+          if (msg.error.code === 'stale_position' && staleRoomRef.current !== roomId) return
           setError(friendlyError(msg.error.code, msg.error.message))
         }
       }
@@ -409,6 +448,19 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           // Stop retrying; the login screen (or redirect) takes over.
           reportAuthProblem({ kind: 'session_expired', message: 'session_expired', epoch: sessionEpoch })
           setConn('error')
+          return
+        }
+        if (ev?.reason === 'stale_position' || staleFrame) {
+          if (staleRoomRef.current === roomId) {
+            // A second one in a row: after=0 cannot cause it, so it is a client bug. The error
+            // frame is on screen; retrying would only repeat it.
+            setConn('error')
+            setError((prev) => prev ?? "This room's event log could not be replayed (stale_position).")
+            return
+          }
+          // The position is past the stored log: drop the room state and replay it all, once.
+          staleRoomRef.current = roomId
+          setReloadKey((k) => k + 1)
           return
         }
         if (ev?.reason === 'room deleted') {
@@ -496,11 +548,14 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   )
 
   const onDelivered = useCallback((listener: DeliveredListener) => ledger.onDelivered(listener), [ledger])
-  const [sends] = useState<SendControls>(() => ({
-    onDelivered: (listener) => ledger.onDelivered(listener),
-    cancel: (clientId) => ledger.cancel(clientId),
-    isPending: (clientId) => ledger.isPending(clientId),
-  }))
+  const sends = useMemo<SendControls>(
+    () => ({
+      onDelivered: (listener) => ledger.onDelivered(listener),
+      cancel: (clientId) => ledger.cancel(clientId),
+      isPending: (clientId) => ledger.isPending(clientId),
+    }),
+    [ledger],
+  )
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))

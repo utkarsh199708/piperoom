@@ -294,3 +294,17 @@ func TestRegisterNeverRecordsSchema(t *testing.T) {
 		t.Fatalf("schema leaked: %s", b)
 	}
 }
+
+// TestRefusedPathRecordsNothing: #446. A path netsec.CheckPath refuses is
+// never sent, so the evidence ledger must not show a request for it.
+func TestRefusedPathRecordsNothing(t *testing.T) {
+	var hits int
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { hits++ })
+	ctx, rec := recordCtx()
+	if _, err := c.Schema(ctx, "..", -1); err == nil {
+		t.Fatal("want the path refused")
+	}
+	if calls := rec.Calls(); len(calls) != 0 || hits != 0 {
+		t.Fatalf("hits = %d, calls = %+v; want no request and no receipt", hits, calls)
+	}
+}

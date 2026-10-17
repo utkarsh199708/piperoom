@@ -3,10 +3,12 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
@@ -17,7 +19,7 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 		desc: "Report the newest timestamp column of a warehouse table and how stale it is.",
 		schema: objSchema(map[string]any{
 			"table":     strProp("\"schema.table\" (or \"db.schema.table\" on Snowflake) to inspect."),
-			"ts_column": strProp("Timestamp column whose max indicates freshness."),
+			"ts_column": strProp("The pipeline's sink timestamp column (sink_ts_column in owners.yaml, shown as ts_column on the pipeline map); no other column is accepted."),
 		}, "table", "ts_column"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
 			var input struct {
@@ -39,6 +41,19 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			}
 			if err := sc.CheckSinkTable(input.Table); err != nil {
 				return tools.Result{}, err
+			}
+			// Only the pipeline's sink_ts_column, as pg_row/warehouse_row allow
+			// only the key: max() of any other column (an email, a card
+			// number) reads personal data out of the sink table (#564).
+			if !sc.Unscoped() {
+				want := sc.Pipeline().SinkTSColumn
+				if want == "" {
+					return tools.Result{}, fmt.Errorf("%w: pipeline %q sets no sink_ts_column in owners.yaml, so warehouse_freshness has no column to read", tools.ErrBadInput, sc.Pipeline().ID)
+				}
+				if input.TSColumn != want && !(d.isSnowflake() && strings.EqualFold(input.TSColumn, want)) {
+					return tools.Result{}, fmt.Errorf("%w: ts_column must be the pipeline's sink_ts_column %q", tools.ErrBadInput, want)
+				}
+				input.TSColumn = want
 			}
 
 			ctx, cancel := toolCtx(ctx)
@@ -134,6 +149,10 @@ func warehouseRowTool(d Deps) tools.Tool {
 			// client does).
 			if pc, ok := d.Wh.(pkColumner); ok {
 				pk, err := pc.PrimaryKeyColumn(ctx, input.Table)
+				if errors.Is(err, clients.ErrNotSupported) {
+					// A composite key: one key value is not one row (#483).
+					return tools.Result{}, fmt.Errorf("%w: %s has a composite primary key; warehouse_row looks rows up by a single-column key only", tools.ErrBadInput, input.Table)
+				}
 				if err != nil {
 					return tools.Result{}, fmt.Errorf("dbtools: warehouse_row: %w", err)
 				}

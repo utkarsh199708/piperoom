@@ -195,19 +195,31 @@ func sourceHealth(slot clients.ReplicationSlot, t Thresholds) (Health, map[strin
 	return HealthOK, facts
 }
 
-// connectorHealth decides a connector's health from its status.
+// connectorHealth decides a connector's health from its status, by the
+// watcher's connector_down rule (classifyOne, devctl): healthy is RUNNING with
+// at least one task and every task RUNNING. Anything else is not OK:
+//   - FAILED connector or task: Fail;
+//   - RUNNING with no tasks: Fail with tasks "none" (the connector moves no
+//     data; the watcher opens a sev2 room for it);
+//   - any other connector or task state (PAUSED, UNASSIGNED, STOPPED,
+//     RESTARTING, one this code does not know): Warn, with the state or a
+//     count of the tasks that are not running.
 func connectorHealth(s clients.ConnectorStatus) (Health, map[string]string) {
 	facts := map[string]string{}
 	failed := s.State == "FAILED"
 	failedTasks := 0
 	pausedTasks := 0
+	otherTasks := 0
 	for _, task := range s.Tasks {
 		switch task.State {
+		case "RUNNING":
 		case "FAILED":
 			failed = true
 			failedTasks++
 		case "PAUSED", "UNASSIGNED", "STOPPED":
 			pausedTasks++
+		default:
+			otherTasks++
 		}
 	}
 	if failed {
@@ -217,16 +229,34 @@ func connectorHealth(s clients.ConnectorStatus) (Health, map[string]string) {
 		}
 		return HealthFail, facts
 	}
-	switch s.State {
-	case "PAUSED", "UNASSIGNED", "STOPPED":
-		facts["state"] = s.State
+	if s.State != "RUNNING" {
+		facts["state"] = truncFact(s.State)
 		return HealthWarn, facts
+	}
+	if len(s.Tasks) == 0 {
+		facts["tasks"] = "none"
+		return HealthFail, facts
 	}
 	if pausedTasks > 0 {
 		facts["tasks_paused"] = strconv.Itoa(pausedTasks)
+	}
+	if otherTasks > 0 {
+		facts["tasks_not_running"] = strconv.Itoa(otherTasks)
+	}
+	if pausedTasks > 0 || otherTasks > 0 {
 		return HealthWarn, facts
 	}
 	return HealthOK, facts
+}
+
+// truncFact caps a state string from Connect before it becomes a fact: the
+// state is untrusted text, and a fact is shown to the model and the room.
+func truncFact(s string) string {
+	const max = 24
+	if r := []rune(s); len(r) > max {
+		return string(r[:max])
+	}
+	return s
 }
 
 // groupHealth decides a consumer group's health from its lag.
@@ -245,8 +275,22 @@ func groupHealth(lag clients.GroupLag, t Thresholds) (Health, map[string]string)
 	if lag.State == "Dead" {
 		return HealthFail, facts
 	}
+	// Unreadable partitions (a broker down) are not in TotalLag, which is
+	// then only a lower bound: the lag is "at least" it, and a group is never
+	// OK on that alone (#508, #495).
+	if n := len(lag.Unknown); n > 0 {
+		facts["unknown_partitions"] = strconv.Itoa(n)
+		if len(lag.Partitions) == 0 {
+			facts["lag"] = fmt.Sprintf("unknown (%d partition(s) unreadable)", n)
+		} else {
+			facts["lag"] = fmt.Sprintf("at least %d (%d partition(s) unreadable)", lag.TotalLag, n)
+		}
+	}
 	if lag.State == "Empty" || lag.TotalLag > t.GroupLagWarn {
 		return HealthWarn, facts
+	}
+	if len(lag.Unknown) > 0 {
+		return HealthUnknown, facts
 	}
 	return HealthOK, facts
 }
@@ -269,15 +313,31 @@ func topicHealth(err error, newest, now time.Time) (Health, map[string]string) {
 // fresh.
 const FutureSkew = time.Minute
 
+// FarFuture is how far ahead a newest timestamp may be and still be shown
+// with its gap: no clock skew or time zone mistake is a year, so beyond it the
+// value is a sentinel or bad data and its "age" means nothing.
+const FarFuture = 365 * 24 * time.Hour
+
 // sinkHealth decides a sink table's health from its newest row timestamp.
 func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 	if ts.IsZero() {
 		return HealthWarn, map[string]string{"stale_for": "never"}
 	}
-	stale := now.Sub(ts)
-	if -stale > FutureSkew {
-		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": HumanAge(-stale) + " ahead"}
+	// The warehouse client's year-9999 stand-in for a Postgres 'infinity'
+	// (#468): no row holds that time, and its "age" is time.Duration
+	// saturating, so neither is shown (#476), as in warehouse_freshness.
+	if ts.Year() >= 9999 {
+		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": "infinity (a sentinel or bad value)"}
 	}
+	// ts.Sub(now), not -now.Sub(ts): beyond ~292 years the Duration saturates
+	// at its minimum and negating that overflows back to a negative, which
+	// read as "ok, stale_for 0s".
+	if ahead := ts.Sub(now); ahead > FarFuture {
+		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": "far in the future (a sentinel or bad value)"}
+	} else if ahead > FutureSkew {
+		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": HumanAge(ahead) + " ahead"}
+	}
+	stale := now.Sub(ts)
 	facts := map[string]string{"stale_for": HumanAge(stale)}
 	switch {
 	case stale > t.SinkStaleFail:

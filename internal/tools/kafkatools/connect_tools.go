@@ -209,9 +209,12 @@ func maskCreds(s string) string {
 	// credential ("connection.password":"Sec@ret..."). Run first, it would eat
 	// that credential's key and leave its tail; run last, the sibling is
 	// already masked and the Oracle pass can only add masks.
-	s = bracedPassword.ReplaceAllString(s, "${1}"+redactedPassword)
+	// The regexps cost about 10 ms each on a 64 KiB line (#533):
+	// maskBracedPasswords is bracedPassword's replacement without one, and
+	// maskOracleThinCreds runs the Oracle regexp only where a match can start.
+	s = maskBracedPasswords(s)
 	s, _ = redact.Text(s)
-	s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
+	s = maskOracleThinCreds(s)
 	return s
 }
 
@@ -366,23 +369,95 @@ func truncateRunes(s string, n int) string {
 func condenseTrace(trace string) string {
 	var out []string
 	size := 0
-	for _, line := range strings.Split(trace, "\n") {
+	var inValue byte // the quote of a sink value that holds a newline, while inside it
+	// A java.time Text '...' value that holds a newline (#560): its opener
+	// carries the quote, so openQuote does not see it, and its parseMarker is on
+	// a later line. inText is set from the opener's line to the marker's line.
+	inText, textKept := false, false
+	markerAt := -1 // the first line after the current one that holds parseMarker, or len(lines)
+	lines := strings.Split(trace, "\n")
+	for i, line := range lines {
 		// cleanTrace keeps maxTraceText bytes; masking past that (plus a margin
 		// for masks that shorten text) is work whose output is cut anyway.
 		if size > maxTraceText+condenseMargin {
 			break
 		}
+		if inText {
+			// Every line up to the marker's is the record's, and so is the text
+			// after the marker on it: main drops such a line, and the words
+			// java.time puts there ("at index 0") are not worth a leak. Only
+			// the marker itself is kept, as the diagnosis.
+			if strings.Contains(line, parseMarker) {
+				inText = false
+				if textKept {
+					out[len(out)-1] += parseMarker
+					size += len(parseMarker)
+				}
+			}
+			continue
+		}
+		if inValue != 0 {
+			// The value's lines go, a "Caused by:" one too: sanitizeTrace
+			// masked the value from its first line to that line's end, and
+			// the rest up to the closing quote is the record's (#527).
+			if strings.IndexByte(line, inValue) >= 0 {
+				inValue = 0
+			}
+			continue
+		}
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "at ") {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0 {
-			kept := sanitizeTrace(trimmed)
-			out = append(out, kept)
-			size += len(kept) + 1
+		text := trimmed
+		isKept := strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0
+		if isKept {
+			text = sanitizeTrace(trimmed)
+		}
+		// Only a marker on a later line makes the opener a multi-line value;
+		// without one, "Text '" is other text and stays as main leaves it.
+		if v := openTextValue(text); v >= 0 {
+			if markerAt <= i {
+				markerAt = len(lines)
+				for j := i + 1; j < len(lines); j++ {
+					if strings.Contains(lines[j], parseMarker) {
+						markerAt = j
+						break
+					}
+				}
+			}
+			if markerAt < len(lines) {
+				text = text[:v] + dlq.Redacted
+				inText, textKept = true, isKept
+			}
+		}
+		if isKept {
+			out = append(out, text)
+			size += len(text) + 1
+		}
+		if !inText {
+			inValue = openQuote(trimmed)
 		}
 	}
 	return strings.Join(out, "\n")
+}
+
+// openTextValue returns the index in s where the value of its last java.time
+// "Text '" opener starts, when no parseMarker follows that opener on the line,
+// or -1. It runs findSinkOpeners once, so a hostile line stays linear.
+func openTextValue(s string) int {
+	low := asciiLower(s)
+	spans := findSinkOpeners(low, 0, len(low))
+	for k := len(spans) - 1; k >= 0; k-- {
+		m := spans[k]
+		if strings.HasPrefix(low[m[0]:], "text '") {
+			if strings.Contains(low[m[1]:], parseMarker) {
+				return -1
+			}
+			return m[1]
+		}
+	}
+	return -1
 }
 
 // condenseMargin is how far past maxTraceText condenseTrace keeps lines.
@@ -398,12 +473,343 @@ func sanitizeTrace(s string) string {
 	s = stripSchemaAfter(s, "Error registering Avro schema")
 	s = stripOldSchema(s)
 	s = maskCreds(s)
-	if recordSnippet.MatchString(s) {
+	if matchesRecordSnippet(s) {
 		// dlq.RedactMessage drops a "Failing row contains (...)" tuple only
 		// after a "Detail:" prefix; some drivers print it without one.
 		s = dlq.RedactMessage(failingRow.ReplaceAllString(s, "${1} "+dlq.Redacted))
 	}
-	return s
+	// Runs on the output of the masks above and only adds masks (org.md §12).
+	return maskSinkValues(s)
+}
+
+// sinkOpeners are the category words after which PostgreSQL, Elasticsearch,
+// Joda and java.time quote the failing value (#505): PostgreSQL's "date/time
+// field value out of range: \"...\"", "malformed array literal: \"...\""
+// and kin, Joda's "Invalid format: \"...\" is malformed at \"...\"",
+// Elasticsearch's "failed to parse date field [...]" and java.time's "Text
+// '...' could not be parsed". The words stay (they are the diagnosis); the
+// value after them is masked. Such lines do not match recordSnippet, so the
+// dlq_peek redaction, which would mask the quoted words too, never sees them.
+// Phrases are lower case and matched case-insensitively at a word start.
+//
+// More forms (#527) put the value before words the mask then covers too
+// (PostgreSQL's "invalid value \"...\" for \"YYYY\"", Snowflake's "Numeric
+// value '...' is not recognized") or after a token that stays: the encoding in
+// "invalid byte sequence for encoding \"UTF8\": 0x..", the Jackson token in
+// Avro's "Got VALUE_STRING: ...", the union in "Not in union [...]: ...".
+var sinkOpeners = []struct {
+	phrase string
+	skip   byte   // before after: '"' a quoted token, 'w' a word, '[' a bracketed list; 0 nothing
+	after  byte   // ':' needs optional spaces, a colon and spaces; ' ' needs spaces; 0 nothing
+	opens  string // the value must open with one of these bytes ('"' also as \"); "" any
+}{
+	{"date/time field value out of range", 0, ':', ""},
+	{"interval field value out of range", 0, ':', ""},
+	{"date out of range", 0, ':', ""},
+	{"timestamp out of range", 0, ':', ""},
+	{"time zone displacement out of range", 0, ':', ""},
+	{"malformed array literal", 0, ':', ""},
+	{"malformed record literal", 0, ':', ""},
+	{"malformed range literal", 0, ':', ""},
+	{"malformed multirange literal", 0, ':', ""},
+	// Unquoted, these are other diagnoses ("Invalid format: magic byte
+	// 0x07", "JSON is malformed at line 3"); Joda always quotes the value.
+	{"invalid format", 0, ':', `"`},
+	{"is malformed at", 0, ' ', `"`},
+	{"failed to parse date field [", 0, 0, ""},
+	{"text '", 0, 0, ""},
+	// Quoted only: "invalid value for parameter" and "invalid date format"
+	// name no value.
+	{"invalid value", 0, ' ', `"`},
+	{"invalid byte sequence for encoding", '"', ':', ""},
+	{"in document with id", 0, ' ', "'"},
+	{"got value_", 'w', ':', ""},
+	{"not in union", '[', ':', ""},
+	{"numeric value", 0, ' ', "'"},
+	{"invalid date", 0, ':', `"'`},
+	{"invalid time", 0, ':', `"'`},
+	{"invalid timestamp", 0, ':', `"'`},
+	{"invalid datetime", 0, ':', `"'`},
+}
+
+// parseMarker follows a java.time value; without it "Text '" is too common a
+// phrase to mask after.
+const parseMarker = "' could not be parsed"
+
+// maskSinkValues masks each sinkOpeners value with dlq.Redacted, from the
+// value's start to the end of its line (a java.time value: to the line's last
+// parseMarker). A value may hold any end marker a
+// rule could stop at (a quote, "  Hint: ", "] with format [", parseMarker),
+// so stopping early can leak its tail; the category words come before the
+// value, so masking the rest of the line over-masks only what follows it.
+// Phrases are found with strings.Index over an ASCII-lowered copy, not a
+// case-insensitive regexp (several times slower on a 64 KiB line, far more
+// under -race), and each search resumes past the last mask or cached
+// result, so a hostile line stays linear.
+func maskSinkValues(s string) string {
+	low := asciiLower(s)
+	spans := findSinkOpeners(low, 0, len(low))
+	if len(spans) == 0 {
+		return s
+	}
+	// nextText[k] is the index of the first "text '" span after spans[k], or -1.
+	nextText := make([]int, len(spans))
+	for k, nt := len(spans)-1, -1; k >= 0; k-- {
+		nextText[k] = nt
+		if strings.HasPrefix(low[spans[k][0]:], "text '") {
+			nt = k
+		}
+	}
+	var b strings.Builder
+	last := 0     // s[:last] is written to b
+	parseAt := -1 // the first parseMarker at or after the last search, or len(low) for none
+	lineEnd := -1 // the first '\n' at or after the last search, or len(low) for none
+	var reasons jsonReasons
+	for k, m := range spans {
+		if m[0] < last {
+			continue
+		}
+		start := m[1]
+		if lineEnd < start {
+			// Cached like parseAt: searched per opener, a line of many
+			// openers and no newline costs quadratic time (#533).
+			lineEnd = len(low)
+			if i := strings.IndexByte(low[start:], '\n'); i >= 0 {
+				lineEnd = start + i
+			}
+		}
+		end := lineEnd
+		if strings.HasPrefix(low[m[0]:], "in document with id") {
+			// Inside a raw JSON reason string the id ends with the string
+			// (a quote in the key is escaped), and a nested caused_by reason
+			// after it is diagnosis main keeps.
+			if e := reasons.end(low, m[0]); e > start && e < end {
+				end = e
+			}
+		}
+		if strings.HasPrefix(low[m[0]:], "text '") {
+			if parseAt < start {
+				parseAt = len(low)
+				if i := strings.Index(low[start:], parseMarker); i >= 0 {
+					parseAt = start + i
+				}
+			}
+			if parseAt >= end {
+				continue
+			}
+			// Only the last "Text '" before the marker opens the value: an
+			// earlier one ("Plain text 'mode' unsupported") is other text.
+			if nt := nextText[k]; nt >= 0 && spans[nt][0] < parseAt {
+				continue
+			}
+			// The value runs to the line's last marker, so a value holding
+			// the marker is still masked; java.time's own words after the
+			// last marker ("at index 0") stay.
+			end = start + strings.LastIndex(low[start:end], parseMarker)
+		}
+		if end <= start {
+			continue
+		}
+		b.WriteString(s[last:start])
+		b.WriteString(dlq.Redacted)
+		last = end
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+// jsonReason is the JSON key an Elasticsearch error reason string follows.
+const jsonReason = `"reason":"`
+
+// jsonReasons finds, for offsets in increasing order, the raw JSON reason
+// string an offset lies in. Each reason string is found and scanned once,
+// so a line of many openers stays linear.
+type jsonReasons struct {
+	from     int // low[:from] has been searched for jsonReason
+	at, stop int // the last reason string found: its body start and closing quote (-1 for none)
+	seen     bool
+}
+
+// end returns the index of the closing quote of the reason string holding
+// offset i, or -1 when i is in none.
+func (r *jsonReasons) end(low string, i int) int {
+	if !r.seen {
+		r.at, r.stop, r.seen = -1, -1, true
+	}
+	for r.from < i {
+		j := strings.Index(low[r.from:i], jsonReason)
+		if j < 0 {
+			r.from = max(r.from, i-len(jsonReason)+1)
+			break
+		}
+		r.at = r.from + j + len(jsonReason)
+		r.from = r.at
+		r.stop = jsonStringEnd(low, r.at)
+	}
+	if r.at < 0 || i < r.at || r.stop < 0 || i >= r.stop {
+		return -1
+	}
+	return r.stop
+}
+
+// jsonStringEnd returns the index of the quote that ends the JSON string
+// whose body starts at low[i], or -1 when it does not end on the line.
+func jsonStringEnd(low string, i int) int {
+	for ; i < len(low) && low[i] != '\n'; i++ {
+		switch low[i] {
+		case '\\':
+			i++
+		case '"':
+			return i
+		}
+	}
+	return -1
+}
+
+// asciiLower lowers ASCII letters only, so byte offsets in the result are
+// offsets in s.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// findSinkOpeners returns the [start, value start) spans of the sinkOpeners
+// in low[from:to], in order and without overlaps.
+func findSinkOpeners(low string, from, to int) [][2]int {
+	var spans [][2]int
+	for _, o := range sinkOpeners {
+		for i := from; i < to; {
+			j := strings.Index(low[i:to], o.phrase)
+			if j < 0 {
+				break
+			}
+			at := i + j
+			i = at + len(o.phrase)
+			if at > 0 && isWordByte(low[at-1]) {
+				continue
+			}
+			end, ok := i, true
+			switch o.skip {
+			case '"':
+				e := skipSpaces(low, end, to)
+				q := -1
+				if e < to && low[e] == '"' {
+					q = strings.IndexByte(low[e+1:to], '"')
+				}
+				if ok = q >= 0; ok {
+					end = e + 1 + q + 1
+				}
+			case 'w':
+				e := end
+				for e < to && isWordByte(low[e]) {
+					e++
+				}
+				ok, end = e > end, e
+			case '[':
+				e := skipSpaces(low, end, to)
+				if ok = e < to && low[e] == '['; !ok {
+					break
+				}
+				c := closingBracket(low, e, to)
+				if c < 0 {
+					// An unclosed list may hold the value: mask from it to
+					// the end of the line, past which no opener matters.
+					spans = append(spans, [2]int{at, e})
+					i, ok = to, false
+					break
+				}
+				// Openers inside the list are schema text before the value.
+				end, i = c+1, c+1
+			}
+			if !ok {
+				continue
+			}
+			switch o.after {
+			case ':':
+				end = skipSpaces(low, end, to)
+				if ok = end < to && low[end] == ':'; ok {
+					end = skipSpaces(low, end+1, to)
+				}
+			case ' ':
+				end = skipSpaces(low, end, to)
+				ok = end > i
+			}
+			if ok && o.opens != "" {
+				ok = end < to && strings.IndexByte(o.opens, low[end]) >= 0 ||
+					strings.IndexByte(o.opens, '"') >= 0 && strings.HasPrefix(low[end:to], `\"`)
+			}
+			if ok {
+				spans = append(spans, [2]int{at, end})
+			}
+		}
+	}
+	sort.Slice(spans, func(a, b int) bool { return spans[a][0] < spans[b][0] })
+	out := spans[:0]
+	for _, sp := range spans {
+		if len(out) > 0 && sp[0] < out[len(out)-1][1] {
+			continue
+		}
+		out = append(out, sp)
+	}
+	return out
+}
+
+// closingBracket returns the index of the ']' that closes the '[' at
+// low[open], skipping brackets inside JSON strings, or -1 before to.
+func closingBracket(low string, open, to int) int {
+	depth, inStr := 0, false
+	for i := open; i < to; i++ {
+		c := low[i]
+		switch {
+		case inStr && c == '\\':
+			i++
+		case c == '"':
+			inStr = !inStr
+		case inStr:
+		case c == '[':
+			depth++
+		case c == ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// openQuote returns the quote byte, double or single, of a sinkOpeners
+// value on line that holds no closing quote on the line, or 0: a value with
+// a newline, whose next lines up to the closing quote are value too (#527).
+func openQuote(line string) byte {
+	low := asciiLower(line)
+	for _, m := range findSinkOpeners(low, 0, len(low)) {
+		if v := low[m[1]:]; v != "" && (v[0] == '"' || v[0] == '\'') && strings.IndexByte(v[1:], v[0]) < 0 {
+			return v[0]
+		}
+	}
+	return 0
+}
+
+func isWordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z'
+}
+
+// skipSpaces returns the first index at or after i (before to) that is not a
+// space or tab.
+func skipSpaces(s string, i, to int) int {
+	for i < to && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
 }
 
 var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)
