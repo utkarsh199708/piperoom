@@ -158,6 +158,7 @@ export function AppShell() {
                   <SidebarContent
                     openRooms={openRooms}
                     needsYou={needsYouCount}
+                    admin={user.admin === true}
                     pipelines={pipelines}
                     currentPipelineId={currentPipelineId}
                     navKey={navKey}
@@ -177,6 +178,7 @@ export function AppShell() {
                     <SidebarContent
                       openRooms={openRooms}
                     needsYou={needsYouCount}
+                    admin={user.admin === true}
                       pipelines={pipelines}
                       currentPipelineId={currentPipelineId}
                       navKey={navKey}
@@ -242,6 +244,9 @@ function safeDecode(v: string): string {
 function Breadcrumb({ pipelineId }: { pipelineId?: string }) {
   const { pathname } = useLocation()
   const inRoom = pathname.startsWith('/rooms/')
+  if (pathname === '/settings') {
+    return <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Settings</h1>
+  }
   if (!inRoom) {
     return (
       <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Rooms</h1>
