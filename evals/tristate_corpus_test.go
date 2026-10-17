@@ -273,7 +273,10 @@ func TestTriStateNoFlip(t *testing.T) {
 // (the owner-approved calibration fill, #454), so a cache with fewer verdicts
 // than the manifest has entries fails: an emptied or partly deleted cache must
 // not pass CI silently. A judged grade that differs from the label fails too:
-// either the label is wrong and is corrected, or the judge prompt is.
+// either the label is wrong and is corrected, or the judge prompt is. The
+// differences the leads have seen and accepted are pinned, with a reason each,
+// in knownJudgeMisses (judge_known_misses_test.go); a pin the judge no longer
+// misses fails, so the list cannot rot.
 func TestJudgedCorpusGrades(t *testing.T) {
 	cache := NewJudgeCache("judgecache")
 	n, err := cache.Len()
@@ -293,7 +296,7 @@ func TestJudgedCorpusGrades(t *testing.T) {
 	}
 	cfg := Config{DefaultJudge: JudgeAuto, JudgeCache: "judgecache", JudgeCacheOnly: true}
 	g := newJudgeGate(cfg)
-	disagreeMain := 0
+	disagreeMain, misses := 0, 0
 	for _, e := range set.Entries {
 		sc := scs[e.Scenario]
 		res, err := gradeFinal(context.Background(), cfg, g, sc, keywordResult(sc, e.Text))
@@ -309,11 +312,22 @@ func TestJudgedCorpusGrades(t *testing.T) {
 			disagreeMain++
 			t.Logf("judge disagrees with main (main %v, judge %v, label %v): %s %q: %s", e.Keyword, got, e.Want, e.Scenario, e.Text, res.Judged.Reason)
 		}
-		if got != e.Want {
+		key := e.Scenario + "\x00" + e.Text
+		pinned, isPinned := knownJudgeMisses[key]
+		switch {
+		case got != e.Want && !isPinned:
 			t.Errorf("judged grade %v differs from the corpus label %v: %s %q: %s", got, e.Want, e.Scenario, e.Text, res.Judged.Reason)
+		case got != e.Want:
+			misses++
+			t.Logf("known judge miss (judge %v, label %v): %s %q: %s", got, e.Want, e.Scenario, e.Text, pinned)
+		case isPinned:
+			t.Errorf("%s %q is pinned as a known judge miss but the judge now agrees with the label: remove the pin", e.Scenario, e.Text)
 		}
 	}
-	t.Logf("judged corpus: %d entries, the judge disagrees with main on %d", len(set.Entries), disagreeMain)
+	if misses != len(knownJudgeMisses) {
+		t.Errorf("%d known judge miss(es) pinned but %d found: a pinned text is no longer in the manifest", len(knownJudgeMisses), misses)
+	}
+	t.Logf("judged corpus: %d entries, the judge disagrees with main on %d and with the label on %d (all pinned)", len(set.Entries), disagreeMain, misses)
 }
 
 // TestScenarioNamesUniqueAcrossSets: a cache key names the scenario without
