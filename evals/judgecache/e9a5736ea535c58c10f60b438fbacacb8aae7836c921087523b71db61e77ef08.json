@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "schema-change",
+  "hypothesis": "Not sure which: the amount change to numeric that the Schema Registry rejected (409), or the slot.",
+  "truth_sha256": "28b40a04cd675e6242339dca297be7d482b2f920ba69ffd83226c869efc1b34c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis hedges between the amount numeric change rejected by the Schema Registry and the replication slot, so it never commits to the true cause. It also names no first-failing layer or root-cause layer."
+  }
+}

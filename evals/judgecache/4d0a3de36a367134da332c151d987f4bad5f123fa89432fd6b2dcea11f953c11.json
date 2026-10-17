@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "schema-change",
+  "hypothesis": "Root cause: a DBA altered orders.amount from integer to numeric(12,2). The new schema is decimal bytes, not compatible.",
+  "truth_sha256": "28b40a04cd675e6242339dca297be7d482b2f920ba69ffd83226c869efc1b34c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the amount column change to numeric/decimal bytes and the incompatibility, but gives no first failing layer. It does place the cause in postgres via the DBA's ALTER, which matches the root-cause layer."
+  }
+}

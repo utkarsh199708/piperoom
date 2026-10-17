@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,5 +321,52 @@ func TestPrimaryKeyColumnIntegration(t *testing.T) {
 	}
 	if _, err := db.PrimaryKeyColumn(ctx, "analytics.x;drop"); err == nil {
 		t.Fatal("bad table name accepted")
+	}
+}
+
+// #564: Freshness on a column that is not a timestamp must fail without
+// quoting max(col), for every column type a sink table holds personal data in.
+// A timestamp (no time zone) column still works.
+func TestFreshnessNeverQuotesValuesIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	conn := writeConn(t, testenv.Require(t).WarehouseDBURL)
+
+	table := testenv.Name("whpii")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS analytics."+table)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "CREATE TABLE analytics."+table+
+		" (id bigint primary key, email text, card varchar(19), amount numeric, nts timestamp)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO analytics."+table+" VALUES (1, 'zoe.secret@example.com', '4111111111111111', 99.5, now() - interval '5 minutes')"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	for _, tc := range []struct{ col, value string }{
+		{"email", "zoe.secret@example.com"},
+		{"card", "4111111111111111"},
+		{"amount", "99.5"},
+	} {
+		t.Run(tc.col, func(t *testing.T) {
+			_, err := db.Freshness(ctx, "analytics."+table, tc.col)
+			if err == nil {
+				t.Fatal("Freshness of a non-timestamp column succeeded")
+			}
+			if strings.Contains(err.Error(), tc.value) {
+				t.Fatalf("error quotes the value: %v", err)
+			}
+			if !errors.Is(err, ErrNotTimestamp) {
+				t.Fatalf("err = %v, want ErrNotTimestamp", err)
+			}
+		})
+	}
+	ts, err := db.Freshness(ctx, "analytics."+table, "nts")
+	if err != nil || ts.IsZero() {
+		t.Fatalf("timestamp column: %v, %v", ts, err)
 	}
 }

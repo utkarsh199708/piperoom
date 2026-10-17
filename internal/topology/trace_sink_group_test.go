@@ -23,7 +23,7 @@ func twoTableBuilder(o *owners.Owners, lags map[string]clients.GroupLag) Builder
 		o,
 		&fakeConnect{
 			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders,public.customers"}},
-			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{
 			findByKey: map[string][]clients.RecordRef{"pg.public.customers": {{Key: "7", Partition: 0, Offset: 3}}},
@@ -125,7 +125,7 @@ func TestTraceGroupForErrors(t *testing.T) {
 				o,
 				&fakeConnect{
 					config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders,public.customers"}},
-					status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+					status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 				},
 				&fakeKafka{
 					findByKey: map[string][]clients.RecordRef{"pg.public.customers": {{Key: "7", Partition: 0, Offset: 3}}},
@@ -158,7 +158,7 @@ func TestTraceSameNameSourcesHaveNoSink(t *testing.T) {
 		o,
 		&fakeConnect{
 			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders,archive.orders"}},
-			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{
 			findByKey: map[string][]clients.RecordRef{"pg.archive.orders": {{Key: "7", Partition: 0, Offset: 3}}},

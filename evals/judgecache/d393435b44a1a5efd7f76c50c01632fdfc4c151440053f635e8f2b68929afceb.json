@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "payments-sink-dlq",
+  "hypothesis": "Was v4 backward incompatible? No: adding the optional risk_score field is BACKWARD compatible; jdbc-payments-sink fails because analytics.payments lacks the column, and errors.tolerance=all sends records to the DLQ.",
+  "truth_sha256": "350d6840c900f7854b330a57da4aaffe37549fe1ff27cfafbd1929ab3e0d42f2",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names jdbc-payments-sink failing because analytics.payments lacks the risk_score column. It also says errors.tolerance=all routes the records to the DLQ, which matches the ground truth, with the cause placed in kafka-connect."
+  }
+}

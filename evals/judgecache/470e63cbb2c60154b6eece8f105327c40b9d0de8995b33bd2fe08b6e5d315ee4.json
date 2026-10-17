@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "sasl-credential-rotated",
+  "hypothesis": "Root cause: the source database's pg_hba.conf now requires scram-sha-256 and the debezium password was rotated, so the connector cannot authenticate.",
+  "truth_sha256": "de46e044dfe2ae2e6b7181259300949c2661958e231ce3ea20baa8c5a1d141ce",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": ""
+  }
+}

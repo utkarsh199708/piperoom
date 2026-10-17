@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "broker-disk-notenoughreplicas",
+  "hypothesis": "pg-orders-connector task 0 failed with NotEnoughReplicasException because broker 2's log dir is 98% used (disk full): its replicas of p3 and p5 left the ISR, below min insync replicas 2.",
+  "truth_sha256": "a91700953749a7404e7ef2f8a7c466487c7a6fc8ca627767101da0671d5b88b0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names broker 2's full disk as the cause of p3 and p5 dropping below min ISR. It places the first failure at the connector and the root cause in kafka, and it tells none of the wrong stories."
+  }
+}

@@ -70,7 +70,7 @@ func srBuilder(cfg map[string]string, sr *fakeSR) *builder {
 	b := newBuilder(testOwners(),
 		&fakeConnect{
 			config: map[string]map[string]string{"pg-orders-connector": cfg},
-			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
 		},
 		&fakeKafka{lags: map[string]clients.GroupLag{"order-sync": lagOn("pg.public.orders")}},
 		&fakeSource{}, &fakeWarehouse{}, nil)

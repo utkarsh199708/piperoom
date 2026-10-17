@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "publication-permission-denied",
+  "hypothesis": "Root cause: the orders table owner changed; the debezium role still owns its slot, not publications.",
+  "truth_sha256": "e3ce5f6d07dbc19a4f485ef94406fa5a01495f02fa8aeabf321512474a40f1d0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis does mention the ownership change, but it never connects that change to Debezium's ALTER PUBLICATION, which needs table ownership, and it states no layers at all. Its phrase 'still owns its slot, not publications' is muddled and does not convey the publication requirement."
+  }
+}

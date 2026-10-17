@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "schema-change",
+  "hypothesis": "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after an ALTER TABLE in Postgres changed amount int -\u003e numeric(12,2). Fix: set compatibility to NONE; I am not sure whether order-sync also crashed.",
+  "truth_sha256": "28b40a04cd675e6242339dca297be7d482b2f920ba69ffd83226c869efc1b34c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the ALTER TABLE that changed amount from int to numeric(12,2), the BACKWARD-incompatible Avro schema rejected with a 409, and the failure of Connect task 0. It only expresses uncertainty about order-sync rather than claiming it crashed, so it does not tell a wrong story."
+  }
+}

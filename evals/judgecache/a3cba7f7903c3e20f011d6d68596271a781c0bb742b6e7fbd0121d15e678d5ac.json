@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "consumer-poison-pill",
+  "hypothesis": "order-sync is stuck on a poison pill: the record at offset 25377154 on partition 1 of pg.public.orders is not Avro (no magic byte), so deserialization fails on every restart. Connect is healthy. Do not reset the group to latest: that skips every partition's unread changes.",
+  "truth_sha256": "c6a77c8dcccbb721ae884ad8f94c38e7466a3fd40b8441a4996ea9c93c950a09",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the poison-pill non-Avro record at partition 1, offset 25377154, which order-sync fails to deserialize on every restart. It warns against resetting to latest rather than proposing it, and it implies the consumer fails first because of a bad record in Kafka."
+  }
+}

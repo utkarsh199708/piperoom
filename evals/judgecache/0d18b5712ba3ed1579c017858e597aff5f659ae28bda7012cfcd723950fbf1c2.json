@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "publication-permission-denied",
+  "hypothesis": "Root cause: Debezium's role has REPLICATION, not table ownership, so it cannot alter the publication.",
+  "truth_sha256": "e3ce5f6d07dbc19a4f485ef94406fa5a01495f02fa8aeabf321512474a40f1d0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the right mechanism: the connector role does not own the table, so it cannot alter the publication, which is a Postgres permission issue. It does not identify kafka-connect (task 0 failing) as the first failing layer."
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "schema-change",
+  "hypothesis": "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after an ALTER TABLE in Postgres changed amount int -\u003e numeric(12,2). Fix: set compatibility to NONE, or alternatively it is a network problem between Connect and the registry.",
+  "truth_sha256": "28b40a04cd675e6242339dca297be7d482b2f920ba69ffd83226c869efc1b34c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the right chain: an ALTER TABLE on amount int -\u003e numeric, a 409 BACKWARD rejection and the Connect task failing. It then hedges with an alternative cause ('a network problem between Connect and the registry') instead of committing to one explanation."
+  }
+}

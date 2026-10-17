@@ -136,13 +136,14 @@ describe('SteerBox composer (U3)', () => {
 
   // A fake ledger handle: one listener (the composer's), every action still owed unless cancelled.
   function fakeSends() {
-    let listener: DeliveredListener | null = null
+    // A Set, like the ledger: the composer's own listener and the #550 delivery watcher.
+    const listeners = new Set<DeliveredListener>()
     const cancelled: string[] = []
     const sends: SendControls = {
       onDelivered: (l) => {
-        listener = l
+        listeners.add(l)
         return () => {
-          listener = null
+          listeners.delete(l)
         }
       },
       cancel: (id) => {
@@ -150,7 +151,7 @@ describe('SteerBox composer (U3)', () => {
       },
       isPending: (id) => !cancelled.includes(id),
     }
-    return { sends, cancelled, deliver: (sent: Sent) => listener!(sent) }
+    return { sends, cancelled, deliver: (sent: Sent) => [...listeners].map((l) => l(sent)).some(Boolean) }
   }
 
   // #390 scenario B: the failed send landed (reconnect copy or its event); the field and the Retry

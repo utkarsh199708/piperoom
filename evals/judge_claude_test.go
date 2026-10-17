@@ -27,7 +27,7 @@ func TestClaudeJudgeRequest(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","stop_reason":"end_turn",`+
 			`"content":[{"type":"text","text":"{\"layer_correct\":true,\"root_cause_correct\":true,\"root_cause_layer_correct\":true,\"reason\":\"ok\"}"}],`+
-			`"usage":{"input_tokens":1,"output_tokens":1}}`)
+			`"usage":{"input_tokens":700,"output_tokens":30,"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}`)
 	}))
 	defer srv.Close()
 
@@ -40,6 +40,11 @@ func TestClaudeJudgeRequest(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("request lacks %s:\n%s", want, body)
 		}
+	}
+
+	// The metered call reports the reply's tokens, cache reads and writes as input.
+	if _, u, err := j.JudgeHypothesisMetered(context.Background(), loadSeed(), "x"); err != nil || u != (JudgeUsage{InputTokens: 707, OutputTokens: 30}) {
+		t.Errorf("usage = %+v err = %v", u, err)
 	}
 
 	if strings.Contains(body, "temperature") {

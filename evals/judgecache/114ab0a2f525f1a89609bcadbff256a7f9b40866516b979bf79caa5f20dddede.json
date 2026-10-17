@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "schema-change",
+  "hypothesis": "Either the ALTER TABLE on amount (numeric, Schema Registry 409) or a broker that is down stopped Kafka Connect task 0.",
+  "truth_sha256": "28b40a04cd675e6242339dca297be7d482b2f920ba69ffd83226c869efc1b34c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis hedges between the correct schema-change cause and a 'broker down' wrong story without committing to either, so the root cause is wrong. Kafka Connect task 0 is still correctly identified as the first failing layer, and the ALTER TABLE implies the postgres root-cause layer."
+  }
+}

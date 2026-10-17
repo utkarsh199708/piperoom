@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "snapshot-stuck",
+  "hypothesis": "pg-orders-connector (Kafka Connect) is not streaming because the replication slot debezium_orders is inactive and retains 61.4 GiB of WAL in Postgres.",
+  "truth_sha256": "19f341180f6f2d37742ea7aa8650e8056fe813201dffad9438924b2273cdda6d",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis blames an inactive replication slot, which is a listed wrong story; the slot is actually active and the connector is still in its initial snapshot. It does place the issue in kafka-connect, but it puts the cause in the Postgres slot."
+  }
+}

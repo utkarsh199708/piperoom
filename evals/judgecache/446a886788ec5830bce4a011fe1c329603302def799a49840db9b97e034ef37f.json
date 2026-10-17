@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "consumer-offsets-out-of-range-retention",
+  "hypothesis": "Order-sync's committed offsets were deleted by retention. We cannot confirm or rule out a reset to latest.",
+  "truth_sha256": "ccd0d43f05e7d72d99ea3ea3110190c971173abbe4c417fe4d4025c73cc0ae75",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names retention deleting data at the committed offsets, which places the cause at the kafka layer. It only says it cannot rule out a reset to latest and does not commit to that as the story. It is brief, but it conveys both retention and deletion."
+  }
+}

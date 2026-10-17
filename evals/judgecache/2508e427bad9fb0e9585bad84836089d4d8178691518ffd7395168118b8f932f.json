@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "consumer-poison-pill",
+  "hypothesis": "Root cause: order-sync is stuck on partition 1 at offset 25377154, not deserializable.",
+  "truth_sha256": "c6a77c8dcccbb721ae884ad8f94c38e7466a3fd40b8441a4996ea9c93c950a09",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis states that order-sync is stuck on partition 1 at offset 25377154 because the record is not deserializable, which conveys both required ideas, and it does not tell the reset-to-latest wrong story. It implicitly places the failure in the consumer (correct first failing layer), but it does not name kafka as the layer where the cause sits, and that placement is weak."
+  }
+}

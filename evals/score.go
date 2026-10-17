@@ -115,6 +115,9 @@ type RunResult struct {
 	// Judged is set when an LLM judge graded the run (ApplyVerdict): RootCause
 	// and LayerNamed then hold the judge's verdicts, Judged the terms ones.
 	Judged *JudgeResult `json:"judged,omitempty"`
+	// Ambiguity is set when the tri-state keyword pass could not decide an
+	// item of the final hypothesis (tristate.go); it says what settled it.
+	Ambiguity *Ambiguity `json:"ambiguity,omitempty"`
 
 	// MissingEvidence are evidence_tools with no successful call. A call that
 	// errored was attempted but observed nothing; those tools are also in
@@ -538,15 +541,25 @@ func diagnoseFailures(sc Scenario, res RunResult) []string {
 		f = append(f, "no hypothesis")
 	case res.Hedged:
 		f = append(f, fmt.Sprintf("wrong root cause: hedges between several causes (%q)", res.HedgedOn))
+	case res.Ambiguity.Unjudged() && res.Ambiguity.RootCause:
+		f = append(f, unjudgedFailure("root cause", res.Ambiguity))
 	case res.ForbiddenCause:
 		f = append(f, "wrong root cause: tells a forbidden story")
 	case !res.RootCause:
 		f = append(f, "wrong root cause")
 	}
-	if !res.LayerNamed {
+	switch {
+	case res.LayerNamed:
+	case res.Ambiguity.Unjudged() && res.Ambiguity.Layer:
+		f = append(f, unjudgedFailure("first failing layer "+sc.Expect.FirstFailingLayer, res.Ambiguity))
+	default:
 		f = append(f, "first failing layer not named: "+sc.Expect.FirstFailingLayer)
 	}
-	if !res.RootCauseLayerNamed {
+	switch {
+	case res.RootCauseLayerNamed:
+	case res.Ambiguity.Unjudged() && res.Ambiguity.RootCauseLayer:
+		f = append(f, unjudgedFailure("root-cause layer "+sc.Expect.RootCauseLayer, res.Ambiguity))
+	default:
 		f = append(f, "root-cause layer not named: "+sc.Expect.RootCauseLayer)
 	}
 	// Without a hypothesis "no hypothesis" already says it all.

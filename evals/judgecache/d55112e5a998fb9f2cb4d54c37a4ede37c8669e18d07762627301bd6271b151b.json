@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "payments-sink-dlq",
+  "hypothesis": "The JDBC sink connector jdbc-payments-sink cannot write records that carry the new risk_score column (added at 08:52; the warehouse table lacks it), and errors.tolerance=all sends every failing record to the dead-letter queue while the task stays RUNNING.",
+  "truth_sha256": "350d6840c900f7854b330a57da4aaffe37549fe1ff27cfafbd1929ab3e0d42f2",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis matches the ground truth. It names the sink failing on the missing risk_score column and records being routed to the DLQ via errors.tolerance=all, both in kafka-connect."
+  }
+}

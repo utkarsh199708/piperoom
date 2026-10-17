@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "publication-permission-denied",
+  "hypothesis": "Root cause: the table owner changed; Debezium's user can read the slot, not publications.",
+  "truth_sha256": "e3ce5f6d07dbc19a4f485ef94406fa5a01495f02fa8aeabf321512474a40f1d0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the owner change and mentions publications, but it states no failing layer. Its mechanism is vague: it says the user cannot read publications, not that ALTER PUBLICATION on task restart needs table ownership."
+  }
+}

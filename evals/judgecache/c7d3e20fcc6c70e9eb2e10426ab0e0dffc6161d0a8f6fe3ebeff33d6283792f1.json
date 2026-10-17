@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "consumer-rebalance-storm",
+  "hypothesis": "The order-sync consumer group is in a rebalance storm: CPU-throttled pods (1 CPU limit since Monday's deploy) miss max.poll.interval.ms, and heartbeat expiry removes members, so the generation climbed from 61 to 4318 and the group makes no progress. The bulk import and the source are not the cause.",
+  "truth_sha256": "f496594406f0913b7466a40a47f0498f9aabf20210abaa5341d3830ce7e9d0d4",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names a rebalance storm in the order-sync consumer group: CPU-throttled pods miss max.poll.interval and heartbeats, and the generation climbs to 4318. It explicitly rules out the bulk import and the source, which matches the ground truth."
+  }
+}

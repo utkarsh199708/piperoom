@@ -70,8 +70,14 @@
 //     as a name and is kept;
 //   - an Oracle JDBC password with an unquoted blank, or an unclosed quote,
 //     is masked only up to the blank (jdbc:oracle:thin:u/a b@host); a
-//     misspelt scheme (jdbc:oralce:); an MS SQL Server braced value holding
-//     ';' or '@' (password={a;b}) leaks its tail;
+//     misspelt scheme (jdbc:oralce:); an MS SQL Server braced value split
+//     across lines (password={a\n;b});
+//   - an environment assignment with ANSI-C quoting
+//     (export PGPASSWORD=$'a b'); passes added for #510, #511 and #534 run
+//     after every other rule and only add masks (more.go): XML text on its
+//     own line, secrets named by key= or name= attributes, shell-quoted
+//     flag values ($'...', a\ b, glued quote runs, typographic quotes),
+//     Windows "set NAME=a b" and braced values (password={a;b});
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
 //     password line is masked although it is evidence; the word after a
@@ -229,8 +235,14 @@ func (r *Redactor) Text(s string) (string, Stats) {
 // it goes after the last line break in the final 4 KiB before the limit, else
 // after the last whitespace or delimiter there, so the partial token at the
 // limit lands in the overflow mask. Only a single token longer than 4 KiB is
-// cut inside, at a rune boundary.
+// cut inside, at a rune boundary. A secret XML element left open at the cut
+// moves it back before the element (openTagCut).
 func scanCut(s string) int {
+	return openTagCut(s, lineCut(s))
+}
+
+// lineCut is scanCut without the XML check.
+func lineCut(s string) int {
 	win := s[MaxScan-4096 : MaxScan]
 	if i := strings.LastIndexByte(win, '\n'); i >= 0 {
 		return MaxScan - 4096 + i + 1
@@ -251,6 +263,7 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	if s == "" {
 		return s, st
 	}
+	orig := s
 	for range maxPasses {
 		out := applyCounted(&pemRule, s, "", &st)
 		if out == s {
@@ -320,8 +333,10 @@ func (r *Redactor) scan(s string) (string, Stats) {
 	if changed {
 		s = b.String()
 	}
-	// The Oracle pass goes last and only adds masks (oracleRule).
-	return maskOracle(r.extend(s, &st), &st), st
+	// The Oracle pass goes last of the rules above and only adds masks
+	// (oracleRule); the passes in more.go run on its output and only add
+	// masks too.
+	return more(orig, maskOracle(r.extend(s, &st), &st), &st), st
 }
 
 // lineFixed masks one line until nothing more changes.
