@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/adminconfig"
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
@@ -468,6 +469,16 @@ func run() error {
 		})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
+	}
+	// Admin settings and connection tests (docs/api.md): real mode only.
+	// --demo has no real connections to show or test, and its users may be
+	// the built-in directory rather than a users file.
+	if !*demoMode {
+		adm, err := adminconfig.New(cfg, own, users, cfg.OwnersFile, cfg.UsersFile)
+		if err != nil {
+			return fmt.Errorf("server: admin settings: %w", err)
+		}
+		httpOpts = append(httpOpts, httpapi.WithAdmin(adm))
 	}
 	if cfg.WebDir != "" {
 		// Fail at start, not at the first page load, when the image or the
