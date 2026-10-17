@@ -34,8 +34,13 @@ const (
 	triagePassReads = 2
 	// triagePickMaxTokens bounds the turn that picks the reads.
 	triagePickMaxTokens = 1024
-	// triageVerdictMaxTokens bounds the verdict request.
-	triageVerdictMaxTokens = 512
+	// triageVerdictMaxTokens bounds the verdict request. The model's thinking
+	// counts against it: on 432 first-look verdict requests rendered from the
+	// held-out eval scenarios, claude-haiku-5-5 used 607 output tokens at the
+	// median and 1122 at most, and a 512 cap cut off 62.5% of verdicts (empty
+	// or half-written JSON, so the first look failed). 2048 is about 1.8x the
+	// largest seen.
+	triageVerdictMaxTokens = 2048
 	// triageHeadlineRunes and triageNextCheckRunes cap the two free-text
 	// fields of the verdict (events.AgentTriagePayload).
 	triageHeadlineRunes  = 200
