@@ -1,36 +1,66 @@
+import { Users } from 'lucide-react'
 import type { AdminPerson } from '@/api/types'
 import { Badge, layerVariant } from '@/components/ui/badge'
+import { Card } from '@/components/ui/card'
 import { lines } from '@/lib/settings'
 
-/** Every person of users.yaml, read only. */
+// The room list's table styles, so every table in the app reads the same.
+const TH = 'h-9 whitespace-nowrap px-4 text-left text-xs font-medium text-subtle-foreground'
+const TD = 'border-t border-border px-4 py-2.5 align-middle'
+
+function initials(name: string, id: string): string {
+  const words = (name || id).trim().split(/\s+/).filter(Boolean)
+  const s = words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? '?').slice(0, 2)
+  return s.toUpperCase()
+}
+
+/** Every person of the users file, read only. */
 export function PeopleTab({ people }: { people: readonly AdminPerson[] }) {
   if (people.length === 0) {
     return (
-      <p role="status" className="m-0 text-muted-foreground">
-        No people are configured. Add them to the users file.
-      </p>
+      <Card className="flex flex-col items-center gap-2 px-6 py-12 text-center">
+        <Users className="size-6 text-subtle-foreground" aria-hidden="true" />
+        <p role="status" className="m-0 text-muted-foreground">
+          No people are configured. Add them to the users file.
+        </p>
+      </Card>
     )
   }
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full min-w-[520px] border-collapse text-left">
+    <Card className="overflow-x-auto">
+      <table className="w-full min-w-[560px] border-collapse text-sm">
         <caption className="sr-only">People</caption>
         <thead>
-          <tr className="border-b border-border text-xs text-subtle-foreground">
-            <th scope="col" className="py-2 pr-4 font-medium">Id</th>
-            <th scope="col" className="py-2 pr-4 font-medium">Name</th>
-            <th scope="col" className="py-2 pr-4 font-medium">Layers</th>
-            <th scope="col" className="py-2 font-medium">Role</th>
+          <tr>
+            <th scope="col" className={TH}>
+              Person
+            </th>
+            <th scope="col" className={TH}>
+              Owns layers
+            </th>
+            <th scope="col" className={TH}>
+              Role
+            </th>
           </tr>
         </thead>
         <tbody>
           {people.map((p) => (
-            <tr key={p.id} className="border-b border-border align-top">
-              <th scope="row" className="py-2 pr-4 text-left font-mono text-xs font-normal">
-                {p.id}
+            <tr key={p.id}>
+              <th scope="row" className={`${TD} text-left font-normal`}>
+                <span className="flex items-center gap-2.5">
+                  <span
+                    className="grid size-7 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground"
+                    aria-hidden="true"
+                  >
+                    {initials(p.name, p.id)}
+                  </span>
+                  <span className="flex min-w-0 flex-col">
+                    <span className="font-medium">{p.name || p.id}</span>
+                    <span className="font-mono text-xs text-subtle-foreground">{p.id}</span>
+                  </span>
+                </span>
               </th>
-              <td className="py-2 pr-4">{p.name}</td>
-              <td className="py-2 pr-4">
+              <td className={TD}>
                 {lines(p.layers).length === 0 ? (
                   <span className="text-subtle-foreground">
                     <span aria-hidden="true">–</span>
@@ -46,11 +76,13 @@ export function PeopleTab({ people }: { people: readonly AdminPerson[] }) {
                   </span>
                 )}
               </td>
-              <td className="py-2">{p.admin ? <Badge variant="accent">admin</Badge> : <span className="text-subtle-foreground">member</span>}</td>
+              <td className={TD}>
+                {p.admin ? <Badge variant="accent">admin</Badge> : <span className="text-muted-foreground">member</span>}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
-    </div>
+    </Card>
   )
 }

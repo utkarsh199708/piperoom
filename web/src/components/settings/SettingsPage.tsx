@@ -1,7 +1,8 @@
-import { Download, Info, Lock } from 'lucide-react'
+import { Download, Lock } from 'lucide-react'
 import { ADMIN_CONFIG_EXPORT_URL } from '@/api/client'
 import type { AdminConfig } from '@/api/types'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useCurrentUser } from '@/context/user'
 import { useAdminConfig } from '@/hooks/useAdminConfig'
@@ -22,11 +23,14 @@ export function SettingsPage() {
   if (!admin || view.phase === 'forbidden') return <AdminsOnly />
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 px-4 py-6 text-sm sm:px-6">
+    <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-6 text-sm sm:px-6">
       {view.phase === 'loading' && (
-        <p role="status" className="m-0 text-muted-foreground">
-          Loading settings…
-        </p>
+        <div role="status" aria-label="Loading settings" className="flex flex-col gap-4">
+          <Skeleton className="h-4 w-80 max-w-full" />
+          <Skeleton className="h-9 w-72 max-w-full" />
+          <Skeleton className="h-[88px] w-full" />
+          <Skeleton className="h-64 w-full" />
+        </div>
       )}
       {view.phase === 'error' && (
         <div role="alert" className="flex flex-wrap items-center gap-3">
@@ -60,29 +64,22 @@ function Loaded({ config }: { config: AdminConfig }) {
   const people = lines(config.people)
   return (
     <>
-      <section
-        aria-label="Where this configuration comes from"
-        className="flex flex-wrap items-start gap-3 rounded-lg border border-border bg-info-subtle p-3 text-info-foreground"
-      >
-        <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <p className="m-0 min-w-0 flex-1">
-          <strong className="font-semibold">Read only.</strong> This configuration comes from the owners file
-          {config.owners_file && (
-            <>
-              {' '}
-              (<code className="font-mono">{config.owners_file}</code>)
-            </>
-          )}
-          , the users file
-          {config.users_file && (
-            <>
-              {' '}
-              (<code className="font-mono">{config.users_file}</code>)
-            </>
-          )}{' '}
-          and the environment. Editing in the app comes later; for now change those and restart.
-        </p>
-        <Button asChild variant="outline" size="sm" className="bg-background text-foreground">
+      <section aria-label="Where this configuration comes from" className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-col gap-1">
+          <p className="m-0 text-muted-foreground">The systems, pipelines and people this Piperoom runs with.</p>
+          <p className="m-0 text-xs leading-5 text-subtle-foreground">
+            <Lock className="mr-1.5 inline size-3.5 -translate-y-px align-middle" aria-hidden="true" />
+            Read only. Managed in{' '}
+            {[config.owners_file, config.users_file].filter(Boolean).map((f) => (
+              <span key={f}>
+                <code className="font-mono text-muted-foreground">{f}</code>
+                {', '}
+              </span>
+            ))}
+            and environment variables; change those and restart. Editing here is coming.
+          </p>
+        </div>
+        <Button asChild variant="outline" size="sm">
           <a href={ADMIN_CONFIG_EXPORT_URL} download="piperoom-config.yaml">
             <Download aria-hidden="true" />
             Export YAML

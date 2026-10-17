@@ -157,38 +157,56 @@ describe('SettingsPage banner and export', () => {
 })
 
 describe('Connections tab', () => {
-  it('renders one card per connection with kind, scope, used-by and settings', async () => {
+  it('renders one row per connection with its role, endpoint, scope and users, and a summary strip', async () => {
     vi.spyOn(api, 'adminConfig').mockResolvedValue(config())
     renderPage()
     const kafka = await screen.findByRole('group', { name: 'Kafka' })
-    expect(within(kafka).getByText('Process-wide')).toBeInTheDocument()
-    expect(within(kafka).getByText('orders')).toBeInTheDocument()
-    expect(within(kafka).getByText('localhost:29092')).toBeInTheDocument()
-    expect(within(kafka).getByText('env KAFKA_BROKERS')).toBeInTheDocument()
+    expect(kafka).toHaveTextContent('Event stream')
+    expect(within(kafka).getAllByText('localhost:29092').length).toBeGreaterThan(0)
+    expect(kafka).toHaveTextContent('used by orders')
+    expect(kafka).toHaveTextContent('Not tested')
 
     const pg = screen.getByRole('group', { name: 'Postgres source' })
     expect(within(pg).getByText('Pipeline orders')).toBeInTheDocument()
+    expect(pg).toHaveTextContent('Connection string set (hidden)')
     expect(within(pg).getByText('db.internal:5432')).toBeInTheDocument()
 
     const connect = screen.getByRole('group', { name: 'Kafka Connect' })
-    expect(within(connect).getByText('no pipeline')).toBeInTheDocument()
+    expect(connect).toHaveTextContent('no pipeline uses it')
     expect(within(connect).getByText('No settings reported.')).toBeInTheDocument()
+
+    const strip = screen.getByRole('group', { name: 'Connection summary' })
+    expect(strip).toHaveTextContent('Connections3')
+    expect(strip).toHaveTextContent('Not tested3')
   })
 
-  it('shows a secret only as set or not set with where it comes from, never a value', async () => {
+  it('labels settings for people and shows a secret only as set or not set with its source, never a value', async () => {
     vi.spyOn(api, 'adminConfig').mockResolvedValue(config())
     const { container } = renderPage()
     const kafka = await screen.findByRole('group', { name: 'Kafka' })
-    const row = within(kafka).getByText('kafka_sasl_password').closest('tr')!
-    expect(row).toHaveTextContent('not set')
-    expect(row).toHaveTextContent('env KAFKA_SASL_PASSWORD')
+    expect(within(kafka).getByText('Bootstrap servers').closest('[data-setting]')).toHaveTextContent('KAFKA_BROKERS')
+    const pw = within(kafka).getByText('SASL password').closest('[data-setting]')!
+    expect(pw).toHaveTextContent('not set')
+    expect(pw).toHaveTextContent('Environment KAFKA_SASL_PASSWORD')
 
     const pg = screen.getByRole('group', { name: 'Postgres source' })
-    expect(within(pg).getByText('source_db_url').closest('tr')).toHaveTextContent('set')
-    expect(within(pg).getByText('source_db_url').closest('tr')).toHaveTextContent('env ORDERS_DB_URL')
-    const leaky = within(pg).getByText('source_db_password').closest('tr')!
-    expect(leaky).toHaveTextContent('file /run/secrets/pw')
+    const dsn = within(pg).getByText('Connection string').closest('[data-setting]')!
+    expect(dsn).toHaveTextContent('set')
+    expect(dsn).toHaveTextContent('ORDERS_DB_URL')
+    const leaky = pg.querySelector('[data-setting="source_db_password"]')!
+    expect(leaky).toHaveTextContent('File /run/secrets/pw')
     expect(container).not.toHaveTextContent('hunter2-LEAK')
+  })
+
+  it('details open and close from the chevron', async () => {
+    vi.spyOn(api, 'adminConfig').mockResolvedValue(config())
+    renderPage()
+    const kafka = await screen.findByRole('group', { name: 'Kafka' })
+    const toggle = within(kafka).getByRole('button', { name: 'Show details: Kafka' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(toggle)
+    expect(within(kafka).getByRole('button', { name: 'Hide details: Kafka' })).toHaveAttribute('aria-expanded', 'true')
+    expect(within(kafka).getByRole('region', { name: 'Configuration of Kafka' })).toBeVisible()
   })
 })
 
@@ -196,18 +214,17 @@ describe('Test connection', () => {
   const open = async () => {
     vi.spyOn(api, 'adminConfig').mockResolvedValue(config())
     renderPage()
-    const card = await screen.findByRole('group', { name: 'Postgres source' })
-    return card
+    return screen.findByRole('group', { name: 'Postgres source' })
   }
 
-  it('posts the connection id, shows a spinner, then the checks with ok, warn, fail and skip', async () => {
+  it('posts the connection id, shows Testing…, then opens the details with labelled checks', async () => {
     let resolve!: (r: ProbeResult) => void
     const spy = vi.spyOn(api, 'testConnection').mockReturnValue(new Promise((r) => (resolve = r)))
     const card = await open()
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
     expect(spy).toHaveBeenCalledWith('pipeline.orders.source_db')
     expect(within(card).getByRole('button', { name: /Test connection/ })).toBeDisabled()
-    expect(within(card).getByText('Testing…', { selector: 'button' })).toBeInTheDocument()
+    expect(within(card).getAllByText('Testing…').length).toBeGreaterThan(0)
     // A second click while it runs sends nothing.
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
     expect(spy).toHaveBeenCalledTimes(1)
@@ -216,31 +233,33 @@ describe('Test connection', () => {
     const list = await within(card).findByRole('list', { name: 'Checks' })
     const items = within(list).getAllByRole('listitem')
     expect(items.map((li) => li.getAttribute('data-status'))).toEqual(['ok', 'ok', 'warn', 'fail', 'skip'])
-    // Each row says its status in words, not only by icon or colour.
-    expect(items[0]).toHaveTextContent(/reach\s*ok/)
-    expect(items[2]).toHaveTextContent(/writes\s*warning/)
-    expect(items[3]).toHaveTextContent(/read_slots\s*failed/)
-    expect(items[4]).toHaveTextContent(/read_tables\s*skipped/)
+    // Each row has a label a person reads and says its status in words, not only by icon or colour.
+    expect(items[0]).toHaveTextContent(/Network reachability\s*passed/)
+    expect(items[1]).toHaveTextContent(/Read-only by default\s*passed/)
+    expect(items[2]).toHaveTextContent(/Writes\s*warning/) // an id this client does not know, humanized
+    expect(items[3]).toHaveTextContent(/Replication slots readable\s*failed/)
+    expect(items[4]).toHaveTextContent(/Read tables\s*skipped/)
     expect(items[3]).toHaveTextContent('role cannot read pg_replication_slots')
     expect(items[3]).toHaveTextContent('GRANT pg_read_all_stats TO piperoom_ro;')
     expect(items[1]).toHaveTextContent('default_transaction_read_only = on')
     expect(items[3]).toHaveTextContent('3 ms')
+    expect(card).toHaveTextContent('Failed')
 
-    // The button is usable again.
     expect(within(card).getByRole('button', { name: /Test connection/ })).toBeEnabled()
   })
 
-  it('announces a pass/fail summary in a live region, with the total time', async () => {
+  it('announces the outcome in a live region, with the total time', async () => {
     vi.spyOn(api, 'testConnection').mockResolvedValue(probe)
     const card = await open()
     const live = card.querySelector('[role="status"][aria-live="polite"]')!
     expect(live).toBeEmptyDOMElement() // present before the answer, so the answer is announced
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
-    await waitFor(() => expect(live).toHaveTextContent('Test failed: 2 of 5 checks ok, 1 failed, 1 with a warning, 1 skipped (212 ms)'))
+    await waitFor(() => expect(live).toHaveTextContent('Failed: 1 of 5 checks failed, 1 warning · 212 ms'))
 
     vi.spyOn(api, 'testConnection').mockResolvedValue({ kind: 'source_db', ok: true, took_ms: 40, checks: [{ id: 'reach', status: 'ok', ms: 4 }] })
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
-    await waitFor(() => expect(live).toHaveTextContent('Test passed: 1 of 1 checks ok (40 ms)'))
+    await waitFor(() => expect(live).toHaveTextContent('Healthy: 1 of 1 check passed · 40 ms'))
+    expect(card).toHaveTextContent('Healthy')
   })
 
   it('Copy writes the fix to the clipboard', async () => {
@@ -249,11 +268,11 @@ describe('Test connection', () => {
     vi.spyOn(api, 'testConnection').mockResolvedValue(probe)
     const card = await open()
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
-    fireEvent.click(await within(card).findByRole('button', { name: 'Copy fix for read_slots' }))
+    fireEvent.click(await within(card).findByRole('button', { name: 'Copy fix: Replication slots readable' }))
     expect(writeText).toHaveBeenCalledWith('GRANT pg_read_all_stats TO piperoom_ro;')
     expect(await within(card).findByText('Copied')).toBeInTheDocument()
     // Only a check with a fix has a Copy button.
-    expect(within(card).getAllByRole('button', { name: /^Copy fix for/ })).toHaveLength(2)
+    expect(within(card).getAllByRole('button', { name: /^Copy fix:/ })).toHaveLength(2)
   })
 
   it('429 asks to wait a minute', async () => {
@@ -262,6 +281,7 @@ describe('Test connection', () => {
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
     expect(await within(card).findByRole('alert')).toHaveTextContent('Too many tests. Wait a minute, then try again.')
     expect(within(card).getByRole('button', { name: /Test connection/ })).toBeEnabled()
+    expect(card).toHaveTextContent('Test error')
   })
 
   it('404 says the connection is gone', async () => {
@@ -275,19 +295,47 @@ describe('Test connection', () => {
     const spy = vi.spyOn(api, 'testConnection').mockRejectedValueOnce(new TypeError('Failed to fetch'))
     const card = await open()
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
-    expect(await within(card).findByRole('alert')).toHaveTextContent("Can't reach Piperoom")
+    expect(await within(card).findByRole('alert')).toHaveTextContent('reach Piperoom')
     spy.mockResolvedValue(probe)
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
     expect(await within(card).findByRole('list', { name: 'Checks' })).toBeInTheDocument()
     expect(within(card).queryByRole('alert')).toBeNull()
   })
 
-  it('only the tested card changes', async () => {
+  it('only the tested row changes', async () => {
     vi.spyOn(api, 'testConnection').mockResolvedValue(probe)
     const card = await open()
     fireEvent.click(within(card).getByRole('button', { name: /Test connection/ }))
     await within(card).findByRole('list', { name: 'Checks' })
-    expect(within(screen.getByRole('group', { name: 'Kafka' })).queryByRole('list', { name: 'Checks' })).toBeNull()
+    const kafka = screen.getByRole('group', { name: 'Kafka' })
+    expect(within(kafka).queryByRole('list', { name: 'Checks' })).toBeNull()
+    expect(kafka).toHaveTextContent('Not tested')
+  })
+
+  it('Test all tests every connection one at a time and the summary strip counts the outcomes', async () => {
+    const order: string[] = []
+    let inFlight = 0
+    let maxInFlight = 0
+    vi.spyOn(api, 'testConnection').mockImplementation(async (id: string) => {
+      order.push(id)
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((r) => setTimeout(r, 0))
+      inFlight--
+      if (id === 'process-wide.kafka') return { kind: 'kafka', ok: true, took_ms: 9, checks: [{ id: 'reach', status: 'ok', ms: 9 }] }
+      if (id === 'process-wide.connect') throw apiError(429, 'rate_limited')
+      return probe
+    })
+    vi.spyOn(api, 'adminConfig').mockResolvedValue(config())
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Test all' }))
+    const strip = screen.getByRole('group', { name: 'Connection summary' })
+    await waitFor(() => expect(strip).toHaveTextContent('Not tested0'))
+    expect(order).toEqual(['process-wide.kafka', 'pipeline.orders.source_db', 'process-wide.connect'])
+    expect(maxInFlight).toBe(1)
+    expect(strip).toHaveTextContent('Healthy1')
+    expect(strip).toHaveTextContent('Needs attention2')
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Test all' })).toBeEnabled())
   })
 })
 
@@ -300,30 +348,26 @@ describe('Pipelines and People tabs', () => {
     fireEvent.click(tab)
   }
 
-  it('lists every pipeline with its connectors, groups, tables, owners and shadow badge', async () => {
+  it('shows every pipeline as a card with its data flow, owners by name, and mode', async () => {
     await openTab(/^Pipelines/)
-    const table = await screen.findByRole('table', { name: 'Pipelines' })
-    const rows = within(table).getAllByRole('row')
-    expect(rows).toHaveLength(3)
-    const orders = rows[1]
+    const orders = await screen.findByRole('group', { name: 'Orders CDC' })
     expect(orders).toHaveTextContent('orders')
-    expect(orders).toHaveTextContent('Orders CDC')
-    expect(orders).toHaveTextContent('default')
-    expect(within(orders).getByText('own')).toBeInTheDocument()
+    expect(orders).toHaveTextContent('tenant default')
+    expect(within(orders).getByText('own connections')).toBeInTheDocument()
     expect(orders).toHaveTextContent('pg-orders-connector')
     expect(orders).toHaveTextContent('order-sync')
     expect(orders).toHaveTextContent('public.orders')
     expect(orders).toHaveTextContent('analytics.orders')
     expect(orders).toHaveTextContent('postgres')
-    expect(orders).toHaveTextContent('user:priya')
-    expect(orders).toHaveTextContent('kafka')
-    expect(orders).toHaveTextContent('group:streaming, user:arjun')
-    expect(within(orders).getByText('shadow')).toBeInTheDocument()
+    expect(orders).toHaveTextContent('priya')
+    expect(orders).not.toHaveTextContent('user:priya')
+    expect(orders).toHaveTextContent('group streaming, arjun')
+    expect(within(orders).getByText('shadow mode')).toBeInTheDocument()
 
-    const payments = rows[2]
-    expect(within(payments).getByText('process-wide')).toBeInTheDocument()
-    expect(within(payments).getByText('off')).toBeInTheDocument()
-    expect(payments).toHaveTextContent('finance')
+    const payments = screen.getByRole('group', { name: 'Payments' })
+    expect(within(payments).getByText('shared connections')).toBeInTheDocument()
+    expect(within(payments).getByText('live')).toBeInTheDocument()
+    expect(payments).toHaveTextContent('tenant finance')
   })
 
   it('lists every person with layers and an admin badge', async () => {
@@ -340,3 +384,4 @@ describe('Pipelines and People tabs', () => {
     expect(within(rows[2]).queryByText('admin')).toBeNull()
   })
 })
+
