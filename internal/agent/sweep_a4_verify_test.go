@@ -149,7 +149,7 @@ func TestVerificationNoteCarriesCitableStepIDs(t *testing.T) {
 		}
 	}
 	// The room's check detail stays free of step ids.
-	for _, c := range verifications(sink)[0].Checks {
+	for _, c := range verifications(t, sink)[0].Checks {
 		if strings.Contains(c.Detail, "s_") {
 			t.Fatalf("check detail carries an id: %q", c.Detail)
 		}

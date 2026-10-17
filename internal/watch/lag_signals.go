@@ -313,6 +313,11 @@ func (w *Watcher) consumerLagReading(now time.Time, sc owners.ConsumerLagSignal,
 	switch {
 	case gl.TotalLag >= sc.FireLag:
 		r.v = vBreach
+		for _, o := range lags {
+			if o.TotalLag >= sc.FireLag {
+				r.targets = append(r.targets, o.Group)
+			}
+		}
 	case allBelowClear:
 		r.v = vClear
 		return r
@@ -429,7 +434,7 @@ func groupUnstableReading(now time.Time, sc owners.GroupUnstableSignal, ps *pipe
 		list = append(list, map[string]any{"at": s.at.UTC().Format(time.RFC3339), "state": s.state, "members": s.members})
 	}
 	r := reading{
-		v: vBreach, sev: sev, withDur: !best.flapped,
+		v: vBreach, sev: sev, withDur: !best.flapped, targets: []string{gl.Group},
 		value:     fmt.Sprintf("%s, %d changes", clean(gl.State, 32), best.flaps),
 		threshold: fmt.Sprintf("Stable|Empty, < %d changes in %s", sc.Flaps, fmtDur(sc.Window)),
 		ev: map[string]any{
@@ -503,6 +508,12 @@ func offsetBelowReading(t target, lags []clients.GroupLag, obs *observation) rea
 		})
 	}
 	lost := h.logStart - h.committed
+	var groups []string
+	for _, x := range hits {
+		if !slices.Contains(groups, x.group) {
+			groups = append(groups, x.group)
+		}
+	}
 	ev := map[string]any{
 		"signal": owners.SignalOffsetBelowLogStart, "severity": "sev1",
 		"group": h.group, "topic": h.topic, "partition": h.partition,
@@ -518,6 +529,7 @@ func offsetBelowReading(t target, lags []clients.GroupLag, obs *observation) rea
 		value:     fmt.Sprintf("%d partitions below", len(hits)),
 		threshold: "committed >= log start",
 		ev:        ev,
+		targets:   groups,
 	}
 }
 

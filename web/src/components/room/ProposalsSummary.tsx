@@ -17,14 +17,20 @@ function describe(p: ProposalState): { tone: DotTone; word: string; count: strin
     if (run.phase === 'failed') return { tone: 'fail', word: `Step ${run.step} failed`, count }
     if (run.phase === 'unknown') return { tone: 'warn', word: `Step ${run.step} outcome unknown`, count }
     if (run.phase === 'done') {
-      if (!p.verification) return { tone: 'ok', word: 'Ran · verifying', count }
-      const v = verdictKind(p.verification)
+      // A repeat only says the verdict was already given; it is not the verdict (Q6 U4).
+      const verification = p.verification && !p.verification.repeat ? p.verification : undefined
+      if (!verification) return { tone: 'ok', word: 'Ran · verifying', count }
+      const v = verdictKind(verification)
       const tone: DotTone = v === 'recovered' ? 'ok' : v === 'not-recovered' ? 'fail' : 'warn'
       return { tone, word: `Ran · ${verdictWords(v)}`, count }
     }
+    // Some steps ran and the rest are on their way (Q6 U4).
+    if (run.phase === 'running' && p.executed.length > 0) return { tone: 'warn', word: 'Executing', count }
     return { tone: 'ok', word: 'Approved', count }
   }
   if (p.status === 'rejected') return { tone: 'fail', word: 'Rejected', count }
+  // Q0: ended without running; it waits on nobody and is not counted as open.
+  if (p.status === 'withdrawn') return { tone: 'muted', word: 'Withdrawn', count: '' }
   const waiting = p.required_layers.find((l) => p.approvals[l] === 'pending')
   return { tone: 'warn', word: waiting ? `Waiting for ${waiting}` : 'Open', count }
 }

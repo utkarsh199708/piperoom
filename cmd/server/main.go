@@ -164,6 +164,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	// Paging outside the app (owner.paged, QA G2): a bad PIPEROOM_NOTIFY_* or
+	// PIPEROOM_PAGE_UNDRIVEN_AFTER stops the start like the other settings.
+	paging, err := pagingSetup(cfg, log)
+	if err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -402,6 +408,7 @@ func run() error {
 		Limits:            limits,
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,
+		Paging:            paging,
 		OnRoomDeleted:     deletedHook.onDeleted,
 	}, authSettings, usage)
 
@@ -499,6 +506,7 @@ func run() error {
 		Config:       watchCfg,
 		MaxOpenRooms: watchMaxOpenRooms,
 	}
+	wireWatchChanges(&watchDeps, st)
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
 	}

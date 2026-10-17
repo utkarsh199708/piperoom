@@ -18,6 +18,7 @@ import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeContr
 import { ageLabel } from '../lib/time'
 import { needsYou } from '../lib/rooms'
 import { handoffInFlight } from '../lib/handoff'
+import { REVEAL_PROPOSAL_EVENT } from '../lib/triage'
 import { useNow } from './room/useNow'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PipelineMap } from './PipelineMap'
@@ -34,6 +35,10 @@ import { NoDriverBanner } from './NoDriverBanner'
 import { ChangesLane } from './room/ChangesLane'
 import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
+import { PageOwnerDialog } from './room/PageOwnerDialog'
+import { FixNoteDialog } from './room/FixNoteDialog'
+import { canPageOwner } from '../lib/pages'
+import { canLogFix } from '../lib/fixNote'
 import type { ChecklistWiring, CitedStep } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { Badge } from '@/components/ui/badge'
@@ -102,6 +107,14 @@ export function RoomScreen() {
     }),
     [setTab],
   )
+  // A proposal id in agent prose links to its card, which lives on the Fix tab of the tabbed layout (T12).
+  useEffect(() => {
+    const open = () => {
+      if (narrowRef.current) setTab('fix')
+    }
+    window.addEventListener(REVEAL_PROPOSAL_EVENT, open)
+    return () => window.removeEventListener(REVEAL_PROPOSAL_EVENT, open)
+  }, [setTab])
   const roomList = useContext(RoomListContext)
   const elsewhereNeedsMe = useMemo(
     () => (roomList?.rooms ?? []).some((r) => r.id !== roomId && needsYou(r, user)),
@@ -188,6 +201,8 @@ export function RoomScreen() {
   const [closeOpen, setCloseOpen] = useState(false)
   const [closeText, setCloseText] = useState('')
   const [labelOpen, setLabelOpen] = useState(false)
+  const [pageOpen, setPageOpen] = useState(false)
+  const [fixOpen, setFixOpen] = useState(false)
   const [postmortemOpen, setPostmortemOpen] = useState(false)
   // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
@@ -321,6 +336,10 @@ export function RoomScreen() {
   }
 
   const viewer = isViewer(user)
+  // The names an owner.paged shows for the user ids it carries: members first, then everyone GET /api/people knows.
+  const ownerLabels: Record<string, string> = {}
+  for (const p of peopleList ?? []) ownerLabels[p.id] = p.name
+  for (const m of state.members) ownerLabels[m.id] = m.name
   const stalledFor = state.status === 'open' && state.opened_at ? ageLabel(state.opened_at) : undefined
   const showProposals = state.proposals.length > 0 || user.solo === true
   const roomOpen = state.status === 'open'
@@ -384,6 +403,7 @@ export function RoomScreen() {
       </div>
       <Timeline
         steps={state.steps}
+        proposalIds={state.proposals.map((x) => x.proposal_id)}
         messages={state.messages}
         comments={state.comments}
         onComment={actions.comment}
@@ -395,6 +415,8 @@ export function RoomScreen() {
         checklist={checklist}
         filterLayer={layerFilter ?? undefined}
         onClearFilter={() => setLayerFilter(null)}
+        pages={state.pages}
+        ownerNames={ownerLabels}
         shadow={state.shadow}
         citedStep={citedStep}
       />
@@ -411,6 +433,7 @@ export function RoomScreen() {
       selfIsViewer={viewer}
       selfVerified={user.verified}
       people={peopleList}
+      closed={state.status !== 'open'}
     />
   )
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
@@ -486,6 +509,8 @@ export function RoomScreen() {
             onPostmortem={viewer ? undefined : openPostmortem}
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
+            onPageOwner={actions.page && canPageOwner(state, user) ? () => setPageOpen(true) : undefined}
+            onLogFix={actions.fixNote && canLogFix(state, user) ? () => setFixOpen(true) : undefined}
             onCite={citeStep}
           />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
@@ -586,6 +611,12 @@ export function RoomScreen() {
       {postmortemOpen && <PostmortemDialog state={state} onClose={() => setPostmortemOpen(false)} />}
       {labelOpen && state.status === 'closed' && !state.labelled && (
         <LabelDialog state={state} onSubmit={actions.label} onClose={() => setLabelOpen(false)} />
+      )}
+      {pageOpen && canPageOwner(state, user) && (
+        <PageOwnerDialog state={state} actions={actions} people={peopleList} onClose={() => setPageOpen(false)} />
+      )}
+      {fixOpen && canLogFix(state, user) && (
+        <FixNoteDialog state={state} actions={actions} onClose={() => setFixOpen(false)} />
       )}
     </div>
     </DecisionHandleContext.Provider>

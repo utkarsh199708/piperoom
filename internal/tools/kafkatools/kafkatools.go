@@ -38,6 +38,20 @@ type Deps struct {
 	CertTargets []CertTarget
 	// CertProbe replaces netsec.CertExpiry in tests.
 	CertProbe func(ctx context.Context, addr string, cfg *tls.Config) (netsec.CertInfo, error)
+	// ConnectLog reads the Connect worker log for connect_worker_log. Nil = the
+	// tool is not registered. The wiring sets it only when
+	// CONNECT_WORKER_LOG_FILE names a file; it must never hold a typed nil.
+	ConnectLog clients.ConnectLogReader
+	// Now replaces time.Now in tests (connect_worker_log's "since").
+	Now func() time.Time
+}
+
+// now is the current time, or Now's.
+func (d Deps) now() time.Time {
+	if d.Now != nil {
+		return d.Now()
+	}
+	return time.Now()
 }
 
 const timeout = 10 * time.Second
@@ -88,6 +102,13 @@ func Register(reg *tools.Registry, d Deps) error {
 	}
 	if _, ok := d.Kafka.(clients.ACLReader); ok {
 		if err := reg.Register(&kafkaACLs{d: d}); err != nil {
+			return err
+		}
+	}
+	// The worker log is a file on the Connect host: without a configured path
+	// there is nothing to read, so the model gets no tool to call in vain. (Q1)
+	if d.ConnectLog != nil {
+		if err := reg.Register(&connectWorkerLog{d: d}); err != nil {
 			return err
 		}
 	}

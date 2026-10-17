@@ -527,9 +527,13 @@ func (t *Tool) build(ctx context.Context, pipeline string, prev map[string]pastR
 	for _, r := range list {
 		// A settled room is reused only while its log is unchanged: a label
 		// added after the close appends an event, which forces a re-read.
+		// Rooms that are not incidents are cached like the others, so a
+		// settled test room is not read again on every rebuild.
 		if old, ok := prev[r.ID]; ok && r.ClosedAt != nil && old.fetched.Sub(*r.ClosedAt) >= settledAfter && old.lastSeq == r.LastSeq {
-			rooms = append(rooms, old)
 			kept[r.ID] = old
+			if isIncident(old) {
+				rooms = append(rooms, old)
+			}
 			continue
 		}
 		pr, err := loadRoom(bctx, t.d.Source, r, now)
@@ -546,8 +550,10 @@ func (t *Tool) build(ctx context.Context, pipeline string, prev map[string]pastR
 			partial = true
 			continue
 		}
-		rooms = append(rooms, pr)
 		kept[r.ID] = pr
+		if isIncident(pr) {
+			rooms = append(rooms, pr)
+		}
 	}
 	if len(rooms) == 0 && partial {
 		return nil, nil, fmt.Errorf("similarincidents: no room could be read: %w", bctx.Err())

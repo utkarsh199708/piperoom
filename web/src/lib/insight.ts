@@ -1,6 +1,6 @@
 // Formatting for the cost chip and the first-insight line (F11). Numbers only.
 import type { AgentStats } from '../api/types'
-import type { InsightState } from '../state/types'
+import type { InsightState, RoomState } from '../state/types'
 
 /** "12s", "2m 10s", "1 h 02 min": whole seconds, no rounding up. */
 export function elapsedLabel(ms: number): string {
@@ -34,14 +34,52 @@ export function costLabel(u: InsightState['usage']): string {
   return u.unpriced_calls > 0 ? `≥ ${usd(u.cost_usd)}` : usd(u.cost_usd)
 }
 
-/** "$0.42 · 11 steps · 2m 10s"; the cost part is left out before the first model call. */
-export function chipText(i: InsightState, durationMs: number): string {
+/**
+ * "$0.42 · 11 steps · 2m 10s"; the cost part is left out before the first model call, and when
+ * `withCost` is false (the header's cost badge already shows a priced cost).
+ */
+export function chipText(i: InsightState, durationMs: number, withCost = true): string {
   const parts = [
-    costLabel(i.usage),
+    withCost ? costLabel(i.usage) : '',
     `${i.steps} ${i.steps === 1 ? 'step' : 'steps'}`,
     elapsedLabel(durationMs),
   ].filter(Boolean)
   return parts.join(' · ')
+}
+
+/** What the header cost badge reads: the folded usage, or the snapshot's while the first replay runs. */
+export type HeaderUsage = Pick<InsightState['usage'], 'calls' | 'unpriced_calls' | 'tokens' | 'cost_usd'>
+
+/**
+ * The usage the header shows. The snapshot's `insight.usage` is the server's fold of the whole log, so it
+ * is right from the first paint; once the replay has caught up with it, the live fold takes over and keeps
+ * counting. It is never added to the fold (the replay folds the same calls again).
+ */
+export function headerUsage(state: RoomState): HeaderUsage {
+  const replaying = state.replay_target > 0 && state.last_seq < state.replay_target
+  return replaying && state.snapshot_usage ? state.snapshot_usage : state.insight.usage
+}
+
+export interface CostBadgeInfo {
+  /** "$1.42 est.", "≥ $1.42 est." when some calls had no price. */
+  text: string
+  /** Hover text: tokens, calls, and why a figure is a lower bound. */
+  title: string
+}
+
+/**
+ * The room's estimated cost for the header (Q0, QA G14). null while no call is priced: an unknown cost
+ * is hidden, never shown as $0 (the chip still names the tokens).
+ */
+export function costBadge(u: HeaderUsage): CostBadgeInfo | null {
+  if (u.cost_usd === null || u.cost_usd === undefined) return null
+  const partial = u.unpriced_calls > 0
+  const parts = [`${u.tokens.toLocaleString('en-US')} tokens`, `${u.calls} model ${u.calls === 1 ? 'call' : 'calls'}`]
+  if (partial) {
+    parts.push(`${u.unpriced_calls} of ${u.calls} ${u.calls === 1 ? 'call' : 'calls'} had no price, so the real cost is higher`)
+  }
+  parts.push('estimated from the configured model prices')
+  return { text: `${partial ? '≥ ' : ''}${usd(u.cost_usd)} est.`, title: parts.join(' · ') }
 }
 
 /** The chip tooltip: calls, tokens, models, first hypothesis, tool errors. */

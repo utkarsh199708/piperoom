@@ -17,7 +17,6 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/events"
-	"piperoom/internal/injectscan"
 	"piperoom/internal/redact"
 	"piperoom/internal/tools/runbooks"
 )
@@ -290,7 +289,7 @@ func (p *triagePass) tableReads(body watcherBody) []toolUse {
 		}
 	case "slot_inactive":
 		wants = []tableRead{statusOrList(""), {"pg_replication_slots", map[string]any{}}}
-	case "slot_wal":
+	case "slot_wal", "slot_stall":
 		wants = []tableRead{{"pg_long_transactions", map[string]any{}}, {"pg_replication_slots", map[string]any{}}}
 	case "dlq_growth":
 		writer := firstName(sig["writers"])
@@ -657,7 +656,7 @@ func firstLookBlock(t TriageResult) string {
 			text = "error: " + text
 		}
 		w := wrapToolOutput(sanitizeLabel(s.Tool), s.StepID, text)
-		if s.Tool != runbooks.ToolName && len(injectscan.Scan(s.Summary)) > 0 {
+		if s.Tool != runbooks.ToolName && len(instructionFindings(s.Summary)) > 0 {
 			w = markSuspected(w)
 		}
 		b.WriteString(w)

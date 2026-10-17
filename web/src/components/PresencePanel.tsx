@@ -15,6 +15,7 @@ export function PresencePanel({
   selfIsViewer = false,
   selfVerified,
   people,
+  closed = false,
 }: {
   members: MemberState[]
   presence: PresenceMember[]
@@ -28,6 +29,8 @@ export function PresencePanel({
   selfVerified?: boolean
   /** GET /api/people (members only): the layers each person may approve. Viewers pass none. */
   people?: Person[]
+  /** The room is closed: nobody is driving, so no Driver chip. */
+  closed?: boolean
 }) {
   const now = useNow()
   type Row = { id: string; name: string; role: string; state: PresenceMember['state'] | 'absent'; since?: string; verified?: unknown[] }
@@ -63,7 +66,7 @@ export function PresencePanel({
       </h2>
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
         {rows.map((r) => {
-          const driver = r.role === 'driver'
+          const driver = r.role === 'driver' && !closed
           const away = r.state === 'away' || r.state === 'absent'
           const layers = layersOf(r.id)
           const label =
@@ -75,23 +78,21 @@ export function PresencePanel({
                   : 'away'
                 : 'not here'
           return (
-            <li key={r.id} className={cn('flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 py-0.5', away && 'opacity-70')}>
+            <li key={r.id} className={cn('flex min-h-8 items-center gap-2 py-0.5', away && 'opacity-70')}>
               <PersonAvatar actor={{ id: r.id, name: r.name }} driver={driver} className={driver ? 'mx-0.5' : undefined} />
-              <PersonName person={{ id: r.id, name: r.name }} verified={r.verified} className="shrink-0" nameClassName="font-medium" />
-              {r.id === selfId && <span className="text-xs text-muted-foreground">you</span>}
-              {driver && <Badge variant="accent">Driver</Badge>}
-              {r.id === selfId && selfIsViewer && <Badge variant="outline">viewer</Badge>}
-              {layers.slice(0, 3).map((l) => (
-                <Badge key={l} variant={layerVariant(l)} mono aria-label={`owns ${l}`}>
-                  {l}
-                </Badge>
-              ))}
-              {layers.length > 3 && (
-                <span className="text-xs text-subtle-foreground" title={layers.slice(3).join(', ')}>
-                  +{layers.length - 3}
-                </span>
-              )}
-              <span className={cn('ml-auto shrink-0 text-xs', away ? 'text-muted-foreground' : 'text-subtle-foreground')}>
+              {/* Chips wrap inside this group: a person with several layers must not push past the rail. */}
+              <span className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                <PersonName person={{ id: r.id, name: r.name }} verified={r.verified} className="shrink-0" nameClassName="font-medium" />
+                {r.id === selfId && <span className="text-xs text-muted-foreground">you</span>}
+                {driver && <Badge variant="accent">Driver</Badge>}
+                {r.id === selfId && selfIsViewer && <Badge variant="outline">viewer</Badge>}
+                {layers.map((l) => (
+                  <Badge key={l} variant={layerVariant(l)} mono aria-label={`owns ${l}`}>
+                    {l}
+                  </Badge>
+                ))}
+              </span>
+              <span className={cn('ml-auto shrink-0 self-start pt-1.5 text-xs', away ? 'text-muted-foreground' : 'text-subtle-foreground')}>
                 {label}
               </span>
             </li>

@@ -5,6 +5,7 @@ import type {
   Actor,
   AgentStatusPayload,
   AgentVerificationPayload,
+  CommentKind,
   HandoffSummary,
   HypothesisSummary,
   HypothesisVerdict,
@@ -12,6 +13,7 @@ import type {
   PostmortemSource,
   ProposalPreviewedPayload,
   ProposalStep,
+  RoomInsight,
   RoomLabelledPayload,
   RoomSnapshot,
   ToolCall,
@@ -118,6 +120,21 @@ export interface CommentState {
   author: Actor
   at: string
   replies: AgentMessageState[]
+  /** "fix_note": a person logged a fix made outside Piperoom (Q0, G10). Absent for a plain comment. */
+  kind?: CommentKind
+}
+
+/** One owner.paged (Q0, G2): who asked which layer's owners to look, and why. `owners` are user ids. */
+export interface PageState {
+  seq: number
+  at: string
+  by: Actor
+  layer: string
+  owners: string[]
+  reason: string
+  proposal_id?: string
+  /** The server paged on its own (no driver for a while). */
+  auto: boolean
 }
 
 /**
@@ -153,6 +170,18 @@ export interface DecisionState {
   at?: string
 }
 
+/** Why and when a proposal ended without running (proposal.withdrawn, or the room closing around it). */
+export interface WithdrawnState {
+  /** The withdrawer's line, or "room closed". May be empty. */
+  reason: string
+  /** Who withdrew it; absent when only the room closing told us (a log from before Q0). */
+  by?: Actor
+  at?: string
+}
+
+/** The reason of the withdrawal the system actor writes when the room closes (events.ProposalWithdrawnRoomClosed). */
+export const WITHDRAWN_ROOM_CLOSED = 'room closed'
+
 export interface ProposalState {
   proposal_id: string
   title: string
@@ -160,6 +189,15 @@ export interface ProposalState {
   risk: string
   rollback: string
   required_layers: string[]
+  /**
+   * Q0 (QA G5): layers the steps do not write to but the fix still affects. They are part of
+   * `required_layers`, so their owners must approve; the card labels them "impacted".
+   */
+  impacted_layers?: string[]
+  /** Q0: "low" | "medium" | "high"; absent on a proposal from before Q0. */
+  risk_level?: string
+  /** Q0: why the risk is what it is, for approvers. */
+  impact_reasons?: string[]
   approvals: Record<string, ApprovalValue>
   /** Per layer, for the layers that have been decided. */
   decisions: Record<string, DecisionState>
@@ -168,7 +206,9 @@ export interface ProposalState {
    * proposal.created (or the snapshot for an older event); "" when there is none.
    */
   params_hash: string
-  status: 'open' | 'approved' | 'rejected'
+  status: 'open' | 'approved' | 'rejected' | 'withdrawn'
+  /** Set with status 'withdrawn': the proposal left the open list and takes no more decisions. */
+  withdrawn?: WithdrawnState
   executed: ActionExecutedPayload[]
   /** When proposal.created was logged: the preview skeleton counts its 20 s from here. */
   created_at?: string
@@ -205,6 +245,9 @@ export interface HandoffState {
   status: 'pending' | 'accepted' | 'voided'
   /** The driver when it was created; the server voids it once someone else drives. */
   from_id?: string
+  /** The driver wrote the summary themselves (Q0, G4); `written_by` is that driver. */
+  manual?: boolean
+  written_by?: Actor
   /** handoff.created's actor: the driver who handed off. */
   from: Actor
   /** handoff.created's time. */
@@ -315,6 +358,8 @@ export interface RoomState {
   status: RoomStatus
   opened_at: string
   closed_at?: string
+  /** Who closed the room: the actor of room.closed (snapshot closed_by); absent while open. */
+  closed_by?: Actor
   resolution?: string
   last_seq: number
   /**
@@ -322,6 +367,8 @@ export interface RoomState {
    * unknown (fixtures, empty room). Drives the replay progress bar.
    */
   replay_target: number
+  /** Q0: injection kinds found in the title, from the snapshot; empty when clean. */
+  title_flags?: string[]
   driver: DriverInfo | null
   /** Set when room.created carried an alert webhook body (alert-opened room). */
   alert: AlertInfo | null
@@ -335,6 +382,8 @@ export interface RoomState {
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
+  /** Every owner.paged of the room, oldest first (capped). */
+  pages: PageState[]
   suggestions: SuggestionState[]
   proposals: ProposalState[]
   /**
@@ -362,8 +411,11 @@ export interface RoomState {
   /** Shadow room: no cost chip until its numbers are revealed; the shadow panel replaces steering once closed. */
   shadow: boolean
   insight: InsightState
-  /** room.closed's actor (snapshot closed_by); closed rooms only. */
-  closed_by?: Actor
+  /**
+   * The snapshot's `insight.usage`, kept for the header cost until the first replay has caught up
+   * with `replay_target`. Never added to `insight` (the replay folds the same calls again).
+   */
+  snapshot_usage?: RoomInsight['usage']
   /** F2: null on open rooms, shadow rooms and closed rooms from before F2. */
   postmortem: PostmortemState | null
 }
@@ -388,6 +440,7 @@ export function emptyRoomState(id: string): RoomState {
     steps: [],
     messages: [],
     comments: [],
+    pages: [],
     suggestions: [],
     proposals: [],
     snapshot_hashes: {},
@@ -421,12 +474,14 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     status: snapshot.status as RoomStatus,
     opened_at: snapshot.opened_at,
     closed_at: snapshot.closed_at,
-    resolution: snapshot.resolution,
     closed_by: snapshot.closed_by,
+    resolution: snapshot.resolution,
     postmortem: postmortemFromSnapshot(snapshot),
     last_seq: 0,
     shadow: snapshot.shadow === true,
+    snapshot_usage: snapshot.insight?.usage,
     replay_target: snapshot.last_seq ?? 0,
+    title_flags: snapshot.title_flags ?? [],
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
         .filter((p) => p.params_hash)

@@ -13,6 +13,7 @@ import { stepAnchor } from '@/lib/triage'
 import { markTerms } from '@/lib/unbacked'
 import { PersonName } from '@/components/VerifiedBadge'
 import { PersonAvatar } from './PersonAvatar'
+import { AgentText, StepNumbersProvider } from './AgentText'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 const MAX_NOTE = 500
@@ -61,6 +62,7 @@ function CitationChips({ ids, steps, onCite }: { ids: string[]; steps: StepState
 }
 
 // The hypothesis text with the terms the cited steps do not show underlined (dotted, warning tone).
+// The rest goes through AgentText, so step and proposal references are links.
 function HypothesisText({ text, terms }: { text: string; terms: string[] }) {
   return (
     <p className="m-0 max-w-[72ch] text-base">
@@ -74,7 +76,9 @@ function HypothesisText({ text, terms }: { text: string; terms: string[] }) {
             {r.text}
           </mark>
         ) : (
-          <span key={i}>{r.text}</span>
+          <span key={i}>
+            <AgentText text={r.text} />
+          </span>
         ),
       )}
     </p>
@@ -185,7 +189,9 @@ export function HypothesisCard({
           {history.map((h) => `${h.confidence} ${clockTime(h.at)}`).join(' → ')}
         </p>
       )}
-      <HypothesisText text={hypothesis.text} terms={unbacked} />
+      <StepNumbersProvider steps={steps}>
+        <HypothesisText text={hypothesis.text} terms={unbacked} />
+      </StepNumbersProvider>
       {canDecide && onVerdict && (
         <div className="flex flex-wrap items-center justify-end gap-2">
           {disputing ? (

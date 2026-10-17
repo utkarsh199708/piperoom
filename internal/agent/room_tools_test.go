@@ -208,9 +208,11 @@ func TestProposeFixRejectsEmptyOrPlaceholderRiskRollback(t *testing.T) {
 // TestRoomToolNamesMatchRoomTools keeps the static roomToolNames list — what
 // RoomToolNames() serves without constructing any tool — in sync with the
 // tools newRoomTools really builds. Add, rename or drop a room tool without
-// touching the list and this fails.
+// touching the list and this fails. The list holds every room tool, so the
+// deps here give page_owner and withdraw_proposal their collaborators; what a
+// run without them builds is TestRoomToolsOfferedByDeps.
 func TestRoomToolNamesMatchRoomTools(t *testing.T) {
-	built := newRoomTools(Deps{}, nil)
+	built := newRoomTools(Deps{Pager: &fakePager{}, Proposals: &withdrawingProposals{}}, nil)
 	names := make([]string, 0, len(built))
 	for _, tl := range built {
 		names = append(names, tl.Name())

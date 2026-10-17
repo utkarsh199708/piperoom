@@ -9,15 +9,17 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
+	"piperoom/internal/watch"
 )
 
 // This file holds the room-service surface the built-in watcher (internal/watch)
-// uses: the OnRoomClosed hook (see Deps), and the three queries and one write
-// below. The watcher opens, joins and resolves through OpenAlertRoom with
-// Source alertin.Watcher and DedupKey "watcher:<pipeline>"; nothing here starts
-// an agent.
+// uses: the OnRoomClosed hook (see Deps), and the queries and writes below.
+// The watcher opens, joins and resolves through OpenAlertRoom with Source
+// alertin.Watcher and DedupKey "watcher:<pipeline>". Only PostIncidentJSON (a
+// different incident joined the room, QA G1) wakes or starts an agent.
 
 // maxNoteBytes caps a PostRoomNote text. Evidence is a few lines of numbers; a
 // runaway caller must not fill the event log.
@@ -161,6 +163,23 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 // agent), and an old first look is re-run (alertUpdateLocked). Empty evidence
 // is a plain note.
 func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evidence json.RawMessage) error {
+	return s.postWatcherNote(ctx, roomID, text, evidence, false)
+}
+
+// PostIncidentJSON is PostRoomEvidence for a join whose signals are new to the
+// room: a different incident (watch.IncidentSink, QA G1). After the note the
+// agent gets an "alert_update" with NewIncident set, which wakes an idle agent
+// (agent.HumanInput.NewIncident). A room with no agent run (never started
+// after a restart, given up, or one whose run ended on its own) gets a new run
+// first, the way a steer starts one: through the agent slots and, with a
+// shared store, the room lease, so there are never two runs. A shadow room only
+// gets the note: its run is one-shot. evidence may be nil.
+func (s *Service) PostIncidentJSON(ctx context.Context, roomID, text string, evidence json.RawMessage) error {
+	return s.postWatcherNote(ctx, roomID, text, evidence, true)
+}
+
+// postWatcherNote is PostRoomEvidence and PostIncidentJSON.
+func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evidence json.RawMessage, newIncident bool) error {
 	text = stripBidi(sanitizeAgentText(text))
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -174,7 +193,7 @@ func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evi
 		text = text[:cut] + "…"
 	}
 	// Backstop: the steps above leave nothing for this to refuse.
-	if err := rejectUnstorable(text); err != nil {
+	if err := checkStorable(text); err != nil {
 		return err
 	}
 	// Shared store: fold what other replicas wrote, reading outside the lock.
@@ -187,7 +206,29 @@ func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evi
 	if !s.roomOpen(st) {
 		return roomClosed("room already closed")
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text})
+	// The note keeps the evidence's incident keys, so RoomSignalKeys can tell
+	// after a restart which signals the room carried (Q3, QA S1).
+	keys := watch.EvidenceKeys(evidence)
+	state := ""
+	switch {
+	case len(evidence) > 0:
+		state = alertFiring
+	case isAllClearNote(text):
+		state = alertResolved
+	}
+	var payload any = events.AgentMessagePayload{Text: text}
+	if len(keys) > 0 || state != "" {
+		payload = incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, SignalKeys: keys, AlertState: state}
+	}
+	if newIncident {
+		in := incidentNotePayload{AgentMessagePayload: events.AgentMessagePayload{Text: text}, NewIncident: true, SignalKeys: keys, AlertState: state}
+		if len(evidence) > 0 {
+			in.AgentText = agent.AlertEvidenceText(evidence)
+			in.Signal, in.Writers, in.Layer = firstWatcherSignal(evidence)
+		}
+		payload = in
+	}
+	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, payload)
 	if err != nil {
 		// A full log cannot take more evidence; retrying would not help, so
 		// the note is dropped with a log line instead of an error the watcher
@@ -198,8 +239,256 @@ func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evi
 		}
 		return fmt.Errorf("room: post note: %w", mapUnstorable(err))
 	}
-	if len(evidence) > 0 {
+	switch {
+	case newIncident:
+		s.newIncidentLocked(ctx, roomID, st, evidence)
+	case len(evidence) > 0:
 		s.alertUpdateLocked(roomID, st, e.Seq, evidence)
 	}
 	return nil
+}
+
+// incidentNotePayload is the agent.message a new-incident join writes: the
+// note, plus the mark and the text the agent gets (QA F21). The log is the
+// store-backed inbox (docs/design/replicas.md section 4): whichever replica
+// holds the room's agent lease folds this event and inputFor turns it into
+// the waking "alert_update" with NewIncident set, so the watcher's leader
+// need not be the lease owner. Only the service writes system messages, so
+// the mark cannot come from a person. Readers of AgentMessagePayload ignore
+// the extra fields.
+type incidentNotePayload struct {
+	events.AgentMessagePayload
+	NewIncident bool `json:"new_incident,omitempty"`
+	// AgentText is the evidence as the agent reads it
+	// (agent.AlertEvidenceText); "" means the note text.
+	AgentText string `json:"agent_text,omitempty"`
+	// SignalKeys are the incident keys of the note's watcher evidence
+	// (watch.EvidenceKeys), kept so RoomSignalKeys works from the log.
+	SignalKeys []string `json:"signal_keys,omitempty"`
+	// AlertState is what the note says about the room's alert: alertFiring
+	// (evidence, a firing repeat) or alertResolved (the source's resolved
+	// report, the watcher's all-clear); "" says nothing. The post-mortem
+	// reads it to tell a close while firing from a fix (Q5 T4).
+	AlertState string `json:"alert_state,omitempty"`
+	// Signal, Writers and Layer are a new incident's first watcher signal
+	// with a known layer (firstWatcherSignal), so the room pages that
+	// layer's owners too (Q5 T3). Empty for other notes.
+	Signal  string   `json:"signal,omitempty"`
+	Writers []string `json:"writers,omitempty"`
+	Layer   string   `json:"layer,omitempty"`
+}
+
+// Alert states of incidentNotePayload.AlertState.
+const (
+	alertFiring   = "firing"
+	alertResolved = "resolved"
+)
+
+// allClearSuffix ends the watcher's all-clear note in a room it only joined
+// (internal/watch resolve: "watcher: <pipeline>: all watcher signals are
+// clear"). The watcher posts it without evidence, so its text is the only
+// mark; only the watcher writes system notes through postWatcherNote.
+const allClearSuffix = ": all watcher signals are clear"
+
+func isAllClearNote(text string) bool {
+	return strings.HasPrefix(text, "watcher: ") && strings.HasSuffix(text, allClearSuffix)
+}
+
+// resolvedJoinSuffix ends the note a resolved repeat writes (joinAlertRoomLocked).
+const resolvedJoinSuffix = "reported resolved at its source; the room stays open until the driver closes it"
+
+// noteAlertState is the alert state a system agent.message records (see
+// incidentNotePayload.AlertState); a note written before the field existed is
+// read from the service's own fixed wording. Caller checks the actor.
+func noteAlertState(e events.Event) string {
+	p, ok := decode[incidentNotePayload](e)
+	if !ok {
+		return ""
+	}
+	switch {
+	case p.AlertState != "":
+		return p.AlertState
+	case isAllClearNote(p.Text), strings.HasPrefix(p.Text, "alert ") && strings.HasSuffix(p.Text, resolvedJoinSuffix):
+		return alertResolved
+	case len(p.SignalKeys) > 0 || p.NewIncident:
+		return alertFiring
+	}
+	return ""
+}
+
+// incidentInput is the agent input of a new-incident note, or nil for any
+// other agent.message.
+func incidentInput(e events.Event) *agent.HumanInput {
+	if e.Type != events.AgentMessage || e.Actor.Kind != events.ActorSystem {
+		return nil
+	}
+	p, ok := decode[incidentNotePayload](e)
+	if !ok || !p.NewIncident {
+		return nil
+	}
+	text := p.AgentText
+	if text == "" {
+		text = p.Text
+	}
+	return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "alert_update", Text: text, NewIncident: true}
+}
+
+// newIncidentLocked gives the room's agent a new incident on the replica
+// that wrote the note: the note's fold already queued the waking input
+// (inputFor) for the lease owner, so this only starts a run when the room
+// has none, and re-runs an old first look. Caller holds st's lock.
+func (s *Service) newIncidentLocked(ctx context.Context, roomID string, st *roomState, raw json.RawMessage) {
+	if !s.wakeForIncidentLocked(ctx, roomID, st) {
+		// Not started here (log full, service closing, another replica holds
+		// the room): the lease owner reads the incident from the log.
+		s.log.Info("room: new incident joined; the agent runs elsewhere or not at all", "room", roomID)
+		return
+	}
+	if len(raw) > 0 {
+		s.refireTriageLocked(roomID, st, raw)
+	}
+}
+
+// wakeForIncidentLocked makes sure the room has an agent run here to read a
+// new incident: a run that ended on its own is freed and a new one started,
+// the way a steer starts one (agent slots, and with a shared store the room
+// lease). A lease taken here primes the inbox with the pending input, the
+// incident included. It reports whether a run is here. Caller holds st's
+// lock.
+func (s *Service) wakeForIncidentLocked(ctx context.Context, roomID string, st *roomState) bool {
+	if st.snap.Shadow || st.inbox == nil || st.deleting || !s.roomOpen(st) {
+		return false
+	}
+	if st.agentCancel != nil && st.agentDone == st.agentRun {
+		// The run ended on its own and its supervisor is gone: free the room
+		// for a new run, as releaseAgent would have.
+		st.agentCancel()
+		st.agentCancel = nil
+	}
+	s.ensureAgentLocked(roomID, st)
+	return st.agentCancel != nil && (s.coord == nil || st.leased)
+}
+
+// markAgentDone records that run ended on its own (Run returned nil while the
+// room's context was live): its supervisor has returned, so a new incident may
+// start another run (newIncidentLocked).
+func (s *Service) markAgentDone(st *roomState, run uint64) {
+	s.lockState(st)
+	if !st.gone && st.agentRun == run {
+		st.agentDone = run
+	}
+	s.unlockRoom(st)
+}
+
+// WatchRoomInfo is the open room of a pipeline as the watcher's join rule
+// sees it (watch.RoomInfo; cmd/server adapts it).
+type WatchRoomInfo struct {
+	RoomID string
+	// AlertSource is room.created.alert_source: "watcher", a signed source or
+	// "webhook"; "" for a room a person opened.
+	AlertSource string
+	OpenedAt    time.Time
+	// LastEventAt is the time of the room's newest activity: every event but
+	// the service's own bookkeeping (countsAsActivity), so a server restart or
+	// a status change does not make an old room look recent.
+	LastEventAt time.Time
+}
+
+// OpenRoomInfo describes the open room OpenRoomForPipeline picks for
+// pipelineID (the newest), from its room.created event and its newest
+// activity, both folded from the log. ok is false when the pipeline has no
+// open room.
+func (s *Service) OpenRoomInfo(pipelineID string) (WatchRoomInfo, bool) {
+	roomID, ok := s.OpenRoomForPipeline(pipelineID)
+	if !ok {
+		return WatchRoomInfo{}, false
+	}
+	// The published snapshot answers without the room's lock; a room still
+	// being opened has none yet, so its lock is waited for, as
+	// OpenRoomForPipeline does.
+	snap := s.published(roomID)
+	if snap == nil {
+		st := s.lockCachedRoom(roomID)
+		if st == nil {
+			return WatchRoomInfo{}, false
+		}
+		c := st.snap.Clone()
+		s.unlockRoom(st)
+		snap = &c
+	}
+	if snap.Status != "open" {
+		return WatchRoomInfo{}, false
+	}
+	last := snap.facts.lastActivity
+	if last.IsZero() {
+		last = snap.OpenedAt
+	}
+	return WatchRoomInfo{RoomID: roomID, AlertSource: snap.facts.alertSource, OpenedAt: snap.OpenedAt, LastEventAt: last}, true
+}
+
+// countsAsActivity reports whether e is room activity for LastEventAt:
+// room.created and everything people, the agent and the executor write, and
+// the system's notes (watcher evidence, a re-fired alert). Not: agent.status
+// (the service writes queued, working and the restart's idle), the restart
+// notice, and the system's other events (lease expiry, limits, its own pages).
+func countsAsActivity(e events.Event) bool {
+	switch {
+	case e.Type == events.RoomCreated:
+		return true
+	case e.Type == events.AgentStatus:
+		return false
+	case e.Actor.Kind == events.ActorSystem && e.Actor.ID == systemActor.ID:
+		if e.Type != events.AgentMessage {
+			return false
+		}
+		p, ok := decode[events.AgentMessagePayload](e)
+		return ok && p.Text != restartNoticeText
+	}
+	return true
+}
+
+// RoomSignalKeys returns the incident keys a watcher room carried: the union
+// of watch.EvidenceKeys over room.created.alert of a watcher room and the
+// evidence of every watcher note, sorted and de-duplicated (watch.
+// ClosedRoomKeysSink). It reads the folded log, so it works for closed rooms
+// and after a restart; the fold is cached like any room's. ok is false when
+// the room is unknown or carries no keys.
+func (s *Service) RoomSignalKeys(roomID string) ([]string, bool) {
+	var keys []string
+	if !s.withRoomFacts(roomID, func(snap RoomSnapshot) { keys = append(keys, snap.facts.signalKeys...) }) {
+		return nil, false
+	}
+	return keys, len(keys) > 0
+}
+
+// RoomTitleFlags returns the room's title_flags: the injectscan kinds found in
+// its title (watch.RoomTitleFlagsSink). ok is false for an unknown room.
+func (s *Service) RoomTitleFlags(roomID string) ([]string, bool) {
+	flags := []string{}
+	if !s.withRoomFacts(roomID, func(snap RoomSnapshot) { flags = append(flags, snap.TitleFlags...) }) {
+		return nil, false
+	}
+	return flags, true
+}
+
+// withRoomFacts runs f on the room's folded snapshot (the published one, or
+// the room loaded from the log); false when the room is unknown or cannot be
+// read. f must not keep or change what the snapshot shares.
+func (s *Service) withRoomFacts(roomID string, f func(RoomSnapshot)) bool {
+	if roomID == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
+	defer cancel()
+	s.syncRoom(ctx, roomID)
+	snap, err := s.readRoom(ctx, roomID)
+	if err != nil {
+		var re *Error
+		if !errors.As(err, &re) && s.ctx.Err() == nil {
+			s.log.Warn("room: read room facts failed", "room", roomID, "err", err)
+		}
+		return false
+	}
+	f(*snap)
+	return true
 }

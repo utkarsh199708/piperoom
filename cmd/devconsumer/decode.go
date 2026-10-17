@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -206,19 +207,44 @@ func asInt64(v any) (int64, error) {
 	return 0, fmt.Errorf("want integer, got %T", v)
 }
 
-// asDecimal accepts amount before the schema change (Avro int) and after it
-// (Avro bytes with decimal logical type, decoded as *big.Rat).
+// asDecimal turns the amount into decimal text. It accepts the four shapes the
+// connector can send: an Avro int (before the schema change), Avro bytes with
+// the decimal logical type (decoded as *big.Rat), a float64 (connector setting
+// decimal.handling.mode=double) and a string (decimal.handling.mode=string).
 func asDecimal(v any) (string, error) {
 	switch n := v.(type) {
 	case int, int32, int64:
 		i, _ := asInt64(n)
 		return strconv.FormatInt(i, 10), nil
 	case *big.Rat:
-		s := n.FloatString(10)
-		s = strings.TrimRight(s, "0")
-		return strings.TrimSuffix(s, "."), nil
+		return ratText(n), nil
 	case big.Rat:
-		return asDecimal(&n)
+		return ratText(&n), nil
+	case float64:
+		// Shortest text that reads back as the same float64; NaN and Inf are not amounts.
+		if math.IsNaN(n) || math.IsInf(n, 0) {
+			return "", fmt.Errorf("amount %v is not finite", n)
+		}
+		return strconv.FormatFloat(n, 'f', -1, 64), nil
+	case string:
+		// big.Rat also accepts "a/b"; an amount is plain decimal text only.
+		t := strings.TrimSpace(n)
+		if strings.Contains(t, "/") {
+			return "", fmt.Errorf("amount %q is not a decimal", n)
+		}
+		r, ok := new(big.Rat).SetString(t)
+		if !ok {
+			return "", fmt.Errorf("amount %q is not a decimal", n)
+		}
+		return ratText(r), nil
 	}
-	return "", fmt.Errorf("want int or decimal, got %T", v)
+	return "", fmt.Errorf("want int, decimal, float or string, got %T", v)
+}
+
+// ratText writes r with up to 10 fractional digits and no trailing zeros, so
+// 1249.50 becomes "1249.5" and 100 becomes "100".
+func ratText(r *big.Rat) string {
+	s := r.FloatString(10)
+	s = strings.TrimRight(s, "0")
+	return strings.TrimSuffix(s, ".")
 }

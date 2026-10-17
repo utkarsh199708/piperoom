@@ -174,8 +174,8 @@ func TestDevLoginSetsCookieAndMe(t *testing.T) {
 	var me map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&me)
 	if me["id"] != "priya" || me["name"] == nil || me["layers"] == nil || me["role"] != "member" || me["groups_missing"] != false ||
-		me["verified"] != true || len(me) != 6 {
-		t.Fatalf("/api/me = %+v, want exactly id, name, layers, role, groups_missing, verified for priya", me)
+		me["verified"] != true || me["groups"] == nil || len(me) != 7 {
+		t.Fatalf("/api/me = %+v, want exactly id, name, layers, role, groups_missing, groups, verified for priya", me)
 	}
 	// Only the hash is stored.
 	hash, _ := auth.HashToken(c.Value)

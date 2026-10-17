@@ -49,15 +49,16 @@ var evidenceNumberKeys = map[string]bool{
 	"members": true, "total_lag": true, "lag_rate_per_min": true, "state_changes_15m": true,
 	"partition": true, "committed": true, "log_start": true, "records_lost": true,
 	"connectors_omitted": true, "tasks_omitted": true, "restarts": true,
+	"stalled_seconds": true, "retained_growth_bytes": true, "stall_after_seconds": true,
 }
 
 // evidenceBoolKeys are watcher keys whose value is a boolean.
 var evidenceBoolKeys = map[string]bool{
-	"active": true, "exists": true, "declared": true, "shared": true, "context_headers": true,
+	"active": true, "exists": true, "declared": true, "shared": true, "context_headers": true, "heartbeat_configured": true,
 }
 
 // evidenceTimeKeys are watcher keys whose value is an RFC 3339 time.
-var evidenceTimeKeys = map[string]bool{"first_seen": true}
+var evidenceTimeKeys = map[string]bool{"first_seen": true, "stalled_since": true}
 
 // evidenceWordKeys are watcher keys with a fixed vocabulary (a state, a
 // wal_status, an ETA basis, a window like "15m"): one short word.
@@ -65,7 +66,7 @@ var evidenceWordKeys = map[string]bool{"state": true, "wal_status": true, "eta_b
 
 // evidenceNameKeys are watcher keys that name an object: a slot, a group, a
 // topic, a connector.
-var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true}
+var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true, "layer": true}
 
 // evidenceWord is the shape of a fixed-vocabulary value.
 var evidenceWord = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
@@ -155,6 +156,14 @@ func signalLine(s map[string]any) string {
 		parts = append(parts, "firing_for="+n+"s")
 	}
 	parts = append(parts, flatFields(s)...)
+	// slot_stall: the same stall in minutes, so nobody has to divide.
+	if sig == "slot_stall" {
+		if n, ok := s["stalled_seconds"].(json.Number); ok {
+			if secs, err := n.Int64(); err == nil && secs >= 0 {
+				parts = append(parts, "stalled_for="+(time.Duration(secs)*time.Second).Round(time.Minute).String())
+			}
+		}
+	}
 	parts = append(parts, connectorFields(s["connectors"])...)
 	parts = append(parts, riskFields(s["risks"])...)
 	parts = append(parts, partitionFields(s["worst_partitions"])...)

@@ -46,8 +46,9 @@ const (
 	KindObfuscated Kind = "obfuscated"
 	// KindEncoded is a base64 blob that decodes to instruction-like text.
 	KindEncoded Kind = "encoded"
-	// KindHiddenText is text written in Unicode tag characters (outside a
-	// flag emoji): nothing renders, but a model reads it.
+	// KindHiddenText is text a reader cannot see but a model reads: Unicode
+	// tag characters outside a flag emoji (scanHiddenTags), and zero-width
+	// and other invisible characters (scanHidden, hidden.go).
 	KindHiddenText Kind = "hidden_text"
 )
 
@@ -137,6 +138,8 @@ func scanWindow(s string, base int) []Finding {
 		}
 	}
 	found = append(found, scanBase64(norm, origin)...)
+	found = append(found, scanBidi(s)...)
+	found = append(found, scanHidden(s)...)
 	found = append(found, scanHiddenTags(s)...)
 	found = append(found, scanStrayTags(s)...)
 	for i := range found {

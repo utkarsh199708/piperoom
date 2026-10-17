@@ -27,7 +27,7 @@ func Important(t events.Type) bool {
 	case events.RoomCreated, events.AgentHypothesis, events.ProposalCreated,
 		events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted,
 		events.HandoffCreated, events.HandoffAccepted, events.RoomClosed,
-		events.ControlLeaseExpired, events.ApprovalNudged:
+		events.ControlLeaseExpired, events.OwnerPaged, events.ApprovalNudged:
 		return true
 	}
 	return false
@@ -231,6 +231,26 @@ func (r *renderer) reply(e events.Event) (m message, ok bool, err error) {
 			blocks = append(blocks, block{Type: "context", Elements: link})
 		}
 		return message{Text: fallback("No active driver: ", actorName(p.Driver)), Blocks: blocks}, true, nil
+
+	case events.OwnerPaged:
+		p, err := events.Decode[events.OwnerPagedPayload](e)
+		if err != nil {
+			return m, false, err
+		}
+		// Layer, owner ids and reason are event text: clip escapes them.
+		owners := "nobody on record"
+		if len(p.Owners) > 0 {
+			owners = clip(strings.Join(p.Owners, ", "), 300)
+		}
+		t := ":bell: *Owners paged* for layer " + inlineCode(p.Layer, 60) + ": " + owners
+		if p.Reason != "" {
+			t += "\n" + clip(p.Reason, 500)
+		}
+		blocks := []block{section(t)}
+		if link := r.linkElement(e.RoomID); link != nil {
+			blocks = append(blocks, block{Type: "context", Elements: link})
+		}
+		return message{Text: fallback("Owners paged: ", p.Layer+" "+p.Reason), Blocks: blocks}, true, nil
 
 	case events.ApprovalNudged:
 		p, err := events.Decode[events.ApprovalNudgedPayload](e)

@@ -30,8 +30,14 @@ const (
 	maxFixActions     = 6
 )
 
+// minIncidentEvents is how many events a closed room needs to count as a real
+// incident (G7). A test room has a handful of events; a room someone worked has
+// far more, so this is a floor, not a target.
+const minIncidentEvents = 8
+
 var (
 	rareTypes    = []events.Type{events.RoomCreated, events.RoomClosed, events.ShadowLabelled, events.RoomLabelled}
+	hypoTypes    = []events.Type{events.AgentHypothesis}
 	handoffTypes = []events.Type{events.HandoffCreated}
 	resTypes     = []events.Type{events.AgentToolResult}
 	fixTypes     = []events.Type{events.ProposalCreated, events.ActionExecuted}
@@ -44,6 +50,17 @@ type pastRoom struct {
 	PipelineID string
 	Title      string
 	ClosedAt   time.Time
+	// Events is the room's event count (its last seq), for isIncident.
+	Events int
+	// Hypothesis is true when the agent wrote a hypothesis. It is read only
+	// for rooms whose agent text is trusted, like the rest of the agent output.
+	Hypothesis bool
+	// Labelled is true when a person labelled the room (room.labelled or
+	// shadow.labelled).
+	Labelled bool
+	// HasResolution is true when the room was closed with a non-blank
+	// resolution, whoever closed it. Resolution below may still be empty.
+	HasResolution bool
 	// Resolution is the text the closing person wrote.
 	Resolution string
 	// Layer and Terms are the human label (shadow.labelled): the layer that
@@ -85,7 +102,7 @@ type pastRoom struct {
 // "not shadow". The shadow-agent run itself lives in the shadow log, which this
 // tool never reads.
 func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pastRoom, error) {
-	pr := pastRoom{RoomID: r.ID, PipelineID: r.PipelineID, Title: clipRunes(scrub(r.Title), maxTitleBytes), fetched: now, lastSeq: r.LastSeq}
+	pr := pastRoom{RoomID: r.ID, PipelineID: r.PipelineID, Title: clipRunes(scrub(r.Title), maxTitleBytes), Events: int(r.LastSeq), fetched: now, lastSeq: r.LastSeq}
 	if r.ClosedAt != nil {
 		pr.ClosedAt = *r.ClosedAt
 	}
@@ -107,11 +124,15 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 				pr.Title = clipRunes(scrub(p.Title), maxTitleBytes)
 			}
 		case events.RoomClosed:
+			p, err := events.Decode[events.RoomClosedPayload](e)
+			if err == nil && strings.TrimSpace(p.Resolution) != "" {
+				pr.HasResolution = true
+			}
 			// Gap 10: a resolution typed by someone the server cannot vouch
 			// for must not steer future rooms, so it is not indexed or shown.
 			if e.Actor.Verified {
 				pr.ClosedBy = clipBytes(oneLine(scrub(e.Actor.Name)), 60)
-				if p, err := events.Decode[events.RoomClosedPayload](e); err == nil {
+				if err == nil {
 					pr.Resolution = clipBytes(scrub(p.Resolution), maxFieldBytes)
 				}
 			}
@@ -121,6 +142,7 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 			if err != nil {
 				continue
 			}
+			pr.Labelled = true
 			pr.Cause = clipBytes(scrub(p.Cause), maxFieldBytes)
 			pr.FixThatWorked = clipBytes(scrub(p.FixThatWorked), maxFieldBytes)
 			pr.FixProposalID = p.FixProposalID
@@ -130,7 +152,11 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 		case events.ShadowLabelled:
 			// One label per room; the last wins if there were ever two.
 			p, err := events.Decode[events.ShadowLabelledPayload](e)
-			if err != nil || !slices.Contains(events.Layers, p.ActualLayer) {
+			if err != nil {
+				continue
+			}
+			pr.Labelled = true
+			if !slices.Contains(events.Layers, p.ActualLayer) {
 				continue
 			}
 			pr.Layer, pr.Terms = p.ActualLayer, nil
@@ -145,6 +171,11 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 	if !agentTextOK {
 		return pr, nil
 	}
+	hyp, err := src.EventsOfTypes(ctx, r.ID, hypoTypes, 1)
+	if err != nil {
+		return pastRoom{}, fmt.Errorf("similarincidents: room %s: %w", r.ID, err)
+	}
+	pr.Hypothesis = len(hyp) > 0
 	fix, err := src.EventsOfTypes(ctx, r.ID, fixTypes, fixEventLimit)
 	if err != nil {
 		return pastRoom{}, fmt.Errorf("similarincidents: room %s: %w", r.ID, err)
@@ -168,6 +199,14 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 	}
 	pr.addTraces(res)
 	return pr, nil
+}
+
+// isIncident says whether a closed room is a real incident worth offering as
+// history: it was closed with a resolution, it has a hypothesis or a human
+// label, and it has enough events to have been worked. A test room titled
+// "test" with a closing note has neither of the last two (G7).
+func isIncident(pr pastRoom) bool {
+	return pr.HasResolution && (pr.Hypothesis || pr.Labelled) && pr.Events >= minIncidentEvents
 }
 
 func clipList(xs []string) []string {

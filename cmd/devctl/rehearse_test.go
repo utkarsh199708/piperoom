@@ -338,7 +338,7 @@ func TestCheckRoomDB(t *testing.T) {
 	}{
 		{"separate port", "postgres://u:p@localhost:5433/piperoom", ""},
 		{"separate host", "postgres://u:p@db.internal:5432/piperoom", ""},
-		{"unset means the dev default, which reset wipes", "", "devctl reset"},
+		{"unset means the roomdb default (:5433), which reset keeps", "", ""},
 		{"same port on 127.0.0.1", "postgres://u:p@127.0.0.1:5432/piperoom", "devctl reset"},
 		{"no port means 5432", "postgres://u:p@localhost/piperoom", "devctl reset"},
 		{"not a url", "nonsense", "PIPEROOM_DB_URL"},

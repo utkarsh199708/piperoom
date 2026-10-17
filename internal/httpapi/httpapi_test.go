@@ -149,15 +149,13 @@ func TestSteerAndCommentAndErrors(t *testing.T) {
 		t.Fatalf("comment status: %d", resp.StatusCode)
 	}
 
-	// priya cannot close (not driver).
+	// priya is not the driver but owns the postgres layer, so she may close
+	// (Q0, QA G16; the 403 for a plain member is in TestCloseRouteWho).
 	resp = doJSON(t, http.MethodPost, srv.URL+"/api/rooms/"+roomID+"/close", "priya", `{"resolution":"x"}`)
-	if resp.StatusCode != http.StatusForbidden {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("close status: %d", resp.StatusCode)
 	}
-	body := decode[map[string]any](t, resp)
-	if body["error"].(map[string]any)["code"] != "not_driver" {
-		t.Fatalf("bad error: %+v", body)
-	}
+	resp.Body.Close()
 
 	// 404 for unknown room.
 	resp = doJSON(t, http.MethodGet, srv.URL+"/api/rooms/nope", "arjun", "")

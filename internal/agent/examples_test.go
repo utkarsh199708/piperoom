@@ -411,12 +411,15 @@ func TestPastIncidentsRealTool(t *testing.T) {
 	st, err := fake.NewStore(context.Background(),
 		fake.Room{
 			ID: "r_old1", PipelineID: "orders", Title: "orders stale after schema change", ClosedAt: closed,
+			// A worked incident, as the tool's filter requires: a closing note, a hypothesis and enough events.
+			Resolution: "column re-added", Hypothesis: true, Steps: 8,
 			Label: &events.RoomLabelledPayload{ActualLayer: "schema-registry", Cause: injection, FixThatWorked: "re-add column discount_code"},
 		},
 		fake.Room{
 			// Labelled with a cause but no fix; its executed proposal's title
 			// is agent text and must not stand in for the fix.
 			ID: "r_old2", PipelineID: "orders", Title: "orders stale, connector task failed", ClosedAt: closed.Add(-24 * time.Hour),
+			Resolution: "task restarted", Hypothesis: true, Steps: 8,
 			Label: &events.RoomLabelledPayload{ActualLayer: "kafka-connect", Cause: "task 0 failed on a bad converter"},
 			Fix:   &fake.Fix{ProposalID: "p_1", Title: "AGENT PROPOSAL TITLE", Actions: []string{"connect_restart_task"}},
 		},
@@ -579,6 +582,8 @@ func TestPastIncidentsSplitInjectionIsLeftOut(t *testing.T) {
 	room := func(id, title, cause, fix string) fake.Room {
 		return fake.Room{
 			ID: id, PipelineID: "orders", Title: title, ClosedAt: closed,
+			// A worked incident, as the tool's filter requires: a closing note, a hypothesis and enough events.
+			Resolution: "fixed", Hypothesis: true, Steps: 8,
 			Label: &events.RoomLabelledPayload{ActualLayer: "kafka-connect", Cause: cause, FixThatWorked: fix},
 		}
 	}

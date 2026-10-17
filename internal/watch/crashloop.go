@@ -22,6 +22,10 @@ import (
 type taskEvent struct {
 	at    time.Time
 	state string
+	// byPerson is set on a RUNNING change that came with the connector itself
+	// going FAILED/PAUSED/STOPPED -> RUNNING: a person or an approved fix
+	// restarted it, which is a repair, not a crash loop (Q5 T10).
+	byPerson bool
 }
 
 // taskHist is the memory of one connector task (key "connector/task id").
@@ -56,6 +60,9 @@ func recordTasks(now time.Time, t target, ps *pipeState, obs *observation) map[s
 	if ps.taskHist == nil {
 		ps.taskHist = map[string]*taskHist{}
 	}
+	if ps.connState == nil {
+		ps.connState = map[string]string{}
+	}
 	cutoff := now.Add(-loop.Window)
 	out := map[string]loopInfo{}
 	for _, name := range t.connectors {
@@ -63,6 +70,10 @@ func recordTasks(now time.Time, t target, ps *pipeState, obs *observation) map[s
 		if co == nil || co.statusErr != nil {
 			continue
 		}
+		prevConn := ps.connState[name]
+		curConn := clean(co.status.State, 24)
+		ps.connState[name] = curConn
+		repaired := curConn == "RUNNING" && (prevConn == "FAILED" || prevConn == "PAUSED" || prevConn == "STOPPED")
 		for _, tk := range co.status.Tasks {
 			key := taskKey(name, tk.ID)
 			h := ps.taskHist[key]
@@ -73,7 +84,7 @@ func recordTasks(now time.Time, t target, ps *pipeState, obs *observation) map[s
 			h.lastSeen = now
 			state := clean(tk.State, 24)
 			if n := len(h.events); n == 0 || h.events[n-1].state != state {
-				h.events = append(h.events, taskEvent{at: now, state: state})
+				h.events = append(h.events, taskEvent{at: now, state: state, byPerson: repaired && state == "RUNNING"})
 			}
 			if state == "FAILED" {
 				if line := traceLine(tk.Trace); line != "" {
@@ -100,11 +111,11 @@ func recordTasks(now time.Time, t target, ps *pipeState, obs *observation) map[s
 	return out
 }
 
-// restarts counts FAILED -> RUNNING changes at or after since.
+// restarts counts FAILED -> RUNNING task changes that nobody caused, at or after since.
 func restarts(evs []taskEvent, since time.Time) int {
 	n := 0
 	for i := 1; i < len(evs); i++ {
-		if evs[i-1].state == "FAILED" && evs[i].state == "RUNNING" && !evs[i].at.Before(since) {
+		if evs[i-1].state == "FAILED" && evs[i].state == "RUNNING" && !evs[i].byPerson && !evs[i].at.Before(since) {
 			n++
 		}
 	}

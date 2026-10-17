@@ -33,8 +33,9 @@ import (
 
 // The pages are: approval needed (proposal.created, to the required layers'
 // owners), hand-off (handoff.created, to Users[to.id]) and no active driver
-// (control.lease_expired, to Users[driver.id] plus NoDriver) and nudge
-// (approval.nudged, to the owners of the nudged layer only).
+// (control.lease_expired, to Users[driver.id] plus NoDriver), owner paged
+// (owner.paged, to Users[owner id] for each owner the server resolved) and
+// nudge (approval.nudged, to the owners of the nudged layer only).
 
 // slackUserID is the shape of a Slack member ID. It also keeps `|`, `>` and
 // spaces out of a configured ID, so a config typo cannot break the markup.
@@ -482,6 +483,32 @@ func (p *pager) message(r *renderer, e events.Event) (m message, keys []pageKey,
 		text := ":rotating_light: *Room has no active driver* " + strings.Join(ms, " ") + "\nThe lease of " +
 			clip(actorName(pl.Driver), 100) + " ran out at " + pl.LeaseUntil.UTC().Format(time.RFC3339) + "."
 		return r.pageMessage(e.RoomID, "No active driver: ", ms, actorName(pl.Driver), text, "Take control in Piperoom"), keys, nil
+
+	case events.OwnerPaged:
+		pl, err := events.Decode[events.OwnerPagedPayload](e)
+		if err != nil {
+			return m, nil, err
+		}
+		// Owners are Piperoom user ids, used only as Users keys. The key holds
+		// the event seq, so a replay of the same page is not sent twice.
+		reason := "owner-paged:" + strconv.FormatInt(e.Seq, 10)
+		var ms []string
+		picked := map[string]bool{}
+		for _, o := range pl.Owners {
+			id, listed := p.users[o]
+			k := pageKey{e.RoomID, id, reason}
+			if !listed || picked[id] || len(picked) >= maxPagedUsers || !p.check(k, keys) {
+				continue
+			}
+			picked[id] = true
+			keys = append(keys, k)
+			ms = append(ms, mention(id))
+		}
+		if len(keys) == 0 {
+			return m, nil, nil
+		}
+		text := ":bell: *You are paged* " + strings.Join(ms, " ") + " for layer " + inlineCode(pl.Layer, 60) + "\n" + clip(pl.Reason, 500)
+		return r.pageMessage(e.RoomID, "Paged: ", ms, pl.Reason, text, "Look at the room in Piperoom"), keys, nil
 	}
 	return m, nil, nil
 }

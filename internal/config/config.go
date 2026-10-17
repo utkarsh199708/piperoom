@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,7 +19,7 @@ import (
 // Config holds every setting. Defaults match dev/docker-compose.yml.
 type Config struct {
 	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default; dev mode off loopback needs PIPEROOM_DEV_ALLOW_NONLOOPBACK)
-	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
+	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log; dev default: the stack's own roomdb service on :5433, never the pipeline's Postgres, so a pipeline reset cannot wipe it — QA G19)
 	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
@@ -54,6 +55,11 @@ type Config struct {
 	ConnectTLSCAFile   string // CONNECT_TLS_CA_FILE
 	ConnectTLSCertFile string // CONNECT_TLS_CERT_FILE
 	ConnectTLSKeyFile  string // CONNECT_TLS_KEY_FILE
+	// ConnectWorkerLogFile is the Kafka Connect worker log the connect_worker_log
+	// tool reads (clients.ConnectLogReader; only its last 4 MiB). Dev default
+	// dev/.logs/connect/connect.log, written by the dev stack's Connect
+	// container; "" or "off" = no log source (the tool says so). (Q0, QA G3)
+	ConnectWorkerLogFile string // CONNECT_WORKER_LOG_FILE
 
 	// Slack mirror of rooms. Off unless both token and channel are set.
 	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
@@ -66,6 +72,12 @@ type Config struct {
 	// and refuses to run on a value that is not a Slack member ID.
 	SlackPageNoDriver []string
 	PublicURL         string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
+
+	// Paging outside Slack (owner.paged, Q0, QA G2). Raw strings; ParseNotify
+	// types them and names the env var on error.
+	NotifyWebhookURL    string // PIPEROOM_NOTIFY_WEBHOOK_URL: POST target for every owner.paged (https, or http to a loopback host); empty = no webhook
+	NotifyWebhookSecret string // PIPEROOM_NOTIFY_WEBHOOK_SECRET (secret): HMAC-SHA256 key for the X-Piperoom-Signature header; empty = unsigned
+	PageUndrivenAfter   string // PIPEROOM_PAGE_UNDRIVEN_AFTER: Go duration a watcher or alert room may stay without a driver before the server pages the suspected layer's owners; default 5m; "0" = off
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
 	// "snowflake" uses it as a gosnowflake DSN.
@@ -108,11 +120,13 @@ type Config struct {
 
 	// Built-in watcher (internal/watch). Kept as strings like the other fields;
 	// ParseWatch turns them into typed values and names the env var on error.
-	WatchMode         string // PIPEROOM_WATCH_MODE: off | log | rooms (default log = shadow mode)
-	WatchInterval     string // PIPEROOM_WATCH_INTERVAL: Go duration, default 60s, minimum 15s
-	WatchCheckTimeout string // PIPEROOM_WATCH_CHECK_TIMEOUT: per-check deadline, default 10s (max 10s = the pilot role's statement_timeout)
-	WatchCooldown     string // PIPEROOM_WATCH_COOLDOWN: quiet time after a watcher room is closed, default 60m
-	WatchMaxOpenRooms string // PIPEROOM_WATCH_MAX_OPEN_ROOMS: rooms the watcher keeps open at once; default 6, min 1 (F6; ParseWatchMaxOpenRooms)
+	WatchMode          string // PIPEROOM_WATCH_MODE: off | log | rooms (default log = shadow mode)
+	WatchInterval      string // PIPEROOM_WATCH_INTERVAL: Go duration, default 60s, minimum 15s
+	WatchCheckTimeout  string // PIPEROOM_WATCH_CHECK_TIMEOUT: per-check deadline, default 10s (max 10s = the pilot role's statement_timeout)
+	WatchCooldown      string // PIPEROOM_WATCH_COOLDOWN: quiet time after a watcher room is closed, default 60m
+	WatchMaxOpenRooms  string // PIPEROOM_WATCH_MAX_OPEN_ROOMS: rooms the watcher keeps open at once; default 6, min 1 (F6; ParseWatchMaxOpenRooms)
+	WatchJoinMaxAge    string // PIPEROOM_WATCH_JOIN_MAX_AGE: the watcher joins an open room only if its newest event is younger than this; default 2h (Q0, QA G1)
+	WatchEscalateAfter string // PIPEROOM_WATCH_ESCALATE_AFTER: a signal still firing this long after its room closed re-opens a room despite the cooldown; default 10m; "0" = never (Q0, QA G1)
 
 	// Triage pass (F6): one bounded first look on a cheap model before the
 	// full investigation, outside the agent pool. Not PIPEROOM_TRIAGE_MODEL,
@@ -158,7 +172,7 @@ type Config struct {
 
 	// Model spend (docs/design/cost.md). Kept as strings like the shadow
 	// fields; ParseCost types them and names the env var on error.
-	ModelPrices              string // PIPEROOM_MODEL_PRICES: path of the JSON price table (model id -> USD per million tokens: input, output, cache_write, cache_read); empty = no table, so cost is omitted, never guessed
+	ModelPrices              string // PIPEROOM_MODEL_PRICES: path of the JSON price table (model id -> USD per million tokens: input, output, cache_write, cache_read); empty = the built-in list-price table (BuiltinModelPrices, QA G14); "off" = no table, so cost is omitted, never guessed
 	PipelineDailyTokenBudget string // PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET: model tokens per pipeline per UTC day, kept in the room database; empty or "0" = off
 	PipelineDailyCostUSD     string // PIPEROOM_PIPELINE_DAILY_COST_USD: estimated USD per pipeline per UTC day, kept in the room database; empty or "0" = off; needs PIPEROOM_MODEL_PRICES
 
@@ -223,7 +237,7 @@ type Config struct {
 func Load() Config {
 	c := Config{
 		HTTPAddr:          get("PIPEROOM_HTTP_ADDR", "127.0.0.1:8090"),
-		RoomDBURL:         get("PIPEROOM_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/piperoom?sslmode=disable"),
+		RoomDBURL:         get("PIPEROOM_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5433/piperoom?sslmode=disable"),
 		SourceDBURL:       get("SOURCE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/orders?sslmode=disable"),
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
@@ -274,11 +288,18 @@ func Load() Config {
 		ReplicaID:        get("PIPEROOM_REPLICA_ID", ""),
 		ResumeOnTakeover: get("PIPEROOM_RESUME_ON_TAKEOVER", ""),
 
-		WatchMode:         get("PIPEROOM_WATCH_MODE", DefaultWatchMode),
-		WatchInterval:     get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),
-		WatchCheckTimeout: get("PIPEROOM_WATCH_CHECK_TIMEOUT", DefaultWatchCheckTimeout),
-		WatchCooldown:     get("PIPEROOM_WATCH_COOLDOWN", DefaultWatchCooldown),
-		WatchMaxOpenRooms: get("PIPEROOM_WATCH_MAX_OPEN_ROOMS", DefaultWatchMaxOpenRooms),
+		WatchMode:          get("PIPEROOM_WATCH_MODE", DefaultWatchMode),
+		WatchInterval:      get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),
+		WatchCheckTimeout:  get("PIPEROOM_WATCH_CHECK_TIMEOUT", DefaultWatchCheckTimeout),
+		WatchCooldown:      get("PIPEROOM_WATCH_COOLDOWN", DefaultWatchCooldown),
+		WatchMaxOpenRooms:  get("PIPEROOM_WATCH_MAX_OPEN_ROOMS", DefaultWatchMaxOpenRooms),
+		WatchJoinMaxAge:    get("PIPEROOM_WATCH_JOIN_MAX_AGE", DefaultWatchJoinMaxAge),
+		WatchEscalateAfter: get("PIPEROOM_WATCH_ESCALATE_AFTER", DefaultWatchEscalateAfter),
+
+		NotifyWebhookURL:     get("PIPEROOM_NOTIFY_WEBHOOK_URL", ""),
+		NotifyWebhookSecret:  get("PIPEROOM_NOTIFY_WEBHOOK_SECRET", ""),
+		PageUndrivenAfter:    get("PIPEROOM_PAGE_UNDRIVEN_AFTER", DefaultPageUndrivenAfter),
+		ConnectWorkerLogFile: connectLogFile(get("CONNECT_WORKER_LOG_FILE", DefaultConnectWorkerLogFile)),
 
 		TriagePass:        get("PIPEROOM_TRIAGE_PASS", DefaultTriagePass),
 		TriagePassModel:   get("PIPEROOM_TRIAGE_PASS_MODEL", DefaultTriagePassModel),
@@ -545,8 +566,9 @@ func ParseShadow(c Config) (Shadow, error) {
 
 // Cost holds the typed spend settings (docs/design/cost.md).
 type Cost struct {
-	// PricesFile is the PIPEROOM_MODEL_PRICES path; "" = no price table, so
-	// every cost is omitted and no cost budget can be set.
+	// PricesFile is the PIPEROOM_MODEL_PRICES path, BuiltinModelPrices for the
+	// table built into the agent package (the default, QA G14), or "" ("off")
+	// for no price table, so every cost is omitted and no cost budget can be set.
 	PricesFile string
 	// PipelineDailyTokens caps model tokens per pipeline per UTC day; 0 = off.
 	PipelineDailyTokens int64
@@ -567,6 +589,12 @@ const MaxPipelineDailyCostUSD = 1_000_000_000
 // at start-up.
 func ParseCost(c Config) (Cost, error) {
 	out := Cost{PricesFile: strings.TrimSpace(c.ModelPrices)}
+	switch strings.ToLower(out.PricesFile) {
+	case "":
+		out.PricesFile = BuiltinModelPrices
+	case "off":
+		out.PricesFile = ""
+	}
 	var err error
 	if out.PipelineDailyTokens, err = parseWholeNumber("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", c.PipelineDailyTokenBudget, "0", true); err != nil {
 		return Cost{}, err
@@ -579,6 +607,12 @@ func ParseCost(c Config) (Cost, error) {
 	}
 	return out, nil
 }
+
+// BuiltinModelPrices is Cost.PricesFile for the list-price table embedded in
+// the agent package (agent.LoadModelPrices knows the name). It is the default
+// so a fresh install shows cost; PIPEROOM_MODEL_PRICES=off turns cost off and a
+// path replaces the table. (Q0, QA G14)
+const BuiltinModelPrices = "builtin"
 
 // maxUSDDecimals is the finest amount PIPEROOM_PIPELINE_DAILY_COST_USD takes:
 // one millionth of a USD, the unit the spend tables keep.
@@ -771,6 +805,9 @@ const (
 	DefaultWatchInterval     = "60s"
 	DefaultWatchCheckTimeout = "10s"
 	DefaultWatchCooldown     = "60m"
+	// Q0 (QA G1).
+	DefaultWatchJoinMaxAge    = "2h"
+	DefaultWatchEscalateAfter = "10m"
 
 	// MinWatchInterval keeps the watcher from hammering the source database.
 	MinWatchInterval = 15 * time.Second
@@ -797,7 +834,18 @@ type Watch struct {
 	Mode         WatchMode
 	Interval     time.Duration
 	CheckTimeout time.Duration
-	Cooldown     time.Duration
+	// Cooldown is keyed to the incident (the set of signals a closed room
+	// carried), not to the pipeline: a signal outside that set opens or joins
+	// a room at once (Q0, QA G1).
+	Cooldown time.Duration
+	// JoinMaxAge: an open room of the pipeline is joined only when its newest
+	// event is younger than this, and it was opened by an alert or the watcher
+	// (a person's room is joined only within JoinMaxAge of its opening). (Q0)
+	JoinMaxAge time.Duration
+	// EscalateAfter: a signal that keeps firing this long after its room
+	// closed (cooldown or a close-while-firing ack) re-opens a room once;
+	// 0 = never. (Q0)
+	EscalateAfter time.Duration
 }
 
 // ParseWatch validates the PIPEROOM_WATCH_* fields. The error names the env var
@@ -832,7 +880,36 @@ func ParseWatch(c Config) (Watch, error) {
 	if w.Cooldown, err = parseWatchDuration("PIPEROOM_WATCH_COOLDOWN", c.WatchCooldown, DefaultWatchCooldown); err != nil {
 		return Watch{}, err
 	}
+	if w.JoinMaxAge, err = parseWatchDuration("PIPEROOM_WATCH_JOIN_MAX_AGE", c.WatchJoinMaxAge, DefaultWatchJoinMaxAge); err != nil {
+		return Watch{}, err
+	}
+	if w.EscalateAfter, err = parseOptionalDuration("PIPEROOM_WATCH_ESCALATE_AFTER", c.WatchEscalateAfter, DefaultWatchEscalateAfter); err != nil {
+		return Watch{}, err
+	}
+	if w.EscalateAfter > 0 && w.EscalateAfter < w.Interval {
+		return Watch{}, fmt.Errorf("config: PIPEROOM_WATCH_ESCALATE_AFTER=%q: must be 0 or at least PIPEROOM_WATCH_INTERVAL (%s)", c.WatchEscalateAfter, w.Interval)
+	}
 	return w, nil
+}
+
+// parseOptionalDuration parses a non-negative Go duration where "0" means
+// off; empty uses def.
+func parseOptionalDuration(name, v, def string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = def
+	}
+	if v == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q: not a duration like 30s or 5m (or 0 for off): %w", name, v, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("config: %s=%q: must not be negative", name, v)
+	}
+	return d, nil
 }
 
 // parseWatchDuration parses a positive Go duration; empty uses def.
@@ -1031,4 +1108,69 @@ func get(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ---- Q wave (QA run 2026-10-15) ----
+
+// Defaults of the Q0 settings.
+const (
+	DefaultPageUndrivenAfter    = "5m"
+	DefaultConnectWorkerLogFile = "dev/.logs/connect/connect.log"
+)
+
+// connectLogFile maps "off" (any case) to "", the no-log-source value.
+func connectLogFile(v string) string {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "off") {
+		return ""
+	}
+	return v
+}
+
+// Notify holds the typed paging settings (owner.paged, QA G2).
+type Notify struct {
+	// WebhookURL receives one POST per owner.paged (docs/api.md, Paging);
+	// "" = no webhook.
+	WebhookURL string
+	// WebhookSecret signs the body (X-Piperoom-Signature: sha256=<hex HMAC>);
+	// "" = unsigned. A secret: never log it.
+	WebhookSecret string
+	// PageUndrivenAfter is how long a watcher or alert room may stay without a
+	// driver before the server pages; 0 = off.
+	PageUndrivenAfter time.Duration
+}
+
+// ParseNotify validates the paging fields. The webhook URL must be https, or
+// http to a loopback host (a local test receiver), and carry no user info.
+func ParseNotify(c Config) (Notify, error) {
+	n := Notify{WebhookURL: strings.TrimSpace(c.NotifyWebhookURL), WebhookSecret: c.NotifyWebhookSecret}
+	if n.WebhookURL != "" {
+		u, err := url.Parse(n.WebhookURL)
+		if err != nil || u.Host == "" {
+			return Notify{}, fmt.Errorf("config: PIPEROOM_NOTIFY_WEBHOOK_URL: not an absolute URL")
+		}
+		if u.User != nil {
+			return Notify{}, fmt.Errorf("config: PIPEROOM_NOTIFY_WEBHOOK_URL: must not carry a user or password; use PIPEROOM_NOTIFY_WEBHOOK_SECRET")
+		}
+		switch {
+		case u.Scheme == "https":
+		case u.Scheme == "http" && isLoopbackHost(u.Hostname()):
+		default:
+			return Notify{}, fmt.Errorf("config: PIPEROOM_NOTIFY_WEBHOOK_URL: want https (http only to a loopback host)")
+		}
+	}
+	var err error
+	if n.PageUndrivenAfter, err = parseOptionalDuration("PIPEROOM_PAGE_UNDRIVEN_AFTER", c.PageUndrivenAfter, DefaultPageUndrivenAfter); err != nil {
+		return Notify{}, err
+	}
+	return n, nil
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP.
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

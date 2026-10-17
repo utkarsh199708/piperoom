@@ -82,23 +82,10 @@ jobs:
     # The room-database tests (store, room, ws: migrations and hundreds of
     # schemas) write hundreds of MB of WAL. Against the dev stack's own Postgres
     # that WAL sits behind the Debezium slot and the smoke's devctl health
-    # rightly fails on it, so they get a separate server (host port 5433, the
-    # dev stack publishes 5432), as the old Postgres-only job had.
-    services:
-      roomdb:
-        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
-        env:
-          POSTGRES_USER: piperoom
-          # CI-only throwaway database on the job's own network; not a secret.
-          POSTGRES_PASSWORD: ci-only
-          POSTGRES_DB: piperoom
-        ports:
-          - 5433:5432
-        options: >-
-          --health-cmd "pg_isready -U piperoom -d piperoom"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+    # rightly fails on it, so they run on the stack's separate roomdb server
+    # (host port 5433, the PIPEROOM_DB_URL default; no logical WAL, no slot).
+    # A job service container on 5433 as well would leave compose unable to
+    # bind roomdb's port.
     env:
       # The state the integration tests expect: owner of the stack lock, so
       # testenv.Require does not skip on a lock held by someone else.
@@ -118,10 +105,15 @@ jobs:
           cache-dependency-path: |
             go.mod
             go.sum
-      - name: Start the dev stack (postgres, kafka, schema registry, connect, devconsumer)
+      - name: Start the dev stack (postgres, roomdb, kafka, schema registry, connect, devconsumer)
         # No --wait: wait-for-stack.sh polls Connect's REST API itself, with a
         # bounded timeout, and dumps the container logs when it gives up.
-        run: docker compose -f dev/docker-compose.yml up -d --build
+        # The Connect worker-log mount first, writable, as `devctl up` makes it:
+        # left to compose it would be created root-owned, and devctl's chmod of
+        # it below would then fail (operation not permitted).
+        run: |
+          mkdir -p dev/.logs/connect && chmod 0777 dev/.logs/connect
+          docker compose -f dev/docker-compose.yml up -d --build
       - name: Wait until Connect and the Schema Registry answer
         run: .github/scripts/wait-for-stack.sh 300
       - name: Register the connector (devctl up is idempotent)
@@ -131,7 +123,9 @@ jobs:
           go run ./cmd/devctl up --owner ci
       - name: go test -tags integration ./internal/... ./cmd/...
         env:
-          PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
+          # The dev stack's roomdb (dev/docker-compose.yml); `devctl up` above
+          # waited for it to be healthy. Local-stack credentials, not a secret.
+          PIPEROOM_DB_URL: postgres://piperoom:piperoom-dev@127.0.0.1:5433/piperoom?sslmode=disable
         run: |
           set +e
           go test -count=1 -timeout 25m -json -tags integration ./internal/... ./cmd/... > test.json

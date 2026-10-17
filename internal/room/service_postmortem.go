@@ -78,8 +78,10 @@ func (s *Service) draftPostmortem(roomID string, allowModel bool) {
 }
 
 // choosePostmortem picks the source of the draft's prose (F2 item 13): the
-// newest hand-off written after the last proposal, action and hypothesis, else
-// one model call, else none.
+// newest hand-off written after the last proposal, action, hypothesis and fix
+// note, else one model call, else none. A fix note counts as work: a person
+// fixed the problem after the hand-off, so its open items and risks are stale
+// (QA G10).
 func (s *Service) choosePostmortem(ctx context.Context, roomID string, evs []events.Event, allowModel bool) (events.Type, any) {
 	var lastWork int64
 	var handoffSeq int64
@@ -88,6 +90,10 @@ func (s *Service) choosePostmortem(ctx context.Context, roomID string, evs []eve
 		switch e.Type {
 		case events.ProposalCreated, events.ActionExecuted, events.AgentHypothesis:
 			lastWork = max(lastWork, e.Seq)
+		case events.CommentAdded:
+			if p, ok := decode[events.CommentAddedPayload](e); ok && p.Kind == events.CommentKindFixNote {
+				lastWork = max(lastWork, e.Seq)
+			}
 		case events.HandoffCreated:
 			if p, ok := decode[events.HandoffCreatedPayload](e); ok {
 				handoffSeq, handoffID = e.Seq, p.HandoffID

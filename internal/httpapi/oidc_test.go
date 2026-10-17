@@ -420,6 +420,9 @@ func TestOIDCLoginFlow(t *testing.T) {
 	if me["id"] != "priya" || me["role"] != "member" || me["groups_missing"] != false {
 		t.Fatalf("/api/me = %+v", me)
 	}
+	if g, ok := me["groups"].([]any); !ok || len(g) != 0 {
+		t.Fatalf("groups = %#v, want []", me["groups"])
+	}
 	if got, _ := me["layers"].([]any); len(got) != 2 || got[0] != "postgres" || got[1] != "schema-registry" {
 		t.Fatalf("layers = %v", me["layers"])
 	}
@@ -452,6 +455,9 @@ func TestOIDCSessionStoresClaims(t *testing.T) {
 	}
 	if len(sess.Groups) != 1 || sess.Groups[0] != "dataeng-oncall" || len(sess.AMR) != 2 || sess.ACR != "urn:mfa" {
 		t.Fatalf("session = %+v", sess)
+	}
+	if g, _ := e.me(t, s)["groups"].([]any); len(g) != 1 || g[0] != "dataeng-oncall" {
+		t.Fatalf("/api/me groups = %v, want [dataeng-oncall]", g)
 	}
 	// No users.yaml entry: id is u_ + 12 hex of sha256(iss|sub); name from the claim.
 	want := httpapi.DerivedUserID(e.idp.Issuer, "idp-oncall")

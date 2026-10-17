@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -21,15 +23,25 @@ import (
 // tool constructor may one day dereference its deps, and a name lookup must
 // not panic on a zero Deps. TestRoomToolNamesMatchRoomTools keeps the list in
 // sync with what the constructor really builds.
+//
+// The list holds every room tool the agent can have. page_owner and
+// withdraw_proposal are built only when their collaborator exists (see
+// newRoomTools), so a run may offer fewer; the system prompt names them only
+// when it does (systemPromptFor).
 func roomToolNames() []string {
-	return []string{"update_hypothesis", "propose_fix", "post_message"}
+	return []string{"update_hypothesis", "propose_fix", "post_message", "page_owner", "withdraw_proposal"}
 }
 
-// newRoomTools builds the three room tools the agent itself owns. These are
-// tools.KindRoom: they only write to the room log or create proposals, never
-// to customer systems. track records each created proposal so the agent can
-// verify recovery when its last step's action_result arrives; it may be nil
-// (the tool then just skips recording).
+// newRoomTools builds the room tools the agent itself owns. These are
+// tools.KindRoom: they only write to the room log, create or withdraw
+// proposals, or ask the room service to page people, never to customer
+// systems. track records each created proposal so the agent can verify
+// recovery when its last step's action_result arrives; it may be nil (the tool
+// then just skips recording).
+//
+// page_owner is built only when d.Pager is set, and withdraw_proposal only
+// when d.Proposals can withdraw (ProposalWithdrawer). They come last, so the
+// three always-present tools keep their place in the tool list.
 func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 	return newRoomToolsWith(d, track, nil)
 }
@@ -38,11 +50,19 @@ func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 // update_hypothesis checks the cited steps against. A nil ledger turns those
 // checks off, for harnesses that build room tools without a runner.
 func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools.Tool {
-	return []tools.Tool{
+	own := newOwnProposals()
+	list := []tools.Tool{
 		&updateHypothesisTool{sink: d.Sink, steps: steps},
-		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track},
+		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, own: own},
 		&postMessageTool{sink: d.Sink},
 	}
+	if d.Pager != nil {
+		list = append(list, newPageOwnerTool(d.Pager))
+	}
+	if w, ok := d.Proposals.(ProposalWithdrawer); ok {
+		list = append(list, &withdrawProposalTool{withdrawer: w, own: own})
+	}
+	return list
 }
 
 // RoomToolNames returns the names of the room tools the agent adds on top of
@@ -263,6 +283,12 @@ func (t *postMessageTool) Run(ctx context.Context, input json.RawMessage) (tools
 		Text:    in.Text,
 		ReplyTo: in.ReplyTo,
 	}); err != nil {
+		// The run's message guard keeps empty and repeated messages out of the
+		// room. Tell the model, so it does not believe people read it.
+		var dropped *messageDroppedError
+		if errors.As(err, &dropped) {
+			return tools.Result{Summary: "message not posted: " + dropped.reason}, nil
+		}
 		return tools.Result{}, fmt.Errorf("agent: emit message: %w", err)
 	}
 	return tools.Result{Summary: "message posted"}, nil
@@ -275,6 +301,8 @@ type proposeFixTool struct {
 	proposals Proposals
 	sink      Sink
 	track     *proposalTracker
+	// own records the proposals this run made, for withdraw_proposal; nil = none.
+	own *ownProposals
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -304,7 +332,9 @@ func (t *proposeFixTool) Description() string {
 	b.WriteString(`A param that is itself JSON, such as the Avro schema of schema_register, is escaped once more: "{\"subject\":\"orders-value\",\"schema\":\"{\\\"type\\\":\\\"string\\\"}\"}". `)
 	b.WriteString("A step with a wrong or missing param is refused and nothing is stored. ")
 	b.WriteString("Params are hashed for the approvers: a number above 2^53 (a Kafka offset, a large id) cannot be hashed exactly and the proposal is refused, so write such values as strings. ")
-	b.WriteString("risk and rollback are required short text: never empty and never a placeholder such as n/a.")
+	b.WriteString("risk and rollback are required short text: never empty and never a placeholder such as n/a. ")
+	b.WriteString("impacted_layers lists every layer whose data the fix changes although no step writes there; their owners must approve too, so name them here rather than asking in prose. ")
+	b.WriteString("risk_level is low, medium or high; losing precision on money or other exact numeric columns is high.")
 	return b.String()
 }
 
@@ -324,6 +354,19 @@ func (t *proposeFixTool) InputSchema() map[string]any {
 		},
 		"risk":     map[string]any{"type": "string", "description": "what could go wrong"},
 		"rollback": map[string]any{"type": "string", "description": "how to undo this fix"},
+		// Both are optional so a caller that knows nothing of them (the evals
+		// harness, a replay) still passes the schema; the prompt tells the model
+		// to set them. The room service treats a missing risk_level as medium.
+		"impacted_layers": map[string]any{
+			"type":        "array",
+			"items":       map[string]any{"type": "string", "enum": slices.Clone(events.Layers)},
+			"description": "layers whose data the fix changes even though no step writes there; their owners must approve too",
+		},
+		"risk_level": map[string]any{
+			"type":        "string",
+			"enum":        []string{events.RiskLow, events.RiskMedium, events.RiskHigh},
+			"description": "how risky the fix is; high when it can lose or corrupt data, such as precision on money columns",
+		},
 	}, "title", "steps", "risk", "rollback")
 }
 
@@ -387,6 +430,9 @@ type proposeFixInput struct {
 	} `json:"steps"`
 	Risk     string `json:"risk"`
 	Rollback string `json:"rollback"`
+	// ImpactedLayers and RiskLevel are optional (see InputSchema).
+	ImpactedLayers []string `json:"impacted_layers"`
+	RiskLevel      string   `json:"risk_level"`
 }
 
 // decodeStepParams returns the params object a step carries: the JSON text
@@ -625,6 +671,10 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if err := checkProposalText("rollback", in.Rollback); err != nil {
 		return tools.Result{}, err
 	}
+	impacted, riskLevel, err := checkImpact(in.ImpactedLayers, in.RiskLevel)
+	if err != nil {
+		return tools.Result{}, err
+	}
 	if t.proposals == nil {
 		return tools.Result{}, fmt.Errorf("agent: proposals are not available")
 	}
@@ -663,17 +713,72 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		Risk:           in.Risk,
 		Rollback:       in.Rollback,
 		RequiredLayers: layers,
+		ImpactedLayers: impacted,
+		RiskLevel:      riskLevel,
 	})
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("agent: create proposal: %w", err)
 	}
+	t.own.add(id, in.Title)
+	// The room service adds the impacted layers to the required ones, so those
+	// owners are waited on as well.
+	approvers := slices.Clone(layers)
+	for _, l := range impacted {
+		if !slices.Contains(approvers, l) {
+			approvers = append(approvers, l)
+		}
+	}
+	// Create returns only the id, so apply the server's rule here: each step
+	// action that implements actions.Impacting adds its layers (known ones).
+	for _, s := range steps {
+		a, ok := t.actions.Get(s.Action)
+		if !ok {
+			continue
+		}
+		im, ok := a.(actions.Impacting)
+		if !ok {
+			continue
+		}
+		for _, l := range im.Impact(s.Params).Layers {
+			if slices.Contains(events.Layers, l) && !slices.Contains(approvers, l) {
+				approvers = append(approvers, l)
+			}
+		}
+	}
+	// The tracker waits on the same set, so it never takes the step layers'
+	// approval for a full one (QA review 2, R6).
 	if t.track != nil {
-		t.track.record(id, steps)
+		t.track.record(id, steps, approvers)
 	}
 	return tools.Result{
-		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", ")),
+		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(approvers, ", ")),
 		Data:    proposeFixResult{ProposalID: id},
 	}, nil
+}
+
+// checkImpact validates the optional impact fields of a proposal. Layers must
+// be known names, so a typo is refused with the list instead of being dropped
+// by the room service and leaving a layer unasked; duplicates are folded. The
+// risk level must be one of the three levels, or empty. Both errors wrap
+// tools.ErrBadInput, so the model retries.
+func checkImpact(layers []string, risk string) ([]string, string, error) {
+	var impacted []string
+	for _, l := range layers {
+		l = strings.TrimSpace(l)
+		if !slices.Contains(events.Layers, l) {
+			return nil, "", fmt.Errorf("%w: impacted_layers: %q is not a layer; use: %s", tools.ErrBadInput, l, strings.Join(events.Layers, ", "))
+		}
+		if !slices.Contains(impacted, l) {
+			impacted = append(impacted, l)
+		}
+	}
+	risk = strings.ToLower(strings.TrimSpace(risk))
+	switch risk {
+	case "", events.RiskLow, events.RiskMedium, events.RiskHigh:
+	default:
+		return nil, "", fmt.Errorf("%w: risk_level must be low, medium or high", tools.ErrBadInput)
+	}
+	return impacted, risk, nil
 }
 
 // proposeFixResult is the structured result of a created proposal. The runner

@@ -236,3 +236,15 @@ describe('PipelineMap — heal flash', () => {
     expect(container.querySelector('[data-node]')?.className).not.toContain('animate-heal')
   })
 })
+
+// Q3 S9: cards size to their content and are never squeezed under their neighbours (the lane scrolls instead).
+describe('PipelineMap — cards do not overlap', () => {
+  it('keeps each node at its content width and lets the lane scroll', () => {
+    render(<PipelineMap topology={topology} updatedAt={null} onTrace={() => undefined} />)
+    const node = document.querySelector('[data-node]') as HTMLElement
+    expect(node.className).toMatch(/shrink-0/)
+    expect(node.className).not.toMatch(/basis-0/)
+    expect(node.className).toMatch(/overflow-hidden/)
+    expect(screen.getByRole('group', { name: /Pipeline, source to sink/ }).className).toMatch(/overflow-x-auto/)
+  })
+})

@@ -26,6 +26,15 @@
 // The consumer-group signals (F6): consumer_lag, group_unstable and
 // offset_below_log_start read GroupLag per group (Deps.Lag) and the log-start
 // offsets of the CDC topics (lag_signals.go).
+//
+// slot_stall (QA G18, stall.go) fires when a slot's restart_lsn and
+// confirmed_flush_lsn sit still while the WAL it holds keeps growing.
+//
+// Cooldown, ack and joins are keyed to the incident, the set of signal keys a
+// room carried, not to the pipeline (QA G1, incident.go): another signal opens
+// or joins a room at once, a signal that keeps firing EscalateAfter with no
+// room re-opens one, and an open room is joined only while it is recent and
+// came from an alert (RoomInfoSink).
 package watch
 
 import (
@@ -34,6 +43,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -183,7 +193,8 @@ const (
 // New signals go at the end so existing titles keep their order.
 var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
-	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}
+	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart,
+	SignalSlotStall, SignalConnectUnreachable}
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -202,6 +213,8 @@ type pipeState struct {
 	groups map[string]*groupMem
 	// taskHist is each connector task's recent state changes (crash loops).
 	taskHist map[string]*taskHist
+	// connState is each connector's last read state (crash loops: a person's restart).
+	connState map[string]string
 	// risks are the current config findings of the pipeline (codes only), added
 	// to the evidence of whatever signal opens a room.
 	risks []map[string]any
@@ -217,7 +230,7 @@ type pipeState struct {
 	// episode: a signal fired and the pipeline has not cleared yet.
 	episode bool
 	// bypassCooldown: a severity rise re-opened an acked incident
-	// (reviveWorse); the next open skips the cooldown.
+	// (reviveWorse), or an escalation did; the next open skips the cooldown.
 	bypassCooldown bool
 	// lastPost is when the watcher last wrote to the room; postedSev the
 	// severity at that time.
@@ -225,12 +238,27 @@ type pipeState struct {
 	postedSev string
 	// lastStill is the last "still firing" log line.
 	lastStill time.Time
-	// lastClosed is when a room this pipeline posted into was closed (set by
-	// ackLocked, in memory). A storm follower never had a room under its own
-	// dedup key, so the room service cannot tell its cooldown; this can.
-	lastClosed time.Time
+	// stall is the slot_stall memory of the pipeline's slot (stall.go).
+	stall stallMem
+	// connFails counts the ticks in a row whose connector status reads all
+	// failed, since connFailSince (connect_signal.go).
+	connFails     int
+	connFailSince time.Time
+	// told lists, per room the pipeline posted into, the incident keys that
+	// room has been told about (newest last, capped). A room keeps its entry
+	// after the signals resolve, so a later close still knows its incident.
+	told []toldRoom
+	// cooled holds the keys of closed rooms' incidents: each stays quiet for
+	// the cooldown after its room closed (QA G1). A storm follower never had a
+	// room under its own dedup key, so only this can tell its cooldown.
+	cooled map[string]cooledKey
+	// note, set by an escalation, says why this open or join happens despite
+	// the cooldown or ack ("kept firing 10m after its room was closed"); it
+	// goes into the title and the evidence. blocked is why the last open
+	// attempt opened nothing, for the escalation log line.
+	note, blocked string
 	// warned* keep "skipped" lines to one per episode.
-	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
+	warnedCooldown, warnedMax, warnedOpen, warnedResolve, warnedStale, warnedFlagged, erroredMax bool
 }
 
 func (ps *pipeState) sig(id string) *sigState {
@@ -327,6 +355,12 @@ func New(d Deps) (*Watcher, error) {
 	if cfg.Cooldown <= 0 {
 		cfg.Cooldown = 60 * time.Minute
 	}
+	if cfg.JoinMaxAge <= 0 {
+		cfg.JoinMaxAge = 2 * time.Hour // config.DefaultWatchJoinMaxAge
+	}
+	if cfg.EscalateAfter < 0 {
+		cfg.EscalateAfter = 0 // never, as "0" means
+	}
 	w := &Watcher{
 		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
@@ -377,7 +411,8 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return nil
 	}
 	w.log.Info("watch: started", "mode", string(w.cfg.Mode), "interval", w.cfg.Interval.String(),
-		"check_timeout", w.cfg.CheckTimeout.String(), "cooldown", w.cfg.Cooldown.String())
+		"check_timeout", w.cfg.CheckTimeout.String(), "cooldown", w.cfg.Cooldown.String(),
+		"join_max_age", w.cfg.JoinMaxAge.String(), "escalate_after", w.cfg.EscalateAfter.String())
 	timer := w.clock.NewTimer(0) // the first tick is at once
 	defer timer.Stop()
 	for {
@@ -438,11 +473,13 @@ func (w *Watcher) tick(ctx context.Context) {
 }
 
 // OnRoomClosed tells the watcher that the driver closed a room. Wire it to the
-// room service's room-closed hook. Signals that still fire in the pipeline
-// become acked: the same incident does not open another room, and the watcher
-// stays quiet until the signal clears. pipelineID and dedupKey are unused: the
-// room is found by roomID, so a storm room acks every pipeline that posts into
-// it, whatever key it was opened under.
+// room service's room-closed hook. The room's incident (the signal keys it was
+// told about) goes into cooldown, and signals that still fire in the pipeline
+// become acked: the same incident does not open another room until the signal
+// clears or, with EscalateAfter set, until it has kept firing that long. A
+// signal outside the incident opens or joins a room at once. pipelineID and
+// dedupKey are unused: the room is found by roomID, so a storm room acks every
+// pipeline that posts into it, whatever key it was opened under.
 func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -452,27 +489,47 @@ func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 	// Remember every close, whatever the key: a post or an open may still be on
 	// its way back, and recordPost must not take a closed room as its own.
 	w.markClosedLocked(roomID)
+	now := w.clock.Now()
 	// Every pipeline that posts into this room is acked: the owner, and the
-	// followers of a storm room.
+	// followers of a storm room. A room the pipeline left when its signals
+	// cleared only cools its incident, so a flap stays quiet.
 	for id, ps := range w.pipes {
+		var told []string
+		known := false
+		if i := ps.toldIndex(roomID); i >= 0 {
+			told, known = slices.Clone(ps.told[i].keys), true
+		}
+		ps.coolRoom(roomID, now)
 		if ps.roomID == roomID {
-			w.ackLocked(id, ps, roomID)
+			w.ackLocked(id, ps, roomID, told, known)
 		}
 	}
 }
 
-// ackLocked turns firing signals into acked and forgets the room.
-func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
+// ackLocked turns the firing signals the closed room carried into acked, puts
+// their keys into cooldown and forgets the room. told are the keys the room was
+// told about (known is false when the watcher never recorded any, such as after
+// a restart: every notified signal is then taken as carried). A signal the room
+// never heard about stays firing and unnotified, so the next tick opens or joins
+// a room for it (QA Q2 F3). Caller holds w.mu.
+func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string, told []string, known bool) {
+	now := w.clock.Now()
 	for id, ss := range ps.sigs {
 		if ss.phase == phaseFiring {
+			if !ss.notified || (known && !carried(told, ss.keys(id))) {
+				ss.notified = false
+				continue
+			}
 			ss.ack()
+			ss.ackedAt = now
+			ps.cool(ss.keys(id), roomID, now)
 			w.log.Info("watch: signal acked, room closed while it still fires",
 				"mode", string(w.cfg.Mode), "pipeline", pipelineID, "signal", id, "room", roomID)
 		}
 	}
 	ps.roomID, ps.owned, ps.follower = "", false, false
-	ps.lastClosed = w.clock.Now()
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
+	ps.warnedStale, ps.warnedFlagged, ps.erroredMax = false, false, false
 }
 
 // Targets returns how many pipelines the watcher looks at: enabled, with at
@@ -490,4 +547,14 @@ func (w *Watcher) openOwned() int {
 		}
 	}
 	return n
+}
+
+// carried reports whether every key is among told.
+func carried(told, keys []string) bool {
+	for _, k := range keys {
+		if !slices.Contains(told, k) {
+			return false
+		}
+	}
+	return true
 }

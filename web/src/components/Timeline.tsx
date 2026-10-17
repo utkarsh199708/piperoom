@@ -1,10 +1,11 @@
 import { PersonName } from '@/components/VerifiedBadge'
 import { createContext, useContext, useEffect, useId, useRef, useState } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
+import { plainText } from '@/lib/title'
 import { emptyStateFor } from '../lib/emptyState'
-import type { FormEvent } from 'react'
-import { Check, ChevronRight, Copy, X } from 'lucide-react'
-import type { AgentMessageState, ChecklistTick, CommentState, StepState, ToolCallState } from '../state/types'
+import type { ComponentProps, FormEvent } from 'react'
+import { Check, ChevronRight, Copy, Wrench, X } from 'lucide-react'
+import type { AgentMessageState, ChecklistTick, CommentState, PageState, StepState, ToolCallState } from '../state/types'
 import type { ToolCall } from '../api/types'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
 import type { SendControls, SendOptions } from '../hooks/useRoom'
@@ -19,10 +20,12 @@ import { Clock } from './room/Clock'
 import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
-import { stepAnchor } from '@/lib/triage'
+import { StepNumbersProvider } from './room/AgentText'
+import { REVEAL_STEP_EVENT, stepAnchor } from '@/lib/triage'
 import { evidenceFor } from '@/lib/evidence'
 import { Raw } from './room/evidence/Raw'
 import { Checklist } from './room/Checklist'
+import { PagesList } from './room/PagesList'
 import type { ChecklistAccess } from './room/Checklist'
 import type { ChecklistStepDonePayload } from '../api/types'
 
@@ -227,16 +230,27 @@ function CommentThread({
     void send()
   }
 
+  // A logged fix (Q0, G10) is a record of what a person did, not a remark: it gets its own tint and label.
+  const fix = comment.kind === 'fix_note'
   return (
-    <div className="flex flex-col gap-1.5">
+    <div
+      className={cn('flex flex-col gap-1.5', fix && 'rounded-md border border-success-foreground/30 bg-success-subtle px-2.5 py-2')}
+      data-kind={fix ? 'fix_note' : undefined}
+    >
       <div className="flex items-start gap-2">
         <PersonAvatar actor={comment.author} size={20} className="mt-px" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
             <PersonName person={comment.author} nameClassName="font-medium" />
+            {fix && (
+              <Badge variant="success" className="self-center">
+                <Wrench className="size-3" aria-hidden="true" />
+                Fix note
+              </Badge>
+            )}
             <Clock iso={comment.at} className="text-xs text-subtle-foreground" />
           </div>
-          <p className="m-0 break-words text-muted-foreground">{comment.text}</p>
+          <p className="m-0 break-words text-muted-foreground">{plainText(comment.text, Infinity)}</p>
         </div>
       </div>
       {comment.replies.map((r, i) => (
@@ -539,7 +553,16 @@ function LiveStep({
   )
 }
 
-export function Timeline({
+// The agent prose in the timeline links its step ids to the rows of these steps.
+export function Timeline(props: ComponentProps<typeof TimelineBody>) {
+  return (
+    <StepNumbersProvider steps={props.steps} proposalIds={props.proposalIds}>
+      <TimelineBody {...props} />
+    </StepNumbersProvider>
+  )
+}
+
+function TimelineBody({
   steps,
   messages,
   comments,
@@ -551,11 +574,15 @@ export function Timeline({
   checklist,
   filterLayer,
   onClearFilter,
+  pages = [],
+  ownerNames,
   shadow = false,
   citedStep,
   sends,
 }: {
   steps: StepState[]
+  /** Proposal ids of the room: a raw id in agent prose links to its card. */
+  proposalIds?: readonly string[]
   messages: AgentMessageState[]
   comments: CommentState[]
   onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
@@ -572,6 +599,10 @@ export function Timeline({
   /** Show only steps that called a tool of this layer (the live step is always kept). */
   filterLayer?: string
   onClearFilter?: () => void
+  /** The owner pages of the room (Q0, G2), shown even before the agent has done a step. */
+  pages?: PageState[]
+  /** user id -> display name, for the owners a page names. */
+  ownerNames?: Record<string, string>
   /** Shadow room: the agent works silently, so the empty state neither reports it nor offers a steer. */
   shadow?: boolean
   /** The step a hypothesis chip asked for: it opens, scrolls into view and flashes (F3). */
@@ -579,26 +610,40 @@ export function Timeline({
   /** RoomActions.sends: a reply box's failed send that lands takes its Retry down; an edit cancels it. */
   sends?: SendControls
 }) {
+  // QA R18 (G11): a step link to a step that the layer filter hides clears the filter.
+  useEffect(() => {
+    if (!filterLayer || !onClearFilter) return
+    const onReveal = (e: Event) => {
+      const id = (e as CustomEvent<string>).detail
+      const step = steps.find((s) => s.id === id)
+      if (step && !step.tool_calls.some((t) => toolLayer(t.tool) === filterLayer)) onClearFilter()
+    }
+    window.addEventListener(REVEAL_STEP_EVENT, onReveal)
+    return () => window.removeEventListener(REVEAL_STEP_EVENT, onReveal)
+  }, [steps, filterLayer, onClearFilter])
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
     const empty = emptyStateFor(agent, shadow)
     return (
-      <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">
-        <PersonAvatar actor={AGENT} size={28} className={empty.busy ? 'animate-pulse' : 'opacity-70'} />
-        <p className="m-0 text-base font-medium">{empty.title}</p>
-        {empty.hint && <p className="m-0 max-w-[48ch] text-muted-foreground">{empty.hint}</p>}
-        {empty.offerSteer && onTakeControl && (
-          <p className="m-0 max-w-[48ch] text-muted-foreground">
-            Take control and send a steer to start. A good first steer: &ldquo;check the consumer lag and look for a
-            stuck partition&rdquo;.
-          </p>
-        )}
-        {empty.offerSteer && onTakeControl && (
-          <Button className="mt-1" aria-keyshortcuts="T" onClick={onTakeControl}>
-            Take control and steer
-            <Kbd aria-hidden="true">T</Kbd>
-          </Button>
-        )}
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">
+          <PersonAvatar actor={AGENT} size={28} className={empty.busy ? 'animate-pulse' : 'opacity-70'} />
+          <p className="m-0 text-base font-medium">{empty.title}</p>
+          {empty.hint && <p className="m-0 max-w-[48ch] text-muted-foreground">{empty.hint}</p>}
+          {empty.offerSteer && onTakeControl && (
+            <p className="m-0 max-w-[48ch] text-muted-foreground">
+              Take control and send a steer to start. A good first steer: &ldquo;check the consumer lag and look for a
+              stuck partition&rdquo;.
+            </p>
+          )}
+          {empty.offerSteer && onTakeControl && (
+            <Button className="mt-1" aria-keyshortcuts="T" onClick={onTakeControl}>
+              Take control and steer
+              <Kbd aria-hidden="true">T</Kbd>
+            </Button>
+          )}
+        </div>
+        <PagesList pages={pages} names={ownerNames} />
       </div>
     )
   }
@@ -663,6 +708,8 @@ export function Timeline({
             )
           })}
         </ol>
+
+        <PagesList pages={pages} names={ownerNames} />
 
         {unanchored.length > 0 && (
           <section aria-label="Room comments" className="flex flex-col gap-2.5 pt-2">

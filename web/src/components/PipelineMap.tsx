@@ -36,7 +36,7 @@ export const EDGE =
   'relative h-0 w-11 shrink-0 self-start border-t-2 border-dashed border-input ' +
   "after:absolute after:-right-px after:-top-[5px] after:border-y-4 after:border-r-0 after:border-l-[6px] after:border-solid after:border-y-transparent after:border-l-input after:content-['']"
 export const EDGE_STALLED =
-  'relative h-0 w-16 shrink-0 self-start border-t-2 border-solid border-destructive ' +
+  'relative h-0 w-28 shrink-0 self-start border-t-2 border-solid border-destructive ' +
   "after:absolute after:-right-px after:-top-[5px] after:border-y-4 after:border-r-0 after:border-l-[6px] after:border-solid after:border-y-transparent after:border-l-destructive after:content-['']"
 
 // The line sits at the middle of the node: 27px of a 56px compact strip, 38px of a 92px card.
@@ -78,7 +78,7 @@ function Node({
         aria-pressed={selected}
         onClick={onSelect}
         title={`owner: ${node.owner}`}
-        className={cn(shared, 'flex h-14 min-w-[168px] flex-1 basis-0 flex-col justify-center gap-0.5 px-3 py-1.5')}
+        className={cn(shared, 'flex min-h-14 min-w-[168px] max-w-[300px] grow shrink-0 basis-auto flex-col justify-center gap-0.5 overflow-hidden px-3 py-1.5')}
       >
         <span className="flex items-center gap-2 text-xs">
           <span className="whitespace-nowrap text-subtle-foreground">{KIND_LABEL[node.kind] ?? node.kind}</span>
@@ -87,7 +87,7 @@ function Node({
             {node.layer}
           </Badge>
         </span>
-        <span className="flex min-w-0 items-center gap-1.5 text-xs">
+        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xs">
           <span className="min-w-0 truncate font-mono text-sm font-medium" title={node.name}>
             {node.name}
           </span>
@@ -113,7 +113,7 @@ function Node({
       aria-pressed={selected}
       onClick={onSelect}
       title={`owner: ${node.owner}`}
-      className={cn(shared, 'flex min-h-[92px] min-w-[200px] flex-1 basis-0 flex-col gap-1.5 px-3 py-2.5')}
+      className={cn(shared, 'flex min-h-[92px] min-w-[200px] max-w-[320px] grow shrink-0 basis-auto flex-col gap-1.5 overflow-hidden px-3 py-2.5')}
     >
       <div className="flex items-center gap-2">
         <span className="whitespace-nowrap text-xs text-subtle-foreground">{KIND_LABEL[node.kind] ?? node.kind}</span>

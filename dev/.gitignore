@@ -1,0 +1,2 @@
+# Logs the dev stack writes on the host (the Connect worker log, QA G3).
+/.logs/

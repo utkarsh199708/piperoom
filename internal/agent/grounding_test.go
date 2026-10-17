@@ -61,7 +61,11 @@ func TestGroundTermsCapsCountAndLength(t *testing.T) {
 func hypoWith(t *testing.T, r *runner, text string, steps ...string) (toolResult, events.AgentHypothesisPayload) {
 	t.Helper()
 	b, _ := json.Marshal(map[string]any{"text": text, "based_on_steps": steps, "confidence": "medium"})
-	sink := r.deps.Sink.(*fakeSink)
+	sink, ok := r.deps.Sink.(*fakeSink)
+	if !ok {
+		// newRunner wraps the sink in the message guard.
+		sink = r.deps.Sink.(*guardedSink).inner.(*fakeSink)
+	}
 	before := len(sink.ofType(events.AgentHypothesis))
 	res := r.runRoomTool(context.Background(), toolUse{id: "tu_h", name: "update_hypothesis", input: b})
 	var p events.AgentHypothesisPayload
@@ -149,12 +153,12 @@ func handoffLog() []events.Event {
 }
 
 const (
-	badSummary  = `{"what_broke":"warehouse stale","why":"see p_01J0000000000000000000000Z","done":[],"ruled_out":[],"open":[],"risks":[]}`
-	goodSummary = `{"what_broke":"warehouse stale","why":"amount changed","done":[],"ruled_out":[],"open":[],"risks":[]}`
+	badSummary      = `{"what_broke":"warehouse stale","why":"see p_01J0000000000000000000000Z","done":[],"ruled_out":[],"open":[],"risks":[]}`
+	groundedSummary = `{"what_broke":"warehouse stale","why":"amount changed","done":[],"ruled_out":[],"open":[],"risks":[]}`
 )
 
 func TestWriteHandoffRetriesOnceOnViolations(t *testing.T) {
-	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(badSummary), handoffText(goodSummary)}}
+	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(badSummary), handoffText(groundedSummary)}}
 	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, m)
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +185,7 @@ func TestWriteHandoffRetriesOnceOnViolations(t *testing.T) {
 }
 
 func TestWriteHandoffNoRetryWhenClean(t *testing.T) {
-	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(goodSummary)}}
+	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(groundedSummary)}}
 	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, m)
 	if err != nil || len(m.calls) != 1 {
 		t.Fatalf("err = %v, %d calls", err, len(m.calls))

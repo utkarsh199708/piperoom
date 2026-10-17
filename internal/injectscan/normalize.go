@@ -9,8 +9,11 @@ import (
 // normalize undoes the cheap tricks that hide an instruction from a plain
 // pattern match. The standard library has no NFKC, so this is a small, fixed
 // mapping:
-//   - Unicode tag characters that mirror ASCII (U+E0020..U+E007E) map to
-//     that ASCII, so text hidden in them is scanned like visible text;
+//   - Unicode tag characters U+E0020..U+E007E map to the ASCII they mirror
+//     (they spell text invisibly, Q6 U1), so text hidden in them is scanned
+//     like visible text, and a run of them is set off by a space on each side
+//     so its first and last words stand alone; the other tag characters are
+//     dropped;
 //   - other format characters (Unicode Cf: zero-width space/joiners, word joiner,
 //     BOM, soft hyphen, bidi embeddings/overrides/isolates) and variation
 //     selectors are dropped, and so are combining marks (Mn), so "i̇gnore"
@@ -33,8 +36,22 @@ func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, had
 	b.Grow(len(s))
 	origin = make([]int, 0, len(s)+1)
 	inSpace, newlines := false, 0
+	inTag := false
 	for i, r := range s {
 		m, keep := mapRune(r)
+		if a, ok := tagASCII(r); ok {
+			m, keep = a, true
+		}
+		if tag := isTagRune(r) && keep; tag != inTag {
+			// Entering or leaving a decoded tag run: a word boundary.
+			inTag = tag
+			changed = true
+			if !inSpace && b.Len() > 0 {
+				b.WriteByte(' ')
+				origin = append(origin, i)
+				inSpace, newlines = true, 0
+			}
+		}
 		if !keep {
 			changed = true
 			if !unicode.Is(unicode.Cf, r) {

@@ -53,6 +53,10 @@ type watchRoomService interface {
 	OpenRoomForPipeline(pipelineID string) (roomID string, ok bool)
 	LastRoomForKey(pipelineID, dedupKey string) (roomID string, closedAt *time.Time, ok bool)
 	PostRoomNote(ctx context.Context, roomID, text string) error
+	// Q1: room info, evidence and incident joins (watch_q1.go).
+	watchIncidentService
+	// Q3: room keys and title flags (watch_q3.go).
+	watchQ3Service
 }
 
 // watchRooms adapts the room service to watch.RoomSink. It only translates
@@ -89,7 +93,12 @@ func (r watchRooms) LastRoomForKey(pipelineID, dedupKey string) (string, *time.T
 // watch.ErrRoomClosed: the watcher only stops retrying on ErrRoomClosed, and a
 // room that is gone is as finished as a closed one.
 func (r watchRooms) PostEvidence(ctx context.Context, roomID, text string) error {
-	err := r.svc.PostRoomNote(ctx, roomID, text)
+	return watchPostErr(r.svc.PostRoomNote(ctx, roomID, text))
+}
+
+// watchPostErr maps the error of a post to a room for the watcher (see
+// PostEvidence); nil stays nil.
+func watchPostErr(err error) error {
 	if err == nil {
 		return nil
 	}

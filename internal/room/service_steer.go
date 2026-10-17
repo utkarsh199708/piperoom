@@ -25,7 +25,8 @@ func mentionsAgent(text string) bool {
 	return agentMention.MatchString(text)
 }
 
-// AddComment posts a comment; "@agent" in the text sets mentions_agent.
+// AddComment posts a plain comment; "@agent" in the text sets mentions_agent.
+// A fix note is AddCommentKind with events.CommentKindFixNote.
 func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, text string) (events.Event, error) {
 	return s.AddCommentKeyed(ctx, user, roomID, stepID, text, "")
 }
@@ -35,52 +36,7 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 // in the room answers the stored event, or 409 client_id_reused for another
 // body, before any other check.
 func (s *Service) AddCommentKeyed(ctx context.Context, user User, roomID, stepID, text, clientID string) (events.Event, error) {
-	if err := checkClientID(clientID); err != nil {
-		return events.Event{}, err
-	}
-	same := sameComment(stepID, text)
-	if e, done, err := s.repeatOf(ctx, roomID, user.ID, clientID, same); done {
-		return e, err
-	}
-	e, err := s.addComment(ctx, user, roomID, stepID, text, clientID)
-	if err != nil {
-		return s.raceLoser(ctx, roomID, user.ID, clientID, same, err)
-	}
-	return e, nil
-}
-
-func (s *Service) addComment(ctx context.Context, user User, roomID, stepID, text, clientID string) (events.Event, error) {
-	if strings.TrimSpace(text) == "" {
-		return events.Event{}, validation("text is required")
-	}
-	if err := rejectUnstorable(stepID, text); err != nil {
-		return events.Event{}, err
-	}
-	if err := checkLen("text", text, MaxMessageChars); err != nil {
-		return events.Event{}, err
-	}
-	// Shared store: fold what other replicas wrote, reading outside the lock.
-	s.syncRoom(ctx, roomID)
-	st, err := s.lockRoom(ctx, roomID)
-	if err != nil {
-		return events.Event{}, err
-	}
-	defer s.unlockRoom(st)
-	if !s.roomOpen(st) {
-		return events.Event{}, roomClosed("room is closed")
-	}
-	payload := events.CommentAddedPayload{
-		CommentID:     NewID("c_"),
-		StepID:        stepID,
-		Text:          text,
-		MentionsAgent: mentionsAgent(text),
-		ClientID:      clientID,
-	}
-	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
-	if err == nil && payload.MentionsAgent {
-		s.ensureAgentLocked(roomID, st)
-	}
-	return e, err
+	return s.AddCommentKindKeyed(ctx, user, roomID, stepID, text, "", clientID)
 }
 
 // Steer sends an instruction. The driver's steer goes straight to the agent

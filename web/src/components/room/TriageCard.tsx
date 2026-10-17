@@ -1,6 +1,6 @@
 import type { RoomState } from '@/state/types'
 import { Badge, layerVariant } from '@/components/ui/badge'
-import { TRIAGE_FAILED_SHOW_MS, triageReasonText, triageStepNumbers } from '@/lib/triage'
+import { TRIAGE_FAILED_SHOW_MS, goToStep, triageReasonText, triageStepNumbers } from '@/lib/triage'
 import { useNow } from './useNow'
 
 // The triage pass's first look (F6) under the room title: the one-line diagnosis the
@@ -69,7 +69,7 @@ export function TriageCard({
                   key={r.id}
                   type="button"
                   aria-label={`Go to step ${r.n}`}
-                  onClick={() => onCite?.(r.id)}
+                  onClick={() => (onCite ? onCite(r.id) : goToStep(r.id))}
                   className="rounded-sm border border-border px-1 font-mono text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring coarse:min-h-11 coarse:min-w-11"
                 >
                   {r.n}

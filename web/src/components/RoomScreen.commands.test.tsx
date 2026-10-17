@@ -44,6 +44,7 @@ const actions: RoomActions = {
 const driver: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'], role: 'member' }
 const other: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member' }
 const viewer: CurrentUser = { id: 'vera', name: 'Vera', layers: [], role: 'viewer' }
+const outsider: CurrentUser = { id: 'sam', name: 'Sam', layers: [], role: 'member' }
 
 function room(over: Partial<RoomState> = {}): RoomState {
   return {
@@ -103,18 +104,23 @@ describe('RoomScreen registers ⌘K room commands', () => {
     expect(offered(c)).toEqual(['closeRoom', 'exportJson', 'handoff', 'invite', 'postmortem', 'trace'])
   })
 
-  it('a non-driver can request control, trace and invite; not hand off or take control', () => {
-    const c = registered(other, room())
+  it('a non-driver can request control, trace and invite; not hand off, take control or close', () => {
+    const c = registered(outsider, room())
     expect(offered(c)).toEqual(['exportJson', 'invite', 'postmortem', 'requestControl', 'trace'])
     c?.requestControl?.()
     expect(actions.requestControl).toHaveBeenCalledTimes(1)
   })
 
+  it('a layer owner who is not the driver can also close the room (Q0, QA G16)', () => {
+    const c = registered(other, room())
+    expect(offered(c)).toEqual(['closeRoom', 'exportJson', 'invite', 'postmortem', 'requestControl', 'trace'])
+  })
+
   it('with no driver anyone can take control (it grants control to themselves)', () => {
-    const c = registered(other, room({ driver: null }))
+    const c = registered(outsider, room({ driver: null }))
     expect(offered(c)).toEqual(['exportJson', 'invite', 'postmortem', 'takeControl', 'trace'])
     c?.takeControl?.()
-    expect(actions.grantControl).toHaveBeenCalledWith('arjun')
+    expect(actions.grantControl).toHaveBeenCalledWith('sam')
   })
 
   it('a viewer gets no write command, export or post-mortem: only the invite link', () => {

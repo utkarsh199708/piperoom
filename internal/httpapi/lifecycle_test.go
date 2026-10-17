@@ -614,7 +614,8 @@ func TestLifecycle_OldDriverAfterHandoff(t *testing.T) {
 			wantError(t, e.do(t, http.MethodPost, "/api/rooms/"+snap.ID+"/suggestions/"+sp.SuggestionID+"/send", "", ck(priya)), http.StatusForbidden, "not_driver")
 			wantError(t, e.do(t, http.MethodPost, "/api/rooms/"+snap.ID+"/handoffs", `{"to":"meera"}`, ck(priya)), http.StatusForbidden, "not_driver")
 			wantError(t, e.do(t, http.MethodPost, "/api/rooms/"+snap.ID+"/control/grant", `{"to":"priya"}`, ck(priya)), http.StatusConflict, "lease_held")
-			wantError(t, e.do(t, http.MethodPost, "/api/rooms/"+snap.ID+"/close", `{"resolution":"done"}`, ck(priya)), http.StatusForbidden, "not_driver")
+			// She may still close the room: she owns its postgres layer (Q0,
+			// QA G16; TestCloseRouteWho covers who may close).
 
 			// Every steer.sent after the accept is the new driver's.
 			if ev := event(t, e.do(t, http.MethodPost, "/api/rooms/"+snap.ID+"/steer", `{"text":"check the slot"}`, ck(next))); ev.Type != events.SteerSent {

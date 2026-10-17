@@ -366,9 +366,14 @@ func listDigest(s *room.RoomSnapshot) [32]byte {
 		Suggestions int          `json:"suggestions"`
 		ClosedAt    *time.Time   `json:"closed_at"`
 		Resolution  string       `json:"resolution"`
+		// Pages and flags drive the web PagedBanner and the title warning,
+		// which read them from the list in push mode (Q2 F4).
+		Pages      []room.Page `json:"pages"`
+		TitleFlags []string    `json:"title_flags"`
 	}{
 		Status: s.Status, Title: s.Title, Severity: s.Severity, Agent: s.AgentStatus.State,
 		Triage: s.Triage, Suggestions: len(s.PendingSuggestions), ClosedAt: s.ClosedAt, Resolution: s.Resolution,
+		Pages: s.Pages, TitleFlags: s.TitleFlags,
 	}
 	if s.Driver != nil {
 		d.Driver, d.LeaseGone = s.Driver.ID, s.Driver.LeaseExpired

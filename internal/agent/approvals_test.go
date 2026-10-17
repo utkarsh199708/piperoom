@@ -297,7 +297,7 @@ func TestApprovalTwoProposalsOneSettlesOneTimesOut(t *testing.T) {
 	inbox := &pushInbox{pending: append(bothApprove("p_1"), bothApprove("p_2")...)}
 	model := &scriptedModel{}
 	r, clk, _ := waitRunner(t, model, inbox)
-	r.proposals.record("p_2", compatSteps("BACKWARD"))
+	r.proposals.record("p_2", compatSteps("BACKWARD"), nil)
 	inbox.steps = []func(context.Context) error{inbox.deliver(bothResults("p_1")...), timeoutStep(clk)}
 
 	if err := r.run(context.Background()); err != nil {
@@ -547,7 +547,7 @@ func TestApprovalForUnknownProposalDoesNotWait(t *testing.T) {
 // event replayed after a restart) completes nothing, so there is no wait.
 func TestApprovalWithoutFieldsDoesNotComplete(t *testing.T) {
 	tr := newProposalTracker()
-	tr.record("p_1", compatSteps("BACKWARD"))
+	tr.record("p_1", compatSteps("BACKWARD"), nil)
 	for _, layer := range []string{"schema-registry", "kafka-connect"} {
 		tr.observe(HumanInput{Kind: "approval_result", Text: fmt.Sprintf("layer %q approved proposal p_1", layer)})
 	}
@@ -574,7 +574,7 @@ func TestApprovalWithoutFieldsDoesNotComplete(t *testing.T) {
 func TestApprovalFlowStates(t *testing.T) {
 	newTracker := func() *proposalTracker {
 		tr := newProposalTracker()
-		tr.record("p_1", compatSteps("BACKWARD")) // layers: schema-registry, kafka-connect; last step 1
+		tr.record("p_1", compatSteps("BACKWARD"), nil) // layers: schema-registry, kafka-connect; last step 1
 		return tr
 	}
 	pending := func(tr *proposalTracker) bool { return len(tr.awaiting()) == 1 }
@@ -733,7 +733,7 @@ func TestCompatRestoreOfTrackedSubjectIsConfigOnlyAndClearsTracking(t *testing.T
 		}
 	}}
 	r, _ = newCompatRunner(t, hook, inbox, sink, compatSteps("NONE"), compatEnv{warehouse: warehouse, levelFn: func() string { return level }})
-	r.proposals.record("p_2", restoreSteps())
+	r.proposals.record("p_2", restoreSteps(), nil)
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -750,7 +750,7 @@ func TestCompatRestoreOfTrackedSubjectIsConfigOnlyAndClearsTracking(t *testing.T
 			t.Fatalf("unexpected NOT recovered verdict: %q", m)
 		}
 	}
-	vs := verifications(sink)
+	vs := verifications(t, sink)
 	if len(verdicts) != 2 || len(vs) != 2 || vs[1].DataFlow == nil || !strings.Contains(vs[1].DataFlow.Detail, "information only") {
 		t.Fatalf("the restore must be judged config-only, got %q %+v", verdicts, vs)
 	}

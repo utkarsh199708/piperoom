@@ -286,9 +286,10 @@ func (w *Watcher) recordConnector(ctx context.Context, now time.Time, t target, 
 	}
 	cb := base.conns[name]
 	if cb == nil {
-		cb = &connBase{states: cur}
+		cb = &connBase{states: map[string]stateVal{}}
 		base.conns[name] = cb
-	} else {
+	}
+	{
 		objects := make([]string, 0, len(cur))
 		for o := range cur {
 			objects = append(objects, o)
@@ -298,7 +299,15 @@ func (w *Watcher) recordConnector(ctx context.Context, now time.Time, t target, 
 			now2 := cur[obj]
 			old, seen := cb.states[obj]
 			if !seen {
-				cb.states[obj] = now2 // a new task: baseline only
+				// First sighting (watcher start or restart, a new task): a
+				// RUNNING object is only the baseline. Any other state is
+				// recorded, so a pause from before the start still shows in
+				// what_changed (QA S8).
+				if now2.state == "RUNNING" || w.storedState(ctx, t, obj) == now2.state || w.writeFirstSeen(ctx, now, t, obj, now2) {
+					cb.states[obj] = now2
+				} else {
+					ok = false
+				}
 				continue
 			}
 			if old.state == now2.state {
@@ -377,6 +386,55 @@ func (w *Watcher) recordConnector(ctx context.Context, now time.Time, t target, 
 		ok = false
 	}
 	return ok
+}
+
+// storedState is the state of the newest stored connector_state row of obj,
+// or ""
+// when there is none or the store cannot be read (a store without ChangeReader,
+// an error): the first sighting is then recorded as before. A restart that
+// sees the stored state again records nothing (Q6 U7).
+func (w *Watcher) storedState(ctx context.Context, t target, obj string) string {
+	r, ok := w.changes.(clients.ChangeReader)
+	if !ok {
+		return ""
+	}
+	rows, err := call(ctx, w.cfg.CheckTimeout, "list changes", func(cc context.Context) ([]clients.PipelineChange, error) {
+		return r.ListChanges(cc, t.p.ID, time.Time{}, time.Time{}, []string{clients.ChangeConnectorState}, 100)
+	})
+	if err != nil {
+		return ""
+	}
+	for _, c := range rows { // newest first
+		if c.Object != obj {
+			continue
+		}
+		var a struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal(c.After, &a) != nil {
+			return ""
+		}
+		return a.State
+	}
+	return ""
+}
+
+// writeFirstSeen records the state of an object the watcher sees for the
+// first time in a state other than RUNNING. When it changed is unknown: the
+// row is at the first sighting and says so. Its fingerprint holds the UTC day
+// instead of the time, so a restart on the same day does not write it again.
+func (w *Watcher) writeFirstSeen(ctx context.Context, now time.Time, t target, obj string, st stateVal) bool {
+	before := mustJSON(map[string]string{"state": "unknown"})
+	after := mustJSON(map[string]string{"state": st.state, "trace": oneLine(st.trace)})
+	summary := fmt.Sprintf("%s: %s (first seen by the watcher; changed before it started)", obj, st.state)
+	if st.trace != "" {
+		summary += " (" + oneLine(st.trace) + ")"
+	}
+	return w.write(ctx, clients.PipelineChange{
+		PipelineID: t.p.ID, Kind: clients.ChangeConnectorState, Object: obj, At: now, Source: "watcher",
+		Fingerprint: fingerprint(clients.ChangeConnectorState, obj, "first_seen", now.UTC().Format(time.DateOnly), string(after)),
+		Before:      before, After: after, Summary: summary,
+	})
 }
 
 func plural(n int, one, many string) string {

@@ -68,6 +68,20 @@ describe('VerificationCard', () => {
     expect(screen.getByText('Take control to close')).toBeInTheDocument()
   })
 
+  it('a layer owner who is not the driver can close too, once the panel hands them onClose (Q0, QA G16)', () => {
+    const onClose = vi.fn()
+    render(
+      <VerificationCard
+        verification={base}
+        title="Restart task"
+        nudge={{ roomOpen: true, isDriver: false, driver: { id: 'arjun', name: 'Arjun' }, onClose }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /Close room/ }))
+    expect(onClose).toHaveBeenCalledWith('Fixed by "Restart task"')
+    expect(screen.queryByText(/can close the room/)).not.toBeInTheDocument()
+  })
+
   it('no nudge once the room is closed', () => {
     render(<VerificationCard verification={base} title="t" nudge={{ ...nudge, roomOpen: false }} />)
     expect(screen.queryByText('Pipeline recovered.')).not.toBeInTheDocument()

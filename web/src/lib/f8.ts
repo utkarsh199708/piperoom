@@ -82,15 +82,14 @@ export interface SimilarHit {
   date: string
   fix_that_worked: string
   fix_actions: string[]
+  /** The layer a person labelled as the cause; '' when the room has no label. */
+  layer: string
   duration_s: number
   closed_by: string
   resolution: string
 }
 
-/** The top hit of a similar_incidents result, or null. `closed_by` is only ever the server's verified name. */
-export function topSimilarHit(data: unknown): SimilarHit | null {
-  if (!isObj(data) || !Array.isArray(data.hits) || data.hits.length === 0) return null
-  const h = data.hits[0]
+function readHit(h: unknown): SimilarHit | null {
   if (!isObj(h) || !str(h.room_id)) return null
   return {
     room_id: str(h.room_id),
@@ -98,10 +97,48 @@ export function topSimilarHit(data: unknown): SimilarHit | null {
     date: str(h.date) || str(h.closed_at) || str(h.opened_at),
     fix_that_worked: str(h.fix_that_worked),
     fix_actions: Array.isArray(h.fix_actions) ? h.fix_actions.filter((a): a is string => typeof a === 'string') : [],
+    layer: str(h.layer),
     duration_s: typeof h.duration_s === 'number' ? h.duration_s : 0,
     closed_by: str(h.closed_by),
     resolution: str(h.resolution),
   }
+}
+
+// The server's text for a room with no resolution to show (hitOf in similar_incidents).
+const NO_RESOLUTION = '(no resolution text)'
+
+/** The resolution to show: '' for none or for the server's placeholder (QA F20). */
+export function resolutionText(h: SimilarHit): string {
+  const r = h.resolution.trim()
+  return r === NO_RESOLUTION ? '' : r
+}
+
+/**
+ * Whether a hit is worth showing. The server's similar_incidents filter already requires a resolution,
+ * a hypothesis or label and enough events, and it withholds the resolution of an unverified closer; so
+ * the web trusts its selection and drops only a hit with nothing to show at all (QA F20).
+ */
+export function isUsableHit(h: SimilarHit): boolean {
+  return (
+    resolutionText(h) !== '' ||
+    h.title.trim() !== '' ||
+    h.fix_that_worked.trim() !== '' ||
+    h.fix_actions.length > 0 ||
+    h.layer.trim() !== ''
+  )
+}
+
+/**
+ * The best usable hit of a similar_incidents result (hits come best first), or null. Hits that are not
+ * worth showing are skipped, not just the first one. `closed_by` is only ever the server's verified name.
+ */
+export function topSimilarHit(data: unknown): SimilarHit | null {
+  if (!isObj(data) || !Array.isArray(data.hits)) return null
+  for (const raw of data.hits) {
+    const hit = readHit(raw)
+    if (hit && isUsableHit(hit)) return hit
+  }
+  return null
 }
 
 export interface RunbookHit {
@@ -146,7 +183,7 @@ export function latestChanges(steps: StepState[]): { changes: ChangeRow[]; seen:
 }
 
 
-/** The top hit of the newest similar_incidents result that has one. */
+/** The top usable hit of the newest similar_incidents result that has one. */
 export function latestSimilarHit(steps: StepState[]): SimilarHit | null {
   for (let i = steps.length - 1; i >= 0; i--) {
     const calls = steps[i].tool_calls

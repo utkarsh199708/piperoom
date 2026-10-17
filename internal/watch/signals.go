@@ -71,8 +71,11 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 		cr := classifyConnectors(t.connectors, obs, loops, t.cfg.ConnectorCrashLoop.Window)
 		if t.cfg.ConnectorDown.Enabled {
 			w.apply(now, t, ps, owners.SignalConnectorDown, t.cfg.ConnectorDown, cr.reading(), fired)
+			if r, ok := connectReading(now, t, ps, obs); ok {
+				w.apply(now, t, ps, SignalConnectUnreachable, connectUnreachableCfg(t.cfg), r, fired)
+			}
 		}
-		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
+		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled || t.cfg.SlotStall.Enabled {
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
 		}
 		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
@@ -92,15 +95,21 @@ func (w *Watcher) evaluateSlot(now time.Time, t target, ps *pipeState, cr connRe
 		if t.cfg.SlotWAL.Enabled {
 			w.apply(now, t, ps, owners.SignalSlotWAL, t.cfg.SlotWAL.WatchSignal, unknown, fired)
 		}
+		// slot_stall gets no reading (its state stays as it is): the slot_wal
+		// line already names the failure, once.
 		return
 	}
 	if t.cfg.SlotInactive.Enabled {
 		w.apply(now, t, ps, owners.SignalSlotInactive, t.cfg.SlotInactive, slotInactiveReading(ps.slot, row), fired)
 	}
 	if t.cfg.SlotWAL.Enabled {
+		hb := heartbeatOf(t, obs)
 		ss := ps.sig(owners.SignalSlotWAL)
-		r := w.slotWALReading(now, t, ps, ss, row, cr, heartbeatOf(t, obs))
+		r := w.slotWALReading(now, t, ps, ss, row, cr, hb)
 		w.apply(now, t, ps, owners.SignalSlotWAL, t.cfg.SlotWAL.WatchSignal, r, fired)
+	}
+	if t.cfg.SlotStall.Enabled {
+		w.apply(now, t, ps, SignalSlotStall, slotStallCfg(t.cfg), slotStallReading(now, t.cfg.SlotStall, ps.slot, &ps.stall, row, heartbeatOf(t, obs)), fired)
 	}
 }
 
@@ -192,8 +201,10 @@ type connResult struct {
 	anyUnknown bool
 	firstErr   error
 	sev        string
-	// parts are "pg-orders FAILED" style descriptions of the bad ones.
+	// parts are "pg-orders FAILED" style descriptions of the bad ones, names
+	// their connector names (the incident targets).
 	parts []string
+	names []string
 	ev    []map[string]any
 }
 
@@ -213,23 +224,24 @@ func classifyConnectors(names []string, obs *observation, loops map[string]loopI
 		case co == nil:
 			res.unknown(fmt.Errorf("watch: connector %s: not read", name))
 		case errors.Is(co.statusErr, clients.ErrNotFound):
-			res.bad("sev2", name+" missing", map[string]any{"name": name, "state": "MISSING"})
+			res.bad(name, "sev2", name+" missing", map[string]any{"name": name, "state": "MISSING"})
 		case co.statusErr != nil:
 			res.unknown(co.statusErr)
 		default:
 			sev, desc, ev := classifyOne(name, co.status, loops, window)
 			if desc != "" {
-				res.bad(sev, desc, ev)
+				res.bad(name, sev, desc, ev)
 			}
 		}
 	}
 	return res
 }
 
-func (c *connResult) bad(sev, desc string, ev map[string]any) {
+func (c *connResult) bad(name, sev, desc string, ev map[string]any) {
 	c.anyBad = true
 	c.sev = moreSevere(c.sev, sev)
 	c.parts = append(c.parts, desc)
+	c.names = append(c.names, name)
 	c.ev = append(c.ev, ev)
 }
 
@@ -327,7 +339,7 @@ func (c connResult) reading() reading {
 		}
 		return reading{
 			v: vBreach, sev: c.sev, label: label, withDur: true,
-			value: strings.Join(c.parts, ", "), threshold: "RUNNING", ev: ev,
+			value: strings.Join(c.parts, ", "), threshold: "RUNNING", ev: ev, targets: c.names,
 		}
 	case c.anyUnknown:
 		return reading{v: vUnknown, err: c.firstErr}
@@ -358,7 +370,7 @@ func slotRow(t target, ps *pipeState, obs *observation) (clients.ReplicationSlot
 		name = ps.slot
 	}
 	if name == "" {
-		return clients.ReplicationSlot{}, fmt.Errorf("watch: pipeline %s: slot name unknown (no watch.slot and no slot.name in the connector config)", t.p.ID)
+		return clients.ReplicationSlot{}, fmt.Errorf("watch: pipeline %s: slot name unknown (no watch.slot and no slot.name in a readable connector config; set watch.slot in owners.yaml so slot signals work while Kafka Connect is down)", t.p.ID)
 	}
 	for _, r := range obs.slots {
 		if r.Name == name {
@@ -438,6 +450,7 @@ func slotInactiveReading(slot string, row clients.ReplicationSlot) reading {
 		r.ev = nil
 	} else {
 		r.v = vBreach
+		r.targets = []string{slot}
 	}
 	return r
 }
@@ -489,6 +502,7 @@ func (w *Watcher) slotWALReading(now time.Time, t target, ps *pipeState, ss *sig
 		label:     slotWALLabel(ps.slot, row, fast, fastOK, slow, slowOK, e),
 		value:     fmtBytes(row.RetainedWALBytes),
 		threshold: fmt.Sprintf("fire %s clear %s", fmtBytes(sw.FireBytes), fmtBytes(sw.ClearBytes)),
+		targets:   []string{ps.slot},
 	}
 	switch {
 	case hardLost:

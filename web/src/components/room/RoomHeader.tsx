@@ -1,4 +1,5 @@
-import { Check, CircleCheck, Copy, Download, Ellipsis, Eye, FileText, Loader2, MoreHorizontal, Repeat2, ShieldAlert, UserPlus } from 'lucide-react'
+import { BellRing, Check, CircleCheck, Copy, Download, Ellipsis, Eye, FileText, Loader2, MoreHorizontal, Repeat2, ShieldAlert, UserPlus, Wrench } from 'lucide-react'
+import { plainText } from '@/lib/title'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -11,9 +12,11 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Kbd } from '@/components/ui/kbd'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { AgentPill } from './AgentPill'
+import { CostBadge } from './CostBadge'
 import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
+import { TitleFlagChip } from './TitleFlagChip'
 import { cn } from '@/lib/utils'
 import { PersonName, VerifiedBadge } from '@/components/VerifiedBadge'
 import { alertSourceLabel, alertVerification, neutralizeBadgeText, personVerification } from '@/lib/verification'
@@ -72,6 +75,8 @@ export function RoomHeader({
   onPostmortem,
   exporting = false,
   handoffBusy = false,
+  onPageOwner,
+  onLogFix,
   onCite,
 }: {
   state: RoomState
@@ -89,6 +94,10 @@ export function RoomHeader({
   onPostmortem?: () => void
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
   handoffBusy?: boolean
+  /** Ask a layer's owners to look (Q0, G2). Left out when this person may not page, or the room is closed. */
+  onPageOwner?: () => void
+  /** Log a fix made outside Piperoom (Q0, G10). Left out when this person may not, or a closed room is past 24 h. */
+  onLogFix?: () => void
   /** A first-look step chip was clicked. */
   onCite?: (stepId: string) => void
 }) {
@@ -106,7 +115,8 @@ export function RoomHeader({
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
-        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{state.title}</h1>
+        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{plainText(state.title, 300)}</h1>
+        <TitleFlagChip flags={state.title_flags} />
         <Badge variant={state.severity} className="uppercase">
           {state.severity}
         </Badge>
@@ -136,6 +146,7 @@ export function RoomHeader({
               View only
             </span>
           )}
+          <CostBadge state={state} />
           {/* The driver role and the agent are retired at close: no pill on a closed room. */}
           {!closed && <AgentPill state={state} />}
           {!closed && state.agent_status.state === 'error' && state.agent_status.detail && (
@@ -148,6 +159,18 @@ export function RoomHeader({
           )}
           {roomy ? (
             <>
+              {onPageOwner && (
+                <Button variant="outline" onClick={onPageOwner}>
+                  <BellRing aria-hidden="true" />
+                  Page owner
+                </Button>
+              )}
+              {onLogFix && (
+                <Button variant="outline" onClick={onLogFix}>
+                  <Wrench aria-hidden="true" />
+                  Log a fix
+                </Button>
+              )}
               {canHandoff(state, user) && (
                 <Button variant="secondary" aria-keyshortcuts="H" aria-busy={handoffBusy || undefined} onClick={onHandoff}>
                   {handoffBusy ? (
@@ -209,6 +232,18 @@ export function RoomHeader({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {onPageOwner && (
+                  <DropdownMenuItem onSelect={onPageOwner} className="coarse:min-h-11">
+                    <BellRing aria-hidden="true" />
+                    Page owner
+                  </DropdownMenuItem>
+                )}
+                {onLogFix && (
+                  <DropdownMenuItem onSelect={onLogFix} className="coarse:min-h-11">
+                    <Wrench aria-hidden="true" />
+                    Log a fix
+                  </DropdownMenuItem>
+                )}
                 {canHandoff(state, user) && (
                   <DropdownMenuItem aria-keyshortcuts="H" disabled={handoffBusy} onSelect={onHandoff} className="coarse:min-h-11">
                     <Repeat2 aria-hidden="true" />

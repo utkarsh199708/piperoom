@@ -1,5 +1,6 @@
 // Pure permission logic. Rules come from docs/api.md: only the driver steers,
 // only a layer owner can approve/reject a pending layer, etc.
+import { LAYERS } from '../api/types'
 import type { ApprovalValue } from '../api/types'
 import type { HandoffState, ProposalState, RoomState, SuggestionState } from './types'
 
@@ -14,6 +15,8 @@ export interface CurrentUser {
   role?: Role
   /** The IdP sent no groups claim, so group-based rights are not available. */
   groupsMissing?: boolean
+  /** `/api/me.groups` when the server sends it; page owners `group:<name>` match against it. */
+  groups?: string[]
   /** `/api/me.solo`: show the solo banner and ask for the typed confirm up front. */
   solo?: boolean
   /** `/api/me.verified` (server-set); absent in fixture mode, which counts as unverified. */
@@ -77,8 +80,23 @@ export function canHandoff(state: RoomState, user: CurrentUser): boolean {
   return !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
+/**
+ * Q0 (QA G16): an approver of any layer can close the room too, so the owner who fixed it does not
+ * have to be handed control first. `/api/me.layers` lists the layers the person approves; the solo
+ * user approves all of them.
+ */
+export function ownsAnyLayer(user: CurrentUser): boolean {
+  return user.solo === true || user.layers.some((l) => (LAYERS as readonly string[]).includes(l))
+}
+
+/** Offers Close; the server decides (403 not_driver for a layer of another pipeline). */
 export function canClose(state: RoomState, user: CurrentUser): boolean {
-  return !isViewer(user) && isOpen(state) && isDriver(state, user)
+  return !isViewer(user) && isOpen(state) && (isDriver(state, user) || ownsAnyLayer(user))
+}
+
+/** The driver can withdraw a proposal nobody has approved or run yet (Q0, QA G9). */
+export function canWithdraw(state: RoomState, user: CurrentUser, proposal: Pick<ProposalState, 'status'>): boolean {
+  return !isViewer(user) && isOpen(state) && isDriver(state, user) && proposal.status === 'open'
 }
 
 export function canSendSuggestionToAgent(

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"piperoom/internal/injectscan"
 	"piperoom/internal/store"
 )
 
@@ -67,24 +68,51 @@ const replacementChar = string(rune(0xFFFD))
 // write. Nothing is changed, because the person should see that the text did
 // not go through. The message never quotes the text.
 //
-// The bidi embedding, override and isolate controls are refused the same way
-// (#358): stored verbatim they reorder the text for every other reader of the
-// log (Slack, the notify webhook, exports, the post-mortem), which do not
-// strip them like the web app does.
+// The bidi embedding, override and isolate controls (U+202A–U+202E,
+// U+2066–U+2069) are refused the same way (#358, Q5 T8): stored verbatim they
+// reorder the text for every other reader of the log (Slack, the notify
+// webhook, exports, the post-mortem, the agent's prompt), which do not strip
+// them like the web app does. Text no person typed goes through checkStorable
+// instead: an alert title is kept as it arrived and flagged (title_flags,
+// injectscan.KindBidi; the snapshot title drops them), while watcher notes and
+// agent text drop them (stripBidi).
+//
+// Hidden text is refused the same way (Q6 U1): Unicode tag characters
+// (U+E0000–U+E007F), zero-width spaces and non-joiners, a zero-width joiner
+// outside an emoji sequence, the word joiner and invisible operators, soft
+// hyphen runs and a U+FEFF inside the text (injectscan.HasHiddenText). They
+// show nothing on screen but reach the model and the log, so a comment could
+// carry an instruction nobody in the room can read. A ZWJ inside an emoji
+// sequence stays allowed.
 func rejectUnstorable(fields ...string) error {
-	if err := store.CheckText(fields...); err != nil {
-		return validation(unstorableTextMsg)
+	if err := checkStorable(fields...); err != nil {
+		return err
 	}
 	for _, f := range fields {
-		if strings.IndexFunc(f, bidiControl) >= 0 {
+		if injectscan.HasBidiOverride(f) {
 			return validation(bidiTextMsg)
 		}
+		if injectscan.HasHiddenText(f) {
+			return validation(hiddenTextMsg)
+		}
+	}
+	return nil
+}
+
+// checkStorable refuses only what Postgres cannot hold (NUL, invalid UTF-8),
+// for text a person did not type.
+func checkStorable(fields ...string) error {
+	if err := store.CheckText(fields...); err != nil {
+		return validation(unstorableTextMsg)
 	}
 	return nil
 }
 
 // bidiTextMsg is the 400 message for typed text holding a bidi control.
 const bidiTextMsg = "text contains bidirectional control characters (U+202A-U+202E, U+2066-U+2069)"
+
+// hiddenTextMsg is the 400 message for typed text with invisible characters.
+const hiddenTextMsg = "text contains invisible characters (Unicode tag characters U+E0000–U+E007F, zero-width spaces or joiners, word joiner, U+FEFF); remove them and send again"
 
 // bidiControl reports the bidi embedding, override and isolate controls.
 func bidiControl(r rune) bool {

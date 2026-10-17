@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
@@ -47,6 +48,14 @@ func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPay
 	p.Title = sanitizeAgentText(p.Title)
 	p.Risk = sanitizeAgentText(p.Risk)
 	p.Rollback = sanitizeAgentText(p.Rollback)
+	p.RiskLevel = sanitizeAgentText(p.RiskLevel)
+	impacted := make([]string, len(p.ImpactedLayers))
+	for i, l := range p.ImpactedLayers {
+		impacted[i] = sanitizeAgentText(l)
+	}
+	p.ImpactedLayers = impacted
+	// Impact reasons are the server's (applyImpact), never the proposer's.
+	p.ImpactReasons = nil
 	steps := make([]events.ProposalStep, len(p.Steps))
 	for i, st := range p.Steps {
 		st.Action = sanitizeAgentText(st.Action)
@@ -62,8 +71,9 @@ func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPay
 }
 
 // CreateProposal validates every step against the actions registry and its
-// scope, derives the required approval layers from the step layers, and stores
-// the proposal (and its proposal.created event). It never executes anything.
+// scope, derives the required approval layers from the step layers and the
+// impacted layers (applyImpact), and stores the proposal (and its
+// proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
 	return s.createProposal(ctx, roomID, p, actor, nil)
 }
@@ -85,7 +95,9 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// The actions of the room's own pipeline (docs/design/tenancy.md): their
 	// Validate reads that pipeline's systems only.
 	acts := s.actionsFor(s.roomPipeline(ctx, roomID))
-	// Structural checks first: they do not need the room state.
+	// Structural checks first: they do not need the room state. Each valid
+	// step's actions.Impact is collected for applyImpact.
+	var impacts []actions.Impact
 	for i, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
 		if !ok {
@@ -104,6 +116,9 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		// approver would not see which value ran (see param_keys.go).
 		if err := checkParamKeys(a.ParamsSchema(), step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+		}
+		if im, ok := stepImpact(a, step.Params); ok {
+			impacts = append(impacts, im)
 		}
 	}
 
@@ -140,16 +155,17 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	}
 
 	// The required layers are the union of the step layers: a proposal needs
-	// approval from every layer it writes to, never fewer.
-	required := make([]string, 0, len(p.Steps))
+	// approval from every layer it writes to, never fewer. The layers whose
+	// data it changes without writing to them follow (QA G5).
+	stepLayers := make([]string, 0, len(p.Steps))
 	seen := map[string]bool{}
 	for _, step := range p.Steps {
 		if !seen[step.Layer] {
 			seen[step.Layer] = true
-			required = append(required, step.Layer)
+			stepLayers = append(stepLayers, step.Layer)
 		}
 	}
-	p.RequiredLayers = required
+	applyImpact(&p, stepLayers, impacts)
 
 	p.ProposalID = NewID("p_")
 	stepsJSON, err := json.Marshal(p.Steps)
@@ -184,7 +200,22 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	}); err != nil {
 		return "", err
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p); err != nil {
+	// Checked append: with a shared store another replica may have closed the
+	// room since the check above, and a proposal.created after room.closed
+	// would never be withdrawn (QA R7). A refused append removes the row below.
+	// A shadow room's agent events go to its own log (emitLocked).
+	emit := func() (events.Event, error) {
+		return s.emitCheckedLocked(ctx, st, roomID, func() error {
+			if !s.roomOpen(st) {
+				return roomClosed("room is closed")
+			}
+			return nil
+		}, events.ProposalCreated, actor, p)
+	}
+	if st.snap.Shadow {
+		emit = func() (events.Event, error) { return s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p) }
+	}
+	if _, err := emit(); err != nil {
 		dctx, cancel := compensateCtx(ctx)
 		defer cancel()
 		if delErr := s.store.DeleteProposal(dctx, p.ProposalID); delErr != nil {
@@ -241,6 +272,11 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")
+		}
+		// The close withdraws open proposals, so a closed room answers
+		// room_closed above; this is a withdrawal in an open room.
+		if p.Status == store.ProposalWithdrawn {
+			return errProposalWithdrawn()
 		}
 		// The solo confirm text is checked after the hash (below), so a stale
 		// solo user is told params_mismatch first.
@@ -322,6 +358,9 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
+	if p.Status == store.ProposalWithdrawn {
+		return events.Event{}, errProposalWithdrawn()
+	}
 	grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, "", false)
 	if err != nil {
 		return events.Event{}, err
@@ -364,9 +403,11 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 // was lost, the row still says open, and without the log check a later
 // approval would be logged for a rejected proposal. The row is repaired then,
 // best effort; the refusal does not depend on it. Caller holds st's lock, so
-// the snapshot holds every event of the room this replica has folded.
+// the snapshot holds every event of the room this replica has folded. A
+// withdrawn row passes: the caller answers room_closed or proposal_withdrawn
+// for it (the store withdraws only an open row, so the log never rejected it).
 func (s *Service) decisionLockedCheck(ctx context.Context, st *roomState, p store.ProposalRow) error {
-	if p.Status != "open" {
+	if p.Status != "open" && p.Status != store.ProposalWithdrawn {
 		return alreadyDecided("proposal already decided")
 	}
 	if !st.snap.rejected[p.ProposalID] {

@@ -52,7 +52,7 @@ describe('PresencePanel layers and state (F9)', () => {
     { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'] },
   ]
 
-  it('shows layer badges (at most 3, then +N) and away from the server-side since', () => {
+  it('shows every layer badge (they wrap, Q3 S9) and away from the server-side since', () => {
     const since = new Date(Date.now() - 12 * 60_000).toISOString()
     render(
       <PresencePanel
@@ -68,8 +68,7 @@ describe('PresencePanel layers and state (F9)', () => {
     const priya = screen.getByText('Priya').closest('li') as HTMLElement
     expect(within(priya).getByLabelText('owns postgres')).toBeInTheDocument()
     expect(within(priya).getByLabelText('owns kafka')).toBeInTheDocument()
-    expect(within(priya).queryByLabelText('owns consumer')).not.toBeInTheDocument()
-    expect(within(priya).getByText('+1')).toHaveAttribute('title', 'consumer')
+    expect(within(priya).getByLabelText('owns consumer')).toBeInTheDocument()
     expect(within(priya).getByText('away 12m')).toBeInTheDocument()
   })
 
@@ -202,6 +201,31 @@ describe('ProposalsSummary', () => {
     )
     expect(screen.getByText('Approved')).toBeInTheDocument()
     expect(screen.getByText('2 of 2')).toBeInTheDocument()
+  })
+
+  describe('after approval (Q6 U4)', () => {
+    const steps = [
+      { action: 'a', layer: 'kafka-connect', params: {} },
+      { action: 'b', layer: 'kafka-connect', params: {} },
+    ] as ProposalState['steps']
+    const approved = (over: Partial<ProposalState>) =>
+      proposal({ status: 'approved', approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' }, steps, ...over })
+    const ran = (i: number, ok = true, extra = {}) => ({ proposal_id: 'p1', step_index: i, ok, output: '', ...extra })
+    const verdict = (recovered: boolean, text: string) => ({ proposal_id: 'p1', checks: [], recovered, verdict: text })
+    const cases: [string, Partial<ProposalState>, string][] = [
+      ['executing', { executed: [ran(0)] }, 'Executing'],
+      ['executed, no verdict yet', { executed: [ran(0), ran(1)] }, 'Ran · verifying'],
+      ['a step failed', { executed: [ran(0), ran(1, false)] }, 'Step 2 failed'],
+      ['outcome unknown', { executed: [ran(0, false, { outcome_unknown: true })] }, 'Step 1 outcome unknown'],
+      ['recovered', { executed: [ran(0), ran(1)], verification: verdict(true, 'recovered: ok') }, 'Ran · recovered'],
+      ['NOT recovered', { executed: [ran(0), ran(1)], verification: verdict(false, 'NOT recovered: lag') }, 'Ran · not recovered'],
+      ['inconclusive', { executed: [ran(0), ran(1)], verification: verdict(false, 'inconclusive: idle') }, 'Ran · inconclusive'],
+    ]
+    it.each(cases)('%s', (_n, over, word) => {
+      render(<ProposalsSummary proposals={[approved(over)]} />)
+      expect(screen.getByText(word)).toBeInTheDocument()
+      expect(screen.queryByText('Approved')).not.toBeInTheDocument()
+    })
   })
 
   // "Approved 1 of 1" on a fix whose step failed, or that was verified NOT recovered, hides the news.

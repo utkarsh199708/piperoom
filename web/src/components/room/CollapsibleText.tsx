@@ -1,5 +1,6 @@
 import { useId, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { AgentText } from './AgentText'
 
 /** Prose longer than this (or with more lines) starts collapsed. */
 const COLLAPSE_CHARS = 280
@@ -14,13 +15,13 @@ function isLongText(text: string): boolean {
 export function CollapsibleText({ text, className }: { text: string; className?: string }) {
   const [open, setOpen] = useState(false)
   const id = useId()
-  if (!isLongText(text)) return <span className={className}>{text}</span>
+  if (!isLongText(text)) return <span className={cn('[overflow-wrap:anywhere]', className)}><AgentText text={text} /></span>
   return (
     // items-start sizes a child to its content, so without max-w-full one long line (a trace, a URL)
     // makes the text wider than its column and it overflows a phone screen instead of wrapping.
-    <span className={cn('flex min-w-0 max-w-full flex-col items-start gap-0.5', className)}>
-      <span id={id} className={cn('max-w-full whitespace-pre-line break-words', !open && 'line-clamp-3')}>
-        {text}
+    <span className={cn('flex w-full min-w-0 max-w-full flex-col items-start gap-0.5', className)}>
+      <span id={id} className={cn('block min-w-0 max-w-full whitespace-pre-line break-words [overflow-wrap:anywhere]', !open && 'line-clamp-3')}>
+        <AgentText text={text} />
       </span>
       <button
         type="button"

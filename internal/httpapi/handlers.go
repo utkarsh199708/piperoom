@@ -22,6 +22,9 @@ type meResponse struct {
 	Layers        []string `json:"layers"`
 	Role          string   `json:"role"`
 	GroupsMissing bool     `json:"groups_missing"`
+	// Groups are the caller's group names as the server knows them for layer
+	// checks (session groups for IdP users); [] when none, never null.
+	Groups []string `json:"groups"`
 	// Verified is true for a users.yaml person only (docs/design/auth.md
 	// section 2.1).
 	Verified bool `json:"verified"`
@@ -37,7 +40,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	writeJSON(w, http.StatusOK, meResponse{
 		ID: u.ID, Name: u.Name, Layers: s.svc.LayersFor(u), Role: roleFrom(r.Context()), GroupsMissing: u.GroupsMissing,
-		Verified: u.Verified, Solo: s.svc.IsSolo(u.ID), Admin: s.svc.IsAdmin(u),
+		Groups: append([]string{}, u.Groups...), Verified: u.Verified, Solo: s.svc.IsSolo(u.ID), Admin: s.svc.IsAdmin(u),
 	})
 }
 
@@ -166,8 +169,11 @@ func checkClientID(id *string) (string, error) {
 
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		StepID   string  `json:"step_id"`
-		Text     string  `json:"text"`
+		StepID string `json:"step_id"`
+		Text   string `json:"text"`
+		// Kind is "" or "fix_note" (Q0, QA G10); the service refuses anything
+		// else with 400 validation.
+		Kind     string  `json:"kind"`
 		ClientID *string `json:"client_id"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
@@ -179,7 +185,7 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.AddCommentKeyed(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.StepID, body.Text, clientID)
+	ev, err := s.svc.AddCommentKindKeyed(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.StepID, body.Text, body.Kind, clientID)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -269,12 +275,33 @@ func (s *Server) handleCreateHandoff(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		To            string `json:"to"`
 		StayAsWatcher bool   `json:"stay_as_watcher"`
+		// Summary is the driver's own summary (Q0, QA G4): when present, no
+		// model call is made. A struct of its own, not events.HandoffSummary,
+		// so the body cannot set violations.
+		Summary *struct {
+			WhatBroke string   `json:"what_broke"`
+			Why       string   `json:"why"`
+			Done      []string `json:"done"`
+			RuledOut  []string `json:"ruled_out"`
+			Open      []string `json:"open"`
+			Risks     []string `json:"risks"`
+		} `json:"summary"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.CreateHandoff(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.To, body.StayAsWatcher)
+	var (
+		ev  events.Event
+		err error
+	)
+	if m := body.Summary; m != nil {
+		ev, err = s.svc.CreateHandoffManual(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.To, body.StayAsWatcher, events.HandoffSummary{
+			WhatBroke: m.WhatBroke, Why: m.Why, Done: m.Done, RuledOut: m.RuledOut, Open: m.Open, Risks: m.Risks,
+		})
+	} else {
+		ev, err = s.svc.CreateHandoff(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.To, body.StayAsWatcher)
+	}
 	if err != nil {
 		s.writeErr(w, err)
 		return

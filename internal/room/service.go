@@ -163,6 +163,11 @@ type Deps struct {
 	// idempotent, so a room reported twice closes its sockets once. Nil means
 	// no-op.
 	OnRoomDeleted func(roomID string, deleted events.Event)
+
+	// Paging is owner.paged delivery and the automatic page of an undriven
+	// alert room (service_page.go, QA G2). The zero value pages in-app only
+	// and never pages on its own.
+	Paging Paging
 }
 
 type roomState struct {
@@ -196,6 +201,7 @@ type roomState struct {
 	inbox           *inbox
 	agentCancel     context.CancelFunc
 	agentRun        uint64             // generation of the latest agent start; see releaseAgent
+	agentDone       uint64             // agentRun of a run that ended on its own (markAgentDone); a new incident restarts it
 	execCancel      context.CancelFunc // cancels the room's executor on close
 	exec            *execQueue         // nil until the first proposal is approved
 	// dedupKey is the alert index key of an alert room; "" otherwise. It is
@@ -262,6 +268,7 @@ type Service struct {
 	tools        *tools.Registry
 	stackFor     func(pipelineID string) PipelineStack
 	topo         topology.Builder
+	preview      previewBudget
 	users        *Users
 	owners       *owners.Owners
 	run          agent.Runner
@@ -345,6 +352,9 @@ type Service struct {
 	list *listHub
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
+
+	// paging is Deps.Paging and its runtime state (service_page.go).
+	paging *pagingState
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -389,6 +399,7 @@ func New(d Deps) *Service {
 		tools:           tls,
 		stackFor:        d.StackFor,
 		topo:            topo,
+		preview:         defaultPreviewBudget,
 		users:           users,
 		owners:          d.Owners,
 		run:             run,
@@ -422,6 +433,7 @@ func New(d Deps) *Service {
 		alertRooms:      map[string]string{},
 		alertLocks:      newAlertLocks(),
 		list:            newListHub(),
+		paging:          newPagingState(d.Paging),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -497,6 +509,7 @@ func (s *Service) Load(ctx context.Context) error {
 	s.sweepPostmortems()
 	s.startCoordination()
 	s.startLeaseExpiry()
+	s.startAutoPage()
 	return nil
 }
 
@@ -622,10 +635,15 @@ func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *room
 		return err
 	}
 	_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
-		Text: "server restarted — the agent is paused; the driver can steer, or anyone can mention @agent, to resume",
+		Text: restartNoticeText,
 	})
 	return err
 }
+
+// restartNoticeText is the system message noteRestartLocked writes. It is
+// not room activity (foldRoomFacts): a restart must not make an old room look
+// recent to the watcher.
+const restartNoticeText = "server restarted — the agent is paused; the driver can steer, or anyone can mention @agent, to resume"
 
 // ensureAgentLocked starts the room's agent run if the room has none yet. A
 // room restored by Load has none until someone steers it or mentions the agent;
@@ -1040,13 +1058,42 @@ func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 }
 
 // executorEmit appends an event on behalf of the action executor.
+//
+// An action.executed also makes sure the room has an agent run to read it
+// (Q5 T1): the run that proposed the fix may be gone (a restart, a run that
+// ended on its own, one that gave up), and then nobody would verify the fix.
+// A room without a live run gets one, the way a steer starts one (agent
+// slots, the room lease); it reads the recap first and then the result. The
+// restart sweeps that record interrupted proposals write through emitLocked
+// and wake nothing: a restart spends no model calls on its own.
 func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
-	if p, ok := payload.(events.ActionExecutedPayload); ok {
-		// Mask before the cap: a cap must not cut a secret in two.
-		p.Output = s.capOutput(maskExecOutput(p.Output))
-		payload = p
+	p, executed := payload.(events.ActionExecutedPayload)
+	if !executed {
+		return s.emitAs(ctx, roomID, executorActor, typ, payload)
 	}
-	return s.emitAs(ctx, roomID, executorActor, typ, payload)
+	// Mask before the cap: a cap must not cut a secret in two.
+	p.Output = s.capOutput(maskExecOutput(p.Output))
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
+		return fmt.Errorf("room: emit on unknown room %q", roomID)
+	}
+	defer s.unlockRoom(st)
+	if _, err := s.emitLocked(ctx, st, roomID, typ, executorActor, p); err != nil {
+		return err
+	}
+	s.wakeForResultLocked(ctx, roomID, st)
+	return nil
+}
+
+// wakeForResultLocked starts a run for an action result when the room has no
+// live one (see executorEmit). Caller holds st's lock.
+func (s *Service) wakeForResultLocked(ctx context.Context, roomID string, st *roomState) {
+	if st.agentCancel != nil && st.agentDone != st.agentRun {
+		return // a live run reads the result from its inbox
+	}
+	if !s.wakeForIncidentLocked(ctx, roomID, st) {
+		s.log.Debug("room: action result recorded; the agent runs elsewhere or cannot start here", "room", roomID)
+	}
 }
 
 func (s *Service) emitAs(ctx context.Context, roomID string, actor events.Actor, typ events.Type, payload any) error {
@@ -1325,6 +1372,8 @@ func (s *Service) feedInput(st *roomState, in agent.HumanInput) {
 // inputFor converts an event into the agent.HumanInput it carries, or nil.
 func inputFor(e events.Event) *agent.HumanInput {
 	switch e.Type {
+	case events.AgentMessage:
+		return incidentInput(e) // service_watch.go; nil for other messages
 	case events.SteerSent:
 		p, ok := decode[events.SteerSentPayload](e)
 		if !ok {
@@ -1378,6 +1427,8 @@ func inputFor(e events.Event) *agent.HumanInput {
 			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
+	case events.ProposalWithdrawn:
+		return withdrawnInput(e) // service_withdraw.go
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
@@ -1471,6 +1522,9 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		// diagnosis. It runs once per room, never on a restart.
 		firstLook = s.startTriageLocked(ctx, roomID, run, agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw})
 	}
+	// fresh: the room's first run in this process right after it opened;
+	// every other run resumes an investigation and gets the recap (Q5 T1).
+	fresh := st.firstLook
 	st.firstLook = false
 	go func() {
 		defer s.wg.Done()
@@ -1483,6 +1537,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 			Sink:      roomSink{s: s, roomID: roomID, run: run},
 			Proposals: proposalCreator{s: s, roomID: roomID, run: run},
+			Pager:     roomPager{s: s, roomID: roomID, run: run}, // never a shadow room: startShadowLocked above
 			Logger:    s.log,
 		}
 		backoff := agentRetryBackoff
@@ -1517,12 +1572,18 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
 				firstLook = nil
 			}
+			if attempt > 1 || !fresh {
+				s.primeRecap(ctx, roomID, st)
+			}
 			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
 			// already written the idle status and the message, so no retry
 			// and no "error" status (agent.Runner contract).
 			if err == nil || ctx.Err() != nil || isBudgetStop(err) {
+				if err == nil && ctx.Err() == nil {
+					s.markAgentDone(st, run)
+				}
 				return
 			}
 			s.log.Warn("room: agent run returned error", "room", roomID, "attempt", attempt, "err", err)
@@ -1558,6 +1619,27 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			backoff *= 2
 		}
 	}()
+}
+
+// recapTimeout bounds the log read behind a run's recap.
+const recapTimeout = 10 * time.Second
+
+// primeRecap puts the room recap (service_recap.go) at the head of the
+// room's inbox, so a resumed run reads it before anything else. A failed read
+// only costs the run its context: it is logged, and the run starts anyway.
+func (s *Service) primeRecap(ctx context.Context, roomID string, st *roomState) {
+	rctx, cancel := context.WithTimeout(ctx, recapTimeout)
+	defer cancel()
+	in, err := s.buildRecap(rctx, roomID)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn("room: recap for a resumed agent run failed; the run starts without it", "room", roomID, "err", err)
+		}
+		return
+	}
+	if in != nil {
+		st.inbox.pushFront([]agent.HumanInput{*in})
+	}
 }
 
 // backoffAfter is time.After for the retry backoff, or the test's replacement.

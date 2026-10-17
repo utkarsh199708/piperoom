@@ -12,6 +12,7 @@ import (
 
 	"piperoom/internal/alertin"
 	"piperoom/internal/events"
+	"piperoom/internal/injectscan"
 	"piperoom/internal/store"
 )
 
@@ -186,8 +187,9 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if err := checkJSONBStorable(raw); err != nil {
 		return RoomSnapshot{}, false, err
 	}
-	title = stripBidi(title)
-	if err := rejectUnstorable(title); err != nil {
+	// Machine text: a bidi control or hidden text is flagged (title_flags),
+	// not refused; the snapshot title drops the hidden characters.
+	if err := checkStorable(title); err != nil {
 		return RoomSnapshot{}, false, err
 	}
 	if title == "" {
@@ -247,8 +249,10 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if resolved {
 		return RoomSnapshot{}, false, ErrResolvedAlertNoRoom
 	}
+	// The room list shows the title as the snapshot does: without hidden
+	// characters (room.created keeps them for title_flags).
 	if err := s.store.CreateRoom(ctx, store.Room{
-		ID: roomID, Title: title, Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
+		ID: roomID, Title: injectscan.StripHidden(title), Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
 	}); err != nil {
 		return RoomSnapshot{}, false, fmt.Errorf("room: create from alert: %w", err)
 	}
@@ -362,10 +366,14 @@ func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
 // evidence (alertUpdateLocked). Caller holds st's lock.
 func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string, raw json.RawMessage, resolved bool) (RoomSnapshot, error) {
 	text := fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title)
+	state := alertFiring
 	if resolved {
-		text = fmt.Sprintf("alert %q reported resolved at its source; the room stays open until the driver closes it", title)
+		text = fmt.Sprintf("alert %q %s", title, resolvedJoinSuffix)
+		state = alertResolved
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text})
+	e, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, incidentNotePayload{
+		AgentMessagePayload: events.AgentMessagePayload{Text: text}, AlertState: state,
+	})
 	if err != nil {
 		// A full log cannot take the note, but the alert still belongs to
 		// this room: answering an error would make the sender retry forever.
@@ -500,7 +508,11 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 	return evs, lastSeq, nil
 }
 
-// CloseRoom closes the room (driver only) and stops the agent.
+// CloseRoom closes the room and stops the agent. The driver may close it, and
+// so may an approver or backup of any layer of the room's pipeline (Q0, QA
+// G16: the owner who fixed it need not be handed control first); that is the
+// label and export rule (canGradeShadow: owners.yaml, users.yaml layers in dev
+// mode, the solo user). Anyone else gets 403 not_driver.
 func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution string) (events.Event, error) {
 	// The web app pre-fills the resolution from a proposal title, which a
 	// room logged before agent text was stripped may still carry bidi
@@ -511,7 +523,9 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	}
 	return s.closeRoom(ctx, roomID, s.humanActor(user), func(st *roomState) (string, error) {
 		if !s.isDriver(st, user.ID) {
-			return "", ErrNotDriver()
+			if _, owner := s.canGradeShadow(st.snap.PipelineID, user); !owner {
+				return "", ErrNotDriver()
+			}
 		}
 		// The resolution is what the shadow run is graded against.
 		if st.snap.Shadow && strings.TrimSpace(resolution) == "" {
@@ -543,8 +557,10 @@ func (s *Service) repairClosedRow(ctx context.Context, row store.Room, snap *Roo
 // closeRoom closes an open room as actor. check runs under the room's lock
 // after the open check and returns the resolution to record, or an error that
 // stops the close. The driver's close and the open-room limit's close share
-// everything else: the alert key release, the persisted close, the shadow
-// grace and reveal, the agent and executor stop and the room-closed hook.
+// everything else: the withdrawal of the proposals still open
+// (withdrawOnCloseLocked), the alert key release, the persisted close, the
+// shadow grace and reveal, the agent and executor stop and the room-closed
+// hook.
 //
 // With a shared store the room is first brought up to the log (reading outside
 // the lock), and the close is a checked append: a close and a control change on
@@ -575,6 +591,8 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 		s.unlockRoom(st)
 		return events.Event{}, err
 	}
+	// Right after room.closed: no proposal stays open in a closed room.
+	s.withdrawOnCloseLocked(ctx, st, roomID)
 	// A closed room no longer takes repeats of its alert: the next one opens a
 	// new room.
 	s.releaseAlertKeyLocked(roomID, st)

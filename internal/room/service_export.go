@@ -72,12 +72,30 @@ type exportProposal struct {
 	CreatedBy  events.Actor `json:"created_by"`
 	CreatedAt  time.Time    `json:"created_at"`
 	CreatedSeq int64        `json:"created_seq"`
-	Status     string       `json:"status"` // open | approved | rejected | executed | failed
+	Status     string       `json:"status"` // open | approved | rejected | executed | failed | withdrawn
+	// ImpactedLayers, RiskLevel and ImpactReasons are what proposal.created
+	// recorded (Q0, QA G5); the impacted layers are in RequiredLayers too.
+	// Omitted when empty, so the export of a room from before Q0 hashes as
+	// it did.
+	ImpactedLayers []string `json:"impacted_layers,omitempty"`
+	RiskLevel      string   `json:"risk_level,omitempty"`
+	ImpactReasons  []string `json:"impact_reasons,omitempty"`
+	// Withdrawn is the proposal.withdrawn that ended the proposal (Q0, QA
+	// G8/G9); absent when it was not withdrawn.
+	Withdrawn *exportWithdrawal `json:"withdrawn,omitempty"`
 
 	approved map[string]bool
 	rejected bool
 	okSteps  int
 	failed   bool
+}
+
+// exportWithdrawal is who withdrew a proposal, when and why.
+type exportWithdrawal struct {
+	Seq    int64        `json:"seq"`
+	By     events.Actor `json:"by"`
+	At     time.Time    `json:"at"`
+	Reason string       `json:"reason"`
 }
 
 // exportApproval is one layer decision with who made it and when.
@@ -332,6 +350,7 @@ func (e *Export) fold(ev events.Event) error {
 			RequiredLayers: nonNilStrings(p.RequiredLayers), Steps: nonNilSteps(p.Steps),
 			ParamsHash: eventParamsHash(ev.RoomID, p),
 			CreatedBy:  ev.Actor, CreatedAt: ev.At, CreatedSeq: ev.Seq, approved: map[string]bool{},
+			ImpactedLayers: p.ImpactedLayers, RiskLevel: p.RiskLevel, ImpactReasons: p.ImpactReasons,
 		}
 		e.proposals = append(e.proposals, ep)
 		e.proposalIdx[p.ProposalID] = ep
@@ -375,6 +394,14 @@ func (e *Export) fold(ev events.Event) error {
 				ep.failed = true
 			}
 		}
+	case events.ProposalWithdrawn:
+		p, ok := decode[events.ProposalWithdrawnPayload](ev)
+		if !ok {
+			return nil
+		}
+		if ep := e.proposalIdx[p.ProposalID]; ep != nil && ep.Withdrawn == nil {
+			ep.Withdrawn = &exportWithdrawal{Seq: ev.Seq, By: ev.Actor, At: ev.At, Reason: p.Reason}
+		}
 	case events.HandoffCreated:
 		p, ok := decode[events.HandoffCreatedPayload](ev)
 		if !ok {
@@ -409,6 +436,8 @@ func (e *Export) finish() {
 		switch {
 		case p.rejected:
 			p.Status = "rejected"
+		case p.Withdrawn != nil:
+			p.Status = "withdrawn"
 		case p.failed:
 			p.Status = "failed"
 		case len(p.Steps) > 0 && p.okSteps >= len(p.Steps):

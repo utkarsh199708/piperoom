@@ -29,6 +29,11 @@ import (
 // rows after the fix. A sink table with no known timestamp column, or a pipeline
 // with no or too many sink tables, is "data flow not verified" and never counts
 // as recovered.
+//
+// The layers do not settle at once (Kafka Connect restarts asynchronously), so
+// the layer checks are polled (verify_settle.go) before any verdict is reached.
+// The verdict is then announced once, as agent.verification; a later repeat of
+// the last step's result gets the Repeat form of the event and no new checks.
 
 const (
 	// freshnessAttempts is how many warehouse_freshness reads follow the check
@@ -49,8 +54,23 @@ const (
 	// recoveredConfigHead opens the verdict of a proposal that only changed
 	// schema configuration. No data path was touched, so it claims no flow.
 	recoveredConfigHead = "recovered: every layer check passed. The proposal only changed schema configuration, so data flow was not part of this verdict.\n"
+	// recoveredIdleHead opens the verdict of a proposal whose layer checks all
+	// passed while the source had no new change: data flow cannot be judged.
+	recoveredIdleHead = "recovered: every layer check passed; no new source changes to confirm data flow.\n"
+	// idleDetail is the data-flow detail of that verdict.
+	idleDetail = "inconclusive: the source was idle (the replication slots show no WAL the connector did not consume), so no new rows could be expected"
+	// inconclusiveHead opens the verdict of a proposal whose layer checks all
+	// passed while the sinks got no rows and the data topics did not grow, but
+	// the source side could not prove it was idle: the connector may not be
+	// capturing. Neither recovered nor NOT recovered (see the idle-source rule).
+	inconclusiveHead = "inconclusive: no source changes observed; connector may not be capturing. Every layer check passed, but no new rows reached the sinks and the source could not be shown to be idle.\n"
+	// inconclusiveDetail is the data-flow detail of that verdict.
+	inconclusiveDetail = "inconclusive: no source changes observed; connector may not be capturing"
 	// waitingDetail is the status detail of a recovered episode parked for input.
 	waitingDetail = "pipeline recovered; waiting for input"
+	// dataFlowInfoOnly is the data-flow detail of a verdict that did not need
+	// data flow (a compatibility restore): the reading is shown, not judged.
+	dataFlowInfoOnly = "information only, not part of this verdict"
 )
 
 // proposalRecord is what the agent remembers about a proposal it created, so a
@@ -66,32 +86,66 @@ type proposalRecord struct {
 	// Nil when none was taken (for example after an agent restart), and then the
 	// check window alone decides the data flow.
 	baseline map[string]time.Time
+	// topicEnds is the summed end offset of each source data topic when the
+	// proposal was made. Nil when not taken; then the check window decides.
+	topicEnds map[string]int64
+	// slots is the replication slots when the proposal was made, for the
+	// source side of the idle-source rule. Nil when not taken.
+	slots []slotPosition
+	// tables is the change counters of the pipeline's source tables
+	// (pg_table_activity) when the proposal was made. Nil when not taken.
+	tables map[string]tableCount
+	// verdict names the verdict once verified: "recovered", "NOT recovered" or
+	// "inconclusive". A repeated last-step result repeats it.
+	verdict string
 }
 
-// proposalTracker remembers the proposals the agent created during this run. It
-// is per-runner state, never global. It does not survive a restart: after a
-// restart the agent has no record of earlier proposals, so their action results
-// are not verified (the room waits for a steer after a restart), and their
-// creation baselines are gone too.
+// proposalTracker remembers the proposals the agent created during this run,
+// and the proposals of earlier runs of the room that this run learned about (a
+// room recap, or a lookup when their step results arrive; resume.go). It is
+// per-runner state, never global. Proposals of earlier runs have no creation
+// baselines: their checks rely on the check window alone.
 type proposalTracker struct {
 	mu   sync.Mutex
 	byID map[string]proposalRecord
 	// flows follows each proposal from approval to executed steps (approvals.go).
 	flows map[string]*execFlow
+	// unverifiable are proposals of earlier runs that could not be loaded; the
+	// room has been told once that they are not verified.
+	unverifiable map[string]bool
 }
 
 func newProposalTracker() *proposalTracker {
-	return &proposalTracker{byID: map[string]proposalRecord{}, flows: map[string]*execFlow{}}
+	return &proposalTracker{byID: map[string]proposalRecord{}, flows: map[string]*execFlow{}, unverifiable: map[string]bool{}}
 }
 
-func (t *proposalTracker) record(id string, steps []events.ProposalStep) {
+// markUnverifiable records that a proposal could not be loaded and reports
+// whether this is the first time, so the room hears it once.
+func (t *proposalTracker) markUnverifiable(id string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.unverifiable[id] {
+		return false
+	}
+	t.unverifiable[id] = true
+	return true
+}
+
+// record remembers a proposal the agent created. approvers is every layer the
+// room requires for it: the step layers plus the impacted ones (the proposer's
+// and each action's Impact layers), the same set the server stores as
+// RequiredLayers. Nil falls back to the step layers alone.
+func (t *proposalTracker) record(id string, steps []events.ProposalStep, approvers []string) {
 	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.byID[id] = proposalRecord{id: id, steps: steps}
-	t.flows[id] = newExecFlow(steps)
+	t.flows[id] = newExecFlow(steps, approvers)
 }
 
 func (t *proposalTracker) get(id string) (proposalRecord, bool) {
@@ -104,8 +158,9 @@ func (t *proposalTracker) get(id string) (proposalRecord, bool) {
 	return rec, ok
 }
 
-// markVerified stores the verdict for a proposal's last step.
-func (t *proposalTracker) markVerified(id string, recovered bool) {
+// markVerified stores the verdict for a proposal's last step; word names it
+// (see verdictWord).
+func (t *proposalTracker) markVerified(id string, recovered bool, word string) {
 	if t == nil {
 		return
 	}
@@ -117,6 +172,52 @@ func (t *proposalTracker) markVerified(id string, recovered bool) {
 	}
 	rec.verified = true
 	rec.recovered = recovered
+	rec.verdict = word
+	t.byID[id] = rec
+}
+
+// setTopicEnds stores the source-topic offsets of a proposal already recorded.
+func (t *proposalTracker) setTopicEnds(id string, ends map[string]int64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.topicEnds = ends
+	t.byID[id] = rec
+}
+
+// setTables stores the proposal-time table counters of a proposal already recorded.
+func (t *proposalTracker) setTables(id string, tables map[string]tableCount) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.tables = tables
+	t.byID[id] = rec
+}
+
+// setSlots stores the proposal-time slot readings of a proposal already recorded.
+func (t *proposalTracker) setSlots(id string, slots []slotPosition) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.slots = slots
 	t.byID[id] = rec
 }
 
@@ -216,18 +317,25 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 	rec, ok := r.proposals.get(id)
 	if !ok {
-		r.log.Warn("agent: action_result for a proposal the agent did not create", "proposal", id)
-		return actionOutcome{}
+		// An earlier run of the room made it (the restart case): load it, so its
+		// last step is verified like this run's own. A proposal that cannot be
+		// loaded is recorded as not verified, never as recovered.
+		var why string
+		if rec, why = r.loadEarlierProposal(ctx, id); why != "" {
+			return r.notVerifiedEarlier(ctx, id, why)
+		}
 	}
 	if step != len(rec.steps)-1 {
 		// Not the last step yet: no verification, the normal loop continues.
 		return actionOutcome{}
 	}
 	if rec.verified {
-		// A repeated last-step result never runs the checks again and never
-		// emits done again; it reports the verdict already reached.
-		repeat := "already verified: " + verdictWord(rec.recovered) + "; no checks were run again"
-		r.emitVerification(ctx, events.AgentVerificationPayload{
+		// A repeated last-step result never runs the checks again, never emits
+		// done again and never announces a second verdict: it gets the Repeat
+		// form of agent.verification, which clients keep from overwriting the
+		// full one. The model hears the verdict already reached.
+		repeat := "already verified: " + verdictWord(rec) + "; no checks were run again"
+		r.emit(ctx, events.AgentVerification, events.AgentVerificationPayload{
 			ProposalID: id,
 			Checks:     []events.VerificationCheck{},
 			Recovered:  rec.recovered,
@@ -241,21 +349,19 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		}
 	}
 
-	vr := r.verifyProposal(ctx, rec)
-	recovered, evidence, head := vr.recovered, vr.evidence, vr.head
+	v := r.verifyProposal(ctx, rec)
+	if v.aborted {
+		// The run is ending. A verdict reached half way would be a guess, and
+		// marking the proposal verified would stop a later run from checking it.
+		return actionOutcome{}
+	}
+	recovered, head, evidence := v.recovered, v.head, v.evidence
 	var followUp string
 	if recovered {
 		followUp = compatFollowUp(rec.steps)
 	}
-	// The room gets the typed verdict; the model note below keeps the text form.
-	r.emitVerification(ctx, vr.payload(id))
-	if followUp != "" {
-		// The room learns of a subject left at NONE now, not only when the model
-		// proposes the restore. People read a notice; the instruction of how to
-		// restore it stays in the model's note.
-		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: strings.TrimSpace(compatRoomNotice(rec.steps))})
-	}
-	r.proposals.markVerified(id, recovered)
+	r.announceVerdict(ctx, id, v, compatRoomNotice(rec.steps), followUp)
+	r.proposals.markVerified(id, recovered, v.word())
 	if recovered {
 		r.trackNoneSubjects(rec.steps)
 	}
@@ -276,6 +382,42 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
 	}
 	return out
+}
+
+// announceVerdict tells the room the verdict on a proposal, once: as the typed
+// agent.verification event, which replaces the plain-text verdict message.
+// roomNote is the follow-up written for people (compatRoomNotice); followUp
+// is the model's version with its guidance, which never reaches the room.
+//
+// A room service that does not know the type yet refuses it (an older build
+// during a rolling upgrade). Then the same verdict goes out as one agent.message
+// so the room is never left without it; the message is the fallback, never sent
+// next to the event.
+func (r *runner) announceVerdict(ctx context.Context, proposalID string, v verifyOutcome, roomNote, followUp string) {
+	err := r.tryEmit(ctx, events.AgentVerification, events.AgentVerificationPayload{
+		ProposalID: proposalID,
+		Checks:     v.checks,
+		DataFlow:   v.flow,
+		Recovered:  v.recovered,
+		Verdict:    strings.TrimSuffix(v.head, "\n"),
+	})
+	if err == nil {
+		// The follow-up is a warning about what the fix left behind, not a second
+		// announcement of the verdict: the room keeps seeing it.
+		if note := strings.TrimSpace(roomNote); note != "" {
+			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: note})
+		}
+		return
+	}
+	r.log.Warn("agent: verification event not accepted; announcing the verdict as a message", "proposal", proposalID, "err", err)
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: "Verification of proposal " + proposalID + ": " + v.head + v.evidence + roomNote})
+}
+
+// tryEmit is emit that returns the sink's error instead of logging it.
+func (r *runner) tryEmit(ctx context.Context, typ events.Type, payload any) error {
+	r.emitMu.Lock()
+	defer r.emitMu.Unlock()
+	return r.deps.Sink.Emit(ctx, typ, payload)
 }
 
 // compatFollowUp tells the model that a recovered fix left a schema subject at
@@ -373,21 +515,39 @@ func (r *runner) emitWaiting(ctx context.Context) {
 }
 
 // verdictWord names a stored verdict for the model.
-func verdictWord(recovered bool) string {
-	if recovered {
+func verdictWord(rec proposalRecord) string {
+	if rec.verdict != "" {
+		return rec.verdict
+	}
+	if rec.recovered {
 		return "recovered"
 	}
 	return "NOT recovered"
 }
 
+// word names the verdict: "recovered", "NOT recovered" or "inconclusive".
+func (v verifyOutcome) word() string {
+	switch {
+	case v.recovered:
+		return "recovered"
+	case v.inconclusive:
+		return "inconclusive"
+	default:
+		return "NOT recovered"
+	}
+}
+
 // failedStepText tells the room a fix step did not succeed. Recovery is not
-// checked in that case, and the agent keeps investigating.
+// checked in that case. step is the 0-based index from the action result; the
+// text uses the 1-based number the action result and the UI show. The model
+// runs next on this note, so the text promises only that it reads the failure
+// and reports, not an open-ended investigation.
 func failedStepText(id string, step int, parsed bool) string {
 	if !parsed {
-		return "A fix step failed. I have not verified recovery and will keep investigating."
+		return "A fix step failed. I have not verified recovery. Next I read the failure and say here what I find."
 	}
 	// Steps are numbered from 1 for people, as in the room's action results.
-	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery and will keep investigating.", id, step+1)
+	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery. Next I read the failure and say here what I find.", id, step+1)
 }
 
 // unknownOutcomeText tells the model a step's outcome is unknown, so it does not
@@ -399,97 +559,48 @@ func unknownOutcomeText(id string, step int, parsed bool) string {
 	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step+1)
 }
 
-// verifyResult is the outcome of verifyProposal: the verdict, the text form
-// the model reads, and the structured form the room shows.
-type verifyResult struct {
+// verifyOutcome is the verdict on one proposal, before it is announced.
+type verifyOutcome struct {
 	recovered bool
-	// evidence is one line per check, for the model note.
+	// head opens the model note and the legacy message; it ends in a newline.
+	// The agent.verification verdict is the same text without it.
+	head string
+	// evidence is one line per check and per sink, for the model note.
 	evidence string
-	// head is the verdict head that opens the model note, with its newline.
-	head   string
+	// checks and flow are the structured form of the evidence, for the event.
 	checks []events.VerificationCheck
 	flow   *events.DataFlowCheck
+	// inconclusive is set, with recovered false, when the layers passed and the
+	// sinks got no rows while the source could not be shown to be idle.
+	inconclusive bool
+	// aborted is true when ctx ended before a verdict: nothing is announced and
+	// the proposal stays unverified, so a replayed result can verify it.
+	aborted bool
 }
 
-// emitVerification writes the typed verdict. A room that refuses the event type
-// (a server older than the agent, or one whose sink allow-list lacks it) would
-// otherwise lose the verdict without a trace, so a refused first verdict is
-// posted as an agent.message instead; a refused repeat is only logged.
-func (r *runner) emitVerification(ctx context.Context, p events.AgentVerificationPayload) {
-	r.emitMu.Lock()
-	err := r.deps.Sink.Emit(ctx, events.AgentVerification, p)
-	r.emitMu.Unlock()
-	if err == nil {
-		return
+// verifyProposal runs the layer checks, polling until they settle (see
+// settleLayers), and then the data-flow check. The data-flow check runs only
+// after the layer checks pass.
+func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyOutcome {
+	settle := r.settleLayers(ctx, verifyChecks(rec.steps))
+	if settle.aborted {
+		return verifyOutcome{aborted: true}
 	}
-	r.log.Warn("agent: verification event not stored", "proposal", p.ProposalID, "err", err)
-	if p.Repeat {
-		return
+	lines := append([]string(nil), settle.lines...)
+	out := verifyOutcome{checks: settle.checks}
+	if out.checks == nil {
+		out.checks = []events.VerificationCheck{} // JSON [], never null
 	}
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: fmt.Sprintf("Verification of proposal %s: %s", p.ProposalID, p.Verdict)})
-}
-
-// payload builds the agent.verification event of proposal id.
-func (v verifyResult) payload(id string) events.AgentVerificationPayload {
-	checks := v.checks
-	if checks == nil {
-		checks = []events.VerificationCheck{}
-	}
-	return events.AgentVerificationPayload{
-		ProposalID: id,
-		Checks:     checks,
-		DataFlow:   v.flow,
-		Recovered:  v.recovered,
-		Verdict:    strings.TrimSuffix(v.head, "\n"),
-	}
-}
-
-// dataFlowCheck converts a flowResult to its event form.
-func (f flowResult) dataFlowCheck(detail string) *events.DataFlowCheck {
-	d := &events.DataFlowCheck{Checked: f.verified, Fresh: f.fresh, Detail: detail}
-	if !f.verified {
-		d.Detail = clipLine(f.detail)
-	}
-	for _, st := range f.sinks {
-		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
-		if st.hasProposal {
-			sc.Baseline = st.proposalAt
+	if !settle.ok {
+		const why = "not checked because a layer check did not pass"
+		lines = append(lines, "data flow: "+why)
+		out.evidence = strings.Join(lines, "\n")
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: why}
+		out.head = "NOT recovered: a layer check did not pass.\n"
+		if settle.timedOut {
+			out.head = fmt.Sprintf("NOT recovered: a layer check had not passed after %s of waiting for the layers to settle.\n", r.timing.verifySettleDeadline())
 		}
-		d.Sinks = append(d.Sinks, sc)
-	}
-	return d
-}
-
-// verifyProposal runs the layer checks and then the data-flow check. It returns
-// the verdict, one evidence line per check, the verdict head that opens the
-// model note, and the structured checks. The data-flow check runs only after
-// the layer checks pass.
-func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyResult {
-	var lines []string
-	var checks []events.VerificationCheck
-	layersOK := true
-	for _, c := range verifyChecks(rec.steps) {
-		ok, line, ids := r.runVerifyCheck(ctx, c)
-		layersOK = layersOK && ok
-		// The model gets the step ids of the reads, so it can cite this
-		// re-check instead of reading the same component again; the room's
-		// check detail stays free of ids.
-		label := c.name
-		if len(ids) > 0 {
-			label += " (step " + strings.Join(ids, ", step ") + ")"
-		}
-		lines = append(lines, label+": "+line)
-		checks = append(checks, events.VerificationCheck{Layer: c.layer, Name: c.name, OK: ok, Detail: clipLine(line)})
-	}
-	if !layersOK {
-		const skipped = "not checked because a layer check did not pass"
-		lines = append(lines, "data flow: "+skipped)
-		return verifyResult{
-			evidence: strings.Join(lines, "\n"),
-			head:     "NOT recovered: a layer check did not pass.\n",
-			checks:   checks,
-			flow:     &events.DataFlowCheck{Detail: skipped},
-		}
+		return out
 	}
 
 	if r.recoveredIdle && schemaConfigOnly(rec.steps) && r.restoresTrackedSubjects(rec.steps) {
@@ -501,42 +612,73 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyR
 		// change of any other subject (for example FULL to BACKWARD after a
 		// re-break) is not that restore, so the data-flow rule applies.
 		flow := r.verifyDataFlow(ctx, rec, false)
+		if ctx.Err() != nil {
+			return verifyOutcome{aborted: true}
+		}
 		lines = append(lines, "data flow (information only, not part of this verdict):")
 		lines = append(lines, flow.lines...)
-		return verifyResult{
-			recovered: true,
-			evidence:  strings.Join(lines, "\n"),
-			head:      recoveredConfigHead,
-			checks:    checks,
-			flow:      flow.dataFlowCheck("information only, not part of this verdict"),
+		out.evidence = strings.Join(lines, "\n")
+		out.flow = flow.event()
+		if out.flow.Checked {
+			// Checked is shown to people as a reading; Detail says it is not part
+			// of the verdict (clients show Detail only for an unchecked flow).
+			out.flow.Detail = dataFlowInfoOnly
 		}
+		out.recovered = true
+		out.head = recoveredConfigHead
+		return out
 	}
 
 	flow := r.verifyDataFlow(ctx, rec, true)
+	if ctx.Err() != nil {
+		return verifyOutcome{aborted: true}
+	}
 	lines = append(lines, flow.lines...)
-	res := verifyResult{evidence: strings.Join(lines, "\n"), checks: checks, flow: flow.dataFlowCheck("")}
+	out.evidence = strings.Join(lines, "\n")
+	out.flow = flow.event()
 	switch {
 	case !flow.verified:
-		res.head = "NOT recovered: data flow not verified.\n"
+		out.head = "NOT recovered: data flow not verified.\n"
+	case !flow.fresh && flow.source == sourceQuiet:
+		detail := idleDetail
+		if flow.idleDetail != "" {
+			detail = flow.idleDetail
+		}
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: detail}
+		out.recovered = true
+		out.head = recoveredIdleHead
+	case !flow.fresh && flow.source == sourceUnproven:
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: inconclusiveDetail}
+		out.inconclusive = true
+		out.head = inconclusiveHead
 	case !flow.fresh:
-		res.head = "NOT recovered: data flow did not pass; no new rows since the fix.\n"
+		out.head = "NOT recovered: data flow did not pass; no new rows since the fix.\n"
 	default:
-		res.recovered = true
-		res.head = recoveredHead
+		out.recovered = true
+		out.head = recoveredHead
 	}
-	return res
+	return out
 }
 
 // verifyCheck is one read-tool check of a layer in the verification pass.
 type verifyCheck struct {
-	// layer is the pipeline layer the check reads (one of events.Layers).
-	layer string
 	name  string
 	input json.RawMessage
+	// layer is the layer the check reads (one of events.Layers), for the
+	// agent.verification event.
+	layer string
 	judge func(tools.Result) bool
+	// state, when set, tells a result that is not a pass apart: still settling
+	// (checkPending) or really failed (checkFail). Nil means judge decides and
+	// everything that is not a pass has failed: the layer answers at once.
+	state func(tools.Result) checkState
 	// settle makes a passing check count only if it still passes after
 	// settleWait, so a transient healthy state does not count as recovery.
 	settle bool
+	// failConfirm is how many rounds in a row a failure must be read before it
+	// counts as final (0 and 1 mean once). The layer may still be showing the
+	// state from before the fix while it restarts.
+	failConfirm int
 }
 
 // verifyChecks maps the layers a proposal touched to read-tool checks, in step
@@ -587,7 +729,11 @@ func compatCheck(s events.ProposalStep, steps []events.ProposalStep) (verifyChec
 	if want == "" {
 		return verifyCheck{}, "", false
 	}
-	return verifyCheck{layer: "schema-registry", name: "schema_registry_versions", input: jsonObject("subject", subject), judge: compatibilityIs(want)}, subject, true
+	layer := s.Layer
+	if layer == "" {
+		layer = "schema-registry"
+	}
+	return verifyCheck{name: "schema_registry_versions", input: jsonObject("subject", subject), layer: layer, judge: compatibilityIs(want)}, subject, true
 }
 
 // compatibilityIs judges a schema_registry_versions result: the subject's
@@ -680,9 +826,9 @@ func checkForStep(s events.ProposalStep) (verifyCheck, bool) {
 		if !ok {
 			return verifyCheck{}, false
 		}
-		return verifyCheck{layer: s.Layer, name: "connect_status", input: jsonObject("connector", conn), judge: connectRecovered, settle: true}, true
+		return verifyCheck{name: "connect_status", input: jsonObject("connector", conn), layer: s.Layer, judge: connectRecovered, state: connectState, settle: true, failConfirm: connectFailConfirm}, true
 	case "postgres":
-		return verifyCheck{layer: s.Layer, name: "pg_replication_slots", input: json.RawMessage(`{}`), judge: pgSlotsRecovered}, true
+		return verifyCheck{name: "pg_replication_slots", input: json.RawMessage(`{}`), layer: s.Layer, judge: pgSlotsRecovered, state: pgSlotsState}, true
 	default:
 		return verifyCheck{}, false
 	}
@@ -698,10 +844,20 @@ type flowResult struct {
 	// lines is the evidence, one line per sink table or per reason it was not
 	// verified.
 	lines []string
+	// sinks is the same evidence for the agent.verification event; empty when
+	// the check could not run.
+	sinks []events.SinkCheck
+	// source is the idle-source judgement, read only when no sink received
+	// rows: quiet makes the data-flow check inconclusive with the layers
+	// deciding, unproven makes the whole verdict inconclusive, active keeps the
+	// failure. sourceLine is its evidence.
+	source     sourceState
+	sourceLine string
+	// idleDetail replaces idleDetail as the data-flow detail of a quiet
+	// source when the proof came from somewhere else than the slots.
+	idleDetail string
 	// detail is the reason the flow was not verified, without the evidence prefix.
 	detail string
-	// sinks is the per-table state, for the verification event.
-	sinks []sinkState
 }
 
 // flowNotVerified is the flowResult of a data-flow check that could not run.
@@ -748,9 +904,9 @@ type sinkState struct {
 	proposalAt  time.Time // creation baseline; meaningful only when hasProposal
 	hasProposal bool
 	checkAt     time.Time // check baseline: the newest row when the check began
+	newest      time.Time // the newest row of the latest read
 	passed      bool
-	passedBy    string    // "rows since proposal" or "rows during check"
-	newest      time.Time // newest row of the latest read
+	passedBy    string // "rows since proposal" or "rows during check"
 	lastSummary string
 }
 
@@ -821,8 +977,18 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		}
 	}
 
-	res := flowResult{verified: true, fresh: true, sinks: states}
+	res := flowResult{verified: true, fresh: true}
+	if wait && anyPending(states) && !anyPassed(states) {
+		// Only a failing check pays for the source reads (the idle-source rule
+		// above sourceIdle).
+		res.source, res.sourceLine, res.idleDetail = r.judgeSource(ctx, rec)
+	}
 	for _, st := range states {
+		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
+		if st.hasProposal {
+			sc.Baseline = st.proposalAt
+		}
+		res.sinks = append(res.sinks, sc)
 		if st.passed {
 			res.lines = append(res.lines, fmt.Sprintf("data flow %s: %s (%s)", st.table.name, st.passedBy, st.readings()))
 			continue
@@ -830,7 +996,267 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		res.fresh = false
 		res.lines = append(res.lines, fmt.Sprintf("data flow %s: no new rows since the fix (%s); last read %s", st.table.name, st.readings(), clipLine(st.lastSummary)))
 	}
+	if res.sourceLine != "" {
+		res.lines = append(res.lines, res.sourceLine)
+	}
 	return res
+}
+
+// event renders the data-flow result for agent.verification. A check that
+// could not run says why in Detail, clipped like a per-check detail.
+func (f flowResult) event() *events.DataFlowCheck {
+	if !f.verified {
+		return &events.DataFlowCheck{Checked: false, Detail: clipLine(f.detail)}
+	}
+	return &events.DataFlowCheck{Checked: true, Fresh: f.fresh, Sinks: f.sinks}
+}
+
+// anyPassed reports whether some sink has passed.
+func anyPassed(states []sinkState) bool {
+	for _, st := range states {
+		if st.passed {
+			return true
+		}
+	}
+	return false
+}
+
+// sourceState is what the source side says about a check whose sinks got no
+// new rows.
+type sourceState int
+
+const (
+	// sourceActive: the source changed, or nothing is known about it. Stale
+	// sinks are then a data-flow failure: NOT recovered.
+	sourceActive sourceState = iota
+	// sourceQuiet: proven on the source side that there was no change to
+	// replicate. Data flow cannot be judged; the verdict rests on the layers.
+	sourceQuiet
+	// sourceUnproven: the data topics did not grow, but the source side could
+	// not prove it was quiet. Inconclusive: neither recovered nor NOT recovered.
+	sourceUnproven
+)
+
+// The idle-source rule (QA review 2, R15 and R20).
+//
+// Flat source data topics are not proof that the source was idle: a connector
+// that reads RUNNING but captures nothing (it loops on a decoding error, or
+// never streams) also writes nothing to them, while the source keeps taking
+// writes. So idleness must be proven on the source side as well, and the proof
+// must survive Debezium heartbeats, which move the slot without any data change
+// (they write only the heartbeat topic, which sourceTopics leaves out).
+//
+// When pg_table_activity is offered, the pipeline's own tables decide first
+// (judgeSource, verify_tables.go): unchanged counters are quiet, changed ones
+// are active. Without it, or when its readings cannot be compared, the
+// source-side signal is the replication slots (pg_replication_slots), read at
+// proposal time when that reading exists, else at both ends of one
+// freshnessWait:
+//
+//   - data topics grew: the source changed. Active.
+//   - data topics flat, and for every slot confirmed_flush_lsn moved: the
+//     connector consumed and acknowledged WAL and emitted no data record from
+//     it, so the WAL held no change of the pipeline's tables (a heartbeat).
+//     Quiet.
+//   - data topics flat, and every slot stood still with retained WAL unchanged:
+//     the server wrote no WAL at all. Quiet.
+//   - data topics flat, a slot's confirmed_flush_lsn stood still and its
+//     retained WAL grew: WAL was written that the connector did not consume.
+//     That is the stuck connector. Active. (A healthy connector without
+//     heartbeats on a server whose other tables write looks the same; NOT
+//     recovered keeps the agent looking, which is the safe side.)
+//   - data topics flat, slots unreadable or not comparable: unproven. The
+//     verdict says "inconclusive", never "recovered", and never "NOT
+//     recovered" for a pure idle doubt.
+//
+// When the topics cannot be read at all, the old slot-only fallback applies: an
+// unchanged slot fingerprint over one freshnessWait is quiet, anything else
+// (including no reading) is active.
+
+// sourceIdle judges the source for a check whose sinks got no new rows, and
+// returns an evidence line saying why.
+func (r *runner) sourceIdle(ctx context.Context, rec proposalRecord) (sourceState, string) {
+	topics, ok := r.sourceTopics(ctx, "verify")
+	if ok {
+		slotsBefore, slotsOK := rec.slots, len(rec.slots) > 0
+		if !slotsOK {
+			slotsBefore, slotsOK = r.readSlots(ctx, "verify")
+		}
+		now, ok := r.topicEnds(ctx, "verify", topics)
+		if ok {
+			before := rec.topicEnds
+			waited := false
+			if len(before) == 0 {
+				before = now
+				if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+					return sourceActive, ""
+				}
+				waited = true
+				if now, ok = r.topicEnds(ctx, "verify", topics); !ok {
+					return sourceActive, ""
+				}
+			}
+			for _, t := range topics {
+				if b, have := before[t]; !have || now[t] != b {
+					return sourceActive, "source: the data topics grew, so the source changed"
+				}
+			}
+			if !slotsOK {
+				return sourceUnproven, "source: the data topics did not grow; the replication slots could not be read to prove the source was idle"
+			}
+			if len(rec.slots) == 0 && !waited {
+				// The slot reading must span a window, like the topic reading.
+				if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+					return sourceActive, ""
+				}
+			}
+			slotsAfter, ok := r.readSlots(ctx, "verify")
+			if !ok {
+				return sourceUnproven, "source: the data topics did not grow; the replication slots could not be read again to prove the source was idle"
+			}
+			return judgeSlots(slotsBefore, slotsAfter)
+		}
+	}
+	before, ok := r.readSlots(ctx, "verify")
+	if !ok {
+		return sourceActive, ""
+	}
+	if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+		return sourceActive, ""
+	}
+	after, ok := r.readSlots(ctx, "verify")
+	if ok && slotFingerprint(after) == slotFingerprint(before) {
+		return sourceQuiet, "source: the replication slots did not move and no WAL was written"
+	}
+	return sourceActive, ""
+}
+
+// judgeSlots applies the slot part of the idle-source rule to two readings
+// taken while the data topics stayed flat.
+func judgeSlots(before, after []slotPosition) (sourceState, string) {
+	if len(before) != len(after) {
+		return sourceUnproven, "source: the data topics did not grow; the replication slots changed between readings, so idleness is not proven"
+	}
+	prev := make(map[string]slotPosition, len(before))
+	for _, s := range before {
+		prev[s.name] = s
+	}
+	consumed := false
+	for _, a := range after {
+		b, ok := prev[a.name]
+		if !ok {
+			return sourceUnproven, "source: the data topics did not grow; the replication slots changed between readings, so idleness is not proven"
+		}
+		switch {
+		case a.confirmedFlush != b.confirmedFlush:
+			consumed = true
+		case a.retainedWAL > b.retainedWAL:
+			return sourceActive, fmt.Sprintf("source: slot %s did not move while its retained WAL grew from %d to %d bytes: the source wrote changes the connector did not capture", a.name, b.retainedWAL, a.retainedWAL)
+		}
+	}
+	if consumed {
+		return sourceQuiet, "source: the data topics did not grow while the connector consumed WAL (heartbeats), so the source had no change to replicate"
+	}
+	return sourceQuiet, "source: the data topics did not grow and the replication slots show no new WAL"
+}
+
+// sourceTopics returns the pipeline's source data topics from pipeline_map,
+// without heartbeat topics. ok is false when none can be named.
+func (r *runner) sourceTopics(ctx context.Context, verb string) ([]string, bool) {
+	if r.alert.PipelineID == "" {
+		return nil, false
+	}
+	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", r.alert.PipelineID))
+	if err != nil {
+		return nil, false
+	}
+	var g struct {
+		Nodes []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"nodes"`
+	}
+	if err := decodeData(res.Data, &g); err != nil {
+		return nil, false
+	}
+	var out []string
+	for _, n := range g.Nodes {
+		if n.Kind == "topic" && n.Name != "" && !strings.Contains(strings.ToLower(n.Name), "heartbeat") {
+			out = append(out, n.Name)
+		}
+	}
+	return out, len(out) > 0
+}
+
+// topicEnds reads the summed end offset of each topic with kafka_topic_offsets.
+func (r *runner) topicEnds(ctx context.Context, verb string, topics []string) (map[string]int64, bool) {
+	out := make(map[string]int64, len(topics))
+	for _, t := range topics {
+		res, err := r.runStep(ctx, verb, "kafka_topic_offsets", jsonObject("topic", t))
+		if err != nil {
+			return nil, false
+		}
+		var d struct {
+			Partitions []struct {
+				End int64 `json:"end"`
+			} `json:"partitions"`
+		}
+		if err := decodeData(res.Data, &d); err != nil || len(d.Partitions) == 0 {
+			return nil, false
+		}
+		var sum int64
+		for _, p := range d.Partitions {
+			sum += p.End
+		}
+		out[t] = sum
+	}
+	return out, true
+}
+
+// slotPosition is one replication slot as pg_replication_slots reports it.
+type slotPosition struct {
+	name           string
+	confirmedFlush string
+	restart        string
+	retainedWAL    int64
+}
+
+// readSlots reads the pipeline's replication slots with pg_replication_slots.
+// Retained WAL grows with every source write while the slot stands still, and
+// confirmed_flush_lsn moves when the connector acknowledges WAL. ok is false
+// when the tool is missing, fails, or names no slot: then the source side is
+// unknown.
+func (r *runner) readSlots(ctx context.Context, verb string) ([]slotPosition, bool) {
+	res, err := r.runStep(ctx, verb, "pg_replication_slots", json.RawMessage(`{}`))
+	if err != nil {
+		return nil, false
+	}
+	var slots []struct {
+		Name              string `json:"name"`
+		ConfirmedFlushLSN string `json:"confirmed_flush_lsn"`
+		RestartLSN        string `json:"restart_lsn"`
+		RetainedWALBytes  int64  `json:"retained_wal_bytes"`
+	}
+	if err := decodeData(res.Data, &slots); err != nil || len(slots) == 0 {
+		return nil, false
+	}
+	out := make([]slotPosition, 0, len(slots))
+	for _, s := range slots {
+		if s.ConfirmedFlushLSN == "" && s.RestartLSN == "" {
+			return nil, false
+		}
+		out = append(out, slotPosition{name: s.Name, confirmedFlush: s.ConfirmedFlushLSN, restart: s.RestartLSN, retainedWAL: s.RetainedWALBytes})
+	}
+	return out, true
+}
+
+// slotFingerprint renders slot readings as one comparable string.
+func slotFingerprint(slots []slotPosition) string {
+	var sb strings.Builder
+	for _, s := range slots {
+		fmt.Fprintf(&sb, "%s|%s|%s|%d;", s.name, s.confirmedFlush, s.restart, s.retainedWAL)
+	}
+	return sb.String()
 }
 
 // anyPending reports whether some sink has not passed yet.
@@ -870,6 +1296,24 @@ func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
 		base[s.name] = newest
 	}
 	r.proposals.setBaseline(proposalID, base)
+	// Best effort: the source tables' change counters, so the idle rule can see
+	// a write to the pipeline's tables anywhere since the proposal.
+	if tables, ok := r.readTables(ctx, "baseline"); ok {
+		r.proposals.setTables(proposalID, tables)
+	}
+	// Best effort: source topic offsets at proposal time, so the idle rule can
+	// tell "no change since the fix" from "no change during the check".
+	if topics, ok := r.sourceTopics(ctx, "baseline"); ok {
+		if ends, ok := r.topicEnds(ctx, "baseline", topics); ok {
+			r.proposals.setTopicEnds(proposalID, ends)
+			// The slots at the same moment: the idle-source rule then sees a
+			// source write anywhere since the proposal, not only inside the
+			// check window.
+			if slots, ok := r.readSlots(ctx, "baseline"); ok {
+				r.proposals.setSlots(proposalID, slots)
+			}
+		}
+	}
 }
 
 // formatBaseline renders a newest-row time, or "none (empty table)" for a table
@@ -947,7 +1391,22 @@ func decodeData(data any, v any) error {
 // connectRecovered reports whether a connect_status result shows a connector
 // that is RUNNING with at least one task, and every task RUNNING. A payload that
 // cannot be decoded is never a recovery: the summary text is not judged.
-func connectRecovered(res tools.Result) bool {
+func connectRecovered(res tools.Result) bool { return connectState(res) == checkPass }
+
+// connectState reads a connect_status result. Kafka Connect restarts a
+// connector or task asynchronously, so right after a fix the status is often a
+// transition, not an outcome:
+//
+//   - checkPass: the connector and every task are RUNNING, and there is at
+//     least one task;
+//   - checkPending: still settling. A connector or task is UNASSIGNED or
+//     RESTARTING, or the connector is RUNNING with no task yet. This wins over
+//     a failure elsewhere in the same status: while something restarts, a FAILED
+//     task next to it may be the state from before the fix;
+//   - checkFail: anything else (FAILED, PAUSED, STOPPED, a state this code does
+//     not know), and a payload that cannot be decoded. Summary text is never
+//     judged.
+func connectState(res tools.Result) checkState {
 	var d struct {
 		State string `json:"state"`
 		Tasks []struct {
@@ -955,72 +1414,62 @@ func connectRecovered(res tools.Result) bool {
 		} `json:"tasks"`
 	}
 	if err := decodeData(res.Data, &d); err != nil {
-		return false
+		return checkFail
 	}
-	if d.State != "RUNNING" || len(d.Tasks) == 0 {
-		return false
-	}
-	for _, t := range d.Tasks {
-		if t.State != "RUNNING" {
-			return false
+	pending, failed := false, false
+	classify := func(state string) {
+		switch state {
+		case "RUNNING":
+		case "UNASSIGNED", "RESTARTING":
+			pending = true
+		default:
+			failed = true
 		}
 	}
-	return true
+	classify(d.State)
+	if len(d.Tasks) == 0 && !failed {
+		pending = true // the tasks are created after the connector starts
+	}
+	for _, t := range d.Tasks {
+		classify(t.State)
+	}
+	switch {
+	case pending:
+		return checkPending
+	case failed:
+		return checkFail
+	}
+	return checkPass
 }
 
 // pgSlotsRecovered reports whether pg_replication_slots shows at least one
 // active logical replication slot. A payload that cannot be decoded is never a
 // recovery: the summary text carries slot names from the database, so it can
 // hold "active=true" without any slot being active, and it is not judged.
-func pgSlotsRecovered(res tools.Result) bool {
+func pgSlotsRecovered(res tools.Result) bool { return pgSlotsState(res) == checkPass }
+
+// pgSlotsState reads a pg_replication_slots result. A slot turns active when
+// the connector reconnects, which follows the fix by a few seconds: no active
+// slot yet is checkPending. A payload that cannot be decoded is checkFail.
+func pgSlotsState(res tools.Result) checkState {
 	var slots []struct {
 		Active bool `json:"active"`
 	}
 	if err := decodeData(res.Data, &slots); err != nil {
-		return false
+		return checkFail
 	}
 	for _, s := range slots {
 		if s.Active {
-			return true
+			return checkPass
 		}
 	}
-	return false
+	return checkPending
 }
 
-// runVerifyCheck runs one layer check. A settling check must also pass a second
-// read after settleWait. It returns whether the check passed, an evidence
-// line, and the step ids of the reads that ran.
-func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, string, []string) {
-	ok, line, id := r.readCheck(ctx, c)
-	ids := appendID(nil, id)
-	if !ok || !c.settle {
-		return ok, line, ids
-	}
-	if err := r.clk.Sleep(ctx, r.timing.settleWait); err != nil {
-		return false, "settling: " + err.Error(), ids
-	}
-	ok, again, id := r.readCheck(ctx, c)
-	return ok, line + "; read again after " + r.timing.settleWait.String() + ": " + again, appendID(ids, id)
-}
-
-// appendID appends a step id when one was made.
-func appendID(ids []string, id string) []string {
-	if id == "" {
-		return ids
-	}
-	return append(ids, id)
-}
-
-// readCheck reads one layer check once and judges it. It returns whether the
-// check passed, the evidence line (a tool summary, or an error message) and
-// the read's step id ("" when no step was started).
-func (r *runner) readCheck(ctx context.Context, c verifyCheck) (bool, string, string) {
-	res, id, err := r.runStepID(ctx, "verify", c.name, c.input)
-	if err != nil {
-		return false, "error: " + err.Error(), id
-	}
-	return c.judge(res), clipLine(res.Summary), id
-}
+// errVerifyUnrunnable marks a verification read that cannot run at all (the
+// tool is missing or is not a read tool, or the input is invalid). Waiting does
+// not change that, unlike a tool that failed while its layer restarts.
+var errVerifyUnrunnable = errors.New("agent: verify: check cannot run")
 
 // runStep executes one read tool for verification, emitting the same
 // step/tool events a normal read-tool call produces, and returns the raw
@@ -1028,22 +1477,27 @@ func (r *runner) readCheck(ctx context.Context, c verifyCheck) (bool, string, st
 // name, so the room tells a creation baseline read ("baseline ...") from a
 // check read ("verify ...").
 func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, error) {
-	res, _, err := r.runStepID(ctx, verb, name, input)
+	res, _, err := r.runStepEvents(ctx, verb, name, input, true)
 	return res, err
 }
 
-// runStepID is runStep that also returns the step id it recorded in the
-// ledger ("" when the read was refused before a step started).
-func (r *runner) runStepID(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, string, error) {
+// runStepEvents is runStep with the room events optional. The settle loop
+// reads the same check every few seconds; only its first read goes to the room,
+// so a layer that takes a minute to restart does not fill the log with a dozen
+// identical steps. The result is scrubbed either way, since its summary reaches
+// the model and the verdict. It also returns the step id it recorded in the
+// step ledger: "" for a read without events, or one refused before a step
+// started.
+func (r *runner) runStepEvents(ctx context.Context, verb, name string, input json.RawMessage, withEvents bool) (tools.Result, string, error) {
 	entry, ok := r.toolList.byName[name]
 	if !ok {
-		return tools.Result{}, "", fmt.Errorf("agent: verify: unknown tool %q", name)
+		return tools.Result{}, "", fmt.Errorf("%w: unknown tool %q", errVerifyUnrunnable, name)
 	}
 	if entry.isRoom {
-		return tools.Result{}, "", fmt.Errorf("agent: verify: %q is not a read tool", name)
+		return tools.Result{}, "", fmt.Errorf("%w: %q is not a read tool", errVerifyUnrunnable, name)
 	}
 	if err := validateInput(entry.schema, input); err != nil {
-		return tools.Result{}, "", fmt.Errorf("agent: verify: invalid input for %s: %w", name, err)
+		return tools.Result{}, "", fmt.Errorf("%w: invalid input for %s: %w", errVerifyUnrunnable, name, err)
 	}
 
 	stepID := newStepID()
@@ -1053,13 +1507,15 @@ func (r *runner) runStepID(ctx context.Context, verb, name string, input json.Ra
 	// context. So events are emitted without the deadline, and only the tool
 	// call itself is bounded by it.
 	emitCtx := context.WithoutCancel(ctx)
-	r.emit(emitCtx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: verb + " " + name})
-	r.emit(emitCtx, events.AgentToolCall, events.AgentToolCallPayload{
-		StepID:    stepID,
-		ToolUseID: toolUseID,
-		Tool:      name,
-		Input:     input,
-	})
+	if withEvents {
+		r.emit(emitCtx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: verb + " " + name})
+		r.emit(emitCtx, events.AgentToolCall, events.AgentToolCallPayload{
+			StepID:    stepID,
+			ToolUseID: toolUseID,
+			Tool:      name,
+			Input:     input,
+		})
+	}
 
 	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
@@ -1074,19 +1530,27 @@ func (r *runner) runStepID(ctx context.Context, verb, name string, input json.Ra
 	if err == nil {
 		err = scrubErr
 	}
-	data, dataCut := r.toolDataJSON(name, res.Data)
 	if err != nil {
 		// The verdict lines built from this error reach the model and the log.
 		err = r.scrubToolError(name, err)
-		summary, truncated := tools.Truncate("error: " + err.Error())
-		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
-			StepID: stepID, ToolUseID: toolUseID, Tool: name,
-			Summary: summary, IsError: true, Truncated: truncated, TookMS: took,
-			Provenance: prov,
-		})
-		r.steps.addWithInput(stepID, name, string(input), summary, true)
-		return tools.Result{}, stepID, err
+		if withEvents {
+			summary, truncated := tools.Truncate("error: " + err.Error())
+			r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
+				StepID: stepID, ToolUseID: toolUseID, Tool: name,
+				Summary: summary, IsError: true, Truncated: truncated, TookMS: took,
+				Provenance: prov,
+			})
+			r.steps.addWithInput(stepID, name, string(input), summary, true)
+			return tools.Result{}, stepID, err
+		}
+		return tools.Result{}, "", err
 	}
+	// A step without events is not in the room, so it never enters the step
+	// ledger the model's citations are checked against.
+	if !withEvents {
+		return res, "", nil
+	}
+	data, dataCut := r.toolDataJSON(name, res.Data)
 	summary, reTruncated := tools.Truncate(res.Summary)
 	r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID: stepID, ToolUseID: toolUseID, Tool: name,

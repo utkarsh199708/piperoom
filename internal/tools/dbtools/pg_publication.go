@@ -3,9 +3,12 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
@@ -32,6 +35,21 @@ type publicationTablesClient interface {
 // (internal/clients/postgres).
 type publicationSourceTablesClient interface {
 	PublicationSourceTables(ctx context.Context, publication, role string, tables []string) ([]postgres.PublicationTable, int, error)
+}
+
+// publicationInfoClient is implemented by source clients that can read the
+// publication's owner and the connector role's attributes
+// (internal/clients/postgres). It is optional: without it the tool gives the
+// table facts only and says what it could not read. (Q1, QA G3)
+type publicationInfoClient interface {
+	PublicationInfo(ctx context.Context, publication, role string) (postgres.PublicationInfo, error)
+}
+
+// roleFacts is the outcome of the optional PublicationInfo read: the info, or
+// why there is none. Both empty means the client cannot read it.
+type roleFacts struct {
+	info *postgres.PublicationInfo
+	err  string
 }
 
 // publicationRead returns the entries for tables and the number of the
@@ -76,14 +94,35 @@ type connectorConfig struct {
 	role              string
 	publication       string
 	publicationSource string
+	// autocreate is publication.autocreate.mode as configured ("" = unset).
+	// "filtered" makes Debezium run ALTER PUBLICATION ... SET TABLE at every
+	// task start, which is what turns table ownership into a requirement.
+	autocreate string
+	// connectDown is set when Connect could not be read: only the default
+	// publication name and the pipeline's own tables are known, so nothing
+	// about the connector role is stated (Q5 T6).
+	connectDown bool
 }
+
+// connectDownNote is the plain sentence the summary carries when Connect was
+// unreachable.
+const connectDownNote = "Connect unreachable: role checks need the connector config"
+
+// connectDownError marks a failed read of the connector config that is not a
+// "no such connector" answer: Connect itself could not be asked.
+type connectDownError struct{ err error }
+
+func (e *connectDownError) Error() string { return e.err.Error() }
+func (e *connectDownError) Unwrap() error { return e.err }
 
 // pgPublicationTablesTool shows, for a pipeline, the Debezium publication and
 // its tables, and whether the connector role can SELECT each source table.
 func pgPublicationTablesTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_publication_tables",
-		desc: "For a pipeline, show the Debezium publication (its tables) and whether the connector role has SELECT on each pipeline source table. Use for connector-permission incidents.",
+		desc: "For a pipeline, show the Debezium publication (its owner and tables) and, for the connector role, its REPLICATION and SUPERUSER attributes and, for each pipeline source table, " +
+			"SELECT, the table's owner and whether the role is that owner or a member of it. Says plainly when the role neither owns the table nor is a member of its owner. " +
+			"Use for connector-permission incidents, e.g. 'must be owner of table' in the Connect worker log while the task shows RUNNING.",
 		schema: objSchema(map[string]any{
 			"pipeline_id": strProp("Pipeline id from owners.yaml."),
 		}, "pipeline_id"),
@@ -114,27 +153,64 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
 			conn, err := resolveConnector(ctx, p, d.Connect)
+			var down *connectDownError
+			if errors.As(err, &down) {
+				// Fall back to the pipeline's own data: the publication name
+				// Debezium defaults to and the pipeline's source tables. No
+				// role is known, so no role fact is read or stated, and the
+				// source read is still limited to the pipeline's tables.
+				conn = connectorConfig{publication: defaultPublication, publicationSource: "default (Connect unreachable)", connectDown: true}
+				err = nil
+			}
 			if err != nil {
 				return tools.Result{}, err
 			}
 
 			tables, other, err := read(ctx, conn.publication, conn.role, p.SourceTables)
+			var facts roleFacts
+			if err != nil && isUndefinedObject(err) {
+				// A dropped or renamed connector role makes the privilege
+				// functions fail with 42704. Ask the catalogs about the role
+				// instead: a missing role is a finding, not a raw SQL error.
+				facts = readRoleFacts(ctx, d.Src, conn)
+				if facts.info != nil && !facts.info.RoleExists {
+					err = nil
+					tables, other = nil, 0
+				}
+			}
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_publication_tables: %w", err)
 			}
+			if facts.info == nil && facts.err == "" && !conn.connectDown {
+				facts = readRoleFacts(ctx, d.Src, conn)
+			}
+			var findings []string
+			if !conn.connectDown {
+				findings = publicationFindings(conn, p.SourceTables, tables, facts)
+			}
 
-			text := publicationSummary(conn.publication, conn.role, p.SourceTables, tables)
+			text := publicationSummary(conn, p.SourceTables, tables, facts, findings)
 			if !sc.Unscoped() {
 				if line := tools.NotShown(other, "table in publication "+conn.publication, "tables in publication "+conn.publication); line != "" {
 					text += line + "\n"
 				}
 			}
 			summary, truncated := tools.Truncate(text)
-			return tools.Result{
-				Summary:   summary,
-				Data:      publicationData(conn, p.SourceTables, tables),
-				Truncated: truncated,
-			}, nil
+			data := publicationData(conn, p.SourceTables, tables)
+			if conn.autocreate != "" {
+				data["autocreate_mode"] = conn.autocreate
+			}
+			if facts.info != nil {
+				data["publication_owner"] = facts.info.Owner
+				data["publication_info"] = *facts.info
+			}
+			if facts.err != "" {
+				data["publication_info_error"] = facts.err
+			}
+			if len(findings) > 0 {
+				data["findings"] = findings
+			}
+			return tools.Result{Summary: summary, Data: data, Truncated: truncated}, nil
 		},
 	}
 }
@@ -162,6 +238,7 @@ func resolveConnector(ctx context.Context, p owners.Pipeline, connect clients.Co
 		name:        name,
 		role:        role,
 		publication: cfg["publication.name"],
+		autocreate:  strings.TrimSpace(cfg["publication.autocreate.mode"]),
 	}
 	if c.publication == "" {
 		c.publication = defaultPublication
@@ -182,7 +259,11 @@ func debeziumSourceConnector(ctx context.Context, connect clients.ConnectClient,
 	for _, name := range names {
 		cfg, err := connect.Config(ctx, name)
 		if err != nil {
-			return "", nil, fmt.Errorf("read connector %q config: %w", name, err)
+			err = fmt.Errorf("read connector %q config: %w", name, err)
+			if !errors.Is(err, clients.ErrNotFound) {
+				err = &connectDownError{err: err}
+			}
+			return "", nil, err
 		}
 		if strings.Contains(cfg["connector.class"], "PostgresConnector") {
 			return name, cfg, nil
@@ -197,22 +278,123 @@ func debeziumSourceConnector(ctx context.Context, connect clients.ConnectClient,
 	return "", nil, fmt.Errorf("no Debezium Postgres source connector found among %v", names)
 }
 
-// publicationSummary renders one line per pipeline source table with its
-// publication membership and SELECT status, prefixed by the publication name
-// and connector role.
-func publicationSummary(pub, role string, sourceTables []string, tables []postgres.PublicationTable) string {
+// readRoleFacts reads the publication's owner and the connector role's
+// attributes when the source client can. A failure is kept as text, not
+// returned: the table facts already read are still worth showing, and the
+// summary says what is missing.
+// isUndefinedObject reports a Postgres undefined_object error (SQLSTATE
+// 42704), which is what has_table_privilege and pg_has_role raise for a role
+// that does not exist.
+func isUndefinedObject(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "42704"
+}
+
+func readRoleFacts(ctx context.Context, src clients.SourceDB, c connectorConfig) roleFacts {
+	ic, ok := src.(publicationInfoClient)
+	if !ok {
+		return roleFacts{}
+	}
+	info, err := ic.PublicationInfo(ctx, c.publication, c.role)
+	if err != nil {
+		return roleFacts{err: cutShort(err.Error(), 300)}
+	}
+	return roleFacts{info: &info}
+}
+
+// sourceTableFacts returns the entry for each pipeline source table, in order;
+// a table the client left out is an empty entry.
+func sourceTableFacts(sourceTables []string, tables []postgres.PublicationTable) []postgres.PublicationTable {
 	byName := map[string]postgres.PublicationTable{}
 	for _, t := range tables {
 		byName[t.Schema+"."+t.Table] = t
 	}
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "publication %s (connector user %s)\n", pub, role)
+	out := make([]postgres.PublicationTable, 0, len(sourceTables))
 	for _, st := range sourceTables {
 		t, ok := byName[st]
 		if !ok {
 			t = splitPublicationName(st)
 		}
-		fmt.Fprintf(&sb, "%s: in_publication=%s, selectable=%s\n", st, yesNo(t.InPublication), yesNo(t.Selectable))
+		out = append(out, t)
+	}
+	return out
+}
+
+// publicationFindings says plainly what is wrong with the connector role's
+// rights, one sentence each, most specific first. A finding starts with
+// PROBLEM when the connector's settings make the missing right fatal, and with
+// NOTE when it only matters if the connector goes on to change the publication.
+// It states only what the catalogs showed: an unread fact is never a finding.
+func publicationFindings(c connectorConfig, sourceTables []string, tables []postgres.PublicationTable, f roleFacts) []string {
+	var out []string
+	filtered := c.autocreate == "filtered"
+	for i, t := range sourceTableFacts(sourceTables, tables) {
+		// Owner is empty when the table is missing or the client did not
+		// say; membership is true for the owner itself and for a superuser.
+		if t.Owner == "" || t.RoleMemberOfOwner {
+			continue
+		}
+		name := sourceTables[i]
+		msg := fmt.Sprintf("%s: connector user %s is not the owner of this table (owner: %s) and is not a member of that role. Postgres lets only the owner of a table, or a member of the owner role, add it to a publication.",
+			name, c.role, t.Owner)
+		if filtered {
+			out = append(out, "PROBLEM "+msg+" publication.autocreate.mode=filtered makes Debezium run ALTER PUBLICATION ... SET TABLE on every task start, so the task fails with \"must be owner of table\" while Connect can still report it RUNNING; read the worker log with connect_worker_log.")
+		} else {
+			out = append(out, "NOTE "+msg+" That matters only when the connector changes the publication (publication.autocreate.mode=filtered); a ready-made publication needs SELECT only.")
+		}
+	}
+	i := f.info
+	if i == nil {
+		return out
+	}
+	// Connect returns a config-provider reference unresolved, so the role name
+	// is not the real one and nothing about the role can be stated.
+	if strings.Contains(c.role, "${") {
+		return append(out, fmt.Sprintf("UNKNOWN connector user %s is a config-provider reference that Connect does not resolve, so Piperoom could not check the role's rights; read the real database.user from the secret store and look it up with pg_roles.", c.role))
+	}
+	if !i.RoleExists {
+		return append(out, fmt.Sprintf("PROBLEM connector user %s does not exist as a role (pg_roles has no such name), so the connector cannot log in.", c.role))
+	}
+	if !i.RoleReplication && !i.RoleSuperuser && !i.RoleManagedReplication {
+		out = append(out, fmt.Sprintf("PROBLEM connector user %s has no REPLICATION attribute and is not a superuser, so it cannot start logical replication (on managed Postgres a role such as rds_replication can stand in).", c.role))
+	}
+	if filtered && i.Owner != "" && !i.RoleMemberOfOwner {
+		out = append(out, fmt.Sprintf("PROBLEM publication %s is owned by %s; connector user %s is not that role and not a member of it, and filtered mode runs ALTER PUBLICATION, which only the owner may.",
+			c.publication, i.Owner, c.role))
+	}
+	return out
+}
+
+// publicationSummary renders the publication and connector role, then one line
+// per pipeline source table with its publication membership, SELECT status and
+// owner, then the findings.
+func publicationSummary(c connectorConfig, sourceTables []string, tables []postgres.PublicationTable, f roleFacts, findings []string) string {
+	var sb strings.Builder
+	if c.connectDown {
+		fmt.Fprintf(&sb, "publication %s (name assumed: %s)\n", c.publication, connectDownNote)
+		for i, t := range sourceTableFacts(sourceTables, tables) {
+			fmt.Fprintf(&sb, "%s: in_publication=%s\n", sourceTables[i], yesNo(t.InPublication))
+		}
+		return sb.String()
+	}
+	if i := f.info; i != nil {
+		fmt.Fprintf(&sb, "publication %s (owner %s; connector user %s: REPLICATION=%s, SUPERUSER=%s)\n",
+			c.publication, i.Owner, c.role, yesNo(i.RoleReplication), yesNo(i.RoleSuperuser))
+	} else {
+		fmt.Fprintf(&sb, "publication %s (connector user %s)\n", c.publication, c.role)
+	}
+	for i, t := range sourceTableFacts(sourceTables, tables) {
+		fmt.Fprintf(&sb, "%s: in_publication=%s, selectable=%s", sourceTables[i], yesNo(t.InPublication), yesNo(t.Selectable))
+		if t.Owner != "" {
+			fmt.Fprintf(&sb, ", owner=%s, role_member_of_owner=%s", t.Owner, yesNo(t.RoleMemberOfOwner))
+		}
+		sb.WriteString("\n")
+	}
+	for _, line := range findings {
+		sb.WriteString(line + "\n")
+	}
+	if f.err != "" {
+		fmt.Fprintf(&sb, "Publication owner and role attributes could not be read: %s\n", f.err)
 	}
 	return sb.String()
 }
@@ -240,6 +422,14 @@ func publicationData(c connectorConfig, sourceTables []string, tables []postgres
 			t = splitPublicationName(st)
 		}
 		sources = append(sources, t)
+	}
+	if c.connectDown {
+		return map[string]any{
+			"publication":         c.publication,
+			"publication_source":  c.publicationSource,
+			"connect_unreachable": true,
+			"publication_tables":  members,
+		}
 	}
 	return map[string]any{
 		"publication":           c.publication,

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 /** An element a keyboard user can land on: attached and not inside a `hidden` subtree. */
 export function usable(el: Element | null | undefined): el is HTMLElement {
@@ -69,5 +69,29 @@ export function useRestoreFocus(): (event: Event) => void {
       event.preventDefault()
       target.focus()
     }
+  }
+}
+
+/**
+ * A dialog over the page with a step link in it (QA R17). Following the link closes the dialog and
+ * shows the step, so the step must keep the focus: the opener would scroll the page back to the top.
+ *
+ *   const follow = useFollowClose(onClose, restoreFocus)
+ *   <StepNumbersProvider onFollow={follow.onFollow}> ... <DialogContent onCloseAutoFocus={follow.onCloseAutoFocus}>
+ */
+export function useFollowClose(
+  onClose: () => void,
+  restoreFocus: (event: Event) => void,
+): { onFollow: () => void; onCloseAutoFocus: (event: Event) => void } {
+  const followed = useRef(false)
+  return {
+    onFollow: () => {
+      followed.current = true
+      onClose()
+    },
+    onCloseAutoFocus: (event) => {
+      if (followed.current) event.preventDefault()
+      else restoreFocus(event)
+    },
   }
 }

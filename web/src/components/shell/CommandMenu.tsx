@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import { plainText } from '@/lib/title'
 import { flushSync } from 'react-dom'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -107,7 +108,7 @@ export function CommandMenu({
       {room && (
         <div className="flex items-center gap-2 px-3.5 pt-1.5">
           <Badge variant="outline" className="h-[18px] max-w-[60%] text-[11px]">
-            <span className="truncate">{room.title}</span>
+            <span className="truncate">{plainText(room.title, 300)}</span>
           </Badge>
           {user.layers.length > 0 && (
             <span className="truncate text-xs text-subtle-foreground">you own {user.layers.join(', ')}</span>
@@ -208,11 +209,11 @@ export function CommandMenu({
             {sorted.map((r) => (
               <CommandItem
                 key={r.id}
-                value={`room ${r.title} ${r.pipeline_id} ${r.id}`}
+                value={`room ${plainText(r.title, 300)} ${r.pipeline_id} ${r.id}`}
                 onSelect={() => run(() => navigate(`/rooms/${encodeURIComponent(r.id)}`))}
               >
                 <Inbox aria-hidden="true" />
-                <span className="min-w-0 truncate">{r.title}</span>
+                <span className="min-w-0 truncate">{plainText(r.title, 300)}</span>
                 <span className="shrink-0 font-mono text-xs text-subtle-foreground">{r.pipeline_id}</span>
                 <span className="ml-auto flex shrink-0 items-center gap-1.5">
                   <span className="text-xs text-muted-foreground">{roomStatusCell(r).label}</span>

@@ -24,7 +24,7 @@ func verifyOnce(t *testing.T, tl []tools.Tool, steps []events.ProposalStep, text
 func TestVerificationEventRecovered(t *testing.T) {
 	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
 	sink, out, _ := verifyOnce(t, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps(), "proposal p_1 step 1: backfilled")
-	vs := verifications(sink)
+	vs := verifications(t, sink)
 	if len(vs) != 1 {
 		t.Fatalf("want one agent.verification, got %d", len(vs))
 	}
@@ -54,7 +54,7 @@ func TestVerificationEventLayerFailed(t *testing.T) {
 	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectBrokenResult()}
 	steps := []events.ProposalStep{{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)}}
 	sink, out, _ := verifyOnce(t, []tools.Tool{connect}, steps, "proposal p_1 step 0: restarted")
-	vs := verifications(sink)
+	vs := verifications(t, sink)
 	if len(vs) != 1 || vs[0].Recovered || vs[0].Checks[0].OK {
 		t.Fatalf("unexpected events: %+v", vs)
 	}
@@ -70,7 +70,7 @@ func TestVerificationEventLayerFailed(t *testing.T) {
 func TestVerificationEventDataFlowSinks(t *testing.T) {
 	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
 	sink, _, _ := verifyOnce(t, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps(), "proposal p_1 step 1: backfilled")
-	df := verifications(sink)[0].DataFlow
+	df := verifications(t, sink)[0].DataFlow
 	if df == nil || len(df.Sinks) != 1 {
 		t.Fatalf("want one sink, got %+v", df)
 	}
@@ -84,7 +84,7 @@ func TestVerificationRepeat(t *testing.T) {
 	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
 	sink, _, r := verifyOnce(t, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps(), "proposal p_1 step 1: backfilled")
 	r.handleActionResults(context.Background(), lastActionResult("proposal p_1 step 1: backfilled"))
-	vs := verifications(sink)
+	vs := verifications(t, sink)
 	if len(vs) != 2 {
 		t.Fatalf("want 2 events, got %d", len(vs))
 	}
@@ -134,7 +134,7 @@ func TestProposeFixVerifyTooLong(t *testing.T) {
 // DataFlowCheck.Detail; it is clipped like a per-check detail.
 func TestVerificationDataFlowDetailIsClipped(t *testing.T) {
 	long := strings.Repeat("x", 3*verifyEvidenceBytes)
-	got := (flowResult{detail: long}).dataFlowCheck("").Detail
+	got := (flowResult{detail: long}).event().Detail
 	if len(got) > verifyEvidenceBytes+len("…") || !strings.HasSuffix(got, "…") {
 		t.Fatalf("detail not clipped: %d bytes", len(got))
 	}

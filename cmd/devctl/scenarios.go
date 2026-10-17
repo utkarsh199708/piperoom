@@ -29,6 +29,15 @@ var scenarios = map[string]scenario{
 	"connector-auth":   {breakConnectorAuth, fixConnectorAuth},
 }
 
+// Waits of the schema-change fix. Registering the new schema needs the task to
+// re-read the WAL since its last confirmed position, which on a slot that stood
+// still for long (QA G18) is far more than the usual second or two.
+const (
+	fixRunningWait = 90 * time.Second
+	fixSchemaWait  = 3 * time.Minute
+	fixProgress    = 30 * time.Second
+)
+
 // schema-change: a migration changes orders.amount from integer to
 // numeric(12,2). Debezium's new Avro schema (bytes/decimal instead of int) is
 // not BACKWARD compatible, Schema Registry rejects it, and the task fails.
@@ -39,6 +48,12 @@ func breakSchemaChange(ctx context.Context, s *stack) error {
 	}
 	if typ != "integer" {
 		return fmt.Errorf("devctl: orders.amount is %q, not integer — run `devctl reset` first", typ)
+	}
+	// A connector still on "filtered" (registered before the dev config moved to
+	// disabled) breaks fine, but no restart gets it past the ALTER afterwards.
+	if live, err := s.liveConnectorConfig(ctx); err == nil && publicationMode(live) != "disabled" {
+		s.log.Warn("connector runs publication.autocreate.mode="+publicationMode(live)+": after this break a task restart cannot decode the WAL before the ALTER (dev/scenarios.md, Known issues G17); `devctl fix schema-change` switches it to disabled",
+			"connector", connectorName)
 	}
 	if _, err := s.psql(ctx, "orders",
 		"ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)",
@@ -56,22 +71,26 @@ func breakSchemaChange(ctx context.Context, s *stack) error {
 // compatibility rule so the next breaking change is caught again.
 //
 // The fix is idempotent. The break may still be active, half-fixed (compatibility
-// NONE, schema not registered yet) or fully fixed by someone else. Every case
-// ends with task 0 RUNNING and compatibility BACKWARD.
+// NONE, schema not registered yet) or fixed by someone else, e.g. an approved
+// agent fix that set decimal.handling.mode=double. Every case ends with task 0
+// RUNNING and compatibility BACKWARD. A connector on publication.autocreate.mode
+// filtered is moved to disabled first: in filtered mode no restart gets past the
+// ALTER (dev/scenarios.md, Known issues G17).
 func fixSchemaChange(ctx context.Context, s *stack) error {
 	// "New schema already registered" is decided from the latest value version,
 	// not from a version count. A count taken before a restart cannot tell a new
 	// version from an old one, and on an already fixed stack no new version comes,
 	// so waiting for one would time out. The schema from before the migration has
-	// amount as Avro int, so amount as bytes/decimal in the latest version means
-	// the new schema is in the registry.
-	registered, err := s.latestAmountIsDecimal(ctx, valueSubject)
+	// amount as Avro int; any other shape (bytes/decimal by default, double or
+	// string with another decimal.handling.mode) means the migrated schema is in.
+	shape, err := s.latestAmountShape(ctx, valueSubject)
 	if err != nil {
 		return err
 	}
+	registered := shape != string(avro.Int)
 	var before []int
 	if registered {
-		s.log.Info("skipped: new schema version already registered, no wait for a new version")
+		s.log.Info("skipped: new schema version already registered, no wait for a new version", "amount", shape)
 	} else {
 		if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
 			return err
@@ -82,11 +101,16 @@ func fixSchemaChange(ctx context.Context, s *stack) error {
 			return err
 		}
 	}
+	mark := workerLogMark(s.workerLogPath())
+	reconfigured, err := s.ensurePublicationDisabled(ctx)
+	if err != nil {
+		return err
+	}
 	// Restart unless the schema is registered and task 0 is already RUNNING. A
 	// task that shows RUNNING can still fail again on the 409, so when the schema
 	// is not registered the restart always happens.
 	restart := true
-	if registered {
+	if registered && !reconfigured {
 		st, err := s.connectorStatus(ctx)
 		if err != nil {
 			return err
@@ -97,24 +121,18 @@ func fixSchemaChange(ctx context.Context, s *stack) error {
 		}
 	}
 	if restart {
-		if err := s.restartTask(ctx, 0); err != nil {
+		if err := s.restartTaskSettled(ctx, 0, fixRunningWait); err != nil {
 			return err
 		}
 	}
-	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
-		return err
+	if err := s.waitConnector(ctx, "RUNNING", fixRunningWait); err != nil {
+		return fmt.Errorf("devctl: task 0 is not RUNNING after the restart: %w; %s", err, s.connectDiagnosis(ctx, mark))
 	}
 	// Wait until the new schema version is registered before restoring BACKWARD;
 	// otherwise the task fails again on the next record.
 	if !registered {
-		if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
-			vs, err := s.schemaVersions(ctx, valueSubject)
-			if err != nil {
-				return false, nil
-			}
-			return len(vs) > len(before), nil
-		}); err != nil {
-			return fmt.Errorf("devctl: new schema version was not registered: %w", err)
+		if err := s.waitSchemaRegistered(ctx, len(before), mark); err != nil {
+			return err
 		}
 	}
 	if err := s.setCompatibility(ctx, valueSubject, "BACKWARD"); err != nil {
@@ -124,56 +142,155 @@ func fixSchemaChange(ctx context.Context, s *stack) error {
 	return nil
 }
 
-// latestAmountIsDecimal reports whether the latest value schema of subject has
-// orders.amount as Avro bytes with logicalType decimal, the shape Debezium
-// registers after the numeric(12,2) migration.
-func (s *stack) latestAmountIsDecimal(ctx context.Context, subject string) (bool, error) {
-	b, err := s.do(ctx, http.MethodGet, s.cfg.SchemaRegistryURL+"/subjects/"+url.PathEscape(subject)+"/versions/latest", nil, http.StatusOK)
+// waitSchemaRegistered waits for a value schema version beyond the before
+// versions. A task that shows RUNNING can be stuck: Debezium retries a failed
+// decode for ever, and only the worker log says so. The wait therefore reads the
+// log too: it stops at once on the G17 signature, says every fixProgress what it
+// sees, and on timeout reports the task state and the newest worker-log error.
+func (s *stack) waitSchemaRegistered(ctx context.Context, before int, mark int64) error {
+	start, lastReport := time.Now(), time.Now()
+	var stuck string
+	err := s.waitFor(ctx, fixSchemaWait, func() (bool, error) {
+		if vs, err := s.schemaVersions(ctx, valueSubject); err == nil && len(vs) > before {
+			return true, nil
+		}
+		if finding, corrupt := s.workerLogFinding(mark); corrupt {
+			stuck = finding
+			return false, errDecodeStuck
+		}
+		if time.Since(lastReport) >= fixProgress {
+			lastReport = time.Now()
+			s.log.Info("still waiting for task 0 to register the new schema version",
+				"elapsed", time.Since(start).Round(time.Second), "seen", s.connectDiagnosis(ctx, mark))
+		}
+		return false, nil
+	})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, errDecodeStuck):
+		return fmt.Errorf("devctl: new schema version was not registered: %w: %s", err, stuck)
+	default:
+		return fmt.Errorf("devctl: new schema version was not registered: %w; %s", err, s.connectDiagnosis(ctx, mark))
+	}
+}
+
+// errDecodeStuck: the worker log shows the G17 decode error, so waiting longer
+// cannot help.
+var errDecodeStuck = errors.New("task 0 shows RUNNING but cannot stream the WAL")
+
+// publicationMode is the connector's publication.autocreate.mode; Debezium's
+// default is all_tables.
+func publicationMode(cfg map[string]string) string {
+	if m := cfg["publication.autocreate.mode"]; m != "" {
+		return m
+	}
+	return "all_tables"
+}
+
+// ensurePublicationDisabled moves the live connector to
+// publication.autocreate.mode=disabled when it runs another mode, keeping every
+// other key (an approved agent fix may have changed some). It reports whether it
+// changed the config; Connect restarts the task for a config change. Before the
+// switch the CDC init script runs again: a filtered start that succeeded set the
+// publication to public.orders alone, and in disabled mode nobody would add the
+// heartbeat table back (the slot would stand still again, G18).
+func (s *stack) ensurePublicationDisabled(ctx context.Context) (bool, error) {
+	live, err := s.liveConnectorConfig(ctx)
 	if err != nil {
 		return false, err
+	}
+	mode := publicationMode(live)
+	if mode == "disabled" {
+		return false, nil
+	}
+	s.log.Warn("connector runs publication.autocreate.mode="+mode+", where a restart cannot decode the WAL before the ALTER (Known issues G17); switching it to disabled",
+		"connector", connectorName)
+	if err := s.ensureCDCObjects(ctx); err != nil {
+		return false, err
+	}
+	live["publication.autocreate.mode"] = "disabled"
+	body, err := json.Marshal(live)
+	if err != nil {
+		return false, fmt.Errorf("devctl: encode connector config: %w", err)
+	}
+	if err := s.putConnectorConfig(ctx, body); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// latestAmountShape returns the Avro type of orders.amount in the latest value
+// schema of subject (see amountShape).
+func (s *stack) latestAmountShape(ctx context.Context, subject string) (string, error) {
+	b, err := s.do(ctx, http.MethodGet, s.cfg.SchemaRegistryURL+"/subjects/"+url.PathEscape(subject)+"/versions/latest", nil, http.StatusOK)
+	if err != nil {
+		return "", err
 	}
 	var v struct {
 		Version int    `json:"version"`
 		Schema  string `json:"schema"`
 	}
 	if err := json.Unmarshal(b, &v); err != nil {
-		return false, fmt.Errorf("devctl: decode latest schema of %s: %w", subject, err)
+		return "", fmt.Errorf("devctl: decode latest schema of %s: %w", subject, err)
 	}
-	ok, err := amountIsDecimal(v.Schema)
+	shape, err := amountShape(v.Schema)
 	if err != nil {
-		return false, fmt.Errorf("devctl: latest schema of %s (version %d): %w", subject, v.Version, err)
+		return "", fmt.Errorf("devctl: latest schema of %s (version %d): %w", subject, v.Version, err)
 	}
-	return ok, nil
+	return shape, nil
 }
 
 // amountIsDecimal reports whether the value schema's after record has amount as
-// Avro bytes with logicalType decimal. Debezium defines the row record once,
-// inside before, and refers to it by name from after, so the schema is parsed
-// with hamba/avro (which resolves those references) before the fields are read.
+// Avro bytes with logicalType decimal, the shape Debezium registers after the
+// numeric(12,2) migration with the default decimal.handling.mode (precise).
 func amountIsDecimal(schema string) (bool, error) {
+	shape, err := amountShape(schema)
+	return shape == "decimal", err
+}
+
+// amountShape names the Avro type of amount in the value schema's after record:
+// "int" before the migration; after it, what Debezium's decimal.handling.mode
+// makes of numeric(12,2): "decimal" (precise: bytes with logicalType decimal),
+// "double" or "string". A nullable column's ["null", T] union reports T.
+// Debezium defines the row record once, inside before, and refers to it by name
+// from after, so the schema is parsed with hamba/avro (which resolves those
+// references) before the fields are read.
+func amountShape(schema string) (string, error) {
 	// A fresh cache per call: hamba/avro's default cache is package-global, so a
 	// name defined by an earlier schema would resolve here without being defined.
 	root, err := avro.ParseWithCache(schema, "", &avro.SchemaCache{})
 	if err != nil {
-		return false, fmt.Errorf("parse value schema: %w", err)
+		return "", fmt.Errorf("parse value schema: %w", err)
 	}
 	env, ok := root.(*avro.RecordSchema)
 	if !ok {
-		return false, fmt.Errorf("value schema is %s, want a record", root.Type())
+		return "", fmt.Errorf("value schema is %s, want a record", root.Type())
 	}
 	after, ok := fieldByName(env, "after")
 	if !ok {
-		return false, errors.New("value schema has no after field")
+		return "", errors.New("value schema has no after field")
 	}
 	row, ok := rowRecord(after)
 	if !ok {
-		return false, errors.New("after field has no record branch")
+		return "", errors.New("after field has no record branch")
 	}
 	amount, ok := fieldByName(row, "amount")
 	if !ok {
-		return false, errors.New("row record has no amount field")
+		return "", errors.New("row record has no amount field")
 	}
-	return isDecimalBytes(amount), nil
+	if u, ok := amount.(*avro.UnionSchema); ok {
+		for _, m := range u.Types() {
+			if m.Type() != avro.Null {
+				amount = m
+				break
+			}
+		}
+	}
+	if isDecimalBytes(amount) {
+		return "decimal", nil
+	}
+	return string(amount.Type()), nil
 }
 
 // rowRecord returns the record a field type points to: the record itself, a
@@ -440,13 +557,16 @@ func fixConsumerLag(ctx context.Context, s *stack) error {
 	return nil
 }
 
-// connector-auth: a DBA moved ownership of public.orders to orders_owner and
-// the connector now authenticates as the least-privilege role `debezium`
-// (non-superuser). With publication.autocreate.mode=filtered Debezium runs
-// `ALTER PUBLICATION dbz_publication SET TABLE "public"."orders"` on every task
-// start, which requires owning the table. debezium owns the publication but not
-// the table, so task 0 fails with "must be owner of table orders"; streaming
-// never starts, so the slot goes inactive and the warehouse goes stale.
+// connector-auth: a DBA moved ownership of public.orders to orders_owner, and
+// the connector was moved to the least-privilege role `debezium` (non-superuser)
+// with a Debezium-managed publication (publication.autocreate.mode=filtered; the
+// dev config itself uses disabled, see dev/scenarios.md Known issues G17). In
+// filtered mode Debezium runs `ALTER PUBLICATION dbz_publication SET TABLE
+// "public"."orders"` on every task start, which requires owning the table.
+// debezium owns the publication but not the table, so task 0 fails with "must be
+// owner of table orders"; streaming never starts, so the slot goes inactive and
+// the warehouse goes stale. The error is only in the worker log: Connect keeps
+// the task RUNNING.
 func breakConnectorAuth(ctx context.Context, s *stack) error {
 	if _, err := s.psql(ctx, "orders",
 		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'debezium') THEN EXECUTE 'CREATE ROLE debezium LOGIN REPLICATION PASSWORD ''piperoom-dev'''; END IF; END $$",
@@ -458,10 +578,14 @@ func breakConnectorAuth(ctx context.Context, s *stack) error {
 		"ALTER TABLE public.orders OWNER TO orders_owner"); err != nil {
 		return err
 	}
-	if err := s.registerConnectorUser(ctx, "debezium", "piperoom-dev"); err != nil {
+	if err := s.registerConnectorWith(ctx, map[string]string{
+		"database.user":               "debezium",
+		"database.password":           "piperoom-dev",
+		"publication.autocreate.mode": "filtered",
+	}); err != nil {
 		return err
 	}
-	if err := s.restartTask(ctx, 0); err != nil {
+	if err := s.restartTaskSettled(ctx, 0, 60*time.Second); err != nil {
 		return err
 	}
 	// The task reports RUNNING but crash-loops on the publication update; the
@@ -480,17 +604,24 @@ func breakConnectorAuth(ctx context.Context, s *stack) error {
 }
 
 // The fix: give ownership back (orders and the publication return to piperoom),
-// point the connector back at piperoom, and restart the task.
+// register the dev connector config again (user piperoom, publication mode
+// disabled), and restart the task. The CDC init script runs again first: a
+// filtered-mode start that did succeed (say, after someone gave debezium the
+// table) rewrote the publication to public.orders alone, without the heartbeat
+// table.
 func fixConnectorAuth(ctx context.Context, s *stack) error {
 	if _, err := s.psql(ctx, "orders",
 		"ALTER TABLE public.orders OWNER TO piperoom",
 		"ALTER PUBLICATION dbz_publication OWNER TO piperoom"); err != nil {
 		return err
 	}
+	if err := s.ensureCDCObjects(ctx); err != nil {
+		return err
+	}
 	if err := s.registerConnector(ctx); err != nil {
 		return err
 	}
-	if err := s.restartTask(ctx, 0); err != nil {
+	if err := s.restartTaskSettled(ctx, 0, 60*time.Second); err != nil {
 		return err
 	}
 	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {

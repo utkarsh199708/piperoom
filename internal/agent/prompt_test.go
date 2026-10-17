@@ -33,11 +33,15 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// 1270 since E5a (#218): its rules (protective checks before a resume or
 	// restart, the nearest competing explanation, a status read per stage
 	// before abstaining, a scoped injection report) took the prompt from 1089
-	// to about 1250 words after cutting rules that repeated others; trim
-	// before raising it again. E6a's pause, healthy-outcome and per-stage read
-	// rules fit under it by cutting repeated wording.
-	if wc := len(strings.Fields(a)); wc > 1270 {
-		t.Fatalf("system prompt is %d words, over the 1270 limit", wc)
+	// to about 1250 words after cutting rules that repeated others. E6a's
+	// pause, healthy-outcome and per-stage read rules fit under it by cutting
+	// repeated wording. 1410 since the Q wave (#233): impacted_layers and
+	// risk_level (QA G5) and the "[new alert signal]" line (QA G1) added about
+	// 140 words. 1430 since main's E7a rules (#377) landed on the
+	// same base: each side fit its own cap, together they are about 1427.
+	// Trim before raising it again.
+	if wc := len(strings.Fields(a)); wc > 1430 {
+		t.Fatalf("system prompt is %d words, over the 1430 limit", wc)
 	}
 	// The untrusted-data rule must be stated so tool output is never treated as
 	// instructions, the alert text must be marked as data from an alerting
@@ -731,7 +735,7 @@ func TestSystemPromptCarriesE6aRules(t *testing.T) {
 	for _, want := range []string{
 		"A pause a person made on purpose and has not released is theirs to undo: name it as the cause, never propose the resume, ask that person, and report the backlog and retention headroom",
 		"A pause a failed job left may be resumed after the checks above",
-		"If every stage reads healthy, your closing message must say the pipeline is healthy now and there is nothing to fix",
+		"If every stage reads healthy, your closing message must first say the pipeline is healthy now and there is nothing to fix",
 		"keep any hypothesis naming a current failing component low",
 		"Each read tests a hypothesis; re-reading an unchanged component is waste",
 	} {

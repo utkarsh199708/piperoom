@@ -104,6 +104,9 @@ env:
   # --- the pipeline (non-secret parts; the DB URLs with passwords are secrets) ---
   KAFKA_BROKERS: ""
   CONNECT_URL: ""
+  # The Kafka Connect worker log file for the connect_worker_log tool (mount it
+  # into the pod), or "off". Off by default: the dev default path does not exist here.
+  CONNECT_WORKER_LOG_FILE: "off"
   # Your registry URL, or `off` when the pipelines use none. The chart skips empty
   # values, so "" is unset and the server falls back to the dev default
   # http://localhost:8081 (unreachable in a pod: the map shows the registry as unknown).

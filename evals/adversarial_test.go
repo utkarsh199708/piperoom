@@ -18,6 +18,33 @@ const (
 	restartT0  = `{"connector":"pg-orders-connector","task":0}`
 )
 
+// withListedTasks returns sc with the first recorded status of connector
+// listing the given task ids as RUNNING besides the ones it has. Action
+// validation reads the connector's tasks from that recording (Q6 U6: a task id
+// the status does not list is refused when proposed), so a test that needs a
+// wrong target the proposal gets past validation with lists it here.
+func withListedTasks(t *testing.T, sc Scenario, connector string, ids ...int) Scenario {
+	t.Helper()
+	for i, r := range sc.Recordings {
+		if r.Tool != "connect_status" || r.Input["connector"] != connector {
+			continue
+		}
+		data, ok := r.Data.(map[string]any)
+		if !ok {
+			continue
+		}
+		tasks, _ := data["tasks"].([]any)
+		for _, id := range ids {
+			tasks = append(tasks, map[string]any{"id": id, "state": "RUNNING"})
+		}
+		data["tasks"] = tasks
+		sc.Recordings[i].Data = data
+		return sc
+	}
+	t.Fatalf("scenario %s has no connect_status data for %s", sc.Name, connector)
+	return sc
+}
+
 func seedEvidence() []step { return goodSchemaChangeScript()[:3] }
 
 func seedFix(steps ...events.ProposalStep) step { return proposal(steps...) }
@@ -104,7 +131,10 @@ func TestScorerRejectsRightCauseWrongFix(t *testing.T) {
 	}
 	for name, tt := range fixes {
 		t.Run(name, func(t *testing.T) {
-			r, _ := evalOnce(t, loadSeed(), append(seedEvidence(), step{hypothesis: seedCause}, tt.fix))
+			// Task 1 exists but the fix needs task 0: a wrong target that
+			// passes the action's Validate.
+			sc := withListedTasks(t, loadSeed(), "pg-orders-connector", 1)
+			r, _ := evalOnce(t, sc, append(seedEvidence(), step{hypothesis: seedCause}, tt.fix))
 			if !r.RootCause {
 				t.Fatalf("the cause is right; failures = %v", r.Failures)
 			}
@@ -112,6 +142,19 @@ func TestScorerRejectsRightCauseWrongFix(t *testing.T) {
 				t.Errorf("pass=%v fix_ok=%v failures=%v, want %q", r.Pass, r.FixOK, r.Failures, tt.want)
 			}
 		})
+	}
+}
+
+// A task the connector does not list is refused when proposed (Q6 U6), so the
+// fix never exists and is not found; the scorer does not call it a wrong target.
+func TestScorerUnlistedTaskIsNeverProposed(t *testing.T) {
+	fix := seedFix(ps("schema_set_compatibility", setCompatV), ps("connect_restart_task", `{"connector":"pg-orders-connector","task":1}`))
+	r, _ := evalOnce(t, loadSeed(), append(seedEvidence(), step{hypothesis: seedCause}, fix))
+	if r.Pass || r.FixOK || r.Proposals != 0 || !hasFailure(r, "expected fix not proposed") {
+		t.Errorf("pass=%v fix_ok=%v proposals=%d failures=%v", r.Pass, r.FixOK, r.Proposals, r.Failures)
+	}
+	if len(r.Attempts) == 0 {
+		t.Errorf("the refused attempt was not logged")
 	}
 }
 

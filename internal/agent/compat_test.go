@@ -166,7 +166,7 @@ func newCompatRunner(t *testing.T, model model, inbox Inbox, sink Sink, steps []
 	}
 	r.model = model
 	r.clk = &fakeClock{}
-	r.proposals.record("p_1", steps)
+	r.proposals.record("p_1", steps, nil)
 	return r, proposals
 }
 
@@ -284,17 +284,23 @@ func TestRecoveredVerdictAfterNoneProposesRestore(t *testing.T) {
 				t.Fatal("the model must be told that p_2 waits for approval")
 			}
 
-			// The room saw the warning too, right after the typed verdict, and the
-			// episode ends parked as done.
-			var recoveredEvent bool
-			for _, v := range verifications(sink) {
-				recoveredEvent = recoveredEvent || (v.Recovered && strings.HasPrefix(v.Verdict, "recovered:"))
-				if strings.Contains(v.Verdict, "follow-up") {
-					t.Fatalf("the verdict must not carry the model follow-up: %q", v.Verdict)
+			// The room saw the warning too (one message right after the verdict
+			// event, not a second verdict), and the episode ends parked as done.
+			var warned int
+			for _, m := range messageTexts(sink) {
+				if strings.Contains(m, "follow-up: "+compatSubject+" compatibility is still NONE") {
+					warned++
 				}
 			}
-			if !recoveredEvent {
-				t.Fatalf("the room must get a recovered agent.verification, got %q", messageTexts(sink))
+			if warned != 1 {
+				t.Fatalf("the room must see the follow-up once, got %d in %q", warned, messageTexts(sink))
+			}
+			vs := verifications(t, sink)
+			if len(vs) != 1 || !vs[0].Recovered || !strings.HasPrefix(vs[0].Verdict, "recovered:") {
+				t.Fatalf("want one recovered verdict event, got %+v", vs)
+			}
+			if strings.Contains(vs[0].Verdict, "follow-up") {
+				t.Fatalf("the verdict must not carry the model follow-up: %q", vs[0].Verdict)
 			}
 			if !strings.Contains(requestText(model.calls[2]), "follow-up: "+compatSubject+" compatibility is still NONE") {
 				t.Fatal("the model must still read the follow-up")
@@ -573,7 +579,7 @@ func TestRestoreProposalOnStaleWarehouseIsRecovered(t *testing.T) {
 	}
 	msgs := messageTexts(sink)
 	assertVerdict(t, msgs, true)
-	vs := verifications(sink)
+	vs := verifications(t, sink)
 	if len(vs) != 1 || len(vs[0].Checks) != 1 || vs[0].Checks[0].Name != "schema_registry_versions" || vs[0].Checks[0].Layer != "schema-registry" ||
 		vs[0].DataFlow == nil || !strings.Contains(vs[0].DataFlow.Detail, "information only") {
 		t.Fatalf("the verdict must show the layer check and data flow as information, got %+v", vs)
@@ -791,7 +797,7 @@ func TestPendingRestoreStatusIsNotOverwritten(t *testing.T) {
 	model := &scriptedModel{}
 	// p_1 recovers and parks; then p_2 leaves a subject at NONE while parked.
 	r, _ := newCompatRunner(t, model, inbox, sink, recoveredSteps(), compatEnv{level: "NONE"})
-	r.proposals.record("p_2", compatSteps("NONE"))
+	r.proposals.record("p_2", compatSteps("NONE"), nil)
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)

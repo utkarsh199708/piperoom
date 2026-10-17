@@ -6,7 +6,7 @@ import type { CurrentUser } from '../state/permissions'
 import { canAcceptHandoff } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
-import { handoffFailureText, handoffInFlight, shiftIndex } from '@/lib/handoff'
+import { canWriteByHand, emptySummaryDraft, handoffFailureText, handoffInFlight, parseSummaryDraft, shiftIndex } from '@/lib/handoff'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -19,10 +19,12 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { PersonSelect } from './PersonSelect'
 import { PersonName } from './VerifiedBadge'
+import { StepNumbersProvider } from './room/AgentText'
 import { HandoffCard, HandoffSummary } from './room/HandoffCard'
 import { RoomDialogClose } from './room/RoomDialogClose'
+import { SummaryFields } from './room/SummaryFields'
 import { useNow } from './room/useNow'
-import { useRestoreFocus } from './room/useRestoreFocus'
+import { useFollowClose, useRestoreFocus } from './room/useRestoreFocus'
 
 // A shadcn Dialog: Esc and the X close it, focus is trapped inside and goes back to
 // whatever opened it. The room screen mounts it only while it is open.
@@ -39,7 +41,14 @@ export function HandoffDialog({
 }) {
   const [to, setTo] = useState('')
   const [stay, setStay] = useState(false)
+  // Q0 (G4): when the agent cannot write the summary the driver can write it themselves.
+  const [mode, setMode] = useState<'agent' | 'manual'>('agent')
+  const [draft, setDraft] = useState(emptySummaryDraft)
+  const [tried, setTried] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [problem, setProblem] = useState<{ code?: string; text: string } | null>(null)
   const restoreFocus = useRestoreFocus()
+  const follow = useFollowClose(onClose, restoreFocus)
   // "Hand off to someone else" on a pending hand-off: a new one voids it on the server. Keyed by
   // id, so the next hand-off's summary shows again once it arrives.
   const [redoOf, setRedoOf] = useState<string | null>(null)
@@ -47,19 +56,39 @@ export function HandoffDialog({
   const now = useNow(5_000)
   const inFlight = pending ? null : handoffInFlight(state, now)
   const failure = state.handoff_failure
+  // The answer to this dialog's own request wins over an older handoff.failed of the log.
+  const failedReason = problem ? (problem.code === 'summary_failed' ? 'summary_failed' : undefined) : failure?.reason
+  const failureText = problem && failedReason === undefined ? problem.text : failedReason ? handoffFailureText(failedReason) : null
+  const parsed = parseSummaryDraft(draft)
 
-  const start = () => {
-    if (!to || inFlight) return
-    actions.handoff(to, stay)
+  const report = (res: { ok: boolean; code?: string; error?: string } | undefined) => {
+    // `?.`: a test double may resolve with nothing.
+    if (res?.ok === false) setProblem({ code: res.code, text: res.error ?? 'The hand-off failed. Try again.' })
+  }
+  const start = async () => {
+    if (!to || inFlight || busy) return
+    setBusy(true)
+    setProblem(null)
+    report(await actions.handoff(to, stay))
+    setBusy(false)
+  }
+  const startManual = async () => {
+    if (!to || inFlight || busy) return
+    setTried(true)
+    if (!parsed.summary) return
+    setBusy(true)
+    setProblem(null)
+    report(await actions.handoff(to, stay, parsed.summary))
+    setBusy(false)
   }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    start()
+    void (mode === 'manual' ? startManual() : start())
   }
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      start()
+      void (mode === 'manual' ? startManual() : start())
     }
   }
 
@@ -69,11 +98,11 @@ export function HandoffDialog({
         hideClose
         className="max-h-[85vh] overflow-y-auto"
         onKeyDown={pending || inFlight ? undefined : onKeyDown}
-        onCloseAutoFocus={restoreFocus}
+        onCloseAutoFocus={follow.onCloseAutoFocus}
       >
         <RoomDialogClose label="Close hand-off dialog" />
         <DialogHeader>
-          <DialogTitle>Hand off the room</DialogTitle>
+          <DialogTitle>{mode === 'manual' && !pending && !inFlight ? 'Write the hand-off summary' : 'Hand off the room'}</DialogTitle>
           <DialogDescription>
             {pending ? (
               <>
@@ -83,6 +112,8 @@ export function HandoffDialog({
               <>
                 The agent is writing the summary for <PersonName person={inFlight.to} />.
               </>
+            ) : mode === 'manual' ? (
+              'You write what the agent would have written. The person who takes over sees that you wrote it.'
             ) : (
               'The agent writes a summary for the person who takes over. They accept it to become the driver.'
             )}
@@ -91,7 +122,9 @@ export function HandoffDialog({
 
         {pending ? (
           <div className="flex flex-col gap-3">
-            <HandoffSummary summary={pending.summary} />
+            <StepNumbersProvider steps={state.steps} proposalIds={state.proposals.map((x) => x.proposal_id)} onFollow={follow.onFollow}>
+              <HandoffSummary summary={pending.summary} manual={pending.manual} writtenBy={pending.written_by} />
+            </StepNumbersProvider>
             <DialogFooter>
               {state.status === 'open' && (
                 <Button type="button" variant="ghost" onClick={() => setRedoOf(pending.handoff_id)}>
@@ -117,9 +150,9 @@ export function HandoffDialog({
           </div>
         ) : (
           <form className="flex flex-col gap-4" onSubmit={submit}>
-            {failure && (
+            {mode === 'agent' && failureText && (
               <p role="alert" className="m-0 text-sm text-destructive-fg">
-                {handoffFailureText(failure.reason)}
+                {failureText}
               </p>
             )}
             <div className="flex flex-col gap-1.5">
@@ -139,15 +172,49 @@ export function HandoffDialog({
               />
               Stay as watcher after hand-off
             </label>
-            <DialogFooter>
-              <Button type="button" variant="ghost" onClick={onClose}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={!to}>
-                Start hand-off
-                <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
-              </Button>
-            </DialogFooter>
+            {mode === 'manual' && (
+              <>
+                <SummaryFields draft={draft} onChange={setDraft} disabled={busy} />
+                {tried && parsed.errors.length > 0 && (
+                  <ul role="alert" className="m-0 list-disc pl-5 text-sm text-destructive-fg">
+                    {parsed.errors.map((m) => (
+                      <li key={m}>{m}</li>
+                    ))}
+                  </ul>
+                )}
+                {problem && (
+                  <p role="alert" className="m-0 text-sm text-destructive-fg">
+                    {problem.text}
+                  </p>
+                )}
+              </>
+            )}
+            {mode === 'agent' ? (
+              <DialogFooter>
+                <Button type="button" variant="ghost" onClick={onClose}>
+                  Cancel
+                </Button>
+                {canWriteByHand(failedReason) && (
+                  <Button type="button" variant="secondary" onClick={() => setMode('manual')}>
+                    Write the summary yourself
+                  </Button>
+                )}
+                <Button type="submit" disabled={!to || busy}>
+                  {busy ? 'Starting…' : 'Start hand-off'}
+                  {!busy && <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>}
+                </Button>
+              </DialogFooter>
+            ) : (
+              <DialogFooter>
+                <Button type="button" variant="ghost" onClick={() => setMode('agent')}>
+                  Back
+                </Button>
+                <Button type="submit" disabled={!to || busy}>
+                  {busy ? 'Sending…' : 'Hand off with this summary'}
+                  {!busy && <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>}
+                </Button>
+              </DialogFooter>
+            )}
           </form>
         )}
       </DialogContent>
@@ -214,43 +281,45 @@ export function HandoffAcceptBanner({
         </div>
       )}
       <div className="px-4 pt-3 sm:px-6" onKeyDown={onKeyDown}>
-        <HandoffCard
-          key={pending.handoff_id}
-          id={mine ? HANDOFF_READ_ID : undefined}
-          handoff={pending}
-          index={shiftIndex(state.handoffs, pending)}
-          from={pending.from}
-          createdAt={pending.created_at}
-          defaultOpen={false}
-          open={open}
-          onOpenChange={mine ? (o) => setClosedId(o ? null : mine.handoff_id) : undefined}
-          onFocusSelf={mine ? () => setClosedId(null) : undefined}
-          footer={
-            mine ? (
-              <>
-                {mine.stay_as_watcher && (
-                  <p className="m-0 mr-auto self-center text-xs text-muted-foreground">
-                    <PersonName person={mine.from} /> stays in the room as a watcher.
-                  </p>
-                )}
-                <Button type="button" variant="ghost" onClick={() => notYet(mine.handoff_id)}>
-                  Not yet
-                </Button>
-                <Button
-                  type="button"
-                  aria-keyshortcuts="Meta+Enter Control+Enter"
-                  disabled={accepting}
-                  aria-busy={accepting || undefined}
-                  onClick={accept}
-                >
-                  {accepting && <Loader2 className="animate-spin motion-reduce:animate-none" aria-hidden="true" />}
-                  Accept and take over
-                  <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
-                </Button>
-              </>
-            ) : undefined
-          }
-        />
+        <StepNumbersProvider steps={state.steps} proposalIds={state.proposals.map((x) => x.proposal_id)}>
+          <HandoffCard
+            key={pending.handoff_id}
+            id={mine ? HANDOFF_READ_ID : undefined}
+            handoff={pending}
+            index={shiftIndex(state.handoffs, pending)}
+            from={pending.from}
+            createdAt={pending.created_at}
+            defaultOpen={false}
+            open={open}
+            onOpenChange={mine ? (o) => setClosedId(o ? null : mine.handoff_id) : undefined}
+            onFocusSelf={mine ? () => setClosedId(null) : undefined}
+            footer={
+              mine ? (
+                <>
+                  {mine.stay_as_watcher && (
+                    <p className="m-0 mr-auto self-center text-xs text-muted-foreground">
+                      <PersonName person={mine.from} /> stays in the room as a watcher.
+                    </p>
+                  )}
+                  <Button type="button" variant="ghost" onClick={() => notYet(mine.handoff_id)}>
+                    Not yet
+                  </Button>
+                  <Button
+                    type="button"
+                    aria-keyshortcuts="Meta+Enter Control+Enter"
+                    disabled={accepting}
+                    aria-busy={accepting || undefined}
+                    onClick={accept}
+                  >
+                    {accepting && <Loader2 className="animate-spin motion-reduce:animate-none" aria-hidden="true" />}
+                    Accept and take over
+                    <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
+                  </Button>
+                </>
+              ) : undefined
+            }
+          />
+        </StepNumbersProvider>
       </div>
     </>
   )

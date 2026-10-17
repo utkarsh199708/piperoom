@@ -36,7 +36,9 @@ export type EventType =
   | 'control.requested'
   | 'control.granted'
   | 'control.lease_expired'
+  | 'owner.paged'
   | 'proposal.created'
+  | 'proposal.withdrawn'
   | 'approval.given'
   | 'approval.rejected'
   | 'action.executed'
@@ -199,12 +201,36 @@ export interface AgentUsagePayload {
   cost_usd?: number // omitted when no price is configured for the model
 }
 
+/** comment.added `kind` (Q0): absent or "" is a plain comment; "fix_note" logs a fix made outside Piperoom. */
+export type CommentKind = 'fix_note'
+
 export interface CommentAddedPayload {
   comment_id: string
   step_id?: string
   text: string
   mentions_agent: boolean
+  kind?: CommentKind | ''
   client_id?: string // the request's idempotency key (#459)
+}
+
+/**
+ * owner.paged (Q0, QA G2): the owners of `layer` were asked to look at the room. `owners` are user
+ * ids the server resolved (never chosen by the caller), `[]` when the layer has nobody. `reason`
+ * can be agent text: render it as text. `auto` is true when the server paged on its own.
+ */
+export interface OwnerPagedPayload {
+  layer: string
+  owners: string[]
+  reason: string
+  proposal_id?: string
+  auto?: boolean
+}
+
+/** Body of POST /api/rooms/{id}/page. */
+export interface PageInput {
+  layer: string
+  reason: string
+  proposal_id?: string
 }
 
 export interface SteerSuggestedPayload {
@@ -319,6 +345,24 @@ export interface ProposalCreatedPayload {
   required_layers: string[]
   /** Hex SHA-256 of the frozen proposal (auth PR 4). Absent on events written before it. */
   params_hash?: string
+  /**
+   * Q0 (QA G5): layers the fix does not write to but whose data it changes. They are inside
+   * `required_layers` already, so their owners must approve too.
+   */
+  impacted_layers?: string[]
+  /** Q0: "low" | "medium" | "high". Absent on events written before Q0. */
+  risk_level?: string
+  /** Q0: why the server raised the risk or added impacted layers (at most 8, each at most 300 characters). */
+  impact_reasons?: string[]
+}
+
+/**
+ * proposal.withdrawn (Q0, QA G8/G9): the proposal ended without running. By the agent, the driver,
+ * or the system actor right after room.closed with reason "room closed".
+ */
+export interface ProposalWithdrawnPayload {
+  proposal_id: string
+  reason: string
 }
 
 /**
@@ -402,6 +446,8 @@ export interface HandoffCreatedPayload {
   to: Actor
   summary: HandoffSummary
   stay_as_watcher: boolean
+  /** Q0: the driver wrote the summary (the event's actor), no model was called. */
+  manual?: boolean
 }
 
 export interface HandoffAcceptedPayload {
@@ -450,6 +496,10 @@ export interface ProposalSummary {
   approvals: Record<string, ApprovalValue>
   /** After auth PR 4. "" only for a proposal that cannot be hashed. */
   params_hash?: string
+  /** Q0: copied from proposal.created. */
+  impacted_layers?: string[]
+  risk_level?: string
+  impact_reasons?: string[]
 }
 
 export interface SuggestionSummary {
@@ -517,6 +567,18 @@ export interface TriageSummary {
   at: string
 }
 
+/** One entry of the snapshot's `pages` (Q0): the newest owner.paged of a layer, open rooms only. */
+export interface PageSummary {
+  layer: string
+  /** User ids; compare with `/api/me` id. */
+  owners: string[]
+  reason: string
+  proposal_id?: string
+  by: Actor
+  auto?: boolean
+  at: string
+}
+
 export interface RoomSnapshot {
   id: string
   title: string
@@ -525,6 +587,8 @@ export interface RoomSnapshot {
   status: string // "open" | "closed"
   opened_at: string
   closed_at?: string
+  /** Who closed the room (F10); absent while open. */
+  closed_by?: Actor
   resolution?: string
   last_seq: number
   driver: DriverSummary | null
@@ -532,6 +596,8 @@ export interface RoomSnapshot {
   hypothesis: HypothesisSummary | null
   /** F6: absent on an older server; null until the first agent.triage. */
   triage?: TriageSummary | null
+  /** Q0: the newest owner.paged per layer, in seq order; absent on an older server, [] on a closed room. */
+  pages?: PageSummary[]
   open_proposals: ProposalSummary[]
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
@@ -541,8 +607,8 @@ export interface RoomSnapshot {
   shadow?: boolean
   /** F11: cost and clock facts folded server-side; absent on an older server. */
   insight?: RoomInsight
-  /** F10: the actor of room.closed; closed rooms only. */
-  closed_by?: Actor
+  /** Q0: injection kinds found in the title (`[]` when clean). The title is still shown, as text. */
+  title_flags?: string[]
   /** F2: the post-mortem draft's state; absent on an older server. */
   postmortem?: PostmortemSummary
 }
@@ -641,6 +707,8 @@ export interface Me {
   role?: 'member' | 'viewer'
   /** The IdP sent no groups claim (docs/design/auth.md 2.2). */
   groups_missing?: boolean
+  /** Group names of the session, so `group:<name>` page owners can match. Not sent by the server yet (docs/api.md /api/me has none). */
+  groups?: string[]
   /** This user is PIPEROOM_SOLO_USER (omitted otherwise): approvals need a typed confirm. */
   solo?: boolean
 }

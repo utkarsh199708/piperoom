@@ -38,14 +38,15 @@ func errClientIDReused() *Error {
 // sameRequest reports whether a stored event answers the current request.
 type sameRequest func(events.Event) bool
 
-func sameComment(stepID, text string) sameRequest {
+func sameComment(stepID, text, kind string) sameRequest {
 	return func(e events.Event) bool {
 		if e.Type != events.CommentAdded {
 			return false
 		}
 		p, err := events.Decode[events.CommentAddedPayload](e)
-		// Byte-for-byte text; absent and "" step_id are the same (docs/api.md).
-		return err == nil && p.Text == text && p.StepID == stepID
+		// Byte-for-byte text; absent and "" step_id are the same (docs/api.md),
+		// and so are absent and "" kind (a plain comment, not a fix note).
+		return err == nil && p.Text == text && p.StepID == stepID && p.Kind == kind
 	}
 }
 

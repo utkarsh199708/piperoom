@@ -28,7 +28,7 @@ func (r *runner) wrapReadToolOutput(tool, stepID, text string) string {
 	if tool == runbooks.ToolName {
 		return wrapped
 	}
-	findings := injectscan.Scan(text)
+	findings := instructionFindings(text)
 	if len(findings) == 0 {
 		return wrapped
 	}
@@ -46,4 +46,24 @@ func markSuspected(wrapped string) string {
 		return wrapped
 	}
 	return wrapped[:i] + ` untrusted="true"` + suspectedAttr + ">" + wrapped[i+len(untrustedAttr):]
+}
+
+// instructionFindings is injectscan.Scan without KindHiddenText findings. An
+// invisible character in tool output is often the evidence itself (a key that
+// differs by a zero-width space), and markInvisible already shows it to the
+// model as a {U+XXXX} marker or removes it (tag characters), so on its own it
+// does not mark the output suspected. Hidden words that read as an instruction
+// still do: Scan decodes tag characters and reports the instruction's kind.
+func instructionFindings(text string) []injectscan.Finding {
+	fs := injectscan.Scan(text)
+	out := fs[:0]
+	for _, f := range fs {
+		if f.Kind != injectscan.KindHiddenText {
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

@@ -34,13 +34,28 @@ func input(query string, limit int) string {
 	return string(b)
 }
 
+// seeded seeds rooms as worked incidents (see worked), which the index keeps.
+// The tests of the incident filter seed bare rooms with fake.NewStore.
 func seeded(t *testing.T, rooms ...fake.Room) *memstore.Store {
 	t.Helper()
-	st, err := fake.NewStore(context.Background(), rooms...)
+	worked := make([]fake.Room, len(rooms))
+	for i, r := range rooms {
+		worked[i] = withWorkedShape(r)
+	}
+	st, err := fake.NewStore(context.Background(), worked...)
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	return st
+}
+
+// withWorkedShape gives a fixture room what a real incident has and the index
+// requires: a hypothesis and enough events (six steps, with room.created,
+// the hypothesis and room.closed, nine in all).
+func withWorkedShape(r fake.Room) fake.Room {
+	r.Hypothesis = true
+	r.Steps = max(r.Steps, 6)
+	return r
 }
 
 func hitIDs(t *testing.T, res tools.Result) []string {
@@ -225,7 +240,12 @@ func TestShadowRoomAgentTextIsNeverIndexedOrReturned(t *testing.T) {
 // room.created is "unknown", not "not shadow".
 func TestAgentTextNeedsAReadableRoomCreated(t *testing.T) {
 	mk := func(id string, mod func(*fake.Room)) fake.Room {
+		// Every room has a human label, so each is an incident the index keeps
+		// without a hypothesis: the shadow and unreadable ones cannot be read
+		// for one. The label has no text, so the words this test searches
+		// are the only ones.
 		r := fake.Room{ID: id, Title: "plain title", ClosedAt: day(9, 1), Resolution: "human words",
+			Label:       &events.RoomLabelledPayload{},
 			Handoff:     &events.HandoffSummary{WhatBroke: "zzhandoffword"},
 			ToolResults: []fake.ToolResult{{Tool: "connect_status", Summary: connectSchemaTrace}}}
 		mod(&r)
@@ -497,7 +517,7 @@ func TestIndexIsCachedForTTLAndRefreshed(t *testing.T) {
 		t.Fatalf("lists = %d, want 1 within the TTL", src.lists)
 	}
 	// A room closes; it shows up only after the TTL.
-	if err := fake.Seed(ctx, st, fake.Room{ID: "r-2", Title: "kafka lag again", ClosedAt: day(9, 2), Resolution: "two"}); err != nil {
+	if err := fake.Seed(ctx, st, withWorkedShape(fake.Room{ID: "r-2", Title: "kafka lag again", ClosedAt: day(9, 2), Resolution: "two"})); err != nil {
 		t.Fatal(err)
 	}
 	res, _ := run(t, tl, scoped("orders"), input("kafka lag", 3))
@@ -544,8 +564,8 @@ func TestLateLabelIsPickedUpButSettledRoomsAreNotReread(t *testing.T) {
 		t.Fatalf("late label not found: %v", ids)
 	}
 	// r-old was read in the first build, long after it closed: settled, kept.
-	if got := src.events - first; got != 4 { // r-new only: rare events, fix events, hand-offs, tool results
-		t.Fatalf("second build made %d event reads, want 4 (r-new only)", got)
+	if got := src.events - first; got != 5 { // r-new only: rare events, hypothesis, fix events, hand-offs, tool results
+		t.Fatalf("second build made %d event reads, want 5 (r-new only)", got)
 	}
 }
 
@@ -554,8 +574,9 @@ func TestSlowStoreGivesPartialAnswerAndCancelStops(t *testing.T) {
 		fake.Room{ID: "r-1", Title: "kafka lag", ClosedAt: day(9, 3), Resolution: "one"},
 		fake.Room{ID: "r-2", Title: "kafka lag", ClosedAt: day(9, 2), Resolution: "two"},
 	)
-	// Reads 1-4 serve room r-1; the fifth (r-2) stalls until the build deadline.
-	src := &countingSource{Source: similarincidents.FromStore(st), stallAt: 5}
+	// Reads 1-5 serve room r-1 (rare events, hypothesis, fix, hand-offs, tool
+	// results); the sixth, the first of r-2, stalls until the build deadline.
+	src := &countingSource{Source: similarincidents.FromStore(st), stallAt: 6}
 	tl := similarincidents.New(similarincidents.Deps{Source: src, BuildTimeout: 50 * time.Millisecond})
 	res, err := run(t, tl, scoped("orders"), input("kafka lag", 5))
 	if err != nil {

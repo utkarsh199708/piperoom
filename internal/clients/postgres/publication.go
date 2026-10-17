@@ -2,9 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/pgconv"
@@ -22,12 +25,60 @@ import (
 //     (-> pg_class.oid).
 //   - has_table_privilege ([user name|oid], table text|oid, privilege text)
 //     (§9.27): privilege types include SELECT.
+//   - pg_class.relowner names the table's owner role and
+//     pg_get_userbyid(oid) turns it into a name; pg_has_role([user name|oid],
+//     role name|oid, 'USAGE') (§9.27) is true when the user is that role or
+//     inherits its privileges through membership (and for a superuser).
+//     'MEMBER' is also true for a NOINHERIT or WITH INHERIT FALSE
+//     membership, which Postgres does not accept as ownership: the ownership
+//     check behind ALTER PUBLICATION ... SET TABLE is object_ownercheck, which
+//     calls has_privs_of_role, the 'USAGE' semantics (PostgreSQL docs,
+//     "System Information Functions", pg_has_role; "Privileges": a member
+//     has the owner's rights only when it inherits them).
 type PublicationTable struct {
 	Schema        string `json:"schema"`
 	Table         string `json:"table"`
 	InPublication bool   `json:"in_publication"`
 	// Selectable is has_table_privilege(role, "schema"."table", 'SELECT').
 	Selectable bool `json:"selectable"`
+	// Owner is the table's owner role (pg_class.relowner); "" when the table
+	// does not exist, or when the reader did not say (then the two flags below
+	// mean nothing). (Q1, QA G3)
+	Owner string `json:"owner,omitempty"`
+	// RoleIsOwner is true when the connector role is Owner itself.
+	RoleIsOwner bool `json:"role_is_owner,omitempty"`
+	// RoleMemberOfOwner is pg_has_role(role, owner, 'USAGE'): the role is the
+	// owner, inherits the owner's privileges through membership, or is a
+	// superuser. Adding a table to a publication needs ownership of the
+	// table, which an inheriting membership gives and a NOINHERIT or WITH
+	// INHERIT FALSE one does not. Omitted when false, so check Owner too.
+	RoleMemberOfOwner bool `json:"role_member_of_owner,omitempty"`
+}
+
+// PublicationInfo is what a connector role needs, beyond SELECT, to keep a
+// publication working, read from the catalogs. (Q1, QA G3)
+type PublicationInfo struct {
+	Publication string `json:"publication"`
+	// Owner is the publication's owner role (pg_publication.pubowner).
+	Owner string `json:"owner"`
+	// Role is the connector role the fields below describe.
+	Role string `json:"role"`
+	// RoleExists is false when pg_roles has no such role; the fields below are
+	// then all false.
+	RoleExists bool `json:"role_exists"`
+	// RoleReplication is pg_roles.rolreplication: the REPLICATION attribute,
+	// which a role needs to open a logical replication connection.
+	RoleReplication bool `json:"role_replication"`
+	// RoleSuperuser is pg_roles.rolsuper.
+	RoleSuperuser bool `json:"role_superuser"`
+	// RoleManagedReplication is true when the role is a member of
+	// rds_replication, which RDS and Aurora use instead of the REPLICATION
+	// attribute; rolreplication stays false for such a role.
+	RoleManagedReplication bool `json:"role_managed_replication"`
+	// RoleIsOwner and RoleMemberOfOwner are the same facts as on
+	// PublicationTable, for the publication: ALTER PUBLICATION needs its owner.
+	RoleIsOwner       bool `json:"role_is_owner"`
+	RoleMemberOfOwner bool `json:"role_member_of_owner"`
 }
 
 // PublicationTables lists the relations in the publication named publication
@@ -83,7 +134,11 @@ func (d *DB) PublicationTables(ctx context.Context, publication, role string, ta
 func (d *DB) publicationMembers(ctx context.Context, publication, role string) ([]PublicationTable, error) {
 	rows, err := d.query(ctx, `
 		SELECT pt.schemaname, pt.tablename,
-		       has_table_privilege($2::name, c.oid, 'SELECT')
+		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN has_table_privilege($2::name, c.oid, 'SELECT') ELSE false END,
+		       pg_get_userbyid(c.relowner)::text,
+		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN pg_has_role($2::name, c.relowner, 'USAGE') ELSE false END
 		FROM pg_publication_tables pt
 		JOIN pg_namespace n ON n.nspname = pt.schemaname
 		JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = pt.tablename
@@ -97,10 +152,11 @@ func (d *DB) publicationMembers(ctx context.Context, publication, role string) (
 	var out []PublicationTable
 	for rows.Next() {
 		var t PublicationTable
-		if err := rows.Scan(&t.Schema, &t.Table, &t.Selectable); err != nil {
+		if err := rows.Scan(&t.Schema, &t.Table, &t.Selectable, &t.Owner, &t.RoleMemberOfOwner); err != nil {
 			return nil, fmt.Errorf("postgres: scan publication table: %w", err)
 		}
 		t.InPublication = true
+		t.RoleIsOwner = t.Owner != "" && t.Owner == role
 		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
@@ -141,7 +197,11 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		WITH ` + publishedCTEs + `
 		SELECT v.schemaname, v.tablename,
 		       (c.oid IS NOT NULL AND ` + publishedMember("c.oid") + `) AS in_publication,
-		       (c.oid IS NOT NULL AND has_table_privilege($2::name, c.oid, 'SELECT')) AS selectable
+		       CASE WHEN c.oid IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN has_table_privilege($2::name, c.oid, 'SELECT') ELSE false END AS selectable,
+		       COALESCE(pg_get_userbyid(c.relowner)::text, '') AS owner,
+		       CASE WHEN c.oid IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN pg_has_role($2::name, c.relowner, 'USAGE') ELSE false END AS role_member
 		FROM (VALUES `)
 	for i := range sources {
 		if i > 0 {
@@ -164,15 +224,54 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	var out []PublicationTable
 	for rows.Next() {
 		var t PublicationTable
-		if err := rows.Scan(&t.Schema, &t.Table, &t.InPublication, &t.Selectable); err != nil {
+		if err := rows.Scan(&t.Schema, &t.Table, &t.InPublication, &t.Selectable, &t.Owner, &t.RoleMemberOfOwner); err != nil {
 			return nil, fmt.Errorf("postgres: scan source privilege: %w", err)
 		}
+		t.RoleIsOwner = t.Owner != "" && t.Owner == role
 		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: read publication %q source privileges: %w", publication, err)
 	}
 	return out, nil
+}
+
+// PublicationInfo reads the publication's owner and role's attributes: the
+// REPLICATION and SUPERUSER flags, and whether role owns the publication or is
+// a member of its owner. It reads catalogs only, with parameters. A missing
+// publication is clients.ErrNotFound; a missing role is not an error: it is
+// reported as RoleExists=false, because a connector pointed at a role that was
+// dropped is a finding, not a failure of this read.
+//
+// This method is not on clients.SourceDB; the pg_publication_tables tool finds
+// it with a type assertion, like PublicationTables. (Q1, QA G3)
+func (d *DB) PublicationInfo(ctx context.Context, publication, role string) (PublicationInfo, error) {
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
+	defer cancel()
+
+	info := PublicationInfo{Publication: publication, Role: role}
+	var roleName *string
+	err := d.queryRow(ctx, `
+		SELECT pg_get_userbyid(p.pubowner)::text,
+		       r.rolname::text,
+		       COALESCE(r.rolreplication, false),
+		       COALESCE(r.rolsuper, false),
+		       (r.oid IS NOT NULL AND pg_has_role(r.oid, p.pubowner, 'USAGE')),
+		       EXISTS (SELECT 1 FROM pg_roles m
+		               WHERE m.rolname = 'rds_replication' AND pg_has_role(r.oid, m.oid, 'USAGE'))
+		FROM pg_publication p
+		LEFT JOIN pg_roles r ON r.rolname = $2::name
+		WHERE p.pubname = $1`, publication, role).
+		Scan(&info.Owner, &roleName, &info.RoleReplication, &info.RoleSuperuser, &info.RoleMemberOfOwner, &info.RoleManagedReplication)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PublicationInfo{}, fmt.Errorf("postgres: publication %q: %w", publication, clients.ErrNotFound)
+	}
+	if err != nil {
+		return PublicationInfo{}, fmt.Errorf("postgres: read publication %q owner and role %q attributes: %w", publication, role, err)
+	}
+	info.RoleExists = roleName != nil
+	info.RoleIsOwner = info.RoleExists && info.Owner == role
+	return info, nil
 }
 
 // publishedCTEs reads publication $1 once (#416 review: a membership check

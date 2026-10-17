@@ -10,10 +10,10 @@ import { PersonName } from '@/components/VerifiedBadge'
 import { neutralizeBadgeText, personVerification } from '@/lib/verification'
 import { useContext, useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
+import { Ban, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canDecideLayer, isViewer } from '../state/permissions'
+import { canDecideLayer, canWithdraw, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
 import { describeIdentity, identityDetails } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
@@ -28,6 +28,7 @@ import { isEditableTarget } from './shell/keys'
 import { DecisionHandleContext } from './shell/context'
 import { completesSet } from '../lib/decision'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
+import { proposalCardAnchor } from '../lib/triage'
 import { PersonAvatar } from './room/PersonAvatar'
 import { WaitingFor } from './room/WaitingFor'
 import type { Person, PresenceMember, Topology } from '../api/types'
@@ -61,6 +62,9 @@ import { Separator } from '@/components/ui/separator'
 // without noticing which connector/subject/table/task the step will touch.
 const TARGET_KEYS = new Set(['connector', 'subject', 'table', 'task', 'task_id'])
 
+/** The server refuses a longer withdraw reason (docs/api.md, 500 characters). */
+const MAX_WITHDRAW_REASON = 500
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -83,17 +87,31 @@ function fingerprint(hash: string): string {
   return `${hash.slice(0, 4)} ${hash.slice(4, 8)} … ${hash.slice(-4)}`
 }
 
-function riskVariant(risk: string): 'success' | 'warning' | 'destructive' | 'neutral' {
-  switch (risk.toLowerCase()) {
+// The risk level the badge shows (Q0: `risk_level`). A proposal from before Q0 has none, but its `risk`
+// text was often just the level, so that still counts.
+function riskLevelOf(proposal: ProposalState): string {
+  const level = proposal.risk_level?.trim().toLowerCase()
+  if (level) return level.slice(0, 20)
+  const legacy = proposal.risk.trim().toLowerCase()
+  return legacy === 'low' || legacy === 'medium' || legacy === 'high' ? legacy : ''
+}
+
+// High is amber, not red: red is for a rejection or a failed step.
+function riskVariant(level: string): 'success' | 'warning' | 'neutral' {
+  switch (level) {
     case 'low':
       return 'success'
-    case 'medium':
-      return 'warning'
     case 'high':
-      return 'destructive'
+      return 'warning'
     default:
       return 'neutral'
   }
+}
+
+// What the agent wrote about the risk, without the level it merely repeats.
+function riskTextOf(proposal: ProposalState): string {
+  const text = proposal.risk.trim()
+  return text.toLowerCase() === riskLevelOf(proposal) ? '' : text
 }
 
 // Keys A and R stay out of the way of anything that owns the keyboard right now: a field, or an
@@ -461,6 +479,7 @@ function LayerRow({
   headingId,
   onSolo,
   waiting,
+  roomOpen,
 }: {
   proposal: ProposalState
   layer: string
@@ -475,6 +494,8 @@ function LayerRow({
   /** The server asked for a solo confirm: the panel shows the solo banner. */
   onSolo: () => void
   waiting?: WaitingContext
+  /** A closed room, or a withdrawn proposal, waits on nobody: an undecided layer reads "Not decided". */
+  roomOpen: boolean
 }) {
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
@@ -530,7 +551,12 @@ function LayerRow({
   // a hash the server would accept, so Approve stays off. Reject stays on: the server
   // takes a rejection with an empty hash for exactly this open proposal (params_hash.go).
   const hashed = proposal.params_hash !== ''
-  const canDecide = canDecideLayer(proposal, user, layer)
+  // A closed room takes no decision, whatever state its log left the proposal in.
+  const canDecide = roomOpen && canDecideLayer(proposal, user, layer)
+  // Q0 (QA G5): a layer the steps do not write to, whose owner must approve all the same.
+  const impacted =
+    (proposal.impacted_layers ?? []).includes(layer) && !proposal.steps.some((s) => s.layer === layer)
+  const settled = !roomOpen || proposal.status === 'withdrawn'
 
   // Solo: the typed box. The approval that completes the set: the run confirm. Otherwise at once.
   const completing = completesSet(proposal, layer)
@@ -595,6 +621,15 @@ function LayerRow({
       <Badge variant={layerVariant(layer)} mono>
         {layer}
       </Badge>
+      {impacted && (
+        <Badge
+          variant="outline"
+          data-testid={`impacted-${layer}`}
+          title="The fix does not write to this layer, but it changes this layer's data: its owner must approve too"
+        >
+          impacted
+        </Badge>
+      )}
       {decision ? (
         <>
           {/* The sentence is for screen readers (and tests); the pieces next to it are the same facts, drawn. */}
@@ -646,7 +681,7 @@ function LayerRow({
           <span className="font-mono text-xs text-muted-foreground">user:{user.id}</span>
           <span className="text-xs font-medium text-warning-foreground">pending · your layer</span>
         </>
-      ) : waiting && state === 'pending' ? (
+      ) : waiting && state === 'pending' && !settled ? (
         <WaitingFor
           proposalId={proposal.proposal_id}
           layer={layer}
@@ -660,8 +695,14 @@ function LayerRow({
         />
       ) : (
         <Badge className="ml-auto" variant="neutral">
-          <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" />
-          Pending
+          {settled && state === 'pending' ? (
+            'Not decided'
+          ) : (
+            <>
+              <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" />
+              Pending
+            </>
+          )}
         </Badge>
       )}
 
@@ -791,9 +832,12 @@ function Proposal({
   waiting,
   topology,
   nudge,
+  withdrawable,
 }: {
   nudge: CloseNudge
   topology: Topology | null
+  /** The driver may withdraw this proposal (open room, open proposal; Q0). */
+  withdrawable: boolean
   proposal: ProposalState
   user: CurrentUser
   actions: RoomActions
@@ -812,16 +856,77 @@ function Proposal({
   // "Got it" hides the note for one stale hash. The note itself comes from `sentHash`, which
   // useRoom keeps across the room reload (this card is unmounted while the room loads).
   const [acknowledged, setAcknowledged] = useState<string | null>(null)
+  // The driver's Withdraw: a reason box first (optional), the call second, the server's refusal below it.
+  const [withdrawing, setWithdrawing] = useState(false)
+  const [reason, setReason] = useState('')
+  const [withdrawBusy, setWithdrawBusy] = useState(false)
+  const [withdrawError, setWithdrawError] = useState<string | null>(null)
+  // The server took it; the proposal.withdrawn event that flips this card may still be on its way.
+  const [withdrawSent, setWithdrawSent] = useState(false)
+  const reasonId = useId()
+  const withdrawButton = useRef<HTMLButtonElement>(null)
+  const cancelWithdraw = () => {
+    setWithdrawing(false)
+    setReason('')
+    setWithdrawError(null)
+    // The form takes its own focus with it; put it back on the button that opened it.
+    window.setTimeout(() => withdrawButton.current?.focus(), 0)
+  }
+  const withdraw = async () => {
+    if (!actions.withdraw || withdrawBusy) return
+    setWithdrawBusy(true)
+    setWithdrawError(null)
+    const res = await actions.withdraw(proposal.proposal_id, reason.trim() || undefined)
+    setWithdrawBusy(false)
+    if (res.ok) {
+      setWithdrawSent(true)
+      setWithdrawing(false)
+      setReason('')
+    } else setWithdrawError(res.error ?? 'The fix could not be withdrawn.')
+  }
 
-  const mine = proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l))
-  const open = proposal.status === 'open'
+  // A closed room waits on nobody, whatever state its log left the proposal in.
+  const open = proposal.status === 'open' && nudge.roomOpen
+  const mine = open ? proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l)) : []
   const hashed = proposal.params_hash !== ''
   const pending = proposal.required_layers.filter((l) => (proposal.approvals[l] ?? 'pending') === 'pending')
   const approved = proposal.required_layers.filter((l) => proposal.approvals[l] === 'approved').length
   const previous = latestDecision(proposal)
+  const level = riskLevelOf(proposal)
+  const riskText = riskTextOf(proposal)
+  const reasons = proposal.impact_reasons ?? []
+  const withdrawn = proposal.status === 'withdrawn' ? proposal.withdrawn : undefined
+  const withdrawnBy = withdrawn?.by && withdrawn.by.kind !== 'system' ? withdrawn.by : undefined
 
   return (
-    <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
+    // overflow-wrap:anywhere is inherited by every line of the card: an unbroken risk, rollback, description or
+    // reason wraps instead of running under the 300px rail (QA G12), and it lets the flex children below shrink.
+    <article
+      id={proposalCardAnchor(proposal.proposal_id)}
+      className="flex min-w-0 flex-col rounded-lg border border-border bg-card text-sm text-card-foreground [overflow-wrap:anywhere]"
+      aria-labelledby={titleId}
+    >
+      {proposal.status === 'withdrawn' && (
+        <div
+          className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-t-lg border-b border-border bg-muted px-3.5 py-1.5 text-sm text-muted-foreground"
+          data-testid="withdrawn-note"
+        >
+          <Ban className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 font-medium text-foreground">
+            {withdrawn?.reason ? `Withdrawn — ${withdrawn.reason}` : 'Withdrawn'}
+          </span>
+          {withdrawnBy && (
+            <span className="inline-flex min-w-0 items-center gap-1 text-xs">
+              by <PersonName person={withdrawnBy} />
+            </span>
+          )}
+          {withdrawn?.at && (
+            <span className="text-xs">
+              <Clock iso={withdrawn.at} />
+            </span>
+          )}
+        </div>
+      )}
       {ribbon && mine.length > 0 && (
         <div className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-t-lg border-b border-border bg-warning-subtle px-3.5 py-1.5 text-sm font-medium text-warning-foreground">
           <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
@@ -829,32 +934,109 @@ function Proposal({
           {previous && <span className="ml-auto text-xs font-normal text-muted-foreground">{previous}</span>}
         </div>
       )}
-      <div className="flex flex-col gap-3 px-3.5 pb-3 pt-3.5">
+      <div className="flex min-w-0 flex-col gap-3 px-3.5 pb-3 pt-3.5">
         <div className="flex flex-wrap items-start gap-2.5">
-          <div className="flex min-w-0 flex-1 basis-80 flex-col gap-1">
+          <div className="flex min-w-0 flex-1 basis-80 flex-col gap-1.5">
             <h3 id={titleId} tabIndex={-1} className="text-lg font-semibold outline-none [text-wrap:balance]">
               {proposal.title}
             </h3>
-            {(proposal.risk || proposal.rollback) && (
-              <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground">
-                {proposal.risk && <Badge variant={riskVariant(proposal.risk)}>risk {proposal.risk}</Badge>}
-                {proposal.rollback && (
-                  <span className="inline-flex items-center gap-1">
-                    <RotateCcw className="size-3 shrink-0" aria-hidden="true" />
-                    rollback: {proposal.rollback}
-                  </span>
-                )}
+            {level && (
+              <p className="m-0 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+                <Badge variant={riskVariant(level)} data-testid="risk-level">
+                  {level === 'high' && <TriangleAlert className="size-3" aria-hidden="true" />}
+                  risk {level}
+                </Badge>
+              </p>
+            )}
+            {riskText && (
+              <p className="m-0 min-w-0 text-xs text-muted-foreground" data-testid="risk-text">
+                {!level && 'risk: '}
+                {riskText}
+              </p>
+            )}
+            {reasons.length > 0 && (
+              <ul
+                className="m-0 flex min-w-0 list-disc flex-col gap-0.5 pl-4 text-xs text-muted-foreground"
+                aria-label="Why this risk"
+                data-testid="impact-reasons"
+              >
+                {reasons.map((r, i) => (
+                  <li key={i} className="min-w-0">
+                    {r}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {proposal.rollback && (
+              <p className="m-0 flex min-w-0 items-start gap-1 text-xs text-muted-foreground" data-testid="rollback-text">
+                <RotateCcw className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+                <span className="min-w-0">rollback: {proposal.rollback}</span>
               </p>
             )}
           </div>
-          <span className="flex shrink-0 items-center gap-2 text-xs text-subtle-foreground">
-            {proposal.status === 'approved' && <Badge variant="success">approved</Badge>}
-            {proposal.status === 'rejected' && <Badge variant="destructive">rejected</Badge>}
-            {open && mine.length === 0 && pending.length > 0
-              ? `waiting for ${pending.join(', ')} ${pending.length === 1 ? 'owner' : 'owners'} · ${approved} of ${proposal.required_layers.length} approved`
-              : 'proposed by the agent'}
-          </span>
+          <div className="flex min-w-0 max-w-full flex-col items-start gap-1.5 sm:items-end">
+            <span className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-subtle-foreground">
+              {proposal.status === 'approved' && <Badge variant="success">approved</Badge>}
+              {proposal.status === 'rejected' && <Badge variant="destructive">rejected</Badge>}
+              {proposal.status === 'withdrawn' && <Badge variant="neutral">withdrawn</Badge>}
+              {open && mine.length === 0 && pending.length > 0
+                ? `waiting for ${pending.join(', ')} ${pending.length === 1 ? 'owner' : 'owners'} · ${approved} of ${proposal.required_layers.length} approved`
+                : 'proposed by the agent'}
+            </span>
+            {withdrawable && actions.withdraw && !withdrawing && !withdrawSent && (
+              <Button
+                ref={withdrawButton}
+                variant="ghost"
+                size="sm"
+                className="coarse:h-11 coarse:px-4"
+                onClick={() => setWithdrawing(true)}
+              >
+                Withdraw
+              </Button>
+            )}
+          </div>
         </div>
+
+        {withdrawable && actions.withdraw && withdrawing && (
+          <form
+            className="flex min-w-0 flex-wrap items-center gap-2"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void withdraw()
+            }}
+          >
+            <label htmlFor={reasonId} className="sr-only">
+              Reason for withdrawing this fix (optional)
+            </label>
+            <Input
+              id={reasonId}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') {
+                  e.stopPropagation()
+                  cancelWithdraw()
+                }
+              }}
+              placeholder="Reason (optional)"
+              maxLength={MAX_WITHDRAW_REASON}
+              autoComplete="off"
+              autoFocus
+              className="min-w-0 flex-1 basis-60"
+            />
+            <Button type="submit" variant="destructive" size="sm" className="coarse:h-11 coarse:px-4" disabled={withdrawBusy}>
+              {withdrawBusy ? 'Withdrawing…' : 'Withdraw fix'}
+            </Button>
+            <Button type="button" variant="ghost" size="sm" className="coarse:h-11 coarse:px-4" onClick={cancelWithdraw}>
+              Cancel
+            </Button>
+          </form>
+        )}
+        {withdrawError && (
+          <p role="alert" className="m-0 text-xs font-medium text-destructive-fg" data-testid="withdraw-error">
+            {withdrawError}
+          </p>
+        )}
 
         {proposal.steps.length > 0 && (
           <ol className="grid list-none grid-cols-[repeat(auto-fit,minmax(min(100%,16rem),1fr))] gap-3 p-0">
@@ -930,6 +1112,7 @@ function Proposal({
             headingId={titleId}
             onSolo={onSolo}
             waiting={waiting}
+            roomOpen={nudge.roomOpen}
           />
         ))}
       </div>
@@ -1038,6 +1221,7 @@ export function ProposalsPanel({
               waiting={waiting}
               topology={topology}
               nudge={nudge}
+              withdrawable={canWithdraw(state, user, p)}
             />
           ))}
         </div>

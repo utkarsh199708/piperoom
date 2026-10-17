@@ -167,6 +167,17 @@ Merge order (vision §4): **F0 → F1, F5, F7, F10 in parallel → F3, F4 → F2
 task, the task file's "Dependencies and merge order" section rules. A task split between agents is one PR per
 agent (and per sub-task when the task file says so).
 
+### Q wave (QA failure-injection run, 2026-10-15)
+
+PR titles start with `[Q1-<sub-task>]` (e.g. `[Q1-watch] watch: incident-keyed cooldown`). Q0 (the leads) carries the
+contract changes: `proposal.withdrawn`, `owner.paged`, `ProposalCreatedPayload.ImpactedLayers`/`RiskLevel`,
+`HandoffCreatedPayload.Manual`, `CommentKindFixNote`, `HumanInput.NewIncident`, `agent.ProposalWithdrawer`,
+`agent.Pager`, `actions.Impacting`, `clients.ConnectLogReader`, the `PIPEROOM_WATCH_JOIN_MAX_AGE`,
+`PIPEROOM_WATCH_ESCALATE_AFTER`, `PIPEROOM_NOTIFY_WEBHOOK_*`, `PIPEROOM_PAGE_UNDRIVEN_AFTER` and
+`CONNECT_WORKER_LOG_FILE` variables, the built-in price table default, and the room DB on its own dev service
+(`:5433`). Task file `tasks/Q1-qa-gaps.md` lists every sub-task with its folders; `internal/notify/**` (new) belongs to
+A5.
+
 ### Contract files (read them, code against them, never edit them)
 
 - `internal/tools/tool.go` — `Tool`, `Result`, `Registry`
@@ -192,7 +203,8 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 - Windows 11, PowerShell. Go 1.27 (`C:\Program Files\Go\bin`). Node 24. Docker Desktop works.
 - Module path: `piperoom` (imports look like `piperoom/internal/events`).
 - Dev stack: `docker compose -f dev/docker-compose.yml up -d` →
-  Postgres `localhost:5432` (user `piperoom` / `piperoom-dev`, db `orders`),
+  Postgres `localhost:5432` (user `piperoom` / `piperoom-dev`, db `orders`; the room database is its own service
+  `roomdb` on `localhost:5433`, db `piperoom`, so a pipeline reset never wipes rooms),
   Kafka `localhost:29092`, Schema Registry `localhost:8081`, Connect `localhost:8083`.
 - Defaults for every address are in `internal/config/config.go`. Read config only through `config.Load()`.
 - Test credentials above are for the local stack only. Never put real secrets in code, tests, logs or commits.

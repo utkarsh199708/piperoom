@@ -18,11 +18,12 @@ var toolNames = setOf(
 	"schema_registry_versions", "schema_registry_diff", "pg_replication_slots", "pg_recent_ddl",
 	"pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row",
 	"pipeline_map", "trace_record", "runbook_lookup",
+	"page_owner", "withdraw_proposal", "connect_worker_log", "pg_table_activity",
 )
 
 // roomToolNames exist only inside the agent: operations text never tells
 // anyone to run them.
-var roomToolNames = setOf("propose_fix", "update_hypothesis", "post_message")
+var roomToolNames = setOf("propose_fix", "update_hypothesis", "post_message", "page_owner", "withdraw_proposal")
 
 // addresseePattern names the AI. It makes the conditional rules count: "you
 // must restart the connector" is ordinary advice in a Postgres HINT, but not
@@ -100,7 +101,7 @@ var rules = []rule{
 			`|\b(?:to|for|attention|dear|hey)\s*:?\s+(?:the\s+)?(?:ai(?:\s+(?:agent|assistant|model|investigator))?|assistant|llm|claude|chatbot|chatgpt|gpt|(?:automated|investigating|investigation|incident|autonomous)\s+(?:agent|investigator))\b`), identGuard: true},
 
 	// ---- tool requests ----
-	{kind: KindToolRequest, nounGuard: true, names: roomToolNames, keys: []string{"propose_fix", "update_hypothesis", "post_message"},
+	{kind: KindToolRequest, nounGuard: true, names: roomToolNames, keys: []string{"propose_fix", "update_hypothesis", "post_message", "page_owner", "withdraw_proposal"},
 		re: regexp.MustCompile(determiner + `\b(?:call|invoke|run|use|execute|trigger|submit)\s+(?:the\s+)?(?:tool\s+)?` + snakeName + `\b`)},
 	{kind: KindToolRequest, names: toolNames, keys: []string{`instruction"`, `instructions"`, `next_action"`, `next_step"`, `action_required"`, `todo"`},
 		re: regexp.MustCompile(`(")(?:instructions?|next_action|next_step|action_required|todo)"\s*:\s*"\s*` + snakeName + `\b`)},

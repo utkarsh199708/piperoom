@@ -129,6 +129,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         layers: me.layers,
         role: me.role === 'viewer' ? 'viewer' : 'member',
         groupsMissing: me.groups_missing === true,
+        groups: Array.isArray(me.groups) ? me.groups.filter((g) => typeof g === 'string') : undefined,
         solo: me.solo === true,
         verified: me.verified === true,
       })

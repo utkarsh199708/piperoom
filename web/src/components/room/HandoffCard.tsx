@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ChevronDown } from 'lucide-react'
+import type { ComponentProps } from 'react'
 import type { Actor } from '@/api/types'
 import type { HandoffState } from '@/state/types'
 import { Badge } from '@/components/ui/badge'
@@ -8,6 +9,7 @@ import { PersonName } from '@/components/VerifiedBadge'
 import { clockTime, utcLabel } from '@/lib/time'
 import { neutralizeBadgeText } from '@/lib/verification'
 import { cn } from '@/lib/utils'
+import { AgentText } from './AgentText'
 import { HandoffChecks } from './HandoffChecks'
 
 function SummaryList({ title, items }: { title: string; items: string[] }) {
@@ -18,7 +20,7 @@ function SummaryList({ title, items }: { title: string; items: string[] }) {
       <ul className="m-0 flex list-disc flex-col gap-0.5 pl-5">
         {items.map((it, i) => (
           <li key={i} className="break-words">
-            {it}
+            <AgentText text={it} />
           </li>
         ))}
       </ul>
@@ -26,23 +28,48 @@ function SummaryList({ title, items }: { title: string; items: string[] }) {
   )
 }
 
+/** The handing-off driver as the badge reads it: server-set fields only. */
+type WriterPerson = ComponentProps<typeof PersonName>['person']
+
 /**
- * The six sections of a hand-off summary. Every string is agent-written (untrusted) and is rendered
- * as a React text node: no HTML, no Markdown, no links.
+ * The six sections of a hand-off summary. Every string is agent- or driver-written (untrusted) and is
+ * rendered through AgentText: text nodes, with step ids as links when a StepNumbersProvider is above;
+ * no HTML, no Markdown.
  */
-export function HandoffSummary({ summary: s, className }: { summary: HandoffState['summary']; className?: string }) {
+export function HandoffSummary({
+  summary: s,
+  manual = false,
+  writtenBy,
+  className,
+}: {
+  summary: HandoffState['summary']
+  /** The driver wrote the summary instead of the agent (Q0, G4). */
+  manual?: boolean
+  /** With manual: who wrote it, shown with their badge; "the driver" when the log does not say. */
+  writtenBy?: WriterPerson | null
+  className?: string
+}) {
   return (
     <div className={cn('handoff__summary flex flex-col gap-3', className)}>
+      {manual && (
+        <p className="m-0 text-xs font-medium text-muted-foreground">
+          Written by {writtenBy ? <PersonName person={writtenBy} /> : 'the driver'}, not by the agent.
+        </p>
+      )}
       {s.what_broke && (
         <div className="flex flex-col gap-1">
           <h4 className="text-xs font-medium text-muted-foreground">What broke</h4>
-          <p className="m-0 break-words">{s.what_broke}</p>
+          <p className="m-0 break-words">
+            <AgentText text={s.what_broke} />
+          </p>
         </div>
       )}
       {s.why && (
         <div className="flex flex-col gap-1">
           <h4 className="text-xs font-medium text-muted-foreground">Why</h4>
-          <p className="m-0 break-words">{s.why}</p>
+          <p className="m-0 break-words">
+            <AgentText text={s.why} />
+          </p>
         </div>
       )}
       <SummaryList title="Done" items={s.done} />
@@ -149,7 +176,12 @@ export function HandoffCard({
         <StatusBadge handoff={handoff} acceptedAt={acceptedAt} />
       </div>
       <div id={bodyId} hidden={!open} className="flex flex-col gap-3 border-t border-border px-4 py-3">
-        <HandoffSummary summary={handoff.summary} className="max-w-[72ch] text-sm leading-5" />
+        <HandoffSummary
+          summary={handoff.summary}
+          manual={handoff.manual}
+          writtenBy={handoff.written_by ?? from}
+          className="max-w-[72ch] text-sm leading-5"
+        />
         {footer && <div className="flex flex-wrap justify-end gap-2">{footer}</div>}
       </div>
     </section>

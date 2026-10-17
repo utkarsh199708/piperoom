@@ -59,3 +59,58 @@ export function triageLine(
   if (Number.isFinite(opened) && now - opened < TRIAGE_PENDING_MS) return { kind: 'pending' }
   return { kind: 'none' }
 }
+
+/**
+ * Fired on window when a step link names a step that is not in the DOM. The timeline listens and
+ * clears a layer filter that hides the step (QA R18), so the step renders and can be shown.
+ */
+export const REVEAL_STEP_EVENT = 'piperoom:reveal-step'
+
+function focusStep(stepId: string): boolean {
+  const el = document.getElementById(stepAnchor(stepId))
+  if (!el) return false
+  el.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+  el.setAttribute('tabindex', '-1')
+  el.focus({ preventScroll: true })
+  el.classList.add('ring-2', 'ring-ring')
+  window.setTimeout(() => el.classList.remove('ring-2', 'ring-ring'), 2000)
+  return true
+}
+
+/**
+ * Scrolls to and briefly highlights a step of the room. Step links are not `#step-` hrefs: the app
+ * uses HashRouter, where a fragment is the route, so following one leaves the room (QA F19).
+ * A step that is not rendered (a layer filter hides it) is revealed through REVEAL_STEP_EVENT, then
+ * found on the next tick, once React has rendered the change.
+ */
+export function goToStep(stepId: string): void {
+  if (focusStep(stepId)) return
+  window.dispatchEvent(new CustomEvent<string>(REVEAL_STEP_EVENT, { detail: stepId }))
+  window.setTimeout(() => focusStep(stepId), 0)
+}
+
+/** DOM id of a proposal card, the target of a proposal id in agent prose (Q5 T12). */
+export function proposalCardAnchor(proposalId: string): string {
+  return `proposal-${proposalId}`
+}
+
+/** Fired on window before a proposal link scrolls; the room screen opens the Fix tab on the tabbed layout. */
+export const REVEAL_PROPOSAL_EVENT = 'piperoom:reveal-proposal'
+
+/**
+ * Scrolls to and focuses a proposal card. Like step links these are not `#` hrefs (HashRouter).
+ * 'proposal' is the id of the proposals block (ProposalsSummary's PROPOSAL_ANCHOR), the fallback
+ * when the card itself is not rendered.
+ */
+export function goToProposal(proposalId: string): void {
+  window.dispatchEvent(new CustomEvent<string>(REVEAL_PROPOSAL_EVENT, { detail: proposalId }))
+  window.setTimeout(() => {
+    const el = document.getElementById(proposalCardAnchor(proposalId)) ?? document.getElementById('proposal')
+    if (!el) return
+    el.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+    el.setAttribute('tabindex', '-1')
+    el.focus({ preventScroll: true })
+    el.classList.add('ring-2', 'ring-ring')
+    window.setTimeout(() => el.classList.remove('ring-2', 'ring-ring'), 2000)
+  }, 0)
+}

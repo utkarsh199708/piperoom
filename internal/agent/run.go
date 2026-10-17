@@ -152,6 +152,10 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
+	// Every agent.message of this run, whoever emits it (the loop, verify-after-fix,
+	// the post_message tool), goes through one guard that drops empty and repeated
+	// ones (QA G6). Wrapping here means no emit site can forget it.
+	deps.Sink = newGuardedSink(deps.Sink)
 	if m == nil {
 		m = newModel(opts, deps.Logger)
 	}
@@ -175,7 +179,9 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 
 func (r *runner) run(ctx context.Context) error {
 	r.toolList = buildToolList(r.deps.Tools, newRoomToolsWith(r.deps, r.proposals, r.steps))
-	r.system = systemPrompt()
+	// The prompt names page_owner, withdraw_proposal and connect_worker_log only
+	// when this run really has them.
+	r.system = systemPromptFor(r.toolList)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
@@ -188,7 +194,7 @@ func (r *runner) run(ctx context.Context) error {
 	initialInputs := r.drain(ctx)
 	// The model reads the verdict of an early recovery in its first turn. Only
 	// an episode that ends after a recovery parks, in pauseForHumanInput.
-	initialInputs, outcome := r.handleInputs(ctx, initialInputs)
+	initialInputs, outcome := r.handleBatch(ctx, initialInputs)
 	r.past = r.pastIncidents(ctx, pastIncidentsRunBytes, pastIncidentsTimeout)
 	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
 	for {
@@ -218,7 +224,7 @@ func (r *runner) run(ctx context.Context) error {
 			if len(inputs) == 0 {
 				return nil
 			}
-			inputs, outcome := r.handleInputs(ctx, inputs)
+			inputs, outcome := r.handleBatch(ctx, inputs)
 			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
 			turns = 0
 			if r.parked(outcome) {
@@ -322,7 +328,7 @@ func (r *runner) run(ctx context.Context) error {
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
-			inputs, outcome := r.handleInputs(ctx, inputs)
+			inputs, outcome := r.handleBatch(ctx, inputs)
 			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
 			blocks = append(blocks, r.inputBlocks(inputs, outcome.notes)...)
 			if len(blocks) == 0 {
@@ -441,7 +447,14 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 }
 
 // takeHeld returns the held quiet inputs followed by inputs, and forgets them.
+// Every drained batch passes through here, so it is also where new human input
+// ends the message guard's repeat window.
 func (r *runner) takeHeld(inputs []HumanInput) []HumanInput {
+	if endsRepeatWindow(inputs) {
+		if g, ok := r.deps.Sink.(*guardedSink); ok {
+			g.reset()
+		}
+	}
 	if len(r.held) == 0 {
 		return inputs
 	}
@@ -514,7 +527,7 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	if len(inputs) == 0 {
 		return true, nil
 	}
-	inputs, outcome := r.handleInputs(ctx, inputs)
+	inputs, outcome := r.handleBatch(ctx, inputs)
 	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
 	*messages = appendUser(*messages, blocks...)
 	*turns = 0
@@ -546,7 +559,7 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 		if err != nil {
 			return true, stopErr(err)
 		}
-		inputs, outcome := r.handleInputs(ctx, inputs)
+		inputs, outcome := r.handleBatch(ctx, inputs)
 		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
 		*turns = 0
 		if !r.parked(outcome) {
@@ -559,11 +572,13 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 }
 
 // hasHumanInput reports whether inputs contain anything a person said, as
-// opposed to executor results and alert updates. A person's words always get
-// a model turn.
+// opposed to executor results and quiet alert updates. A person's words always
+// get a model turn, and so does a new incident: the room tells the agent that a
+// signal it has not seen has joined, which it must read even when it had
+// parked as recovered.
 func hasHumanInput(inputs []HumanInput) bool {
 	for _, in := range inputs {
-		if in.Kind != "action_result" && in.Kind != "alert_update" {
+		if in.Kind != "action_result" && !isQuiet(in) {
 			return true
 		}
 	}
@@ -572,8 +587,10 @@ func hasHumanInput(inputs []HumanInput) bool {
 
 // isQuiet reports an input that rides along with the next batch but never
 // starts a turn or resets the turn guard on its own: an alert update (the
-// alert fired again, the watcher joined) is new numbers, not a request.
-func isQuiet(in HumanInput) bool { return in.Kind == "alert_update" }
+// alert fired again, the watcher joined) is new numbers, not a request. An
+// update that brings a new incident (HumanInput.NewIncident) is not quiet: it
+// wakes an idle agent and resets the turn guard, like a steer.
+func isQuiet(in HumanInput) bool { return in.Kind == "alert_update" && !in.NewIncident }
 
 // resetsTurns reports whether a batch resets the per-episode turn guard: any
 // input but a quiet one does.
@@ -587,6 +604,13 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 	r.emitMu.Lock()
 	defer r.emitMu.Unlock()
 	if err := r.deps.Sink.Emit(ctx, typ, payload); err != nil {
+		// A message the guard dropped (empty, markup only, or a repeat) is
+		// expected, not a failure.
+		var dropped *messageDroppedError
+		if errors.As(err, &dropped) {
+			r.log.Debug("agent: message dropped", "reason", dropped.reason)
+			return
+		}
 		r.log.Warn("agent: emit failed", "type", typ, "err", err)
 	}
 }
@@ -599,8 +623,8 @@ const stepEventTimeout = 10 * time.Second
 // even when ctx is done: a read that hits the first-look pass deadline, or a
 // run cancelled mid-read, must not leave a step whose call is stored and whose
 // result is not, because the stores refuse events on a done context. Each
-// write gets its own deadline instead (runStepID does the same for verify
-// reads).
+// write gets its own deadline instead (runStepEvents does the same for
+// verify reads).
 func (r *runner) emitStep(ctx context.Context, typ events.Type, payload any) {
 	ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepEventTimeout)
 	defer cancel()

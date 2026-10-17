@@ -28,7 +28,12 @@ type sigSnap struct {
 	withDur bool
 	since   time.Time
 	ev      map[string]any
-	pending bool // not yet in a room
+	pending bool     // not yet in a room
+	keys    []string // incident keys (sigState.keys)
+	// fired is when the signal last fired (sigState.firedAt).
+	fired time.Time
+	// clearedFrom is when the signal last started to clear (sigState.clearedFrom).
+	clearedFrom time.Time
 }
 
 // view is a copy of what the output step needs to know about one pipeline.
@@ -45,8 +50,21 @@ type view struct {
 	sev        string // most severe of active
 	postedSev  string
 	lastPost   time.Time
-	bypass     bool             // skip the cooldown (a severity rise re-opened the incident)
+	bypass     bool             // skip the cooldown (a severity rise or an escalation re-opened the incident)
 	risks      []map[string]any // current config findings (codes only)
+	// note is the escalation's reason, for the title and the evidence.
+	note string
+}
+
+// keys are the incident keys of the active signals.
+func (v view) keys() []string { return snapKeys(v.active) }
+
+func snapKeys(ss []sigSnap) []string {
+	var out []string
+	for _, s := range ss {
+		out = append(out, s.keys...)
+	}
+	return out
 }
 
 func (v view) pending() []sigSnap {
@@ -80,6 +98,10 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 		return cfg.GroupUnstable.WatchSignal
 	case owners.SignalOffsetBelowLogStart:
 		return cfg.OffsetBelowLogStart
+	case SignalSlotStall:
+		return slotStallCfg(cfg)
+	case SignalConnectUnreachable:
+		return connectUnreachableCfg(cfg)
 	}
 	return cfg.SlotWAL.WatchSignal
 }
@@ -87,7 +109,8 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 // viewOf copies the state of a pipeline. Caller holds w.mu.
 func (w *Watcher) viewOf(t target, ps *pipeState) view {
 	v := view{roomID: ps.roomID, owned: ps.owned, follower: ps.follower, episode: ps.episode,
-		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, sev: "sev9", risks: ps.risks}
+		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, sev: "sev9", risks: ps.risks,
+		note: ps.note}
 	v.leaderGone = ps.follower && ps.roomID != "" && !w.roomLedLocked(ps.roomID)
 	for _, id := range signalIDs {
 		ss := ps.sigs[id]
@@ -101,7 +124,8 @@ func (w *Watcher) viewOf(t target, ps *pipeState) view {
 			v.sev = moreSevere(v.sev, ss.last.sev)
 			v.active = append(v.active, sigSnap{
 				id: id, sev: ss.last.sev, label: ss.last.label, withDur: ss.last.withDur,
-				since: ss.breachingSince, ev: ss.last.ev, pending: !ss.notified,
+				since: ss.breachingSince, ev: ss.last.ev, pending: !ss.notified, keys: ss.keys(id),
+				fired: ss.firedAt, clearedFrom: ss.clearedFrom,
 			})
 		case phaseAcked:
 			v.hasAny = true
@@ -211,7 +235,7 @@ func (w *Watcher) stormGroups(now time.Time, ts []target, fired map[string][]str
 		ids = slices.Compact(ids)
 		var members []string
 		for _, id := range ids {
-			if !bypass[id] && w.inCooldown(now, id) {
+			if !bypass[id] && w.inCooldown(now, id, sig) {
 				continue
 			}
 			members = append(members, id)
@@ -226,37 +250,6 @@ func (w *Watcher) stormGroups(now time.Time, ts []target, fired map[string][]str
 	w.storms = next
 	w.mu.Unlock()
 	return out
-}
-
-// closedAtFor is when the pipeline's last watcher room closed: the later of the
-// room service's closedAt for its own key and the close the watcher saw for any
-// room the pipeline posted into (a storm follower has no room under its key).
-// It is nil when nothing closed, and also while the key's room is still open:
-// that room is joined, not waited out.
-func (w *Watcher) closedAtFor(id string, closedAt *time.Time, found bool) *time.Time {
-	if found && closedAt == nil {
-		return nil
-	}
-	w.mu.Lock()
-	var seen time.Time
-	if ps := w.pipes[id]; ps != nil {
-		seen = ps.lastClosed
-	}
-	w.mu.Unlock()
-	switch {
-	case closedAt != nil && closedAt.After(seen):
-		return closedAt
-	case !seen.IsZero():
-		return &seen
-	}
-	return nil
-}
-
-// inCooldown: a watcher room for the pipeline closed less than `cooldown` ago.
-func (w *Watcher) inCooldown(now time.Time, id string) bool {
-	_, closedAt, found := w.rooms.LastRoomForKey(id, DedupKey(id))
-	at := w.closedAtFor(id, closedAt, found)
-	return at != nil && now.Sub(*at) < w.cfg.Cooldown
 }
 
 // emit writes to rooms for this tick: opens, joins, "still firing" and
@@ -281,6 +274,7 @@ func (w *Watcher) emitPipeline(ctx context.Context, now time.Time, t target, sto
 		return
 	}
 	w.reviveWorse(id, ps, t)
+	w.escalateLocked(now, id, ps, t)
 	v := w.viewOf(t, ps)
 	w.mu.Unlock()
 
@@ -290,6 +284,7 @@ func (w *Watcher) emitPipeline(ctx context.Context, now time.Time, t target, sto
 	if v.roomID == "" {
 		for sig, si := range storm {
 			if si.leader != id && slices.Contains(si.members, id) && v.hasPending(sig) {
+				w.block(id, blockedStorm)
 				w.log.Debug("watch: storm, waiting for the leader's room", "pipeline", id, "signal", sig, "leader", si.leader)
 				return
 			}
@@ -308,12 +303,28 @@ func (w *Watcher) emitPipeline(ctx context.Context, now time.Time, t target, sto
 	}
 }
 
-// updateRoom joins the room the pipeline already has: a new signal, a higher
-// severity, or the 15-minute "still firing".
+// updateRoom joins the room the pipeline already has: a new signal (or a new
+// target of a firing one, such as a second connector), a higher severity, or
+// the 15-minute "still firing". Keys the room was not told about make it an
+// incident post (IncidentSink), which wakes the agent; the rest are repeats.
 func (w *Watcher) updateRoom(ctx context.Context, now time.Time, t target, v view) {
+	w.mu.Lock()
+	fresh, _ := w.pipes[t.p.ID].untold(v.roomID, v.keys())
+	w.mu.Unlock()
+	// A new incident in a room the pipeline only joined is a join too: the
+	// join rules apply again (QA S2). Repeats keep going to the room.
+	if (len(fresh) > 0 || len(v.pending()) > 0) && !v.owned && !v.follower && w.leaveJoined(now, t, v, fresh) {
+		w.mu.Lock()
+		v = w.viewOf(t, w.pipes[t.p.ID])
+		w.mu.Unlock()
+		if v.roomID == "" && len(v.pending()) > 0 {
+			w.openRoom(ctx, now, t, v, nil)
+		}
+		return
+	}
 	reason := ""
 	switch {
-	case len(v.pending()) > 0:
+	case len(v.pending()) > 0 || len(fresh) > 0:
 		reason = "new signal"
 	case sevRank(v.sev) < sevRank(v.postedSev):
 		reason = "severity raised to " + v.sev
@@ -323,7 +334,7 @@ func (w *Watcher) updateRoom(ctx context.Context, now time.Time, t target, v vie
 		return
 	}
 	title, ev := compose(t.p.ID, now, v, reason, nil)
-	if !w.post(ctx, v.roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, reason, ev), ev) {
+	if !w.post(ctx, v.roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, reason, ev), ev, len(fresh) > 0) {
 		return
 	}
 	if w.recordPost(now, t.p.ID, v, v.roomID, v.owned, v.follower) {
@@ -331,22 +342,66 @@ func (w *Watcher) updateRoom(ctx context.Context, now time.Time, t target, v vie
 	}
 }
 
-// openRoom starts the incident for a pipeline: cooldown, then an already open
-// room (join it), then the room cap, then a new room.
+// leaveJoined reports whether the pipeline leaves the room it joined (v.roomID,
+// not its own) because that room no longer passes the join rules (old, a
+// person's room past JoinMaxAge, a flagged title). The signals that bring the
+// fresh keys become pending again, so the caller opens or joins another room
+// for them. A room that is not the pipeline's newest open one cannot be
+// checked and is kept. Called without w.mu.
+func (w *Watcher) leaveJoined(now time.Time, t target, v view, fresh []string) bool {
+	ris, ok := w.rooms.(RoomInfoSink)
+	if !ok {
+		return false
+	}
+	info, ok := ris.OpenRoomInfo(t.p.ID)
+	if !ok || info.RoomID != v.roomID || w.mayJoin(now, t.p.ID, info) {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ps := w.pipes[t.p.ID]
+	if ps == nil || ps.roomID != v.roomID {
+		return false
+	}
+	for id, ss := range ps.sigs {
+		if ss.phase == phaseFiring && ss.notified && slices.ContainsFunc(ss.keys(id), func(k string) bool { return slices.Contains(fresh, k) }) {
+			ss.notified = false
+		}
+	}
+	ps.roomID, ps.owned, ps.follower = "", false, false
+	w.log.Info("watch: new signals do not join the room the pipeline joined earlier, it no longer passes the join rules",
+		"mode", string(w.cfg.Mode), "pipeline", t.p.ID, "room", v.roomID)
+	return true
+}
+
+// openRoom starts the incident for a pipeline: the cooldown of the closed
+// incident (pending signals outside it skip it), then an already open room
+// that may be joined, then the room cap, then a new room.
 func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view, storm map[string]*stormInfo) {
 	id := t.p.ID
 	key := DedupKey(id)
 
 	existing, closedAt, found := w.rooms.LastRoomForKey(id, key)
-	if last := w.closedAtFor(id, closedAt, found); last != nil && !v.bypass && now.Sub(*last) < w.cfg.Cooldown {
-		w.once(id, func(ps *pipeState) *bool { return &ps.warnedCooldown }, func() {
-			w.log.Info("watch: cooldown after a closed watcher room, staying quiet",
-				"mode", string(w.cfg.Mode), "pipeline", id, "room", existing,
-				"closed_ago", now.Sub(*last).Round(time.Second).String(), "cooldown", w.cfg.Cooldown.String())
-		})
-		return
+	if !v.bypass {
+		w.recoverClosed(now, id, existing, closedAt)
+		w.mu.Lock()
+		q := w.cooldownOf(now, id, v.pending(), existing, closedAt, found)
+		w.mu.Unlock()
+		if q.on {
+			w.block(id, blockedCooldown)
+			w.once(id, func(ps *pipeState) *bool { return &ps.warnedCooldown }, func() {
+				incident := "same signals"
+				if q.unknown {
+					incident = "unknown: closed before the watcher saw it"
+				}
+				w.log.Info("watch: cooldown after a closed watcher room, staying quiet",
+					"mode", string(w.cfg.Mode), "pipeline", id, "room", q.room,
+					"closed_ago", q.ago.Round(time.Second).String(), "cooldown", w.cfg.Cooldown.String(), "incident", incident)
+			})
+			return
+		}
 	}
-	reuse := found && closedAt == nil // a watcher room from before a restart is still open
+	reuse := found && closedAt == nil // our watcher room is still open (from before a restart, or resolved)
 
 	// Storm: the leader carries every affected pipeline in its evidence and the
 	// followers join its room afterwards.
@@ -362,16 +417,20 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 	slices.Sort(led)
 
 	if !reuse {
-		// Any open room for the pipeline, an Alertmanager one included, takes
-		// the evidence instead of a second room (B1).
-		if other, ok := w.rooms.OpenRoomForPipeline(id); ok {
+		// An open room for the pipeline, an Alertmanager one included, takes
+		// the evidence instead of a second room (B1), when the join rules allow.
+		if other, ok := w.roomToJoin(now, id); ok {
 			title, ev := compose(id, now, v, "joined an open room", affected)
-			if !w.post(ctx, other, fmt.Sprintf("watcher: %s\nevidence: %s", title, ev), ev) {
+			w.mu.Lock()
+			fresh, _ := w.pipes[id].untold(other, v.keys())
+			w.mu.Unlock()
+			if !w.post(ctx, other, fmt.Sprintf("watcher: %s\nevidence: %s", title, ev), ev, len(fresh) > 0) {
 				return
 			}
 			if w.recordPost(now, id, v, other, false, false) {
 				w.assignFollowers(now, id, other, storm, led)
-				w.log.Info("watch: joined an open room", "mode", string(w.cfg.Mode), "pipeline", id, "room", other, "severity", v.sev)
+				w.log.Info("watch: joined an open room", "mode", string(w.cfg.Mode), "pipeline", id, "room", other,
+					"severity", v.sev, "new_incident", len(fresh) > 0)
 			}
 			return
 		}
@@ -379,10 +438,17 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 		full := w.openOwned() >= w.maxRooms
 		w.mu.Unlock()
 		if full {
+			w.block(id, blockedMax)
 			w.once(id, func(ps *pipeState) *bool { return &ps.warnedMax }, func() {
 				w.log.Warn("watch: max_open_watcher_rooms reached, not opening a room",
 					"mode", string(w.cfg.Mode), "pipeline", id, "max", w.maxRooms)
 			})
+			if v.note != "" { // an escalation: a signal has fired EscalateAfter with no room
+				w.once(id, func(ps *pipeState) *bool { return &ps.erroredMax }, func() {
+					w.log.Error("watch: signal firing with no room, max_open_watcher_rooms reached",
+						"mode", string(w.cfg.Mode), "pipeline", id, "max", w.maxRooms, "note", v.note)
+				})
+			}
 			return
 		}
 	}
@@ -407,6 +473,7 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 		w.mu.Lock()
 		first := !w.pipes[id].warnedOpen
 		w.pipes[id].warnedOpen = true
+		w.pipes[id].blocked = blockedOpen
 		w.mu.Unlock()
 		if first {
 			w.log.Warn("watch: could not open a room, will retry", "mode", string(w.cfg.Mode), "pipeline", id, "err", msg)
@@ -415,13 +482,35 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 		}
 		return
 	}
+	// What the room knew before this open: its keys when it is our room that
+	// stayed open after its signals cleared. After a restart the watcher has
+	// no told list; the room service's log says what the room carried (QA Q4
+	// R2), so a key it never carried is a new incident that wakes the agent.
+	stale := false
+	w.mu.Lock()
+	_, inProcess := w.pipes[id].untold(roomID, nil)
+	w.mu.Unlock()
+	if !created {
+		stale = w.seedFromRoom(now, id, roomID)
+	}
+	w.mu.Lock()
+	fresh, known := w.pipes[id].untold(roomID, v.keys())
+	w.mu.Unlock()
 	if !w.recordPost(now, id, v, roomID, true, false) {
 		return
 	}
 	if !created {
 		// The service only writes "fired again" with the title on a join; the
-		// numbers go in as evidence (a room that survived a restart).
-		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (re-attached after a restart)\nevidence: %s", title, ev), ev)
+		// numbers go in as evidence. After a restart it is a repeat (the agent
+		// is not woken, docs/api.md); in-process, keys the room has not seen
+		// are a new incident.
+		how := "re-attached after a restart"
+		if inProcess {
+			how = "fired again in the open room"
+		}
+		// A room that fails the join rules (old, flagged title) is a new
+		// incident for whoever is in it, whatever it carried before.
+		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, how, ev), ev, (known && len(fresh) > 0) || stale)
 	}
 	w.assignFollowers(now, id, roomID, storm, led)
 	if len(affected) > 1 {
@@ -429,6 +518,37 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 	}
 	w.log.Info("watch: room "+map[bool]string{true: "opened", false: "joined"}[created],
 		"mode", string(w.cfg.Mode), "pipeline", id, "room", roomID, "severity", v.sev)
+}
+
+// seedFromRoom learns what the watcher's own open room carried when the
+// pipeline has no told list for it (a restart, a leadership change): the
+// keys come from ClosedRoomKeysSink, which reads any room, open or not. It
+// also reports whether the room fails the join rules (JoinMaxAge, flagged
+// title), so the post wakes the agent even for a repeated key. Called
+// without w.mu.
+func (w *Watcher) seedFromRoom(now time.Time, id, roomID string) (stale bool) {
+	if ris, ok := w.rooms.(RoomInfoSink); ok {
+		if info, ok := ris.OpenRoomInfo(id); ok && info.RoomID == roomID &&
+			(!joinable(now, info, w.cfg.JoinMaxAge) || len(w.titleFlags(roomID)) > 0) {
+			stale = true
+			w.log.Info("watch: re-attached room is old or flagged, telling the agent as a new incident",
+				"mode", string(w.cfg.Mode), "pipeline", id, "room", roomID)
+		}
+	}
+	w.mu.Lock()
+	seeded := w.pipes[id].toldIndex(roomID) >= 0
+	w.mu.Unlock()
+	if seeded {
+		return stale
+	}
+	if ks, ok := w.rooms.(ClosedRoomKeysSink); ok {
+		if keys, ok := ks.RoomSignalKeys(roomID); ok && len(keys) > 0 {
+			w.mu.Lock()
+			w.pipes[id].tell(roomID, keys)
+			w.mu.Unlock()
+		}
+	}
+	return stale
 }
 
 // assignFollowers puts the other members of a storm into the leader's room
@@ -454,10 +574,13 @@ func (w *Watcher) assignFollowers(now time.Time, leader, roomID string, storm ma
 			}
 			ss.notified = true
 			if w.closed[roomID] {
+				at := w.clock.Now()
 				ss.ack()
-				ps.lastClosed = w.clock.Now()
+				ss.ackedAt = at
+				ps.cool(ss.keys(sig), roomID, at)
 				continue
 			}
+			ps.tell(roomID, ss.keys(sig))
 			sev := "sev9"
 			for _, other := range ps.sigs {
 				if other.phase == phaseFiring {
@@ -487,16 +610,24 @@ func (w *Watcher) once(id string, flag func(*pipeState) *bool, log func()) {
 // post writes one system message to a room under its own deadline. It reports
 // success. ev, when not nil, is the evidence JSON of the message: a sink that
 // implements EvidenceSink gets it as data (the service feeds it to the agent as
-// an alert_update), any other sink gets the text alone. When the sink says the room is closed, the pipeline is acked, as if
+// an alert_update), any other sink gets the text alone. incident marks a post
+// that brings keys the room was not told about: a sink that implements
+// IncidentSink gets it there, so the service wakes or restarts the agent (QA
+// G1). When the sink says the room is closed, the pipeline is acked, as if
 // OnRoomClosed had arrived (a missed close event must not leave the watcher
 // posting into a closed room).
-func (w *Watcher) post(ctx context.Context, roomID, text string, ev json.RawMessage) bool {
+func (w *Watcher) post(ctx context.Context, roomID, text string, ev json.RawMessage, incident bool) bool {
 	sctx, cancel := context.WithTimeout(ctx, w.cfg.CheckTimeout)
 	defer cancel()
 	var err error
-	if es, ok := w.rooms.(EvidenceSink); ok {
+	is, isIncident := w.rooms.(IncidentSink)
+	es, isEvidence := w.rooms.(EvidenceSink)
+	switch {
+	case incident && isIncident:
+		err = is.PostIncidentJSON(sctx, roomID, text, ev)
+	case isEvidence:
 		err = es.PostEvidenceJSON(sctx, roomID, text, ev)
-	} else {
+	default:
 		err = w.rooms.PostEvidence(sctx, roomID, text)
 	}
 	if err == nil {
@@ -511,33 +642,42 @@ func (w *Watcher) post(ctx context.Context, roomID, text string, ev json.RawMess
 	return false
 }
 
-// recordPost remembers that the pending signals are now in roomID. It returns
-// false when the room was closed while the post or the open was in flight: the
-// pipeline then does not take the closed room as its own (that would make every
-// later tick post into it and never open another).
+// recordPost remembers that the pending signals are now in roomID, and that
+// the room carries the keys of every active signal. It returns false when the
+// room was closed while the post or the open was in flight: the pipeline then
+// does not take the closed room as its own (that would make every later tick
+// post into it and never open another), and the keys go into cooldown.
 func (w *Watcher) recordPost(now time.Time, pipelineID string, v view, roomID string, owned, follower bool) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	ps := w.pipes[pipelineID]
+	closed := w.closed[roomID]
+	at := w.clock.Now()
 	for _, s := range v.pending() {
 		if ss := ps.sigs[s.id]; ss != nil {
 			ss.notified = true
-			if w.closed[roomID] && ss.phase == phaseFiring {
+			if ss.escFree && !closed {
+				ss.escalated, ss.escFree = false, false
+			}
+			if closed && ss.phase == phaseFiring {
 				ss.ack()
+				ss.ackedAt = at
 			}
 		}
 	}
-	if w.closed[roomID] {
+	if closed {
+		ps.cool(v.keys(), roomID, at)
 		ps.roomID, ps.owned, ps.follower = "", false, false
-		ps.lastClosed = w.clock.Now()
 		w.log.Info("watch: room closed while it was being written to, signals acked",
 			"mode", string(w.cfg.Mode), "pipeline", pipelineID, "room", roomID)
 		return false
 	}
+	ps.tell(roomID, v.keys())
 	ps.roomID, ps.owned, ps.follower = roomID, owned, follower
 	ps.lastPost, ps.postedSev = now, v.sev
 	ps.bypassCooldown = false
 	ps.warnedOpen = false
+	ps.note, ps.blocked = "", ""
 	return true
 }
 
@@ -584,7 +724,7 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 				}
 				return
 			}
-		} else if !w.post(ctx, v.roomID, "watcher: "+id+": all watcher signals are clear", nil) {
+		} else if !w.post(ctx, v.roomID, "watcher: "+id+": all watcher signals are clear", nil, false) {
 			// post acks the pipeline itself when the room is closed; then the
 			// incident is over too.
 			w.mu.Lock()
@@ -601,7 +741,9 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 	ps.episode, ps.roomID, ps.owned, ps.follower = false, "", false, false
 	ps.postedSev, ps.lastPost = "", time.Time{}
 	ps.bypassCooldown = false
+	ps.note, ps.blocked = "", ""
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
+	ps.warnedStale, ps.warnedFlagged, ps.erroredMax = false, false, false
 	w.mu.Unlock()
 }
 
@@ -623,9 +765,12 @@ func compose(pipelineID string, now time.Time, v view, reason string, affected [
 				frag += " " + fmtDur(now.Sub(s.since).Round(time.Second))
 			}
 			frags = append(frags, frag)
-			ev := make(map[string]any, len(s.ev)+2)
+			ev := make(map[string]any, len(s.ev)+3)
 			for k, val := range s.ev {
 				ev[k] = val
+			}
+			if _, ok := ev["layer"]; !ok && SignalLayer(s.id) != "" {
+				ev["layer"] = SignalLayer(s.id)
 			}
 			if !s.since.IsZero() {
 				ev["since"] = s.since.UTC().Format(time.RFC3339)
@@ -641,9 +786,22 @@ func compose(pipelineID string, now time.Time, v view, reason string, affected [
 	if len(affected) > 1 {
 		title += fmt.Sprintf(" (and %d other pipelines)", len(affected)-1)
 	}
+	if v.note != "" {
+		title += " (" + v.note + ")"
+	}
 	body := map[string]any{
 		"source": "watcher", "pipeline": pipelineID, "severity": v.sev,
 		"at": now.UTC().Format(time.RFC3339), "reason": reason, "signals": sigs,
+	}
+	// The incident keys, so the room service can tell a restarted watcher
+	// what a closed room carried (ClosedRoomKeysSink, QA S1).
+	if keys := evidenceKeys(v.keys()); len(keys) > 0 {
+		body["keys"] = keys
+	}
+	if v.note != "" {
+		// An escalation (QA G1): the signal kept firing with no room.
+		body["escalated"] = true
+		body["note"] = v.note
 	}
 	if len(v.risks) > 0 && !riskInEv {
 		body["config_risks"] = v.risks

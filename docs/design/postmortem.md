@@ -33,13 +33,23 @@ stored fact is where the prose came from (`postmortem.drafted`), written once af
    agent messages before F4), `room.closed`.
 4. `## Root cause` — final hypothesis, confidence and verdicts; `summary.why`; the resolution.
 5. `## What was done` — per proposal: title; steps `action · layer · description`; params as a compact fenced
-   `json` block; approvals `layer — name (grant, method) at`; outcome.
-6. `## Verification` — the verification records, else "No verification recorded".
-7. `## Still open` — from the summary's `open`; "none recorded" when empty.
-8. `## Risks` — from the summary's `risks`; "none recorded" when empty.
+   `json` block; approvals `layer — name (grant, method) at`; outcome (a withdrawn proposal says so, with its
+   reason). Then every fix note (`comment.added` with `kind: "fix_note"`: who, when, text). When the room has
+   neither an executed step nor a fix note, the close resolution stands here instead of "No fix was proposed"
+   (Q1, QA G10).
+6. `## Verification` — the `agent.verification` records; for a room fixed by a person (fix notes or the
+   resolution, no executed step) "Fixed outside Piperoom per the resolution / fix notes; no agent verification
+   ran"; else "No verification recorded".
+7. `## Still open` — from the summary's `open`; "none recorded" when empty. When a fix (an executed step or a
+   fix note) came after the hand-off the summary was taken from, its items are labelled "Earlier, from the
+   hand-off at HH:MM (before the fix: …)" instead of being shown as current (Q1).
+8. `## Risks` — from the summary's `risks`, with the same before-the-fix label; "none recorded" when empty.
+   Hand-off bookkeeping ("summary lines were truncated", "a hand-off failed") never appears in these sections:
+   it goes to a footnote under the footer.
 9. `## Ruled out` — from the summary's `ruled_out`; "none recorded" when empty.
 10. `## Agent` — steps, tool calls, failed tool calls, first hypothesis after N s, model calls, tokens, cost `$x.xx`
-    or `not priced`.
+    ("less than $0.01" for tiny amounts), or `not priced` when no call was priced (the built-in price table is the
+    default since Q0, so this needs `PIPEROOM_MODEL_PRICES=off` or an unknown model).
 11. Footer: `Drafted by Piperoom <version> from <N> events; summary source: handoff h_… | model | none`.
 
 ## 4. Markdown safety
