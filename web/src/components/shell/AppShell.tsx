@@ -244,7 +244,9 @@ function Breadcrumb({ pipelineId }: { pipelineId?: string }) {
   const inRoom = pathname.startsWith('/rooms/')
   if (!inRoom) {
     return (
-      <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Rooms</h1>
+      <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">
+        {pathname === '/shadow' ? 'Shadow results' : 'Rooms'}
+      </h1>
     )
   }
   return (

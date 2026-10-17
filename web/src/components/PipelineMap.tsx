@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronsLeftRight, ChevronsRightLeft, Route } from 'lucide-react'
 import type { Topology, TopologyNode } from '../api/types'
 import { updatedAgoLabel } from '../lib/time'
+import { factLabel, factPhrase, factValue } from '../lib/facts'
 import { cn } from '@/lib/utils'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -21,6 +22,16 @@ const KIND_LABEL: Record<TopologyNode['kind'], string> = {
   sink_table: 'Sink',
 }
 
+// The compact node's left edge in its layer colour (full class names, so Tailwind sees them).
+const LAYER_EDGE: Record<string, string> = {
+  postgres: 'border-l-layer-postgres',
+  'kafka-connect': 'border-l-layer-kafka-connect',
+  'schema-registry': 'border-l-layer-schema-registry',
+  kafka: 'border-l-layer-kafka',
+  consumer: 'border-l-layer-consumer',
+  warehouse: 'border-l-layer-warehouse',
+}
+
 const HEALTH: Record<TopologyNode['health'], { word: string; tone: DotTone }> = {
   ok: { word: 'healthy', tone: 'ok' },
   warn: { word: 'degraded', tone: 'warn' },
@@ -36,7 +47,7 @@ export const EDGE =
   'relative h-0 w-11 shrink-0 self-start border-t-2 border-dashed border-input ' +
   "after:absolute after:-right-px after:-top-[5px] after:border-y-4 after:border-r-0 after:border-l-[6px] after:border-solid after:border-y-transparent after:border-l-input after:content-['']"
 export const EDGE_STALLED =
-  'relative h-0 w-16 shrink-0 self-start border-t-2 border-solid border-destructive ' +
+  'relative h-0 w-20 shrink-0 self-start border-t-2 border-solid border-destructive ' +
   "after:absolute after:-right-px after:-top-[5px] after:border-y-4 after:border-r-0 after:border-l-[6px] after:border-solid after:border-y-transparent after:border-l-destructive after:content-['']"
 
 // The line sits at the middle of the node: 27px of a 56px compact strip, 38px of a 92px card.
@@ -60,6 +71,8 @@ function Node({
 }) {
   const health = HEALTH[node.health] ?? HEALTH.unknown
   const facts = node.facts ? Object.entries(node.facts) : []
+  // The hover names the owner and, where the compact strip has no room for them, the facts.
+  const tip = [`owner: ${node.owner}`, ...facts.map(([k, v]) => factPhrase(k, v))].join('\n')
   const shared = cn(
     'rounded-lg border bg-card text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
     // Status is never a card border, except a failed node.
@@ -77,29 +90,22 @@ function Node({
         data-worst={worst ? 'true' : undefined}
         aria-pressed={selected}
         onClick={onSelect}
-        title={`owner: ${node.owner}`}
-        className={cn(shared, 'flex h-14 min-w-[168px] flex-1 basis-0 flex-col justify-center gap-0.5 px-3 py-1.5')}
+        title={`${node.layer}\n${tip}`}
+        className={cn(shared, 'flex h-14 min-w-[168px] flex-1 basis-0 flex-col justify-center gap-0.5 border-l-[3px] px-3 py-1.5', LAYER_EDGE[node.layer] ?? 'border-l-input')}
       >
-        <span className="flex items-center gap-2 text-xs">
+        {/* Line one: what it is and how it is, in words. Line two: the name, with the whole width
+            (it used to share a line with the health word and truncated to "public.o…"). The layer
+            is a coloured left edge here and a badge in the expanded lane; its name is in the tooltip. */}
+        <span className="flex items-center gap-1.5 text-xs">
           <span className="whitespace-nowrap text-subtle-foreground">{KIND_LABEL[node.kind] ?? node.kind}</span>
-          <span aria-hidden="true" className="text-subtle-foreground">·</span>
-          <Badge variant={layerVariant(node.layer)} mono>
-            {node.layer}
-          </Badge>
-        </span>
-        <span className="flex min-w-0 items-center gap-1.5 text-xs">
-          <span className="min-w-0 truncate font-mono text-sm font-medium" title={node.name}>
-            {node.name}
-          </span>
-          <StatusDot tone={health.tone} />
+          <span className="sr-only">, {node.layer},</span>
+          <StatusDot tone={health.tone} className="ml-auto" />
           <span className={cn('whitespace-nowrap', node.health === 'fail' ? 'text-destructive-fg' : 'text-muted-foreground')}>
             {health.word}
           </span>
-          {facts.length > 0 && (
-            <span className="ml-auto whitespace-nowrap font-mono text-muted-foreground">
-              <span className="text-subtle-foreground">{facts[0][0]}</span> {facts[0][1]}
-            </span>
-          )}
+        </span>
+        <span className="min-w-0 truncate font-mono text-sm font-medium" title={node.name}>
+          {node.name}
         </span>
       </button>
     )
@@ -112,7 +118,7 @@ function Node({
       data-worst={worst ? 'true' : undefined}
       aria-pressed={selected}
       onClick={onSelect}
-      title={`owner: ${node.owner}`}
+      title={tip}
       className={cn(shared, 'flex min-h-[92px] min-w-[200px] flex-1 basis-0 flex-col gap-1.5 px-3 py-2.5')}
     >
       <div className="flex items-center gap-2">
@@ -134,17 +140,17 @@ function Node({
         <StatusDot tone={health.tone} />
         <span>{health.word}</span>
         {facts.length > 0 && (
-          <span className="ml-auto font-mono">
-            <span className="text-subtle-foreground">{facts[0][0]}</span> {facts[0][1]}
+          <span className="ml-auto tabular-nums" title={facts[0][0]}>
+            <span className="text-subtle-foreground">{factLabel(facts[0][0])}</span> {factValue(facts[0][1])}
           </span>
         )}
       </div>
       {facts.length > 1 && (
-        <dl className="m-0 flex flex-wrap gap-x-2 font-mono text-xs text-muted-foreground">
+        <dl className="m-0 flex flex-wrap gap-x-2 text-xs tabular-nums text-muted-foreground">
           {facts.slice(1).map(([k, v]) => (
-            <div key={k} className="flex gap-1">
-              <dt className="text-subtle-foreground">{k}</dt>
-              <dd className="m-0">{v}</dd>
+            <div key={k} className="flex gap-1" title={k}>
+              <dt className="text-subtle-foreground">{factLabel(k)}</dt>
+              <dd className="m-0">{factValue(v)}</dd>
             </div>
           ))}
         </dl>
@@ -348,7 +354,7 @@ export function PipelineMap({
                   {prev &&
                     (stalled ? (
                       <div className={cn(EDGE_STALLED, edgeTop(compact))}>
-                        <span className="absolute left-1/2 top-[-24px] -translate-x-1/2 whitespace-nowrap rounded-sm border border-border bg-background px-1.5 font-mono text-[11px] font-medium leading-4 text-destructive-fg">
+                        <span className="absolute left-1/2 top-[-24px] -translate-x-1/2 whitespace-nowrap rounded-sm border border-border bg-background px-1.5 text-[11px] font-medium leading-4 text-destructive-fg">
                           {stalledFor ? `no flow · ${stalledFor}` : 'no flow'}
                         </span>
                       </div>

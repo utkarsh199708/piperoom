@@ -17,7 +17,10 @@ import {
 } from '../lib/auth'
 import type { AuthMode, AuthProblem } from '../lib/auth'
 import { errorText } from '../lib/errors'
-import { AuthBanner } from '../components/AuthBanner'
+import { AuthBanner, ErrorBar } from '../components/AuthBanner'
+import { AppSkeleton, NoticeScreen } from '../components/BootScreens'
+import { Button, buttonVariants } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 import { LoginScreen } from '../components/LoginScreen'
 import { LoginErrorScreen } from '../components/LoginErrorScreen'
 import { GroupsMissingNotice } from '../components/GroupsMissingNotice'
@@ -64,9 +67,7 @@ function FixtureUserProvider({ children }: { children: ReactNode }) {
   if (!dev) {
     return (
       <div className="shell">
-        <main className="roomlist">
-          <p className="empty">Unknown user: {id}</p>
-        </main>
+        <NoticeScreen title="Unknown user">No fixture user is called {id}.</NoticeScreen>
       </div>
     )
   }
@@ -245,9 +246,15 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
   const banners = (
     <>
       {problem && <AuthBanner problem={problem} onDismiss={() => setProblem(null)} />}
-      {failure && <div className="banner banner--error" role="alert">{failure}</div>}
+      {/* Without a user the failed screen says it in its body instead. */}
+      {failure && !(phase === 'failed' && !user) && <ErrorBar>{failure}</ErrorBar>}
       {user?.groupsMissing && <GroupsMissingNotice />}
     </>
+  )
+  const reload = (
+    <Button variant="secondary" className="w-full" onClick={() => window.location.reload()}>
+      Reload
+    </Button>
   )
 
   if (phase === 'login') {
@@ -257,23 +264,20 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         {mode === 'dev' ? (
           <LoginScreen onPick={setUserId} busy={busy} notice={notice ?? undefined} />
         ) : mode === 'oidc' ? (
-          <main className="roomlist">
-            <p className="empty">
-              You are signed out.{' '}
-              <a href={loginRedirectUrl()} onClick={() => saveReturnHash()}>
+          <NoticeScreen
+            title="You are signed out"
+            action={
+              <a className={cn(buttonVariants(), 'w-full')} href={loginRedirectUrl()} onClick={() => saveReturnHash()}>
                 Sign in
               </a>
-            </p>
-          </main>
+            }
+          >
+            Sign in again to get back to your rooms.
+          </NoticeScreen>
         ) : (
-          <main className="roomlist">
-            <div className="banner banner--error" role="alert">
-              <span>You are signed out. Reload the page to sign in again.</span>
-              <button type="button" className="btn btn--ghost btn--small" onClick={() => window.location.reload()}>
-                Reload
-              </button>
-            </div>
-          </main>
+          <NoticeScreen title="You are signed out" action={reload} alert>
+            You are signed out. Reload the page to sign in again.
+          </NoticeScreen>
         )}
       </div>
     )
@@ -283,9 +287,13 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
     return (
       <div className="shell">
         {banners}
-        <main className="roomlist">
-          <p className="empty">{phase === 'failed' ? 'Could not load your user.' : 'Loading user…'}</p>
-        </main>
+        {phase === 'failed' ? (
+          <NoticeScreen title="Could not load your account" action={reload} alert>
+            {failure ?? 'Could not load your user.'}
+          </NoticeScreen>
+        ) : (
+          <AppSkeleton label="Loading your account" />
+        )}
       </div>
     )
   }

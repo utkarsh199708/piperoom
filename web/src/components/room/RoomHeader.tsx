@@ -1,3 +1,5 @@
+import { Fragment } from 'react'
+import type { ReactNode } from 'react'
 import { Check, CircleCheck, Copy, Download, Ellipsis, Eye, FileText, Loader2, MoreHorizontal, Repeat2, ShieldAlert, UserPlus } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
@@ -103,10 +105,42 @@ export function RoomHeader({
   const exportLabel = exporting ? 'Exporting…' : 'Export JSON'
   const duration = closed && state.opened_at && state.closed_at ? durationLabel(state.opened_at, state.closed_at) : ''
 
+  // The facts line: pipeline, cost and clock, then when it opened or closed. Built as a list so the
+  // separators only sit between parts that are there. The room id is not a fact people read; it
+  // stays in the URL and in the title's tooltip.
+  const facts: { key: string; node: ReactNode }[] = []
+  if (state.pipeline_id) facts.push({ key: 'pipeline', node: <span className="font-mono">{state.pipeline_id}</span> })
+  if (!state.shadow && state.opened_at) facts.push({ key: 'cost', node: <CostChip state={state} /> })
+  if (closed && state.closed_at) {
+    facts.push({ key: 'closed', node: <span>Closed <Clock iso={state.closed_at} /></span> })
+    // The cost chip already carries the room's time, frozen at close; a shadow room hides the chip.
+    if (duration && state.shadow) facts.push({ key: 'duration', node: <span>{duration}</span> })
+    if (state.closed_by) {
+      facts.push({
+        key: 'closed-by',
+        node: (
+          <span className="inline-flex min-w-0 items-center gap-1">
+            closed by{' '}
+            {state.closed_by.kind === 'human' ? (
+              <PersonName person={state.closed_by} />
+            ) : (
+              // A retention close: the system, not a person.
+              'Piperoom'
+            )}
+          </span>
+        ),
+      })
+    }
+  } else if (state.opened_at) {
+    facts.push({ key: 'opened', node: <span>opened <Clock iso={state.opened_at} /></span> })
+  }
+
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
-        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{state.title}</h1>
+        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight" title={`Room ${state.id}`}>
+          {state.title}
+        </h1>
         <Badge variant={state.severity} className="uppercase">
           {state.severity}
         </Badge>
@@ -245,55 +279,13 @@ export function RoomHeader({
 
       <TriageCard state={state} onCite={onCite} />
 
-      <p className="m-0 flex flex-wrap items-center gap-x-2.5 font-mono text-xs text-subtle-foreground">
-        {state.pipeline_id && (
-          <>
-            <span>{state.pipeline_id}</span>
-            <Sep />
-          </>
-        )}
-        <span className="hidden sm:inline">#{state.id}</span>
-        {!state.shadow && state.opened_at && (
-          <>
-            <Sep />
-            <CostChip state={state} />
-          </>
-        )}
-        {closed && state.closed_at ? (
-          <>
-            <Sep />
-            <span>
-              Closed <Clock iso={state.closed_at} />
-            </span>
-            {duration && (
-              <>
-                <Sep />
-                <span>{duration}</span>
-              </>
-            )}
-            {state.closed_by && (
-              <>
-                <Sep />
-                <span className="inline-flex min-w-0 items-center gap-1 font-sans">
-                  closed by{' '}
-                  {state.closed_by.kind === 'human' ? (
-                    <PersonName person={state.closed_by} />
-                  ) : (
-                    // A retention close: the system, not a person.
-                    'Piperoom'
-                  )}
-                </span>
-              </>
-            )}
-          </>
-        ) : (
-          state.opened_at && (
-            <>
-              <Sep />
-              <span>opened <Clock iso={state.opened_at} /></span>
-            </>
-          )
-        )}
+      <p className="m-0 flex flex-wrap items-center gap-x-2.5 text-xs tabular-nums text-subtle-foreground">
+        {facts.map((f, i) => (
+          <Fragment key={f.key}>
+            {i > 0 && <Sep />}
+            {f.node}
+          </Fragment>
+        ))}
       </p>
 
       {closed && (onExport || onPostmortem) && (
