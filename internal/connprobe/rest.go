@@ -41,8 +41,8 @@ func restReach(ctx context.Context, h *httpProbe, g *Guard, path string, valid f
 	return reach, login, body
 }
 
-// skipRest appends skip checks for ids after a blocking failure.
-func skipRest(r *Result, why string, ids ...string) {
+// skipRestInto appends skip checks to r for ids after a blocking failure.
+func skipRestInto(r *Result, why string, ids ...string) {
 	for _, id := range ids {
 		r.Checks = append(r.Checks, skipped(id, why))
 	}

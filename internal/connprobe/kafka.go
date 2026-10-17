@@ -64,7 +64,7 @@ func probeKafka(ctx context.Context, t Target, g *Guard) Result {
 		return Check{ID: "config", Status: StatusOK, Detail: fmt.Sprintf("%s, %s, %d seed brokers", s.proto, login, len(s.brokers))}
 	}))
 	if ks == nil {
-		skipRest(&r, "settings are incomplete", kafkaChecks...)
+		skipRestInto(&r, "settings are incomplete", kafkaChecks...)
 		return r
 	}
 	if ks.msk {
@@ -88,7 +88,7 @@ func probeKafka(ctx context.Context, t Target, g *Guard) Result {
 		r.Checks[0] = Check{ID: "config", Status: StatusFail, MS: r.Checks[0].MS,
 			Problem: "The Kafka client cannot be built from these settings.",
 			Fix:     "Check KAFKA_BROKERS, KAFKA_SECURITY_PROTOCOL, KAFKA_SASL_* and KAFKA_TLS_*."}
-		skipRest(&r, "settings are incomplete", kafkaChecks...)
+		skipRestInto(&r, "settings are incomplete", kafkaChecks...)
 		return r
 	}
 	defer cl.Close()
@@ -121,12 +121,12 @@ func probeKafka(ctx context.Context, t Target, g *Guard) Result {
 	})
 	r.Checks = append(r.Checks, reach)
 	if reach.Status == StatusFail {
-		skipRest(&r, "no broker reachable", kafkaChecks[1:]...)
+		skipRestInto(&r, "no broker reachable", kafkaChecks[1:]...)
 		return r
 	}
 	r.Checks = append(r.Checks, login)
 	if login.Status == StatusFail {
-		skipRest(&r, "login failed", kafkaChecks[2:]...)
+		skipRestInto(&r, "login failed", kafkaChecks[2:]...)
 		return r
 	}
 
@@ -285,10 +285,10 @@ func probeKafkaMSK(ctx context.Context, r Result, ks *kafkaSettings, g *Guard) R
 	})
 	r.Checks = append(r.Checks, reach)
 	if reach.Status == StatusFail {
-		skipRest(&r, "no broker reachable", kafkaChecks[1:]...)
+		skipRestInto(&r, "no broker reachable", kafkaChecks[1:]...)
 		return r
 	}
-	skipRest(&r, "AWS_MSK_IAM signs in with the server's AWS identity, which a connection test does not load; the server checks the login at start", kafkaChecks[1:]...)
+	skipRestInto(&r, "AWS_MSK_IAM signs in with the server's AWS identity, which a connection test does not load; the server checks the login at start", kafkaChecks[1:]...)
 	return r
 }
 

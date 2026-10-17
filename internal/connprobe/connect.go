@@ -51,7 +51,7 @@ func probeConnect(ctx context.Context, t Target, g *Guard) Result {
 		return Check{ID: "config", Status: StatusOK, Detail: httpConfigDetail(p)}
 	}))
 	if hp == nil {
-		skipRest(&r, "settings are incomplete", "reach", "login", "connectors", "config_read")
+		skipRestInto(&r, "settings are incomplete", "reach", "login", "connectors", "config_read")
 		return r
 	}
 	defer hp.close()
@@ -65,18 +65,18 @@ func probeConnect(ctx context.Context, t Target, g *Guard) Result {
 	})
 	r.Checks = append(r.Checks, reach)
 	if reach.Status == StatusFail {
-		skipRest(&r, "Kafka Connect not reachable", "login", "connectors", "config_read")
+		skipRestInto(&r, "Kafka Connect not reachable", "login", "connectors", "config_read")
 		return r
 	}
 	r.Checks = append(r.Checks, login)
 	if login.Status == StatusFail {
-		skipRest(&r, "login failed", "connectors", "config_read")
+		skipRestInto(&r, "login failed", "connectors", "config_read")
 		return r
 	}
 
 	names := pipelineConnectors(t)
 	if len(names) == 0 {
-		skipRest(&r, "no pipeline connectors to check", "connectors", "config_read")
+		skipRestInto(&r, "no pipeline connectors to check", "connectors", "config_read")
 		return r
 	}
 	var found []string
