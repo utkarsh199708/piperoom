@@ -589,7 +589,7 @@ here writes them. **No response ever contains a secret value**: DSNs, passwords,
       "used_by": ["orders"],
       "settings": [
         {"key": "kafka_brokers", "display": "localhost:29092", "secret": false, "from": "env KAFKA_BROKERS"},
-        {"key": "kafka_sasl_password", "display": "", "secret": true, "set": false, "from": "env KAFKA_SASL_PASSWORD"}
+        {"key": "kafka_sasl_password", "display": "", "secret": true, "set": true, "from": "env KAFKA_SASL_PASSWORD"}
       ]
     }
   ],
@@ -613,7 +613,9 @@ here writes them. **No response ever contains a secret value**: DSNs, passwords,
   with a `connections:` block (`id` `pipeline.<pipeline id>.<kind>`, `scope` `pipeline`, `pipeline_id` set). A kind
   whose required setting (the DSN, brokers or URL) is empty is left out. `used_by` lists the pipelines whose client
   set the connection serves, in owners order.
-- **Settings.** One row per `owners.ConnectionKeys()` key of the kind that is set or required. `secret` is true for
+- **Settings.** One row per `owners.ConnectionKeys()` key of the kind that is set or required (so a process-wide
+  secret row always has `set: true`; `set: false` appears for a pipeline reference whose variable or file is
+  missing). `secret` is true for
   every key that may hold a credential (DSNs, user names, passwords); then `display` is `""` and `set` says whether
   a value is present. For URLs and `kafka_brokers`, `display` is scheme, host, port and path only. For literal keys
   (`owners.IsLiteralKey`) and TLS file paths, `display` is the value. `from` is `env NAME`, `file /path` or `value`
@@ -628,9 +630,15 @@ here writes them. **No response ever contains a secret value**: DSNs, passwords,
   {"id": "reach", "status": "ok", "ms": 4},
   {"id": "login", "status": "ok", "ms": 31},
   {"id": "read_only", "status": "ok", "ms": 2, "detail": "default_transaction_read_only = on"},
-  {"id": "read_slots", "status": "fail", "ms": 3, "problem": "role cannot read pg_replication_slots",
-   "fix": "GRANT pg_read_all_stats TO piperoom_ro;"}]}
+  {"id": "read_slots", "status": "fail", "ms": 3, "problem": "role piperoom_ro cannot read pg_replication_slots",
+   "fix": "GRANT SELECT ON pg_catalog.pg_replication_slots TO piperoom_ro;"}]}
 ```
+
+Check ids are stable per kind. Every kind starts with `config` (the settings are present and parse; a pipeline
+reference that cannot be resolved is a failed `config` check naming the key and its reference, never a value), then
+`reach` and `login`; later checks are `skip` when one of those three fails. Kind-specific ids: `source_db`
+`read_only`, `statement_timeout`, `read_slots`, `read_publications`, `select_tables`, `can_write`; `warehouse`
+`read_only` (Postgres only), `select_sink`; `kafka`, `connect` and `schema_registry` as their probes document.
 
 `status` is `ok`, `fail`, `warn` (works, but should change, e.g. the login can write) or `skip` (not run because an
 earlier check failed). `ok` is false when any check failed. `problem`, `fix` and `detail` are fixed text with object
