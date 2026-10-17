@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "consumer-poison-pill",
+  "hypothesis": "Root cause: a poison pill on partition 1 that order-sync cannot deserialize. While a reset to latest would skip every unread record, it is the only fix.",
+  "truth_sha256": "c6a77c8dcccbb721ae884ad8f94c38e7466a3fd40b8441a4996ea9c93c950a09",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis identifies the undeserializable poison pill on partition 1, but it also recommends resetting to latest, which is a listed wrong story. That makes root_cause_correct false. The first failing layer (consumer) and the root-cause layer (kafka record) are implied correctly."
+  }
+}

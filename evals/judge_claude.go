@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -37,6 +38,19 @@ var verdictSchema = map[string]any{
 	"additionalProperties": false,
 }
 
+// workspaceOptions adds the workspace header when ANTHROPIC_WORKSPACE_ID is
+// set. A user API key (sk-ant-usr-...) is not scoped to a workspace, and the
+// API rejects its requests with a 400 unless they carry
+// "anthropic-workspace-id"; internal/agent sends the same header for the
+// agent. The id is not a secret. A blank value adds nothing, so a
+// workspace-scoped key behaves as before.
+func workspaceOptions(getenv func(string) string) []option.RequestOption {
+	if id := strings.TrimSpace(getenv("ANTHROPIC_WORKSPACE_ID")); id != "" {
+		return []option.RequestOption{option.WithHeader("anthropic-workspace-id", id)}
+	}
+	return nil
+}
+
 // NewClaudeJudge returns a HypothesisJudge that calls the Anthropic Messages
 // API with the SDK client, at low effort and with a JSON-schema output format
 // (the key comes from ANTHROPIC_API_KEY and is never read or logged here). The
@@ -45,12 +59,15 @@ var verdictSchema = map[string]any{
 // configured model (PIPEROOM_MODEL). The client is a bare anthropic.NewClient
 // because internal/agent exports no single-message call through its Endpoint
 // (see the PR's contract change request); it ignores PIPEROOM_MODEL_PROVIDER.
-func NewClaudeJudge(model string, extra ...option.RequestOption) HypothesisJudge {
+//
+// The judge is metered (MeteredJudge): each call reports its input and output
+// tokens, which the auto judge adds up for the report.
+func NewClaudeJudge(model string, extra ...option.RequestOption) MeteredJudge {
 	if model == "" {
 		model = config.Load().Model // PIPEROOM_MODEL, the repo's configured model
 	}
-	client := anthropic.NewClient(extra...)
-	return NewTextJudge(func(ctx context.Context, system, user string) (string, error) {
+	client := anthropic.NewClient(append(workspaceOptions(os.Getenv), extra...)...)
+	return NewMeteredTextJudge(func(ctx context.Context, system, user string) (string, JudgeUsage, error) {
 		ctx, cancel := context.WithTimeout(ctx, judgeTimeout)
 		defer cancel()
 		msg, err := client.Messages.New(ctx, anthropic.MessageNewParams{
@@ -64,16 +81,21 @@ func NewClaudeJudge(model string, extra ...option.RequestOption) HypothesisJudge
 			},
 		})
 		if err != nil {
-			return "", fmt.Errorf("messages: %w", err)
+			return "", JudgeUsage{}, fmt.Errorf("messages: %w", err)
+		}
+		// Cache reads and writes are input too: they are billed.
+		u := JudgeUsage{
+			InputTokens:  msg.Usage.InputTokens + msg.Usage.CacheCreationInputTokens + msg.Usage.CacheReadInputTokens,
+			OutputTokens: msg.Usage.OutputTokens,
 		}
 		switch msg.StopReason {
 		case anthropic.StopReasonRefusal:
-			return "", errors.New("messages: the judge model refused to grade this hypothesis")
+			return "", u, errors.New("messages: the judge model refused to grade this hypothesis")
 		case anthropic.StopReasonMaxTokens:
-			return "", fmt.Errorf("messages: the verdict was cut off at max_tokens (%d)", judgeMaxTokens)
+			return "", u, fmt.Errorf("messages: the verdict was cut off at max_tokens (%d)", judgeMaxTokens)
 		case anthropic.StopReasonEndTurn:
 		default:
-			return "", fmt.Errorf("messages: unexpected stop reason %q", msg.StopReason)
+			return "", u, fmt.Errorf("messages: unexpected stop reason %q", msg.StopReason)
 		}
 		var b strings.Builder
 		for _, c := range msg.Content {
@@ -82,8 +104,8 @@ func NewClaudeJudge(model string, extra ...option.RequestOption) HypothesisJudge
 			}
 		}
 		if b.Len() == 0 {
-			return "", errors.New("messages: reply has no text")
+			return "", u, errors.New("messages: reply has no text")
 		}
-		return b.String(), nil
+		return b.String(), u, nil
 	})
 }

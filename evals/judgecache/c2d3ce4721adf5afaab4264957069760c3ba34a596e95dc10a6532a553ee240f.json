@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "sink-connector-paused-warehouse-stale",
+  "hypothesis": "Meera paused the wh-orders-sink connector on purpose for a migration, with 0 errors and no failed tasks; resume it when the migration is done.",
+  "truth_sha256": "82fd74eea3688325e49ce5ef9c4fe178d3ebb975a3e483f8845be7d13718c909",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis says Meera deliberately paused the wh-orders-sink connector for a migration and that no tasks failed, which matches the root cause in the kafka-connect layer. Its advice to resume once the migration is done is slightly off from 'ask first', but it tells none of the wrong stories."
+  }
+}

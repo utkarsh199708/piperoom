@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "payments-sink-dlq",
+  "hypothesis": "Had the registry rejected v4, the source task would have FAILED; it is RUNNING, so the risk_score records reach jdbc-payments-sink, which cannot write them to analytics.payments, and errors.tolerance=all sends them to the DLQ.",
+  "truth_sha256": "350d6840c900f7854b330a57da4aaffe37549fe1ff27cfafbd1929ab3e0d42f2",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis says jdbc-payments-sink cannot write the risk_score records to analytics.payments and that errors.tolerance=all routes them to the DLQ. That matches the ground-truth root cause and places it in kafka-connect."
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "ledger-producer-timeout-recovery",
+  "hypothesis": "Task 0 of pg-ledger-connector timed out because of a Kafka outage during the 08:52 rolling restart, and Connect does not restart a failed task.",
+  "truth_sha256": "bf133c3e2deea4e2534d0718f7a34229cb7ac444cb55d35149d43ffcbe1de337",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis says task 0 timed out because of the Kafka rolling restart and stays failed because Connect does not restart it, which matches the ground truth. That places the first failure in kafka-connect and the root cause in kafka."
+  }
+}

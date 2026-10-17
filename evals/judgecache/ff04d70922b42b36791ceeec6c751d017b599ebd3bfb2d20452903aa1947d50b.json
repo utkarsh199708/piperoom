@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "broker-disk-notenoughreplicas",
+  "hypothesis": "Broker 2's log dir is full, so the ISR fell lower than min.insync.replicas=2 and producers get NotEnoughReplicas; free disk space on broker 2.",
+  "truth_sha256": "a91700953749a7404e7ef2f8a7c466487c7a6fc8ca627767101da0671d5b88b0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the correct root cause: broker 2's log dir is full, so the ISR dropped below min.insync.replicas and producers get NotEnoughReplicas. That places the root cause correctly in kafka. It does not name the first failing layer (kafka-connect), and it tells none of the wrong stories."
+  }
+}

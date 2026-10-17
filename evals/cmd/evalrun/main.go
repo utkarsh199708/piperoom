@@ -10,6 +10,7 @@
 //	go run ./evals/cmd/evalrun -validate   # (or -check) validate scenarios, no model calls
 //	go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/new.yaml   # scenario from a graded shadow run
 //	go run ./evals/cmd/evalrun -validate -set heldout   # the held-out set; never tune prompts on it
+//	go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run   # what a verdict-cache fill would cost; no model calls
 package main
 
 import (
@@ -53,6 +54,11 @@ type flags struct {
 	label       string
 	judge       string
 	judgeModel  string
+	judgeCache  string
+	cacheOnly   bool
+	maxCalls    int
+	judgeFill   string
+	dryRun      bool
 	out         string
 	md          string
 	transcripts string
@@ -106,8 +112,13 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.effort, "effort", "", "effort (default PIPEROOM_EFFORT / high)")
 	fs.IntVar(&f.maxTurns, "max-turns", 0, "agent max turns per episode (default 40)")
 	fs.StringVar(&f.label, "label", "", "name for this configuration in the report, e.g. main or prompt-v2")
-	fs.StringVar(&f.judge, "judge", "", `how root cause and layer are judged: "terms" (deterministic) or "claude" (LLM judge, needs a -tags claude build); default: each scenario's judge field, else terms`)
-	fs.StringVar(&f.judgeModel, "judge-model", "", "model for -judge claude (default: the configured model, PIPEROOM_MODEL)")
+	fs.StringVar(&f.judge, "judge", "", `how root cause and layer are judged: "terms" (keyword grade only), "claude" (LLM judge on every hypothesis, needs a -tags claude build) or "auto" (the LLM judge only where the keyword pass is ambiguous: recorded verdicts first, then live calls up to -judge-max-calls); default: each scenario's judge field, else auto`)
+	fs.StringVar(&f.judgeModel, "judge-model", "", "model for the LLM judge (default: the configured model, PIPEROOM_MODEL)")
+	fs.StringVar(&f.judgeCache, "judge-cache", evals.DefaultJudgeCacheDir, "directory of recorded judge verdicts that -judge auto reads first (empty: none)")
+	fs.BoolVar(&f.cacheOnly, "judge-cache-only", false, "-judge auto reads only the recorded verdicts and fails on a miss; never a live judge call (replays in CI)")
+	fs.IntVar(&f.maxCalls, "judge-max-calls", evals.DefaultJudgeMaxCalls, "at most this many live judge calls per run in -judge auto, and per -judge-fill; past it an ambiguous hypothesis is reported ambiguous (unjudged) and counts as not passed (negative: no live calls)")
+	fs.StringVar(&f.judgeFill, "judge-fill", "", "MANIFEST (evals/judgecache/ambiguous.json): record a live judge verdict into -judge-cache for every listed corpus text that lacks one, up to -judge-max-calls, and exit. PAID: needs the owner's approval, a -tags claude build and ANTHROPIC_API_KEY; -dry-run prints the estimate only")
+	fs.BoolVar(&f.dryRun, "dry-run", false, "with -judge-fill: count the missing verdicts and estimate their tokens and cost; no model calls, nothing written")
 	fs.StringVar(&f.out, "out", "", "write the JSON report here")
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
 	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
@@ -184,6 +195,13 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		return runFromShadow(f, stdout, stderr)
 	}
 
+	if f.judgeFill != "" {
+		return runJudgeFill(f, stdout)
+	}
+	if f.dryRun {
+		return 1, errors.New("-dry-run goes with -judge-fill")
+	}
+
 	dir, err := scenarioDir(f)
 	if err != nil {
 		return 1, err
@@ -251,11 +269,9 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if opts.Effort == "" {
 		opts.Effort = cfg.Effort
 	}
-	var judgeClient evals.HypothesisJudge
-	if f.judge == evals.JudgeClaude || (f.judge == "" && anyClaudeJudge(scenarios)) {
-		if judgeClient, err = newJudge(f.judgeModel); err != nil {
-			return 1, err
-		}
+	judgeClient, err := liveJudge(f, scenarios)
+	if err != nil {
+		return 1, err
 	}
 	logLevel := slog.LevelError
 	if f.verbose {
@@ -294,17 +310,21 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	}
 
 	rep, runErr := evals.Evaluate(ctx, scenarios, evals.Config{
-		Label:       f.label,
-		Runner:      runner,
-		Tap:         tap,
-		Commit:      commit,
-		Judge:       f.judge,
-		JudgeClient: judgeClient,
-		Options:     opts,
-		Runs:        f.runs,
-		Parallel:    f.parallel,
-		Timeout:     f.timeout,
-		Logger:      logger,
+		Label:          f.label,
+		Runner:         runner,
+		Tap:            tap,
+		Commit:         commit,
+		Judge:          f.judge,
+		DefaultJudge:   evals.JudgeAuto,
+		JudgeClient:    judgeClient,
+		JudgeCache:     f.judgeCache,
+		JudgeCacheOnly: f.cacheOnly,
+		JudgeMaxCalls:  judgeMaxCalls(f.maxCalls),
+		Options:        opts,
+		Runs:           f.runs,
+		Parallel:       f.parallel,
+		Timeout:        f.timeout,
+		Logger:         logger,
 		OnRun: func(r evals.RunResult, tr evals.Transcript) {
 			usage.Add(r, tr)
 			verdict := "PASS"
@@ -367,6 +387,55 @@ func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 		return exitRegressed, nil
 	}
 	return 0, nil
+}
+
+// liveJudge builds the live LLM judge a run needs. -judge claude (or a
+// scenario's judge: claude) must have it, and so must -judge auto (the
+// default) unless it may make no live call (-judge-cache-only, or
+// -judge-max-calls 0 or less). Without it evalrun refuses to start: in a build
+// without -tags claude every ambiguous live hypothesis would otherwise count
+// as unjudged and not passed, and the run would read as a regression.
+func liveJudge(f flags, scenarios []evals.Scenario) (evals.HypothesisJudge, error) {
+	needed := f.judge == evals.JudgeClaude || (f.judge == "" && anyClaudeJudge(scenarios))
+	auto := f.judge == evals.JudgeAuto || (f.judge == "" && anyAutoJudge(scenarios))
+	if !needed && (!auto || f.cacheOnly || f.maxCalls <= 0) {
+		return nil, nil
+	}
+	j, err := newJudge(f.judgeModel)
+	switch {
+	case err != nil && needed:
+		return nil, err
+	case err != nil:
+		return nil, fmt.Errorf("-judge auto (the default) needs the live LLM judge for ambiguous hypotheses without a recorded verdict in %s, and this build has none (%w): build with -tags claude, or pass -judge terms for the keyword grade only (-judge-cache-only fails the run on a miss; -judge-max-calls 0 reports such hypotheses ambiguous (unjudged), not passed)", orNone(f.judgeCache), err)
+	}
+	return j, nil
+}
+
+// judgeMaxCalls maps the flag to Config.JudgeMaxCalls, where 0 means the
+// default: -judge-max-calls 0 allows no live calls.
+func judgeMaxCalls(n int) int {
+	if n == 0 {
+		return -1
+	}
+	return n
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "no cache"
+	}
+	return s
+}
+
+// anyAutoJudge reports whether a scenario is judged in auto mode: it says so,
+// or sets no mode (the evalrun default is auto).
+func anyAutoJudge(scenarios []evals.Scenario) bool {
+	for _, s := range scenarios {
+		if s.Judge == "" || s.Judge == evals.JudgeAuto {
+			return true
+		}
+	}
+	return false
 }
 
 // anyClaudeJudge reports whether a scenario asks for the LLM judge itself.

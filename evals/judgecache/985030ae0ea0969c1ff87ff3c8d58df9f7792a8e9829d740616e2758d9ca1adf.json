@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "schema-change",
+  "hypothesis": "The root cause is one of these: an ALTER TABLE changed amount to numeric so the Schema Registry rejected the Avro schema (409); a crash of the order-sync consumer; topic retention deleting records.",
+  "truth_sha256": "28b40a04cd675e6242339dca297be7d482b2f920ba69ffd83226c869efc1b34c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis lists several candidate causes without committing to one, and it includes the wrong stories of an order-sync crash and retention deletion. It also never names a first failing layer, so neither layer can be credited."
+  }
+}

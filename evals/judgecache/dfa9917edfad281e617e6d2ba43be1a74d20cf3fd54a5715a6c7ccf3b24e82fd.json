@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "replication-slot-lost-failover",
+  "hypothesis": "Before PG 17, a failover did not carry logical slots, but orders-db-2 runs PG 17 with sync_replication_slots on, so slot debezium_orders exists there; task 0 failed on a network blip.",
+  "truth_sha256": "fa26ddedfcae6870adcbc11dafafd1a20906d1be5d2195baa67147e10141c233",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": false,
+    "reason": "The hypothesis says the slot exists on the new primary and blames a network blip for the failure, which contradicts the ground truth that the slot was lost in the failover. It does not place the failure in postgres as the cause."
+  }
+}

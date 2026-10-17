@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "watcher-start",
+  "hypothesis": "pg-orders-connector task 0 FAILED because the source Postgres was restarted: the replication connection was terminated by administrator command (57P01). Postgres is back, the slot is reserved and no DDL ran, so restarting task 0 resumes streaming. Nothing changed the schema, except the DDL at 09:10.",
+  "truth_sha256": "4a1db905f0e3c6afd613d3bc36e9ebdf251743e70e56a99b59f2c79f02ee6e6c",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis correctly blames the Postgres restart (57P01) for the failed connector task. However, it also claims a DDL changed the schema at 09:10, which matches the wrong story 'ddl + changed the' and contradicts the ground truth that no DDL ran."
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "snowflake-sink-column-missing",
+  "hypothesis": "analytics.orders does not have the risk_score column the new records carry; there is nothing incompatible in the schema.",
+  "truth_sha256": "a64ff10591c1a72eb0c6fc144d9e778bbba9e3c1ebf5926ab9bb2023618d8cbd",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": false,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis correctly says analytics.orders lacks the risk_score column and explicitly says the schema is compatible, so the wrong stories do not apply. It also places the cause in the warehouse table. It does not name kafka-connect as the first failing layer, so the layer is not credited."
+  }
+}

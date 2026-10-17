@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "ledger-producer-timeout-recovery",
+  "hypothesis": "Task 0 timed out because kafka is unreachable during every rolling restart for more than 120 s; it failed at 08:52 and Connect does not restart it.",
+  "truth_sha256": "bf133c3e2deea4e2534d0718f7a34229cb7ac444cb55d35149d43ffcbe1de337",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis does commit to task 0 timing out during the broker restart and staying FAILED because Connect does not restart it. It places the cause in Kafka and the first failure in Connect, which matches the ground truth; the 'every rolling restart' generalization is an overstatement but the core cause is right."
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "avro-schema-id-deleted-sink-failed",
+  "hypothesis": "Schema id 7 (v3) was permanently deleted from the registry subject, so the sink cannot decode records written with it. The DDL broke nothing.",
+  "truth_sha256": "a257cc445c6f70278077c8e71ba1c171b935a6227bcdc043eaa5b06e16bac6d2",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis puts the cause in the schema registry: schema id 7 (v3) was permanently deleted from the subject, which matches the ground truth. Its line that the DDL broke nothing explicitly rejects the wrong stories rather than telling one."
+  }
+}

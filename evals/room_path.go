@@ -381,15 +381,9 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		tr.Events = evs
 		tr.Room = &RoomTrace{RoomID: rr.roomID, Entry: sc.entry(), Alert: alert}
 	}
-	res := Judge(sc, tr, runErr, timedOut)
-	// Nothing to grade without a hypothesis; the terms verdict already says so.
-	// Healthy, abstain and ask scenarios have no root cause for a judge.
-	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" && sc.Expect.outcome() == OutcomeDiagnose {
-		v, jerr := cfg.JudgeClient.JudgeHypothesis(ctx, sc, res.FinalHypothesis)
-		if jerr != nil {
-			return RunResult{}, Transcript{}, jerr
-		}
-		res = ApplyVerdict(sc, res, v)
+	res, err := gradeFinal(ctx, cfg, cfg.gate(), sc, Judge(sc, tr, runErr, timedOut))
+	if err != nil {
+		return RunResult{}, Transcript{}, err
 	}
 	res.Run = run
 	res.DurationMS = took.Milliseconds()

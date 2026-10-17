@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "payments-sink-dlq",
+  "hypothesis": "analytics.payments is not backward compatible with v4: it lacks risk_score, so jdbc-payments-sink fails every insert and errors.tolerance=all sends the records to the DLQ.",
+  "truth_sha256": "350d6840c900f7854b330a57da4aaffe37549fe1ff27cfafbd1929ab3e0d42f2",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis gives the ground-truth cause: the warehouse table lacks risk_score, so the JDBC sink fails every insert, and errors.tolerance=all sends the records to the DLQ. It places both the first failure and the root cause at the sink connector in kafka-connect."
+  }
+}

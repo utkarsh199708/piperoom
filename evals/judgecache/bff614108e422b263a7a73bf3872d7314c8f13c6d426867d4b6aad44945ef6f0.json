@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "slot-inactive-wal-growth",
+  "hypothesis": "pg-orders-connector is STOPPED (not FAILED): with no tasks, the replication slot debezium_orders is inactive and retains WAL, so pg_wal grows to 48.6 GiB and the disk is at risk. A long transaction is ruled out.",
+  "truth_sha256": "748616172fc5ab036e04e609128860f5fa8ec54bad55bb7a3c0bfbf415921b15",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis identifies the connector as STOPPED (not failed) with no tasks, which leaves the slot inactive and retaining WAL. That places the failure in kafka-connect and covers every required idea without telling any of the wrong stories."
+  }
+}

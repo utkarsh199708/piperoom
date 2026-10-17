@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "source-column-dropped",
+  "hypothesis": "A migration dropped orders.amount in Postgres, so the v3 Avro records no longer carry amount and order-sync cannot build warehouse rows. Connect is healthy.",
+  "truth_sha256": "24820a75f5ea000bee21af663d72aaa77c166395f0401608384e204bdd21f2d5",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the migration that dropped orders.amount in Postgres, which removed the field from v3 records and broke order-sync while Connect stayed healthy. It implies the consumer is the first failing layer and Postgres is the root-cause layer."
+  }
+}

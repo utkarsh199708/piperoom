@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "publication-permission-denied",
+  "hypothesis": "Task 0 FAILED: Debezium cannot ALTER PUBLICATION because orders_owner, not piperoom, owns public.orders (permission denied). The connector needs the table owner to change the publication.",
+  "truth_sha256": "e3ce5f6d07dbc19a4f485ef94406fa5a01495f02fa8aeabf321512474a40f1d0",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis identifies the ownership change to orders_owner, which blocks piperoom from running ALTER PUBLICATION and leaves task 0 failed. That matches the root cause. Task 0 failing places the first failure in kafka-connect, and the cause sits in Postgres table ownership."
+  }
+}

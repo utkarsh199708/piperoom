@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "recurring-schema-deleted",
+  "hypothesis": "A cleanup job hard-deleted schema id 2 (version 1 of pg.public.orders-value) from the Schema Registry, so order-sync's empty cache gets 40403 Schema 2 not found after the redeploy. Same as last month's closed room: restore it under its original id in IMPORT mode, then restart order-sync.",
+  "truth_sha256": "b454d4c4023be4e340da70976918e54ea9b54a5fb0f488d2bdc71b9348102d47",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis names the hard-deleted schema id 2 in Schema Registry as the cause, which leads to the 40403 error. It gives the correct fix: restore the schema under its original id in IMPORT mode and restart order-sync. It tells none of the wrong stories."
+  }
+}

@@ -39,6 +39,10 @@ type Report struct {
 	// RunUsage is each run's latency, tokens and cost (stats.go); set by
 	// UsageCollector.Apply.
 	RunUsage []RunUsage `json:"run_usage,omitempty"`
+	// Judge is what the LLM judge did: ambiguous hypotheses, verdicts from
+	// the cache or live, unjudged ones, live calls and their tokens
+	// (judge_auto.go). Nil when no hypothesis was ambiguous or judged.
+	Judge *JudgeStats `json:"judge,omitempty"`
 }
 
 // Summary aggregates runs. Rates are 0..1. In Report.Overall every scenario
@@ -105,6 +109,7 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 	}
 	cal, ev := calibrate(results), evidenceTotals(results)
 	rep.Calibration, rep.Evidence = &cal, &ev
+	rep.Judge = cfg.judge.snapshot()
 	return rep
 }
 
@@ -300,6 +305,7 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
+	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)
 	writeUsageTable(&b, r)
 	var failed []string
@@ -338,6 +344,13 @@ func failedRunDetails(res RunResult) []string {
 		out = append(out, fmt.Sprintf("  - hypothesis (confidence %s, first layer named %t, root-cause layer named %t): %s",
 			orDefault(res.Confidence), res.LayerNamed, res.RootCauseLayerNamed, mdCell(text)))
 	}
+	if a := res.Ambiguity; a != nil {
+		settled := a.Source
+		if settled == "" {
+			settled = "keyword grade kept"
+		}
+		out = append(out, fmt.Sprintf("  - ambiguous %s (%s): %s", mdCell(strings.Join(a.Items(), ", ")), mdCell(settled), mdCell(strings.Join(a.Reasons, "; "))))
+	}
 	if len(res.ProposedActions) > 0 {
 		out = append(out, "  - proposed actions: "+mdCell(strings.Join(res.ProposedActions, ", ")))
 	}
@@ -345,6 +358,33 @@ func failedRunDetails(res RunResult) []string {
 		out = append(out, "  - missing "+mdCell(g))
 	}
 	return out
+}
+
+// writeJudgeLine prints what the judge did, under the table: how many final
+// hypotheses the keyword pass found ambiguous, how many a verdict settled and
+// from where, how many stayed unjudged (counted not passed), and the live
+// calls and their tokens.
+func writeJudgeLine(b *strings.Builder, j *JudgeStats) {
+	if j == nil {
+		return
+	}
+	limit := "no cap"
+	switch {
+	case j.MaxLiveCalls < 0:
+		limit = "live calls off"
+	case j.MaxLiveCalls > 0:
+		limit = fmt.Sprintf("cap %d", j.MaxLiveCalls)
+	}
+	if j.ClaudeModeCalls > 0 {
+		// -judge claude calls have no cap; the cap is the auto mode's.
+		limit = fmt.Sprintf("%d of them -judge claude (no cap), auto %s", j.ClaudeModeCalls, limit)
+	}
+	cached := ""
+	if len(j.CacheModels) > 0 {
+		cached = " by " + strings.Join(j.CacheModels, ", ")
+	}
+	fmt.Fprintf(b, "\njudge: %d ambiguous · %d judged (%d cached%s, %d live) · %d ambiguous (unjudged), counted not passed · %d live call(s), %s · judge tokens %d in / %d out\n",
+		j.Ambiguous, j.Judged, j.CacheHits, mdCell(cached), j.LiveVerdicts, j.Unjudged, j.LiveCalls, limit, j.Usage.InputTokens, j.Usage.OutputTokens)
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {

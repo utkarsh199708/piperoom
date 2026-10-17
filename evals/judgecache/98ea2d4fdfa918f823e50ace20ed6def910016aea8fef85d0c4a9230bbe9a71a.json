@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "consumer-poison-pill",
+  "hypothesis": "Root cause: a poison pill on partition 1 that order-sync cannot deserialize. A reset to latest would skip it.",
+  "truth_sha256": "c6a77c8dcccbb721ae884ad8f94c38e7466a3fd40b8441a4996ea9c93c950a09",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": false,
+    "root_cause_layer_correct": true,
+    "reason": "It correctly names an undeserializable poison pill on partition 1 that order-sync cannot consume, but it also proposes a reset to latest. That matches the listed wrong story, so root_cause_correct is false."
+  }
+}

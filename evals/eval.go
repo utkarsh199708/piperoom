@@ -44,12 +44,29 @@ type Config struct {
 	Tap *ModelTap
 	// Logger receives the agent's own logs (default slog.Default()).
 	Logger *slog.Logger
-	// Judge forces the judge mode for every scenario ("terms" or "claude");
-	// empty uses each scenario's own `judge` field (default terms).
+	// Judge forces the judge mode for every scenario ("terms", "claude" or
+	// "auto"); empty uses each scenario's own `judge` field, else
+	// DefaultJudge.
 	Judge string
-	// JudgeClient grades hypotheses when a scenario's judge mode is "claude".
-	// Nil is an error then; tests and CI never set it.
+	// DefaultJudge is the mode of a scenario that sets none (default terms;
+	// evalrun sets auto).
+	DefaultJudge string
+	// JudgeClient is the live judge. A scenario whose judge mode is "claude"
+	// needs it; "auto" calls it on a cache miss while JudgeMaxCalls lasts,
+	// and without it a miss leaves the hypothesis ambiguous (unjudged).
 	JudgeClient HypothesisJudge
+	// JudgeCache is the directory of recorded verdicts auto mode reads first
+	// (judgecache.go); empty reads none.
+	JudgeCache string
+	// JudgeCacheOnly makes auto mode read only the cache: a miss fails the
+	// run (unit tests and CI replays), it never calls the live judge.
+	JudgeCacheOnly bool
+	// JudgeMaxCalls caps the live judge calls of auto mode over the whole
+	// evaluation (0: DefaultJudgeMaxCalls; negative: none). Past the cap an
+	// ambiguous hypothesis is unjudged and counts as not passed.
+	JudgeMaxCalls int
+	// judge is the evaluation's shared judge gate (Evaluate sets it).
+	judge *judgeGate
 	// OnRun, if set, is called after each run, for progress output. Calls are
 	// serialized.
 	OnRun func(RunResult, Transcript)
@@ -68,7 +85,19 @@ func (c Config) withDefaults() Config {
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+	if c.judge == nil {
+		c.judge = newJudgeGate(c)
+	}
 	return c
+}
+
+// gate returns the evaluation's judge gate, or a fresh one for a Config that
+// did not go through withDefaults.
+func (c Config) gate() *judgeGate {
+	if c.judge != nil {
+		return c.judge
+	}
+	return newJudgeGate(c)
 }
 
 // Evaluate runs every scenario cfg.Runs times and returns the report. All
@@ -96,11 +125,13 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 	if err := ValidateAll(scenarios, defs); err != nil {
 		return Report{}, err
 	}
-	if cfg.Judge != "" && cfg.Judge != JudgeTerms && cfg.Judge != JudgeClaude {
-		return Report{}, fmt.Errorf("evals: unknown judge %q (want %q or %q)", cfg.Judge, JudgeTerms, JudgeClaude)
+	for _, m := range []string{cfg.Judge, cfg.DefaultJudge} {
+		if !validJudge(m) {
+			return Report{}, fmt.Errorf("evals: unknown judge %q (want %q, %q or %q)", m, JudgeTerms, JudgeClaude, JudgeAuto)
+		}
 	}
 	for _, sc := range scenarios {
-		if effectiveJudge(cfg.Judge, sc) == JudgeClaude && cfg.JudgeClient == nil {
+		if effectiveJudge(cfg.Judge, sc, cfg.DefaultJudge) == JudgeClaude && cfg.JudgeClient == nil {
 			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags claude and set ANTHROPIC_API_KEY)", sc.Name, JudgeClaude)
 		}
 	}

@@ -1,0 +1,13 @@
+{
+  "prompt_version": "judge-2026-10-15.1",
+  "scenario": "users-compat-none-consumer",
+  "hypothesis": "A NONE override let v4 with loyalty_tier register; that is why the Postgres DDL broke user-profile-sync instead of failing at registration.",
+  "truth_sha256": "6dcefdc8be68957aee5732cdac9d2fce27c4d4229315ef4f697be66829df020b",
+  "model": "claude-opus-5-5",
+  "verdict": {
+    "layer_correct": true,
+    "root_cause_correct": true,
+    "root_cause_layer_correct": true,
+    "reason": "The hypothesis states that a NONE compatibility override let an incompatible v4 schema with loyalty_tier register, which then broke user-profile-sync. That matches the root cause in schema-registry, with the consumer as the first failing layer."
+  }
+}
