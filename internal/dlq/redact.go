@@ -50,8 +50,10 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 //     URL's user:password@, bearer tokens, cloud keys).
 //
 // Then, on that output, the values of a PostgreSQL "Key (cols)=(values)"
-// detail without a "Detail:" label are replaced (maskKeyValues); the column
-// list stays.
+// detail without a "Detail:" label are replaced (maskKeyValues), and so are
+// those of MySQL's "Duplicate entry 'v' for key", SQL Server's "The duplicate
+// key value is (v)" and PostgreSQL details printed with "= (" or "＝（"
+// (maskKeyForms); column and key names stay.
 //
 // Control characters and runs of spaces become one space. The result is at
 // most 300 runes and RedactMessage is idempotent.
@@ -65,7 +67,7 @@ func RedactMessage(s string) string {
 	// Additive passes (docs/agents/org.md §12): they only add masks on the
 	// output of the rules above, which then run again on the result.
 	for i := 0; i < maxRedactRounds; i++ {
-		next := redactRules(string(capRunes(tidy([]rune(maskKeyValues(out))))))
+		next := redactRules(string(capRunes(tidy([]rune(maskKeyForms(maskKeyValues(out)))))))
 		if next == out {
 			break
 		}
@@ -112,11 +114,18 @@ func redactOnce(s string) string {
 	return string(capRunes(tidy(rs)))
 }
 
-// urlTokenSpans are the URLs as safeCut cuts them, found by the literal
+// urlTokenSpans are the URLs safeCut replaces whole, found by the literal
 // "://" alone (no scheme rule: "my_postgres://" and a scheme glued to a long
 // word are URLs too): each runs from the last white space, quote or bracket
 // before the "://" (or the start) to the next white space or quote after it.
-func urlTokenSpans(s string) [][]int {
+// #539: a URL leaves this set, so the word rule cuts it and its path stays,
+// only when it is plainly credential-free: no '@' after its "://" (userinfo;
+// internal/redact allows '/', '?', '#' and ':' in the password), no '?' or
+// '#' (signed and OAuth query parameters), the whole token is in s (open says
+// s was cut short), and neither internal/redact nor maskUnquoted changes the
+// whole token (provider tokens and webhook paths). Anything else is replaced
+// whole, as on main.
+func urlTokenSpans(s string, open bool) [][]int {
 	var spans [][]int
 	for off := 0; ; {
 		k := strings.Index(s[off:], "://")
@@ -129,12 +138,21 @@ func urlTokenSpans(s string) [][]int {
 		if e := strings.IndexAny(s[k:], urlTokenStops); e >= 0 {
 			end = k + e
 		}
-		spans = append(spans, []int{start, end})
+		if !credentialFreeURL(s[start:end], s[k:end], open && end == len(s)) {
+			spans = append(spans, []int{start, end})
+		}
 		off = end
 		if off <= k {
 			off = k + 3
 		}
 	}
+}
+
+// credentialFreeURL reports whether the URL token tok (rest: from its "://")
+// can be cut like a word; cut says the token may go on past the window.
+func credentialFreeURL(tok, rest string, cut bool) bool {
+	// maskUnquoted runs internal/redact on top of its own patterns.
+	return !cut && !strings.ContainsAny(rest, "@?#") && maskUnquoted(tok) == tok
 }
 
 // urlTokenStops end a URL token: white space and quotes.
@@ -152,7 +170,8 @@ const (
 
 // safeCut makes the first cut of rs (len(rs) > MaxMessageRunes). A cut value
 // no longer matches its mask ("jane.doe@exam", "123-45-678") and went out in
-// part. So a value that maskUnquoted's own patterns match, or a URL, and that
+// part. So a value that maskUnquoted's own patterns match, or a URL that may
+// carry a credential (urlTokenSpans), and that
 // straddles the cap (also one with spaces, "4111 1111 1111 1111") is replaced by
 // Redacted from its start; otherwise the cut moves back to the start of a word
 // that straddles the cap. The values are found in the tidied window, as the
@@ -171,10 +190,11 @@ func safeCut(rs []rune) []rune {
 	}
 	win := string(tw)
 	capByte := len(string(tw[:capT]))
-	// A URL is one value from its scheme to the next white space or quote:
-	// internal/redact allows '/', '@', '?', '#' and ':' in its password, so no
-	// split inside it is safe ("postgres://app:S3cr/t9x@db..." cut after "/").
-	spans := append(piiSpans(win), urlTokenSpans(win)...)
+	// A URL that may carry a credential is one value from its scheme to the
+	// next white space or quote: no split inside it is safe
+	// ("postgres://app:S3cr/t9x@db..." cut after "/").
+	open := len(rs) > MaxMessageRunes+cutLookahead
+	spans := append(piiSpans(win), urlTokenSpans(win, open)...)
 	for _, sp := range spans {
 		if sp[0] < capByte && sp[1] > capByte {
 			at = min(at, raw[utf8.RuneCountInString(win[:sp[0]])])
