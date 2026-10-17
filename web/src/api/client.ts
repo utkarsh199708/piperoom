@@ -16,6 +16,8 @@ import type {
   LabelInput,
   Me,
   Person,
+  ProbeResult,
+  AdminConfig,
   AgentStats,
   PipelineInfo,
   RoomSnapshot,
@@ -181,6 +183,13 @@ async function fetchText(url: string, accept?: string): Promise<Response> {
   return res
 }
 
+/**
+ * The config export (GET /api/admin/config/export, admin only): the owners file, `---`, the users file, as a
+ * `piperoom-config.yaml` attachment. The page links to it instead of fetching it, so the browser saves the
+ * bytes the server sent and the session cookie authorises it.
+ */
+export const ADMIN_CONFIG_EXPORT_URL = '/api/admin/config/export'
+
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
 export const api = {
@@ -281,6 +290,11 @@ export const api = {
     request<ShadowResponse>(`${room(roomId)}/shadow${include.length ? `?include=${include.join(',')}` : ''}`),
   shadowGrade: (roomId: string, body: ShadowGradeBody) =>
     request<Event>(`${room(roomId)}/shadow/grade`, { method: 'POST', body: JSON.stringify(body) }),
+  // Admin only: any other member gets 403 not_allowed, a viewer 403 viewer. Nothing here changes configuration.
+  adminConfig: () => request<AdminConfig>('/api/admin/config'),
+  // A failed check is a 200 with ok: false. 404 not_found: unknown id. 429 rate_limited: 10 tests a minute.
+  testConnection: (id: string) =>
+    request<ProbeResult>('/api/admin/connections/test', { method: 'POST', body: JSON.stringify({ id }) }),
   shadowMetrics: (filter: { pipeline?: string; since?: string } = {}) => {
     const q = new URLSearchParams()
     if (filter.pipeline) q.set('pipeline', filter.pipeline)
