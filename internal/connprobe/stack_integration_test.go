@@ -32,8 +32,6 @@ func devTarget(k Kind) Target {
 	}
 }
 
-func devGuard() *Guard { return &Guard{AllowLoopback: true, AllowPrivate: true} }
-
 func runDev(t *testing.T, k Kind) Result {
 	t.Helper()
 	r := Run(context.Background(), devTarget(k), devGuard())
