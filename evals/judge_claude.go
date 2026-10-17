@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -37,6 +38,19 @@ var verdictSchema = map[string]any{
 	"additionalProperties": false,
 }
 
+// workspaceOptions adds the workspace header when ANTHROPIC_WORKSPACE_ID is
+// set. A user API key (sk-ant-usr-...) is not scoped to a workspace, and the
+// API rejects its requests with a 400 unless they carry
+// "anthropic-workspace-id"; internal/agent sends the same header for the
+// agent. The id is not a secret. A blank value adds nothing, so a
+// workspace-scoped key behaves as before.
+func workspaceOptions(getenv func(string) string) []option.RequestOption {
+	if id := strings.TrimSpace(getenv("ANTHROPIC_WORKSPACE_ID")); id != "" {
+		return []option.RequestOption{option.WithHeader("anthropic-workspace-id", id)}
+	}
+	return nil
+}
+
 // NewClaudeJudge returns a HypothesisJudge that calls the Anthropic Messages
 // API with the SDK client, at low effort and with a JSON-schema output format
 // (the key comes from ANTHROPIC_API_KEY and is never read or logged here). The
@@ -52,7 +66,7 @@ func NewClaudeJudge(model string, extra ...option.RequestOption) MeteredJudge {
 	if model == "" {
 		model = config.Load().Model // PIPEROOM_MODEL, the repo's configured model
 	}
-	client := anthropic.NewClient(extra...)
+	client := anthropic.NewClient(append(workspaceOptions(os.Getenv), extra...)...)
 	return NewMeteredTextJudge(func(ctx context.Context, system, user string) (string, JudgeUsage, error) {
 		ctx, cancel := context.WithTimeout(ctx, judgeTimeout)
 		defer cancel()
