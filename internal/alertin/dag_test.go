@@ -107,6 +107,7 @@ func TestMatchDAGKind(t *testing.T) {
 		{"dag listed by cdc and batch: the batch one", []string{"shared_dag"}, "daily-revenue"},
 		{"no match", []string{"no_such_dag"}, ""},
 		{"several batch matches are not guessed", []string{"both_batch"}, ""},
+		{"cdc dag plus batch dag in one alert: the batch one", []string{"orders_nightly", "revenue_daily"}, "daily-revenue"},
 		{"several matches narrowed by a second id", []string{"both_batch", "customers_daily"}, "daily-customers"},
 		{"single id, as room passes it", []string{" revenue_daily "}, "daily-revenue"},
 	}

@@ -20,9 +20,10 @@ import (
 // name DAGs of different pipelines, gives "" rather than a guess.
 //
 // The ids come from the payload and are untrusted; they are only compared
-// with owners.yaml entries, never logged or shown. Only a batch pipeline can
-// match: owners.Load refuses dags on a cdc pipeline, but an Owners built in
-// code is not checked, and a dag_id must never send a room to a CDC pipeline.
+// with owners.yaml entries, never logged or shown. Only batch pipelines take
+// part: owners.Load refuses dags on a cdc pipeline, but an Owners built in code
+// is not checked, and a dag_id must never send a room to a CDC pipeline. A dag
+// that only a non-batch pipeline lists is ignored like an unknown id.
 // ids is variadic so a caller with one dag_id (the dev webhook in
 // internal/room) passes it as is.
 func MatchDAG(o *owners.Owners, ids ...string) string {
@@ -36,7 +37,11 @@ func MatchDAG(o *owners.Owners, ids ...string) string {
 		}
 	}
 	var known []string
-	for _, p := range o.Pipelines {
+	for i := range o.Pipelines {
+		p := &o.Pipelines[i]
+		if p.KindOrDefault() != events.PipelineKindBatch {
+			continue
+		}
 		for _, d := range p.DAGs {
 			if want[d] && !slices.Contains(known, d) {
 				known = append(known, d)
