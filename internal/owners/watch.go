@@ -298,12 +298,17 @@ func DefaultWatch() WatchConfig {
 }
 
 // Watch returns the validated watcher settings for the pipeline. A pipeline
-// with no `watch:` block, or one built in code, gets DefaultWatch.
+// with no `watch:` block, or one built in code, gets DefaultWatch. A batch
+// pipeline has no watcher signals in this wave (Load refuses a `watch:` block
+// on it), so it gets every signal off, whether loaded or built in code.
 func (p Pipeline) Watch() WatchConfig {
 	if p.watch != nil {
 		w := *p.watch
 		w.DLQTopics = slices.Clone(w.DLQTopics) // callers must not edit the shared slice
 		return w
+	}
+	if p.isBatch() {
+		return batchWatch()
 	}
 	return DefaultWatch()
 }

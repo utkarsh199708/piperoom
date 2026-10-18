@@ -1,6 +1,8 @@
 // Package owners loads and validates the pipeline ownership config
 // (dev/owners.yaml): which source tables, connectors, consumer groups and
-// sink tables form each pipeline, and which user owns each layer.
+// sink tables form each pipeline, and which user owns each layer. A pipeline
+// is of kind cdc (the default) or batch (DAGs, dbt models and sink tables);
+// see kind.go.
 package owners
 
 import (
@@ -17,19 +19,35 @@ import (
 type Pipeline struct {
 	ID    string `yaml:"id"`
 	Title string `yaml:"title"`
+	// Kind is the optional `kind:` (tasks/P0-contracts.md item 3): "cdc" or
+	// empty for a Postgres -> Debezium -> Kafka pipeline, "batch" for an
+	// orchestrated one (DAGs, dbt models, sink tables). Load refuses any other
+	// value, and a field of the other kind. Read it with KindOrDefault and the
+	// pipeline's layers with Layers.
+	Kind string `yaml:"kind"`
 	// TopicPrefix is the Debezium topic prefix; pipeline topics are named
-	// "<TopicPrefix>.<schema>.<table>".
-	TopicPrefix    string   `yaml:"topic_prefix"`
+	// "<TopicPrefix>.<schema>.<table>". A cdc field: a batch pipeline has none.
+	TopicPrefix string `yaml:"topic_prefix"`
+	// SourceTables, Connectors and ConsumerGroups are cdc fields too.
 	SourceTables   []string `yaml:"source_tables"`
 	Connectors     []string `yaml:"connectors"`
 	ConsumerGroups []string `yaml:"consumer_groups"`
-	SinkTables     []string `yaml:"sink_tables"`
-	SinkTSColumn   string   `yaml:"sink_ts_column"`
+	// SinkTables and SinkTSColumn belong to both kinds.
+	SinkTables   []string `yaml:"sink_tables"`
+	SinkTSColumn string   `yaml:"sink_ts_column"`
+	// DAGs, DBTProject and Models are the batch fields (a cdc pipeline sets
+	// none). DAGs are Airflow dag_ids, Models are dbt model names, DBTProject
+	// is the dbt project's path or URL. A batch pipeline needs at least one
+	// DAG or model. Load trims the entries.
+	DAGs       []string `yaml:"dags"`
+	DBTProject string   `yaml:"dbt_project"`
+	Models     []string `yaml:"models"`
 	// WatchSpec is the optional `watch:` block (see watch.go). Read the
-	// validated values with Watch().
+	// validated values with Watch(). Refused on a batch pipeline in this wave:
+	// every watcher signal reads Kafka or Connect.
 	WatchSpec *WatchSpec `yaml:"watch"`
 	// ShadowSpec is the optional `shadow:` block (see shadow.go). Read it with
-	// Shadow().
+	// Shadow(). Allowed on both kinds.
 	ShadowSpec *ShadowSpec `yaml:"shadow"`
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
 	// replaces the top-level `layers:` entry for this pipeline.
@@ -170,7 +188,8 @@ func (o *Owners) validate() error {
 	}
 	seen := map[string]bool{}
 	for i := range o.Pipelines {
-		p := o.Pipelines[i]
+		// A pointer: validateKind trims the batch lists in place.
+		p := &o.Pipelines[i]
 		if p.ID == "" {
 			return fmt.Errorf("pipeline with empty id")
 		}
@@ -178,14 +197,20 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("duplicate pipeline id %q", p.ID)
 		}
 		seen[p.ID] = true
-		if p.TopicPrefix == "" {
-			return fmt.Errorf("pipeline %q: topic_prefix is required", p.ID)
+		if err := p.validateKind(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
-		if len(p.SourceTables) == 0 {
-			return fmt.Errorf("pipeline %q: no source tables", p.ID)
-		}
-		if len(p.Connectors) == 0 {
-			return fmt.Errorf("pipeline %q: no connectors", p.ID)
+		// validateKind has already refused the cdc fields on a batch pipeline.
+		if !p.isBatch() {
+			if p.TopicPrefix == "" {
+				return fmt.Errorf("pipeline %q: topic_prefix is required", p.ID)
+			}
+			if len(p.SourceTables) == 0 {
+				return fmt.Errorf("pipeline %q: no source tables", p.ID)
+			}
+			if len(p.Connectors) == 0 {
+				return fmt.Errorf("pipeline %q: no connectors", p.ID)
+			}
 		}
 		for _, l := range []struct {
 			name  string
@@ -208,14 +233,20 @@ func (o *Owners) validate() error {
 		if err := checkAutoApproveSyntax(p.AutoApprove); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if p.isBatch() {
+			// No watch: block (validateKind) and nothing to watch.
+			w := batchWatch()
+			p.watch = &w
+			continue
+		}
 		w, err := resolveWatch(p.WatchSpec)
 		if err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
-		if err := resolveDLQTopics(p, &w); err != nil {
+		if err := resolveDLQTopics(*p, &w); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
-		o.Pipelines[i].watch = &w
+		p.watch = &w
 	}
 	if err := o.validateDLQ(); err != nil {
 		return err
