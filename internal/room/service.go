@@ -356,6 +356,9 @@ type Service struct {
 	statsCache agentStatsCache
 	// approvals counts approval.given by grant for /metrics (metrics.go).
 	approvals approvalCounts
+	// soleMembers counts the sole-member grants for /metrics
+	// (service_solemember.go).
+	soleMembers soleMemberCounter
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
