@@ -116,8 +116,10 @@ instead of connector → topic → group. CDC rooms are unchanged.
 ## Dependencies and merge order
 P0 → **P4a** → P4b (needs `Kind`) → P4c, P4d, P4e in parallel (each against P0's interfaces with fakes; A4
 adds the `Register` line when each lands) → P4g (needs real clients to record against) → P4f, P4h → P4i.
-P1, P2, P3 are not dependencies, but P4 merges after them (vision order): a batch room gets the quickstart,
-the ceremony and the driver-authored proposal for free.
+P1, P2, P3 are not dependencies. The client rows (P4c-1, P4d-1, P4e-1, P4e-2), P4a-1 and P4g-1 may start and
+merge right after P0, as `tasks/P-board.md` says; the rows that change what a room shows or what the agent sees
+(P4b-*, P4f-*) and the integration rows (P4g-2, P4h-*, P4i-*) merge after P1–P3 (vision order), so a batch room
+gets the quickstart, the ceremony and the driver-authored proposal for free.
 
 ## Done when
 - [ ] `owners.yaml` with one `cdc` and one `batch` pipeline loads; a CDC room offers no `dag_*`/`dbt_*` tool and a

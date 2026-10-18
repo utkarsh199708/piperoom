@@ -2,7 +2,7 @@
 
 Owner: leads (`[LEAD-ARCH]`), one PR titled `[P0] contracts: write mode, solo ceremony, write clients, pipeline kinds`.
 Plan: `docs/product/fit-2026-10.md`. Merges first, alone; every P PR codes against the items below by number
-("Uses (P0)" in `AGENTS.md`). This file is the final text, matching the code of the P0 PR (branch `p/P0`); the
+("Uses (P0)" in `AGENTS.md`). This file is the final text, matching the code of the P0 PR (#583, branch `claude/p0-contracts`); the
 code and its doc comments win where the two ever differ.
 
 Agents **never edit** these files: `internal/clients/clients.go`, `internal/events/events.go`,
