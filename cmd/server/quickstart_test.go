@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -151,6 +152,13 @@ func TestCheckQuickstartListener(t *testing.T) {
 			}
 			if err != nil && !errors.Is(err, errNonLoopback) {
 				t.Fatalf("want errNonLoopback, got %v", err)
+			}
+			// run reports it through serveError: one "server:" prefix.
+			if err != nil {
+				msg := serveError(err).Error()
+				if !strings.HasPrefix(msg, "server: listen: --quickstart: ") || strings.Count(msg, "server:") != 1 {
+					t.Fatalf("reported as %q, want one \"server:\" prefix then \"listen: --quickstart: \"", msg)
+				}
 			}
 		})
 	}
@@ -419,7 +427,11 @@ func TestQuickstartUsersRefusedIDCleansUp(t *testing.T) {
 
 // noDataStack opens no client set: every pipeline gets the empty set (runbook
 // tool only), so the quickstart start path runs with no data stack.
+//
+// It also reports opts.ReadOnly on stderr (the log stream, so stdout stays the
+// URL alone) for the test that checks run passes it.
 func noDataStack(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts wiring.StackOptions) (*wiring.Stacks, error) {
+	fmt.Fprintf(os.Stderr, "TEST openStacks ReadOnly=%t\n", opts.ReadOnly)
 	opts.Only = []string{}
 	return wiring.OpenStacks(ctx, cfg, awsCfg, own, opts)
 }
@@ -593,7 +605,8 @@ func TestQuickstartServesRoomListWithin10s(t *testing.T) {
 		t.Fatalf("stdout = %q, want only the URL", lines)
 	}
 	logs := stderr.String()
-	for _, want := range []string{"mode=quickstart", "write mode off", "wrote a one-user users file"} {
+	// Write mode is off, so run opens the stacks with ReadOnly (P1a-3).
+	for _, want := range []string{"mode=quickstart", "write mode off", "wrote a one-user users file", "TEST openStacks ReadOnly=true"} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("the log lacks %q:\n%s", want, logs)
 		}
@@ -644,7 +657,7 @@ func TestQuickstartStartRefusesWriteModeOn(t *testing.T) {
 
 // A listen failure comes after the one-user users file is written, so the
 // start must still remove its temp directory, and the error must carry the
-// "server: listen" prefix once (#600 review).
+// "server:" prefix once (#600 review).
 func TestQuickstartListenErrorRemovesTempDir(t *testing.T) {
 	// Occupy a loopback port so the server's own Listen fails.
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
@@ -668,7 +681,7 @@ func TestQuickstartListenErrorRemovesTempDir(t *testing.T) {
 			runErr = strings.TrimPrefix(line, "RUN ERROR: ")
 		}
 	}
-	want := "server: listen: listen on " + busy.Addr().String() + ": "
+	want := "server: listen on " + busy.Addr().String() + ": "
 	if !strings.HasPrefix(runErr, want) || strings.Count(runErr, "server:") != 1 {
 		t.Fatalf("run error = %q, want it to start %q with one \"server:\" prefix", runErr, want)
 	}
