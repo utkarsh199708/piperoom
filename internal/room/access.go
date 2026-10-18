@@ -67,15 +67,17 @@ func (s *Service) IsSolo(userID string) bool {
 
 // LayersFor returns the layers the person may approve, for GET /api/me:
 // the users.yaml layers, the owners.yaml layers they own as a user, through a
-// group or as a backup, and every layer for the solo user. The result is in
+// group or as a backup, and every layer for the solo user. Only layers of the
+// pipeline kinds owners.yaml uses count (knownLayers, P4a-4). The result is in
 // events.Layers order and is never nil.
 func (s *Service) LayersFor(u User) []string {
+	known := s.knownLayers()
 	if s.soloUser != "" && u.ID == s.soloUser {
-		return append([]string{}, events.Layers...)
+		return known
 	}
 	fromOwners := s.owners.LayersFor(u.ID, u.Groups)
 	out := []string{}
-	for _, l := range events.Layers {
+	for _, l := range known {
 		// A users.yaml layer counts only where authorizeLayer would honour it,
 		// so the UI never shows an approve button that answers 403.
 		if (slices.Contains(u.Layers, l) && s.ownersNameUser(l, u.ID)) || slices.Contains(fromOwners, l) {
