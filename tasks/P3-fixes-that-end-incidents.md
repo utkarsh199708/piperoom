@@ -67,7 +67,7 @@ agent verification as one the agent wrote. There is no free-form command.
    `internal/actions/pgactions/**` folder (A3's from this wave) holding `pg_add_publication_table`,
    `pg_drop_replication_slot` and the `signal_table` half of `connect_snapshot_table`.
    - The writer is a **separate pool** from `pgconv.ReadOnlyPool`: `SOURCE_DB_WRITE_URL` (P0 item 7's config
-     line; empty → no writer, actions report "no write credentials" at `Validate`) with its own role, documented
+     line; empty → no writer, actions report "no write credentials" at `Execute`, never `Validate`: with write mode off there is no writer and the agent still proposes; #606 ruling) with its own role, documented
      in P3f. Identifiers go through `pgx.Identifier{}.Sanitize()` after the `^[a-zA-Z_][a-zA-Z0-9_]*$` check
      (rule 6); no statement is built from untrusted text.
    - `pg_drop_replication_slot` `Validate` re-reads `pg_replication_slots` and refuses `active`, a slot whose name

@@ -372,7 +372,7 @@ repos:
 | C18 (cloud, new) | `internal/clients/workerlogs/**`, `internal/tools/logtools/**`, `internal/tools/nettools/**` |
 
 A2 keeps the rest of `internal/actions/**` except `action.go`, `pgactions/**`, `sourceactions/**` and `fixpr/**`. If
-no eighth local agent runs, A3 takes the A8 rows after step 2; the After column does not change.
+no eighth local agent runs, A3 takes the A8 rows after step 2; the After column does not change. Taking them is a leads' PR that sets those rows' Agent cells to A3 and adds `internal/clients/mysql/**` and `internal/tools/mysqltools/**` to A3 in AGENTS.md and `docs/process/ownership.json` together, because ship-check reads the Agent cell and the ownership file.
 
 ## Load per agent
 
