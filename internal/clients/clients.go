@@ -315,6 +315,8 @@ type KafkaWriter interface {
 // GroupResetPlanner is implemented by the Kafka write client; an action's
 // Validate and Preview hold it (never the writer) to refuse an active group
 // and to show per-partition moves before anything is committed. Read-only.
+// Optional: asserted at use time, like RecordReader; a nil or absent planner
+// makes the action refuse at Validate.
 type GroupResetPlanner interface {
 	CheckGroupInactive(ctx context.Context, group string) error
 	PlanGroupReset(ctx context.Context, group string, to OffsetTarget) ([]OffsetMove, error)
@@ -324,9 +326,9 @@ type GroupResetPlanner interface {
 type OffsetMove struct {
 	Topic     string `json:"topic"`
 	Partition int32  `json:"partition"`
-	Committed int64  `json:"committed"`
-	Target    int64  `json:"target"`
-	End       int64  `json:"end"`
+	Committed int64  `json:"committed"` // the group's committed offset before the reset; -1 when nothing was committed
+	Target    int64  `json:"target"`    // the offset the reset commits
+	End       int64  `json:"end"`       // the high watermark at planning time; End-Target is the lag the reset leaves
 }
 
 // RecordReader reads whole records for dlq_replay (P3a): at most limit
