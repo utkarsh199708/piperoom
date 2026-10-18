@@ -3,11 +3,13 @@ package room
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
+	"piperoom/internal/events"
 	"piperoom/internal/store/memstore"
 )
 
@@ -136,9 +138,9 @@ func TestAuthorizeLayerSolo(t *testing.T) {
 	if _, err := svc.authorizeLayer("orders", User{ID: "arjun"}, "kafka", "orders/kafka", true); err == nil {
 		t.Fatal("a non-solo user approved a layer they do not own")
 	}
-	// /api/me lists every layer for the solo user.
-	if got := svc.LayersFor(User{ID: "priya"}); len(got) != 6 {
-		t.Fatalf("solo layers = %v, want all six", got)
+	// /api/me lists every layer for the solo user (every kind's: events.Layers).
+	if got := svc.LayersFor(User{ID: "priya"}); !slices.Equal(got, events.Layers) {
+		t.Fatalf("solo layers = %v, want all of %v", got, events.Layers)
 	}
 }
 
