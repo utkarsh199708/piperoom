@@ -50,7 +50,8 @@ type Pipeline struct {
 	// Shadow(). Allowed on both kinds.
 	ShadowSpec *ShadowSpec `yaml:"shadow"`
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
-	// replaces the top-level `layers:` entry for this pipeline.
+	// replaces the top-level `layers:` entry for this pipeline. Load refuses a
+	// layer that is not one of the pipeline's Layers().
 	Owners map[string]LayerRights `yaml:"owners"`
 	// AutoApprove is the optional `auto_approve:` list (tasks/P0-contracts.md
 	// item 3): names of actions whose proposals this pipeline lets run after a
@@ -198,6 +199,9 @@ func (o *Owners) validate() error {
 		}
 		seen[p.ID] = true
 		if err := p.validateKind(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.checkOwnerLayers(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		// validateKind has already refused the cdc fields on a batch pipeline.

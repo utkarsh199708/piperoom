@@ -540,7 +540,8 @@ func isAbsPath(p string) bool {
 // would vanish without a word and the policy the admin meant would not run. A
 // null auto_approve: key itself is left alone: it reads as no list, which is
 // no auto-approval, the safe meaning (checkAutoApproveSyntax). A null entry in
-// a dags: or models: list is refused the same way.
+// a dags: or models: list is refused the same way. Because only literal keys
+// are read, a `<<` merge key in a pipeline is refused too.
 func checkNullBlocks(root *yaml.Node) error {
 	doc := root
 	if doc.Kind == yaml.DocumentNode {
@@ -566,6 +567,13 @@ func checkNullBlocks(root *yaml.Node) error {
 		name := fmt.Sprintf("pipelines[%d]", i)
 		if id, ok := mapValue(p, "id"); ok && id.Kind == yaml.ScalarNode && !isNull(id) {
 			name = "pipeline " + quoteName(id.Value)
+		}
+		// This function reads literal keys only. A `<<` merge key would bring in
+		// fields it never sees (a null dags: entry, say), so it is refused.
+		for j := 0; j+1 < len(p.Content); j += 2 {
+			if k := p.Content[j]; k.Kind == yaml.ScalarNode && k.ShortTag() == "!!merge" {
+				return fmt.Errorf("line %d: %s: merge key << is not supported in a pipeline; write the fields out", k.Line, name)
+			}
 		}
 		if v, ok := mapValue(p, "connections"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: connections: is empty (null); list the connections, or remove the key to use the process-wide settings", v.Line, name)

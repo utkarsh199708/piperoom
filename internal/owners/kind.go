@@ -3,7 +3,10 @@ package owners
 import (
 	"fmt"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
+	"unicode"
 
 	"piperoom/internal/events"
 )
@@ -135,13 +138,37 @@ func (p *Pipeline) validateBatch() error {
 	}
 	project := strings.TrimSpace(p.DBTProject)
 	// The value is a path or URL for the dbt client; a control character in it
-	// would reach logs and the agent's prompt as a line break.
+	// would reach logs and the agent's prompt as a line break. unicode.IsControl
+	// covers the C0 and C1 ranges (DEL and NEL included); the Unicode line and
+	// paragraph separators are not control characters but break a line too.
 	for _, r := range project {
-		if r < 0x20 || r == 0x7f {
+		if unicode.IsControl(r) || r == ' ' || r == ' ' {
 			return fmt.Errorf("dbt_project %q: contains a control character", project)
 		}
 	}
 	p.DAGs, p.Models, p.DBTProject = dags, models, project
+	return nil
+}
+
+// checkOwnerLayers refuses an `owners:` entry for a layer the pipeline's kind
+// does not have. validateRights checks the block against every known layer
+// (events.Layers), so a batch pipeline with a kafka-connect entry, or a cdc
+// pipeline with an orchestrator one, would load and never grant anything: the
+// person who wrote it would believe a layer was covered. It runs after
+// validateKind, so the kind is cdc or batch. The keys are sorted so the same
+// file gives the same error.
+func (p *Pipeline) checkOwnerLayers() error {
+	layers := p.Layers()
+	keys := make([]string, 0, len(p.Owners))
+	for l := range p.Owners {
+		keys = append(keys, l)
+	}
+	sort.Strings(keys)
+	for _, l := range keys {
+		if !slices.Contains(layers, l) {
+			return fmt.Errorf("owners: layer %q is not a %s layer (want one of %s)", l, p.KindOrDefault(), strings.Join(layers, ", "))
+		}
+	}
 	return nil
 }
 

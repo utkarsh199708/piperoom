@@ -298,6 +298,13 @@ func TestBatchDBTProject(t *testing.T) {
 		{name: "blank is absent", line: "\"   \"", want: ""},
 		{name: "newline inside", line: "\"/srv/dbt\\nanalytics\"", wantErr: "dbt_project"},
 		{name: "escape character", line: "\"/srv/\\u001b[31m\"", wantErr: "control character"},
+		{name: "delete character", line: "\"/srv/\\u007fx\"", wantErr: "control character"},
+		{name: "C1 next line (NEL)", line: "\"/srv/\\u0085analytics\"", wantErr: "control character"},
+		{name: "C1 last control", line: "\"/srv/\\u009fx\"", wantErr: "control character"},
+		{name: "line separator U+2028", line: "\"/srv/\\u2028analytics\"", wantErr: "control character"},
+		{name: "paragraph separator U+2029", line: "\"/srv/\\u2029analytics\"", wantErr: "control character"},
+		{name: "non-ascii letters are fine", line: "\"/srv/d\\u00e9p\\u00f4t\"", want: "/srv/dépôt"},
+		{name: "inner space is fine", line: "\"/srv/my project\"", want: "/srv/my project"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			extra := "    dags: [d1]\n"
@@ -644,4 +651,150 @@ func TestDevOwnersIsCDC(t *testing.T) {
 			t.Errorf("pipeline %s: the watcher was switched off", p.ID)
 		}
 	}
+}
+
+// A pipeline `owners:` block may name only layers of the pipeline's kind:
+// validateRights checks against every known layer, so a wrong-kind entry would
+// load and never grant anything.
+func TestOwnersBlockMustNameLayersOfTheKind(t *testing.T) {
+	const cdcOwners = "    owners:\n      kafka-connect: {approvers: [alice]}\n      warehouse: {approvers: [meera]}\n"
+	cases := []struct {
+		name     string
+		pipeline string
+		wantErr  string // substring; "" = must load
+	}{
+		{
+			name:     "cdc with its own layers",
+			pipeline: pipelineYAML("orders", cdcOwners),
+		},
+		{
+			name:     "cdc with every layer of the kind",
+			pipeline: pipelineYAML("orders", "    owners:\n      postgres: {approvers: [a]}\n      kafka-connect: {approvers: [a]}\n      schema-registry: {approvers: [a]}\n      kafka: {approvers: [a]}\n      consumer: {approvers: [a]}\n      warehouse: {approvers: [a]}\n"),
+		},
+		{
+			name:     "batch with its own layers",
+			pipeline: batchYAML("daily-revenue", "    dags: [d1]\n    owners:\n      orchestrator: {approvers: [priya]}\n      transform: {approvers: [priya], backup: [sam]}\n      warehouse: {approvers: [meera]}\n"),
+		},
+		{
+			name:     "batch with no owners block",
+			pipeline: batchYAML("daily-revenue", "    dags: [d1]\n"),
+		},
+		{
+			name:     "batch naming a cdc layer",
+			pipeline: batchYAML("daily-revenue", "    dags: [d1]\n    owners:\n      kafka-connect: {approvers: [alice]}\n"),
+			wantErr:  `pipeline "daily-revenue": owners: layer "kafka-connect" is not a batch layer (want one of orchestrator, transform, warehouse)`,
+		},
+		{
+			name:     "batch naming postgres",
+			pipeline: batchYAML("daily-revenue", "    models: [m1]\n    owners:\n      postgres: {approvers: [alice]}\n"),
+			wantErr:  `layer "postgres" is not a batch layer`,
+		},
+		{
+			name:     "cdc naming a batch layer (implied kind)",
+			pipeline: pipelineYAML("orders", "    owners:\n      orchestrator: {approvers: [alice]}\n"),
+			wantErr:  `pipeline "orders": owners: layer "orchestrator" is not a cdc layer (want one of postgres, kafka-connect, schema-registry, kafka, consumer, warehouse)`,
+		},
+		{
+			name:     "cdc naming a batch layer (explicit kind)",
+			pipeline: pipelineYAML("orders", "    kind: cdc\n    owners:\n      transform: {approvers: [alice]}\n"),
+			wantErr:  `layer "transform" is not a cdc layer`,
+		},
+		{
+			name:     "valid and invalid layer together",
+			pipeline: batchYAML("daily-revenue", "    dags: [d1]\n    owners:\n      warehouse: {approvers: [meera]}\n      kafka: {approvers: [alice]}\n"),
+			wantErr:  `layer "kafka" is not a batch layer`,
+		},
+		{
+			// Sorted keys: the same file always gives the same error.
+			name:     "first wrong layer in sorted order",
+			pipeline: batchYAML("daily-revenue", "    dags: [d1]\n    owners:\n      postgres: {approvers: [a]}\n      consumer: {approvers: [a]}\n      kafka: {approvers: [a]}\n"),
+			wantErr:  `layer "consumer" is not a batch layer`,
+		},
+		{
+			name:     "unknown layer is still the generic error",
+			pipeline: batchYAML("daily-revenue", "    dags: [d1]\n    owners:\n      bogus: {approvers: [a]}\n"),
+			wantErr:  `owners: unknown layer "bogus"`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Top-level layers: of both kinds are fine in one file: they apply
+			// to whichever pipelines have that layer.
+			_, err := Load(writeTemp(t, "pipelines:\n"+c.pipeline+sixLayers+"  orchestrator: priya\n  transform: priya\n"))
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("err = %v, want it to contain %q", err, c.wantErr)
+			}
+		})
+	}
+	// The error is the same on every load, whatever the map order.
+	doc := "pipelines:\n" + batchYAML("daily-revenue", "    dags: [d1]\n    owners:\n      postgres: {approvers: [a]}\n      consumer: {approvers: [a]}\n      kafka: {approvers: [a]}\n      schema-registry: {approvers: [a]}\n") + "layers:\n  warehouse: meera\n"
+	path := writeTemp(t, doc)
+	var first string
+	for i := 0; i < 20; i++ {
+		_, err := Load(path)
+		if err == nil {
+			t.Fatal("Load accepted wrong-kind owners")
+		}
+		if i == 0 {
+			first = err.Error()
+		} else if err.Error() != first {
+			t.Fatalf("error changed between loads:\n%s\n%s", first, err.Error())
+		}
+	}
+}
+
+// checkNullBlocks reads literal keys only, so a `<<` merge key in a pipeline
+// (which could bring in a null dags: entry) is refused.
+func TestMergeKeyInPipelineRefused(t *testing.T) {
+	const wantErr = "merge key << is not supported in a pipeline"
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			name: "merged dags with a null entry",
+			yaml: "pipelines:\n  - id: daily-revenue\n    kind: batch\n    <<: {dags: [d, ~]}\nlayers:\n  warehouse: meera\n",
+		},
+		{
+			name: "merged models with a null entry",
+			yaml: "pipelines:\n  - id: daily-revenue\n    kind: batch\n    dags: [d]\n    <<: {models: [m, ~]}\nlayers:\n  warehouse: meera\n",
+		},
+		{
+			name: "merged auto_approve with a null entry",
+			yaml: "pipelines:\n  - id: daily-revenue\n    kind: batch\n    dags: [d]\n    <<: {auto_approve: [~]}\nlayers:\n  warehouse: meera\n",
+		},
+		{
+			name: "merged from an anchor",
+			yaml: "pipelines:\n  - &base\n    id: orders\n    topic_prefix: pg\n    source_tables: [public.orders]\n    connectors: [c1]\n  - <<: *base\n    id: orders2\nlayers:\n  warehouse: meera\n",
+		},
+		{
+			name: "merge list",
+			yaml: "pipelines:\n  - id: daily-revenue\n    kind: batch\n    dags: [d]\n    <<: [{sink_ts_column: ts}]\nlayers:\n  warehouse: meera\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := Load(writeTemp(t, c.yaml))
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("err = %v, want it to contain %q", err, wantErr)
+			}
+		})
+	}
+	t.Run("a quoted << key is an ordinary unknown key, not a merge", func(t *testing.T) {
+		_, err := Load(writeTemp(t, "pipelines:\n  - id: daily-revenue\n    kind: batch\n    dags: [d]\n    \"<<\": {x: 1}\nlayers:\n  warehouse: meera\n"))
+		if err == nil || strings.Contains(err.Error(), "merge key") || !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("err = %v, want the unknown-field error", err)
+		}
+	})
+	t.Run("no merge key still loads", func(t *testing.T) {
+		if _, err := Load(writeTemp(t, p4Example)); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+	})
 }
