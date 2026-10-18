@@ -1,0 +1,497 @@
+package actions
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	"piperoom/internal/clients"
+	"piperoom/internal/clients/kafka"
+	"piperoom/internal/owners"
+	"piperoom/internal/tools"
+)
+
+// SnapshotTableName is the registered name of connect_snapshot_table.
+const SnapshotTableName = "connect_snapshot_table"
+
+// The two ways a Debezium connector takes a snapshot signal.
+const (
+	ViaSignalTopic = "signal_topic" // a record on signal.kafka.topic (P3a)
+	ViaSignalTable = "signal_table" // a row in signal.data.collection (P3b, SourceWriter)
+)
+
+// maxSnapshotTables caps the tables of one step: one signal, one approval.
+const maxSnapshotTables = 50
+
+// snapshotTableRe is a "schema.table" as owners.yaml lists source tables;
+// AGENTS.md §4 rule 6 for each part.
+var snapshotTableRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+var (
+	// ErrSignalNotConfigured refuses a via the connector has no signal
+	// channel for; the message names the keys to set.
+	ErrSignalNotConfigured = errors.New("actions: the connector is not configured for this snapshot signal")
+	// errSignalTableLayer refuses via signal_table until the room service
+	// checks a step's layer per params (contract change request, P3a-5): the
+	// action's Layer() is kafka-connect, and a signal table row is a write
+	// on the source database whose owner must approve it.
+	errSignalTableLayer = errors.New("actions: connect_snapshot_table via signal_table writes to the source database and needs the postgres layer's approval, which the room cannot ask for yet (the action's layer is kafka-connect); use via signal_topic")
+)
+
+// SnapshotDeps is what connect_snapshot_table reads and writes through.
+type SnapshotDeps struct {
+	// Connect reads the connector config (signal channels, topic.prefix).
+	Connect clients.ConnectReader
+	// Source is optional: when it can estimate a table's rows
+	// (tableRowEstimator), Preview shows the estimate.
+	Source clients.SourceReader
+	// Kafka is nil unless write mode is on; only Execute touches it.
+	Kafka clients.KafkaWriter
+	// SourceWriter is nil unless write mode is on and SOURCE_DB_WRITE_URL is
+	// set; only Execute touches it (via signal_table).
+	SourceWriter clients.SourceWriter
+
+	// Timeout overrides the 10 s bound of each call; tests only.
+	Timeout time.Duration
+}
+
+// RegisterSnapshot adds connect_snapshot_table to reg.
+func RegisterSnapshot(reg *Registry, d SnapshotDeps) error {
+	return reg.Register(&snapshotTable{d: d})
+}
+
+// snapshotSignaler is the Kafka Writer's narrow signal produce: Produce only
+// writes the pipeline's CDC topics, and the signal topic is none of them.
+type snapshotSignaler interface {
+	SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (kafka.SnapshotSignal, error)
+}
+
+var _ snapshotSignaler = (*kafka.Writer)(nil)
+
+// tableRowEstimator is an optional read of the source client: the planner's
+// row estimate of "schema.table" (pg_class.reltuples; negative = never
+// analysed). Not on the contract SourceReader, so fakes and replay clients
+// compile without it; Preview says "estimate unavailable" then.
+type tableRowEstimator interface {
+	EstimatedRows(ctx context.Context, table string) (int64, error)
+}
+
+type snapshotTable struct{ d SnapshotDeps }
+
+var (
+	_ Action  = (*snapshotTable)(nil)
+	_ Scoped  = (*snapshotTable)(nil)
+	_ Preview = (*snapshotTable)(nil)
+)
+
+type snapshotParams struct {
+	Connector string   `json:"connector"`
+	Tables    []string `json:"tables"`
+	Via       string   `json:"via"`
+}
+
+func (a *snapshotTable) Name() string { return SnapshotTableName }
+
+// Layer is kafka-connect: the signal topic variant changes nothing but what
+// the connector does. See LayerFor for the signal table variant.
+func (a *snapshotTable) Layer() string { return "kafka-connect" }
+
+// LayerFor is the layer of a step by its via: postgres for signal_table,
+// whose write is a row in the source database. The room service does not
+// call it yet (contract change request, P3a-5); until it does Validate
+// refuses signal_table.
+func (a *snapshotTable) LayerFor(raw json.RawMessage) (string, error) {
+	p, err := parseSnapshot(raw)
+	if err != nil {
+		return "", err
+	}
+	if p.Via == ViaSignalTable {
+		return "postgres", nil
+	}
+	return "kafka-connect", nil
+}
+
+func (a *snapshotTable) Describe() string {
+	return "Asks a Debezium source connector for an incremental snapshot of some of the pipeline's source tables: " +
+		"it re-reads them in chunks and emits every existing row again (op r) to their topics while streaming goes on. " +
+		"For a table whose rows never reached Kafka (missed by the publication or include list) or reached it corrupted. " +
+		"via signal_topic produces the execute-snapshot signal to the connector's signal.kafka.topic (needs kafka in " +
+		"signal.enabled.channels). Downstream sinks see duplicates unless they upsert by key."
+}
+
+func (a *snapshotTable) ParamsSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"connector": strProp("the pipeline's Debezium source connector"),
+		"tables": map[string]any{
+			"type":        "array",
+			"description": "source tables to snapshot, schema.table, each one of the pipeline's source_tables",
+			"items":       map[string]any{"type": "string"},
+			"minItems":    1,
+			"maxItems":    maxSnapshotTables,
+		},
+		"via": map[string]any{
+			"type":        "string",
+			"enum":        []string{ViaSignalTopic, ViaSignalTable},
+			"description": "how the signal reaches the connector: signal_topic (its signal.kafka.topic) or signal_table (its signal.data.collection)",
+		},
+	}, "connector", "tables", "via")
+}
+
+// parseSnapshot decodes params strictly and checks them without I/O. Tables
+// come back deduplicated in order.
+func parseSnapshot(raw json.RawMessage) (snapshotParams, error) {
+	var p snapshotParams
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return p, fmt.Errorf("actions: %s: bad params: %w", SnapshotTableName, err)
+	}
+	if strings.TrimSpace(p.Connector) == "" {
+		return p, fmt.Errorf("actions: %s: connector is required", SnapshotTableName)
+	}
+	if p.Via != ViaSignalTopic && p.Via != ViaSignalTable {
+		return p, fmt.Errorf("actions: %s: via must be %q or %q, got %q", SnapshotTableName, ViaSignalTopic, ViaSignalTable, capParam(p.Via))
+	}
+	if len(p.Tables) == 0 {
+		return p, fmt.Errorf("actions: %s: tables needs at least one schema.table", SnapshotTableName)
+	}
+	seen := make(map[string]bool, len(p.Tables))
+	tables := make([]string, 0, len(p.Tables))
+	for _, t := range p.Tables {
+		if !snapshotTableRe.MatchString(t) {
+			return p, fmt.Errorf("actions: %s: table %q is not schema.table (letters, digits and _)", SnapshotTableName, capParam(t))
+		}
+		if !seen[t] {
+			seen[t] = true
+			tables = append(tables, t)
+		}
+	}
+	if len(tables) > maxSnapshotTables {
+		return p, fmt.Errorf("actions: %s: %d tables, at most %d per step", SnapshotTableName, len(tables), maxSnapshotTables)
+	}
+	p.Tables = tables
+	return p, nil
+}
+
+// CheckScope refuses a connector that is not the pipeline's and a table that
+// is not one of its source_tables (tools.ErrOutOfScope), without I/O.
+func (a *snapshotTable) CheckScope(pl owners.Pipeline, raw json.RawMessage) error {
+	p, err := parseSnapshot(raw)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(pl.Connectors, p.Connector) {
+		return fmt.Errorf("actions: %s: %w: connector %q is not part of pipeline %q", SnapshotTableName, tools.ErrOutOfScope, capParam(p.Connector), pl.ID)
+	}
+	for _, t := range p.Tables {
+		if !slices.Contains(pl.SourceTables, t) {
+			return fmt.Errorf("actions: %s: %w: table %q is not one of pipeline %q's source_tables (%s)", SnapshotTableName, tools.ErrOutOfScope, t, pl.ID, strings.Join(pl.SourceTables, ", "))
+		}
+	}
+	return nil
+}
+
+// signalSetup is what the connector config says about its signals.
+type signalSetup struct {
+	class       string
+	prefix      string // topic.prefix: the key of a Kafka signal
+	channels    []string
+	topic       string // signal.kafka.topic
+	collection  string // signal.data.collection
+	includeList string // table.include.list
+}
+
+// readSetup reads the connector's config and checks it takes p.Via. Every
+// refusal of a missing key wraps ErrSignalNotConfigured and says what to set.
+func (a *snapshotTable) readSetup(ctx context.Context, p snapshotParams) (signalSetup, error) {
+	if a.d.Connect == nil {
+		return signalSetup{}, fmt.Errorf("actions: %s: no Connect client to read connector %q's config", SnapshotTableName, capParam(p.Connector))
+	}
+	cfg, err := a.d.Connect.Config(ctx, p.Connector)
+	if err != nil {
+		return signalSetup{}, fmt.Errorf("actions: %s: read connector %q config: %w", SnapshotTableName, capParam(p.Connector), err)
+	}
+	s := signalSetup{
+		class:       cfg["connector.class"],
+		prefix:      strings.TrimSpace(cfg["topic.prefix"]),
+		topic:       strings.TrimSpace(cfg["signal.kafka.topic"]),
+		collection:  strings.TrimSpace(cfg["signal.data.collection"]),
+		includeList: cfg["table.include.list"],
+	}
+	// Debezium's default when the key is unset is the source channel only.
+	ch := cfg["signal.enabled.channels"]
+	if strings.TrimSpace(ch) == "" {
+		ch = "source"
+	}
+	for _, c := range strings.Split(ch, ",") {
+		if c = strings.ToLower(strings.TrimSpace(c)); c != "" {
+			s.channels = append(s.channels, c)
+		}
+	}
+	if !strings.HasPrefix(s.class, "io.debezium.connector.") {
+		return s, fmt.Errorf("actions: %s: connector %q is not a Debezium source connector (connector.class %q); only Debezium takes snapshot signals", SnapshotTableName, capParam(p.Connector), capParam(s.class))
+	}
+	var missing []string
+	switch p.Via {
+	case ViaSignalTopic:
+		if !slices.Contains(s.channels, "kafka") {
+			missing = append(missing, fmt.Sprintf("signal.enabled.channels to include kafka (now %q, e.g. %q)", strings.Join(s.channels, ","), strings.Join(append(slices.Clone(s.channels), "kafka"), ",")))
+		}
+		if s.topic == "" {
+			missing = append(missing, "signal.kafka.topic to a one-partition topic the connector reads signals from")
+		}
+		if strings.TrimSpace(cfg["signal.kafka.bootstrap.servers"]) == "" {
+			missing = append(missing, "signal.kafka.bootstrap.servers to the brokers of that topic")
+		}
+		if s.prefix == "" {
+			missing = append(missing, "topic.prefix (the key of every signal record)")
+		}
+		// An incremental snapshot that is not read-only writes its window
+		// watermarks to the signal table, whichever channel carried the
+		// signal.
+		if s.collection == "" && !strings.EqualFold(strings.TrimSpace(cfg["read.only"]), "true") {
+			missing = append(missing, "signal.data.collection to the signal table (schema.table, in the publication): Debezium writes the snapshot's window watermarks there even when the signal comes over Kafka")
+		}
+	case ViaSignalTable:
+		if !strings.HasSuffix(s.class, ".postgresql.PostgresConnector") {
+			return s, fmt.Errorf("actions: %s: via %s needs a Debezium Postgres connector; %q is %q: %w", SnapshotTableName, ViaSignalTable, capParam(p.Connector), capParam(s.class), ErrSignalNotConfigured)
+		}
+		if !slices.Contains(s.channels, "source") {
+			missing = append(missing, fmt.Sprintf("signal.enabled.channels to include source (now %q)", strings.Join(s.channels, ",")))
+		}
+		if s.collection == "" {
+			missing = append(missing, "signal.data.collection to the signal table (schema.table with columns id, type, data, in the publication)")
+		} else if !snapshotTableRe.MatchString(s.collection) {
+			return s, fmt.Errorf("actions: %s: connector %q's signal.data.collection %q is not schema.table: %w", SnapshotTableName, capParam(p.Connector), capParam(s.collection), ErrSignalNotConfigured)
+		}
+	}
+	if len(missing) > 0 {
+		alt := ViaSignalTable
+		if p.Via == ViaSignalTable {
+			alt = ViaSignalTopic
+		}
+		return s, fmt.Errorf("actions: %s: connector %q cannot take a snapshot signal via %s; set %s (a connect_update_connector_config step), or use via %s if the connector has that channel: %w",
+			SnapshotTableName, capParam(p.Connector), p.Via, strings.Join(missing, "; "), alt, ErrSignalNotConfigured)
+	}
+	return s, nil
+}
+
+// Validate reads the connector config and refuses a connector that is not a
+// Debezium source, and a via it is not configured for (ErrSignalNotConfigured,
+// naming the keys to set). Tables outside source_tables are CheckScope's.
+// It never touches a writer, so it works with write mode off.
+func (a *snapshotTable) Validate(ctx context.Context, raw json.RawMessage) error {
+	p, err := parseSnapshot(raw)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := a.ctx(ctx)
+	defer cancel()
+	if _, err := a.readSetup(ctx, p); err != nil {
+		return err
+	}
+	if p.Via == ViaSignalTable {
+		return errSignalTableLayer
+	}
+	return nil
+}
+
+// Preview shows the tables (with a row estimate when the source client has
+// one), what the snapshot re-emits and how to stop it. It reads the Connect
+// config and the source client only.
+func (a *snapshotTable) Preview(ctx context.Context, raw json.RawMessage) (PreviewResult, error) {
+	p, err := parseSnapshot(raw)
+	if err != nil {
+		return PreviewResult{}, err
+	}
+	if err := a.ctxScope(ctx, raw); err != nil {
+		return PreviewResult{}, err
+	}
+	ctx, cancel := a.ctx(ctx)
+	defer cancel()
+	s, err := a.readSetup(ctx, p)
+	if err != nil {
+		return PreviewResult{}, previewErr(SnapshotTableName, err)
+	}
+	tables := strings.Join(p.Tables, ", ")
+	var target, how, stop string
+	if p.Via == ViaSignalTopic {
+		target = fmt.Sprintf("incremental snapshot of %s by connector %s, signal on topic %s", tables, p.Connector, s.topic)
+		how = fmt.Sprintf("one execute-snapshot record on %s keyed %q", s.topic, s.prefix)
+		stopVal, _ := kafka.StopSnapshotSignalValue(p.Tables) // tables already checked by parseSnapshot
+		stop = fmt.Sprintf("produce %s with key %q to %s", stopVal, s.prefix, s.topic)
+	} else {
+		target = fmt.Sprintf("incremental snapshot of %s by connector %s, signal row in %s", tables, p.Connector, s.collection)
+		how = fmt.Sprintf("one execute-snapshot row in %s", s.collection)
+		stop = fmt.Sprintf("insert a stop-snapshot row (type stop-snapshot, same data) into %s", s.collection)
+	}
+	rows := a.estimates(ctx, s.prefix, p.Tables)
+	downstream := []string{
+		fmt.Sprintf("history is re-emitted: every existing row of %s reaches its topic again as a read event (op r), next to live changes. Sinks that upsert or merge by key converge; append-only or other non-idempotent consumers get duplicates", tables),
+		"not undone by a later action: rows already emitted stay in the topics. To stop the snapshot before it ends, " + stop + " (not a registered action)",
+	}
+	if miss := notIncluded(s.includeList, p.Tables); len(miss) > 0 {
+		downstream = append(downstream, fmt.Sprintf("table.include.list does not match %s: Debezium skips a table it does not capture, so add it there first", strings.Join(miss, ", ")))
+	}
+	return PreviewResult{
+		Target:  target,
+		Current: fmt.Sprintf("connector %s (%s, topic.prefix %s, signal channels %s); %s", p.Connector, s.class, s.prefix, strings.Join(s.channels, ","), rows),
+		Expected: fmt.Sprintf("%s; the connector reads the tables in chunks (incremental.snapshot.chunk.size, default 1024 rows) while streaming continues, and logs the snapshot's start and end",
+			how),
+		Downstream: downstream,
+		Reversible: false,
+	}, nil
+}
+
+// estimates renders the row estimate of each table, or why there is none.
+func (a *snapshotTable) estimates(ctx context.Context, prefix string, tables []string) string {
+	re, ok := a.d.Source.(tableRowEstimator)
+	if !ok {
+		return "row estimate unavailable (the source client has no estimate)"
+	}
+	parts := make([]string, 0, len(tables))
+	for _, t := range tables {
+		n, err := re.EstimatedRows(ctx, t)
+		switch {
+		case err != nil:
+			parts = append(parts, fmt.Sprintf("%s: estimate unavailable (%v)", t, err))
+		case n < 0:
+			parts = append(parts, fmt.Sprintf("%s: never analysed, no estimate", t))
+		default:
+			parts = append(parts, fmt.Sprintf("%s: ~%d rows to %s.%s", t, n, prefix, t))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// notIncluded lists the tables that table.include.list (comma-separated
+// regular expressions matched against the whole name) does not match. An
+// unset list captures every table; a pattern that does not compile is not
+// judged.
+func notIncluded(list string, tables []string) []string {
+	if strings.TrimSpace(list) == "" {
+		return nil
+	}
+	var pats []*regexp.Regexp
+	for _, s := range strings.Split(list, ",") {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		re, err := regexp.Compile("^(?:" + s + ")$")
+		if err != nil {
+			return nil
+		}
+		pats = append(pats, re)
+	}
+	var out []string
+	for _, t := range tables {
+		if !slices.ContainsFunc(pats, func(re *regexp.Regexp) bool { return re.MatchString(t) }) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// Execute re-reads the connector config (it may have changed since the
+// approval) and sends the signal: a record on its signal topic through the
+// Kafka writer, or a row in its signal table through the SourceWriter.
+func (a *snapshotTable) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
+	p, err := parseSnapshot(raw)
+	if err != nil {
+		return "", err
+	}
+	if err := a.ctxScope(ctx, raw); err != nil {
+		return "", err
+	}
+	switch {
+	case p.Via == ViaSignalTopic && a.d.Kafka == nil:
+		return "", fmt.Errorf("actions: %s: no Kafka write client (PIPEROOM_WRITE_MODE=on is needed); nothing was sent", SnapshotTableName)
+	case p.Via == ViaSignalTable && a.d.SourceWriter == nil:
+		return "", fmt.Errorf("actions: %s: no write credentials for the source database (PIPEROOM_WRITE_MODE=on and SOURCE_DB_WRITE_URL are needed); nothing was sent", SnapshotTableName)
+	}
+	ctx, cancel := a.ctx(ctx)
+	defer cancel()
+	s, err := a.readSetup(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	tables := strings.Join(p.Tables, ", ")
+	if p.Via == ViaSignalTable {
+		id, err := a.d.SourceWriter.InsertSnapshotSignal(ctx, s.collection, p.Connector, p.Tables)
+		if err != nil {
+			return "", fmt.Errorf("actions: %s: signal row in %s: %w", SnapshotTableName, s.collection, err)
+		}
+		return fmt.Sprintf("sent execute-snapshot signal %s (incremental) for %s to connector %s as a row in %s; Debezium snapshots in the background", id, tables, p.Connector, s.collection), nil
+	}
+	id, err := a.sendTopic(ctx, s, p)
+	if err != nil {
+		return "", fmt.Errorf("actions: %s: signal to %s: %w", SnapshotTableName, s.topic, err)
+	}
+	return fmt.Sprintf("sent execute-snapshot signal %s (incremental) for %s to connector %s on topic %s (key %s); Debezium snapshots in the background and emits the rows to their topics", id, tables, p.Connector, s.topic, s.prefix), nil
+}
+
+// sendTopic produces the signal record and returns its id. A writer without
+// the narrow signal method (a fake or replay client) gets the same record
+// through Produce.
+func (a *snapshotTable) sendTopic(ctx context.Context, s signalSetup, p snapshotParams) (string, error) {
+	if ss, ok := a.d.Kafka.(snapshotSignaler); ok {
+		sig, err := ss.SendSnapshotSignal(ctx, s.topic, p.Connector, s.prefix, p.Tables)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s (partition %d offset %d, the id Debezium logs)", sig.ID, sig.Partition, sig.Offset), nil
+	}
+	value, err := kafka.SnapshotSignalValue(p.Tables)
+	if err != nil {
+		return "", err
+	}
+	acked, err := a.d.Kafka.Produce(ctx, s.topic, []clients.Record{{Key: []byte(s.prefix), Value: value}})
+	if err != nil {
+		return "", err
+	}
+	if acked != 1 {
+		return "", fmt.Errorf("the writer acked %d of 1 records", acked)
+	}
+	return "(offset not reported by this writer)", nil
+}
+
+// ctxScope is the fail-closed scope gate of Preview and Execute, before any
+// I/O: the room's pipeline must be in ctx (tools.WithPipeline) and the params
+// in it; tools.WithUnscoped (tests, CLI) passes; anything else is
+// tools.ErrNoScope.
+func (a *snapshotTable) ctxScope(ctx context.Context, raw json.RawMessage) error {
+	sc, err := tools.ScopeFor(ctx, nil)
+	if err != nil {
+		if !errors.Is(err, tools.ErrNoScope) {
+			err = fmt.Errorf("%w: %w", tools.ErrNoScope, err)
+		}
+		return fmt.Errorf("actions: %s: needs the room's pipeline in ctx: %w", SnapshotTableName, err)
+	}
+	if sc.Unscoped() {
+		return nil
+	}
+	return a.CheckScope(sc.Pipeline(), raw)
+}
+
+func (a *snapshotTable) ctx(ctx context.Context) (context.Context, context.CancelFunc) {
+	t := timeout
+	if a.d.Timeout > 0 {
+		t = a.d.Timeout
+	}
+	return context.WithTimeout(ctx, t)
+}
+
+// capParam caps a param echoed in an error.
+func capParam(s string) string {
+	const n = 80
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "") + "…"
+}
