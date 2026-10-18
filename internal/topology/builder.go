@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
 
@@ -42,6 +43,11 @@ type Thresholds struct {
 	// version change the subject still counts as registered recently (and
 	// warns).
 	SchemaRecentWarn time.Duration
+	// BatchCadence is the run interval assumed for a batch pipeline whose
+	// DAG runs show none (no orchestrator, or fewer than two scheduled runs).
+	// A batch sink table is judged against its cadence (batch.go), never
+	// against SinkStaleWarn alone: a daily load is not 30 minutes stale.
+	BatchCadence time.Duration
 }
 
 // DefaultThresholds returns the thresholds the task specifies.
@@ -54,6 +60,7 @@ func DefaultThresholds() Thresholds {
 		HealthBudget:          5 * time.Second,
 		DLQRecentWarn:         time.Hour,
 		SchemaRecentWarn:      time.Hour,
+		BatchCadence:          24 * time.Hour, // the commonest batch schedule
 	}
 }
 
@@ -93,6 +100,11 @@ type builder struct {
 	// latest version (see subjectSeen).
 	srMu     sync.Mutex
 	subjects map[string]subjectSeen
+
+	// orch and transform are the optional batch readers (batch.go); nil
+	// leaves their nodes out of a batch graph and marks it Partial.
+	orch      clients.OrchestratorReader
+	transform clients.TransformReader
 }
 
 // Option configures a Builder made by NewBuilder.
@@ -139,6 +151,10 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	p, ok := b.o.Pipeline(pipelineID)
 	if !ok {
 		return Graph{}, fmt.Errorf("%w: pipeline %q not found", ErrBadInput, pipelineID)
+	}
+	if p.KindOrDefault() == events.PipelineKindBatch {
+		// No CDC client is called for a batch pipeline: it has none.
+		return b.buildBatch(ctx, p), nil
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, b.t.HealthBudget)
@@ -218,7 +234,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))
 	}
 	for _, s := range p.SinkTables {
-		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info))
+		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info.freshness[s], info.now, b.t))
 	}
 	// Subjects are side nodes, after the data flow.
 	for _, s := range subjects {
@@ -430,7 +446,9 @@ func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) (clients.GroupLa
 	return l, len(kept) > 0 || len(unknown) > 0
 }
 
-func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
+// sinkNode draws sink table s from its freshness reading snap, judged by t
+// (b.t for a CDC pipeline; a batch pipeline's cadence, batch.go).
+func (b *builder) sinkNode(p owners.Pipeline, s string, snap freshSnapshot, now time.Time, t Thresholds) Node {
 	n := Node{
 		ID:     "wh:" + s,
 		Kind:   KindSinkTable,
@@ -439,7 +457,6 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 		Owner:  b.layerOwner("warehouse"),
 		Health: HealthUnknown,
 	}
-	snap := info.freshness[s]
 	switch {
 	case errors.Is(snap.err, clients.ErrNotFound):
 		// The table or its timestamp column is gone: nothing can load.
@@ -448,7 +465,7 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 	case snap.err != nil:
 		n.Facts = map[string]string{"error": "unreachable"}
 	default:
-		n.Health, n.Facts = sinkHealth(snap.ts, info.now, b.t)
+		n.Health, n.Facts = sinkHealth(snap.ts, now, t)
 	}
 	// The timestamp column is set on every sink node, including unreachable
 	// ones, so the agent knows which column its recovery check must read.
