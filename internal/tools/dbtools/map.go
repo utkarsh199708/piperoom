@@ -14,7 +14,7 @@ import (
 func pipelineMapTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pipeline_map",
-		desc: "Render the pipeline map: tables, connectors, topics, consumer groups, sink tables with owners and health.",
+		desc: "Render the pipeline map with owners and health: tables, connectors, topics, consumer groups and sink tables (cdc), or DAGs, tasks, models and sink tables (batch).",
 		schema: objSchema(map[string]any{
 			"pipeline_id": strProp("Pipeline id from owners.yaml."),
 		}, "pipeline_id"),

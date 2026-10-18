@@ -119,7 +119,12 @@ func (c *Connections) UnmarshalYAML(node *yaml.Node) error {
 
 // connKey describes one key of a connections: block.
 type connKey struct {
-	required bool // every connections: block must set it
+	// kind is the only pipeline kind whose block may set the key (a cdc
+	// system a batch pipeline does not have, or the reverse); "" = every kind.
+	kind string
+	// required: every connections: block of a pipeline the key belongs to
+	// (kind) must set it, so a batch block needs only the batch keys.
+	required bool
 	literal  bool // {value: X} allowed: the setting is never a secret
 	path     bool // the value is a file path (TLS material)
 	// ca: a CA bundle path. It is public material and a shared corporate CA
@@ -130,32 +135,42 @@ type connKey struct {
 // connKeys are the lower-case names of the process-wide settings a pipeline
 // can replace (internal/config/config.go). wiring maps each to its field; a
 // test there keeps the two lists equal.
+//
+// The warehouse keys belong to both kinds; every other key today is a cdc
+// one. The Airflow and dbt keys of a batch pipeline join when wiring maps
+// them (P4b-1), so the two lists stay equal.
 var connKeys = map[string]connKey{
-	"source_db_url":                 {required: true},
+	"source_db_url":                 {kind: cdc, required: true},
 	"warehouse_db_url":              {required: true},
 	"warehouse_kind":                {literal: true},
-	"kafka_brokers":                 {required: true},
-	"kafka_security_protocol":       {literal: true},
-	"kafka_sasl_mechanism":          {literal: true},
-	"kafka_sasl_username":           {},
-	"kafka_sasl_password":           {},
-	"kafka_tls_ca_file":             {path: true, ca: true},
-	"kafka_tls_cert_file":           {path: true},
-	"kafka_tls_key_file":            {path: true},
-	"kafka_tls_server_name":         {literal: true},
-	"connect_url":                   {required: true},
-	"connect_username":              {},
-	"connect_password":              {},
-	"connect_tls_ca_file":           {path: true, ca: true},
-	"connect_tls_cert_file":         {path: true},
-	"connect_tls_key_file":          {path: true},
-	"schema_registry_url":           {required: true},
-	"schema_registry_username":      {},
-	"schema_registry_password":      {},
-	"schema_registry_tls_ca_file":   {path: true, ca: true},
-	"schema_registry_tls_cert_file": {path: true},
-	"schema_registry_tls_key_file":  {path: true},
+	"kafka_brokers":                 {kind: cdc, required: true},
+	"kafka_security_protocol":       {kind: cdc, literal: true},
+	"kafka_sasl_mechanism":          {kind: cdc, literal: true},
+	"kafka_sasl_username":           {kind: cdc},
+	"kafka_sasl_password":           {kind: cdc},
+	"kafka_tls_ca_file":             {kind: cdc, path: true, ca: true},
+	"kafka_tls_cert_file":           {kind: cdc, path: true},
+	"kafka_tls_key_file":            {kind: cdc, path: true},
+	"kafka_tls_server_name":         {kind: cdc, literal: true},
+	"connect_url":                   {kind: cdc, required: true},
+	"connect_username":              {kind: cdc},
+	"connect_password":              {kind: cdc},
+	"connect_tls_ca_file":           {kind: cdc, path: true, ca: true},
+	"connect_tls_cert_file":         {kind: cdc, path: true},
+	"connect_tls_key_file":          {kind: cdc, path: true},
+	"schema_registry_url":           {kind: cdc, required: true},
+	"schema_registry_username":      {kind: cdc},
+	"schema_registry_password":      {kind: cdc},
+	"schema_registry_tls_ca_file":   {kind: cdc, path: true, ca: true},
+	"schema_registry_tls_cert_file": {kind: cdc, path: true},
+	"schema_registry_tls_key_file":  {kind: cdc, path: true},
 }
+
+// cdc is events.PipelineKindCDC, short for the table above.
+const cdc = events.PipelineKindCDC
+
+// belongsTo reports whether a pipeline of kind may set the key.
+func (k connKey) belongsTo(kind string) bool { return k.kind == "" || k.kind == kind }
 
 // ConnectionKeys returns every key a connections: block may hold, sorted.
 func ConnectionKeys() []string {
@@ -467,16 +482,18 @@ func (o *Owners) validateTenancy() error {
 		if p.Connections != nil && len(p.Connections) == 0 {
 			return fmt.Errorf("pipeline %q: connections: is empty; remove it to use the process-wide settings", p.ID)
 		}
-		if err := validateConnections(p.Connections); err != nil {
+		if err := validateConnections(p.Connections, p.KindOrDefault()); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 	}
 	return o.CheckSharedRefs(nil)
 }
 
-// validateConnections checks the shape of a connections: block. Values are
-// never read here and never quoted in an error.
-func validateConnections(c Connections) error {
+// validateConnections checks the shape of a connections: block of a pipeline
+// of the given kind: a key of the other kind is refused, as a field of the
+// other kind is (kind.go), and only the required keys of this kind must be
+// set. Values are never read here and never quoted in an error.
+func validateConnections(c Connections, kind string) error {
 	if len(c) == 0 {
 		return nil
 	}
@@ -489,6 +506,11 @@ func validateConnections(c Connections) error {
 		info, ok := connKeys[k]
 		if !ok {
 			return fmt.Errorf("connections: unknown key %s (allowed: %s)", quoteName(k), strings.Join(ConnectionKeys(), ", "))
+		}
+		if !info.belongsTo(kind) {
+			// A batch pipeline has no Kafka or Connect: a key for one would
+			// open a client to a system the pipeline does not have.
+			return fmt.Errorf("connections.%s is a %s setting, but the pipeline kind is %s", k, info.kind, kind)
 		}
 		r := c[k]
 		n := 0
@@ -512,9 +534,9 @@ func validateConnections(c Connections) error {
 		}
 	}
 	for _, k := range ConnectionKeys() {
-		if connKeys[k].required {
+		if info := connKeys[k]; info.required && info.belongsTo(kind) {
 			if _, ok := c[k]; !ok {
-				return fmt.Errorf("connections: %s is required", k)
+				return fmt.Errorf("connections: %s is required for kind %s", k, kind)
 			}
 		}
 	}

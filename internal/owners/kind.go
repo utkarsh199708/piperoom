@@ -61,6 +61,30 @@ func (p *Pipeline) Layers() []string {
 	return events.LayersOf(p.KindOrDefault())
 }
 
+// ModelName returns the dbt model name that ref names: a model name as
+// owners.yaml writes it ("fct_revenue"), or a model unique_id as
+// clients.Lineage and clients.ModelResult report it
+// ("model.analytics.fct_revenue", versioned "model.analytics.fct_revenue.v2").
+// ok is false for anything else: another resource type ("source.", "seed.",
+// "test."), or a name outside the model alphabet. The topology builder and
+// the tool scope (tools.Scope) both compare a pipeline's models through it,
+// so the map and the scope agree on which node is which model.
+func ModelName(ref string) (string, bool) {
+	name := ref
+	if strings.Contains(ref, ".") {
+		parts := strings.Split(ref, ".")
+		// model.<package>.<name>[.<version>]
+		if len(parts) < 3 || len(parts) > 4 || parts[0] != "model" || parts[1] == "" {
+			return "", false
+		}
+		name = parts[2]
+	}
+	if !modelNameRE.MatchString(name) {
+		return "", false
+	}
+	return name, true
+}
+
 // isBatch reports whether the pipeline is of kind batch.
 func (p *Pipeline) isBatch() bool { return p.KindOrDefault() == events.PipelineKindBatch }
 

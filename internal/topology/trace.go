@@ -64,6 +64,9 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if !ok {
 		return nil, fmt.Errorf("%w: pipeline %q not found", ErrBadInput, pipelineID)
 	}
+	if k := p.KindOrDefault(); k == events.PipelineKindBatch {
+		return nil, fmt.Errorf("%w: trace follows a row through a cdc pipeline; pipeline %q is kind %s (read its DAG runs, task logs and dbt results instead)", ErrBadInput, p.ID, k)
+	}
 	if key == "" {
 		return nil, fmt.Errorf("%w: trace: empty key", ErrBadInput)
 	}

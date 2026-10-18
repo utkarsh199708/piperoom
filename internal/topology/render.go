@@ -12,6 +12,11 @@ const renderLegend = `legend: listed upstream first. "from:" = data inputs. "dep
 	`(unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. ` +
 	`First failing component and root cause can differ; check upstream dependencies of the first failing component.`
 
+// renderPartial follows the legend of a Partial graph, so the model does not
+// read the nodes it cannot see as healthy.
+const renderPartial = `partial: some nodes are left out because a reader this pipeline needs is not configured or not supported; ` +
+	`the map is incomplete, not healthy.`
+
 // maxRenderBytes caps the map so no graph source can flood the prompt.
 const maxRenderBytes = 16 << 10
 
@@ -45,6 +50,10 @@ func (b *builder) Render(g Graph) string {
 	fmt.Fprintf(&sb, "pipeline %s\n", printable(g.PipelineID))
 	sb.WriteString(renderLegend)
 	sb.WriteByte('\n')
+	if g.Partial {
+		sb.WriteString(renderPartial)
+		sb.WriteByte('\n')
+	}
 	for i, idx := range order {
 		n := g.Nodes[idx]
 		var blk strings.Builder
