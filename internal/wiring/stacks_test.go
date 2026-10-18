@@ -1080,8 +1080,28 @@ func TestConnFieldsMatchOwnersKeys(t *testing.T) {
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
-	if !slices.Equal(keys, owners.ConnectionKeys()) {
-		t.Fatalf("wiring keys %v\nowners keys %v", keys, owners.ConnectionKeys())
+	// Relaxed for P4b-1 (LEAD-ARCH ruling on #611): wiring maps the Airflow
+	// and dbt keys before owners accepts them, so for now every owners key
+	// must have a connFields entry (a key owners accepts but wiring cannot
+	// fill would be dropped silently). A3's owners follow-up adds the keys to
+	// owners.connKeys and restores the equality check:
+	//	if !slices.Equal(keys, owners.ConnectionKeys()) { t.Fatalf(...) }
+	for _, k := range owners.ConnectionKeys() {
+		if _, ok := connFields[k]; !ok {
+			t.Fatalf("owners key %s has no connFields entry\nwiring keys %v\nowners keys %v", k, keys, owners.ConnectionKeys())
+		}
+	}
+	// The keys wiring maps ahead of owners are exactly the batch ones.
+	var ahead []string
+	for _, k := range keys {
+		if !slices.Contains(owners.ConnectionKeys(), k) {
+			ahead = append(ahead, k)
+		}
+	}
+	for _, k := range ahead {
+		if !strings.HasPrefix(k, "airflow_") && !strings.HasPrefix(k, "dbt_") {
+			t.Fatalf("connFields key %s is not an owners key and not an Airflow or dbt key", k)
+		}
 	}
 	// Every setter reaches a distinct field.
 	var c config.Config

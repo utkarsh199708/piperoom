@@ -25,11 +25,6 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
-	"piperoom/internal/tools/changes"
-	"piperoom/internal/tools/dbtools"
-	"piperoom/internal/tools/debeziumtools"
-	"piperoom/internal/tools/kafkatools"
-	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 )
@@ -56,6 +51,15 @@ type Wired struct {
 	// DebeziumMetrics is the parsed DEBEZIUM_METRICS_URL/_PREFIX; an empty URL
 	// leaves debezium_metrics registered but answering "not configured".
 	DebeziumMetrics config.DebeziumMetrics
+
+	// Orchestrator reads Airflow DAG runs and task logs, and Transform reads
+	// dbt artifacts (P0 item 8). Open builds them only for a set that serves
+	// a batch pipeline, and only when AIRFLOW_URL or the dbt settings are set;
+	// nil otherwise, and the batch tools then answer clients.ErrNotSupported.
+	// A set with no CDC pipeline has the reverse: Source, Connect, Kafka and
+	// Registry stay nil (kinds.go).
+	Orchestrator clients.OrchestratorReader
+	Transform    clients.TransformReader
 
 	// Builder derives pipeline graphs with live health from the clients above.
 	Builder topology.Builder
@@ -199,8 +203,44 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 // mode (never read from cfg: a pipeline's own cfg holds connections only);
 // with it off no write client is built.
 func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners, write bool) (*Wired, error) {
+	return openClientsWith(ctx, cfg, awsCfg, o, write, defaultClientOpeners())
+}
+
+// clientOpeners are openClients' constructors; tests replace them to see which
+// clients a set opens without any stack.
+type clientOpeners struct {
+	a2        func(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error)
+	source    func(ctx context.Context, dsn string) (clients.SourceDB, func(), error)
+	warehouse warehouseOpeners
+	writers   writerOpeners
+	batch     batchOpeners
+}
+
+func defaultClientOpeners() clientOpeners {
+	return clientOpeners{
+		a2: buildA2Clients,
+		source: func(ctx context.Context, dsn string) (clients.SourceDB, func(), error) {
+			src, err := postgres.New(ctx, dsn)
+			if err != nil {
+				return nil, nil, err
+			}
+			return src, src.Close, nil
+		},
+		warehouse: defaultWarehouseOpeners,
+		writers:   defaultWriterOpeners(),
+		batch:     defaultBatchOpeners,
+	}
+}
+
+// openClientsWith is openClients with its constructors as a parameter. The
+// kinds of o's pipelines decide what is opened (kinds.go): the CDC clients
+// (Kafka, Connect, Schema Registry, source Postgres, Debezium metrics and,
+// with write mode on, the writers) only when a pipeline is cdc, the Airflow
+// and dbt readers only when one is batch, the warehouse always.
+func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners, write bool, op clientOpeners) (*Wired, error) {
 	ctx, cancel := context.WithTimeout(ctx, openTimeout)
 	defer cancel()
+	ks := kindsOf(o)
 
 	// A bad WAREHOUSE_KIND is a config mistake: fail before any client is built.
 	whKind, err := warehouseKind(cfg)
@@ -208,16 +248,21 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 		return nil, err
 	}
 
-	dm, err := config.ParseDebeziumMetrics(cfg)
-	if err != nil {
-		return nil, err
+	var dm config.DebeziumMetrics
+	if ks.cdc() {
+		if dm, err = config.ParseDebeziumMetrics(cfg); err != nil {
+			return nil, err
+		}
 	}
 
-	// Build the A2 clients before any database ping so a bad security
-	// configuration fails Open even when no stack is reachable at all.
-	a2, err := buildA2Clients(cfg, awsCfg)
-	if err != nil {
-		return nil, err
+	// The batch readers do no I/O when built; like the A2 clients they come
+	// before any database ping so a bad setting fails without a stack.
+	var orch clients.OrchestratorReader
+	var tr clients.TransformReader
+	if ks.batch() {
+		if orch, tr, err = openBatch(cfg, op.batch); err != nil {
+			return nil, err
+		}
 	}
 
 	// opened collects the cleanup steps of the clients constructed so far so
@@ -228,16 +273,27 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 			opened[i]()
 		}
 	}
-	opened = append(opened, a2.Kafka.Close)
 
-	src, err := postgres.New(ctx, cfg.SourceDBURL)
-	if err != nil {
-		closeOpened()
-		return nil, fmt.Errorf("wiring: source postgres: %w", err)
+	var a2 *a2Clients
+	var src clients.SourceDB
+	if ks.cdc() {
+		// Build the A2 clients before any database ping so a bad security
+		// configuration fails Open even when no stack is reachable at all.
+		if a2, err = op.a2(cfg, awsCfg); err != nil {
+			return nil, err
+		}
+		opened = append(opened, a2.Kafka.Close)
+
+		s, closeSrc, err := op.source(ctx, cfg.SourceDBURL)
+		if err != nil {
+			closeOpened()
+			return nil, fmt.Errorf("wiring: source postgres: %w", err)
+		}
+		src = s
+		opened = append(opened, closeSrc)
 	}
-	opened = append(opened, src.Close)
 
-	wh, closeWh, err := openWarehouse(ctx, cfg, defaultWarehouseOpeners)
+	wh, closeWh, err := openWarehouse(ctx, cfg, op.warehouse)
 	if err != nil {
 		closeOpened()
 		return nil, err
@@ -245,11 +301,12 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 	opened = append(opened, closeWh)
 
 	// The writers come last: with write mode off nothing here runs, and with
-	// it on a dead source database has already failed above.
+	// it on a dead source database has already failed above. Every writer is
+	// a CDC system's, so a set with no CDC pipeline has none.
 	var wc writeClients
-	if write {
+	if write && ks.cdc() {
 		var closeWriters func()
-		wc, closeWriters, err = openWriters(ctx, cfg, awsCfg, defaultWriterOpeners())
+		wc, closeWriters, err = openWriters(ctx, cfg, awsCfg, op.writers)
 		if err != nil {
 			closeOpened()
 			return nil, err
@@ -259,27 +316,36 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 
 	w := assemble(o, whKind, a2, src, wh, closeOpened)
 	w.DebeziumMetrics = dm
+	w.Orchestrator, w.Transform = orch, tr
 	w.write, w.writers = write, wc
 	return w, nil
 }
 
 // assemble builds the Wired that Open returns from the clients it opened,
 // the topology builder included. It is apart from Open so a test can check
-// the assembly without a database.
+// the assembly without a database. a2 is nil for a set with no CDC pipeline;
+// src and wh may be nil interfaces.
 func assemble(o *owners.Owners, whKind string, a2 *a2Clients, src clients.SourceDB, wh clients.Warehouse, closeAll func()) *Wired {
 	var once sync.Once
 	w := &Wired{
 		Source:        src,
 		Warehouse:     wh,
 		WarehouseKind: whKind,
-		Connect:       a2.Connect,
-		Kafka:         a2.Kafka,
 		Owners:        o,
 		close:         func() { once.Do(closeAll) },
 	}
-	// A nil *schemareg.Client in the interface would read as configured.
-	if a2.Registry != nil {
-		w.Registry = a2.Registry
+	// A nil *Client in an interface would read as configured, so each is set
+	// only when it exists.
+	if a2 != nil {
+		if a2.Connect != nil {
+			w.Connect = a2.Connect
+		}
+		if a2.Kafka != nil {
+			w.Kafka = a2.Kafka
+		}
+		if a2.Registry != nil {
+			w.Registry = a2.Registry
+		}
 	}
 	w.Builder = newTopologyBuilder(w)
 	return w
@@ -320,10 +386,15 @@ func actionRegistry(w *Wired) clients.SchemaRegistryClient {
 	return w.Registry
 }
 
-// RegisterTools registers the A3 db tools, A2's read-only Kafka/Connect/
-// Schema Registry tools, C11's runbook_lookup, similar_incidents (when w.Rooms is set) and the write actions the agent may propose (never
-// run), reading every client from w. If w.Builder is nil it is built from
-// w's clients and stored back on w, so callers can use it afterwards.
+// RegisterTools registers the read tool packages of the pipeline kinds w's
+// set serves (toolPackages, kinds.go): A3's db tools, A2's read-only Kafka/
+// Connect/Schema Registry tools and the Debezium metrics tool for cdc (the
+// batch packages for batch), C11's runbook_lookup, similar_incidents (when
+// w.Rooms is set) and what_changed for every kind; and the write actions the
+// agent may propose (never run), for a set with a cdc pipeline. Every client
+// is read from w. If w.Builder is nil it is built from w's clients and stored
+// back on w, so callers can use it afterwards. A room then sees only its own
+// kind's tools: the agent filters this registry by Alert.PipelineKind.
 //
 // reg must come from tools.NewReadOnlyRegistry: it is agent.Deps.Tools, so a
 // tool that is not KindRead fails here, at start, never in a room. The tools
@@ -334,41 +405,17 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if !reg.ReadOnly() {
 		return fmt.Errorf("wiring: register tools: %w: registry is not from tools.NewReadOnlyRegistry", tools.ErrNotReadOnly)
 	}
-	b := w.Builder
-	if b == nil {
-		b = newTopologyBuilder(w)
-		w.Builder = b
+	if w.Builder == nil {
+		w.Builder = newTopologyBuilder(w)
 	}
-	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka}); err != nil {
-		return fmt.Errorf("wiring: register db tools: %w", err)
+	if err := registerToolsWith(reg, w, toolPackages()); err != nil {
+		return err
 	}
-	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners}); err != nil {
-		return fmt.Errorf("wiring: register kafka tools: %w", err)
-	}
-	if err := debeziumtools.Register(reg, debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners}); err != nil {
-		return fmt.Errorf("wiring: register debezium tools: %w", err)
-	}
-	// The runbook library is embedded in the binary, so it needs no client.
-	if err := runbooks.Register(reg); err != nil {
-		return fmt.Errorf("wiring: register runbooks: %w", err)
-	}
-	// similar_incidents needs the room store, which only the room service
-	// owns, so it is registered when the caller provided one.
-	if w.Rooms != nil {
-		if err := similarincidents.Register(reg, similarincidents.Deps{Source: w.Rooms, Owners: w.Owners}); err != nil {
-			return fmt.Errorf("wiring: register similar_incidents: %w", err)
-		}
-	}
-	// what_changed is always registered: the prompt names it, and the live DDL
-	// read works without the change log. The change log is the room store when
-	// it implements clients.ChangeReader (F8d); without it the tool says
-	// "change log unavailable".
-	chg := changes.Deps{Src: w.Source, Owners: w.Owners}
-	if cr, ok := w.Rooms.(clients.ChangeReader); ok {
-		chg.Changes = cr
-	}
-	if err := changes.Register(reg, chg); err != nil {
-		return fmt.Errorf("wiring: register what_changed: %w", err)
+	// Every action fixes a CDC system (Connect, Schema Registry, Kafka,
+	// source Postgres), so a set with no CDC pipeline has none: the batch
+	// agent says what a person should run (P4 wave).
+	if !kindsOf(w.Owners).cdc() {
+		return nil
 	}
 	if err := registerActions(areg, w); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)
