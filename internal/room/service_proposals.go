@@ -265,28 +265,8 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 			}
 		}
 		prow = p
-		ident := s.identityFor(user, grant)
-		if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "approved", "", p.ParamsHash, ident)); err != nil {
-			if errors.Is(err, store.ErrAlreadyExists) {
-				return alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
-			}
+		if ev, err = s.appendApprovalLocked(ctx, st, p, user, layer, grant); err != nil {
 			return err
-		}
-		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
-			ProposalID: proposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident,
-		})
-		if err != nil {
-			dctx, cancel := compensateCtx(ctx)
-			defer cancel()
-			if delErr := s.store.DeleteApproval(dctx, proposalID, layer); delErr != nil {
-				s.log.Warn("room: compensate failed approval", "proposal", proposalID, "layer", layer, "err", delErr)
-			}
-			return err
-		}
-		s.log.Info("room: approval given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
-		if strings.HasPrefix(grant, owners.GrantBackupPrefix) {
-			_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)})
-			s.afterAppend(p.RoomID, "backup approval note", err, "proposal", proposalID)
 		}
 		if allApproved(st.snap, proposalID) {
 			// Approved in full: queue the steps on the room's single executor so
@@ -299,6 +279,57 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	}
 
 	return ev, nil
+}
+
+// appendApprovalLocked records one layer's approval: the approvals row first,
+// so the store's one-decision-per-layer rule refuses a second one
+// (409 already_decided), then approval.given, removing the row again when the
+// event cannot be appended. detail is authorizeLayer's principal detail
+// ("user:priya", "backup:user:meera", "solo"): it is identity.grant, and
+// approvalGrant(detail) is the event's grant (P0 item 4). A backup's approval
+// also gets the room's backup note. ApproveProposalConfirm and
+// ApproveAllProposal both record through here, so an approval is the same
+// record, log line and metric whichever route gave it. The caller has checked
+// that the proposal is open, the layer pending and the params hash; it holds
+// st's lock and queues the executor once allApproved.
+func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p store.ProposalRow, user User, layer, detail string) (events.Event, error) {
+	ident := s.identityFor(user, detail)
+	grant := approvalGrant(detail)
+	if err := s.store.RecordApproval(ctx, approvalRow(p.ProposalID, layer, "approved", "", p.ParamsHash, ident)); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
+		}
+		return events.Event{}, err
+	}
+	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
+		ProposalID: p.ProposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident, Grant: grant,
+	})
+	if err != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if delErr := s.store.DeleteApproval(dctx, p.ProposalID, layer); delErr != nil {
+			s.log.Warn("room: compensate failed approval", "proposal", p.ProposalID, "layer", layer, "err", delErr)
+		}
+		return events.Event{}, err
+	}
+	s.approvals.inc(grant)
+	s.log.Info("room: approval given", "proposal", p.ProposalID, "layer", layer, "user", user.ID, "grant", detail)
+	if strings.HasPrefix(detail, owners.GrantBackupPrefix) {
+		_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, detail)})
+		s.afterAppend(p.RoomID, "backup approval note", err, "proposal", p.ProposalID)
+	}
+	return ev, nil
+}
+
+// approvalGrant maps authorizeLayer's principal detail to approval.given's
+// grant: the solo user's detail is "solo", every other detail is an owner
+// right (owners.yaml principal or backup, or the users.yaml layers list).
+// P2b-3 adds GrantFallback for the driver's "fallback" detail.
+func approvalGrant(detail string) string {
+	if detail == events.GrantSolo {
+		return events.GrantSolo
+	}
+	return events.GrantOwner
 }
 
 // RejectProposal records a layer owner's rejection. paramsHash follows the same

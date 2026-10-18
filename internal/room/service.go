@@ -354,6 +354,8 @@ type Service struct {
 	list *listHub
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
+	// approvals counts approval.given by grant for /metrics (metrics.go).
+	approvals approvalCounts
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
