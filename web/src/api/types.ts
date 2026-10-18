@@ -678,6 +678,8 @@ export interface PipelineInfo {
   id: string
   title: string
   shadow: boolean
+  /** P0 item 8 (server P4a-4): `cdc` or `batch`. Missing (an older server) means `cdc`. */
+  kind?: 'cdc' | 'batch'
 }
 
 export interface Person {
