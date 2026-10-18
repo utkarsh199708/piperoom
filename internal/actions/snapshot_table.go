@@ -37,11 +37,12 @@ var (
 	// ErrSignalNotConfigured refuses a via the connector has no signal
 	// channel for; the message names the keys to set.
 	ErrSignalNotConfigured = errors.New("actions: the connector is not configured for this snapshot signal")
-	// errSignalTableLayer refuses via signal_table until the room service
-	// checks a step's layer per params (contract change request, P3a-5): the
-	// action's Layer() is kafka-connect, and a signal table row is a write
-	// on the source database whose owner must approve it.
-	errSignalTableLayer = errors.New("actions: connect_snapshot_table via signal_table writes to the source database and needs the postgres layer's approval, which the room cannot ask for yet (the action's layer is kafka-connect); use via signal_topic")
+	// errSignalTableLayer refuses via signal_table: a signal table row is a
+	// write on the source database whose owner must approve it, and this
+	// action's layer is kafka-connect. That variant is the postgres-layer
+	// action pg_snapshot_signal (pgactions, P3b-4); the signal_table code
+	// here is deleted once it lands.
+	errSignalTableLayer = errors.New("actions: connect_snapshot_table: via signal_table is the postgres-layer action pg_snapshot_signal (it writes a row to the source database, whose owner must approve it); use via signal_topic here")
 )
 
 // SnapshotDeps is what connect_snapshot_table reads and writes through.
@@ -99,23 +100,9 @@ type snapshotParams struct {
 func (a *snapshotTable) Name() string { return SnapshotTableName }
 
 // Layer is kafka-connect: the signal topic variant changes nothing but what
-// the connector does. See LayerFor for the signal table variant.
+// the connector does. The signal table variant is the postgres-layer action
+// pg_snapshot_signal (pgactions, P3b-4).
 func (a *snapshotTable) Layer() string { return "kafka-connect" }
-
-// LayerFor is the layer of a step by its via: postgres for signal_table,
-// whose write is a row in the source database. The room service does not
-// call it yet (contract change request, P3a-5); until it does Validate
-// refuses signal_table.
-func (a *snapshotTable) LayerFor(raw json.RawMessage) (string, error) {
-	p, err := parseSnapshot(raw)
-	if err != nil {
-		return "", err
-	}
-	if p.Via == ViaSignalTable {
-		return "postgres", nil
-	}
-	return "kafka-connect", nil
-}
 
 func (a *snapshotTable) Describe() string {
 	return "Asks a Debezium source connector for an incremental snapshot of some of the pipeline's source tables: " +

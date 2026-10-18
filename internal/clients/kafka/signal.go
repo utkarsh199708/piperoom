@@ -61,7 +61,7 @@ func SnapshotSignalValue(tables []string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := json.Marshal(snapshotSignalValue{Type: "execute-snapshot", Data: snapshotSignalData{DataCollections: list, Type: "incremental"}})
+	b, err := json.Marshal(snapshotSignalValue{Type: "execute-snapshot", Data: snapshotSignalData{DataCollections: list, Type: "INCREMENTAL"}})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: snapshot signal: encode: %w", err)
 	}
@@ -75,7 +75,7 @@ func StopSnapshotSignalValue(tables []string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b, err := json.Marshal(snapshotSignalValue{Type: "stop-snapshot", Data: snapshotSignalData{DataCollections: list, Type: "incremental"}})
+	b, err := json.Marshal(snapshotSignalValue{Type: "stop-snapshot", Data: snapshotSignalData{DataCollections: list, Type: "INCREMENTAL"}})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: stop-snapshot signal: encode: %w", err)
 	}

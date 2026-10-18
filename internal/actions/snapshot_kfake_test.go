@@ -61,7 +61,7 @@ func TestSnapshotTableKfake(t *testing.T) {
 		t.Fatalf("fetch: %v", errs)
 	}
 	recs := fs.Records()
-	want := `{"type":"execute-snapshot","data":{"data-collections":["public.orders"],"type":"incremental"}}`
+	want := `{"type":"execute-snapshot","data":{"data-collections":["public.orders"],"type":"INCREMENTAL"}}`
 	if len(recs) != 1 || string(recs[0].Key) != "pg" || string(recs[0].Value) != want {
 		t.Fatalf("signal records %+v", recs)
 	}

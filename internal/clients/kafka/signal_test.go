@@ -20,7 +20,7 @@ func TestSnapshotSignalValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"type":"execute-snapshot","data":{"data-collections":["public.orders","public.refunds"],"type":"incremental"}}`
+	want := `{"type":"execute-snapshot","data":{"data-collections":["public.orders","public.refunds"],"type":"INCREMENTAL"}}`
 	if string(got) != want {
 		t.Fatalf("value %s, want %s", got, want)
 	}

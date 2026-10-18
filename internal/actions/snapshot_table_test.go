@@ -206,16 +206,6 @@ func TestSnapshotCheckScope(t *testing.T) {
 	}
 }
 
-func TestSnapshotLayerFor(t *testing.T) {
-	a := &snapshotTable{}
-	if l, _ := a.LayerFor(snapParams(ViaSignalTopic, "public.orders")); l != a.Layer() || l != "kafka-connect" {
-		t.Fatalf("signal_topic layer %q", l)
-	}
-	if l, _ := a.LayerFor(snapParams(ViaSignalTable, "public.orders")); l != "postgres" {
-		t.Fatalf("signal_table layer %q", l)
-	}
-}
-
 // ---- Validate ----
 
 func TestSnapshotValidateConfig(t *testing.T) {
@@ -246,7 +236,7 @@ func TestSnapshotValidateConfig(t *testing.T) {
 		{"table: source channel off", ViaSignalTable, with(func(c map[string]string) { c["signal.enabled.channels"] = "kafka" }), "include source", ErrSignalNotConfigured},
 		{"table: not postgres", ViaSignalTable, with(func(c map[string]string) { c["connector.class"] = "io.debezium.connector.mysql.MySqlConnector" }), "Postgres connector", ErrSignalNotConfigured},
 		{"table: bad collection", ViaSignalTable, with(func(c map[string]string) { c["signal.data.collection"] = "orders.public.sig" }), "not schema.table", ErrSignalNotConfigured},
-		{"table: configured, layer not checkable yet", ViaSignalTable, topicConfig(), "postgres layer", errSignalTableLayer},
+		{"table: configured, belongs to pg_snapshot_signal", ViaSignalTable, topicConfig(), "postgres-layer action pg_snapshot_signal", errSignalTableLayer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &snapshotTable{d: SnapshotDeps{Connect: &sigConnect{cfg: tc.cfg}}}
@@ -401,7 +391,7 @@ func TestSnapshotExecuteProduceFallback(t *testing.T) {
 	if k.topic != "pg-signal" || len(k.recs) != 1 || string(k.recs[0].Key) != "pg" {
 		t.Fatalf("produced %q %+v", k.topic, k.recs)
 	}
-	want := `{"type":"execute-snapshot","data":{"data-collections":["public.orders"],"type":"incremental"}}`
+	want := `{"type":"execute-snapshot","data":{"data-collections":["public.orders"],"type":"INCREMENTAL"}}`
 	if string(k.recs[0].Value) != want {
 		t.Fatalf("value %s, want %s", k.recs[0].Value, want)
 	}
