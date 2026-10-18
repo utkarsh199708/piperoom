@@ -2,11 +2,7 @@ pipelines:
   - id: orders
     title: Orders CDC
     topic_prefix: pg # Debezium topic.prefix of pg-orders-connector (topics span pg.public.orders)
-    # public.devctl_refunds exists only while `devctl break missed-table` is
-    # active; it is listed so pg_add_publication_table and
-    # connect_snapshot_table accept it (dev/scenarios.md §10). Keep orders first:
-    # `devctl health` reads the first table's topic.
-    source_tables: [public.orders, public.devctl_refunds]
+    source_tables: [public.orders]
     connectors: [pg-orders-connector]
     consumer_groups: [order-sync]
     sink_tables: [analytics.orders]
@@ -19,11 +15,6 @@ pipelines:
       signals:
         connector_down: {for: 30s}
         slot_inactive: {for: 30s}
-        dlq_growth: {for: 30s}
-      # devconsumer's DLQ (dev/docker-compose.yml DLQ_TOPIC); `devctl break
-      # dlq-backlog` creates the topic and `fix` deletes it.
-      dlq_topics:
-        - {topic: devctl.order-sync.dlq, written_by: order-sync}
 layers:
   postgres: priya
   kafka-connect: arjun

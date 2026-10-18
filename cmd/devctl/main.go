@@ -51,6 +51,9 @@ const usage = `devctl — local pipeline control
   devctl shadow up|down|status|env   run the server in shadow mode on this stack (dev/shadow.md)
   devctl lock --steal       steal a stale (>15m) lock
 
+missed-table, dead-slot, consumer-bad-deploy and dlq-backlog need the server
+started with OWNERS_FILE=dev/owners.p3.yaml (dev/scenarios.md, P3 scenarios).
+
 up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
 (or PIPEROOM_STACK_OWNER) to match the current lock holder.
 
@@ -172,6 +175,11 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		}
 		if err := requireLock(owner); err != nil {
 			return err
+		}
+		if sc.owners != "" {
+			// The baseline owners file has neither the scenario's table nor its
+			// DLQ: a server on it opens no room and its actions refuse the fix.
+			st.log.Info("devctl: scenario "+rest[0]+" needs the server started with OWNERS_FILE="+sc.owners, "owners_file", sc.owners)
 		}
 		if cmd == "break" {
 			return sc.breakIt(ctx, st)

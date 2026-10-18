@@ -25,6 +25,10 @@ type scenario struct {
 	// alert a team would have (a reconciliation or freshness check).
 	signals []string
 	alert   string
+	// owners is the owners file the server must run with for the break to open
+	// a room and the fix actions to accept it ("" = the baseline
+	// dev/owners.yaml).
+	owners string
 }
 
 var scenarios = map[string]scenario{
@@ -37,11 +41,12 @@ var scenarios = map[string]scenario{
 	"connector-auth":   {breakIt: breakConnectorAuth, fix: fixConnectorAuth},
 
 	// P3 (tasks/P3-fixes-that-end-incidents.md): one per write action.
-	"missed-table": {breakIt: breakMissedTable, fix: fixMissedTable, alert: missedTableAlert},
-	"dead-slot": {breakIt: breakDeadSlot, fix: fixDeadSlot,
+	// They need the server on dev/owners.p3.yaml (p3OwnersFile).
+	"missed-table": {breakIt: breakMissedTable, fix: fixMissedTable, alert: missedTableAlert, owners: p3OwnersFile},
+	"dead-slot": {breakIt: breakDeadSlot, fix: fixDeadSlot, owners: p3OwnersFile,
 		signals: []string{owners.SignalSlotInactive, owners.SignalConnectorDown}},
-	"consumer-bad-deploy": {breakIt: breakConsumerBadDeploy, fix: fixConsumerBadDeploy, alert: badDeployAlert},
-	"dlq-backlog": {breakIt: breakDLQBacklog, fix: fixDLQBacklog,
+	"consumer-bad-deploy": {breakIt: breakConsumerBadDeploy, fix: fixConsumerBadDeploy, alert: badDeployAlert, owners: p3OwnersFile},
+	"dlq-backlog": {breakIt: breakDLQBacklog, fix: fixDLQBacklog, owners: p3OwnersFile,
 		signals: []string{owners.SignalDLQGrowth}},
 }
 

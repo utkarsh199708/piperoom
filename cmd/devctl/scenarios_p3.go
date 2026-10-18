@@ -20,6 +20,12 @@ import (
 // incident one of the P3 write actions ends. Everything they create is named
 // devctl_* / devctl.* so a leftover is easy to spot, and each fix removes it.
 
+// p3OwnersFile is the owners file the P3 scenarios need: dev/owners.yaml
+// plus public.devctl_refunds in source_tables (the actions refuse a table
+// outside it), the DLQ in watch.dlq_topics and dlq_growth. It is a separate
+// file because evals/gen derives fixtures from the baseline.
+const p3OwnersFile = "dev/owners.p3.yaml"
+
 const (
 	publicationName = "dbz_publication" // Debezium's default publication.name
 	ordersTopic     = "pg.public.orders"
@@ -32,7 +38,7 @@ const (
 	signalTopic  = "pg.public.devctl_signal"
 	refundRows   = 25
 
-	// dlq-backlog: the topic is declared in dev/owners.yaml watch.dlq_topics
+	// dlq-backlog: the topic is declared in dev/owners.p3.yaml watch.dlq_topics
 	// and set as DLQ_TOPIC of devconsumer in dev/docker-compose.yml.
 	dlqTopic     = "devctl.order-sync.dlq"
 	rejectStatus = "gift"

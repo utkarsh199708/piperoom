@@ -316,7 +316,7 @@ Every object a break creates is named `devctl_*` / `devctl.*`; every fix removes
 | `missed-table` | alert: `devctl alert missed-table` (no watcher signal sees a table that is missing from Kafka) | `pg_add_publication_table`, then `connect_snapshot_table` (`via: signal_table`) for the rows written before | adds the table to the publication if missing, sends one incremental-snapshot signal if the topic is short, waits until every row is in Kafka; then back to baseline: connector config from `dev/connectors`, publication on `orders` only, `devctl_*` tables, topics and subjects removed |
 | `dead-slot` | watcher: `slot_inactive`, `connector_down` (STOPPED, sev3) | `pg_drop_replication_slot` | drops the slot if it is inactive and the connector is not RUNNING (refuses otherwise), resumes the connector (new slot), re-emits the rows changed meanwhile, waits for order-sync lag 0 |
 | `consumer-bad-deploy` | alert: `devctl alert consumer-bad-deploy` (lag is 0; only a reconciliation sees it) | `kafka_reset_consumer_offsets` (group inactive, to the deploy time) | stops devconsumer, resets order-sync to the start of `pg.public.orders` (the load is an upsert by id, so a full replay is safe), starts the good build, waits for lag 0 |
-| `dlq-backlog` | watcher: `dlq_growth` (`devctl.order-sync.dlq` is declared in `dev/owners.yaml`) | `dlq_replay`, after the cause is fixed | deploys the good build, replays every DLQ record into `pg.public.orders` in order without the `__connect.errors.*` headers, deletes the DLQ topic, waits until every `gift` order is in the warehouse |
+| `dlq-backlog` | watcher: `dlq_growth` (`devctl.order-sync.dlq` is declared in `dev/owners.p3.yaml`) | `dlq_replay`, after the cause is fixed | deploys the good build, replays every DLQ record into `pg.public.orders` in order without the `__connect.errors.*` headers, deletes the DLQ topic, waits until every `gift` order is in the warehouse |
 
 `devctl alert <scenario> [--server URL] [--as user]` posts the scenario's alert body (`cmd/devctl/alert.go`) to
 `POST /api/alerts/webhook` with `X-User` (dev auth mode only; default server `PIPEROOM_HTTP_ADDR`, user
@@ -324,9 +324,13 @@ Every object a break creates is named `devctl_*` / `devctl.*`; every fix removes
 repeat joins the open room. `devctl demo --rehearse` waits for a watcher room, so of these four it only fits
 `dead-slot` and `dlq-backlog`.
 
-`dev/owners.yaml` (and `owners.shadow.yaml`) carry what the actions check: `public.devctl_refunds` in
-`source_tables` (the actions refuse a table outside it), the DLQ in `watch.dlq_topics` (`written_by:
-order-sync`), and `dlq_growth: {for: 30s}`. devconsumer gets `DLQ_TOPIC`, `SKIP_OPS` and `REJECT_STATUS` from
+**These four scenarios need the server started with `OWNERS_FILE=dev/owners.p3.yaml`** (`devctl break|fix`
+logs a reminder). That file is `dev/owners.yaml` plus what the scenarios and actions check:
+`public.devctl_refunds` in `source_tables` (the actions refuse a table outside it), the DLQ in
+`watch.dlq_topics` (`written_by: order-sync`), and `dlq_growth: {for: 30s}`. On the baseline file the
+watcher does not see the DLQ and `pg_add_publication_table` / `connect_snapshot_table` refuse the table. The
+additions stay out of `dev/owners.yaml` because `evals/gen` derives eval fixtures from it;
+`TestOwnersP3MatchesBaseline` fails when the two files drift beyond them. devconsumer gets `DLQ_TOPIC`, `SKIP_OPS` and `REJECT_STATUS` from
 `dev/docker-compose.yml`; the last two are empty (the good build) unless a break sets them.
 
 ## 8. `missed-table` — a new table that never reaches Kafka

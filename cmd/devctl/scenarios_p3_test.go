@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,14 +24,14 @@ import (
 
 var p3Scenarios = []string{"missed-table", "dead-slot", "consumer-bad-deploy", "dlq-backlog"}
 
-// Every P3 break must trip the watcher (a signal enabled in dev/owners.yaml)
+// Every P3 break must trip the watcher (a signal enabled in dev/owners.p3.yaml)
 // or carry an alert that opens a room for the dev pipeline (P-board P3h).
 func TestP3ScenariosTripWatcherOrAlert(t *testing.T) {
 	root, err := repoRoot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, file := range []string{"owners.yaml", "owners.shadow.yaml"} {
+	for _, file := range []string{filepath.Base(p3OwnersFile)} {
 		own, err := owners.Load(filepath.Join(root, "dev", file))
 		if err != nil {
 			t.Fatalf("load dev/%s: %v", file, err)
@@ -97,7 +98,7 @@ func TestP3ScenariosTripWatcherOrAlert(t *testing.T) {
 	}
 }
 
-// devconsumer must write rejects to the DLQ the scenario and owners.yaml use,
+// devconsumer must write rejects to the DLQ the scenario and owners.p3.yaml use,
 // and pass the bad-build knobs the scenarios set.
 func TestComposeDevconsumerKnobs(t *testing.T) {
 	root, err := repoRoot()
@@ -125,6 +126,48 @@ func TestComposeDevconsumerKnobs(t *testing.T) {
 	for k, v := range want {
 		if env[k] != v {
 			t.Errorf("devconsumer %s = %q, want %q", k, env[k], v)
+		}
+	}
+}
+
+// dev/owners.p3.yaml is the baseline plus the P3 additions, nothing else; the
+// baseline (which evals/gen derives fixtures from) has none of them.
+func TestOwnersP3MatchesBaseline(t *testing.T) {
+	root, err := repoRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(name string) map[string]any {
+		b, err := os.ReadFile(filepath.Join(root, "dev", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := yaml.Unmarshal(b, &m); err != nil {
+			t.Fatalf("dev/%s: %v", name, err)
+		}
+		return m
+	}
+	base, p3 := read("owners.yaml"), read(filepath.Base(p3OwnersFile))
+	pipe := func(m map[string]any) map[string]any { return m["pipelines"].([]any)[0].(map[string]any) }
+	bp, pp := pipe(base), pipe(p3)
+	if fmt.Sprint(bp["source_tables"]) != "[public.orders]" {
+		t.Errorf("baseline source_tables = %v: the P3 table belongs in %s only", bp["source_tables"], p3OwnersFile)
+	}
+	if _, ok := bp["watch"].(map[string]any)["dlq_topics"]; ok {
+		t.Errorf("baseline has watch.dlq_topics: the P3 DLQ belongs in %s only", p3OwnersFile)
+	}
+	// Strip the P3 additions; what is left must equal the baseline.
+	pp["source_tables"] = []any{"public.orders"}
+	w := pp["watch"].(map[string]any)
+	delete(w, "dlq_topics")
+	delete(w["signals"].(map[string]any), "dlq_growth")
+	if fmt.Sprint(base) != fmt.Sprint(p3) {
+		t.Errorf("%s drifted from dev/owners.yaml beyond the P3 additions:\nbase %v\np3   %v", p3OwnersFile, base, p3)
+	}
+	for _, name := range p3Scenarios {
+		if scenarios[name].owners != p3OwnersFile {
+			t.Errorf("scenario %q owners = %q, want %s", name, scenarios[name].owners, p3OwnersFile)
 		}
 	}
 }
