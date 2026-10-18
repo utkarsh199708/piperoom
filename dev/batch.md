@@ -22,6 +22,10 @@ Linux only: `export AIRFLOW_UID=$(id -u)` first, so dbt can write the bind-mount
 that the service is healthy once the API answers for `revenue_daily` (target < 3 min). The DAG is unpaused
 at creation, so one run starts right away (`catchup=False`) and then daily.
 
+`go test -tags integration -run TestBatchProfile ./internal/testenv/` does the same against a running dev stack,
+waits for one successful `revenue_daily` run, checks `analytics.fct_revenue` and the artifacts, logs the
+timings, and removes only the `airflow` service afterwards.
+
 ## What is where
 
 | What | Value |
