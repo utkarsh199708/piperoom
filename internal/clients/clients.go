@@ -316,7 +316,9 @@ type KafkaWriter interface {
 // Validate and Preview hold it (never the writer) to refuse an active group
 // and to show per-partition moves before anything is committed. Read-only.
 // Optional: asserted at use time, like RecordReader; a nil or absent planner
-// makes the action refuse at Validate.
+// makes the action refuse at Validate. The Kafka client satisfies it from
+// P3a-3, when its own OffsetMove becomes an alias of the type below; until
+// then the assertion is false and the action refuses.
 type GroupResetPlanner interface {
 	CheckGroupInactive(ctx context.Context, group string) error
 	PlanGroupReset(ctx context.Context, group string, to OffsetTarget) ([]OffsetMove, error)
@@ -448,7 +450,9 @@ var ErrSlotActive = errors.New("clients: replication slot is active")
 
 // ErrAlreadyPublished is returned (wrapped) by SourceWriter.AddPublicationTables
 // when a table is already in the publication or the publication is FOR ALL
-// TABLES; nothing is changed.
+// TABLES; nothing is changed. The postgres client returns it from P3b-2;
+// until then errors.Is against this sentinel is false for the writer's
+// errors, so no action or fake branches on it before that lands.
 var ErrAlreadyPublished = errors.New("clients: table is already in the publication")
 
 // SourceWriter is implemented by the source Postgres client when write mode is

@@ -179,13 +179,16 @@ type SourceWriter interface {
 var ErrSlotActive = errors.New("clients: replication slot is active")
 ```
 `config.go`: `SourceDBWriteURL string // SOURCE_DB_WRITE_URL` (secret; empty = no `SourceWriter`, and the pg actions
-refuse at `Validate` with "no write credentials"). Every method takes the room's pipeline scope from `ctx`
-(`tools.WithPipeline`) and the actions re-check it (`actions.Scoped`).
+refuse at `Validate` with "no write credentials"). Scope, for `SourceWriter` and `KafkaWriter` alike: every write
+method requires the room's pipeline scope in `ctx` (`tools.WithPipeline`) and refuses a target outside it before any
+I/O (`tools.ErrOutOfScope`); without a scope it refuses with `tools.ErrNoScope` unless the caller opted out with
+`tools.WithUnscoped` (tests, CLI); read helpers on the same type are scoped by the action's `CheckScope`
+(`actions.Scoped`) instead. (edited in follow-up 1, accepted in review of #590/#591/#592/#587)
 
 - `var ErrAlreadyPublished = errors.New("clients: table is already in the publication")`, next to `ErrSlotActive`: returned (wrapped) by `SourceWriter.AddPublicationTables` when a table is already in the publication or the publication is `FOR ALL TABLES`; nothing is changed. (follow-up 1, accepted in review of #590/#591/#592/#587)
-- `GroupResetPlanner` (optional, read-only, implemented by the Kafka write client): `CheckGroupInactive(ctx, group) error`, `PlanGroupReset(ctx, group, to OffsetTarget) ([]OffsetMove, error)`, with `OffsetMove{Topic string; Partition int32; Committed, Target, End int64}` (json `topic`, `partition`, `committed`, `target`, `end`); an action's `Validate` and `Preview` hold it, never the writer. (follow-up 1, accepted in review of #590/#591/#592/#587)
+- `GroupResetPlanner` (optional, read-only, implemented by the Kafka write client): `CheckGroupInactive(ctx, group) error`, `PlanGroupReset(ctx, group, to OffsetTarget) ([]OffsetMove, error)`, with `OffsetMove{Topic string; Partition int32; Committed, Target, End int64}` (json `topic`, `partition`, `committed`, `target`, `end`); an action's `Validate` and `Preview` hold it, never the writer. The Kafka client's own `OffsetMove` (#592) becomes `= clients.OffsetMove` in P3a-3, with `var _ clients.GroupResetPlanner = (*Writer)(nil)`; until then the assertion is false. (follow-up 1, accepted in review of #590/#591/#592/#587)
 - `RecordReader.ReadRecords` returns fewer than `limit` records when the partition ends first or 32 MiB were read. (follow-up 1, accepted in review of #590/#591/#592/#587)
-- Scope, replacing the sentence above for `KafkaWriter` and `SourceWriter`: every write method requires the room's pipeline scope in `ctx` (`tools.WithPipeline`) and refuses a target outside it before any I/O (`tools.ErrOutOfScope`); without a scope it refuses with `tools.ErrNoScope` unless the caller opted out with `tools.WithUnscoped` (tests, CLI); read helpers on the same type are scoped by the action's `CheckScope` instead. (follow-up 1, accepted in review of #590/#591/#592/#587)
+- Scope: the fail-closed rule is in the paragraph above, edited in place (it replaced "every method takes the scope from `ctx` and the actions re-check it"). (follow-up 1, accepted in review of #590/#591/#592/#587)
 
 ### 8. Pipeline kinds (P4) — `internal/events/events.go`, `internal/topology/graph.go`, `internal/clients/clients.go`, `internal/config/config.go`
 
