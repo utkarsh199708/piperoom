@@ -5,14 +5,14 @@
     "Read by docs/process/ship-check.mjs: every file of a row must be under one of its board agent's folders and under none of its exclusions, and a contract file may change only on a leads row.",
     "Paths are repo-relative. 'dir/**' (or 'dir') covers everything under dir; a path without a wildcard is that file. A '*' inside a path matches within one segment only: 'evals/scenarios/*.yaml' is the YAML files directly in evals/scenarios. A file listed exactly in folders wins over a '*' pattern in excluded (C6 keeps evals/scenarios/schema-change.yaml).",
     "Not encoded: task-scoped grants of the R wave table (R2: docs/demo/** for A1; R6: Dockerfile, cmd/devconsumer/Dockerfile, deploy/** and the go line of go.mod for C1), R0's concurrency: block of .github/workflows/ci.yml (part of a file), and the done rows C2 and C8 (no folders). A row that needs such a path asks the leads, as AGENTS.md section 2 says.",
-    "U wave (tasks/U-board.md): A9, A10, C19, C20, C21, C22 and the A3, A8, C6 and C7 lines mirror the U wave table of AGENTS.md section 2."
+    "U wave (tasks/U-board.md): A9, A10, C19, C20, C21, C22 and the A3, A5, A8, C1, C6, C7 and leads lines mirror the U wave table of AGENTS.md section 2. internal/setup/protocol/** is a contract file (leads). The A9 to A2 and A10 to A3 fallbacks of AGENTS.md are applied here by the leads in the same PR that switches the board rows; until then ship-check rejects them, as intended."
   ],
   "agents": {
     "leads": {
       "folders": ["AGENTS.md", "tasks/**", "docs/**", "reviews/**",
         "internal/tools/tool.go", "internal/events/events.go", "internal/clients/clients.go", "internal/actions/action.go",
         "internal/agent/contract.go", "internal/topology/graph.go", "internal/config/config.go", "internal/version/version.go",
-        "docs/api.md"],
+        "docs/api.md", "internal/setup/protocol/**"],
       "excluded": []
     },
     "A1": { "folders": ["dev/**", "cmd/devctl/**", "cmd/devconsumer/**", "internal/testenv/**"], "excluded": [] },
@@ -30,15 +30,15 @@
     },
     "A4": { "folders": ["internal/agent/**", "cmd/investigate/**", "internal/wiring/**"], "excluded": ["internal/agent/contract.go"] },
     "A5": {
-      "folders": ["migrations/**", "internal/store/**", "internal/room/**", "internal/httpapi/**", "internal/ws/**", "cmd/server/**", "internal/auth/**"],
+      "folders": ["migrations/**", "internal/store/**", "internal/room/**", "internal/httpapi/**", "internal/ws/**", "cmd/server/**", "internal/auth/**", "internal/quickstart/**"],
       "excluded": []
     },
     "A6": { "folders": ["web/**"], "excluded": [] },
     "A8": { "folders": ["internal/clients/mysql/**", "internal/tools/mysqltools/**", "internal/setup/sources/mysql/**"], "excluded": [] },
-    "A9": { "folders": ["cmd/setup/**", "cmd/piperoom/**", "internal/setup/**"], "excluded": ["internal/setup/targets/**", "internal/setup/sources/**", "internal/setup/knowledge/**"] },
+    "A9": { "folders": ["cmd/setup/**", "cmd/piperoom/**", "internal/setup/**"], "excluded": ["internal/setup/protocol/**", "internal/setup/targets/**", "internal/setup/sources/**", "internal/setup/knowledge/**"] },
     "A10": { "folders": ["internal/clients/sqlserver/**", "internal/clients/mongodb/**", "internal/clients/oracle/**", "internal/setup/sources/sqlserver/**", "internal/setup/sources/mongodb/**", "internal/setup/sources/oracle/**"], "excluded": [] },
     "A7": { "folders": ["internal/watch/**", "internal/dlq/**"], "excluded": [] },
-    "C1": { "folders": [".github/**", "README.md", "docs/runbook.md", "Makefile", "deploy/docker-compose.quickstart.yml"], "excluded": [] },
+    "C1": { "folders": [".github/**", "README.md", "docs/runbook.md", "Makefile", "deploy/docker-compose.quickstart.yml", "Dockerfile", "deploy/helm/**"], "excluded": [] },
     "C2": { "folders": [], "excluded": [] },
     "C3": { "folders": ["internal/clients/snowflake/**", "internal/clients/bigquery/**", "internal/clients/databricks/**"], "excluded": [] },
     "C4": { "folders": ["docs/security/**"], "excluded": [] },
