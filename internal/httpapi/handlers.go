@@ -118,7 +118,8 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRoom(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.svc.GetRoom(r.Context(), chi.URLParam(r, "id"))
+	// The caller's view: mode and open_proposals[].blocked (P0 item 1).
+	snap, err := s.svc.RoomFor(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"))
 	if err != nil {
 		s.writeErr(w, err)
 		return

@@ -34,6 +34,10 @@ const (
 	// DefaultUnclaimedStale is how long a fully approved proposal may wait for
 	// an executor to claim it.
 	DefaultUnclaimedStale = 2 * time.Minute
+	// writeOffUnclaimedStale is the unclaimed window of the stale sweep with
+	// write mode off (sweepStaleProposals): about a century, so no blocked
+	// proposal ever reaches it.
+	writeOffUnclaimedStale = 100 * 365 * 24 * time.Hour
 )
 
 // maxPendingInputs caps the human inputs a room keeps for priming the inbox
@@ -563,8 +567,16 @@ func (s *Service) touchExecution(ctx context.Context, proposalID string) (bool, 
 // conditional UPDATE, so exactly one replica writes its event. A step that was
 // started is never run again: its outcome is unknown and recorded as failed.
 func (s *Service) sweepStaleProposals() {
+	unclaimed := s.timing.UnclaimedStale
+	if s.writeOff {
+		// With write mode off a fully approved proposal is never claimed by
+		// design: it is blocked, not stale. A window no proposal reaches
+		// keeps the store from listing (and spending the LIMIT on) them,
+		// while claims a write-on run left behind are still swept.
+		unclaimed = writeOffUnclaimedStale
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
-	stale, err := s.coord.StaleProposals(ctx, s.timing.ClaimStale, s.timing.UnclaimedStale, 100)
+	stale, err := s.coord.StaleProposals(ctx, s.timing.ClaimStale, unclaimed, 100)
 	cancel()
 	if err != nil {
 		if s.ctx.Err() == nil {
@@ -584,7 +596,7 @@ func (s *Service) sweepStaleProposals() {
 			return
 		}
 		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
-		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, s.timing.UnclaimedStale)
+		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, unclaimed)
 		cancel()
 		if err != nil || !ok {
 			s.wg.Done()

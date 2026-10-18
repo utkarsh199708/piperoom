@@ -126,6 +126,14 @@ type Deps struct {
 	// typed confirm and the grant "solo". The caller has already run
 	// CheckSoloUser.
 	SoloUser string
+	// WriteModeOff is PIPEROOM_WRITE_MODE=off (config.ParseWriteMode, P0 item
+	// 1): proposals are still created, previewed and approved, but a fully
+	// approved one is never queued for the executor, so nothing runs and no
+	// action.executed is written; the room view says why
+	// (open_proposals[].blocked). The zero value is write mode on, the
+	// behaviour before the switch, so callers that predate it keep running
+	// fixes; cmd/server always sets it from the config, whose default is off.
+	WriteModeOff bool
 
 	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
 	// CreateRoomFromAlert, after room.created is appended. Each call runs in
@@ -286,6 +294,7 @@ type Service struct {
 	sessionLive     auth.Liveness
 	viewerGroups    map[string]struct{}
 	soloUser        string
+	writeOff        bool // Deps.WriteModeOff
 	limits          config.Limits
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
@@ -413,6 +422,7 @@ func New(d Deps) *Service {
 		sessionLive:     d.SessionLive,
 		viewerGroups:    groupSet(d.ViewerGroups),
 		soloUser:        d.SoloUser,
+		writeOff:        d.WriteModeOff,
 		limits:          d.Limits,
 		leaseTicker:     d.LeaseTicker,
 		ctx:             ctx,
@@ -565,8 +575,12 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, w
 		// With a shared store a proposal may be running on another replica
 		// right now; the stale-claim sweep decides instead. The store reads
 		// are made before the lock (staleProposals), the writes after it.
+		// With write mode off a fully approved proposal is blocked, not
+		// interrupted: it stays open and the room view says why. A
+		// single-process store does not outlive its process, so no proposal
+		// a write-on run left half done can reach here.
 		var stale []staleProposal
-		if s.coord == nil {
+		if s.coord == nil && !s.writeOff {
 			if p := st.pub.Load(); p != nil && p.Status == "open" {
 				stale = s.staleProposals(ctx, r.ID, *p)
 			}

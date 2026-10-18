@@ -111,6 +111,10 @@ type Proposal struct {
 	// the proposal exists (proposal.previewed, F4). Informational: it is not
 	// part of ParamsHash. nil until the event arrives.
 	Preview *events.ProposalPreviewedPayload `json:"preview,omitempty"`
+	// Blocked says why a fully approved proposal does not run:
+	// BlockedWriteModeOff. Empty otherwise. Set on the room view only
+	// (RoomFor), never by Apply: it depends on the server, not on the log.
+	Blocked string `json:"blocked,omitempty"`
 }
 
 // ChecklistTick says who ticked one runbook item and when.
@@ -155,6 +159,10 @@ type RoomSnapshot struct {
 	Members            []Member     `json:"members"`
 	// Insight is the room's cost and clock facts (F11), folded from the log.
 	Insight Insight `json:"insight"`
+	// Mode is what the server does with the caller's approvals (P0 items 1
+	// and 4). Set on the room view only (RoomFor), never by Apply; nil, and
+	// left out of the JSON, everywhere else.
+	Mode *Mode `json:"mode,omitempty"`
 
 	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
 	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
@@ -298,6 +306,11 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		for k, v := range s.pendingPreviews {
 			c.pendingPreviews[k] = v
 		}
+	}
+	if s.Mode != nil {
+		m := *s.Mode
+		m.AutoApprove = append([]string{}, s.Mode.AutoApprove...)
+		c.Mode = &m
 	}
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)

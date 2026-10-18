@@ -90,8 +90,14 @@ func (q *execQueue) busy() bool {
 // here, when it is queued (docs/design/replicas.md section 5): a proposal that
 // waits behind a long one in this room's queue is then a live claim this
 // replica refreshes, never "approved and unclaimed". A claim another executor
-// already holds queues nothing. Caller holds st's lock.
+// already holds queues nothing. With write mode off nothing is queued or
+// claimed: the proposal stays open and fully approved (BlockedWriteModeOff).
+// Caller holds st's lock.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
+	if s.writeOff {
+		s.log.Info("room: proposal fully approved; not run: write mode is off", "room", p.RoomID, "proposal", p.ProposalID)
+		return
+	}
 	// The worker's place in wg is reserved before the claim, so a closing
 	// service claims nothing; it is given back when the room has its worker
 	// already or nothing is queued.
@@ -177,6 +183,9 @@ func (s *Service) abandonQueued(roomID string, q *execQueue) {
 	}
 }
 
+// errWriteModeOff is executeProposal's refusal with write mode off.
+var errWriteModeOff = errors.New("write mode is off (PIPEROOM_WRITE_MODE): approved proposals do not run")
+
 // stepStatus is one state of the explicit per-step state machine.
 type stepStatus int
 
@@ -259,6 +268,13 @@ func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
 // every write below holds only while this replica holds the claim.
 func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 	ctx := s.ctx
+
+	// The queue never holds a proposal with write mode off; this guards a
+	// caller that reaches the executor some other way. It runs before the
+	// claim, so the proposal stays as it was and nothing is recorded.
+	if s.writeOff {
+		return fmt.Errorf("room: proposal %s: %w", p.ProposalID, errWriteModeOff)
+	}
 
 	// One executor per approved proposal across replicas
 	// (docs/design/replicas.md section 5): the claim comes before anything

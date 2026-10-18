@@ -81,7 +81,7 @@ func TestHealthz(t *testing.T) {
 	// Even a failing store must not affect liveness.
 	srv, logs := newProbeServer(t, httpapi.WithReady(&fakePinger{err: errors.New("down")}))
 	code, body := get(t, http.MethodGet, srv.URL+"/healthz")
-	if code != http.StatusOK || body != `{"status":"ok","version":"dev"}` {
+	if code != http.StatusOK || body != `{"status":"ok","version":"dev","write_mode":"on"}` {
 		t.Fatalf("GET /healthz = %d %s", code, body)
 	}
 	l := logs.String()
@@ -205,7 +205,7 @@ func TestHealthzVersion(t *testing.T) {
 		version.Version = tc.set
 		code, body := get(t, http.MethodGet, srv.URL+"/healthz")
 		version.Version = old
-		if code != http.StatusOK || body != `{"status":"ok","version":"`+tc.want+`"}` {
+		if code != http.StatusOK || body != `{"status":"ok","version":"`+tc.want+`","write_mode":"on"}` {
 			t.Fatalf("Version=%q: GET /healthz = %d %s", tc.set, code, body)
 		}
 	}

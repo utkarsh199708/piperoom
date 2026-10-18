@@ -140,6 +140,14 @@ func run() error {
 		return fmt.Errorf("server: %w", err)
 	}
 
+	// Write mode (P0 item 1): a bad PIPEROOM_WRITE_MODE stops the server
+	// before it connects to anything; off (the default) records approvals
+	// and runs nothing; --demo forces on.
+	writeOn, err := writeModeSetup(cfg, *demoMode, log)
+	if err != nil {
+		return err
+	}
+
 	// Spend limits and the price table (docs/design/cost.md): a bad value
 	// stops the server before it connects to anything.
 	spend, err := spendSetup(cfg)
@@ -399,6 +407,7 @@ func run() error {
 		ResumeOnTakeover:  resumeOnTakeover,
 		Sessions:          sessions,
 		SoloUser:          soloUser,
+		WriteModeOff:      !writeOn,
 		Limits:            limits,
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,

@@ -217,6 +217,12 @@ type Config struct {
 	// password: anyone who reaches the port picks any user) is served on a
 	// non-loopback address. See ParseDevAck. Never baked into an image.
 	DevAck string // PIPEROOM_DEV_ACK: "" (default) | DevAckValue
+
+	// WriteMode is PIPEROOM_WRITE_MODE: "off" (default) keeps every write action
+	// out of the registry the executor uses; proposals are still created,
+	// previewed and approved, and `action.executed` is never emitted. "on" wires
+	// the write clients. --demo forces "on" (fake clients only).
+	WriteMode string // PIPEROOM_WRITE_MODE: off | on
 }
 
 // Load reads the environment and applies dev defaults.
@@ -337,6 +343,8 @@ func Load() Config {
 		LogFormat: get("PIPEROOM_LOG_FORMAT", DefaultLogFormat),
 
 		DevAck: get("PIPEROOM_DEV_ACK", ""),
+
+		WriteMode: get("PIPEROOM_WRITE_MODE", "off"),
 	}
 	c.SlackPageNoDriver = splitList(get("PIPEROOM_SLACK_PAGE_NO_DRIVER", ""))
 	return c
@@ -420,6 +428,20 @@ func ParseDevAck(c Config) (bool, error) {
 		return true, nil
 	}
 	return false, fmt.Errorf("config: PIPEROOM_DEV_ACK: want exactly %q (or unset)", DevAckValue)
+}
+
+// ParseWriteMode validates PIPEROOM_WRITE_MODE and reports whether write mode
+// is on. "off" (the default, also when empty) is false and "on" is true; any
+// other value is an error, so a "true", "1" or typo stops the start instead of
+// silently counting as either.
+func ParseWriteMode(c Config) (bool, error) {
+	switch strings.TrimSpace(c.WriteMode) {
+	case "", "off":
+		return false, nil
+	case "on":
+		return true, nil
+	}
+	return false, fmt.Errorf("config: PIPEROOM_WRITE_MODE=%q: want off or on", c.WriteMode)
 }
 
 // slackMemberID is the shape of a Slack member ID ("U0…" for users, "W0…"
