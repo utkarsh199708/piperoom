@@ -10,7 +10,7 @@ func (s *Server) handleAuthUsers(w http.ResponseWriter, _ *http.Request) {
 }
 
 // handlePipelines is GET /api/pipelines: the pipelines the caller may see, for
-// the new-room form. Viewers included; only id, title and shadow.
+// the new-room form. Viewers included; only id, title, shadow and kind.
 func (s *Server) handlePipelines(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.svc.PipelinesFor(userFrom(r.Context())))
 }
