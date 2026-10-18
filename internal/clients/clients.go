@@ -258,9 +258,12 @@ type DLQReader interface {
 //
 // Not embedded in KafkaAdmin: a read-only tool, the topology builder, the
 // watcher and discovery can never reach them through a KafkaReader, and fakes
-// and the eval replay need not implement them. Every method takes the room's
-// pipeline scope from ctx (tools.WithPipeline); the actions re-check it
-// (actions.Scoped) before they call.
+// and the eval replay need not implement them. Every write method requires the
+// room's pipeline scope in ctx (tools.WithPipeline) and refuses a target
+// outside it before any I/O (tools.ErrOutOfScope); without a scope it refuses
+// with tools.ErrNoScope unless the caller opted out with tools.WithUnscoped
+// (tests, CLI). Read helpers on the same type are scoped by the action's
+// CheckScope instead.
 
 // ErrGroupActive is returned (wrapped) by ResetGroupOffsets when the group
 // has active members: committed offsets of a live group are overwritten by
@@ -309,12 +312,34 @@ type KafkaWriter interface {
 	Produce(ctx context.Context, topic string, recs []Record) (acked int, err error)
 }
 
+// GroupResetPlanner is implemented by the Kafka write client; an action's
+// Validate and Preview hold it (never the writer) to refuse an active group
+// and to show per-partition moves before anything is committed. Read-only.
+// Optional: asserted at use time, like RecordReader; a nil or absent planner
+// makes the action refuse at Validate. The Kafka client satisfies it from
+// P3a-3, when its own OffsetMove becomes an alias of the type below; until
+// then the assertion is false and the action refuses.
+type GroupResetPlanner interface {
+	CheckGroupInactive(ctx context.Context, group string) error
+	PlanGroupReset(ctx context.Context, group string, to OffsetTarget) ([]OffsetMove, error)
+}
+
+// OffsetMove is one partition's planned move for a group reset.
+type OffsetMove struct {
+	Topic     string `json:"topic"`
+	Partition int32  `json:"partition"`
+	Committed int64  `json:"committed"` // the group's committed offset before the reset; -1 when nothing was committed
+	Target    int64  `json:"target"`    // the offset the reset commits
+	End       int64  `json:"end"`       // the high watermark at planning time; End-Target is the lag the reset leaves
+}
+
 // RecordReader reads whole records for dlq_replay (P3a): at most limit
 // records of one partition of topic from offset from, in offset order (fewer
-// when the partition ends first). It changes nothing, so an action's Preview
-// may call it, but it returns keys and values: only package actions may
-// assert it on a Kafka client, never a read-only tool, the topology builder
-// or the watcher (that is what DLQReader's key-free DLQRecord is for).
+// when the partition ends first or 32 MiB were read). It changes nothing, so
+// an action's Preview may call it, but it returns keys and values: only
+// package actions may assert it on a Kafka client, never a read-only tool,
+// the topology builder or the watcher (that is what DLQReader's key-free
+// DLQRecord is for).
 // Optional, asserted at use time; implemented with KafkaWriter (P3a-2).
 type RecordReader interface {
 	ReadRecords(ctx context.Context, topic string, partition int32, from int64, limit int) ([]Record, error)
@@ -423,13 +448,24 @@ type SourceDB interface {
 // is active: dropping the slot of a running connector loses its position.
 var ErrSlotActive = errors.New("clients: replication slot is active")
 
+// ErrAlreadyPublished is returned (wrapped) by SourceWriter.AddPublicationTables
+// when a table is already in the publication or the publication is FOR ALL
+// TABLES; nothing is changed. The postgres client returns it from P3b-2;
+// until then errors.Is against this sentinel is false for the writer's
+// errors, so no action or fake branches on it before that lands.
+var ErrAlreadyPublished = errors.New("clients: table is already in the publication")
+
 // SourceWriter is implemented by the source Postgres client when write mode is
 // on (P3b): a separate pool on SOURCE_DB_WRITE_URL with its own role, never
 // the read-only SourceDB pool. No SOURCE_DB_WRITE_URL = no SourceWriter. Not
 // embedded in SourceDB. Identifiers are checked against
 // ^[a-zA-Z_][a-zA-Z0-9_]*$ and quoted with pgx.Identifier.Sanitize; no
-// statement is built from untrusted text. Every method takes the room's
-// pipeline scope from ctx (tools.WithPipeline); the actions re-check it.
+// statement is built from untrusted text. Every write method requires the
+// room's pipeline scope in ctx (tools.WithPipeline) and refuses a target
+// outside it before any I/O (tools.ErrOutOfScope); without a scope it refuses
+// with tools.ErrNoScope unless the caller opted out with tools.WithUnscoped
+// (tests, CLI). Read helpers on the same type are scoped by the action's
+// CheckScope instead.
 type SourceWriter interface {
 	// AddPublicationTables runs ALTER PUBLICATION … ADD TABLE for each of
 	// tables ("schema.table").
@@ -558,7 +594,7 @@ type DAGRun struct {
 // TaskInstance is one try of one task in a DAG run.
 type TaskInstance struct {
 	TaskID    string    `json:"task_id"`
-	Try       int       `json:"try"`   // try number, from 1
+	Try       int       `json:"try"`   // Airflow try_number as reported; 0 when the task never ran (e.g. upstream_failed)
 	State     string    `json:"state"` // as reported: success | failed | up_for_retry | running | skipped | upstream_failed | …
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at"`
