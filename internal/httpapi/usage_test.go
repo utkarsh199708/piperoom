@@ -249,7 +249,7 @@ func usageTenantOwners() string {
 	own := func(user string) string {
 		var b strings.Builder
 		b.WriteString("\n    owners:")
-		for _, l := range events.Layers {
+		for _, l := range events.LayersOf(events.PipelineKindCDC) {
 			b.WriteString("\n      " + l + ": {approvers: [user:" + user + "]}")
 		}
 		return b.String()
