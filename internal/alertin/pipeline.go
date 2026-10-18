@@ -4,12 +4,14 @@ import (
 	"slices"
 	"strings"
 
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
 
-// matchDAG finds the one batch pipeline that the alert's dag_id values point
-// to. The ids are compared exactly (trimmed, case-sensitive): an Airflow dag_id
-// is case-sensitive, and the batch tools check a dag_id against the room
+// MatchDAG returns the one batch pipeline in o whose dags list the known ids, or "" when none or several do.
+//
+// The ids are the alert's dag_id values, compared exactly (trimmed,
+// case-sensitive): an Airflow dag_id is case-sensitive, and the batch tools check a dag_id against the room
 // pipeline's dags the same way, so the pipeline found here can read the DAG.
 // An id no pipeline lists is ignored, as the owners scan ignores names it does
 // not know, so an alert whose ids are all unknown resolves exactly as if it had
@@ -18,8 +20,12 @@ import (
 // name DAGs of different pipelines, gives "" rather than a guess.
 //
 // The ids come from the payload and are untrusted; they are only compared
-// with owners.yaml entries, never logged or shown.
-func matchDAG(o *owners.Owners, ids []string) string {
+// with owners.yaml entries, never logged or shown. Only a batch pipeline can
+// match: owners.Load refuses dags on a cdc pipeline, but an Owners built in
+// code is not checked, and a dag_id must never send a room to a CDC pipeline.
+// ids is variadic so a caller with one dag_id (the dev webhook in
+// internal/room) passes it as is.
+func MatchDAG(o *owners.Owners, ids ...string) string {
 	if o == nil || len(ids) == 0 {
 		return ""
 	}
@@ -41,8 +47,9 @@ func matchDAG(o *owners.Owners, ids []string) string {
 		return ""
 	}
 	match := ""
-	for _, p := range o.Pipelines {
-		if !listsAll(p.DAGs, known) {
+	for i := range o.Pipelines {
+		p := &o.Pipelines[i]
+		if p.KindOrDefault() != events.PipelineKindBatch || !listsAll(p.DAGs, known) {
 			continue
 		}
 		if match != "" && match != p.ID {
