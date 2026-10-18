@@ -279,10 +279,28 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 ## What
 ## Why
 ## How I tested   (exact commands + short output)
+## Risk   (tier from §6a and why; what a bug here would break)
+## How to revert   (what reverting the merge undoes; any data or config to undo too)
 ## Not done / known gaps
 ## New dependencies   (module, version, why)
 ## Contract change request   (only if needed)
 ```
+
+### 6a. Ship workflow (from 2026-10-18): no human approval
+
+Board rows are built and reviewed by the ship workflow, [`docs/process/ship-workflow.md`](docs/process/ship-workflow.md)
+(script `docs/process/piperoom-ship.workflow.js`). For a row it ships, it replaces the two leads' approvals below:
+
+- independent re-run of every check; four bug hunters and a security reviewer (Fable 5.1); three verifiers that try
+  to refute each finding, two of three to keep it (Fable 5.1 and Opus 5.5);
+- a risk tier set from the diff, never lowered by the author: **low** needs no approval, **medium** one agent
+  approval, **high** (actions, write clients, auth, executor and approvals, migrations, deploy, contract files, this
+  pipeline) two approvals from different models, plus an integrity check on changes to the pipeline;
+- at most three review rounds, diff-only after the first; an approval covers one commit.
+
+The owner chose to run without a human approver. Lead 1 still pushes, opens the PR with the workflow's body, waits
+for required CI and merges in board order; rows the workflow returns `blocked` go back to the leads. PRs made
+outside the workflow keep the §7 two-lead review.
 
 ## 7. How the leads check your PR
 
