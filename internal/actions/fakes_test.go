@@ -74,6 +74,11 @@ func TestFakeWritesRefusedByDefault(t *testing.T) {
 			err := f.SetCompatibility(ctx, "pg.public.orders-value", "FULL")
 			return f.set && f.compatLevel == "FULL", err
 		}},
+		{"fakeProducer.Produce", func(allow bool) (bool, error) {
+			f := &fakeProducer{allowWrites: allow, failAt: -1}
+			_, err := f.Produce(ctx, "pg.public.orders", []clients.Record{{Key: []byte("k")}})
+			return len(f.produced) == 1, err
+		}},
 		{"compatSetFails.SetCompatibility", func(allow bool) (bool, error) {
 			// The fake's own error stands in for the registry failure; with
 			// writes off, the refusal must come back instead of that error.
