@@ -1,6 +1,9 @@
 package room
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Test-only knobs for the external room_test package. Each must be set right
 // after New, before a room starts an agent, so no goroutine reads the field
@@ -15,3 +18,16 @@ func SetTriageWaitForTest(s *Service, d time.Duration) { s.triageWait = d }
 
 // TriageWaitForTest is the wait New derived from Deps.TriagePassTimeout.
 func TriageWaitForTest(s *Service) time.Duration { return s.triageWait }
+
+// AgentStartsForTest is how many agent supervisors the room has started (its
+// run generation). A steer starts one under the room's lock before it
+// returns, so the count is final when the steer is, unlike the runs a
+// supervisor makes later in its own goroutine.
+func AgentStartsForTest(s *Service, roomID string) (uint64, error) {
+	st, err := s.lockRoom(context.Background(), roomID)
+	if err != nil {
+		return 0, err
+	}
+	defer s.unlockRoom(st)
+	return st.agentRun, nil
+}
