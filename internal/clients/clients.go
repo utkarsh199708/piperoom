@@ -686,6 +686,23 @@ type TransformReader interface {
 	ModelLineage(ctx context.Context, model string) (Lineage, error) // parents and children from manifest.json; model is a name as owners.yaml lists it, or a dbt unique_id; a short name that matches several nodes is an error (dbt.ErrAmbiguous), and the caller retries with the unique_id
 }
 
+// ModelSQL is one dbt model's SQL from manifest.json.
+type ModelSQL struct {
+	Model    string `json:"model"`              // unique_id
+	Path     string `json:"path,omitempty"`     // original_file_path
+	Language string `json:"language,omitempty"` // sql | python
+	Compiled bool   `json:"compiled"`           // false: raw_code (dbt never compiled the model)
+	SQL      string `json:"sql"`                // untrusted text
+}
+
+// TransformSQLReader is optional next to TransformReader, asserted at use
+// time like ClusterReader: without it (nil, or a client that cannot) a tool
+// answers ErrNotSupported. An unknown model, or a node that is not a model,
+// is ErrNotFound.
+type TransformSQLReader interface {
+	ModelSQL(ctx context.Context, model string) (ModelSQL, error)
+}
+
 // ---- Pipeline change log (Piperoom's own table, fed by the watcher, F8) ----
 //
 // Not a customer system: the room store implements both interfaces.

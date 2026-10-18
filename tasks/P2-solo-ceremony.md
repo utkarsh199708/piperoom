@@ -87,7 +87,7 @@ The big-team ceremony is unchanged when several people own the layers.
 Accepted by the leads in the round 1 and round 2 reviews (P0 follow-up 1); also on the P2b-3 and P2b-4 rows of
 `tasks/P-board.md`.
 - **P2b-3 (fallback):** one proposal-aware `authorizeProposalLayer(st, p, user, layer, confirm, needConfirm)` that both `approve` and approve-all call (`authorizeLayer` first, then layer ∈ `fallback_layers` && driver == user → `"fallback"`); `approvalGrant` gains the fallback case.
-- **P2b-4 (policy auto-approve):** the timer's fire path is authoritative (under the room lock: open, no `proposal.cancelled`, no human `approval.*` after `proposal.scheduled`); the explicit stop lives in `appendApprovalLocked` and the reject path, not as a third copy; `appendApprovalLocked` takes the actor and optional identity so policy approvals reuse it; `mode.solo` = `authorizeAllLayers(pid, user, pipeline.Layers())`; `auto_approve` is validated against the FULL proposal registry, never an executor registry emptied by write-mode-off; a `schema_*` entry is refused.
+- **P2b-4 (policy auto-approve; revised in leads follow-up 4):** the countdown lives in the event log (`proposal.scheduled`), with one loop per replica for the rooms whose lease it holds; it stops in the snapshot fold (a person's `approval.given`, a `proposal.cancelled` or a rejection after `proposal.scheduled`), not in `appendApprovalLocked`; the fire path re-checks it under the room lock (open, still scheduled in the fold) before the policy approvals; P2b-4b drops `scheduled` from the snapshot once `run_at` is a short grace in the past; `appendApprovalLocked` takes the actor and optional identity so policy approvals reuse it; `mode.solo` = `authorizeAllLayers(pid, user, pipeline.Layers())`; `auto_approve` is validated against the FULL proposal registry, never an executor registry emptied by write-mode-off; a `schema_*` entry is refused.
 
 ## Out of scope
 - Auto-approve for anything whose preview is missing, failed or `DryRun.OK == false`; for `schema_*` actions;
@@ -125,7 +125,9 @@ P2b waits for P1a only for the `mode.write` field; it reads `cfg.WriteMode` dire
 ## Tests
 - A3: table tests for `IsOwned`, `OwnsAll`, `auto_approve` validation (unknown action name, duplicate, empty).
 - A5: memstore unit tests for every bullet above, with a fake clock for the timer; `-race` on `internal/room`;
-  an integration run of the `schema-change` scenario with `auto_approve` set.
+  an integration run with `auto_approve: [connect_restart_task]` set, on a break whose fix is a single
+  `connect_restart_task` proposal (a failed connector task). Not `schema-change`: its fix carries `schema_*`
+  steps, which the policy excludes, so it would never be scheduled (leads follow-up 4).
 - A4: prompt snapshot tests; the eval suite's pass rate must not move (`make evals`).
 
 ## Effort
