@@ -218,10 +218,10 @@ type Config struct {
 	// non-loopback address. See ParseDevAck. Never baked into an image.
 	DevAck string // PIPEROOM_DEV_ACK: "" (default) | DevAckValue
 
-	// WriteMode is PIPEROOM_WRITE_MODE: "off" (default) keeps every write action
-	// out of the registry the executor uses; proposals are still created,
-	// previewed and approved, and `action.executed` is never emitted. "on" wires
-	// the write clients. --demo forces "on" (fake clients only).
+	// WriteMode is PIPEROOM_WRITE_MODE: "off" (default) makes the executor
+	// refuse to queue or run any step, so an approved proposal is recorded but
+	// never executed and `action.executed` is never emitted; "on" wires the
+	// write clients. --demo forces "on" (fake clients only).
 	WriteMode string // PIPEROOM_WRITE_MODE: off | on
 }
 

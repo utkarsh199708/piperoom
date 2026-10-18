@@ -10,6 +10,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
+	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 )
 
@@ -138,8 +139,8 @@ func TestWriteModeOffApprovedProposalNeverRuns(t *testing.T) {
 	if pg.Calls()+wh.Calls() != 0 {
 		t.Fatalf("actions ran with write mode off: pg %d, wh %d", pg.Calls(), wh.Calls())
 	}
-	if row, err := st.GetProposal(context.Background(), pid); err != nil || row.Status != "open" {
-		t.Fatalf("proposal row = %+v (err %v), want status open", row, err)
+	if row, err := st.GetProposal(context.Background(), pid); err != nil || row.Status != store.ProposalStatusBlocked {
+		t.Fatalf("proposal row = %+v (err %v), want status %s", row, err, store.ProposalStatusBlocked)
 	}
 	if got := st.ProposalStepStatus(pid, 0); got != "" {
 		t.Fatalf("step 0 status %q, want never started", got)
@@ -209,8 +210,9 @@ func TestWriteModeOffSurvivesRestart(t *testing.T) {
 			outs = append(outs, p)
 		}
 	}
-	if len(outs) != 1 || outs[0].OK || outs[0].ProposalID != pid || !strings.Contains(outs[0].Output, "interrupted") {
-		t.Fatalf("on restart outcome = %+v, want one failed interruption of %s", outs, pid)
+	if len(outs) != 1 || outs[0].OK || outs[0].OutcomeUnknown || outs[0].ProposalID != pid ||
+		!strings.Contains(outs[0].Output, "approved while write mode was off") {
+		t.Fatalf("on restart outcome = %+v, want one failed %s saying it was approved while write mode was off", outs, pid)
 	}
 	if pg.Calls()+wh.Calls() != 0 {
 		t.Fatalf("an approval given with write mode off ran after the switch: pg %d, wh %d", pg.Calls(), wh.Calls())

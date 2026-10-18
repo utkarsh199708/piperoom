@@ -660,6 +660,9 @@ func (s *Service) ensureAgentLocked(roomID string, st *roomState) {
 type staleProposal struct {
 	p    Proposal
 	next int
+	// writeBlocked: the row is store.ProposalStatusBlocked, approved while
+	// write mode was off; it never ran.
+	writeBlocked bool
 }
 
 // staleProposals finds the stale proposals of a room just loaded, from its
@@ -677,10 +680,13 @@ func (s *Service) staleProposals(ctx context.Context, roomID string, snap RoomSn
 		// says executed/failed/rejected while the snapshot still shows the
 		// proposal open. Skip those — do not re-mark a finished proposal failed
 		// (review item 6).
-		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil && row.Status != "open" {
-			continue
+		blocked := false
+		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil {
+			if blocked = row.Status == store.ProposalStatusBlocked; !blocked && row.Status != "open" {
+				continue
+			}
 		}
-		out = append(out, staleProposal{p: p, next: s.interruptedStep(ctx, roomID, p)})
+		out = append(out, staleProposal{p: p, next: s.interruptedStep(ctx, roomID, p), writeBlocked: blocked})
 	}
 	return out
 }
@@ -702,12 +708,16 @@ func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID stri
 		if !ok || !fullyApproved(p) {
 			continue
 		}
+		output := "proposal was interrupted by a service restart before it finished; create a new proposal to retry"
+		if sp.writeBlocked {
+			output = writeOffNotRunOutput
+		}
 		if _, err := s.emitLocked(ctx, st, roomID, events.ActionExecuted, executorActor, events.ActionExecutedPayload{
 			ProposalID: p.ProposalID,
 			StepIndex:  sp.next,
 			OK:         false,
 			ParamsHash: p.ParamsHash,
-			Output:     "proposal was interrupted by a service restart before it finished; create a new proposal to retry",
+			Output:     output,
 		}); err != nil {
 			s.log.Warn("room: emit interruption failed", "proposal", p.ProposalID, "err", err)
 		}

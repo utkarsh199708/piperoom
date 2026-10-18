@@ -26,7 +26,8 @@ func writeModeSetup(cfg config.Config, demoMode bool, log *slog.Logger) (bool, e
 	case on:
 		log.Info("server: write mode on: fully approved fixes run")
 	default:
-		log.Warn("server: write mode off: fixes will be approved but not executed; set PIPEROOM_WRITE_MODE=on to run them")
+		log.Warn("server: write mode off: fixes will be approved but not executed; set PIPEROOM_WRITE_MODE=on to run them",
+			"replicas", "every replica that shares the room database must run the same PIPEROOM_WRITE_MODE")
 	}
 	return on, nil
 }

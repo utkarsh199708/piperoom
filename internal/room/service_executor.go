@@ -91,11 +91,12 @@ func (q *execQueue) busy() bool {
 // waits behind a long one in this room's queue is then a live claim this
 // replica refreshes, never "approved and unclaimed". A claim another executor
 // already holds queues nothing. With write mode off nothing is queued or
-// claimed: the proposal stays open and fully approved (BlockedWriteModeOff).
-// Caller holds st's lock.
+// claimed: the proposal stays open and fully approved (BlockedWriteModeOff),
+// and its row is marked store.ProposalStatusBlocked. Caller holds st's lock.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 	if s.writeOff {
 		s.log.Info("room: proposal fully approved; not run: write mode is off", "room", p.RoomID, "proposal", p.ProposalID)
+		s.markWriteBlocked(p.ProposalID)
 		return
 	}
 	// The worker's place in wg is reserved before the claim, so a closing
@@ -182,6 +183,23 @@ func (s *Service) abandonQueued(roomID string, q *execQueue) {
 		q.done()
 	}
 }
+
+// markWriteBlocked marks the row of a proposal fully approved with write mode
+// off, so a later run with write mode on can tell it from one whose server
+// stopped before it started (writeOffNotRunOutput). Best effort: a row left
+// "open" is still kept out of the off-mode sweep by its window, and reads as
+// never claimed later.
+func (s *Service) markWriteBlocked(proposalID string) {
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	if err := s.store.SetProposalStatus(rctx, proposalID, store.ProposalStatusBlocked); err != nil {
+		s.log.Warn("room: mark proposal blocked by write mode failed", "proposal", proposalID, "err", err)
+	}
+}
+
+// writeOffNotRunOutput is the failed outcome recorded, once write mode is
+// on, for a proposal that was fully approved while it was off.
+const writeOffNotRunOutput = "approved while write mode was off, so it was not run; create a new proposal to run it"
 
 // errWriteModeOff is executeProposal's refusal with write mode off.
 var errWriteModeOff = errors.New("write mode is off (PIPEROOM_WRITE_MODE): approved proposals do not run")
