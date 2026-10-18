@@ -94,7 +94,9 @@ func TestIntegrationResetGroupToStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cl.Close()
+	// t.Cleanup, not defer: the cleanup below still uses adm after the test body
+	// returns, and cleanups run last-registered first.
+	t.Cleanup(cl.Close)
 	adm := kadm.NewClient(cl)
 	t.Cleanup(func() {
 		cctx, ccancel := context.WithTimeout(context.Background(), 20*time.Second)
