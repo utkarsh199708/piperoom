@@ -48,9 +48,11 @@ See `AGENTS.md` for the full architecture diagram, team roles, and file ownershi
 ## Quickstart (5 minutes)
 
 Read-only: Piperoom investigates and proposes fixes, but nothing executes. You need Go 1.27
-(plus Node 24 for the UI) or Docker, and a reachable Kafka Connect, Kafka, Schema Registry,
-source Postgres and warehouse (the server will not start if one is down), with the read-only
-roles of `docs/pilot/permissions.md`. Point the standard variables at them (`CONNECT_URL`,
+(plus Node 24 for the UI) or Docker, and your Kafka Connect, Kafka, Schema Registry, source
+Postgres and warehouse, with the read-only roles of `docs/pilot/permissions.md`. `discover`
+reads Connect, Kafka and the Registry. The server pings the source Postgres and the warehouse
+at start and will not start if either is down; it connects to Connect, Kafka and the Registry
+only when a tool first uses them. Point the standard variables at them (`CONNECT_URL`,
 `KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`); unset, they
 default to the local dev stack below. Set `ANTHROPIC_API_KEY` for the agent.
 
