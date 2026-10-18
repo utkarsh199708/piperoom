@@ -57,8 +57,10 @@ var ErrNoWriter = errors.New("postgres: no write credentials (SOURCE_DB_WRITE_UR
 
 // ErrAlreadyPublished is returned (wrapped) by AddPublicationTables when a
 // table is already in the publication, or the publication is FOR ALL TABLES.
-// Nothing is changed then, not even for the other tables of the call.
-var ErrAlreadyPublished = errors.New("postgres: table is already in the publication")
+// Nothing is changed then, not even for the other tables of the call. It is
+// the contract's sentinel, so callers holding a clients.SourceWriter match it
+// with errors.Is(err, clients.ErrAlreadyPublished).
+var ErrAlreadyPublished = clients.ErrAlreadyPublished
 
 // errReadOnlyRole refuses a write URL whose sessions start read-only: that is
 // the read-only role of docs/pilot/permissions.md, never the writer's.
