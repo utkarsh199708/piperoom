@@ -629,7 +629,8 @@ export interface AgentStats {
 
 export interface TopologyNode {
   id: string
-  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table'
+  /** 'dag', 'task' and 'model' are a batch pipeline's nodes (P4), drawn dag → task → model → sink_table. */
+  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table' | 'dag' | 'task' | 'model'
   name: string
   layer: string
   owner: string
@@ -650,6 +651,8 @@ export interface Topology {
   pipeline_id: string
   nodes: TopologyNode[]
   edges: TopologyEdge[]
+  /** P4: a reader the pipeline's kind needs is missing or not supported, so some nodes are left out. Absent when false. */
+  partial?: boolean
 }
 
 export interface Me {
