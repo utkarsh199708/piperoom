@@ -26,7 +26,10 @@ import (
 
 var (
 	// dagIDRE is Airflow's dag_id alphabet (letters, digits, '_', '.', '-'). It
-	// has no '/', so an id can never change the path of a REST call.
+	// has no '/', '?' or '#', so an id cannot add a path segment or a query to
+	// a REST call. It does admit "." and "..", which a server may read as dot
+	// segments; validateBatch refuses an id of only dots, and the Airflow
+	// client's netsec.CheckPath refuses a dot segment in every request path.
 	dagIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	// modelNameRE is a dbt model name: letters, digits and '_' only.
 	modelNameRE = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
@@ -128,6 +131,13 @@ func (p *Pipeline) validateBatch() error {
 	dags, err := cleanNames("dags", p.DAGs, dagIDRE, "a DAG id (letters, digits, '_', '.' and '-')")
 	if err != nil {
 		return err
+	}
+	for _, d := range dags {
+		// "." and ".." (and "...") match the alphabet but are a path segment
+		// to a server that removes dot segments.
+		if strings.Trim(d, ".") == "" {
+			return fmt.Errorf("dags: %q is not a DAG id (an id of only dots is a path segment, not a name)", d)
+		}
 	}
 	models, err := cleanNames("models", p.Models, modelNameRE, "a model name (letters, digits and '_')")
 	if err != nil {

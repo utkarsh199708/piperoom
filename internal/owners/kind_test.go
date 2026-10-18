@@ -218,6 +218,12 @@ func TestBatchNameRules(t *testing.T) {
 	}{
 		// DAG ids: letters, digits, '_', '.', '-'.
 		{name: "dag with dot dash underscore", extra: "    dags: [a.b-c_1, Revenue.Daily]\n"},
+		{name: "dag one dot", extra: "    dags: [\".\"]\n", wantErr: `pipeline "daily-revenue": dags: "." is not a DAG id`},
+		{name: "dag two dots", extra: "    dags: [\"..\"]\n", wantErr: `dags: ".." is not a DAG id`},
+		{name: "dag three dots", extra: "    dags: [d1, \"...\"]\n", wantErr: `dags: "..." is not a DAG id`},
+		{name: "dag dots after trim", extra: "    dags: [\" .. \"]\n", wantErr: `dags: ".." is not a DAG id`},
+		{name: "dag dotted id", extra: "    dags: [revenue.daily, a..b, .hidden, trailing.]\n"},
+		{name: "dag dashes and dots only", extra: "    dags: [\"-.\"]\n"},
 		{name: "dag slash", extra: "    dags: [\"a/b\"]\n", wantErr: `dags: "a/b" is not a DAG id`},
 		{name: "dag dot dot slash", extra: "    dags: [\"../x\"]\n", wantErr: `dags: "../x" is not a DAG id`},
 		{name: "dag space inside", extra: "    dags: [\"a b\"]\n", wantErr: `dags: "a b" is not a DAG id`},
