@@ -72,6 +72,11 @@ func installOwners(path string, data []byte, force bool, clean func(string) stri
 // no hard links, an exclusive create does the same job.
 func place(tmp, path string, data []byte, force bool) error {
 	if force {
+		// The rename would replace the link itself, not the file it points
+		// to, which is not what -force promises either: refuse.
+		if err := refuseSymlink(path); err != nil {
+			return err
+		}
 		if err := os.Rename(tmp, path); err != nil {
 			return fmt.Errorf("discover: replace %s: %w", path, err)
 		}
@@ -85,6 +90,22 @@ func place(tmp, path string, data []byte, force bool) error {
 		return fmt.Errorf("discover: %s already exists (use -force to overwrite): %w", path, fs.ErrExist)
 	}
 	return err
+}
+
+// refuseSymlink fails when path is a symbolic link. -force replaces a file;
+// doing that through a link would overwrite, or swap out, a file the operator
+// did not name. A missing path is fine.
+func refuseSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("discover: %s: %w", path, err)
+	case fi.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("discover: %s is a symbolic link; -force does not replace through links (remove it, or name the file it points to)", path)
+	}
+	return nil
 }
 
 // draftHeader is the comment block on top of a .draft file. Each line of the

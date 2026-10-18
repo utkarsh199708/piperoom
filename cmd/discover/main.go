@@ -98,8 +98,8 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 	writeOwners := fl.String("write-owners", "", "owners file to write that loads as it is: every layer owned by -owner, checked with owners.Load\n"+
 		"(if the check fails the file is written as FILE.draft with the error on top, and the exit code is 1)")
 	owner := fl.String("owner", defaultOwner(r.osUser, os.Getenv), "user id that owns every layer in the -write-owners file")
-	users := fl.String("users", "", "also write a one-user users.yaml for -owner (needs -write-owners)")
-	force := fl.Bool("force", false, "overwrite -out, -write-owners and -users if they already exist")
+	users := fl.String("users", "", "also write a one-user users.yaml for -owner, only if the -write-owners file passes owners.Load")
+	force := fl.Bool("force", false, "overwrite -out, -write-owners and -users if they already exist (never through a symbolic link)")
 	sourceDB := fl.Bool("source-db", false, "also read replication slots from the source Postgres (SOURCE_DB_URL)")
 	timeout := fl.Duration("timeout", defaultTimeout, "limit for the whole run")
 	fl.Usage = func() {
@@ -149,15 +149,20 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 			return exitError
 		}
 	}
-	if !*force {
-		for _, p := range []string{*out, *writeOwners, *users} {
-			if p == "" || p == "-" {
-				continue
-			}
-			if _, err := os.Lstat(p); err == nil {
-				fmt.Fprintf(stderr, "discover: %s already exists (use -force to overwrite)\n", p)
+	for _, p := range []string{*out, *writeOwners, *users} {
+		if p == "" || p == "-" {
+			continue
+		}
+		if *force {
+			// -force replaces a file; through a symbolic link that would
+			// overwrite whatever the link points to.
+			if err := refuseSymlink(p); err != nil {
+				fmt.Fprintln(stderr, err.Error())
 				return exitError
 			}
+		} else if _, err := os.Lstat(p); err == nil {
+			fmt.Fprintf(stderr, "discover: %s already exists (use -force to overwrite)\n", p)
+			return exitError
 		}
 	}
 
@@ -233,6 +238,7 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 
 	code := exitOK
 	var failure []string // lines for stderr after the summary
+	var notes []string   // lines under the summary table
 	if *writeOwners != "" {
 		if len(res.Pipelines) == 0 {
 			// An owners file without pipelines loads but does nothing; stop
@@ -265,7 +271,12 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 			log.Info("owners file written", "path", oc.path, "owner", *owner)
 		}
 	}
-	if *users != "" {
+	switch {
+	case *users != "" && code != exitOK:
+		// The two files are a pair: a users file next to an owners draft that
+		// the server cannot load would only suggest the pair is ready.
+		notes = append(notes, fmt.Sprintf("users file %s was not written: it is written only with an owners file that passes owners.Load", red.line(*users)))
+	case *users != "":
 		if c := writeOne(stderr, *users, usersBuf.Bytes(), *force); c != exitOK {
 			return c
 		}
@@ -280,7 +291,7 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 		if toStdout {
 			table = stderr
 		}
-		printTable(table, res, written, red)
+		printTable(table, res, written, red, notes...)
 	}
 	for _, l := range failure {
 		fmt.Fprintln(stderr, l)
@@ -324,6 +335,16 @@ func checkFiles(out, writeOwners, users string, ownerSet bool) string {
 		}
 		seen[clean] = f.flag
 	}
+	// A failed owners file is written to <write-owners>.draft; another output
+	// on that name would be overwritten by it, or refuse it.
+	if writeOwners != "" {
+		draft := filepath.Clean(writeOwners + ".draft")
+		for _, f := range []struct{ flag, path string }{{"-out", out}, {"-users", users}} {
+			if f.path != "" && f.path != "-" && filepath.Clean(f.path) == draft {
+				return fmt.Sprintf("%s names %s, the file -write-owners falls back to when the owners file fails owners.Load", f.flag, f.path)
+			}
+		}
+	}
 	return ""
 }
 
@@ -333,6 +354,10 @@ func checkFiles(out, writeOwners, users string, ownerSet bool) string {
 func writeFile(path string, data []byte, force bool) error {
 	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	if force {
+		// O_TRUNC follows a symbolic link; O_EXCL (above) never does.
+		if err := refuseSymlink(path); err != nil {
+			return err
+		}
 		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
 	}
 	f, err := os.OpenFile(path, flags, 0o644)

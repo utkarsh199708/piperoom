@@ -177,8 +177,8 @@ func TestDraftOnValidationError(t *testing.T) {
 				t.Fatalf("exit = %d, want %d; stderr:\n%s", code, exitError, stderr)
 			}
 			draftPath := ownersPath + ".draft"
-			if got := names(t, dir); !slices.Equal(got, []string{"owners.yaml.draft", "users.yaml"}) {
-				t.Fatalf("directory = %v, want the .draft and the users file only", got)
+			if got := names(t, dir); !slices.Equal(got, []string{"owners.yaml.draft"}) {
+				t.Fatalf("directory = %v, want the .draft only", got)
 			}
 			// The message names the .draft and the reason.
 			for _, want := range []string{"owners.Load", draftPath, tt.want} {
@@ -214,9 +214,13 @@ func TestDraftOnValidationError(t *testing.T) {
 			if !strings.Contains(stdout, draftPath) {
 				t.Errorf("table does not name the .draft:\n%s", stdout)
 			}
-			// The users file is still written: it matches the draft's layers.
-			if _, err := room.LoadUsers(usersPath); err != nil {
-				t.Errorf("users file: %v", err)
+			// The users file is written only with an owners file that loads,
+			// and the summary says so.
+			if _, err := os.Stat(usersPath); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("users file written next to a draft (stat err %v)", err)
+			}
+			if !strings.Contains(stdout, "NOTE: users file "+usersPath+" was not written") {
+				t.Errorf("summary does not say the users file was skipped:\n%s", stdout)
 			}
 		})
 	}
@@ -410,6 +414,8 @@ func TestFlagRules(t *testing.T) {
 		{"write-owners to stdout", []string{"-write-owners", "-"}, "need a file path"},
 		{"users to stdout", []string{"-write-owners", p("o"), "-users", "-"}, "need a file path"},
 		{"same file twice", []string{"-write-owners", p("o"), "-users", p("o")}, "name the same file"},
+		{"out is the draft fallback", []string{"-out", p("o") + ".draft", "-write-owners", p("o")}, "falls back to"},
+		{"users is the draft fallback", []string{"-write-owners", p("o"), "-users", p("o") + ".draft"}, "falls back to"},
 		{"same file, different spelling", []string{"-out", p("o"), "-write-owners", dir + string(filepath.Separator) + "." + string(filepath.Separator) + "o"}, "name the same file"},
 		{"owner with a space", []string{"-write-owners", p("o"), "-owner", "a b"}, "whitespace"},
 		{"owner with a colon", []string{"-write-owners", p("o"), "-owner", "user:a"}, "colon"},
@@ -586,4 +592,93 @@ func TestPrintTableHidesAddresses(t *testing.T) {
 	var buf bytes.Buffer
 	printTable(&buf, res, []string{"o.yaml"}, newRedactor(config.Load()))
 	assertNoSecrets(t, buf.String())
+}
+
+func TestUsersFileWrittenOnlyOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	ownersPath, usersPath := filepath.Join(dir, "owners.yaml"), filepath.Join(dir, "users.yaml")
+	code, stdout, stderr := runT(t, resultRunner(goodResult()), "-write-owners", ownersPath, "-users", usersPath, "-owner", "alice")
+	if code != exitOK {
+		t.Fatalf("exit = %d; stderr:\n%s", code, stderr)
+	}
+	if strings.Contains(stdout, "NOTE:") {
+		t.Errorf("a good run should not skip the users file:\n%s", stdout)
+	}
+	if got := names(t, dir); !slices.Equal(got, []string{"owners.yaml", "users.yaml"}) {
+		t.Errorf("directory = %v", got)
+	}
+}
+
+// symlinkTo makes link point at target, or skips the test where the platform
+// does not let this user create symbolic links.
+func symlinkTo(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("cannot create a symbolic link here: %v", err)
+	}
+}
+
+func TestForceDoesNotFollowASymlink(t *testing.T) {
+	// Each output is a link to a file that must survive -force untouched. The
+	// last case is the .draft: the owners file fails owners.Load, so the run
+	// writes through the link at <write-owners>.draft.
+	bad := goodResult()
+	bad.Pipelines[1].ID = bad.Pipelines[0].ID
+	tests := []struct {
+		name string
+		res  discover.Result
+		link string // which output is the link
+	}{
+		{"out", goodResult(), "draft.yaml"},
+		{"owners", goodResult(), "owners.yaml"},
+		{"users", goodResult(), "users.yaml"},
+		{"draft", bad, "owners.yaml.draft"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			target := filepath.Join(dir, "real.txt")
+			const keep = "must survive\n"
+			if err := os.WriteFile(target, []byte(keep), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(dir, tt.link)
+			symlinkTo(t, target, link)
+			built := false
+			r := resultRunner(tt.res)
+			r.build = func(context.Context, config.Config, bool) (discover.Deps, func(), error) {
+				built = true
+				return discover.Deps{}, func() {}, nil
+			}
+			args := []string{"-force", "-out", filepath.Join(dir, "draft.yaml"),
+				"-write-owners", filepath.Join(dir, "owners.yaml"), "-users", filepath.Join(dir, "users.yaml"), "-owner", "alice"}
+			code, _, stderr := runT(t, r, args...)
+			if code != exitError || !strings.Contains(stderr, "symbolic link") {
+				t.Fatalf("exit = %d; stderr:\n%s", code, stderr)
+			}
+			assertFile(t, target, keep)
+			if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("%s is no longer a link: %v, %v", tt.link, fi, err)
+			}
+			// Links at the three named outputs are caught before the cluster is read.
+			if tt.name != "draft" && built {
+				t.Error("cluster was read although an output is a symbolic link")
+			}
+		})
+	}
+}
+
+func TestForceStillReplacesARegularFile(t *testing.T) {
+	// The link check must not get in the way of an ordinary -force.
+	dir := t.TempDir()
+	ownersPath := filepath.Join(dir, "owners.yaml")
+	if err := os.WriteFile(ownersPath, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, stderr := runT(t, resultRunner(goodResult()), "-force", "-write-owners", ownersPath, "-owner", "alice"); code != exitOK {
+		t.Fatalf("exit = %d; stderr:\n%s", code, stderr)
+	}
+	if _, err := owners.Load(ownersPath); err != nil {
+		t.Errorf("owners.Load: %v", err)
+	}
 }

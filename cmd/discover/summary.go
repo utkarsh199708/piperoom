@@ -21,8 +21,8 @@ const (
 // written. A sink table is "found" only when a sink connector names it
 // literally; otherwise the cell says MISSING. Text from the cluster goes
 // through the redactor, which also removes the tabs and newlines that would
-// break the columns.
-func printTable(w io.Writer, res discover.Result, files []string, red redactor) {
+// break the columns. notes are extra lines printed under the table.
+func printTable(w io.Writer, res discover.Result, files []string, red redactor, notes ...string) {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "PIPELINE\tCONNECTORS\tTOPICS\tSOURCE TABLES\tSINK TABLES\tFILES")
 	for _, p := range res.Pipelines {
@@ -40,6 +40,9 @@ func printTable(w io.Writer, res discover.Result, files []string, red redactor) 
 	if len(res.Pipelines) > 0 {
 		// Every pipeline in the file has "sink_tables: []", found or not.
 		fmt.Fprintln(w, "TODO: fill in sink_tables (schema.table) and sink_ts_column in the owners file to turn on warehouse checks; MISSING means no sink connector config names the table.")
+	}
+	for _, n := range notes {
+		fmt.Fprintln(w, "NOTE: "+n)
 	}
 }
 
