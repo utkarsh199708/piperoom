@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
+	"piperoom/internal/tools"
 )
 
 // stepTimeout bounds each action execution (rule 4).
@@ -84,7 +85,17 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	}
 	// The actions of the room's own pipeline (docs/design/tenancy.md): their
 	// Validate reads that pipeline's systems only.
-	acts := s.actionsFor(s.roomPipeline(ctx, roomID))
+	pipelineID := s.roomPipeline(ctx, roomID)
+	acts := s.actionsFor(pipelineID)
+	// Validate runs under the room's pipeline scope, as the executor and the
+	// preview do, so an action reads that pipeline's whole config.
+	// The same scoping as pipelineCtx of P3-0 (#599), which replaces it.
+	vctx := tools.WithPipelineID(ctx, pipelineID)
+	if s.owners != nil {
+		if pl, ok := s.owners.Pipeline(pipelineID); ok {
+			vctx = tools.WithPipeline(ctx, pl)
+		}
+	}
 	// Structural checks first: they do not need the room state.
 	for i, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
@@ -97,7 +108,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		if !isKnownLayer(step.Layer) {
 			return "", validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
 		}
-		if err := a.Validate(ctx, step.Params); err != nil {
+		if err := a.Validate(vctx, step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 		// Exact, case-sensitive keys only: the decoder would fold case and the
@@ -150,6 +161,8 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 	}
 	p.RequiredLayers = required
+	// Fixed at creation like the required layers; never set by the caller.
+	p.FallbackLayers = s.fallbackLayersFor(st.snap.PipelineID, required)
 
 	p.ProposalID = NewID("p_")
 	stepsJSON, err := json.Marshal(p.Steps)
@@ -244,7 +257,7 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		// The solo confirm text is checked after the hash (below), so a stale
 		// solo user is told params_mismatch first.
-		grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, confirm, false)
+		grant, err := s.authorizeProposalLayer(st, p, user, layer, confirm, false)
 		if err != nil {
 			return err
 		}
@@ -285,13 +298,15 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 // so the store's one-decision-per-layer rule refuses a second one
 // (409 already_decided), then approval.given, removing the row again when the
 // event cannot be appended. detail is authorizeLayer's principal detail
-// ("user:priya", "backup:user:meera", "solo"): it is identity.grant, and
+// ("user:priya", "backup:user:meera", "solo", "fallback"): it is identity.grant, and
 // approvalGrant(detail) is the event's grant (P0 item 4). A backup's approval
 // also gets the room's backup note. ApproveProposalConfirm and
 // ApproveAllProposal both record through here, so an approval is the same
 // record, log line and metric whichever route gave it. The caller has checked
 // that the proposal is open, the layer pending and the params hash; it holds
-// st's lock and queues the executor once allApproved.
+// st's lock and queues the executor once allApproved. A fallback approval is
+// appended only while checkFallbackLocked still holds (emitCheckedLocked), so
+// a driver change logged after the caller's check refuses it.
 func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p store.ProposalRow, user User, layer, detail string) (events.Event, error) {
 	ident := s.identityFor(user, detail)
 	grant := approvalGrant(detail)
@@ -302,9 +317,18 @@ func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p sto
 		// Named, so a failure part-way through approve-all says which layer.
 		return events.Event{}, fmt.Errorf("room: record approval of %s: %w", layer, err)
 	}
-	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
+	payload := events.ApprovalGivenPayload{
 		ProposalID: p.ProposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident, Grant: grant,
-	})
+	}
+	var ev events.Event
+	var err error
+	if grant == events.GrantFallback {
+		ev, err = s.emitCheckedLocked(ctx, st, p.RoomID, func() error {
+			return s.checkFallbackLocked(st, p.ProposalID, user, layer)
+		}, events.ApprovalGiven, s.humanActor(user), payload)
+	} else {
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), payload)
+	}
 	if err != nil {
 		dctx, cancel := compensateCtx(ctx)
 		defer cancel()
@@ -323,12 +347,15 @@ func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p sto
 }
 
 // approvalGrant maps authorizeLayer's principal detail to approval.given's
-// grant: the solo user's detail is "solo", every other detail is an owner
+// grant: the solo user's detail is "solo", the driver's on an unowned layer
+// is "fallback" (authorizeProposalLayer), every other detail is an owner
 // right (owners.yaml principal or backup, or the users.yaml layers list).
-// P2b-3 adds GrantFallback for the driver's "fallback" detail.
 func approvalGrant(detail string) string {
-	if detail == events.GrantSolo {
+	switch detail {
+	case events.GrantSolo:
 		return events.GrantSolo
+	case events.GrantFallback:
+		return events.GrantFallback
 	}
 	return events.GrantOwner
 }

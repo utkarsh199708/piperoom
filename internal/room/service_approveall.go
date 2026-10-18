@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"piperoom/internal/events"
+	"piperoom/internal/store"
 )
 
 // ApproveAllProposal is POST /api/proposals/{pid}/approve-all (P0 item 4,
@@ -56,7 +57,7 @@ func (s *Service) ApproveAllProposal(ctx context.Context, user User, proposalID,
 	if !s.roomOpen(st) {
 		return nil, roomClosed("room is closed")
 	}
-	details, err := s.authorizeAllLayers(st.snap.PipelineID, user, p.RequiredLayers)
+	details, err := s.authorizeAllLayers(st, p, user)
 	if err != nil {
 		return nil, err
 	}
@@ -93,22 +94,23 @@ func (s *Service) ApproveAllProposal(ctx context.Context, user User, proposalID,
 	return out, nil
 }
 
-// authorizeAllLayers runs authorizeLayer for every layer, in order, and
-// returns each layer's principal detail (identity.grant), or the refusal for
-// the first layer the user may not approve, naming it. Its owners.yaml part
+// authorizeAllLayers runs authorizeProposalLayer for every required layer of
+// the proposal, in order, and returns each layer's principal detail
+// (identity.grant; "fallback" for the driver on a fallback_layers entry), or
+// the refusal for the first layer the user may not approve, naming it. Its owners.yaml part
 // is CanApprove per layer, the answer owners.OwnsAll gives; like a single
 // approve it also honours the solo user and, in dev mode, the users.yaml
 // layers, so the two routes never disagree about a layer. No layers is a
 // refusal too (fail closed, as OwnsAll): "every layer of nothing" must not
 // read as allowed.
-func (s *Service) authorizeAllLayers(pipelineID string, user User, layers []string) ([]string, error) {
+func (s *Service) authorizeAllLayers(st *roomState, p store.ProposalRow, user User) ([]string, error) {
+	layers := p.RequiredLayers
 	if len(layers) == 0 {
 		return nil, notLayerOwner("this proposal names no required layer, so approve-all has nothing it may approve")
 	}
 	details := make([]string, len(layers))
 	for i, layer := range layers {
-		// P2b-3: a layer in the proposal's fallback_layers is allowed here for the room's current driver (detail "fallback").
-		d, err := s.authorizeLayer(pipelineID, user, layer, "", false)
+		d, err := s.authorizeProposalLayer(st, p, user, layer, "", false)
 		if err != nil {
 			var re *Error
 			if errors.As(err, &re) && re.Code == codeNotLayerOwner {
