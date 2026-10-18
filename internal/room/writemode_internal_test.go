@@ -167,8 +167,9 @@ func TestSharedStoreWriteOffProposalRecordedOnceWriteOn(t *testing.T) {
 	if p := got[pid]; p.OK || p.OutcomeUnknown || p.Output != writeOffNotRunOutput {
 		t.Fatalf("approved-while-off outcome = %+v, want failed with %q", p, writeOffNotRunOutput)
 	}
-	if p := got["p_crash"]; p.OK || p.Output == writeOffNotRunOutput {
-		t.Fatalf("never-claimed outcome = %+v, want the stopped-server message", p)
+	const stopped = "the proposal was approved, but the server that should have run it stopped before it started; create a new proposal to retry"
+	if p := got["p_crash"]; p.OK || p.OutcomeUnknown || p.Output != stopped {
+		t.Fatalf("never-claimed outcome = %+v, want failed with %q", p, stopped)
 	}
 	act.mu.Lock()
 	defer act.mu.Unlock()

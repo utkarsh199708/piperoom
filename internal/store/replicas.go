@@ -125,9 +125,10 @@ type StaleProposal struct {
 
 // ProposalStatusBlocked is the status of a proposal fully approved while
 // write mode was off (PIPEROOM_WRITE_MODE): never claimed, never run. Once
-// its unclaimed window passes the stale rule lists it like an approved,
+// its unclaimed window passes, the stale rule lists it like an approved,
 // unclaimed open proposal, flagged WriteBlocked, so a replica with write mode
-// on records why it did not run instead of running it.
+// on records why it did not run instead of running it. Only while its room is
+// open: a closed room's blocked row stays blocked.
 const ProposalStatusBlocked = "blocked"
 
 var _ Coordinator = (*PG)(nil)
@@ -369,10 +370,14 @@ func (s *PG) TouchProposalClaim(ctx context.Context, proposalID, owner string) (
 // InterruptProposal. $a is the claim staleness, $b the unclaimed staleness,
 // both in milliseconds; p is the proposals row. 'blocked' is
 // ProposalStatusBlocked: such a row is never claimed, so only the unclaimed
-// branch can list it.
+// branch can list it, and only while its room is open. In a closed room
+// "blocked" is the accurate last word, and no action.executed should land
+// after the room's post-mortem.
 const staleProposalSQL = `(
     (p.status = 'open' AND p.claimed_by IS NOT NULL AND p.claimed_at < now() - %[1]s * interval '1 millisecond')
- OR (p.status IN ('open', 'blocked') AND p.claimed_by IS NULL
+ OR ((p.status = 'open'
+      OR (p.status = 'blocked' AND EXISTS (SELECT 1 FROM rooms rm WHERE rm.id = p.room_id AND rm.status = 'open')))
+     AND p.claimed_by IS NULL
      AND jsonb_array_length(p.required_layers) > 0
      AND NOT EXISTS (
          SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
