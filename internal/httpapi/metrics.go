@@ -59,6 +59,9 @@ type gauges struct {
 	agents    func() (inUse, queued int) // agent slots in use, rooms queued for one
 	openRooms func() int                 // open rooms in the room cache
 	approvals func() map[string]uint64   // approval.given appended here, by grant (a counter)
+	// soleMembers is how many control.granted{reason: "sole_member"} this
+	// replica appended (a counter, P2b).
+	soleMembers func() uint64
 }
 
 func newMetrics(start time.Time, g gauges) *metrics {
@@ -189,6 +192,11 @@ func (m *metrics) write(w io.Writer, now time.Time) {
 		for _, g := range grants {
 			fmt.Fprintf(w, "piperoom_approvals_total{grant=%s} %d\n", quoteLabel(g), byGrant[g])
 		}
+	}
+	if m.g.soleMembers != nil {
+		fmt.Fprintln(w, "# HELP piperoom_sole_member_grants_total Driverless alert rooms whose first member this replica made the driver.")
+		fmt.Fprintln(w, "# TYPE piperoom_sole_member_grants_total counter")
+		fmt.Fprintf(w, "piperoom_sole_member_grants_total %d\n", m.g.soleMembers())
 	}
 	fmt.Fprintln(w, "# HELP piperoom_goroutines Goroutines in this process.")
 	fmt.Fprintln(w, "# TYPE piperoom_goroutines gauge")

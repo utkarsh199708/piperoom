@@ -219,6 +219,14 @@ type RoomSnapshot struct {
 	// It is in flight while set and before its expires_at (docs/api.md,
 	// Hand-off requests). Unexported, like the shadow facts.
 	handoffReq handoffRequest
+
+	// alertRoom is true for a room an alert opened (room.created carries an
+	// alert_source or an alert). controlRequested is true once a
+	// control.requested was logged while the room had no driver. Together
+	// with Driver and Shadow they decide the sole-member grant (P2b,
+	// service_solemember.go). Unexported: not part of the snapshot JSON.
+	alertRoom        bool
+	controlRequested bool
 }
 
 // PostmortemState mirrors the snapshot's postmortem member (docs/api.md).
@@ -405,6 +413,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Severity = p.Severity
 		snap.PipelineID = p.PipelineID
 		snap.Shadow = p.Shadow
+		snap.alertRoom = p.AlertSource != "" || len(p.Alert) > 0
 		snap.Status = "open"
 		snap.OpenedAt = e.At
 
@@ -578,6 +587,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	case events.HandoffFailed:
 		if p, ok := decode[events.HandoffFailedPayload](e); ok && p.RequestID == snap.handoffReq.id {
 			snap.handoffReq = handoffRequest{}
+		}
+
+	case events.ControlRequested:
+		if snap.Driver == nil {
+			snap.controlRequested = true
 		}
 
 	case events.ControlGranted:

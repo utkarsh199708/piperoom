@@ -92,7 +92,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	s.normalizeAuth()
 	s.gw.Identify = wsIdentify
 	s.gw.SessionAlive = s.sessionAlive
-	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentSlotStats, openRooms: svc.OpenRooms, approvals: svc.ApprovalsByGrant})
+	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentSlotStats, openRooms: svc.OpenRooms, approvals: svc.ApprovalsByGrant,
+		soleMembers: svc.SoleMemberGrants})
 
 	r := chi.NewRouter()
 	// Outside Recoverer, so a handler that panics is counted with the 500

@@ -405,6 +405,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// that gap: a logout after this point finds the client itself.
 	g.recheckNewClient(ctx, c, ident)
 
+	// The first member to join a driverless alert room becomes its driver
+	// (P2b, sole member). The grant is an ordinary event after lastSeq, so
+	// the subscription below delivers it to this client and every other.
+	// A failure leaves the room as it was; the join goes on.
+	if _, _, err := g.svc.JoinRoom(ctx, user, roomID); err != nil {
+		g.log.Warn("ws: sole-member grant failed", "room", roomID, "user", user.ID, "err", err)
+	}
+
 	ch, err := g.store.Subscribe(ctx, roomID, lastSeq)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
