@@ -80,6 +80,7 @@ const (
 	CallHTTP     = "http"     // a Kafka Connect REST request
 	CallKafka    = "kafka"    // a kadm/kgo admin or fetch request
 	CallRegistry = "registry" // a Schema Registry REST request
+	CallFile     = "file"     // a local file read, e.g. dbt artifacts from DBT_ARTIFACTS_DIR
 )
 
 // Call is one read a tool made against a customer system: the receipt behind

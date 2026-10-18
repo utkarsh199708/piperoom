@@ -643,9 +643,11 @@ const (
 )
 
 // ProposalScheduledPayload: the auto-approve policy (Policy, always
-// PolicyAutoApprove in this wave) runs the proposal at RunAt; until
-// CancelUntil (equal to RunAt in this wave) the driver or any required-layer
-// owner may cancel it. Times are UTC. (P2)
+// PolicyAutoApprove in this wave) runs the proposal at RunAt. The driver or
+// any required-layer owner may cancel it until the policy starts (its first
+// approval is logged); CancelUntil (equal to RunAt in this wave) is the
+// advertised deadline, and a cancel after it still wins if it lands first.
+// Times are UTC. (P2)
 type ProposalScheduledPayload struct {
 	ProposalID  string    `json:"proposal_id"`
 	RunAt       time.Time `json:"run_at"`
