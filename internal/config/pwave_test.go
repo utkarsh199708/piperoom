@@ -68,9 +68,12 @@ func TestParseAutoApproveDelay(t *testing.T) {
 		{"0", 0, false},
 		{"2s", 2 * time.Second, false},
 		{"5m", 5 * time.Minute, false},
+		{"1h", time.Hour, false},
 		{"0s", 0, true}, // "0" is the one way to say off
 		{"-5s", 0, true},
 		{"soon", 0, true},
+		{"61m", 0, true},
+		{"24h", 0, true},
 	}
 	for _, tt := range tests {
 		got, err := ParseAutoApproveDelay(Config{AutoApproveDelay: tt.in})
@@ -81,22 +84,32 @@ func TestParseAutoApproveDelay(t *testing.T) {
 			t.Errorf("ParseAutoApproveDelay(%q) error does not name the var: %v", tt.in, err)
 		}
 	}
+	// A zero duration points at the one spelling of off.
+	if _, err := ParseAutoApproveDelay(Config{AutoApproveDelay: "0s"}); err == nil || !strings.Contains(err.Error(), `use "0" to turn the policy off`) {
+		t.Errorf(`ParseAutoApproveDelay("0s") error = %v; want it to say use "0" to turn the policy off`, err)
+	}
+	if _, err := ParseAutoApproveDelay(Config{AutoApproveDelay: "2h"}); err == nil || !strings.Contains(err.Error(), "at most 1h0m0s") {
+		t.Errorf(`ParseAutoApproveDelay("2h") error = %v; want the 1h bound`, err)
+	}
 }
 
 func TestParseAirflow(t *testing.T) {
+	const pw, tok = "s3cr3t-pw", "s3cr3t-tok" // must never appear in an error
 	tests := []struct {
 		name    string
 		c       Config
 		wantErr string
 	}{
 		{"off", Config{}, ""},
-		{"basic auth", Config{AirflowURL: "https://airflow.example:8080", AirflowUsername: "ro", AirflowPassword: "pw"}, ""},
-		{"token", Config{AirflowURL: "http://airflow:8080", AirflowToken: "tok"}, ""},
-		{"no login", Config{AirflowURL: "http://airflow:8080"}, ""},
-		{"login without url", Config{AirflowToken: "tok"}, "AIRFLOW_URL is empty"},
-		{"user without password", Config{AirflowURL: "http://airflow:8080", AirflowUsername: "ro"}, "go together"},
-		{"both logins", Config{AirflowURL: "http://airflow:8080", AirflowUsername: "ro", AirflowPassword: "pw", AirflowToken: "tok"}, "not both"},
-		{"user info in url", Config{AirflowURL: "http://ro:pw@airflow:8080"}, "user info"},
+		{"basic auth", Config{AirflowURL: "https://airflow.example:8080", AirflowUsername: "ro", AirflowPassword: pw}, ""},
+		{"token", Config{AirflowURL: "https://airflow.example:8080", AirflowToken: tok}, ""},
+		{"no login over http", Config{AirflowURL: "http://airflow:8080"}, ""},
+		{"token over http", Config{AirflowURL: "http://airflow:8080", AirflowToken: tok}, "AIRFLOW_TOKEN with an http:// AIRFLOW_URL sends the token in clear text"},
+		{"basic auth over http", Config{AirflowURL: "HTTP://airflow:8080", AirflowUsername: "ro", AirflowPassword: pw}, "AIRFLOW_USERNAME/AIRFLOW_PASSWORD with an http:// AIRFLOW_URL sends the password in clear text"},
+		{"login without url", Config{AirflowToken: tok}, "AIRFLOW_URL is empty"},
+		{"user without password", Config{AirflowURL: "https://airflow:8080", AirflowUsername: "ro"}, "go together"},
+		{"both logins", Config{AirflowURL: "https://airflow:8080", AirflowUsername: "ro", AirflowPassword: pw, AirflowToken: tok}, "not both"},
+		{"user info in url", Config{AirflowURL: "https://ro:" + pw + "@airflow:8080"}, "user info"},
 		{"not http", Config{AirflowURL: "ftp://airflow"}, "AIRFLOW_URL"},
 		{"no host", Config{AirflowURL: "http://"}, "AIRFLOW_URL"},
 	}
@@ -113,7 +126,7 @@ func TestParseAirflow(t *testing.T) {
 			continue
 		}
 		// A secret never reaches the error text.
-		if strings.Contains(err.Error(), "pw") || strings.Contains(err.Error(), "tok") {
+		if strings.Contains(err.Error(), pw) || strings.Contains(err.Error(), tok) {
 			t.Errorf("%s: error quotes a secret: %v", tt.name, err)
 		}
 	}
@@ -134,6 +147,7 @@ func TestParseDBT(t *testing.T) {
 		{"cloud missing job", Config{DBTCloudURL: "https://cloud.getdbt.com", DBTCloudToken: "tok", DBTCloudAccount: "12"}, "together"},
 		{"cloud bad account", Config{DBTCloudURL: "https://cloud.getdbt.com", DBTCloudToken: "tok", DBTCloudAccount: "acme", DBTCloudJobID: "345"}, "DBT_CLOUD_ACCOUNT_ID"},
 		{"cloud bad url", Config{DBTCloudURL: "cloud.getdbt.com", DBTCloudToken: "tok", DBTCloudAccount: "12", DBTCloudJobID: "345"}, "DBT_CLOUD_URL"},
+		{"cloud over http", Config{DBTCloudURL: "http://dbt.internal:8080", DBTCloudToken: "tok", DBTCloudAccount: "12", DBTCloudJobID: "345"}, "DBT_CLOUD_TOKEN with an http:// DBT_CLOUD_URL sends the token in clear text; use an https:// URL"},
 	}
 	for _, tt := range tests {
 		_, err := ParseDBT(tt.c)
