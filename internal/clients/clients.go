@@ -657,7 +657,7 @@ type Lineage struct {
 // Cloud in P4d). An unknown model is ErrNotFound.
 type TransformReader interface {
 	RunResults(ctx context.Context) (RunResults, error)              // latest run_results.json
-	ModelLineage(ctx context.Context, model string) (Lineage, error) // parents and children from manifest.json
+	ModelLineage(ctx context.Context, model string) (Lineage, error) // parents and children from manifest.json; model is a name as owners.yaml lists it, or a dbt unique_id
 }
 
 // ---- Pipeline change log (Piperoom's own table, fed by the watcher, F8) ----

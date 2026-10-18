@@ -179,7 +179,7 @@ type SourceWriter interface {
 var ErrSlotActive = errors.New("clients: replication slot is active")
 ```
 `config.go`: `SourceDBWriteURL string // SOURCE_DB_WRITE_URL` (secret; empty = no `SourceWriter`, and the pg actions
-refuse at `Validate` with "no write credentials"). Scope, for `SourceWriter` and `KafkaWriter` alike: every write
+refuse at `Execute` with "no write credentials": with write mode off wiring builds no writer, and the agent must still propose, so `Validate` cannot refuse it; #606 ruling). Scope, for `SourceWriter` and `KafkaWriter` alike: every write
 method requires the room's pipeline scope in `ctx` (`tools.WithPipeline`) and refuses a target outside it before any
 I/O (`tools.ErrOutOfScope`); without a scope it refuses with `tools.ErrNoScope` unless the caller opted out with
 `tools.WithUnscoped` (tests, CLI); read helpers on the same type are scoped by the action's `CheckScope`
