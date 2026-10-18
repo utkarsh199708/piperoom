@@ -30,6 +30,8 @@ vet:
 	go vet -tags integration $(call go_pkgs,-tags integration)
 	go vet -tags claude ./internal/agent/... ./evals/...
 	go vet -tags $(TAGGED_ONLY) $(call go_pkgs,-tags $(TAGGED_ONLY))
+	go vet -tags bigquery_integration ./internal/clients/bigquery/
+	@if [ -d internal/clients/databricks ]; then go vet -tags databricks_integration ./internal/clients/databricks/; fi
 
 build:
 	go build $(GO_PKGS)
