@@ -117,7 +117,10 @@ func judgePrompt(sc Scenario, hypothesis string) string {
 		b.WriteString("Description (the truth, including the root cause):\n" + d + "\n")
 	}
 	if l := sc.Expect.FirstFailingLayer; l != "" {
-		b.WriteString("First failing layer: " + l + " (one of " + strings.Join(events.Layers, ", ") + ")\n")
+		// The CDC layers, not events.Layers: every scenario is a CDC one until
+		// scenarios carry a kind (P4h), and the recorded verdicts are keyed on
+		// this exact prompt text.
+		b.WriteString("First failing layer: " + l + " (one of " + strings.Join(events.LayersOf(events.PipelineKindCDC), ", ") + ")\n")
 	}
 	if l := sc.Expect.RootCauseLayer; l != "" {
 		b.WriteString("Root-cause layer: " + l + "\n")

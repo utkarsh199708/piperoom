@@ -126,7 +126,7 @@ func TestRenderOwnedLoads(t *testing.T) {
 		t.Fatalf("owners.Load: %v\n%s", err, out)
 	}
 	want := owners.Principal{Kind: owners.KindUser, Name: "alice"}
-	for _, layer := range events.Layers {
+	for _, layer := range cdcLayers() {
 		if !o.Layers[layer].Contains(want) || len(o.Layers[layer]) != 1 {
 			t.Errorf("layer %s = %v, want only user:alice", layer, o.Layers[layer])
 		}
@@ -145,6 +145,48 @@ func TestRenderOwnedLoads(t *testing.T) {
 	}
 	if strings.Contains(string(out), "sink table not found") {
 		t.Errorf("a found table was also reported missing:\n%s", out)
+	}
+}
+
+// TestOwnersAndUsersFilesNameTheSameLayers pins the P0 merge bug: when
+// events.Layers grew to eight entries, the two renderers built their lists
+// separately, the users file listed eight layers and the owners file six, and
+// room.ValidateUsers refused the pair. Both files must name exactly the CDC
+// layers, in the same order.
+func TestOwnersAndUsersFilesNameTheSameLayers(t *testing.T) {
+	want := events.LayersOf(events.PipelineKindCDC)
+	if !slices.Equal(cdcLayers(), want) {
+		t.Fatalf("cdcLayers() = %v, want %v", cdcLayers(), want)
+	}
+	var ownersDoc struct {
+		Layers yaml.Node `yaml:"layers"`
+	}
+	if err := yaml.Unmarshal(renderOwned(t, run(t, happyDeps(), Options{}), "alice"), &ownersDoc); err != nil {
+		t.Fatal(err)
+	}
+	var ownersLayers []string
+	for i := 0; i+1 < len(ownersDoc.Layers.Content); i += 2 {
+		ownersLayers = append(ownersLayers, ownersDoc.Layers.Content[i].Value)
+	}
+	var ub bytes.Buffer
+	if err := RenderUsers(&ub, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	var usersDoc struct {
+		Users []struct {
+			Layers []string `yaml:"layers"`
+		} `yaml:"users"`
+	}
+	if err := yaml.Unmarshal(ub.Bytes(), &usersDoc); err != nil || len(usersDoc.Users) != 1 {
+		t.Fatalf("users file: %v, %+v", err, usersDoc)
+	}
+	if !slices.Equal(ownersLayers, want) || !slices.Equal(usersDoc.Users[0].Layers, want) {
+		t.Errorf("owners file layers %v, users file layers %v, want both %v", ownersLayers, usersDoc.Users[0].Layers, want)
+	}
+	for _, batchOnly := range []string{"orchestrator", "transform"} {
+		if slices.Contains(ownersLayers, batchOnly) || slices.Contains(usersDoc.Users[0].Layers, batchOnly) {
+			t.Errorf("batch-only layer %s is in a CDC file", batchOnly)
+		}
 	}
 }
 
@@ -234,7 +276,7 @@ func TestOwnerRulesMatchTheServer(t *testing.T) {
 			if !ok || u.Name != id {
 				t.Fatalf("user %q = %+v, %v", id, u, ok)
 			}
-			for _, layer := range events.Layers {
+			for _, layer := range cdcLayers() {
 				if !u.OwnsLayer(layer) {
 					t.Errorf("%s does not own %s", id, layer)
 				}
@@ -250,7 +292,7 @@ func TestOwnerRulesMatchTheServer(t *testing.T) {
 			}
 			// A real loader must agree that the id is unusable.
 			_, perr := owners.ParsePrincipal("user:" + id)
-			data, err := yaml.Marshal(map[string]any{"users": []map[string]any{{"id": id, "name": id, "layers": events.Layers}}})
+			data, err := yaml.Marshal(map[string]any{"users": []map[string]any{{"id": id, "name": id, "layers": cdcLayers()}}})
 			if err != nil {
 				t.Fatal(err)
 			}

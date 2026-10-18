@@ -13,7 +13,6 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/discover"
-	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
 )
@@ -88,7 +87,7 @@ func TestWriteOwnersDevStack(t *testing.T) {
 		t.Errorf("sink_tables = %v, want empty: the column is not discoverable", p.SinkTables)
 	}
 	want := owners.Principal{Kind: owners.KindUser, Name: "it_discover"}
-	for _, layer := range events.Layers {
+	for _, layer := range cdcLayers() {
 		if !own.Layers[layer].Contains(want) {
 			t.Errorf("layer %s = %v, want user:it_discover", layer, own.Layers[layer])
 		}

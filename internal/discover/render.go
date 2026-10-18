@@ -67,6 +67,13 @@ func ValidateOwner(id string) error {
 // id that starts with it. A test compares the two.
 const derivedIDPrefix = "u_"
 
+// cdcLayers is the layer list of both generated files. Discovery finds CDC
+// pipelines only, so the owners file and the users file name the CDC layers,
+// not every known layer (events.Layers also holds the batch ones). One helper
+// feeds both files because room.ValidateUsers refuses a pair whose lists
+// differ, and the server then does not start.
+func cdcLayers() []string { return events.LayersOf(events.PipelineKindCDC) }
+
 // RenderUsers writes the one-user users.yaml that goes with RenderOwned: the
 // owner lists every layer, because the server checks that users.yaml and
 // owners.yaml agree in both directions.
@@ -77,7 +84,7 @@ func RenderUsers(w io.Writer, owner string) error {
 	user := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
 		str("id"), str(owner),
 		str("name"), str(owner),
-		str("layers"), flowList(events.Layers),
+		str("layers"), flowList(cdcLayers()),
 	}}
 	users := &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{user}}
 	root := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{str("users"), users}}
@@ -97,7 +104,7 @@ func renderDoc(w io.Writer, r Result, owner string) error {
 	}
 
 	layers := &yaml.Node{Kind: yaml.MappingNode}
-	for _, l := range events.Layers {
+	for _, l := range cdcLayers() {
 		who := "TODO"
 		if owned {
 			who = "user:" + owner

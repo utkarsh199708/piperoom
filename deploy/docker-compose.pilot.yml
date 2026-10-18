@@ -86,6 +86,10 @@ services:
       PIPEROOM_SOLO_USER: ${PIPEROOM_SOLO_USER:-}
       OWNERS_FILE: /config/owners.yaml
       USERS_FILE: /config/users.yaml
+      # Write mode (on | off). The server's default is off; this file defaults
+      # to on so a deploy/.env from before the setting keeps running approved
+      # fixes. Set PIPEROOM_WRITE_MODE=off in deploy/.env for a read-only pilot.
+      PIPEROOM_WRITE_MODE: ${PIPEROOM_WRITE_MODE:-on}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
       SOURCE_DB_URL: ${SOURCE_DB_URL:-}

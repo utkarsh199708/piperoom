@@ -20,6 +20,10 @@ import (
 	"piperoom/internal/room"
 )
 
+// cdcLayers are the layers both generated files must name: discovery finds CDC
+// pipelines only, and events.Layers also holds the batch-only ones.
+func cdcLayers() []string { return events.LayersOf(events.PipelineKindCDC) }
+
 // goodResult is two pipelines that pass owners.Load: one with a found sink
 // table, one without.
 func goodResult() discover.Result {
@@ -77,7 +81,7 @@ func TestWriteOwnersLoadsWithTheRealLoaders(t *testing.T) {
 		t.Errorf("pipelines = %+v", own.Pipelines)
 	}
 	alice := owners.Principal{Kind: owners.KindUser, Name: "alice"}
-	for _, layer := range events.Layers {
+	for _, layer := range cdcLayers() {
 		if ps := own.Layers[layer]; len(ps) != 1 || !ps.Contains(alice) {
 			t.Errorf("layer %s = %v, want user:alice", layer, ps)
 		}
