@@ -195,7 +195,8 @@ New folders of the wave (owned from the first PR that creates them):
 
 Merge order (plan §4): **P0 → P1 and P2 in parallel → P3 → P4.** Inside a task, the task file's "Dependencies and
 merge order" section rules; inside P1 and P2 the `a` sub-task (the server or owners change) lands before the rest.
-A task split between agents is one PR per agent and per sub-task.
+A task split between agents is one PR per agent and per sub-task. `tasks/P-board.md` splits every sub-task into
+PR-sized rows with the model, the days and the rows it waits on; the PR tag is the board row's ID (`[P2b-1]`).
 
 ### Contract files (read them, code against them, never edit them)
 

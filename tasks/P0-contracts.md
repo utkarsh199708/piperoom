@@ -68,6 +68,9 @@ field of the other kind.
 - `POST /api/rooms/{id}/proposals` `{title, risk, rollback, steps: [{action, layer, params}]}`: driver only;
   the same validation, scope check, `params_hash` and preview as an agent proposal; `400 validation` names the
   step. The agent gets a `HumanInput` kind `proposal_created` (item 6) so it can verify after execution.
+- `GET /api/actions` (does not exist today): `[{name, layer, describe, params_schema, preview: bool}]` of the
+  registry the agent proposes from, for any logged-in member; `params_schema` is the action's `ParamsSchema()`.
+  Never includes client state or credentials. The web form of P3d is generated from it.
 
 ### 6. Agent contract (P2d, P3e) — `internal/agent/contract.go`
 
