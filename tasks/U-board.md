@@ -18,7 +18,7 @@ changed lines, §6 of `AGENTS.md`).
 **Order.** U0, then the design row U1-0 and the U1 rows (the core: runner, catalogue, Compose, Postgres,
 verification); then steps 2 to 13 in coverage-per-day order: MySQL, transforms and sinks, SQL Server, logs,
 embedded, MongoDB, plain hosts, Oracle, tuning, Debezium Server, Strimzi, managed. The design rows U12-0 and U13-0
-start as soon as U0 merges (owner decision 1 in the plan), so pulling Strimzi or the managed services forward costs
+start as soon as U0 merges (decided, plan §7 item 1), so pulling Strimzi or the managed services forward costs
 no rework. An agent with two rows ready takes the lower step first.
 
 **Before the wave.** U0 merges after Q0. U1 codes against Q1a (known issues), Q2a to Q2d (Postgres settings and
@@ -74,7 +74,7 @@ and new events, so every existing fake and the eval replay compile unchanged.
 | U1-19 | C7 | Opus 5.5 | 1 | scenarios: `setup/compose-postgres-clean`, `setup/flat-plugin-dir`, `setup/wal-level-replica`, `setup/missing-grant`, `setup/db-unreachable-from-connect` | each label names the failing check and the fixing op | U1-15 |
 | U1-20 | C6 | Opus 5.5 | 1.5 | evals: runner recordings replay (`evals/setup`), per-target and per-source pass rate in the report | the five U1-19 scenarios score; the CDC pass rate is unchanged | U1-19 |
 | U1-R | A9 (Linux, macOS), A1 (Windows) | Opus 5.5 | 1.5 | real runs: Linux, macOS Docker Desktop, Windows Docker Desktop, each from an empty directory to `pipeline live`; the write-up of the three runs in `reviews/setup-runs-2026-11.md` (leads' folder; A9 posts, the leads commit) | three exports attached; wall clock, steps, approvals and tokens per run in the write-up; every failure the agent could not fix is a row on this board or an issue | U1-10 to U1-16 |
-| U1-21 | A9 | Opus 5.5 | 1 | cmd/piperoom: the umbrella binary (`piperoom server`, `discover`, `investigate`, `setup`), the image's entrypoint | owner decision 2; each subcommand is the existing `main` with its flags; `piperoom setup` is `piperoom-setup`; the pilot image still works with the old entrypoint | U1-11 |
+| U1-21 | A9 | Opus 5.5 | 1 | cmd/piperoom: the umbrella binary (`piperoom server`, `discover`, `investigate`, `setup`), the image's entrypoint | the optional row of plan §7 item 2; each subcommand is the existing `main` with its flags; `piperoom setup` is `piperoom-setup`; the pilot image still works with the old entrypoint | U1-11 |
 
 ## Step 2: MySQL prerequisites
 
@@ -103,7 +103,7 @@ and new events, so every existing fake and the eval replay compile unchanged.
 | U4b | A10 | Opus 5.5 | 1.5 | setup/sources/sqlserver: the driver, canary table, connector config | each check names its fix op and floor; Agent stopped is a check whose fix is T2 (`service_restart` on a host target) or a documented ask on managed SQL | U4a, U1-9 |
 | U4c | A1 | Opus 5.5 | 1 | dev: compose profile `mssql` (`mcr.microsoft.com/mssql/server`, CDC off by default), `setup-break` `agent-stopped`, `cdc-not-enabled-table` | profile healthy in < 3 min; each break fails at the named check | U4a |
 | U4d | C7 + C6 | Opus 5.5 | 1 | scenarios: `setup/compose-sqlserver-clean` and the two U4c breaks; eval replay | the three score | U4c |
-| U4-R | A10 | Opus 5.5 | 1 | real runs: SQL Server 2022 on Compose, Linux; Azure SQL as a manual check (sandbox, owner decision 6) | exports in the write-up; the Azure run marked manual with its date | U4b, U1-R |
+| U4-R | A10 | Opus 5.5 | 1 | real runs: SQL Server 2022 on Compose, Linux; Azure SQL as a manual check (the sandbox of plan §7 item 6) | exports in the write-up; the Azure run marked manual with its date | U4b, U1-R |
 
 ## Step 5: container and worker logs in the loop
 
@@ -185,7 +185,7 @@ and new events, so every existing fake and the eval replay compile unchanged.
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| U13-0 | leads | Opus 5.5 | 1.5 | design: `docs/design/setup-managed.md` (the three clients' auth: SigV4 over the shared AWS config, Confluent Cloud API keys, Aiven tokens; which operations each exposes; the recorded-fakes harness; the sandbox accounts of owner decision 6) | the page answers each; item 7's managed part lands in code with it | U0 |
+| U13-0 | leads | Opus 5.5 | 1.5 | design: `docs/design/setup-managed.md` (the three clients' auth: SigV4 over the shared AWS config, Confluent Cloud API keys, Aiven tokens; which operations each exposes; the recorded-fakes harness; the sandbox accounts of plan §7 item 6) | the page answers each; item 7's managed part lands in code with it | U0 |
 | U13a | C21 | Opus 5.5 | 1 | setup/targets/managed: the recorded-fakes harness (`httptest` cassettes, secrets scrubbed at record time, a `//go:build manual` re-record) | a cassette with a credential-looking string fails the test that loads it | U13-0 |
 | U13b | C21 | Opus 5.5 | 2.5 | clients/mskconnect + ops: `msk_describe_cluster`, `msk_list_plugins`, `msk_describe_connector`, the IAM, VPC and security group reads (T0); `msk_create_plugin` (from an S3 object the person uploaded), `msk_create_worker_config`, `msk_create_connector`, `msk_delete_connector` (T2; T3 on production) | the AWS SDK calls confirmed with `go doc`; the cassettes cover 400, 403, 404, 409, throttling; the manual check on the sandbox account dated in the PR | U13a |
 | U13c | C21 | Opus 5.5 | 2 | clients/confluentcloud + ops: plugins, connector status, cluster (T0); `ccloud_create_connector` (validate then create), `ccloud_acl_create` (T2) | basic auth over https only (`netsec`); cassettes; manual check dated | U13a |
@@ -198,7 +198,7 @@ and new events, so every existing fake and the eval replay compile unchanged.
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| U14 | leads | Opus 5.5 | 1 | `reviews/setup-runs-2026-11.md`: the first ten real setups (wall clock, steps, approvals, tokens, what blocked), the coverage re-count against the label files, the next wave's candidates | the numbers are in the plan's §8 caveats paragraph as a follow-up; owner decisions 4 and 8 revisited with data | U13-R |
+| U14 | leads | Opus 5.5 | 1 | `reviews/setup-runs-2026-11.md`: the first ten real setups (wall clock, steps, approvals, tokens, what blocked), the coverage re-count against the label files, the next wave's candidates | the numbers are in the plan's §8 caveats paragraph as a follow-up; plan §7 items 1, 4 and 8 revisited with data | U13-R |
 
 ## New folders and owners
 

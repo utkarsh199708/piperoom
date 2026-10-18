@@ -390,7 +390,7 @@ MongoDB Go driver, `go-ora`) are new modules, each listed in its PR with why (ru
   unit tests and the runner's capability detection and service ops with fakes; `ubuntu-latest` also runs the Compose
   integration; `macos-latest` runs Compose through Colima when it is available on the runner image and is otherwise
   a documented skip; **Windows Linux-container runs need a self-hosted runner** (GitHub-hosted Windows runners run
-  Windows containers only), the R1 dev machine nightly (owner decision 7).
+  Windows containers only), the owner's dev machine nightly (decided, plan §7 item 7).
 - **Strimzi:** `kind` on `ubuntu-latest` with the Strimzi operator, a one-broker KRaft Kafka and the in-cluster
   runner Job; the ladder to a canary event; 20-minute budget, nightly not per PR.
 - **Managed clouds:** recorded fakes (`httptest` cassettes recorded once against the sandbox accounts, secrets
