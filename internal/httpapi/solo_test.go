@@ -123,14 +123,15 @@ func TestSoloModeApprovalNeedsConfirm(t *testing.T) {
 		t.Fatalf("the grant is not 'solo' in the log:\n%s", logs.String())
 	}
 
-	// /api/me lists every layer for the solo user.
+	// /api/me lists every layer of the kinds owners.yaml uses for the solo
+	// user (P4a-4): one cdc pipeline, so the six CDC layers.
 	resp = doJSON(t, http.MethodGet, srv.URL+"/api/me", "priya", "")
 	var me struct {
 		Layers []string `json:"layers"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&me)
 	resp.Body.Close()
-	if !slices.Equal(me.Layers, events.Layers) {
-		t.Fatalf("solo layers = %v, want all of %v (every kind's)", me.Layers, events.Layers)
+	if want := events.LayersOf(events.PipelineKindCDC); !slices.Equal(me.Layers, want) {
+		t.Fatalf("solo layers = %v, want all of %v (the cdc kind's)", me.Layers, want)
 	}
 }
