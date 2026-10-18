@@ -38,7 +38,7 @@ The big-team ceremony is unchanged when several people own the layers.
    unowned `consumer` layer for the demo.
 2. **P2b (A5): the room service.**
    - **Sole-member driver.** `CreateRoomFromAlert` leaves `Driver` empty as today; on the first WebSocket join
-     (or first steer/comment/approve) of a room with no driver and no `control.requested` pending, the service
+     (join only; a driverless steer stays a suggestion; #624 ruling) of a room with no driver and no `control.requested` pending, the service
      grants control to that member with `control.granted{reason: "sole_member"}` (P0 item 4). A second member
      joining does not change it. Shadow rooms excepted. A viewer (`isViewer`) never becomes driver.
    - **Unowned layer fallback.** In `createProposal`, a required layer with `!owners.IsOwned` is recorded in

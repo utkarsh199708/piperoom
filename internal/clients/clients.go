@@ -333,6 +333,32 @@ type OffsetMove struct {
 	End       int64  `json:"end"`       // the high watermark at planning time; End-Target is the lag the reset leaves
 }
 
+// SnapshotSignaler sends one Debezium incremental-snapshot signal to the
+// connector's Kafka signal topic (signal.kafka.topic). It builds the record
+// itself, so it can only ever request an execute-snapshot of tables: key = the
+// connector's topic.prefix, value {"type":"execute-snapshot","data":
+// {"data-collections":[..],"type":"INCREMENTAL"}}, partition 0 of a
+// single-partition topic. It is a write method: it requires the room's
+// pipeline scope in ctx (connector in connectors, every table in
+// source_tables, key equal to topic_prefix) and refuses before any I/O
+// otherwise, as KafkaWriter does. Implemented by the Kafka write client
+// (internal/clients/kafka, #620); optional, asserted by connect_snapshot_table,
+// so fakes and the eval replay need not implement it. KafkaWriter.Produce is not
+// used for signals: its scope allows CDC topics only. The Kafka client's own
+// type becomes an alias of SnapshotSignal (A2 follow-up), as with OffsetMove.
+type SnapshotSignaler interface {
+	SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (SnapshotSignal, error)
+}
+
+// SnapshotSignal is the record SendSnapshotSignal produced. ID is the signal id
+// Debezium logs for it (the record offset).
+type SnapshotSignal struct {
+	ID        string `json:"id"`
+	Topic     string `json:"topic"`
+	Partition int32  `json:"partition"`
+	Offset    int64  `json:"offset"`
+}
+
 // RecordReader reads whole records for dlq_replay (P3a): at most limit
 // records of one partition of topic from offset from, in offset order (fewer
 // when the partition ends first or 32 MiB were read). It changes nothing, so
@@ -657,7 +683,7 @@ type Lineage struct {
 // Cloud in P4d). An unknown model is ErrNotFound.
 type TransformReader interface {
 	RunResults(ctx context.Context) (RunResults, error)              // latest run_results.json
-	ModelLineage(ctx context.Context, model string) (Lineage, error) // parents and children from manifest.json; model is a name as owners.yaml lists it, or a dbt unique_id
+	ModelLineage(ctx context.Context, model string) (Lineage, error) // parents and children from manifest.json; model is a name as owners.yaml lists it, or a dbt unique_id; a short name that matches several nodes is an error (dbt.ErrAmbiguous), and the caller retries with the unique_id
 }
 
 // ---- Pipeline change log (Piperoom's own table, fed by the watcher, F8) ----
