@@ -185,11 +185,20 @@ func (b *builder) buildBatch(ctx context.Context, p owners.Pipeline) Graph {
 	var cadence time.Duration
 	for _, d := range p.DAGs {
 		snap, ok := info.dags[d]
-		if !ok || errors.Is(snap.err, clients.ErrNotSupported) {
+		// owners.yaml checks the alphabet, not the length: an id the
+		// orchestrator could not hold is not drawn either.
+		if !ok || errors.Is(snap.err, clients.ErrNotSupported) || !airflowIDRE.MatchString(d) {
 			g.Partial = true
 			continue
 		}
 		dn := b.dagNode(d, snap, info.now)
+		taskNodes, skipped := b.taskNodes(d, snap.tasks)
+		if skipped > 0 {
+			if dn.Facts == nil {
+				dn.Facts = map[string]string{}
+			}
+			dn.Facts["tasks_skipped"] = strconv.Itoa(skipped)
+		}
 		g.Nodes = append(g.Nodes, dn)
 		dagIDs = append(dagIDs, dn.ID)
 		if c, ok := runCadence(snap.runs); ok && c > cadence {
@@ -198,7 +207,7 @@ func (b *builder) buildBatch(ctx context.Context, p owners.Pipeline) Graph {
 		if errors.Is(snap.tasksErr, clients.ErrNotSupported) {
 			g.Partial = true
 		}
-		for _, tn := range b.taskNodes(d, snap.tasks) {
+		for _, tn := range taskNodes {
 			g.Nodes = append(g.Nodes, tn)
 			g.Edges = append(g.Edges, Edge{From: dn.ID, To: tn.ID})
 			tasks = append(tasks, taskRef{id: tn.ID, taskID: strings.TrimPrefix(tn.Name, d+".")})
@@ -377,7 +386,11 @@ func (b *builder) dagNode(dagID string, s dagSnapshot, now time.Time) Node {
 // taskNodes draws one node per task of the latest run, in the order they
 // started (never-started last). The instances of a mapped task share a node
 // that shows its worst instance.
-func (b *builder) taskNodes(dagID string, tis []clients.TaskInstance) []Node {
+//
+// A task whose id is not an Airflow id (airflowIDRE) is not drawn: the id is
+// server text that becomes a node id and name in the lane and the model's
+// map. skipped counts those instances.
+func (b *builder) taskNodes(dagID string, tis []clients.TaskInstance) (out []Node, skipped int) {
 	type agg struct {
 		rep    clients.TaskInstance
 		health Health
@@ -388,8 +401,9 @@ func (b *builder) taskNodes(dagID string, tis []clients.TaskInstance) []Node {
 	byID := map[string]*agg{}
 	var order []string
 	for _, ti := range tis {
-		if ti.TaskID == "" {
-			continue // nothing to name the node by
+		if !airflowIDRE.MatchString(ti.TaskID) {
+			skipped++
+			continue
 		}
 		h := taskHealth(ti.State)
 		a, ok := byID[ti.TaskID]
@@ -419,7 +433,7 @@ func (b *builder) taskNodes(dagID string, tis []clients.TaskInstance) []Node {
 		}
 		return strings.Compare(x, y)
 	})
-	out := make([]Node, 0, len(order))
+	out = make([]Node, 0, len(order))
 	for _, id := range order {
 		a := byID[id]
 		facts := map[string]string{"state": factWord(a.rep.State)}
@@ -442,7 +456,7 @@ func (b *builder) taskNodes(dagID string, tis []clients.TaskInstance) []Node {
 			Facts:  facts,
 		})
 	}
-	return out
+	return out, skipped
 }
 
 // modelNodes draws the pipeline's models, parents before children (ties in
@@ -650,6 +664,10 @@ func worse(a, b Health) Health {
 	}
 	return a
 }
+
+// airflowIDRE is Airflow's own dag_id and task_id rule (KEY_REGEX, at most
+// 250 characters), ASCII only: Go's \w is ASCII.
+var airflowIDRE = regexp.MustCompile(`^[\w.-]{1,250}$`)
 
 // factWordRE is a state, run type or operator class as the batch systems
 // write them.
