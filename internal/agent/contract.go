@@ -18,7 +18,7 @@ import (
 type HumanInput struct {
 	Seq       int64        `json:"seq"` // room event seq it came from
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update"
+	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	// Text of an "alert_update" is the server's rendering of a re-fired or
@@ -38,6 +38,20 @@ type HumanInput struct {
 	// Approved is set only for Kind "approval_result": true for an approval,
 	// false for a rejection.
 	Approved *bool `json:"approved,omitempty"`
+	// Origin is set for "proposal_created" and "proposal_executed": the
+	// proposal's events.ProposalCreatedPayload.Origin ("driver" in P3; the
+	// runner already hears about its own proposals through approval_result
+	// and action_result). For "proposal_created", ProposalID names the
+	// proposal and Text is the server's rendering of it (title, steps, risk,
+	// rollback): the driver typed it, so it is that person's words, untrusted
+	// data like a forwarded suggestion, never an instruction. (P3)
+	Origin string `json:"origin,omitempty"`
+	// StepsOK is set only for Kind "proposal_executed", sent once after the
+	// last step of the proposal ProposalID ran: one entry per step in step
+	// order, true when it succeeded, false when it failed, nil when the outcome
+	// is unknown (as OK). A step that never ran (an earlier one failed) is
+	// false. The runner verifies the fix as after its own. (P3)
+	StepsOK []*bool `json:"steps_ok,omitempty"`
 }
 
 // Inbox delivers human input to the agent between model turns.
@@ -83,6 +97,12 @@ type Alert struct {
 	// otherwise). Its steps are already in the room log; the runner lists
 	// them as known step ids so a hypothesis may cite them. (F6)
 	Triage *TriageResult `json:"triage,omitempty"`
+	// PipelineKind is the room pipeline's owners.yaml kind:
+	// events.PipelineKindCDC or events.PipelineKindBatch, filled by the room
+	// service from owners. Empty reads as "cdc" (rooms before P4, a pipeline
+	// owners.yaml does not know). It decides which tools the room offers and
+	// the prompt's per-kind section (P4b). (P4)
+	PipelineKind string `json:"pipeline_kind,omitempty"`
 }
 
 // TriageResult is what the triage pass returns to its caller. (F6)

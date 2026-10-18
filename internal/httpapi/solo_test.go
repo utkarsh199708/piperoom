@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -129,7 +130,7 @@ func TestSoloModeApprovalNeedsConfirm(t *testing.T) {
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&me)
 	resp.Body.Close()
-	if len(me.Layers) != 6 {
-		t.Fatalf("solo layers = %v, want all six", me.Layers)
+	if !slices.Equal(me.Layers, events.Layers) {
+		t.Fatalf("solo layers = %v, want all of %v (every kind's)", me.Layers, events.Layers)
 	}
 }
