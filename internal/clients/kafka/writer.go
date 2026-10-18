@@ -59,8 +59,9 @@ type Writer struct {
 }
 
 var (
-	_ clients.KafkaWriter  = (*Writer)(nil)
-	_ clients.RecordReader = (*Writer)(nil)
+	_ clients.KafkaWriter       = (*Writer)(nil)
+	_ clients.RecordReader      = (*Writer)(nil)
+	_ clients.GroupResetPlanner = (*Writer)(nil)
 )
 
 const (
@@ -171,17 +172,11 @@ type CommittedOffset struct {
 	Offset    int64  `json:"offset"`
 }
 
-// OffsetMove is one partition of a planned group offset reset.
-type OffsetMove struct {
-	Topic     string `json:"topic"`
-	Partition int32  `json:"partition"`
-	// Committed is the group's committed offset now, -1 when the partition
-	// has none (the reset then adds one).
-	Committed int64 `json:"committed"`
-	Target    int64 `json:"target"`
-	// End is the high watermark: End-Target is the lag the reset leaves.
-	End int64 `json:"end"`
-}
+// OffsetMove is one partition of a planned group offset reset: Committed is
+// the group's committed offset now (-1 when the partition has none; the reset
+// then adds one), and End-Target is the lag the reset leaves. An alias, so
+// the Writer satisfies clients.GroupResetPlanner (P0 item 7).
+type OffsetMove = clients.OffsetMove
 
 // CheckGroupInactive returns nil when group has no active member and an
 // error wrapping clients.ErrGroupActive when it has one. Only a group that is

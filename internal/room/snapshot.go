@@ -107,6 +107,10 @@ type Proposal struct {
 	// sends it back with approve and reject. "" only for a proposal that
 	// predates the hash and cannot be hashed.
 	ParamsHash string `json:"params_hash"`
+	// FallbackLayers is proposal.created.fallback_layers: the required
+	// layers nobody owns, which the room's driver approves (grant
+	// "fallback", P2b). [] when every layer has an owner.
+	FallbackLayers []string `json:"fallback_layers"`
 	// Preview is what each step would do, written once by the system after
 	// the proposal exists (proposal.previewed, F4). Informational: it is not
 	// part of ParamsHash. nil until the event arrives.
@@ -373,6 +377,7 @@ func cloneProposals(in []Proposal) []Proposal {
 		out[i] = p
 		out[i].Steps = append([]events.ProposalStep{}, p.Steps...)
 		out[i].RequiredLayers = append([]string{}, p.RequiredLayers...)
+		out[i].FallbackLayers = append([]string{}, p.FallbackLayers...)
 		out[i].Preview = clonePreview(p.Preview)
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
@@ -627,6 +632,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			RequiredLayers: p.RequiredLayers,
 			Approvals:      approvals,
 			ParamsHash:     eventParamsHash(e.RoomID, p),
+			FallbackLayers: append([]string{}, p.FallbackLayers...),
 		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv
