@@ -12,8 +12,10 @@ IDs below say "merged"; a row that lists them under After waits only on its othe
 
 **Merged in round 2 (2026-10-18):** #589 (P1e-1), #590 (P2b-1), #591 (P3b-1), #592 (P3a-2), #588 (P4a-1), plus the
 leads' #594 (contracts follow-up 1: `ErrAlreadyPublished`, `GroupResetPlanner`, the P3-0 and P4a-4 rows) and A5's
-#595 (two flaky `internal/room` tests). Unblocked now: P1a-3, P1e-2, P2b-2, P2b-3, P2c-1, P3-0, P4a-2, P4a-3, P4a-4;
-the P3a-3…P3a-5 and P3b-2, P3b-3 rows wait on P3-0, P4b-1 on P4a-4, P4c-2 on P4a-2.
+#595 (two flaky `internal/room` tests). Unblocked by round 2: P1e-2, P2c-1, P3-0 (new row), P4a-2, P4a-3, P4a-4. Still dispatchable from before (After all
+merged, not merged themselves): P1a-2, P1a-3, P1d-2, P2b-2, P2b-3, P3h, P4d-1, P4e-1, P4e-2, P4g-1. Waiting: P3a-1,
+P3a-3…P3a-5, P3b-2, P3b-3 on P3-0 (P3b-4 on P3-0 and P3a-5); P4b-1 and P4f-2 on P4a-4; P4c-2, P4f-1 and P4d-2 on
+P4a-2 (P4d-2 also on P4d-1); P2b-4 on P2b-3.
 
 ## Step 0
 
