@@ -56,6 +56,9 @@ var ErrInboxClosed = errors.New("agent: inbox closed")
 // runner carries the per-investigation state.
 type runner struct {
 	alert Alert
+	// kind is the room's pipeline kind, normalised (RoomKind): it picks the
+	// system prompt section and the verification of a fix.
+	kind  string
 	deps  Deps
 	opts  Options
 	log   *slog.Logger
@@ -143,13 +146,23 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	if err := checkReadOnly(deps.Tools); err != nil {
 		return nil, err
 	}
-	// The room offers only the tools of its pipeline's kind (P4b): every use
-	// below (tool list, worked examples, triage reads) goes through r.deps.
-	kindTools, err := ToolsForKind(deps.Tools, alert.PipelineKind)
+	// The room offers only the tools and the write actions of its pipeline's
+	// kind (P4b): every use below (tool list, worked examples, triage reads,
+	// propose_fix) goes through r.deps.
+	kind, err := RoomKind(alert.PipelineKind)
+	if err != nil {
+		return nil, err
+	}
+	kindTools, err := ToolsForKind(deps.Tools, kind)
 	if err != nil {
 		return nil, err
 	}
 	deps.Tools = kindTools
+	kindActions, err := ActionsForKind(deps.Actions, kind)
+	if err != nil {
+		return nil, err
+	}
+	deps.Actions = kindActions
 	if deps.Sink == nil {
 		return nil, errors.New("agent: Deps.Sink is nil")
 	}
@@ -167,6 +180,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	steps.setBackground(alertBackground(alert))
 	return &runner{
 		alert:     alert,
+		kind:      kind,
 		deps:      deps,
 		opts:      opts,
 		log:       deps.Logger,
@@ -182,7 +196,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 
 func (r *runner) run(ctx context.Context) error {
 	r.toolList = buildToolList(r.deps.Tools, newRoomToolsWith(r.deps, r.proposals, r.steps))
-	r.system = systemPrompt()
+	r.system = systemPromptFor(r.kind)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 

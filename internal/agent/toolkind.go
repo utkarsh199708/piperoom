@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -128,6 +129,53 @@ func ToolsForKind(reg *tools.Registry, kind string) (*tools.Registry, error) {
 		}
 		if err := out.Register(t); err != nil {
 			return nil, fmt.Errorf("agent: tools for kind %s: %w", k, err)
+		}
+	}
+	return out, nil
+}
+
+// KindedAction is implemented by a write action that serves pipeline kinds
+// other than cdc. PipelineKinds returns the kinds whose rooms may propose it.
+// An action without the method is a CDC action: every action today writes to
+// Postgres, Kafka Connect, Schema Registry or Kafka, so a batch room is
+// offered none of them until an action declares batch. The method is
+// optional so the actions contract (internal/actions/action.go) does not
+// change; an action package implements it without importing this one.
+type KindedAction interface {
+	PipelineKinds() []string
+}
+
+// ActionKinds returns the pipeline kinds whose rooms may propose a: its
+// declared kinds when it implements KindedAction, cdc otherwise. The returned
+// slice is new on every call.
+func ActionKinds(a actions.Action) []string {
+	if k, ok := a.(KindedAction); ok {
+		return slices.Clone(k.PipelineKinds())
+	}
+	return slices.Clone(cdcOnly)
+}
+
+// ActionsForKind returns a new registry with the actions of reg that a room
+// of pipeline kind may propose (ActionKinds), in reg's order, so the
+// propose_fix description stays byte-identical for every room of one kind.
+// CheckScope refuses a step outside the room's pipeline anyway; this keeps the
+// model from being offered fixes it can never use. A nil reg stays nil (no
+// actions wired), and reg itself is not changed.
+func ActionsForKind(reg *actions.Registry, kind string) (*actions.Registry, error) {
+	k, err := RoomKind(kind)
+	if err != nil {
+		return nil, err
+	}
+	if reg == nil {
+		return nil, nil
+	}
+	out := actions.NewRegistry()
+	for _, a := range reg.All() {
+		if !slices.Contains(ActionKinds(a), k) {
+			continue
+		}
+		if err := out.Register(a); err != nil {
+			return nil, fmt.Errorf("agent: actions for kind %s: %w", k, err)
 		}
 	}
 	return out, nil
