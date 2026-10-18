@@ -1,7 +1,8 @@
 // Package kafka implements clients.KafkaAdmin against a Kafka cluster using
 // franz-go (kgo for consuming, kadm for admin reads). Writer (writer.go) is
 // the separate write client of the P3 actions: clients.KafkaWriter and
-// clients.RecordReader.
+// clients.RecordReader. Its two writes fail closed on the room's pipeline
+// scope in ctx (see Writer).
 package kafka
 
 import (

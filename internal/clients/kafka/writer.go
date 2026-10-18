@@ -17,6 +17,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/netsec"
+	"piperoom/internal/tools"
 )
 
 // Writer is the Kafka client of the P3 actions (P0 item 7): consumer group
@@ -25,8 +26,26 @@ import (
 // builder and the watcher hold, and it has no method that writes or returns
 // a record value. A Writer is not a KafkaReader either, so it cannot be
 // handed to them by mistake. Wiring builds one only with PIPEROOM_WRITE_MODE
-// on and gives it to package actions alone. It does not check the room's
-// pipeline scope; the actions do (actions.Scoped) before they call.
+// on and gives it to package actions alone.
+//
+// Pipeline scope (checkWriteScope): the two methods that write,
+// ResetGroupOffsets and Produce, fail closed as tools.ScopeFor does, before
+// any I/O:
+//   - ctx carries the room's whole pipeline (tools.WithPipeline): the group
+//     must be one of its consumer_groups (tools.Scope.CheckGroup, the rule of
+//     the kafka_consumer_lag tool) and the topic one of its topics
+//     (tools.Scope.CheckTopic: exactly "<topic_prefix>.<source_table>", the
+//     rule of the kafka_topic_offsets and kafka_find_by_key tools); a miss
+//     wraps tools.ErrOutOfScope;
+//   - ctx carries the explicit opt-out (tools.WithUnscoped; the CLI and the
+//     integration tests): nothing is checked;
+//   - anything else, no scope at all or only a pipeline id
+//     (tools.WithPipelineID: the Writer has no owners config to resolve it),
+//     wraps tools.ErrNoScope.
+//
+// The other methods (ReadRecords, CheckGroupInactive, PlanGroupReset,
+// PreviousOffsets) change nothing and are not checked here; the action's
+// CheckScope scopes the names it passes them.
 //
 // Every method takes its deadline from ctx, or 10 s when ctx has none.
 type Writer struct {
@@ -112,6 +131,33 @@ func (w *Writer) producer() func(context.Context, *kgo.Record, func(*kgo.Record,
 		return w.produceFn
 	}
 	return w.c.cl.Produce
+}
+
+// checkWriteScope is the fail-closed scope check of the writes (see Writer).
+// check runs only when ctx carries the whole pipeline.
+func checkWriteScope(ctx context.Context, check func(tools.Scope) error) error {
+	if _, ok := tools.PipelineFrom(ctx); !ok {
+		// The opt-out is the only way through without a pipeline. With no
+		// owners config, ScopeFor answers a bare pipeline id with an error of
+		// its own (the id wins over the opt-out); that is no scope here too.
+		sc, err := tools.ScopeFor(ctx, nil)
+		switch {
+		case err == nil && sc.Unscoped():
+			return nil
+		case err == nil || errors.Is(err, tools.ErrNoScope):
+			return fmt.Errorf("kafka: %w: a write needs the room's pipeline in ctx (tools.WithPipeline) or tools.WithUnscoped", tools.ErrNoScope)
+		default:
+			return fmt.Errorf("kafka: %w: ctx names the room's pipeline only by id; a write needs the whole pipeline (tools.WithPipeline)", tools.ErrNoScope)
+		}
+	}
+	sc, err := tools.ScopeFor(ctx, nil) // a whole pipeline needs no owners config
+	if err != nil {
+		return fmt.Errorf("kafka: %w", err)
+	}
+	if err := check(sc); err != nil {
+		return fmt.Errorf("kafka: %w", err)
+	}
+	return nil
 }
 
 // ---- consumer group offsets ----
@@ -390,8 +436,13 @@ func planMoves(committed map[string]map[int32]int64, targets, ends kadm.ListedOf
 // like), which is reported as clients.ErrGroupActive too. When some
 // partitions commit and others fail, moved counts the committed ones and the
 // error names the first failure. The previous offsets are not returned: call
-// PreviousOffsets (or PlanGroupReset) first to keep them.
+// PreviousOffsets (or PlanGroupReset) first to keep them. Before any I/O, a
+// group outside the room's pipeline is refused (tools.ErrOutOfScope), and so
+// is a ctx with no scope (tools.ErrNoScope); see Writer.
 func (w *Writer) ResetGroupOffsets(ctx context.Context, group string, to clients.OffsetTarget) (int, error) {
+	if err := checkWriteScope(ctx, func(sc tools.Scope) error { return sc.CheckGroup(group) }); err != nil {
+		return 0, err
+	}
 	if err := checkTarget(to, time.Now()); err != nil {
 		return 0, fmt.Errorf("kafka: reset group %s: %w", group, err)
 	}
@@ -473,10 +524,15 @@ func commitErr(err error) error {
 // never asks the broker to create one). When ctx ends while a record is in
 // flight and kgo cannot tell within a second whether it was written, the
 // error says its outcome is unknown: it is not counted, and it may still
-// appear in the topic.
+// appear in the topic. Before any I/O, a topic outside the room's pipeline
+// is refused (tools.ErrOutOfScope), and so is a ctx with no scope
+// (tools.ErrNoScope); see Writer.
 func (w *Writer) Produce(ctx context.Context, topic string, recs []clients.Record) (int, error) {
 	if strings.TrimSpace(topic) == "" {
 		return 0, errors.New("kafka: produce: empty topic")
+	}
+	if err := checkWriteScope(ctx, func(sc tools.Scope) error { return sc.CheckTopic(topic) }); err != nil {
+		return 0, err
 	}
 	for i := range recs {
 		if n := len(recs[i].Value); n > maxProduceValueBytes {

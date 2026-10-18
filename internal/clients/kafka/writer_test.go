@@ -14,6 +14,8 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/owners"
+	"piperoom/internal/tools"
 )
 
 // fakeGroups answers the group requests of a reset from fixed values and
@@ -64,6 +66,10 @@ func committedOf(topic string, offs map[int32]int64) kadm.OffsetResponses {
 	}
 	return rs
 }
+
+// unscoped is the explicit scope opt-out the Writer's writes need when no
+// room pipeline is in ctx.
+func unscoped() context.Context { return tools.WithUnscoped(context.Background()) }
 
 func emptyGroup(g string) kadm.DescribedGroups {
 	return kadm.DescribedGroups{g: {Group: g, State: "Empty"}}
@@ -164,7 +170,7 @@ func TestResetGroupOffsetsRefusesActiveGroupAndChangesNothing(t *testing.T) {
 		committed: committedOf("t", map[int32]int64{0: 5}),
 	}
 	l := &fakeLister{starts: merge(listed("t", map[int32]int64{0: 0})), ends: merge(listed("t", map[int32]int64{0: 9}))}
-	moved, err := resetWriter(f, l).ResetGroupOffsets(context.Background(), "g", clients.OffsetTarget{Earliest: true})
+	moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", clients.OffsetTarget{Earliest: true})
 	if !errors.Is(err, clients.ErrGroupActive) || moved != 0 {
 		t.Fatalf("moved=%d err=%v, want 0 and ErrGroupActive", moved, err)
 	}
@@ -176,7 +182,7 @@ func TestResetGroupOffsetsRefusesActiveGroupAndChangesNothing(t *testing.T) {
 func TestResetGroupOffsetsBadTargetSendsNothing(t *testing.T) {
 	f := &fakeGroups{classic: emptyGroup("g")}
 	for _, to := range []clients.OffsetTarget{{}, {Timestamp: time.Now().Add(time.Hour)}} {
-		if _, err := resetWriter(f, &fakeLister{}).ResetGroupOffsets(context.Background(), "g", to); err == nil {
+		if _, err := resetWriter(f, &fakeLister{}).ResetGroupOffsets(unscoped(), "g", to); err == nil {
 			t.Fatalf("target %+v accepted", to)
 		}
 	}
@@ -218,7 +224,7 @@ func TestResetGroupOffsetsEarliestCommitsOnlyMovedPartitions(t *testing.T) {
 		starts: merge(listed("t", map[int32]int64{0: 2, 1: 2})),
 		ends:   merge(listed("t", map[int32]int64{0: 10, 1: 10})),
 	}
-	moved, err := resetWriter(f, l).ResetGroupOffsets(context.Background(), "g", clients.OffsetTarget{Earliest: true})
+	moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", clients.OffsetTarget{Earliest: true})
 	if err != nil || moved != 1 {
 		t.Fatalf("moved=%d err=%v, want 1 nil", moved, err)
 	}
@@ -240,7 +246,7 @@ func TestResetGroupOffsetsToTimestamp(t *testing.T) {
 		after: merge(listed("t", map[int32]int64{0: 7, 1: -1})),
 		ends:  merge(listed("t", map[int32]int64{0: 10, 1: 10})),
 	}
-	moved, err := resetWriter(f, l).ResetGroupOffsets(context.Background(), "g", clients.OffsetTarget{Timestamp: time.Now().Add(-time.Hour)})
+	moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", clients.OffsetTarget{Timestamp: time.Now().Add(-time.Hour)})
 	if err != nil || moved != 2 {
 		t.Fatalf("moved=%d err=%v, want 2 nil", moved, err)
 	}
@@ -259,27 +265,27 @@ func TestResetGroupOffsetsCommitAnswers(t *testing.T) {
 	// A member joined after the check: the broker refuses an admin commit.
 	f := newF()
 	f.commitErrs = map[int32]error{0: kerr.UnknownMemberID, 1: kerr.UnknownMemberID}
-	if moved, err := resetWriter(f, l).ResetGroupOffsets(context.Background(), "g", earliest); !errors.Is(err, clients.ErrGroupActive) || moved != 0 {
+	if moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", earliest); !errors.Is(err, clients.ErrGroupActive) || moved != 0 {
 		t.Fatalf("joined member: moved=%d err=%v", moved, err)
 	}
 
 	f = newF()
 	f.commitErrs = map[int32]error{1: kerr.CoordinatorLoadInProgress}
-	moved, err := resetWriter(f, l).ResetGroupOffsets(context.Background(), "g", earliest)
+	moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", earliest)
 	if moved != 1 || !errors.Is(err, kerr.CoordinatorLoadInProgress) || errors.Is(err, clients.ErrGroupActive) {
 		t.Fatalf("partial: moved=%d err=%v, want 1 and the partition error", moved, err)
 	}
 
 	f = newF()
 	f.commitErr = errors.New("connection reset")
-	if moved, err := resetWriter(f, l).ResetGroupOffsets(context.Background(), "g", earliest); err == nil || moved != 0 {
+	if moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", earliest); err == nil || moved != 0 {
 		t.Fatalf("request error: moved=%d err=%v", moved, err)
 	}
 }
 
 func TestResetGroupOffsetsNoCommitsIsNotFound(t *testing.T) {
 	f := &fakeGroups{classic: emptyGroup("g"), committed: kadm.OffsetResponses{}}
-	_, err := resetWriter(f, &fakeLister{}).ResetGroupOffsets(context.Background(), "g", clients.OffsetTarget{Earliest: true})
+	_, err := resetWriter(f, &fakeLister{}).ResetGroupOffsets(unscoped(), "g", clients.OffsetTarget{Earliest: true})
 	if !errors.Is(err, clients.ErrNotFound) || len(f.commits) != 0 {
 		t.Fatalf("err=%v commits=%d, want ErrNotFound and none", err, len(f.commits))
 	}
@@ -288,7 +294,7 @@ func TestResetGroupOffsetsNoCommitsIsNotFound(t *testing.T) {
 func TestResetGroupOffsetsAlreadyThere(t *testing.T) {
 	f := &fakeGroups{classic: emptyGroup("g"), committed: committedOf("t", map[int32]int64{0: 0})}
 	l := &fakeLister{starts: merge(listed("t", map[int32]int64{0: 0})), ends: merge(listed("t", map[int32]int64{0: 4}))}
-	moved, err := resetWriter(f, l).ResetGroupOffsets(context.Background(), "g", clients.OffsetTarget{Earliest: true})
+	moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", clients.OffsetTarget{Earliest: true})
 	if moved != 0 || err != nil || len(f.commits) != 0 {
 		t.Fatalf("moved=%d err=%v commits=%d, want 0 nil none", moved, err, len(f.commits))
 	}
@@ -353,7 +359,7 @@ func TestProduceInOrderStopsAtFirstFailure(t *testing.T) {
 		{Key: []byte("k2"), Value: []byte("v2")},
 		{Key: []byte("k3"), Value: []byte("v3")},
 	}
-	acked, err := produceWriter(p, topicHere("orders")).Produce(context.Background(), "orders", recs)
+	acked, err := produceWriter(p, topicHere("orders")).Produce(unscoped(), "orders", recs)
 	if acked != 2 || !errors.Is(err, kerr.NotEnoughReplicas) {
 		t.Fatalf("acked=%d err=%v, want 2 and the broker error", acked, err)
 	}
@@ -380,20 +386,20 @@ func TestProduceInOrderStopsAtFirstFailure(t *testing.T) {
 func TestProduceRefusesBeforeProducing(t *testing.T) {
 	p := &produceLog{failAt: -1}
 	big := []clients.Record{{Value: []byte("ok")}, {Value: make([]byte, maxProduceValueBytes+1)}}
-	if acked, err := produceWriter(p, topicHere("t")).Produce(context.Background(), "t", big); err == nil || acked != 0 {
+	if acked, err := produceWriter(p, topicHere("t")).Produce(unscoped(), "t", big); err == nil || acked != 0 {
 		t.Fatalf("oversized value: acked=%d err=%v", acked, err)
 	}
-	if _, err := produceWriter(p, topicHere("t")).Produce(context.Background(), " ", []clients.Record{{}}); err == nil {
+	if _, err := produceWriter(p, topicHere("t")).Produce(unscoped(), " ", []clients.Record{{}}); err == nil {
 		t.Fatal("empty topic accepted")
 	}
 	gone := kadm.TopicDetails{"t": {Topic: "t", Err: kerr.UnknownTopicOrPartition}}
-	if _, err := produceWriter(p, gone).Produce(context.Background(), "t", []clients.Record{{}}); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := produceWriter(p, gone).Produce(unscoped(), "t", []clients.Record{{}}); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("missing topic: %v", err)
 	}
-	if _, err := produceWriter(p, kadm.TopicDetails{}).Produce(context.Background(), "t", []clients.Record{{}}); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := produceWriter(p, kadm.TopicDetails{}).Produce(unscoped(), "t", []clients.Record{{}}); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("topic absent from metadata: %v", err)
 	}
-	if acked, err := produceWriter(p, nil).Produce(context.Background(), "t", nil); acked != 0 || err != nil {
+	if acked, err := produceWriter(p, nil).Produce(unscoped(), "t", nil); acked != 0 || err != nil {
 		t.Fatalf("no records: acked=%d err=%v", acked, err)
 	}
 	if len(p.got) != 0 {
@@ -404,7 +410,7 @@ func TestProduceRefusesBeforeProducing(t *testing.T) {
 // TestProduceAfterDeadline: a record kgo acks just after ctx ended counts;
 // the next one is not sent; one kgo never answers is reported unknown.
 func TestProduceAfterDeadline(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(unscoped())
 	var sent int
 	w := produceWriter(nil, topicHere("t"))
 	w.produceFn = func(pctx context.Context, r *kgo.Record, promise func(*kgo.Record, error)) {
@@ -420,7 +426,7 @@ func TestProduceAfterDeadline(t *testing.T) {
 		t.Fatalf("acked=%d sent=%d err=%v, want 1 1 canceled", acked, sent, err)
 	}
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx2, cancel2 := context.WithTimeout(unscoped(), 50*time.Millisecond)
 	defer cancel2()
 	w.produceFn = func(context.Context, *kgo.Record, func(*kgo.Record, error)) {} // never answers
 	start := time.Now()
@@ -592,5 +598,105 @@ func TestReadRecordsFetchErrorKeepsPrefix(t *testing.T) {
 	got, err = w.ReadRecords(ctx, "dlq", 0, 0, 10)
 	if !errors.Is(err, context.DeadlineExceeded) || len(got) != 1 {
 		t.Fatalf("deadline: got %d records, err %v; want the prefix and the deadline", len(got), err)
+	}
+}
+
+// ---- pipeline scope of the writes ----
+
+// countMeta counts metadata requests (Produce's topic check is its first I/O).
+type countMeta struct {
+	fakeMeta
+	n int
+}
+
+func (m *countMeta) ListTopics(ctx context.Context, topics ...string) (kadm.TopicDetails, error) {
+	m.n++
+	return m.fakeMeta.ListTopics(ctx, topics...)
+}
+
+// countGroups counts the describe requests of a reset (its first I/O).
+type countGroups struct {
+	fakeGroups
+	n int
+}
+
+func (g *countGroups) DescribeGroups(ctx context.Context, groups ...string) (kadm.DescribedGroups, error) {
+	g.n++
+	return g.fakeGroups.DescribeGroups(ctx, groups...)
+}
+
+func scopePipeline() owners.Pipeline {
+	return owners.Pipeline{ID: "orders", TopicPrefix: "pg", SourceTables: []string{"public.orders"}, ConsumerGroups: []string{"order-sync"}}
+}
+
+// TestWriteScope: the writes fail closed like tools.ScopeFor. The room's
+// pipeline decides; the opt-out lets everything through; no scope, or only a
+// pipeline id, is ErrNoScope. Every refusal comes before any broker request.
+func TestWriteScope(t *testing.T) {
+	p := scopePipeline()
+	bg := context.Background()
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		group string
+		topic string
+		want  error // nil: allowed
+	}{
+		{"no scope", bg, "order-sync", "pg.public.orders", tools.ErrNoScope},
+		{"pipeline id only", tools.WithPipelineID(bg, "orders"), "order-sync", "pg.public.orders", tools.ErrNoScope},
+		{"pipeline id wins over the opt-out", tools.WithPipelineID(tools.WithUnscoped(bg), "orders"), "order-sync", "pg.public.orders", tools.ErrNoScope},
+		{"unscoped", unscoped(), "any-group", "any.topic", nil},
+		{"in scope", tools.WithPipeline(bg, p), "order-sync", "pg.public.orders", nil},
+		{"out of scope", tools.WithPipeline(bg, p), "billing-sync", "pay.public.payments", tools.ErrOutOfScope},
+		{"near miss", tools.WithPipeline(bg, p), "order-sync2", "x.pg.public.orders", tools.ErrOutOfScope},
+		{"pipeline wins over the opt-out", tools.WithPipeline(tools.WithUnscoped(bg), p), "billing-sync", "pay.public.payments", tools.ErrOutOfScope},
+	} {
+		g := &countGroups{fakeGroups: fakeGroups{classic: kadm.DescribedGroups{tc.group: {State: "Empty"}}, committed: committedOf("pg.public.orders", map[int32]int64{0: 5})}}
+		l := &fakeLister{starts: merge(listed("pg.public.orders", map[int32]int64{0: 0})), ends: merge(listed("pg.public.orders", map[int32]int64{0: 9}))}
+		w := &Writer{c: &Client{offs: l}, groups: g}
+		moved, err := w.ResetGroupOffsets(tc.ctx, tc.group, clients.OffsetTarget{Earliest: true})
+		if tc.want == nil {
+			if err != nil || moved != 1 {
+				t.Errorf("%s: reset moved=%d err=%v, want it allowed", tc.name, moved, err)
+			}
+		} else if !errors.Is(err, tc.want) || g.n != 0 || g.fetchCalls != 0 || l.calls.Load() != 0 || len(g.commits) != 0 {
+			t.Errorf("%s: reset err=%v, broker calls describe=%d fetch=%d list=%d commit=%d; want %v and none",
+				tc.name, err, g.n, g.fetchCalls, l.calls.Load(), len(g.commits), tc.want)
+		}
+
+		meta := &countMeta{fakeMeta: fakeMeta{topics: topicHere(tc.topic)}}
+		prod := &produceLog{failAt: -1}
+		pw := &Writer{c: &Client{meta: meta}, produceFn: prod.produce}
+		acked, err := pw.Produce(tc.ctx, tc.topic, []clients.Record{{Value: []byte("v")}})
+		if tc.want == nil {
+			if err != nil || acked != 1 {
+				t.Errorf("%s: produce acked=%d err=%v, want it allowed", tc.name, acked, err)
+			}
+		} else if !errors.Is(err, tc.want) || meta.n != 0 || len(prod.got) != 0 {
+			t.Errorf("%s: produce err=%v, metadata=%d produced=%d; want %v and no request", tc.name, err, meta.n, len(prod.got), tc.want)
+		}
+	}
+}
+
+// TestReadsAreNotScoped: the methods that change nothing run with no scope
+// and with a pipeline the names are not part of; the action scopes them.
+func TestReadsAreNotScoped(t *testing.T) {
+	for _, ctx := range []context.Context{context.Background(), tools.WithPipeline(context.Background(), scopePipeline())} {
+		w := &Writer{c: &Client{offs: &fakeLister{
+			starts: merge(listed("other", map[int32]int64{0: 0})),
+			ends:   merge(listed("other", map[int32]int64{0: 4})),
+		}}, groups: &fakeGroups{classic: emptyGroup("other-group"), committed: committedOf("other", map[int32]int64{0: 2})}}
+		if err := w.CheckGroupInactive(ctx, "other-group"); err != nil {
+			t.Fatalf("CheckGroupInactive: %v", err)
+		}
+		if _, err := w.PreviousOffsets(ctx, "other-group"); err != nil {
+			t.Fatalf("PreviousOffsets: %v", err)
+		}
+		if _, err := w.PlanGroupReset(ctx, "other-group", clients.OffsetTarget{Earliest: true}); err != nil {
+			t.Fatalf("PlanGroupReset: %v", err)
+		}
+		if _, err := w.ReadRecords(ctx, "other", 0, 4, 1); err != nil {
+			t.Fatalf("ReadRecords: %v", err)
+		}
 	}
 }

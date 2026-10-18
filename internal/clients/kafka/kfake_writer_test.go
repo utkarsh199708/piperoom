@@ -12,6 +12,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/tools"
 )
 
 // These tests run the Writer against kfake, franz-go's in-process broker,
@@ -56,9 +57,12 @@ func writerOn(t *testing.T, addrs []string) *Writer {
 	return w
 }
 
-func ctx10s(t *testing.T) context.Context {
+// unscopedCtx is a 10 s context with the explicit scope opt-out
+// (tools.WithUnscoped), as the CLI uses: the Writer's writes refuse a ctx
+// with no scope, and these tests have no room pipeline.
+func unscopedCtx(t *testing.T) context.Context {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(tools.WithUnscoped(context.Background()), 10*time.Second)
 	t.Cleanup(cancel)
 	return ctx
 }
@@ -68,7 +72,7 @@ func produceAt(t *testing.T, raw *kgo.Client, topic string, p int32, tss ...time
 	t.Helper()
 	for _, ts := range tss {
 		r := &kgo.Record{Topic: topic, Partition: p, Value: []byte("v"), Timestamp: ts}
-		if err := raw.ProduceSync(ctx10s(t), r).FirstErr(); err != nil {
+		if err := raw.ProduceSync(unscopedCtx(t), r).FirstErr(); err != nil {
 			t.Fatalf("produce: %v", err)
 		}
 	}
@@ -80,7 +84,7 @@ func commitAt(t *testing.T, raw *kgo.Client, group, topic string, offs map[int32
 	for p, o := range offs {
 		os.AddOffset(topic, p, o, -1)
 	}
-	resp, err := kadm.NewClient(raw).CommitOffsets(ctx10s(t), group, os)
+	resp, err := kadm.NewClient(raw).CommitOffsets(unscopedCtx(t), group, os)
 	if err != nil || resp.Error() != nil {
 		t.Fatalf("commit: %v %v", err, resp.Error())
 	}
@@ -88,7 +92,7 @@ func commitAt(t *testing.T, raw *kgo.Client, group, topic string, offs map[int32
 
 func committedNow(t *testing.T, raw *kgo.Client, group, topic string) map[int32]int64 {
 	t.Helper()
-	resp, err := kadm.NewClient(raw).FetchOffsets(ctx10s(t), group)
+	resp, err := kadm.NewClient(raw).FetchOffsets(unscopedCtx(t), group)
 	if err != nil || resp.Error() != nil {
 		t.Fatalf("fetch offsets: %v %v", err, resp.Error())
 	}
@@ -109,12 +113,12 @@ func TestKFakeWriterResetToEarliestAndTimestamp(t *testing.T) {
 	produceAt(t, raw, topic, 1, old, old)                      // p1: 0..1, nothing after recent
 	commitAt(t, raw, group, topic, map[int32]int64{0: 5, 1: 2})
 
-	prev, err := w.PreviousOffsets(ctx10s(t), group)
+	prev, err := w.PreviousOffsets(unscopedCtx(t), group)
 	if err != nil || len(prev) != 2 || prev[0] != (CommittedOffset{topic, 0, 5}) || prev[1] != (CommittedOffset{topic, 1, 2}) {
 		t.Fatalf("previous offsets = %+v, %v", prev, err)
 	}
 
-	moved, err := w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Earliest: true})
+	moved, err := w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Earliest: true})
 	if err != nil || moved != 2 {
 		t.Fatalf("earliest: moved=%d err=%v", moved, err)
 	}
@@ -123,21 +127,21 @@ func TestKFakeWriterResetToEarliestAndTimestamp(t *testing.T) {
 	}
 
 	at := recent.Add(-30 * time.Minute)
-	plan, err := w.PlanGroupReset(ctx10s(t), group, clients.OffsetTarget{Timestamp: at})
+	plan, err := w.PlanGroupReset(unscopedCtx(t), group, clients.OffsetTarget{Timestamp: at})
 	if err != nil || len(plan) != 2 || plan[0].Target != 3 || plan[0].End != 5 || plan[1].Target != 2 || plan[1].Committed != 0 {
 		t.Fatalf("plan = %+v, %v; want p0 -> 3 (first recent record), p1 -> 2 (its end)", plan, err)
 	}
-	moved, err = w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Timestamp: at})
+	moved, err = w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Timestamp: at})
 	if err != nil || moved != 2 {
 		t.Fatalf("timestamp: moved=%d err=%v", moved, err)
 	}
 	if got := committedNow(t, raw, group, topic); got[0] != 3 || got[1] != 2 {
 		t.Fatalf("after timestamp: %v, want 3 and 2", got)
 	}
-	if moved, err = w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Timestamp: at}); err != nil || moved != 0 {
+	if moved, err = w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Timestamp: at}); err != nil || moved != 0 {
 		t.Fatalf("again: moved=%d err=%v, want nothing to move", moved, err)
 	}
-	if _, err := w.ResetGroupOffsets(ctx10s(t), "kf-no-such-group", clients.OffsetTarget{Earliest: true}); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := w.ResetGroupOffsets(unscopedCtx(t), "kf-no-such-group", clients.OffsetTarget{Earliest: true}); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("unknown group: %v", err)
 	}
 }
@@ -210,11 +214,11 @@ func TestKFakeWriterRefusesActiveGroups(t *testing.T) {
 		group := "kf-active-" + tc.name
 		commitAt(t, raw, group, topic, map[int32]int64{0: 0})
 		joinGroup(t, addrs, group, topic, tc.extra...)
-		moved, err := w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Earliest: true})
+		moved, err := w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Earliest: true})
 		if !errors.Is(err, clients.ErrGroupActive) || moved != 0 {
 			t.Fatalf("%s: moved=%d err=%v, want ErrGroupActive", tc.name, moved, err)
 		}
-		if err := w.CheckGroupInactive(ctx10s(t), group); !errors.Is(err, clients.ErrGroupActive) {
+		if err := w.CheckGroupInactive(unscopedCtx(t), group); !errors.Is(err, clients.ErrGroupActive) {
 			t.Fatalf("%s: check: %v", tc.name, err)
 		}
 	}
@@ -229,17 +233,17 @@ func TestKFakeWriterProduceAndReadBack(t *testing.T) {
 		{Key: []byte("k1"), Value: []byte("v3")},
 		{Key: []byte("k1"), Value: []byte("v4"), Timestamp: time.Unix(1, 0)},
 	}
-	acked, err := w.Produce(ctx10s(t), topic, in)
+	acked, err := w.Produce(unscopedCtx(t), topic, in)
 	if err != nil || acked != len(in) {
 		t.Fatalf("acked=%d err=%v", acked, err)
 	}
-	if _, err := w.Produce(ctx10s(t), "kf-no-such-topic", in); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := w.Produce(unscopedCtx(t), "kf-no-such-topic", in); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("missing topic: %v", err)
 	}
 
 	byKey := map[string][]clients.Record{}
 	for p := int32(0); p < 3; p++ {
-		recs, err := w.ReadRecords(ctx10s(t), topic, p, 0, 100)
+		recs, err := w.ReadRecords(unscopedCtx(t), topic, p, 0, 100)
 		if err != nil {
 			t.Fatalf("read p%d: %v", p, err)
 		}
@@ -264,7 +268,7 @@ func TestKFakeWriterProduceAndReadBack(t *testing.T) {
 	}
 
 	from := k1[1].Offset
-	recs, err := w.ReadRecords(ctx10s(t), topic, k1[0].Partition, from, 1)
+	recs, err := w.ReadRecords(unscopedCtx(t), topic, k1[0].Partition, from, 1)
 	if err != nil || len(recs) != 1 || recs[0].Offset != from {
 		t.Fatalf("read one from %d: %+v %v", from, recs, err)
 	}

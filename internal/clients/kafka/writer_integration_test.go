@@ -17,7 +17,9 @@ import (
 
 // Writer against the dev stack's Kafka 4.1: group offset resets (classic and
 // KIP-848 members), produce and whole-record reads. Every topic and group is
-// it_-named and deleted afterwards.
+// it_-named and deleted afterwards. There is no room pipeline here, so every
+// call runs with the explicit opt-out (unscopedCtx: tools.WithUnscoped), as
+// the CLI does; the Writer's writes refuse a ctx with no scope.
 
 // itTopic creates an it_ topic with partitions and waits until the Writer's
 // metadata sees it (kadm caches a "missing" answer for a few seconds).
@@ -65,15 +67,15 @@ func TestWriterResetGroupOffsetsAgainstDevStack(t *testing.T) {
 	produceAt(t, raw, topic, 1, old, old)                      // p1: nothing after recent
 	commitAt(t, raw, group, topic, map[int32]int64{0: 5, 1: 2})
 
-	prev, err := w.PreviousOffsets(ctx10s(t), group)
+	prev, err := w.PreviousOffsets(unscopedCtx(t), group)
 	if err != nil || len(prev) != 2 || prev[0].Offset != 5 || prev[1].Offset != 2 {
 		t.Fatalf("previous offsets = %+v, %v", prev, err)
 	}
-	if err := w.CheckGroupInactive(ctx10s(t), group); err != nil {
+	if err := w.CheckGroupInactive(unscopedCtx(t), group); err != nil {
 		t.Fatalf("a group with only commits is inactive: %v", err)
 	}
 
-	moved, err := w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Earliest: true})
+	moved, err := w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Earliest: true})
 	if err != nil || moved != 2 {
 		t.Fatalf("earliest: moved=%d err=%v", moved, err)
 	}
@@ -82,7 +84,7 @@ func TestWriterResetGroupOffsetsAgainstDevStack(t *testing.T) {
 	}
 
 	at := recent.Add(-30 * time.Minute)
-	moved, err = w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Timestamp: at})
+	moved, err = w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Timestamp: at})
 	if err != nil || moved != 2 {
 		t.Fatalf("timestamp: moved=%d err=%v", moved, err)
 	}
@@ -90,7 +92,7 @@ func TestWriterResetGroupOffsetsAgainstDevStack(t *testing.T) {
 		t.Fatalf("after timestamp: %v, want p0=3 (first recent record), p1=2 (end)", got)
 	}
 
-	if _, err := w.ResetGroupOffsets(ctx10s(t), testenv.Name("it-nogroup"), clients.OffsetTarget{Earliest: true}); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := w.ResetGroupOffsets(unscopedCtx(t), testenv.Name("it-nogroup"), clients.OffsetTarget{Earliest: true}); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("unknown group: %v", err)
 	}
 }
@@ -111,7 +113,7 @@ func TestWriterRefusesActiveGroupAgainstDevStack(t *testing.T) {
 		group := itGroup(t, raw, "it-active-"+tc.name)
 		commitAt(t, raw, group, topic, map[int32]int64{0: 2})
 		leave := joinGroup(t, brokers, group, topic, tc.extra...)
-		moved, err := w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Earliest: true})
+		moved, err := w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Earliest: true})
 		if !errors.Is(err, clients.ErrGroupActive) || moved != 0 {
 			t.Fatalf("%s: moved=%d err=%v, want ErrGroupActive", tc.name, moved, err)
 		}
@@ -123,7 +125,7 @@ func TestWriterRefusesActiveGroupAgainstDevStack(t *testing.T) {
 		testenv.WaitFor(t, 30*time.Second, func() (bool, error) {
 			return w.CheckGroupInactive(context.Background(), group) == nil, nil
 		})
-		if moved, err := w.ResetGroupOffsets(ctx10s(t), group, clients.OffsetTarget{Earliest: true}); err != nil || moved != 1 {
+		if moved, err := w.ResetGroupOffsets(unscopedCtx(t), group, clients.OffsetTarget{Earliest: true}); err != nil || moved != 1 {
 			t.Fatalf("%s after leave: moved=%d err=%v", tc.name, moved, err)
 		}
 	}
@@ -142,23 +144,23 @@ func TestWriterReplayAgainstDevStack(t *testing.T) {
 		in = append(in, &kgo.Record{Topic: src, Partition: 0, Key: []byte(k), Value: []byte{byte('0' + i)},
 			Headers: []kgo.RecordHeader{{Key: "__connect.errors.topic", Value: []byte("orders")}, {Key: "app", Value: []byte("x")}}})
 	}
-	if err := raw.ProduceSync(ctx10s(t), in...).FirstErr(); err != nil {
+	if err := raw.ProduceSync(unscopedCtx(t), in...).FirstErr(); err != nil {
 		t.Fatalf("seed dlq: %v", err)
 	}
 
-	recs, err := w.ReadRecords(ctx10s(t), src, 0, 1, 10)
+	recs, err := w.ReadRecords(unscopedCtx(t), src, 0, 1, 10)
 	if err != nil || len(recs) != 4 || recs[0].Offset != 1 || string(recs[0].Key) != "b" || len(recs[0].Headers) != 2 {
 		t.Fatalf("read = %+v, %v; want offsets 1..4 with keys and headers", recs, err)
 	}
-	if _, err := w.ReadRecords(ctx10s(t), src, 0, 5, 10); err != nil {
+	if _, err := w.ReadRecords(unscopedCtx(t), src, 0, 5, 10); err != nil {
 		t.Fatalf("read at end: %v", err)
 	}
 
-	acked, err := w.Produce(ctx10s(t), dst, recs)
+	acked, err := w.Produce(unscopedCtx(t), dst, recs)
 	if err != nil || acked != 4 {
 		t.Fatalf("acked=%d err=%v", acked, err)
 	}
-	ends, err := kadm.NewClient(raw).ListEndOffsets(ctx10s(t), dst)
+	ends, err := kadm.NewClient(raw).ListEndOffsets(unscopedCtx(t), dst)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +172,7 @@ func TestWriterReplayAgainstDevStack(t *testing.T) {
 	}
 	var aValues []string
 	for p := int32(0); p < 3; p++ {
-		got, err := w.ReadRecords(ctx10s(t), dst, p, 0, 10)
+		got, err := w.ReadRecords(unscopedCtx(t), dst, p, 0, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -185,7 +187,7 @@ func TestWriterReplayAgainstDevStack(t *testing.T) {
 		t.Fatalf("key a replayed as %v on p%d, want [2 4] in order on one partition", aValues, aPart)
 	}
 
-	if _, err := w.Produce(ctx10s(t), testenv.Name("it-missing"), recs); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := w.Produce(unscopedCtx(t), testenv.Name("it-missing"), recs); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("missing topic: %v", err)
 	}
 }
