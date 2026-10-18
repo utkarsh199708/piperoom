@@ -41,7 +41,8 @@ One team, clear roles:
 | **Claude Lead 3 — Cloud lead** | `[LEAD-CLOUD]` | leads the cloud agents (C1…): watches their cloud sessions, relays their status to Slack, code-reviews their GitHub PRs (instead of Lead 2), starts round-N fix runs | merge, write feature code |
 
 A PR is merged only when **both** leads approve: `[LEAD-REVIEW] APPROVED` (code) and
-`[LEAD-ARCH] APPROVED` (architecture + completeness). Then Lead 1 merges.
+`[LEAD-ARCH] APPROVED` (architecture + completeness), or, for a row shipped by §6a, a `ready` manifest that passes
+ship-check. Then Lead 1 merges.
 For cloud-agent (C*) PRs the code approval comes from `[LEAD-CLOUD]` instead of `[LEAD-REVIEW]`.
 Each agent owns folders. **Never edit a file you do not own.**
 
@@ -265,8 +266,8 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 
 - **Talking to the reviewer happens in Slack #piperoom-agents — read `docs/collab.md` now.**
 - Work in your own **git worktree** (`docs/collab.md` §1), never in the main folder.
-- **Only Lead 1 (Claude, `[LEAD-ARCH]`) merges into `main`**, after both leads approve. Agents never commit, merge, rebase onto, reset or
-  push `main`. You raise a PR: commit on your branch, then post `[A<N>] READY FOR REVIEW` (local repo)
+- **Only Lead 1 (Claude, `[LEAD-ARCH]`) merges into `main`**, after both leads approve or, for a row shipped by §6a,
+  a `ready` manifest that passes ship-check. Agents never commit, merge, rebase onto, reset or push `main`. You raise a PR: commit on your branch, then post `[A<N>] READY FOR REVIEW` (local repo)
   or open a pull request (if the repo is on GitHub). A git hook rejects any change to `main` from agents.
 - Base branch: `main`. Your branch: `a<N>/<short-topic>` (e.g. `a2/connect-client`).
 - Small PRs (aim < 600 changed lines, excluding generated code and lockfiles).
@@ -289,18 +290,21 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 ### 6a. Ship workflow (from 2026-10-18): no human approval
 
 Board rows are built and reviewed by the ship workflow, [`docs/process/ship-workflow.md`](docs/process/ship-workflow.md)
-(script `docs/process/piperoom-ship.workflow.js`). For a row it ships, it replaces the two leads' approvals below:
+(script `docs/process/piperoom-ship.workflow.js`). For a row it ships, a `ready` manifest that passes ship-check
+replaces the two leads' approvals of §2, §6 and §7. The owner chose to run without a human approver.
 
-- independent re-run of every check; four bug hunters and a security reviewer (Fable 5.1); three verifiers that try
-  to refute each finding, two of three to keep it (Fable 5.1 and Opus 5.5);
-- a risk tier set from the diff, never lowered by the author: **low** needs no approval, **medium** one agent
-  approval, **high** (actions, write clients, auth, executor and approvals, migrations, deploy, contract files, this
-  pipeline) two approvals from different models, plus an integrity check on changes to the pipeline;
-- at most three review rounds, diff-only after the first; an approval covers one commit.
+- The workflow's builder acts as the row's owner agent: it edits only that agent's folders (§2) and uses the row's
+  tag. A file outside them, or a contract file on a row that is not the leads', blocks the row.
+- Lead 1 runs the workflow and ships its rows as the doc's §5 says, and writes no feature code.
+- The workflow builds every row on Opus 5.5 at xhigh. The board's Model column applies only to rows built outside
+  the workflow.
+- The risk tier and the approvals it needs are in the doc's §2 table.
+- Approvals stand while the row's own patch is unchanged: the first field of
+  `git diff $(git merge-base origin/main HEAD) HEAD | git patch-id --verbatim`, run in the row's worktree after
+  `git fetch origin main`, equals the manifest's `patchId`. A conflict resolution or any other change means
+  rerunning the workflow on that row with resume (`args.resume = {ROW: {worktree, branch}}`).
 
-The owner chose to run without a human approver. Lead 1 still pushes, opens the PR with the workflow's body, waits
-for required CI and merges in board order; rows the workflow returns `blocked` go back to the leads. PRs made
-outside the workflow keep the §7 two-lead review.
+Rows the workflow returns `blocked` go back to the leads. PRs made outside the workflow keep the §7 two-lead review.
 
 ## 7. How the leads check your PR
 
