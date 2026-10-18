@@ -319,7 +319,7 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 	// starts at a line.
 	tb := &tailBuffer{buf: make([]byte, maxBytes+1)}
 	err = c.get(ctx, path, acceptLogPlain, func(r io.Reader) error {
-		if _, err := io.Copy(tb, io.LimitReader(r, c.logCeiling)); err != nil {
+		if _, err := io.Copy(tb, io.LimitReader(r, c.ceiling())); err != nil {
 			return fmt.Errorf("read log: %w", err)
 		}
 		// A byte past the ceiling means the log goes on.
@@ -335,6 +335,16 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 		return "", false, err
 	}
 	return tailFrom(tb.Bytes(), maxBytes), cut, nil
+}
+
+// ceiling is logCeiling, or MaxLogStreamBytes when it is 0 or less: a Client
+// not built by New (a zero value, a test literal) must still stream a log
+// rather than read nothing and report it cut.
+func (c *Client) ceiling() int64 {
+	if c.logCeiling <= 0 {
+		return MaxLogStreamBytes
+	}
+	return c.logCeiling
 }
 
 // tailBuffer is an io.Writer that keeps only the last len(buf) bytes
@@ -516,6 +526,11 @@ func (c *Client) roundTrip(ctx context.Context, path, accept string, read func(i
 		return fmt.Errorf("airflow: GET %s: %w", path, err)
 	}
 	req.Header.Set("Accept", accept)
+	if c.hc == nil {
+		// A Client not built by New has no HTTP client (and no timeout,
+		// netsec settings or credentials); refuse rather than panic.
+		return fmt.Errorf("airflow: GET %s: client not built by New", path)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("airflow: GET %s: %w", path, err)
