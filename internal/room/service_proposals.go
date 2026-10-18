@@ -11,7 +11,6 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
-	"piperoom/internal/tools"
 )
 
 // stepTimeout bounds each action execution (rule 4).
@@ -89,13 +88,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	acts := s.actionsFor(pipelineID)
 	// Validate runs under the room's pipeline scope, as the executor and the
 	// preview do, so an action reads that pipeline's whole config.
-	// The same scoping as pipelineCtx of P3-0 (#599), which replaces it.
-	vctx := tools.WithPipelineID(ctx, pipelineID)
-	if s.owners != nil {
-		if pl, ok := s.owners.Pipeline(pipelineID); ok {
-			vctx = tools.WithPipeline(ctx, pl)
-		}
-	}
+	vctx := s.pipelineCtx(ctx, pipelineID)
 	// Structural checks first: they do not need the room state.
 	for i, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
