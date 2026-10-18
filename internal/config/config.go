@@ -20,6 +20,7 @@ type Config struct {
 	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default; dev mode off loopback needs PIPEROOM_DEV_ALLOW_NONLOOPBACK)
 	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
 	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
+	SourceDBWriteURL  string // SOURCE_DB_WRITE_URL (P0 item 7): the source Postgres as a separate WRITE role for the pg write actions, never the read-only SOURCE_DB_URL role; empty = no writer (those actions refuse at Validate: "no write credentials"); secret
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
 	ConnectURL        string // CONNECT_URL
@@ -68,8 +69,28 @@ type Config struct {
 	PublicURL         string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
-	// "snowflake" uses it as a gosnowflake DSN.
-	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake
+	// "snowflake" uses it as a gosnowflake DSN; "bigquery" and "databricks"
+	// (P0 item 8, readers in P4e) use it as that driver's DSN. internal/wiring
+	// validates the value and refuses a kind it has no reader for yet.
+	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake | bigquery | databricks
+
+	// Batch pipelines (P0 item 8): the orchestrator and transform readers.
+	// An empty URL or directory turns that reader off, and its tools answer
+	// clients.ErrNotSupported. ParseAirflow and ParseDBT type them.
+	AirflowURL      string // AIRFLOW_URL: base URL of the Airflow REST API v1 (http or https, no user info)
+	AirflowUsername string // AIRFLOW_USERNAME: basic auth, with AIRFLOW_PASSWORD
+	AirflowPassword string // AIRFLOW_PASSWORD (secret)
+	AirflowToken    string // AIRFLOW_TOKEN: bearer token instead of basic auth (secret)
+	DBTArtifactsDir string // DBT_ARTIFACTS_DIR: directory holding run_results.json and manifest.json; or dbt Cloud below, not both
+	DBTCloudURL     string // DBT_CLOUD_URL: dbt Cloud base URL, e.g. https://cloud.getdbt.com
+	DBTCloudToken   string // DBT_CLOUD_TOKEN: read-only service token (secret)
+	DBTCloudAccount string // DBT_CLOUD_ACCOUNT_ID: the {a} of /api/v2/accounts/{a}/runs/
+	DBTCloudJobID   string // DBT_CLOUD_JOB_ID: the job whose latest run's artifacts are read
+
+	// AutoApproveDelay is how long a proposal whose every step is on its
+	// pipeline's owners.yaml auto_approve: list waits, cancellable, before the
+	// policy approves and runs it (P2). ParseAutoApproveDelay.
+	AutoApproveDelay string // PIPEROOM_AUTO_APPROVE_DELAY: Go duration before a policy-approved proposal runs; default "60s"; "0" turns the policy off even when owners.yaml lists actions
 
 	// Signed alert sources (internal/alertin). A source with an empty secret is
 	// disabled: its route answers 401. All secrets; never log them.
@@ -231,6 +252,7 @@ func Load() Config {
 		HTTPAddr:          get("PIPEROOM_HTTP_ADDR", "127.0.0.1:8090"),
 		RoomDBURL:         get("PIPEROOM_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/piperoom?sslmode=disable"),
 		SourceDBURL:       get("SOURCE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/orders?sslmode=disable"),
+		SourceDBWriteURL:  get("SOURCE_DB_WRITE_URL", ""),
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
 		ConnectURL:        get("CONNECT_URL", "http://localhost:8083"),
@@ -266,6 +288,18 @@ func Load() Config {
 		PublicURL:      get("PIPEROOM_PUBLIC_URL", ""),
 
 		WarehouseKind: get("WAREHOUSE_KIND", "postgres"),
+
+		AirflowURL:      get("AIRFLOW_URL", ""),
+		AirflowUsername: get("AIRFLOW_USERNAME", ""),
+		AirflowPassword: get("AIRFLOW_PASSWORD", ""),
+		AirflowToken:    get("AIRFLOW_TOKEN", ""),
+		DBTArtifactsDir: get("DBT_ARTIFACTS_DIR", ""),
+		DBTCloudURL:     get("DBT_CLOUD_URL", ""),
+		DBTCloudToken:   get("DBT_CLOUD_TOKEN", ""),
+		DBTCloudAccount: get("DBT_CLOUD_ACCOUNT_ID", ""),
+		DBTCloudJobID:   get("DBT_CLOUD_JOB_ID", ""),
+
+		AutoApproveDelay: get("PIPEROOM_AUTO_APPROVE_DELAY", DefaultAutoApproveDelay),
 
 		AlertmanagerToken:    get("ALERTMANAGER_TOKEN", ""),
 		GrafanaAlertSecret:   get("GRAFANA_ALERT_SECRET", ""),
@@ -1025,6 +1059,168 @@ func ParseDebeziumMetrics(c Config) (DebeziumMetrics, error) {
 		}
 	}
 	return d, nil
+}
+
+// ---- P wave (P2, P3, P4; PIPEROOM_WRITE_MODE of P1 is next to ParseDevAck) ----
+
+// DefaultAutoApproveDelay is the policy countdown (P0 item 2): long enough
+// for someone in the room to read the card and cancel.
+const DefaultAutoApproveDelay = "60s"
+
+// MaxAutoApproveDelay bounds PIPEROOM_AUTO_APPROVE_DELAY: a countdown longer
+// than an hour leaves a fix pending past any incident's attention span, so it
+// is a typo, not a policy.
+const MaxAutoApproveDelay = time.Hour
+
+// ParseAutoApproveDelay validates PIPEROOM_AUTO_APPROVE_DELAY: "0" turns the
+// auto-approve policy off (0 is returned), anything else must be a Go
+// duration above zero and at most MaxAutoApproveDelay; empty = 60s. "0s" is
+// refused with a pointer to "0", so off is always spelled one way. The error
+// names the env var.
+func ParseAutoApproveDelay(c Config) (time.Duration, error) {
+	v := strings.TrimSpace(c.AutoApproveDelay)
+	switch v {
+	case "0":
+		return 0, nil
+	case "":
+		v = DefaultAutoApproveDelay
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: not a duration like 60s or 2m: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: must be greater than zero; use \"0\" to turn the policy off", v)
+	}
+	if d > MaxAutoApproveDelay {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: at most %s", v, MaxAutoApproveDelay)
+	}
+	return d, nil
+}
+
+// Airflow holds the typed Airflow settings (P0 item 8). URL "" = off.
+// Password and Token are secrets: never log them.
+type Airflow struct {
+	URL      string
+	Username string
+	Password string
+	Token    string
+}
+
+// ParseAirflow validates AIRFLOW_URL (empty, or an absolute http or https URL
+// with a host and no user info) and the login: basic auth (AIRFLOW_USERNAME
+// and AIRFLOW_PASSWORD, both) or AIRFLOW_TOKEN, not both. A URL with neither
+// is allowed (an Airflow behind a proxy that authenticates). A login needs an
+// https URL: over http:// the password or token would travel in clear text
+// (the internal/clients/netsec rule). A login without a URL is an error, so a
+// forgotten URL is not read as "off". The error names the env var and never
+// quotes a secret.
+func ParseAirflow(c Config) (Airflow, error) {
+	a := Airflow{
+		URL:      strings.TrimSpace(c.AirflowURL),
+		Username: strings.TrimSpace(c.AirflowUsername),
+		Password: c.AirflowPassword,
+		Token:    strings.TrimSpace(c.AirflowToken),
+	}
+	if a.URL == "" {
+		if a.Username != "" || a.Password != "" || a.Token != "" {
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_USERNAME, AIRFLOW_PASSWORD or AIRFLOW_TOKEN is set but AIRFLOW_URL is empty")
+		}
+		return Airflow{}, nil
+	}
+	scheme, err := checkHTTPURL("AIRFLOW_URL", a.URL)
+	if err != nil {
+		return Airflow{}, err
+	}
+	if (a.Username == "") != (a.Password == "") {
+		return Airflow{}, fmt.Errorf("config: AIRFLOW_USERNAME and AIRFLOW_PASSWORD go together: set both or neither")
+	}
+	if a.Username != "" && a.Token != "" {
+		return Airflow{}, fmt.Errorf("config: AIRFLOW_TOKEN and AIRFLOW_USERNAME/AIRFLOW_PASSWORD: set one login, not both")
+	}
+	if scheme == "http" {
+		switch {
+		case a.Token != "":
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_TOKEN with an http:// AIRFLOW_URL sends the token in clear text; use an https:// URL")
+		case a.Username != "":
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_USERNAME/AIRFLOW_PASSWORD with an http:// AIRFLOW_URL sends the password in clear text; use an https:// URL")
+		}
+	}
+	return a, nil
+}
+
+// DBT holds the typed dbt settings (P0 item 8): an artifacts directory or dbt
+// Cloud, never both; all empty = off. CloudToken is a secret.
+type DBT struct {
+	ArtifactsDir string
+	CloudURL     string
+	CloudToken   string
+	CloudAccount string
+	CloudJobID   string
+}
+
+// ParseDBT validates the dbt settings: DBT_ARTIFACTS_DIR (an absolute path)
+// or dbt Cloud (DBT_CLOUD_URL, an https URL without user info, plus
+// DBT_CLOUD_TOKEN, DBT_CLOUD_ACCOUNT_ID and DBT_CLOUD_JOB_ID, the two ids
+// whole numbers), not both. An http:// DBT_CLOUD_URL is refused: the token
+// goes with every request and would travel in clear text. Whether the
+// directory exists is the reader's check at use, not this one. The error
+// names the env var.
+func ParseDBT(c Config) (DBT, error) {
+	d := DBT{
+		ArtifactsDir: strings.TrimSpace(c.DBTArtifactsDir),
+		CloudURL:     strings.TrimSpace(c.DBTCloudURL),
+		CloudToken:   strings.TrimSpace(c.DBTCloudToken),
+		CloudAccount: strings.TrimSpace(c.DBTCloudAccount),
+		CloudJobID:   strings.TrimSpace(c.DBTCloudJobID),
+	}
+	cloud := d.CloudURL != "" || d.CloudToken != "" || d.CloudAccount != "" || d.CloudJobID != ""
+	if d.ArtifactsDir != "" {
+		if cloud {
+			return DBT{}, fmt.Errorf("config: DBT_ARTIFACTS_DIR and DBT_CLOUD_*: set one dbt source, not both")
+		}
+		if !filepath.IsAbs(d.ArtifactsDir) {
+			return DBT{}, fmt.Errorf("config: DBT_ARTIFACTS_DIR=%q: want an absolute path", c.DBTArtifactsDir)
+		}
+		d.ArtifactsDir = filepath.Clean(d.ArtifactsDir)
+		return d, nil
+	}
+	if !cloud {
+		return DBT{}, nil
+	}
+	if d.CloudURL == "" || d.CloudToken == "" || d.CloudAccount == "" || d.CloudJobID == "" {
+		return DBT{}, fmt.Errorf("config: dbt Cloud needs DBT_CLOUD_URL, DBT_CLOUD_TOKEN, DBT_CLOUD_ACCOUNT_ID and DBT_CLOUD_JOB_ID together")
+	}
+	scheme, err := checkHTTPURL("DBT_CLOUD_URL", d.CloudURL)
+	if err != nil {
+		return DBT{}, err
+	}
+	if scheme == "http" {
+		return DBT{}, fmt.Errorf("config: DBT_CLOUD_TOKEN with an http:// DBT_CLOUD_URL sends the token in clear text; use an https:// URL")
+	}
+	if _, err := parseWholeNumber("DBT_CLOUD_ACCOUNT_ID", d.CloudAccount, "", false); err != nil {
+		return DBT{}, err
+	}
+	if _, err := parseWholeNumber("DBT_CLOUD_JOB_ID", d.CloudJobID, "", false); err != nil {
+		return DBT{}, err
+	}
+	return d, nil
+}
+
+// checkHTTPURL refuses anything but an absolute http(s) URL with a host and
+// no user info (credentials do not belong in a URL that may be logged) and
+// returns its scheme ("http" or "https", lower case) so the caller can refuse
+// a login over plain http. The error names the env var but never quotes the
+// value.
+func checkHTTPURL(name, v string) (string, error) {
+	u, err := url.Parse(v)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("config: %s: want an http(s)://host URL", name)
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("config: %s: must not carry user info", name)
+	}
+	return u.Scheme, nil
 }
 
 // getSet is get, except that a variable set to "" keeps "" (for settings

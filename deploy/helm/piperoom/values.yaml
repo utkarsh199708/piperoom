@@ -109,6 +109,10 @@ env:
   # http://localhost:8081 (unreachable in a pod: the map shows the registry as unknown).
   SCHEMA_REGISTRY_URL: ""
   WAREHOUSE_KIND: postgres            # postgres | snowflake
+  # on = approved fixes run; off = fixes stay suggestions. The server's default
+  # is off; the chart sets "on" (quoted: a bare on is a YAML boolean) so a
+  # release from before the setting keeps running approved fixes.
+  PIPEROOM_WRITE_MODE: "on"
 
   # --- agent and model ---
   PIPEROOM_MODEL_PROVIDER: ""         # anthropic | bedrock | vertex (empty = anthropic)

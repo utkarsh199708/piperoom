@@ -72,6 +72,17 @@ const (
 	// look (POST /api/rooms/{id}/nudge); at most one per proposal and layer
 	// per 10 minutes. The Slack mirror renders it as a thread reply. (F9)
 	ApprovalNudged Type = "approval.nudged"
+	// ProposalScheduled says the pipeline's auto-approve policy will approve
+	// and run the proposal at RunAt unless someone cancels it first. Written
+	// by the system actor after proposal.previewed, at most once per proposal.
+	// Like approval.given it counts against the room log caps (system events
+	// may use the 2% reserve; it is not exempt like room.closed). (P2)
+	ProposalScheduled Type = "proposal.scheduled"
+	// ProposalCancelled stops a scheduled proposal: the policy will not run
+	// it, and it stays open for manual approval. Actor: the person who
+	// cancelled (POST /api/proposals/{pid}/cancel). Counted like
+	// proposal.scheduled. (P2)
+	ProposalCancelled Type = "proposal.cancelled"
 
 	// HypothesisVerdict is a person's confirm or dispute of the agent's
 	// current hypothesis (POST /api/rooms/{id}/hypothesis). HypothesisSeq is
@@ -497,11 +508,20 @@ type ControlLeaseExpiredPayload struct {
 	LeaseUntil time.Time `json:"lease_until"`
 }
 
-// ControlGrantedPayload moves the driver role.
+// ControlGrantedPayload moves the driver role. Reason is empty for a grant a
+// person made (control/grant, hand-off accept, a lease renewal) and
+// ControlReasonSoleMember when the server made the room's first member the
+// driver without a request (P2). omitempty: events before P2 hash as before.
 type ControlGrantedPayload struct {
 	To         Actor     `json:"to"`
 	LeaseUntil time.Time `json:"lease_until"`
+	Reason     string    `json:"reason,omitempty"`
 }
+
+// ControlReasonSoleMember is ControlGrantedPayload.Reason when the first
+// member to join a driverless alert room (not a viewer, not a shadow room,
+// no control.requested pending) became its driver. System actor. (P2)
+const ControlReasonSoleMember = "sole_member"
 
 // ProposalStep is one write action in a proposed fix.
 type ProposalStep struct {
@@ -603,6 +623,44 @@ type ProposalCreatedPayload struct {
 	// ParamsHash is hex SHA-256 of the RFC 8785 (JCS) form of the frozen
 	// proposal (docs/design/auth.md §3.1). Empty on events written before auth PR 4.
 	ParamsHash string `json:"params_hash,omitempty"`
+	// Origin says who wrote the proposal: ProposalOriginAgent or
+	// ProposalOriginDriver (POST /api/rooms/{id}/proposals). Empty reads as
+	// "agent": every proposal before P3 came from the agent. Not part of
+	// params_hash. (P3)
+	Origin string `json:"origin,omitempty"`
+	// FallbackLayers are the RequiredLayers nobody owns in owners.yaml (no
+	// layers: entry and no pipeline owners: entry names a principal): the
+	// room's driver approves them, with grant "fallback". Fixed at creation
+	// like RequiredLayers; empty when every layer has an owner. Not part of
+	// params_hash. (P2)
+	FallbackLayers []string `json:"fallback_layers,omitempty"`
+}
+
+// Proposal origins in ProposalCreatedPayload.Origin. (P3)
+const (
+	ProposalOriginAgent  = "agent"
+	ProposalOriginDriver = "driver"
+)
+
+// ProposalScheduledPayload: the auto-approve policy (Policy, always
+// PolicyAutoApprove in this wave) runs the proposal at RunAt; until
+// CancelUntil (equal to RunAt in this wave) the driver or any required-layer
+// owner may cancel it. Times are UTC. (P2)
+type ProposalScheduledPayload struct {
+	ProposalID  string    `json:"proposal_id"`
+	RunAt       time.Time `json:"run_at"`
+	Policy      string    `json:"policy"`
+	CancelUntil time.Time `json:"cancel_until"`
+}
+
+// ProposalCancelledPayload stops a scheduled proposal. By is the person who
+// cancelled (also the event actor, kept here so a mirror reads one object);
+// Reason is their optional typed text, at most 500 characters, under the
+// typed-text rule of docs/api.md. (P2)
+type ProposalCancelledPayload struct {
+	ProposalID string `json:"proposal_id"`
+	By         Actor  `json:"by"`
+	Reason     string `json:"reason"`
 }
 
 // Identity says who made a decision and how they logged in
@@ -612,7 +670,7 @@ type Identity struct {
 	Sub       string    `json:"sub,omitempty"`
 	SessionID string    `json:"session_id,omitempty"`
 	Method    string    `json:"method"`          // "oidc" | "dev"
-	Grant     string    `json:"grant,omitempty"` // "user:…" | "group:…" | "backup:…" | "solo"
+	Grant     string    `json:"grant,omitempty"` // "user:…" | "group:…" | "backup:…" | "solo" | "fallback" (P2: the driver on an unowned layer)
 	AuthTime  time.Time `json:"auth_time,omitzero"`
 	// Email ties the decision to a mailbox as well as to the actor id, so the
 	// audit trail never rests on a display name (docs/design/auth.md §2.1):
@@ -621,13 +679,39 @@ type Identity struct {
 	Email string `json:"email,omitempty"`
 }
 
-// ApprovalGivenPayload is one layer owner's approval.
+// ApprovalGivenPayload is one layer's approval. Grant says what gave the
+// right to approve (Grant* below); Identity.Grant keeps the principal detail
+// ("user:priya", "backup:user:meera"). A policy approval has the system actor,
+// Grant GrantPolicy, Policy naming the owners.yaml list that allowed it
+// (PolicyAutoApprove) and no Identity. Grant and Policy are empty on events
+// written before P2: read "solo" from Identity.Grant, anything else as owner.
 type ApprovalGivenPayload struct {
 	ProposalID string    `json:"proposal_id"`
 	Layer      string    `json:"layer"`
 	ParamsHash string    `json:"params_hash,omitempty"`
 	Identity   *Identity `json:"identity,omitempty"`
+	Grant      string    `json:"grant,omitempty"`  // (P2) GrantOwner | GrantSolo | GrantFallback | GrantPolicy
+	Policy     string    `json:"policy,omitempty"` // (P2) set only with GrantPolicy
 }
+
+// Grants in ApprovalGivenPayload.Grant. (P2)
+const (
+	// GrantOwner: the actor owns the layer (owners.yaml principal or backup,
+	// or the users.yaml layers list in dev mode).
+	GrantOwner = "owner"
+	// GrantSolo: the actor is PIPEROOM_SOLO_USER.
+	GrantSolo = "solo"
+	// GrantFallback: nobody owns the layer (ProposalCreatedPayload.FallbackLayers)
+	// and the actor was the room's driver when the approval was appended.
+	GrantFallback = "fallback"
+	// GrantPolicy: the pipeline's auto-approve policy, after the
+	// proposal.scheduled countdown ran out uncancelled. System actor.
+	GrantPolicy = "policy"
+)
+
+// PolicyAutoApprove names the owners.yaml auto_approve: list in
+// ApprovalGivenPayload.Policy and ProposalScheduledPayload.Policy. (P2)
+const PolicyAutoApprove = "auto_approve"
 
 // ApprovalRejectedPayload is one layer owner's rejection.
 type ApprovalRejectedPayload struct {
@@ -846,5 +930,32 @@ type ShadowGradedPayload struct {
 	Identity     *Identity `json:"identity,omitempty"`
 }
 
-// Layers are the pipeline layers that own nodes and approve fixes.
-var Layers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse"}
+// Layers are the pipeline layers that own nodes and approve fixes, of every
+// pipeline kind: the six CDC layers first, then the batch-only ones (P4). A
+// check of "is this a known layer" uses Layers; the layers of one pipeline
+// come from LayersOf(its kind).
+var Layers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform"}
+
+// Pipeline kinds (owners.yaml kind:). (P4)
+const (
+	// PipelineKindCDC is Postgres -> Debezium -> Kafka -> consumers ->
+	// warehouse; the default when owners.yaml names no kind.
+	PipelineKindCDC = "cdc"
+	// PipelineKindBatch is an orchestrated batch pipeline: an orchestrator
+	// (Airflow DAGs), a transform step (dbt models) and the warehouse.
+	PipelineKindBatch = "batch"
+)
+
+// LayersOf returns the layers of a pipeline of the given kind, upstream
+// first: "cdc" (and "", the default kind) gives the six CDC layers, "batch"
+// gives orchestrator, transform, warehouse. An unknown kind gives nil. The
+// slice is new on every call, so a caller may keep or change it. (P4)
+func LayersOf(kind string) []string {
+	switch kind {
+	case "", PipelineKindCDC:
+		return []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse"}
+	case PipelineKindBatch:
+		return []string{"orchestrator", "transform", "warehouse"}
+	}
+	return nil
+}

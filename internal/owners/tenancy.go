@@ -534,6 +534,12 @@ func isAbsPath(p string) bool {
 // process-wide credentials (a lost tenants: block would turn the filter
 // off). The key's presence is read from the node tree. root is the decoded
 // document; anything that is not a mapping is left to the normal decoder.
+//
+// It also refuses a null entry inside an auto_approve: list. yaml.v3 drops a
+// null list item when it decodes into []string, so `- ` left behind by an edit
+// would vanish without a word and the policy the admin meant would not run. A
+// null auto_approve: key itself is left alone: it reads as no list, which is
+// no auto-approval, the safe meaning (checkAutoApproveSyntax).
 func checkNullBlocks(root *yaml.Node) error {
 	doc := root
 	if doc.Kind == yaml.DocumentNode {
@@ -565,6 +571,13 @@ func checkNullBlocks(root *yaml.Node) error {
 		}
 		if v, ok := mapValue(p, "tenant"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: tenant: is empty (null); name the tenant, or remove the key for tenant %q", v.Line, name, DefaultTenant)
+		}
+		if v, ok := mapValue(p, "auto_approve"); ok && v.Kind == yaml.SequenceNode {
+			for _, item := range v.Content {
+				if isNull(item) {
+					return fmt.Errorf("line %d: %s: auto_approve: has an empty (null) entry; name an action or remove the entry", item.Line, name)
+				}
+			}
 		}
 	}
 	return nil

@@ -36,6 +36,16 @@ const (
 	// registration; exists=false (health warn) when a converter config names
 	// it but nothing is registered; error=unreachable (health unknown).
 	KindSchemaSubject NodeKind = "schema_subject"
+
+	// Batch pipelines (P4): DAG -> task -> model -> sink_table, data edges.
+	// KindDAG is an orchestrator DAG (id "dag:<dag_id>", layer orchestrator).
+	KindDAG NodeKind = "dag"
+	// KindTask is one task of the DAG's latest run (id "task:<dag_id>.<task_id>",
+	// layer orchestrator); its state is a fact.
+	KindTask NodeKind = "task"
+	// KindModel is a transform model (id "model:<name>", layer transform),
+	// from TransformReader.ModelLineage, parents before children.
+	KindModel NodeKind = "model"
 )
 
 // Health is a node's state.
@@ -49,8 +59,9 @@ const (
 )
 
 // Node is one part of a pipeline. ID is "<prefix>:<name>" with prefixes
-// pg, connect, topic, dlq, group, wh, sr (e.g. "connect:pg-orders-connector",
-// "dlq:orders-dlq", "sr:pg.public.orders-value").
+// pg, connect, topic, dlq, group, wh, sr and, for batch pipelines, dag, task,
+// model (e.g. "connect:pg-orders-connector", "dlq:orders-dlq",
+// "sr:pg.public.orders-value", "dag:revenue_daily").
 type Node struct {
 	ID     string            `json:"id"`
 	Kind   NodeKind          `json:"kind"`
@@ -110,6 +121,12 @@ type Graph struct {
 	PipelineID string `json:"pipeline_id"`
 	Nodes      []Node `json:"nodes"`
 	Edges      []Edge `json:"edges"`
+	// Partial is true when an optional reader the pipeline's kind needs is
+	// not configured or answers clients.ErrNotSupported, so its nodes are
+	// left out (P4: no OrchestratorReader leaves out dag and task nodes).
+	// It is not "unhealthy": an unreachable system still gives
+	// HealthUnknown nodes. Omitted when false, so CDC graphs are unchanged.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // Builder builds graphs and traces records.
