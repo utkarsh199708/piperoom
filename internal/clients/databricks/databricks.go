@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	dbsql "github.com/databricks/databricks-sql-go"
@@ -71,7 +72,7 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 // open builds the connector from cfg. host carries the scheme: always
 // https:// in New; tests pass an httptest http:// URL.
 func open(ctx context.Context, cfg Config, host string, base http.RoundTripper) (*DB, error) {
-	if err := dbsqllog.SetLogLevel("disabled"); err != nil {
+	if err := silenceDriverLog(); err != nil {
 		return nil, fmt.Errorf("databricks: set driver log level: %w", err)
 	}
 	opts := []dbsql.ConnOption{
@@ -91,12 +92,9 @@ func open(ctx context.Context, cfg Config, host string, base http.RoundTripper) 
 		dbsql.WithRetries(2, 250*time.Millisecond, 2*time.Second),
 		dbsql.WithUserAgentEntry("piperoom"),
 		dbsql.WithTransport(guardTransport{base: base}),
-	}
-	switch cfg.Auth {
-	case authM2M:
-		opts = append(opts, dbsql.WithClientCredentials(cfg.ClientID, cfg.ClientSecret))
-	default:
-		opts = append(opts, dbsql.WithAccessToken(cfg.Token))
+		// A personal access token only: the driver's OAuth M2M token fetch
+		// has no deadline or cap (see errM2MRefused).
+		dbsql.WithAccessToken(cfg.Token),
 	}
 	connector, err := dbsql.NewConnector(opts...)
 	if err != nil {
@@ -126,13 +124,22 @@ func newWithRunner(cfg Config, r runner) *DB {
 
 // credentialStrings are the secrets of cfg, as they could appear in text.
 func credentialStrings(cfg Config) []string {
-	var out []string
-	for _, s := range []string{cfg.Token, cfg.ClientSecret} {
-		if len(s) >= minSecretLen {
-			out = append(out, s)
-		}
+	if len(cfg.Token) >= minSecretLen {
+		return []string{cfg.Token}
 	}
-	return out
+	return nil
+}
+
+// The driver's logger is process-wide; switch it off once, not on every
+// New (concurrent opens would otherwise race on it).
+var (
+	driverLogOnce sync.Once
+	driverLogErr  error
+)
+
+func silenceDriverLog() error {
+	driverLogOnce.Do(func() { driverLogErr = dbsqllog.SetLogLevel("disabled") })
+	return driverLogErr
 }
 
 // Close releases the connection pool.

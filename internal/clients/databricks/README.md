@@ -15,11 +15,14 @@ WAREHOUSE_KIND=databricks
 WAREHOUSE_DB_URL='token:<personal-access-token>@dbc-1234abcd-5678.cloud.databricks.com:443/sql/1.0/warehouses/1234567890abcdef?catalog=main'
 ```
 
+**Requires Databricks Runtime 14.1 or later** on the SQL warehouse: every value is sent as a
+named parameter (`:key`, `:since`, ...), which older runtimes reject. Current SQL warehouses
+(Serverless, Pro, Classic on the current channel) meet it.
+
 `WAREHOUSE_DB_URL` is the driver's DSN form, restricted to what a read-only reader needs:
 
 ```
 token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]
-<host>[:<port>]/<http-path>?catalog=<catalog>&authType=OAuthM2M&clientId=<application-id>&clientSecret=<secret>
 ```
 
 | Part | Meaning |
@@ -30,19 +33,25 @@ token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&sch
 | `<http-path>` | The SQL warehouse's HTTP path (Connection details tab), e.g. `/sql/1.0/warehouses/<id>`. |
 | `catalog` | **Required.** Unity Catalog catalog holding the sink tables. `sink_tables` in `owners.yaml` are `schema.table` in it. |
 | `schema` | Optional initial schema; tables are always schema-qualified, so it changes nothing. |
-| `authType=OAuthM2M`, `clientId`, `clientSecret` | OAuth machine-to-machine login of a service principal instead of a token. |
 
 Anything else is refused at startup: other parameters (the driver would pass them on as
 session parameters), a user name other than `token`, OAuth U2M (it opens a browser), a
 repeated parameter, a `#fragment`. Error messages never quote the DSN or any part of it;
-`databricks.Redact(err, dsn)` scrubs the token and client secret from any error text.
+`databricks.Redact(err, dsn)` scrubs the token (and any client secret) from any error text.
+
+**OAuth M2M is not supported yet.** A DSN with `authType=OAuthM2M`, `clientId` or
+`clientSecret` is refused at startup. In `databricks-sql-go` v1.16.0 the M2M authenticator
+fetches its token, and runs OIDC discovery, with `context.Background()` and the default
+HTTP client while it holds a lock: no deadline, no 4 MB cap, outside the guarded transport.
+One hung token endpoint would stall every query past the 10 s deadline. For a service
+principal, create a personal access token for it and use `token:<pat>@`.
 
 The DSN holds the credential. Keep it in a secret store, not in a file in the repository.
 
 ## Grants (read-only comes from these)
 
 The driver has no read-only session switch: read-only is enforced by the principal the
-token or service principal belongs to. Give it exactly:
+token belongs to (a user or, better, a service principal). Give it exactly:
 
 | Grant | On | Why |
 |---|---|---|
@@ -82,7 +91,8 @@ grant it.
   `clients.ErrNotFound`; a composite key is `clients.ErrNotSupported`. The name is
   lower-cased.
 - `CountByBucket` counts rows per bucket (at least one second wide, at most 200 buckets)
-  over `[since, until)`; only counts are selected.
+  over `[since, until)`; only counts are selected. A partial last bucket counts toward the
+  200, and a result with more buckets than the window allows is refused, never cut.
 - Every call has a 10 second deadline (context and server-side statement timeout). Cloud
   fetch is off, so results come inline over one HTTP client whose responses are capped at
   4 MB (`ErrResponseTooLarge`).

@@ -19,19 +19,15 @@ func TestParseDSN(t *testing.T) {
 		want      Config
 	}{
 		{"pat", "token:" + testToken + "@" + host + ":443" + path + "?catalog=main",
-			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Auth: authPAT, Token: testToken}},
+			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Token: testToken}},
 		{"https prefix, default port, schema", "https://token:" + testToken + "@" + host + path + "?catalog=main&schema=sales",
-			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Schema: "sales", Auth: authPAT, Token: testToken}},
+			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Schema: "sales", Token: testToken}},
 		{"other port", "token:" + testToken + "@" + host + ":8443" + path + "?catalog=main",
-			Config{Host: host, Port: 8443, HTTPPath: path, Catalog: "main", Auth: authPAT, Token: testToken}},
+			Config{Host: host, Port: 8443, HTTPPath: path, Catalog: "main", Token: testToken}},
 		{"accessToken param", host + ":443" + path + "?catalog=main&authType=Pat&accessToken=" + testToken,
-			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Auth: authPAT, Token: testToken}},
-		{"m2m", host + ":443" + path + "?catalog=main&authType=OAuthM2M&clientId=app-1&clientSecret=" + testSecret,
-			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Auth: authM2M, ClientID: "app-1", ClientSecret: testSecret}},
-		{"m2m inferred", host + path + "?catalog=main&clientID=app-1&clientSecret=" + testSecret,
-			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Auth: authM2M, ClientID: "app-1", ClientSecret: testSecret}},
+			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Token: testToken}},
 		{"escaped token", "token:" + url.QueryEscape("ab/c+d=e") + "@" + host + path + "?catalog=main",
-			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Auth: authPAT, Token: "ab/c+d=e"}},
+			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", Token: "ab/c+d=e"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, err := ParseDSN(c.dsn)
@@ -66,6 +62,8 @@ func TestParseDSNRefuses(t *testing.T) {
 		{"unknown auth", host + path + "?catalog=main&authType=basic&accessToken=" + testToken},
 		{"m2m without secret", host + path + "?catalog=main&authType=OAuthM2M&clientId=app"},
 		{"token and m2m", tok + host + path + "?catalog=main&clientId=app&clientSecret=" + testSecret},
+		{"m2m", host + path + "?catalog=main&authType=OAuthM2M&clientId=app&clientSecret=" + testSecret},
+		{"m2m inferred", host + path + "?catalog=main&clientID=app&clientSecret=" + testSecret},
 		{"token twice", tok + host + path + "?catalog=main&accessToken=" + testToken},
 		{"no path", tok + host + "?catalog=main"},
 		{"dotdot path", tok + host + "/sql/../x?catalog=main"},
@@ -88,9 +86,29 @@ func TestParseDSNRefuses(t *testing.T) {
 	}
 }
 
+// OAuth M2M is refused until its token fetch can be bounded (errM2MRefused),
+// with the reason, and without echoing the secret.
+func TestParseDSNRefusesM2M(t *testing.T) {
+	base := "dbc-1234abcd-5678.cloud.databricks.com/sql/1.0/warehouses/a?catalog=main"
+	for _, q := range []string{
+		"&authType=OAuthM2M&clientId=app&clientSecret=" + testSecret,
+		"&clientId=app&clientSecret=" + testSecret,
+		"&clientSecret=" + testSecret,
+		"&authType=oauthm2m",
+	} {
+		_, err := ParseDSN(base + q)
+		if !errors.Is(err, errM2MRefused) {
+			t.Errorf("%s: err = %v, want errM2MRefused", q, err)
+			continue
+		}
+		if strings.Contains(err.Error(), testSecret) {
+			t.Errorf("%s: secret in error", q)
+		}
+	}
+}
+
 func TestConfigStringHidesSecrets(t *testing.T) {
 	c := testCfg
-	c.ClientSecret = testSecret
 	for _, s := range []string{fmt.Sprint(c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c), c.target()} {
 		if strings.Contains(s, testToken) || strings.Contains(s, testSecret) {
 			t.Fatalf("secret printed: %s", s)

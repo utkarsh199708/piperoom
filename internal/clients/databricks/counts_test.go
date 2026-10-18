@@ -35,7 +35,7 @@ func TestCountByBucket(t *testing.T) {
 	if len(q.Params) != 3 || q.Params[0].Value != since.UnixMicro() || q.Params[1].Value != since.Add(time.Hour).UnixMicro() || q.Params[2].Value != int64(300_000_000) {
 		t.Errorf("params = %#v", q.Params)
 	}
-	if q.MaxRows != maxCountBuckets {
+	if q.MaxRows != maxCountBuckets+1 {
 		t.Errorf("MaxRows = %d", q.MaxRows)
 	}
 }
@@ -52,6 +52,8 @@ func TestCountByBucketRejects(t *testing.T) {
 		{since.Add(time.Hour), 0},                      // no width
 		{since.Add(time.Hour), 500 * time.Millisecond}, // under a second
 		{since.Add(100 * time.Hour), time.Minute},      // too many buckets
+		// 200.5 buckets: the partial last one makes 201.
+		{since.Add(200*time.Minute + 30*time.Second), time.Minute},
 	} {
 		if _, err := d.CountByBucket(context.Background(), "sales.orders", "ts", since, c.until, c.width); err == nil {
 			t.Errorf("%+v: want error", c)
@@ -59,6 +61,40 @@ func TestCountByBucketRejects(t *testing.T) {
 	}
 	if n := len(f.calls()); n != 0 {
 		t.Errorf("ran %d statements for bad input", n)
+	}
+}
+
+func TestCountByBucketWindowEdges(t *testing.T) {
+	since := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	// Exactly 200 buckets is allowed.
+	d, _ := newFake(ok([]field{{"bucket", "BIGINT"}, {"n", "BIGINT"}}))
+	if _, err := d.CountByBucket(context.Background(), "sales.orders", "ts", since, since.Add(200*time.Minute), time.Minute); err != nil {
+		t.Fatalf("200 buckets: %v", err)
+	}
+	for _, c := range []struct {
+		window, width time.Duration
+		want          time.Duration
+	}{
+		{time.Hour, time.Minute, 60},
+		{time.Hour + time.Second, time.Minute, 61},
+		{time.Second, time.Minute, 1},
+	} {
+		if got := bucketCount(c.window, c.width); got != c.want {
+			t.Errorf("bucketCount(%s, %s) = %d, want %d", c.window, c.width, got, c.want)
+		}
+	}
+}
+
+// A result longer than the window allows is refused, never cut to 200.
+func TestCountByBucketRefusesExtraBucket(t *testing.T) {
+	since := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	rows := make([][]any, maxCountBuckets+1)
+	for i := range rows {
+		rows[i] = []any{since.Add(time.Duration(i) * time.Minute).UnixMicro(), int64(1)}
+	}
+	d, _ := newFake(ok([]field{{"bucket", "BIGINT"}, {"n", "BIGINT"}}, rows...))
+	if got, err := d.CountByBucket(context.Background(), "sales.orders", "ts", since, since.Add(200*time.Minute), time.Minute); err == nil {
+		t.Fatalf("201 buckets accepted (%d returned)", len(got))
 	}
 }
 

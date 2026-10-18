@@ -62,7 +62,7 @@ func (f *fakeRunner) calls() []query {
 
 var testCfg = Config{
 	Host: "dbc-1234abcd-5678.cloud.databricks.com", Port: 443, HTTPPath: "/sql/1.0/warehouses/abc123",
-	Catalog: "main", Auth: authPAT, Token: testToken,
+	Catalog: "main", Token: testToken,
 }
 
 func newFake(results ...fakeResult) (*DB, *fakeRunner) {

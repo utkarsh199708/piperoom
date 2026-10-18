@@ -10,11 +10,14 @@ import (
 	"strings"
 )
 
-// Auth kinds a DSN may select.
-const (
-	authPAT = "pat"
-	authM2M = "oauthm2m"
-)
+// errM2MRefused explains why OAuth M2M DSNs are refused. In
+// databricks-sql-go v1.16.0 the M2M authenticator fetches its token (and runs
+// OIDC discovery) with context.Background() and the default HTTP client,
+// under the authenticator's lock: no deadline, no 4 MB cap, not through the
+// guarded transport, so one hung token endpoint stalls every query past the
+// 10 s deadline. Rebuilding that flow here (cloud inference, Azure endpoints,
+// account-rooted discovery) is a reimplementation, not a wrapper.
+var errM2MRefused = errors.New("databricks: dsn OAuth M2M (authType=OAuthM2M, clientId, clientSecret) is not supported yet: the driver fetches its token without a deadline or size cap; use a personal access token of the service principal (token:<pat>@host)")
 
 var (
 	// hostRe is a DNS host name or IPv4 address: the workspace host, such as
@@ -37,18 +40,15 @@ type Config struct {
 	// qualified with their schema, so it changes nothing this client reads.
 	Schema string
 
-	// Auth is authPAT or authM2M. The secrets below are never printed:
-	// Config has a String method that leaves them out.
-	Auth         string
-	Token        string // personal access token (pat)
-	ClientID     string // service principal application id (oauthm2m)
-	ClientSecret string // service principal OAuth secret (oauthm2m)
+	// Token is the personal access token. It is never printed: Config has a
+	// String method that leaves it out.
+	Token string
 }
 
-// String leaves the credentials out, so a Config printed by mistake (%v in
-// a log line) does not leak them.
+// String leaves the token out, so a Config printed by mistake (%v in a log
+// line) does not leak it.
 func (c Config) String() string {
-	return fmt.Sprintf("databricks{host=%s port=%d path=%s catalog=%s auth=%s}", c.Host, c.Port, c.HTTPPath, c.Catalog, c.Auth)
+	return fmt.Sprintf("databricks{host=%s port=%d path=%s catalog=%s}", c.Host, c.Port, c.HTTPPath, c.Catalog)
 }
 
 // GoString is String, for %#v.
@@ -63,14 +63,14 @@ func (c Config) target() string {
 // read-only warehouse client needs:
 //
 //	token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]
-//	<host>[:<port>]/<http-path>?catalog=<catalog>&authType=OAuthM2M&clientId=<id>&clientSecret=<secret>
 //
 // An optional https:// prefix is accepted; http:// is refused (the token
 // would travel in clear text). The port defaults to 443. accessToken=<pat>
-// may stand in for the token: user info. catalog is required. Any other
-// parameter is refused: the driver would pass it on as a session parameter.
-// So are a user name other than "token", OAuth U2M (interactive, it opens a
-// browser), a repeated parameter and a #fragment.
+// (with optional authType=Pat) may stand in for the token: user info.
+// catalog is required. Any other parameter is refused: the driver would pass
+// it on as a session parameter. So are a user name other than "token", OAuth
+// M2M (see errM2MRefused), OAuth U2M (interactive, it opens a browser), a
+// repeated parameter and a #fragment.
 //
 // Error messages never quote the DSN or any part of it: a token pasted in
 // the wrong place (the path, the host) must not reach a log.
@@ -112,7 +112,6 @@ func ParseDSN(dsn string) (Config, error) {
 	if err != nil {
 		return Config{}, errors.New("databricks: dsn query string does not parse")
 	}
-	var authType string
 	for k, v := range q {
 		if len(v) != 1 {
 			return Config{}, fmt.Errorf("databricks: dsn parameter %s is repeated", safeKey(k))
@@ -130,18 +129,21 @@ func ParseDSN(dsn string) (Config, error) {
 			}
 			cfg.Schema = val
 		case "authType":
-			authType = strings.ToLower(val)
+			switch strings.ToLower(val) {
+			case "pat":
+			case "oauthm2m":
+				return Config{}, errM2MRefused
+			case "oauthu2m":
+				return Config{}, errors.New("databricks: dsn authType=OAuthU2M is not supported: it opens a browser; use a personal access token")
+			default:
+				return Config{}, errors.New("databricks: dsn authType must be Pat")
+			}
 		case "accessToken":
 			cfg.Token = val
-		case "clientId", "clientID":
-			if cfg.ClientID != "" {
-				return Config{}, errors.New("databricks: dsn parameter clientId is repeated")
-			}
-			cfg.ClientID = val
-		case "clientSecret":
-			cfg.ClientSecret = val
+		case "clientId", "clientID", "clientSecret":
+			return Config{}, errM2MRefused
 		default:
-			return Config{}, fmt.Errorf("databricks: dsn parameter %s is not allowed (allowed: catalog, schema, authType, accessToken, clientId, clientSecret)", safeKey(k))
+			return Config{}, fmt.Errorf("databricks: dsn parameter %s is not allowed (allowed: catalog, schema, authType=Pat, accessToken)", safeKey(k))
 		}
 	}
 	if cfg.Catalog == "" {
@@ -161,35 +163,8 @@ func ParseDSN(dsn string) (Config, error) {
 		}
 	}
 
-	switch authType {
-	case "", authPAT:
-		if cfg.ClientID != "" || cfg.ClientSecret != "" {
-			if authType == authPAT || cfg.Token != "" {
-				return Config{}, errors.New("databricks: dsn mixes a token with clientId/clientSecret; pick one")
-			}
-			cfg.Auth = authM2M
-		} else {
-			cfg.Auth = authPAT
-		}
-	case authM2M:
-		if cfg.Token != "" {
-			return Config{}, errors.New("databricks: dsn mixes a token with authType=OAuthM2M; pick one")
-		}
-		cfg.Auth = authM2M
-	case "oauthu2m":
-		return Config{}, errors.New("databricks: dsn authType=OAuthU2M is not supported: it opens a browser; use a token or OAuthM2M")
-	default:
-		return Config{}, errors.New("databricks: dsn authType must be Pat or OAuthM2M")
-	}
-	switch cfg.Auth {
-	case authPAT:
-		if cfg.Token == "" {
-			return Config{}, errors.New("databricks: dsn has no credential; want token:<pat>@host or clientId and clientSecret")
-		}
-	case authM2M:
-		if cfg.ClientID == "" || cfg.ClientSecret == "" {
-			return Config{}, errors.New("databricks: dsn authType=OAuthM2M needs both clientId and clientSecret")
-		}
+	if cfg.Token == "" {
+		return Config{}, errors.New("databricks: dsn has no credential; want token:<pat>@host")
 	}
 	return cfg, nil
 }
@@ -224,7 +199,8 @@ func (e *redactedError) Error() string { return e.msg }
 func (e *redactedError) Unwrap() error { return e.err }
 
 // Redact returns err with every secret of dsn removed from its message: the
-// whole DSN, the token and the OAuth client secret, raw and URL-escaped. The
+// whole DSN, the token and any OAuth client secret (ParseDSN refuses one, but
+// the error about it must not echo it), raw and URL-escaped. The
 // result still unwraps to err. A nil err gives nil. internal/wiring uses it
 // on every error from New, like snowflake.Redact.
 func Redact(err error, dsn string) error {
@@ -292,7 +268,6 @@ func dsnSecrets(dsn string) []string {
 	}
 	if cfg, err := ParseDSN(dsn); err == nil {
 		add(cfg.Token)
-		add(cfg.ClientSecret)
 	}
 	return out
 }

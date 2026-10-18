@@ -28,7 +28,7 @@ func driverCfg(t *testing.T, srv *httptest.Server) (Config, string) {
 		t.Fatal(err)
 	}
 	p, _ := strconv.Atoi(port)
-	return Config{Host: host, Port: p, HTTPPath: "/sql/1.0/warehouses/abc123", Catalog: "main", Auth: authPAT, Token: testToken}, "http://" + host
+	return Config{Host: host, Port: p, HTTPPath: "/sql/1.0/warehouses/abc123", Catalog: "main", Token: testToken}, "http://" + host
 }
 
 func openAgainst(ctx context.Context, t *testing.T, h http.Handler) error {

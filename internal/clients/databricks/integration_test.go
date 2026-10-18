@@ -75,9 +75,6 @@ func TestIntegrationBadTokenIsPermissionDenied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Auth != authPAT {
-		t.Skip("needs a token DSN")
-	}
 	bad := "dapi" + strings.Repeat("0", 32)
 	_, err = New(context.Background(), strings.Replace(dsn, cfg.Token, bad, 1))
 	if !errors.Is(err, ErrPermissionDenied) {
