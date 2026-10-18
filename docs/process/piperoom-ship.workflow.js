@@ -39,10 +39,10 @@ if (!ROWS.length) {
 // RULES-BEGIN (docs/process/ship-check.mjs evaluates this block, so Lead 1 re-checks a PR with the same rules)
 // The change sets the tier, not the author. Paths are repo-relative after norm().
 const CONTRACT = /^(internal\/tools\/tool\.go|internal\/events\/events\.go|internal\/clients\/clients\.go|internal\/actions\/action\.go|internal\/agent\/contract\.go|internal\/topology\/graph\.go|internal\/config\/config\.go|internal\/version\/version\.go|docs\/api\.md)$/
-const PIPELINE = /^(docs\/process\/|\.claude\/|\.github\/|tasks\/|Makefile$|\.gitattributes$|web\/(eslint|vite|vitest)\.config|web\/\.eslintrc|web\/tsconfig)|(^|\/)(AGENTS|CLAUDE|REVIEW)\.md$/
+const PIPELINE = /^(docs\/process\/|docs\/collab\.md$|\.claude\/|\.github\/|tasks\/|Makefile$|\.gitattributes$|web\/(eslint|vite|vitest)\.config|web\/\.eslintrc|web\/tsconfig)|(^|\/)(AGENTS|CLAUDE|REVIEW)\.md$/
 const HIGH = [
   /^internal\/actions\//,                                        // everything that writes to a customer system
-  /^internal\/clients\/(connect|schemareg|pgconv|netsec)\//,      // clients with write paths or the read-only pool
+  /^internal\/clients\/(connect|schemareg|pgconv|netsec|kafka|postgres)\//, // clients with write paths, the code writers share, the read-only pool
   /^internal\/clients\/[^/]+\/writer/,                            // write clients
   /^internal\/room\//,                                            // approvals, write gate, executor, preview, replicas, control, policies
   /^internal\/owners\//, /^internal\/wiring\//, /^cmd\/server\//, /^internal\/tools\/scope\.go$/,
@@ -294,9 +294,12 @@ async function shipRow(row) {
       fullReviewed = true
       reviewedHead = head
       const byKey = new Map()
-      for (const f of found.filter(x => x.severity === 'important')) if (!byKey.has(exactKey(f))) byKey.set(exactKey(f), f)
-      const openKeys = new Set(open.map(exactKey))
-      const fresh = [...byKey.values()].filter(f => !refuted.has(claimKey(f)) && !openKeys.has(exactKey(f)))
+      for (const f of found.filter(x => x.severity === 'important')) if (!byKey.has(claimKey(f))) byKey.set(claimKey(f), f)
+      // Skip only an identical claim: a different bug on the same line and class is new work, not a repeat.
+      const openKeys = new Set(open.map(claimKey))
+      const fresh = [...byKey.values()].filter(f => !refuted.has(claimKey(f)) && !openKeys.has(claimKey(f)))
+      const skipped = byKey.size - fresh.length
+      if (skipped) log(`${row.id} round ${round}: ${skipped} finding(s) repeat an open or refuted claim and were not re-voted`)
       for (const f of found.filter(x => x.severity === 'nit')) if (out.nits.length < 3) out.nits.push(f)
       out.preexisting.push(...found.filter(x => x.severity === 'preexisting'))
       out.found += fresh.length

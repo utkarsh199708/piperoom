@@ -8,7 +8,7 @@
 // Stubs route by the agent label prefix (plan, build, verify, hunt, security, vote, check, fix, tier, integrity,
 // approve). By default every stub answers like a clean row: build at h1, checks pass, no findings, approvals at head.
 // A scenario overrides a stub by kind; a stub that returns undefined falls back to the default, null is a failed agent.
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, copyFileSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -119,7 +119,7 @@ function tester() {
 // ---------- fixtures ----------
 const ROW = {
   low: id => ({ id, agent: 'C9', folders: ['docs/design/**'], files: ['docs/design/watcher.md'] }),
-  medium: id => ({ id, agent: 'A2', folders: ['internal/clients/kafka/**'], files: ['internal/clients/kafka/lag.go', 'internal/clients/kafka/lag_test.go'] }),
+  medium: id => ({ id, agent: 'A3', folders: ['internal/clients/warehouse/**'], files: ['internal/clients/warehouse/load.go', 'internal/clients/warehouse/load_test.go'] }),
   high: id => ({ id, agent: 'A5', folders: ['internal/room/**'], files: ['internal/room/service_executor.go', 'internal/room/executor_test.go'] }),
   pipeline: id => ({ id, agent: 'leads', folders: ['docs/**', 'tasks/**'], files: ['docs/process/ship-workflow.md'] }),
 }
@@ -167,7 +167,7 @@ scenario('1. approve:false with no blocking items, or only refuted ones, never y
   t.eq(res.count('fix'), 0, '1a: no fix round without a verified item')
 
   // b: its blocking items are refuted by the verifiers; asked again, it still says no.
-  const B = F('internal/clients/kafka/lag.go', 7, 'lag can go negative')
+  const B = F('internal/clients/warehouse/load.go', 7, 'lag can go negative')
   res = await run([ROW.medium('1b')], { stubs: {
     approve: c => ({ approve: false, sha: c.head[c.id], reasons: ['bug'], blocking: [B] }),
     vote: () => ({ refuted: true, reason: 'cannot happen' }) } })
@@ -220,6 +220,26 @@ scenario('2. a verified finding the fixer does not fix never vanishes', async t 
     approve: c => (c.round === 0 && c.head[c.id] === 'h1' ? { approve: false, sha: 'h1', reasons: ['bug'], blocking: [A] } : undefined),
     check: () => ({ fixed: false, evidence: 'still leaks' }) } })
   t.row(res, '2e', { status: 'blocked', reason: ['not converged', 'lease never released'] })
+})
+
+// ---------- 2, round 2 of #597: the cross-round skip compares the claim ----------
+scenario('2c. a different claim on an open finding\'s file, line and class is voted; an identical claim is skipped', async t => {
+  const SAME = ROOM_BUG
+  const OTHER = { ...ROOM_BUG, claim: 'Execute drops the request deadline', evidence: 'line 40 starts from context.Background()' }
+  // Round 1 raises SAME; it is still open in round 2 (the checker says so), when a reviewer reports SAME again and
+  // OTHER, a new bug at the same file, line and class. Both orders, so the result cannot depend on lens order.
+  for (const [id, round2] of [['CKa', [SAME, OTHER]], ['CKb', [OTHER, SAME]]]) {
+    const res = await run([ROW.high(id)], { stubs: {
+      hunt: c => (c.rest[0] === 'correctness' ? { findings: c.round === 1 ? [SAME] : c.round === 2 ? round2 : [] } : undefined),
+      check: c => ({ fixed: c.nth > 0, evidence: c.nth > 0 ? 'gone' : 'still there' }) } })
+    const r = t.row(res, id, { status: 'ready', rounds: 3 })
+    const votesOn = f => res.calls.filter(c => c.kind === 'vote' && c.prompt.includes(f.claim)).length
+    t.eq([votesOn(SAME), votesOn(OTHER)], [3, 3], `${id}: votes on [identical claim, different claim]`)
+    t.eq(r.verified, 2, `${id}: verified`)
+    const fix2 = res.calls.find(c => c.label === `fix:${id}:r2`)
+    t.ok(fix2 && fix2.prompt.includes(SAME.claim) && fix2.prompt.includes(OTHER.claim), `${id}: round 2 fix gets both claims`)
+    t.ok(res.logs.some(l => l.includes(`${id} round 2: 1 finding(s) repeat an open or refuted claim`)), `${id}: skip logged: ${J(res.logs.filter(l => l.includes('repeat')))}`)
+  }
 })
 
 // ---------- 3 ----------
@@ -290,8 +310,8 @@ scenario('5. file list normalised; empty diff blocks; the tier never fails open'
   }
 
   // d: the verifier lists only a medium file; the classifier's list adds an actions file: the union sets the tier.
-  const mixed = { id: '5d', agent: 'A2', folders: ['internal/clients/kafka/**', 'internal/actions/**'], excluded: ['internal/actions/action.go'], files: ['internal/clients/kafka/lag.go'] }
-  res = await run([mixed], { stubs: { tier: () => ({ raiseTo: 'none', reason: '', files: ['./internal/clients/kafka/lag.go', 'internal/actions/kafka_actions.go'] }) } })
+  const mixed = { id: '5d', agent: 'A3', folders: ['internal/clients/warehouse/**', 'internal/actions/pgactions/**'], files: ['internal/clients/warehouse/load.go'] }
+  res = await run([mixed], { stubs: { tier: () => ({ raiseTo: 'none', reason: '', files: ['./internal/clients/warehouse/load.go', 'internal/actions/pgactions/reset.go'] }) } })
   t.row(res, '5d', { status: 'ready', tier: 'high', approvals: ['fable', 'opus'] })
 
   // e: the classifier raises a docs row to medium; f: it cannot lower a high row.
@@ -307,20 +327,23 @@ scenario('5. file list normalised; empty diff blocks; the tier never fails open'
 // ---------- 6 ----------
 const CONTRACT_FILES = ['internal/tools/tool.go', 'internal/events/events.go', 'internal/clients/clients.go', 'internal/actions/action.go',
   'internal/agent/contract.go', 'internal/topology/graph.go', 'internal/config/config.go', 'internal/version/version.go', 'docs/api.md']
-const PIPELINE_FILES = ['docs/process/ship-workflow.md', 'docs/process/ship-check.mjs', '.claude/settings.json', '.github/workflows/ci.yml',
-  '.github/scripts/fail-on-skips.sh', 'tasks/P-board.md', 'Makefile', 'web/eslint.config.js', 'web/vitest.config.ts', 'web/vite.config.ts',
-  'web/.eslintrc.cjs', 'AGENTS.md', 'internal/agent/CLAUDE.md', 'REVIEW.md', 'web/REVIEW.md']
+const PIPELINE_FILES = ['docs/process/ship-workflow.md', 'docs/process/ship-check.mjs', 'docs/process/ownership.json', 'docs/collab.md',
+  '.claude/settings.json', '.github/workflows/ci.yml', '.github/scripts/fail-on-skips.sh', 'tasks/P-board.md', 'Makefile', '.gitattributes',
+  'web/eslint.config.js', 'web/vitest.config.ts', 'web/vite.config.ts', 'web/.eslintrc.cjs', 'web/tsconfig.json', 'web/tsconfig.app.json',
+  'AGENTS.md', 'internal/agent/CLAUDE.md', 'REVIEW.md', 'web/REVIEW.md']
 const HIGH_FILES = ['internal/room/service_executor.go', 'internal/room/executor_test.go', 'internal/owners/owners.go', 'internal/wiring/wiring.go',
   'cmd/server/main.go', 'internal/tools/scope.go', 'internal/clients/connect/client.go', 'internal/clients/schemareg/client.go',
   'internal/clients/pgconv/convert.go', 'internal/clients/netsec/tls.go', 'internal/clients/kafka/writer.go', 'internal/clients/postgres/writer.go',
+  'internal/clients/kafka/lag.go', 'internal/clients/kafka/lag_test.go', 'internal/clients/postgres/query.go', 'internal/clients/airflow/writer.go',
   'internal/alertin/ingest.go', 'internal/store/events.go', 'internal/httpapi/server.go', 'internal/httpapi/auth.go', 'internal/httpapi/auth_oidc.go',
   'internal/auth/session.go', 'internal/actions/kafka_actions.go', 'internal/actions/pgactions/reset.go', 'internal/redact/redact.go',
   'internal/injectscan/scan.go', 'internal/agent/alerttext.go', 'internal/agent/alertevidence.go', 'internal/agent/injectflag.go',
   'internal/agent/approvals.go', 'internal/agent/prompt.go', 'migrations/0042_leases.sql', 'deploy/helm/values.yaml', 'Dockerfile',
   'cmd/devconsumer/Dockerfile', 'go.mod', 'go.sum', 'web/package.json', 'web/package-lock.json', ...CONTRACT_FILES, ...PIPELINE_FILES]
-const MEDIUM_FILES = ['internal/clients/kafka/lag_test.go', 'evals/scenarios/schema-change.yaml', 'evals/scenarios/heldout/x.yaml',
-  'web/src/App.test.tsx', 'test/e2e/room.spec.ts', 'internal/agent/run_test.go', 'internal/httpapi/hypothesis.go']
-const LOW_FILES = ['docs/design/watcher.md', 'reviews/capacity-2026-10/run1.md', 'research/notes.md', 'README.md']
+const MEDIUM_FILES = ['internal/clients/warehouse/load_test.go', 'internal/topology/build_test.go', 'internal/clients/warehouse/load.go',
+  'internal/topology/build.go', 'evals/scenarios/schema-change.yaml', 'evals/scenarios/heldout/x.yaml', 'web/src/App.test.tsx',
+  'test/e2e/room.spec.ts', 'internal/agent/run_test.go', 'internal/httpapi/hypothesis.go']
+const LOW_FILES = ['docs/design/watcher.md', 'docs/collab-notes.md', 'reviews/capacity-2026-10/run1.md', 'research/notes.md', 'README.md']
 
 // One row per path, folders = that path, so a row's tier comes from that one file.
 async function tiersOf(paths) {
@@ -524,61 +547,76 @@ scenario('extra 10x. only requested rows are shipped, once each', async t => {
 
 // ---------- ship-check.mjs ----------
 const TMP = mkdtempSync(join(tmpdir(), 'ship-check-'))
+const OWNERSHIP = fileURLToPath(new URL('./ownership.json', import.meta.url))
+const REPO = fileURLToPath(new URL('../../', import.meta.url))
+// The board ship-check reads each row's Agent cell from. A table without an ID column comes first and the first row
+// carries a "(merged #1)" note, as on tasks/P-board.md.
+const BOARD_AGENTS = { SC1: 'A5', SC2: 'A3', SC2h: 'leads', SC3: 'A5', SC4: 'A5', SC5: 'A5', SC6: 'A4', SC7: 'A2', SC8: 'A5' }
+const boardText = agents => ['# Dry-run board', '', '| Agent | PRs |', '|---|---|', '| A5 | 1 |', '',
+  '| ID | Agent | Model | Days | PR | Done when | After |', '|---|---|---|---|---|---|---|',
+  ...Object.entries(agents).map(([id, a], i) => `| ${id}${i === 0 ? ' (merged #1)' : ''} | ${a} | Opus 5.5 | 1 | x | y | P0 |`)].join('\n') + '\n'
+const BOARD = join(TMP, 'board.md')
+writeFileSync(BOARD, boardText(BOARD_AGENTS))
+const DRY = ['--i-know-this-is-not-main', '--board', BOARD]
 let tmpN = 0
-function shipCheck(row, files, patchId) {
+function shipCheck(row, files, patchId, { flags = DRY, script = SHIP_CHECK } = {}) {
   const n = ++tmpN
   const rowFile = join(TMP, `row${n}.json`), listFile = join(TMP, `files${n}.txt`)
   writeFileSync(rowFile, JSON.stringify(row, null, 2))
   writeFileSync(listFile, files.join('\r\n') + '\n')
-  const r = spawnSync(process.execPath, [SHIP_CHECK, rowFile, listFile, ...(patchId === undefined ? [] : [patchId])], { encoding: 'utf8' })
+  const r = spawnSync(process.execPath, [script, ...flags, rowFile, listFile, ...(patchId === undefined ? [] : [patchId])], { encoding: 'utf8' })
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') }
 }
-const line = (out, mark, name) => out.split('\n').some(l => l.startsWith(`${mark}  ${name}`))
+// line: the output has a "<mark>  <check>" line containing text
+const line = (out, mark, name, text = '') => out.split('\n').some(l => l.startsWith(`${mark}  ${name}`) && l.includes(text))
 
-scenario('ship-check 1. a ready manifest row and its real files pass (CRLF and ./ paths normalised)', async t => {
+scenario('ship-check 1. a ready row and its real files pass (CRLF, ./ paths, a board ID with a merged note)', async t => {
   const res = await run([ROW.high('SC1')])
   const row = t.row(res, 'SC1', { status: 'ready', tier: 'high' })
   const c = shipCheck(row, row.files.map(f => './' + f), row.patchId)
   t.eq(c.code, 0, `exit code\n${c.out}`)
-  for (const name of ['status', 'tier', 'ownership', 'approvals', 'patch id']) t.ok(line(c.out, 'PASS', name), `PASS ${name}\n${c.out}`)
+  for (const name of ['status', 'agent', 'files', 'tier', 'ownership', 'approvals', 'patch id']) t.ok(line(c.out, 'PASS', name), `PASS ${name}\n${c.out}`)
+  t.ok(line(c.out, 'SKIP', 'checkout', '--i-know-this-is-not-main') && c.out.includes('OK for a dry run only'), `the escape flag is reported\n${c.out}`)
+  t.ok(c.out.includes('owner      A5 (ownership.json): folders migrations/**, internal/store/**, internal/room/**') && c.out.includes('excluded none'),
+    `prints the owner's folders and exclusions\n${c.out}`)
 })
 
 scenario('ship-check 2. a file the workflow did not see raises the tier and fails', async t => {
-  const res = await run([{ id: 'SC2', agent: 'A2', folders: ['internal/clients/kafka/**', 'internal/actions/**'], excluded: ['internal/actions/action.go'], files: ['internal/clients/kafka/lag.go'] }])
+  const res = await run([{ id: 'SC2', agent: 'A3', folders: ['internal/clients/warehouse/**', 'internal/actions/pgactions/**'], files: ['internal/clients/warehouse/load.go'] }])
   const row = t.row(res, 'SC2', { status: 'ready', tier: 'medium', approvals: ['fable'] })
-  const c = shipCheck(row, [...row.files, 'internal/actions/kafka_actions.go'], row.patchId)
+  const c = shipCheck(row, [...row.files, 'internal/actions/pgactions/reset.go'], row.patchId)
   t.eq(c.code, 1, `exit code\n${c.out}`)
-  t.ok(line(c.out, 'FAIL', 'tier') && c.out.includes('internal/actions/kafka_actions.go'), `FAIL tier names the file\n${c.out}`)
-  t.ok(line(c.out, 'FAIL', 'approvals') && c.out.includes('high needs 2'), `FAIL approvals\n${c.out}`)
-  t.ok(line(c.out, 'FAIL', 'files') && c.out.includes('never reviewed: internal/actions/kafka_actions.go'), `FAIL files (unreviewed)\n${c.out}`)
-  t.ok(line(c.out, 'PASS', 'ownership'), `PASS ownership\n${c.out}`)
+  t.ok(line(c.out, 'FAIL', 'tier', 'from: internal/actions/pgactions/reset.go'), `FAIL tier names the file\n${c.out}`)
+  t.ok(line(c.out, 'FAIL', 'approvals', 'high needs 2'), `FAIL approvals\n${c.out}`)
+  t.ok(line(c.out, 'FAIL', 'files', 'never reviewed: internal/actions/pgactions/reset.go'), `FAIL files (unreviewed)\n${c.out}`)
+  t.ok(line(c.out, 'PASS', 'ownership'), `PASS ownership (pgactions is A3's)\n${c.out}`)
   // on a row that is already high, a hidden pipeline file leaves tier and approvals intact but had no integrity check
   const h = await run([{ id: 'SC2h', agent: 'leads', folders: ['docs', 'tasks'], files: ['docs/process/ship-workflow.md'] }])
   const hrow = t.row(h, 'SC2h', { status: 'ready', tier: 'high' })
-  const c2 = shipCheck(hrow, [...hrow.files, 'tasks/P-board.md'])
-  t.ok(c2.code === 1 && line(c2.out, 'FAIL', 'files') && line(c2.out, 'PASS', 'tier') && line(c2.out, 'PASS', 'approvals'), `FAIL files for a hidden pipeline file at high tier\n${c2.out}`)
+  const c2 = shipCheck(hrow, [...hrow.files, 'tasks/P-board.md'], hrow.patchId)
+  t.ok(c2.code === 1 && line(c2.out, 'FAIL', 'files', 'tasks/P-board.md') && line(c2.out, 'PASS', 'tier') && line(c2.out, 'PASS', 'approvals') && line(c2.out, 'PASS', 'ownership'),
+    `FAIL files for a hidden pipeline file at high tier\n${c2.out}`)
 })
 
-scenario('ship-check 3. ownership and contract files fail', async t => {
+scenario('ship-check 3. a file outside the board agent\'s folders, or a contract file, fails', async t => {
   const res = await run([ROW.high('SC3')])
   const row = t.row(res, 'SC3', { status: 'ready' })
-  let c = shipCheck(row, [...row.files, 'internal/store/events.go'], row.patchId)
-  t.eq(c.code, 1, `exit code (outside folders)\n${c.out}`)
-  t.ok(line(c.out, 'FAIL', 'ownership') && c.out.includes("internal/store/events.go: outside A5's folders"), `FAIL ownership\n${c.out}`)
-  c = shipCheck({ ...row, folders: ['internal/room', 'internal/events'] }, [...row.files, 'internal/events/events.go'], row.patchId)
-  t.eq(c.code, 1, `exit code (contract file)\n${c.out}`)
-  t.ok(line(c.out, 'FAIL', 'ownership') && c.out.includes('internal/events/events.go: contract file'), `FAIL contract file\n${c.out}`)
+  let c = shipCheck({ ...row, files: [...row.files, 'internal/agent/run.go'] }, [...row.files, 'internal/agent/run.go'], row.patchId)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'ownership', "internal/agent/run.go: outside A5's folders"), `FAIL outside folders\n${c.out}`)
+  c = shipCheck({ ...row, files: [...row.files, 'internal/events/events.go'] }, [...row.files, 'internal/events/events.go'], row.patchId)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'ownership', 'internal/events/events.go: contract file'), `FAIL contract file\n${c.out}`)
+  // the planner gave internal/room only, but A5 owns internal/store too: ownership.json decides, in both directions
+  c = shipCheck({ ...row, files: [...row.files, 'internal/store/events.go'] }, [...row.files, 'internal/store/events.go'], row.patchId)
+  t.ok(c.code === 0 && line(c.out, 'PASS', 'ownership'), `PASS a file in ownership.json's folders\n${c.out}`)
 })
 
-scenario('ship-check 4. a changed patch id, a stale or same-model approval, or bad input fails', async t => {
+scenario('ship-check 4. a missing or changed patch id, a stale or same-model approval, or bad input fails', async t => {
   const res = await run([ROW.high('SC4')])
   const row = t.row(res, 'SC4', { status: 'ready' })
   let c = shipCheck(row, row.files, 'pid-somethingelse')
-  t.eq(c.code, 1, `exit code (patch id)\n${c.out}`)
-  t.ok(line(c.out, 'FAIL', 'patch id') && c.out.includes('approvals must be given again'), `FAIL patch id\n${c.out}`)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'patch id', 'approvals must be given again'), `FAIL changed patch id\n${c.out}`)
   c = shipCheck(row, row.files)
-  t.eq(c.code, 0, `exit code (no patch id given)\n${c.out}`)
-  t.ok(line(c.out, 'SKIP', 'patch id'), `SKIP patch id\n${c.out}`)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'patch id', 'not given'), `FAIL missing patch id\n${c.out}`)
   c = shipCheck({ ...row, approvals: [row.approvals[0], { ...row.approvals[1], sha: 'h0' }] }, row.files, row.patchId)
   t.ok(c.code === 1 && line(c.out, 'FAIL', 'approvals'), `FAIL stale approval\n${c.out}`)
   c = shipCheck({ ...row, approvals: [row.approvals[0], { ...row.approvals[0] }] }, row.files, row.patchId)
@@ -587,8 +625,128 @@ scenario('ship-check 4. a changed patch id, a stale or same-model approval, or b
   t.ok(c.code === 1 && line(c.out, 'FAIL', 'status'), `FAIL blocked row\n${c.out}`)
   c = shipCheck(row, [], row.patchId)
   t.ok(c.code === 1 && line(c.out, 'FAIL', 'files'), `FAIL empty file list\n${c.out}`)
-  const u = spawnSync(process.execPath, [SHIP_CHECK], { encoding: 'utf8' })
-  t.ok(u.status === 1 && u.stderr.includes('Usage: node docs/process/ship-check.mjs'), `usage error exits 1: ${u.status} ${u.stderr}`)
+  for (const args of [[], ['--no-such-flag', 'a', 'b', 'c']]) {
+    const u = spawnSync(process.execPath, [SHIP_CHECK, ...args], { encoding: 'utf8' })
+    t.ok(u.status === 1 && u.stderr.includes('Usage: node docs/process/ship-check.mjs'), `usage error exits 1 (${J(args)}): ${u.status} ${u.stderr}`)
+  }
+})
+
+scenario('ship-check 5. the planner widened the folders: ownership.json still decides', async t => {
+  const res = await run([{ id: 'SC5', agent: 'A5', folders: ['internal/**'], files: ['internal/room/a.go', 'internal/agent/run.go'] }])
+  const row = t.row(res, 'SC5', { status: 'ready', tier: 'high' }) // the workflow itself trusted the planner
+  const c = shipCheck(row, row.files, row.patchId)
+  t.ok(c.code === 1 && line(c.out, 'PASS', 'agent') && line(c.out, 'FAIL', 'ownership', "internal/agent/run.go: outside A5's folders"), `FAIL ownership\n${c.out}`)
+})
+
+scenario('ship-check 6. the planner relabelled a row as leads to change a contract file', async t => {
+  const res = await run([{ id: 'SC6', agent: 'leads', folders: ['internal/agent/**'], files: ['internal/agent/run.go', 'internal/agent/contract.go'] }])
+  const row = t.row(res, 'SC6', { status: 'ready', tier: 'high' })
+  const c = shipCheck(row, row.files, row.patchId)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'agent', 'says A4, the manifest says leads'), `FAIL agent\n${c.out}`)
+  t.ok(line(c.out, 'FAIL', 'ownership', 'internal/agent/contract.go: contract file'), `FAIL contract file for the board's agent\n${c.out}`)
+})
+
+scenario('ship-check 7. the board names another agent, or not the row at all', async t => {
+  const res = await run([{ id: 'SC7', agent: 'A3', folders: ['internal/clients/warehouse'], files: ['internal/clients/warehouse/load.go'] }])
+  const row = t.row(res, 'SC7', { status: 'ready', tier: 'medium' })
+  let c = shipCheck(row, row.files, row.patchId)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'agent', 'says A2, the manifest says A3') && line(c.out, 'FAIL', 'ownership', "outside A2's folders"), `FAIL agent and ownership\n${c.out}`)
+  c = shipCheck({ ...row, row: 'SC-none' }, row.files, row.patchId)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'agent', 'row SC-none not found') && line(c.out, 'FAIL', 'ownership'), `FAIL row not on the board\n${c.out}`)
+})
+
+scenario('ship-check 8. it runs only from a clean checkout at origin/main', async t => {
+  const hooks = join(TMP, 'no-hooks')
+  mkdirSync(hooks)
+  const g = (dir, ...args) => {
+    const r = spawnSync('git', ['-c', 'user.name=dryrun', '-c', 'user.email=dryrun@example.invalid', '-c', 'commit.gpgsign=false',
+      '-c', `core.hooksPath=${hooks}`, '-C', dir, ...args], { encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr || r.error}`)
+  }
+  const plant = root => {
+    const proc = join(root, 'docs', 'process')
+    mkdirSync(proc, { recursive: true })
+    mkdirSync(join(root, 'tasks'), { recursive: true })
+    copyFileSync(SCRIPT, join(proc, 'piperoom-ship.workflow.js'))
+    copyFileSync(SHIP_CHECK, join(proc, 'ship-check.mjs'))
+    copyFileSync(OWNERSHIP, join(proc, 'ownership.json'))
+    writeFileSync(join(root, 'tasks', 'P-board.md'), boardText(BOARD_AGENTS))
+    writeFileSync(join(root, 'tasks', 'Q-board.md'), boardText({ SC8: 'A5' }))
+    return join(proc, 'ship-check.mjs')
+  }
+  const repo = join(TMP, 'pinned'), origin = join(TMP, 'pinned-origin.git')
+  const script = plant(repo)
+  g(repo, 'init', '-q', '-b', 'main')
+  g(repo, 'add', '-A')
+  g(repo, 'commit', '-q', '-m', 'base')
+  g(TMP, 'clone', '-q', '--bare', repo, origin)
+  g(repo, 'remote', 'add', 'origin', origin)
+  g(repo, 'fetch', '-q', 'origin')
+  g(repo, 'checkout', '-q', '--detach', 'origin/main')
+  const res = await run([ROW.high('SC8')])
+  const row = t.row(res, 'SC8', { status: 'ready' })
+  const pinned = { flags: [], script }
+  let c = shipCheck(row, row.files, row.patchId, pinned)
+  t.ok(c.code === 0 && line(c.out, 'PASS', 'checkout', 'HEAD is origin/main') && line(c.out, 'PASS', 'agent', 'tasks/P-board.md') && c.out.includes('OK: every check passed'),
+    `a clean checkout at origin/main passes, with the default board\n${c.out}`)
+  c = shipCheck(row, row.files, row.patchId, { ...pinned, flags: ['--board', 'tasks/Q-board.md'] })
+  t.ok(c.code === 0 && line(c.out, 'PASS', 'agent', 'tasks/Q-board.md'), `--board tasks/Q-board.md\n${c.out}`)
+
+  writeFileSync(join(repo, 'tasks', 'P-board.md'), boardText({ ...BOARD_AGENTS, SC8: 'leads' }))
+  g(repo, 'commit', '-q', '-am', 'the PR edits the board')
+  c = shipCheck(row, row.files, row.patchId, pinned)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'checkout', 'is not origin/main') && c.out.includes('run ship-check from a checkout detached at origin/main') && !line(c.out, 'PASS', 'agent'),
+    `a commit on top of origin/main: refused before any check\n${c.out}`)
+
+  g(repo, 'checkout', '-q', '--detach', 'origin/main')
+  const own = join(repo, 'docs', 'process', 'ownership.json')
+  writeFileSync(own, readFileSync(own, 'utf8').replace('"web/**"', '"web/**", "internal/**"'))
+  c = shipCheck(row, row.files, row.patchId, pinned)
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'checkout', 'local changes to files ship-check reads: docs/process/ownership.json'), `an edited ownership.json\n${c.out}`)
+  g(repo, 'checkout', '-q', '--', '.')
+
+  c = shipCheck(row, row.files, row.patchId, { ...pinned, flags: ['--board', BOARD] })
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'checkout', 'the board must be a tasks/<wave>-board.md file of this checkout'), `a board outside the checkout\n${c.out}`)
+
+  c = shipCheck(row, row.files, row.patchId, { flags: [], script: plant(join(TMP, 'loose')) })
+  t.ok(c.code === 1 && line(c.out, 'FAIL', 'checkout', 'run ship-check from a checkout detached at origin/main'), `not a git checkout\n${c.out}`)
+})
+
+scenario('ship-check 9. ownership.json: the C6/C7 split, exclusions, and every path is one AGENTS.md names', async t => {
+  const cases = [
+    ['C7', ['evals/scenarios/new-case.yaml', 'evals/scenarios/README.md'], true],
+    ['C7', ['evals/scenarios/schema-change.yaml'], false],
+    ['C7', ['evals/scenarios/heldout/x.yaml'], false],
+    ['C6', ['evals/run.go', 'evals/scenarios/schema-change.yaml', 'evals/scenarios/learned/x.yaml'], true],
+    ['C6', ['evals/scenarios/new-case.yaml'], false],
+    ['C6', ['evals/scenarios/README.md'], false],
+    ['A2', ['internal/actions/kafka_actions.go', 'internal/clients/netsec/tls.go'], true],
+    ['A2', ['internal/actions/pgactions/reset.go'], false],
+    ['A3', ['internal/actions/pgactions/reset.go', 'internal/topology/build.go', 'internal/tools/scope.go'], true],
+    ['A3', ['internal/topology/graph.go'], false],
+    ['A4', ['internal/agent/contract.go'], false],
+    ['leads', ['internal/agent/contract.go', 'tasks/P-board.md', 'AGENTS.md'], true],
+    ['E3', ['evals/scenarios/heldout/x.yaml'], true],
+    ['C2', ['internal/agent/run.go'], false],
+  ]
+  const board = join(TMP, 'board-own.md')
+  writeFileSync(board, boardText(Object.fromEntries(cases.map(([agent], i) => [`OWN${i}`, agent]))))
+  cases.forEach(([agent, files, ok], i) => {
+    const row = { row: `OWN${i}`, status: 'ready', agent, tier: 'high', head: 'h1', patchId: 'p1', files,
+      approvals: [{ model: 'fable', approve: true, sha: 'h1' }, { model: 'opus', approve: true, sha: 'h1' }] }
+    const c = shipCheck(row, files, 'p1', { flags: ['--i-know-this-is-not-main', '--board', board] })
+    t.ok(line(c.out, ok ? 'PASS' : 'FAIL', 'ownership') && c.code === (ok ? 0 : 1), `${agent} ${J(files)}: want ownership ${ok ? 'PASS' : 'FAIL'}\n${c.out}`)
+  })
+  // a typo guard: every path in ownership.json is named in AGENTS.md, in full or by its last segments
+  const md = readFileSync(join(REPO, 'AGENTS.md'), 'utf8')
+  const agents = JSON.parse(readFileSync(OWNERSHIP, 'utf8')).agents
+  for (const [agent, e] of Object.entries(agents)) {
+    for (const p of [...e.folders, ...e.excluded]) {
+      const segs = p.split('/')
+      const named = segs.some((_, i) => !segs[i].startsWith('*') && md.includes('`' + segs.slice(i).join('/') + '`'))
+      t.ok(named, `ownership.json ${agent}: ${p} is not named in AGENTS.md`)
+    }
+  }
 })
 
 // ---------- run ----------

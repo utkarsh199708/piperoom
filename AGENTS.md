@@ -56,7 +56,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A6 | `tasks/A6-web.md` | `web/**` |
 | A7 | `docs/design/watcher.md` (watcher), `docs/design/dlq.md` | `internal/watch/**`, `internal/dlq/**` |
 | A3 (F wave, new folders) | `tasks/F8-what-changed-checklist.md`, `tasks/F12-deep-signals-scenarios.md` | `internal/tools/changes/**` (F8b), `internal/clients/prom/**` and `internal/tools/debeziumtools/**` (F12b) |
-| C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
+| C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile`, `deploy/docker-compose.quickstart.yml` (P1c) |
 | C2 (cloud) | `tasks/C2-agent-memory.md` | done — merged `9519d23`; `internal/agent/**` belongs to A4 again |
 | C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |
 | C4 (cloud) | `tasks/C4-security.md` | `docs/security/**` (no code changes) |
@@ -295,7 +295,10 @@ replaces the two leads' approvals of §2, §6 and §7. The owner chose to run wi
 
 - The workflow's builder acts as the row's owner agent: it edits only that agent's folders (§2) and uses the row's
   tag. A file outside them, or a contract file on a row that is not the leads', blocks the row.
-- Lead 1 runs the workflow and ships its rows as the doc's §5 says, and writes no feature code.
+- Lead 1 runs the workflow and ships its rows as the doc's §5 says, and writes no feature code. Both the workflow
+  and ship-check run from a checkout detached at `origin/main`, never from a row's branch, so a PR cannot be graded
+  by rules it edits. Ownership in ship-check comes from `docs/process/ownership.json` (kept in step with §2) and the
+  board's Agent cell, not from the workflow's own planner.
 - The workflow builds every row on Opus 5.5 at xhigh. The board's Model column applies only to rows built outside
   the workflow.
 - The risk tier and the approvals it needs are in the doc's §2 table.

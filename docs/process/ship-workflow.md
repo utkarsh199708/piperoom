@@ -38,7 +38,8 @@ still fails fails closed: the row blocks, a verifier refutes nothing, a checker 
 High-risk paths, copied from the script's `RULES-BEGIN`..`RULES-END` block (if the two differ, the script wins):
 
 - Writes and the gates in front of them: `internal/actions/**`; `internal/clients/connect/**`,
-  `internal/clients/schemareg/**`, `internal/clients/pgconv/**`, `internal/clients/netsec/**`; write clients
+  `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/clients/postgres/**` (the code the writers
+  share), `internal/clients/pgconv/**`, `internal/clients/netsec/**`; write clients
   (`internal/clients/*/writer*`); `internal/room/**`; `internal/owners/**`; `internal/wiring/**`; `cmd/server/**`;
   `internal/tools/scope.go`.
 - Auth, storage and untrusted text: `internal/auth/**`; `internal/httpapi/auth*` and `internal/httpapi/server*`;
@@ -51,7 +52,7 @@ High-risk paths, copied from the script's `RULES-BEGIN`..`RULES-END` block (if t
 - Contract files (AGENTS.md §2): `internal/tools/tool.go`, `internal/events/events.go`,
   `internal/clients/clients.go`, `internal/actions/action.go`, `internal/agent/contract.go`,
   `internal/topology/graph.go`, `internal/config/config.go`, `internal/version/version.go`, `docs/api.md`.
-- Pipeline files: `docs/process/**`, `.claude/**`, `.github/**`, `tasks/**` (the board and the task files'
+- Pipeline files: `docs/process/**`, `docs/collab.md`, `.claude/**`, `.github/**`, `tasks/**` (the board and the task files'
   Done-when), `Makefile`, `.gitattributes`, the web lint, Vite, Vitest and TypeScript configs (`web/eslint.config*`,
   `web/.eslintrc*`, `web/vite.config*`, `web/vitest.config*`, `web/tsconfig*`), and any `AGENTS.md`, `CLAUDE.md` or `REVIEW.md` in any folder.
 
@@ -139,9 +140,12 @@ writes no feature code. Save the row's manifest entry as a JSON file (`<row.json
    `gh api repos/utkarsh199708/piperoom/pulls/<n>/files --paginate --jq '.[] | .filename, (.previous_filename // empty)' > files.txt` (both sides of
    a rename). Compute the
    patch id in the worktree with the command in §2. Run
-   `node docs/process/ship-check.mjs <row.json> <files.txt> <patch-id>`. It evaluates the script's rules block on
-   the real files (tier, ownership, contract files) and compares the result and the patch id with the manifest. If
-   it fails, stop: do not merge, and report the row to the leads.
+   `node docs/process/ship-check.mjs <row.json> <files.txt> <patch-id>` **from a checkout detached at `origin/main`**
+   (`git fetch origin main && git checkout --detach origin/main`), never from the row's worktree or branch: a PR
+   that edits the rules must not be graded by its own rules, and ship-check refuses to run anywhere else. The patch
+   id is required; without it ship-check fails. It evaluates the rules block on the real files (tier, ownership
+   against `docs/process/ownership.json` and the board's Agent cell, contract files) and compares the result and
+   the patch id with the manifest. If it fails, stop: do not merge, and report the row to the leads.
 4. **Keep the branch current** (the merge-queue equivalent). Before each merge the branch must contain the current
    `origin/main`. Run `git fetch origin main`. If the branch is behind, run `git merge origin/main` in the worktree.
    The merge must be conflict-free and the patch id unchanged (§2). Then push and run ship-check again on the new
@@ -159,7 +163,9 @@ writes no feature code. Save the row's manifest entry as a JSON file (`<row.json
 
 ## 6. Running it
 
-From a Claude Code session in this repo, with the owner's go-ahead to run a workflow:
+From a Claude Code session in this repo, with the owner's go-ahead to run a workflow, and from a checkout detached
+at `origin/main` (`git fetch origin main && git checkout --detach origin/main`), so a branch that edits the script
+never runs its own version:
 
 ```
 Workflow({scriptPath: "docs/process/piperoom-ship.workflow.js",
