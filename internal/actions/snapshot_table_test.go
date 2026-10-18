@@ -108,24 +108,6 @@ func (k *signalKafka) SendSnapshotSignal(_ context.Context, topic, connector, ke
 	return kafka.SnapshotSignal{ID: "42", Topic: topic, Offset: 42}, nil
 }
 
-type sigSourceWriter struct {
-	args []string
-	tbls []string
-	id   string
-	err  error
-}
-
-func (w *sigSourceWriter) AddPublicationTables(context.Context, string, []string) error {
-	return errors.New("fake: unexpected AddPublicationTables")
-}
-func (w *sigSourceWriter) DropReplicationSlot(context.Context, string) error {
-	return errors.New("fake: unexpected DropReplicationSlot")
-}
-func (w *sigSourceWriter) InsertSnapshotSignal(_ context.Context, table, connector string, tables []string) (string, error) {
-	w.args, w.tbls = []string{table, connector}, tables
-	return w.id, w.err
-}
-
 // estSource is a SourceReader with the optional row estimate.
 type estSource struct {
 	clients.SourceReader
@@ -232,10 +214,7 @@ func TestSnapshotValidateConfig(t *testing.T) {
 		{"no signal brokers", ViaSignalTopic, with(func(c map[string]string) { delete(c, "signal.kafka.bootstrap.servers") }), "signal.kafka.bootstrap.servers", ErrSignalNotConfigured},
 		{"no topic.prefix", ViaSignalTopic, with(func(c map[string]string) { delete(c, "topic.prefix") }), "topic.prefix", ErrSignalNotConfigured},
 		{"no watermark table", ViaSignalTopic, with(func(c map[string]string) { delete(c, "signal.data.collection") }), "watermarks", ErrSignalNotConfigured},
-		{"table: no collection", ViaSignalTable, with(func(c map[string]string) { delete(c, "signal.data.collection") }), "signal.data.collection to the signal table", ErrSignalNotConfigured},
-		{"table: source channel off", ViaSignalTable, with(func(c map[string]string) { c["signal.enabled.channels"] = "kafka" }), "include source", ErrSignalNotConfigured},
-		{"table: not postgres", ViaSignalTable, with(func(c map[string]string) { c["connector.class"] = "io.debezium.connector.mysql.MySqlConnector" }), "Postgres connector", ErrSignalNotConfigured},
-		{"table: bad collection", ViaSignalTable, with(func(c map[string]string) { c["signal.data.collection"] = "orders.public.sig" }), "not schema.table", ErrSignalNotConfigured},
+		{"signal topic is a CDC topic", ViaSignalTopic, with(func(c map[string]string) { c["signal.kafka.topic"] = "pg.public.orders" }), "CDC topic of public.orders", ErrSignalNotConfigured},
 		{"table: configured, belongs to pg_snapshot_signal", ViaSignalTable, topicConfig(), "postgres-layer action pg_snapshot_signal", errSignalTableLayer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,8 +269,8 @@ func TestSnapshotReadOnlyValidateAndPreview(t *testing.T) {
 	if _, err := a.Execute(roomCtx(), snapParams(ViaSignalTopic, "public.orders")); err == nil || !strings.Contains(err.Error(), "PIPEROOM_WRITE_MODE=on") {
 		t.Fatalf("Execute with no writer: %v", err)
 	}
-	if _, err := a.Execute(roomCtx(), snapParams(ViaSignalTable, "public.orders")); err == nil || !strings.Contains(err.Error(), "no write credentials") {
-		t.Fatalf("Execute signal_table with no writer: %v", err)
+	if _, err := a.Execute(roomCtx(), snapParams(ViaSignalTable, "public.orders")); !errors.Is(err, errSignalTableLayer) {
+		t.Fatalf("Execute signal_table with no writer: %v, want errSignalTableLayer", err)
 	}
 }
 
@@ -300,8 +279,7 @@ func TestSnapshotReadOnlyValidateAndPreview(t *testing.T) {
 func TestSnapshotPreview(t *testing.T) {
 	fc := &sigConnect{cfg: topicConfig()}
 	k := &signalKafka{}
-	sw := &sigSourceWriter{}
-	a := &snapshotTable{d: SnapshotDeps{Connect: fc, Kafka: k, SourceWriter: sw,
+	a := &snapshotTable{d: SnapshotDeps{Connect: fc, Kafka: k,
 		Source: estSource{rows: map[string]int64{"public.orders": 120000}}}}
 	res, err := a.Preview(roomCtx(), snapParams(ViaSignalTopic, "public.orders", "public.refunds"))
 	if err != nil {
@@ -320,7 +298,7 @@ func TestSnapshotPreview(t *testing.T) {
 	if res.Reversible || res.Rollback != "" {
 		t.Errorf("a snapshot is not reversible: %+v", res)
 	}
-	if k.args != nil || k.recs != nil || sw.args != nil {
+	if k.args != nil || k.recs != nil {
 		t.Fatal("Preview called a writer")
 	}
 
@@ -329,11 +307,6 @@ func TestSnapshotPreview(t *testing.T) {
 	res, err = a.Preview(roomCtx(), snapParams(ViaSignalTopic, "public.orders"))
 	if err != nil || !strings.Contains(res.Current, "row estimate unavailable") {
 		t.Fatalf("preview without estimator: %v %q", err, res.Current)
-	}
-	// The signal_table variant previews too (its Validate is gated, not its preview).
-	res, err = a.Preview(roomCtx(), snapParams(ViaSignalTable, "public.orders"))
-	if err != nil || !strings.Contains(res.Target, "public.debezium_signal") {
-		t.Fatalf("signal_table preview: %v %+v", err, res)
 	}
 }
 
@@ -351,7 +324,7 @@ func TestSnapshotScopeGateBeforeIO(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fc := &sigConnect{cfg: topicConfig()}
 			k := &signalKafka{}
-			a := &snapshotTable{d: SnapshotDeps{Connect: fc, Kafka: k, SourceWriter: &sigSourceWriter{}}}
+			a := &snapshotTable{d: SnapshotDeps{Connect: fc, Kafka: k}}
 			if _, err := a.Preview(tc.ctx, tc.raw); !errors.Is(err, tc.want) {
 				t.Fatalf("Preview = %v, want %v", err, tc.want)
 			}
@@ -411,7 +384,6 @@ func TestSnapshotExecuteErrors(t *testing.T) {
 		{"not acked", SnapshotDeps{Kafka: &recKafka{acked: -1}}, ViaSignalTopic, nil, "acked 0 of 1"},
 		{"produce timeout", SnapshotDeps{Kafka: &recKafka{block: true}, Timeout: 20 * time.Millisecond}, ViaSignalTopic, context.DeadlineExceeded, ""},
 		{"config gone since approval", SnapshotDeps{Kafka: &signalKafka{}}, ViaSignalTopic, ErrSignalNotConfigured, ""},
-		{"source writer not ready (P3b-4)", SnapshotDeps{SourceWriter: &sigSourceWriter{err: clients.ErrNotSupported}}, ViaSignalTable, clients.ErrNotSupported, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := topicConfig()
@@ -434,18 +406,56 @@ func TestSnapshotExecuteErrors(t *testing.T) {
 	}
 }
 
-func TestSnapshotExecuteSignalTableDelegates(t *testing.T) {
-	sw := &sigSourceWriter{id: "6f1c"}
-	a := &snapshotTable{d: SnapshotDeps{Connect: &sigConnect{cfg: topicConfig()}, SourceWriter: sw}}
-	out, err := a.Execute(roomCtx(), snapParams(ViaSignalTable, "public.orders"))
+// via signal_table is pg_snapshot_signal's (P3b-4): every stage refuses it
+// with errSignalTableLayer before any client call, so neither Connect nor a
+// writer of any kind (the signal method, Produce, offset reset) is touched,
+// whatever the scope in ctx.
+func TestSnapshotSignalTableRefusedEveryStage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+	}{
+		{"room", roomCtx()},
+		{"unscoped", tools.WithUnscoped(context.Background())},
+		{"no scope", context.Background()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &sigConnect{cfg: topicConfig()}
+			sk := &signalKafka{}
+			pk := &recKafka{}
+			raw := snapParams(ViaSignalTable, "public.orders")
+			check := func(stage string, err error) {
+				t.Helper()
+				if !errors.Is(err, errSignalTableLayer) || !strings.Contains(err.Error(), "pg_snapshot_signal") {
+					t.Fatalf("%s = %v, want errSignalTableLayer naming pg_snapshot_signal", stage, err)
+				}
+			}
+			for _, k := range []clients.KafkaWriter{sk, pk} {
+				a := &snapshotTable{d: SnapshotDeps{Connect: fc, Kafka: k}}
+				_, err := a.Execute(tc.ctx, raw)
+				check("Execute", err)
+				_, err = a.Preview(tc.ctx, raw)
+				check("Preview", err)
+				check("Validate", a.Validate(tc.ctx, raw))
+				check("CheckScope", a.CheckScope(snapPipeline, raw))
+			}
+			if fc.n() != 0 {
+				t.Fatalf("read the connector config %d times before refusing", fc.n())
+			}
+			if sk.args != nil || sk.recs != nil || pk.recs != nil || pk.topic != "" {
+				t.Fatalf("a writer was called: signal %v, produce %q %v / %v", sk.args, pk.topic, pk.recs, sk.recs)
+			}
+		})
+	}
+}
+
+func TestSnapshotParamsSchemaOffersSignalTopicOnly(t *testing.T) {
+	b, err := json.Marshal((&snapshotTable{}).ParamsSchema())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(sw.args, ",") != "public.debezium_signal,pg-orders-connector" || strings.Join(sw.tbls, ",") != "public.orders" {
-		t.Fatalf("InsertSnapshotSignal args %v %v", sw.args, sw.tbls)
-	}
-	if !strings.Contains(out, "6f1c") {
-		t.Fatalf("result %q lacks the signal id", out)
+	if strings.Contains(string(b), `"`+ViaSignalTable+`"`) {
+		t.Fatalf("schema still offers via %s: %s", ViaSignalTable, b)
 	}
 }
 

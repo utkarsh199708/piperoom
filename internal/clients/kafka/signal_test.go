@@ -70,6 +70,25 @@ func TestSendSnapshotSignalScopeBeforeIO(t *testing.T) {
 			}
 		})
 	}
+	// The signal topic is never a CDC topic: neither a requested table's
+	// (with or without a scope) nor any source table's of the room's pipeline.
+	wide := sigPipeline
+	wide.SourceTables = []string{"public.orders", "public.refunds"}
+	for _, tc := range []struct {
+		name, topic string
+		ctx         context.Context
+	}{
+		{"requested table's topic, room", "pg.public.orders", room},
+		{"requested table's topic, unscoped", "pg.public.orders", tools.WithUnscoped(context.Background())},
+		{"other source table's topic", "pg.public.refunds", tools.WithPipeline(context.Background(), wide)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := w.SendSnapshotSignal(tc.ctx, tc.topic, "pg-orders-connector", "pg", []string{"public.orders"})
+			if !errors.Is(err, tools.ErrOutOfScope) || !strings.Contains(err.Error(), "CDC topic") {
+				t.Fatalf("SendSnapshotSignal to %s = %v, want a CDC topic refusal (tools.ErrOutOfScope)", tc.topic, err)
+			}
+		})
+	}
 	for name, args := range map[string][3]string{"no topic": {"", "c", "pg"}, "no connector": {"t", "", "pg"}, "no key": {"t", "c", ""}} {
 		if _, err := w.SendSnapshotSignal(room, args[0], args[1], args[2], []string{"public.orders"}); err == nil {
 			t.Errorf("%s: accepted", name)

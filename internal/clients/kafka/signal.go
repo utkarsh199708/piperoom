@@ -117,7 +117,11 @@ func signalTables(tables []string) ([]string, error) {
 // fails closed as Produce does (tools.ErrNoScope, unless tools.WithUnscoped).
 // The caller names the topic from the connector's own config; that the topic
 // is the connector's is not checked here, since the Writer cannot read
-// Connect.
+// Connect. What is checked is that it is no CDC topic: never
+// "<logicalName>.<table>" for a requested table, and with the room's
+// pipeline in ctx never "<topic_prefix>.<source_table>" for any of its source
+// tables (tools.ErrOutOfScope), so this narrow path cannot put a signal
+// record among the data records consumers read.
 //
 // Debezium consumes partition 0 of the signal topic only, so a topic with
 // more partitions is refused; a missing one is clients.ErrNotFound. Every
@@ -135,7 +139,12 @@ func (w *Writer) SendSnapshotSignal(ctx context.Context, signalTopic, connector,
 	if err != nil {
 		return SnapshotSignal{}, err
 	}
-	if err := checkWriteScope(ctx, func(sc tools.Scope) error { return signalScope(sc, connector, logicalName, list) }); err != nil {
+	for _, t := range list {
+		if signalTopic == logicalName+"."+t {
+			return SnapshotSignal{}, fmt.Errorf("kafka: snapshot signal: %w: signal topic %q is the CDC topic of %s", tools.ErrOutOfScope, cut(signalTopic), t)
+		}
+	}
+	if err := checkWriteScope(ctx, func(sc tools.Scope) error { return signalScope(sc, signalTopic, connector, logicalName, list) }); err != nil {
 		return SnapshotSignal{}, err
 	}
 	value, err := SnapshotSignalValue(list)
@@ -160,7 +169,7 @@ func (w *Writer) SendSnapshotSignal(ctx context.Context, signalTopic, connector,
 }
 
 // signalScope is SendSnapshotSignal's check against the room's pipeline.
-func signalScope(sc tools.Scope, connector, logicalName string, tables []string) error {
+func signalScope(sc tools.Scope, signalTopic, connector, logicalName string, tables []string) error {
 	if err := sc.CheckConnector(connector); err != nil {
 		return err
 	}
@@ -171,6 +180,13 @@ func signalScope(sc tools.Scope, connector, logicalName string, tables []string)
 	}
 	if p := sc.Pipeline(); !sc.Unscoped() && logicalName != p.TopicPrefix {
 		return fmt.Errorf("%w: signal key %q is not pipeline %q's topic_prefix %q", tools.ErrOutOfScope, cut(logicalName), p.ID, p.TopicPrefix)
+	}
+	if p := sc.Pipeline(); !sc.Unscoped() {
+		for _, t := range p.SourceTables {
+			if signalTopic == p.TopicPrefix+"."+t {
+				return fmt.Errorf("%w: signal topic %q is pipeline %q's CDC topic of %s", tools.ErrOutOfScope, cut(signalTopic), p.ID, t)
+			}
+		}
 	}
 	return nil
 }
