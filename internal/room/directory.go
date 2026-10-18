@@ -28,6 +28,9 @@ type PipelineInfo struct {
 	ID     string `json:"id"`
 	Title  string `json:"title"`
 	Shadow bool   `json:"shadow"`
+	// Kind is the pipeline's owners.yaml kind, "cdc" or "batch" ("cdc" when
+	// the file names none). (P4a-4)
+	Kind string `json:"kind"`
 }
 
 // PipelinesFor returns the owners.yaml pipelines u may see, in file order
@@ -42,7 +45,7 @@ func (s *Service) PipelinesFor(u User) []PipelineInfo {
 		if !s.CanSeePipeline(u, p.ID) {
 			continue
 		}
-		out = append(out, PipelineInfo{ID: p.ID, Title: p.Title, Shadow: p.Shadow()})
+		out = append(out, PipelineInfo{ID: p.ID, Title: p.Title, Shadow: p.Shadow(), Kind: p.KindOrDefault()})
 	}
 	return out
 }

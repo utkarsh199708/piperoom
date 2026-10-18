@@ -138,9 +138,11 @@ func TestAuthorizeLayerSolo(t *testing.T) {
 	if _, err := svc.authorizeLayer("orders", User{ID: "arjun"}, "kafka", "orders/kafka", true); err == nil {
 		t.Fatal("a non-solo user approved a layer they do not own")
 	}
-	// /api/me lists every layer for the solo user (every kind's: events.Layers).
-	if got := svc.LayersFor(User{ID: "priya"}); !slices.Equal(got, events.Layers) {
-		t.Fatalf("solo layers = %v, want all of %v", got, events.Layers)
+	// /api/me lists every layer of the kinds owners.yaml uses for the solo
+	// user (P4a-4): one cdc pipeline, so the six CDC layers and no
+	// orchestrator/transform.
+	if got, want := svc.LayersFor(User{ID: "priya"}), events.LayersOf(events.PipelineKindCDC); !slices.Equal(got, want) {
+		t.Fatalf("solo layers = %v, want all of %v", got, want)
 	}
 }
 

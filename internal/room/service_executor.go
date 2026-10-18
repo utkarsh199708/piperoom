@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
+	"piperoom/internal/tools"
 )
 
 // execQueue serializes proposal execution per room: approvals released while
@@ -388,7 +389,11 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
 		}
-		if err := action.Validate(ctx, step.Params); err != nil {
+		// Validate and Execute run under the room's whole pipeline: the
+		// write clients refuse a write without it (fail closed), and
+		// Validate sees the same scope the write will run under.
+		actx := s.pipelineCtx(ctx, pipelineID)
+		if err := action.Validate(actx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
 		}
@@ -399,7 +404,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return nil
 		}
 
-		sctx, cancel := context.WithTimeout(ctx, stepTimeout)
+		sctx, cancel := context.WithTimeout(actx, stepTimeout)
 		out, err := action.Execute(sctx, step.Params)
 		cancel()
 		output := out
@@ -613,6 +618,23 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 		return fmt.Errorf("action %q: %w", a.Name(), err)
 	}
 	return nil
+}
+
+// pipelineCtx scopes ctx to the room's pipeline for an action call. The
+// Postgres and Kafka write clients need the whole pipeline in ctx
+// (tools.WithPipeline) and refuse a write without it (P0 item 7), so the
+// executor's Validate and Execute and the preview all scope through here.
+// A pipeline the owners config does not resolve (no config, an unknown id, no
+// pipeline at all) gets its id only (tools.WithPipelineID): the writers refuse
+// that as tools.ErrNoScope, and "" also clears a pipeline ctx already carried.
+// It never opts out with tools.WithUnscoped.
+func (s *Service) pipelineCtx(ctx context.Context, pipelineID string) context.Context {
+	if pipelineID != "" && s.owners != nil {
+		if p, ok := s.owners.Pipeline(pipelineID); ok {
+			return tools.WithPipeline(ctx, p)
+		}
+	}
+	return tools.WithPipelineID(ctx, pipelineID)
 }
 
 // roomPipeline returns the pipeline of a room ("" when unknown).

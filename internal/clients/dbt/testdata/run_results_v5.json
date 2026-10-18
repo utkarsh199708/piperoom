@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v5.json",
+    "dbt_version": "1.7.4",
+    "generated_at": "2026-10-16T00:10:02Z",
+    "invocation_id": "0c9e1d2a-1111-4c3a-9a43-3c1f0d7e9b21",
+    "env": {}
+  },
+  "results": [
+    {
+      "status": "success",
+      "timing": [],
+      "thread_id": "Thread-1",
+      "execution_time": 2.5,
+      "adapter_response": {"_message": "INSERT 0 42", "rows_affected": 42},
+      "message": "INSERT 0 42",
+      "failures": null,
+      "unique_id": "model.analytics.fct_revenue"
+    }
+  ],
+  "elapsed_time": 2.6,
+  "args": {}
+}
