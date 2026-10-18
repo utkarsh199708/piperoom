@@ -34,7 +34,7 @@ below is from the code.
 | F4 | **fixed** (with F11) | Row tools accept only tables listed in the `source_tables` / `sink_tables` of the room's pipeline. The `pipeline_id` in a tool input must be the room's own pipeline, or the tool refuses. | `internal/tools/dbtools/pg.go`, `wh.go`, `dbtools.go` (`resolve`, `scopedTable`); `internal/tools/scope.go` |
 | F5 | **fixed** | Integration tests print only host and port, not the DSN. Test code only. | `internal/clients/postgres/integration_test.go`; `internal/clients/warehouse/integration_test.go` |
 | F6 | **closed** | Retention and export are live: `PIPEROOM_RETENTION_DAYS` deletes whole closed rooms older than N days, checked every 6 hours; an empty value or `0` keeps everything; `GET /api/rooms/{id}/export` saves a room first. A room's log is capped by `PIPEROOM_ROOM_MAX_EVENTS` (default 20000) and `PIPEROOM_ROOM_MAX_BYTES` (default 256 MiB), and with `PIPEROOM_ARCHIVE_DIR` set retention, and an admin delete asked to (`archive=true`, or `devctl rooms delete --archive`), write the room's export first. Details are in [data-handling.md](data-handling.md#4-retention-and-deletion). | `cmd/server/retention.go`; `internal/store/retention.go`; `internal/room/service_export.go`; the orphan-room delete is `internal/store/store.go` |
-| F7 | **open** | One set of connection settings (databases, Kafka, Connect, Registry) per process, shared by every pipeline in `owners.yaml`. | `internal/config/config.go`; `internal/wiring/wiring.go` |
+| F7 | **fixed by `connections:`** | A pipeline in `owners.yaml` may have its own `connections:` block. It names the environment variable or file that holds each DSN, URL and login (a plain secret value is refused). That pipeline gets its own clients, tools and actions and takes nothing from the process-wide `SOURCE_DB_URL`, `KAFKA_*` and so on. A pipeline without the block uses the process-wide settings, as before. The start fails when two tenants use the same variable or file, unless every pipeline involved sets `shared_connections: true`. One process still holds the secrets of every pipeline it serves, so separate customers still need one deployment each. Setup: [setup.md](setup.md#2a-tenancy). | `internal/owners/tenancy.go` (`Connections`, `ConnRef.UnmarshalYAML`, `validateConnections`, `Pipeline.HasConnections`, `Owners.CheckSharedRefs`); `internal/wiring/connections.go` (`pipelineConfig`); `internal/wiring/stacks.go` (`openStacks`); design `docs/design/tenancy.md` |
 | F8 | **fixed** | The dev terminal sink removes control characters (including DEL and C1) and caps printed size. Dev CLI only, not the room service. | `cmd/investigate/sink.go` |
 | F9 | **partly fixed** | The signed routes `POST /api/alerts/{source}` check the sender with a token or HMAC, and a source with no secret answers 401. The unsigned dev route `POST /api/alerts/webhook` still has no sender check: in dev mode anyone who can reach it and sends the `X-User` of a user in `users.yaml` (or has a dev session) can open rooms through it. In oidc mode it is not mounted (`404`); use the signed `/api/alerts/generic`. | `internal/httpapi/alerts.go`; `internal/alertin/verify.go`; `internal/httpapi/handlers.go`; `internal/httpapi/server.go` |
 | F10 | **fixed** for write actions | Every write action is scope-checked against the room's pipeline when the proposal is created and again right before it runs. | `internal/room/service_proposals.go`; `service_executor.go`; `internal/actions/scope_test.go` |
@@ -97,8 +97,18 @@ below is from the code.
   whatever its type (`dbtools.go`). Other tools return their values as described in
   [data-handling.md](data-handling.md#2-what-each-tool-exposes). Table, topic and column names,
   and timestamps, still appear in the room.
-- **One credential set per process (F7).** Run one Piperoom process per team or pipeline group.
-  Do not share one process between teams with different data access.
+- **Write mode is off by default.** With `PIPEROOM_WRITE_MODE` unset or `off`, the agent still
+  proposes fixes and people still approve them, but a fully approved fix never runs and no
+  `action.executed` is written. The room view marks it `blocked: "write_mode_off"` and `/healthz`
+  reports `"write_mode": "off"`. Any value other than `off` or `on` stops the start. `--demo` forces
+  `on` (its actions use fake clients). The switch is one per process. Grant read-only credentials
+  too: the switch stops the executor, not the credentials. Code: `internal/config/config.go`
+  (`ParseWriteMode`); `cmd/server/writemode.go` (`writeModeSetup`); `internal/room/service_executor.go`
+  (`enqueueExecutionLocked`, `executeProposal`); `internal/room/writemode.go` (`RoomFor`);
+  `internal/httpapi/health.go` (`handleHealthz`).
+- **Credentials per pipeline (F7).** Give each team's pipelines their own `connections:` block
+  (`internal/owners/tenancy.go`). Pipelines without it share the process-wide settings. One process
+  still holds every secret it is given: run one deployment per customer.
 
 If any of these is a blocker for your environment, start with a non-production replica or a
 staging pipeline. Check the code on your release before you trust a row in the table above.
