@@ -15,8 +15,11 @@ paths only and never sends a user-id header. Under `npm run dev` a login screen 
   allows loopback names on any port (`421 bad_host` otherwise).
 - `VITE_FIXTURES=1 npm run dev` runs the UI without a server (no login).
 - `VITE_DOCS_BASE_URL` (build time, optional) is the URL prefix of the repo's docs, for example
-  `https://github.com/<org>/piperoom/blob/main`. The read-only banner's "How to turn it on" link is
-  `<prefix>/docs/pilot/quickstart.md`; without it the link is the bare repo path.
+  `https://github.com/<org>/piperoom/blob/main`. With it, the read-only banner's "How to turn it on" link
+  opens `<prefix>/docs/pilot/quickstart.md` in a new tab. Without it there is no link (the doc is not served
+  by the app, so a relative one would 404) and the banner names the path as text instead.
+- The write mode (`mode` in the room GET) is read again on every WebSocket reconnect, because it changes only
+  when the server restarts, and a restart drops the socket.
 - On `401 session_expired` the server says its mode in `error.auth_mode` (`dev` shows the user picker,
   `oidc` goes to `/auth/login?return=...`). With no `auth_mode` the app asks `GET /api/me`, and if that does
   not say either it shows a plain "signed out" notice. It never redirects unless the mode is `oidc`.

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Info, X } from 'lucide-react'
 import type { RoomMode } from '../api/types'
-import { quickstartHref, writeModeOff } from '../lib/writeMode'
+import { QUICKSTART_DOC_PATH, quickstartHref, writeModeOff } from '../lib/writeMode'
 import { Button } from '@/components/ui/button'
 
 export const WRITE_MODE_BANNER_TEXT = 'Fixes are suggestions until write mode is on'
@@ -21,9 +21,12 @@ function readDismissed(): boolean {
 // never runs. One persistent line under the room header says so; dismissing it lasts for the
 // browser session. Storage may be missing or throw (private window, blocked site data): the
 // component state still hides it for this screen, and it simply comes back on the next visit.
+// The how-to is a doc in the repo: it is a link only when the build knows where the docs are
+// (quickstartHref); otherwise a dead link would be worse than the path as plain text.
 export function WriteModeBanner({ mode }: { mode?: RoomMode }) {
   const [dismissed, setDismissed] = useState(readDismissed)
   if (!writeModeOff(mode) || dismissed) return null
+  const href = quickstartHref()
   const dismiss = () => {
     setDismissed(true)
     try {
@@ -43,17 +46,27 @@ export function WriteModeBanner({ mode }: { mode?: RoomMode }) {
       <span className="min-w-0 truncate font-medium" title={WRITE_MODE_BANNER_TEXT}>
         {WRITE_MODE_BANNER_TEXT}
       </span>
-      <span className="shrink-0" aria-hidden="true">
-        ·
-      </span>
-      <a
-        href={quickstartHref()}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="shrink-0 whitespace-nowrap rounded-sm font-medium underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        How to turn it on
-      </a>
+      {href ? (
+        <>
+          <span className="shrink-0" aria-hidden="true">
+            ·
+          </span>
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 whitespace-nowrap rounded-sm font-medium underline underline-offset-2 hover:no-underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            How to turn it on
+          </a>
+        </>
+      ) : (
+        // No link to follow, and a path is no use on a phone: it shows from sm up so the text keeps the one line.
+        <span className="hidden shrink-0 whitespace-nowrap sm:inline">
+          <span aria-hidden="true">· </span>
+          see <code className="font-mono text-[0.95em]">{QUICKSTART_DOC_PATH}</code>
+        </span>
+      )}
       <Button
         variant="ghost"
         size="icon"

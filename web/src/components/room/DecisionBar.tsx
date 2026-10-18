@@ -129,8 +129,7 @@ export function DecisionBar({
             aria-keyshortcuts="A"
             onClick={() => handle()?.approve()}
           >
-            Approve {decision.layer}
-            {writeModeOff(state.mode) ? ' (will not run)' : ''}
+            {`Approve ${decision.layer}${writeModeOff(state.mode) ? ' (will not run)' : ''}`}
             {!sheet && <Kbd aria-hidden="true">A</Kbd>}
           </Button>
           {!sheet && view}

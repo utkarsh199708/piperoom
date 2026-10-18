@@ -143,7 +143,8 @@ describe('stale_position (#464)', () => {
     act(() => server.sockets[0].drop())
     await pass(15_000)
     expect(server.opens).toEqual([0, 2, 0])
-    expect(api.room).toHaveBeenCalledTimes(2) // the room state is rebuilt from the snapshot
+    // The first snapshot, the reconnect's write-mode refresh, and the snapshot the room is rebuilt from.
+    expect(api.room).toHaveBeenCalledTimes(3)
     expect(hook.result.current.error).toBeNull()
     expect(hook.result.current.conn).toBe('live')
     expect(hook.result.current.state?.agent_status.state).toBe('idle')
@@ -209,7 +210,7 @@ describe('stale_position (#464)', () => {
     act(() => server.sockets[0].drop('replay timeout'))
     await pass(15_000)
     expect(server.opens).toEqual([0, 2])
-    expect(api.room).toHaveBeenCalledTimes(1)
+    expect(api.room).toHaveBeenCalledTimes(2) // the first snapshot and the reconnect's write-mode refresh
   })
 
   // #550: a reload of the room on screen keeps the old state until the new snapshot's init
@@ -229,7 +230,7 @@ describe('stale_position (#464)', () => {
     act(() => server.sockets[0].drop())
     await pass(15_000)
     expect(server.opens).toEqual([0, 1, 0])
-    expect(api.room).toHaveBeenCalledTimes(2)
+    expect(api.room).toHaveBeenCalledTimes(3) // first snapshot, the reconnect's write-mode refresh, the reload's snapshot
     expect(seen.slice(first).every((x) => x !== null)).toBe(true)
     expect(hook.result.current.conn).toBe('live')
     expect(hook.result.current.error).toBeNull()

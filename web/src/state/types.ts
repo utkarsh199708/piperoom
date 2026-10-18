@@ -351,13 +351,15 @@ export interface RoomState {
    */
   snapshot_hashes: Record<string, string>
   /**
-   * proposal_id -> "write_mode_off" from the snapshot's open_proposals[].blocked. The reducer copies
-   * it onto the proposal when proposal.created replays (same reason as snapshot_hashes).
+   * proposal_id -> "write_mode_off" from the snapshot's open_proposals[].blocked (refreshed with
+   * `mode` on a reconnect). The reducer copies it onto the proposal when proposal.created replays
+   * (same reason as snapshot_hashes).
    */
   snapshot_blocked?: Record<string, 'write_mode_off'>
   /**
-   * The room GET's `mode` (P1a, P2b): fixed for the life of the page, the socket never changes it.
-   * Absent on a server from before P1a, which has write mode on.
+   * The room GET's `mode` (P1a, P2b). Write mode changes only when the server restarts, which drops
+   * the socket, so it is read again on every reconnect (`mode_refreshed`, applyModeRefresh). The
+   * socket never carries it. Absent on a server from before P1a, which has write mode on.
    */
   mode?: RoomMode
   members: MemberState[]
@@ -482,7 +484,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
 
 // The P1a fields, left off entirely when the server sent none so a snapshot from an older server
 // folds to the same state as before.
-function snapshotWriteMode(snapshot: RoomSnapshot): Pick<RoomState, 'mode' | 'snapshot_blocked'> {
+export function snapshotWriteMode(snapshot: RoomSnapshot): Pick<RoomState, 'mode' | 'snapshot_blocked'> {
   const blocked = Object.fromEntries(
     (snapshot.open_proposals ?? [])
       .filter((p) => p.blocked === 'write_mode_off')

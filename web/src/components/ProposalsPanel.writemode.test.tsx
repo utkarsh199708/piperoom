@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ProposalsPanel } from './ProposalsPanel'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -99,11 +99,34 @@ describe('approve button copy', () => {
     expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled() // the dialog's own button
   })
 
-  it('the run confirm for the approval that completes the set keeps its text', () => {
+  it('the approval that completes the set still asks to confirm, in words that say nothing runs', async () => {
+    approve.mockResolvedValue({ ok: true })
     show(room(proposal(), off))
     fireEvent.click(screen.getByRole('button', { name: 'Approve (will not run)' }))
-    expect(screen.getByText('Run this fix now?')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Approve and run' })).toBeInTheDocument()
+    const dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByText('Approve this fix?')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent(
+      'Your approval completes the set. Write mode is off, so nothing runs: the fix waits for write mode.',
+    )
+    expect(dialog).not.toHaveTextContent(/Run this fix now|right away/)
+    expect(within(dialog).queryByRole('button', { name: 'Approve and run' })).not.toBeInTheDocument()
+    // The step stays: nothing is sent until the dialog's own button is pressed.
+    expect(approve).not.toHaveBeenCalled()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Approve (will not run)' }))
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
+  })
+
+  it.each([
+    ['write mode on', on],
+    ['no mode at all (an older server)', undefined],
+  ])('the run confirm keeps its old text with %s', (_name, mode) => {
+    show(room(proposal(), mode))
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByText('Run this fix now?')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('Your approval completes the set. Piperoom runs 2 steps on schema-registry and kafka-connect right away.')
+    expect(within(dialog).getByRole('button', { name: 'Approve and run' })).toBeInTheDocument()
+    expect(dialog).not.toHaveTextContent(/will not run|Write mode is off/)
   })
 })
 

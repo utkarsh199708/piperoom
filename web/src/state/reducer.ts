@@ -5,6 +5,7 @@ import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
   ProposalPreviewedPayload,
+  RoomSnapshot,
   Actor,
   AgentHypothesisPayload,
   AgentTriagePayload,
@@ -43,11 +44,39 @@ import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
 import { stripBidi } from '../lib/title'
-import { checklistKey } from './types'
+import { checklistKey, snapshotWriteMode } from './types'
 import type { HypothesisHistoryEntry, InsightState, MemberState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
+}
+
+/**
+ * Write mode as the server says it now. It changes only when the server restarts, so the hook asks
+ * again on every reconnect and calls this with the fresh room GET. Everything derived from the old
+ * answer is redone: a `blocked` mark the new mode no longer backs is dropped (off to on), and an
+ * approved proposal that has run nothing is marked (on to off). It does not matter whether the
+ * answer lands before or after the replayed events, since each is judged against the mode in hand
+ * and this pass re-judges all of them. Everything else in the state is left alone.
+ */
+export function applyModeRefresh(state: RoomState, snapshot: RoomSnapshot): RoomState {
+  const fresh = snapshotWriteMode(snapshot)
+  const next: RoomState = {
+    ...state,
+    ...fresh,
+    proposals: state.proposals.map((p) => {
+      const blocked =
+        fresh.snapshot_blocked?.[p.proposal_id] ?? (p.status === 'approved' && fresh.mode?.write === false ? 'write_mode_off' : undefined)
+      const proposal = { ...p }
+      delete proposal.blocked
+      if (blocked) proposal.blocked = blocked
+      return proposal
+    }),
+  }
+  // A snapshot without them (a server from before P1a, or one with nothing blocked) clears the old ones.
+  if (!fresh.mode) delete next.mode
+  if (!fresh.snapshot_blocked) delete next.snapshot_blocked
+  return next
 }
 
 // True when the event's seq skips ahead — the transport must fetch the missing

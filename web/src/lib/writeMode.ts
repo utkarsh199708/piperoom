@@ -10,13 +10,13 @@ export const QUICKSTART_DOC_PATH = 'docs/pilot/quickstart.md'
 export const WAITING_FOR_WRITE_MODE = 'Approved · waiting for write mode'
 
 /**
- * Where "How to turn it on" points. The doc lives in the repo, not in the app, so a deployment that
- * wants a working link builds with `VITE_DOCS_BASE_URL` (e.g. the repo's `blob/main` URL); without
- * it the link is the bare repo path.
+ * Where "How to turn it on" points, or null when the build has no docs URL. The doc lives in the
+ * repo, not in the app: a path relative to the app would 404 here, so without `VITE_DOCS_BASE_URL`
+ * (e.g. the repo's `blob/main` URL) there is no link and the banner shows the path as text.
  */
-export function quickstartHref(): string {
+export function quickstartHref(): string | null {
   const base = (import.meta.env.VITE_DOCS_BASE_URL as string | undefined)?.trim()
-  return base ? `${base.replace(/\/+$/, '')}/${QUICKSTART_DOC_PATH}` : QUICKSTART_DOC_PATH
+  return base ? `${base.replace(/\/+$/, '')}/${QUICKSTART_DOC_PATH}` : null
 }
 
 /** The server said write mode is off. No `mode` (an older server) means on. */

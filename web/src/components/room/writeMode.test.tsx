@@ -66,7 +66,7 @@ describe('DecisionBar with write mode off', () => {
 
   it('the approve button says it will not run', () => {
     show(room(prop(), { write: false, solo: false, auto_approve: [] }))
-    expect(screen.getByRole('button', { name: /^Approve kafka-connect \(will not run\)/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Approve kafka-connect (will not run)' })).toBeInTheDocument()
   })
 
   it.each([
@@ -74,7 +74,7 @@ describe('DecisionBar with write mode off', () => {
     ['no mode', undefined],
   ])('is unchanged with %s', (_name, mode) => {
     show(room(prop(), mode))
-    expect(screen.getByRole('button', { name: /^Approve kafka-connect/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Approve kafka-connect' })).toBeInTheDocument()
     expect(screen.queryByText(/will not run/)).not.toBeInTheDocument()
   })
 

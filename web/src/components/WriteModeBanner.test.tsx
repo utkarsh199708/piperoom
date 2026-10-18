@@ -16,25 +16,40 @@ afterEach(() => {
 })
 
 describe('WriteModeBanner', () => {
-  it('is shown when write mode is off, as a labelled region with the text and the how-to link', () => {
+  it('is shown when write mode is off, as a labelled region with the text', () => {
     render(<WriteModeBanner mode={off} />)
     const banner = screen.getByRole('region', { name: 'Write mode is off' })
     expect(within(banner).getByText(WRITE_MODE_BANNER_TEXT)).toBeInTheDocument()
     expect(WRITE_MODE_BANNER_TEXT).toBe('Fixes are suggestions until write mode is on')
-    const link = within(banner).getByRole('link', { name: 'How to turn it on' })
-    expect(link).toHaveAttribute('href', QUICKSTART_DOC_PATH)
-    expect(link).toHaveAttribute('target', '_blank')
-    expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
   })
 
-  it('points the link at the repo doc, under VITE_DOCS_BASE_URL when the build sets one', () => {
+  it('without a docs URL it names the doc as text and links nowhere (a relative link would 404 in the app)', () => {
     expect(QUICKSTART_DOC_PATH).toBe('docs/pilot/quickstart.md')
+    render(<WriteModeBanner mode={off} />)
+    const banner = screen.getByRole('region', { name: 'Write mode is off' })
+    expect(within(banner).queryByRole('link')).not.toBeInTheDocument()
+    const path = within(banner).getByText(QUICKSTART_DOC_PATH)
+    expect(path.tagName).toBe('CODE')
+    expect(banner).toHaveTextContent(/see\s+docs\/pilot\/quickstart\.md/)
+  })
+
+  it('with VITE_DOCS_BASE_URL set, "How to turn it on" opens the repo doc in a new tab', () => {
     vi.stubEnv('VITE_DOCS_BASE_URL', 'https://example.test/piperoom/blob/main/')
     render(<WriteModeBanner mode={off} />)
-    expect(screen.getByRole('link', { name: 'How to turn it on' })).toHaveAttribute(
-      'href',
-      'https://example.test/piperoom/blob/main/docs/pilot/quickstart.md',
-    )
+    const banner = screen.getByRole('region', { name: 'Write mode is off' })
+    const link = within(banner).getByRole('link', { name: 'How to turn it on' })
+    expect(link).toHaveAttribute('href', 'https://example.test/piperoom/blob/main/docs/pilot/quickstart.md')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', expect.stringContaining('noopener'))
+    expect(within(banner).queryByRole('code')).not.toBeInTheDocument()
+    expect(banner).not.toHaveTextContent('see')
+  })
+
+  it('a blank VITE_DOCS_BASE_URL counts as none', () => {
+    vi.stubEnv('VITE_DOCS_BASE_URL', '   ')
+    render(<WriteModeBanner mode={off} />)
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    expect(screen.getByText(QUICKSTART_DOC_PATH)).toBeInTheDocument()
   })
 
   it.each([
@@ -87,11 +102,19 @@ describe('WriteModeBanner', () => {
   })
 
   it('stays on one line on a phone: the text gives way, the link and the button do not', () => {
+    vi.stubEnv('VITE_DOCS_BASE_URL', 'https://example.test/piperoom/blob/main')
     render(<WriteModeBanner mode={off} />)
     const banner = screen.getByRole('region', { name: 'Write mode is off' })
     expect(banner).toHaveClass('flex-nowrap')
     expect(screen.getByText(WRITE_MODE_BANNER_TEXT)).toHaveClass('truncate', 'min-w-0')
     expect(screen.getByRole('link', { name: 'How to turn it on' })).toHaveClass('shrink-0', 'whitespace-nowrap')
     expect(screen.getByRole('button', { name: 'Dismiss write-mode notice' })).toHaveClass('shrink-0')
+  })
+
+  it('on a phone the doc path (no link to follow) steps aside so the text keeps the one line', () => {
+    render(<WriteModeBanner mode={off} />)
+    const path = screen.getByText(QUICKSTART_DOC_PATH).parentElement
+    expect(path).toHaveClass('hidden', 'sm:inline')
+    expect(screen.getByText(WRITE_MODE_BANNER_TEXT)).toHaveClass('truncate')
   })
 })

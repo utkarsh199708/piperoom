@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { RoomActions } from '../hooks/useRoom'
@@ -77,14 +77,24 @@ beforeEach(() => {
   vi.resetAllMocks()
   window.sessionStorage.clear()
 })
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
 
 describe('RoomScreen — read-only banner', () => {
-  it('shows the banner when the room GET said write mode is off, and the link opens the quickstart in a new tab', () => {
+  it('shows the banner when the room GET said write mode is off, naming the quickstart doc', () => {
     show(room({ mode: { write: false, solo: false, auto_approve: [] } }))
     const banner = screen.getByRole('region', { name: 'Write mode is off' })
     expect(banner).toHaveTextContent('Fixes are suggestions until write mode is on')
-    const link = within(banner).getByRole('link', { name: 'How to turn it on' })
-    expect(link).toHaveAttribute('href', QUICKSTART_DOC_PATH)
+    expect(within(banner).getByText(QUICKSTART_DOC_PATH)).toBeInTheDocument()
+    expect(within(banner).queryByRole('link')).not.toBeInTheDocument()
+  })
+
+  it('links to the doc in a new tab when the build knows where the docs are', () => {
+    vi.stubEnv('VITE_DOCS_BASE_URL', 'https://example.test/piperoom/blob/main')
+    show(room({ mode: { write: false, solo: false, auto_approve: [] } }))
+    const link = within(screen.getByRole('region', { name: 'Write mode is off' })).getByRole('link', { name: 'How to turn it on' })
+    expect(link).toHaveAttribute('href', 'https://example.test/piperoom/blob/main/docs/pilot/quickstart.md')
     expect(link).toHaveAttribute('target', '_blank')
   })
 

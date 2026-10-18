@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Event, RoomMode, RoomSnapshot } from '../api/types'
-import { applyEvent } from './reducer'
+import { applyEvent, applyModeRefresh } from './reducer'
 import { fromSnapshot } from './types'
 import type { RoomState } from './types'
 import { waitingForWriteMode } from '../lib/writeMode'
@@ -137,5 +137,77 @@ describe('applyEvent — write mode on or unknown', () => {
     expect(s.proposals[0].blocked).toBeUndefined()
     expect('blocked' in s.proposals[0]).toBe(false)
     expect(waitingForWriteMode(s.proposals[0])).toBe(false)
+  })
+})
+
+describe('applyModeRefresh — the room GET again after a reconnect', () => {
+  const on: RoomMode = { write: true, solo: false, auto_approve: [] }
+
+  it('on to off: marks an approved proposal that ran nothing, and leaves an open one alone', () => {
+    let s = applyEvent(fromSnapshot(snapshot({ mode: on })), ev(1, 'proposal.created', created))
+    s = applyEvent(s, ev(2, 'proposal.created', { ...created, proposal_id: 'p2' }))
+    s = approveAll(s, 3)
+    expect(s.proposals[0].blocked).toBeUndefined()
+
+    const next = applyModeRefresh(s, snapshot({ mode: modeOff }))
+    expect(next.mode).toEqual(modeOff)
+    expect(next.proposals[0].blocked).toBe('write_mode_off')
+    expect(next.proposals[1].blocked).toBeUndefined() // p2 was never approved
+    expect(waitingForWriteMode(next.proposals[0])).toBe(true)
+  })
+
+  it('off to on: drops the mark, the snapshot copy and the mode, and keeps the decision', () => {
+    const start = fromSnapshot(
+      snapshot({
+        mode: modeOff,
+        open_proposals: [
+          { ...created, approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' }, blocked: 'write_mode_off' },
+        ],
+      }),
+    )
+    const s = approveAll(applyEvent(start, ev(1, 'proposal.created', created)))
+    expect(waitingForWriteMode(s.proposals[0])).toBe(true)
+
+    const next = applyModeRefresh(s, snapshot({ mode: on }))
+    expect(next.mode).toEqual(on)
+    expect(next.snapshot_blocked).toBeUndefined()
+    expect('blocked' in next.proposals[0]).toBe(false)
+    expect(waitingForWriteMode(next.proposals[0])).toBe(false)
+    expect(next.proposals[0].status).toBe('approved')
+    expect(next.proposals[0].approvals).toEqual(s.proposals[0].approvals)
+  })
+
+  it('a snapshot without mode (a server from before P1a) reads as write mode on', () => {
+    const start = fromSnapshot(snapshot({ mode: modeOff }))
+    const s = approveAll(applyEvent(start, ev(1, 'proposal.created', created)))
+    const next = applyModeRefresh(s, snapshot())
+    expect('mode' in next).toBe(false)
+    expect(waitingForWriteMode(next.proposals[0])).toBe(false)
+  })
+
+  it('takes the snapshot\'s own blocked marks, and never marks a proposal that ran', () => {
+    let s = applyEvent(fromSnapshot(snapshot({ mode: on })), ev(1, 'proposal.created', created))
+    s = approveAll(s)
+    s = applyEvent(s, ev(5, 'action.executed', { proposal_id: 'p1', step_index: 0, ok: true, output: 'done' }))
+    const next = applyModeRefresh(
+      s,
+      snapshot({
+        mode: modeOff,
+        open_proposals: [{ ...created, approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' }, blocked: 'write_mode_off' }],
+      }),
+    )
+    expect(next.snapshot_blocked).toEqual({ p1: 'write_mode_off' })
+    expect(waitingForWriteMode(next.proposals[0])).toBe(false) // a step ran: the execution card tells the story
+  })
+
+  it('changes nothing else in the room', () => {
+    let s = applyEvent(fromSnapshot(snapshot({ mode: on })), ev(1, 'proposal.created', created))
+    s = approveAll(s)
+    const next = applyModeRefresh(s, snapshot({ mode: modeOff }))
+    expect(next.last_seq).toBe(s.last_seq)
+    expect(next.title).toBe(s.title)
+    expect(next.steps).toBe(s.steps)
+    expect(next.activity).toBe(s.activity)
+    expect(next.proposals[0].decisions).toBe(s.proposals[0].decisions)
   })
 })

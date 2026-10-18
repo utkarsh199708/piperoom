@@ -14,6 +14,7 @@ export type StatusKind =
   | 'agent-error'
   | 'log-full'
   | 'executing'
+  // Its place in this list is not its precedence: it applies only when the blocked proposal is the newest.
   | 'awaiting-write-mode'
   | 'fix-failed'
   | 'fixed'
