@@ -45,6 +45,28 @@ AGENTS.md        rules for coding agents working on this repo — read it first
 See `AGENTS.md` for the full architecture diagram, team roles, and file ownership, and
 `docs/collab.md` for how agents and the three reviewing leads work together.
 
+## Quickstart (5 minutes)
+
+Read-only: Piperoom investigates and proposes fixes, but nothing executes. You need Go 1.27
+(plus Node 24 for the UI) or Docker, and a reachable Kafka Connect, Kafka, Schema Registry,
+source Postgres and warehouse (the server will not start if one is down), with the read-only
+roles of `docs/pilot/permissions.md`. Point the standard variables at them (`CONNECT_URL`,
+`KAFKA_BROKERS`, `SCHEMA_REGISTRY_URL`, `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`); unset, they
+default to the local dev stack below. Set `ANTHROPIC_API_KEY` for the agent.
+
+```sh
+make quickstart                                          # Go: discover, build the UI, start
+docker compose -f deploy/docker-compose.quickstart.yml up --build   # or Docker (host network)
+```
+
+`cmd/discover` writes `owners.yaml` with every layer owned by you (an existing file is kept;
+`FORCE=1` rediscovers), then `server --quickstart` starts with in-memory rooms and dev login on
+127.0.0.1 only, and prints the URL to open. The room says fixes are suggestions: approvals are
+recorded, nothing runs. Send a test alert with the `curl` in `docs/pilot/quickstart.md`.
+
+Write mode is a separate, full-server setup: `PIPEROOM_WRITE_MODE=on` plus the Connect write
+role in `docs/pilot/permissions.md` (`--quickstart` refuses it); see `docs/pilot/setup.md`.
+
 ## Running the dev stack
 
 Requires Docker. From the repo root — `devctl` shares one dev stack across everyone working

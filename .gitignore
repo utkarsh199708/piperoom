@@ -10,3 +10,8 @@ web/dist/
 .idea/
 .vscode/
 .claude/
+# Per-person cmd/discover output (make quickstart); the dev/ copies stay tracked.
+/owners.yaml
+/owners.yaml.draft
+/owners.draft.yaml
+/users.yaml
