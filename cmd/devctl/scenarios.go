@@ -12,21 +12,42 @@ import (
 	"time"
 
 	"github.com/hamba/avro/v2"
+
+	"piperoom/internal/owners"
 )
 
 type scenario struct {
 	breakIt func(ctx context.Context, s *stack) error
 	fix     func(ctx context.Context, s *stack) error
+	// signals are the watcher signals (owners.Signal*) the break trips with
+	// dev/owners.yaml. A break the watcher cannot see has an alert instead:
+	// the JSON body `devctl alert <scenario>` posts to the alert webhook, the
+	// alert a team would have (a reconciliation or freshness check).
+	signals []string
+	alert   string
+	// owners is the owners file the server must run with for the break to open
+	// a room and the fix actions to accept it ("" = the baseline
+	// dev/owners.yaml).
+	owners string
 }
 
 var scenarios = map[string]scenario{
-	"schema-change":    {breakSchemaChange, fixSchemaChange},
-	"connector-down":   {breakConnectorDown, fixConnectorDown},
-	"consumer-stuck":   {breakConsumerStuck, fixConsumerStuck},
-	"long-transaction": {breakLongTransaction, fixLongTransaction},
-	"slot-inactive":    {breakSlotInactive, fixSlotInactive},
-	"consumer-lag":     {breakConsumerLag, fixConsumerLag},
-	"connector-auth":   {breakConnectorAuth, fixConnectorAuth},
+	"schema-change":    {breakIt: breakSchemaChange, fix: fixSchemaChange},
+	"connector-down":   {breakIt: breakConnectorDown, fix: fixConnectorDown},
+	"consumer-stuck":   {breakIt: breakConsumerStuck, fix: fixConsumerStuck},
+	"long-transaction": {breakIt: breakLongTransaction, fix: fixLongTransaction},
+	"slot-inactive":    {breakIt: breakSlotInactive, fix: fixSlotInactive},
+	"consumer-lag":     {breakIt: breakConsumerLag, fix: fixConsumerLag},
+	"connector-auth":   {breakIt: breakConnectorAuth, fix: fixConnectorAuth},
+
+	// P3 (tasks/P3-fixes-that-end-incidents.md): one per write action.
+	// They need the server on dev/owners.p3.yaml (p3OwnersFile).
+	"missed-table": {breakIt: breakMissedTable, fix: fixMissedTable, alert: missedTableAlert, owners: p3OwnersFile},
+	"dead-slot": {breakIt: breakDeadSlot, fix: fixDeadSlot, owners: p3OwnersFile,
+		signals: []string{owners.SignalSlotInactive, owners.SignalConnectorDown}},
+	"consumer-bad-deploy": {breakIt: breakConsumerBadDeploy, fix: fixConsumerBadDeploy, alert: badDeployAlert, owners: p3OwnersFile},
+	"dlq-backlog": {breakIt: breakDLQBacklog, fix: fixDLQBacklog, owners: p3OwnersFile,
+		signals: []string{owners.SignalDLQGrowth}},
 }
 
 // schema-change: a migration changes orders.amount from integer to
@@ -316,48 +337,15 @@ func fixLongTransaction(ctx context.Context, s *stack) error {
 // debezium_orders has no WAL sender: nothing confirms WAL and Postgres keeps
 // every segment written after restart_lsn.
 func breakSlotInactive(ctx context.Context, s *stack) error {
-	if _, err := s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/stop", nil, http.StatusNoContent, http.StatusAccepted, http.StatusOK); err != nil {
+	if err := s.stopConnectorUntilSlotInactive(ctx); err != nil {
 		return err
-	}
-	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
-		st, err := s.connectorStatus(ctx)
-		if err != nil {
-			return false, nil
-		}
-		return st.Connector.State == "STOPPED", nil
-	}); err != nil {
-		return fmt.Errorf("devctl: connector did not stop: %w", err)
-	}
-	// The WAL sender closes shortly after the task stops.
-	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
-		active, err := s.slotActive(ctx)
-		if err != nil {
-			return false, nil
-		}
-		return !active, nil
-	}); err != nil {
-		return fmt.Errorf("devctl: slot %s did not go inactive: %w", slotName, err)
 	}
 	// Prove that WAL is really retained: sample the slot's retained bytes,
 	// write one batch of orders, and check that the number grew (nobody
 	// confirms the new WAL anymore).
-	before, err := s.retainedWALBytes(ctx)
+	before, after, err := s.proveWALGrows(ctx)
 	if err != nil {
 		return err
-	}
-	if _, err := s.psql(ctx, "orders", "INSERT INTO orders (customer_id, amount) SELECT g, 100 + g FROM generate_series(1, 100) g"); err != nil {
-		return err
-	}
-	var after int64
-	if err := s.waitFor(ctx, 30*time.Second, func() (bool, error) {
-		n, err := s.retainedWALBytes(ctx)
-		if err != nil {
-			return false, nil
-		}
-		after = n
-		return n > before, nil
-	}); err != nil {
-		return fmt.Errorf("devctl: retained WAL did not grow (stayed at %d bytes): %w", before, err)
 	}
 	s.log.Info("broken: connector STOPPED, slot "+slotName+" inactive — run `devctl load` to grow retained WAL further", "retained_before_bytes", before, "retained_after_bytes", after)
 	return nil
