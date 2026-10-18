@@ -539,7 +539,9 @@ func isAbsPath(p string) bool {
 // null list item when it decodes into []string, so `- ` left behind by an edit
 // would vanish without a word and the policy the admin meant would not run. A
 // null auto_approve: key itself is left alone: it reads as no list, which is
-// no auto-approval, the safe meaning (checkAutoApproveSyntax).
+// no auto-approval, the safe meaning (checkAutoApproveSyntax). A null entry in
+// a dags: or models: list is refused the same way. Because only literal keys
+// are read, a `<<` merge key in a pipeline is refused too.
 func checkNullBlocks(root *yaml.Node) error {
 	doc := root
 	if doc.Kind == yaml.DocumentNode {
@@ -566,6 +568,13 @@ func checkNullBlocks(root *yaml.Node) error {
 		if id, ok := mapValue(p, "id"); ok && id.Kind == yaml.ScalarNode && !isNull(id) {
 			name = "pipeline " + quoteName(id.Value)
 		}
+		// This function reads literal keys only. A `<<` merge key would bring in
+		// fields it never sees (a null dags: entry, say), so it is refused.
+		for j := 0; j+1 < len(p.Content); j += 2 {
+			if k := p.Content[j]; k.Kind == yaml.ScalarNode && k.ShortTag() == "!!merge" {
+				return fmt.Errorf("line %d: %s: merge key << is not supported in a pipeline; write the fields out", k.Line, name)
+			}
+		}
 		if v, ok := mapValue(p, "connections"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: connections: is empty (null); list the connections, or remove the key to use the process-wide settings", v.Line, name)
 		}
@@ -576,6 +585,17 @@ func checkNullBlocks(root *yaml.Node) error {
 			for _, item := range v.Content {
 				if isNull(item) {
 					return fmt.Errorf("line %d: %s: auto_approve: has an empty (null) entry; name an action or remove the entry", item.Line, name)
+				}
+			}
+		}
+		// The same for dags: and models: of a batch pipeline: a dropped null
+		// entry would shrink the scope the file seems to give.
+		for _, key := range []string{"dags", "models"} {
+			if v, ok := mapValue(p, key); ok && v.Kind == yaml.SequenceNode {
+				for _, item := range v.Content {
+					if isNull(item) {
+						return fmt.Errorf("line %d: %s: %s: has an empty (null) entry; name one or remove the entry", item.Line, name, key)
+					}
 				}
 			}
 		}
