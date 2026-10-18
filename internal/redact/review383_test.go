@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestReview383 covers #383: the command-line flag and XML element rules of
@@ -1037,24 +1038,92 @@ var slowLines510 = map[string]func(n int) string{
 	"padded-words":    func(n int) string { return strings.Repeat("<password> debezium </password>", n/31) },
 }
 
-// TestReview510LinearTime: every hostile 64 KiB line runs in under 50 ms.
+// TestReview510LinearTime: every hostile line takes linear time. Each line at
+// the scan limit is timed against linearSpread runs of its first
+// 1/linearSpread, the same bytes: linear passes take about as long on both
+// sides (0.4x to 3x here, with the machine's cores 7x oversubscribed), a
+// quadratic one linearSpread times longer on the long line. The limit is a
+// ratio of two timings taken in the same loop on the same machine, not a
+// wall-clock limit, so a slow or loaded runner slows both sides alike.
 func TestReview510LinearTime(t *testing.T) {
 	if raceEnabled {
+		// -race makes these lines about 20x slower (some 40 s for the test)
+		// and has nothing to find in code that runs on one goroutine.
 		t.Skip("timing check; runs without -race")
 	}
-	const ceiling = 50 * time.Millisecond
+	step := clockStep()
 	for name, mk := range slowLines510 {
-		s := mk(MaxScan)
-		best := time.Duration(1 << 62)
-		for range 5 {
-			start := time.Now()
-			Text(s)
-			best = min(best, time.Since(start))
-		}
-		if best > ceiling {
-			t.Errorf("%s: best %v for %d KiB, want under %v", name, best, len(s)>>10, ceiling)
+		long := mk(MaxScan)
+		short := long[:runeStart(long, len(long)/linearSpread)]
+		if growth, tLong, tShort := perByteGrowth(long, short, step); growth > maxPerByteGrowth {
+			t.Errorf("%s: %v for %d KiB but %v for %d runs of its first %d bytes: %.1fx the time per byte, want under %vx: superlinear?",
+				name, tLong, len(long)>>10, tShort, linearSpread, len(short), growth, maxPerByteGrowth)
 		}
 	}
+}
+
+// linearSpread is how many times longer the long line of
+// TestReview510LinearTime is than its short one, and maxPerByteGrowth the
+// most its time per byte may grow from the short line to the long one.
+const (
+	linearSpread     = 32
+	maxPerByteGrowth = 4
+)
+
+// perByteGrowth is how many times more time per byte Text(long) takes than
+// linearSpread runs of Text(short), from the best time of each. The rounds
+// alternate between the two, so a pause on a busy machine is not counted on
+// one side only. It takes five rounds, and up to fifteen while the growth is
+// over maxPerByteGrowth: more rounds leave more pauses out of the best times,
+// while a superlinear pass is slow in every round.
+func perByteGrowth(long, short string, step time.Duration) (growth float64, tLong, tShort time.Duration) {
+	// The short runs may scan a few bytes less than the long line.
+	perByte := float64(linearSpread*len(short)) / float64(len(long))
+	tLong, tShort = time.Duration(1<<62), time.Duration(1<<62)
+	for round := 1; round <= 15; round++ {
+		start := time.Now()
+		Text(long)
+		tLong = min(tLong, time.Since(start))
+		start = time.Now()
+		for range linearSpread {
+			Text(short)
+		}
+		tShort = min(tShort, time.Since(start))
+		growth = float64(tLong) / float64(max(tShort, step)) * perByte
+		if round >= 5 && growth <= maxPerByteGrowth {
+			break
+		}
+	}
+	return growth, tLong, tShort
+}
+
+// runeStart moves i back to the start of the rune it falls in, so a cut at i
+// leaves valid UTF-8.
+func runeStart(s string, i int) int {
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
+}
+
+// clockStep is the smallest step time.Now takes on this machine: well under a
+// microsecond on Linux, up to 15.6 ms on Windows. A timing shorter than a step
+// can read as zero, so a side is counted as at least one step.
+func clockStep() time.Duration {
+	step := time.Duration(1 << 62)
+	for range 3 {
+		t0 := time.Now()
+		t1 := time.Now()
+		for t1.Sub(t0) == 0 {
+			t1 = time.Now()
+		}
+		t2 := time.Now()
+		for t2.Sub(t1) == 0 {
+			t2 = time.Now()
+		}
+		step = min(step, t2.Sub(t1))
+	}
+	return step
 }
 
 // review547Leaks are the texts of the round-1 review of #547 (LEAD-REVIEW,
