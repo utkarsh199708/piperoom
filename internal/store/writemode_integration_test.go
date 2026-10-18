@@ -13,18 +13,25 @@ import (
 // A proposal fully approved while write mode was off (status blocked) is
 // never listed under the write-off unclaimed window, cannot be claimed, and
 // under a normal window is listed flagged WriteBlocked, next to an approved,
-// unclaimed open one that is not, and is failed by exactly one interrupt.
+// unclaimed open one that is not, and is failed by exactly one interrupt. A
+// blocked row in a closed room is never listed and stays blocked.
 func TestStaleWriteBlockedProposal(t *testing.T) {
 	s, _, schema := requireStoreSchema(t)
 	roomID := createTestRoom(t, s)
+	closedRoom := createTestRoom(t, s)
 	ctx := context.Background()
-	for _, pid := range []string{"p_blocked", "p_open"} {
-		createTestProposal(t, s, roomID, pid)
+	for pid, room := range map[string]string{"p_blocked": roomID, "p_open": roomID, "p_closed": closedRoom} {
+		createTestProposal(t, s, room, pid)
 		if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "postgres", Decision: "approved"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.SetProposalStatus(ctx, "p_blocked", store.ProposalStatusBlocked); err != nil {
+	for _, pid := range []string{"p_blocked", "p_closed"} {
+		if err := s.SetProposalStatus(ctx, pid, store.ProposalStatusBlocked); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CloseRoom(ctx, closedRoom, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	execSQL(t, schema, `UPDATE approvals SET decided_at = now() - interval '10 minutes'`)
@@ -57,5 +64,11 @@ func TestStaleWriteBlockedProposal(t *testing.T) {
 	}
 	if row, _ := s.GetProposal(ctx, "p_blocked"); row.Status != "failed" {
 		t.Fatalf("status %q, want failed", row.Status)
+	}
+	if ok, err := s.InterruptProposal(ctx, "p_closed", "sweeper", time.Minute, time.Minute); err != nil || ok {
+		t.Fatalf("interrupt in a closed room: ok=%v err=%v, want false", ok, err)
+	}
+	if row, _ := s.GetProposal(ctx, "p_closed"); row.Status != store.ProposalStatusBlocked {
+		t.Fatalf("closed room's row status %q, want %s", row.Status, store.ProposalStatusBlocked)
 	}
 }

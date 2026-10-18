@@ -3,6 +3,8 @@ package room_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -131,6 +133,18 @@ func TestWriteModeOffApprovedProposalNeverRuns(t *testing.T) {
 	// Approving again is still refused: the layers are decided.
 	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "meera"), pid, "warehouse", proposalHash(t, svc, pid))
 	wantCode(t, err, "already_decided")
+	// A reject answers already_decided (409) from the row's blocked status,
+	// before the layer check and before any write: kabir owns neither layer,
+	// so a later check would have answered not_layer_owner.
+	before := len(allEvents(t, st, roomID))
+	_, err = svc.RejectProposal(context.Background(), mustUser(t, svc, "kabir"), pid, "postgres", "no", proposalHash(t, svc, pid))
+	wantCode(t, err, "already_decided")
+	if re := (*room.Error)(nil); !errors.As(err, &re) || re.Status != http.StatusConflict {
+		t.Fatalf("reject on a blocked proposal = %v, want 409", err)
+	}
+	if n := len(allEvents(t, st, roomID)); n != before {
+		t.Fatalf("a refused reject appended %d events", n-before)
+	}
 
 	svc.Close() // waits for every goroutine the service started
 	if n := countEvents(t, st, roomID, events.ActionExecuted); n != 0 {
