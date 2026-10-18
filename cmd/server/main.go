@@ -4,8 +4,11 @@
 // --demo it applies the migrations, opens the real stack clients via
 // wiring.OpenStacks (one client set per pipeline with its own connections,
 // docs/design/tenancy.md), registers the real tools/actions and runs the real
-// agent (agent.Run). Owners are loaded and cross-checked against the users
-// file in both modes.
+// agent (agent.Run). With --quickstart it runs the real agent and tools like
+// the full server, but on the in-memory store, with dev login on loopback
+// only, write mode off and a one-user users file written for the run
+// (quickstart.go). Owners are loaded and cross-checked against the users file
+// in every mode.
 package main
 
 import (
@@ -13,7 +16,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 
@@ -51,10 +57,24 @@ func main() {
 	}
 }
 
+// startDeps are what run reaches outside the process besides the room store:
+// the data stack and stdout. Tests replace the stack opener so the whole
+// --quickstart start runs with no stack.
+type startDeps struct {
+	openStacks func(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts wiring.StackOptions) (*wiring.Stacks, error)
+	stdout     io.Writer
+}
+
 // run is main's body so every cleanup defer runs on every exit path,
 // including the listen-error path.
 func run() error {
+	return runWith(startDeps{openStacks: wiring.OpenStacks, stdout: os.Stdout})
+}
+
+func runWith(d startDeps) error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
+	quickstart := flag.Bool("quickstart", false, "read-only quickstart: the real agent and tools, in-memory room store, dev login on loopback only, write mode off, a one-user users file for this run; prints the URL to open")
+	ownersPath := flag.String("owners", "", "with --quickstart: the owners file (default ./"+quickstartDefaultOwners+"); without --quickstart, set OWNERS_FILE instead")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
 	showVersion := flag.Bool("version", false, "print the build version and exit")
@@ -73,12 +93,18 @@ func run() error {
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
 	}
+	if err := checkStartFlags(*demoMode, *quickstart, *allowRemote, *ownersPath); err != nil {
+		return err
+	}
 	if down.n != 0 || down.apply || down.confirm != "" || down.dropEvents {
 		if down.n == 0 {
 			return errDownStrayFlag
 		}
 		if *demoMode {
 			return errors.New("server: -migrate-down needs the room database; it cannot run with -demo")
+		}
+		if *quickstart {
+			return errors.New("server: -migrate-down needs the room database; it cannot run with --quickstart")
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -92,6 +118,19 @@ func run() error {
 	}
 	slog.SetDefault(log)
 	log.Info("server: starting", "version", version.String())
+
+	// --quickstart rewrites the settings it forces (loopback, dev login,
+	// write mode off, owners file) before any check below reads them, and
+	// refuses a non-loopback address before anything starts.
+	if *quickstart {
+		cfg, err = quickstartConfig(cfg, *ownersPath, log)
+		if err != nil {
+			return err
+		}
+		log.Info("server: quickstart: in-memory room store, dev login on loopback, write mode off", "owners_file", cfg.OwnersFile)
+	}
+	// memStore: the in-memory room store, which --demo and --quickstart use.
+	memStore := *demoMode || *quickstart
 
 	// The agent cap is cost control: parse it first so a bad value stops the
 	// server before it connects to anything.
@@ -179,22 +218,34 @@ func run() error {
 	// Real mode refuses to start without a usable users file: it is the
 	// directory of who may approve and drive (LEAD-ARCH round 4, item 7).
 	// Demo mode stays self-contained for the users file only, falling back to
-	// the dev directory so the UI can be built with no config.
-	users, err := room.LoadUsers(cfg.UsersFile)
-	if err != nil {
-		if !*demoMode {
-			return fmt.Errorf("server: load users file %s: %w", cfg.UsersFile, err)
+	// the dev directory so the UI can be built with no config. --quickstart
+	// builds its users file from the owners file, below.
+	var users *room.Users
+	if !*quickstart {
+		users, err = room.LoadUsers(cfg.UsersFile)
+		if err != nil {
+			if !*demoMode {
+				return fmt.Errorf("server: load users file %s: %w", cfg.UsersFile, err)
+			}
+			log.Warn("server: users file unavailable, using demo users", "path", cfg.UsersFile, "err", err)
+			users = room.DefaultUsers()
 		}
-		log.Warn("server: users file unavailable, using demo users", "path", cfg.UsersFile, "err", err)
-		users = room.DefaultUsers()
 	}
-	// Owners are required in both modes: every action's scope check runs
+	// Owners are required in every mode: every action's scope check runs
 	// against them, so a room can only ever write inside its own pipeline.
 	// Users and owners must agree (a layer owner in owners.yaml must exist in
 	// users.yaml and actually own that layer), otherwise start is refused.
 	own, err := owners.Load(cfg.OwnersFile)
 	if err != nil {
 		return fmt.Errorf("server: load owners file %s: %w", cfg.OwnersFile, err)
+	}
+	if *quickstart {
+		var removeUsers func()
+		users, removeUsers, err = quickstartUsers(cfg, own, "", log)
+		if err != nil {
+			return err
+		}
+		defer removeUsers()
 	}
 	if err := room.ValidateUsers(users, own); err != nil {
 		return fmt.Errorf("server: users/owners config: %w", err)
@@ -243,9 +294,9 @@ func run() error {
 	log.Info("server: alert sources", "enabled", enabledAlertSources(alerts))
 
 	// --demo is fully self-contained (in-memory store + scripted agent) so A6
-	// can build the UI against it with no database or migrations. The real
-	// mode uses Postgres: migrations first (goose on migrations.FS), then the
-	// store.
+	// can build the UI against it with no database or migrations;
+	// --quickstart takes only its in-memory store. The real mode uses
+	// Postgres: migrations first (goose on migrations.FS), then the store.
 	var (
 		st      store.Store
 		ready   httpapi.Pinger      // nil in demo mode: the in-memory store is always ready
@@ -259,7 +310,7 @@ func run() error {
 		loginStates auth.LoginStateStore = auth.NewMemLoginStates()
 		identities  auth.IdentityStore   = auth.NewMemIdentities()
 	)
-	if *demoMode {
+	if memStore {
 		st = memstore.New()
 	} else {
 		if err := migrateRoomDB(ctx, cfg.RoomDBURL, log); err != nil {
@@ -369,7 +420,7 @@ func run() error {
 		// the process-wide set when a pipeline uses it (docs/design/tenancy.md
 		// section 5). Each room, the topology and the watcher reach only the
 		// set of their own pipeline.
-		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
+		sets, err := d.openStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
 			// similar_incidents reads past closed rooms from the room store;
 			// each set's Owners holds only its own pipelines.
 			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
@@ -418,9 +469,9 @@ func run() error {
 	loadErr := svc.Load(loadCtx)
 	cancelLoad()
 	if loadErr != nil {
-		if *demoMode {
-			// Demo uses an in-memory store; a failed load is unexpected but not
-			// worth refusing to start.
+		if memStore {
+			// Demo and quickstart use an in-memory store; a failed load is
+			// unexpected but not worth refusing to start.
 			log.Warn("server: cache load failed", "err", loadErr)
 		} else {
 			// Real mode must fail: a broken cache means rooms reached later are
@@ -486,6 +537,8 @@ func run() error {
 		}
 		httpOpts = append(httpOpts, httpapi.WithWebDir(cfg.WebDir))
 		log.Info("server: serving the web UI", "dir", cfg.WebDir)
+	} else if *quickstart {
+		log.Info("server: quickstart: PIPEROOM_WEB_DIR is unset, so the printed URL serves the API only; run `npm run build` in web/ and set PIPEROOM_WEB_DIR=web/dist for the UI")
 	}
 	handler := httpapi.New(svc, st, log, httpOpts...)
 	// Retention and other replicas' deletes close sockets from here on; none
@@ -529,11 +582,15 @@ func run() error {
 	}()
 
 	mode := "real"
-	if *demoMode {
+	switch {
+	case *demoMode:
 		mode = "demo"
+	case *quickstart:
+		mode = "quickstart"
 	}
-	log.Info("server: listening", "addr", cfg.HTTPAddr, "mode", mode)
-	serveErr := server.ListenAndServe()
+	// Listen before Serve so the log and the quickstart URL carry the bound
+	// address (a :0 port is the real one there).
+	serveErr := listenAndServe(server, *quickstart, d.stdout, log, mode)
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		// There was no signal; trigger the same shutdown path, then report.
 		log.Error("server: listen failed", "err", serveErr)
@@ -544,6 +601,31 @@ func run() error {
 		return fmt.Errorf("server: listen: %w", serveErr)
 	}
 	return nil
+}
+
+// listenAndServe binds the server's address and serves until Shutdown. With
+// quickstart it refuses a listener that is not on loopback and prints the URL
+// to open once to out; everything else goes to the log.
+func listenAndServe(server *http.Server, quickstart bool, out io.Writer, log *slog.Logger, mode string) error {
+	addr := server.Addr
+	if addr == "" {
+		addr = ":http" // what http.Server.ListenAndServe uses
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("server: listen on %s: %w", addr, err)
+	}
+	if quickstart {
+		if err := checkQuickstartListener(ln.Addr()); err != nil {
+			_ = ln.Close()
+			return err
+		}
+	}
+	log.Info("server: listening", "addr", ln.Addr().String(), "mode", mode)
+	if quickstart {
+		fmt.Fprintln(out, quickstartURL(ln.Addr()))
+	}
+	return server.Serve(ln)
 }
 
 // checkWebDir verifies that dir holds a built web UI (an index.html).
