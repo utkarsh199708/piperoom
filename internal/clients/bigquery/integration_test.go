@@ -1,4 +1,8 @@
-//go:build integration
+//go:build bigquery_integration
+
+// A tag of its own, not `integration`: these tests need a real BigQuery
+// project, which the full-stack CI job never has, and that job fails on any
+// skipped test (.github/scripts/fail-on-skips.sh).
 
 package bigquery
 

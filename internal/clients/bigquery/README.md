@@ -73,6 +73,7 @@ Query results go to an anonymous temporary table the service manages; no user da
 ## Tests
 
 Unit tests use a fake runner and a fake REST endpoint (`httptest`); no network. The
-integration tests (`-tags integration`) are skipped unless `GOOGLE_APPLICATION_CREDENTIALS`
-and `PIPEROOM_IT_BIGQUERY_DSN` are set; `PIPEROOM_IT_BIGQUERY_TABLE` and
+integration tests use their own tag (`go test -tags bigquery_integration ./internal/clients/bigquery/`,
+not the dev-stack `integration` tag, which CI runs without cloud credentials) and are
+skipped unless `GOOGLE_APPLICATION_CREDENTIALS` and `PIPEROOM_IT_BIGQUERY_DSN` are set; `PIPEROOM_IT_BIGQUERY_TABLE` and
 `PIPEROOM_IT_BIGQUERY_TS_COLUMN` name an existing table to read.
