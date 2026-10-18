@@ -228,6 +228,45 @@ actions, Connect worker visibility, config validation before registration, conne
 network and TLS probes, pull-request fix, MySQL). The board's After column is the only hard dependency; Q0 waits on
 the P wave's open contract follow-ups, and every row that adds a write action waits on P3-0.
 
+### U wave (planned 2026-10-18; plan `docs/product/setup-2026-10.md`, design `docs/design/setup-agent.md`, board `tasks/U-board.md`)
+
+PR titles start with the board row's ID: `[U<N><letter>]` or `[U1-<n>]` for the core rows, `[U<N>-0]` for a design
+row (e.g. `[U1-3] setup/compose: driver and T1 ops`). Same rules as the P and Q waves: each row stays inside its
+agent's folders (the rows above plus the new folders below); a file outside them is asked for in the thread, never
+edited. The wave adds **setup as a functionality of Piperoom** (the owner's decision: not a separate product): the
+same agent, room, approval model, `owners.yaml` and web UI take a user from nothing to a watched Debezium pipeline.
+Commands run through a **runner** (`cmd/setup`, `piperoom-setup`) that executes only typed operations from an
+allow-listed catalogue where the user's Docker, `kubectl` and cloud credentials are; the server never holds them.
+U0 (the leads) carries the contract changes (events, `Alert.Mode`, `actions.Tiered`, `clients.RunnerExecutor`,
+config, API); the design rows U1-0 (protocol, Windows service), U12-0 (Strimzi) and U13-0 (managed) carry their own.
+The wave comes from the same 722-problem Stack Overflow analysis as the Q wave: 572 are setup problems, and the
+wave makes 473 of them (82.7%) agent-fixable. Every U row runs on Opus 5.5, cloud rows included.
+
+New folders of the wave (owned from the first PR that creates them):
+
+| Agent | Owns (new in the U wave) |
+|---|---|
+| A9 (Qoder, new; if no ninth local agent runs, A2 takes its rows) | `cmd/setup/**`, `cmd/piperoom/**`, `internal/setup/**` except `internal/setup/targets/**`, `internal/setup/sources/**` and `internal/setup/knowledge/**` |
+| A10 (Qoder, new; if no tenth local agent runs, A3 takes its rows) | `internal/clients/sqlserver/**`, `internal/clients/mongodb/**`, `internal/clients/oracle/**`, `internal/setup/sources/sqlserver/**`, `internal/setup/sources/mongodb/**`, `internal/setup/sources/oracle/**` |
+| A3 | `internal/setup/sources/postgres/**` |
+| A8 | `internal/setup/sources/mysql/**` |
+| C19 (cloud, new) | `internal/setup/targets/compose/**`, `internal/setup/targets/host/**` |
+| C20 (cloud, new) | `internal/setup/targets/strimzi/**`, `internal/setup/targets/server/**` |
+| C21 (cloud, new) | `internal/setup/targets/managed/**`, `internal/clients/mskconnect/**`, `internal/clients/confluentcloud/**`, `internal/clients/aiven/**` |
+| C22 (cloud, new) | `internal/setup/knowledge/**` |
+| C7 | `evals/scenarios/setup/**` (C6 keeps the rest of `evals/**`) |
+
+Setup rules that every U row follows: no op takes a shell string, only typed params (an AST test guards it); a
+`file_write` stays under the project directory; the runner refuses a T1+ op without an approved proposal id;
+secrets are `${secret:name}` references materialised on the runner only; every runner output is redacted before
+transport and wrapped as untrusted on the server; the production guard table is never relaxed by a row.
+
+Order: **U0 first, after Q0**; then U1-0 and the U1 rows (runner, catalogue, Compose, Postgres, verification);
+then steps 2 to 13 by coverage per day (MySQL, transforms and sinks, SQL Server, logs, embedded, MongoDB, plain
+hosts, Oracle, tuning, Debezium Server, Strimzi, managed); U12-0 and U13-0 start as soon as U0 merges. The board's
+After column is the only hard dependency. Every target row's "Done when" includes a real run on the named OS and
+target with the room export attached to the PR.
+
 ### Contract files (read them, code against them, never edit them)
 
 - `internal/tools/tool.go` — `Tool`, `Result`, `Registry`
