@@ -104,6 +104,9 @@ func (e *StatusError) Is(target error) bool {
 type Client struct {
 	baseURL string
 	hc      *http.Client
+	// logCeiling is MaxLogStreamBytes; a field rather than the constant so
+	// a test can lower it instead of streaming 64 MiB on a slow runner.
+	logCeiling int64
 }
 
 var (
@@ -166,7 +169,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		}
 		hc.Transport = &bearer{next: hc.Transport, scheme: u.Scheme, host: u.Host, token: s.token}
 	}
-	return &Client{baseURL: strings.TrimRight(baseURL, "/"), hc: hc}, nil
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), hc: hc, logCeiling: MaxLogStreamBytes}, nil
 }
 
 // bearer adds the token to requests for the base URL's scheme and host only,
@@ -316,7 +319,7 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 	// starts at a line.
 	tb := &tailBuffer{buf: make([]byte, maxBytes+1)}
 	err = c.get(ctx, path, acceptLogPlain, func(r io.Reader) error {
-		if _, err := io.Copy(tb, io.LimitReader(r, MaxLogStreamBytes)); err != nil {
+		if _, err := io.Copy(tb, io.LimitReader(r, c.logCeiling)); err != nil {
 			return fmt.Errorf("read log: %w", err)
 		}
 		// A byte past the ceiling means the log goes on.
