@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/owners"
@@ -578,6 +580,39 @@ func TestKeyPreview(t *testing.T) {
 	}
 	if got := keyPreview([]byte("password=hunter2")); strings.Contains(got, "hunter2") {
 		t.Errorf("keyPreview did not redact: %q", got)
+	}
+}
+
+// TestKeyPreviewRedactsBeforeCut covers keys longer than the cap whose secret
+// straddles rune 60: cutting first broke the pattern and left the head bare.
+func TestKeyPreviewRedactsBeforeCut(t *testing.T) {
+	const jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+	tests := []struct {
+		name   string
+		key    string
+		leaked []string // none of these may appear in the preview
+	}{
+		{"bare jwt", "order-" + jwt, []string{"eyJhbGciOiJIUzI1NiIs", "eyJzdWIi", "SflKxwRJ", "ssw5c"}},
+		{"token jwt", "order-42|token=" + jwt, []string{"eyJhbGciOiJIUzI1NiIs", "eyJzdWIi", "SflKxwRJ", "ssw5c"}},
+		{"password", strings.Repeat("0", 50) + "|password=Sup3rS3cretValueThatIsLong", []string{"Sup3", "S3cret", "IsLong"}},
+		{"multibyte prefix", strings.Repeat("é", 40) + "|password=Sup3rS3cretValueThatIsLong", []string{"Sup3", "S3cret", "IsLong"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := keyPreview([]byte(tc.key))
+			for _, l := range tc.leaked {
+				if strings.Contains(got, l) {
+					t.Errorf("keyPreview(%q) = %q, leaks %q", tc.key, got, l)
+				}
+			}
+			s, err := strconv.Unquote(got)
+			if err != nil {
+				t.Fatalf("keyPreview = %q, not a quoted string: %v", got, err)
+			}
+			if !utf8.ValidString(s) || utf8.RuneCountInString(strings.TrimSuffix(s, "…")) > dlqKeyRunes {
+				t.Errorf("keyPreview = %q, want valid UTF-8 of at most %d runes plus …", s, dlqKeyRunes)
+			}
+		})
 	}
 }
 

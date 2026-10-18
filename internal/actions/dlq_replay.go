@@ -347,8 +347,10 @@ func stripConnectHeaders(recs []clients.Record) ([]clients.Record, int) {
 	return out, dropped
 }
 
-// keyPreview renders one record key for approvers: text keys capped and
-// redacted (redact.Text), binary keys (Avro, Protobuf) by size only.
+// keyPreview renders one record key for approvers: text keys redacted
+// (redact.Text) and then capped, binary keys (Avro, Protobuf) by size only.
+// Redaction runs on the whole key before the cut: cutting first can break a
+// secret's pattern (a JWT without its signature) and leave its head unmasked.
 func keyPreview(k []byte) string {
 	if k == nil {
 		return "null key"
@@ -356,11 +358,10 @@ func keyPreview(k []byte) string {
 	if !utf8.Valid(k) || strings.ContainsFunc(string(k), func(r rune) bool { return unicode.IsControl(r) && r != '\t' }) {
 		return fmt.Sprintf("binary key, %d bytes", len(k))
 	}
-	s := string(k)
+	s, _ := redact.Text(string(k))
 	if utf8.RuneCountInString(s) > dlqKeyRunes {
 		s = string([]rune(s)[:dlqKeyRunes]) + "…"
 	}
-	s, _ = redact.Text(s)
 	return strconv.Quote(s)
 }
 
