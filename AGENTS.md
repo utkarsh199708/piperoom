@@ -48,7 +48,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | Agent | Task file | Owns |
 |---|---|---|
 | A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
-| A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`) |
+| A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`; not `pgactions/**`, A3's from the P wave) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/tools/scope.go`, `internal/topology/**` (not `graph.go`), `internal/owners/**`, `internal/clients/pgconv/**` |
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**`, `internal/auth/**` (A5 created it in auth PR 2, `e6dc2a1`) |
@@ -166,6 +166,36 @@ L1 needs no contract change.
 Merge order (vision §4): **F0 → F1, F5, F7, F10 in parallel → F3, F4 → F2, F9, F11 → F6, F8 → F12.** Inside a
 task, the task file's "Dependencies and merge order" section rules. A task split between agents is one PR per
 agent (and per sub-task when the task file says so).
+
+### P wave (dispatched 2026-10-18; plan `docs/product/fit-2026-10.md`)
+
+PR titles start with `[P<N><letter>]` (e.g. `[P2b] room: approve-all, sole-member driver, policy auto-approve`).
+Same rules as the F wave: each sub-task stays inside its agent's folders (the rows above plus the new folders
+below); a file outside them is asked for in the thread, never edited. P0 (the leads) carries every contract
+change; "Uses" names the P0 items (`tasks/P0-contracts.md`) each task codes against. The wave answers the four
+reasons a data engineer does not install Piperoom today (plan §1): setup cost, a NOC-sized ceremony, too few
+fixes, one pipeline shape.
+
+| Task | Agents (sub-tasks) | Task file | Uses (P0) |
+|---|---|---|---|
+| P0 | leads (`[LEAD-ARCH]`) | `tasks/P0-contracts.md` | — (contract files, `AGENTS.md`, `docs/api.md`, `docs/product/fit-2026-10.md`) |
+| P1 | A5 (P1a), C10 (P1b), C1 (P1c), C14 (P1d), A6 (P1e), A1 (P1f) | `tasks/P1-quickstart-readonly.md` | 1, 3 |
+| P2 | A3 (P2a), A5 (P2b), A6 (P2c), A4 (P2d), C12 (P2e) | `tasks/P2-solo-ceremony.md` | 2, 3, 4, 6 |
+| P3 | A2 (P3a), A3 (P3b), A5 (P3c), A6 (P3d), A4 (P3e), C14 (P3f), C7 + C6 (P3g) | `tasks/P3-fixes-that-end-incidents.md` | 5, 6, 7 |
+| P4 | A3 (P4a), A4 (P4b), C15 (P4c), C16 (P4d), C3 (P4e), A6 (P4f), A1 (P4g), C7 + C6 (P4h), C14 + C1 (P4i) | `tasks/P4-pipeline-kinds-batch.md` | 3, 6, 8 |
+
+New folders of the wave (owned from the first PR that creates them):
+
+| Agent | Owns (new in the P wave) |
+|---|---|
+| A3 | `internal/actions/pgactions/**` (A2 keeps the rest of `internal/actions/**` except `action.go`) |
+| C3 (cloud) | `internal/clients/bigquery/**`, `internal/clients/databricks/**` |
+| C15 (cloud, new) | `internal/clients/airflow/**`, `internal/tools/batchtools/**` |
+| C16 (cloud, new) | `internal/clients/dbt/**`, `internal/tools/dbttools/**` |
+
+Merge order (plan §4): **P0 → P1 and P2 in parallel → P3 → P4.** Inside a task, the task file's "Dependencies and
+merge order" section rules; inside P1 and P2 the `a` sub-task (the server or owners change) lands before the rest.
+A task split between agents is one PR per agent and per sub-task.
 
 ### Contract files (read them, code against them, never edit them)
 
