@@ -18,6 +18,7 @@ var (
 	_ Preview = (*restartConnector)(nil)
 	_ Preview = (*resumeConnector)(nil)
 	_ Preview = (*updateConnectorConfig)(nil)
+	_ Preview = (*pauseConnector)(nil)
 	_ Preview = (*setCompatibility)(nil)
 	_ Preview = (*registerSchema)(nil)
 )
@@ -131,47 +132,88 @@ func (a *resumeConnector) Preview(ctx context.Context, raw json.RawMessage) (Pre
 		Target:     "connector " + p.Connector,
 		Current:    fmt.Sprintf("%s (GET /connectors/%s/status)", orUnknown(st.State), p.Connector),
 		Expected:   "RUNNING (tasks assigned)",
-		Reversible: false, // there is no pause action
+		Reversible: false, // re-pausing is its own proposal (connect_pause_connector), not offered as an undo
 	}, nil
 }
 
 func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage) (PreviewResult, error) {
-	p, err := a.parseParams(raw)
+	set, err := a.parseParams(raw)
 	if err != nil {
+		return PreviewResult{}, previewErr(a.Name(), err)
+	}
+	if err := ctxConnectorScope(ctx, set.connector); err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cfg, err := a.d.Connect.Config(ctx, p.Connector)
+	cfg, err := a.d.Connect.Config(ctx, set.connector)
 	if err != nil {
 		return PreviewResult{}, previewErr(a.Name(), err)
 	}
-	res := PreviewResult{
-		Target:   fmt.Sprintf("connector %s key %s", p.Connector, p.Key),
-		Current:  fmt.Sprintf("%s = %s (GET /connectors/%s/config)", p.Key, configText(cfg, p.Key), p.Connector),
-		Expected: fmt.Sprintf("%s = %s; Connect restarts the tasks", p.Key, p.Value),
+	keys := set.keys()
+	todo, same := set.plan(cfg)
+	noun := "key"
+	if len(keys) > 1 {
+		noun = "keys"
 	}
-	if cur, set := cfg[p.Key]; set && cur == p.Value {
+	cur := make([]string, 0, len(keys))
+	for _, k := range keys {
+		cur = append(cur, fmt.Sprintf("%s = %s", k, configText(cfg, k)))
+	}
+	res := PreviewResult{
+		Target:  fmt.Sprintf("connector %s %s %s", set.connector, noun, strings.Join(keys, ", ")),
+		Current: fmt.Sprintf("%s (GET /connectors/%s/config)", strings.Join(cur, "; "), set.connector),
+	}
+	sameText := make([]string, 0, len(same))
+	for _, k := range same {
+		sameText = append(sameText, fmt.Sprintf("%s is already %s", k, set.changes[k]))
+	}
+	if len(todo) == 0 {
 		// Execute writes nothing then; the preview must not promise a change.
-		res.Expected = fmt.Sprintf("no change: %s is already %s; no task restart", p.Key, p.Value)
+		res.Expected = fmt.Sprintf("no change: %s; no task restart", strings.Join(sameText, ", "))
 		return res, nil
 	}
-	// Undo needs a stored value the allow-list would accept again; an unset
-	// key (or a value we truncated or do not offer) cannot be restored by an action.
-	if cur, set := cfg[p.Key]; set && a.allowList()[p.Key][cur] {
-		res.Reversible = true
-		res.Rollback = rollbackText(a.Name(), map[string]string{"connector": p.Connector, "key": p.Key, "value": cur})
+	todoKeys := sortedStringKeys(todo)
+	exp := make([]string, 0, len(todoKeys))
+	for _, k := range todoKeys {
+		exp = append(exp, fmt.Sprintf("%s = %s", k, todo[k]))
 	}
-	res.DryRun = a.dryRun(ctx, p, cfg)
+	res.Expected = strings.Join(exp, "; ") + "; Connect restarts the tasks"
+	if len(sameText) > 0 {
+		res.Expected += " (unchanged: " + strings.Join(sameText, ", ") + ")"
+	}
+	// Undo needs, for every key written, a stored value the allow-list would
+	// accept again; an unset key (or a value we truncated or do not offer)
+	// cannot be restored by an action, and a partial undo is not offered.
+	prev := make(map[string]string, len(todoKeys))
+	for _, k := range todoKeys {
+		v, set := cfg[k]
+		if !set || !a.allowList()[k][v] {
+			prev = nil
+			break
+		}
+		prev[k] = v
+	}
+	if prev != nil {
+		res.Reversible = true
+		if set.legacy {
+			k := todoKeys[0]
+			res.Rollback = rollbackText(a.Name(), map[string]string{"connector": set.connector, "key": k, "value": prev[k]})
+		} else {
+			b, _ := json.Marshal(map[string]any{"connector": set.connector, "changes": prev}) // strings only: cannot fail
+			res.Rollback = a.Name() + " " + string(b)
+		}
+	}
+	res.DryRun = a.dryRun(ctx, cfg, todo)
 	return res, nil
 }
 
-// dryRun sends the connector's config with the one key replaced to Connect's
-// validate endpoint. It never reads or returns a value other than through
-// Connect's error messages, and it sends nothing when the config holds a
-// credential-looking key: those values would leave this process for a call
+// dryRun sends the connector's config with the changed keys merged in to
+// Connect's validate endpoint. It never reads or returns a value other than
+// through Connect's error messages, and it sends nothing when the config holds
+// a credential-looking key: those values would leave this process for a call
 // that exists only for the preview.
-func (a *updateConnectorConfig) dryRun(ctx context.Context, p updateConnectorConfigParams, cfg map[string]string) *DryRunResult {
+func (a *updateConnectorConfig) dryRun(ctx context.Context, cfg, changes map[string]string) *DryRunResult {
 	for k := range cfg {
 		if looksSecret(k) {
 			return &DryRunResult{Source: sourceValidate, Skipped: "the connector config holds secret keys; not sent to validate"}
@@ -185,11 +227,13 @@ func (a *updateConnectorConfig) dryRun(ctx context.Context, p updateConnectorCon
 	if class == "" {
 		return &DryRunResult{Source: sourceValidate, Skipped: "the connector config has no connector.class"}
 	}
-	next := make(map[string]string, len(cfg)+1)
+	next := make(map[string]string, len(cfg)+len(changes))
 	for k, val := range cfg {
 		next[k] = val
 	}
-	next[p.Key] = p.Value
+	for k, val := range changes {
+		next[k] = val
+	}
 	vr, err := v.ValidateConfig(ctx, class, next)
 	if err != nil {
 		return &DryRunResult{Source: sourceValidate, Skipped: dryRunText("validate failed: " + err.Error())}
