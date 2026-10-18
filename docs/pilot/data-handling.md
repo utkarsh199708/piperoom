@@ -225,7 +225,8 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
   health data, government ids) for the pilot unless your security team signs off.
 - Keep `source_tables` / `sink_tables` as small as possible and grant `SELECT` only on them.
 - Keep `owners.yaml` to the pipelines your Piperoom may serve. A room can only read its own
-  pipeline (F11), but one process holds the credentials for all of them (F7).
+  pipeline (F11). A pipeline with its own `connections:` block gets its own clients (F7,
+  `internal/owners/tenancy.go`), but one process still holds the credentials for all of them.
 - Pilot with a small, named group in `users.yaml`: everyone in a room sees everything in it.
 - Turn Slack on only with a **private** channel whose members may see every room mirrored into it.
   Leave `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` unset if they may not.
