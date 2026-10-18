@@ -59,8 +59,27 @@ var ErrTooLarge = errors.New("dbt: artifact larger than 16 MiB")
 var ErrNoArtifact = errors.New("dbt: artifact not available")
 
 // ErrAmbiguous is wrapped when a short model name matches models of more
-// than one package or version; the caller retries with the unique_id.
+// than one package or version; the caller retries with the unique_id. The
+// error is an *AmbiguousError, which lists the candidates.
 var ErrAmbiguous = errors.New("dbt: model name is ambiguous")
+
+// AmbiguousError is a short model name that matches more than one model.
+// Candidates are the matching unique_ids, sorted; they are manifest text
+// (package names), so a caller shows them as untrusted data.
+type AmbiguousError struct {
+	Name       string
+	Candidates []string
+}
+
+// Error shows the name and the candidates, each part cut to 200 bytes
+// without control characters.
+func (e *AmbiguousError) Error() string {
+	return fmt.Sprintf("dbt: model %q matches %d nodes (%s): %v",
+		errorText(e.Name, maxErrorText), len(e.Candidates), errorText(strings.Join(e.Candidates, ", "), maxErrorText), ErrAmbiguous)
+}
+
+// Is makes an *AmbiguousError match ErrAmbiguous.
+func (e *AmbiguousError) Is(target error) bool { return target == ErrAmbiguous }
 
 // VersionError is an artifact whose metadata.dbt_schema_version is missing,
 // not a dbt schema URL, of the other artifact kind, or a version this
@@ -176,14 +195,34 @@ func parseRunResults(b []byte) (RunResults, error) {
 	return out, nil
 }
 
-// manifest is the part of manifest.json lineage needs.
+// manifest is the part of manifest.json lineage and model SQL need.
 type manifest struct {
-	Nodes map[string]struct {
-		Name         string `json:"name"`
-		ResourceType string `json:"resource_type"`
-	} `json:"nodes"`
-	ParentMap map[string][]string `json:"parent_map"`
-	ChildMap  map[string][]string `json:"child_map"`
+	Nodes     map[string]manifestNode `json:"nodes"`
+	ParentMap map[string][]string     `json:"parent_map"`
+	ChildMap  map[string][]string     `json:"child_map"`
+}
+
+type manifestNode struct {
+	Name         string `json:"name"`
+	ResourceType string `json:"resource_type"`
+	Path         string `json:"original_file_path"`
+	Language     string `json:"language"`
+	// CompiledCode is absent (nil) until dbt compiled the node: a manifest
+	// written by "dbt parse" has raw_code only.
+	CompiledCode *string `json:"compiled_code"`
+	RawCode      string  `json:"raw_code"`
+}
+
+// ModelSQL is one model's SQL from manifest.json.
+type ModelSQL struct {
+	Model    string `json:"model"`              // the model's unique_id
+	Path     string `json:"path,omitempty"`     // original_file_path, e.g. "models/fct_revenue.sql"
+	Language string `json:"language,omitempty"` // "sql" or "python"; "" when the manifest does not say
+	// Compiled is false when the manifest has no compiled_code for the
+	// model (dbt parsed but never compiled it); SQL is then the raw code,
+	// Jinja included.
+	Compiled bool   `json:"compiled"`
+	SQL      string `json:"sql"` // file text: untrusted, may quote literals and credentials
 }
 
 // parseManifest decodes manifest.json, version first (see parseRunResults).
@@ -227,6 +266,29 @@ func (m manifest) lineage(model string) (Lineage, error) {
 	return Lineage{Model: id, Parents: sortedCopy(m.ParentMap[id]), Children: sortedCopy(m.ChildMap[id])}, nil
 }
 
+// modelSQL resolves model like lineage and returns its compiled SQL, or its
+// raw code when the manifest has none compiled. A node that is not a model
+// (a source, seed or test unique_id) is clients.ErrNotFound.
+func (m manifest) modelSQL(model string) (ModelSQL, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ModelSQL{}, fmt.Errorf("dbt: model sql: empty model name")
+	}
+	id, err := m.resolve(model)
+	if err != nil {
+		return ModelSQL{}, err
+	}
+	n, ok := m.Nodes[id]
+	if !ok || n.ResourceType != "model" {
+		return ModelSQL{}, fmt.Errorf("dbt: %q is not a model in %s: %w", errorText(model, maxErrorText), ManifestFile, clients.ErrNotFound)
+	}
+	out := ModelSQL{Model: id, Path: n.Path, Language: n.Language, SQL: n.RawCode}
+	if n.CompiledCode != nil {
+		out.Compiled, out.SQL = true, *n.CompiledCode
+	}
+	return out, nil
+}
+
 func (m manifest) resolve(model string) (string, error) {
 	if _, ok := m.ParentMap[model]; ok {
 		return model, nil
@@ -247,8 +309,7 @@ func (m manifest) resolve(model string) (string, error) {
 		return ids[0], nil
 	}
 	slices.Sort(ids)
-	return "", fmt.Errorf("dbt: model %q matches %d nodes (%s): %w",
-		errorText(model, maxErrorText), len(ids), errorText(strings.Join(ids, ", "), maxErrorText), ErrAmbiguous)
+	return "", &AmbiguousError{Name: model, Candidates: ids}
 }
 
 // sortedCopy never returns nil (the contract's Lineage has no nil slices).

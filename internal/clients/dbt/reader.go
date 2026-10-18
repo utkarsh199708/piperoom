@@ -1,6 +1,7 @@
 package dbt
 
 import (
+	"context"
 	"fmt"
 
 	"piperoom/internal/clients"
@@ -23,9 +24,19 @@ type (
 	Lineage = clients.Lineage
 )
 
+// SQLReader reads one model's SQL from manifest.json. Both readers implement
+// it next to Reader; it is not part of clients.TransformReader (P4d-2's
+// contract change request proposes it there), so the dbt_model_sql tool
+// asserts it at use time, like clients.ClusterReader.
+type SQLReader interface {
+	ModelSQL(ctx context.Context, model string) (ModelSQL, error)
+}
+
 var (
-	_ Reader = (*Dir)(nil)
-	_ Reader = (*Cloud)(nil)
+	_ Reader    = (*Dir)(nil)
+	_ Reader    = (*Cloud)(nil)
+	_ SQLReader = (*Dir)(nil)
+	_ SQLReader = (*Cloud)(nil)
 )
 
 // FromConfig returns the reader the dbt settings select (config.ParseDBT's

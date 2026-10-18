@@ -6,7 +6,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
+
+	"piperoom/internal/tools"
 )
+
+// CallFile is the provenance kind (tools.Call.Kind) of an artifact read from
+// DBT_ARTIFACTS_DIR. tools.go names no kind for a local file read yet (see
+// the P4d-2 PR's contract change request); this one is local until it does.
+const CallFile = "file"
 
 // Dir reads the artifacts dbt writes to its target directory
 // (DBT_ARTIFACTS_DIR). Each call opens the file again, so the newest dbt run
@@ -49,17 +57,59 @@ func (d *Dir) ModelLineage(ctx context.Context, model string) (Lineage, error) {
 	return m.lineage(model)
 }
 
-// read returns one artifact, at most MaxArtifactBytes. A local file read
-// does not take a context, so ctx is checked before opening and between
-// reads: a slow network share stops at the caller's deadline.
+// ModelSQL reads manifest.json and returns model's compiled SQL (its raw
+// code when dbt never compiled it). model is a unique_id or a model's short
+// name; an unknown one, or a node that is not a model, is
+// clients.ErrNotFound. The SQL is untrusted file text.
+func (d *Dir) ModelSQL(ctx context.Context, model string) (ModelSQL, error) {
+	b, err := d.read(ctx, ManifestFile)
+	if err != nil {
+		return ModelSQL{}, err
+	}
+	m, err := parseManifest(b)
+	if err != nil {
+		return ModelSQL{}, err
+	}
+	return m.modelSQL(model)
+}
+
+// read returns one artifact, at most MaxArtifactBytes, and records one
+// provenance call for it (the file's path, never its content).
 func (d *Dir) read(ctx context.Context, name string) ([]byte, error) {
+	start := time.Now()
+	b, err := d.readFile(ctx, name)
+	tools.Record(ctx, tools.Call{
+		Kind:   CallFile,
+		Target: d.dir,
+		Text:   "read " + name,
+		At:     start,
+		TookMS: time.Since(start).Milliseconds(),
+	})
+	return b, err
+}
+
+// readFile does read's work. A local file read does not take a context, so
+// ctx is checked before opening and between reads: a slow network share
+// stops at the caller's deadline.
+func (d *Dir) readFile(ctx context.Context, name string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("dbt: read %s: %w", name, err)
 	}
 	path := filepath.Join(d.dir, name)
-	f, err := os.Open(path)
+	// Check the type BEFORE opening: opening a FIFO for reading blocks until
+	// a writer appears, so a check after os.Open came too late and a named
+	// pipe in place of the artifact hung the tool past its deadline. dbt
+	// writes regular files; anything else is refused unopened.
+	pre, err := os.Stat(path)
 	if err != nil {
 		// The *PathError names the configured path, never file content.
+		return nil, fmt.Errorf("dbt: %w: %w", ErrNoArtifact, err)
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, fmt.Errorf("dbt: %s: %w: not a regular file", path, ErrMalformed)
+	}
+	f, err := os.Open(path)
+	if err != nil {
 		return nil, fmt.Errorf("dbt: %w: %w", ErrNoArtifact, err)
 	}
 	defer f.Close()
@@ -67,7 +117,8 @@ func (d *Dir) read(ctx context.Context, name string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dbt: stat %s: %w", path, err)
 	}
-	// A FIFO or device would block or never end; dbt writes regular files.
+	// The path may have been swapped between Stat and Open; check what was
+	// actually opened too.
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("dbt: %s: %w: not a regular file", path, ErrMalformed)
 	}
