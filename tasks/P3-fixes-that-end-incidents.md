@@ -12,7 +12,7 @@ The agent can propose, and an approved room can run, the fixes that actually clo
 |---|---|---|---|---|
 | 1 | `connect_update_connector_config` with **N keys** (replaces the one-key limit) | kafka-connect | `PATCH /connectors/{name}/config` | one fix, one approval, not three |
 | 2 | `connect_pause_connector` | kafka-connect | `PUT /connectors/{name}/pause` | stop the bleeding while people decide |
-| 3 | `connect_snapshot_table` (Debezium incremental snapshot) | postgres + kafka-connect | signal table insert (P3b) or Kafka signal topic (P3a) | a missed or corrupted table |
+| 3 | `connect_snapshot_table` (Kafka signal topic, P3a) and `pg_snapshot_signal` (signal table, P3b) — Debezium incremental snapshot | kafka-connect; postgres | a missed or corrupted table |
 | 4 | `pg_add_publication_table` | postgres | `ALTER PUBLICATION … ADD TABLE` | "new table is not replicating" |
 | 5 | `pg_drop_replication_slot` (inactive slots only) | postgres | `SELECT pg_drop_replication_slot(..)` | WAL bloat from a dead slot |
 | 6 | `kafka_reset_consumer_offsets` (to earliest or a timestamp; group must be inactive) | consumer | `kadm.Client.CommitOffsets` | reprocess after a bad deploy |
@@ -43,12 +43,12 @@ agent verification as one the agent wrote. There is no free-form command.
      secrets never travel through a proposal), a group with active members (`ErrGroupActive`), a timestamp in
      the future, `dlq_replay` with `count > 1000` or a target topic outside the pipeline's prefix, a snapshot
      table outside `source_tables`.
-   - `connect_snapshot_table`: params `{connector, tables: [..], via: "signal_topic"}` in P3a; `via: "signal_table"`
-     delegates to P3b's `SourceWriter.InsertSnapshotSignal` (A2 calls the interface; A3 implements it). `Validate`
-     reads `connect_config` for `signal.kafka.topic` / `signal.data.collection` and refuses the `via` that is not
-     configured. Layer: `kafka-connect` for the topic variant, `postgres` for the table variant (the action
-     reports its `Layer()` from the chosen `via`; a step whose layer does not match is refused as today,
-     `service_proposals.go:94`).
+   - `connect_snapshot_table`: params `{connector, tables: [..], via: "signal_topic"}`, layer `kafka-connect`. It sends
+     the signal through the Kafka writer's narrow `SendSnapshotSignal` (`clients.SnapshotSignaler`), never `Produce`.
+     The signal-table variant is a separate postgres-layer action, `pg_snapshot_signal` (P3b-4), through
+     `SourceWriter.InsertSnapshotSignal`: one action, one layer, so the source DB's owner approves a write to it
+     (#620 ruling; a per-params layer was declined). `Validate` reads `connect_config` and refuses the variant the
+     connector is not configured for.
    - `kafka_reset_consumer_offsets`: `Preview` lists per partition current → target offset and the lag it
      creates; `Execute` commits with `kadm`; the result text names moved partitions. Never on a group outside
      `consumer_groups`.
@@ -65,7 +65,7 @@ agent verification as one the agent wrote. There is no free-form command.
      → the previous committed offsets, which `Preview` records).
 2. **P3b (A3): source Postgres writes**, in `internal/clients/postgres` (`SourceWriter`, P0 item 7) and a new
    `internal/actions/pgactions/**` folder (A3's from this wave) holding `pg_add_publication_table`,
-   `pg_drop_replication_slot` and the `signal_table` half of `connect_snapshot_table`.
+   `pg_drop_replication_slot` and `pg_snapshot_signal` (the signal-table snapshot).
    - The writer is a **separate pool** from `pgconv.ReadOnlyPool`: `SOURCE_DB_WRITE_URL` (P0 item 7's config
      line; empty → no writer, actions report "no write credentials" at `Execute`, never `Validate`: with write mode off there is no writer and the agent still proposes; #606 ruling) with its own role, documented
      in P3f. Identifiers go through `pgx.Identifier{}.Sanitize()` after the `^[a-zA-Z_][a-zA-Z0-9_]*$` check

@@ -47,8 +47,9 @@ instead of connector → topic → group. CDC rooms are unchanged.
    a batch pipeline's scope is its `dags`, `models` and `sink_tables`; `pipeline_id` outside the room's is refused
    as today. `internal/alertin/pipeline.go` is C5's: ask in thread for a DAG-id → pipeline mapping
    (`dag_id` label or payload field → the pipeline whose `dags` lists it).
-2. **P4b (A4): wiring and prompt by kind.** `wiring.RegisterTools` registers `dbtools`/`kafkatools`/
-   `debeziumtools` only when some pipeline is `cdc`, `batchtools`/`dbttools` only when some is `batch`;
+2. **P4b (A4): wiring and prompt by kind.** `wiring.RegisterTools` registers `kafkatools`/
+   `debeziumtools` and the source-DB tools of `dbtools` only when some pipeline is `cdc` (`dbtools`' warehouse tools and
+   `pipeline_map` serve batch too; #625 ruling), `batchtools`/`dbttools` only when some is `batch`;
    `runbooks`, `similarincidents`, `changes` always. The agent's tool list per room is filtered by the room's
    pipeline kind (`Alert.PipelineKind`, P0 item 6) so a batch room never offers `kafka_read`. The system prompt
    gets a per-kind section: layers, what "healthy" means (last run success, freshness within SLA), the first
