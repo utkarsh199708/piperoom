@@ -72,7 +72,8 @@ package.
 
 - `POST /api/setup` (the UI's **Set up** button; driver of the new room) returns a pairing code: 8 characters from
   a 32-character alphabet (40 bits), valid 10 minutes, **single use**, bound to `(tenant, room, creator)`. The
-  server allows 5 attempts per code and 20 per source address per 10 minutes, compares the code and every later
+  server allows 5 attempts per code, 20 per source address and 100 in all per 10 minutes (then pairing is closed
+  for 10 minutes and audited), compares the code and every later
   token with `crypto/subtle.ConstantTimeCompare`, and emits `setup.pairing {outcome, source, runner_label?}` for
   every attempt, success or not, and for a replacement of a lost runner.
 - `piperoom-setup --server https://piperoom.acme --code XXXXXXXX` opens one WebSocket to `/api/runners/ws`
@@ -227,12 +228,31 @@ on the host, and "no shell from model text" holds only if the content is typed t
 
 | Artifact | How it is produced | Validator (in `Validate`, no I/O) | If it fails |
 |---|---|---|---|
-| compose file | `compose_write {template, params}`: templates from the driver (`kafka-kraft`, `connect`, `registry`, `jdbc-sink`, `source-postgres` for a local DB), typed params (versions, ports, plugin list, project name); `file_write` is refused for `compose.yaml` and `docker-compose*.yml` | images only from the knowledge index allow-list, pinned by digest (`debezium/connect@sha256:...`); no `privileged`, `cap_add`, `devices`, `security_opt`, `pid`, `ipc`, `network_mode: host`, `userns_mode`; bind mounts only under the project dir and never the Docker socket or `/`; no `extends`, no `build:` with a `Dockerfile` outside the templates; ports bind `127.0.0.1` unless the person raised the target class | the step is T2 with a click, the validator's reason in the preview |
+| compose file | `compose_write {template, params}`: templates from the driver (`kafka-kraft`, `connect`, `registry`, `jdbc-sink`, `source-postgres` for a local DB), typed params (versions, ports, plugin list, project name); `file_write` is refused for the compose names (`compose.yaml`, `compose.yml`, `compose.override.yaml`, `compose.override.yml`, `docker-compose*.y*ml`) | images only from the knowledge index allow-list, pinned by digest (`debezium/connect@sha256:...`); no `privileged`, `cap_add`, `devices`, `security_opt`, `pid`, `ipc`, `network_mode: host`, `userns_mode`; bind mounts only under the project dir and never the Docker socket or `/`; no `extends`, no `build:` with a `Dockerfile` outside the templates; ports bind `127.0.0.1` unless the person raised the target class | the step is T2 with a click, the validator's reason in the preview |
 | `.env` and properties files | `properties_write {file, entries}` with a key allow-list per file kind from the knowledge index; values that look like a path or an URL are checked like hosts and paths | unknown key, a `plugin.path` outside the project dir, a `${}` reference other than `${secret:}`/`${file:}` to the materialised file | T2 with a click |
 | systemd unit, Windows service | `service_install {template, params}`: the driver's unit template with typed `ExecStart` built from the Connect distribution path under the project dir, the properties file and the Java path from `java_version`; no free-form `ExecStart`, `Environment`, `User` | the template is the only source; params are paths under the project dir and the detected Java | refused |
 | Kubernetes manifests | `k8s_apply {kind, template, params}` for `KafkaConnect`, `KafkaConnector`, `Secret`, `ConfigMap` only, rendered from templates | field allow-list: no `spec.template` pod overrides (`securityContext`, `hostPath`, `hostNetwork`, `serviceAccountName`, `initContainers`, `volumes`), `build.plugins` artifacts only from the knowledge index with their `sha512sum`; a namespace from `Env.Targets` | refused |
 | connector config | the source driver's `ConnectorConfig` plus `setup_config_help` keys | Connect's own `config/validate` (Q4a) as the preview; `${secret:}` references only | the proposal is not created |
 | the embedded reference project | `file_write` under `<project dir>/piperoom-reference/` from the knowledge templates | the runner **never builds or runs it**; `reference_run` does not exist; the person runs it and the ladder reads the log file the person points at (U6) | n/a |
+
+**`file_write` is for files nothing executes or loads, and the runner proves it** (S1 closure; every rule a table
+test in U1-2):
+
+- it refuses any path under a directory a template mounts into a container or builds from: the Connect plugin
+  dir, the worker config dir, the log4j dir, every `volumes:` source of the rendered compose file and every
+  `build:` context; the driver registers these directories with the ops package when it renders a template, and
+  `Validate` consults the list;
+- it refuses the names `.env*`, `Dockerfile*`, `*.jar`, `*.sh`, `*.ps1`, `*.bat`, the compose names above, unit
+  files (`*.service`) and manifests (`*.yaml`/`*.yml` under a `k8s/` or `manifests/` directory); those have their
+  own ops or no op at all;
+- it refuses content that is not valid UTF-8 (so no jar or binary ever arrives through it) and content over 256 KiB;
+- it refuses a destination that exists and is not a regular file (a device file, a FIFO, a socket), which
+  `os.Root` alone does not; `file_read` and `dir_list` skip non-regular files the same way;
+- the `.env` key allow-list of `properties_write` excludes `COMPOSE_*` and `DOCKER_*` (they change what compose
+  does, not what the stack is);
+- the compose argv is pinned: `docker compose --project-directory <project dir> -f <rendered file> --env-file
+  <rendered .env> <subcommand> [service names]`, every path the one the template rendered, no other flag; a test
+  asserts the argv shape for each compose op.
 
 Other rules, each with a test in `internal/setup/ops`:
 
@@ -269,6 +289,15 @@ the server's own addresses. A new target's class is never below `shared`. `http_
 listed targets; the tier of a step comes from the class of the **endpoint the op resolves from its params**
 (host and port after name resolution on the runner, matched to a target entry), never from a label the model
 supplies.
+
+**The denylist is enforced at dial time on the runner, against the IP that is dialed.** The runner re-resolves
+names on its own network, so split DNS or DNS rebinding could turn a listed name into `169.254.169.254` after the
+server checked it. Every runner connection (`http_get`, `net_probe`, the remote clients' Connect, Registry and
+database dials) goes through one `net.Dialer` whose `Control` hook receives the resolved address the kernel is
+about to connect to and refuses the denylisted ranges there, before `connect(2)`; there is no earlier resolve
+whose answer could differ from the dialed one. A unit test uses a resolver that answers a listed name with
+`169.254.169.254` and asserts the dial is refused with the address in the error (U1-2). The server keeps its own
+check at registration as a first filter, not as the guarantee.
 
 ### 2.7 Standalone mode (A3)
 
@@ -400,7 +429,9 @@ recorded with `POST /api/rooms/{id}/setup/maintenance-window {start, end}` (`set
   owner of every layer; a tenant admin may edit the owners in the UI before approving.
 - **Overlap check**: `owners.Overlap(p Pipeline) []Overlap` compares topic prefix, connector names, source tables
   (per source host) and hosts against every loaded pipeline across tenants; `pipeline_register` refuses with the
-  list unless the overlapping pipeline's owners are among the approvers of that very proposal.
+  list unless the overlapping pipeline's owners are among the approvers of that very proposal. The refusal names
+  the overlap kind and the requester's own tenant's pipelines only; a pipeline of another tenant appears as "a
+  pipeline in another tenant" with its tenant admin as the contact, so the check leaks no other tenant's names.
 
 ### 3.7 Watching after setup (A2)
 
@@ -410,7 +441,7 @@ card:
 
 | Target class | Who watches | How the credentials get there | What the person sees |
 |---|---|---|---|
-| `shared` or `production` (a database the person brought, a Kafka or Connect on the network, Strimzi, managed) | the team server, as for any pipeline | the setup creates a **read-only role** (`source_create_read_role`, T2, the grants of `docs/pilot/permissions.md`) and read-only API keys where the target supports them; the person then clicks **Register read credentials with this server**: the UI's secret field posts each value to `POST /api/rooms/{id}/setup/credentials` (driver only, body, not logged), the server writes them to `PIPEROOM_SECRETS_DIR/<pipeline>/` (0600, server side) and `pipeline_register` writes a `connections:` block whose values are `file:` references to those paths (tenancy §3: references only). Nothing is registered without that click | "Watched by this server. Read role `piperoom_ro` on `db.acme`; Connect at `connect.acme:8083`." |
+| `shared` or `production` (a database the person brought, a Kafka or Connect on the network, Strimzi, managed) | the team server, as for any pipeline | the setup creates a **read-only role** (`source_create_read_role`, T2, the grants of `docs/pilot/permissions.md`): the **runner generates the password**, stores it in its own secret store under a name, and `CreateReadRole` returns only that name; read-only API keys where the target supports them are stored the same way. The person then clicks **Register read credentials with this server** in the UI, which only asks the runner; the runner prints the server origin and the secret names and waits for `y/N` on its terminal, then sends the values in one `Credentials` frame over the paired socket straight into `PIPEROOM_SECRETS_DIR/<pipeline>/` (0600, server side), never through the model, an action result or the event log (the server emits `setup.credentials_registered {names}`); `pipeline_register` writes a `connections:` block whose values are `file:` references to those paths (tenancy §3: references only). Nothing is registered without the click and the terminal confirmation. With more than one replica `PIPEROOM_SECRETS_DIR` must be one volume every replica mounts (the Helm chart mounts one `ReadWriteMany` volume or a Secret-backed store for it; the pilot compose uses a named volume); a replica that cannot write to it refuses to start with setup enabled | "Watched by this server. Read role `piperoom_ro` on `db.acme`; Connect at `connect.acme:8083`." |
 | `local` (a Compose stack on a laptop, Docker Desktop) | the **standalone server on the same machine** (`piperoom-setup --standalone` keeps running; a later `piperoom-setup --watch` restarts it against the written `owners.yaml`) | the standalone server reads the same `file:` references from `<project dir>/.piperoom/` | "Watched locally while `piperoom-setup` runs. A team server cannot reach 127.0.0.1." A team-server room that set up a local target registers the pipeline with `watched_by: local` and the server does not watch it |
 
 Why not a runner relay for local targets: a long-lived daemon that proxies the watcher's reads is a different
@@ -476,6 +507,7 @@ SetupTargetRegistered   Type = "setup.target_registered"  // {kind, address, cla
 SetupTargetClassed      Type = "setup.target_classed"     // {target, class, reason, by: "server" | "person"}
 SetupPipelineExtended   Type = "setup.pipeline_extended"  // {add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?, by}
 SetupSecretSet          Type = "setup.secret_set"         // {name, actor}
+SetupCredentialsRegistered Type = "setup.credentials_registered" // {names, runner_label}; values nowhere
 SetupMaintenanceWindow  Type = "setup.maintenance_window" // {start, end, by}
 SetupVerified           Type = "setup.verified"           // {plan_id, nonce_hash, rungs: [{name, ok, step_id?, receipt_id?, note}], first_event_latency_ms?}; emitted by the ladder runner only
 SetupAwaitingChange     Type = "setup.awaiting_change"    // {table, example_sql}
@@ -535,7 +567,7 @@ type SetupSourceWriter interface {
 	CreatePublication(ctx context.Context, name string, tables []string) error
 	CreateCanaryTable(ctx context.Context, table string) error
 	InsertCanary(ctx context.Context, table, nonce string) error
-	CreateReadRole(ctx context.Context, role string, tables []string) (password string, err error) // the permissions.md grants; the password is returned once and only to the runner
+	CreateReadRole(ctx context.Context, role string, tables []string) (secretName string, err error) // the permissions.md grants; the runner generates and stores the password and returns only its name
 	AlterSystem(ctx context.Context, name, value string) (pendingRestart bool, err error)       // name in the allow-list of §2.5 only
 }
 ```
@@ -560,7 +592,7 @@ watched_by}`; `OWNERS_DIR`; `Provisional(req)`, `Overlap(p)`, `Reload()`.
 | POST | `/api/rooms/{id}/setup/targets/{t}/class` | `{class}` | `Event` | driver only; raise only |
 | POST | `/api/rooms/{id}/setup/pipeline` | `{add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?}` | `Event` | driver only; extends the provisional pipeline |
 | POST | `/api/rooms/{id}/setup/secret` | `{name, value}` | `204` | driver only; same CSRF rule as every non-GET; excluded from request logging (test); forwarded to the runner in one frame, stored nowhere; emits `setup.secret_set` |
-| POST | `/api/rooms/{id}/setup/credentials` | `{name, value}` | `204` | driver only; the read credentials of §3.7 to `PIPEROOM_SECRETS_DIR`; same logging rule |
+| POST | `/api/rooms/{id}/setup/credentials` | – | `202` | driver only; asks the paired runner to register the read credentials of §3.7; the values travel in the runner's `Credentials` frame after its terminal confirmation, never in this request; `setup.credentials_registered` on success |
 | POST | `/api/rooms/{id}/setup/maintenance-window` | `{start, end}` | `Event` | driver only; ≤ 4 h, ≤ 24 h ahead |
 | POST | `/api/rooms/{id}/setup/verify` | – | `202` | driver only: the person can also request the ladder |
 | GET | `/api/pipelines` | | rows gain `setup: {room_id, target, registered_at, watched_by}` | |
@@ -611,8 +643,13 @@ meaning. Drivers (`go-mssqldb`, the MongoDB Go driver, `go-ora`) are new modules
   catalogue with a made-up proposal. What holds against that is the local confirmation at pairing (the runner shows
   the origin, the room and the creator), the catalogue and validators (no artifact executes with host privileges,
   nothing deletes data, no data leaves except redacted op output), the runner's own op log, and the `--server`
-  origin being what the person typed. A malicious server can still make the runner start validated containers and
-  read non-secret files under the project directory; §9 keeps that as the residual risk.
+  origin being what the person typed, plus two runner-local floors: the runner keeps **its own target registry
+  with classes** (the targets and classes the person confirmed at pairing, raised by every `setup.target_classed`
+  it is told of, never lowered) and raises `OpRequest.Class` to its own floor before the guard runs, so a server
+  that sends `Class: shared` for a production target still meets the guard; and **every T3 op needs a `y` on the
+  runner's terminal**. What a malicious server can still do: start validated containers, read non-secret project
+  files, and send T2 ops against the targets the person registered (create a connector, a publication, a read
+  role); §9 keeps that as the residual risk.
 - **Untrusted output.** Everything the runner returns is redacted literally and by pattern on the runner,
   injection-scanned and wrapped on the server, and treated as data by the prompt. Logs are the largest new surface
   and are capped; and because tiers, classes, targets and the pipeline grow only by driver clicks or server
@@ -660,9 +697,10 @@ meaning. Drivers (`go-mssqldb`, the MongoDB Go driver, `go-ora`) are new modules
 
 ## 9. Known gaps and follow-ups
 
-- A malicious server the person paired with can start validated containers and read non-secret project files
-  through the runner (§7). Signed catalogues or a server allow-list in the runner's config are candidates for a
-  later wave.
+- A malicious server the person paired with can start validated containers, read non-secret project files and
+  run T2 ops against the registered targets through the runner (§7); T3 ops and a lowered class are stopped by the
+  runner's own floor and terminal confirm. Signed catalogues, a server allow-list in the runner's config and a
+  terminal confirm for T2 on `production`-class targets are candidates for a later wave.
 - The standalone mode keeps rooms in memory; a laptop that sleeps loses the setup room. `setup-log.jsonl` and the
   op log keep the record; `--resume` is not in this wave.
 - A runner relay so a team server can watch a laptop stack is not in this wave (§3.7).
