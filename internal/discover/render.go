@@ -31,7 +31,9 @@ func Render(w io.Writer, r Result) error {
 	}
 
 	layers := &yaml.Node{Kind: yaml.MappingNode}
-	for _, l := range events.Layers {
+	// Discovery finds CDC pipelines only, so the draft names the CDC layers,
+	// not every known layer (events.Layers also holds the batch ones).
+	for _, l := range events.LayersOf(events.PipelineKindCDC) {
 		layers.Content = append(layers.Content, str(l), str("TODO"))
 	}
 
