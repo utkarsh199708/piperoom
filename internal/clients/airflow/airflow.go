@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
@@ -21,8 +22,12 @@ import (
 
 // Limits of the client (AGENTS.md rules 4 and 7).
 const (
-	// MaxResponseBytes caps every response body read, JSON or log text.
+	// MaxResponseBytes caps every JSON body read and the log tail kept in
+	// memory (a larger maxBytes is cut to it).
 	MaxResponseBytes = 4 << 20
+	// MaxLogStreamBytes caps how much of one log is streamed through the
+	// tail buffer. Memory stays at the tail's size; only time grows with it.
+	MaxLogStreamBytes = 64 << 20
 	// DefaultLogTailBytes is TaskLogTail's maxBytes when the caller passes 0 or less.
 	DefaultLogTailBytes = 64 << 10
 	// DefaultRunLimit is DAGRuns' limit when the caller passes 0 or less.
@@ -30,9 +35,16 @@ const (
 	// MaxPageLimit is Airflow's default [api] maximum_page_limit: the server
 	// clamps a larger limit to it, so the client asks for no more.
 	MaxPageLimit = 100
+	// MaxTaskInstances caps how many task instances of one run TaskInstances
+	// pages through; beyond it the result is cut and ErrTruncated returned.
+	MaxTaskInstances = 1000
 
+	// maxTaskPages bounds the requests of one TaskInstances call when the
+	// server's page size is below MaxPageLimit.
+	maxTaskPages   = 20
 	maxErrorBody   = 4 << 10
-	maxTitleRunes  = 80
+	maxErrorText   = 256
+	maxTitleBytes  = 120
 	apiV1          = "/api/v1"
 	acceptJSON     = "application/json"
 	acceptLogPlain = "text/plain"
@@ -42,6 +54,11 @@ const (
 // the credentials are missing or wrong, or the user's role lacks the read.
 var ErrAuth = errors.New("airflow: not authorized")
 
+// ErrTruncated is wrapped by the error of a list call that returns only part
+// of the list (TaskInstances over MaxTaskInstances). The partial result is
+// returned with it.
+var ErrTruncated = errors.New("airflow: list truncated")
+
 // StatusError is a non-2xx answer other than 404 (which wraps
 // clients.ErrNotFound instead).
 type StatusError struct {
@@ -50,8 +67,31 @@ type StatusError struct {
 	Body string // first 4 KiB of the answer, trimmed; server text, untrusted
 }
 
+// Error shows at most 256 bytes of Body without control characters: the
+// error text reaches the room log and slog, and the body is server text.
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("airflow: GET %s: status %d: %s", e.Path, e.Code, e.Body)
+	return fmt.Sprintf("airflow: GET %s: status %d: %s", e.Path, e.Code, errorText(e.Body, maxErrorText))
+}
+
+// errorText makes untrusted server text safe for one error line: control
+// characters become spaces, space runs collapse, and the result is cut to at
+// most limit bytes on a rune boundary, ending in "…" when cut.
+func errorText(s string, limit int) string {
+	s = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)), " ")
+	if len(s) <= limit {
+		return s
+	}
+	const marker = "…"
+	cut := limit - len(marker)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + marker
 }
 
 // Is makes a 401 or 403 match ErrAuth.
@@ -184,51 +224,75 @@ func (c *Client) DAGRuns(ctx context.Context, dagID string, limit int) ([]DAGRun
 	return out, nil
 }
 
-// TaskInstances returns the task instances of one run (the first
-// MaxPageLimit; Airflow pages beyond that).
+// TaskInstances returns the task instances of one run, paging with limit and
+// offset until total_entries is read. A run with more than MaxTaskInstances
+// (a wide mapped task) returns the first MaxTaskInstances and an error
+// wrapping ErrTruncated; the caller may use both.
 func (c *Client) TaskInstances(ctx context.Context, dagID, runID string) ([]TaskInstance, error) {
-	var raw struct {
-		TaskInstances []struct {
-			TaskID   string    `json:"task_id"`
-			Try      int       `json:"try_number"`
-			State    string    `json:"state"`
-			Start    time.Time `json:"start_date"`
-			End      time.Time `json:"end_date"`
-			Operator string    `json:"operator"`
-			MapIndex *int      `json:"map_index"` // absent before Airflow 2.3
-		} `json:"task_instances"`
+	type key struct {
+		task     string
+		mapIndex int
 	}
-	path := runPath(dagID, runID) + "/taskInstances?limit=" + strconv.Itoa(MaxPageLimit)
-	if err := c.getJSON(ctx, path, &raw); err != nil {
-		return nil, err
-	}
-	out := make([]TaskInstance, 0, len(raw.TaskInstances))
-	for _, t := range raw.TaskInstances {
-		mapIndex := -1
-		if t.MapIndex != nil {
-			mapIndex = *t.MapIndex
+	out := []TaskInstance{}
+	seen := map[key]bool{}
+	offset, total := 0, 0
+	for page := 0; page < maxTaskPages && len(out) < MaxTaskInstances; page++ {
+		var raw struct {
+			TaskInstances []struct {
+				TaskID   string    `json:"task_id"`
+				Try      int       `json:"try_number"`
+				State    string    `json:"state"`
+				Start    time.Time `json:"start_date"`
+				End      time.Time `json:"end_date"`
+				Operator string    `json:"operator"`
+				MapIndex *int      `json:"map_index"` // absent before Airflow 2.3
+			} `json:"task_instances"`
+			Total int `json:"total_entries"`
 		}
-		out = append(out, TaskInstance{
-			TaskID: t.TaskID, Try: t.Try, State: t.State, StartedAt: t.Start, EndedAt: t.End, Operator: t.Operator,
-			MapIndex: mapIndex,
-		})
+		path := runPath(dagID, runID) + "/taskInstances?limit=" + strconv.Itoa(MaxPageLimit) + "&offset=" + strconv.Itoa(offset)
+		if err := c.getJSON(ctx, path, &raw); err != nil {
+			return nil, err
+		}
+		total = raw.Total
+		for _, t := range raw.TaskInstances {
+			mapIndex := -1
+			if t.MapIndex != nil {
+				mapIndex = *t.MapIndex
+			}
+			// Offset paging over a list that changes between pages can
+			// repeat an entry; keep the first.
+			if k := (key{t.TaskID, mapIndex}); !seen[k] && len(out) < MaxTaskInstances {
+				seen[k] = true
+				out = append(out, TaskInstance{
+					TaskID: t.TaskID, Try: t.Try, State: t.State, StartedAt: t.Start, EndedAt: t.End, Operator: t.Operator,
+					MapIndex: mapIndex,
+				})
+			}
+		}
+		offset += len(raw.TaskInstances)
+		if len(raw.TaskInstances) == 0 || offset >= total {
+			return out, nil
+		}
 	}
-	return out, nil
+	return out, fmt.Errorf("airflow: task instances of %s/%s: read %d of %d: %w", dagID, runID, len(out), total, ErrTruncated)
 }
 
 // TaskLogTail returns the end of the log of one try (1 or more) of a task:
-// at most maxBytes bytes (0 or less means DefaultLogTailBytes), starting at
-// a line when the cut falls inside one. The text is untrusted and returned
-// as read. See TaskLogTailCut for a log longer than MaxResponseBytes.
+// at most maxBytes bytes (0 or less means DefaultLogTailBytes, more than
+// MaxResponseBytes is cut to it), starting at a line when the cut falls
+// inside one. Airflow's v1 API has no documented way to read a log from the
+// end, so the whole log streams through a buffer that keeps only the tail.
+// The text is untrusted and returned as read. See TaskLogTailCut for a log
+// longer than MaxLogStreamBytes.
 func (c *Client) TaskLogTail(ctx context.Context, dagID, runID, taskID string, try int, maxBytes int) (string, error) {
 	tail, _, err := c.TaskLogTailCut(ctx, dagID, runID, taskID, try, maxBytes)
 	return tail, err
 }
 
 // TaskLogTailCut is TaskLogTail that also reports cut: the log was longer
-// than MaxResponseBytes, so the tail is the end of its first 4 MiB, not the
-// end of the log. Airflow's v1 API has no documented way to read a log from
-// the end. Not on Reader; the batch tools may assert for it.
+// than MaxLogStreamBytes, reading stopped there, and the tail is the end of
+// its first 64 MiB, not the end of the log. Not on Reader; the batch tools
+// may assert for it.
 func (c *Client) TaskLogTailCut(ctx context.Context, dagID, runID, taskID string, try int, maxBytes int) (tail string, cut bool, err error) {
 	return c.TaskLogTailMapped(ctx, dagID, runID, taskID, -1, try, maxBytes)
 }
@@ -243,26 +307,65 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 	if maxBytes <= 0 {
 		maxBytes = DefaultLogTailBytes
 	}
+	maxBytes = min(maxBytes, MaxResponseBytes)
 	path := runPath(dagID, runID) + "/taskInstances/" + url.PathEscape(taskID) + "/logs/" + strconv.Itoa(try)
 	if mapIndex >= 0 {
 		path += "?map_index=" + strconv.Itoa(mapIndex)
 	}
-	var body []byte
+	// One byte more than the tail lets tailFrom see whether the window
+	// starts at a line.
+	tb := &tailBuffer{buf: make([]byte, maxBytes+1)}
 	err = c.get(ctx, path, acceptLogPlain, func(r io.Reader) error {
-		b, err := io.ReadAll(io.LimitReader(r, MaxResponseBytes+1))
-		if err != nil {
+		if _, err := io.Copy(tb, io.LimitReader(r, MaxLogStreamBytes)); err != nil {
 			return fmt.Errorf("read log: %w", err)
 		}
-		body = b
+		// A byte past the ceiling means the log goes on.
+		var probe [1]byte
+		n, err := io.ReadFull(r, probe[:])
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("read log: %w", err)
+		}
+		cut = n == 1
 		return nil
 	})
 	if err != nil {
 		return "", false, err
 	}
-	if len(body) > MaxResponseBytes {
-		body, cut = body[:MaxResponseBytes], true
+	return tailFrom(tb.Bytes(), maxBytes), cut, nil
+}
+
+// tailBuffer is an io.Writer that keeps only the last len(buf) bytes
+// written to it, so a log of any length streams through bounded memory.
+type tailBuffer struct {
+	buf  []byte
+	next int  // where the next byte goes; the oldest byte once full
+	full bool // buf has wrapped at least once
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	n, size := len(p), len(t.buf)
+	if n >= size {
+		copy(t.buf, p[n-size:])
+		t.next, t.full = 0, true
+		return n, nil
 	}
-	return tailFrom(body, maxBytes), cut, nil
+	k := copy(t.buf[t.next:], p)
+	copy(t.buf, p[k:])
+	if t.next+n >= size {
+		t.full = true
+	}
+	t.next = (t.next + n) % size
+	return n, nil
+}
+
+// Bytes returns the kept bytes, oldest first.
+func (t *tailBuffer) Bytes() []byte {
+	if !t.full {
+		return t.buf[:t.next]
+	}
+	out := make([]byte, 0, len(t.buf))
+	out = append(out, t.buf[t.next:]...)
+	return append(out, t.buf[:t.next]...)
 }
 
 // DAG returns the schedule state of one DAG (GET /api/v1/dags/{dag_id}).
@@ -436,12 +539,11 @@ func notFoundTitle(body io.Reader) string {
 	var p struct {
 		Title string `json:"title"`
 	}
-	if err := json.NewDecoder(io.LimitReader(body, maxErrorBody)).Decode(&p); err != nil || p.Title == "" {
+	if err := json.NewDecoder(io.LimitReader(body, maxErrorBody)).Decode(&p); err != nil {
 		return ""
 	}
-	t := p.Title
-	if r := []rune(t); len(r) > maxTitleRunes {
-		t = string(r[:maxTitleRunes])
+	if t := errorText(p.Title, maxTitleBytes); t != "" {
+		return " (" + t + ")"
 	}
-	return " (" + t + ")"
+	return ""
 }

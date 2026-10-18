@@ -4,13 +4,18 @@ import (
 	"context"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/netsec"
@@ -139,7 +144,7 @@ func TestDAGRunsLimit(t *testing.T) {
 
 func TestTaskInstances(t *testing.T) {
 	c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/dags/revenue_daily/dagRuns/"+failedRun+"/taskInstances" || r.URL.RawQuery != "limit=100" {
+		if r.URL.Path != "/api/v1/dags/revenue_daily/dagRuns/"+failedRun+"/taskInstances" || r.URL.RawQuery != "limit=100&offset=0" {
 			t.Errorf("request %s", r.RequestURI)
 		}
 		w.Write(fixture(t, "task_instances.json"))
@@ -323,28 +328,123 @@ func TestTailFrom(t *testing.T) {
 }
 
 func TestOversizedBodies(t *testing.T) {
-	line := "0123456789abcde\n" // 16 bytes; MaxResponseBytes is a multiple
-	big := strings.Repeat(line, MaxResponseBytes/len(line))
-	var body string
+	var serve func(w io.Writer)
 	c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(body))
+		serve(w)
 	})
 	ctx := context.Background()
 
-	body = big + "THE REAL END\n"
-	tail, cut, err := c.TaskLogTailCut(ctx, "d", "r", "t", 1, 64)
-	if err != nil || !cut || tail != strings.Repeat(line, 4) {
-		t.Fatalf("over the cap: tail %q, cut %v, err %v", tail, cut, err)
+	// 5 MiB, more than MaxResponseBytes: the tail is the real end of the log.
+	var log strings.Builder
+	for i := 0; log.Len() < 5<<20; i++ {
+		fmt.Fprintf(&log, "[2026-10-18, 00:05:%02d UTC] {subprocess.py:93} INFO - row batch %07d loaded\n", i%60, i)
 	}
-	body = big
+	last := "[2026-10-18, 00:06:00 UTC] {taskinstance.py:2698} ERROR - unique last line 7f3a\n"
+	log.WriteString(last)
+	serve = func(w io.Writer) { io.WriteString(w, log.String()) }
+	tail, cut, err := c.TaskLogTailCut(ctx, "d", "r", "t", 1, 200)
+	if err != nil || cut || len(tail) > 200 || !strings.HasSuffix(tail, last) || !strings.HasPrefix(tail, "[2026-10-18, ") {
+		t.Fatalf("5 MiB log: tail %q, cut %v, err %v", tail, cut, err)
+	}
+
+	// Past MaxLogStreamBytes reading stops: cut, and the tail ends the first 64 MiB.
+	line := "0123456789abcde\n"
+	chunk := strings.Repeat(line, (1<<20)/len(line)) // 1 MiB of whole lines
+	stream := func(end string) func(io.Writer) {
+		return func(w io.Writer) {
+			for range MaxLogStreamBytes >> 20 {
+				io.WriteString(w, chunk)
+			}
+			io.WriteString(w, end)
+		}
+	}
+	serve = stream("past the ceiling\n")
+	if tail, cut, err = c.TaskLogTailCut(ctx, "d", "r", "t", 1, 64); err != nil || !cut || tail != strings.Repeat(line, 4) {
+		t.Fatalf("over the ceiling: tail %q, cut %v, err %v", tail, cut, err)
+	}
+	serve = stream("")
 	if tail, cut, err = c.TaskLogTailCut(ctx, "d", "r", "t", 1, 64); err != nil || cut || tail != strings.Repeat(line, 4) {
-		t.Fatalf("at the cap: tail %q, cut %v, err %v", tail, cut, err)
+		t.Fatalf("at the ceiling: tail %q, cut %v, err %v", tail, cut, err)
 	}
 
 	elem := `{"dag_run_id":"r","state":"success"},`
-	body = `{"dag_runs":[` + strings.Repeat(elem, MaxResponseBytes/len(elem)+1) + `{}],"total_entries":1}`
+	body := `{"dag_runs":[` + strings.Repeat(elem, MaxResponseBytes/len(elem)+1) + `{}],"total_entries":1}`
+	serve = func(w io.Writer) { io.WriteString(w, body) }
 	if _, err := c.DAGRuns(ctx, "d", 1); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("JSON over the cap: err %v, want a decode error", err)
+	}
+}
+
+func TestTailBuffer(t *testing.T) {
+	data := []byte("the quick brown fox jumps over the lazy dog\n")
+	for _, size := range []int{1, 7, len(data), 100} {
+		for _, chunk := range []int{1, 3, 7, 8, 50} {
+			tb := &tailBuffer{buf: make([]byte, size)}
+			for i := 0; i < len(data); i += chunk {
+				tb.Write(data[i:min(i+chunk, len(data))])
+			}
+			if got, want := string(tb.Bytes()), string(data[max(0, len(data)-size):]); got != want {
+				t.Errorf("size %d chunk %d: got %q, want %q", size, chunk, got, want)
+			}
+		}
+	}
+}
+
+func TestTaskInstancesPaging(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		total, pageSize, overlap int
+		want, requests           int
+		truncated                bool
+	}{
+		{name: "three pages", total: 250, pageSize: 100, want: 250, requests: 3},
+		{name: "overlapping pages kept once", total: 250, pageSize: 100, overlap: 10, want: 250, requests: 3},
+		{name: "exactly the ceiling", total: 1000, pageSize: 100, want: 1000, requests: 10},
+		{name: "over the ceiling", total: 2000, pageSize: 100, want: 1000, requests: 10, truncated: true},
+		{name: "small server pages hit the request cap", total: 2000, pageSize: 10, want: 200, requests: 20, truncated: true},
+	} {
+		var offsets []string
+		c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			offsets = append(offsets, q.Get("offset"))
+			from, _ := strconv.Atoi(q.Get("offset"))
+			from = max(0, from-tc.overlap)
+			var items []string
+			for i := from; i < min(from+tc.pageSize, tc.total); i++ {
+				items = append(items, fmt.Sprintf(`{"task_id":"load_partition","map_index":%d,"try_number":1,"state":"success"}`, i))
+			}
+			fmt.Fprintf(w, `{"task_instances":[%s],"total_entries":%d}`, strings.Join(items, ","), tc.total)
+		})
+		tis, err := c.TaskInstances(context.Background(), "d", "r")
+		if errors.Is(err, ErrTruncated) != tc.truncated || (!tc.truncated && err != nil) {
+			t.Errorf("%s: err %v, want truncated %v", tc.name, err, tc.truncated)
+		}
+		if len(tis) != tc.want || len(offsets) != tc.requests {
+			t.Errorf("%s: %d instances in %d requests, want %d in %d", tc.name, len(tis), len(offsets), tc.want, tc.requests)
+			continue
+		}
+		for i, ti := range tis {
+			if ti.MapIndex != i {
+				t.Errorf("%s: [%d] map index %d", tc.name, i, ti.MapIndex)
+				break
+			}
+		}
+		if offsets[0] != "0" || offsets[1] != strconv.Itoa(tc.pageSize) {
+			t.Errorf("%s: offsets %v", tc.name, offsets)
+		}
+	}
+}
+
+func TestStatusErrorText(t *testing.T) {
+	body := "line one\r\n\x1b[31mred\x1b[0m\ttab " + strings.Repeat("é", 300)
+	e := &StatusError{Path: "/p", Code: 502, Body: body}
+	shown, ok := strings.CutPrefix(e.Error(), "airflow: GET /p: status 502: ")
+	if !ok || len(shown) > 256 || !utf8.ValidString(shown) || strings.ContainsFunc(shown, unicode.IsControl) ||
+		!strings.HasPrefix(shown, "line one [31mred [0m tab éé") || !strings.HasSuffix(shown, "…") {
+		t.Errorf("Error() = %q", e.Error())
+	}
+	if e.Body != body {
+		t.Error("Body must keep the full text")
 	}
 }
 
@@ -514,7 +614,7 @@ func TestPathEscaping(t *testing.T) {
 	c.TaskLogTail(ctx, "team/a b", "manual__2026-10-18T09:12:44+00:00", "load?x=1#y", 3, 0)
 	want := []string{
 		"/api/v1/dags/team%2Fa%20b/dagRuns?limit=1&order_by=-execution_date",
-		"/api/v1/dags/team%2Fa%20b/dagRuns/manual__2026-10-18T09:12:44+00:00/taskInstances?limit=100",
+		"/api/v1/dags/team%2Fa%20b/dagRuns/manual__2026-10-18T09:12:44+00:00/taskInstances?limit=100&offset=0",
 		"/api/v1/dags/team%2Fa%20b/dagRuns/manual__2026-10-18T09:12:44+00:00/taskInstances/load%3Fx=1%23y/logs/3",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
