@@ -225,6 +225,7 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/shadow/grade", "/api/rooms/" + f.rbs + "/shadow/grade", `{"layer_correct":true,"root_cause":"yes"}`},
 		{"POST", "/api/proposals/{pid}/approve", "/api/proposals/" + f.open + "/approve", `{"layer":"kafka-connect","params_hash":"x"}`},
 		{"POST", "/api/proposals/{pid}/reject", "/api/proposals/" + f.open + "/reject", `{"layer":"kafka-connect","reason":"no","params_hash":"x"}`},
+		{"POST", "/api/proposals/{pid}/approve-all", "/api/proposals/" + f.open + "/approve-all", `{"params_hash":"x"}`},
 		{"POST", "/api/handoffs/{hid}/accept", "/api/handoffs/" + f.handoff + "/accept", ""},
 		{"GET", "/api/pipelines/{pid}/topology", "/api/pipelines/pb/topology", ""},
 		{"GET", "/api/pipelines/{pid}/agent-stats", "/api/pipelines/pb/agent-stats", ""},

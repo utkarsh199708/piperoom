@@ -13,6 +13,7 @@ import type {
   ProposalPreviewedPayload,
   ProposalStep,
   RoomLabelledPayload,
+  RoomMode,
   RoomSnapshot,
   ToolCall,
   TraceStage,
@@ -176,6 +177,12 @@ export interface ProposalState {
   preview?: ProposalPreviewedPayload
   /** The agent's verdict after the last step ran. */
   verification?: AgentVerificationPayload
+  /**
+   * P1a: every required layer approved while write mode is off, so no step runs. From the snapshot
+   * (`open_proposals[].blocked`) or, for an approval that arrives over the socket, from `mode.write`
+   * (see the reducer). Read it through `waitingForWriteMode`, which also checks that nothing ran.
+   */
+  blocked?: 'write_mode_off'
 }
 
 export interface MemberState {
@@ -343,6 +350,18 @@ export interface RoomState {
    * falls back to it when the event has none.
    */
   snapshot_hashes: Record<string, string>
+  /**
+   * proposal_id -> "write_mode_off" from the snapshot's open_proposals[].blocked (refreshed with
+   * `mode` on a reconnect). The reducer copies it onto the proposal when proposal.created replays
+   * (same reason as snapshot_hashes).
+   */
+  snapshot_blocked?: Record<string, 'write_mode_off'>
+  /**
+   * The room GET's `mode` (P1a, P2b). Write mode changes only when the server restarts, which drops
+   * the socket, so it is read again on every reconnect (`mode_refreshed`, applyModeRefresh). The
+   * socket never carries it. Absent on a server from before P1a, which has write mode on.
+   */
+  mode?: RoomMode
   members: MemberState[]
   control_requests: ControlRequestState[]
   trace: TraceState | null
@@ -432,6 +451,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
         .filter((p) => p.params_hash)
         .map((p) => [p.proposal_id, p.params_hash as string]),
     ),
+    ...snapshotWriteMode(snapshot),
     driver: snapshot.driver
       ? {
           id: snapshot.driver.id,
@@ -459,6 +479,20 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     triage: snapshot.triage && snapshot.shadow !== true
       ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
+  }
+}
+
+// The P1a fields, left off entirely when the server sent none so a snapshot from an older server
+// folds to the same state as before.
+export function snapshotWriteMode(snapshot: RoomSnapshot): Pick<RoomState, 'mode' | 'snapshot_blocked'> {
+  const blocked = Object.fromEntries(
+    (snapshot.open_proposals ?? [])
+      .filter((p) => p.blocked === 'write_mode_off')
+      .map((p) => [p.proposal_id, 'write_mode_off' as const]),
+  )
+  return {
+    ...(snapshot.mode ? { mode: snapshot.mode } : {}),
+    ...(Object.keys(blocked).length > 0 ? { snapshot_blocked: blocked } : {}),
   }
 }
 
