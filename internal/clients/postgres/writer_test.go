@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +127,9 @@ func failOn(prefix string, err error) func(string) error {
 		return nil
 	}
 }
+
+// unscopedCtx is the explicit opt-out of CLI and dev callers.
+func unscopedCtx() context.Context { return tools.WithUnscoped(context.Background()) }
 
 func pipelineCtx() context.Context {
 	return tools.WithPipeline(context.Background(), owners.Pipeline{
@@ -251,14 +255,21 @@ type fakeRowQuerier struct{ row pgx.Row }
 func (f fakeRowQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return f.row }
 
 func TestCheckWritable(t *testing.T) {
-	setting := func(v string) pgx.Row {
-		return scanRow(func(dest ...any) error { *dest[0].(*string) = v; return nil })
+	setting := func(readOnly string, inRecovery bool) pgx.Row {
+		return scanRow(func(dest ...any) error {
+			*dest[0].(*string) = readOnly
+			*dest[1].(*bool) = inRecovery
+			return nil
+		})
 	}
-	if err := checkWritable(context.Background(), fakeRowQuerier{setting("off")}); err != nil {
-		t.Fatalf("a writable role refused: %v", err)
+	if err := checkWritable(context.Background(), fakeRowQuerier{setting("off", false)}); err != nil {
+		t.Fatalf("a writable primary refused: %v", err)
 	}
-	if err := checkWritable(context.Background(), fakeRowQuerier{setting("on")}); !errors.Is(err, errReadOnlyRole) {
+	if err := checkWritable(context.Background(), fakeRowQuerier{setting("on", false)}); !errors.Is(err, errReadOnlyRole) {
 		t.Fatalf("a read-only role accepted: %v", err)
+	}
+	if err := checkWritable(context.Background(), fakeRowQuerier{setting("off", true)}); !errors.Is(err, errStandby) || !strings.Contains(err.Error(), "hot standby") {
+		t.Fatalf("a hot standby accepted: %v", err)
 	}
 	down := errors.New("connection refused")
 	if err := checkWritable(context.Background(), fakeRowQuerier{fakeRow{err: down}}); !errors.Is(err, down) {
@@ -288,6 +299,7 @@ func TestAddPublicationTablesSQL(t *testing.T) {
 	tx := &fakeTx{scan: pubRow(false)}
 	w, _ := testWriter(tx)
 	ctx, rec := recordCtx()
+	ctx = tools.WithUnscoped(ctx)
 	if err := w.AddPublicationTables(ctx, "dbz_publication", []string{"public.orders", "Sales.Items", "public.orders"}); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +346,7 @@ func TestAddPublicationTablesRefusesBadInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &fakeTx{scan: pubRow(false)}
 			w, b := testWriter(tx)
-			if err := w.AddPublicationTables(context.Background(), tc.pub, tc.tables); err == nil {
+			if err := w.AddPublicationTables(unscopedCtx(), tc.pub, tc.tables); err == nil {
 				t.Fatal("expected a refusal")
 			}
 			if b.begins != 0 {
@@ -366,7 +378,7 @@ func TestAddPublicationTablesRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &fakeTx{scan: tc.scan, execErr: tc.execErr}
 			w, _ := testWriter(tx)
-			err := w.AddPublicationTables(context.Background(), "dbz_publication", []string{"public.orders"})
+			err := w.AddPublicationTables(unscopedCtx(), "dbz_publication", []string{"public.orders"})
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -395,13 +407,13 @@ func TestWriterTransactionErrors(t *testing.T) {
 	down := errors.New("pool closed")
 	w, _ := testWriter(nil)
 	w.db = &fakeBeginner{err: down}
-	if err := w.AddPublicationTables(context.Background(), "dbz", []string{"public.orders"}); !errors.Is(err, down) || !strings.Contains(err.Error(), "begin") {
+	if err := w.AddPublicationTables(unscopedCtx(), "dbz", []string{"public.orders"}); !errors.Is(err, down) || !strings.Contains(err.Error(), "begin") {
 		t.Fatalf("begin error = %v", err)
 	}
 
 	tx := &fakeTx{scan: pubRow(false), execErr: failOn(setTimeoutsSQL, pgErr("42501"))}
 	w, _ = testWriter(tx)
-	if err := w.AddPublicationTables(context.Background(), "dbz", []string{"public.orders"}); err == nil || !strings.Contains(err.Error(), "set timeouts") {
+	if err := w.AddPublicationTables(unscopedCtx(), "dbz", []string{"public.orders"}); err == nil || !strings.Contains(err.Error(), "set timeouts") {
 		t.Fatalf("set timeouts error = %v", err)
 	}
 	if len(tx.stmts) != 1 || tx.rollbacks != 1 {
@@ -411,7 +423,7 @@ func TestWriterTransactionErrors(t *testing.T) {
 	lost := errors.New("connection lost")
 	tx = &fakeTx{scan: pubRow(false), commitErr: lost}
 	w, _ = testWriter(tx)
-	if err := w.AddPublicationTables(context.Background(), "dbz", []string{"public.orders"}); !errors.Is(err, lost) || !strings.Contains(err.Error(), "commit") {
+	if err := w.AddPublicationTables(unscopedCtx(), "dbz", []string{"public.orders"}); !errors.Is(err, lost) || !strings.Contains(err.Error(), "commit") {
 		t.Fatalf("commit error = %v", err)
 	}
 }
@@ -436,7 +448,7 @@ func TestAddPublicationTablesScope(t *testing.T) {
 func TestDropReplicationSlotSQL(t *testing.T) {
 	tx := &fakeTx{scan: slotRow(false, true)}
 	w, _ := testWriter(tx)
-	if err := w.DropReplicationSlot(context.Background(), "debezium_orders"); err != nil {
+	if err := w.DropReplicationSlot(unscopedCtx(), "debezium_orders"); err != nil {
 		t.Fatal(err)
 	}
 	checkTx(t, tx, true)
@@ -453,7 +465,7 @@ func TestDropReplicationSlotSQL(t *testing.T) {
 func TestDropReplicationSlotRefusesBadNames(t *testing.T) {
 	for _, name := range []string{"", "Debezium", "dbz-orders", "x'); DROP TABLE t; --", "a b", strings.Repeat("s", 64)} {
 		w, b := testWriter(&fakeTx{scan: slotRow(false, true)})
-		if err := w.DropReplicationSlot(context.Background(), name); err == nil {
+		if err := w.DropReplicationSlot(unscopedCtx(), name); err == nil {
 			t.Fatalf("slot %q accepted", name)
 		}
 		if b.begins != 0 {
@@ -471,6 +483,8 @@ func TestDropReplicationSlotRefusals(t *testing.T) {
 		dropped bool // the drop was sent
 	}{
 		{name: "missing slot", want: clients.ErrNotFound},
+		// slot_type = 'logical' in the check: a physical slot is no row.
+		{name: "physical slot", want: clients.ErrNotFound},
 		{name: "another database", scan: slotRow(false, false), want: clients.ErrNotFound},
 		{name: "active", scan: slotRow(true, true), want: clients.ErrSlotActive},
 		{name: "active since the check", scan: slotRow(false, true), execErr: failOn("SELECT pg_drop", pgErr("55006")), want: clients.ErrSlotActive, dropped: true},
@@ -481,7 +495,7 @@ func TestDropReplicationSlotRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := &fakeTx{scan: tc.scan, execErr: tc.execErr}
 			w, _ := testWriter(tx)
-			err := w.DropReplicationSlot(context.Background(), "debezium_orders")
+			err := w.DropReplicationSlot(unscopedCtx(), "debezium_orders")
 			if err == nil {
 				t.Fatal("expected an error")
 			}
@@ -506,7 +520,7 @@ func TestDropReplicationSlotRefusals(t *testing.T) {
 func TestDropReplicationSlotCommitFailsAfterDrop(t *testing.T) {
 	tx := &fakeTx{scan: slotRow(false, true), commitErr: errors.New("connection lost")}
 	w, _ := testWriter(tx)
-	err := w.DropReplicationSlot(context.Background(), "debezium_orders")
+	err := w.DropReplicationSlot(unscopedCtx(), "debezium_orders")
 	if err == nil || !strings.Contains(err.Error(), "the slot is dropped") {
 		t.Fatalf("a failed commit after the drop must say the slot is gone: %v", err)
 	}
@@ -519,7 +533,7 @@ var uuidV4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-
 func TestInsertSnapshotSignalSQL(t *testing.T) {
 	tx := &fakeTx{}
 	w, _ := testWriter(tx)
-	id, err := w.InsertSnapshotSignal(context.Background(), "debezium.signal", "pg-orders-connector", []string{"public.orders", "public.items", "public.orders"})
+	id, err := w.InsertSnapshotSignal(unscopedCtx(), "debezium.signal", "pg-orders-connector", []string{"public.orders", "public.items", "public.orders"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,7 +569,7 @@ func TestInsertSnapshotSignalRefusesBadInput(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			w, b := testWriter(&fakeTx{})
-			id, err := w.InsertSnapshotSignal(context.Background(), tc.table, tc.connector, tc.tables)
+			id, err := w.InsertSnapshotSignal(unscopedCtx(), tc.table, tc.connector, tc.tables)
 			if err == nil || id != "" {
 				t.Fatalf("= %q, %v; want a refusal", id, err)
 			}
@@ -569,7 +583,7 @@ func TestInsertSnapshotSignalRefusesBadInput(t *testing.T) {
 func TestInsertSnapshotSignalErrors(t *testing.T) {
 	tx := &fakeTx{execErr: failOn("INSERT", pgErr("42P01"))}
 	w, _ := testWriter(tx)
-	id, err := w.InsertSnapshotSignal(context.Background(), "public.debezium_signal", "pg-orders-connector", []string{"public.orders"})
+	id, err := w.InsertSnapshotSignal(unscopedCtx(), "public.debezium_signal", "pg-orders-connector", []string{"public.orders"})
 	if !errors.Is(err, clients.ErrNotFound) || id != "" {
 		t.Fatalf("missing signal table = %q, %v; want ErrNotFound", id, err)
 	}
@@ -577,7 +591,7 @@ func TestInsertSnapshotSignalErrors(t *testing.T) {
 
 	tx = &fakeTx{execErr: failOn("INSERT", pgErr("22001"))}
 	w, _ = testWriter(tx)
-	if id, err := w.InsertSnapshotSignal(context.Background(), "public.debezium_signal", "pg-orders-connector", []string{"public.orders"}); err == nil || id != "" || errors.Is(err, clients.ErrNotFound) {
+	if id, err := w.InsertSnapshotSignal(unscopedCtx(), "public.debezium_signal", "pg-orders-connector", []string{"public.orders"}); err == nil || id != "" || errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("value too long = %q, %v", id, err)
 	}
 }
@@ -617,5 +631,141 @@ func TestNewUUID(t *testing.T) {
 			t.Fatalf("bad or repeated id %q", id)
 		}
 		seen[id] = true
+	}
+}
+
+// ---- round 1: scope fails closed, physical slots, signal size, timeouts ----
+
+// Every method refuses before any I/O unless ctx has the room's whole
+// pipeline or the explicit unscoped opt-out (tools.ScopeFor's order: a
+// pipeline id wins over the opt-out, and the writer cannot resolve an id).
+func TestWriterScopeFailsClosed(t *testing.T) {
+	bg := context.Background()
+	cases := []struct {
+		name string
+		ctx  context.Context
+		ok   bool
+	}{
+		{"no scope", bg, false},
+		{"pipeline id only", tools.WithPipelineID(bg, "orders"), false},
+		{"pipeline id and the opt-out", tools.WithPipelineID(tools.WithUnscoped(bg), "orders"), false},
+		{"recorder only", tools.WithRecorder(bg, tools.NewRecorder()), false},
+		{"unscoped", tools.WithUnscoped(bg), true},
+		{"whole pipeline", pipelineCtx(), true},
+	}
+	calls := []struct {
+		name string
+		scan func(dest ...any) error
+		run  func(ctx context.Context, w *Writer) error
+	}{
+		{"AddPublicationTables", pubRow(false), func(ctx context.Context, w *Writer) error {
+			return w.AddPublicationTables(ctx, "dbz", []string{"public.orders"})
+		}},
+		{"DropReplicationSlot", slotRow(false, true), func(ctx context.Context, w *Writer) error {
+			return w.DropReplicationSlot(ctx, "debezium_orders")
+		}},
+		{"InsertSnapshotSignal", nil, func(ctx context.Context, w *Writer) error {
+			_, err := w.InsertSnapshotSignal(ctx, "public.debezium_signal", "pg-orders-connector", []string{"public.orders"})
+			return err
+		}},
+	}
+	for _, c := range calls {
+		for _, tc := range cases {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				tx := &fakeTx{scan: c.scan}
+				w, b := testWriter(tx)
+				err := c.run(tc.ctx, w)
+				if tc.ok {
+					if err != nil || b.begins != 1 {
+						t.Fatalf("refused with a scope: %v (begins %d)", err, b.begins)
+					}
+					return
+				}
+				if !errors.Is(err, tools.ErrNoScope) {
+					t.Fatalf("error %v, want tools.ErrNoScope", err)
+				}
+				if b.begins != 0 || len(tx.stmts) != 0 {
+					t.Fatalf("no scope reached the database: begins %d, statements %d", b.begins, len(tx.stmts))
+				}
+			})
+		}
+	}
+}
+
+func TestSlotCheckOnlyLogicalSlotsOfThisDatabase(t *testing.T) {
+	for _, want := range []string{"slot_type = 'logical'", "COALESCE(database = current_database(), false)"} {
+		if !strings.Contains(slotCheckSQL, want) {
+			t.Fatalf("slotCheckSQL lacks %q:\n%s", want, slotCheckSQL)
+		}
+	}
+	tx := &fakeTx{} // a physical slot is no row of the check
+	w, _ := testWriter(tx)
+	err := w.DropReplicationSlot(unscopedCtx(), "standby_1")
+	if !errors.Is(err, clients.ErrNotFound) || !strings.Contains(err.Error(), "physical slots are never dropped") {
+		t.Fatalf("physical slot: %v", err)
+	}
+	for _, s := range tx.sqls() {
+		if strings.HasPrefix(s, "SELECT pg_drop") {
+			t.Fatal("a slot the check did not return was dropped")
+		}
+	}
+}
+
+var fitRe = regexp.MustCompile(`at most (\d+) of these tables per snapshot signal`)
+
+func TestInsertSnapshotSignalRefusesDataOverColumn(t *testing.T) {
+	tables := make([]string, 60)
+	for i := range tables {
+		tables[i] = fmt.Sprintf("public.a_rather_long_table_name_for_the_signal_%02d", i)
+	}
+	w, b := testWriter(&fakeTx{})
+	_, err := w.InsertSnapshotSignal(unscopedCtx(), "public.debezium_signal", "c", tables)
+	m := fitRe.FindStringSubmatch(fmt.Sprint(err))
+	if m == nil || b.begins != 0 {
+		t.Fatalf("over 2048 bytes: %v (begins %d); want a refusal naming how many fit, before the database", err, b.begins)
+	}
+	fit, err := strconv.Atoi(m[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fit < 1 || fit >= len(tables) {
+		t.Fatalf("fit = %d of %d", fit, len(tables))
+	}
+
+	// Exactly fit tables go; one more does not.
+	tx := &fakeTx{}
+	w, _ = testWriter(tx)
+	if _, err := w.InsertSnapshotSignal(unscopedCtx(), "public.debezium_signal", "c", tables[:fit]); err != nil {
+		t.Fatalf("%d tables (said to fit): %v", fit, err)
+	}
+	if n := len(tx.stmts[1].args[1].(string)); n > maxSignalDataBytes {
+		t.Fatalf("data of %d bytes sent", n)
+	}
+	w, b = testWriter(&fakeTx{})
+	if _, err := w.InsertSnapshotSignal(unscopedCtx(), "public.debezium_signal", "c", tables[:fit+1]); err == nil || b.begins != 0 {
+		t.Fatalf("%d tables (one more than fit): %v", fit+1, err)
+	}
+}
+
+func TestTimeoutsNeverRenderAsZero(t *testing.T) {
+	cases := map[time.Duration]string{
+		500 * time.Microsecond:  "1",
+		time.Millisecond:        "1",
+		1500 * time.Millisecond: "1500",
+		10 * time.Second:        "10000",
+	}
+	for d, want := range cases {
+		if got := millis(d); got != want {
+			t.Fatalf("millis(%v) = %q, want %q", d, got, want)
+		}
+	}
+	tx := &fakeTx{}
+	w, _ := testWriter(tx)
+	w.lockTimeout, w.timeout = 300*time.Microsecond, 900*time.Microsecond
+	if _, err := w.InsertSnapshotSignal(unscopedCtx(), "public.debezium_signal", "c", []string{"public.orders"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := tx.stmts[0].args; !reflect.DeepEqual(got, []any{"1", "1"}) {
+		t.Fatalf("sub-millisecond timeouts sent as %v, want 1 ms each (0 turns them off)", got)
 	}
 }

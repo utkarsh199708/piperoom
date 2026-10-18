@@ -16,13 +16,16 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/testenv"
+	"piperoom/internal/tools"
 )
 
 // The writer against the dev stack. It connects as the dev SOURCE_DB_URL
 // role, which may create tables, publications and slots there (production
 // gives the writer its own role, SOURCE_DB_WRITE_URL). Every object is named
 // it_w_<random> and dropped at the end. Slots are server-wide and the T2 tests
-// count them, so these tests hold the same advisory lock (scopeTestLock).
+// count them, so these tests hold the same advisory lock (scopeTestLock). The
+// writes run with the explicit tools.WithUnscoped opt-out: the writer fails
+// closed without a scope.
 
 type writerFixture struct {
 	w        *Writer
@@ -85,7 +88,10 @@ func newWriterFixture(t *testing.T) writerFixture {
 
 func TestWriterAddPublicationTablesIntegration(t *testing.T) {
 	f := newWriterFixture(t)
-	ctx := context.Background()
+	if err := f.w.AddPublicationTables(context.Background(), f.pub, []string{f.tableOut}); !errors.Is(err, tools.ErrNoScope) {
+		t.Fatalf("no scope: %v, want tools.ErrNoScope", err)
+	}
+	ctx := tools.WithUnscoped(context.Background())
 
 	if err := f.w.AddPublicationTables(ctx, f.pub, []string{f.tableOut}); err != nil {
 		t.Fatalf("AddPublicationTables: %v", err)
@@ -114,8 +120,27 @@ func TestWriterAddPublicationTablesIntegration(t *testing.T) {
 
 func TestWriterDropReplicationSlotIntegration(t *testing.T) {
 	f := newWriterFixture(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(tools.WithUnscoped(context.Background()), 30*time.Second)
 	defer cancel()
+
+	// A physical slot (a standby's) is never dropped: not found for the
+	// writer, and still there after.
+	phys := f.slot + "_phys"
+	if _, err := f.admin.Exec(ctx, "SELECT pg_create_physical_replication_slot($1)", phys); err != nil {
+		t.Fatalf("create physical slot: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = f.admin.Exec(ctx, "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = $1", phys)
+	})
+	if err := f.w.DropReplicationSlot(ctx, phys); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("physical slot: %v, want ErrNotFound", err)
+	}
+	var left int
+	if err := f.admin.QueryRow(ctx, "SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1", phys).Scan(&left); err != nil || left != 1 {
+		t.Fatalf("physical slot after the refusal: count %d, %v", left, err)
+	}
 
 	// A temporary slot is active for as long as the session that made it
 	// lives: the shape of a slot a running connector holds.
@@ -146,7 +171,7 @@ func TestWriterDropReplicationSlotIntegration(t *testing.T) {
 
 func TestWriterInsertSnapshotSignalIntegration(t *testing.T) {
 	f := newWriterFixture(t)
-	ctx := context.Background()
+	ctx := tools.WithUnscoped(context.Background())
 
 	id, err := f.w.InsertSnapshotSignal(ctx, f.signal, "pg-orders-connector", []string{f.tableIn})
 	if err != nil {

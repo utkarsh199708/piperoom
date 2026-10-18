@@ -31,6 +31,12 @@ import (
 // quotes them with pgx.Identifier.Sanitize, passes values as $n parameters,
 // runs in one short transaction with its own lock and statement timeouts, and
 // is bounded by the write timeout (10 s by default) whatever ctx says.
+//
+// The pipeline scope fails closed, like tools.ScopeFor: every method needs
+// the room's whole pipeline in ctx (tools.WithPipeline), or the explicit
+// tools.WithUnscoped opt-out of CLI and dev callers. Anything else, a context
+// that names the pipeline only by id included, is tools.ErrNoScope before
+// any I/O.
 type Writer struct {
 	pool        *pgxpool.Pool // nil in tests
 	db          txBeginner    // the pool; a fake in tests
@@ -58,6 +64,10 @@ var ErrAlreadyPublished = errors.New("postgres: table is already in the publicat
 // the read-only role of docs/pilot/permissions.md, never the writer's.
 var errReadOnlyRole = errors.New("the SOURCE_DB_WRITE_URL role has default_transaction_read_only = on; the writer needs its own write role, never the read-only SOURCE_DB_URL role")
 
+// errStandby refuses a write URL that points at a hot standby, where every
+// write fails: the writer needs the primary.
+var errStandby = errors.New("the SOURCE_DB_WRITE_URL server is a hot standby (pg_is_in_recovery() is true); the writer needs the primary")
+
 const (
 	defaultWriteTimeout = 10 * time.Second
 	defaultLockTimeout  = 5 * time.Second
@@ -68,6 +78,10 @@ const (
 	// maxWriteTables bounds one statement; a pipeline's source tables are
 	// far fewer.
 	maxWriteTables = 100
+	// maxSignalDataBytes is the data column of the signal table as the
+	// Debezium docs define it, varchar(2048). A longer value fails the
+	// INSERT, so it is refused before the transaction.
+	maxSignalDataBytes = 2048
 )
 
 // slotNameRe is what Postgres accepts as a replication slot name
@@ -167,13 +181,20 @@ type rowQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// checkWritableSQL reads what makes every write of the pool fail.
+const checkWritableSQL = `SELECT current_setting('default_transaction_read_only'), pg_is_in_recovery()`
+
 // checkWritable connects (the first query opens the first connection) and
-// refuses a role whose sessions start read-only: every write would fail, and
-// it most likely is the read-only role given by mistake.
+// refuses a role whose sessions start read-only (most likely the read-only
+// role given by mistake) and a hot standby: every write would fail.
 func checkWritable(ctx context.Context, q rowQuerier) error {
 	var readOnly string
-	if err := q.QueryRow(ctx, `SELECT current_setting('default_transaction_read_only')`).Scan(&readOnly); err != nil {
+	var inRecovery bool
+	if err := q.QueryRow(ctx, checkWritableSQL).Scan(&readOnly, &inRecovery); err != nil {
 		return fmt.Errorf("postgres: writer: ping: %w", err)
+	}
+	if inRecovery {
+		return fmt.Errorf("postgres: writer: %w", errStandby)
 	}
 	if readOnly == "on" {
 		return fmt.Errorf("postgres: writer: %w", errReadOnlyRole)
@@ -223,13 +244,13 @@ const publicationCheckSQL = `
 		FROM pg_publication p
 		WHERE p.pubname = $1`
 
-// slotCheckSQL re-reads slot $1: whether it is active and whether it lives in
-// this database (a logical slot can only be dropped from its own; a physical
-// slot has none).
+// slotCheckSQL re-reads the LOGICAL slot $1: whether it is active and whether
+// it lives in this database (a logical slot can only be dropped from its
+// own). A physical slot (a standby's) is no row: a CDC fix never drops one.
 const slotCheckSQL = `
-		SELECT active, COALESCE(database = current_database(), true)
+		SELECT active, COALESCE(database = current_database(), false)
 		FROM pg_replication_slots
-		WHERE slot_name = $1`
+		WHERE slot_name = $1 AND slot_type = 'logical'`
 
 // dropSlotSQL takes the slot name as a value, never as an identifier.
 const dropSlotSQL = `SELECT pg_drop_replication_slot($1)`
@@ -239,8 +260,8 @@ const dropSlotSQL = `SELECT pg_drop_replication_slot($1)`
 // the publication: missing is clients.ErrNotFound; a table already in it (or
 // a FOR ALL TABLES publication) is ErrAlreadyPublished and nothing changes. A
 // table that does not exist is clients.ErrNotFound. Repeated tables count
-// once. When ctx carries the room's pipeline, every table must be one of its
-// source tables (tools.ErrOutOfScope).
+// once. With the room's pipeline in ctx every table must be one of its source
+// tables (tools.ErrOutOfScope); with no scope see Writer.
 func (w *Writer) AddPublicationTables(ctx context.Context, publication string, tables []string) error {
 	if w == nil || w.db == nil {
 		return ErrNoWriter
@@ -300,19 +321,27 @@ func (w *Writer) AddPublicationTables(ctx context.Context, publication string, t
 	return nil
 }
 
-// DropReplicationSlot drops the inactive replication slot named slot. In one
-// transaction it re-reads pg_replication_slots: no such slot (or one of
-// another database) is clients.ErrNotFound and an active slot is
+// DropReplicationSlot drops the inactive logical replication slot named slot.
+// In one transaction it re-reads pg_replication_slots: no such logical slot (a
+// physical slot included: a standby's is never dropped) or one of another
+// database is clients.ErrNotFound, and an active slot is
 // clients.ErrSlotActive; only then it runs pg_drop_replication_slot($1). A
 // slot that turns active in between is refused by Postgres, also as
 // ErrSlotActive. The drop itself is not transactional: once it returned, the
 // slot is gone even if the commit fails, and the error says so.
+//
+// A slot name cannot be mapped to a pipeline here (the connector's slot.name
+// is in its config, which the action checks), but the call still needs a
+// scope in ctx (see Writer).
 func (w *Writer) DropReplicationSlot(ctx context.Context, slot string) error {
 	if w == nil || w.db == nil {
 		return ErrNoWriter
 	}
 	if !slotNameRe.MatchString(slot) {
 		return fmt.Errorf("postgres: drop replication slot: invalid slot name %q (lower-case letters, digits and _, at most 63)", cutParam(slot))
+	}
+	if err := checkWriteScope(ctx, "", nil); err != nil {
+		return err
 	}
 	ctx, cancel := pgconv.WithDeadline(ctx, w.timeout)
 	defer cancel()
@@ -322,7 +351,7 @@ func (w *Writer) DropReplicationSlot(ctx context.Context, slot string) error {
 		var active, here bool
 		err := w.queryRow(ctx, tx, slotCheckSQL, []any{slot}, &active, &here)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("no such slot: %w", clients.ErrNotFound)
+			return fmt.Errorf("no logical slot of this name (physical slots are never dropped): %w", clients.ErrNotFound)
 		}
 		if err != nil {
 			return fmt.Errorf("read slot: %w", err)
@@ -363,9 +392,11 @@ type snapshotSignal struct {
 // InsertSnapshotSignal inserts one Debezium execute-snapshot row into
 // signalTable ("schema.table", the connector's signal.data.collection) asking
 // for an incremental snapshot of tables, and returns the row id (a new random
-// UUID). A missing signal table is clients.ErrNotFound. When ctx carries the
-// room's pipeline, connectorID must be one of its connectors and every table
-// one of its source tables (tools.ErrOutOfScope).
+// UUID). A missing signal table is clients.ErrNotFound. The data value must
+// fit the signal table's varchar(2048); more tables than fit are refused
+// before the transaction. With the room's pipeline in ctx connectorID must be
+// one of its connectors and every table one of its source tables
+// (tools.ErrOutOfScope); with no scope see Writer.
 //
 // Debezium reads data-collections as regular expressions. The identifier
 // check leaves "." as the only metacharacter, and a dot can only match the
@@ -393,9 +424,9 @@ func (w *Writer) InsertSnapshotSignal(ctx context.Context, signalTable, connecto
 	for i, t := range list {
 		collections[i] = t.String()
 	}
-	data, err := json.Marshal(snapshotSignal{DataCollections: collections, Type: "incremental"})
+	data, err := signalData(collections)
 	if err != nil {
-		return "", fmt.Errorf("postgres: snapshot signal: encode data: %w", err)
+		return "", err
 	}
 	id, err := newUUID()
 	if err != nil {
@@ -490,16 +521,25 @@ func writeTables(tables []string) ([]sourceTable, error) {
 	return out, nil
 }
 
-// checkWriteScope refuses a connector or a table outside the room's pipeline
-// when ctx carries the whole pipeline (tools.WithPipeline). Without one the
-// action's CheckScope, which the room runs right before Execute, is the check:
-// the room's executor does not put the pipeline in ctx today. connector ""
-// is not checked.
+// checkWriteScope is the writer's scope gate. It fails closed, in the order
+// of tools.ScopeFor: with the room's whole pipeline in ctx a connector or
+// table outside it is tools.ErrOutOfScope; the explicit tools.WithUnscoped
+// opt-out passes; anything else is tools.ErrNoScope, a context that names the
+// pipeline only by id (tools.WithPipelineID) included: the writer has no
+// owners config to resolve it and must not guess. connector "" and no tables
+// check only that a scope is there.
 func checkWriteScope(ctx context.Context, connector string, tables []sourceTable) error {
-	p, ok := tools.PipelineFrom(ctx)
-	if !ok {
+	sc, err := tools.ScopeFor(ctx, nil)
+	if err != nil {
+		if !errors.Is(err, tools.ErrNoScope) {
+			err = fmt.Errorf("%w: %w", tools.ErrNoScope, err)
+		}
+		return fmt.Errorf("postgres: write refused: it needs the room's whole pipeline in ctx (tools.WithPipeline) or the explicit tools.WithUnscoped opt-out: %w", err)
+	}
+	if sc.Unscoped() {
 		return nil
 	}
+	p := sc.Pipeline()
 	if connector != "" && !slices.Contains(p.Connectors, connector) {
 		return fmt.Errorf("postgres: %w: connector %q is not one of pipeline %q's connectors", tools.ErrOutOfScope, cutParam(connector), p.ID)
 	}
@@ -509,6 +549,34 @@ func checkWriteScope(ctx context.Context, connector string, tables []sourceTable
 		}
 	}
 	return nil
+}
+
+// signalData encodes the execute-snapshot data and refuses a value longer
+// than the signal table's data column, naming how many of the tables fit.
+func signalData(collections []string) ([]byte, error) {
+	encode := func(c []string) ([]byte, error) {
+		b, err := json.Marshal(snapshotSignal{DataCollections: c, Type: "incremental"})
+		if err != nil {
+			return nil, fmt.Errorf("postgres: snapshot signal: encode data: %w", err)
+		}
+		return b, nil
+	}
+	data, err := encode(collections)
+	if err != nil || len(data) <= maxSignalDataBytes {
+		return data, err
+	}
+	fit := 0
+	for fit < len(collections) {
+		b, err := encode(collections[:fit+1])
+		if err != nil {
+			return nil, err
+		}
+		if len(b) > maxSignalDataBytes {
+			break
+		}
+		fit++
+	}
+	return nil, fmt.Errorf("postgres: snapshot signal: data for %d tables is %d bytes, over the %d of the signal table's data column: at most %d of these tables per snapshot signal; send the rest in another", len(collections), len(data), maxSignalDataBytes, fit)
 }
 
 // String is the "schema.table" form.
@@ -531,7 +599,9 @@ func pgCode(err error) string {
 	return ""
 }
 
-func millis(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
+// millis renders d for set_config in whole milliseconds, at least 1: "0"
+// would turn the server-side timeout off.
+func millis(d time.Duration) string { return strconv.FormatInt(max(d.Milliseconds(), 1), 10) }
 
 // newUUID returns a random (version 4) UUID in its canonical form.
 func newUUID() (string, error) {
