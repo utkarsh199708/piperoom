@@ -1,10 +1,67 @@
 package alertin
 
 import (
+	"slices"
 	"strings"
 
 	"piperoom/internal/owners"
 )
+
+// matchDAG finds the one batch pipeline that the alert's dag_id values point
+// to. The ids are compared exactly (trimmed, case-sensitive): an Airflow dag_id
+// is case-sensitive, and the batch tools check a dag_id against the room
+// pipeline's dags the same way, so the pipeline found here can read the DAG.
+// An id no pipeline lists is ignored, as the owners scan ignores names it does
+// not know, so an alert whose ids are all unknown resolves exactly as if it had
+// none. Of the ids that are known, the pipeline must list every one, and only
+// one pipeline may do so: a DAG that two pipelines list, or a group whose alerts
+// name DAGs of different pipelines, gives "" rather than a guess.
+//
+// The ids come from the payload and are untrusted; they are only compared
+// with owners.yaml entries, never logged or shown.
+func matchDAG(o *owners.Owners, ids []string) string {
+	if o == nil || len(ids) == 0 {
+		return ""
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id = strings.TrimSpace(id); id != "" {
+			want[id] = true
+		}
+	}
+	var known []string
+	for _, p := range o.Pipelines {
+		for _, d := range p.DAGs {
+			if want[d] && !slices.Contains(known, d) {
+				known = append(known, d)
+			}
+		}
+	}
+	if len(known) == 0 {
+		return ""
+	}
+	match := ""
+	for _, p := range o.Pipelines {
+		if !listsAll(p.DAGs, known) {
+			continue
+		}
+		if match != "" && match != p.ID {
+			return ""
+		}
+		match = p.ID
+	}
+	return match
+}
+
+// listsAll reports whether every id in ids is in dags.
+func listsAll(dags, ids []string) bool {
+	for _, id := range ids {
+		if !slices.Contains(dags, id) {
+			return false
+		}
+	}
+	return true
+}
 
 // matchOwners finds the one pipeline whose connector, consumer group or
 // table names appear in the alert. values are exact names (label and tag

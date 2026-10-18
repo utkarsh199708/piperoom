@@ -28,16 +28,23 @@ A source with no secret is disabled, and every request for it fails `ErrUnauthen
 
 **Pipeline**, in this order:
 1. the alert's own `pipeline` or `pipeline_id` label, tag or field;
-2. for PagerDuty, the service ID looked up in `Config.PagerDutyServices`;
-3. the single `owners.yaml` pipeline whose connector, consumer group or table the alert mentions (label
+2. the `dag_id` label (Alertmanager, Grafana) or field (generic): the single batch pipeline whose `dags`
+   lists it. The id is compared exactly (trimmed, case-sensitive). In an Alertmanager or Grafana group the
+   `dag_id` of every firing alert counts (plus the common and group labels): an id no pipeline lists is
+   skipped, and the pipeline must list every id that is left. Datadog and PagerDuty `dag_id` tags are not
+   read here;
+3. for PagerDuty, the service ID looked up in `Config.PagerDutyServices`;
+4. the single `owners.yaml` pipeline whose connector, consumer group or table the alert mentions (label
    values exactly, or whole names in the title or summary). Only the first `MaxMatchTextRunes` (2000) runes
    of each title or description are scanned, and only the first `MaxLabelValues` (256) label values are
    compared, each cut to `MaxLabelRunes` (256). A name past those limits is not matched. Explicit
-   `pipeline` / `pipeline_id` labels are read directly and are not affected by these limits;
-4. `Config.DefaultPipeline`.
+   `pipeline` / `pipeline_id` and `dag_id` labels are read directly and are not affected by these limits;
+5. `Config.DefaultPipeline`.
 
-If more than one pipeline matches in step 3, no guess is made. `Alert.PipelineVia` records which step
-was used.
+If more than one pipeline matches in step 2 or step 4, no guess is made: a DAG listed by two pipelines, or a
+group whose alerts name DAGs of two pipelines, skips step 2. A `dag_id` that no pipeline lists changes
+nothing: the alert resolves as it would without one. `Alert.PipelineVia` records which step was used
+(`label`, `dag`, `service`, `owners`, `default`).
 
 **Repeats:** `DedupKey` is the Alertmanager/Grafana group key, the PagerDuty incident ID, the Datadog
 alert cycle key, or the generic `dedup_key` (otherwise a hash of the body). The room service should
@@ -58,7 +65,8 @@ receivers:
             credentials_file: /etc/alertmanager/piperoom-token
 ```
 
-Add the label `pipeline: orders` to the alert rules (or add it with `alert_relabel_configs`).
+Add the label `pipeline: orders` to the alert rules (or add it with `alert_relabel_configs`). For a batch
+pipeline, an Airflow metric's `dag_id` label is enough when `owners.yaml` lists that DAG under `dags`.
 
 ## Grafana (unified alerting)
 
@@ -82,7 +90,8 @@ Integrations → Webhooks → New. Custom headers: `{"X-Piperoom-Token": "<token
 ## Generic
 
 Any JSON body. If the body is an object, these keys are read when present: `title`, `severity`,
-`pipeline_id`, `status`, `dedup_key`, `url`. Sign the body with `alertin.SignGeneric(secret, time.Now(), body)`
+`pipeline_id`, `dag_id`, `status`, `dedup_key`, `url`. An Airflow failure callback can post
+`{"title": "...", "dag_id": "revenue_daily"}`. Sign the body with `alertin.SignGeneric(secret, time.Now(), body)`
 and send the result in `X-Piperoom-Signature`.
 
 Alertmanager and Datadog cannot compute a signature over the body. Their token is a bearer secret:
