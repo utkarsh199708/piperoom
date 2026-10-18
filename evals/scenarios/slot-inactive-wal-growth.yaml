@@ -250,16 +250,13 @@ recordings:
       pipeline orders
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
       1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=44.1 GiB wal_status=extended
-      2 pg:public.devctl_refunds [postgres, owner priya] UNKNOWN slot=unknown
-      3 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
         from: pg:public.orders
-      4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
         from: connect:pg-orders-connector
-      5 group:order-sync [consumer, owner kabir] WARN lag=859737 state=Stable
+      4 group:order-sync [consumer, owner kabir] WARN lag=859737 state=Stable
         from: topic:pg.public.orders
-      6 dlq:devctl.order-sync.dlq [consumer, owner kabir] OK exists=false records=0 writer=order-sync
-        from: group:order-sync
-      7 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.3h ts_column=updated_at
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.3h ts_column=updated_at
         from: group:order-sync (unconfirmed)
     data:
       edges:
@@ -272,8 +269,6 @@ recordings:
         - from: group:order-sync
           mapping: inferred
           to: wh:analytics.orders
-        - from: group:order-sync
-          to: dlq:devctl.order-sync.dlq
       nodes:
         - facts:
             slot_active: "true"
@@ -284,14 +279,6 @@ recordings:
           kind: source_table
           layer: postgres
           name: public.orders
-          owner: priya
-        - facts:
-            slot: unknown
-          health: unknown
-          id: pg:public.devctl_refunds
-          kind: source_table
-          layer: postgres
-          name: public.devctl_refunds
           owner: priya
         - health: ok
           id: connect:pg-orders-connector
@@ -307,16 +294,6 @@ recordings:
           layer: kafka
           name: pg.public.orders
           owner: arjun
-        - facts:
-            exists: "false"
-            records: "0"
-            writer: order-sync
-          health: ok
-          id: dlq:devctl.order-sync.dlq
-          kind: dlq_topic
-          layer: consumer
-          name: devctl.order-sync.dlq
-          owner: kabir
         - facts:
             lag: "859737"
             state: Stable
