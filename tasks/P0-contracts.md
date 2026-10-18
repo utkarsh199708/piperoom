@@ -102,6 +102,7 @@ type ProposalCancelledPayload struct {
   `PIPEROOM_SOLO_USER` still implies it); `mode.auto_approve` lists the pipeline's policy actions.
 - `ControlGrantedPayload.Reason string json:"reason,omitempty"`; `events.ControlReasonSoleMember` (`"sole_member"`)
   when the room's first member becomes driver without a request (system actor).
+- `docs/api.md` `/metrics`: counter `piperoom_approvals_total{grant}`, `grant` = `owner` | `solo` | `fallback` | `policy`, all four series present from start, per replica. (follow-up 1, accepted in review of #590/#591/#592/#587)
 
 ### 5. Driver-authored proposals (P3c) — `internal/events/events.go`, `docs/api.md`
 
@@ -181,6 +182,11 @@ var ErrSlotActive = errors.New("clients: replication slot is active")
 refuse at `Validate` with "no write credentials"). Every method takes the room's pipeline scope from `ctx`
 (`tools.WithPipeline`) and the actions re-check it (`actions.Scoped`).
 
+- `var ErrAlreadyPublished = errors.New("clients: table is already in the publication")`, next to `ErrSlotActive`: returned (wrapped) by `SourceWriter.AddPublicationTables` when a table is already in the publication or the publication is `FOR ALL TABLES`; nothing is changed. (follow-up 1, accepted in review of #590/#591/#592/#587)
+- `GroupResetPlanner` (optional, read-only, implemented by the Kafka write client): `CheckGroupInactive(ctx, group) error`, `PlanGroupReset(ctx, group, to OffsetTarget) ([]OffsetMove, error)`, with `OffsetMove{Topic string; Partition int32; Committed, Target, End int64}` (json `topic`, `partition`, `committed`, `target`, `end`); an action's `Validate` and `Preview` hold it, never the writer. (follow-up 1, accepted in review of #590/#591/#592/#587)
+- `RecordReader.ReadRecords` returns fewer than `limit` records when the partition ends first or 32 MiB were read. (follow-up 1, accepted in review of #590/#591/#592/#587)
+- Scope, replacing the sentence above for `KafkaWriter` and `SourceWriter`: every write method requires the room's pipeline scope in `ctx` (`tools.WithPipeline`) and refuses a target outside it before any I/O (`tools.ErrOutOfScope`); without a scope it refuses with `tools.ErrNoScope` unless the caller opted out with `tools.WithUnscoped` (tests, CLI); read helpers on the same type are scoped by the action's `CheckScope` instead. (follow-up 1, accepted in review of #590/#591/#592/#587)
+
 ### 8. Pipeline kinds (P4) — `internal/events/events.go`, `internal/topology/graph.go`, `internal/clients/clients.go`, `internal/config/config.go`
 
 - `events.Layers` += `"orchestrator"`, `"transform"` (appended after the six CDC layers: `Layers` is "every known
@@ -259,6 +265,7 @@ at a UTF-8 boundary. Log text, notes and messages are untrusted: the tool wraps 
   `WAREHOUSE_DB_URL` as the driver DSN (`internal/wiring` validates the value and adds the cases in P4e).
 - `docs/api.md`: `GET /api/pipelines` gains `kind`; `GET /api/pipelines/{pid}/topology` nodes carry the new kinds
   and the graph `partial`; the P-wave events section says the two layers are valid wherever a layer is.
+- `TaskInstance.Try` is Airflow's `try_number` as reported; 0 when the task never ran (e.g. `upstream_failed`). (follow-up 1, accepted in review of #590/#591/#592/#587)
 
 ### 9. Deferred (not in this wave)
 

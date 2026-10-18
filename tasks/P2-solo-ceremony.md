@@ -83,6 +83,12 @@ The big-team ceremony is unchanged when several people own the layers.
    the cancel link (`PIPEROOM_PUBLIC_URL` deep link); `proposal.cancelled` and the policy `approval.given` as one
    line each. Nothing inbound.
 
+### Design decisions from review (2026-10-18)
+Accepted by the leads in the round 1 and round 2 reviews (P0 follow-up 1); also on the P2b-3 and P2b-4 rows of
+`tasks/P-board.md`.
+- **P2b-3 (fallback):** one proposal-aware `authorizeProposalLayer(st, p, user, layer, confirm, needConfirm)` that both `approve` and approve-all call (`authorizeLayer` first, then layer ∈ `fallback_layers` && driver == user → `"fallback"`); `approvalGrant` gains the fallback case.
+- **P2b-4 (policy auto-approve):** the timer's fire path is authoritative (under the room lock: open, no `proposal.cancelled`, no human `approval.*` after `proposal.scheduled`); the explicit stop lives in `appendApprovalLocked` and the reject path, not as a third copy; `appendApprovalLocked` takes the actor and optional identity so policy approvals reuse it; `mode.solo` = `authorizeAllLayers(pid, user, pipeline.Layers())`; `auto_approve` is validated against the FULL proposal registry, never an executor registry emptied by write-mode-off; a `schema_*` entry is refused.
+
 ## Out of scope
 - Auto-approve for anything whose preview is missing, failed or `DryRun.OK == false`; for `schema_*` actions;
   for driver-authored proposals (P3). The list is per pipeline, never global.
