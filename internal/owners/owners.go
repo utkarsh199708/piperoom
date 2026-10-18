@@ -34,6 +34,13 @@ type Pipeline struct {
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
 	// replaces the top-level `layers:` entry for this pipeline.
 	Owners map[string]LayerRights `yaml:"owners"`
+	// AutoApprove is the optional `auto_approve:` list (tasks/P0-contracts.md
+	// item 3): names of actions whose proposals this pipeline lets run after a
+	// cancellable countdown with no human approval. Empty or absent = none, so a
+	// pipeline opts in action by action and never by default. Load checks the
+	// syntax; LoadWithActions and ValidateAutoApprove also check the names
+	// against the action registry. Read it with AutoApproveList.
+	AutoApprove []string `yaml:"auto_approve"`
 	// RetentionDays is the optional `retention_days:` of the pipeline: closed
 	// rooms of this pipeline are deleted after this many days; with
 	// PIPEROOM_RETENTION_DAYS also set, the shorter wins
@@ -101,7 +108,10 @@ type Owners struct {
 	Tenants map[string]Tenant `yaml:"tenants"`
 }
 
-// Load reads and validates the owners file at path.
+// Load reads and validates the owners file at path. An `auto_approve:` entry
+// is checked for syntax only, so the file loads before the action registry
+// exists (the CLI tools do); a server that has the registry calls
+// LoadWithActions, or ValidateAutoApprove after Load.
 func Load(path string) (*Owners, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -194,6 +204,9 @@ func (o *Owners) validate() error {
 		}
 		if d := p.RetentionDays; d != nil && (*d < 1 || *d > MaxRetentionDays) {
 			return fmt.Errorf("pipeline %q: retention_days %d: want 1 to %d (leave it out to use PIPEROOM_RETENTION_DAYS)", p.ID, *d, MaxRetentionDays)
+		}
+		if err := checkAutoApproveSyntax(p.AutoApprove); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		w, err := resolveWatch(p.WatchSpec)
 		if err != nil {
