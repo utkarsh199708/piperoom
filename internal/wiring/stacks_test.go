@@ -258,7 +258,10 @@ func twoTenantEnv() map[string]string {
 }
 
 // fakeOpener records each set's settings and gives it a spy labelled by its
-// source DSN, wired exactly as openClients wires real clients.
+// source DSN, wired exactly as openClients wires real clients: with write
+// mode on, the writers come from the real openWriters over fake constructors
+// (writemode_test.go), so a set gets a source writer only when its own
+// settings hold SOURCE_DB_WRITE_URL.
 type fakeOpener struct {
 	mu      sync.Mutex
 	cfgs    []config.Config
@@ -266,11 +269,13 @@ type fakeOpener struct {
 	closed  []string
 	failOn  string // a source DSN whose open fails
 	openErr error
+	// writers lists every fake write client built, in order.
+	writers []*fakeWriter
 }
 
 func newFakeOpener() *fakeOpener { return &fakeOpener{spies: map[string]*spy{}} }
 
-func (f *fakeOpener) open(_ context.Context, cfg config.Config, _ *aws.Config, o *owners.Owners) (*Wired, error) {
+func (f *fakeOpener) open(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners, write bool) (*Wired, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cfgs = append(f.cfgs, cfg)
@@ -280,11 +285,24 @@ func (f *fakeOpener) open(_ context.Context, cfg config.Config, _ *aws.Config, o
 	s := &spy{label: cfg.SourceDBURL}
 	f.spies[cfg.SourceDBURL] = s
 	label := cfg.SourceDBURL
+	closeWriters := func() {}
+	var wc writeClients
+	if write {
+		var err error
+		// The fake constructors append to f.writers; f.mu is already held.
+		wc, closeWriters, err = openWriters(ctx, cfg, awsCfg, fakeWriterOpeners(label, &f.writers))
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &Wired{
 		Source: s, Warehouse: s, Connect: s, Kafka: s, Registry: s,
 		Builder: topology.NewBuilder(o, s, s, s, s),
 		Owners:  o,
+		write:   write,
+		writers: wc,
 		close: func() {
+			closeWriters()
 			f.mu.Lock()
 			f.closed = append(f.closed, label)
 			f.mu.Unlock()
@@ -366,7 +384,9 @@ var clientFree = []string{"runbook_lookup", "debezium_metrics"}
 func TestTwoTenantsToolsHitOnlyTheirOwnClients(t *testing.T) {
 	own := loadOwners(t, twoTenantYAML(""))
 	f := newFakeOpener()
-	st, err := openStacks(context.Background(), config.Config{SourceDBURL: "src-process"}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
+	// Write mode on: the actions part below runs a restart through each set
+	// (with it off the actions hold read-only clients; writemode_test.go).
+	st, err := openStacks(context.Background(), config.Config{SourceDBURL: "src-process", WriteMode: "on"}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
 	if err != nil {
 		t.Fatalf("openStacks: %v", err)
 	}
