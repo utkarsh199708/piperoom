@@ -81,20 +81,37 @@ func fixInput(t *testing.T, action, paramsJSON string) json.RawMessage {
 // layer, exactly as before.
 func TestProposeFixAcceptsEveryRealAction(t *testing.T) {
 	cases := []struct {
-		action, params, layer string
+		name, action, params, layer string
 	}{
-		{"connect_restart_task", `{"connector":"pg-orders-connector","task":0}`, "kafka-connect"},
-		{"connect_restart_connector", `{"connector":"pg-orders-connector"}`, "kafka-connect"},
-		{"connect_resume_connector", `{"connector":"pg-orders-connector"}`, "kafka-connect"},
-		{"connect_update_connector_config", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"string"}`, "kafka-connect"},
-		{"schema_set_compatibility", `{"subject":"pg.public.orders-value","level":"BACKWARD"}`, "schema-registry"},
-		{"schema_register", `{"subject":"pg.public.orders-value","schema":"\"string\""}`, "schema-registry"},
+		{"connect_restart_task", "connect_restart_task", `{"connector":"pg-orders-connector","task":0}`, "kafka-connect"},
+		{"connect_restart_connector", "connect_restart_connector", `{"connector":"pg-orders-connector"}`, "kafka-connect"},
+		{"connect_resume_connector", "connect_resume_connector", `{"connector":"pg-orders-connector"}`, "kafka-connect"},
+		{"connect_pause_connector", "connect_pause_connector", `{"connector":"pg-orders-connector"}`, "kafka-connect"},
+		{"connect_update_connector_config/one-key", "connect_update_connector_config", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"string"}`, "kafka-connect"},
+		{"connect_update_connector_config/n-key", "connect_update_connector_config", `{"changes":{"decimal.handling.mode":"string","tombstones.on.delete":"false"},"connector":"pg-orders-connector"}`, "kafka-connect"},
+		{"schema_set_compatibility", "schema_set_compatibility", `{"subject":"pg.public.orders-value","level":"BACKWARD"}`, "schema-registry"},
+		{"schema_register", "schema_register", `{"subject":"pg.public.orders-value","schema":"\"string\""}`, "schema-registry"},
 	}
-	if got := len(realActions(t).All()); got != len(cases) {
-		t.Fatalf("registry has %d actions, this test covers %d: add the new action here", got, len(cases))
+	// Every registered action has at least one case, and no case names an
+	// action the registry lacks.
+	covered := map[string]bool{}
+	for _, c := range cases {
+		covered[c.action] = true
+	}
+	registered := map[string]bool{}
+	for _, a := range realActions(t).All() {
+		registered[a.Name()] = true
+		if !covered[a.Name()] {
+			t.Errorf("registry action %s has no case here: add it", a.Name())
+		}
+	}
+	for a := range covered {
+		if !registered[a] {
+			t.Errorf("case action %s is not in the registry", a)
+		}
 	}
 	for _, c := range cases {
-		t.Run(c.action, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			r, proposals := proposeRunner(t, realActions(t))
 			res := r.runRoomTool(context.Background(), toolUse{id: "tu_1", name: "propose_fix", input: fixInput(t, c.action, c.params)})
 			if res.isError {
@@ -245,7 +262,8 @@ func TestProposeFixDescriptionListsParams(t *testing.T) {
 	d := tool.Description()
 	for _, want := range []string{
 		"connect_restart_task(connector:string [connector name], task:integer [task id]) [kafka-connect]",
-		"connect_update_connector_config(connector:string, key:decimal.handling.mode|errors.deadletterqueue.context.headers.enable|errors.log.enable|time.precision.mode|tombstones.on.delete, value:string)",
+		"connect_pause_connector(connector:string [connector name]) [kafka-connect]",
+		"connect_update_connector_config(connector:string [connector name], changes?:{decimal.handling.mode?:precise|string, errors.deadletterqueue.context.headers.enable?:true, errors.log.enable?:true, time.precision.mode?:adaptive|adaptive_time_microseconds|connect, tombstones.on.delete?:false|true} [config keys to set, with their new values; all change in one request], key?:decimal.handling.mode|errors.deadletterqueue.context.headers.enable|errors.log.enable|time.precision.mode|tombstones.on.delete [old one-key form; use changes], value?:string [old one-key form; use changes]) [kafka-connect]",
 		"schema_set_compatibility(subject:string [subject name], level:string [BACKWARD",
 		"schema_register(subject:string [subject name], schema:string [Avro schema JSON string]) [schema-registry]",
 	} {

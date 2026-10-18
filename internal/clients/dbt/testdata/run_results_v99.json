@@ -1,0 +1,8 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/run-results/v99.json",
+    "dbt_version": "9.0.0",
+    "generated_at": "2026-10-17T00:12:31Z"
+  },
+  "results": {"changed": "shape"}
+}

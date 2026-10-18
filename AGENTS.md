@@ -49,7 +49,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | Agent | Task file | Owns |
 |---|---|---|
 | A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
-| A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`; not `pgactions/**`, A3's from the P wave) |
+| A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`; not `pgactions/**`, A3's from the P wave; not `sourceactions/**` (A3) or `fixpr/**` (C17), from the Q wave) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/tools/scope.go`, `internal/topology/**` (not `graph.go`), `internal/owners/**`, `internal/clients/pgconv/**` |
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**`, `internal/auth/**` (A5 created it in auth PR 2, `e6dc2a1`) |
@@ -198,6 +198,35 @@ Merge order (plan §4): **P0 → P1 and P2 in parallel → P3 → P4.** Inside a
 merge order" section rules; inside P1 and P2 the `a` sub-task (the server or owners change) lands before the rest.
 A task split between agents is one PR per agent and per sub-task. `tasks/P-board.md` splits every sub-task into
 PR-sized rows with the model, the days and the rows it waits on; the PR tag is the board row's ID (`[P2b-1]`).
+
+### Q wave (planned 2026-10-18; plan `docs/product/so-gaps-2026-10.md`, board `tasks/Q-board.md`)
+
+PR titles start with the board row's ID: `[Q<N><letter>]`, or `[Q<N>-0]` for a design row (e.g.
+`[Q2c] sourceactions: replica identity and heartbeat table`). Same rules as the P wave: each row stays inside its
+agent's folders (the rows above plus the new folders below); a file outside them is asked for in the thread, never
+edited. Q0 (the leads) carries the contract changes of steps 1 to 6; the design rows Q7-0 (pull-request fix,
+`docs/design/fix-pr.md`) and Q8-0 (MySQL source, `docs/design/mysql-source.md`) carry their own. The board's
+"Q0 items" section names the item each row codes against. The wave comes from a measured analysis of 722 Stack
+Overflow Debezium problems: resolved goes from 7.1% to 18.8% (up to 26.5% with the pull-request fix), diagnosed from
+7.5% to 26.5%. New interfaces, tools and actions are source-neutral, so MySQL implements them instead of copying them. Every Q row runs on Opus 5.5, cloud
+rows included (the owner's standing instruction; this overrides "Sonnet 5" for cloud agents in §2 for this wave).
+
+New folders of the wave (owned from the first PR that creates them):
+
+| Agent | Owns (new in the Q wave) |
+|---|---|
+| A3 | `internal/actions/sourceactions/**` |
+| A8 (Qoder, new; if no eighth local agent runs, A3 takes its rows after step 2) | `internal/clients/mysql/**`, `internal/tools/mysqltools/**` |
+| C17 (cloud, new) | `internal/clients/forge/**`, `internal/tools/forgetools/**`, `internal/actions/fixpr/**` |
+| C18 (cloud, new) | `internal/clients/workerlogs/**`, `internal/tools/logtools/**`, `internal/tools/nettools/**` |
+
+A2 keeps the rest of `internal/actions/**` except `action.go`, `pgactions/**`, `sourceactions/**` and `fixpr/**`.
+The known-issues index of step 1 lives in `internal/tools/runbooks/**` (C11).
+
+Order: **Q0 first, alone**; then steps 1 to 8 in priority order (version knowledge, database settings and admin
+actions, Connect worker visibility, config validation before registration, connector lifecycle and source offsets,
+network and TLS probes, pull-request fix, MySQL). The board's After column is the only hard dependency; Q0 waits on
+the P wave's open contract follow-ups, and every row that adds a write action waits on P3-0.
 
 ### Contract files (read them, code against them, never edit them)
 
