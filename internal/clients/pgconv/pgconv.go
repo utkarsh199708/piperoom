@@ -1,7 +1,7 @@
-// Package pgconv shares helpers used by the read-only Postgres-backed clients
-// (postgres and warehouse): converting pgx-decoded values into JSON-friendly
-// values, rendering numerics without float rounding, and applying a per-call
-// deadline.
+// Package pgconv shares helpers used by the Postgres-backed clients (postgres
+// and warehouse): converting pgx-decoded values into JSON-friendly values,
+// rendering numerics without float rounding, applying a per-call deadline, the
+// read-only pool wrapper, and scrubbing a DSN out of start-up errors.
 package pgconv
 
 import (

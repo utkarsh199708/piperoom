@@ -62,9 +62,15 @@ func (r *recordedRow) Scan(dest ...any) error {
 }
 
 func (d *DB) record(ctx context.Context, start time.Time, sql string, args []any) {
+	recordSQL(ctx, d.target, start, sql, args)
+}
+
+// recordSQL records one statement against target as a provenance call; the
+// reader (DB) and the writer (Writer) share it.
+func recordSQL(ctx context.Context, target string, start time.Time, sql string, args []any) {
 	tools.Record(ctx, tools.Call{
 		Kind:           tools.CallSQL,
-		Target:         d.target,
+		Target:         target,
 		Text:           sqlText(sql),
 		ParamsRedacted: redactArgs(args),
 		At:             start,
