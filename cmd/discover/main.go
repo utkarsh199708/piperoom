@@ -5,6 +5,12 @@
 // cluster.
 //
 //	go run ./cmd/discover -out owners.draft.yaml
+//
+// With -write-owners it writes a file that loads as it is (every layer owned
+// by one user, checked with owners.Load), plus a matching users.yaml with
+// -users, and prints a summary table:
+//
+//	go run ./cmd/discover -write-owners owners.yaml -users users.yaml -owner alice
 package main
 
 import (
@@ -20,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -53,11 +60,16 @@ func main() {
 type buildFunc func(ctx context.Context, cfg config.Config, sourceDB bool) (discover.Deps, func(), error)
 
 // runner holds the seams that make run testable without a network: the client
-// builder and the library entry points. Production uses the real ones.
+// builder and the library entry points. Production uses the real ones; a nil
+// field takes its production default (see withDefaults).
 type runner struct {
-	build    buildFunc
-	discover func(context.Context, discover.Deps, discover.Options) (discover.Result, error)
-	render   func(io.Writer, discover.Result) error
+	build       buildFunc
+	discover    func(context.Context, discover.Deps, discover.Options) (discover.Result, error)
+	render      func(io.Writer, discover.Result) error
+	renderOwned func(io.Writer, discover.Result, string) error
+	renderUsers func(io.Writer, string) error
+	// osUser returns the OS user name, for the default of -owner.
+	osUser func() (string, error)
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -65,15 +77,33 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return r.run(ctx, args, stdout, stderr)
 }
 
+func (r runner) withDefaults() runner {
+	if r.renderOwned == nil {
+		r.renderOwned = discover.RenderOwned
+	}
+	if r.renderUsers == nil {
+		r.renderUsers = discover.RenderUsers
+	}
+	if r.osUser == nil {
+		r.osUser = currentUsername
+	}
+	return r
+}
+
 func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	r = r.withDefaults()
 	fl := flag.NewFlagSet("discover", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	out := fl.String("out", "", "draft owners file to write (required; - = stdout)")
-	force := fl.Bool("force", false, "overwrite -out if it already exists")
+	out := fl.String("out", "", "draft owners file to write, with TODO layer owners (- = stdout)")
+	writeOwners := fl.String("write-owners", "", "owners file to write that loads as it is: every layer owned by -owner, checked with owners.Load\n"+
+		"(if the check fails the file is written as FILE.draft with the error on top, and the exit code is 1)")
+	owner := fl.String("owner", defaultOwner(r.osUser, os.Getenv), "user id that owns every layer in the -write-owners file")
+	users := fl.String("users", "", "also write a one-user users.yaml for -owner (needs -write-owners)")
+	force := fl.Bool("force", false, "overwrite -out, -write-owners and -users if they already exist")
 	sourceDB := fl.Bool("source-db", false, "also read replication slots from the source Postgres (SOURCE_DB_URL)")
 	timeout := fl.Duration("timeout", defaultTimeout, "limit for the whole run")
 	fl.Usage = func() {
-		fmt.Fprintln(fl.Output(), "usage: discover -out FILE [-force] [-source-db] [-timeout 2m]")
+		fmt.Fprintln(fl.Output(), "usage: discover (-out FILE | -write-owners FILE [-owner ID] [-users FILE]) [-force] [-source-db] [-timeout 2m]")
 		fl.PrintDefaults()
 	}
 	if err := fl.Parse(args); err != nil {
@@ -88,10 +118,18 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 		fl.Usage()
 		return exitUsage
 	}
-	if *out == "" {
-		fmt.Fprintln(stderr, "discover: -out is required (use - for stdout)")
+	ownerSet := false
+	fl.Visit(func(f *flag.Flag) { ownerSet = ownerSet || f.Name == "owner" })
+	if msg := checkFiles(*out, *writeOwners, *users, ownerSet); msg != "" {
+		fmt.Fprintln(stderr, "discover: "+msg)
 		fl.Usage()
 		return exitUsage
+	}
+	if *writeOwners != "" {
+		if err := discover.ValidateOwner(*owner); err != nil {
+			fmt.Fprintln(stderr, err.Error())
+			return exitUsage
+		}
 	}
 	if *timeout <= 0 {
 		fmt.Fprintln(stderr, "discover: -timeout must be positive")
@@ -99,12 +137,27 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	toStdout := *out == "-"
 
-	// Fail before touching the cluster when the file is already there; the
-	// O_EXCL open below still guards against a file that appears meanwhile.
-	if !toStdout && !*force {
-		if _, err := os.Lstat(*out); err == nil {
-			fmt.Fprintf(stderr, "discover: %s already exists (use -force to overwrite)\n", *out)
+	// Fail before touching the cluster when a file is already there, or when
+	// the owners or users file has no directory to go in; the exclusive create
+	// below still guards against a file that appears meanwhile.
+	for _, p := range []string{*writeOwners, *users} {
+		if p == "" {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Dir(p)); err != nil || !fi.IsDir() {
+			fmt.Fprintf(stderr, "discover: %s: the directory %s does not exist\n", p, filepath.Dir(p))
 			return exitError
+		}
+	}
+	if !*force {
+		for _, p := range []string{*out, *writeOwners, *users} {
+			if p == "" || p == "-" {
+				continue
+			}
+			if _, err := os.Lstat(p); err == nil {
+				fmt.Fprintf(stderr, "discover: %s already exists (use -force to overwrite)\n", p)
+				return exitError
+			}
 		}
 	}
 
@@ -140,31 +193,138 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 		return exitError
 	}
 
-	// Render fully before opening the output so a failure never creates or
-	// truncates the file.
-	var buf bytes.Buffer
-	if err := r.render(&buf, res); err != nil {
-		fmt.Fprintln(stderr, red.line(fmt.Sprintf("discover: render draft: %v", err)))
-		return exitError
+	// Render everything fully before opening any output so a failure never
+	// creates or truncates a file.
+	var draftBuf, ownersBuf, usersBuf bytes.Buffer
+	renders := []struct {
+		want bool
+		buf  *bytes.Buffer
+		do   func() error
+	}{
+		{*out != "", &draftBuf, func() error { return r.render(&draftBuf, res) }},
+		{*writeOwners != "", &ownersBuf, func() error { return r.renderOwned(&ownersBuf, res, *owner) }},
+		{*users != "", &usersBuf, func() error { return r.renderUsers(&usersBuf, *owner) }},
+	}
+	for _, rd := range renders {
+		if !rd.want {
+			continue
+		}
+		if err := rd.do(); err != nil {
+			fmt.Fprintln(stderr, red.line(fmt.Sprintf("discover: render draft: %v", err)))
+			return exitError
+		}
 	}
 
+	var written []string // files for the summary table
 	if toStdout {
-		if _, err := stdout.Write(buf.Bytes()); err != nil {
+		if _, err := stdout.Write(draftBuf.Bytes()); err != nil {
 			fmt.Fprintf(stderr, "discover: write stdout: %v\n", err)
 			return exitError
 		}
-	} else if err := writeFile(*out, buf.Bytes(), *force); err != nil {
+	} else if *out != "" {
+		if code := writeOne(stderr, *out, draftBuf.Bytes(), *force); code != exitOK {
+			return code
+		}
+		written = append(written, *out)
+	}
+	if *out != "" {
+		log.Info("draft written", "out", *out, "bytes", draftBuf.Len(), "took", time.Since(start).Round(time.Millisecond).String())
+	}
+
+	code := exitOK
+	var failure []string // lines for stderr after the summary
+	if *writeOwners != "" {
+		if len(res.Pipelines) == 0 {
+			// An owners file without pipelines loads but does nothing; stop
+			// the make-quickstart style chain here, and say why.
+			printSummary(stderr, res, red)
+			for _, s := range res.Skipped {
+				fmt.Fprintln(stderr, "skipped: "+red.line(s.Connector+": "+s.Reason))
+			}
+			fmt.Fprintf(stderr, "discover: no Debezium Postgres source connector found; nothing written to %s\n", *writeOwners)
+			return exitError
+		}
+		oc, err := installOwners(*writeOwners, ownersBuf.Bytes(), *force, red.line)
+		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				fmt.Fprintf(stderr, "discover: %s already exists (use -force to overwrite)\n", *writeOwners)
+			} else {
+				fmt.Fprintln(stderr, red.line(err.Error()))
+			}
+			return exitError
+		}
+		written = append(written, oc.path)
+		if oc.draft {
+			log.Warn("owners draft written: it failed owners.Load", "path", oc.path)
+			code = exitError
+			failure = []string{
+				"discover: the owners file failed owners.Load: " + red.line(oc.reason),
+				fmt.Sprintf("discover: wrote the draft to %s with the error at the top; fix it, then rename it to %s", oc.path, *writeOwners),
+			}
+		} else {
+			log.Info("owners file written", "path", oc.path, "owner", *owner)
+		}
+	}
+	if *users != "" {
+		if c := writeOne(stderr, *users, usersBuf.Bytes(), *force); c != exitOK {
+			return c
+		}
+		written = append(written, *users)
+		log.Info("users file written", "path", *users, "user", *owner)
+	}
+
+	printSummary(stderr, res, red)
+	if *writeOwners != "" {
+		// With -out - stdout carries the draft, so the table must not follow it.
+		table := stdout
+		if toStdout {
+			table = stderr
+		}
+		printTable(table, res, written, red)
+	}
+	for _, l := range failure {
+		fmt.Fprintln(stderr, l)
+	}
+	return code
+}
+
+// writeOne writes a file for run and reports a failure on stderr. It returns
+// exitOK or the exit code to stop with.
+func writeOne(stderr io.Writer, path string, data []byte, force bool) int {
+	if err := writeFile(path, data, force); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			fmt.Fprintf(stderr, "discover: %s already exists (use -force to overwrite)\n", *out)
+			fmt.Fprintf(stderr, "discover: %s already exists (use -force to overwrite)\n", path)
 		} else {
 			fmt.Fprintln(stderr, err.Error())
 		}
 		return exitError
 	}
-	log.Info("draft written", "out", *out, "bytes", buf.Len(), "took", time.Since(start).Round(time.Millisecond).String())
-
-	printSummary(stderr, res, red)
 	return exitOK
+}
+
+// checkFiles returns what is wrong with the file flags, or "". It runs before
+// anything is read, so a usage mistake never costs a cluster round trip.
+func checkFiles(out, writeOwners, users string, ownerSet bool) string {
+	switch {
+	case out == "" && writeOwners == "":
+		return "-out or -write-owners is required (-out - writes the draft to stdout)"
+	case writeOwners == "-" || users == "-":
+		return "-write-owners and -users need a file path: the owners file is checked with owners.Load before it is moved into place"
+	case writeOwners == "" && (users != "" || ownerSet):
+		return "-owner and -users go with -write-owners"
+	}
+	seen := map[string]string{}
+	for _, f := range []struct{ flag, path string }{{"-out", out}, {"-write-owners", writeOwners}, {"-users", users}} {
+		if f.path == "" || f.path == "-" {
+			continue
+		}
+		clean := filepath.Clean(f.path)
+		if other, dup := seen[clean]; dup {
+			return fmt.Sprintf("%s and %s name the same file %s", other, f.flag, f.path)
+		}
+		seen[clean] = f.flag
+	}
+	return ""
 }
 
 // writeFile writes data to path. Without force the file must not exist yet;
