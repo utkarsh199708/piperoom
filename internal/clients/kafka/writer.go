@@ -66,12 +66,14 @@ var (
 const (
 	// writeCallTimeout is the deadline of every Writer call whose ctx has none.
 	writeCallTimeout = 10 * time.Second
-	// maxProduceValueBytes caps one record value; Produce refuses the whole
-	// call before producing anything when a value is larger.
-	maxProduceValueBytes = 1 << 20
+	// maxProduceRecordBytes caps one record: key, value and every header key
+	// and value together (recordBytes). Produce refuses the whole call before
+	// producing anything when a record is larger.
+	maxProduceRecordBytes = 1 << 20
 	// produceBatchMaxBytes is kgo's local batch limit. Produce sends one
 	// record per batch, so it only has to sit above any record Produce
-	// accepts; the topic's max.message.bytes still decides on the broker.
+	// accepts plus its encoding overhead; the topic's max.message.bytes
+	// still decides on the broker.
 	produceBatchMaxBytes = 2 << 20
 	// produceGrace is how long Produce waits, after ctx ended, for kgo to
 	// say what became of the record in flight (kgo fails a record on ctx
@@ -435,8 +437,12 @@ func planMoves(committed map[string]map[int32]int64, targets, ends kadm.ListedOf
 // refuses the commit (UNKNOWN_MEMBER_ID, REBALANCE_IN_PROGRESS and the
 // like), which is reported as clients.ErrGroupActive too. When some
 // partitions commit and others fail, moved counts the committed ones and the
-// error names the first failure. The previous offsets are not returned: call
-// PreviousOffsets (or PlanGroupReset) first to keep them. Before any I/O, a
+// error names the first failure. When the commit request gets no answer
+// (the deadline cut it off, or the connection failed), moved is 0 and the
+// error says the outcome is unknown: the commit may have been applied, and
+// running the same reset again is safe (it commits the same offsets). The
+// previous offsets are not returned: call PreviousOffsets (or
+// PlanGroupReset) first to keep them. Before any I/O, a
 // group outside the room's pipeline is refused (tools.ErrOutOfScope), and so
 // is a ctx with no scope (tools.ErrNoScope); see Writer.
 func (w *Writer) ResetGroupOffsets(ctx context.Context, group string, to clients.OffsetTarget) (int, error) {
@@ -473,7 +479,9 @@ func (w *Writer) ResetGroupOffsets(ctx context.Context, group string, to clients
 	resp, err := w.admin().CommitOffsets(ctx, group, offs)
 	w.c.record(ctx, start, "kadm.CommitOffsets(group, offsets)", "group="+group, "partitions="+strconv.Itoa(n))
 	if err != nil {
-		return 0, fmt.Errorf("kafka: reset group %s: commit: %w", group, commitErr(err))
+		// kadm returns an error only when no answer came back: the broker
+		// may still have applied the commit.
+		return 0, fmt.Errorf("kafka: reset group %s: commit of %d partitions: outcome unknown, the commit may have been applied: %w", group, n, commitErr(err))
 	}
 	moved := 0
 	var firstErr error
@@ -519,8 +527,9 @@ func commitErr(err error) error {
 // argument wins, kgo's default partitioner places a keyed record by the
 // murmur2 hash of its key as Kafka's default partitioner does, and the
 // record gets the produce time. Key (nil stays a null key) and headers are
-// kept. A value over 1 MiB fails the whole call before anything is
-// produced, as does a topic that does not exist (clients.ErrNotFound; kgo
+// kept. A record over 1 MiB (key, value and headers together) fails the
+// whole call before anything is produced, as does a topic that does not
+// exist (clients.ErrNotFound; kgo
 // never asks the broker to create one). When ctx ends while a record is in
 // flight and kgo cannot tell within a second whether it was written, the
 // error says its outcome is unknown: it is not counted, and it may still
@@ -535,8 +544,8 @@ func (w *Writer) Produce(ctx context.Context, topic string, recs []clients.Recor
 		return 0, err
 	}
 	for i := range recs {
-		if n := len(recs[i].Value); n > maxProduceValueBytes {
-			return 0, fmt.Errorf("kafka: produce %s: record %d has a %d byte value, over the %d byte cap; nothing was produced", topic, i, n, maxProduceValueBytes)
+		if n := recordBytes(recs[i]); n > maxProduceRecordBytes {
+			return 0, fmt.Errorf("kafka: produce %s: record %d is %d bytes (key, value and headers), over the %d byte cap; nothing was produced", topic, i, n, maxProduceRecordBytes)
 		}
 	}
 	if len(recs) == 0 {
@@ -603,6 +612,15 @@ func (w *Writer) topicExists(ctx context.Context, topic string) error {
 		return fmt.Errorf("topic %s: %w", topic, mapNotFound(td.Err))
 	}
 	return nil
+}
+
+// recordBytes is what a record weighs against maxProduceRecordBytes.
+func recordBytes(r clients.Record) int {
+	n := len(r.Key) + len(r.Value)
+	for _, h := range r.Headers {
+		n += len(h.Key) + len(h.Value)
+	}
+	return n
 }
 
 // toKgoRecord builds the record to produce. Timestamp stays zero so kgo

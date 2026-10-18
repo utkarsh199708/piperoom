@@ -30,6 +30,9 @@ type fakeGroups struct {
 	// commitErrs gives a partition's commit answer; others succeed.
 	commitErrs map[int32]error
 	commitErr  error
+	// commitBlocks makes CommitOffsets wait for ctx to end, like a broker
+	// that never answers.
+	commitBlocks bool
 
 	consumerCalls, fetchCalls int
 	commits                   []kadm.Offsets
@@ -51,6 +54,10 @@ func (f *fakeGroups) FetchOffsets(ctx context.Context, _ string) (kadm.OffsetRes
 
 func (f *fakeGroups) CommitOffsets(ctx context.Context, _ string, os kadm.Offsets) (kadm.OffsetResponses, error) {
 	f.commits = append(f.commits, os)
+	if f.commitBlocks {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if f.commitErr != nil {
 		return nil, f.commitErr
 	}
@@ -278,8 +285,24 @@ func TestResetGroupOffsetsCommitAnswers(t *testing.T) {
 
 	f = newF()
 	f.commitErr = errors.New("connection reset")
-	if moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", earliest); err == nil || moved != 0 {
-		t.Fatalf("request error: moved=%d err=%v", moved, err)
+	if moved, err := resetWriter(f, l).ResetGroupOffsets(unscoped(), "g", earliest); err == nil || moved != 0 || !strings.Contains(err.Error(), "outcome unknown") {
+		t.Fatalf("request error: moved=%d err=%v, want 0 and an unknown outcome", moved, err)
+	}
+}
+
+// TestResetGroupOffsetsCommitCutOff: a commit the deadline cuts off may
+// have been applied; the error must say so, not report a plain failure.
+func TestResetGroupOffsetsCommitCutOff(t *testing.T) {
+	f := &fakeGroups{classic: emptyGroup("g"), committed: committedOf("t", map[int32]int64{0: 5}), commitBlocks: true}
+	l := &fakeLister{starts: merge(listed("t", map[int32]int64{0: 0})), ends: merge(listed("t", map[int32]int64{0: 9}))}
+	ctx, cancel := context.WithTimeout(unscoped(), 50*time.Millisecond)
+	defer cancel()
+	moved, err := resetWriter(f, l).ResetGroupOffsets(ctx, "g", clients.OffsetTarget{Earliest: true})
+	if moved != 0 || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "outcome unknown, the commit may have been applied") {
+		t.Fatalf("moved=%d err=%v, want 0 and an unknown outcome wrapping the deadline", moved, err)
+	}
+	if len(f.commits) != 1 {
+		t.Fatalf("commits sent = %d, want 1", len(f.commits))
 	}
 }
 
@@ -385,9 +408,19 @@ func TestProduceInOrderStopsAtFirstFailure(t *testing.T) {
 
 func TestProduceRefusesBeforeProducing(t *testing.T) {
 	p := &produceLog{failAt: -1}
-	big := []clients.Record{{Value: []byte("ok")}, {Value: make([]byte, maxProduceValueBytes+1)}}
-	if acked, err := produceWriter(p, topicHere("t")).Produce(unscoped(), "t", big); err == nil || acked != 0 {
-		t.Fatalf("oversized value: acked=%d err=%v", acked, err)
+	// The cap counts key, value and headers together.
+	for name, rec := range map[string]clients.Record{
+		"value":         {Value: make([]byte, maxProduceRecordBytes+1)},
+		"key and value": {Key: make([]byte, 20), Value: make([]byte, maxProduceRecordBytes-10)},
+		"header value":  {Value: make([]byte, maxProduceRecordBytes-10), Headers: []clients.RecordHeader{{Key: "h", Value: make([]byte, 10)}}},
+		"header key":    {Value: make([]byte, maxProduceRecordBytes), Headers: []clients.RecordHeader{{Key: "h"}}},
+		"many headers":  {Headers: manyHeaders(1025, 1024)},
+		"key alone":     {Key: make([]byte, maxProduceRecordBytes+1)},
+	} {
+		big := []clients.Record{{Value: []byte("ok")}, rec}
+		if acked, err := produceWriter(p, topicHere("t")).Produce(unscoped(), "t", big); err == nil || acked != 0 {
+			t.Fatalf("oversized %s: acked=%d err=%v", name, acked, err)
+		}
 	}
 	if _, err := produceWriter(p, topicHere("t")).Produce(unscoped(), " ", []clients.Record{{}}); err == nil {
 		t.Fatal("empty topic accepted")
@@ -404,6 +437,22 @@ func TestProduceRefusesBeforeProducing(t *testing.T) {
 	}
 	if len(p.got) != 0 {
 		t.Fatalf("%d records produced by refused calls", len(p.got))
+	}
+}
+
+func manyHeaders(n, size int) []clients.RecordHeader {
+	hs := make([]clients.RecordHeader, n)
+	for i := range hs {
+		hs[i] = clients.RecordHeader{Key: "h", Value: make([]byte, size-1)}
+	}
+	return hs
+}
+
+func TestProduceAtTheCap(t *testing.T) {
+	p := &produceLog{failAt: -1}
+	rec := clients.Record{Key: make([]byte, 10), Value: make([]byte, maxProduceRecordBytes-12), Headers: []clients.RecordHeader{{Key: "h", Value: []byte("v")}}}
+	if acked, err := produceWriter(p, topicHere("t")).Produce(unscoped(), "t", []clients.Record{rec}); err != nil || acked != 1 {
+		t.Fatalf("a record of exactly the cap: acked=%d err=%v", acked, err)
 	}
 }
 
@@ -447,6 +496,9 @@ func TestNewWriterProducerSettings(t *testing.T) {
 	defer w.Close()
 	if v := w.c.cl.OptValue(kgo.ProducerBatchMaxBytes); v != int32(produceBatchMaxBytes) {
 		t.Fatalf("ProducerBatchMaxBytes = %v", v)
+	}
+	if v := w.c.cl.OptValue(kgo.RequiredAcks); v != kgo.AllISRAcks() {
+		t.Fatalf("RequiredAcks = %v, want all in-sync replicas", v)
 	}
 	if v := w.c.cl.OptValue(kgo.DisableIdempotentWrite); v != false {
 		t.Fatalf("idempotent writes disabled: %v", v)
