@@ -1,5 +1,7 @@
 // Package kafka implements clients.KafkaAdmin against a Kafka cluster using
-// franz-go (kgo for consuming, kadm for admin reads).
+// franz-go (kgo for consuming, kadm for admin reads). Writer (writer.go) is
+// the separate write client of the P3 actions: clients.KafkaWriter and
+// clients.RecordReader.
 package kafka
 
 import (
@@ -92,10 +94,20 @@ func (c *Client) metadata() metaReader {
 // connOpts are connection options such as kgo.DialTLSConfig and kgo.SASL; most
 // callers want NewSecure instead.
 func New(brokers []string, sr *schemareg.Client, connOpts ...kgo.Opt) (*Client, error) {
-	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]string{}, keyAPI: newKeyAPI()}
-	cl, err := c.newKgo()
+	c, err := buildClient(brokers, sr, connOpts)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
+	}
+	return c, nil
+}
+
+// buildClient builds a Client. mainOpts go to its long-lived kgo client only
+// (NewWriter's producer settings), never to the short-lived consumers.
+func buildClient(brokers []string, sr *schemareg.Client, connOpts []kgo.Opt, mainOpts ...kgo.Opt) (*Client, error) {
+	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]string{}, keyAPI: newKeyAPI()}
+	cl, err := c.newKgo(mainOpts...)
+	if err != nil {
+		return nil, err
 	}
 	c.cl, c.adm = cl, kadm.NewClient(cl)
 	return c, nil
