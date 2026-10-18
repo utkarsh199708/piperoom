@@ -64,6 +64,9 @@ services:
       FORCE: ${FORCE:-}
       OWNER: ${PIPEROOM_QUICKSTART_OWNER:-${USER:-me}}
       DISCOVER_FLAGS: ${DISCOVER_FLAGS:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
     command:
       - sh
       - -ec
