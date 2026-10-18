@@ -136,14 +136,24 @@ func TestWriteModeOffApprovedProposalNeverRuns(t *testing.T) {
 	// A reject answers already_decided (409) from the row's blocked status,
 	// before the layer check and before any write: kabir owns neither layer,
 	// so a later check would have answered not_layer_owner.
-	before := len(allEvents(t, st, roomID))
+	// Only approval.* events are counted: the preview goroutine CreateProposal
+	// started appends proposal.previewed whenever it gets to it, so the whole
+	// log may grow during the reject for reasons unrelated to it.
+	approvalEvents := func() int {
+		return countEvents(t, st, roomID, events.ApprovalGiven) + countEvents(t, st, roomID, events.ApprovalRejected)
+	}
+	before := approvalEvents()
 	_, err = svc.RejectProposal(context.Background(), mustUser(t, svc, "kabir"), pid, "postgres", "no", proposalHash(t, svc, pid))
 	wantCode(t, err, "already_decided")
 	if re := (*room.Error)(nil); !errors.As(err, &re) || re.Status != http.StatusConflict {
 		t.Fatalf("reject on a blocked proposal = %v, want 409", err)
 	}
-	if n := len(allEvents(t, st, roomID)); n != before {
-		t.Fatalf("a refused reject appended %d events", n-before)
+	if n := approvalEvents(); n != before {
+		t.Fatalf("a refused reject appended %d approval events", n-before)
+	}
+	if apps, err := st.ListApprovals(context.Background(), pid); err != nil || len(apps) != 2 ||
+		apps[0].Decision != "approved" || apps[1].Decision != "approved" {
+		t.Fatalf("approval rows after a refused reject = %+v (err %v), want the two approvals only", apps, err)
 	}
 
 	svc.Close() // waits for every goroutine the service started

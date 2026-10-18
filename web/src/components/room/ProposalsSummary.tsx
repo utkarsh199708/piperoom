@@ -1,6 +1,7 @@
 import type { ProposalState } from '@/state/types'
 import { cn } from '@/lib/utils'
 import { executionPhase, verdictKind, verdictWords } from '@/lib/execution'
+import { WAITING_FOR_WRITE_MODE } from '@/lib/writeMode'
 import { StatusDot } from './StatusDot'
 import type { DotTone } from './StatusDot'
 
@@ -14,6 +15,8 @@ function describe(p: ProposalState): { tone: DotTone; word: string; count: strin
   if (p.status === 'approved') {
     // Approval is not the end: once steps ran, what happened to them is the news.
     const run = executionPhase(p)
+    // Write mode is off: nothing runs, and that is not news worth a colour (no error, no success).
+    if (run.phase === 'blocked') return { tone: 'muted', word: WAITING_FOR_WRITE_MODE, count }
     if (run.phase === 'failed') return { tone: 'fail', word: `Step ${run.step} failed`, count }
     if (run.phase === 'unknown') return { tone: 'warn', word: `Step ${run.step} outcome unknown`, count }
     if (run.phase === 'done') {
