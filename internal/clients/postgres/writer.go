@@ -362,14 +362,8 @@ func (w *Writer) DropReplicationSlot(ctx context.Context, slot string) error {
 		if active {
 			return clients.ErrSlotActive
 		}
-		if err := w.exec(ctx, tx, dropSlotSQL, slot); err != nil {
-			switch pgCode(err) {
-			case "55006": // object_in_use: a consumer attached since the check
-				return fmt.Errorf("drop: %w: %w", clients.ErrSlotActive, err)
-			case "42704": // undefined_object: dropped by someone else since the check
-				return fmt.Errorf("drop: %w: %w", clients.ErrNotFound, err)
-			}
-			return fmt.Errorf("drop: %w", err)
+		if err := w.dropSlot(ctx, tx, slot); err != nil {
+			return err
 		}
 		dropped = true
 		return nil
