@@ -1,6 +1,7 @@
 // Package postgres implements clients.SourceDB against the CDC source
 // Postgres database. Every read runs in its own READ ONLY transaction that is
-// rolled back (pgconv.ReadOnlyPool).
+// rolled back (pgconv.ReadOnlyPool). Writer (writer.go) implements
+// clients.SourceWriter on a separate pool and role, for the write actions only.
 package postgres
 
 import (
