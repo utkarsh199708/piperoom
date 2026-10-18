@@ -118,7 +118,18 @@ type StaleProposal struct {
 	ProposalID string
 	RoomID     string
 	ClaimedBy  string // "" when it was never claimed
+	// WriteBlocked: the status is ProposalStatusBlocked, so the proposal was
+	// fully approved while write mode was off and never ran.
+	WriteBlocked bool
 }
+
+// ProposalStatusBlocked is the status of a proposal fully approved while
+// write mode was off (PIPEROOM_WRITE_MODE): never claimed, never run. Once
+// its unclaimed window passes, the stale rule lists it like an approved,
+// unclaimed open proposal, flagged WriteBlocked, so a replica with write mode
+// on records why it did not run instead of running it. Only while its room is
+// open: a closed room's blocked row stays blocked.
+const ProposalStatusBlocked = "blocked"
 
 var _ Coordinator = (*PG)(nil)
 
@@ -357,10 +368,16 @@ func (s *PG) TouchProposalClaim(ctx context.Context, proposalID, owner string) (
 
 // staleProposalSQL is the stale rule shared by StaleProposals and
 // InterruptProposal. $a is the claim staleness, $b the unclaimed staleness,
-// both in milliseconds; p is the proposals row.
-const staleProposalSQL = `p.status = 'open' AND (
-    (p.claimed_by IS NOT NULL AND p.claimed_at < now() - %[1]s * interval '1 millisecond')
- OR (p.claimed_by IS NULL
+// both in milliseconds; p is the proposals row. 'blocked' is
+// ProposalStatusBlocked: such a row is never claimed, so only the unclaimed
+// branch can list it, and only while its room is open. In a closed room
+// "blocked" is the accurate last word, and no action.executed should land
+// after the room's post-mortem.
+const staleProposalSQL = `(
+    (p.status = 'open' AND p.claimed_by IS NOT NULL AND p.claimed_at < now() - %[1]s * interval '1 millisecond')
+ OR ((p.status = 'open'
+      OR (p.status = 'blocked' AND EXISTS (SELECT 1 FROM rooms rm WHERE rm.id = p.room_id AND rm.status = 'open')))
+     AND p.claimed_by IS NULL
      AND jsonb_array_length(p.required_layers) > 0
      AND NOT EXISTS (
          SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
@@ -377,7 +394,7 @@ func (s *PG) StaleProposals(ctx context.Context, claimStale, unclaimedStale time
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.proposal_id, p.room_id, coalesce(p.claimed_by, '') FROM proposals p
+		`SELECT p.proposal_id, p.room_id, coalesce(p.claimed_by, ''), p.status = 'blocked' FROM proposals p
 		 WHERE `+fmt.Sprintf(staleProposalSQL, "$1", "$2")+`
 		 ORDER BY p.proposal_id LIMIT $3`, millis(claimStale), millis(unclaimedStale), limit)
 	if err != nil {
@@ -387,7 +404,7 @@ func (s *PG) StaleProposals(ctx context.Context, claimStale, unclaimedStale time
 	var out []StaleProposal
 	for rows.Next() {
 		var sp StaleProposal
-		if err := rows.Scan(&sp.ProposalID, &sp.RoomID, &sp.ClaimedBy); err != nil {
+		if err := rows.Scan(&sp.ProposalID, &sp.RoomID, &sp.ClaimedBy, &sp.WriteBlocked); err != nil {
 			return nil, fmt.Errorf("store: scan stale proposal: %w", err)
 		}
 		out = append(out, sp)
