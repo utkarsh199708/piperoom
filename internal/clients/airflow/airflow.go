@@ -107,8 +107,8 @@ type Client struct {
 }
 
 var (
-	_ Reader         = (*Client)(nil)
-	_ ScheduleReader = (*Client)(nil)
+	_ clients.OrchestratorReader = (*Client)(nil)
+	_ clients.DAGScheduleReader  = (*Client)(nil)
 )
 
 // Option configures New.

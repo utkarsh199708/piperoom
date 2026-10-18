@@ -1,8 +1,9 @@
 // Package airflow is a read-only client for the Apache Airflow 2.x stable
 // REST API (v1, under /api/v1; Airflow 2.1 or later, which added order_by).
 // It reads what the batch tools need (P4c): a DAG's schedule, its last runs,
-// the task instances of one run, and the end of one task try's log. It sends
-// GET requests only, so a Viewer-role Airflow user is enough.
+// the task instances of one run, and the end of one task try's log. *Client
+// implements clients.OrchestratorReader and clients.DAGScheduleReader. It
+// sends GET requests only, so a Viewer-role Airflow user is enough.
 //
 // Paths used (each segment url.PathEscape'd and checked by netsec.CheckPath):
 //
