@@ -351,6 +351,38 @@ func TestIsOwned(t *testing.T) {
 	}
 }
 
+func TestHasPipeline(t *testing.T) {
+	o, err := Load(writeTemp(t, ownershipDoc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		o    *Owners
+		id   string
+		want bool
+	}{
+		{"known pipeline", o, "orders", true},
+		{"second known pipeline", o, "payments", true},
+		{"unknown pipeline", o, "nope", false},
+		{"id is case sensitive", o, "Orders", false},
+		{"empty id is not a pipeline", o, "", false},
+		{"nil Owners", nil, "orders", false},
+		{"no pipelines declared", &Owners{}, "orders", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.o.HasPipeline(tc.id); got != tc.want {
+				t.Errorf("HasPipeline(%q) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
+	}
+	// The reason it exists: IsOwned alone cannot tell "unowned" from "unknown".
+	if o.IsOwned("nope", "postgres") != o.IsOwned("payments", "warehouse") {
+		t.Error("an unknown pipeline and an unowned layer both read IsOwned == false; that is why HasPipeline exists")
+	}
+}
+
 func TestOwnsAll(t *testing.T) {
 	o, err := Load(writeTemp(t, ownershipDoc))
 	if err != nil {

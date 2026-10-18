@@ -11,7 +11,8 @@ import (
 //
 //	Pipeline.AutoApprove / AutoApproveList   the actions a pipeline lets run on a timer
 //	LoadWithActions / ValidateAutoApprove    check those names against the action registry
-//	IsOwned                                  does anyone own (pipeline, layer)? false = unowned, the driver approves
+//	HasPipeline                              is this id a declared pipeline? check it before reading !IsOwned as "unowned"
+//	IsOwned                                  does anyone own (pipeline, layer)? false for an unowned layer and for an unknown pipeline
 //	OwnsAll                                  may this session approve every one of these layers? (approve-all)
 //
 // None of them does I/O except LoadWithActions, which reads the file.
@@ -23,6 +24,9 @@ import (
 //
 // actionNames is the complete set of names the caller can run. A nil or empty
 // set is an empty registry, not "skip the check": any entry is then refused.
+// Pass the names of the FULL proposal registry (the one the agent proposes
+// from), never an executor registry emptied because write mode is off: a
+// read-only server would then refuse to start over a valid file.
 func LoadWithActions(path string, actionNames []string) (*Owners, error) {
 	o, err := Load(path)
 	if err != nil {
@@ -38,7 +42,8 @@ func LoadWithActions(path string, actionNames []string) (*Owners, error) {
 // actionNames. It exists for a caller that loaded the file with Load before the
 // action registry was built (the server re-validates at start). Same rules as
 // LoadWithActions: the error names the pipeline and the entry, and a nil or
-// empty actionNames refuses every entry.
+// empty actionNames refuses every entry. As there, pass the FULL proposal
+// registry's names, not an executor registry emptied for write-mode-off.
 func (o *Owners) ValidateAutoApprove(actionNames []string) error {
 	if o == nil {
 		return nil
@@ -121,6 +126,18 @@ func (p *Pipeline) AutoApproveList() []string {
 	return append([]string{}, p.AutoApprove...)
 }
 
+// HasPipeline reports whether the file declares a pipeline with this id. It is
+// the check a caller needs before it treats !IsOwned as "unowned", because
+// IsOwned is false for an unknown pipeline too. Nil-safe. The empty id is not a
+// pipeline.
+func (o *Owners) HasPipeline(id string) bool {
+	if o == nil {
+		return false
+	}
+	_, ok := o.Pipeline(id)
+	return ok
+}
+
 // IsOwned reports whether anyone is named for the layer of the pipeline: an
 // approver or a backup in the pipeline's `owners:` entry or, when it has none
 // for that layer, in the top-level `layers:` entry. A layer that is not owned
@@ -128,9 +145,16 @@ func (p *Pipeline) AutoApproveList() []string {
 //
 // It uses the same lookup as CanApprove, so the two never disagree: a pipeline
 // `owners:` entry replaces the top-level one (an entry with no principals does
-// not fall back to it), and a pipeline id that matches no pipeline is not owned
-// (fail closed). Only the empty id reads `layers:` alone. A backup counts
-// because CanApprove lets a backup approve.
+// not fall back to it), and a pipeline id that matches no pipeline has no
+// rights. Only the empty id reads `layers:` alone. A backup counts because
+// CanApprove lets a backup approve.
+//
+// "Not owned" is the PERMISSIVE answer for the driver fallback, which lets the
+// driver approve a layer nobody owns. An unknown pipeline id returns false here
+// because it has no rights to grant (the safe answer for CanApprove), but that
+// must not be read as "unowned": a caller that decides a fallback from
+// !IsOwned must first check HasPipeline, or a mistyped or removed pipeline id
+// would hand its approvals to the driver.
 func (o *Owners) IsOwned(pipelineID, layer string) bool {
 	if o == nil {
 		return false
