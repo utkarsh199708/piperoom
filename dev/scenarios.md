@@ -98,6 +98,10 @@ Expected health per scenario, derived from the symptoms above (**not yet verifie
 | `slot-inactive` | kafka-connect (STOPPED); postgres; kafka and warehouse after 60 s | consumer |
 | `connector-auth` | postgres (slot inactive); kafka and warehouse after 60 s | kafka-connect (task stays RUNNING, see §7), consumer |
 | `long-transaction` | nothing until retained WAL passes 100 MB | all |
+| `missed-table` (§8) | nothing: the connector streams, only the new table's rows are missing | all |
+| `dead-slot` (§9) | kafka-connect (STOPPED); postgres (slot inactive); kafka and warehouse after 60 s | consumer |
+| `consumer-bad-deploy` (§10) | consumer (stopped, no members) | kafka-connect, postgres, kafka; warehouse until a new change waits > 60 s |
+| `dlq-backlog` (§11) | nothing: lag stays 0, the rejected orders are committed | all |
 
 ---
 
@@ -294,3 +298,132 @@ warehouse   analytics.orders: stale                          ← no new records 
 `ALTER TABLE public.orders OWNER TO piperoom`, `ALTER PUBLICATION dbz_publication OWNER TO piperoom`,
 re-register the connector with `database.user=piperoom`, restart task 0. The slot goes back
 `active=true` and the next insert reaches the warehouse (verified: 103 → 104 rows, stale 9 s).
+
+---
+
+## P3 scenarios: one incident per write action
+
+Each break below is the incident one P3 action ends (`tasks/P3-fixes-that-end-incidents.md`). Written on
+2026-10-18 **without a running stack** (no Docker in that session): the SQL, REST and Kafka steps are
+unit-tested against fakes and kfake (`cmd/devctl/scenarios_p3_test.go`), and the Kafka helpers have
+`integration`-tagged tests, but **nothing in §8–§11 has been observed yet**. Whoever runs them first on the
+dev stack: replace the "Expected" blocks with what you saw, as in §1–§7.
+
+Every object a break creates is named `devctl_*` / `devctl.*`; every fix removes it and is safe to run twice.
+
+| Scenario | How the room opens | Action that ends it (P3) | `devctl fix` does |
+|---|---|---|---|
+| `missed-table` | alert: `devctl alert missed-table` (no watcher signal sees a table that is missing from Kafka) | `pg_add_publication_table`, then `connect_snapshot_table` (`via: signal_table`) for the rows written before | adds the table to the publication if missing, sends one incremental-snapshot signal if the topic is short, waits until every row is in Kafka; then back to baseline: connector config from `dev/connectors`, publication on `orders` only, `devctl_*` tables, topics and subjects removed |
+| `dead-slot` | watcher: `slot_inactive`, `connector_down` (STOPPED, sev3) | `pg_drop_replication_slot` | drops the slot if it is inactive and the connector is not RUNNING (refuses otherwise), resumes the connector (new slot), re-emits the rows changed meanwhile, waits for order-sync lag 0 |
+| `consumer-bad-deploy` | alert: `devctl alert consumer-bad-deploy` (lag is 0; only a reconciliation sees it) | `kafka_reset_consumer_offsets` (group inactive, to the deploy time) | stops devconsumer, resets order-sync to the start of `pg.public.orders` (the load is an upsert by id, so a full replay is safe), starts the good build, waits for lag 0 |
+| `dlq-backlog` | watcher: `dlq_growth` (`devctl.order-sync.dlq` is declared in `dev/owners.yaml`) | `dlq_replay`, after the cause is fixed | deploys the good build, replays every DLQ record into `pg.public.orders` in order without the `__connect.errors.*` headers, deletes the DLQ topic, waits until every `gift` order is in the warehouse |
+
+`devctl alert <scenario> [--server URL] [--as user]` posts the scenario's alert body (`cmd/devctl/alert.go`) to
+`POST /api/alerts/webhook` with `X-User` (dev auth mode only; default server `PIPEROOM_HTTP_ADDR`, user
+`arjun`). It takes no lock and changes nothing on the stack. Its `dedup_key` is `devctl-<scenario>`, so a
+repeat joins the open room. `devctl demo --rehearse` waits for a watcher room, so of these four it only fits
+`dead-slot` and `dlq-backlog`.
+
+`dev/owners.yaml` (and `owners.shadow.yaml`) carry what the actions check: `public.devctl_refunds` in
+`source_tables` (the actions refuse a table outside it), the DLQ in `watch.dlq_topics` (`written_by:
+order-sync`), and `dlq_growth: {for: 30s}`. devconsumer gets `DLQ_TOPIC`, `SKIP_OPS` and `REJECT_STATUS` from
+`dev/docker-compose.yml`; the last two are empty (the good build) unless a break sets them.
+
+## 8. `missed-table` — a new table that never reaches Kafka
+
+**Break (`devctl break missed-table`):**
+1. `CREATE TABLE public.devctl_refunds (id bigserial PRIMARY KEY, …)` and the Debezium signal table
+   `public.devctl_signal (id varchar(42) PRIMARY KEY, type varchar(32), data varchar(2048))`. Both land in
+   `piperoom_audit.ddl_log`.
+2. Re-register the connector with `publication.autocreate.mode=disabled` (the DBA owns the publication),
+   `table.include.list=public.orders,public.devctl_refunds,public.devctl_signal` (the app team added the
+   table to the connector) and `signal.data.collection=public.devctl_signal`; restart task 0.
+3. `ALTER PUBLICATION dbz_publication SET TABLE public.orders, public.devctl_signal`: the new table is not
+   published. Insert 25 refunds.
+4. Proof: an order written after the refunds reaches `analytics.orders` (the connector streams), and topic
+   `pg.public.devctl_refunds` has no record.
+
+**Root cause:** pgoutput only decodes tables in the publication. With autocreate disabled Debezium never adds
+the table, so the include list says "capture it" and nothing fails: the task stays RUNNING, the slot active.
+
+**Expected symptoms (not yet observed):**
+```
+connector   pg-orders-connector: RUNNING, tasks 0=RUNNING
+slot        debezium_orders active=true
+consumer    order-sync: state Stable, members 1, total lag 0
+warehouse   fresh
+pg_publication_tables (dbz_publication): orders, devctl_signal      ← devctl_refunds missing
+topic pg.public.devctl_refunds: does not exist
+```
+
+**Fix:** the agent proposes `pg_add_publication_table` (postgres owner approves); new refunds flow from then
+on. The 25 rows written before need `connect_snapshot_table` with `via: signal_table` (the connector's
+`signal.data.collection`), which writes the same `execute-snapshot` row `devctl fix` writes.
+
+## 9. `dead-slot` — a retired connector's slot keeps all WAL
+
+**Break (`devctl break dead-slot`):** the orders connector is retired: Connect REST `stop` (the config stays
+for the record). The slot `debezium_orders` loses its WAL sender, and a 100-row insert proves retained WAL
+grows (`retained_before_bytes` / `retained_after_bytes` in the log, as in §5).
+
+**Why this is not §5:** the mechanics are the same; the decision is not. In §5 the connector comes back, so
+`connect_resume_connector` is right. Here nobody will read the slot again, so the fix that protects the
+database is dropping it. The P3 action only drops the slot named in a pipeline connector's `slot.name` (P3b),
+which is why the dead slot is the connector's own slot and not a second, unrelated one: an extra slot would
+be refused by the action and is not watched by the watcher either. That the connector is retired is human
+context the room gets from people; the C7 eval scenario (`dead-slot-wal.yaml`, P3g-1) has to state it in
+its alert or a steer, or "resume" is the right answer there too.
+
+**Expected symptoms (not yet observed):** as §5: `connector STOPPED`, `slot debezium_orders active=false`,
+retained WAL growing with `devctl load`; the watcher fires `connector_down` (sev3, STOPPED) and
+`slot_inactive` after 30 s.
+
+**Fix:** `pg_drop_replication_slot` (postgres owner approves) frees the WAL at once (the slot is gone).
+`devctl fix dead-slot` does the same, then puts the dev pipeline back: resume (Debezium creates a new slot at
+the current WAL position) and `UPDATE orders SET updated_at = updated_at` on the rows newer than the
+warehouse's newest row, so the changes made while no slot existed reach the warehouse. In production that last
+step is `connect_snapshot_table`. If the agent already dropped the slot, the fix skips the drop.
+
+## 10. `consumer-bad-deploy` — offsets committed past orders never loaded
+
+**Break (`devctl break consumer-bad-deploy`):** devconsumer is redeployed with `SKIP_OPS=c` (a build that
+drops create events but commits their offsets; updates still load, so the warehouse looks fresh). 30 orders
+are inserted; the break checks that order-sync's lag went back to 0 and that none of the 30 ids is in
+`analytics.orders`. Then on-call stops devconsumer (`docker compose stop`), leaving the group Empty: the reset
+action refuses a group with members.
+
+**Expected symptoms (not yet observed):**
+```
+connector   pg-orders-connector: RUNNING, tasks 0=RUNNING
+consumer    order-sync: state Empty, members 0, total lag 0   ← grows only with `devctl load`
+warehouse   analytics.orders: the 30 new ids missing
+devconsumer log (before the stop): "devconsumer started … skip_ops=c"
+```
+
+**Fix:** `kafka_reset_consumer_offsets` to a time before the deploy (consumer owner approves), then the good
+build starts and replays: lag jumps, then drains to 0, and the 30 orders arrive. `devctl fix
+consumer-bad-deploy` resets to the start of the topic instead of a timestamp (it does not know the deploy
+time; the upsert makes a full replay safe) and starts devconsumer with `SKIP_OPS` empty.
+
+## 11. `dlq-backlog` — a strict release routes valid orders to the DLQ
+
+**Break (`devctl break dlq-backlog`):** creates `devctl.order-sync.dlq` (1 partition), redeploys devconsumer
+with `REJECT_STATUS=gift` (a release that validates `status` and does not know the new value `gift`), and
+inserts 20 `gift` orders. Each is produced to the DLQ with its key, value and headers, plus the
+`__connect.errors.*` context headers Kafka Connect uses (topic, partition, offset, exception class
+`devconsumer.ValidationError`, message `unknown status "gift"`), so `dlq_peek` reads it like a sink
+connector's DLQ. The break waits until the DLQ holds the 20 records.
+
+**Expected symptoms (not yet observed):**
+```
+consumer    order-sync: state Stable, members 1, total lag 0   ← rejected records are committed
+warehouse   fresh, but no 'gift' order
+topic devctl.order-sync.dlq: 20 records
+devconsumer log: level=WARN msg="record rejected to the DLQ" … reason="unknown status \"gift\""
+watcher: dlq_growth fires after 30 s and clears once no new DLQ record arrived for its window (1 h)
+```
+
+**Fix:** deploy a build that accepts `gift` (the cause), then `dlq_replay` (kafka owner approves): the DLQ's
+end offset does not change, `pg.public.orders` grows by 20, the orders load. `devctl fix dlq-backlog` does
+both, then deletes the DLQ topic so a second run replays nothing. If the agent already replayed, the fix's
+replay is a duplicate the upsert absorbs.
