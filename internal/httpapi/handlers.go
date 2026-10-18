@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"piperoom/internal/alertin"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
 )
@@ -85,7 +86,7 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAlertWebhook accepts any JSON body, maps title/severity/pipeline_id
-// when present and stores the raw body verbatim in room.created.alert
+// (or, without a valid pipeline_id, a top-level dag_id) when present and stores the raw body verbatim in room.created.alert
 // (docs/api.md). A resolved alert with no open room to join is 202 and opens
 // nothing.
 func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
@@ -104,8 +105,18 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 		Title      string `json:"title"`
 		Severity   string `json:"severity"`
 		PipelineID string `json:"pipeline_id"`
+		DAGID      string `json:"dag_id"`
 	}
 	_ = json.Unmarshal(raw, &probe)
+	// The signed routes' order (alertin resolvePipeline): a valid explicit
+	// pipeline_id first, then the one batch pipeline whose dags list dag_id.
+	// An unknown or shared dag_id changes nothing, so the body resolves as it
+	// did before dag_id was read.
+	if !alertin.ValidPipelineID(probe.PipelineID) {
+		if id := s.svc.PipelineForDAG(probe.DAGID); id != "" {
+			probe.PipelineID = id
+		}
+	}
 	// The dev webhook has a session: it may open or join rooms only in the
 	// caller's tenants (an unknown pipeline is in none). The answer is the
 	// 404 of an unknown pipeline.

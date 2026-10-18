@@ -35,7 +35,7 @@ func main() {
 		effort    = flag.String("effort", "", "effort override (default from config)")
 		maxTurns  = flag.Int("max-turns", 0, "max turns (default 40)")
 		record    = flag.String("record", "", "write a recording of the run (events, tool calls, model, prompt hash, commit, timings) to this new directory")
-		approve   = flag.Bool("approve-all", false, "DEV STACK ONLY: approve and EXECUTE every proposal. Refused unless every address is local and -confirm-dev-stack (or "+approveConfirmEnv+") is set")
+		approve   = flag.Bool("approve-all", false, "DEV STACK ONLY: approve and EXECUTE every proposal. Refused unless every address is local, -confirm-dev-stack (or "+approveConfirmEnv+") is set and PIPEROOM_WRITE_MODE=on")
 		confirm   = flag.Bool("confirm-dev-stack", false, "confirm that -approve-all runs against the local dev stack")
 	)
 	flag.Parse()
@@ -98,6 +98,9 @@ func run(o runOptions) (err error) {
 		if err := checkApproveAll(cfg, pipe, havePipe, o.ConfirmDevStack, os.Getenv); err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
+		if err := checkApproveAllWriteMode(cfg); err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
 		fmt.Fprint(os.Stderr, approveAllWarning)
 	}
 
@@ -127,7 +130,9 @@ func run(o runOptions) (err error) {
 		// Only the investigated pipeline's client set is opened: its own
 		// connections: from owners.yaml, or the process-wide settings
 		// (docs/design/tenancy.md). No other pipeline's credentials are read.
-		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{Only: []string{pipeline}})
+		// Without -approve-all nothing runs a fix, so no write client is
+		// built whatever PIPEROOM_WRITE_MODE says.
+		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{Only: []string{pipeline}, ReadOnly: !o.ApproveAll})
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}

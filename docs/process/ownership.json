@@ -18,13 +18,13 @@
     "A2": {
       "folders": ["internal/clients/connect/**", "internal/clients/schemareg/**", "internal/clients/kafka/**", "internal/tools/kafkatools/**",
         "internal/actions/**", "internal/clients/netsec/**"],
-      "excluded": ["internal/actions/action.go", "internal/actions/pgactions/**"]
+      "excluded": ["internal/actions/action.go", "internal/actions/pgactions/**", "internal/actions/sourceactions/**", "internal/actions/fixpr/**"]
     },
     "A3": {
       "folders": ["internal/clients/postgres/**", "internal/clients/warehouse/**", "internal/tools/dbtools/**", "internal/tools/scope.go",
         "internal/topology/**", "internal/owners/**", "internal/clients/pgconv/**",
         "internal/tools/changes/**", "internal/clients/prom/**", "internal/tools/debeziumtools/**",
-        "internal/actions/pgactions/**"],
+        "internal/actions/pgactions/**", "internal/actions/sourceactions/**"],
       "excluded": ["internal/topology/graph.go"]
     },
     "A4": { "folders": ["internal/agent/**", "cmd/investigate/**", "internal/wiring/**"], "excluded": ["internal/agent/contract.go"] },
@@ -33,6 +33,7 @@
       "excluded": []
     },
     "A6": { "folders": ["web/**"], "excluded": [] },
+    "A8": { "folders": ["internal/clients/mysql/**", "internal/tools/mysqltools/**"], "excluded": [] },
     "A7": { "folders": ["internal/watch/**", "internal/dlq/**"], "excluded": [] },
     "C1": { "folders": [".github/**", "README.md", "docs/runbook.md", "Makefile", "deploy/docker-compose.quickstart.yml"], "excluded": [] },
     "C2": { "folders": [], "excluded": [] },
@@ -56,6 +57,8 @@
     "C14": { "folders": ["docs/pilot/**"], "excluded": [] },
     "C15": { "folders": ["internal/clients/airflow/**", "internal/tools/batchtools/**"], "excluded": [] },
     "C16": { "folders": ["internal/clients/dbt/**", "internal/tools/dbttools/**"], "excluded": [] },
+    "C17": { "folders": ["internal/clients/forge/**", "internal/tools/forgetools/**", "internal/actions/fixpr/**"], "excluded": [] },
+    "C18": { "folders": ["internal/clients/workerlogs/**", "internal/tools/logtools/**", "internal/tools/nettools/**"], "excluded": [] },
     "E2": { "folders": ["evals/score.go", "evals/calibration.go"], "excluded": [] },
     "E3": { "folders": ["evals/gen/**", "evals/scenarios/heldout/**"], "excluded": [] },
     "N3": { "folders": ["internal/textnorm/**"], "excluded": [] },
