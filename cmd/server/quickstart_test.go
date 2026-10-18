@@ -428,8 +428,10 @@ func noDataStack(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own
 // binary with PIPEROOM_TEST_QUICKSTART=1 so runWith executes --quickstart in
 // its own process, with noDataStack in place of the real stack.
 func TestQuickstartHelper(t *testing.T) {
+	// A plain return, not t.Skip: the full-stack CI job fails on any skipped
+	// test, and this one only does work inside the subprocess.
 	if os.Getenv("PIPEROOM_TEST_QUICKSTART") != "1" {
-		t.Skip("helper for subprocess tests")
+		return
 	}
 	os.Args = []string{"server", "--quickstart", "--owners", os.Getenv("PIPEROOM_TEST_OWNERS")}
 	if err := runWith(startDeps{openStacks: noDataStack, stdout: os.Stdout}); err != nil {

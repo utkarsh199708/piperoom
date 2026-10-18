@@ -613,7 +613,7 @@ func listenAndServe(server *http.Server, quickstart bool, out io.Writer, log *sl
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("server: listen on %s: %w", addr, err)
 	}
 	if quickstart {
 		if err := checkQuickstartListener(ln.Addr()); err != nil {
