@@ -65,31 +65,18 @@ func topicConfig() map[string]string {
 }
 
 // recKafka is a clients.KafkaWriter without the narrow signal method: the
-// action falls back to Produce.
+// action refuses it (ErrNoSignalWriter) and never calls its Produce.
 type recKafka struct {
 	topic string
 	recs  []clients.Record
-	acked int
-	err   error
-	block bool
 }
 
 func (k *recKafka) ResetGroupOffsets(context.Context, string, clients.OffsetTarget) (int, error) {
 	return 0, errors.New("fake: unexpected ResetGroupOffsets")
 }
-func (k *recKafka) Produce(ctx context.Context, topic string, recs []clients.Record) (int, error) {
-	if k.block {
-		<-ctx.Done()
-		return 0, ctx.Err()
-	}
+func (k *recKafka) Produce(_ context.Context, topic string, recs []clients.Record) (int, error) {
 	k.topic, k.recs = topic, recs
-	if k.err != nil {
-		return 0, k.err
-	}
-	if k.acked >= 0 {
-		return len(recs), nil
-	}
-	return 0, nil
+	return len(recs), nil
 }
 
 // signalKafka has the narrow method, as the real kafka.Writer.
@@ -355,18 +342,37 @@ func TestSnapshotExecuteSignalTopic(t *testing.T) {
 	}
 }
 
-func TestSnapshotExecuteProduceFallback(t *testing.T) {
-	k := &recKafka{}
-	a := &snapshotTable{d: SnapshotDeps{Connect: &sigConnect{cfg: topicConfig()}, Kafka: k}}
-	if _, err := a.Execute(roomCtx(), snapParams(ViaSignalTopic, "public.orders")); err != nil {
-		t.Fatal(err)
+// A writer without SendSnapshotSignal is refused before any I/O by Validate
+// and Execute: no connector config read, nothing produced. Its Produce would
+// skip the check against every source table's CDC topic.
+func TestSnapshotRefusesWriterWithoutSignal(t *testing.T) {
+	for _, ctx := range []context.Context{roomCtx(), tools.WithUnscoped(context.Background())} {
+		fc := &sigConnect{cfg: topicConfig()}
+		k := &recKafka{}
+		a := &snapshotTable{d: SnapshotDeps{Connect: fc, Kafka: k}}
+		raw := snapParams(ViaSignalTopic, "public.orders")
+		if err := a.Validate(ctx, raw); !errors.Is(err, ErrNoSignalWriter) || !strings.Contains(err.Error(), "cannot send snapshot signals") {
+			t.Fatalf("Validate = %v, want ErrNoSignalWriter", err)
+		}
+		out, err := a.Execute(ctx, raw)
+		if !errors.Is(err, ErrNoSignalWriter) || out != "" {
+			t.Fatalf("Execute = %q, %v; want ErrNoSignalWriter", out, err)
+		}
+		if fc.n() != 0 {
+			t.Fatalf("read the connector config %d times before refusing", fc.n())
+		}
+		if k.topic != "" || k.recs != nil {
+			t.Fatalf("produced %q %+v", k.topic, k.recs)
+		}
 	}
-	if k.topic != "pg-signal" || len(k.recs) != 1 || string(k.recs[0].Key) != "pg" {
-		t.Fatalf("produced %q %+v", k.topic, k.recs)
-	}
-	want := `{"type":"execute-snapshot","data":{"data-collections":["public.orders"],"type":"INCREMENTAL"}}`
-	if string(k.recs[0].Value) != want {
-		t.Fatalf("value %s, want %s", k.recs[0].Value, want)
+}
+
+// With write mode off there is no writer: Validate still passes, so a step
+// can be proposed and approved before write mode is on.
+func TestSnapshotValidateWithoutWriter(t *testing.T) {
+	a := &snapshotTable{d: SnapshotDeps{Connect: &sigConnect{cfg: topicConfig()}}}
+	if err := a.Validate(roomCtx(), snapParams(ViaSignalTopic, "public.orders")); err != nil {
+		t.Fatalf("Validate = %v", err)
 	}
 }
 
@@ -380,9 +386,7 @@ func TestSnapshotExecuteErrors(t *testing.T) {
 		wantS string
 	}{
 		{"signal error", SnapshotDeps{Kafka: &signalKafka{err: boom}}, ViaSignalTopic, boom, ""},
-		{"produce error", SnapshotDeps{Kafka: &recKafka{err: boom}}, ViaSignalTopic, boom, ""},
-		{"not acked", SnapshotDeps{Kafka: &recKafka{acked: -1}}, ViaSignalTopic, nil, "acked 0 of 1"},
-		{"produce timeout", SnapshotDeps{Kafka: &recKafka{block: true}, Timeout: 20 * time.Millisecond}, ViaSignalTopic, context.DeadlineExceeded, ""},
+		{"writer without signal method", SnapshotDeps{Kafka: &recKafka{}}, ViaSignalTopic, ErrNoSignalWriter, "cannot send snapshot signals"},
 		{"config gone since approval", SnapshotDeps{Kafka: &signalKafka{}}, ViaSignalTopic, ErrSignalNotConfigured, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

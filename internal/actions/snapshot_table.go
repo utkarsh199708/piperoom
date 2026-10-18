@@ -46,6 +46,12 @@ var (
 	// variant is the postgres-layer action pg_snapshot_signal (pgactions,
 	// P3b-4).
 	errSignalTableLayer = errors.New("actions: connect_snapshot_table: via signal_table is the postgres-layer action pg_snapshot_signal (it writes a row to the source database, whose owner must approve it); use via signal_topic here")
+	// ErrNoSignalWriter refuses a wired Kafka writer without the narrow
+	// SendSnapshotSignal. Its Produce would not do: it checks the topic
+	// against the CDC topics of the request's tables only (readSetup), not of
+	// every source table as SendSnapshotSignal does, so a signal topic that
+	// is another source table's CDC topic would get the signal record.
+	ErrNoSignalWriter = errors.New("actions: connect_snapshot_table: the Kafka writer cannot send snapshot signals (no SendSnapshotSignal); nothing was sent")
 )
 
 // SnapshotDeps is what connect_snapshot_table reads and writes through.
@@ -55,9 +61,11 @@ type SnapshotDeps struct {
 	// Source is optional: when it can estimate a table's rows
 	// (tableRowEstimator), Preview shows the estimate.
 	Source clients.SourceReader
-	// Kafka is nil unless write mode is on; only Execute touches it. It is
-	// the action's only writer: a signal table row, a source database write,
-	// is pg_snapshot_signal's.
+	// Kafka is nil unless write mode is on; only Execute writes through it.
+	// It is the action's only writer: a signal table row, a source database
+	// write, is pg_snapshot_signal's. It must also be a snapshotSignaler
+	// (the real kafka.Writer is); Validate and Execute refuse one that is not
+	// (ErrNoSignalWriter), and the action never falls back to Produce.
 	Kafka clients.KafkaWriter
 
 	// Timeout overrides the 10 s bound of each call; tests only.
@@ -71,6 +79,7 @@ func RegisterSnapshot(reg *Registry, d SnapshotDeps) error {
 
 // snapshotSignaler is the Kafka Writer's narrow signal produce: Produce only
 // writes the pipeline's CDC topics, and the signal topic is none of them.
+// SendSnapshotSignal checks the topic against every source table's CDC topic.
 type snapshotSignaler interface {
 	SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (kafka.SnapshotSignal, error)
 }
@@ -267,11 +276,17 @@ func (a *snapshotTable) readSetup(ctx context.Context, p snapshotParams) (signal
 // Validate reads the connector config and refuses a connector that is not a
 // Debezium source, and a via it is not configured for (ErrSignalNotConfigured,
 // naming the keys to set). Tables outside source_tables are CheckScope's.
-// It never touches a writer, so it works with write mode off.
+// It never writes, so it works with write mode off (no writer); a wired
+// writer without SendSnapshotSignal is ErrNoSignalWriter, before any I/O.
 func (a *snapshotTable) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseSnapshot(raw)
 	if err != nil {
 		return err
+	}
+	if a.d.Kafka != nil {
+		if _, ok := a.d.Kafka.(snapshotSignaler); !ok {
+			return ErrNoSignalWriter
+		}
 	}
 	ctx, cancel := a.ctx(ctx)
 	defer cancel()
@@ -372,7 +387,8 @@ func notIncluded(list string, tables []string) []string {
 
 // Execute re-reads the connector config (it may have changed since the
 // approval) and sends the signal as a record on its signal topic through the
-// Kafka writer. via signal_table never gets here (parseSnapshot).
+// Kafka writer's SendSnapshotSignal (ErrNoSignalWriter without it, before any
+// I/O). via signal_table never gets here (parseSnapshot).
 func (a *snapshotTable) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	p, err := parseSnapshot(raw)
 	if err != nil {
@@ -384,6 +400,10 @@ func (a *snapshotTable) Execute(ctx context.Context, raw json.RawMessage) (strin
 	if a.d.Kafka == nil {
 		return "", fmt.Errorf("actions: %s: no Kafka write client (PIPEROOM_WRITE_MODE=on is needed); nothing was sent", SnapshotTableName)
 	}
+	ss, ok := a.d.Kafka.(snapshotSignaler)
+	if !ok {
+		return "", ErrNoSignalWriter
+	}
 	ctx, cancel := a.ctx(ctx)
 	defer cancel()
 	s, err := a.readSetup(ctx, p)
@@ -391,36 +411,12 @@ func (a *snapshotTable) Execute(ctx context.Context, raw json.RawMessage) (strin
 		return "", err
 	}
 	tables := strings.Join(p.Tables, ", ")
-	id, err := a.sendTopic(ctx, s, p)
+	sig, err := ss.SendSnapshotSignal(ctx, s.topic, p.Connector, s.prefix, p.Tables)
 	if err != nil {
 		return "", fmt.Errorf("actions: %s: signal to %s: %w", SnapshotTableName, s.topic, err)
 	}
+	id := fmt.Sprintf("%s (partition %d offset %d, the id Debezium logs)", sig.ID, sig.Partition, sig.Offset)
 	return fmt.Sprintf("sent execute-snapshot signal %s (incremental) for %s to connector %s on topic %s (key %s); Debezium snapshots in the background and emits the rows to their topics", id, tables, p.Connector, s.topic, s.prefix), nil
-}
-
-// sendTopic produces the signal record and returns its id. A writer without
-// the narrow signal method (a fake or replay client) gets the same record
-// through Produce.
-func (a *snapshotTable) sendTopic(ctx context.Context, s signalSetup, p snapshotParams) (string, error) {
-	if ss, ok := a.d.Kafka.(snapshotSignaler); ok {
-		sig, err := ss.SendSnapshotSignal(ctx, s.topic, p.Connector, s.prefix, p.Tables)
-		if err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("%s (partition %d offset %d, the id Debezium logs)", sig.ID, sig.Partition, sig.Offset), nil
-	}
-	value, err := kafka.SnapshotSignalValue(p.Tables)
-	if err != nil {
-		return "", err
-	}
-	acked, err := a.d.Kafka.Produce(ctx, s.topic, []clients.Record{{Key: []byte(s.prefix), Value: value}})
-	if err != nil {
-		return "", err
-	}
-	if acked != 1 {
-		return "", fmt.Errorf("the writer acked %d of 1 records", acked)
-	}
-	return "(offset not reported by this writer)", nil
 }
 
 // ctxScope is the fail-closed scope gate of Preview and Execute, before any
