@@ -51,6 +51,8 @@ func checkApproveAll(cfg config.Config, pipe owners.Pipeline, havePipe bool, con
 	}{
 		{"PIPEROOM_DB_URL", cfg.RoomDBURL, false, true},
 		{"SOURCE_DB_URL", cfg.SourceDBURL, false, true},
+		// With write mode on, wiring opens the source writer here (P1a-3).
+		{"SOURCE_DB_WRITE_URL", cfg.SourceDBWriteURL, true, true},
 		{"WAREHOUSE_DB_URL", cfg.WarehouseDBURL, false, true},
 		{"KAFKA_BROKERS", cfg.KafkaBrokers, false, false},
 		{"CONNECT_URL", cfg.ConnectURL, false, false},
@@ -123,6 +125,22 @@ func checkApproveAll(cfg config.Config, pipe owners.Pipeline, havePipe bool, con
 
 	if len(problems) > 0 {
 		return fmt.Errorf("%w: not the local dev stack:\n  - %s", errApproveAllRefused, strings.Join(problems, "\n  - "))
+	}
+	return nil
+}
+
+// checkApproveAllWriteMode refuses -approve-all while PIPEROOM_WRITE_MODE is
+// off: wiring then gives the actions read-only clients (internal/wiring,
+// P1a-3), so every approved fix would fail at Execute. The variable is the
+// one switch for writes, for this command as for the server. A bad value is
+// refused like everywhere else.
+func checkApproveAllWriteMode(cfg config.Config) error {
+	on, err := config.ParseWriteMode(cfg)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errApproveAllRefused, err)
+	}
+	if !on {
+		return fmt.Errorf("%w: write mode is off: -approve-all executes fixes, so set PIPEROOM_WRITE_MODE=on as well", errApproveAllRefused)
 	}
 	return nil
 }
