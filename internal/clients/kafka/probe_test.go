@@ -448,8 +448,8 @@ func TestKFakeStuckPartitionBesideBusyOne(t *testing.T) {
 	within(t, func(ctx context.Context) {
 		// The newest records win the limit, and partition 0 keeps getting
 		// newer ones, so k1 may be cut; what matters is that partition 1
-		// finishes, which within's 2 s bound checks (a stuck partition
-		// waited out the deadline and still returned a nil error).
+		// finishes, which withinBound checks (a stuck partition waits out
+		// withinDeadline and still returns a nil error).
 		if _, err := c.PeekDLQ(ctx, kfTopic, 5); err != nil {
 			t.Fatalf("PeekDLQ: %v", err)
 		}
