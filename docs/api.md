@@ -340,7 +340,7 @@ Additive, same rule as the F-wave fields: absent until the task lands, and an ab
   `auto_approve:` list from `owners.yaml` (`[]` when none, or when `PIPEROOM_AUTO_APPROVE_DELAY=0`). `GET /api/rooms`
   rows do not carry `mode` (room view only).
 - `open_proposals[].blocked` (item 1, P1a): `"write_mode_off"` when every required layer approved and the executor
-  did not run the steps because write mode is off. The proposal stays `approved`; no `action.executed` is written.
+  did not run the steps because write mode is off. The proposal stays open with every required layer approved; no `action.executed` is written.
   It is the only value in this wave.
 - `open_proposals[].scheduled` (item 4, P2b): from the pending `proposal.scheduled`; cleared by
   `proposal.cancelled`, by the policy's approvals, or by any human `approval.*` on the proposal.

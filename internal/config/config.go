@@ -239,10 +239,10 @@ type Config struct {
 	// non-loopback address. See ParseDevAck. Never baked into an image.
 	DevAck string // PIPEROOM_DEV_ACK: "" (default) | DevAckValue
 
-	// WriteMode is PIPEROOM_WRITE_MODE: "off" (default) keeps every write action
-	// out of the registry the executor uses; proposals are still created,
-	// previewed and approved, and `action.executed` is never emitted. "on" wires
-	// the write clients. --demo forces "on" (fake clients only).
+	// WriteMode is PIPEROOM_WRITE_MODE: "off" (default) makes the executor
+	// refuse to queue or run any step, so an approved proposal is recorded but
+	// never executed and `action.executed` is never emitted; "on" wires the
+	// write clients. --demo forces "on" (fake clients only).
 	WriteMode string // PIPEROOM_WRITE_MODE: off | on
 }
 
@@ -1067,15 +1067,35 @@ func ParseDebeziumMetrics(c Config) (DebeziumMetrics, error) {
 // for someone in the room to read the card and cancel.
 const DefaultAutoApproveDelay = "60s"
 
+// MaxAutoApproveDelay bounds PIPEROOM_AUTO_APPROVE_DELAY: a countdown longer
+// than an hour leaves a fix pending past any incident's attention span, so it
+// is a typo, not a policy.
+const MaxAutoApproveDelay = time.Hour
+
 // ParseAutoApproveDelay validates PIPEROOM_AUTO_APPROVE_DELAY: "0" turns the
-// auto-approve policy off (0 is returned), anything else must be a positive
-// Go duration; empty = 60s. The error names the env var.
+// auto-approve policy off (0 is returned), anything else must be a Go
+// duration above zero and at most MaxAutoApproveDelay; empty = 60s. "0s" is
+// refused with a pointer to "0", so off is always spelled one way. The error
+// names the env var.
 func ParseAutoApproveDelay(c Config) (time.Duration, error) {
 	v := strings.TrimSpace(c.AutoApproveDelay)
-	if v == "0" {
+	switch v {
+	case "0":
 		return 0, nil
+	case "":
+		v = DefaultAutoApproveDelay
 	}
-	return parseWatchDuration("PIPEROOM_AUTO_APPROVE_DELAY", v, DefaultAutoApproveDelay)
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: not a duration like 60s or 2m: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: must be greater than zero; use \"0\" to turn the policy off", v)
+	}
+	if d > MaxAutoApproveDelay {
+		return 0, fmt.Errorf("config: PIPEROOM_AUTO_APPROVE_DELAY=%q: at most %s", v, MaxAutoApproveDelay)
+	}
+	return d, nil
 }
 
 // Airflow holds the typed Airflow settings (P0 item 8). URL "" = off.
@@ -1090,9 +1110,11 @@ type Airflow struct {
 // ParseAirflow validates AIRFLOW_URL (empty, or an absolute http or https URL
 // with a host and no user info) and the login: basic auth (AIRFLOW_USERNAME
 // and AIRFLOW_PASSWORD, both) or AIRFLOW_TOKEN, not both. A URL with neither
-// is allowed (an Airflow behind a proxy that authenticates). A login without
-// a URL is an error, so a forgotten URL is not read as "off". The error names
-// the env var and never quotes a secret.
+// is allowed (an Airflow behind a proxy that authenticates). A login needs an
+// https URL: over http:// the password or token would travel in clear text
+// (the internal/clients/netsec rule). A login without a URL is an error, so a
+// forgotten URL is not read as "off". The error names the env var and never
+// quotes a secret.
 func ParseAirflow(c Config) (Airflow, error) {
 	a := Airflow{
 		URL:      strings.TrimSpace(c.AirflowURL),
@@ -1106,7 +1128,8 @@ func ParseAirflow(c Config) (Airflow, error) {
 		}
 		return Airflow{}, nil
 	}
-	if err := checkHTTPURL("AIRFLOW_URL", a.URL); err != nil {
+	scheme, err := checkHTTPURL("AIRFLOW_URL", a.URL)
+	if err != nil {
 		return Airflow{}, err
 	}
 	if (a.Username == "") != (a.Password == "") {
@@ -1114,6 +1137,14 @@ func ParseAirflow(c Config) (Airflow, error) {
 	}
 	if a.Username != "" && a.Token != "" {
 		return Airflow{}, fmt.Errorf("config: AIRFLOW_TOKEN and AIRFLOW_USERNAME/AIRFLOW_PASSWORD: set one login, not both")
+	}
+	if scheme == "http" {
+		switch {
+		case a.Token != "":
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_TOKEN with an http:// AIRFLOW_URL sends the token in clear text; use an https:// URL")
+		case a.Username != "":
+			return Airflow{}, fmt.Errorf("config: AIRFLOW_USERNAME/AIRFLOW_PASSWORD with an http:// AIRFLOW_URL sends the password in clear text; use an https:// URL")
+		}
 	}
 	return a, nil
 }
@@ -1129,10 +1160,12 @@ type DBT struct {
 }
 
 // ParseDBT validates the dbt settings: DBT_ARTIFACTS_DIR (an absolute path)
-// or dbt Cloud (DBT_CLOUD_URL, an http(s) URL without user info, plus
+// or dbt Cloud (DBT_CLOUD_URL, an https URL without user info, plus
 // DBT_CLOUD_TOKEN, DBT_CLOUD_ACCOUNT_ID and DBT_CLOUD_JOB_ID, the two ids
-// whole numbers), not both. Whether the directory exists is the reader's
-// check at use, not this one. The error names the env var.
+// whole numbers), not both. An http:// DBT_CLOUD_URL is refused: the token
+// goes with every request and would travel in clear text. Whether the
+// directory exists is the reader's check at use, not this one. The error
+// names the env var.
 func ParseDBT(c Config) (DBT, error) {
 	d := DBT{
 		ArtifactsDir: strings.TrimSpace(c.DBTArtifactsDir),
@@ -1158,8 +1191,12 @@ func ParseDBT(c Config) (DBT, error) {
 	if d.CloudURL == "" || d.CloudToken == "" || d.CloudAccount == "" || d.CloudJobID == "" {
 		return DBT{}, fmt.Errorf("config: dbt Cloud needs DBT_CLOUD_URL, DBT_CLOUD_TOKEN, DBT_CLOUD_ACCOUNT_ID and DBT_CLOUD_JOB_ID together")
 	}
-	if err := checkHTTPURL("DBT_CLOUD_URL", d.CloudURL); err != nil {
+	scheme, err := checkHTTPURL("DBT_CLOUD_URL", d.CloudURL)
+	if err != nil {
 		return DBT{}, err
+	}
+	if scheme == "http" {
+		return DBT{}, fmt.Errorf("config: DBT_CLOUD_TOKEN with an http:// DBT_CLOUD_URL sends the token in clear text; use an https:// URL")
 	}
 	if _, err := parseWholeNumber("DBT_CLOUD_ACCOUNT_ID", d.CloudAccount, "", false); err != nil {
 		return DBT{}, err
@@ -1171,17 +1208,19 @@ func ParseDBT(c Config) (DBT, error) {
 }
 
 // checkHTTPURL refuses anything but an absolute http(s) URL with a host and
-// no user info (credentials do not belong in a URL that may be logged). The
-// error names the env var but never quotes the value.
-func checkHTTPURL(name, v string) error {
+// no user info (credentials do not belong in a URL that may be logged) and
+// returns its scheme ("http" or "https", lower case) so the caller can refuse
+// a login over plain http. The error names the env var but never quotes the
+// value.
+func checkHTTPURL(name, v string) (string, error) {
 	u, err := url.Parse(v)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("config: %s: want an http(s)://host URL", name)
+		return "", fmt.Errorf("config: %s: want an http(s)://host URL", name)
 	}
 	if u.User != nil {
-		return fmt.Errorf("config: %s: must not carry user info", name)
+		return "", fmt.Errorf("config: %s: must not carry user info", name)
 	}
-	return nil
+	return u.Scheme, nil
 }
 
 // getSet is get, except that a variable set to "" keeps "" (for settings

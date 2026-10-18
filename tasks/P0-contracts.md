@@ -44,8 +44,11 @@ default is **off** for every new install; `deploy/pilot.env.example` (`PIPEROOM_
 AutoApproveDelay string // PIPEROOM_AUTO_APPROVE_DELAY: Go duration before a policy-approved proposal runs; default "60s"; "0" turns the policy off even when owners.yaml lists actions
 
 const DefaultAutoApproveDelay = "60s"
-func ParseAutoApproveDelay(c Config) (time.Duration, error) // "0" → 0 (off); else a positive Go duration; "" = 60s
+const MaxAutoApproveDelay = time.Hour
+func ParseAutoApproveDelay(c Config) (time.Duration, error) // "0" → 0 (off); else a Go duration > 0 and ≤ 1h; "" = 60s
 ```
+`"0s"` (or any zero or negative duration) is refused with `use "0" to turn the policy off`; anything above
+`MaxAutoApproveDelay` (1h) is refused as a typo.
 
 ### 3. owners.yaml schema (P2a, P4a implement in `internal/owners`, A3's folder; the schema is fixed here)
 
@@ -194,7 +197,7 @@ refuse at `Validate` with "no write credentials"). Every method takes the room's
 type OrchestratorReader interface {
 	DAGRuns(ctx context.Context, dagID string, limit int) ([]DAGRun, error)                               // newest first
 	TaskInstances(ctx context.Context, dagID, runID string) ([]TaskInstance, error)
-	TaskLogTail(ctx context.Context, dagID, runID, taskID string, try int, maxBytes int) (string, error) // from the END
+	TaskLogTail(ctx context.Context, dagID, runID, taskID string, try int, maxBytes int) (string, error) // the LAST maxBytes of the log
 }
 // DAGScheduleReader is optional; GET /api/v1/dags/{dag_id}.
 type DAGScheduleReader interface {
@@ -246,11 +249,13 @@ type Lineage struct {
 	Children []string `json:"children"`
 }
 ```
-Log text, notes and messages are untrusted: the tool wraps them like every other read.
+`TaskLogTail` returns the **last** `maxBytes` of the log (the API returns whole logs; the client keeps the tail), cut
+at a UTF-8 boundary. Log text, notes and messages are untrusted: the tool wraps them like every other read.
 - `config.go`: `AIRFLOW_URL`, `AIRFLOW_USERNAME` + `AIRFLOW_PASSWORD` or `AIRFLOW_TOKEN` (`ParseAirflow`: http(s)
-  URL without user info, one login or none, a login without a URL is an error); `DBT_ARTIFACTS_DIR` (absolute) or
-  `DBT_CLOUD_URL` + `DBT_CLOUD_TOKEN` + `DBT_CLOUD_ACCOUNT_ID` + `DBT_CLOUD_JOB_ID` (`ParseDBT`: one source, the
-  cloud four together, ids whole numbers). `WAREHOUSE_KIND` accepts `bigquery`, `databricks` with
+  URL without user info, one login or none, a login needs `https://` (over `http://` it would travel in clear text,
+  the netsec rule), a login without a URL is an error); `DBT_ARTIFACTS_DIR` (absolute) or `DBT_CLOUD_URL` +
+  `DBT_CLOUD_TOKEN` + `DBT_CLOUD_ACCOUNT_ID` + `DBT_CLOUD_JOB_ID` (`ParseDBT`: one source, the cloud four together,
+  an `https://` URL, ids whole numbers). `WAREHOUSE_KIND` accepts `bigquery`, `databricks` with
   `WAREHOUSE_DB_URL` as the driver DSN (`internal/wiring` validates the value and adds the cases in P4e).
 - `docs/api.md`: `GET /api/pipelines` gains `kind`; `GET /api/pipelines/{pid}/topology` nodes carry the new kinds
   and the graph `partial`; the P-wave events section says the two layers are valid wherever a layer is.
