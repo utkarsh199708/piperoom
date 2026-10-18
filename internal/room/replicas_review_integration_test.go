@@ -339,6 +339,11 @@ func TestReplicasExecutorObeysClaimRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	row, _ := a.store.GetProposal(ctx, pid)
+	// Approved in the store only (no approval.given, so nothing is queued):
+	// the executor below is the only one that claims it.
+	if err := a.store.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "kafka", Decision: "approved", ParamsHash: row.ParamsHash}); err != nil {
+		t.Fatal(err)
+	}
 	tl.lie.Store(true)
 	if err := a.executeProposal(row, false); err != nil {
 		t.Fatal(err)

@@ -306,7 +306,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return fmt.Errorf("room: proposal %s: claim: %w", p.ProposalID, err)
 		}
 		if !ok {
-			s.log.Info("room: proposal already claimed by another executor; not run here", "proposal", p.ProposalID)
+			s.log.Info("room: proposal not approved in full, not open, or claimed by another executor; not run here", "proposal", p.ProposalID)
 			return nil
 		}
 	}
@@ -458,6 +458,10 @@ func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output 
 // run a step (design section 3.2).
 const paramsHashMismatchOutput = "params hash mismatch"
 
+// notApprovedOutput is the step output when a required layer has no approved
+// decision right before the step runs.
+const notApprovedOutput = "not approved by every required layer"
+
 // recheckStep is the executor's integrity check (design section 3.2). It
 // re-reads the proposal row and recomputes the hash from what the row holds
 // now. The step runs only if the recomputed hash equals BOTH the row's stored
@@ -495,6 +499,12 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 		if a.Decision == "approved" && a.ParamsHash != approved {
 			return events.ProposalStep{}, paramsHashMismatchOutput
 		}
+	}
+	// The claim checked this already; checked again before every write so a
+	// step never runs on a proposal that is not approved in full, whatever
+	// path reached the executor.
+	if !layersApproved(cur.RequiredLayers, apps) {
+		return events.ProposalStep{}, notApprovedOutput
 	}
 	return steps[i], ""
 }

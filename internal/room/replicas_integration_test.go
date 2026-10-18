@@ -587,6 +587,17 @@ func TestReplicasExecutorExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Every replica has the room cached before it races, as the one that
+	// queues an executor in production always has (the approve path loads
+	// it): an executor on a replica that never loaded the room could neither
+	// check that it is open nor log the step's outcome.
+	for _, s := range svcs {
+		s.syncProposalRoom(ctx, pid)
+	}
+	// The executors below start before the approval: until it is recorded
+	// none of them may claim the proposal or run a step (claimExecution and
+	// the store claim check every required layer), and none may decide it so
+	// that the approval is refused.
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {

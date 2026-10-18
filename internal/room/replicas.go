@@ -538,16 +538,63 @@ func (s *Service) interruptShadowRunLocked(ctx context.Context, roomID string, s
 
 // ---- executor claims ----
 
-// claimExecution claims a proposal for this replica's executor. With a
-// single-process store there is nothing to claim. ok false: another executor
-// has it, run nothing.
+// claimExecution claims a proposal for this replica's executor. ok false:
+// the proposal is not approved in full (or no longer open), or another
+// executor has it; run nothing. The approval check comes first and reads the
+// store, not the room's snapshot, so a caller that reaches the executor
+// without the approve path's allApproved check (a replica that never loaded
+// the room) cannot run, or fail, a proposal the owners have not approved. With
+// a shared store the claim itself checks the approvals again in the same
+// statement (store.Coordinator.ClaimProposal); with a single-process store
+// there is nothing more to claim.
 func (s *Service) claimExecution(ctx context.Context, proposalID string) (bool, error) {
+	cctx, cancel := context.WithTimeout(ctx, coordTimeout)
+	defer cancel()
+	ok, err := s.approvedInStore(cctx, proposalID)
+	if err != nil || !ok {
+		return false, err
+	}
 	if s.coord == nil {
 		return true, nil
 	}
-	cctx, cancel := context.WithTimeout(ctx, coordTimeout)
-	defer cancel()
 	return s.coord.ClaimProposal(cctx, proposalID, s.replica)
+}
+
+// approvedInStore reports whether the stored proposal is open and every
+// required layer has an approved decision.
+func (s *Service) approvedInStore(ctx context.Context, proposalID string) (bool, error) {
+	p, err := s.store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return false, fmt.Errorf("room: read proposal %s before claim: %w", proposalID, err)
+	}
+	if p.Status != "open" {
+		return false, nil
+	}
+	apps, err := s.store.ListApprovals(ctx, proposalID)
+	if err != nil {
+		return false, fmt.Errorf("room: read approvals of %s before claim: %w", proposalID, err)
+	}
+	return layersApproved(p.RequiredLayers, apps), nil
+}
+
+// layersApproved reports whether every required layer has an approved
+// decision. No required layers is never approved.
+func layersApproved(required []string, apps []store.ApprovalRow) bool {
+	if len(required) == 0 {
+		return false
+	}
+	approved := make(map[string]bool, len(apps))
+	for _, a := range apps {
+		if a.Decision == "approved" {
+			approved[a.Layer] = true
+		}
+	}
+	for _, l := range required {
+		if !approved[l] {
+			return false
+		}
+	}
+	return true
 }
 
 // touchExecution refreshes this replica's claim before a step. false: the

@@ -47,9 +47,11 @@ type Coordinator interface {
 	// ReleaseAgentSlot clears the slot flag of owner's lease on roomID.
 	ReleaseAgentSlot(ctx context.Context, roomID, owner string) error
 
-	// ClaimProposal claims an open, unclaimed proposal for owner's executor.
-	// ok is false when another executor claimed it first (or it is no longer
-	// open): the caller must not run any step.
+	// ClaimProposal claims an open, unclaimed proposal for owner's executor,
+	// only when every required layer has approved it (a proposal with no
+	// required layers is never claimed). ok is false when another executor
+	// claimed it first, it is no longer open, or it is not approved in full:
+	// the caller must not run any step.
 	ClaimProposal(ctx context.Context, proposalID, owner string) (ok bool, err error)
 	// TouchProposalClaim refreshes owner's claim before a step. ok is false
 	// when owner no longer holds the claim (the stale sweep took it): the
@@ -345,13 +347,23 @@ func (s *PG) ClaimProposal(ctx context.Context, proposalID, owner string) (bool,
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE proposals SET claimed_by = $2, claimed_at = now()
-		 WHERE proposal_id = $1 AND claimed_by IS NULL AND status = 'open'`, proposalID, owner)
+		`UPDATE proposals p SET claimed_by = $2, claimed_at = now()
+		 WHERE p.proposal_id = $1 AND p.claimed_by IS NULL AND p.status = 'open' AND `+fullyApprovedSQL, proposalID, owner)
 	if err != nil {
 		return false, fmt.Errorf("store: claim proposal %s: %w", proposalID, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
+
+// fullyApprovedSQL holds when every required layer of proposals row p has an
+// approved decision. The claim checks it in the same statement that takes the
+// claim, so no executor (whoever calls it, whenever) can ever claim, and so
+// run, a proposal that is not approved in full.
+const fullyApprovedSQL = `jsonb_array_length(p.required_layers) > 0
+     AND NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
+         WHERE NOT EXISTS (SELECT 1 FROM approvals a
+                           WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer AND a.decision = 'approved'))`
 
 // TouchProposalClaim implements Coordinator.
 func (s *PG) TouchProposalClaim(ctx context.Context, proposalID, owner string) (bool, error) {

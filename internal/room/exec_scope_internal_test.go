@@ -160,6 +160,11 @@ func TestExecutorWithoutTheRoomPipelineWritesNothing(t *testing.T) {
 			if err := mem.CreateProposal(ctx, row); err != nil {
 				t.Fatal(err)
 			}
+			// Approved in full, as the executor requires: the test is
+			// about the pipeline scope, not the approval gate.
+			if err := mem.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "postgres", Decision: "approved", ParamsHash: hash}); err != nil {
+				t.Fatal(err)
+			}
 
 			if err := svc.executeProposal(row, false); err != nil {
 				t.Fatalf("executeProposal: %v", err)
