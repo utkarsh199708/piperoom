@@ -356,6 +356,12 @@ func approvalGrant(detail string) string {
 // RejectProposal records a layer owner's rejection. paramsHash follows the same
 // rule as in ApproveProposal: required, and 409 params_mismatch when it is not
 // the proposal's hash.
+//
+// Whoever may approve a layer may reject it (authorizeProposalLayer), so the
+// room's driver may reject a fallback_layers entry (P2b-3b); otherwise a layer
+// nobody owns would keep the proposal open until the room closes. As for a
+// fallback approval, the fallback rule is checked again when the event is
+// appended (emitCheckedLocked), so a driver change logged in between refuses it.
 func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, layer, reason, paramsHash string) (events.Event, error) {
 	if err := rejectUnstorable(layer, reason, paramsHash); err != nil {
 		return events.Event{}, err
@@ -374,7 +380,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, "", false)
+	grant, err := s.authorizeProposalLayer(st, p, user, layer, "", false)
 	if err != nil {
 		return events.Event{}, err
 	}
@@ -394,9 +400,17 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		}
 		return events.Event{}, err
 	}
-	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), events.ApprovalRejectedPayload{
+	payload := events.ApprovalRejectedPayload{
 		ProposalID: proposalID, Layer: layer, Reason: reason, ParamsHash: p.ParamsHash, Identity: &ident,
-	})
+	}
+	var ev events.Event
+	if grant == events.GrantFallback {
+		ev, err = s.emitCheckedLocked(ctx, st, p.RoomID, func() error {
+			return s.checkFallbackLocked(st, proposalID, user, layer)
+		}, events.ApprovalRejected, s.humanActor(user), payload)
+	} else {
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), payload)
+	}
 	if err != nil {
 		dctx, cancel := compensateCtx(ctx)
 		defer cancel()
