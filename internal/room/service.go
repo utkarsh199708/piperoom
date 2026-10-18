@@ -134,6 +134,17 @@ type Deps struct {
 	// behaviour before the switch, so callers that predate it keep running
 	// fixes; cmd/server always sets it from the config, whose default is off.
 	WriteModeOff bool
+	// AutoApproveDelay is PIPEROOM_AUTO_APPROVE_DELAY
+	// (config.ParseAutoApproveDelay, P0 item 2): how long a proposal whose
+	// every step is on its pipeline's owners.yaml auto_approve: list waits,
+	// cancellable, before the policy approves it (autoapprove.go). 0 turns
+	// the policy off, which is also the zero value: callers that predate it
+	// never auto-approve. cmd/server has already refused a schema_* entry and
+	// an entry that names no action of the proposal registry.
+	AutoApproveDelay time.Duration
+	// AutoApproveTicker, when set, replaces the ticker of the policy loop
+	// (autoapprove.go), like LeaseTicker. Nil uses time.NewTicker.
+	AutoApproveTicker func(d time.Duration) (<-chan time.Time, func())
 
 	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
 	// CreateRoomFromAlert, after room.created is appended. Each call runs in
@@ -296,6 +307,16 @@ type Service struct {
 	soloUser        string
 	writeOff        bool // Deps.WriteModeOff
 	limits          config.Limits
+	// Auto-approve policy (autoapprove.go). autoDelay is
+	// Deps.AutoApproveDelay (0 = off). autoTickDone, when set (tests only),
+	// runs after each check of the loop. autoSkip remembers the proposals
+	// the loop found due but refused, so each is logged once.
+	autoDelay    time.Duration
+	autoTicker   func(d time.Duration) (<-chan time.Time, func())
+	autoOnce     sync.Once
+	autoTickDone func()
+	autoSkipMu   sync.Mutex
+	autoSkip     map[string]bool
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex
@@ -426,6 +447,8 @@ func New(d Deps) *Service {
 		soloUser:        d.SoloUser,
 		writeOff:        d.WriteModeOff,
 		limits:          d.Limits,
+		autoDelay:       d.AutoApproveDelay,
+		autoTicker:      d.AutoApproveTicker,
 		leaseTicker:     d.LeaseTicker,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -509,6 +532,7 @@ func (s *Service) Load(ctx context.Context) error {
 	s.sweepPostmortems()
 	s.startCoordination()
 	s.startLeaseExpiry()
+	s.startAutoApprove()
 	return nil
 }
 

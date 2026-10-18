@@ -95,7 +95,11 @@ func (s *Service) previewProposal(parent context.Context, roomID, pipelineID, pr
 	}
 	if _, err := s.emitLocked(parent, st, roomID, events.ProposalPreviewed, systemActor, payload); err != nil {
 		s.log.Warn("room: preview append failed", "room", roomID, "proposal", proposalID, "err", err)
+		return
 	}
+	// The auto-approve countdown starts once the preview is in the log, and
+	// only when it passed (autoapprove.go).
+	s.maybeScheduleLocked(parent, st, roomID, proposalID)
 }
 
 func redactText(s string) string {

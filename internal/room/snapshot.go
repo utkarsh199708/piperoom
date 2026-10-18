@@ -119,7 +119,46 @@ type Proposal struct {
 	// BlockedWriteModeOff. Empty otherwise. Set on the room view only
 	// (RoomFor), never by Apply: it depends on the server, not on the log.
 	Blocked string `json:"blocked,omitempty"`
+	// Scheduled is the pending policy countdown (proposal.scheduled, P2b):
+	// set while the policy has neither run nor been stopped; nil otherwise.
+	Scheduled *Scheduled `json:"scheduled,omitempty"`
+
+	// origin is proposal.created.origin ("" reads as agent). Unexported until
+	// P3c exposes it; the auto-approve policy never schedules a driver's
+	// proposal (autoapprove.go).
+	origin string
+	// sched is the fold of the proposal's policy countdown (autoapprove.go).
+	sched schedState
 }
+
+// Scheduled mirrors the pending proposal.scheduled of a proposal
+// (open_proposals[].scheduled, docs/api.md).
+type Scheduled struct {
+	RunAt       time.Time `json:"run_at"`
+	CancelUntil time.Time `json:"cancel_until"`
+}
+
+// schedState is the log's answer to "is the policy countdown of this
+// proposal still live?". set: a proposal.scheduled was folded (at most one
+// counts). stopped: a proposal.cancelled or a person's approval.given came
+// after it, so the policy never runs. policyRan: at least one policy
+// approval landed; the countdown is over but the policy may still owe the
+// remaining layers (a replica that stopped part-way). A value type, so a
+// proposal copy never shares it.
+type schedState struct {
+	set         bool
+	runAt       time.Time
+	cancelUntil time.Time
+	stopped     bool
+	policyRan   bool
+}
+
+// pending reports whether the policy still owes this proposal its approvals.
+func (s schedState) pending() bool { return s.set && !s.stopped }
+
+// cancellable reports whether a person may still cancel the countdown: it is
+// pending and the policy has not started approving.
+func (s schedState) cancellable() bool { return s.pending() && !s.policyRan }
 
 // ChecklistTick says who ticked one runbook item and when.
 type ChecklistTick struct {
@@ -371,6 +410,10 @@ func cloneProposals(in []Proposal) []Proposal {
 		out[i].RequiredLayers = append([]string{}, p.RequiredLayers...)
 		out[i].FallbackLayers = append([]string{}, p.FallbackLayers...)
 		out[i].Preview = clonePreview(p.Preview)
+		if p.Scheduled != nil {
+			sc := *p.Scheduled
+			out[i].Scheduled = &sc
+		}
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
 			for k, v := range p.Approvals {
@@ -619,6 +662,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			Approvals:      approvals,
 			ParamsHash:     eventParamsHash(e.RoomID, p),
 			FallbackLayers: append([]string{}, p.FallbackLayers...),
+			origin:         p.Origin,
 		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv
@@ -662,6 +706,17 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			break
 		}
 		setApproval(snap.OpenProposals, p.ProposalID, p.Layer, "approved")
+		foldScheduleDecision(snap.OpenProposals, p.ProposalID, e.Actor.Kind == events.ActorSystem && p.Grant == events.GrantPolicy)
+
+	case events.ProposalScheduled:
+		if p, ok := decode[events.ProposalScheduledPayload](e); ok {
+			foldScheduled(snap.OpenProposals, p)
+		}
+
+	case events.ProposalCancelled:
+		if p, ok := decode[events.ProposalCancelledPayload](e); ok {
+			foldScheduleDecision(snap.OpenProposals, p.ProposalID, false)
+		}
 
 	case events.ApprovalRejected:
 		p, ok := decode[events.ApprovalRejectedPayload](e)
@@ -840,5 +895,49 @@ func setApproval(proposals []Proposal, proposalID, layer, decision string) {
 			proposals[i].Approvals = m
 			return
 		}
+	}
+}
+
+// foldScheduled folds a proposal.scheduled into its open proposal. Only the
+// first one counts (at most one per proposal), and a proposal a person has
+// already decided on is not given one.
+func foldScheduled(proposals []Proposal, p events.ProposalScheduledPayload) {
+	for i := range proposals {
+		if proposals[i].ProposalID != p.ProposalID || proposals[i].sched.set {
+			continue
+		}
+		proposals[i].sched = schedState{set: true, runAt: p.RunAt, cancelUntil: p.CancelUntil}
+		for _, d := range proposals[i].Approvals {
+			if d != "pending" {
+				// Never written by the service (the schedule check wants
+				// every layer pending); a log that has it anyway gets no
+				// policy run.
+				proposals[i].sched.stopped = true
+				return
+			}
+		}
+		proposals[i].Scheduled = &Scheduled{RunAt: p.RunAt, CancelUntil: p.CancelUntil}
+		return
+	}
+}
+
+// foldScheduleDecision ends the visible countdown of a proposal. policy is
+// true for the policy's own approval.given: the countdown ran out, and the
+// policy goes on with the remaining layers. Anything else (a person's
+// approval, a proposal.cancelled) stops the policy for good: the explicit
+// stop lives here, in the fold every replica runs, so the fire path
+// (fireCheckLocked) sees it whichever replica logged the decision.
+func foldScheduleDecision(proposals []Proposal, proposalID string, policy bool) {
+	for i := range proposals {
+		if proposals[i].ProposalID != proposalID {
+			continue
+		}
+		proposals[i].Scheduled = nil
+		if policy {
+			proposals[i].sched.policyRan = true
+		} else if proposals[i].sched.set {
+			proposals[i].sched.stopped = true
+		}
+		return
 	}
 }

@@ -74,13 +74,15 @@ func (s *Service) ApproveAllProposal(ctx context.Context, user User, proposalID,
 			return nil, err
 		}
 	}
-	// P2b-4: a pending proposal.scheduled countdown of this proposal stops here, without an event.
+	// A pending policy countdown of this proposal stops with the first
+	// approval below, without a proposal.cancelled: the fold of a person's
+	// approval.given ends it (foldScheduleDecision).
 	out := make([]events.Event, 0, len(p.RequiredLayers))
 	for i, layer := range p.RequiredLayers {
 		if approvalFor(st.snap, proposalID, layer) != "pending" {
 			continue
 		}
-		ev, err := s.appendApprovalLocked(ctx, st, p, user, layer, details[i])
+		ev, err := s.appendApprovalLocked(ctx, st, p, layer, s.personApprover(st, proposalID, user, layer, details[i]))
 		if err != nil {
 			return nil, err
 		}
