@@ -66,7 +66,10 @@ type Client struct {
 	hc      *http.Client
 }
 
-var _ Reader = (*Client)(nil)
+var (
+	_ Reader         = (*Client)(nil)
+	_ ScheduleReader = (*Client)(nil)
+)
 
 // Option configures New.
 type Option func(*settings)
@@ -153,11 +156,14 @@ func (c *Client) DAGRuns(ctx context.Context, dagID string, limit int) ([]DAGRun
 	limit = min(limit, MaxPageLimit)
 	var raw struct {
 		DAGRuns []struct {
-			RunID string    `json:"dag_run_id"`
-			State string    `json:"state"`
-			Start time.Time `json:"start_date"` // null decodes to the zero time
-			End   time.Time `json:"end_date"`
-			Note  string    `json:"note"`
+			RunID         string    `json:"dag_run_id"`
+			State         string    `json:"state"`
+			Start         time.Time `json:"start_date"` // null decodes to the zero time
+			End           time.Time `json:"end_date"`
+			Note          string    `json:"note"`
+			LogicalDate   time.Time `json:"logical_date"`   // Airflow 2.2+
+			ExecutionDate time.Time `json:"execution_date"` // the same date; the only one before 2.2
+			RunType       string    `json:"run_type"`
 		} `json:"dag_runs"`
 	}
 	path := apiV1 + "/dags/" + url.PathEscape(dagID) + "/dagRuns?limit=" + strconv.Itoa(limit) + "&order_by=-execution_date"
@@ -166,7 +172,14 @@ func (c *Client) DAGRuns(ctx context.Context, dagID string, limit int) ([]DAGRun
 	}
 	out := make([]DAGRun, 0, len(raw.DAGRuns))
 	for _, r := range raw.DAGRuns {
-		out = append(out, DAGRun{ID: r.RunID, State: r.State, StartedAt: r.Start, EndedAt: r.End, Note: r.Note})
+		logical := r.LogicalDate
+		if logical.IsZero() {
+			logical = r.ExecutionDate
+		}
+		out = append(out, DAGRun{
+			ID: r.RunID, State: r.State, StartedAt: r.Start, EndedAt: r.End, Note: r.Note,
+			LogicalDate: logical, RunType: r.RunType,
+		})
 	}
 	return out, nil
 }
@@ -182,6 +195,7 @@ func (c *Client) TaskInstances(ctx context.Context, dagID, runID string) ([]Task
 			Start    time.Time `json:"start_date"`
 			End      time.Time `json:"end_date"`
 			Operator string    `json:"operator"`
+			MapIndex *int      `json:"map_index"` // absent before Airflow 2.3
 		} `json:"task_instances"`
 	}
 	path := runPath(dagID, runID) + "/taskInstances?limit=" + strconv.Itoa(MaxPageLimit)
@@ -190,8 +204,13 @@ func (c *Client) TaskInstances(ctx context.Context, dagID, runID string) ([]Task
 	}
 	out := make([]TaskInstance, 0, len(raw.TaskInstances))
 	for _, t := range raw.TaskInstances {
+		mapIndex := -1
+		if t.MapIndex != nil {
+			mapIndex = *t.MapIndex
+		}
 		out = append(out, TaskInstance{
 			TaskID: t.TaskID, Try: t.Try, State: t.State, StartedAt: t.Start, EndedAt: t.End, Operator: t.Operator,
+			MapIndex: mapIndex,
 		})
 	}
 	return out, nil
@@ -211,6 +230,13 @@ func (c *Client) TaskLogTail(ctx context.Context, dagID, runID, taskID string, t
 // end of the log. Airflow's v1 API has no documented way to read a log from
 // the end. Not on Reader; the batch tools may assert for it.
 func (c *Client) TaskLogTailCut(ctx context.Context, dagID, runID, taskID string, try int, maxBytes int) (tail string, cut bool, err error) {
+	return c.TaskLogTailMapped(ctx, dagID, runID, taskID, -1, try, maxBytes)
+}
+
+// TaskLogTailMapped is TaskLogTailCut for one map index of a mapped task: it
+// adds the logs call's map_index query parameter. A negative mapIndex is an
+// unmapped task (the parameter is left out; Airflow's default is -1).
+func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID string, mapIndex, try, maxBytes int) (tail string, cut bool, err error) {
 	if try < 1 {
 		return "", false, fmt.Errorf("airflow: task log tail: try %d: want 1 or more", try)
 	}
@@ -218,6 +244,9 @@ func (c *Client) TaskLogTailCut(ctx context.Context, dagID, runID, taskID string
 		maxBytes = DefaultLogTailBytes
 	}
 	path := runPath(dagID, runID) + "/taskInstances/" + url.PathEscape(taskID) + "/logs/" + strconv.Itoa(try)
+	if mapIndex >= 0 {
+		path += "?map_index=" + strconv.Itoa(mapIndex)
+	}
 	var body []byte
 	err = c.get(ctx, path, acceptLogPlain, func(r io.Reader) error {
 		b, err := io.ReadAll(io.LimitReader(r, MaxResponseBytes+1))
@@ -234,6 +263,89 @@ func (c *Client) TaskLogTailCut(ctx context.Context, dagID, runID, taskID string
 		body, cut = body[:MaxResponseBytes], true
 	}
 	return tailFrom(body, maxBytes), cut, nil
+}
+
+// DAG returns the schedule state of one DAG (GET /api/v1/dags/{dag_id}).
+func (c *Client) DAG(ctx context.Context, dagID string) (DAG, error) {
+	var raw struct {
+		DAGID       string          `json:"dag_id"`
+		Paused      bool            `json:"is_paused"`
+		Description string          `json:"timetable_description"` // Airflow 2.3+
+		Interval    json.RawMessage `json:"schedule_interval"`
+		CreateAfter time.Time       `json:"next_dagrun_create_after"`
+		Next        time.Time       `json:"next_dagrun"`
+	}
+	if err := c.getJSON(ctx, apiV1+"/dags/"+url.PathEscape(dagID), &raw); err != nil {
+		return DAG{}, err
+	}
+	next := raw.CreateAfter
+	if next.IsZero() {
+		next = raw.Next
+	}
+	return DAG{
+		ID:        raw.DAGID,
+		Schedule:  scheduleText(raw.Interval, raw.Description),
+		Paused:    raw.Paused,
+		NextRunAt: next,
+	}, nil
+}
+
+// scheduleInterval is Airflow's schedule_interval object: a cron expression
+// (also a preset such as "@daily"), a timedelta, or a dateutil relativedelta
+// (only its relative fields are read).
+type scheduleInterval struct {
+	Type         string `json:"__type"`
+	Value        string `json:"value"`
+	Years        int64  `json:"years"`
+	Months       int64  `json:"months"`
+	Days         int64  `json:"days"`
+	Hours        int64  `json:"hours"`
+	Minutes      int64  `json:"minutes"`
+	Seconds      int64  `json:"seconds"`
+	Microseconds int64  `json:"microseconds"`
+}
+
+// scheduleText renders the interval and appends the description when it
+// adds something. A schedule_interval of a shape this client does not know
+// leaves only the description: the schedule is context, so it never fails
+// the read.
+func scheduleText(rawInterval json.RawMessage, desc string) string {
+	var iv string
+	var si scheduleInterval
+	if len(rawInterval) > 0 && json.Unmarshal(rawInterval, &si) == nil {
+		iv = si.text()
+	}
+	switch {
+	case iv != "" && desc != "" && iv != desc:
+		return iv + " (" + desc + ")"
+	case iv != "":
+		return iv
+	}
+	return desc
+}
+
+func (s scheduleInterval) text() string {
+	switch s.Type {
+	case "CronExpression":
+		return s.Value
+	case "TimeDelta":
+		d := time.Duration(s.Days)*24*time.Hour + time.Duration(s.Seconds)*time.Second + time.Duration(s.Microseconds)*time.Microsecond
+		return "every " + d.String()
+	case "RelativeDelta":
+		var parts []string
+		for _, p := range []struct {
+			n    int64
+			unit string
+		}{{s.Years, "y"}, {s.Months, "mo"}, {s.Days, "d"}, {s.Hours, "h"}, {s.Minutes, "m"}, {s.Seconds, "s"}} {
+			if p.n != 0 {
+				parts = append(parts, strconv.FormatInt(p.n, 10)+p.unit)
+			}
+		}
+		if len(parts) > 0 {
+			return "every " + strings.Join(parts, " ")
+		}
+	}
+	return ""
 }
 
 func runPath(dagID, runID string) string {

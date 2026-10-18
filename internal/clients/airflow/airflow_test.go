@@ -84,6 +84,35 @@ func TestDAGRuns(t *testing.T) {
 		!failed.EndedAt.Equal(wantEnd) || failed.Note != "paged on-call: fct_revenue broke" {
 		t.Errorf("failed run = %+v", failed)
 	}
+	if !running.LogicalDate.Equal(time.Date(2026, 10, 18, 9, 12, 44, 102938000, time.UTC)) || running.RunType != "manual" ||
+		!failed.LogicalDate.Equal(time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)) || failed.RunType != "scheduled" {
+		t.Errorf("logical date / run type: running %+v, failed %+v", running, failed)
+	}
+}
+
+func TestDAGRunLogicalDate(t *testing.T) {
+	day := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, run string
+		want      time.Time
+		runType   string
+	}{
+		{"both dates", `{"logical_date":"2026-10-17T00:00:00+00:00","execution_date":"2026-10-16T00:00:00+00:00","run_type":"backfill"}`, day, "backfill"},
+		{"execution_date only (Airflow 2.1)", `{"execution_date":"2026-10-17T00:00:00+00:00","run_type":"scheduled"}`, day, "scheduled"},
+		{"null logical_date", `{"logical_date":null,"execution_date":"2026-10-17T00:00:00+00:00"}`, day, ""},
+		{"neither", `{"dag_run_id":"r"}`, time.Time{}, ""},
+	} {
+		c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"dag_runs":[` + tc.run + `],"total_entries":1}`))
+		})
+		runs, err := c.DAGRuns(context.Background(), "d", 1)
+		if err != nil || len(runs) != 1 {
+			t.Fatalf("%s: runs %v, err %v", tc.name, runs, err)
+		}
+		if !runs[0].LogicalDate.Equal(tc.want) || runs[0].RunType != tc.runType {
+			t.Errorf("%s: got %+v, want logical %v run type %q", tc.name, runs[0], tc.want, tc.runType)
+		}
+	}
 }
 
 func TestDAGRunsLimit(t *testing.T) {
@@ -120,20 +149,127 @@ func TestTaskInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []TaskInstance{
-		{TaskID: "extract_orders", Try: 1, State: "success", Operator: "PythonOperator",
+		{TaskID: "extract_orders", Try: 1, State: "success", Operator: "PythonOperator", MapIndex: -1,
 			StartedAt: time.Date(2026, 10, 18, 0, 0, 3, 701288000, time.UTC), EndedAt: time.Date(2026, 10, 18, 0, 0, 7, 912004000, time.UTC)},
-		{TaskID: "dbt_run_fct_revenue", Try: 2, State: "failed", Operator: "BashOperator",
+		{TaskID: "dbt_run_fct_revenue", Try: 2, State: "failed", Operator: "BashOperator", MapIndex: -1,
 			StartedAt: time.Date(2026, 10, 18, 0, 5, 12, 98127000, time.UTC), EndedAt: time.Date(2026, 10, 18, 0, 5, 21, 118540000, time.UTC)},
-		{TaskID: "publish_dashboard", Try: 0, State: "upstream_failed", Operator: "EmptyOperator"},
+		{TaskID: "publish_dashboard", Try: 0, State: "upstream_failed", Operator: "EmptyOperator", MapIndex: -1},
+		{TaskID: "load_partition", Try: 1, State: "success", Operator: "_PythonDecoratedOperator", MapIndex: 0,
+			StartedAt: time.Date(2026, 10, 18, 0, 1, 2, 350144000, time.UTC), EndedAt: time.Date(2026, 10, 18, 0, 1, 4, 220917000, time.UTC)},
+		{TaskID: "load_partition", Try: 1, State: "failed", Operator: "_PythonDecoratedOperator", MapIndex: 1,
+			StartedAt: time.Date(2026, 10, 18, 0, 1, 2, 581190000, time.UTC), EndedAt: time.Date(2026, 10, 18, 0, 1, 5, 12733000, time.UTC)},
 	}
 	if len(tis) != len(want) {
 		t.Fatalf("got %+v", tis)
 	}
 	for i, w := range want {
 		g := tis[i]
-		if g.TaskID != w.TaskID || g.Try != w.Try || g.State != w.State || g.Operator != w.Operator ||
+		if g.TaskID != w.TaskID || g.Try != w.Try || g.State != w.State || g.Operator != w.Operator || g.MapIndex != w.MapIndex ||
 			!g.StartedAt.Equal(w.StartedAt) || !g.EndedAt.Equal(w.EndedAt) {
 			t.Errorf("[%d] = %+v, want %+v", i, g, w)
+		}
+	}
+}
+
+func TestTaskInstanceMapIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name, ti string
+		want     int
+	}{
+		{"unmapped", `{"task_id":"t","map_index":-1}`, -1},
+		{"first mapped", `{"task_id":"t","map_index":0}`, 0},
+		{"mapped", `{"task_id":"t","map_index":7}`, 7},
+		{"absent (Airflow < 2.3)", `{"task_id":"t"}`, -1},
+		{"null", `{"task_id":"t","map_index":null}`, -1},
+	} {
+		c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(`{"task_instances":[` + tc.ti + `],"total_entries":1}`))
+		})
+		tis, err := c.TaskInstances(context.Background(), "d", "r")
+		if err != nil || len(tis) != 1 || tis[0].MapIndex != tc.want {
+			t.Errorf("%s: tis %+v, err %v, want map index %d", tc.name, tis, err, tc.want)
+		}
+	}
+}
+
+func TestTaskLogTailMapped(t *testing.T) {
+	var got []string
+	c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.RequestURI)
+		w.Write([]byte("log line\n"))
+	})
+	ctx := context.Background()
+	for _, idx := range []int{2, 0, -1} {
+		tail, cut, err := c.TaskLogTailMapped(ctx, "d", "r", "load_partition", idx, 1, 0)
+		if err != nil || cut || tail != "log line\n" {
+			t.Fatalf("map index %d: tail %q, cut %v, err %v", idx, tail, cut, err)
+		}
+	}
+	base := "/api/v1/dags/d/dagRuns/r/taskInstances/load_partition/logs/1"
+	want := []string{base + "?map_index=2", base + "?map_index=0", base}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("sent\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if _, _, err := c.TaskLogTailMapped(ctx, "d", "r", "t", 0, 0, 0); err == nil {
+		t.Error("try 0: want an error")
+	}
+}
+
+func TestDAG(t *testing.T) {
+	c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/dags/revenue_daily" || r.URL.RawQuery != "" || r.Header.Get("Accept") != "application/json" {
+			t.Errorf("request %s Accept=%q", r.RequestURI, r.Header.Get("Accept"))
+		}
+		w.Write(fixture(t, "dag.json"))
+	})
+	d, err := c.DAG(context.Background(), "revenue_daily")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.ID != "revenue_daily" || d.Schedule != "0 0 * * * (At 00:00)" || d.Paused ||
+		!d.NextRunAt.Equal(time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)) {
+		t.Errorf("DAG = %+v", d)
+	}
+}
+
+func TestDAGFields(t *testing.T) {
+	next := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, body string
+		want       DAG
+	}{
+		{"cron, no description (Airflow < 2.3)",
+			`{"dag_id":"d","schedule_interval":{"__type":"CronExpression","value":"@daily"}}`,
+			DAG{ID: "d", Schedule: "@daily"}},
+		{"description only",
+			`{"dag_id":"d","schedule_interval":null,"timetable_description":"Triggered by datasets"}`,
+			DAG{ID: "d", Schedule: "Triggered by datasets"}},
+		{"same text once",
+			`{"dag_id":"d","schedule_interval":{"__type":"CronExpression","value":"Dataset"},"timetable_description":"Dataset"}`,
+			DAG{ID: "d", Schedule: "Dataset"}},
+		{"timedelta",
+			`{"dag_id":"d","schedule_interval":{"__type":"TimeDelta","days":0,"seconds":21600,"microseconds":0}}`,
+			DAG{ID: "d", Schedule: "every 6h0m0s"}},
+		{"relativedelta",
+			`{"dag_id":"d","schedule_interval":{"__type":"RelativeDelta","years":0,"months":1,"days":0,"leapdays":0,"hours":0,"minutes":0,"seconds":0,"microseconds":0,"year":null,"month":null,"day":null,"weekday":null,"hour":null,"minute":null,"second":null,"microsecond":null}}`,
+			DAG{ID: "d", Schedule: "every 1mo"}},
+		{"unknown schedule shape keeps the read",
+			`{"dag_id":"d","schedule_interval":"0 0 * * *","timetable_description":"At 00:00"}`,
+			DAG{ID: "d", Schedule: "At 00:00"}},
+		{"paused, next_dagrun only",
+			`{"dag_id":"d","is_paused":true,"next_dagrun":"2026-10-18T00:00:00+00:00","next_dagrun_create_after":null}`,
+			DAG{ID: "d", Paused: true, NextRunAt: next}},
+		{"no optional field", `{"dag_id":"d"}`, DAG{ID: "d"}},
+	} {
+		c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte(tc.body))
+		})
+		d, err := c.DAG(context.Background(), "d")
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if d.ID != tc.want.ID || d.Schedule != tc.want.Schedule || d.Paused != tc.want.Paused || !d.NextRunAt.Equal(tc.want.NextRunAt) {
+			t.Errorf("%s: got %+v, want %+v", tc.name, d, tc.want)
 		}
 	}
 }
@@ -214,6 +350,7 @@ func TestOversizedBodies(t *testing.T) {
 
 func TestErrors(t *testing.T) {
 	calls := map[string]func(*Client) error{
+		"DAG":     func(c *Client) error { _, err := c.DAG(context.Background(), "d"); return err },
 		"DAGRuns": func(c *Client) error { _, err := c.DAGRuns(context.Background(), "d", 1); return err },
 		"TaskInstances": func(c *Client) error {
 			_, err := c.TaskInstances(context.Background(), "d", "r")
@@ -388,7 +525,9 @@ func TestPathEscaping(t *testing.T) {
 	got = nil
 	for _, id := range []string{"", ".", ".."} {
 		errs := []error{}
-		_, err := c.DAGRuns(ctx, id, 1)
+		_, err := c.DAG(ctx, id)
+		errs = append(errs, err)
+		_, err = c.DAGRuns(ctx, id, 1)
 		errs = append(errs, err)
 		_, err = c.TaskInstances(ctx, "d", id)
 		errs = append(errs, err)
