@@ -6,8 +6,8 @@ action) and diagnosed to 26.5%. Each row is a PR an agent finishes in one or two
 lines, §6 of `AGENTS.md`).
 
 - **ID** is the PR tag (`[Q2c] sourceactions: replica identity and heartbeat table`).
-- **Model**: the model the row runs on, cloud rows included. Opus 5.5 where the PR writes to a customer system or
-  decides who may act (wiring that builds a write client counts); Sonnet 5.5 otherwise.
+- **Model**: every row runs on Opus 5.5, cloud rows included (the owner's standing instruction: the strongest model
+  for every row; leads' decision on #605). This overrides AGENTS.md §2's "Sonnet 5" for cloud agents in this wave.
 - **Days**: one agent's working days including tests and review fixes.
 - **After**: rows that must be merged first. Q0 always; P rows by their `tasks/P-board.md` ID.
 
@@ -248,45 +248,45 @@ repos:
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| Q1a | C11 | Sonnet 5.5 | 1.5 | runbooks: known-issues index (`library/known-issues/*.yaml`, embedded) and `runbook_lookup` `versions` | an entry has id, component (`debezium-postgres`, `debezium-mysql`, `connect`, `kafka`, `pgjdbc`, ...), affected range, fixed in, symptom keywords, workaround, renamed keys (old to new), source URL; `issues.redhat.com` and `github.com/debezium` join the allowed hosts; a bad range or host fails start-up; with `versions` the lookup ranks entries whose range holds the running version first and says "fixed in X"; the tool still reads no customer system | Q0 |
-| Q1b | C11 | Sonnet 5.5 | 1.5 | runbooks: seed the known-issues index | at least 40 entries over the five themes of the plan's §6, Debezium 2.x and 3.x first; each cites a release note or an issue; a table test resolves every renamed key old to new | Q1a |
-| Q1c | A2 | Sonnet 5.5 | 1 | connect: `ConnectInfoReader`; tool `connect_plugins` | lists connector, converter, transform and predicate plugins with versions, and the Kafka version; a pre-3.2 Connect (connectors only) is marked; httptest: 404, timeout, oversized, bad JSON | Q0 |
-| Q1d | A4 | Sonnet 5.5 | 0.5 | agent: read versions once per room and pass them to `runbook_lookup`; register `connect_plugins` | the prompt names the version and the fixed-in release when it recommends an upgrade; prompt snapshot; `make evals` pass rate unchanged | Q1a, Q1c |
-| Q1e | C7 | Sonnet 5.5 | 1 | scenarios: `renamed-property-after-upgrade`, `removed-decoder-plugin` | the label names the known-issue id | Q1b |
+| Q1a | C11 | Opus 5.5 | 1.5 | runbooks: known-issues index (`library/known-issues/*.yaml`, embedded) and `runbook_lookup` `versions` | an entry has id, component (`debezium-postgres`, `debezium-mysql`, `connect`, `kafka`, `pgjdbc`, ...), affected range, fixed in, symptom keywords, workaround, renamed keys (old to new), source URL; `issues.redhat.com` and `github.com/debezium` join the allowed hosts; a bad range or host fails start-up; with `versions` the lookup ranks entries whose range holds the running version first and says "fixed in X"; the tool still reads no customer system | Q0 |
+| Q1b | C11 | Opus 5.5 | 1.5 | runbooks: seed the known-issues index | at least 40 entries over the five themes of the plan's §6, Debezium 2.x and 3.x first; each cites a release note or an issue; a table test resolves every renamed key old to new | Q1a |
+| Q1c | A2 | Opus 5.5 | 1 | connect: `ConnectInfoReader`; tool `connect_plugins` | lists connector, converter, transform and predicate plugins with versions, and the Kafka version; a pre-3.2 Connect (connectors only) is marked; httptest: 404, timeout, oversized, bad JSON | Q0 |
+| Q1d | A4 | Opus 5.5 | 0.5 | agent: read versions once per room and pass them to `runbook_lookup`; register `connect_plugins` | the prompt names the version and the fixed-in release when it recommends an upgrade; prompt snapshot; `make evals` pass rate unchanged | Q1a, Q1c |
+| Q1e | C7 | Opus 5.5 | 1 | scenarios: `renamed-property-after-upgrade`, `removed-decoder-plugin` | the label names the known-issue id | Q1b |
 
 ## Step 2: database settings read and approved DB admin actions
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| Q2a | A3 | Sonnet 5.5 | 2 | postgres + dbtools: `SourceSettingsReader`; tools `source_settings`, `source_table_replication`, `source_role_grants`, `source_blocking_sessions` | settings `wal_level`, `max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`, `wal_sender_timeout`, `rds.logical_replication` when present, with `pending_restart`; replica identity and primary key per `source_tables` entry; the connector role (`database.user` from `connect_config`): login, REPLICATION, SELECT per table; blockers: sessions whose open transaction is older than a waiting slot creation or holds the oldest xmin, query redacted (N5) and cut to 200 bytes; scoped like the other dbtools; integration with `it_` tables | Q0 |
+| Q2a | A3 | Opus 5.5 | 2 | postgres + dbtools: `SourceSettingsReader`; tools `source_settings`, `source_table_replication`, `source_role_grants`, `source_blocking_sessions` | settings `wal_level`, `max_replication_slots`, `max_wal_senders`, `max_slot_wal_keep_size`, `wal_sender_timeout`, `rds.logical_replication` when present, with `pending_restart`; replica identity and primary key per `source_tables` entry; the connector role (`database.user` from `connect_config`): login, REPLICATION, SELECT per table; blockers: sessions whose open transaction is older than a waiting slot creation or holds the oldest xmin, query redacted (N5) and cut to 200 bytes; scoped like the other dbtools; integration with `it_` tables | Q0 |
 | Q2b | A3 | Opus 5.5 | 1.5 | postgres: `SourceAdminWriter` on the `SOURCE_DB_WRITE_URL` pool | identifiers through `Sanitize()` after the rule 6 check; `GrantSelect` grants SELECT and nothing else; `EndSession` re-reads `pid` and `backend_start` and refuses a mismatch (`ErrSessionChanged`), the pipeline's own walsender and Piperoom's own sessions; fail-closed scope like `SourceWriter`; fake-pool unit tests; integration with `it_` objects | Q0 |
 | Q2c | A3 | Opus 5.5 | 1.5 | sourceactions: `pg_set_replica_identity`, `source_create_heartbeat_table` | Validate: table in `source_tables`, write credentials present; Preview: the brief `ACCESS EXCLUSIVE` lock, the extra WAL of `FULL` from the table size, and for the heartbeat table the follow-up steps in the same proposal (`pg_add_publication_table` when the publication is filtered, `heartbeat.action.query` through the N-key config action); rollback text; Preview never calls a writer (`readonly_test.go` style) | Q2b, P3-0 |
 | Q2d | A3 | Opus 5.5 | 1.5 | sourceactions: `source_grant_select`, `source_end_session` | grant: the role is the connector's `database.user`, tables in `source_tables`, SELECT only; end session: the pid is in `source_blocking_sessions` at Validate and again at Execute; Preview shows age, application and the redacted query; both refuse a target outside the pipeline before any I/O | Q2b, P3-0 |
 | Q2e | A4 | Opus 5.5 | 0.5 | wiring: build `SourceAdminWriter` with write mode on; register `sourceactions` and the Q2a tools; prompt "read database settings before proposing a config change" | write mode off: no admin writer is reachable (the P1a-3 test extended); prompt snapshot; evals unchanged | Q2a, Q2c, Q2d, P1a-3 |
-| Q2f | A1 | Sonnet 5.5 | 1.5 | devctl: `break`/`fix` `no-replica-identity`, `missing-grant`, `blocked-slot`, `idle-wal-growth` | each break shows in a Q2a tool and trips an alert or the watcher; each fix restores; `dev/scenarios.md` rows | Q0 |
-| Q2g | C7 | Sonnet 5.5 | 1 | scenarios: the four Q2f breaks | the expected action name in each label | Q2f |
-| Q2h | C6 | Sonnet 5.5 | 1 | evals: replay `SourceSettingsReader`; `SourceAdminWriter` as recording no-ops | the four scenarios score; CDC pass rate unchanged | Q2g |
-| Q2i | C14 | Sonnet 5.5 | 0.5 | docs: the write role's additions | each action with its SQL and the minimal grant: table ownership (or a role that owns the captured tables) for REPLICA IDENTITY, GRANT OPTION on SELECT, `pg_signal_backend`, CREATE on the heartbeat schema | Q2c, Q2d |
+| Q2f | A1 | Opus 5.5 | 1.5 | devctl: `break`/`fix` `no-replica-identity`, `missing-grant`, `blocked-slot`, `idle-wal-growth` | each break shows in a Q2a tool and trips an alert or the watcher; each fix restores; `dev/scenarios.md` rows | Q0 |
+| Q2g | C7 | Opus 5.5 | 1 | scenarios: the four Q2f breaks | the expected action name in each label | Q2f |
+| Q2h | C6 | Opus 5.5 | 1 | evals: replay `SourceSettingsReader`; `SourceAdminWriter` as recording no-ops | the four scenarios score; CDC pass rate unchanged | Q2g |
+| Q2i | C14 | Opus 5.5 | 0.5 | docs: the write role's additions | each action with its SQL and the minimal grant: table ownership (or a role that owns the captured tables) for REPLICA IDENTITY, GRANT OPTION on SELECT, `pg_signal_backend`, CREATE on the heartbeat schema | Q2c, Q2d |
 
 ## Step 3: Connect worker visibility
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| Q3a | A2 | Sonnet 5.5 | 2 | kafka + kafkatools: `ConnectClusterReader`; tool `connect_worker_info` | finds worker groups by protocol type `connect` (several are listed); the worker URL comes from the member metadata only if `go doc` shows `kadm` exposes it, else host only; internal topics from `CONNECT_INTERNAL_TOPICS` or the `-configs`/`-offsets`/`-status` suffixes; flags a config topic with more than one partition, an internal topic that is not compacted, replication factor 1 on a multi-broker cluster; includes plugins and logger levels from Q1c; `go doc` for every `kadm` call | Q0, Q1c |
-| Q3b | A3 | Sonnet 5.5 | 1 | debeziumtools: `connect_worker_metrics` from the JMX exporter behind `DEBEZIUM_METRICS_URL` | task error totals, records skipped, DLQ produce failures, task startup failures, rebalance state; a missing family says "the exporter does not export X"; fixture tests; `CONNECT_METRICS_PREFIX` | Q0 |
-| Q3c | C18 | Sonnet 5.5 | 2.5 | workerlogs + logtools: `WorkerLogReader` over Loki `query_range`; tool `connect_worker_logs` | at most 200 lines and 64 KiB, newest last; text wrapped, redacted (N5) and injection-scanned (N6); the LogQL selector only from config, the model passes connector, task, level and since; 10 s, 4 MB, `netsec`; httptest: 401, 404, timeout, oversized, bad JSON | Q0 |
-| Q3d | A1 | Sonnet 5.5 | 1.5 | dev: compose profile `logs` (Loki and Promtail on the Connect container); JMX exporter rules export `kafka_connect_*` | `docker compose --profile logs up` healthy in < 2 min; `connect_worker_logs` and `connect_worker_metrics` return data on the dev stack | Q0 |
-| Q3e | A4 | Sonnet 5.5 | 0.5 | wiring + prompt: register `logtools`; "a task that is RUNNING but skips records: read worker metrics and logs" | prompt snapshot; evals unchanged | Q3a, Q3b, Q3c |
-| Q3f | C7 | Sonnet 5.5 | 1 | scenarios: `tolerance-all-skips`, `internal-topic-not-compacted`, `rebalance-loop` | the label names the tool that shows the cause | Q3d |
-| Q3g | C14 | Sonnet 5.5 | 0.5 | docs: Loki read token scope, JMX exporter rules, data-handling (worker log lines reach the model) | citations per claim | Q3c |
+| Q3a | A2 | Opus 5.5 | 2 | kafka + kafkatools: `ConnectClusterReader`; tool `connect_worker_info` | finds worker groups by protocol type `connect` (several are listed); the worker URL comes from the member metadata only if `go doc` shows `kadm` exposes it, else host only; internal topics from `CONNECT_INTERNAL_TOPICS` or the `-configs`/`-offsets`/`-status` suffixes; flags a config topic with more than one partition, an internal topic that is not compacted, replication factor 1 on a multi-broker cluster; includes plugins and logger levels from Q1c; `go doc` for every `kadm` call | Q0, Q1c |
+| Q3b | A3 | Opus 5.5 | 1 | debeziumtools: `connect_worker_metrics` from the JMX exporter behind `DEBEZIUM_METRICS_URL` | task error totals, records skipped, DLQ produce failures, task startup failures, rebalance state; a missing family says "the exporter does not export X"; fixture tests; `CONNECT_METRICS_PREFIX` | Q0 |
+| Q3c | C18 | Opus 5.5 | 2.5 | workerlogs + logtools: `WorkerLogReader` over Loki `query_range`; tool `connect_worker_logs` | at most 200 lines and 64 KiB, newest last; text wrapped, redacted (N5) and injection-scanned (N6); the LogQL selector only from config, the model passes connector, task, level and since; 10 s, 4 MB, `netsec`; httptest: 401, 404, timeout, oversized, bad JSON | Q0 |
+| Q3d | A1 | Opus 5.5 | 1.5 | dev: compose profile `logs` (Loki and Promtail on the Connect container); JMX exporter rules export `kafka_connect_*` | `docker compose --profile logs up` healthy in < 2 min; `connect_worker_logs` and `connect_worker_metrics` return data on the dev stack | Q0 |
+| Q3e | A4 | Opus 5.5 | 0.5 | wiring + prompt: register `logtools`; "a task that is RUNNING but skips records: read worker metrics and logs" | prompt snapshot; evals unchanged | Q3a, Q3b, Q3c |
+| Q3f | C7 | Opus 5.5 | 1 | scenarios: `tolerance-all-skips`, `internal-topic-not-compacted`, `rebalance-loop` | the label names the tool that shows the cause | Q3d |
+| Q3g | C14 | Opus 5.5 | 0.5 | docs: Loki read token scope, JMX exporter rules, data-handling (worker log lines reach the model) | citations per claim | Q3c |
 
 ## Step 4: config validation before registration
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| Q4a | A2 | Sonnet 5.5 | 1.5 | connect + kafkatools: `ConfigValidator`; tool `connect_validate_config {class, config, base_connector?}` | secret keys come from `base_connector` on the server, never from the model (a `looksSecret` value in the input is refused); host keys must equal the pipeline's source host or the base connector's, so Connect is never asked to reach another host; an unknown key gets the nearest known key from `PluginConfigDef`; an error on a renamed key names the Q1 known-issue id; creates nothing; httptest: 400, 404, 405, 500 | Q0, Q1a |
-| Q4b | A4 | Sonnet 5.5 | 0.5 | agent: the "connector does not exist yet" path (validate before proposing a create); register the tool | prompt snapshot; evals unchanged | Q4a |
-| Q4c | C7 | Sonnet 5.5 | 0.5 | scenarios: `register-rejected-renamed-key`, `register-rejected-missing-plugin` | the label names the key or the plugin | Q4a |
+| Q4a | A2 | Opus 5.5 | 1.5 | connect + kafkatools: `ConfigValidator`; tool `connect_validate_config {class, config, base_connector?}` | secret keys come from `base_connector` on the server, never from the model (a `looksSecret` value in the input is refused); host keys must equal the pipeline's source host or the base connector's, so Connect is never asked to reach another host; an unknown key gets the nearest known key from `PluginConfigDef`; an error on a renamed key names the Q1 known-issue id; creates nothing; httptest: 400, 404, 405, 500 | Q0, Q1a |
+| Q4b | A4 | Opus 5.5 | 0.5 | agent: the "connector does not exist yet" path (validate before proposing a create); register the tool | prompt snapshot; evals unchanged | Q4a |
+| Q4c | C7 | Opus 5.5 | 0.5 | scenarios: `register-rejected-renamed-key`, `register-rejected-missing-plugin` | the label names the key or the plugin | Q4a |
 
 ## Step 5: connector lifecycle and source offsets
 
@@ -296,18 +296,18 @@ repos:
 | Q5b | A2 | Opus 5.5 | 1.5 | actions: `connect_stop_connector`, `connect_reset_source_offsets` (to empty, or to a position) | refuses a connector outside the pipeline, a sink connector, a position the source cannot have; a running connector needs the stop step first in the same proposal; Preview: the stored offsets now (the rollback), what a restart does under `snapshot.mode`, the table size estimate when a snapshot follows; executes on the dev stack | Q5a, P3-0 |
 | Q5c | A2 | Opus 5.5 | 1.5 | actions: `connect_create_connector`, `connect_delete_connector` | create: the name is in the pipeline's `connectors` and absent; Preview runs `ValidateConfig` and refuses on errors; secret values must be config-provider references (`${file:...}`, `${env:...}`); delete: refuses a connector whose config holds a plaintext secret (its rollback could not restore it); Preview says stored offsets stay under the name; re-register is delete then create in one proposal | Q5a, Q4a, P3-0 |
 | Q5d | A4 | Opus 5.5 | 0.5 | wiring + prompt: register the four actions; when to clear offsets and when to snapshot one table (P3a-5) | write mode off: none reachable; prompt snapshot; evals unchanged | Q5b, Q5c, P1a-3 |
-| Q5e | A1 | Sonnet 5.5 | 1 | devctl: `break`/`fix` `stale-source-offsets` (a connector repointed at a fresh database keeps its old offsets) | the break shows in `connect_source_offsets`; the fix restores; `dev/scenarios.md` row | Q0 |
-| Q5f | C7 | Sonnet 5.5 | 0.5 | scenario: `stale-source-offsets` | expected actions stop and reset in the label | Q5e |
-| Q5g | C14 | Sonnet 5.5 | 0.5 | docs: the Q5a Connect calls with method, path and the Kafka version each needs | citations per claim | Q5c |
+| Q5e | A1 | Opus 5.5 | 1 | devctl: `break`/`fix` `stale-source-offsets` (a connector repointed at a fresh database keeps its old offsets) | the break shows in `connect_source_offsets`; the fix restores; `dev/scenarios.md` row | Q0 |
+| Q5f | C7 | Opus 5.5 | 0.5 | scenario: `stale-source-offsets` | expected actions stop and reset in the label | Q5e |
+| Q5g | C14 | Opus 5.5 | 0.5 | docs: the Q5a Connect calls with method, path and the Kafka version each needs | citations per claim | Q5c |
 
 ## Step 6: network and TLS probes
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| Q6a | C18 | Sonnet 5.5 | 2 | nettools: `net_probe` | DNS, TCP and TLS (chain, SAN, expiry) per target, plus the brokers' advertised listeners from metadata; the database as Connect sees it, through `ValidateConfig` with the running config; targets only from config, the pipeline's `connections:` and its connectors' `database.hostname`/`database.port`: the model names a target label, never an address; no credentials sent; 3 s per step; reuses `kafkatools.CertTargets` and `netsec`; tests with loopback listeners and test certificates | Q0, Q4a |
-| Q6b | A4 | Sonnet 5.5 | 0.5 | wiring + prompt: register `nettools`; "compare Piperoom's view with Connect's" | prompt snapshot; evals unchanged | Q6a |
-| Q6c | C7 | Sonnet 5.5 | 0.5 | scenarios: `advertised-listener-wrong`, `db-unreachable-from-connect` | the label names the failing probe step | Q6a |
-| Q6d | C6 | Sonnet 5.5 | 1.5 | evals: replay for the Q1c, Q3a, Q3c, Q4a and Q5a readers; writers as recording no-ops | the step 1 and 3 to 6 scenarios score; CDC pass rate unchanged | Q1e, Q3f, Q4c, Q5f, Q6c |
+| Q6a | C18 | Opus 5.5 | 2 | nettools: `net_probe` | DNS, TCP and TLS (chain, SAN, expiry) per target, plus the brokers' advertised listeners from metadata; the database as Connect sees it, through `ValidateConfig` with the running config; targets only from config, the pipeline's `connections:` and its connectors' `database.hostname`/`database.port`: the model names a target label, never an address; no credentials sent; 3 s per step; reuses `kafkatools.CertTargets` and `netsec`; tests with loopback listeners and test certificates | Q0, Q4a |
+| Q6b | A4 | Opus 5.5 | 0.5 | wiring + prompt: register `nettools`; "compare Piperoom's view with Connect's" | prompt snapshot; evals unchanged | Q6a |
+| Q6c | C7 | Opus 5.5 | 0.5 | scenarios: `advertised-listener-wrong`, `db-unreachable-from-connect` | the label names the failing probe step | Q6a |
+| Q6d | C6 | Opus 5.5 | 1.5 | evals: replay for the Q1c, Q3a, Q3c, Q4a and Q5a readers; writers as recording no-ops | the step 1 and 3 to 6 scenarios score; CDC pass rate unchanged | Q1e, Q3f, Q4c, Q5f, Q6c |
 
 ## Step 7: propose the fix as a pull request
 
@@ -317,32 +317,50 @@ repos:
 | Q7a | A3 | Opus 5.5 | 1 | owners: `repos:` per pipeline | load refuses a glob without a layer, a layer outside `p.Layers()`, a glob under `.github/`, a non-https URL, two repos with one id; table tests | Q7-0 |
 | Q7b | C17 | Opus 5.5 | 2.5 | forge: GitHub client (`ForgeReader`, `ForgeWriter`) with a GitHub App installation token | writes only to `piperoom/<room>-<proposal>` branches; never pushes the base branch, never merges; commits on the recorded base SHA (`ErrBaseMoved` otherwise); 10 s, 4 MB, `netsec`; the token is never logged; httptest: 401, 403, 404, 409, 422, timeout, oversized | Q7-0 |
 | Q7c | C17 | Opus 5.5 | 2 | fixpr: action `repo_open_pull_request` | Validate: repo in the pipeline's `repos`, every path matches one glob, all files of a step share one layer, at most 10 files of 64 KiB, no binary, no `looksSecret` or redact hit; Preview: unified diff against the base head SHA, which it records; `params_hash` covers the diff; Execute refuses if the base moved; the result carries the PR URL | Q7a, Q7b, P3-0 |
-| Q7d | C17 | Sonnet 5.5 | 1 | forgetools: `repo_read_file`, `pr_status` | scope: the pipeline's repos and globs only; file text wrapped as untrusted; at most 64 KiB | Q7a, Q7b |
-| Q7e | A5 | Sonnet 5.5 | 2 | room: follow opened PRs (`pull_request.updated`, `HumanInput` `pr_merged`, snapshot `open_proposals[].pull_request`) | the room's lease holder polls every 60 s, one poller per room across replicas; polling stops on merge, close or room close; fake-clock tests | Q7-0, Q7c |
+| Q7d | C17 | Opus 5.5 | 1 | forgetools: `repo_read_file`, `pr_status` | scope: the pipeline's repos and globs only; file text wrapped as untrusted; at most 64 KiB | Q7a, Q7b |
+| Q7e | A5 | Opus 5.5 | 2 | room: follow opened PRs (`pull_request.updated`, `HumanInput` `pr_merged`, snapshot `open_proposals[].pull_request`) | the room's lease holder polls every 60 s, one poller per room across replicas; polling stops on merge, close or room close; fake-clock tests | Q7-0, Q7c |
 | Q7f | A4 | Opus 5.5 | 1.5 | agent + wiring: propose a PR when the fix lives in a listed repo; verify after `pr_merged`; build `ForgeWriter` with write mode on | one step never mixes two layers' files; prompt snapshot; evals unchanged | Q7c, Q7d, Q7e, P1a-3 |
-| Q7g | A6 | Sonnet 5.5 | 1.5 | web: diff view in the proposal preview; PR link and state badge | Vitest; the file list is keyboard and screen-reader complete; mobile wraps long lines | Q7e |
-| Q7h | C14 | Sonnet 5.5 | 1 | docs: GitHub App setup (contents and pull requests write, checks read, listed repos only); data-handling (repo files reach the model) | citations per claim | Q7b |
-| Q7i | C7 | Sonnet 5.5 | 1 | scenarios: `plugin-missing-in-image` (Dockerfile), `debezium-upgrade` (version pin), `consumer-deserializer` (consumer config) | the label names repo and path | Q7c |
-| Q7j | C6 | Sonnet 5.5 | 1 | evals: forge replay (writer as recording no-op); "right files changed" score | the three scenarios score; CDC pass rate unchanged | Q7i |
+| Q7g | A6 | Opus 5.5 | 1.5 | web: diff view in the proposal preview; PR link and state badge | Vitest; the file list is keyboard and screen-reader complete; mobile wraps long lines | Q7e |
+| Q7h | C14 | Opus 5.5 | 1 | docs: GitHub App setup (contents and pull requests write, checks read, listed repos only); data-handling (repo files reach the model) | citations per claim | Q7b |
+| Q7i | C7 | Opus 5.5 | 1 | scenarios: `plugin-missing-in-image` (Dockerfile), `debezium-upgrade` (version pin), `consumer-deserializer` (consumer config) | the label names repo and path | Q7c |
+| Q7j | C6 | Opus 5.5 | 1 | evals: forge replay (writer as recording no-op); "right files changed" score | the three scenarios score; CDC pass rate unchanged | Q7i |
 
 ## Step 8: MySQL source
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
 | Q8-0 | leads | Opus 5.5 | 1.5 | design: `docs/design/mysql-source.md` and Q0 item 7 | decides the layer id of a MySQL source, `source_kind`, the DSN, which interfaces MySQL implements, where `RecentDDL` comes from, the MySQL identifier rule (and its line in `AGENTS.md` §4), the driver (`github.com/go-sql-driver/mysql`); item 7 lands in code with it | Q0 |
-| Q8a | A1 | Sonnet 5.5 | 2.5 | dev: compose profile `mysql` (MySQL 8.4 with GTID, Debezium MySQL connector `orders-mysql`); `devctl break`/`fix` `binlog-purged`, `history-topic-deleted`, `missing-replication-grant`, `server-id-clash`; the pipeline in `dev/owners.yaml` | profile healthy in < 3 min; each break trips the watcher or an alert; each fix restores | Q8-0 |
-| Q8b | A8 | Sonnet 5.5 | 3 | mysql: read-only client (`BinlogReader`, `SourceSettingsReader`, long transactions, row) | read-only session; 10 s per call; identifiers by the Q8-0 rule; the new module listed in the PR; settings `binlog_format`, `binlog_row_image`, `gtid_mode`, `server_id`, `log_bin`, `binlog_expire_logs_seconds`; integration on the profile | Q8-0, Q8a |
-| Q8c | A8 | Sonnet 5.5 | 1.5 | mysqltools: `mysql_binlog_status` | compares the connector's stored position (`SourceOffsetReader`) with the purged binlogs and GTIDs and says "the binlog the connector needs is purged"; a test shows the Q2a `source_*` tools work on MySQL through the interface | Q8b, Q5a |
-| Q8d | A3 | Sonnet 5.5 | 1.5 | owners + topology + scope: `source_kind`, the MySQL source node, `db.table` names in scope | builder and scope table tests for both source kinds | Q8-0 |
+| Q8a | A1 | Opus 5.5 | 2.5 | dev: compose profile `mysql` (MySQL 8.4 with GTID, Debezium MySQL connector `orders-mysql`); `devctl break`/`fix` `binlog-purged`, `history-topic-deleted`, `missing-replication-grant`, `server-id-clash`; the pipeline in `dev/owners.yaml` | profile healthy in < 3 min; each break trips the watcher or an alert; each fix restores | Q8-0 |
+| Q8b | A8 | Opus 5.5 | 3 | mysql: read-only client (`BinlogReader`, `SourceSettingsReader`, long transactions, row) | read-only session; 10 s per call; identifiers by the Q8-0 rule; the new module listed in the PR; settings `binlog_format`, `binlog_row_image`, `gtid_mode`, `server_id`, `log_bin`, `binlog_expire_logs_seconds`; integration on the profile | Q8-0, Q8a |
+| Q8c | A8 | Opus 5.5 | 1.5 | mysqltools: `mysql_binlog_status` | compares the connector's stored position (`SourceOffsetReader`) with the purged binlogs and GTIDs and says "the binlog the connector needs is purged"; a test shows the Q2a `source_*` tools work on MySQL through the interface | Q8b, Q5a |
+| Q8d | A3 | Opus 5.5 | 1.5 | owners + topology + scope: `source_kind`, the MySQL source node, `db.table` names in scope | builder and scope table tests for both source kinds | Q8-0 |
 | Q8e | A2 | Opus 5.5 | 1.5 | kafkatools + actions: `kafka_schema_history`; MySQL positions (file, pos, GTID set) in `connect_reset_source_offsets` | the tool flags a missing history topic, finite retention, more than one partition; the action refuses a position past the binlog end or in a purged file | Q8-0, Q5b |
 | Q8f | A8 | Opus 5.5 | 1.5 | mysql: `SourceAdminWriter` on the `SOURCE_DB_WRITE_URL` pool | `GrantSelect`, `EndSession` (`KILL` after the same re-read), `CreateHeartbeatTable`; `SetReplicaIdentity` answers `ErrNotSupported`; the Q2b refusals; integration on the profile | Q8b, Q2b |
 | Q8g | A4 | Opus 5.5 | 1.5 | wiring + agent: build MySQL clients for `source_kind: mysql` (writers only with write mode on); per-source prompt (binlog, GTID, schema history) | a MySQL room offers no `pg_*` tool and a Postgres room no `mysql_*`; prompt snapshots per source; Postgres evals unchanged | Q8b, Q8d, Q8f, P1a-3 |
-| Q8h | C10 | Sonnet 5.5 | 1 | discover: MySQL connectors give `source_kind: mysql` | the output loads with `owners.Load`; dev-profile integration test | Q8a, Q8d |
-| Q8i | C7 | Sonnet 5.5 | 1.5 | scenarios: the four Q8a breaks | labels name layer and action | Q8a |
-| Q8j | C6 | Sonnet 5.5 | 1.5 | evals: MySQL replay readers; pass rate per source kind | the four scenarios score; Postgres pass rate unchanged | Q8c, Q8i |
-| Q8k | A6 | Sonnet 5.5 | 1 | web: MySQL source node and layer label | Vitest; Postgres lane unchanged | Q8d |
-| Q8l | C14 | Sonnet 5.5 | 1 | docs: MySQL read user (`SELECT`, `REPLICATION CLIENT`, `REPLICATION SLAVE`) and write user grants; setup rows | citations per claim | Q8b, Q8f |
-| Q8m | C1 | Sonnet 5.5 | 0.5 | ci: unit tests for the new packages; README lists MySQL | CI green | Q8c |
+| Q8h | C10 | Opus 5.5 | 1 | discover: MySQL connectors give `source_kind: mysql` | the output loads with `owners.Load`; dev-profile integration test | Q8a, Q8d |
+| Q8i | C7 | Opus 5.5 | 1.5 | scenarios: the four Q8a breaks | labels name layer and action | Q8a |
+| Q8j | C6 | Opus 5.5 | 1.5 | evals: MySQL replay readers; pass rate per source kind | the four scenarios score; Postgres pass rate unchanged | Q8c, Q8i |
+| Q8k | A6 | Opus 5.5 | 1 | web: MySQL source node and layer label | Vitest; Postgres lane unchanged | Q8d |
+| Q8l | C14 | Opus 5.5 | 1 | docs: MySQL read user (`SELECT`, `REPLICATION CLIENT`, `REPLICATION SLAVE`) and write user grants; setup rows | citations per claim | Q8b, Q8f |
+| Q8m | C1 | Opus 5.5 | 0.5 | ci: unit tests for the new packages; README lists MySQL | CI green | Q8c |
+
+## Leads' decisions on the plan (review of #605, 2026-10-18)
+
+1. **Order.** The planned order stands: steps 2 to 6 are within the error of the day estimates, and MySQL (step 8)
+   implements the source-neutral interfaces of steps 2 and 5, so it stays last. Step 4 (config validation, 2.4
+   resolved per agent-day) waits only on Q0 and Q1a, so it is dispatched as soon as Q1a lands, in parallel with
+   steps 2 and 3; the After column already allows it.
+2. **Counting rule.** Accepted as written in the plan (§ coverage curve): a problem's first-pass source and runtime
+   count as needs. Any later re-count uses the same rule or says why not.
+3. **Offsets reset.** Counted only once step 5 lands (Q5b, Q5c), as the plan does. The 7 resolvable ones are Q5f's
+   scenarios.
+4. **New owners.** A8 (Qoder, local; A3 takes the A8 rows after step 2 if no eighth local agent runs), C17 and C18
+   (cloud) are accepted with the folders below. `docs/process/ownership.json` carries them in the same PR as
+   AGENTS.md (its own rule).
+5. **Model column.** Every row runs on Opus 5.5, cloud rows included (see the Model note at the top).
+6. **Unconfirmed facts.** The Connect offsets API versions (KIP-875: stop and read in Kafka 3.5, alter and reset in
+   3.6) stay unconfirmed until Q5a's Done-when confirms them against the Kafka release notes and the dev stack's
+   Connect; a refusal message names the version it needs.
 
 ## New folders and owners
 
@@ -360,22 +378,22 @@ no eighth local agent runs, A3 takes the A8 rows after step 2; the After column 
 
 | Agent | PRs | Days | Opus days | Critical for |
 |---|---|---|---|---|
-| A2 | 7 | 10.5 | 6 | the Connect side of steps 1, 3, 4, 5 and 8; the longest chain |
-| A3 | 7 | 10 | 5.5 | step 2; `repos:` (step 7); MySQL owners and topology |
-| A4 | 8 | 6 | 4 | every step's agent and wiring line |
-| A8 | 3 | 6 | 1.5 | step 8 |
-| A1 | 4 | 6.5 | 0 | dev breaks of steps 2, 3, 5 and 8 |
-| C7 | 8 | 7 | 0 | scenarios |
-| C17 | 3 | 5.5 | 4.5 | step 7 |
-| C6 | 4 | 5 | 0 | evals |
-| C18 | 2 | 4.5 | 0 | steps 3 and 6 |
+| A2 | 7 | 10.5 | 10.5 | the Connect side of steps 1, 3, 4, 5 and 8; the longest chain |
+| A3 | 7 | 10 | 10 | step 2; `repos:` (step 7); MySQL owners and topology |
+| A4 | 8 | 6 | 6 | every step's agent and wiring line |
+| A8 | 3 | 6 | 6 | step 8 |
+| A1 | 4 | 6.5 | 6.5 | dev breaks of steps 2, 3, 5 and 8 |
+| C7 | 8 | 7 | 7 | scenarios |
+| C17 | 3 | 5.5 | 5.5 | step 7 |
+| C6 | 4 | 5 | 5 | evals |
+| C18 | 2 | 4.5 | 4.5 | steps 3 and 6 |
 | leads | 3 | 4.5 | 4.5 | contracts and both designs |
-| C14 | 5 | 3.5 | 0 | docs each step |
-| C11 | 2 | 3 | 0 | step 1 |
-| A6 | 2 | 2.5 | 0 | steps 7 and 8 |
-| A5 | 1 | 2 | 0 | step 7 |
-| C10 | 1 | 1 | 0 | step 8 |
-| C1 | 1 | 0.5 | 0 | step 8 |
+| C14 | 5 | 3.5 | 3.5 | docs each step |
+| C11 | 2 | 3 | 3 | step 1 |
+| A6 | 2 | 2.5 | 2.5 | steps 7 and 8 |
+| A5 | 1 | 2 | 2 | step 7 |
+| C10 | 1 | 1 | 1 | step 8 |
+| C1 | 1 | 0.5 | 0.5 | step 8 |
 
 Total about 78 agent-days over 61 PRs. The critical path is A2: Q0, Q1c, Q3a, Q4a, Q5a, Q5b, Q5c, Q8e, about 12
 working days. The MySQL chain (Q0, Q8-0, Q8a, Q8b, Q8f, Q8g) is about as long. If A2 slips, Q8e moves to the end;

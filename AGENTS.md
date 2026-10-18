@@ -208,7 +208,8 @@ edited. Q0 (the leads) carries the contract changes of steps 1 to 6; the design 
 `docs/design/fix-pr.md`) and Q8-0 (MySQL source, `docs/design/mysql-source.md`) carry their own. The board's
 "Q0 items" section names the item each row codes against. The wave comes from a measured analysis of 722 Stack
 Overflow Debezium problems: resolved goes from 7.1% to 18.8% (up to 26.5% with the pull-request fix), diagnosed from
-7.5% to 26.5%. New interfaces, tools and actions are source-neutral, so MySQL implements them instead of copying them.
+7.5% to 26.5%. New interfaces, tools and actions are source-neutral, so MySQL implements them instead of copying them. Every Q row runs on Opus 5.5, cloud
+rows included (the owner's standing instruction; this overrides "Sonnet 5" for cloud agents in §2 for this wave).
 
 New folders of the wave (owned from the first PR that creates them):
 
