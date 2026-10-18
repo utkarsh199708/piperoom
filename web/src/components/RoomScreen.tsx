@@ -14,7 +14,7 @@ import { useRoomAttention } from '../hooks/useRoomAttention'
 import { useCatchUp } from '../hooks/useCatchUp'
 import { CatchUpStrip } from './room/CatchUpStrip'
 import { useCurrentUser } from '../context/user'
-import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
+import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeControl, isViewer, roomPeopleCount } from '../state/permissions'
 import { ageLabel } from '../lib/time'
 import { needsYou } from '../lib/rooms'
 import { handoffInFlight } from '../lib/handoff'
@@ -257,10 +257,12 @@ export function RoomScreen() {
 
   useBreadcrumbTail(state?.pipeline_id) // shell breadcrumb: "Rooms › <pipeline>"
 
+  // Everyone here (presence, the log, you): one person has nobody to ask for control or hand off to (P2).
+  const peopleHere = state ? roomPeopleCount(state, headerMembers.map((m) => m.id), user.id) : 0
   const takeControl = state && canTakeControl(state, user) ? () => actions.grantControl(user.id) : undefined
   const requestControl =
-    state && !takeControl && canRequestControl(state, user) ? actions.requestControl : undefined
-  const openHandoff = state && canHandoff(state, user) ? () => setHandoffOpen(true) : undefined
+    state && !takeControl && canRequestControl(state, user, peopleHere) ? actions.requestControl : undefined
+  const openHandoff = state && canHandoff(state, user, peopleHere) ? () => setHandoffOpen(true) : undefined
   const openTrace = state && !isViewer(user) ? () => setTraceOpen(true) : undefined
   const canCloseHere = !!state && canClose(state, user)
   const openClose = canCloseHere
@@ -559,7 +561,7 @@ export function RoomScreen() {
           )}
 
           {state.shadow && state.status === 'closed' && <ShadowPanel state={state} user={user} />}
-          {!state.shadow && <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} />}
+          {!state.shadow && <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} people={peopleHere} />}
         </div>
 
         {wide && (

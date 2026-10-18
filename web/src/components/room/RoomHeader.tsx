@@ -1,7 +1,7 @@
 import { Check, CircleCheck, Copy, Download, Ellipsis, Eye, FileText, Loader2, MoreHorizontal, Repeat2, ShieldAlert, UserPlus } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
-import { canClose, canHandoff, isViewer } from '@/state/permissions'
+import { canClose, canHandoff, isViewer, roomPeopleCount } from '@/state/permissions'
 import type { ConnState } from '@/hooks/useRoom'
 import { Clock } from './Clock'
 import { roomStatus, statusInputFromState } from '@/lib/roomStatus'
@@ -96,6 +96,8 @@ export function RoomHeader({
   // useRoomShortcuts does not depend on the buttons.
   const roomy = useMediaQuery('(min-width: 768px)')
   const status = roomStatus(statusInputFromState(state))
+  // Hand-off needs someone to take it (P2): same count as RoomScreen's.
+  const peopleHere = roomPeopleCount(state, members.map((m) => m.id), user.id)
   const ordered = [...members].sort((a, b) => Number(b.id === state.driver?.id) - Number(a.id === state.driver?.id))
   const shown = ordered.slice(0, MAX_AVATARS)
   const extra = ordered.length - shown.length
@@ -148,7 +150,7 @@ export function RoomHeader({
           )}
           {roomy ? (
             <>
-              {canHandoff(state, user) && (
+              {canHandoff(state, user, peopleHere) && (
                 <Button variant="secondary" aria-keyshortcuts="H" aria-busy={handoffBusy || undefined} onClick={onHandoff}>
                   {handoffBusy ? (
                     <Loader2 className="animate-spin" aria-hidden="true" />
@@ -209,7 +211,7 @@ export function RoomHeader({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
-                {canHandoff(state, user) && (
+                {canHandoff(state, user, peopleHere) && (
                   <DropdownMenuItem aria-keyshortcuts="H" disabled={handoffBusy} onSelect={onHandoff} className="coarse:min-h-11">
                     <Repeat2 aria-hidden="true" />
                     {handoffBusy ? 'Writing hand-off…' : 'Hand off'}

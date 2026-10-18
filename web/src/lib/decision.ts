@@ -30,7 +30,7 @@ export function decisionFor(state: RoomState, user: CurrentUser): Decision | nul
   // The same row ProposalsPanel gives the A and R keys: first proposal, first layer you can decide.
   if (!isViewer(user)) {
     for (const p of proposals) {
-      const layer = p.required_layers.find((l) => canDecideLayer(p, user, l))
+      const layer = p.required_layers.find((l) => canDecideLayer(p, user, l, state.driver?.id))
       if (layer) return { kind: 'needs-you', proposal: p, layer, completing: completesSet(p, layer) }
     }
   }

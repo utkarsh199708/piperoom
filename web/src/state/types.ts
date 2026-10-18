@@ -33,6 +33,8 @@ export interface DriverInfo {
    * Lease expiry). The driver stays the driver; the next control.granted clears it.
    */
   lease_expired?: boolean
+  /** control.granted.reason (P2b): "sole_member" when the server made the only person here the driver. */
+  reason?: string
 }
 
 export interface AgentStatusState {
@@ -183,6 +185,11 @@ export interface ProposalState {
    * (see the reducer). Read it through `waitingForWriteMode`, which also checks that nothing ran.
    */
   blocked?: 'write_mode_off'
+  /**
+   * P2b: proposal.created.fallback_layers, the required layers nobody owns. The room's driver
+   * approves them. Absent when every layer has an owner.
+   */
+  fallback_layers?: string[]
 }
 
 export interface MemberState {

@@ -5,11 +5,13 @@ import {
   canAcceptHandoff,
   canApprove,
   canDecideLayer,
+  canHandoff,
   canRequestControl,
   canSendSuggestionToAgent,
   canSteer,
   canSuggest,
   canTakeControl,
+  roomPeopleCount,
 } from './permissions'
 import type { CurrentUser } from './permissions'
 
@@ -54,10 +56,47 @@ describe('permissions', () => {
   })
 
   it('request control is gated to non-drivers who have not already asked', () => {
-    expect(canRequestControl(room('arjun'), kabir)).toBe(true)
-    expect(canRequestControl(room('arjun'), arjun)).toBe(false)
+    expect(canRequestControl(room('arjun'), kabir, 2)).toBe(true)
+    expect(canRequestControl(room('arjun'), arjun, 2)).toBe(false)
     const asked = room('arjun', { control_requests: [{ from: { kind: 'human', id: 'kabir', name: 'Kabir' } }] })
-    expect(canRequestControl(asked, kabir)).toBe(false)
+    expect(canRequestControl(asked, kabir, 2)).toBe(false)
+  })
+
+  it('the sole member never requests control (P2)', () => {
+    expect(canRequestControl(room('arjun'), kabir, 1)).toBe(false)
+  })
+
+  it('hand-off is offered only when more than one person is in the room (P2)', () => {
+    expect(canHandoff(room('arjun'), arjun, 1)).toBe(false)
+    expect(canHandoff(room('arjun'), arjun, 0)).toBe(false)
+    expect(canHandoff(room('arjun'), arjun, 2)).toBe(true)
+    expect(canHandoff(room('arjun'), kabir, 2)).toBe(false)
+  })
+
+  it('roomPeopleCount counts presence, the log and you once each', () => {
+    const s = room('arjun', { members: [{ id: 'arjun', name: 'Arjun', role: 'driver' }] })
+    expect(roomPeopleCount(room(null), [], 'arjun')).toBe(1)
+    expect(roomPeopleCount(s, ['arjun'], 'arjun')).toBe(1)
+    expect(roomPeopleCount(s, ['arjun', 'kabir'], 'arjun')).toBe(2)
+    expect(roomPeopleCount(s, [], 'kabir')).toBe(2)
+  })
+
+  it('the driver decides a layer nobody owns; nobody else does (P2b fallback)', () => {
+    const p: ProposalState = {
+      ...proposal,
+      required_layers: ['kafka-connect', 'consumer'],
+      approvals: { 'kafka-connect': 'pending', consumer: 'pending' },
+      fallback_layers: ['consumer'],
+    }
+    // meera owns neither layer; as the driver she may decide the unowned one only.
+    expect(canDecideLayer(p, meera, 'consumer', 'meera')).toBe(true)
+    expect(canDecideLayer(p, meera, 'kafka-connect', 'meera')).toBe(false)
+    expect(canDecideLayer(p, meera, 'consumer', 'arjun')).toBe(false)
+    expect(canDecideLayer(p, meera, 'consumer')).toBe(false)
+    expect(canDecideLayer(p, arjun, 'consumer', 'meera')).toBe(false)
+    // Without fallback_layers the driver has no extra right.
+    expect(canDecideLayer({ ...p, fallback_layers: undefined }, meera, 'consumer', 'meera')).toBe(false)
+    expect(canDecideLayer(p, { ...meera, role: 'viewer' }, 'consumer', 'meera')).toBe(false)
   })
 
   it('a pending layer can be decided only by its owner', () => {

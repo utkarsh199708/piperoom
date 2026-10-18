@@ -49,8 +49,23 @@ export function canSuggest(state: RoomState, user: CurrentUser): boolean {
   return !isViewer(user) && isOpen(state) && !isDriver(state, user) && state.driver != null
 }
 
-export function canRequestControl(state: RoomState, user: CurrentUser): boolean {
+/**
+ * How many people are in the room: everyone the presence frame or the event log names, the driver,
+ * and you. The sole-member rules (P2) read it: nobody to ask for control, nobody to hand off to.
+ */
+export function roomPeopleCount(state: RoomState, presenceIds: readonly string[], userId: string): number {
+  const ids = [...presenceIds, ...state.members.map((m) => m.id), userId]
+  if (state.driver) ids.push(state.driver.id)
+  return new Set(ids).size
+}
+
+/**
+ * `people` is roomPeopleCount: the room's sole member never asks for control (P2: the server makes
+ * the first member of a driverless alert room its driver).
+ */
+export function canRequestControl(state: RoomState, user: CurrentUser, people: number): boolean {
   return (
+    people > 1 &&
     !isViewer(user) &&
     isOpen(state) &&
     !isDriver(state, user) &&
@@ -73,8 +88,9 @@ export function canGrantControl(state: RoomState, user: CurrentUser): boolean {
   return !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
-export function canHandoff(state: RoomState, user: CurrentUser): boolean {
-  return !isViewer(user) && isOpen(state) && isDriver(state, user)
+/** A hand-off needs someone to take it: offered only when `people` (roomPeopleCount) is above one (P2). */
+export function canHandoff(state: RoomState, user: CurrentUser, people: number): boolean {
+  return people > 1 && !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
 export function canClose(state: RoomState, user: CurrentUser): boolean {
@@ -93,7 +109,12 @@ export function canSendSuggestionToAgent(
  * What the layer rules need from a proposal: the full ProposalState, or a room snapshot's
  * open proposal (the room list) with `status: 'open'`.
  */
-export type ProposalLike = Pick<ProposalState, 'required_layers' | 'approvals' | 'status'>
+export type ProposalLike = Pick<ProposalState, 'required_layers' | 'approvals' | 'status' | 'fallback_layers'>
+
+/** A layer nobody owns (P2b `fallback_layers`): the room's driver approves it. */
+export function isFallbackLayer(proposal: Pick<ProposalLike, 'fallback_layers'>, layer: string): boolean {
+  return proposal.fallback_layers?.includes(layer) === true
+}
 
 export function pendingLayersFor(
   proposal: ProposalLike,
@@ -104,16 +125,21 @@ export function pendingLayersFor(
   )
 }
 
+/**
+ * `driverId` is the room's driver: they may decide a layer in `fallback_layers` (docs/api.md, P2b).
+ * Pass it only for an open room; the server checks the driver again when it appends the event.
+ */
 export function canDecideLayer(
   proposal: ProposalLike,
   user: CurrentUser,
   layer: string,
+  driverId?: string | null,
 ): boolean {
   return (
     !isViewer(user) &&
     proposal.status === 'open' &&
     proposal.approvals[layer] === 'pending' &&
-    user.layers.includes(layer)
+    (user.layers.includes(layer) || (driverId != null && driverId === user.id && isFallbackLayer(proposal, layer)))
   )
 }
 
@@ -121,16 +147,18 @@ export function canApprove(
   proposal: ProposalState,
   user: CurrentUser,
   layer: string,
+  driverId?: string | null,
 ): boolean {
-  return canDecideLayer(proposal, user, layer)
+  return canDecideLayer(proposal, user, layer, driverId)
 }
 
 export function canReject(
   proposal: ProposalState,
   user: CurrentUser,
   layer: string,
+  driverId?: string | null,
 ): boolean {
-  return canDecideLayer(proposal, user, layer)
+  return canDecideLayer(proposal, user, layer, driverId)
 }
 
 export function canAcceptHandoff(user: CurrentUser, handoff: HandoffState): boolean {
