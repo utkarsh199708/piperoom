@@ -1,0 +1,8 @@
+version: 2
+
+sources:
+  - name: warehouse
+    schema: analytics
+    tables:
+      - name: orders # loaded by the order-sync consumer (cmd/devconsumer)
+        loaded_at_field: loaded_at

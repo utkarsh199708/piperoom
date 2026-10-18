@@ -1,0 +1,17 @@
+# The batch pipeline of the `batch` compose profile (dev/batch.md): Airflow DAG
+# revenue_daily runs dbt, which builds stg_orders -> fct_revenue in the warehouse.
+# P4g-2 adds this pipeline to dev/owners.yaml; until then point OWNERS_FILE here.
+# TestOwnersBatchLoads (cmd/devctl) loads it with owners.Load.
+pipelines:
+  - id: daily-revenue
+    title: Daily revenue (Airflow + dbt)
+    kind: batch
+    dags: [revenue_daily]
+    dbt_project: dev/batch/dbt/analytics
+    models: [stg_orders, fct_revenue]
+    sink_tables: [analytics.fct_revenue]
+    sink_ts_column: loaded_at
+layers:
+  orchestrator: priya
+  transform: priya
+  warehouse: meera

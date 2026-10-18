@@ -152,3 +152,45 @@ services:
       PIPEROOM_SHADOW_GRACE: ${PIPEROOM_SHADOW_GRACE:-0}
       PIPEROOM_SHADOW_TOKEN_BUDGET: ${PIPEROOM_SHADOW_TOKEN_BUDGET:-500000}
       PIPEROOM_SHADOW_MAX_TURNS: ${PIPEROOM_SHADOW_MAX_TURNS:-20}
+
+  # Batch pipeline "daily-revenue" (dev/batch.md, dev/owners.batch.yaml):
+  # Airflow standalone runs DAG revenue_daily, whose dbt run builds
+  # analytics.stg_orders -> analytics.fct_revenue in the warehouse database.
+  # Profile "batch": `docker compose --profile batch up -d --wait` starts it
+  # with the default services; without the profile nothing here starts.
+  airflow:
+    profiles: ["batch"]
+    build: ./batch/airflow
+    image: piperoom-dev/airflow:2.10.5-dbt1.9.0
+    command: ["standalone"]
+    # Linux: export AIRFLOW_UID=$(id -u) so dbt can write the bind-mounted artifacts dir.
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      postgres: { condition: service_healthy }
+    # Host loopback only: the REST API below takes no login.
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ./batch/dags:/opt/airflow/dags:ro
+      - ./batch/dbt:/opt/airflow/dbt:ro
+      # dbt's target/ (run_results.json, manifest.json); the host server reads it
+      # as DBT_ARTIFACTS_DIR=<absolute path of dev/batch/artifacts>.
+      - ./batch/artifacts:/opt/airflow/dbt-artifacts
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      # No login on /api/v1: internal/clients/airflow refuses to send a password
+      # or token over http:// (#587), and the port is bound to 127.0.0.1.
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.default
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
+      WAREHOUSE_HOST: postgres
+      WAREHOUSE_USER: piperoom
+      WAREHOUSE_PASSWORD: piperoom-dev
+      DBT_PROFILES_DIR: /opt/airflow/dbt/analytics
+      DBT_TARGET_PATH: /opt/airflow/dbt-artifacts
+      DBT_LOG_PATH: /tmp/dbt-logs
+    healthcheck:
+      # Healthy once the API answers without login and the DAG is parsed.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/api/v1/dags/revenue_daily >/dev/null"]
+      start_period: 30s
+      interval: 5s
+      retries: 30
