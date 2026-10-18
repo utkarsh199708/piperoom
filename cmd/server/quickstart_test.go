@@ -642,6 +642,46 @@ func TestQuickstartStartRefusesWriteModeOn(t *testing.T) {
 	}
 }
 
+// A listen failure comes after the one-user users file is written, so the
+// start must still remove its temp directory, and the error must carry the
+// "server: listen" prefix once (#600 review).
+func TestQuickstartListenErrorRemovesTempDir(t *testing.T) {
+	// Occupy a loopback port so the server's own Listen fails.
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+
+	ownersPath := writeOwnersFile(t, "user:"+quickstartOwner)
+	tmp := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	cmd := quickstartCmd(ctx, t, ownersPath, tmp, "PIPEROOM_HTTP_ADDR="+busy.Addr().String())
+	out, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "RUN ERROR") {
+		t.Fatalf("listen on the occupied %s: err %v, want a start-up error\n%s", busy.Addr(), err, out)
+	}
+	var runErr string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "RUN ERROR: ") {
+			runErr = strings.TrimPrefix(line, "RUN ERROR: ")
+		}
+	}
+	want := "server: listen: listen on " + busy.Addr().String() + ": "
+	if !strings.HasPrefix(runErr, want) || strings.Count(runErr, "server:") != 1 {
+		t.Fatalf("run error = %q, want it to start %q with one \"server:\" prefix", runErr, want)
+	}
+	// The users file was written before the listen (the log says so), and the
+	// failed start removed it.
+	if !strings.Contains(string(out), "wrote a one-user users file") {
+		t.Fatalf("the start did not reach the users file before the listen:\n%s", out)
+	}
+	if left, _ := filepath.Glob(filepath.Join(tmp, "piperoom-quickstart-*")); len(left) != 0 {
+		t.Fatalf("the temp users dir outlived the failed listen: %v", left)
+	}
+}
+
 // lockedBuffer is a bytes.Buffer safe for the exec copier goroutine and the
 // test reading it.
 type lockedBuffer struct {

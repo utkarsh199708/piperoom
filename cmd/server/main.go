@@ -421,6 +421,9 @@ func runWith(d startDeps) error {
 		// section 5). Each room, the topology and the watcher reach only the
 		// set of their own pipeline.
 		sets, err := d.openStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
+			// Write mode off opens every set read-only, so no write client
+			// exists at all, not only an executor that runs nothing.
+			ReadOnly: !writeOn,
 			// similar_incidents reads past closed rooms from the room store;
 			// each set's Owners holds only its own pipelines.
 			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
@@ -613,7 +616,7 @@ func listenAndServe(server *http.Server, quickstart bool, out io.Writer, log *sl
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("server: listen on %s: %w", addr, err)
+		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	if quickstart {
 		if err := checkQuickstartListener(ln.Addr()); err != nil {
