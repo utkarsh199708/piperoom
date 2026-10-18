@@ -58,6 +58,7 @@ type gauges struct {
 	conns     func() int                 // live WebSocket connections
 	agents    func() (inUse, queued int) // agent slots in use, rooms queued for one
 	openRooms func() int                 // open rooms in the room cache
+	approvals func() map[string]uint64   // approval.given appended here, by grant (a counter)
 }
 
 func newMetrics(start time.Time, g gauges) *metrics {
@@ -175,6 +176,19 @@ func (m *metrics) write(w io.Writer, now time.Time) {
 	}
 	if m.g.openRooms != nil {
 		gauge(w, "piperoom_rooms_open", "Open rooms in this replica's room cache.", m.g.openRooms())
+	}
+	if m.g.approvals != nil {
+		byGrant := m.g.approvals()
+		grants := make([]string, 0, len(byGrant))
+		for g := range byGrant {
+			grants = append(grants, g)
+		}
+		slices.Sort(grants)
+		fmt.Fprintln(w, "# HELP piperoom_approvals_total approval.given events this replica appended, by grant.")
+		fmt.Fprintln(w, "# TYPE piperoom_approvals_total counter")
+		for _, g := range grants {
+			fmt.Fprintf(w, "piperoom_approvals_total{grant=%s} %d\n", quoteLabel(g), byGrant[g])
+		}
 	}
 	fmt.Fprintln(w, "# HELP piperoom_goroutines Goroutines in this process.")
 	fmt.Fprintln(w, "# TYPE piperoom_goroutines gauge")

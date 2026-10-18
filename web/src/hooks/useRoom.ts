@@ -20,11 +20,14 @@ import { newClientId } from '../lib/clientId'
 import { SendLedger } from './sendLedger'
 import type { DeliveredListener, SendItem } from './sendLedger'
 import { mentionsAgent } from '../lib/mentions'
-import { applyEvent } from '../state/reducer'
+import { applyEvent, applyModeRefresh } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
 import { hideStaleToast, showStaleToast } from '../lib/staleToast'
 import { equalJitter } from '../lib/backoff'
+
+// How long a reconnect waits for GET /api/rooms/{id} (the write mode) before it resumes the replay.
+const MODE_WAIT_MS = 4000
 
 // HTTP status an error frame code stands for (docs/api.md, Errors).
 const WS_FRAME_STATUS: Record<string, number> = {
@@ -155,6 +158,8 @@ export interface RoomActions {
 type RoomAction =
   | { type: 'init'; snapshot: RoomSnapshot }
   | { type: 'event'; event: Event }
+  // A reconnect asked the server for the room again: only the write mode in its answer is used.
+  | { type: 'mode_refreshed'; snapshot: RoomSnapshot }
   | { type: 'reset' }
 
 function roomReducer(state: RoomState | null, action: RoomAction): RoomState | null {
@@ -165,6 +170,8 @@ function roomReducer(state: RoomState | null, action: RoomAction): RoomState | n
       return fromSnapshot(action.snapshot)
     case 'event':
       return state ? applyEvent(state, action.event) : state
+    case 'mode_refreshed':
+      return state ? applyModeRefresh(state, action.snapshot) : state
   }
 }
 
@@ -388,9 +395,39 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       applyEventSeq(ev)
     }
 
-    const connect = () => {
+    // Write mode changes only when the server restarts, and a restart drops the socket. So every
+    // reconnect (not the first connect, whose snapshot is fresh) asks for the room again and takes
+    // its `mode` and `blocked` marks before the replay resumes, in both directions. A failed ask
+    // changes nothing: the replay goes on with the mode already known, and the next reconnect asks
+    // again. The reconnect waits for the answer only briefly (MODE_WAIT_MS): a server that is up
+    // for the socket but slow to answer must not hold the replay back, and a late answer is still
+    // applied, because applyModeRefresh re-judges what the replay has already folded in.
+    const refreshMode = async () => {
+      try {
+        const snapshot = await api.room(roomId)
+        if (cancelled || !snapshot) return
+        dispatch({ type: 'mode_refreshed', snapshot })
+      } catch {
+        // see above
+      }
+    }
+
+    const connect = async () => {
       if (cancelled) return
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      if (!firstConnect) {
+        let waitTimer: number | undefined
+        await Promise.race([
+          refreshMode(),
+          new Promise<void>((resolve) => {
+            waitTimer = window.setTimeout(resolve, MODE_WAIT_MS)
+          }),
+        ])
+        window.clearTimeout(waitTimer)
+        if (cancelled) return
+        // Another connect may have opened a socket while the room was being fetched.
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      }
       const sock = openRoomWs(roomId, firstConnect ? 0 : lastSeqRef.current)
       ws = sock
       firstConnect = false
@@ -479,7 +516,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           void api.me().catch(() => undefined)
         }
         setConn('reconnecting')
-        reconnectTimer = window.setTimeout(connect, equalJitter(backoff, randomRef.current))
+        reconnectTimer = window.setTimeout(() => void connect(), equalJitter(backoff, randomRef.current))
         backoff = Math.min(backoff * 2, 10000)
       }
       sock.onerror = () => {
@@ -495,7 +532,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         // lastSeqRef stays 0: open with after=0 so the full log replays and the
         // reducer rebuilds timeline/comments/proposals/trace/handoffs (item D).
         setConn('connecting')
-        connect()
+        void connect()
       } catch (e) {
         if (cancelled) return
         setConn(e instanceof ApiClientError && e.status === 404 ? 'not_found' : 'error')

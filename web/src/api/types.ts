@@ -450,6 +450,24 @@ export interface ProposalSummary {
   approvals: Record<string, ApprovalValue>
   /** After auth PR 4. "" only for a proposal that cannot be hashed. */
   params_hash?: string
+  /**
+   * P1a: every required layer approved and nothing ran because write mode is off. Absent
+   * otherwise, and on a server from before P1a. The only value in the P wave.
+   */
+  blocked?: 'write_mode_off'
+}
+
+/**
+ * RoomSnapshot.mode (docs/api.md, P-wave snapshot fields; P1a, P2b). It arrives with the room GET
+ * and does not change over the socket. A server without it (before P1a) has write mode on.
+ */
+export interface RoomMode {
+  /** The server's PIPEROOM_WRITE_MODE: false means approved fixes are recorded and never run. */
+  write: boolean
+  /** True when the caller may approve every layer of the room's pipeline. */
+  solo: boolean
+  /** The pipeline's auto_approve: list from owners.yaml. */
+  auto_approve: string[]
 }
 
 export interface SuggestionSummary {
@@ -545,6 +563,8 @@ export interface RoomSnapshot {
   closed_by?: Actor
   /** F2: the post-mortem draft's state; absent on an older server. */
   postmortem?: PostmortemSummary
+  /** P1a/P2b: on the room GET only (list rows have none); absent on an older server, which means write mode on. */
+  mode?: RoomMode
 }
 
 /** RoomSnapshot.postmortem (docs/api.md, F2). */

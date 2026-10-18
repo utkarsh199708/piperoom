@@ -27,6 +27,7 @@ import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
 import { DecisionHandleContext } from './shell/context'
 import { completesSet } from '../lib/decision'
+import { writeModeOff } from '../lib/writeMode'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
 import { WaitingFor } from './room/WaitingFor'
@@ -378,11 +379,14 @@ function SoloConfirmDialog({
 }
 
 // The approval that completes the set runs the fix right away. One more look, with the steps
-// that will run, before a production change (Enter or Ctrl/⌘⏎ confirms, Esc cancels).
+// that will run, before a production change (Enter or Ctrl/⌘⏎ confirms, Esc cancels). With write
+// mode off the step stays, because the approval is still a decision on record, but the words say
+// that nothing runs: the dialog must never promise what the server will not do.
 function RunConfirmDialog({
   proposal,
   layer,
   busy,
+  writeOff,
   onConfirm,
   onCancel,
   onClosed,
@@ -390,6 +394,7 @@ function RunConfirmDialog({
   proposal: ProposalState
   layer: string
   busy: boolean
+  writeOff: boolean
   onConfirm: () => void
   onCancel: () => void
   onClosed: () => void
@@ -420,10 +425,16 @@ function RunConfirmDialog({
         }}
       >
         <DialogHeader className="gap-1.5">
-          <DialogTitle>Run this fix now?</DialogTitle>
+          <DialogTitle>{writeOff ? 'Approve this fix?' : 'Run this fix now?'}</DialogTitle>
           <DialogDescription>
-            Your approval completes the set. Piperoom runs {n} {n === 1 ? 'step' : 'steps'} on {layers.join(' and ') || layer}{' '}
-            right away.
+            {writeOff ? (
+              'Your approval completes the set. Write mode is off, so nothing runs: the fix waits for write mode.'
+            ) : (
+              <>
+                Your approval completes the set. Piperoom runs {n} {n === 1 ? 'step' : 'steps'} on{' '}
+                {layers.join(' and ') || layer} right away.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         <ul className="m-0 flex list-none flex-col gap-1 rounded-lg border border-border bg-muted p-3 font-mono text-xs">
@@ -439,7 +450,7 @@ function RunConfirmDialog({
             <Kbd aria-hidden="true">esc</Kbd>
           </Button>
           <Button variant="success" disabled={busy} autoFocus onClick={onConfirm}>
-            Approve and run
+            {writeOff ? 'Approve (will not run)' : 'Approve and run'}
             <Kbd aria-hidden="true">⏎</Kbd>
           </Button>
         </DialogFooter>
@@ -461,12 +472,15 @@ function LayerRow({
   headingId,
   onSolo,
   waiting,
+  writeOff,
 }: {
   proposal: ProposalState
   layer: string
   user: CurrentUser
   actions: RoomActions
   pipelineId: string
+  /** Write mode is off (P1a): an approval is recorded and nothing runs, and the button says so. */
+  writeOff: boolean
   /** This row's buttons answer to A and R (the first layer you can decide). */
   shortcuts: boolean
   noHashNoteId: string
@@ -681,7 +695,7 @@ function LayerRow({
             aria-keyshortcuts={shortcuts ? 'A' : undefined}
             onClick={startApprove}
           >
-            Approve
+            Approve{writeOff ? ' (will not run)' : ''}
             {shortcuts && <Kbd aria-hidden="true">A</Kbd>}
           </Button>
         </span>
@@ -735,6 +749,7 @@ function LayerRow({
           proposal={proposal}
           layer={layer}
           busy={busy}
+          writeOff={writeOff}
           onCancel={() => setRunConfirm(false)}
           onConfirm={() => {
             setRunConfirm(false)
@@ -791,6 +806,7 @@ function Proposal({
   waiting,
   topology,
   nudge,
+  writeOff,
 }: {
   nudge: CloseNudge
   topology: Topology | null
@@ -806,6 +822,7 @@ function Proposal({
   ribbon: boolean
   onSolo: () => void
   waiting: WaitingContext
+  writeOff: boolean
 }) {
   const titleId = useId()
   const noteId = useId()
@@ -930,6 +947,7 @@ function Proposal({
             headingId={titleId}
             onSolo={onSolo}
             waiting={waiting}
+            writeOff={writeOff}
           />
         ))}
       </div>
@@ -1038,6 +1056,7 @@ export function ProposalsPanel({
               waiting={waiting}
               topology={topology}
               nudge={nudge}
+              writeOff={writeModeOff(state.mode)}
             />
           ))}
         </div>

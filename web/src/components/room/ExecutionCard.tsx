@@ -1,7 +1,8 @@
 import type { SendControls, SendOptions } from '../../hooks/useRoom'
-import { CircleCheck, CircleX, LoaderCircle, TriangleAlert } from 'lucide-react'
+import { CircleCheck, CirclePause, CircleX, LoaderCircle, TriangleAlert } from 'lucide-react'
 import type { ProposalState } from '../../state/types'
 import { executionPhase } from '../../lib/execution'
+import { WAITING_FOR_WRITE_MODE } from '../../lib/writeMode'
 import { shortHash } from '../../lib/hash'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
@@ -25,6 +26,19 @@ function headerText(proposal: ProposalState): string {
   }
 }
 
+// Every layer approved while write mode is off (P1a): nothing runs, so there is no step list, no
+// progress bar and no "Ran" header. One neutral line; the banner above the room says how to change it.
+function WaitingForWriteModeCard() {
+  return (
+    <div className="flex px-3.5 py-2.5 text-sm">
+      <p role="status" className="m-0 inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <CirclePause className="size-3.5 shrink-0" aria-hidden="true" />
+        {WAITING_FOR_WRITE_MODE}
+      </p>
+    </div>
+  )
+}
+
 // What happened to an approved proposal's steps, one row each. The header is the card's single
 // live region. The "hash differs" badge and exec-hash test ids carry over from the old list.
 export function ExecutionCard({
@@ -40,6 +54,7 @@ export function ExecutionCard({
   }
 }) {
   const info = executionPhase(proposal)
+  if (info.phase === 'blocked') return <WaitingForWriteModeCard />
   if (proposal.executed.length === 0 && info.phase !== 'running') return null
   const byStep = new Map(proposal.executed.map((x) => [x.step_index, x]))
   const running = info.phase === 'running'

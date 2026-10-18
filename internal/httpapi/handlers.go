@@ -118,7 +118,8 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRoom(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.svc.GetRoom(r.Context(), chi.URLParam(r, "id"))
+	// The caller's view: mode and open_proposals[].blocked (P0 item 1).
+	snap, err := s.svc.RoomFor(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"))
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -319,6 +320,29 @@ func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeEvent(w, http.StatusOK, ev)
+}
+
+// handleApproveAllProposal serves POST /api/proposals/{pid}/approve-all
+// (P0 item 4): one approval.given per required layer still pending, answered
+// as the list of those events in required_layers order.
+func (s *Server) handleApproveAllProposal(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		// ParamsHash follows approve's rule: missing is 400, different 409.
+		ParamsHash string `json:"params_hash"`
+		// Confirm is the solo user's "<pipeline_id>/*", typed once for every
+		// layer of the call. Ignored for anyone else.
+		Confirm string `json:"confirm"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	evs, err := s.svc.ApproveAllProposal(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.ParamsHash, body.Confirm)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, evs)
 }
 
 func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request) {

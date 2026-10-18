@@ -347,12 +347,19 @@ func TestOversizedBodies(t *testing.T) {
 		t.Fatalf("5 MiB log: tail %q, cut %v, err %v", tail, cut, err)
 	}
 
-	// Past MaxLogStreamBytes reading stops: cut, and the tail ends the first 64 MiB.
+	// Past the stream ceiling reading stops: cut, and the tail ends at the
+	// ceiling. Streaming the real 64 MiB outran the 10 s client timeout on a
+	// loaded CI runner, so the ceiling is lowered to 5 MiB (still above
+	// MaxResponseBytes, and a whole number of lines).
+	if c.logCeiling != MaxLogStreamBytes {
+		t.Fatalf("New set logCeiling %d, want MaxLogStreamBytes", c.logCeiling)
+	}
+	c.logCeiling = 5 << 20
 	line := "0123456789abcde\n"
 	chunk := strings.Repeat(line, (1<<20)/len(line)) // 1 MiB of whole lines
 	stream := func(end string) func(io.Writer) {
 		return func(w io.Writer) {
-			for range MaxLogStreamBytes >> 20 {
+			for range c.logCeiling >> 20 {
 				io.WriteString(w, chunk)
 			}
 			io.WriteString(w, end)
