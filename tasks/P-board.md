@@ -10,6 +10,13 @@ working days including tests and review fixes. **After** lists the rows that mus
 **Merged in round 1 (2026-10-18):** #583 (P0), #584 (P1a-1), #585 (P2a), #586 (P1b), #587 and #593 (P4c-1). Their
 IDs below say "merged"; a row that lists them under After waits only on its other entries.
 
+**Merged in round 2 (2026-10-18):** #589 (P1e-1), #590 (P2b-1), #591 (P3b-1), #592 (P3a-2), #588 (P4a-1), plus the
+leads' #594 (contracts follow-up 1: `ErrAlreadyPublished`, `GroupResetPlanner`, the P3-0 and P4a-4 rows) and A5's
+#595 (two flaky `internal/room` tests). Unblocked by round 2: P1e-2, P2c-1, P3-0 (new row), P4a-2, P4a-3, P4a-4. Still dispatchable from before (After all
+merged, not merged themselves): P1a-2, P1a-3, P1d-2, P2b-2, P2b-3, P3h, P4d-1, P4e-1, P4e-2, P4g-1. Waiting: P3a-1,
+P3a-3…P3a-5, P3b-2, P3b-3 on P3-0 (P3b-4 on P3-0 and P3a-5); P4b-1 and P4f-2 on P4a-4; P4c-2, P4f-1 and P4d-2 on
+P4a-2 (P4d-2 also on P4d-1); P2b-4 on P2b-3.
+
 ## Step 0
 
 | ID | Agent | Model | Days | PR | Done when | After |
@@ -31,7 +38,7 @@ IDs below say "merged"; a row that lists them under After waits only on its othe
 | P1c-2 | C1 | Sonnet 5 | 0.5 | ci: quickstart job (5-minute budget, curls `/healthz` for `write_mode: "off"`) | job green on the P1c-1 merge commit | P1c-1 |
 | P1d-1 | C14 | Sonnet 5 | 0.5 | docs: `docs/pilot/quickstart.md` (≤ 60 lines) and the ten-variable table at the top of `setup.md` | every claim cites a file; links resolve | P1a-2, P1b |
 | P1d-2 | C14 | Sonnet 5 | 0.5 | docs: F7 row → fixed by `connections:`; `decision.md` §4 read-only default, shadow as a toggle | citations to `internal/owners/tenancy.go` and the write-mode code | P1a-1 |
-| P1e-1 | A6 | Sonnet 5.5 | 1 | web: read-only banner; "Approve (will not run)"; "Approved · waiting for write mode" | Vitest for the three states; banner is a labelled `region`; mobile one-liner | P0 (fake snapshot), P1a-1 to verify |
+| P1e-1 (merged #589) | A6 | Sonnet 5.5 | 1 | web: read-only banner; "Approve (will not run)"; "Approved · waiting for write mode" | Vitest for the three states; banner is a labelled `region`; mobile one-liner | P0 (fake snapshot), P1a-1 to verify |
 | P1e-2 | A6 | Sonnet 5.5 | 0.5 | web: first-run panel on the empty room list with the `curl` for `/api/alerts/webhook` | pipeline id comes from `GET /api/pipelines`; copy button; Vitest | P1e-1 |
 | P1f | A1 | Sonnet 5.5 | 1 | testenv: `Quickstart(t)` integration test; `dev/README.md` quickstart first | passes with and without `ANTHROPIC_API_KEY` against the dev stack; asserts no `action.executed` | P1a-2, P1b |
 
@@ -40,7 +47,7 @@ IDs below say "merged"; a row that lists them under After waits only on its othe
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
 | P2a (merged #585) | A3 | Sonnet 5.5 | 1 | owners: `auto_approve`, `IsOwned`, `OwnsAll`, `LoadWithActions` | table tests: unknown action, duplicate, unowned layer, group membership | P0 |
-| P2b-1 | A5 | Opus 5.5 | 1.5 | room: `POST /api/proposals/{pid}/approve-all` | one call → one `approval.given` per required layer, then execution; partial owner → `403 not_layer_owner`, nothing written; solo confirm `pipeline/*` | P2a |
+| P2b-1 (merged #590) | A5 | Opus 5.5 | 1.5 | room: `POST /api/proposals/{pid}/approve-all` | one call → one `approval.given` per required layer, then execution; partial owner → `403 not_layer_owner`, nothing written; solo confirm `pipeline/*` | P2a |
 | P2b-2 | A5 | Opus 5.5 | 1 | room: sole-member driver (`control.granted{reason: "sole_member"}` on first join of a driverless alert room) | second joiner changes nothing; viewer never; shadow rooms excepted; metrics | P0 |
 | P2b-3 | A5 | Opus 5.5 | 1 | room: unowned-layer fallback (`fallback_layers` on the proposal; driver approves with `grant: "fallback"`) | non-driver owner of another layer cannot approve the fallback layer; re-checked at append. Design (review 2026-10-18): one proposal-aware `authorizeProposalLayer(st, p, user, layer, confirm, needConfirm)` that both `approve` and approve-all call (`authorizeLayer` first, then layer ∈ `fallback_layers` && driver == user → `"fallback"`); `approvalGrant` gains the fallback case | P2a |
 | P2b-4 | A5 | Opus 5.5 | 2 | room: policy auto-approve (`proposal.scheduled`, timer, `cancel` route, snapshot `scheduled`, `mode.solo`/`mode.auto_approve`) | fake-clock tests: runs after delay with `grant: "policy"`; cancel stops it; failed preview, write mode off, shadow, driver-origin → never scheduled; a `schema_*` entry in `auto_approve` is refused at start (P2 out of scope). Design (review 2026-10-18): the timer's fire path is authoritative (under the room lock: open, no `proposal.cancelled`, no human `approval.*` after `proposal.scheduled`); the explicit stop lives in `appendApprovalLocked` and the reject path, not as a third copy; `appendApprovalLocked` takes the actor and optional identity so policy approvals reuse it; `mode.solo` = `authorizeAllLayers(pid, user, pipeline.Layers())`; `auto_approve` is validated against the FULL proposal registry, never an executor registry emptied by write-mode-off; a `schema_*` entry is refused | P2b-1, P2b-3, P1a-1 |
@@ -55,11 +62,11 @@ IDs below say "merged"; a row that lists them under After waits only on its othe
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
 | P3a-1 | A2 | Opus 5.5 | 2 | connect: `PauseConnector`, `UpdateConnectorConfigKeys`; actions `connect_pause_connector`, N-key `connect_update_connector_config` (old one-key shape still parses) | `Validate` refuses out-of-pipeline, unknown key, `looksSecret`; `Preview` sends the merged config to validate; integration test with `it_` connector | P1a-1, P3-0 |
-| P3a-2 | A2 | Opus 5.5 | 1.5 | kafka: `KafkaWriter` (`ResetGroupOffsets`, `Produce`) with `kadm`/`kgo`; `ErrGroupActive` | `go doc` for every `kadm` call in the PR; integration: reset an `it_` group to earliest and to a timestamp | P0 |
+| P3a-2 (merged #592) | A2 | Opus 5.5 | 1.5 | kafka: `KafkaWriter` (`ResetGroupOffsets`, `Produce`) with `kadm`/`kgo`; `ErrGroupActive` | `go doc` for every `kadm` call in the PR; integration: reset an `it_` group to earliest and to a timestamp | P0 |
 | P3a-3 | A2 | Opus 5.5 | 1 | actions: `kafka_reset_consumer_offsets` with per-partition preview and rollback offsets | refuses active group, future timestamp, group outside `consumer_groups`, and (shared group) a planned move on a topic outside `CheckScope`'s topics, since the client resets every committed topic of the group; executes against the dev stack; the Kafka client's `OffsetMove` (#592, `internal/clients/kafka/writer.go`) becomes `= clients.OffsetMove` and the client asserts `var _ clients.GroupResetPlanner = (*Writer)(nil)`, so the action's interface assertion holds | P3a-2, P1a-1, P3-0 |
 | P3a-4 | A2 | Opus 5.5 | 1 | actions: `dlq_replay` (ordered, ≤ 1000, drops `__connect.errors.*` headers, redacted key preview) | end offsets move as expected on the dev stack; stops at first produce error and reports `acked`; the Validate error says the target must be a pipeline CDC topic (`<topic_prefix>.<table>`), which is all the client's `CheckTopic` allows | P3a-2, P1a-1, P3-0 |
 | P3a-5 | A2 | Opus 5.5 | 1.5 | actions: `connect_snapshot_table` (`via: signal_topic`; `signal_table` delegates to `SourceWriter`) | refuses the `via` the connector is not configured for and tables outside `source_tables`; fake `SourceWriter` until P3b-4 | P3a-2, P1a-1, P3-0 |
-| P3b-1 | A3 | Opus 5.5 | 1.5 | postgres: `SourceWriter` on a separate pool (`SOURCE_DB_WRITE_URL`); identifiers via `Sanitize()` | no writer when the URL is empty; unit tests with a fake pool; integration: `it_` publication and slot | P0 |
+| P3b-1 (merged #591) | A3 | Opus 5.5 | 1.5 | postgres: `SourceWriter` on a separate pool (`SOURCE_DB_WRITE_URL`); identifiers via `Sanitize()` | no writer when the URL is empty; unit tests with a fake pool; integration: `it_` publication and slot | P0 |
 | P3b-2 | A3 | Opus 5.5 | 1 | pgactions: `pg_add_publication_table` | refuses wrong publication, table outside scope, no PK/replica identity, already published; preview text; the postgres client's `ErrAlreadyPublished` (#591, `internal/clients/postgres/writer.go`) becomes `= clients.ErrAlreadyPublished` | P3b-1, P1a-1, P3-0 |
 | P3b-3 | A3 | Opus 5.5 | 1 | pgactions: `pg_drop_replication_slot` (inactive, pipeline's slot only, `lost` needs `force`) | re-reads before drop; integration against an `it_` slot; `ErrSlotActive` path | P3b-1, P1a-1, P3-0 |
 | P3b-4 | A3 | Opus 5.5 | 1 | postgres + pgactions: `InsertSnapshotSignal` and the `signal_table` half of `connect_snapshot_table` | signal row written with the expected JSON; `reltuples` size warning in preview | P3b-1, P3a-5, P3-0 |
@@ -76,7 +83,7 @@ IDs below say "merged"; a row that lists them under After waits only on its othe
 
 | ID | Agent | Model | Days | PR | Done when | After |
 |---|---|---|---|---|---|---|
-| P4a-1 | A3 | Sonnet 5.5 | 1 | owners: `kind`, batch fields, cross-kind field refusal, `Pipeline.Layers()` | table tests for both kinds and the refusals | P0 |
+| P4a-1 (merged #588) | A3 | Sonnet 5.5 | 1 | owners: `kind`, batch fields, cross-kind field refusal, `Pipeline.Layers()` | table tests for both kinds and the refusals | P0 |
 | P4a-4 | A5 | Sonnet 5.5 | 1 | server: `GET /api/pipelines` returns `kind`; the room fills `Alert.PipelineKind` from owners; `/api/me` `layers` scoped to the kinds in owners.yaml | docs/api.md rows satisfied; tests for cdc and batch | P4a-1 |
 | P4a-2 | A3 | Opus 5.5 | 1.5 | topology + scope: DAG → task → model → sink graph; batch scope (`dags`, `models`, `sink_tables`); `partial` on nil readers | builder tests with nil readers and `ErrNotSupported`; scope tests; a pipeline `connections:` block requires only the keys of its kind (batch: `warehouse_db_url`, plus Airflow/dbt keys once P4b-1 maps them); a pipeline `owners:` layer outside `p.Layers()` stays refused (landed in #588 round 1; keep the test); coordinate the equal-lists wiring test with A4 | P4a-1 |
 | P4a-3 | C5 | Sonnet 5 | 0.5 | alertin: `dag_id` label/field → the pipeline whose `dags` lists it | parse tests for Alertmanager and generic payloads | P4a-1 |
