@@ -5,6 +5,7 @@ import type { ProposalState, RoomState } from '../state/types'
 import { neutralizeBadgeText } from './verification'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer, isViewer } from '../state/permissions'
+import { waitingForWriteMode } from './writeMode'
 
 export type Decision =
   | { kind: 'needs-you'; proposal: ProposalState; layer: string; completing: boolean }
@@ -42,6 +43,9 @@ export function decisionFor(state: RoomState, user: CurrentUser): Decision | nul
     const failed = approved.executed.findIndex((e) => !e.ok)
     if (failed >= 0) {
       if (!superseded) return { kind: 'done', proposal: approved, ok: false, failedStep: failed + 1 }
+    } else if (waitingForWriteMode(approved)) {
+      // Write mode is off: the set is complete and nothing will run, so no "Running step 1" bar.
+      // The card and the rail say so; the bar has no question to ask.
     } else if (approved.executed.length < total) {
       const i = approved.executed.length
       return { kind: 'executing', proposal: approved, step: i + 1, total, action: approved.steps[i].action }

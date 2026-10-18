@@ -548,6 +548,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
             status: 'open',
             executed: [],
             created_at: event.at,
+            // Only the snapshot says so for a proposal that was already blocked when it was taken.
+            ...(state.snapshot_blocked?.[p.proposal_id] ? { blocked: state.snapshot_blocked[p.proposal_id] } : {}),
           },
         ],
       }
@@ -602,6 +604,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
               },
             },
             status: allApproved ? 'approved' : 'open',
+            // The snapshot's `blocked` is not refreshed over the socket: an approval that completes the
+            // set while write mode is off leaves nothing to run (docs/api.md, P1a), so mark it here.
+            ...(allApproved && !prop.blocked && state.mode?.write === false ? { blocked: 'write_mode_off' as const } : {}),
           }
         }),
       }

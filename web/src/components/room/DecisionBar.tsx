@@ -6,6 +6,7 @@ import { ArrowDown, TriangleAlert } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { decisionFor } from '@/lib/decision'
+import { writeModeOff } from '@/lib/writeMode'
 import type { Decision } from '@/lib/decision'
 import { cn } from '@/lib/utils'
 import { PersonName } from '@/components/VerifiedBadge'
@@ -129,6 +130,7 @@ export function DecisionBar({
             onClick={() => handle()?.approve()}
           >
             Approve {decision.layer}
+            {writeModeOff(state.mode) ? ' (will not run)' : ''}
             {!sheet && <Kbd aria-hidden="true">A</Kbd>}
           </Button>
           {!sheet && view}

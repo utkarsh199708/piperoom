@@ -5,6 +5,7 @@ import type { RoomState } from '../state/types'
 import type { Dot } from './rooms'
 import { ageLabel } from './time'
 import { verdictKind, verdictWords } from './execution'
+import { WAITING_FOR_WRITE_MODE, waitingForWriteMode } from './writeMode'
 
 /** Precedence is this order: the first kind that applies wins. */
 export type StatusKind =
@@ -13,6 +14,7 @@ export type StatusKind =
   | 'agent-error'
   | 'log-full'
   | 'executing'
+  | 'awaiting-write-mode'
   | 'fix-failed'
   | 'fixed'
   | 'needs-approval'
@@ -40,6 +42,8 @@ export interface StatusProposal {
   executed: { ok: boolean }[]
   /** The agent's verdict on the fix, once it ran (the list snapshot has none). */
   verification?: { recovered: boolean; verdict?: string }
+  /** P1a: approved by every layer, held back because write mode is off (the list snapshot has none). */
+  waitingForWriteMode?: boolean
 }
 
 export interface RoomStatusInput {
@@ -81,7 +85,12 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
   // The newest approved proposal decides executing / failed / fixed. These outrank the agent's own
   // status: the demo agent re-emits waiting_approval after every approval.
   const approved = [...input.proposals].reverse().find((p) => p.status === 'approved')
-  if (approved) {
+  // Nothing runs while write mode is off, so it is neither executing nor fixed. A newer proposal
+  // takes over, like a finished fix.
+  if (approved?.waitingForWriteMode && input.proposals[input.proposals.length - 1] === approved) {
+    return info('awaiting-write-mode', WAITING_FOR_WRITE_MODE, 'muted')
+  }
+  if (approved && !approved.waitingForWriteMode) {
     const failed = approved.executed.findIndex((e) => !e.ok)
     if (failed >= 0) return info('fix-failed', `Fix failed · step ${failed + 1}`, 'fail', failed + 1)
     if (approved.steps > 0 && approved.executed.length < approved.steps) {
@@ -126,6 +135,7 @@ export function statusInputFromState(s: RoomState): RoomStatusInput {
       steps: p.steps.length,
       executed: p.executed,
       verification: p.verification,
+      ...(waitingForWriteMode(p) ? { waitingForWriteMode: true } : {}),
     })),
     steps: s.steps.length,
   }

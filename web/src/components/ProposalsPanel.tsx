@@ -27,6 +27,7 @@ import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
 import { DecisionHandleContext } from './shell/context'
 import { completesSet } from '../lib/decision'
+import { writeModeOff } from '../lib/writeMode'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
 import { WaitingFor } from './room/WaitingFor'
@@ -461,12 +462,15 @@ function LayerRow({
   headingId,
   onSolo,
   waiting,
+  writeOff,
 }: {
   proposal: ProposalState
   layer: string
   user: CurrentUser
   actions: RoomActions
   pipelineId: string
+  /** Write mode is off (P1a): an approval is recorded and nothing runs, and the button says so. */
+  writeOff: boolean
   /** This row's buttons answer to A and R (the first layer you can decide). */
   shortcuts: boolean
   noHashNoteId: string
@@ -681,7 +685,7 @@ function LayerRow({
             aria-keyshortcuts={shortcuts ? 'A' : undefined}
             onClick={startApprove}
           >
-            Approve
+            Approve{writeOff ? ' (will not run)' : ''}
             {shortcuts && <Kbd aria-hidden="true">A</Kbd>}
           </Button>
         </span>
@@ -791,6 +795,7 @@ function Proposal({
   waiting,
   topology,
   nudge,
+  writeOff,
 }: {
   nudge: CloseNudge
   topology: Topology | null
@@ -806,6 +811,7 @@ function Proposal({
   ribbon: boolean
   onSolo: () => void
   waiting: WaitingContext
+  writeOff: boolean
 }) {
   const titleId = useId()
   const noteId = useId()
@@ -930,6 +936,7 @@ function Proposal({
             headingId={titleId}
             onSolo={onSolo}
             waiting={waiting}
+            writeOff={writeOff}
           />
         ))}
       </div>
@@ -1038,6 +1045,7 @@ export function ProposalsPanel({
               waiting={waiting}
               topology={topology}
               nudge={nudge}
+              writeOff={writeModeOff(state.mode)}
             />
           ))}
         </div>

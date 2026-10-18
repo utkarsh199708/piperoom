@@ -31,6 +31,7 @@ import { TracePanel } from './TracePanel'
 import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
 import { NoDriverBanner } from './NoDriverBanner'
+import { WriteModeBanner } from './WriteModeBanner'
 import { ChangesLane } from './room/ChangesLane'
 import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
@@ -488,6 +489,7 @@ export function RoomScreen() {
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
             onCite={citeStep}
           />
+          <WriteModeBanner mode={state.mode} />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
 
