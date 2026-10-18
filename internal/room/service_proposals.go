@@ -299,7 +299,8 @@ func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p sto
 		if errors.Is(err, store.ErrAlreadyExists) {
 			return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 		}
-		return events.Event{}, err
+		// Named, so a failure part-way through approve-all says which layer.
+		return events.Event{}, fmt.Errorf("room: record approval of %s: %w", layer, err)
 	}
 	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
 		ProposalID: p.ProposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident, Grant: grant,

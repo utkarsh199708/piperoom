@@ -2,7 +2,9 @@ package room_test
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +35,14 @@ func approveAllOwners() *owners.Owners {
 // wh_act actions of writeModeProposal.
 func newApproveAllService(t *testing.T, off bool, solo string) (*room.Service, *memstore.Store, *fakeAction, *fakeAction) {
 	t.Helper()
+	st := memstore.New()
+	svc, pg, wh := newApproveAllServiceOn(t, st, off, solo)
+	return svc, st, pg, wh
+}
+
+// newApproveAllServiceOn is newApproveAllService over st.
+func newApproveAllServiceOn(t *testing.T, st store.Store, off bool, solo string) (*room.Service, *fakeAction, *fakeAction) {
+	t.Helper()
 	pg := &fakeAction{name: "pg_act", layer: "postgres"}
 	wh := &fakeAction{name: "wh_act", layer: "warehouse"}
 	reg := actions.NewRegistry()
@@ -41,13 +51,48 @@ func newApproveAllService(t *testing.T, off bool, solo string) (*room.Service, *
 			t.Fatalf("register action: %v", err)
 		}
 	}
-	st := memstore.New()
 	svc := room.New(room.Deps{
 		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: approveAllOwners(),
 		Run: fakeRun, WriteHandoff: fakeWrite, WriteModeOff: off, SoloUser: solo,
 	})
 	t.Cleanup(svc.Close)
-	return svc, st, pg, wh
+	return svc, pg, wh
+}
+
+// errRecordApproval is failApprovalStore's refusal.
+var errRecordApproval = errors.New("simulated approvals row failure")
+
+// failApprovalStore refuses, once, the approvals row of one layer (failLayer),
+// and when lostBlocked is set loses every write of the "blocked" status, so a
+// proposal fully approved with write mode off keeps an "open" row.
+type failApprovalStore struct {
+	*memstore.Store
+	mu          sync.Mutex
+	failLayer   string
+	lostBlocked bool
+}
+
+func (f *failApprovalStore) RecordApproval(ctx context.Context, a store.ApprovalRow) error {
+	f.mu.Lock()
+	fail := a.Layer == f.failLayer
+	if fail {
+		f.failLayer = ""
+	}
+	f.mu.Unlock()
+	if fail {
+		return errRecordApproval
+	}
+	return f.Store.RecordApproval(ctx, a)
+}
+
+func (f *failApprovalStore) SetProposalStatus(ctx context.Context, proposalID, status string) error {
+	f.mu.Lock()
+	lost := f.lostBlocked && status == store.ProposalStatusBlocked
+	f.mu.Unlock()
+	if lost {
+		return errSideWrite
+	}
+	return f.Store.SetProposalStatus(ctx, proposalID, status)
 }
 
 // approvalsGiven decodes every approval.given of the room, in log order.
@@ -243,6 +288,140 @@ func TestApproveAllSkipsLayerAlreadyApproved(t *testing.T) {
 	if pg.Calls() != 1 || wh.Calls() != 1 {
 		t.Fatalf("calls pg %d wh %d, want 1 each", pg.Calls(), wh.Calls())
 	}
+}
+
+// Every required layer is authorised, also one approved before the call:
+// kabir owns postgres only, so after meera's warehouse approval approve-all is
+// still 403 naming warehouse. It never completes a proposal for a person who
+// could not approve all of it; kabir uses approve for postgres.
+func TestApproveAllAuthorisesLayerAlreadyApproved(t *testing.T) {
+	svc, st, pg, wh := newApproveAllService(t, false, "")
+	roomID := createRoom(t, svc, "arjun").ID
+	pid := writeModeProposal(t, svc, roomID)
+	hash := proposalHash(t, svc, pid)
+	approveLayer(t, svc, "meera", pid, "warehouse")
+
+	_, err := svc.ApproveAllProposal(context.Background(), mustUser(t, svc, "kabir"), pid, hash, "")
+	wantCode(t, err, "not_layer_owner")
+	if !strings.Contains(err.Error(), `layer "warehouse"`) {
+		t.Fatalf("message %q does not name layer warehouse", err)
+	}
+	if got := approvalsGiven(t, st, roomID); len(got) != 1 || got[0].Layer != "warehouse" || got[0].Identity.Grant != "user:meera" {
+		t.Fatalf("log approvals = %+v, want meera's warehouse only", got)
+	}
+	svc.Close() // waits for every goroutine the service started
+	if n := countEvents(t, st, roomID, events.ActionExecuted); n != 0 || pg.Calls()+wh.Calls() != 0 {
+		t.Fatalf("%d action.executed, calls pg %d wh %d: nothing may run", n, pg.Calls(), wh.Calls())
+	}
+}
+
+// A failure part-way: the approvals row of the second layer is refused. The
+// first layer stays recorded (the log is append-only), the call answers the
+// error naming the layer, and nothing runs. The retry records the rest and the
+// steps run once.
+func TestApproveAllPartialRecordThenRetry(t *testing.T) {
+	st := &failApprovalStore{Store: memstore.New(), failLayer: "warehouse"}
+	svc, pg, wh := newApproveAllServiceOn(t, st, false, "")
+	roomID := createRoom(t, svc, "arjun").ID
+	pid := writeModeProposal(t, svc, roomID)
+	hash := proposalHash(t, svc, pid)
+	priya := mustUser(t, svc, "priya")
+
+	evs, err := svc.ApproveAllProposal(context.Background(), priya, pid, hash, "")
+	if !errors.Is(err, errRecordApproval) || !strings.Contains(err.Error(), "warehouse") || evs != nil {
+		t.Fatalf("approve-all = %v, %v; want the row error naming warehouse and no events", evs, err)
+	}
+	if got := approvalsGiven(t, st.Store, roomID); len(got) != 1 || got[0].Layer != "postgres" {
+		t.Fatalf("log approvals = %+v, want postgres only", got)
+	}
+	if _, p := viewProposal(t, svc, "priya", roomID, pid); p.Approvals["postgres"] != "approved" || p.Approvals["warehouse"] == "approved" {
+		t.Fatalf("approvals %v, want postgres approved and warehouse pending", p.Approvals)
+	}
+	if n := countEvents(t, st.Store, roomID, events.ActionExecuted); n != 0 || pg.Calls()+wh.Calls() != 0 {
+		t.Fatalf("%d action.executed, calls pg %d wh %d after a partial approve-all", n, pg.Calls(), wh.Calls())
+	}
+
+	evs, err = svc.ApproveAllProposal(context.Background(), priya, pid, hash, "")
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	checkApprovals(t, evs, pid, hash, "priya", events.GrantOwner, "user:priya", "warehouse")
+	waitFor(t, 5*time.Second, func() bool { return countEvents(t, st.Store, roomID, events.ActionExecuted) == 2 })
+	svc.Close()
+	if pg.Calls() != 1 || wh.Calls() != 1 || len(approvalsGiven(t, st.Store, roomID)) != 2 {
+		t.Fatalf("calls pg %d wh %d, approvals %d; want 1, 1 and 2", pg.Calls(), wh.Calls(), len(approvalsGiven(t, st.Store, roomID)))
+	}
+}
+
+// Concurrent calls by the same owner: one records both layers, every other
+// one is already_decided, and the steps run once.
+func TestApproveAllConcurrentCallsRunOnce(t *testing.T) {
+	svc, st, pg, wh := newApproveAllService(t, false, "")
+	roomID := createRoom(t, svc, "arjun").ID
+	pid := writeModeProposal(t, svc, roomID)
+	hash := proposalHash(t, svc, pid)
+	priya := mustUser(t, svc, "priya")
+
+	const calls = 8
+	start := make(chan struct{})
+	errs := make(chan error, calls)
+	var wg sync.WaitGroup
+	for range calls {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := svc.ApproveAllProposal(context.Background(), priya, pid, hash, "")
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	ok := 0
+	for err := range errs {
+		if err == nil {
+			ok++
+			continue
+		}
+		wantCode(t, err, "already_decided")
+	}
+	if ok != 1 {
+		t.Fatalf("%d calls succeeded, want 1", ok)
+	}
+	waitFor(t, 5*time.Second, func() bool { return countEvents(t, st, roomID, events.ActionExecuted) == 2 })
+	svc.Close()
+	if got := approvalsGiven(t, st, roomID); len(got) != 2 {
+		t.Fatalf("log approvals = %+v, want 2", got)
+	}
+	if n := countEvents(t, st, roomID, events.ActionExecuted); n != 2 || pg.Calls() != 1 || wh.Calls() != 1 {
+		t.Fatalf("%d action.executed, calls pg %d wh %d; want 2, 1 and 1", n, pg.Calls(), wh.Calls())
+	}
+}
+
+// approve's order: a caller who may not approve every layer is told 403 also
+// on a fully approved proposal whose row still says "open" (here: write mode
+// off and the "blocked" status write lost); an owner of every layer is told
+// already_decided.
+func TestApproveAllAuthorisesBeforeDecidedCheck(t *testing.T) {
+	st := &failApprovalStore{Store: memstore.New(), lostBlocked: true}
+	svc, _, _ := newApproveAllServiceOn(t, st, true, "")
+	roomID := createRoom(t, svc, "arjun").ID
+	pid := writeModeProposal(t, svc, roomID)
+	hash := proposalHash(t, svc, pid)
+
+	_, err := svc.ApproveAllProposal(context.Background(), mustUser(t, svc, "arjun"), pid, hash, "")
+	wantCode(t, err, "not_layer_owner")
+	if _, err := svc.ApproveAllProposal(context.Background(), mustUser(t, svc, "priya"), pid, hash, ""); err != nil {
+		t.Fatalf("approve-all: %v", err)
+	}
+	if row, err := st.GetProposal(context.Background(), pid); err != nil || row.Status != "open" {
+		t.Fatalf("row = %+v (err %v), want status open (blocked write lost)", row, err)
+	}
+	_, err = svc.ApproveAllProposal(context.Background(), mustUser(t, svc, "arjun"), pid, hash, "")
+	wantCode(t, err, "not_layer_owner")
+	_, err = svc.ApproveAllProposal(context.Background(), mustUser(t, svc, "priya"), pid, hash, "")
+	wantCode(t, err, "already_decided")
 }
 
 // A proposal with a rejected layer is decided: 409 already_decided, nothing

@@ -16,14 +16,16 @@ import (
 // single approve. It returns those events.
 //
 // The rules are approve's, applied to the whole proposal under one hold of
-// the room's lock:
-//   - paramsHash is required (400 validation) and must be the proposal's
-//     (409 params_mismatch);
-//   - the room must be open (409 room_closed); a rejected, blocked, executed
-//     or fully approved proposal is 409 already_decided;
+// the room's lock, and checked in approve's order:
+//   - paramsHash is required (400 validation);
+//   - a rejected, blocked or executed proposal is 409 already_decided, and
+//     the room must be open (409 room_closed);
 //   - the caller must be allowed every required layer, an already approved
 //     one included (authorizeAllLayers), else 403 not_layer_owner naming the
 //     first layer the caller lacks, and nothing is recorded;
+//   - a proposal whose every layer is approved is 409 already_decided (after
+//     the 403, as approve answers a decided layer only to its owner);
+//   - paramsHash must be the proposal's (409 params_mismatch);
 //   - the solo user types confirm "<pipeline_id>/*" once for the call (400
 //     validation otherwise), checked after the hash like approve's; anyone
 //     else's confirm is ignored.
@@ -54,14 +56,14 @@ func (s *Service) ApproveAllProposal(ctx context.Context, user User, proposalID,
 	if !s.roomOpen(st) {
 		return nil, roomClosed("room is closed")
 	}
+	details, err := s.authorizeAllLayers(st.snap.PipelineID, user, p.RequiredLayers)
+	if err != nil {
+		return nil, err
+	}
 	// Fully approved while its row still says "open": queued for the
 	// executor, or held by write mode with the row's "blocked" write lost.
 	if allApproved(st.snap, proposalID) {
 		return nil, alreadyDecided("every layer of this proposal is already approved")
-	}
-	details, err := s.authorizeAllLayers(st.snap.PipelineID, user, p.RequiredLayers)
-	if err != nil {
-		return nil, err
 	}
 	if err := s.checkParamsHash(ctx, &p, paramsHash, false); err != nil {
 		return nil, err
