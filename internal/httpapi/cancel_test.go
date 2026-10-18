@@ -106,3 +106,37 @@ func TestCancelProposalRoute(t *testing.T) {
 		t.Fatalf("mode = %+v", view.Mode)
 	}
 }
+
+// A viewer gets 403 viewer from the cancel route (default-deny guard) and
+// nothing is logged. A member on the same proposal reaches the service and
+// is told 409 not_scheduled (this env has no countdown), so the 403 came
+// from the guard, not from the service.
+func TestOIDCViewerCannotCancel(t *testing.T) {
+	e := newOIDCEnv(t, oidcOpts{})
+	snap := e.newRoom(t, "priya")
+	pid := e.proposal(t, snap.ID, "kafka-connect")
+	path := "/api/proposals/" + pid + "/cancel"
+
+	viewer := e.mustLogin(t, idpViewer)
+	resp := e.do(t, http.MethodPost, path, `{"reason":"no"}`, ck(viewer))
+	wantStatus(t, resp, http.StatusForbidden)
+	if code, _ := errCode(t, resp); code != "viewer" {
+		t.Fatalf("viewer cancel: code %q, want viewer", code)
+	}
+
+	oncall := e.mustLogin(t, idpOncall)
+	resp = e.do(t, http.MethodPost, path, `{}`, ck(oncall))
+	wantStatus(t, resp, http.StatusConflict)
+	if code, _ := errCode(t, resp); code != "not_scheduled" {
+		t.Fatalf("member cancel: code %q, want not_scheduled", code)
+	}
+	evs, _, err := e.svc.Events(context.Background(), snap.ID, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range evs {
+		if ev.Type == events.ProposalCancelled {
+			t.Fatalf("proposal.cancelled logged: %+v", ev)
+		}
+	}
+}

@@ -57,6 +57,14 @@ var errNotAutoApprovable = errors.New("room: proposal not eligible for the auto-
 // stopped by a person, is not due, or the room or the proposal changed.
 var errScheduleGone = errors.New("room: policy countdown no longer due")
 
+// policyRefusal is the fire check's refusal of a countdown that is due but
+// that the policy must not approve any more: the preview, the auto_approve:
+// list or a layer's decision changed. Unlike errScheduleGone it is worth one
+// log line (notePolicyOnce): the proposal waits for people.
+type policyRefusal struct{ why string }
+
+func (e *policyRefusal) Error() string { return "room: auto-approve policy refuses: " + e.why }
+
 // notScheduled is 409 not_scheduled (docs/api.md): no countdown of the
 // proposal is pending.
 func notScheduled(msg string) *Error {
@@ -221,13 +229,28 @@ func (s *Service) fireCheckLocked(st *roomState, proposalID string) (Proposal, e
 	if !ok || !p.sched.pending() || fullyApproved(p) || s.now().Before(p.sched.runAt) {
 		return Proposal{}, errScheduleGone
 	}
-	if !previewAllOK(p) || !s.policyCovers(st.snap.PipelineID, p.Steps) {
-		return Proposal{}, errScheduleGone
+	if !previewAllOK(p) {
+		return Proposal{}, &policyRefusal{why: "the preview no longer says every step would be accepted"}
 	}
+	if !s.policyCovers(st.snap.PipelineID, p.Steps) {
+		return Proposal{}, &policyRefusal{why: "the auto_approve: list no longer covers every step"}
+	}
+	// Every approved layer must be one the policy approved: the fold stops
+	// the countdown on a person's approval, so this holds for any log the
+	// service writes; it keeps the policy from finishing a proposal a person
+	// half-decided should the fold ever miss one.
+	approved := 0
 	for _, l := range p.RequiredLayers {
-		if d := p.Approvals[l]; d != "pending" && d != "approved" {
-			return Proposal{}, errScheduleGone
+		switch p.Approvals[l] {
+		case "pending":
+		case "approved":
+			approved++
+		default:
+			return Proposal{}, &policyRefusal{why: fmt.Sprintf("layer %q was decided by a person", l)}
 		}
+	}
+	if approved != p.sched.policyN {
+		return Proposal{}, &policyRefusal{why: "a required layer was approved by a person"}
 	}
 	return p, nil
 }
@@ -302,11 +325,13 @@ func (s *Service) checkSchedules(ctx context.Context) {
 		return
 	}
 	due := map[string][]string{}
-	for id, p := range s.publishedRooms() {
+	published := s.publishedRooms()
+	for id, p := range published {
 		if ids := s.scheduleDue(p); len(ids) > 0 {
 			due[id] = ids
 		}
 	}
+	s.pruneAutoNotes(published)
 	if len(due) == 0 {
 		return
 	}
@@ -359,16 +384,21 @@ func (s *Service) firePolicy(ctx context.Context, roomID, proposalID string) {
 	}
 	defer s.unlockRoom(st)
 	prop, err := s.fireCheckLocked(st, proposalID)
+	var refused *policyRefusal
+	if errors.As(err, &refused) {
+		s.notePolicyOnce(roomID, proposalID, noteRefused, refused.why, nil)
+		return
+	}
 	if err != nil {
 		return
 	}
 	row, err := s.store.GetProposal(ctx, proposalID)
 	if err != nil {
-		s.log.Warn("room: auto-approve: read proposal failed; retry at the next check", "room", roomID, "proposal", proposalID, "err", err)
+		s.notePolicyOnce(roomID, proposalID, noteFailed, "read the proposal", err)
 		return
 	}
-	if why := s.policyRowMismatch(roomID, st.snap.PipelineID, row, prop); why != "" {
-		s.skipPolicyOnce(roomID, proposalID, why)
+	if why := policyRowMismatch(roomID, row, prop); why != "" {
+		s.notePolicyOnce(roomID, proposalID, noteRefused, why, nil)
 		return
 	}
 	a := approver{actor: systemActor, detail: events.GrantPolicy, check: func() error {
@@ -381,12 +411,18 @@ func (s *Service) firePolicy(ctx context.Context, roomID, proposalID string) {
 			continue
 		}
 		if _, err := s.appendApprovalLocked(ctx, st, row, layer, a); err != nil {
+			// Each kind is logged once per proposal: the loop retries every
+			// second, and an approvals row with no event behind it, or a
+			// store that keeps failing, would otherwise log at that rate.
 			var re *Error
-			if errors.Is(err, errScheduleGone) || (errors.As(err, &re) && re.Code == codeAlreadyDecided) {
-				s.log.Info("room: auto-approve: countdown decided elsewhere; policy stops", "room", roomID, "proposal", proposalID, "layer", layer, "err", err)
-				return
+			switch {
+			case errors.As(err, &refused):
+				s.notePolicyOnce(roomID, proposalID, noteRefused, refused.why, nil)
+			case errors.Is(err, errScheduleGone) || (errors.As(err, &re) && re.Code == codeAlreadyDecided):
+				s.notePolicyOnce(roomID, proposalID, noteDecided, "layer "+layer, err)
+			default:
+				s.notePolicyOnce(roomID, proposalID, noteFailed, "approve layer "+layer, err)
 			}
-			s.log.Warn("room: auto-approve: approval failed; retry at the next check", "room", roomID, "proposal", proposalID, "layer", layer, "err", err)
 			return
 		}
 		n++
@@ -398,11 +434,12 @@ func (s *Service) firePolicy(ctx context.Context, roomID, proposalID string) {
 }
 
 // policyRowMismatch re-reads the stored proposal at fire time: it must be
-// the room's, still open, carry the params_hash shown with the countdown,
-// hash to it from its stored steps (what the executor runs), and its steps
-// must still be covered by the policy. Any difference is the reason the
-// policy does not approve; "" when there is none.
-func (s *Service) policyRowMismatch(roomID, pipelineID string, row store.ProposalRow, p Proposal) string {
+// the room's, still open, carry the params_hash shown with the countdown and
+// hash to it from its stored steps (what the executor runs). With the same
+// hash the stored steps are the folded ones, which fireCheckLocked checked
+// against the policy. Any difference is the reason the policy does not
+// approve; "" when there is none.
+func policyRowMismatch(roomID string, row store.ProposalRow, p Proposal) string {
 	if row.RoomID != roomID {
 		return "proposal row belongs to another room"
 	}
@@ -412,28 +449,74 @@ func (s *Service) policyRowMismatch(roomID, pipelineID string, row store.Proposa
 	if row.ParamsHash == "" || row.ParamsHash != p.ParamsHash {
 		return "params_hash changed since the countdown started"
 	}
-	h, steps, err := rowParamsHash(row)
-	if err != nil || h != row.ParamsHash {
+	if h, _, err := rowParamsHash(row); err != nil || h != row.ParamsHash {
 		return "stored steps no longer hash to the params_hash"
-	}
-	if !s.policyCovers(pipelineID, steps) {
-		return "the policy no longer covers every stored step"
 	}
 	return ""
 }
 
-// skipPolicyOnce logs, once per proposal and process, why a due countdown
-// was not fired. The proposal stays open for manual approval.
-func (s *Service) skipPolicyOnce(roomID, proposalID, why string) {
+// Kinds of notePolicyOnce lines.
+const (
+	noteRefused = "refused" // due, but the policy must not approve (Warn)
+	noteDecided = "decided" // another replica or a person decided first (Info)
+	noteFailed  = "failed"  // a store read or write failed; retried (Warn)
+)
+
+// notePolicyOnce logs why the policy did not approve a due proposal, once
+// per proposal, kind and process: the loop looks again every second. The
+// notes of a proposal are dropped when it leaves the open list
+// (pruneAutoNotes).
+func (s *Service) notePolicyOnce(roomID, proposalID, kind, why string, err error) {
 	s.autoSkipMu.Lock()
-	seen := s.autoSkip[proposalID]
 	if s.autoSkip == nil {
-		s.autoSkip = map[string]bool{}
+		s.autoSkip = map[string]map[string]bool{}
 	}
-	s.autoSkip[proposalID] = true
-	s.autoSkipMu.Unlock()
+	seen := s.autoSkip[proposalID][kind]
 	if !seen {
-		s.log.Warn("room: auto-approve: countdown ran out but the policy does not approve; the proposal waits for manual approval", "room", roomID, "proposal", proposalID, "why", why)
+		if s.autoSkip[proposalID] == nil {
+			s.autoSkip[proposalID] = map[string]bool{}
+		}
+		s.autoSkip[proposalID][kind] = true
+	}
+	s.autoSkipMu.Unlock()
+	if seen {
+		return
+	}
+	attrs := []any{"room", roomID, "proposal", proposalID, "why", why}
+	if err != nil {
+		attrs = append(attrs, "err", err)
+	}
+	switch kind {
+	case noteDecided:
+		s.log.Info("room: auto-approve: countdown decided elsewhere; the policy stops", attrs...)
+	case noteFailed:
+		s.log.Warn("room: auto-approve: store call failed; retried at every check, logged once", attrs...)
+	default:
+		s.log.Warn("room: auto-approve: countdown ran out but the policy does not approve; the proposal waits for manual approval", attrs...)
+	}
+}
+
+// pruneAutoNotes forgets the notes of every proposal that is no longer open
+// in an open room of rooms (decided, executed, its room closed or gone).
+func (s *Service) pruneAutoNotes(rooms map[string]*RoomSnapshot) {
+	s.autoSkipMu.Lock()
+	defer s.autoSkipMu.Unlock()
+	if len(s.autoSkip) == 0 {
+		return
+	}
+	open := map[string]bool{}
+	for _, r := range rooms {
+		if r.Status != "open" {
+			continue
+		}
+		for _, p := range r.OpenProposals {
+			open[p.ProposalID] = true
+		}
+	}
+	for pid := range s.autoSkip {
+		if !open[pid] {
+			delete(s.autoSkip, pid)
+		}
 	}
 }
 

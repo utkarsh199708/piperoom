@@ -141,16 +141,17 @@ type Scheduled struct {
 // schedState is the log's answer to "is the policy countdown of this
 // proposal still live?". set: a proposal.scheduled was folded (at most one
 // counts). stopped: a proposal.cancelled or a person's approval.given came
-// after it, so the policy never runs. policyRan: at least one policy
-// approval landed; the countdown is over but the policy may still owe the
-// remaining layers (a replica that stopped part-way). A value type, so a
+// after it, so the policy never runs. policyN: how many policy
+// approvals landed; once above 0 the countdown is over but the policy may
+// still owe the remaining layers (a replica that stopped part-way), and every
+// approved layer must be one of them (fireCheckLocked). A value type, so a
 // proposal copy never shares it.
 type schedState struct {
 	set         bool
 	runAt       time.Time
 	cancelUntil time.Time
 	stopped     bool
-	policyRan   bool
+	policyN     int
 }
 
 // pending reports whether the policy still owes this proposal its approvals.
@@ -158,7 +159,7 @@ func (s schedState) pending() bool { return s.set && !s.stopped }
 
 // cancellable reports whether a person may still cancel the countdown: it is
 // pending and the policy has not started approving.
-func (s schedState) cancellable() bool { return s.pending() && !s.policyRan }
+func (s schedState) cancellable() bool { return s.pending() && s.policyN == 0 }
 
 // ChecklistTick says who ticked one runbook item and when.
 type ChecklistTick struct {
@@ -934,7 +935,7 @@ func foldScheduleDecision(proposals []Proposal, proposalID string, policy bool) 
 		}
 		proposals[i].Scheduled = nil
 		if policy {
-			proposals[i].sched.policyRan = true
+			proposals[i].sched.policyN++
 		} else if proposals[i].sched.set {
 			proposals[i].sched.stopped = true
 		}

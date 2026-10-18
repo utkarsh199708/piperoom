@@ -309,14 +309,15 @@ type Service struct {
 	limits          config.Limits
 	// Auto-approve policy (autoapprove.go). autoDelay is
 	// Deps.AutoApproveDelay (0 = off). autoTickDone, when set (tests only),
-	// runs after each check of the loop. autoSkip remembers the proposals
-	// the loop found due but refused, so each is logged once.
+	// runs after each check of the loop. autoSkip remembers what the loop
+	// logged about each due proposal it did not approve, so each kind is
+	// logged once (notePolicyOnce).
 	autoDelay    time.Duration
 	autoTicker   func(d time.Duration) (<-chan time.Time, func())
 	autoOnce     sync.Once
 	autoTickDone func()
 	autoSkipMu   sync.Mutex
-	autoSkip     map[string]bool
+	autoSkip     map[string]map[string]bool // proposal -> notePolicyOnce kinds logged
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex

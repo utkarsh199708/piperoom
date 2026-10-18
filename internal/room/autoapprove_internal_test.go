@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -125,6 +126,7 @@ type aaOpts struct {
 	writeOff bool
 	delay    time.Duration
 	solo     string
+	log      *slog.Logger
 }
 
 func newAARig(t *testing.T, st store.Store, c *testClock, acts *aaActions, o aaOpts) *aaRig {
@@ -140,7 +142,7 @@ func newAARig(t *testing.T, st store.Store, c *testClock, acts *aaActions, o aaO
 	r := &aaRig{t: t, st: st, clock: c, acts: acts, ticks: make(chan time.Time), done: make(chan struct{})}
 	r.svc = New(Deps{
 		Store: st, Actions: acts.reg, Users: DefaultUsers(), Owners: o.own, Run: idleRun, Now: c.Now,
-		WriteModeOff: o.writeOff, AutoApproveDelay: o.delay, SoloUser: o.solo,
+		WriteModeOff: o.writeOff, AutoApproveDelay: o.delay, SoloUser: o.solo, Logger: o.log,
 		AutoApproveTicker: func(time.Duration) (<-chan time.Time, func()) {
 			return r.ticks, func() { r.stops.Add(1) }
 		},
