@@ -67,8 +67,15 @@ type Wired struct {
 	// store).
 	Rooms similarincidents.Source
 
+	// write is true when the set was opened with write mode on
+	// (PIPEROOM_WRITE_MODE=on and not StackOptions.ReadOnly). Only then do
+	// the actions get the whole Connect and Schema Registry clients, and only
+	// then does writers hold anything. A Wired built any other way is read-only.
+	write   bool
+	writers writeClients
+
 	// close is the closer built by Open: it releases the database pools and
-	// the Kafka client. Only Open sets it, so a zero Wired is safe to Close.
+	// the Kafka clients. Only Open sets it, so a zero Wired is safe to Close.
 	close func()
 }
 
@@ -171,20 +178,27 @@ func kafkaSecurity(cfg config.Config, awsCfg *aws.Config) (netsec.Kafka, error) 
 
 // Open constructs every client Wired needs. awsCfg is the result of LoadAWS,
 // shared with NewAgentEndpoint; it may be nil, but MSK IAM is then a config
-// error. On a partial failure it closes what it already opened and returns a
-// wrapped error naming the failing step.
+// error. PIPEROOM_WRITE_MODE decides whether the write clients are built
+// (openWriteMode). On a partial failure it closes what it already opened and
+// returns a wrapped error naming the failing step.
 func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, error) {
+	write, err := openWriteMode(cfg, false)
+	if err != nil {
+		return nil, err
+	}
 	o, err := owners.Load(cfg.OwnersFile)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
-	return openClients(ctx, cfg, awsCfg, o)
+	return openClients(ctx, cfg, awsCfg, o, write)
 }
 
 // openClients builds one client set from the connection settings of cfg and
 // gives it o as its owners config. OpenStacks calls it once per set, with the
-// owners view of the pipelines that set serves.
-func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners) (*Wired, error) {
+// owners view of the pipelines that set serves. write is the process's write
+// mode (never read from cfg: a pipeline's own cfg holds connections only);
+// with it off no write client is built.
+func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners, write bool) (*Wired, error) {
 	ctx, cancel := context.WithTimeout(ctx, openTimeout)
 	defer cancel()
 
@@ -230,8 +244,22 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 	}
 	opened = append(opened, closeWh)
 
+	// The writers come last: with write mode off nothing here runs, and with
+	// it on a dead source database has already failed above.
+	var wc writeClients
+	if write {
+		var closeWriters func()
+		wc, closeWriters, err = openWriters(ctx, cfg, awsCfg, defaultWriterOpeners())
+		if err != nil {
+			closeOpened()
+			return nil, err
+		}
+		opened = append(opened, closeWriters)
+	}
+
 	w := assemble(o, whKind, a2, src, wh, closeOpened)
 	w.DebeziumMetrics = dm
+	w.write, w.writers = write, wc
 	return w, nil
 }
 
@@ -283,7 +311,8 @@ func (noRegistry) Compatibility(context.Context, string) (string, bool, error) {
 	return "", false, errNoRegistry
 }
 
-// actionRegistry is w's registry for the write actions, never nil.
+// actionRegistry is w's registry for the write actions with write mode on,
+// never nil (off: readOnlyActionRegistry).
 func actionRegistry(w *Wired) clients.SchemaRegistryClient {
 	if w.Registry == nil {
 		return noRegistry{}
@@ -299,7 +328,8 @@ func actionRegistry(w *Wired) clients.SchemaRegistryClient {
 // reg must come from tools.NewReadOnlyRegistry: it is agent.Deps.Tools, so a
 // tool that is not KindRead fails here, at start, never in a room. The tools
 // get read-only Connect and Schema Registry clients (readonly.go); only the
-// actions get the writers.
+// actions get the writers, and only when w was opened with write mode on
+// (registerActions).
 func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error {
 	if !reg.ReadOnly() {
 		return fmt.Errorf("wiring: register tools: %w: registry is not from tools.NewReadOnlyRegistry", tools.ErrNotReadOnly)
@@ -340,10 +370,24 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if err := changes.Register(reg, chg); err != nil {
 		return fmt.Errorf("wiring: register what_changed: %w", err)
 	}
-	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
+	if err := registerActions(areg, w); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)
 	}
 	return nil
+}
+
+// registerActions registers the write actions over w's clients. With write
+// mode on they get the whole Connect and Schema Registry clients. Off (also
+// for any Wired that Open or OpenStacks did not build) they get read-only
+// ones: every write refuses with ErrReadOnly before any I/O, while the reads
+// and dry-runs of Validate and Preview still work, so the agent proposes and
+// the room previews as before. The room's executor already runs nothing then
+// (P1a-1); this keeps an action that got past it from writing anyway.
+func registerActions(areg *actions.Registry, w *Wired) error {
+	if w.write {
+		return actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)})
+	}
+	return actions.Register(areg, actions.Deps{Connect: readOnlyActionConnect(w), Registry: readOnlyActionRegistry(w)})
 }
 
 // splitBrokers splits a comma-separated broker list, trimming blanks.
