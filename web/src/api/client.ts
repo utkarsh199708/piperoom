@@ -271,7 +271,7 @@ export const api = {
       body: JSON.stringify(reason ? { reason } : {}),
     }),
   // paramsHash: the hash shown with the proposal, same rule as approve.
-  reject:(proposalId: string, layer: string, reason: string, paramsHash: string) =>
+  reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ layer, reason, params_hash: paramsHash }),

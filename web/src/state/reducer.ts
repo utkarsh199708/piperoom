@@ -613,15 +613,22 @@ function applyCore(state: RoomState, event: Event): RoomState {
       break
     }
 
-    // The policy countdown (P2b). The fold keeps it however late it gets, like the server's fold;
+    // The policy countdown (P2b). Only the first schedule counts. The fold keeps it however late it gets, like the server's fold;
     // whether the card still shows it is a question of the clock (lib/countdown.ts, #652).
     case 'proposal.scheduled': {
       const p = as<ProposalScheduledPayload>(event)
       next = {
         ...state,
         proposals: state.proposals.map((prop) =>
-          prop.proposal_id === p.proposal_id && prop.status === 'open'
-            ? { ...prop, scheduled: { run_at: p.run_at, cancel_until: p.cancel_until || p.run_at, policy: p.policy } }
+          prop.proposal_id === p.proposal_id && prop.status === 'open' && !prop.schedule_seen
+            ? {
+                ...prop,
+                schedule_seen: true,
+                // A proposal someone already decided on gets no countdown (the server's foldScheduled).
+                ...(Object.values(prop.approvals).every((v) => v === 'pending')
+                  ? { scheduled: { run_at: p.run_at, cancel_until: p.cancel_until || p.run_at, policy: p.policy } }
+                  : {}),
+              }
             : prop,
         ),
       }

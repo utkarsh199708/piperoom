@@ -47,12 +47,13 @@ export function attentionItems(prev: RoomState, next: RoomState, user: CurrentUs
   const items: AttentionItem[] = []
   const room = next.title || next.id
 
-  // The driver decides a fallback layer only while the room is open (the same rule as the panel's buttons).
-  const driverId = next.status === 'open' ? next.driver?.id : undefined
+  // Nobody decides a layer in a room that is not open, owner or driver (the same rule as the panel's buttons).
+  const isOpen = next.status === 'open'
+  const driverId = isOpen ? next.driver?.id : undefined
   const knownProposals = new Set(prev.proposals.map((p) => p.proposal_id))
   for (const p of next.proposals) {
     if (knownProposals.has(p.proposal_id)) continue
-    const layer = p.required_layers.find((l) => canDecideLayer(p, user, l, driverId))
+    const layer = isOpen ? p.required_layers.find((l) => canDecideLayer(p, user, l, driverId)) : undefined
     const mine = layer !== undefined
     items.push({
       kind: mine ? 'approval_needed' : 'proposal',

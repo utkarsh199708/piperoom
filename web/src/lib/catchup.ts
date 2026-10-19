@@ -15,9 +15,9 @@ export interface CatchUpSummary {
   lastStepId?: string
 }
 
-// `driverId` only for an open room: the driver decides a fallback layer there (state/permissions.ts).
-function mine(p: ProposalState, user: CurrentUser, driverId: string | undefined): boolean {
-  return p.required_layers.some((l) => canDecideLayer(p, user, l, driverId))
+// Only in an open room does anyone decide a layer; the driver decides a fallback layer there (state/permissions.ts).
+function mine(p: ProposalState, user: CurrentUser, open: boolean, driverId: string | undefined): boolean {
+  return open && p.required_layers.some((l) => canDecideLayer(p, user, l, driverId))
 }
 
 function executedCount(proposals: ProposalState[], ok: boolean): number {
@@ -46,7 +46,7 @@ export function catchUpSummary(prev: RoomState, next: RoomState, user: CurrentUs
   const known = new Set(prev.proposals.map((p) => p.proposal_id))
   const fresh = next.proposals.filter((p) => !known.has(p.proposal_id))
   const driverId = next.status === 'open' ? next.driver?.id : undefined
-  if (fresh.some((p) => mine(p, user, driverId))) {
+  if (fresh.some((p) => mine(p, user, next.status === 'open', driverId))) {
     items.push('a proposal needs you')
     target = 'proposal'
   } else if (fresh.length > 0) {
