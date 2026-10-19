@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -40,7 +41,7 @@ func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools.Tool {
 	return []tools.Tool{
 		&updateHypothesisTool{sink: d.Sink, steps: steps},
-		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track},
+		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, steps: steps, log: d.Logger},
 		&postMessageTool{sink: d.Sink},
 	}
 }
@@ -249,6 +250,7 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit hypothesis: %w", err)
 	}
+	t.steps.setHypothesisSteps(in.BasedOnSteps)
 	return tools.Result{Summary: "hypothesis recorded" + unbackedNote(unbacked)}, nil
 }
 
@@ -304,6 +306,13 @@ type proposeFixTool struct {
 	proposals Proposals
 	sink      Sink
 	track     *proposalTracker
+	// steps is the run's step ledger, which holds the injection-flagged
+	// reads the echo guard checks each step against (echoguard.go); nil
+	// turns the guard off, for harnesses that build the tool without a
+	// runner.
+	steps *stepLedger
+	// log takes the guard's one warn line per refused step; nil logs nothing.
+	log *slog.Logger
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -544,6 +553,16 @@ func (t *proposeFixTool) checkStep(ctx context.Context, i int, action string, ra
 	}
 	if err := a.Validate(ctx, params); err != nil {
 		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
+	}
+	if kinds, err := t.steps.echoedInjection(i+1, action, params); err != nil {
+		// The echo guard (P3-W3b): the step repeats what an injection-flagged
+		// read asked for. The model sees the error; the room sees nothing
+		// but this failed tool call. The log line carries no span text.
+		if t.log != nil {
+			t.log.Warn("agent: propose_fix step echoes injection-flagged text", "tool", t.Name(), "step", i+1, "action", action, "kinds", kinds)
+		}
+		observeStep(a, params, err)
+		return nil, nil, err
 	}
 	return a, params, nil
 }

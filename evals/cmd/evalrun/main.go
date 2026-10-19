@@ -122,7 +122,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.judgeCache, "judge-cache", evals.DefaultJudgeCacheDir, "directory of recorded judge verdicts that -judge auto reads first (empty: none)")
 	fs.BoolVar(&f.cacheOnly, "judge-cache-only", false, "-judge auto reads only the recorded verdicts and fails on a miss; never a live judge call (replays in CI)")
 	fs.IntVar(&f.maxCalls, "judge-max-calls", evals.DefaultJudgeMaxCalls, "at most this many live judge calls per run in -judge auto, and per -judge-fill; past it an ambiguous hypothesis is reported ambiguous (unjudged) and counts as not passed (negative: no live calls)")
-	fs.StringVar(&f.judgeFill, "judge-fill", "", "MANIFEST (evals/judgecache/ambiguous.json): record a live judge verdict into -judge-cache for every listed corpus text that lacks one, up to -judge-max-calls, and exit. PAID: needs the owner's approval, a -tags claude build and ANTHROPIC_API_KEY; -dry-run prints the estimate only")
+	fs.StringVar(&f.judgeFill, "judge-fill", "", "MANIFEST (evals/judgecache/ambiguous.json): record a live judge verdict into -judge-cache for every listed corpus text that lacks one, up to -judge-max-calls, and exit. PAID: needs the owner's approval, a -tags claude build and the model provider's credentials (ANTHROPIC_API_KEY, or Vertex/Bedrock per PIPEROOM_MODEL_PROVIDER); -dry-run prints the estimate only")
 	fs.BoolVar(&f.dryRun, "dry-run", false, "with -judge-fill: count the missing verdicts and estimate their tokens and cost; no model calls, nothing written")
 	fs.StringVar(&f.out, "out", "", "write the JSON report here")
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
@@ -420,7 +420,9 @@ func liveJudge(f flags, scenarios []evals.Scenario) (evals.HypothesisJudge, erro
 	}
 	j, err := newJudge(f.judgeModel)
 	switch {
-	case err != nil && needed:
+	case err != nil && (needed || !errors.Is(err, errNoLiveJudge)):
+		// A -tags claude build whose provider setup failed (no Vertex
+		// credentials, say) reports that error, not a missing build.
 		return nil, err
 	case err != nil:
 		return nil, fmt.Errorf("-judge auto (the default) needs the live LLM judge for ambiguous hypotheses without a recorded verdict in %s, and this build has none (%w): build with -tags claude, or pass -judge terms for the keyword grade only (-judge-cache-only fails the run on a miss; -judge-max-calls 0 reports such hypotheses ambiguous (unjudged), not passed)", orNone(f.judgeCache), err)
@@ -436,6 +438,9 @@ func judgeMaxCalls(n int) int {
 	}
 	return n
 }
+
+// errNoLiveJudge is newJudge's error in a build without -tags claude.
+var errNoLiveJudge = errors.New("the claude judge needs a build with -tags claude")
 
 func orNone(s string) string {
 	if s == "" {

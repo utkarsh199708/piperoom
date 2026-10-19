@@ -7,8 +7,44 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+// waitForBrokerOffsets polls the broker, through a kadm client independent of
+// the Client under test, until partition 0 of topic reports high watermark hw
+// and last stable offset lso. EndTransaction returns once the coordinator has
+// logged PREPARE_COMMIT; it writes the commit marker to the partition
+// afterwards, asynchronously. Until that marker lands the partition still
+// sees an open transaction (HW one short, LSO pinned at the transaction's
+// first offset), so asserting straight after EndTransaction races the broker.
+func waitForBrokerOffsets(t *testing.T, adm *kadm.Client, topic string, hw, lso int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	var gotHW, gotLSO int64 = -1, -1
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ends, eerr := adm.ListEndOffsets(ctx, topic)
+		stable, serr := adm.ListCommittedOffsets(ctx, topic)
+		cancel()
+		if eerr == nil && serr == nil {
+			if e, ok := ends.Lookup(topic, 0); ok && e.Err == nil {
+				gotHW = e.Offset
+			}
+			if l, ok := stable.Lookup(topic, 0); ok && l.Err == nil {
+				gotLSO = l.Offset
+			}
+			if gotHW == hw && gotLSO == lso {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("topic %s: broker at HW %d, LSO %d after 10 s (errs %v, %v); want HW %d, LSO %d",
+				topic, gotHW, gotLSO, eerr, serr, hw, lso)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
 
 // TestAdminReadsOnTransactionalTopic: a commit marker at the tail, then a
 // transaction left open there, must stall neither TopicOffsets nor
@@ -16,11 +52,12 @@ import (
 func TestAdminReadsOnTransactionalTopic(t *testing.T) {
 	brokers := requireKafka(t)
 	c := dlqTestClient(t, brokers)
-	w, _ := newTxnWriter(t, brokers)
+	w, adm := newTxnWriter(t, brokers)
 
 	w.begin(3, "committed")
 	w.end(kgo.TryCommit) // offsets 0..2, commit marker at 3
 	waitForTopic(t, c, w.topic)
+	waitForBrokerOffsets(t, adm, w.topic, 4, 4) // the commit marker is on the partition
 	check := func(wantEnd int64) {
 		t.Helper()
 		start := time.Now()
@@ -42,6 +79,7 @@ func TestAdminReadsOnTransactionalTopic(t *testing.T) {
 	check(4)
 
 	w.begin(2, "open") // offsets 4..5 stay undecided
+	waitForBrokerOffsets(t, adm, w.topic, 6, 4)
 	check(6)
 	w.end(kgo.TryAbort)
 }

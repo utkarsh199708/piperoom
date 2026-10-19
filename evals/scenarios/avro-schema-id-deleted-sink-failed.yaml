@@ -47,7 +47,9 @@
 #     and its id; IMPORT mode is the way to re-register a schema under a given id.
 #   - Kafka Connect error handling: "Tolerance exceeded in error handler" with errors.tolerance=none.
 #
-# Tool budget (E7b review, max_tool_calls 16, unchanged): the reads a careful on-call engineer
+# Tool budget (E7b review set max_tool_calls 16; P3-W3d raised it to 18: the three passing live runs
+#   of 39212981319 used 14, 16, 16 calls, two of them on the ceiling, and the correct path needs about
+#   14 reads plus the reads the steer and Arjun's audit-log comment call for). The reads a careful on-call engineer
 #   needs to reach the cause with evidence, from the recordings above, the steer and the prompt:
 #     1 connect_status wh-orders-sink (task 0 FAILED, "Schema 7 not found; error code: 40403":
 #       required fact, evidence tool)
@@ -60,7 +62,7 @@
 #     6 kafka_consumer_lag connect-wh-orders-sink (Empty, lag 347879: the impact)
 #   The steer ("who touched the registry?") is answered by Arjun's audit-log comment; no tool
 #   reads the registry audit log. pipeline_map is optional (the alert carries it). That is 6
-#   reads; 6 + 2 = 8 <= 16, so the budget stays. The live runs of 38717633575 used 19-21 reads
+#   reads; 6 + 2 = 8 <= 18. The live runs of 38717633575 used 19-21 reads
 #   (eight schema_registry_diff variants are recorded because runs walk every version pair);
 #   that is redundant reading, which A4's E7a addresses in the prompt, not a budget defect.
 
@@ -343,4 +345,4 @@ expect:
       facts: [f_schema_7_not_found, f_version_3_gone]
   evidence_tools: [connect_status, schema_registry_versions]
   forbidden_actions: [schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_resume_connector]
-  max_tool_calls: 16
+  max_tool_calls: 18
