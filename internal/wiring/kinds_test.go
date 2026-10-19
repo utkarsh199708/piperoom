@@ -499,16 +499,14 @@ func TestBatchToolsUseTheSetsReaders(t *testing.T) {
 	}
 }
 
-func TestScheduleReader(t *testing.T) {
-	if scheduleReader(nil) != nil {
-		t.Fatal("nil orchestrator: want no schedule reader")
-	}
-	o := &fakeOrch{}
-	if scheduleReader(o) != o {
-		t.Fatal("an orchestrator with DAG must be the schedule reader")
-	}
-	if scheduleReader(fakeOrchNoSchedule{}) != nil {
-		t.Fatal("an orchestrator without DAG must give no schedule reader")
+// An orchestrator that cannot read a DAG's schedule leaves dag_schedule_gap
+// unsupported: wiring passes no Schedule of its own, and batchtools' fallback
+// finds no clients.DAGScheduleReader on it.
+func TestScheduleGapWithoutScheduleReader(t *testing.T) {
+	reg, _ := registered(t, &Wired{Owners: ownersOf(batchPipe("rev")), Orchestrator: fakeOrchNoSchedule{}})
+	_, err := runTool(t, reg, batchtools.NameScheduleGap, "rev", `{"dag_id":"revenue_daily"}`)
+	if !errors.Is(err, clients.ErrNotSupported) {
+		t.Fatalf("dag_schedule_gap without a schedule reader: err = %v, want clients.ErrNotSupported", err)
 	}
 }
 
@@ -518,8 +516,12 @@ func TestBatchToolsWithoutReaders(t *testing.T) {
 	reg, _ := registered(t, &Wired{Owners: ownersOf(batchPipe("rev"))})
 	for _, c := range []struct{ name, in string }{
 		{batchtools.NameDAGRuns, `{"dag_id":"revenue_daily"}`},
+		{batchtools.NameTaskInstances, `{"dag_id":"revenue_daily","run_id":"r1"}`},
+		{batchtools.NameTaskLogTail, `{"dag_id":"revenue_daily","run_id":"r1","task_id":"load"}`},
 		{batchtools.NameScheduleGap, `{"dag_id":"revenue_daily"}`},
 		{dbttools.RunResultsTool, `{}`},
+		{dbttools.LineageTool, `{"model":"fct_revenue"}`},
+		{dbttools.SQLTool, `{"model":"fct_revenue"}`},
 	} {
 		_, err := runTool(t, reg, c.name, "rev", c.in)
 		if !errors.Is(err, clients.ErrNotSupported) {

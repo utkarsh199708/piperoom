@@ -98,8 +98,10 @@ type spySourceReads interface {
 
 type spySource struct{ spySourceReads }
 
-// checkedSlotDropperMethods mirrors pgactions' unexported checkedSlotDropper:
-// the method pg_drop_replication_slot's Execute looks for on its writer.
+// checkedSlotDropperMethods mirrors pgactions' unexported checkedSlotDropper
+// (internal/actions/pgactions/drop_replication_slot.go): the method
+// pg_drop_replication_slot's Execute looks for on its writer. Keep the two
+// method sets equal; a change there must be copied here.
 type checkedSlotDropperMethods interface {
 	DropReplicationSlotChecked(ctx context.Context, slot string, allowLost bool) (postgres.SlotSeen, error)
 }
