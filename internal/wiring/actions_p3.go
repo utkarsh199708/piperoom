@@ -51,34 +51,67 @@ func actionKafkaReads(w *Wired) (clients.GroupResetPlanner, actions.DLQRecordRea
 	return kafka.NewPlanner(kc), kafka.NewReplayReader(kc)
 }
 
-// registerP3Actions registers kafka_reset_consumer_offsets, dlq_replay,
-// connect_snapshot_table, pg_drop_replication_slot, pg_add_publication_table
-// and pg_snapshot_signal over w's clients. Every one reads the connector
-// config through the read-only Connect adapter in both modes: none needs a
-// Connect write. connect_snapshot_table gets the Kafka writer only (the real
-// *kafka.Writer has SendSnapshotSignal), never a source writer: a signal
-// table row is pg_snapshot_signal's, approved by the postgres owner (#620).
-func registerP3Actions(areg *actions.Registry, w *Wired) error {
-	sw, kw := actionWriters(w)
-	planner, records := actionKafkaReads(w)
-	// readConnect is nil (a nil interface) without a Connect client, and an
-	// interface conversion keeps it nil.
-	var connReader clients.ConnectReader = readConnect(w)
+// P3ActionDeps are the clients the six P3 actions read and write through
+// (RegisterP3Actions). Any field may be nil; an absent client must then be a
+// nil interface, never an interface holding a typed nil, because the actions
+// refuse on Writer == nil before any I/O.
+type P3ActionDeps struct {
+	// Connect reads connector configs and status for every P3 action. It
+	// should hold no Connect write: none of the six needs one.
+	Connect clients.ConnectReader
+	// Source is the read-only source Postgres (slots, publications, tables).
+	Source clients.SourceDB
+	// Planner plans kafka_reset_consumer_offsets and Records reads the DLQ
+	// records dlq_replay replays. Both only read.
+	Planner clients.GroupResetPlanner
+	Records actions.DLQRecordReader
+	// SourceWriter executes the pg_* actions; KafkaWriter executes the Kafka
+	// actions and connect_snapshot_table. In wiring both are nil unless
+	// write mode is on; a harness may pass writers that perform nothing.
+	SourceWriter clients.SourceWriter
+	KafkaWriter  clients.KafkaWriter
+}
 
-	if err := actions.RegisterKafka(areg, actions.KafkaDeps{Writer: kw, Planner: planner, Records: records}); err != nil {
-		return err
+// RegisterP3Actions registers kafka_reset_consumer_offsets, dlq_replay,
+// connect_snapshot_table, pg_drop_replication_slot, pg_add_publication_table
+// and pg_snapshot_signal over d, in that order. It is the one place the P3
+// actions are put together with their readers and writers: wiring calls it
+// for each client set (registerP3Actions), and the evals harness can call it
+// over its replay clients, so both register the same actions the same way.
+// connect_snapshot_table gets the Kafka writer only (the real *kafka.Writer
+// has SendSnapshotSignal), never a source writer: a signal table row is
+// pg_snapshot_signal's, approved by the postgres owner (#620).
+func RegisterP3Actions(areg *actions.Registry, d P3ActionDeps) error {
+	if err := actions.RegisterKafka(areg, actions.KafkaDeps{Writer: d.KafkaWriter, Planner: d.Planner, Records: d.Records}); err != nil {
+		return fmt.Errorf("wiring: register P3 kafka actions: %w", err)
 	}
-	if err := actions.RegisterSnapshot(areg, actions.SnapshotDeps{Connect: connReader, Source: w.Source, Kafka: kw}); err != nil {
-		return err
+	if err := actions.RegisterSnapshot(areg, actions.SnapshotDeps{Connect: d.Connect, Source: d.Source, Kafka: d.KafkaWriter}); err != nil {
+		return fmt.Errorf("wiring: register connect_snapshot_table: %w", err)
 	}
 	for _, a := range []actions.Action{
-		pgactions.NewDropReplicationSlot(pgactions.DropSlotDeps{Source: w.Source, Connect: connReader, Writer: sw}),
-		pgactions.NewAddPublicationTable(pgactions.AddPublicationTableDeps{Connect: connReader, Source: w.Source, Writer: sw}),
-		pgactions.NewSnapshotSignal(pgactions.SnapshotSignalDeps{Connect: connReader, Source: w.Source, Writer: sw}),
+		pgactions.NewDropReplicationSlot(pgactions.DropSlotDeps{Source: d.Source, Connect: d.Connect, Writer: d.SourceWriter}),
+		pgactions.NewAddPublicationTable(pgactions.AddPublicationTableDeps{Connect: d.Connect, Source: d.Source, Writer: d.SourceWriter}),
+		pgactions.NewSnapshotSignal(pgactions.SnapshotSignalDeps{Connect: d.Connect, Source: d.Source, Writer: d.SourceWriter}),
 	} {
 		if err := areg.Register(a); err != nil {
 			return fmt.Errorf("wiring: register %s: %w", a.Name(), err)
 		}
 	}
 	return nil
+}
+
+// registerP3Actions registers the P3 actions over w's clients through
+// RegisterP3Actions. Every one reads the connector config through the
+// read-only Connect adapter in both write modes, and gets writers only when
+// w was opened with write mode on (actionWriters).
+func registerP3Actions(areg *actions.Registry, w *Wired) error {
+	sw, kw := actionWriters(w)
+	planner, records := actionKafkaReads(w)
+	// readConnect is nil (a nil interface) without a Connect client, and an
+	// interface conversion keeps it nil.
+	var connReader clients.ConnectReader = readConnect(w)
+	return RegisterP3Actions(areg, P3ActionDeps{
+		Connect: connReader, Source: w.Source, Planner: planner, Records: records,
+		SourceWriter: sw, KafkaWriter: kw,
+	})
 }
