@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
+	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
@@ -26,14 +28,18 @@ type fakeWriter struct {
 	label  string // the source DSN of the set it was built for
 	dsn    string // what the source constructor was given
 	closed atomic.Bool
+	writes atomic.Int64 // write calls that reached it
 }
 
 func (w *fakeWriter) Close() { w.closed.Store(true) }
 
 type fakeSourceWriter struct{ *fakeWriter }
 
-func (fakeSourceWriter) AddPublicationTables(context.Context, string, []string) error { return nil }
-func (fakeSourceWriter) DropReplicationSlot(context.Context, string) error            { return nil }
+func (w fakeSourceWriter) AddPublicationTables(context.Context, string, []string) error {
+	w.writes.Add(1)
+	return nil
+}
+func (fakeSourceWriter) DropReplicationSlot(context.Context, string) error { return nil }
 func (fakeSourceWriter) InsertSnapshotSignal(context.Context, string, string, []string) (string, error) {
 	return "", nil
 }
@@ -140,20 +146,33 @@ var refusingAdapters = map[reflect.Type]bool{
 	reflect.TypeOf(noRegistry{}):             true,
 }
 
+// readOnlyKafkaViews are the only types reachable from the actions with write
+// mode off that have the record or offset-plan reads of the Kafka writer:
+// kafka.Planner and kafka.ReplayReader hold a Writer over the reader client
+// in an unexported field and expose only its reads (P3a), so the Kafka
+// actions validate and preview without a writer.
+var readOnlyKafkaViews = map[reflect.Type]bool{
+	reflect.TypeOf(&kafka.Planner{}):      true,
+	reflect.TypeOf(&kafka.ReplayReader{}): true,
+}
+
 // assertNoWriterReachable fails when any value the actions of areg can reach
 // could write: a P3 writer (SourceWriter, KafkaWriter, ConnectFixWriter, or
-// the record and offset-plan reads that only the Kafka writer has), a type
-// with the Connect resume or one-key config write the actions assert for, or
-// a ConnectWriter / SchemaRegistryWriter other than the refusing adapters.
+// the record and offset-plan reads that only the Kafka writer has, outside
+// the read-only views above), a type with the Connect resume or one-key
+// config write the actions assert for, or a ConnectWriter /
+// SchemaRegistryWriter other than the refusing adapters.
 func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) {
 	t.Helper()
-	never := []reflect.Type{
-		ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter](),
-		ifaceOf[clients.RecordReader](), ifaceOf[clients.GroupResetPlanner](),
-	}
+	writers := []reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[clients.KafkaWriter](), ifaceOf[clients.ConnectFixWriter]()}
+	writerReads := []reflect.Type{ifaceOf[clients.RecordReader](), ifaceOf[clients.GroupResetPlanner]()}
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0
 	for ty := range reachableTypes(areg) {
+		never := writers
+		if !readOnlyKafkaViews[ty] {
+			never = append(slices.Clone(writers), writerReads...)
+		}
 		for _, w := range never {
 			if ty.Implements(w) {
 				t.Errorf("%s: an action can reach %s, which implements %s", name, ty, w)
@@ -245,6 +264,19 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 					t.Errorf("write method %s reached the client with write mode off", m)
 				}
 			}
+
+			// The P3 actions are listed in every set, and each refuses at
+			// Execute for want of a writer, with params it accepts, in the
+			// room's scope (P3-W).
+			for _, s := range st.All() {
+				for _, n := range p3ActionNames {
+					if _, ok := s.Actions.Get(n); !ok {
+						t.Errorf("set %q: %s not registered with write mode off", s.Name, n)
+					}
+				}
+			}
+			pipe, _ := loadOwners(t, threeSetYAML()).Pipeline("pa")
+			assertP3ExecuteRefuses(t, pa.Actions, tools.WithPipeline(ctx, pipe), p3Params("pa"))
 		})
 	}
 }

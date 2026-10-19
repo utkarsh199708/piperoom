@@ -83,6 +83,20 @@ func (s *spy) PublicationTables(_ context.Context, _, _ string, tables []string)
 	}
 	return out, nil
 }
+
+// spySourceReads are the source methods of spy. spySource holds the spy
+// behind them only, as the real source client (*postgres.DB) has no write
+// method: the P3 pg actions hold the source client, and the reachability
+// check must not see the spy's Connect and Registry writes through it.
+type spySourceReads interface {
+	clients.SourceDB
+	LongTransactionsOnTables(context.Context, time.Duration, []string) (postgres.TableTransactions, error)
+	PublicationTables(context.Context, string, string, []string) ([]postgres.PublicationTable, error)
+	clients.CountReader
+}
+
+type spySource struct{ spySourceReads }
+
 func (s *spy) Freshness(context.Context, string, string) (time.Time, error) {
 	s.hit("Freshness")
 	return time.Now(), nil
@@ -296,7 +310,7 @@ func (f *fakeOpener) open(ctx context.Context, cfg config.Config, awsCfg *aws.Co
 		}
 	}
 	return &Wired{
-		Source: s, Warehouse: s, Connect: s, Kafka: s, Registry: s,
+		Source: spySource{s}, Warehouse: s, Connect: s, Kafka: s, Registry: s,
 		Builder: topology.NewBuilder(o, s, s, s, s),
 		Owners:  o,
 		write:   write,

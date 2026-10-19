@@ -432,12 +432,17 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 // ones: every write refuses with ErrReadOnly before any I/O, while the reads
 // and dry-runs of Validate and Preview still work, so the agent proposes and
 // the room previews as before. The room's executor already runs nothing then
-// (P1a-1); this keeps an action that got past it from writing anyway.
+// (P1a-1); this keeps an action that got past it from writing anyway. The
+// P3 actions follow (registerP3Actions, actions_p3.go).
 func registerActions(areg *actions.Registry, w *Wired) error {
 	if w.write {
-		return actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)})
+		if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
+			return err
+		}
+	} else if err := actions.Register(areg, actions.Deps{Connect: readOnlyActionConnect(w), Registry: readOnlyActionRegistry(w)}); err != nil {
+		return err
 	}
-	return actions.Register(areg, actions.Deps{Connect: readOnlyActionConnect(w), Registry: readOnlyActionRegistry(w)})
+	return registerP3Actions(areg, w)
 }
 
 // splitBrokers splits a comma-separated broker list, trimming blanks.
