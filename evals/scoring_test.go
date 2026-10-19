@@ -243,6 +243,27 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after an ALTER TABLE in Postgres changed amount int -> numeric(12,2).",
 		wrong: "The consumer order-sync is stuck on a poison pill.",
 	},
+	// P3g-1 scenarios (C7).
+	"missed-table": {
+		good:  "The publication dbz_publication lacks public.devctl_refunds, while pg-orders-connector's table.include.list has it; publication autocreate is disabled, so pgoutput skips the table's changes and the 25 refunds stay out of Kafka. The connector and task 0 are running. Add the table to the publication, then take an incremental snapshot of the rows written before.",
+		wrong: "The connector task 0 failed on the new table and must be restarted to create the refunds topic.",
+	},
+	"dead-slot-wal": {
+		good:  "pg-orders-connector was retired, so its replication slot debezium_orders is orphaned: nobody reads it, it is inactive and Postgres retains all WAL behind it (1.4 GiB, wal_status extended). Drop the slot to free the WAL; the new connector will start from a new snapshot.",
+		wrong: "pg-orders-connector stopped by accident; resume it so the slot becomes active again and Postgres can recycle the WAL.",
+	},
+	"dead-slot-wal-no-context": {
+		good:  "pg-orders-connector is STOPPED: someone stopped it and it stayed that way. The replication slot debezium_orders is inactive and retains WAL, so pg_wal holds 1.4 GiB (wal_status extended). Resume the connector.",
+		wrong: "A long-running transaction holds back the WAL; the connector is running and the slot is fine.",
+	},
+	"consumer-bad-deploy": {
+		good:  "The 08:52 deploy of order-sync (2.14.0) dropped create events and committed their offsets anyway: the 30 new orders are in pg.public.orders, order-sync committed past them, and they are missing from analytics.orders. Reset order-sync's offsets to before 08:52 and start the good build.",
+		wrong: "A poison pill crashed order-sync; the consumer crashed and left the group Empty.",
+	},
+	"dlq-backlog": {
+		good:  "order-sync 2.15.0's new status validation rejects orders with the new status 'gift' and routes them to its DLQ devctl.order-sync.dlq (20 records, devconsumer.ValidationError), then commits them, so lag is 0 while the 20 gift orders are missing from analytics.orders. 2.15.1 accepts gift; replay the DLQ into pg.public.orders.",
+		wrong: "The Kafka Connect source task 0 failed and dropped 20 change events before they reached the topic.",
+	},
 	"slot-inactive-wal-growth": {
 		good:  slotInactiveHypothesis,
 		wrong: "A long-running transaction holds back the WAL; the connector is running and the slot is fine.",
@@ -364,8 +385,9 @@ func TestScoringOldVsNew(t *testing.T) {
 				// Copying the pipeline map is not cheating when the map itself
 				// states the cause. Known gap: the slot-inactive map says
 				// state=STOPPED and slot_active=false. Terms cannot tell that
-				// from an understanding; the LLM judge can.
-				if want := sc.Name == "slot-inactive-wal-growth"; n != want {
+				// from an understanding; the LLM judge can. dead-slot-wal-no-context
+				// is the same stack state (P3g-1).
+				if want := sc.Name == "slot-inactive-wal-growth" || sc.Name == "dead-slot-wal-no-context"; n != want {
 					t.Errorf("%s: parrot+map passes = %v, want %v", sc.Name, n, want)
 				}
 			default:
