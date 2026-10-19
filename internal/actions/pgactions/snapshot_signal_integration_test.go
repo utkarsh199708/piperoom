@@ -87,17 +87,22 @@ func TestSnapshotSignalIntegration(t *testing.T) {
 	a := NewSnapshotSignal(SnapshotSignalDeps{Connect: conn, Source: src, Writer: w})
 	sctx := tools.WithPipeline(ctx, pl)
 
+	step := func(connector, signal string, tables ...string) json.RawMessage {
+		b, _ := json.Marshal(map[string]any{"connector": connector, "tables": tables, "signal_table": "public." + signal})
+		return b
+	}
+
 	// Refusals, read-only.
-	if err := a.Validate(ctx, snapSigParams("it-pg-unpub", "public."+tbl)); !errors.Is(err, ErrSignalTableNotConfigured) || !strings.Contains(err.Error(), "not in publication") {
+	if err := a.Validate(ctx, step("it-pg-unpub", unpub, "public."+tbl)); !errors.Is(err, ErrSignalTableNotConfigured) || !strings.Contains(err.Error(), "not in publication") {
 		t.Fatalf("unpublished signal table: %v", err)
 	}
-	if err := a.Validate(ctx, snapSigParams("it-pg", "public."+p+"_missing")); !errors.Is(err, clients.ErrNotFound) {
+	if err := a.Validate(ctx, step("it-pg", sig, "public."+p+"_missing")); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("missing table: %v, want ErrNotFound", err)
 	}
 
-	raw, _ := json.Marshal(map[string]any{"connector": "it-pg", "tables": []string{"public." + tbl}, "signal_table": "public." + sig})
+	raw := step("it-pg", sig, "public."+tbl)
 	// The approved signal table is pinned: a step naming another one is refused.
-	other, _ := json.Marshal(map[string]any{"connector": "it-pg", "tables": []string{"public." + tbl}, "signal_table": "public." + unpub})
+	other := step("it-pg", unpub, "public."+tbl)
 	if _, err := a.Execute(sctx, other); !errors.Is(err, ErrSignalTableChanged) {
 		t.Fatalf("Execute with another signal_table: %v, want ErrSignalTableChanged", err)
 	}

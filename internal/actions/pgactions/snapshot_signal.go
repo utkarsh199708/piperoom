@@ -132,16 +132,17 @@ func (a *snapshotSignal) ParamsSchema() map[string]any {
 			"signal_table": signalTableProp(),
 		},
 		"additionalProperties": false,
-		"required":             []string{"connector", "tables"},
+		"required":             []string{"connector", "tables", "signal_table"},
 	}
 }
 
-// signalTableProp is the optional signal_table param: the table the proposer
-// and the approvers saw, so Execute can tell when the config moved since.
+// signalTableProp is the required signal_table param: the write target, named
+// in the params (and so in params_hash) so approvers approve a named table and
+// Execute can tell when the config moved since.
 func signalTableProp() map[string]any {
 	return map[string]any{
 		"type":        "string",
-		"description": "The connector's signal.data.collection (\"schema.table\") as seen when proposing. Recommended: Validate refuses it when it differs from the config, and Execute refuses when the config changed since approval.",
+		"description": "Required: the connector's signal.data.collection (\"schema.table\") exactly as read with connect_config; the signal row is written there. Validate refuses any other value, and Execute refuses when the config changed since approval.",
 		"pattern":     snapSigTableRe.String(),
 	}
 }
@@ -150,8 +151,9 @@ type snapshotSignalParams struct {
 	Connector string   `json:"connector"`
 	Tables    []string `json:"tables"`
 	// SignalTable is the signal table the step was proposed and approved
-	// with; "" when the proposer did not record it.
-	SignalTable string `json:"signal_table,omitempty"`
+	// with: the write target, which must equal the connector's
+	// signal.data.collection at Validate and at Execute.
+	SignalTable string `json:"signal_table"`
 }
 
 // parseSnapshotSignal decodes params strictly and checks every identifier
@@ -172,7 +174,10 @@ func parseSnapshotSignal(raw json.RawMessage) (snapshotSignalParams, error) {
 	if len(p.Tables) > snapSigMaxTables {
 		return p, fmt.Errorf("pgactions: %s: %d tables, at most %d per signal", SnapshotSignalName, len(p.Tables), snapSigMaxTables)
 	}
-	if p.SignalTable != "" && !snapSigTableRe.MatchString(p.SignalTable) {
+	if strings.TrimSpace(p.SignalTable) == "" {
+		return p, fmt.Errorf("pgactions: %s: bad params: signal_table is required: the connector's signal.data.collection (\"schema.table\") as read with connect_config, so the approvers approve a named write target", SnapshotSignalName)
+	}
+	if !snapSigTableRe.MatchString(p.SignalTable) {
 		return p, fmt.Errorf("pgactions: %s: invalid signal_table %q: want \"schema.table\"", SnapshotSignalName, addPubCut(p.SignalTable))
 	}
 	uniq := make([]string, 0, len(p.Tables))
@@ -271,7 +276,7 @@ func (a *snapshotSignal) connectorSignal(ctx context.Context, connector string) 
 // table that is one of the tables being snapshotted or, with the room's
 // pipeline known, one of its source_tables.
 func checkSignalTarget(p snapshotSignalParams, sc signalConfig, pl owners.Pipeline, scoped bool) error {
-	if p.SignalTable != "" && p.SignalTable != sc.table {
+	if p.SignalTable != sc.table {
 		return fmt.Errorf("pgactions: %s: the step names signal table %s but connector %q's signal.data.collection is now %s; the connector config changed since the step was proposed: propose it again: %w",
 			SnapshotSignalName, p.SignalTable, addPubCut(p.Connector), sc.table, ErrSignalTableChanged)
 	}
@@ -312,8 +317,9 @@ func checkSignalState(sc signalConfig, st postgres.SnapshotSignalState) error {
 // Validate reads the connector config and the source on the read-only
 // clients and refuses a connector without a usable signal table, a signal
 // table other than the step's signal_table or among the source tables (with
-// the room's pipeline in ctx), and a table that does not exist. It does not depend on the scope in ctx (CheckScope is
-// the scope gate) nor on the writer (Execute refuses without one).
+// the room's pipeline in ctx), and a table that does not exist. It does not
+// depend on the scope in ctx (CheckScope is the scope gate) nor on the
+// writer (Execute refuses without one).
 func (a *snapshotSignal) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseSnapshotSignal(raw)
 	if err != nil {
@@ -505,9 +511,10 @@ func snapSigCurrent(sc signalConfig, st postgres.SnapshotSignalState) string {
 }
 
 // Execute re-reads the connector's signal table from its config (the agent
-// never chooses where the row goes; signal_table only pins what was
-// approved), re-runs the target and signal-state checks of Validate, and
-// only then inserts the signal through the SourceWriter.
+// never chooses where the row goes; the required signal_table pins what was
+// approved and must still equal it), re-runs the target and signal-state
+// checks of Validate, and only then inserts the signal through the
+// SourceWriter.
 func (a *snapshotSignal) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	p, err := parseSnapshotSignal(raw)
 	if err != nil {
