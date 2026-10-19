@@ -37,6 +37,7 @@ var connFields = map[string]func(*config.Config) *string{
 	"dbt_cloud_job_id":     func(c *config.Config) *string { return &c.DBTCloudJobID },
 
 	"source_db_url":                 func(c *config.Config) *string { return &c.SourceDBURL },
+	"source_db_write_url":           func(c *config.Config) *string { return &c.SourceDBWriteURL },
 	"warehouse_db_url":              func(c *config.Config) *string { return &c.WarehouseDBURL },
 	"warehouse_kind":                func(c *config.Config) *string { return &c.WarehouseKind },
 	"kafka_brokers":                 func(c *config.Config) *string { return &c.KafkaBrokers },

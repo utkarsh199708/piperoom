@@ -289,8 +289,10 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 
 // TestWriteModeOnBuildsWriters: with PIPEROOM_WRITE_MODE=on the actions get
 // the whole clients, every set gets a Kafka writer over its own settings, and
-// only the process-wide set gets a source writer, from SOURCE_DB_WRITE_URL: a
-// pipeline with its own connections: block has no write URL key yet. The P3
+// only the process-wide set gets a source writer, from SOURCE_DB_WRITE_URL: the
+// fixture's pipelines with their own connections: block set no
+// source_db_write_url, and never get the process-wide one (writeurl_test.go
+// covers the key). The P3
 // rows hand the writers to their actions; Close closes them.
 func TestWriteModeOnBuildsWriters(t *testing.T) {
 	f := newFakeOpener()
