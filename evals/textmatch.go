@@ -356,13 +356,14 @@ var delayTerms = map[string]bool{"behind": true, "stale": true}
 
 // shortDelay reports whether the fault term at j is a delayTerm with a short
 // duration right before it, or, for "stale", right after it with an optional
-// "for" in between, in the same sub.
+// "for" or "by" in between. Punctuation between them does not matter
+// ("stale (1m)", "freshness: 1m stale"), as for "behind".
 func shortDelay(c clauseToks, j int) bool {
 	if !delayTerms[c.toks[j]] {
 		return false
 	}
 	for i := max(0, j-3); i < j; i++ {
-		if l := phraseAt(c.toks, i, shortDurations); l > 0 && i+l == j && c.sub[i] == c.sub[j] {
+		if l := phraseAt(c.toks, i, shortDurations); l > 0 && i+l == j {
 			return true
 		}
 	}
@@ -370,10 +371,10 @@ func shortDelay(c clauseToks, j int) bool {
 		return false
 	}
 	k := j + 1
-	if k < len(c.toks) && c.toks[k] == "for" {
+	if k < len(c.toks) && (c.toks[k] == "for" || c.toks[k] == "by") {
 		k++
 	}
-	return k < len(c.toks) && c.sub[k] == c.sub[j] && phraseAt(c.toks, k, shortDurations) > 0
+	return k < len(c.toks) && phraseAt(c.toks, k, shortDurations) > 0
 }
 
 // faultNegators make a fault term a non-fault when they sit in the three words

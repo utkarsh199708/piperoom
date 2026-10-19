@@ -51,6 +51,8 @@ func TestHasFaultShortStale(t *testing.T) {
 		{"warehouse stale 1m", false},
 		{"analytics.orders stale for 2 minutes", false},
 		{"warehouse 1 minute stale", false},
+		{"warehouse stale (1m)", false},
+		{"warehouse stale by 1m", false},
 		{"warehouse 1 minute behind", false},
 		// Still faults.
 		{"The warehouse is stale for 3h.", true},
