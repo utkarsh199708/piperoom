@@ -421,6 +421,10 @@ func runWith(d startDeps) error {
 		// section 5). Each room, the topology and the watcher reach only the
 		// set of their own pipeline.
 		sets, err := d.openStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
+			// Defence in depth, no change in behaviour: with write mode off
+			// the executor already runs nothing; this also keeps the write
+			// clients from being built.
+			ReadOnly: !writeOn,
 			// similar_incidents reads past closed rooms from the room store;
 			// each set's Owners holds only its own pipelines.
 			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
@@ -598,9 +602,16 @@ func runWith(d startDeps) error {
 	}
 	<-done
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-		return fmt.Errorf("server: listen: %w", serveErr)
+		return serveError(serveErr)
 	}
 	return nil
+}
+
+// serveError adds the one "server:" prefix to a listenAndServe error, whose
+// own messages carry none ("listen on ...", "listen: --quickstart: ...",
+// "serve: ...").
+func serveError(err error) error {
+	return fmt.Errorf("server: %w", err)
 }
 
 // listenAndServe binds the server's address and serves until Shutdown. With
@@ -613,7 +624,7 @@ func listenAndServe(server *http.Server, quickstart bool, out io.Writer, log *sl
 	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("server: listen on %s: %w", addr, err)
+		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
 	if quickstart {
 		if err := checkQuickstartListener(ln.Addr()); err != nil {
@@ -625,7 +636,10 @@ func listenAndServe(server *http.Server, quickstart bool, out io.Writer, log *sl
 	if quickstart {
 		fmt.Fprintln(out, quickstartURL(ln.Addr()))
 	}
-	return server.Serve(ln)
+	if err := server.Serve(ln); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	return nil
 }
 
 // checkWebDir verifies that dir holds a built web UI (an index.html).

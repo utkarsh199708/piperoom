@@ -71,10 +71,11 @@ func checkQuickstartAddr(addr string) error {
 
 // checkQuickstartListener checks the address the listener really bound: a
 // "localhost" that resolves off loopback must not slip past the check above.
+// The message has no "server:" prefix: run adds it (serveError).
 func checkQuickstartListener(a net.Addr) error {
 	tcp, ok := a.(*net.TCPAddr)
 	if !ok || !tcp.IP.IsLoopback() {
-		return fmt.Errorf("server: --quickstart: the listener bound %s, which is not loopback: %w", a, errNonLoopback)
+		return fmt.Errorf("listen: --quickstart: the listener bound %s, which is not loopback: %w", a, errNonLoopback)
 	}
 	return nil
 }
