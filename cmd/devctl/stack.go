@@ -36,9 +36,10 @@ type stack struct {
 
 	// Test seams; nil or zero means the real thing. Unit tests play Postgres
 	// and docker compose with them, since neither runs without Docker.
-	sqlFn     func(ctx context.Context, db string, sql ...string) (string, error)
-	composeFn func(ctx context.Context, env map[string]string, args ...string) error
-	groupFn   func(ctx context.Context, group string) (groupView, error)
+	sqlFn            func(ctx context.Context, db string, sql ...string) (string, error)
+	composeFn        func(ctx context.Context, env map[string]string, args ...string) error
+	clickhouseExecFn func(ctx context.Context, query string) error
+	groupFn          func(ctx context.Context, group string) (groupView, error)
 	// poll is how often waitFor checks its condition (default 2 s).
 	poll time.Duration
 }

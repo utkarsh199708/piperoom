@@ -10,6 +10,7 @@
 //	devctl identities unbind <user>   move a user to a new IdP account
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
 //	devctl shadow up|down|status|env   Piperoom server in shadow mode (dev/shadow.md)
+//	devctl clickhouse init [--owner <tag>]  start ClickHouse and create the Kafka-backed orders sink
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
 // slot-inactive, consumer-lag, connector-auth, and the P3 ones missed-table,
@@ -49,6 +50,7 @@ const usage = `devctl — local pipeline control
   devctl identities unbind <user>   delete the user's IdP binding (room database)
   devctl rooms delete <id> --reason <text> --as <admin> [--archive]   erase one room through the running server (admin only; --archive keeps a copy)
   devctl shadow up|down|status|env   run the server in shadow mode on this stack (dev/shadow.md)
+  devctl clickhouse init [--owner <tag>]   start ClickHouse and create the Kafka-backed orders sink
   devctl lock --steal       steal a stale (>15m) lock
 
 missed-table, dead-slot, consumer-bad-deploy and dlq-backlog need the server
@@ -195,6 +197,18 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return roomsCmd(ctx, st, args, os.Stdout)
 	case "shadow":
 		return shadowCmd(ctx, st, args, os.Stdout)
+	case "clickhouse":
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 || rest[0] != "init" {
+			return fmt.Errorf("usage: devctl clickhouse init [--owner <tag>]")
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
+		return st.clickhouseInit(ctx)
 	}
 	return fmt.Errorf("unknown command %q", cmd)
 }

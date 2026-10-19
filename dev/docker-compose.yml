@@ -205,3 +205,23 @@ services:
       start_period: 60s
       interval: 5s
       retries: 40
+
+  # Optional ClickHouse warehouse and Kafka Engine sink (dev/clickhouse/README.md).
+  clickhouse:
+    profiles: ["clickhouse"]
+    image: clickhouse/clickhouse-server:25.8
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: piperoom_admin
+      CLICKHOUSE_PASSWORD: piperoom-clickhouse-admin
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["127.0.0.1:9001:9000"]
+    volumes:
+      - ./clickhouse/init/01-reader.sql:/docker-entrypoint-initdb.d/01-reader.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8123/ping"]
+      interval: 5s
+      retries: 40
