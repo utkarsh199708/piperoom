@@ -96,7 +96,7 @@ func TestDirRecordsProvenance(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("calls = %+v (want one per read, failed reads included)", calls)
 	}
-	if calls[0].Kind != CallFile || calls[0].Target != d.dir || calls[0].Text != "read manifest.json" || calls[1].Text != "read run_results.json" {
+	if calls[0].Kind != tools.CallFile || calls[0].Target != d.dir || calls[0].Text != "read manifest.json" || calls[1].Text != "read run_results.json" {
 		t.Errorf("calls = %+v", calls)
 	}
 }

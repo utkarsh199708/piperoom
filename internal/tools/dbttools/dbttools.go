@@ -58,8 +58,8 @@ type Deps struct {
 	// Transform reads the dbt artifacts. Nil when dbt is not configured
 	// (DBT_ARTIFACTS_DIR and DBT_CLOUD_URL unset): the tools stay registered,
 	// so the tool list does not depend on setup, and answer
-	// clients.ErrNotSupported. dbt_model_sql also needs dbt.SQLReader, which
-	// both dbt readers implement.
+	// clients.ErrNotSupported. dbt_model_sql also needs the optional
+	// clients.TransformSQLReader, which both dbt readers implement.
 	Transform clients.TransformReader
 	// Owners resolves the room's pipeline id (tools.WithPipelineID) to its
 	// models. Wiring must pass it; without it a room-scoped call is refused.

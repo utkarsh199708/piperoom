@@ -11,11 +11,6 @@ import (
 	"piperoom/internal/tools"
 )
 
-// CallFile is the provenance kind (tools.Call.Kind) of an artifact read from
-// DBT_ARTIFACTS_DIR. tools.go names no kind for a local file read yet (see
-// the P4d-2 PR's contract change request); this one is local until it does.
-const CallFile = "file"
-
 // Dir reads the artifacts dbt writes to its target directory
 // (DBT_ARTIFACTS_DIR). Each call opens the file again, so the newest dbt run
 // is read without a restart. It is safe for concurrent use.
@@ -79,7 +74,7 @@ func (d *Dir) read(ctx context.Context, name string) ([]byte, error) {
 	start := time.Now()
 	b, err := d.readFile(ctx, name)
 	tools.Record(ctx, tools.Call{
-		Kind:   CallFile,
+		Kind:   tools.CallFile,
 		Target: d.dir,
 		Text:   "read " + name,
 		At:     start,
@@ -117,8 +112,12 @@ func (d *Dir) readFile(ctx context.Context, name string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dbt: stat %s: %w", path, err)
 	}
-	// The path may have been swapped between Stat and Open; check what was
-	// actually opened too.
+	// Race window: the path may have been swapped between os.Stat and
+	// os.Open (a directory, a device, a symlink to one). This f.Stat on the
+	// open handle re-checks what was actually opened, so a non-regular file
+	// is never read. A FIFO swapped in during that window could still block
+	// os.Open itself; that needs write access to the artifacts dir at the
+	// exact instant, and the pre-open check covers every FIFO left in place.
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("dbt: %s: %w: not a regular file", path, ErrMalformed)
 	}

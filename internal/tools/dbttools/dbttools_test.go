@@ -80,7 +80,7 @@ func fixtureDir(t *testing.T) *dbt.Dir {
 type counting struct {
 	next interface {
 		clients.TransformReader
-		dbt.SQLReader
+		clients.TransformSQLReader
 	}
 	mu    sync.Mutex
 	calls []string
@@ -141,7 +141,7 @@ func (f fake) ModelSQL(_ context.Context, m string) (dbt.ModelSQL, error) {
 	return f.sql(m)
 }
 
-// lineageOnly is a TransformReader without dbt.SQLReader.
+// lineageOnly is a TransformReader without clients.TransformSQLReader.
 type lineageOnly struct{ clients.TransformReader }
 
 func registry(t *testing.T, d Deps) *tools.Registry {
@@ -599,7 +599,7 @@ func TestProvenance(t *testing.T) {
 	}
 	var texts []string
 	for _, c := range rec.Calls() {
-		if c.Kind != dbt.CallFile {
+		if c.Kind != tools.CallFile {
 			t.Errorf("call kind %q", c.Kind)
 		}
 		texts = append(texts, c.Text)

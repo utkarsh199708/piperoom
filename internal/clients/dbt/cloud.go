@@ -282,7 +282,7 @@ func (c *Cloud) roundTrip(ctx context.Context, path string, read func(io.Reader)
 	req.Header.Set("Accept", acceptJSON)
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("dbt: GET %s: %w", path, err)
+		return ctxErr(ctx, fmt.Errorf("dbt: GET %s: %w", path, err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -290,7 +290,19 @@ func (c *Cloud) roundTrip(ctx context.Context, path string, read func(io.Reader)
 		return &StatusError{Path: path, Code: resp.StatusCode, Body: strings.TrimSpace(string(b))}
 	}
 	if err := read(resp.Body); err != nil {
-		return fmt.Errorf("dbt: GET %s: %w", path, err)
+		return ctxErr(ctx, fmt.Errorf("dbt: GET %s: %w", path, err))
 	}
 	return nil
+}
+
+// ctxErr makes err match ctx's error (errors.Is) once ctx is done. A body cut
+// short at the deadline can surface as a decode error (ErrMalformed,
+// "unexpected end of JSON input") instead of the context error; the caller
+// must still see context.DeadlineExceeded, not a broken artifact.
+func ctxErr(ctx context.Context, err error) error {
+	cerr := ctx.Err()
+	if cerr == nil || errors.Is(err, cerr) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", cerr, err)
 }
