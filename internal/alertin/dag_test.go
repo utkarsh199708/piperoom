@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
 
@@ -72,13 +73,53 @@ func TestMatchDAG(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := matchDAG(o, tt.ids); got != tt.want {
-				t.Fatalf("matchDAG(%q) = %q, want %q", tt.ids, got, tt.want)
+			if got := MatchDAG(o, tt.ids...); got != tt.want {
+				t.Fatalf("MatchDAG(%q) = %q, want %q", tt.ids, got, tt.want)
 			}
 		})
 	}
-	if got := matchDAG(nil, []string{"revenue_daily"}); got != "" {
+	if got := MatchDAG(nil, "revenue_daily"); got != "" {
 		t.Fatalf("nil owners matched %q", got)
+	}
+}
+
+// TestMatchDAGKind: only a batch pipeline is matched by a dag_id. owners.Load
+// refuses dags on a cdc pipeline, so the Owners is built in code, the one way a
+// CDC pipeline can carry a dags list.
+func TestMatchDAGKind(t *testing.T) {
+	o := &owners.Owners{Pipelines: []owners.Pipeline{
+		{ID: "orders", DAGs: []string{"orders_nightly", "shared_dag"}}, // kind unset: cdc
+		{ID: "payments", Kind: events.PipelineKindCDC, DAGs: []string{"payments_nightly", "shared_dag"}},
+		{ID: "odd", Kind: "streaming", DAGs: []string{"odd_dag"}}, // unknown kind: not batch
+		{ID: "daily-revenue", Kind: events.PipelineKindBatch, DAGs: []string{"revenue_daily", "shared_dag", "both_batch"}},
+		{ID: "daily-customers", Kind: events.PipelineKindBatch, DAGs: []string{"customers_daily", "both_batch"}},
+	}}
+	tests := []struct {
+		name string
+		ids  []string
+		want string
+	}{
+		{"batch pipeline matched", []string{"revenue_daily"}, "daily-revenue"},
+		{"other batch pipeline matched", []string{"customers_daily"}, "daily-customers"},
+		{"cdc pipeline (default kind) with the dag is not matched", []string{"orders_nightly"}, ""},
+		{"cdc pipeline (explicit kind) with the dag is not matched", []string{"payments_nightly"}, ""},
+		{"unknown kind is not matched", []string{"odd_dag"}, ""},
+		{"dag listed by cdc and batch: the batch one", []string{"shared_dag"}, "daily-revenue"},
+		{"no match", []string{"no_such_dag"}, ""},
+		{"several batch matches are not guessed", []string{"both_batch"}, ""},
+		{"cdc dag plus batch dag in one alert: the batch one", []string{"orders_nightly", "revenue_daily"}, "daily-revenue"},
+		{"several matches narrowed by a second id", []string{"both_batch", "customers_daily"}, "daily-customers"},
+		{"single id, as room passes it", []string{" revenue_daily "}, "daily-revenue"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MatchDAG(o, tt.ids...); got != tt.want {
+				t.Fatalf("MatchDAG(%q) = %q, want %q", tt.ids, got, tt.want)
+			}
+		})
+	}
+	if got := MatchDAG(o); got != "" {
+		t.Fatalf("no ids matched %q", got)
 	}
 }
 

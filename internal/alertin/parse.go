@@ -17,7 +17,7 @@ import (
 type parsed struct {
 	alert    Alert
 	explicit string   // pipeline the alert names itself
-	dags     []string // dag_id values, matched against owners.yaml dags (matchDAG)
+	dags     []string // dag_id values, matched against owners.yaml dags (MatchDAG)
 	service  string   // PagerDuty service ID
 	values   []string // exact names (label values, tag values) matched against owners
 	text     []string // free text (titles, summaries) scanned for owner names
@@ -94,7 +94,7 @@ func (c Config) resolvePipeline(p parsed) (string, string) {
 	if ValidPipelineID(p.explicit) {
 		return p.explicit, ViaLabel
 	}
-	if id := matchDAG(c.Owners, p.dags); id != "" {
+	if id := MatchDAG(c.Owners, p.dags...); id != "" {
 		return id, ViaDAG
 	}
 	if id := c.PagerDutyServices[p.service]; p.service != "" && ValidPipelineID(id) {
