@@ -345,6 +345,12 @@ var syntheticLabels = map[string]Label{
 	"snowflake-sink-column-missing": {"kafka-connect", []string{"risk_score", "invalid identifier", "column"}},
 	// R8a's watcher-started scenario.
 	"watcher-start": {"kafka-connect", []string{"administrator command", "57p01", "restarted"}},
+	// The P3g-1 scenarios.
+	"missed-table":             {"postgres", []string{"publication", "autocreate"}},
+	"dead-slot-wal":            {"postgres", []string{"orphaned", "nobody reads", "drop the slot"}},
+	"dead-slot-wal-no-context": {"kafka-connect", []string{"stopped", "never resumed", "retains all wal"}},
+	"consumer-bad-deploy":      {"consumer", []string{"deploy", "committed", "offsets"}},
+	"dlq-backlog":              {"consumer", []string{"validation", "gift"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -382,6 +388,15 @@ var syntheticTruth = map[string]map[string]truth{
 	// watcher-start lazy is the watcher's title, which names the failed
 	// connector task; wrong blames the Schema Registry.
 	"watcher-start": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// P3g-1: lazy texts are the alert titles. consumer-bad-deploy and
+	// dlq-backlog titles name order-sync (and its DLQ), the consumer. Both
+	// dead-slot titles blame the slot (postgres) to a reader; the matcher reads
+	// "debezium_orders" as kafka-connect, so their lazy layer is a known miss.
+	"missed-table":             {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"dead-slot-wal":            {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"dead-slot-wal-no-context": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"consumer-bad-deploy":      {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"dlq-backlog":              {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.

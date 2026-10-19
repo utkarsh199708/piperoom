@@ -845,6 +845,7 @@ func TestEveryScenarioCanPass(t *testing.T) {
 		"schema-change": {ps("schema_set_compatibility", `{"subject":"pg.public.orders-value","level":"NONE"}`),
 			ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`)},
 		"slot-inactive-wal-growth":   {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
+		"dead-slot-wal-no-context":   {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 		"recurring-connector-paused": {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 		"watcher-start":              {ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`)},
 	}
