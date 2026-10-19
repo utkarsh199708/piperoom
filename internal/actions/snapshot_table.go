@@ -63,7 +63,7 @@ type SnapshotDeps struct {
 	Source clients.SourceReader
 	// Kafka is nil unless write mode is on; only Execute writes through it.
 	// It is the action's only writer: a signal table row, a source database
-	// write, is pg_snapshot_signal's. It must also be a snapshotSignaler
+	// write, is pg_snapshot_signal's. It must also be a clients.SnapshotSignaler
 	// (the real kafka.Writer is); Validate and Execute refuse one that is not
 	// (ErrNoSignalWriter), and the action never falls back to Produce.
 	Kafka clients.KafkaWriter
@@ -77,14 +77,11 @@ func RegisterSnapshot(reg *Registry, d SnapshotDeps) error {
 	return reg.Register(&snapshotTable{d: d})
 }
 
-// snapshotSignaler is the Kafka Writer's narrow signal produce: Produce only
-// writes the pipeline's CDC topics, and the signal topic is none of them.
-// SendSnapshotSignal checks the topic against every source table's CDC topic.
-type snapshotSignaler interface {
-	SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (kafka.SnapshotSignal, error)
-}
-
-var _ snapshotSignaler = (*kafka.Writer)(nil)
+// The Kafka Writer's narrow signal produce is clients.SnapshotSignaler:
+// Produce only writes the pipeline's CDC topics, and the signal topic is none
+// of them. SendSnapshotSignal checks the topic against every source table's
+// CDC topic.
+var _ clients.SnapshotSignaler = (*kafka.Writer)(nil)
 
 // tableRowEstimator is an optional read of the source client: the planner's
 // row estimate of "schema.table" (pg_class.reltuples; negative = never
@@ -284,7 +281,7 @@ func (a *snapshotTable) Validate(ctx context.Context, raw json.RawMessage) error
 		return err
 	}
 	if a.d.Kafka != nil {
-		if _, ok := a.d.Kafka.(snapshotSignaler); !ok {
+		if _, ok := a.d.Kafka.(clients.SnapshotSignaler); !ok {
 			return ErrNoSignalWriter
 		}
 	}
@@ -400,7 +397,7 @@ func (a *snapshotTable) Execute(ctx context.Context, raw json.RawMessage) (strin
 	if a.d.Kafka == nil {
 		return "", fmt.Errorf("actions: %s: no Kafka write client (PIPEROOM_WRITE_MODE=on is needed); nothing was sent", SnapshotTableName)
 	}
-	ss, ok := a.d.Kafka.(snapshotSignaler)
+	ss, ok := a.d.Kafka.(clients.SnapshotSignaler)
 	if !ok {
 		return "", ErrNoSignalWriter
 	}

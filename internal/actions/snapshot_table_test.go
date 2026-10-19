@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/kafka"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -87,12 +86,27 @@ type signalKafka struct {
 	err  error
 }
 
-func (k *signalKafka) SendSnapshotSignal(_ context.Context, topic, connector, key string, tables []string) (kafka.SnapshotSignal, error) {
+func (k *signalKafka) SendSnapshotSignal(_ context.Context, topic, connector, key string, tables []string) (clients.SnapshotSignal, error) {
 	k.args, k.tbls = []string{topic, connector, key}, tables
 	if k.err != nil {
-		return kafka.SnapshotSignal{}, k.err
+		return clients.SnapshotSignal{}, k.err
 	}
-	return kafka.SnapshotSignal{ID: "42", Topic: topic, Offset: 42}, nil
+	return clients.SnapshotSignal{ID: "42", Topic: topic, Offset: 42}, nil
+}
+
+var _ clients.SnapshotSignaler = (*signalKafka)(nil)
+
+// blockingSignalKafka is a signal writer whose broker never answers: it
+// returns only when ctx ends, with ctx's error.
+type blockingSignalKafka struct {
+	recKafka
+	hadDeadline bool
+}
+
+func (k *blockingSignalKafka) SendSnapshotSignal(ctx context.Context, _, _, _ string, _ []string) (clients.SnapshotSignal, error) {
+	_, k.hadDeadline = ctx.Deadline()
+	<-ctx.Done()
+	return clients.SnapshotSignal{}, ctx.Err()
 }
 
 // estSource is a SourceReader with the optional row estimate.
@@ -339,6 +353,51 @@ func TestSnapshotExecuteSignalTopic(t *testing.T) {
 	}
 	if !strings.Contains(out, "signal 42") || !strings.Contains(out, "pg-signal") {
 		t.Fatalf("result %q does not report the signal id and topic", out)
+	}
+}
+
+// A signal writer that never answers does not hold Execute past a deadline:
+// the caller's, or the action's own bound when the caller set none. The test
+// fails after 5 s instead of hanging when Execute does not return.
+func TestSnapshotExecuteSignalBlockedEndsAtDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration // the action's own bound (SnapshotDeps.Timeout)
+		caller  time.Duration // the caller's deadline; 0 = none
+	}{
+		{"caller deadline", time.Minute, 100 * time.Millisecond},
+		{"action bound", 100 * time.Millisecond, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &blockingSignalKafka{}
+			a := &snapshotTable{d: SnapshotDeps{Connect: &sigConnect{cfg: topicConfig()}, Kafka: k, Timeout: tc.timeout}}
+			ctx := roomCtx()
+			if tc.caller > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.caller)
+				defer cancel()
+			}
+			type result struct {
+				out string
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				out, err := a.Execute(ctx, snapParams(ViaSignalTopic, "public.orders"))
+				done <- result{out, err}
+			}()
+			select {
+			case r := <-done:
+				if !errors.Is(r.err, context.DeadlineExceeded) || r.out != "" {
+					t.Fatalf("Execute = %q, %v; want the deadline", r.out, r.err)
+				}
+				if !k.hadDeadline {
+					t.Fatal("SendSnapshotSignal got a ctx without a deadline")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Execute still blocked 5 s after a 100 ms deadline")
+			}
+		})
 	}
 }
 
