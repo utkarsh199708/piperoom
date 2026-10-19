@@ -43,6 +43,36 @@ import (
 // that ran out. A fix runs at most this long after its run_at.
 const AutoApproveCheckEvery = time.Second
 
+// StaleCountdownGrace is how long past run_at the room view (RoomFor) keeps
+// showing a countdown the policy has not fired. A healthy replica fires
+// within one loop tick (AutoApproveCheckEvery) of run_at; two ticks cover a
+// missed check, and the rest is margin for a fire that waits on the room
+// lock, the lease lookup or a slow store. Past it the countdown will most
+// likely never fire (the fire check refused it, or the replica that holds
+// the room is stuck), and a card that shows "Runs in 0:00" forever misleads:
+// the view drops open_proposals[].scheduled, and the proposal waits for a
+// person as it would without the policy. Only the view changes; the log, the
+// fold and the published snapshot do not, and no event is written.
+const StaleCountdownGrace = 2*AutoApproveCheckEvery + 8*time.Second
+
+// countdownStale reports a countdown whose run_at is more than
+// StaleCountdownGrace before now.
+func countdownStale(runAt, now time.Time) bool {
+	return now.After(runAt.Add(StaleCountdownGrace))
+}
+
+// hideStaleCountdowns drops open_proposals[].scheduled from a caller's view
+// where the countdown is stale (countdownStale). snap must be a clone
+// (GetRoom), never the published snapshot.
+func (s *Service) hideStaleCountdowns(snap *RoomSnapshot) {
+	now := s.now()
+	for i := range snap.OpenProposals {
+		if sc := snap.OpenProposals[i].Scheduled; sc != nil && countdownStale(sc.RunAt, now) {
+			snap.OpenProposals[i].Scheduled = nil
+		}
+	}
+}
+
 // autoApproveCheckTimeout bounds one check: the reads and the appends.
 const autoApproveCheckTimeout = 30 * time.Second
 
@@ -548,6 +578,21 @@ func (s *Service) CancelProposal(ctx context.Context, user User, proposalID, rea
 		p, ok := openProposal(st.snap, proposalID)
 		if !ok || !p.sched.cancellable() {
 			return notScheduled("no auto-approve countdown of this proposal is pending")
+		}
+		// A stale countdown (past run_at plus StaleCountdownGrace) is gone
+		// from the room view (RoomFor), and the cancel answers as the view
+		// does, 409 not_scheduled, unless the policy can still fire it
+		// (fireCheckLocked passes, so a late or stuck replica could still
+		// approve it). Then the cancel is taken: docs/api.md says the
+		// proposal is "cancellable until the policy starts", and a person
+		// who wants a fix stopped is never refused while it can still run.
+		// A countdown the policy refuses (preview turned bad, auto_approve:
+		// list narrowed, policy off at restart) can never fire, so there is
+		// nothing left to cancel: the proposal already waits for a person.
+		if countdownStale(p.sched.runAt, s.now()) {
+			if _, err := s.fireCheckLocked(st, proposalID); err != nil {
+				return notScheduled("the auto-approve countdown ran out and the policy will not approve this proposal; it waits for manual approval")
+			}
 		}
 		return nil
 	}

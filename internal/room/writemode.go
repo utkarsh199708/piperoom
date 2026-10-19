@@ -26,15 +26,19 @@ type Mode struct {
 func (s *Service) WriteOn() bool { return !s.writeOff }
 
 // RoomFor is GetRoom for one caller: the snapshot plus what depends on the
-// server's settings and on who asks (mode, open_proposals[].blocked). The
-// published snapshot stays free of both: it is folded from the log alone, and
-// every client folding the same log must reach it.
+// server's settings, the clock and who asks (mode, open_proposals[].blocked,
+// a stale open_proposals[].scheduled hidden). The published snapshot stays
+// free of all of these: it is folded from the log alone, and every client
+// folding the same log must reach it.
 func (s *Service) RoomFor(ctx context.Context, u User, roomID string) (RoomSnapshot, error) {
 	snap, err := s.GetRoom(ctx, roomID)
 	if err != nil {
 		return RoomSnapshot{}, err
 	}
 	snap.Mode = &Mode{Write: !s.writeOff, Solo: s.soloFor(u, snap.PipelineID), AutoApprove: s.autoApproveFor(snap.PipelineID)}
+	// A countdown past run_at plus the grace is not shown (P2b-4b); the
+	// published snapshot keeps it, as the log does.
+	s.hideStaleCountdowns(&snap)
 	if s.writeOff {
 		// GetRoom returned a clone, so these writes never reach the
 		// published snapshot.
