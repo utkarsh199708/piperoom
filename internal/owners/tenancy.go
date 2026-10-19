@@ -140,7 +140,13 @@ type connKey struct {
 // one. The Airflow and dbt keys of a batch pipeline join when wiring maps
 // them (P4b-1), so the two lists stay equal.
 var connKeys = map[string]connKey{
+	// source_db_write_url is the source Postgres as its separate write role
+	// (SOURCE_DB_WRITE_URL), for the pg write actions. Optional: without it
+	// the pipeline gets no writer and those actions refuse at Execute. Never
+	// a literal (a DSN with a password), and never the same reference as
+	// source_db_url (checkWriteRole).
 	"source_db_url":                 {kind: cdc, required: true},
+	"source_db_write_url":           {kind: cdc},
 	"warehouse_db_url":              {required: true},
 	"warehouse_kind":                {literal: true},
 	"kafka_brokers":                 {kind: cdc, required: true},
@@ -533,6 +539,9 @@ func validateConnections(c Connections, kind string) error {
 			return fmt.Errorf("connections.%s: file: must be an absolute path", k)
 		}
 	}
+	if err := checkWriteRole(c); err != nil {
+		return err
+	}
 	for _, k := range ConnectionKeys() {
 		if info := connKeys[k]; info.required && info.belongsTo(kind) {
 			if _, ok := c[k]; !ok {
@@ -541,6 +550,35 @@ func validateConnections(c Connections, kind string) error {
 		}
 	}
 	return nil
+}
+
+// checkWriteRole refuses a source_db_write_url that names the same reference
+// as source_db_url: the write actions would then run as the read-only role
+// (or the read tools as the write role), which defeats the separate role.
+// Only two references of the same form can be compared here; an env: and a
+// file: that hold the same DSN are caught by wiring when it resolves them.
+func checkWriteRole(c Connections) error {
+	w, okW := c["source_db_write_url"]
+	r, okR := c["source_db_url"]
+	if !okW || !okR {
+		return nil
+	}
+	if cw, cr := canonRef(w), canonRef(r); cw != "" && cw == cr {
+		return fmt.Errorf("connections.source_db_write_url: is the same reference as source_db_url; the write role needs its own credentials")
+	}
+	return nil
+}
+
+// canonRef is the canonical form of an env: or file: reference (see
+// ConnRefs), or "" for a literal.
+func canonRef(r ConnRef) string {
+	switch {
+	case r.Env != "":
+		return refEnv(r.Env)
+	case r.File != "":
+		return FileRef(r.File)
+	}
+	return ""
 }
 
 // isAbsPath accepts an absolute path on this OS, and also a slash-rooted one
