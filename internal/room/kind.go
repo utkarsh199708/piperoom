@@ -3,9 +3,9 @@ package room
 import (
 	"encoding/json"
 	"slices"
-	"strings"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/alertin"
 	"piperoom/internal/events"
 )
 
@@ -63,27 +63,12 @@ func (s *Service) knownLayers() []string {
 	return out
 }
 
-// PipelineForDAG returns the one owners.yaml pipeline whose dags list dagID,
-// or "" when none does, more than one does, or there is no owners config. It
-// is the single-id form of internal/alertin's matchDAG (exact, case-sensitive
-// match after trimming spaces; a DAG two pipelines list is never guessed), for
-// the unsigned dev webhook, which reads one top-level dag_id. The id is
-// untrusted: it is only compared, never logged.
+// PipelineForDAG returns the one batch pipeline in owners.yaml whose dags list
+// dagID, or "" when none or several do, or there is no owners config. It is
+// alertin.MatchDAG with one id, for the unsigned dev webhook, which reads one
+// top-level dag_id: the dev webhook and the signed routes then resolve a
+// dag_id the same way, including that a dag_id never selects a CDC pipeline.
+// The id is untrusted: it is only compared, never logged.
 func (s *Service) PipelineForDAG(dagID string) string {
-	dagID = strings.TrimSpace(dagID)
-	if s.owners == nil || dagID == "" {
-		return ""
-	}
-	match := ""
-	for i := range s.owners.Pipelines {
-		p := &s.owners.Pipelines[i]
-		if !slices.Contains(p.DAGs, dagID) {
-			continue
-		}
-		if match != "" && match != p.ID {
-			return ""
-		}
-		match = p.ID
-	}
-	return match
+	return alertin.MatchDAG(s.owners, dagID)
 }
