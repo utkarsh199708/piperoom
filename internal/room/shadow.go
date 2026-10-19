@@ -585,7 +585,7 @@ func (s *Service) ShadowLabel(ctx context.Context, user User, roomID, actualLaye
 		return events.Event{}, errShadowNotAllowed()
 	}
 	if !isLayer(actualLayer) {
-		return events.Event{}, validation(fmt.Sprintf("actual_layer must be one of %s", strings.Join(events.Layers, ", ")))
+		return events.Event{}, validation(fmt.Sprintf("actual_layer must be one of %s", strings.Join(events.IncidentLayers(), ", ")))
 	}
 	if len(terms) < 1 || len(terms) > maxRootCauseTerms {
 		return events.Event{}, validation(fmt.Sprintf("root_cause_terms must hold 1 to %d terms", maxRootCauseTerms))
@@ -655,12 +655,9 @@ func (s *Service) ShadowGrade(ctx context.Context, user User, roomID string, lay
 }
 
 func isLayer(l string) bool {
-	for _, x := range events.Layers {
-		if x == l {
-			return true
-		}
-	}
-	return false
+	// An actual layer is where the incident was, so the setup layer
+	// (environment) is refused (U0).
+	return slices.Contains(events.IncidentLayers(), l)
 }
 
 // ShadowEvent is a shadow log entry as GET /api/rooms/{id}/shadow returns it:
