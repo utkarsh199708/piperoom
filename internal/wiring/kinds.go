@@ -119,8 +119,11 @@ func toolPackages() []toolPackage {
 		{name: "debezium tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
 			return debeziumtools.Register(reg, debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners})
 		}},
+		// Schedule is left nil: batchtools.Register falls back to the
+		// orchestrator's clients.DAGScheduleReader (*airflow.Client), the one
+		// copy of that fallback.
 		{name: "batch tools", kinds: batchKind, register: func(reg *tools.Registry, w *Wired) error {
-			return batchtools.Register(reg, batchtools.Deps{Orchestrator: w.Orchestrator, Schedule: scheduleReader(w.Orchestrator), Owners: w.Owners, Now: w.Now})
+			return batchtools.Register(reg, batchtools.Deps{Orchestrator: w.Orchestrator, Owners: w.Owners, Now: w.Now})
 		}},
 		{name: "dbt tools", kinds: batchKind, register: func(reg *tools.Registry, w *Wired) error {
 			return dbttools.Register(reg, dbttools.Deps{Transform: w.Transform, Owners: w.Owners})
@@ -150,16 +153,6 @@ func toolPackages() []toolPackage {
 			return changes.Register(reg, chg)
 		}},
 	}
-}
-
-// scheduleReader is orch's schedule reader when it has one (*airflow.Client
-// does), for dag_schedule_gap; nil otherwise, and the tool then answers
-// clients.ErrNotSupported.
-func scheduleReader(orch clients.OrchestratorReader) clients.DAGScheduleReader {
-	if s, ok := orch.(clients.DAGScheduleReader); ok {
-		return s
-	}
-	return nil
 }
 
 // registerToolsWith registers the packages the set's kinds need, each into a
