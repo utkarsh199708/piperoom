@@ -14,7 +14,7 @@ import type { ReactNode, RefObject } from 'react'
 import { Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canDecideLayer, isViewer } from '../state/permissions'
+import { canDecideLayer, isFallbackLayer, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
 import { approveAllFor, approveAllLabel, soloAllConfirmText } from '../lib/approveAll'
 import { describeIdentity, identityDetails } from '../lib/hash'
@@ -34,7 +34,7 @@ import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
 import { WaitingFor } from './room/WaitingFor'
 import type { Person, PresenceMember, Topology } from '../api/types'
-import type { NudgeState } from '../state/types'
+import type { DriverInfo, NudgeState } from '../state/types'
 
 /** What a pending layer row needs to say who it waits on and to nudge them (F9). */
 export interface WaitingContext {
@@ -881,6 +881,7 @@ function LayerRow({
   onSolo,
   waiting,
   writeOff,
+  driver,
   bundled,
 }: {
   proposal: ProposalState
@@ -888,6 +889,8 @@ function LayerRow({
   user: CurrentUser
   actions: RoomActions
   pipelineId: string
+  /** The room's driver while the room is open (null otherwise): they approve a layer nobody owns (P2b). */
+  driver: DriverInfo | null
   /** Write mode is off (P1a): an approval is recorded and nothing runs, and the button says so. */
   writeOff: boolean
   /**
@@ -957,9 +960,12 @@ function LayerRow({
   // a hash the server would accept, so Approve stays off. Reject stays on: the server
   // takes a rejection with an empty hash for exactly this open proposal (params_hash.go).
   const hashed = proposal.params_hash !== ''
-  const canDecide = !bundled && canDecideLayer(proposal, user, layer)
+  const canDecide = !bundled && canDecideLayer(proposal, user, layer, driver?.id)
   // Pending and part of the card's one approval: shown as the person's own layer, decided below.
   const inBundle = bundled && state === 'pending'
+  // Nobody owns this layer (P2b): the driver approves it, and the row says so instead of naming owners.
+  const fallback = isFallbackLayer(proposal, layer)
+  const driverName = driver ? neutralizeBadgeText(driver.name || driver.id) : ''
 
   // Solo: the typed box. The approval that completes the set: the run confirm. Otherwise at once.
   const completing = completesSet(proposal, layer)
@@ -1042,8 +1048,29 @@ function LayerRow({
           <span className="text-xs text-muted-foreground">you</span>
           {/* muted, not subtle: subtle text is 4.2:1 on the amber tint of this row */}
           <span className="font-mono text-xs text-muted-foreground">user:{user.id}</span>
-          <span className="text-xs font-medium text-warning-foreground">pending · your layer</span>
+          {fallback ? (
+            <span className="text-xs font-medium text-warning-foreground" data-testid={`fallback-${layer}`}>
+              no owner for <span className="font-mono">{layer}</span> · driver approves
+            </span>
+          ) : (
+            <span className="text-xs font-medium text-warning-foreground">pending · your layer</span>
+          )}
         </>
+      ) : fallback && state === 'pending' ? (
+        // Greyed for everyone but the driver: no owner to wait on or nudge.
+        <span className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <span data-testid={`fallback-${layer}`}>
+            no owner for <span className="font-mono">{layer}</span> · driver approves
+          </span>
+          {driver ? (
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              <PersonAvatar actor={{ id: driver.id, name: driverName }} size={20} />
+              <PersonName person={{ ...driver, kind: 'human' }} name={driverName} />
+            </span>
+          ) : (
+            <span>no driver yet</span>
+          )}
+        </span>
       ) : waiting && state === 'pending' ? (
         <WaitingFor
           proposalId={proposal.proposal_id}
@@ -1158,9 +1185,12 @@ function Proposal({
   topology,
   nudge,
   writeOff,
+  driver,
   bundle,
   refused,
 }: {
+  /** The room's driver while the room is open, else null (see LayerRow). */
+  driver: DriverInfo | null
   nudge: CloseNudge
   topology: Topology | null
   proposal: ProposalState
@@ -1187,12 +1217,18 @@ function Proposal({
   // useRoom keeps across the room reload (this card is unmounted while the room loads).
   const [acknowledged, setAcknowledged] = useState<string | null>(null)
 
-  const mine = bundle ?? proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l))
+  const mine = bundle ?? proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l, driver?.id))
   const open = proposal.status === 'open'
   const hashed = proposal.params_hash !== ''
   const pending = proposal.required_layers.filter((l) => (proposal.approvals[l] ?? 'pending') === 'pending')
   const approved = proposal.required_layers.filter((l) => proposal.approvals[l] === 'approved').length
   const previous = latestDecision(proposal)
+  // A layer nobody owns waits on the driver, not on an owner (P2b).
+  const ownersPending = pending.filter((l) => !isFallbackLayer(proposal, l))
+  const waitingOn = [
+    ...(ownersPending.length > 0 ? [`${ownersPending.join(', ')} ${ownersPending.length === 1 ? 'owner' : 'owners'}`] : []),
+    ...(ownersPending.length < pending.length ? ['the driver'] : []),
+  ].join(' and ')
 
   return (
     <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
@@ -1225,7 +1261,7 @@ function Proposal({
             {proposal.status === 'approved' && <Badge variant="success">approved</Badge>}
             {proposal.status === 'rejected' && <Badge variant="destructive">rejected</Badge>}
             {open && mine.length === 0 && pending.length > 0
-              ? `waiting for ${pending.join(', ')} ${pending.length === 1 ? 'owner' : 'owners'} · ${approved} of ${proposal.required_layers.length} approved`
+              ? `waiting for ${waitingOn} · ${approved} of ${proposal.required_layers.length} approved`
               : 'proposed by the agent'}
           </span>
         </div>
@@ -1310,6 +1346,7 @@ function Proposal({
             onSolo={onSolo}
             waiting={waiting}
             writeOff={writeOff}
+            driver={driver}
             bundled={bundle !== null}
           />
         ))}
@@ -1380,6 +1417,8 @@ export function ProposalsPanel({
   // status "open": with no decidable layers no card shows Approve, Reject or a "your layer" row,
   // and A and R do nothing, matching the decision bar, which already hides on a closed room.
   const decider: CurrentUser = state.status === 'open' ? user : { ...user, layers: [] }
+  // Same for the driver's right to a layer nobody owns: none on a closed room.
+  const driver = state.status === 'open' ? state.driver : null
   const nudge: CloseNudge = {
     roomOpen: state.status === 'open',
     driver: state.driver ?? undefined,
@@ -1399,7 +1438,7 @@ export function ProposalsPanel({
   // run" ("*"), else the first layer you can decide.
   let shortcutKey = ''
   for (const p of proposals) {
-    const layer = bundleFor(p) ? '*' : p.required_layers.find((l) => canDecideLayer(p, decider, l))
+    const layer = bundleFor(p) ? '*' : p.required_layers.find((l) => canDecideLayer(p, decider, l, driver?.id))
     if (layer) {
       shortcutKey = `${p.proposal_id}/${layer}`
       break
@@ -1439,6 +1478,7 @@ export function ProposalsPanel({
               topology={topology}
               nudge={nudge}
               writeOff={writeModeOff(state.mode)}
+              driver={driver}
               bundle={bundleFor(p)}
               refused={state.approve_all_refused?.[p.proposal_id]}
             />

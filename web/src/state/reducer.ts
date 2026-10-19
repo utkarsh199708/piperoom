@@ -532,7 +532,13 @@ function applyCore(state: RoomState, event: Event): RoomState {
           ]
       next = {
         ...state,
-        driver: { id: p.to.id, name: p.to.name, verified: p.to.verified === true, lease_until: p.lease_until },
+        driver: {
+          id: p.to.id,
+          name: p.to.name,
+          verified: p.to.verified === true,
+          lease_until: p.lease_until,
+          ...(p.reason ? { reason: p.reason } : {}),
+        },
         members,
         control_requests: state.control_requests.filter((r) => r.from.id !== p.to.id),
         // A hand-off is accepted only while its creator drives (409 stale_handoff). The receiver's
@@ -579,6 +585,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
             created_at: event.at,
             // Only the snapshot says so for a proposal that was already blocked when it was taken.
             ...(state.snapshot_blocked?.[p.proposal_id] ? { blocked: state.snapshot_blocked[p.proposal_id] } : {}),
+            // Left off when every layer has an owner, so such a proposal folds as before P2b.
+            ...(p.fallback_layers && p.fallback_layers.length > 0 ? { fallback_layers: [...p.fallback_layers] } : {}),
           },
         ],
       }

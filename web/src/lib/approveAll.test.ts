@@ -128,3 +128,36 @@ describe('words', () => {
     expect(approveAllLabel(true)).toBe('Approve (will not run)')
   })
 })
+
+describe('approveAllLayers with fallback layers (P2b-3)', () => {
+  const p = proposal({
+    required_layers: ['kafka-connect', 'consumer'],
+    approvals: { 'kafka-connect': 'pending', consumer: 'pending' },
+    fallback_layers: ['consumer'],
+  })
+
+  it('the driver who owns the other layer gets one approve-all over both', () => {
+    expect(approveAllLayers(p, one, undefined, 'arjun')).toEqual(['kafka-connect', 'consumer'])
+    expect(approveAllFor(room(p, { driver: { id: 'arjun', name: 'Arjun' } }), p, one)).toEqual(['kafka-connect', 'consumer'])
+  })
+
+  it('a non-driver owner of the other layer, or no driver, keeps the rows', () => {
+    expect(approveAllLayers(p, one, undefined, 'kabir')).toBeNull()
+    expect(approveAllLayers(p, one, undefined)).toBeNull()
+    expect(approveAllFor(room(p, { driver: null }), p, one)).toBeNull()
+  })
+
+  it('a closed room offers nothing, driver or not', () => {
+    expect(approveAllFor(room(p, { status: 'closed', driver: { id: 'arjun', name: 'Arjun' } }), p, one)).toBeNull()
+  })
+
+  it('the fallback layer alone pending: the driver keeps the row Approve', () => {
+    const last = { ...p, approvals: { 'kafka-connect': 'approved' as const, consumer: 'pending' as const } }
+    expect(approveAllLayers(last, one, undefined, 'arjun')).toBeNull()
+  })
+
+  it('a one-layer fallback proposal: the driver keeps the row', () => {
+    const single = proposal({ required_layers: ['consumer'], approvals: { consumer: 'pending' }, fallback_layers: ['consumer'] })
+    expect(approveAllLayers(single, none, undefined, 'kabir')).toBeNull()
+  })
+})

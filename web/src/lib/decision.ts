@@ -35,7 +35,7 @@ export function decisionFor(state: RoomState, user: CurrentUser): Decision | nul
     for (const p of proposals) {
       const all = approveAllFor(state, p, user)
       if (all) return { kind: 'needs-you', proposal: p, layer: all[0], completing: true, all }
-      const layer = p.required_layers.find((l) => canDecideLayer(p, user, l))
+      const layer = p.required_layers.find((l) => canDecideLayer(p, user, l, state.driver?.id))
       if (layer) return { kind: 'needs-you', proposal: p, layer, completing: completesSet(p, layer) }
     }
   }

@@ -235,6 +235,11 @@ export type ControlRequestedPayload = Record<string, never>
 export interface ControlGrantedPayload {
   to: Actor
   lease_until: string
+  /**
+   * P2b: "sole_member" when the first member to join a driverless alert room became its driver
+   * without asking (system actor). Absent for every other grant.
+   */
+  reason?: 'sole_member' | string
 }
 
 export interface ProposalStep {
@@ -319,6 +324,11 @@ export interface ProposalCreatedPayload {
   required_layers: string[]
   /** Hex SHA-256 of the frozen proposal (auth PR 4). Absent on events written before it. */
   params_hash?: string
+  /**
+   * P2b: the required_layers nobody owns; the room's driver approves them (`grant: "fallback"`).
+   * Absent when every layer has an owner.
+   */
+  fallback_layers?: string[]
 }
 
 /**
@@ -339,6 +349,10 @@ export interface ApprovalGivenPayload {
   layer: string
   params_hash?: string
   identity?: Identity
+  /** P2b: what gave the right to approve. Absent before P2: read `identity.grant` instead. */
+  grant?: 'owner' | 'solo' | 'fallback' | 'policy' | string
+  /** P2b: "auto_approve" with `grant: "policy"`. */
+  policy?: string
 }
 
 export interface ApprovalRejectedPayload {
@@ -455,6 +469,8 @@ export interface ProposalSummary {
    * otherwise, and on a server from before P1a. The only value in the P wave.
    */
   blocked?: 'write_mode_off'
+  /** P2b: copied from proposal.created.fallback_layers; [] when every layer has an owner, absent before P2b. */
+  fallback_layers?: string[]
 }
 
 /**

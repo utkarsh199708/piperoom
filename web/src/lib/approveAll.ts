@@ -5,7 +5,7 @@
 import type { RoomMode } from '../api/types'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser, ProposalLike } from '../state/permissions'
-import { canDecideLayer, isViewer } from '../state/permissions'
+import { canDecideLayer, isFallbackLayer, isViewer } from '../state/permissions'
 
 /**
  * The words of the one button, on the card, in its confirm and on the decision bar. With write mode
@@ -28,16 +28,27 @@ export function soloAllConfirmText(pipelineId: string): string {
  * all of them (403 not_layer_owner otherwise): `mode.solo` (the server's own answer for this room
  * and caller) or `/api/me` layers that hold each one. With a single pending layer the row's own
  * Approve is already one click behind the same run confirm, so the card keeps it, unless the row
- * cannot offer it (mode.solo for a layer `/api/me` does not list).
+ * cannot offer it (mode.solo for a layer `/api/me` does not list). `driverId` is the room's driver:
+ * they cover the proposal's `fallback_layers` (pass it only for an open room).
  */
-export function approveAllLayers(proposal: ProposalLike, user: CurrentUser, mode: RoomMode | null | undefined): string[] | null {
+export function approveAllLayers(
+  proposal: ProposalLike,
+  user: CurrentUser,
+  mode: RoomMode | null | undefined,
+  driverId?: string | null,
+): string[] | null {
   if (isViewer(user) || proposal.status !== 'open') return null
   if (proposal.required_layers.some((l) => proposal.approvals[l] === 'rejected')) return null
   const pending = proposal.required_layers.filter((l) => (proposal.approvals[l] ?? 'pending') === 'pending')
   if (pending.length === 0) return null
-  const covers = mode?.solo === true || proposal.required_layers.every((l) => user.layers.includes(l))
+  // The room's driver covers a layer nobody owns (P2b `fallback_layers`), as the server's approve-all
+  // does: one owned layer plus one unowned layer is one "Approve and run" for a lone driver.
+  const asDriver = driverId != null && driverId === user.id
+  const covers =
+    mode?.solo === true ||
+    proposal.required_layers.every((l) => user.layers.includes(l) || (asDriver && isFallbackLayer(proposal, l)))
   if (!covers) return null
-  if (pending.length === 1 && canDecideLayer(proposal, user, pending[0])) return null
+  if (pending.length === 1 && canDecideLayer(proposal, user, pending[0], driverId)) return null
   return pending
 }
 
@@ -50,5 +61,5 @@ export function approveAllLayers(proposal: ProposalLike, user: CurrentUser, mode
 export function approveAllFor(state: RoomState, proposal: ProposalState, user: CurrentUser): string[] | null {
   if (state.status !== 'open') return null
   if (state.approve_all_refused?.[proposal.proposal_id] !== undefined) return null
-  return approveAllLayers(proposal, user, state.mode)
+  return approveAllLayers(proposal, user, state.mode, state.driver?.id)
 }

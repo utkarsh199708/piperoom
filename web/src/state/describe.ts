@@ -207,6 +207,8 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       return { text: `${who} asked for control`, kind: 'control' }
     case 'control.granted': {
       const p = as<ControlGrantedPayload>(e)
+      // P2b: the system made the first member of a driverless room its driver.
+      if (p.reason === 'sole_member') return { text: `${nm(p.to.name)} is the driver · the only one here`, kind: 'control' }
       if (e.actor.id === p.to.id) {
         // A self-grant is either the sitting driver renewing their lease or
         // someone taking over (no driver, or an expired lease), never a hand-over.
