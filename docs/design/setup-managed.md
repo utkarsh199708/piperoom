@@ -1,4 +1,4 @@
-# Setup on managed clouds: MSK Connect, Confluent Cloud, Aiven (U13-0; main @ `2681f65b`, 2026-10-19; rev 2 after the #660 reviews)
+# Setup on managed clouds: MSK Connect, Confluent Cloud, Aiven (U13-0; main @ `2681f65b`, 2026-10-19; rev 3 after the #660 reviews)
 
 Owner: LEAD-ARCH. Parent design: `docs/design/setup-agent.md`; plan: `docs/product/setup-2026-10.md` (§4 row U13,
 §7 items 1 and 6); board: `tasks/U-board.md` rows U13-0 to U13-R; the earlier MSK design `docs/design/msk.md`
@@ -12,6 +12,9 @@ artifacts, the ladder, the guard, the `Credentials` frame.
 item 7) lands in **one separate leads PR, "U12-0/U13-0 contracts"**, merged before U12a, U13a and U13c start; the
 board marks U13-0 done only when that PR merges. §10 lists the decisions the owner makes.
 
+**Rev 3** (round 2): the Aiven token age is a card rule, not a check; D5 is T3 when no price is returned; D6
+records the watcher identity's `DescribeConnector` access as an exception to parent §3.7; D9's default is a
+`read_only` API token or an unreachable Connect layer, never a full-rights user.
 **Rev 2** answers the #660 reviews: cloud setup credentials are entered on the runner only, never through the room's
 secret field (S6, §2); the cassette scrubber rewrites response bodies by key and URL userinfo (S5, §5); the Confluent
 read account is created by the person, not by an org-level setup key; no global `CONFLUENT_*` server variables; the
@@ -111,15 +114,17 @@ Two kinds of key, two scopes, both **basic auth over https only** (`netsec`'s ru
   {user}/access-tokens`, verified path) is the service-account equivalent and is what the setup uses, made a member
   of **one project** with the least project role that can create a Kafka Connect service and connectors (the roles
   are `admin`, `operator`, `developer`, `read_only`; which of `operator` or `developer` suffices is **unverified**
-  until U13a). **Rule:** the token is created with `max_age_seconds` ≤ 86400; the runner refuses a token whose
-  `GET /v1/me`-style introspection (**unverified** endpoint; else the person's statement on the card) shows a longer
-  life, and a token under 20 bytes. It is entered on the runner as `${secret:aiven_token}` (§2).
+  until U13a). **Card rule:** the card tells the person to create the token with `max_age_seconds` ≤ 86400 and
+  shows the exact `avn user access-token create --max-age-seconds 86400 --description piperoom-setup` line; the
+  runner cannot verify a token's age (no introspection endpoint is verified here; if U13a finds one, the check
+  becomes real and this sentence changes), so the rule is the card's and the close card repeats "revoke the setup
+  token". A token under 20 bytes is refused. It is entered on the runner as `${secret:aiven_token}` (§2).
 - **Read-only where possible**: the watcher does not use an Aiven token at all. An Aiven Kafka Connect service
   exposes the standard Connect REST API on `https://<service>-<project>.aivencloud.com:443` with the service's
   users (basic auth). **Unverified**: Aiven Kafka Connect service users may all carry full rights on the Connect REST
-  API; if so, the watcher's Connect user is a full-rights user and the card says so (§10 D9), or the alternative is
-  an Aiven API token with the `read_only` project role for status reads (`GET .../connectors/{name}/status`,
-  verified path). Decided after U13a.
+  API; if so, no service user is registered for the watcher, and status reads go through the `aiven` client with a
+  `read_only`-role application-user token (`GET .../connectors/{name}/status`, verified path) or the Connect layer
+  is marked unreachable (§10 D9). Decided after U13a.
 - The token is in a header, never a URL (U13d's "Done when").
 
 ## 3. Provider operations the setup needs
@@ -266,7 +271,7 @@ that reach it only through the `Credentials` frame after the person's click and 
 
 | Provider | Kafka reads | Connect reads | What the `Credentials` frame carries | `connections:` written by `pipeline_register` |
 |---|---|---|---|---|
-| MSK | `AWS_MSK_IAM` with the **server's own identity** (IRSA, an instance role or the chain) over `wiring.LoadAWS`, reaching the cluster's IAM listener (9098) from inside the VPC or over VPC connectivity | `CONNECT_KIND=msk` (msk.md PR 2, **not merged**: §9 C1) with `kafkaconnect:ListConnectors`, `DescribeConnector`, `logs:FilterLogEvents` | only the RDS read role's password (`source_create_read_role` on the runner) | `kafka_brokers: {value: <IAM bootstrap>}`, `kafka_security_protocol: {value: SASL_SSL}`, `kafka_sasl_mechanism: {value: AWS_MSK_IAM}`, `source_db_url: {file: ...}`; the registration card names the IAM role the server runs as and the policy it needs |
+| MSK | `AWS_MSK_IAM` with the **server's own identity** (IRSA, an instance role or the chain) over `wiring.LoadAWS`, reaching the cluster's IAM listener (9098) from inside the VPC or over VPC connectivity | `CONNECT_KIND=msk` (msk.md PR 2, **not merged**: §9 C1) with `kafkaconnect:ListConnectors`, `DescribeConnector`, `logs:FilterLogEvents`; **note (D6)**: `DescribeConnector` returns `ConnectorConfiguration` with the materialised DB password, so the watcher identity receives it on every status read; the client redacts it before `Data` and stores nothing, an exception to parent §3.7 recorded in §10 D6 | only the RDS read role's password (`source_create_read_role` on the runner) | `kafka_brokers: {value: <IAM bootstrap>}`, `kafka_security_protocol: {value: SASL_SSL}`, `kafka_sasl_mechanism: {value: AWS_MSK_IAM}`, `source_db_url: {file: ...}`; the registration card names the IAM role the server runs as and the policy it needs |
 | Confluent Cloud | SASL_SSL PLAIN with the `piperoom-ro` cluster API key (ACLs of §2.2) | `CONNECT_KIND=confluent` (new, §9 C1) with the `piperoom-ro` Cloud API key, **per pipeline** from `connections:` (no server-wide Confluent variables: a long-lived key shared across tenants on the server is exactly what tenancy §3.2 forbids) | `kafka_sasl_username`, `kafka_sasl_password` (the cluster key), `ccloud_api_key`, `ccloud_api_secret` (the person-created read account's keys, typed on the runner), the DB read role's password | `kafka_brokers`, `kafka_security_protocol: {value: SASL_SSL}`, `kafka_sasl_mechanism: {value: PLAIN}`, the two `kafka_sasl_*` files, `connect_kind: {value: confluent}`, `connect_url: {value: https://api.confluent.cloud/connect/v1/environments/<env>/clusters/<lkc>}`, `connect_username`, `connect_password` (the Cloud key, `file:`) |
 | Aiven | SASL_SSL SCRAM-SHA-256 or TLS client certs with a Kafka service user the setup created with read ACLs (`aiven_create_read_user`, `aiven_acl_create`) | **today's REST client** against `https://<connect service>-<project>.aivencloud.com:443` with basic auth of a Connect service user (§2.3's caveat, §10 D9) | the Kafka user's password or cert and key, the Connect user's password, the DB read role's password | `kafka_brokers`, `kafka_security_protocol: {value: SASL_SSL}`, `kafka_sasl_mechanism: {value: SCRAM-SHA-256}`, `kafka_tls_ca_file` (the project CA, `GET /project/{project}/kms/ca`, unverified; the service's `connection_info` is the fallback), `connect_url`, `connect_username`, `connect_password` |
 
@@ -338,10 +343,10 @@ scenario.
 
 | # | Decision | Recommended default | Alternative |
 |---|---|---|---|
-| D5 | Billable `aiven_create_service` | **allow it**, T2 with the plan name and, when the service-types API returns it (`GET /project/{project}/service_types`, unverified), the monthly price in the preview; T3 on a production project | require an existing Connect service (the form asks for its name; U13d loses one op and 0.25 day) |
-| D6 | MSK secrets in v1 | **accept** the DB password materialised into `ConnectorConfiguration` (encrypted at rest by the service, readable by any `DescribeConnector` principal), redacted on every read, stated on the user page | the MSK config-provider route: a Secrets Manager provider jar bundled into the custom plugin archive plus `secretsmanager:GetSecretValue` on the execution role; a later U13 row |
+| D5 | Billable `aiven_create_service` | **allow it**, T2 with the plan name and, when the service-types API returns it (`GET /project/{project}/service_types`, unverified), the monthly price in the preview; **when the price is not returned the step is T3 with the typed confirm on every class**; T3 on a production project regardless | require an existing Connect service (the form asks for its name; U13d loses one op and 0.25 day) |
+| D6 | MSK secrets in v1 | **accept** the DB password materialised into `ConnectorConfiguration` (encrypted at rest by the service, readable by any `DescribeConnector` principal), redacted on every read, stated on the user page. **This is an explicit exception to `setup-agent.md` §3.7** ("the model never sees them" holds; "credentials never cross to a team server except by the person's click" does not): the server's watcher identity calls `DescribeConnector` (§7) and so receives the DB password in the response, which the `mskconnect` client redacts before `Data` and never stores; it is written down here and on the registration card | the MSK config-provider route: a Secrets Manager provider jar bundled into the custom plugin archive plus `secretsmanager:GetSecretValue` on the execution role; a later U13 row, which removes the exception |
 | D7 | Sandbox accounts and standing cost | one account per provider as §6; AWS MSK cluster plus RDS **kept** between runs with RDS stopped; keys through the owner's password manager to the leads only | tear the AWS cluster down after each run (adds about 30 minutes per manual run and a provisioning script) |
 | D8 | Confluent read account | **the person creates** `piperoom-ro-<pipeline>` and its two keys from a card; the runner applies the ACLs only, so the setup key needs a role on one cluster | the runner creates it through IAM v2 (the setup key then needs an organisation-level role, against least privilege) |
-| D9 | Aiven watcher Connect user | if Aiven Connect service users are all full-rights (unverified), **accept a full-rights watcher user** and say so on the card (the server's REST client only reads) | use an Aiven API token with the `read_only` project role for status reads (the watcher then needs an Aiven client, and the token is a second credential to rotate) |
+| D9 | Aiven watcher Connect user | if Aiven Connect service users are all full-rights (unverified), **do not register one**: the watcher reads connector status through the `aiven` client with an application-user token of the **`read_only` project role** (`GET .../connectors/{name}/status`, verified path; `connect_kind: aiven` in `connections:`, one more value of §9 C1), or, if the owner prefers no second token, the Connect layer is marked `unreachable_layers: [kafka-connect]` and the card says so | accept a full-rights Connect service user for the watcher (the server's REST client only reads, but a leaked credential could create connectors); not recommended |
 
 (D1–D4 and D10 are in the Strimzi design's §12, so one owner reply can answer both pages.)
