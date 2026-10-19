@@ -83,14 +83,15 @@ func peekQuick(t *testing.T, c *Client, topic string, want int) {
 func TestPeekDLQCommitThenAbort(t *testing.T) {
 	brokers := requireKafka(t)
 	c := dlqTestClient(t, brokers)
-	w, _ := newTxnWriter(t, brokers)
+	w, adm := newTxnWriter(t, brokers)
 
 	w.begin(3, "committed")
-	w.end(kgo.TryCommit)
+	w.end(kgo.TryCommit) // offsets 0..2, commit marker at 3
 	w.begin(2, "aborted")
-	w.end(kgo.TryAbort)
+	w.end(kgo.TryAbort) // offsets 4..5, abort marker at 6
 
 	waitForTopic(t, c, w.topic)
+	waitForBrokerOffsets(t, adm, w.topic, 7, 7) // both markers are on the partition
 	peekQuick(t, c, w.topic, 3)
 }
 
@@ -101,7 +102,7 @@ func TestPeekDLQCommitThenAbort(t *testing.T) {
 func TestPeekDLQTransactionLeftOpen(t *testing.T) {
 	brokers := requireKafka(t)
 	c := dlqTestClient(t, brokers)
-	w, _ := newTxnWriter(t, brokers)
+	w, adm := newTxnWriter(t, brokers)
 
 	// Committed records come from a second producer so this transaction can
 	// stay open on the first.
@@ -112,12 +113,14 @@ func TestPeekDLQTransactionLeftOpen(t *testing.T) {
 	t.Cleanup(other.Close)
 	ow := &txnWriter{t: t, cl: other, topic: w.topic}
 	ow.begin(3, "committed")
-	ow.end(kgo.TryCommit)
+	ow.end(kgo.TryCommit) // offsets 0..2, commit marker at 3
 
-	w.begin(2, "open")
+	w.begin(2, "open") // offsets 4..5 stay undecided
 	waitForTopic(t, c, w.topic)
-	peekQuick(t, c, w.topic, 3) // transaction still open
+	waitForBrokerOffsets(t, adm, w.topic, 6, 4) // commit marker landed, LSO pinned at 4
+	peekQuick(t, c, w.topic, 3)                 // transaction still open
 
-	w.end(kgo.TryAbort)
+	w.end(kgo.TryAbort) // abort marker at 6
+	waitForBrokerOffsets(t, adm, w.topic, 7, 7)
 	peekQuick(t, c, w.topic, 3) // after the abort marker landed
 }
