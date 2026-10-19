@@ -527,6 +527,9 @@ recordings:
       - layer: warehouse
         name: analytics.orders
         status: not_seen
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
 
 inputs:
   - kind: steer

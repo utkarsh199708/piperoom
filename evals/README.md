@@ -70,7 +70,9 @@ go run ./evals/cmd/evalrun -compare base.json,cand.json -fail-on-regression   # 
 ```
 
 Optional LLM judge: `judge: claude` in a scenario, or `-judge claude` (overrides the scenario;
-`-judge terms` forces the default). It needs a build with `-tags claude` and `ANTHROPIC_API_KEY`:
+`-judge terms` forces the default). It needs a build with `-tags claude` and the model provider's
+credentials: `ANTHROPIC_API_KEY`, or Vertex or Bedrock (below). The judge uses the same provider as the
+agent (`PIPEROOM_MODEL_PROVIDER`):
 
 ```sh
 go run -tags claude ./evals/cmd/evalrun -judge claude -out report.json   # model: PIPEROOM_MODEL, or -judge-model
@@ -88,6 +90,40 @@ denying them, and accept the common ways a correct agent writes, but they are no
 English: when the two disagree, trust the judge.
 `go test -tags claude ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
 agreement. Default tests and CI never call the network.
+
+### On Vertex AI or Bedrock
+
+`PIPEROOM_MODEL_PROVIDER=vertex` or `bedrock` sends both the agent and the judge there; the judge mirrors
+`internal/agent/endpoint.go` (`evals/judge_provider.go`), so a missing project, region or credential stops
+evalrun before the first episode with an error. The model ids must be the provider's: `PIPEROOM_MODEL` (the
+agent and, without `-judge-model`, the judge), `-model`, `-judge-model`, and `PIPEROOM_TRIAGE_MODEL` and
+`PIPEROOM_TRIAGE_PASS_MODEL` wherever they are used (the pass model defaults to a first-party id). The
+model tap only sees the Anthropic API, so results record `prompt_hash: untapped`.
+
+A first Vertex run (one cheap scenario, one run; set `PIPEROOM_MODEL` to the model's id in the Vertex Model
+Garden and make sure the model is enabled for the project and region):
+
+```sh
+gcloud auth application-default login          # once: application default credentials
+export PIPEROOM_MODEL_PROVIDER=vertex
+export VERTEX_PROJECT_ID=my-gcp-project
+export VERTEX_REGION=us-east5                  # a region the model is offered in, or global
+export PIPEROOM_MODEL=<vertex model id>
+go run -tags claude ./evals/cmd/evalrun -only missed-table -runs 1 -out vertex.json
+```
+
+`ANTHROPIC_API_KEY` is not needed. Bedrock is the same with `PIPEROOM_MODEL_PROVIDER=bedrock`, `AWS_REGION`,
+AWS credentials from the usual chain (or `AWS_BEARER_TOKEN_BEDROCK`) and Bedrock model or inference-profile ids.
+Add `-prices` with the provider's prices to price the run.
+
+Filling the judge cache (below) works the same way: with the variables above set, the judge of `-judge-fill`
+calls Vertex (or Bedrock), and each recorded verdict names the provider model id that gave it. It is still a paid run
+that needs the owner's approval; estimate it first:
+
+```sh
+go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run -prices prices.json   # estimate only
+go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
+```
 
 ### Ambiguous answers: tri-state keyword pass and the cached judge (#454)
 
@@ -355,6 +391,7 @@ comes before it up to the previous `,` or `and`: "Connect is healthy" does not n
 | `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split), and in one comma part of it: a comma after a predicate of its own (an auxiliary such as `is`, `was`, `has`) ends a part, so "nothing is lost, the slot is still there" does not tell `lost the slot`, while a comma list or aside ("order-sync, the consumer and the registry all crashed", "the consumer, which many suspected, crashed") stays one part. Denials still reach across commas. A term inside a denial does not count (`forbidden.go`): after a negator (`not`, `never`, `no`, `cannot`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`, `neither`, `nor`) or a rule-out (`rule`/`rules`/`ruled`/`ruling out`, `exclude*`) up to the next contrast word (`but`, `however`, `although`, `though`, `whereas`, `actually`), or before a predicate denial within five words with no `so`/`because`/`since`/`therefore`/`thus`/`then`/`while`/`when`/`until` between ("X is not the cause", "X wasn't", "X cannot be", "X was ruled out", "X is advised against"; but "the slot has become inactive so the snapshot cannot progress" still tells the inactive-slot story). So "do not reset to latest" and "I ruled out a poison pill" are fine, while "the cause is a consumer crash, not the schema", "not only X but" and a negated rule-out ("cannot rule out X", "X has not been ruled out") still tell the story. A negator reaches to the end of its clause unless a contrast word stops it, so "no lag, so reset to latest" is (cautiously) not told. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
 | `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
+| `root_cause_layer_alt` | []string | optional further layers the root cause may defensibly sit in, each one of the six layers; the root-cause-layer grade (keyword and judge) passes when the final hypothesis names `root_cause_layer` **or** any alternative. **Rule:** an alternative is for a scenario with two defensible readings of where the cause sits (the diagnosis names two: a consumer down for 87 h against a 48 h retention is a consumer story and a retention story), never for a scenario whose label is simply wrong (fix the label instead), and **never equal to `first_failing_layer`** (that would collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684). Validation refuses an unknown layer, a duplicate of `root_cause_layer`, a repeat, an alternative equal to `first_failing_layer`, and the field without `root_cause_layer`. Scenarios without it grade exactly as before: the report's root-cause-layer column, the tri-state corpus and the recorded judge verdicts are unchanged |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
 | `expected_facts` | list | what the diagnosis must rest on, see below |
 | `claims` | list | `[{about: root_cause, facts: [ids]}]`: the final hypothesis's `based_on_steps` must include a step that established at least one of these facts **before** the hypothesis was posted |
@@ -393,7 +430,7 @@ expect:
 | outcome | a run passes the outcome when |
 |---|---|
 | `diagnose` | root cause, both layers, claims and fix as above |
-| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck") or counted as zero right before ("0 errors", "zero failed tasks"; not a decimal's fraction, "10.0 errors"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind") |
+| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck") or counted as zero right before ("0 errors", "zero failed tasks"; not a decimal's fraction, "10.0 errors"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind", "1m stale", "stale for 1m") |
 | `abstain` | no proposal, and no hypothesis or a final one at low confidence. Known gap: a cause claimed only in a message, with no hypothesis, is not seen |
 | `ask` | after the first steer or comment reached the agent, an agent message to the room (not a reply to a watcher's comment) has a sentence that ends in `?` (a `?` inside a URL does not count), and the run proposes **nothing**: the run ends without an answer, so a proposal acts on an unanswered question. The scenario needs a `steer` or `comment` input (validation checks): the harness logs each delivered one as `steer.sent` / `comment.added`, and only questions after the first count, so "What broke?" before the steer is not asking. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
 
@@ -636,8 +673,10 @@ paired comparison and the cost-per-run delta, and never fails on cost alone.
 
 The job builds `evalrun` with `-tags claude`, which links the live LLM judge that the default `-judge auto`
 needs for an ambiguous hypothesis with no verdict in `evals/judgecache`. The judge is capped by
-`-judge-max-calls` (default 50 live calls per run); past the cap an ambiguous hypothesis is reported
-`ambiguous (unjudged)` and counts as not passed.
+`-judge-max-calls`: the job sets it to 2 × scenarios × runs (at most two judge calls per episode: root cause
+and layer), since evalrun's own default of 50 ran out after about 77 of 90 episodes. Past the cap an ambiguous
+hypothesis is reported `ambiguous (unjudged)` and counts as not passed. The job calls the Anthropic API; a
+Vertex or Bedrock run is a local run (above).
 
 With `runs: 1`, one flipped result fails the job: missing the expected fix alone costs 20 points, over the
 tolerance of 5. Treat a 1-run failure as a lead, not a verdict: run the same scenarios again with `runs: 3`

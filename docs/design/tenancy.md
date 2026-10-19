@@ -108,6 +108,7 @@ exactly one reference:
 | Key | Replaces | Notes |
 |---|---|---|
 | `source_db_url` | `SOURCE_DB_URL` | required |
+| `source_db_write_url` | `SOURCE_DB_WRITE_URL` | optional, `cdc` pipelines only (P1a-3b, P1a-3c; #665, #673): the source Postgres as its separate write role, for the pg write actions. `{env}` or `{file}` only, never a literal. `owners.Load` refuses it when it is the same reference as `source_db_url`; `wiring` resolves it at start and refuses it when it logs in as the same role (same user, host and port) as `source_db_url`. Both checks run in either write mode, so the mistake stops the start; the writer is built from it only with `PIPEROOM_WRITE_MODE=on` (off, the pipeline's set drops it). Without it the pg write actions refuse at Execute ("no write credentials") |
 | `warehouse_db_url` | `WAREHOUSE_DB_URL` | required |
 | `warehouse_kind` | `WAREHOUSE_KIND` | literal allowed; empty = `postgres` |
 | `kafka_brokers` | `KAFKA_BROKERS` | required |

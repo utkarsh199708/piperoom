@@ -251,6 +251,7 @@ func scanText(text string, origin []int) []Finding {
 	}
 	for i := range out {
 		out[i].Offset = origin[out[i].Offset]
+		out[i].End = origin[out[i].End]
 	}
 	return out
 }
@@ -283,9 +284,35 @@ func runRule(r rule, subject, text string, spans [][2]int) []Finding {
 		if r.names != nil && (len(loc) < 6 || loc[4] < 0 || !r.names[subject[loc[4]:loc[5]]]) {
 			continue
 		}
-		out = append(out, Finding{Kind: r.kind, Offset: loc[0], Excerpt: excerpt(text[loc[0]:loc[1]])})
+		out = append(out, Finding{Kind: r.kind, Offset: loc[0], End: clauseEnd(subject, loc[1]), Excerpt: excerpt(text[loc[0]:loc[1]])})
 	}
 	return out
+}
+
+// clauseEnd returns the end of the clause a match ending at end belongs to:
+// the next line break, sentence stop (. ! ? ; followed by a space, a closing
+// quote or bracket, or the end), comment close or closing tag, at most
+// SpanTailBytes further (then widened to the next word boundary, so a name
+// is never cut in half).
+func clauseEnd(s string, end int) int {
+	limit := min(len(s), end+SpanTailBytes)
+	for i := end; i < limit; i++ {
+		switch c := s[i]; {
+		case c == '\n':
+			return i
+		case c == '.' || c == '!' || c == '?' || c == ';':
+			if i+1 == len(s) || strings.IndexByte(" \t\r\n'\")]}>", s[i+1]) >= 0 {
+				return i
+			}
+		case c == '-' && strings.HasPrefix(s[i:], "-->"),
+			c == '<' && strings.HasPrefix(s[i:], "</"):
+			return i
+		}
+	}
+	for n := 0; limit < len(s) && n < 64 && isWordByte(s[limit]); n++ {
+		limit++
+	}
+	return limit
 }
 
 // keyOffsets returns the sorted offsets of every occurrence of keys in s,
@@ -381,11 +408,13 @@ func hiddenComments(lower, text string) []Finding {
 		}
 		start := from + i
 		end := min(len(lower), start+commentBytes)
+		spanEnd := end
 		if j := strings.Index(lower[start+4:end], "-->"); j >= 0 {
 			end = start + 4 + j
+			spanEnd = end + len("-->")
 		}
 		if addressee.MatchString(lower[start+4 : max(start+4, end)]) {
-			out = append(out, Finding{Kind: KindHiddenComment, Offset: start, Excerpt: excerpt(text[start:end])})
+			out = append(out, Finding{Kind: KindHiddenComment, Offset: start, End: spanEnd, Excerpt: excerpt(text[start:end])})
 		}
 		from = start + 4
 	}

@@ -129,7 +129,14 @@ func judgePrompt(sc Scenario, hypothesis string) string {
 		b.WriteString("First failing layer: " + l + " (one of " + strings.Join(judgeIncidentLayers, ", ") + ")\n")
 	}
 	if l := sc.Expect.RootCauseLayer; l != "" {
-		b.WriteString("Root-cause layer: " + l + "\n")
+		// The alternatives change this line only for a scenario that sets
+		// them, so the recorded verdicts of every other scenario stay valid.
+		if alt := sc.Expect.RootCauseLayerAlt; len(alt) > 0 {
+			b.WriteString("Root-cause layer: " + l + ", or alternatively " + strings.Join(alt, " or ") +
+				" (the cause has more than one defensible reading; root_cause_layer_correct is true when the hypothesis places the root cause in any one of these)\n")
+		} else {
+			b.WriteString("Root-cause layer: " + l + "\n")
+		}
 	} else {
 		b.WriteString("Root-cause layer: not given (answer root_cause_layer_correct true)\n")
 	}

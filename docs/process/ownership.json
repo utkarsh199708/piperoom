@@ -5,14 +5,15 @@
     "Read by docs/process/ship-check.mjs: every file of a row must be under one of its board agent's folders and under none of its exclusions, and a contract file may change only on a leads row.",
     "Paths are repo-relative. 'dir/**' (or 'dir') covers everything under dir; a path without a wildcard is that file. A '*' inside a path matches within one segment only: 'evals/scenarios/*.yaml' is the YAML files directly in evals/scenarios. A file listed exactly in folders wins over a '*' pattern in excluded (C6 keeps evals/scenarios/schema-change.yaml).",
     "Not encoded: task-scoped grants of the R wave table (R2: docs/demo/** for A1; R6: Dockerfile, cmd/devconsumer/Dockerfile, deploy/** and the go line of go.mod for C1), R0's concurrency: block of .github/workflows/ci.yml (part of a file), and the done rows C2 and C8 (no folders). A row that needs such a path asks the leads, as AGENTS.md section 2 says.",
-    "U wave (tasks/U-board.md): A9, A10, C19, C20, C21, C22 and the A3, A5, A8, C1, C6, C7 and leads lines mirror the U wave table of AGENTS.md section 2. internal/setup/protocol/** is a contract file (leads). The A9 to A2 and A10 to A3 fallbacks of AGENTS.md are applied here by the leads in the same PR that switches the board rows; until then ship-check rejects them, as intended."
+    "U wave (tasks/U-board.md): A9, A10, C19, C20, C21, C22 and the A3, A5, A8, C1, C6, C7 and leads lines mirror the U wave table of AGENTS.md section 2. internal/setup/protocol/** is a contract file (leads). The A9 to A2 and A10 to A3 fallbacks of AGENTS.md are applied here by the leads in the same PR that switches the board rows; until then ship-check rejects them, as intended.",
+    "V wave (tasks/V-board.md): internal/agent/llm/llm.go is a contract file (leads), excluded from A4; the rest of internal/agent/llm/** stays A4's. No other new folders. go.mod and go.sum stay in no agent's folders: V5 adds a module and is built outside the ship workflow under the AGENTS.md section 7 two-lead review."
   ],
   "agents": {
     "leads": {
       "folders": ["AGENTS.md", "tasks/**", "docs/**", "reviews/**",
         "internal/tools/tool.go", "internal/events/events.go", "internal/clients/clients.go", "internal/actions/action.go",
         "internal/agent/contract.go", "internal/topology/graph.go", "internal/config/config.go", "internal/version/version.go",
-        "docs/api.md", "internal/setup/protocol/**", "cmd/setup-spike/**"],
+        "docs/api.md", "internal/setup/protocol/**", "cmd/setup-spike/**", "internal/agent/llm/llm.go"],
       "excluded": []
     },
     "A1": { "folders": ["dev/**", "cmd/devctl/**", "cmd/devconsumer/**", "internal/testenv/**"], "excluded": [] },
@@ -28,7 +29,7 @@
         "internal/actions/pgactions/**", "internal/actions/sourceactions/**", "internal/setup/sources/postgres/**"],
       "excluded": ["internal/topology/graph.go"]
     },
-    "A4": { "folders": ["internal/agent/**", "cmd/investigate/**", "internal/wiring/**"], "excluded": ["internal/agent/contract.go"] },
+    "A4": { "folders": ["internal/agent/**", "cmd/investigate/**", "internal/wiring/**"], "excluded": ["internal/agent/contract.go", "internal/agent/llm/llm.go"] },
     "A5": {
       "folders": ["migrations/**", "internal/store/**", "internal/room/**", "internal/httpapi/**", "internal/ws/**", "cmd/server/**", "internal/auth/**", "internal/quickstart/**"],
       "excluded": []

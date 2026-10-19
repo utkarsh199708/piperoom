@@ -146,11 +146,11 @@ const maxFlagTags = 6
 // own right whatever it says.
 func scanHiddenTags(s string) []Finding {
 	var out []Finding
-	start, inFlag, flagTags := -1, false, 0
+	start, end, inFlag, flagTags := -1, 0, false, 0
 	var run strings.Builder
 	flush := func() {
 		if start >= 0 && run.Len() > 0 && !inFlag {
-			out = append(out, Finding{Kind: KindHiddenText, Offset: start, Excerpt: excerpt("tag text: " + run.String())})
+			out = append(out, Finding{Kind: KindHiddenText, Offset: start, End: end, Excerpt: excerpt("tag text: " + run.String())})
 		}
 		start = -1
 		run.Reset()
@@ -164,6 +164,7 @@ func scanHiddenTags(s string) []Finding {
 			if start < 0 {
 				start = i
 			}
+			end = i + utf8.RuneLen(r)
 			run.WriteRune(r - tagBase)
 			if inFlag {
 				if flagTags++; flagTags > maxFlagTags {
@@ -218,11 +219,11 @@ func rgiFlagLen(s string) int {
 // characters scanHiddenTags drops (cancel, language tag, U+E0000) count too.
 func scanStrayTags(s string) []Finding {
 	var out []Finding
-	start := -1
+	start, end := -1, 0
 	var run strings.Builder
 	flush := func() {
 		if start >= 0 {
-			out = append(out, Finding{Kind: KindHiddenText, Offset: start, Excerpt: excerpt("tag text: " + run.String())})
+			out = append(out, Finding{Kind: KindHiddenText, Offset: start, End: end, Excerpt: excerpt("tag text: " + run.String())})
 		}
 		start = -1
 		run.Reset()
@@ -240,6 +241,7 @@ func scanStrayTags(s string) []Finding {
 			if start < 0 {
 				start = i
 			}
+			end = i + n
 			if isTagText(r) {
 				run.WriteRune(r - tagBase)
 			}
