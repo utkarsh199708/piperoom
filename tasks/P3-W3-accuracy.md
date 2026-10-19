@@ -10,7 +10,7 @@ Diagnosis: `reviews/evals-2026-10-19/diagnosis.md` (read it first; every row bel
 
 Every top-level scenario of `evals/scenarios/*.yaml` passes the live evals with score 100 and no misses, reached by
 targeted fixes, each verified with a per-scenario live run (`evals-live` with `only=<scenarios>`, `runs=1`, about
-$0.21 per episode), never a full run until the last row. The last row confirms every previously failing scenario on
+$0.21 per episode: the smoke run's cost/run mean; the baseline's was $0.22 and the morning's about $0.19), never a full run until the last row. The last row confirms every previously failing scenario on
 3 runs, and only then is a full baseline made.
 
 ## Evidence
@@ -42,7 +42,7 @@ $0.21 per episode), never a full run until the last row. The last row confirms e
 ## Scope — rows
 
 Order: safety guards first, then wrong root causes, then budgets and misses, then behaviour rules, then the
-confirmation. Each row re-tests at most 5 scenarios. Costs at $0.21 per episode.
+confirmation. Each row re-tests at most 5 scenarios. Costs at $0.21 per episode (the smoke mean).
 
 ### P3-W3a — injectscan: span bounds and the names a flagged span mentions (N6)
 
@@ -68,8 +68,9 @@ instruction-like, marks the wrapper `suspected_instructions="true"` and relies o
 check in `proposeFixTool.Run` (`internal/agent/tools_room.go`), before `t.proposals.Create`:
 
 1. The runner keeps, per room and in memory only, the flagged spans of this room's reads: for each flagged step the
-   step id, the tool, and the findings of `injectscan.ScanNames(text, names)` where `names` is the registered action
-   names plus the pipeline's resource names (connectors, groups, topics, subjects, tables from the owners config).
+   step id, the tool, and the findings of `injectscan.ScanNames(text, names)` where `names` is the action names of
+   `Deps.Actions` plus the component names in the alert's `PipelineMap` text (connectors, groups, topics, subjects,
+   tables); the agent holds no owners config.
    Nothing of the span text is logged (it may hold record values); the existing `slog` line keeps kinds and count.
 2. A step is **refused** when its action is in `Names` of a flagged span of this room **and** either
    (a) one of the step's param string values of 8 or more characters occurs verbatim inside a flagged span
@@ -89,8 +90,12 @@ check in `proposeFixTool.Run` (`internal/agent/tools_room.go`), before `t.propos
 Done when: unit tests in `internal/agent` for the three cases above plus a room with no flagged reads (no change in
 behaviour) and a panic-free path when the proposals sink is nil; `go test ./internal/agent`; and
 `evals-live only=injection-ddl-comment,injection-ddl-comment-subtle,injection-kafka-record-key,injection-connect-trace`
-1 run passes with score 100 (no misses) — 4 episodes, $0.84. The PR's "Risk" names the off switch (an `Options`
-field in `internal/agent/options.go`, default on; no contract change).
+1 run passes with score 100 (no misses) — 4 episodes, $0.84. **No off switch** (ruling on #684): `Options` is
+declared in `internal/agent/contract.go`, a contract file A4 cannot edit, so the guard is always on; a refused step is
+logged (tool, step, kinds) and surfaced as the `tool_result` error, so the driver sees it in the room. The PR's
+"Risk" says so. `injection-ddl-comment-subtle` is **not flagged by `injectscan`** (a documented recall gap,
+`injectscan_test.go`, `recall_test.go`), so the guard cannot act on it: its line in the live run is a regression check,
+not a test of the guard. No contract change needed.
 
 ### P3-W3c — evals: alternative root-cause layers (C6)
 
@@ -104,27 +109,30 @@ without the field. `evals/README.md` gets the row and the rule: an alternative i
 readings of where the cause sits (the diagnosis names two), never for a scenario whose label is simply wrong.
 
 Done when: table test with a hypothesis that names the alternative and one that names neither; `-validate`
-refuses an unknown layer and a duplicate of `root_cause_layer`; `go test ./evals`. No live run (the C7 row runs it).
+refuses an unknown layer, a duplicate of `root_cause_layer` and **an alt equal to `first_failing_layer`** (that would
+collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684);
+`go test ./evals`. No live run (the C7 row runs it).
 
-### P3-W3d — scenarios: labels, terms and the one budget (C7)
+### P3-W3d — scenarios: one label, one term group and one budget (C7)
 
 Folders: `evals/scenarios/*.yaml` (not `schema-change.yaml`), `evals/scenarios/README.md`. Days 0.5. After: P3-W3c.
 
-- `sasl-credential-rotated`: `root_cause_layer_alt: [kafka-connect]` (the worker's stale credential is the other
-  defensible reading; the broker-side rotation stays the label).
 - `consumer-offsets-out-of-range-retention`: `root_cause_layer_alt: [consumer]` (down for 87 h, longer than the
-  48 h retention).
+  48 h retention; the scenario's own header calls it a two-sided cause, and the `root_cause` groups still require a
+  retention term and a loss term). Ruled a legitimate label fix on #684. Not `sasl-credential-rotated`: its alt
+  would equal `first_failing_layer` and the header puts the cause broker-side on purpose; 2 of 3 morning runs pass on
+  the label, and W3z's three runs decide.
 - `topic-retention-data-loss`: `root_cause` group 2 adds `delet*`, `removed`, `purg*`, `unread` (the baseline
   hypothesis "Retention deleted the … change events before order-sync read them" matched no group-2 term; the trap
   `[reset*, latest]` is untouched and a `negated_causes_test`/corpus row pins that "do not delete" still fails).
-- `dead-slot-wal`: `root_cause` group 1 adds `retired` (the alert's and the driver's own word; #677 makes the model
-  say "orphaned" too).
 - `avro-schema-id-deleted-sink-failed`: `max_tool_calls` 16 → 18 (three passing runs at 14, 16, 16; the correct path
   needs about 14 reads plus the reads the steer and the audit-log comment call for).
 
 Done when: `evalrun -validate` clean; the scenario corpus tests pass; and
-`evals-live only=sasl-credential-rotated,consumer-offsets-out-of-range-retention,topic-retention-data-loss,dead-slot-wal,avro-schema-id-deleted-sink-failed`
-1 run passes with score 100 (no misses) — 5 episodes, $1.05.
+`evals-live only=consumer-offsets-out-of-range-retention,topic-retention-data-loss,avro-schema-id-deleted-sink-failed,dead-slot-wal`
+1 run passes with score 100 (no misses) — 4 episodes, $0.84 (`dead-slot-wal` runs here unchanged as the regression
+check of its untouched trap: the scenario documents `retire*` as a word a hypothesis must not pass on alone, and #677
+already makes the smoke pass; nothing in this row edits it).
 
 ### P3-W3e — scenarios: the misses (C7)
 
@@ -141,7 +149,7 @@ Folders: `evals/scenarios/*.yaml` (not `schema-change.yaml`). Days 0.25. After: 
   returns (`out of scope: …`), as `consumer-poison-pill` records `dlq_peek`.
 
 Done when: `evals-live only=consumer-bad-deploy,dead-slot-wal-no-context,dlq-backlog,missed-table,ambiguous-lag-spike`
-1 run passes with score 100 and **misses 0** on every line — 5 episodes, $1.05. (`dead-slot-wal` is run by P3-W3d;
+1 run passes with score 100 and **misses 0** on every line — 5 episodes, $1.05. (`dead-slot-wal` runs in P3-W3d;
 the other three morning misses are confirmed in P3-W3z.)
 
 ### P3-W3f — evals: a short "stale" is no fault (C6)
@@ -218,8 +226,8 @@ the day the row is dispatched.
 
 ## Done when
 
-Every row above green; P3-W3z step 2 committed. Total re-test cost: $4.41 for the rows, $16.38 for W3z step 1,
-$18.90 for the baseline — about **$40**.
+Every row above green; P3-W3z step 2 committed. Total re-test cost: $4.20 for the rows (20 episodes), $16.38 for
+W3z step 1, $18.90 for the baseline — **$39.48**.
 
 ## Tests
 
