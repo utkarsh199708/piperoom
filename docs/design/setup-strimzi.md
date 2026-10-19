@@ -445,9 +445,10 @@ Ops (tier floor in brackets):
 `template` outside the table is `RefuseSchema`; a rendered object is validated field by field in `Validate` (no
 I/O) against the allow-list before the dry run, and a field outside it is refused even when the template could not
 have produced it (the test renders each template with every param and asserts the allow-list is complete; a second
-test feeds hand-made objects with each refused field and asserts the refusal names it). Because a merge patch
-replaces the whole `spec`, the validated object is exactly what the API server stores: a patch cannot "change" a
-forbidden field such as `spec.image` or add a volume, since the rendered spec never contains them.
+test feeds hand-made objects with each refused field and asserts the refusal names it). Because the JSON patch
+`replace`s the whole `/spec` and the runner then requires the stored `spec` to equal the rendered one before it
+unpauses (§5), the validated object is exactly what the operator reconciles: a forbidden field such as
+`spec.image` or a volume cannot survive from the shell or arrive between the write and the unpause.
 
 | Kind (`kafka.strimzi.io/v1` unless noted) | Template | Fields the runner may set | Always refused |
 |---|---|---|---|
