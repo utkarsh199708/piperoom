@@ -21,10 +21,10 @@ one or two sessions (target < 600 changed lines, §6 of `AGENTS.md`).
 **Order.** U0, then the design row U1-0 and the U1 rows (the core: runner, catalogue, Compose, Postgres,
 verification); then steps 2 to 13 in coverage-per-day order. Step numbers are identifiers; the dispatch order is the plan's §4
 table, recomputed from this board's days: U2 MySQL, U3 transforms and sinks, U5 logs, U4 SQL Server, U6 embedded,
-U7 MongoDB, U8 plain hosts, U10 tuning, U9 Oracle, U11 Debezium Server, U12 Strimzi, U13 managed. The design rows
+U7 MongoDB, U10 tuning, U9 Oracle, U8 plain hosts, U11 Debezium Server, U12 Strimzi, U13 managed. The design rows
 U12-0 and U13-0
 start as soon as U0 merges (decided, plan §7 item 1), so pulling Strimzi or the managed services forward costs no
-rework. An agent with two rows ready takes the lower step first.
+rework. An agent with two rows ready takes the one earlier in this order first.
 
 **Before the wave.** U0 merges first (there is no Q0 contracts PR yet: #605 is the plan); Q0 rebases over it. U1 codes against Q1a (known issues), Q2a to Q2d (Postgres settings and
 admin), Q4a (validate), Q5a and Q5c (lifecycle), Q6a (`net_probe`); each row's After column names them. Three Q
@@ -66,9 +66,10 @@ New methods go on **new** interfaces and new events, so every existing fake and 
 forms open (in-root `..`, in-root relative symlinks, `.git` case and trailing-dot variants, `CON.txt` on Windows 11,
 8.3 aliases, everything off Windows), so U1-2 carries an explicit lexical rule on three OSes and an `Lstat` walk
 (2 → 2.5), and the version handshake adds a check and a drop path on each side (U1-1 2.5 → 2.75, U1-5a 2 → 2.25).
-U8 goes from 8 to 9 days: the service control manager cannot run `java.exe`, so U8b also builds the service-host
-role of `piperoom-setup` (2.5 → 3.5); U8 is now 4.7 fixed per day against U10's 5.0, and the two are independent,
-so the leads may dispatch U10 first.
+U8 goes from 8 to 9.25 days: the service control manager cannot run `java.exe`, so U8b also builds the
+service-host role of `piperoom-setup` (2.5 → 3.5), and U8-C (0.25) deletes the U1-0 spikes once U8b and U1-2 have
+merged. U8 is now 4.5 fixed problems per day, below U10's 5.0 and U9's 4.9, so the leads ruled the dispatch order
+U10 → U9 → U8 (plan §4 table reordered, running totals recomputed).
 
 ## Step 1: the core: runner, catalogue, Compose target, Postgres prerequisites, verification
 
@@ -172,6 +173,7 @@ so the leads may dispatch U10 first.
 | U8c | A1 | Opus 5.5 | 1 | devctl: `setup-break` `wrong-standalone-args`, `plugin-path-unset`, `java-too-old` on a host target (a container that plays a host on Linux) | each break fails at the named check | U8a |
 | U8d | C7 | Opus 5.5 | 0.5 | scenarios: the three U8c breaks | labels name the properties key or the argv | U8c |
 | U8e | C14 | Opus 5.5 | 0.5 | docs: the host target (systemd, Windows service), what the agent needs (sudo or not, a service account) | citations per claim | U8b |
+| U8-C | leads | Opus 5.5 | 0.25 | cleanup: delete `cmd/setup-spike/**` (the U1-0 spikes) and its leads line in `AGENTS.md` and `docs/process/ownership.json` | the directory is gone; nothing imports it; `go build ./...`, `go vet ./...` green | U8b, U1-2 |
 | U8-R | A1 (Windows), C19 (Linux) | Opus 5.5 | 1 | real runs: Ubuntu 24.04 with systemd, Windows 11 as a service, from an empty directory | two exports in the write-up | U8b |
 
 ## Step 9: Oracle prerequisites
@@ -263,7 +265,7 @@ A4's, A6's, A1's, C4's and C14's rows stay inside their existing folders; A5's r
 | C19 | 7 | 11.5 | Compose and host targets, their validators |
 | C20 | 6 | 10 | Strimzi and Debezium Server |
 | A1 | 8 | 8.25 | dev profiles and breaks, Windows runs |
-| leads | 6 | 8 | contracts, three designs, manual runs, the measurement |
+| leads | 7 | 8.25 | contracts, three designs, manual runs, the measurement, the spike cleanup |
 | C21 | 5 | 8 | managed |
 | C22 | 4 | 7 | knowledge, the image and plugin digests |
 | C7 (half of each shared row) | 12 | 6.25 | scenarios |
@@ -277,7 +279,7 @@ A4's, A6's, A1's, C4's and C14's rows stay inside their existing folders; A5's r
 | C4 | 1 | 1 | threat model |
 | A2 | 1 | 0.25 | `LooksSecret` switch |
 
-Total 95 rows and about 127 agent-days; 124.25 of those days are the step rows the plan's §4 curve counts (U0 and
+Total 96 rows and about 127.5 agent-days; 124.5 of those days are the step rows the plan's §4 curve counts (U0 and
 U14 are outside the steps). The critical path by After and days is U0 → U1-0 → U1-2 → U1-8 → U1-6 → U1-8b → U1-10 →
 U1-R, about 12.5 working days after U0 across A9, A5 and A4; U1-1, U1-5a and U1-9 run beside it. The second-longest
 chain is A10's three databases (about 14 days, sequential). If A9 slips, C19's Compose driver and A3's Postgres
@@ -291,7 +293,7 @@ driver can be reviewed against the protocol fakes and merge first.
 | 2 | U1-2, U1-2b, U1-3a, U1-4, U1-5b, U1-5d, U1-8, U1-12a, U3a, U4c, U6a, U7a, U9a, U12a, U13b1 |
 | 3 | U1-3b, U1-6, U1-7, U1-8b, U1-9, U1-11, U1-14b, U1-17, U2a, U2b, U3b, U4b, U5a, U7b, U7c, U8a, U9b, U9c, U12b, U13b2, U13c, U13d |
 | 4 | U1-10, U1-12b, U1-14, U1-15, U1-16, U1-18, U1-19, U1-20, U1-22, U1-R, U2c, U3c, U3d, U3e, U4d, U5b, U5c, U6b, U6c, U7d, U8b, U8c, U9d, U10a, U11a, U12c, U13e, U13f |
-| 5 | U1-21, U2-R, U4-R, U7-R, U8d, U8e, U8-R, U9-R, U10b, U11b, U11c, U11d, U11-R, U12d, U12e, U12-R, U13-R; U14 |
+| 5 | U1-21, U2-R, U4-R, U7-R, U8d, U8e, U8-R, U8-C, U9-R, U10b, U11b, U11c, U11d, U11-R, U12d, U12e, U12-R, U13-R; U14 |
 
 Review load for the leads peaks at about 25 PRs in weeks 3 and 4; the code review of C* PRs goes to `[LEAD-CLOUD]`
 as usual, and every target row's real run is checked by Lead 1 from the attached export before the merge.

@@ -49,6 +49,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"piperoom/internal/events"
@@ -91,6 +92,11 @@ func (v Version) Has(since int) bool { return v.Minor >= since }
 // message names both versions so the person knows which side to upgrade.
 var ErrProtocolVersion = errors.New("setup: protocol version not compatible")
 
+// valid is false for a version no build ever speaks: a major below 1 (also
+// what an absent field decodes to) or a negative minor. Without it a peer
+// claiming minor -1 would pass "minor >= own minor - 1" against a 1.0 side.
+func (v Version) valid() bool { return v.Major >= 1 && v.Minor >= 0 }
+
 // ServerAccepts is the server's rule: a runner pairs when its major equals
 // the server's and its minor is at least the server's minor minus one. A
 // runner newer than the server passes here; the runner's own rule
@@ -98,7 +104,7 @@ var ErrProtocolVersion = errors.New("setup: protocol version not compatible")
 // Pair carries a version (1.1 and later) and at Hello always; a refusal is
 // setup.pairing {outcome: "refused"} and a close with CloseProtocolVersion.
 func ServerAccepts(server, runner Version) error {
-	if runner.Major != server.Major || runner.Minor < server.Minor-1 {
+	if !runner.valid() || !server.valid() || runner.Major != server.Major || runner.Minor < server.Minor-1 {
 		return fmt.Errorf("%w: server %s accepts runner %d.%d or later, runner is %s",
 			ErrProtocolVersion, server, server.Major, max(server.Minor-1, 0), runner)
 	}
@@ -110,7 +116,7 @@ func ServerAccepts(server, runner Version) error {
 // minus one. The runner checks it at Welcome, before it prints the room or
 // asks the person for "y", and refuses with RefuseProtocolVersion.
 func RunnerAccepts(runner, server Version) error {
-	if server.Major != runner.Major || server.Minor < runner.Minor-1 {
+	if !runner.valid() || !server.valid() || server.Major != runner.Major || server.Minor < runner.Minor-1 {
 		return fmt.Errorf("%w: runner %s needs server %d.%d or later, server is %s",
 			ErrProtocolVersion, runner, runner.Major, max(runner.Minor-1, 0), server)
 	}
@@ -188,6 +194,20 @@ const (
 // (Frame.Check).
 type FrameType string
 
+// MaxLoggedTypeBytes caps how much of a peer's frame type reaches a log
+// line or an error: the type of an unknown frame is peer text.
+const MaxLoggedTypeBytes = 32
+
+// Short is the type as a receiver may log it: at most MaxLoggedTypeBytes
+// bytes, valid UTF-8, "…" appended when cut.
+func (t FrameType) Short() string {
+	s := string(t)
+	if len(s) <= MaxLoggedTypeBytes {
+		return strings.ToValidUTF8(s, "?")
+	}
+	return strings.ToValidUTF8(s[:MaxLoggedTypeBytes], "?") + "…"
+}
+
 // Frame types, runner → server (R) and server → runner (S).
 const (
 	// FramePair (R) is the runner's first frame: a pairing code, or a token
@@ -249,8 +269,9 @@ type Frame struct {
 // Errors of Frame.Check.
 var (
 	// ErrUnknownFrame: the type is not one this build knows (a newer
-	// minor). The receiver drops the frame, logs its type only, and keeps
-	// the socket open; the payload is never acted on.
+	// minor). The receiver drops the frame, logs its type only (Short, or
+	// this error, which carries Short), and keeps the socket open; the
+	// payload is never acted on. Check runs before any handler sees a frame.
 	ErrUnknownFrame = errors.New("setup: unknown frame type")
 	// ErrMalformedFrame: a known type whose payload field is missing, or
 	// with another payload field set. The receiver closes the socket.
@@ -277,7 +298,7 @@ func FrameSince(t FrameType) (minor int, known bool) {
 // one.
 func (f *Frame) Check() error {
 	if _, known := FrameSince(f.Type); !known {
-		return ErrUnknownFrame
+		return fmt.Errorf("%w: %q", ErrUnknownFrame, f.Type.Short())
 	}
 	set := []struct {
 		t     FrameType
@@ -291,7 +312,7 @@ func (f *Frame) Check() error {
 	}
 	for _, p := range set {
 		if p.isSet != (p.t == f.Type) {
-			return fmt.Errorf("%w: type %q", ErrMalformedFrame, f.Type)
+			return fmt.Errorf("%w: type %q", ErrMalformedFrame, f.Type.Short())
 		}
 	}
 	return nil

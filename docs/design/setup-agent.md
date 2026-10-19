@@ -188,11 +188,32 @@ symlink that stays inside the root (it follows it), `.git` case and trailing-dot
 (`RtlIsDosDeviceName_U` frees reserved names with an extension; Windows 10 still refuses them), 8.3 aliases
 (`PIPERO~1` opens `.piperoom` on a volume with short names), and hard links. Off Windows it accepts every Windows
 form as an ordinary name. So U1-2 keeps an explicit lexical check that runs on all three OSes (the reference is
-`explicitRefusal` in the spike: `..`, a leading separator, `:`, wildcards and NUL, a trailing dot or space,
-reserved names with any extension, `~<digit>`, `.git` and `.piperoom` case-folded) and a per-component `Root.Lstat`
-walk that refuses `ModeSymlink` and `ModeIrregular` (a junction or other reparse point since Go 1.23). Hard links
-are not refused by either; `file_write` opens with `O_CREATE|O_EXCL` to a temporary name and renames, so a planted
-hard link is replaced, never written through.
+`explicitRefusal` in the spike), in this order:
+
+1. any control character (`r < 0x20` or `r == 0x7f`, NUL included) and the wildcards `? * < > " |`;
+2. the NFKC-normal look-alikes of `/`, `\`, `:` and `.`, and the characters an ANSI best-fit code page maps to
+   them (U+2215, U+2044, U+29F8, U+2216, U+29F5, U+29F9, U+00A5 (`\` in code page 932), U+20A9 (`\` in code page
+   949), U+2236, U+02D0);
+3. any name that is not NFKC-normal (`golang.org/x/text/unicode/norm`, already a direct dependency): fullwidth
+   `．／＼：`, the small full stop, ligatures, the Kelvin sign, superscript digits;
+4. a leading separator, any `:`;
+5. per component: `..`, a trailing dot or space, a reserved name with any extension, `~<digit>`, and `.git` or
+   `.piperoom` compared both with `strings.EqualFold` and with `strings.ToUpper` (EqualFold misses the dotless `ı`,
+   U+0131, whose upper case is `I`, so `.gıt` must still be refused; whether NTFS's upcase table opens `.git`
+   through `.gıt` is a logged row of the spike's Windows test).
+
+After the name check, a per-component `Root.Lstat` walk refuses `ModeSymlink` and `ModeIrregular` (a junction or
+other reparse point since Go 1.23). And because a name rule can only list the aliases someone thought of, U1-2 also
+checks identity: before any write or delete, and on every `file_read`, `os.SameFile` between the opened file's (or
+its parent directory's) `Stat` and the root's `.git` and `.piperoom` directories (stat once at start), refusing a
+match. Hard links are not refused by the name or the walk; `file_write` opens with `O_CREATE|O_EXCL` to a temporary
+name and renames, so a planted hard link is replaced, never written through.
+
+**Never pass a confined name onward.** A name that passed this check is safe only for `os.Root` methods. U1-2 must
+never put it, or a path built from it, into a child process's argv or any ANSI (`...A`) Windows API: Windows
+converts such strings with the best-fit code page ("WorstFit"), which can turn U+FF02 into `"` and U+00A5 into `\`
+and split or escape an argument. Ops that run a program pass it paths the runner built itself (the project dir, a
+template's fixed names), never a name from the request.
 
 ### 2.4 Secrets on the runner (S4)
 
@@ -518,7 +539,15 @@ retyping or re-meaning a field, or adding one a receiver must understand to stay
 newer peer, unknown fields are ignored, an unknown frame type is dropped unread and never executed
 (`Frame.Check` → `ErrUnknownFrame`), an unknown op is refused; neither side sends a frame type (`FrameSince`), nor
 the server an op (the op's `since` minor in the catalogue, U1-2), that the negotiated minor lacks. Table tests in
-`internal/setup/protocol/version_test.go`.
+`internal/setup/protocol/version_test.go`. A version with a major below 1 or a negative minor is refused by both
+rules; a peer's frame type reaches a log line or error only through `FrameType.Short` (32 bytes); `Frame.Check`
+runs before any handler sees a frame (U1-1 and U1-5a each test that).
+
+A 1.0 runner sends no version in `pair`, so it receives `welcome` (room id, title, pipeline id, tenant, creator,
+targets) before the server refuses it at `hello`. That is accepted: the runner already presented a valid single-use
+pairing code, which only the room's creator had and which the server consumed, so `welcome` tells it nothing the
+code's holder was not shown in the UI; no op, token or secret is sent before `hello` passes; and no 1.0 runner was
+ever released (U0 shipped the types, not a runner), so the case exists only for a hand-built client.
 
 ```go
 // RunnerExecutor is how a setup action or remote client reaches the paired runner. The room service implements

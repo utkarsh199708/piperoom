@@ -278,7 +278,7 @@ checked at create, execute, rollback and on the runner and is never relaxed by a
 
 Order: **U0 first, after Q0**; then U1-0 and the U1 rows (runner, catalogue, Compose, Postgres, verification);
 then steps 2 to 13 by coverage per day as the plan's §4 table orders them (U2 MySQL, U3 transforms and sinks, U5
-logs, U4 SQL Server, U6 embedded, U7 MongoDB, U8 plain hosts, U10 tuning, U9 Oracle, U11 Debezium Server, U12
+logs, U4 SQL Server, U6 embedded, U7 MongoDB, U10 tuning, U9 Oracle, U8 plain hosts, U11 Debezium Server, U12
 Strimzi, U13 managed); U12-0 and U13-0 start as soon as U0 merges. The board's
 After column is the only hard dependency. Every target row's "Done when" includes a real run on the named OS and
 target with the room export attached to the PR.

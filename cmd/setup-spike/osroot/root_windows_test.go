@@ -75,6 +75,13 @@ func TestRootWindowsForms(t *testing.T) {
 		{name: `.GIT\config`, root: "opens"},            // NTFS is case-insensitive: the deny list must fold case
 		{name: `.git.\config`, root: "varies"},          // NT paths keep the trailing dot; Win32 paths strip it
 		{name: `PIPERO~1\secrets.json`, root: "varies"}, // opens when the volume generates 8.3 names
+		// Does NTFS's upcase table fold the dotless ı to I? If these open,
+		// the name rule is the only thing between a path and .git/.piperoom.
+		{name: ".gıt\\config", root: "varies"},
+		{name: ".pıperoom\\secrets.json", root: "varies"},
+		{name: "．git\\config", root: "varies"}, // fullwidth full stop: NT does not normalise, expect not found
+		{name: "a∕b", root: "varies"},          // division slash: a plain character to NT
+		{name: "a\x01b", root: "varies"},       // control character: NTFS refuses most of them
 	}
 	if haveSymlink {
 		// os.Root follows a relative link that stays inside the root.

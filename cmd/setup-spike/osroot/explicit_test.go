@@ -11,15 +11,29 @@ package osroot
 import (
 	"strings"
 	"testing"
+
+	"golang.org/x/text/unicode/norm"
 )
+
+// lookAlikes are NFKC-normal runes that read as, or that an ANSI best-fit
+// code page maps to, "/", "\", ":" or "." (the WorstFit class). Fullwidth
+// forms such as U+FF0F need no entry: NFKC folds them, so the NFKC rule
+// refuses them.
+const lookAlikes = "∕⁄⧸∖⧵⧹¥₩∶ː"
 
 // explicitRefusal returns why name is refused before any open, or "".
 func explicitRefusal(name string) string {
 	switch {
 	case name == "":
 		return "empty"
-	case strings.ContainsAny(name, "\x00?*<>\"|"):
-		return "wildcard or control character"
+	case strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		return "control character"
+	case strings.ContainsAny(name, "?*<>\"|"):
+		return "wildcard"
+	case strings.ContainsAny(name, lookAlikes):
+		return "slash, colon or dot look-alike"
+	case !norm.NFKC.IsNormalString(name):
+		return "not NFKC-normal" // fullwidth ．／＼：, ligatures, the Kelvin sign, ...
 	case name[0] == '/' || name[0] == '\\':
 		return "absolute, rooted or UNC" // \x, \\host\share, \\?\C:\, \\.\NUL, //host
 	case strings.ContainsRune(name, ':'):
@@ -35,11 +49,21 @@ func explicitRefusal(name string) string {
 			return "reserved device name"
 		case shortNameAlias(part):
 			return "8.3 short-name alias" // PIPERO~1 is .piperoom on a volume with 8.3 names
-		case strings.EqualFold(part, ".git") || strings.EqualFold(part, ".piperoom"):
+		case deniedDir(part):
 			return "denied directory"
 		}
 	}
 	return ""
+}
+
+// deniedDir compares by simple fold and by upper case: strings.EqualFold
+// misses the dotless ı (U+0131), whose upper case is "I", so ".gıt" must be
+// caught by strings.ToUpper; NTFS's upcase table may fold it the same way.
+// Trailing dots and spaces are refused before this runs.
+func deniedDir(part string) bool {
+	up := strings.ToUpper(part)
+	return strings.EqualFold(part, ".git") || strings.EqualFold(part, ".piperoom") ||
+		up == ".GIT" || up == ".PIPEROOM"
 }
 
 // reservedDevice matches the device names with any extension, as Windows 10
@@ -86,7 +110,7 @@ func TestExplicitRefusal(t *testing.T) {
 		{`C:\Windows\win.ini`, "drive letter or alternate data stream"},
 		{`\\host\share\x`, "absolute, rooted or UNC"},
 		{`//host/share/x`, "absolute, rooted or UNC"},
-		{`\\?\C:\Windows\win.ini`, "wildcard or control character"},
+		{`\\?\C:\Windows\win.ini`, "wildcard"},
 		{`\\.\NUL`, "absolute, rooted or UNC"},
 		{"a.yaml:x", "drive letter or alternate data stream"},
 		{"a.yaml::$DATA", "drive letter or alternate data stream"},
@@ -94,7 +118,8 @@ func TestExplicitRefusal(t *testing.T) {
 		{"nul", "reserved device name"},
 		{"COM1", "reserved device name"},
 		{"LPT9", "reserved device name"},
-		{"COM\u00b9", "reserved device name"},
+		{"COM\u00b9", "not NFKC-normal"}, // \u00b9 folds to 1; reservedDevice also catches it
+		{"COM\u00b9.txt", "not NFKC-normal"},
 		{"CONIN$", "reserved device name"},
 		{"NUL ", "trailing dot or space"},
 		{"CON.txt", "reserved device name"},
@@ -110,8 +135,32 @@ func TestExplicitRefusal(t *testing.T) {
 		{`PIPERO~1\secrets.json`, "8.3 short-name alias"},
 		{"GIT~1/config", "8.3 short-name alias"},
 		{"a~b.txt", ""},
-		{"a\x00b", "wildcard or control character"},
-		{"*.yaml", "wildcard or control character"},
+		{"a\x00b", "control character"},
+		{"a\x01b", "control character"},
+		{"a\tb.yaml", "control character"},
+		{"a\nb", "control character"},
+		{"a\x1fb", "control character"},
+		{"a\x7fb", "control character"},
+		{"*.yaml", "wildcard"},
+		// Unicode: the dotless ı upper-cases to I (EqualFold misses it).
+		{".gıt/config", "denied directory"},
+		{".GıT/config", "denied directory"},
+		{".pıperoom/secrets.json", "denied directory"},
+		// NFKC folds these to ".", "/", "\" or ":".
+		{"．git/config", "not NFKC-normal"},      // fullwidth full stop
+		{"a／b", "not NFKC-normal"},              // fullwidth solidus
+		{"a＼b", "not NFKC-normal"},              // fullwidth reverse solidus
+		{"a.yaml：x", "not NFKC-normal"},         // fullwidth colon
+		{"﹒git/config", "not NFKC-normal"},      // small full stop
+		{"Kafka.properties", "not NFKC-normal"}, // Kelvin sign
+		{"coﬁg.yaml", "not NFKC-normal"},        // fi ligature
+		// NFKC-normal look-alikes and ANSI best-fit targets (WorstFit).
+		{"a∕b", "slash, colon or dot look-alike"}, // division slash
+		{"a⁄b", "slash, colon or dot look-alike"}, // fraction slash
+		{"a¥b", "slash, colon or dot look-alike"}, // yen sign: "\" in code page 932
+		{"a₩b", "slash, colon or dot look-alike"}, // won sign: "\" in code page 949
+		{"a∶b", "slash, colon or dot look-alike"}, // ratio
+		{"café.yaml", ""},                         // NFC-composed, NFKC-normal: allowed
 	}
 	for _, c := range cases {
 		if got := explicitRefusal(c.name); got != c.want {

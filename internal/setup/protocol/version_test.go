@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"piperoom/internal/setup/protocol"
 )
@@ -31,6 +32,10 @@ func TestCompatibilityRule(t *testing.T) {
 		{"older major runner", v(2, 0), v(1, 9), false, false, protocol.Version{}},
 		{"newer major runner", v(1, 9), v(2, 0), false, false, protocol.Version{}},
 		{"a runner that sent no version never pairs", v(1, 1), v(0, 0), false, false, protocol.Version{}},
+		{"negative runner minor against a 1.0 server", v(1, 0), v(1, -1), false, false, protocol.Version{}},
+		{"negative server minor against a 1.0 runner", v(1, -1), v(1, 0), false, false, protocol.Version{}},
+		{"major 0 on both sides", v(0, 1), v(0, 1), false, false, protocol.Version{}},
+		{"negative major on both sides", v(-1, 0), v(-1, 0), false, false, protocol.Version{}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -161,6 +166,27 @@ func TestWireBackwardCompatible(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"protocol_version":1,"protocol_minor":1`) {
 		t.Errorf("hello = %s", raw)
+	}
+}
+
+// A peer's frame type reaches a log line or an error at most 32 bytes long
+// (plus the cut marker), as valid UTF-8.
+func TestFrameTypeShort(t *testing.T) {
+	long := protocol.FrameType(strings.Repeat("x", 4096))
+	if got := long.Short(); len(got) > protocol.MaxLoggedTypeBytes+len("…") || !strings.HasSuffix(got, "…") {
+		t.Errorf("Short = %q (%d bytes)", got, len(got))
+	}
+	if got := protocol.FrameType("op").Short(); got != "op" {
+		t.Errorf("Short(op) = %q", got)
+	}
+	cut := protocol.FrameType(strings.Repeat("a", 31) + "é") // é straddles byte 32
+	if got := cut.Short(); !utf8.ValidString(got) {
+		t.Errorf("Short is not valid UTF-8: %q", got)
+	}
+	f := protocol.Frame{Type: long}
+	err := f.Check()
+	if !errors.Is(err, protocol.ErrUnknownFrame) || len(err.Error()) > 100 {
+		t.Errorf("Check on a 4 KiB type = %d bytes: %v", len(err.Error()), err)
 	}
 }
 

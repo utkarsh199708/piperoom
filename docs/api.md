@@ -842,7 +842,7 @@ stored nowhere on the server), `ping`/`pong`.
 `protocol_minor` the minor (absent means 0); this build is `protocol.Current()`, 1.1. 1.0 is the U0 shape (no
 version in `pair`). Compatibility rule: a runner and a server pair when the majors are equal and each side's minor
 is at most one behind the other's, so a runner one minor behind the server still pairs, and so does one a minor
-ahead. The server checks `protocol.ServerAccepts` at `pair` when it carries a version (a 1.0 `pair` does not, so
+ahead; a major below 1 or a negative minor never pairs. The server checks `protocol.ServerAccepts` at `pair` when it carries a version (a 1.0 `pair` does not, so
 the check waits for `hello`) and always at `hello` (which must repeat the `pair`'s version); a refusal is
 `setup.pairing {outcome: "refused"}` and a close with status 4001 (`protocol.CloseProtocolVersion`) whose reason
 names both versions, before the runner learns anything about the room. The runner checks `protocol.RunnerAccepts`
@@ -850,7 +850,7 @@ on `welcome` before it prints the room and answers `refused {reason: "protocol_v
 the lower minor (`protocol.Negotiate`). A minor bump only adds (a frame type, an optional field whose absence keeps
 the old meaning, an op, a refusal code); anything else, including a field a receiver must understand to stay safe,
 is a major bump. Toward a newer peer: unknown fields are ignored, an unknown frame type is dropped unread and never
-executed (`Frame.Check` → `ErrUnknownFrame`; a known type with a missing or extra payload closes the socket), an
+executed (`Frame.Check`, run before any handler → `ErrUnknownFrame`, the type logged at most 32 bytes; a known type with a missing or extra payload closes the socket), an
 unknown op is refused (`unknown_op`); neither side sends a frame type, nor the server an op, that the negotiated
 minor lacks (`Version.Has`, `protocol.FrameSince`, the op's `since` minor in the catalogue).
 
