@@ -327,58 +327,122 @@ func TestTailFrom(t *testing.T) {
 	}
 }
 
-func TestOversizedBodies(t *testing.T) {
-	var serve func(w io.Writer)
-	c, _ := plainClient(t, func(w http.ResponseWriter, r *http.Request) {
-		serve(w)
-	})
-	ctx := context.Background()
+// memTransport answers every request in-process with a 200 whose body is
+// body(), and counts the bytes the client pulls from it. TestOversizedBodies
+// uses it instead of httptest: over a loopback socket each MiB is many
+// writer-to-reader handoffs, each one a scheduler wake-up, so on a loaded CI
+// runner one 5 MiB body ran into the client's 10 s timeout (#675) though it
+// takes milliseconds idle. In memory the cost is copying only, and the byte
+// count lets the test assert where the client stops reading, not just that
+// it returned.
+type memTransport struct {
+	body func() io.Reader
+	read int64 // bytes the client read from the last body
+}
 
-	// 5 MiB, more than MaxResponseBytes: the tail is the real end of the log.
-	var log strings.Builder
-	for i := 0; log.Len() < 5<<20; i++ {
-		fmt.Fprintf(&log, "[2026-10-18, 00:05:%02d UTC] {subprocess.py:93} INFO - row batch %07d loaded\n", i%60, i)
+func (m *memTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	m.read = 0
+	return &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{},
+		Body:          &countingBody{r: m.body(), n: &m.read},
+		ContentLength: -1, // unknown length, as Airflow streams a log
+		Request:       req,
+	}, nil
+}
+
+type countingBody struct {
+	r io.Reader
+	n *int64
+}
+
+func (b *countingBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	*b.n += int64(n)
+	return n, err
+}
+
+func (b *countingBody) Close() error { return nil }
+
+func TestOversizedBodies(t *testing.T) {
+	c, err := New("http://airflow.test")
+	if err != nil {
+		t.Fatal(err)
 	}
+	mt := &memTransport{}
+	c.hc.Transport = mt
+	// Each request gets its own deadline so a slow one cannot eat the next
+	// one's budget; the client's own 10 s timeout still applies inside it.
+	call := func(maxBytes int) (string, bool, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return c.TaskLogTailCut(ctx, "d", "r", "t", 1, maxBytes)
+	}
+
+	// 5 MiB, more than MaxResponseBytes: the tail is the real end of the
+	// log, so the client streamed all of it through the bounded tail buffer.
+	row := "[2026-10-18, 00:05:59 UTC] {subprocess.py:93} INFO - row batch loaded\n"
 	last := "[2026-10-18, 00:06:00 UTC] {taskinstance.py:2698} ERROR - unique last line 7f3a\n"
-	log.WriteString(last)
-	serve = func(w io.Writer) { io.WriteString(w, log.String()) }
-	tail, cut, err := c.TaskLogTailCut(ctx, "d", "r", "t", 1, 200)
+	log := strings.Repeat(row, (5<<20)/len(row)+1) + last
+	mt.body = func() io.Reader { return strings.NewReader(log) }
+	tail, cut, err := call(200)
 	if err != nil || cut || len(tail) > 200 || !strings.HasSuffix(tail, last) || !strings.HasPrefix(tail, "[2026-10-18, ") {
 		t.Fatalf("5 MiB log: tail %q, cut %v, err %v", tail, cut, err)
 	}
+	if mt.read != int64(len(log)) {
+		t.Fatalf("5 MiB log: read %d bytes, want all %d", mt.read, len(log))
+	}
 
-	// Past the stream ceiling reading stops: cut, and the tail ends at the
-	// ceiling. Streaming the real 64 MiB outran the 10 s client timeout on a
-	// loaded CI runner, so the ceiling is lowered to 5 MiB (still above
-	// MaxResponseBytes, and a whole number of lines).
+	// Past the stream ceiling reading stops: cut, the tail ends at the
+	// ceiling, and the client reads one byte past it and no more. The real
+	// 64 MiB ceiling is lowered to 5 MiB (still above MaxResponseBytes, and
+	// a whole number of lines) to keep the test fast.
 	if c.logCeiling != MaxLogStreamBytes {
 		t.Fatalf("New set logCeiling %d, want MaxLogStreamBytes", c.logCeiling)
 	}
 	c.logCeiling = 5 << 20
 	line := "0123456789abcde\n"
 	chunk := strings.Repeat(line, (1<<20)/len(line)) // 1 MiB of whole lines
-	stream := func(end string) func(io.Writer) {
-		return func(w io.Writer) {
+	stream := func(end string) func() io.Reader {
+		return func() io.Reader {
+			parts := make([]io.Reader, 0, c.logCeiling>>20+1)
 			for range c.logCeiling >> 20 {
-				io.WriteString(w, chunk)
+				parts = append(parts, strings.NewReader(chunk))
 			}
-			io.WriteString(w, end)
+			return io.MultiReader(append(parts, strings.NewReader(end))...)
 		}
 	}
-	serve = stream("past the ceiling\n")
-	if tail, cut, err = c.TaskLogTailCut(ctx, "d", "r", "t", 1, 64); err != nil || !cut || tail != strings.Repeat(line, 4) {
+	mt.body = stream("past the ceiling\n")
+	if tail, cut, err = call(64); err != nil || !cut || tail != strings.Repeat(line, 4) {
 		t.Fatalf("over the ceiling: tail %q, cut %v, err %v", tail, cut, err)
 	}
-	serve = stream("")
-	if tail, cut, err = c.TaskLogTailCut(ctx, "d", "r", "t", 1, 64); err != nil || cut || tail != strings.Repeat(line, 4) {
+	if mt.read != c.logCeiling+1 {
+		t.Fatalf("over the ceiling: read %d bytes, want ceiling+1 = %d", mt.read, c.logCeiling+1)
+	}
+	mt.body = stream("")
+	if tail, cut, err = call(64); err != nil || cut || tail != strings.Repeat(line, 4) {
 		t.Fatalf("at the ceiling: tail %q, cut %v, err %v", tail, cut, err)
 	}
+	if mt.read != c.logCeiling {
+		t.Fatalf("at the ceiling: read %d bytes, want %d", mt.read, c.logCeiling)
+	}
 
+	// JSON past MaxResponseBytes: the decoder sees at most the cap (rule 7),
+	// so the cut body fails to decode and the error says so.
 	elem := `{"dag_run_id":"r","state":"success"},`
 	body := `{"dag_runs":[` + strings.Repeat(elem, MaxResponseBytes/len(elem)+1) + `{}],"total_entries":1}`
-	serve = func(w io.Writer) { io.WriteString(w, body) }
+	mt.body = func() io.Reader { return strings.NewReader(body) }
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if _, err := c.DAGRuns(ctx, "d", 1); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("JSON over the cap: err %v, want a decode error", err)
+	}
+	if mt.read > MaxResponseBytes {
+		t.Fatalf("JSON over the cap: read %d bytes, want at most MaxResponseBytes (%d)", mt.read, MaxResponseBytes)
 	}
 }
 
