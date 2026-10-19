@@ -174,14 +174,22 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
   ```sql
   UPDATE proposals p SET claimed_by = $me, claimed_at = now()
    WHERE p.proposal_id = $1 AND p.claimed_by IS NULL AND p.status = 'open'
-     AND jsonb_array_length(p.required_layers) > 0
-     AND NOT EXISTS (
-       SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS l(layer)
-        WHERE NOT EXISTS (SELECT 1 FROM approvals a
-                           WHERE a.proposal_id = p.proposal_id AND a.layer = l.layer
-                             AND a.decision = 'approved'))
-  RETURNING …
+     AND CASE WHEN jsonb_typeof(p.required_layers) IS DISTINCT FROM 'array' THEN false
+              WHEN jsonb_array_length(p.required_layers) = 0 THEN false
+              ELSE NOT EXISTS (
+                  SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
+                  WHERE NOT EXISTS (SELECT 1 FROM approvals a
+                                    WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer
+                                      AND a.decision = 'approved'))
+         END
   ```
+  The `CASE` is `fullyApprovedSQL` in `internal/store/replicas.go` (#638). It is a `CASE`, not three `AND`ed
+  conditions, because Postgres does not promise to evaluate `AND` operands in order, and `jsonb_array_length`
+  raises an error on a jsonb `null` or any other non-array (`CreateProposal` stores a nil `RequiredLayers` slice as
+  jsonb `null`). `CASE` branches run in order, so a non-array never reaches the array functions: the row is simply
+  not approved and the statement does not fail. The stale sweep (`staleProposalSQL`, used by `StaleProposals` and
+  `InterruptProposal`) reuses the same `fullyApprovedSQL` for its unclaimed branch, so "approved, nobody claimed it"
+  means exactly what the claim means.
   No row: another executor has it (or had it) and nothing is queued or written. Each room runs one
   proposal at a time (review item 10), so a second approved proposal can wait in the queue behind a
   long first one; the replica refreshes the claims of **queued** proposals on every lease renew
@@ -189,12 +197,14 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
 - **Only a proposal approved in full is claimed** (#638; the rule the code enforces once #638 merges):
   - "approved in full" means every entry of `required_layers` has an `approvals` row with
     `decision = 'approved'`, whatever the grant (owner, backup, solo, fallback, sole-member driver, policy);
-  - a proposal with no required layers (`required_layers = []`) is never claimed, so it never runs;
+  - a proposal with no required layers is never claimed, so it never runs: `required_layers` an empty array, a jsonb
+    `null`, or any other non-array value is refused the same way;
   - a rejection or a cancel blocks the claim for good: neither is undone, so the proposal never qualifies again;
   - the claim `UPDATE` enforces this itself, not only its caller, so a caller bug or a race cannot queue a
     proposal that is not approved in full;
-  - the room re-checks the same rule before the claim and before every step (`recheckStep`); a step that
-    fails it is not run and records `action.executed {ok: false}` with output `not approved by every required layer`;
+  - the room re-checks the same rule before the claim and before every step (`recheckStep`, after the claim
+    refresh and the step start); a step that fails it is not run and records `action.executed {ok: false}` with
+    output `not approved by every required layer`;
   - hash freshness (`params_hash`) is not part of the claim, because `recheckStep` checks it before every step
     (output `params hash mismatch`; `docs/design/auth.md` §3.2).
 - Every write of the executor is conditional on the claim (`claimed_by = $me AND status = 'open'`):
