@@ -167,6 +167,16 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		if _, err := warehouseKind(pc); err != nil {
 			return nil, fmt.Errorf("wiring: pipeline %q: %w", p.ID, err)
 		}
+		// The pipeline's own write URL is checked in both write modes, like
+		// SOURCE_DB_WRITE_URL, so the mistake stops the start before anyone
+		// turns write mode on. Off, the set's settings drop it: no writer can
+		// be built from it and the set does not keep the secret.
+		if err := checkPipelineWriteURL(p.ID, pc); err != nil {
+			return nil, err
+		}
+		if !write {
+			pc.SourceDBWriteURL = ""
+		}
 		// Settings that are not connections (the AWS region) stay process-wide.
 		pc.AWSRegion = cfg.AWSRegion
 		extra[p.ID] = append(extra[p.ID], tlsPathRefs(pc)...)
