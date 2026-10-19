@@ -27,6 +27,20 @@ func TestEnvironmentLayer(t *testing.T) {
 	}
 }
 
+// IncidentLayers is exactly the pre-U Layers list (what the triage schema and
+// the label validators saw before U0), in order, and a fresh slice.
+func TestIncidentLayers(t *testing.T) {
+	want := []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform"}
+	got := events.IncidentLayers()
+	if !slices.Equal(got, want) {
+		t.Fatalf("IncidentLayers() = %v, want %v", got, want)
+	}
+	got[0] = "changed"
+	if events.IncidentLayers()[0] != "postgres" || events.Layers[0] != "postgres" {
+		t.Fatal("IncidentLayers shares its slice")
+	}
+}
+
 // The U-wave fields on payloads that already exist are omitempty, so an event
 // written before U0 marshals exactly as before (export hashes).
 func TestUWaveFieldsAreOmittedWhenEmpty(t *testing.T) {

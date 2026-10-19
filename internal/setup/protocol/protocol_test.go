@@ -1,9 +1,12 @@
 package protocol_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -16,9 +19,10 @@ import (
 // server will both read them.
 func TestFrameShapes(t *testing.T) {
 	deadline := time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC)
+	two := 2
 	f := protocol.Frame{Type: protocol.FrameOp, Op: &protocol.OpRequest{
 		ID: "op_1", Op: "compose_up", Params: json.RawMessage(`{"services":["connect"]}`), Tier: protocol.TierT1,
-		Class: protocol.ClassLocal, Deadline: deadline, ProposalID: "p_1", StepIndex: 2, ParamsHash: "ab",
+		Class: protocol.ClassLocal, Deadline: deadline, ProposalID: "p_1", StepIndex: &two, ParamsHash: "ab",
 	}}
 	raw, err := json.Marshal(f)
 	if err != nil {
@@ -37,7 +41,7 @@ func TestFrameShapes(t *testing.T) {
 		t.Errorf("result frame decoded as %+v", in)
 	}
 
-	raw, err = json.Marshal(protocol.Frame{Type: protocol.FrameResume, Resume: &protocol.Resume{InFlight: []protocol.OpStatus{{ID: "op_1", ProposalID: "p_1", StepIndex: 2, State: protocol.StateRunning}}}})
+	raw, err = json.Marshal(protocol.Frame{Type: protocol.FrameResume, Resume: &protocol.Resume{InFlight: []protocol.OpStatus{{ID: "op_1", ProposalID: "p_1", StepIndex: &two, State: protocol.StateRunning}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,11 +49,11 @@ func TestFrameShapes(t *testing.T) {
 		t.Errorf("resume frame = %s", raw)
 	}
 
-	raw, err = json.Marshal(protocol.Frame{Type: protocol.FrameCredentials, Credentials: &protocol.Credentials{PipelineID: "orders", Secrets: []protocol.Secret{{Name: "pg_ro", Value: "s3cret-value"}}}})
+	raw, err = json.Marshal(protocol.Frame{Type: protocol.FrameCredentials, Credentials: &protocol.Credentials{RequestID: "cr_1", Secrets: []protocol.Secret{{Name: "pg_ro", Value: "s3cret-value"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"type":"credentials","credentials":{"pipeline_id":"orders","secrets":[{"name":"pg_ro","value":"s3cret-value"}]}}`; string(raw) != want {
+	if want := `{"type":"credentials","credentials":{"request_id":"cr_1","secrets":[{"name":"pg_ro","value":"s3cret-value"}]}}`; string(raw) != want {
 		t.Errorf("credentials frame = %s", raw)
 	}
 	raw, err = json.Marshal(protocol.Frame{Type: protocol.FrameSecret, Secret: &protocol.SecretValue{Secret: protocol.Secret{Name: "pg_pw", Value: "typed-in-ui"}}})
@@ -59,11 +63,11 @@ func TestFrameShapes(t *testing.T) {
 	if want := `{"type":"secret","secret":{"name":"pg_pw","value":"typed-in-ui"}}`; string(raw) != want {
 		t.Errorf("secret frame = %s", raw)
 	}
-	raw, err = json.Marshal(protocol.Frame{Type: protocol.FrameRegisterCredentials, RegisterCredentials: &protocol.RegisterCredentials{PipelineID: "orders", Names: []string{"pg_ro"}}})
+	raw, err = json.Marshal(protocol.Frame{Type: protocol.FrameRegisterCredentials, RegisterCredentials: &protocol.RegisterCredentials{RequestID: "cr_1", PipelineID: "orders", Names: []string{"pg_ro"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := `{"type":"register_credentials","register_credentials":{"pipeline_id":"orders","names":["pg_ro"]}}`; string(raw) != want {
+	if want := `{"type":"register_credentials","register_credentials":{"request_id":"cr_1","pipeline_id":"orders","names":["pg_ro"]}}`; string(raw) != want {
 		t.Errorf("register_credentials frame = %s", raw)
 	}
 	raw, err = json.Marshal(protocol.Frame{Type: protocol.FramePing})
@@ -135,4 +139,38 @@ func TestRunnerExecutorInterface(t *testing.T) {
 	}
 	// The receipt type is the events one, so an executor stores it unchanged.
 	var _ events.SetupReceipt = protocol.OpResult{}.Receipt
+}
+
+// A T0 request has no step index on the wire, so "refuse a T1+ request
+// without one" is a nil check, not a zero check (step 0 is a step).
+func TestStepIndexOmittedOnT0(t *testing.T) {
+	raw, err := json.Marshal(protocol.OpRequest{ID: "op_0", Op: "env_detect", Params: json.RawMessage(`{}`), Tier: protocol.TierT0, Class: protocol.ClassLocal})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "step_index") {
+		t.Errorf("T0 request carries step_index: %s", raw)
+	}
+	var req protocol.OpRequest
+	if err := json.Unmarshal([]byte(`{"id":"op_1","op":"compose_up","params":{},"tier":"T1","class":"local","deadline":"2026-10-19T10:00:00Z","proposal_id":"p_1","step_index":0,"params_hash":"ab"}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.StepIndex == nil || *req.StepIndex != 0 {
+		t.Errorf("step 0 decoded as %v", req.StepIndex)
+	}
+}
+
+// A Secret never prints its value: not through %v, %s, String or slog.
+func TestSecretPrintsNameOnly(t *testing.T) {
+	s := protocol.Secret{Name: "pg_ro", Value: "hunter2-hunter2"}
+	for _, got := range []string{s.String(), fmt.Sprint(s), fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), s.LogValue().String()} {
+		if strings.Contains(got, "hunter2") || !strings.Contains(got, "pg_ro") {
+			t.Errorf("secret printed as %q", got)
+		}
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("x", "secret", s, "frame", protocol.SecretValue{Secret: s})
+	if strings.Contains(buf.String(), "hunter2") {
+		t.Errorf("slog line shows the value: %s", buf.String())
+	}
 }

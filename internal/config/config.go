@@ -264,6 +264,15 @@ type Config struct {
 	SetupCode        string // PIPEROOM_SETUP_CODE: the pairing code, same as --code; single use, never logged
 }
 
+// LogValue keeps a Config out of the log: it holds database URLs with
+// passwords, the alert HMAC secrets, the OIDC client secret and the runner's
+// pairing code (PIPEROOM_SETUP_CODE), so slog prints a fixed marker instead
+// of the fields. A command that wants to log settings logs the typed values
+// ParseX returns, which hold no secret. (U0)
+func (c Config) LogValue() slog.Value {
+	return slog.StringValue("config.Config{redacted: holds secrets}")
+}
+
 // Load reads the environment and applies dev defaults.
 func Load() Config {
 	c := Config{

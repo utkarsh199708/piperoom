@@ -11,6 +11,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
@@ -258,5 +259,42 @@ func TestRoomViewModeSoloPerCaller(t *testing.T) {
 	}
 	if _, err := svc.RoomFor(context.Background(), mustUser(t, svc, "priya"), "r_missing"); err == nil {
 		t.Fatal("RoomFor of a missing room: want an error")
+	}
+}
+
+// mode.solo for a derived solo owner (P2b-4) ignores the setup layer
+// "environment" that U0 appended to events.LayersOf("cdc"): an owners file
+// from before the U wave, which names the six CDC layers only, keeps its solo
+// mode; a user missing one of the six is still not solo.
+func TestRoomViewModeSoloIgnoresEnvironmentLayer(t *testing.T) {
+	six := map[string]string{}
+	for _, l := range events.LayersOf(events.PipelineKindCDC) {
+		if l != events.LayerEnvironment {
+			six[l] = "priya"
+		}
+	}
+	own := &owners.Owners{Layers: owners.UserLayers(six), Pipelines: []owners.Pipeline{{ID: "orders", SourceTables: []string{"public.orders"}}}}
+	svc := room.New(room.Deps{Store: memstore.New(), Actions: actions.NewRegistry(), Users: room.DefaultUsers(), Owners: own, Run: fakeRun, WriteHandoff: fakeWrite})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "priya").ID
+	for user, want := range map[string]bool{"priya": true, "arjun": false} {
+		snap, err := svc.RoomFor(context.Background(), mustUser(t, svc, user), roomID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if snap.Mode == nil || snap.Mode.Solo != want {
+			t.Errorf("%s: mode = %+v, want solo %v", user, snap.Mode, want)
+		}
+	}
+	// Owning environment too changes nothing; missing one of the six does.
+	delete(six, "warehouse")
+	own.Layers = owners.UserLayers(six)
+	own.Layers[events.LayerEnvironment] = owners.Principals{{Kind: owners.KindUser, Name: "priya"}}
+	snap, err := svc.RoomFor(context.Background(), mustUser(t, svc, "priya"), roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Mode == nil || snap.Mode.Solo {
+		t.Errorf("priya without warehouse: mode = %+v, want solo false", snap.Mode)
 	}
 }

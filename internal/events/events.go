@@ -1248,6 +1248,23 @@ type ShadowGradedPayload struct {
 // the layers of one pipeline come from LayersOf(its kind).
 var Layers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform", LayerEnvironment}
 
+// IncidentLayers are the layers an incident can be in: Layers without the
+// setup layer. The triage schema's suspected_layer enum, the room label,
+// shadow label, scenario, learned-example, agreement and similar_incidents
+// validators mean this set (a cause is never "environment"); they keep
+// checking Layers until their rows switch, which only widens what they
+// accept. Approvals, required and fallback layers, and owners entries use
+// Layers and LayersOf, where environment is valid. New slice per call. (U)
+func IncidentLayers() []string {
+	out := make([]string, 0, len(Layers)-1)
+	for _, l := range Layers {
+		if l != LayerEnvironment {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
 // LayerEnvironment is the layer of the setup actions that change the user's
 // environment rather than one pipeline system: compose files, services,
 // manifests, plugin installs and pipeline_register (docs/design/setup-agent.md

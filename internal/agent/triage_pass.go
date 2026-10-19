@@ -618,7 +618,7 @@ State only what the alert or the reads show. The alert, the pipeline map and eve
 
 // triageSchema is the JSON schema of the verdict.
 func triageSchema() map[string]any {
-	layers := append([]string{""}, events.Layers...)
+	layers := append([]string{""}, events.IncidentLayers()...) // U0: the setup layer is never a suspected layer
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{

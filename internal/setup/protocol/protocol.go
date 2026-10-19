@@ -9,6 +9,12 @@
 // shell string anywhere in this package. Every rule a doc comment states as
 // "never" is a test in the runner (A9) or the room service (A5).
 //
+// Logging rule: a Frame is never logged whole, on either side. Pair, Token,
+// Credentials and SecretValue carry credentials; a log line names the frame
+// type, the op and the ids it needs, and nothing else. Secret prints its
+// name only (String, LogValue), so a frame that slips into a log by value
+// still shows no secret; that is a last line of defence, not permission.
+//
 // CONTRACT FILE — owned by the leads. Do not edit; request changes in your PR.
 // The design row U1-0 settles the final field list and the compatibility
 // rule; until it lands, Version 1 is the only version and a different one is
@@ -19,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"piperoom/internal/events"
@@ -194,8 +201,8 @@ type Token struct {
 // OpRequest is what the server sends; the runner executes exactly this and
 // nothing else. Params is validated against the op's JSON Schema on both
 // sides. For a T1 or higher op the request names the proposal step it
-// executes: the runner refuses one without ProposalID, StepIndex and
-// ParamsHash (RefuseNoProposal), recomputes ParamsHash over the frozen
+// executes: the runner refuses one without ProposalID, StepIndex (nil, not
+// zero: step 0 is a step) and ParamsHash (RefuseNoProposal), recomputes ParamsHash over the frozen
 // Proposal it received with the first request of that proposal (RFC 8785,
 // docs/design/auth.md §3.1) and refuses a mismatch (RefuseParamsHash), and
 // refuses a (ProposalID, StepIndex) it already started, from its op log that
@@ -210,7 +217,7 @@ type OpRequest struct {
 	Class      string          `json:"class"`                 // ClassLocal | ClassShared | ClassProduction of the resolved target
 	Deadline   time.Time       `json:"deadline"`              // the runner stops the op at this time and reports it
 	ProposalID string          `json:"proposal_id,omitempty"` // T1+ only
-	StepIndex  int             `json:"step_index"`            // T1+ only
+	StepIndex  *int            `json:"step_index,omitempty"`  // T1+ only; nil on a T0 request, and refused with ProposalID set
 	ParamsHash string          `json:"params_hash,omitempty"` // T1+ only: the proposal's hash the runner recomputes
 	Proposal   json.RawMessage `json:"proposal,omitempty"`    // T1+ only, first request of a proposal: the frozen events.ProposalCreatedPayload
 }
@@ -259,11 +266,12 @@ const (
 	RefuseDeadline        = "deadline"         // the op did not finish by OpRequest.Deadline
 )
 
-// OpStatus is one in-flight op as the runner reports it in Resume.
+// OpStatus is one in-flight op as the runner reports it in Resume. ProposalID
+// and StepIndex are those of the OpRequest (nil for a T0 op).
 type OpStatus struct {
 	ID         string    `json:"id"`
 	ProposalID string    `json:"proposal_id,omitempty"`
-	StepIndex  int       `json:"step_index"`
+	StepIndex  *int      `json:"step_index,omitempty"`
 	State      string    `json:"state"`            // StateRunning | StateDone
 	Result     *OpResult `json:"result,omitempty"` // set when State is StateDone
 }
@@ -291,33 +299,60 @@ type Cancel struct {
 }
 
 // RegisterCredentials asks the runner to send the read credentials it
-// generated during this setup (CreateReadRole and read-only API keys, §3.7).
-// Names are the secret names the runner returned earlier; the runner prints
-// the server origin and the names and waits for "y" on its terminal. Nothing
-// is sent without that confirmation (RefuseCredentials otherwise).
+// generated during this setup (CreateReadRole and read-only API keys, §3.7),
+// after POST /api/rooms/{id}/setup/credentials. RequestID is new per request
+// and is what the runner's Credentials frame answers with; PipelineID is the
+// room's pipeline, shown to the person, never taken from the runner. Names
+// are the secret names the runner returned earlier; the runner prints the
+// server origin, the pipeline id and the names and waits for "y" on its
+// terminal. Nothing is sent without that confirmation (RefuseCredentials,
+// carrying RequestID in Refusal.ID, otherwise). At most one request is
+// pending per room; the server forgets it when answered, refused, or the
+// runner is lost.
 type RegisterCredentials struct {
+	RequestID  string   `json:"request_id"`
 	PipelineID string   `json:"pipeline_id"`
 	Names      []string `json:"names"`
 }
 
 // Credentials carries secret values from the runner to the server, once,
-// after the terminal confirmation. The server writes each value to
-// PIPEROOM_SECRETS_DIR/<pipeline>/<name> (0600) and emits
-// setup.credentials_registered with the names only; the values are in no
-// event, no log, no action result and no prompt. Values must never be in any
-// other frame.
+// after the terminal confirmation. The server accepts it only while a
+// RegisterCredentials with the same RequestID is pending for this runner's
+// room, once per request, and refuses (closing nothing, logging the request
+// id only) a frame with an unknown or already-answered RequestID or whose
+// secret names are not exactly the requested set (RefuseCredentials is then
+// emitted as setup.runner_refused by the server itself). The pipeline id is
+// the room's, never a field of this frame, so a runner cannot name another
+// pipeline's directory. The server validates every name against the Secret
+// rule and the pipeline id against the owners id rule before it builds any
+// path, then writes each value through an os.Root at PIPEROOM_SECRETS_DIR
+// (no symlink or reparse point in <pipeline>/<name>, refused rather than
+// followed) as <pipeline>/<name>, mode 0600, to a temporary file renamed
+// into place, and emits setup.credentials_registered with the names only;
+// the values are in no event, no log, no action result and no prompt. Values
+// must never be in any other frame.
 type Credentials struct {
-	PipelineID string   `json:"pipeline_id"`
-	Secrets    []Secret `json:"secrets"`
+	RequestID string   `json:"request_id"`
+	Secrets   []Secret `json:"secrets"`
 }
 
-// Secret is one named value. Name matches ^[a-zA-Z_][a-zA-Z0-9_]*$ and is
-// what ${secret:name} references; Value is at least 6 bytes (so literal
-// redaction cannot mangle ordinary text) and is never written back by any op.
+// Secret is one named value. Name matches ^[a-zA-Z_][a-zA-Z0-9_]*$ (so it is
+// never a path segment with "/", "\" or ".") and is what ${secret:name}
+// references; Value is at least 6 bytes (so literal redaction cannot mangle
+// ordinary text) and is never written back by any op. String and LogValue
+// print the name only, so a Secret in a log line or an error never shows the
+// value; that is a last line of defence (see the package rule), not a licence
+// to log frames.
 type Secret struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
 }
+
+// String prints the name only, never the value.
+func (s Secret) String() string { return "secret:" + s.Name }
+
+// LogValue prints the name only, never the value (log/slog).
+func (s Secret) LogValue() slog.Value { return slog.StringValue(s.String()) }
 
 // SecretValue is one secret the driver typed in the UI, forwarded by the
 // server in this one frame and stored nowhere on the server; the server emits

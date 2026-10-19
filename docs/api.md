@@ -282,8 +282,13 @@ runner, a name for a secret, a hash for the canary nonce.
   (postgres, kafka-connect, schema-registry, kafka, consumer, warehouse, environment); `events.Layers` has nine
   entries. It is the layer of the setup actions (compose, service, manifest, plugin, `pipeline_register`). An
   `owners.yaml` that does not name it leaves it unowned (the driver approves it with `grant: "fallback"` in solo mode;
-  a tenant admin with `grant: "admin"` otherwise); every existing owners file still loads. Wherever a field says "one
-  of the layers", `environment` is valid too.
+  a tenant admin with `grant: "admin"` otherwise); every existing owners file still loads. `environment` is valid
+  for **approvals, `required_layers`, `fallback_layers` and owners entries only**. It is never an incident layer
+  (`events.IncidentLayers()`): the triage `suspected_layer` enum the model sees is unchanged, and
+  `room.labelled.actual_layer`, `shadow.labelled.actual_layer`, the scenario, learned-example, agreement and
+  `similar_incidents` validators mean the eight incident layers (they switch from `events.Layers` to
+  `events.IncidentLayers()` in their owners' rows; until then they accept `environment` too, which only widens
+  what a label may say).
 - **Runner lifecycle.** `setup.pairing {outcome: ok | bad_code | expired | rate_limited | replaced | refused, source,
   runner_label?}` for every pairing attempt (system actor); `setup.runner_attached {runner_label, os, arch, tools,
   project_dir, catalogue_version, protocol_version}` (the runner's `Hello`, after the person confirmed on its
@@ -735,7 +740,7 @@ renews the driver lease. The model never calls them: it may ask for a click in a
 | POST | `/api/rooms/{id}/setup/targets/{t}/class` | `{class}` | `Event` (`setup.target_classed {by: "person"}`) | raise only: `local` → `shared` → `production`; a lower value `400 class_lowered`; `{t}` is the target's address as registered (`404 not_found` otherwise) |
 | POST | `/api/rooms/{id}/setup/pipeline` | `{add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?}` | `Event` (`setup.pipeline_extended`) | extends the provisional pipeline; every name follows the owners.yaml rules for that list (`400 validation` names the entry); the room re-derives the tool and action scope. Hosts are targets, not here |
 | POST | `/api/rooms/{id}/setup/secret` | `{name, value}` | `204` | `name` matches `^[a-zA-Z_][a-zA-Z0-9_]*$`, `value` ≥ 6 bytes and ≤ 4 KiB (`400 validation`); forwarded to the paired runner in one `secret` frame (`409 no_runner` when none) and **stored nowhere on the server**; the route is excluded from request logging (a test asserts no log line carries the body); emits `setup.secret_set {name, actor}`. The value is in no event, log or prompt |
-| POST | `/api/rooms/{id}/setup/credentials` | – (no body) | `202` | asks the paired runner (`register_credentials` frame; `409 no_runner`) to register the read credentials it generated (design §3.7). The values travel in the runner's `credentials` frame after the person's `y` on the runner's terminal, never in this request; the server writes them to `PIPEROOM_SECRETS_DIR/<pipeline_id>/<name>` (0600) and emits `setup.credentials_registered {pipeline_id, names, runner_label}`; a refusal on the terminal is `setup.runner_refused {reason: "credentials"}`. `409 already_decided` while a request is pending |
+| POST | `/api/rooms/{id}/setup/credentials` | – (no body) | `202` | asks the paired runner (`register_credentials {request_id, pipeline_id, names}` frame; `409 no_runner`) to register the read credentials it generated (design §3.7). The values travel in the runner's `credentials {request_id, secrets}` frame after the person's `y` on the runner's terminal, never in this request. The server accepts that frame only while this request is pending (one per room; `409 already_decided` while one is), once, with exactly the requested names, else `setup.runner_refused {reason: "credentials"}`; the pipeline id is the room's, never the runner's; names and the pipeline id are validated before any path is built; each value is written through an `os.Root` at `PIPEROOM_SECRETS_DIR` (no symlink followed) as `<pipeline_id>/<name>`, 0600, temp file then rename; then `setup.credentials_registered {pipeline_id, names, runner_label}`. A refusal on the terminal is `setup.runner_refused {reason: "credentials"}` |
 | POST | `/api/rooms/{id}/setup/maintenance-window` | `{start, end}` | `Event` (`setup.maintenance_window`) | RFC 3339 times; `end − start` ≤ 4 h and `start` ≤ 24 h ahead, `end` in the future (`400 window_too_long`, `400 validation`). A T3 step whose guard row needs a window is created and executed only inside the latest window; a later window replaces it |
 | POST | `/api/rooms/{id}/setup/verify` | – | `202` | asks the server's ladder runner to run the verification ladder now (the person's equivalent of the agent's `setup_request_verification`); `409 no_runner` when no runner is paired; `409 already_decided` while a ladder run is in flight. Its outcome is `setup.verified`, written by the ladder runner only |
 | GET | `/api/pipelines` | – | rows gain `setup: {room_id, target, registered_at, watched_by}` | present for a pipeline a setup room registered (the owners.yaml `setup:` block); absent otherwise |
@@ -817,13 +822,18 @@ Runner → server: `pair {code | token}` (first), `hello {os, arch, label, tools
 protocol_version}` (only after the person confirmed the `welcome` on the runner's terminal), `result {id, ok,
 summary, data?, receipt, truncated?}`, `refused {id, op, reason, proposal_id?, step_index?}`, `resume {in_flight:
 [{id, proposal_id?, step_index, state: running | done, result?}]}` (first frame after a reconnect with a token),
-`credentials {pipeline_id, secrets: [{name, value}]}` (only after a `register_credentials` and the terminal `y`;
-the one frame that ever carries a secret value, written straight to `PIPEROOM_SECRETS_DIR`), `ping`/`pong`.
+`credentials {request_id, secrets: [{name, value}]}` (only after a `register_credentials` and the terminal `y`;
+the one frame that ever carries a secret value; the server accepts it only while a `register_credentials` with
+that `request_id` is pending for the runner's room, once per request, with exactly the requested names, and
+refuses anything else as `setup.runner_refused {reason: "credentials"}`; the pipeline id is the room's, never the
+runner's; names and the pipeline id are validated before any path is built; each value is written through an
+`os.Root` at `PIPEROOM_SECRETS_DIR`, no symlink followed, as `<pipeline>/<name>` 0600, temp file then rename),
+`ping`/`pong`.
 
 Server → runner: `welcome {room_id, title, pipeline_id, tenant?, creator, protocol_version, targets?}` (what the
 runner shows before asking `y/N`), `token {token, expires_at}` (after `hello` and after every reconnect; idle expiry
 30 min), `op {id, op, params, tier, class, deadline, proposal_id?, step_index, params_hash?, proposal?}`, `cancel
-{id}`, `register_credentials {pipeline_id, names}`, `secret {name, value}` (one value the driver typed in the UI,
+{id}`, `register_credentials {request_id, pipeline_id, names}` (one pending per room), `secret {name, value}` (one value the driver typed in the UI,
 stored nowhere on the server), `ping`/`pong`.
 
 Rules: ping every 20 s, a runner silent 90 s is `setup.runner_lost`; a `protocol_version` other than

@@ -1,6 +1,8 @@
 package config_test
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -131,5 +133,21 @@ func TestLoadSetupVariables(t *testing.T) {
 	}
 	if _, err := config.ParseSetup(c); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A Config logged by value shows no secret: the pairing code, the OIDC client
+// secret and the database URLs stay out of every log line.
+func TestConfigLogValueHidesSecrets(t *testing.T) {
+	c := config.Config{SetupCode: "ABCD2345", OIDCClientSecret: "oidc-s3cret", RoomDBURL: "postgres://u:dbpass@h/db", SetupServerURL: "https://piperoom.acme"}
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("start", "cfg", c, "ptr", &c)
+	for _, s := range []string{"ABCD2345", "oidc-s3cret", "dbpass"} {
+		if strings.Contains(buf.String(), s) {
+			t.Errorf("log line shows %q: %s", s, buf.String())
+		}
+	}
+	if !strings.Contains(buf.String(), "redacted") {
+		t.Errorf("log line = %s", buf.String())
 	}
 }
