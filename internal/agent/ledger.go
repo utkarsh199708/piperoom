@@ -32,6 +32,13 @@ type stepLedger struct {
 	// background is the text the model was given up front (alert, pipeline map),
 	// lower-cased once. A term in it needs no step to back it (see groundTerms).
 	background string
+
+	// scanNames, flagged and cited serve the echo guard (echoguard.go):
+	// the names ScanNames looks for in a read, the reads injectscan flagged
+	// by step id, and the steps the latest hypothesis cites.
+	scanNames []string
+	flagged   map[string]flaggedRead
+	cited     []string
 }
 
 // stepFact is what the ledger keeps of one step.
@@ -94,6 +101,7 @@ func (l *stepLedger) evictOldest() {
 			continue
 		}
 		delete(l.steps, id)
+		delete(l.flagged, id)
 		l.order = append(l.order[:i], l.order[i+1:]...)
 		return
 	}

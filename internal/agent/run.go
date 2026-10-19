@@ -179,6 +179,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	steps := newStepLedger()
 	steps.seedTriage(alert.Triage)
 	steps.setBackground(alertBackground(alert))
+	steps.setScanNames(scanNamesFor(deps, alert.PipelineMap))
 	return &runner{
 		alert:     alert,
 		kind:      kind,
