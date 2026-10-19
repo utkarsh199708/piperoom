@@ -322,8 +322,9 @@ scenario.
 
 **C. Contract impact (the same separate leads PR as the Strimzi design's §11 C-list):**
 
-- **C1, `CONNECT_KIND`.** `config.go` gains `ConnectKind string // CONNECT_KIND: rest (default) | msk | confluent`
-  (folding msk.md PR 2's stalled `msk` into one enum; `strimzi` later per the Strimzi design's D4) with the msk.md
+- **C1, `CONNECT_KIND`.** `config.go` gains `ConnectKind string // CONNECT_KIND: rest (default) | msk | confluent
+  | aiven` (folding msk.md PR 2's stalled `msk` into one enum; `aiven` is the `read_only`-token status client of
+  D9; `strimzi` later per the Strimzi design's D4) with the msk.md
   §5.2 `MSK_CONNECT_*` variables; **no** server-wide `CONFLUENT_*` variables. `tenancy.md` §3.2 gains the
   per-pipeline keys `connect_kind` (literal), `ccloud_api_key`, `ccloud_api_secret` (`file:` only), and the loader
   refuses `connect_kind: confluent` without both. The client packages are C21's (board); the wiring line is A4's,

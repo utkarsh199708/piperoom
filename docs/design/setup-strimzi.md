@@ -1,4 +1,4 @@
-# Setup on Kubernetes with Strimzi: design (U12-0; main @ `2681f65b`, 2026-10-19; rev 3 after the #660 reviews)
+# Setup on Kubernetes with Strimzi: design (U12-0; main @ `2681f65b`, 2026-10-19; rev 4 after the #660 reviews)
 
 Owner: LEAD-ARCH. Parent design: `docs/design/setup-agent.md` (the runner, tiers T0–T3, `os.Root`, the
 `Credentials` frame); plan: `docs/product/setup-2026-10.md` (§4 row U12, §7 item 1: Strimzi is last by the measured
@@ -12,7 +12,14 @@ wins.
 of this row (parent §4 item 7) lands in **one separate leads PR, "U12-0/U13-0 contracts"**, merged before U12a, U13a
 and U13c start; the board marks U12-0 done only when that PR merges. §12 lists the decisions the owner makes.
 
-**Rev 3** answers the round-2 review (R1): the runner has **no `create` at all**. The chart pre-creates every
+**Rev 4** answers round 3 (B1–B3): the runner writes a CR's `spec` with an RFC 6902 JSON patch (`replace` on
+`/spec`, `test` on `resourceVersion`), reads it back and requires byte-equality with the rendered spec before it
+unpauses, because a merge patch keeps fields the validator never saw (§5); the chart is **two releases**, a
+pipeline release that lives as long as the pipeline and a room release the close card uninstalls (§3, §8); RBAC
+bounds objects, not fields, so a `ValidatingAdmissionPolicy` is back as owner decision D11 (§4, §12); `delete` on
+`kafkaconnects` dropped; the push Secret and the metrics ConfigMap are chart-named; a `KafkaConnector` refuses every
+`${provider:}` reference but the one to `db-credentials`.
+**Rev 3** answered the round-2 review (R1): the runner has **no `create` at all**. The chart pre-creates every
 object the room will touch, the Strimzi CRs as shells annotated `strimzi.io/pause-reconciliation: "true"`; the
 runner patches them by name and removes the annotation last; `get`, `watch` and `pods/log` are by `resourceNames`
 (StrimziPodSet pod names are deterministic, §4). The pause annotation is verified for all five kinds (§2), so no
@@ -34,7 +41,8 @@ floor** raised to the **class** of the resolved target; an executed artifact is 
 | `kubectl` vs the API | the **Kubernetes API over `net/http`** with the mounted ServiceAccount token, no `kubectl` in the image, no `client-go` module (§5; a conflict with board U12a, §11) |
 | Manifest allow-list | `k8s_apply` renders six kinds from templates as **patches of chart-created shells**; a field allow-list per kind; everything that touches the pod, a user's password source or ACLs beyond the pipeline's own names is refused (§6) |
 | Tiers | reads T0; every write in a namespace is at least T2 (a namespace is a shared system); T3 when the context, namespace or cluster matches `PIPEROOM_SETUP_PROD_PATTERNS` or the person said so (§7) |
-| Rollback | patch each shell back to empty and re-pause it, in reverse order; `KafkaConnector` and `KafkaTopic` are deleted by name; the built image stays in the registry and the card says so; the close card gives `helm uninstall` (§8) |
+| Rollback | patch each shell back to empty and re-pause it, in reverse order; `KafkaConnector` and `KafkaTopic` are deleted by name; the built image stays in the registry and the card says so; the close card uninstalls the **room release only**; the rollback card also names the pipeline release for the person to uninstall (§3, §8) |
+| Server-side field bound | RBAC bounds objects, not fields; a chart-shipped `ValidatingAdmissionPolicy` pins `spec.image`, `spec.template`, `spec.externalConfiguration`, a `KafkaUser`'s password source and `cluster` ACLs on the room's named objects; owner decision D11, recommended required for the `production` class (§4, §12) |
 
 ## 2. Strimzi versions and how the runner detects them
 
@@ -55,8 +63,9 @@ Kubernetes ≥ 1.32; the newest entries are 1.4.0 (Kafka 4.2.x, 4.3.x). Release 
 `createOrUpdate` is skipped), `KafkaConnector` in `KafkaConnectAssemblyOperator` (status updated, connector not
 touched), `KafkaUser` in `UserControllerLoop` (paused status, nothing done), `KafkaTopic` in `TopicOperatorUtil.isPaused`
 (0.24.0 for the old operator, 0.38.0 for the unidirectional one). So the chart can pre-create every CR as a paused
-shell and no `ValidatingAdmissionPolicy` is needed; a policy stays an optional hardening a cluster admin may add
-(it would also pin `spec.image` and `spec.template` server-side), not an owner decision.
+shell for every kind, and no kind needs a fallback mechanism for the pause itself. A `ValidatingAdmissionPolicy`
+is a different matter: it is the only **server-side bound on fields** (RBAC bounds objects, §4), needs
+cluster-admin to install, and is owner decision D11 (§12).
 
 **Supported:** Strimzi **1.0.0 and newer**, every CR at `kafka.strimzi.io/v1`: `Kafka`, `KafkaNodePool` (read
 only), `KafkaConnect`, `KafkaConnector`, `KafkaTopic`, `KafkaUser`. Strimzi 0.49.x serves `v1` too and works, but is
@@ -86,13 +95,13 @@ authenticated principal may read):
 
 ## 3. The in-cluster runner Job
 
-The Helm chart (C1, U12c) renders, with `setup.runner.enabled=true`, `setup.runner.room=<room>`,
-`setup.runner.pipeline=<pipeline>`, `setup.runner.kafka=<kafka>`, `setup.runner.connectors=[...]` (the provisional
-pipeline's connector names) and `setup.runner.namespace=<ns>`:
+The Helm chart (C1, U12c) is installed as **two releases** in `<ns>` (B2), because the objects a setup creates
+outlive the room that created them:
 
-- a `ServiceAccount` `piperoom-setup-<room>` in `<ns>`;
-- the `Role` and `RoleBinding` of §4;
-- **every object the runner will touch, pre-created** (R1), with names fixed at chart time:
+**The pipeline release, `piperoom-pipeline-<pipeline>`** (`setup.pipeline.enabled=true`, values
+`setup.pipeline.id=<pipeline>`, `setup.pipeline.kafka=<kafka>`, `setup.pipeline.connectors=[...]`, the provisional
+pipeline's connector names). It lives as long as the pipeline, is owned by the person, is never uninstalled by a
+setup card, and holds **every object the runner will touch, pre-created** (R1), with names fixed at chart time:
   - the Strimzi CRs as **paused shells**, each with `metadata.annotations["strimzi.io/pause-reconciliation"]:
     "true"` and the smallest `spec` the `v1` schema accepts (`.spec` is required in `v1`): `KafkaConnect`
     `<pipeline>-connect`; one `KafkaConnector` per listed connector name (label `strimzi.io/cluster:
@@ -102,11 +111,25 @@ pipeline's connector names) and `setup.runner.namespace=<ns>`:
     half-written spec is never reconciled;
   - the `Secret` `<pipeline>-db-credentials` (empty, `type: Opaque`; a Secret's `type` is immutable, so no later
     patch can turn it into a `kubernetes.io/service-account-token` Secret), the `ConfigMap`
-    `<pipeline>-connect-logging` (empty), and the `Role`/`RoleBinding` `<pipeline>-connect-secrets` (one rule:
-    `get` on `secrets` with `resourceNames: [<pipeline>-db-credentials]`, bound to the Connect pods'
-    ServiceAccount `<pipeline>-connect-connect`, the name `KafkaConnectResources.serviceAccountName` gives
-    (`<KafkaConnect name>-connect`, verified); the runner never touches RBAC);
-- a `Job` `piperoom-setup-<room>` in `<ns>`: the Piperoom image (it ships `piperoom-setup`, U1-22), one container,
+    `<pipeline>-connect-logging` (empty), the `ConfigMap` `<pipeline>-connect-metrics` (the JMX exporter rules,
+    **fixed content**, never patched), and the `Role`/`RoleBinding` `<pipeline>-connect-secrets` (one rule: `get`
+    on `secrets` with `resourceNames: [<pipeline>-db-credentials]`, bound to the Connect pods' ServiceAccount
+    `<pipeline>-connect-connect`, the name `KafkaConnectResources.serviceAccountName` gives (`<KafkaConnect
+    name>-connect`, verified); the runner never touches RBAC);
+  - **not in the chart, created by the person** with their own `kubectl` because it holds a credential: the
+    registry push Secret `<pipeline>-registry-push` (`kubectl create secret docker-registry ...`), the only
+    `pushSecret` name the `KafkaConnect` template accepts; the runner has no verb on it (Strimzi's build pod mounts
+    it, the runner never reads it);
+  - optionally the `ValidatingAdmissionPolicy` and its binding of D11 (cluster-scoped, so a separate value
+    `setup.pipeline.admissionPolicy=true` that needs cluster-admin at install).
+
+**The room release, `piperoom-setup-<room>`** (`setup.runner.enabled=true`, values `setup.runner.room=<room>`,
+`setup.runner.pipeline=<pipeline>`, `setup.runner.kafka=<kafka>`, `setup.runner.connectors=[...]`), which the
+close card uninstalls and nothing else depends on:
+
+- a `ServiceAccount` `piperoom-setup-<room>`;
+- the runner `Role` and `RoleBinding` of §4;
+- a `Job` `piperoom-setup-<room>`: the Piperoom image (it ships `piperoom-setup`, U1-22), one container,
   `args: ["--server", "<PIPEROOM_PUBLIC_URL>", "--code-file", "/var/run/piperoom/pairing/code",
   "--confirm-secret-prefix", "piperoom-setup-<room>-confirm", "--project", "/work"]`, `restartPolicy: Never`,
   `backoffLimit: 0`, `activeDeadlineSeconds: 7200` (longer than the 45 min plan wall clock plus the ladder's waits,
@@ -124,13 +147,16 @@ line, and `command` in the `POST /api/setup` response carries them joined by `\n
 through `setup.pipeline_extended` has no shell and no RBAC name: the card says "redeploy the Job with the new
 connector list" (`helm upgrade` with the new value; the shells of existing names are untouched).
 
-**Teardown.** `ttlSecondsAfterFinished` removes the Job only. The ServiceAccount, Role, RoleBinding and the
-pre-created objects outlive the room, so the room's close card and the rollback card both give
-`helm uninstall piperoom-setup-<room> -n <ns>`. The leftover Role holds no `create` at all and reaches only the
-chart's own objects by name, so the window between close and uninstall grants nothing beyond patching those.
-`helm uninstall` deletes the CRs: the Topic Operator then deletes the canary topic and the User Operator the two
-users, which is the intended end state; the **pipeline's** `KafkaConnect` and `KafkaConnector` would go too, so the
-chart marks them `helm.sh/resource-policy: keep` and the close card lists the four objects that stay.
+**Teardown.** `ttlSecondsAfterFinished` removes the Job only; the room release's ServiceAccount, Role and
+RoleBinding outlive the room, so the **close card** gives `helm uninstall piperoom-setup-<room> -n <ns>` and
+nothing else: that release holds no object the running pipeline needs. The leftover Role holds no `create` at all
+and reaches only the pipeline release's objects by name, so the window between close and uninstall grants nothing
+beyond patching those. The pipeline release (the Connect user the running Connect cluster authenticates as, the
+watcher's user, `db-credentials` that the connectors read through the config provider, the connect-secrets Role,
+the ConfigMaps, the shells that are now the live CRs) is **never** named on the close card; the **rollback card**
+names it (`helm uninstall piperoom-pipeline-<pipeline> -n <ns>`) as the person's last step after the runner's
+rollback ops (§8), since uninstalling it makes the Topic Operator delete the canary topic and the User Operator the
+two users.
 
 **Pairing hijack.** Anyone with `get` on Secrets in the namespace can read the pairing code and pair first; the
 real Job then fails with `bad_code`, but the room shows an attached runner. The room therefore shows the runner's
@@ -143,11 +169,18 @@ The code is never in a manifest, a Helm value or an environment variable (enviro
 describe` and in every pod inspection). The person runs, on their own machine, with their own `kubectl`:
 
 ```
+kubectl -n <ns> create secret docker-registry <pipeline>-registry-push --docker-server=... --docker-username=... --docker-password-stdin
+helm upgrade --install piperoom-pipeline-<pipeline> piperoom/piperoom -n <ns> --set setup.pipeline.enabled=true \
+  --set setup.pipeline.id=<pipeline> --set setup.pipeline.kafka=<kafka> --set 'setup.pipeline.connectors={<name>,...}'
 kubectl -n <ns> create secret generic piperoom-setup-<room>-pairing --from-literal=code=<CODE>
 helm upgrade --install piperoom-setup-<room> piperoom/piperoom -n <ns> --set setup.runner.enabled=true \
   --set setup.runner.room=<room> --set setup.runner.pipeline=<pipeline> --set setup.runner.kafka=<kafka> \
   --set 'setup.runner.connectors={<name>,...}' ...
 ```
+
+(The first two lines are skipped when the pipeline release already exists, as on a second room for the same
+pipeline; `--docker-password-stdin` is **unverified** as a `kubectl` flag and the page shows `--docker-password`
+read from an environment variable if it does not exist.)
 
 (`--from-literal` keeps the code out of files; `--from-file=code=/dev/stdin` is the alternative the page shows for
 shells with history.) The runner reads `/var/run/piperoom/pairing/code` once, sends `Pair{Code}`, and **deletes the
@@ -238,9 +271,8 @@ rules:
 - apiGroups: [kafka.strimzi.io]
   resources: [kafkaconnects]
   resourceNames: [<pipeline>-connect]
-  verbs: [get, watch, patch, delete]               # patch: fill the shell, remove the pause annotation; delete: never
-                                                   # used by an op (helm owns it); listed so rollback's re-pause patch
-                                                   # is the only write and a future op cannot gain delete silently
+  verbs: [get, watch, patch]                       # patch: fill the shell, remove the pause annotation, re-pause on
+                                                   # rollback; no delete (helm deletes with the person's credentials)
 - apiGroups: [kafka.strimzi.io]
   resources: [kafkaconnectors]
   resourceNames: [<each connector name of setup.runner.connectors>]
@@ -268,6 +300,10 @@ rules:
   resources: [configmaps]
   resourceNames: [<pipeline>-connect-logging]
   verbs: [get, patch]                              # the chart's ConfigMap; the only ConfigMap template (log4j levels)
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [<pipeline>-connect-metrics]
+  verbs: [get]                                     # fixed content from the chart; read so the preview can confirm it exists
 - apiGroups: [""]
   resources: [pods]
   resourceNames: [<pipeline>-connect-connect-0, <pipeline>-connect-connect-1, <pipeline>-connect-connect-2,
@@ -313,13 +349,23 @@ Why each line, and what is absent:
   the U12c `helm template` test asserts the Role's `verbs`, `resources` and `resourceNames` **exactly** against a
   golden file for a given room, pipeline, Kafka name and connector list, and that every CR shell carries the pause
   annotation.
-- **What RBAC cannot bound, and what does:** a `KafkaUser` patch is bounded by name, but its *content* (the
-  password source, the ACLs) is not: the §6 allow-list refuses `spec.authentication.password` (so the User Operator
-  always generates the password), ACLs on any resource but the pipeline's own topic prefix, the Connect cluster's
-  internal topics and group, and any `cluster` or `transactionalId` ACL; a `KafkaConnect` patch is bounded by name,
-  and the allow-list refuses `spec.image`, `spec.template` and every volume or mount, so the Connect pods can read
-  nothing the chart's `<pipeline>-connect-secrets` Role does not grant. A server that sends a hand-made spec is
-  refused by the validator before any request (parent §7 "malicious server").
+- **The residual, stated plainly: RBAC bounds objects, not fields.** Against a malicious *server* the runner's
+  validator (§6) holds: a hand-made spec is refused before any request. Against a **compromised or buggy runner**
+  (its image, a dependency) the validator is gone, and the RBAC above still lets such a runner (1) patch its own
+  `<pipeline>-connect` with `spec.image` or `spec.template.pod.volumes` mounting any Secret in the namespace and
+  read the result through `pods/log` on `<pipeline>-connect-connect-0`, which is allowed by name: every Secret in
+  the namespace; (2) patch its own `<pipeline>-connect` `KafkaUser` with `authentication.password.valueFrom.
+  secretKeyRef` pointing at `<pipeline>-db-credentials`, whose content it controls, plus a `cluster` `All` ACL: a
+  Kafka superuser. The only server-side bound on *fields* is a `ValidatingAdmissionPolicy` (GA in Kubernetes
+  1.30) shipped by the chart and bound to the room's named objects: `KafkaConnect` without `spec.image`,
+  `spec.template` and `spec.externalConfiguration`, `spec.build.output.pushSecret` equal to
+  `<pipeline>-registry-push`; `KafkaUser` without `spec.authentication.password` and without `cluster` or
+  `transactionalId` ACLs. It needs cluster-admin at install, so it is owner decision **D11** (§12): recommended
+  opt-in, and **required for the `production` class** (the room refuses to run T2 steps on a production target
+  until `env_detect` finds the policy bound: `GET /apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings/<name>`
+  is cluster-scoped and readable by every authenticated principal in the default RBAC, **unverified**; if not, the
+  person confirms its presence on the card). Without it, the trust in the runner image is the trust in the
+  pipeline release's objects.
 - `events` `list` is the one namespace-wide read: Kubernetes events cannot be scoped by `resourceNames`, and
   `k8s_events` is the only way to see why a pod is `Pending` or a build `ImagePullBackOff`. Residual: event messages
   of other objects in the namespace are readable (object names, reasons, messages; never data). If a pilot refuses
@@ -348,17 +394,35 @@ the image would have to ship and pin it, `kubectl apply` reads files the runner 
 ladder's predicates need. Every op below is one or two HTTP requests whose receipt is `SetupReceipt{Kind: "http",
 Target: "<method> <path>"}` with the response body's MAC; the `Argv` field stays empty.
 
-**Patches, not server-side apply.** Helm created the shells and is their field manager; a server-side apply from
-the runner with `force=false` would conflict on every field Helm set (the pause annotation, the minimal spec), and
-`force=true` would silently take ownership. The runner therefore sends `PATCH` with
-`Content-Type: application/merge-patch+json` whose body is the full rendered `spec` (a merge patch replaces the
-`spec` subtree, so the validator's view of the rendered object is what the API server stores) and, as a separate
-final request on each object, a merge patch setting `metadata.annotations["strimzi.io/pause-reconciliation"]`
-to `null`. The preview is the same merge patch with `?dryRun=All`: the API server validates it against the CRD
-schema and returns the object as it would be stored, which the preview diffs against the shell. The U12a unit tests
-run against an `httptest` API server that serves discovery, the named CRs and `pods/log`, with table cases for 401,
-403 (a name the Role does not list), 404, 409 (`resourceVersion` conflict on a patch), 422 (the schema rejects a
-field), 429 (`Retry-After` honoured once) and a cut body.
+**JSON patch with a `resourceVersion` test, then read-back equality, then unpause (B1).** Helm created the shells
+and is their field manager; a server-side apply from the runner with `force=false` would conflict on every field
+Helm set, and `force=true` would silently take ownership. A JSON **merge** patch (RFC 7386) is wrong too: it merges
+objects recursively, so a key already on the shell (from the chart's minimal spec, a later chart version, or anyone
+with `patch` on the shell while it sat paused: `spec.template`, `spec.image`, `spec.externalConfiguration`,
+`spec.rack`, `spec.tracing`, an extra `config.providers.*`) would survive the runner's patch, be reconciled at
+unpause, and never be seen by the validator. The runner therefore writes every CR in three requests:
+
+1. `PATCH .../<plural>/<name>` with `Content-Type: application/json-patch+json` (RFC 6902) and the body
+   `[{"op":"test","path":"/metadata/resourceVersion","value":"<rv from the preceding GET>"},
+   {"op":"replace","path":"/spec","value":<the rendered spec>}]`: `replace` swaps the **whole** `spec` subtree,
+   and `test` makes the write race-free (a 409 if anyone changed the object since the GET; the step is retried
+   once from a fresh GET and then fails).
+2. `GET` the object and **require the stored `spec` to equal the rendered `spec` exactly**, after normalising the
+   server's defaults: the preview's `dryRun=All` response of the same JSON patch is the normalised form the
+   comparison uses, so a default the CRD schema adds does not count as a difference, and any other difference
+   (a field that is in the stored spec and not in the rendered one, or a different value) fails the step before
+   anything can be reconciled.
+3. `PATCH` with another JSON patch: `test` on the `resourceVersion` the GET of step 2 returned, then `remove` of
+   `/metadata/annotations/strimzi.io~1pause-reconciliation` (the `~1` escapes the slash); a 409 here means someone
+   changed the object between the equality check and the unpause, and the step fails rather than unpausing.
+
+The preview is step 1 with `?dryRun=All`: the API server validates the patch against the CRD schema and returns
+the object as it would be stored; the preview shows that object's `spec` in full (not a diff against the shell,
+which would hide fields present in both). The U12a unit tests run against an `httptest` API server that serves
+discovery, the named CRs and `pods/log`, with table cases for 401, 403 (a name the Role does not list), 404, 409
+(a failed `resourceVersion` test on step 1 and on step 3), 422 (the schema rejects a field), 429 (`Retry-After`
+honoured once), a cut body, and **a shell pre-seeded with `spec.template` (and, separately, `spec.image` and an
+extra `config.providers` key) that must be refused at step 2 and never unpaused**.
 
 Ops (tier floor in brackets):
 
@@ -369,9 +433,9 @@ Ops (tier floor in brackets):
 | `k8s_events {involved}` [T0] | `GET .../events?fieldSelector=involvedObject.name=<name>` with `name` one of the chart-fixed names | 100 newest, capped, redacted, injection-scanned on the server |
 | `k8s_logs {pod, container?, tail?}` [T0] | `GET .../pods/<pod>/log?tailLines=200&container=` | `pod` one of the four names of §4; 200 lines, 64 KiB, newest last |
 | `strimzi_build_status` [T0] | `GET .../kafkaconnects/<pipeline>-connect` → `status.conditions`, `status.connectorPlugins[]`, the build pod's phase and, on failure, its log tail | Kaniko (Kubernetes) or Buildah (OpenShift) output is untrusted text |
-| `k8s_apply {kind, template, params}` [T2] | preview: `PATCH .../<plural>/<name>?dryRun=All` (merge patch of `spec`); execute: the same without `dryRun`, then the annotation patch | the name is the template's, never a param; for `Secret` and `ConfigMap` the patch fills `stringData`/`data`; the unpause patch is sent only after the spec patch returned 200 |
-| `k8s_secret_apply {keys}` [T2] | the merge-patch path on `secrets/<pipeline>-db-credentials` | values are `${secret:<name>}` references materialised on the runner into `stringData`; the preview shows key names only |
-| `k8s_unapply {kind}` [T2] | merge patch: the pause annotation back to `"true"`, then `spec` back to the shell's | rollback of `KafkaConnect` and `KafkaUser` (the objects stay; `helm uninstall` removes them) |
+| `k8s_apply {kind, template, params}` [T2] | preview: the JSON patch of step 1 with `?dryRun=All`; execute: steps 1–3 above | the name is the template's, never a param; for `Secret` and `ConfigMap` the JSON patch `replace`s `/stringData` or `/data` (no pause step; read-back equality still applies) |
+| `k8s_secret_apply {keys}` [T2] | the JSON-patch path on `secrets/<pipeline>-db-credentials` | values are `${secret:<name>}` references materialised on the runner into `stringData`; the preview shows key names only; the read-back compares key names (the server stores `data`, base64) |
+| `k8s_unapply {kind}` [T2] | JSON patch with the `resourceVersion` test: `add` the pause annotation back as `"true"`, then `replace` `/spec` with the shell's | rollback of `KafkaConnect` and `KafkaUser` (the objects stay; the person's `helm uninstall` of the pipeline release removes them) |
 | `k8s_delete {kind, name}` [T2] | `DELETE .../<plural>/<name>` with `propagationPolicy=Foreground` | rollback of `KafkaConnector` and `KafkaTopic` only; by RBAC only the names of §4 |
 | `k8s_wait {kind, name, condition, timeout}` [T0] | `GET` polling every 5 s, or `watch=true` with `fieldSelector=metadata.name=<name>` and `resourceVersion` | Ready, or a connector `status.connectorStatus.connector.state`; ends at the op deadline |
 
@@ -387,8 +451,8 @@ forbidden field such as `spec.image` or add a volume, since the rendered spec ne
 
 | Kind (`kafka.strimzi.io/v1` unless noted) | Template | Fields the runner may set | Always refused |
 |---|---|---|---|
-| `KafkaConnect` | `connect` | `metadata.annotations["strimzi.io/use-connector-resources"]="true"` (fixed; the pause annotation is removed by `k8s_apply`'s last request, never set by a template), `spec.replicas` (1–3), `spec.version` (equal to the Kafka CR's `status.kafkaVersion` major.minor, or absent), `spec.bootstrapServers` (from the Kafka CR's listener status only), `spec.tls.trustedCertificates[0]` (`{secretName: <kafka>-cluster-ca-cert, pattern: "*.crt"}`), `spec.authentication` (`type: tls` with `certificateAndKey` from the `<pipeline>-connect` KafkaUser's Secret, or `type: scram-sha-512` with `passwordSecret` from it; no other Secret name), `spec.config` under a key allow-list (`group.id`, `offset.storage.topic`, `config.storage.topic`, `status.storage.topic`, the three `*.replication.factor` (−1 or 1–3), `key.converter`, `value.converter`, `*.converter.schemas.enable`, `*.converter.schema.registry.url` (a registered target), `config.providers: secrets`, `config.providers.secrets.class: io.strimzi.kafka.KubernetesSecretConfigProvider`), `spec.build.output` (`type: docker`, `image: <registry>/<repo>:piperoom-<pipeline>-<plugins digest>`, `pushSecret`; the registry host must be an `Env.Targets` entry of kind `image_registry`, §11 C5), `spec.build.plugins[]` (name and artifacts **only from the knowledge index**: `type: tgz`/`jar`/`zip` with `url` on `PIPEROOM_SETUP_PLUGIN_HOSTS` and the index's `sha512sum`; `type: maven` only if the owner decides so, §12 D10, since Strimzi's maven artifact type carries no checksum), `spec.resources` (requests and limits within `100m–2` CPU, `512Mi–4Gi` memory), `spec.logging` (`type: inline`, loggers from a level allow-list, or `type: external` naming `<pipeline>-connect-logging`), `spec.metricsConfig` (the template's JMX exporter ConfigMap only) | `spec.image` (the operator picks the image for `spec.version`; a user image means an unvalidated artifact), `spec.template` entirely (pod, container, `securityContext`, `hostPath`, `hostNetwork`, `serviceAccountName`, `initContainers`, **`volumes`, `volumeMounts`**, `env`, `tolerations`, `affinity`), **any Secret or ConfigMap reference other than the four named above** (the cluster CA, the Connect user's Secret, the logging ConfigMap, the metrics ConfigMap), `spec.externalConfiguration` (deprecated in Strimzi 0.44.0; whether it survived into the `v1` schema is unverified; refused either way), `spec.jvmOptions` other than `-Xms`/`-Xmx` within the resource limits, `spec.rack`, `spec.clientRackInitImage`, `spec.build.output.type: imagestream` (OpenShift, not in the matrix), `spec.build.resources`, any `config.providers.*.class` but the one above, any `config` key with `ssl.`, `sasl.`, `plugin.path`, `rest.`, `listeners`, `admin.`, `producer.`/`consumer.` prefixes, any `metadata.labels`/`annotations` beyond the one fixed annotation |
-| `KafkaConnector` | `connector` | `metadata.labels["strimzi.io/cluster"]` (`<pipeline>-connect`; the chart set it, the patch repeats it), `spec.class` (an `io.debezium.connector.*` class the knowledge index lists for the plugin), `spec.tasksMax` (1 for a Debezium source), `spec.config` (the source driver's `ConnectorConfig` after Q4a's validate, where every secret is `${secrets:<ns>/<pipeline>-db-credentials:<key>}`; `setup_config_help` keys for SMTs and sinks, U3), `spec.autoRestart` (`enabled: true, maxRestarts: 3`) | `spec.state`/`spec.pause` (lifecycle is a typed op through the Q5c actions over the remote Connect client, not a manifest edit), `spec.listOffsets`/`alterOffsets`, any config key that `actions.LooksSecret` matches with a literal value, a `${secrets:...}` reference to any Secret but `<pipeline>-db-credentials`, `connector.class` in `config` (it is `spec.class`), `database.hostname` not in `Env.Targets` |
+| `KafkaConnect` | `connect` | `metadata.annotations["strimzi.io/use-connector-resources"]="true"` (fixed; the pause annotation is removed by `k8s_apply`'s last request, never set by a template), `spec.replicas` (1–3), `spec.version` (equal to the Kafka CR's `status.kafkaVersion` major.minor, or absent), `spec.bootstrapServers` (from the Kafka CR's listener status only), `spec.tls.trustedCertificates[0]` (`{secretName: <kafka>-cluster-ca-cert, pattern: "*.crt"}`), `spec.authentication` (`type: tls` with `certificateAndKey` from the `<pipeline>-connect` KafkaUser's Secret, or `type: scram-sha-512` with `passwordSecret` from it; no other Secret name), `spec.config` under a key allow-list (`group.id`, `offset.storage.topic`, `config.storage.topic`, `status.storage.topic`, the three `*.replication.factor` (−1 or 1–3), `key.converter`, `value.converter`, `*.converter.schemas.enable`, `*.converter.schema.registry.url` (a registered target), `config.providers: secrets`, `config.providers.secrets.class: io.strimzi.kafka.KubernetesSecretConfigProvider`), `spec.build.output` (`type: docker`, `image: <registry>/<repo>:piperoom-<pipeline>-<plugins digest>`, `pushSecret: <pipeline>-registry-push` (fixed; the Secret the person created, §3); the registry host must be an `Env.Targets` entry of kind `image_registry`, §11 C5), `spec.build.plugins[]` (name and artifacts **only from the knowledge index**: `type: tgz`/`jar`/`zip` with `url` on `PIPEROOM_SETUP_PLUGIN_HOSTS` and the index's `sha512sum`; `type: maven` only if the owner decides so, §12 D10, since Strimzi's maven artifact type carries no checksum), `spec.resources` (requests and limits within `100m–2` CPU, `512Mi–4Gi` memory), `spec.logging` (`type: inline`, loggers from a level allow-list, or `type: external` naming `<pipeline>-connect-logging`), `spec.metricsConfig` (`type: jmxPrometheusExporter`, `valueFrom.configMapKeyRef` to the chart's `<pipeline>-connect-metrics` only) | `spec.image` (the operator picks the image for `spec.version`; a user image means an unvalidated artifact), `spec.template` entirely (pod, container, `securityContext`, `hostPath`, `hostNetwork`, `serviceAccountName`, `initContainers`, **`volumes`, `volumeMounts`**, `env`, `tolerations`, `affinity`), **any Secret or ConfigMap reference other than the five named above** (the cluster CA `<kafka>-cluster-ca-cert`, the Connect user's Secret `<pipeline>-connect`, the push Secret `<pipeline>-registry-push`, the logging and the metrics ConfigMaps), `spec.tracing`, `spec.externalConfiguration` (deprecated in Strimzi 0.44.0; whether it survived into the `v1` schema is unverified; refused either way), `spec.jvmOptions` other than `-Xms`/`-Xmx` within the resource limits, `spec.rack`, `spec.clientRackInitImage`, `spec.build.output.type: imagestream` (OpenShift, not in the matrix), `spec.build.resources`, any `config.providers.*.class` but the one above, any `config` key with `ssl.`, `sasl.`, `plugin.path`, `rest.`, `listeners`, `admin.`, `producer.`/`consumer.` prefixes, any `metadata.labels`/`annotations` beyond the one fixed annotation |
+| `KafkaConnector` | `connector` | `metadata.labels["strimzi.io/cluster"]` (`<pipeline>-connect`; the chart set it, the patch repeats it), `spec.class` (an `io.debezium.connector.*` class the knowledge index lists for the plugin), `spec.tasksMax` (1 for a Debezium source), `spec.config` (the source driver's `ConnectorConfig` after Q4a's validate, where every secret is `${secrets:<ns>/<pipeline>-db-credentials:<key>}`; `setup_config_help` keys for SMTs and sinks, U3), `spec.autoRestart` (`enabled: true, maxRestarts: 3`) | `spec.state`/`spec.pause` (lifecycle is a typed op through the Q5c actions over the remote Connect client, not a manifest edit), `spec.listOffsets`/`alterOffsets`, any config key that `actions.LooksSecret` matches with a literal value, **any `${<provider>:...}` reference whatsoever other than `${secrets:<ns>/<pipeline>-db-credentials:<key>}`** (so `${strimzienv:}`, `${strimzifile:}`, `${strimzidir:}`, `${file:}`, `${env:}` and a `${secrets:}` to another Secret are all refused, even though the template leaves only the `secrets` provider on: one line against a template regression), `connector.class` in `config` (it is `spec.class`), `database.hostname` not in `Env.Targets` |
 | `KafkaUser` | `connect-user`, `read-user` | `metadata.labels["strimzi.io/cluster"]` (`<kafka>`), `spec.authentication.type` (`tls` or `scram-sha-512`, whichever the Kafka listener uses), `spec.authorization` (`type: simple`; **ACLs only from a fixed table per template, every resource the pipeline's own**: the Connect user gets `Create`, `Describe`, `Read`, `Write` on topics with prefix `<topic_prefix>.`, `Create`/`Describe`/`Read`/`Write` on the three internal topics `<pipeline>-connect-connect-{configs,offsets,status}` (literal), `Read`/`Describe` on group `<pipeline>-connect` (literal); the read user gets `Describe`, `Read`, `DescribeConfigs` on topics with prefix `<topic_prefix>.` and `Describe` on group `<pipeline>-connect`) | **`spec.authentication.password` (a `valueFrom.secretKeyRef` would let the runner choose the password; the User Operator always generates it)**, any ACL whose resource is not one of the names above (another prefix, a wildcard, a literal outside the pipeline), **any ACL of type `cluster` or `transactionalId`**, any operation outside the table (`Alter`, `Delete`, `AlterConfigs`, `ClusterAction`, `IdempotentWrite`, `All`), `type: tls-external`, `spec.quotas`, `spec.template` |
 | `KafkaTopic` | `canary-topic` | `metadata.labels["strimzi.io/cluster"]` (`<kafka>`), `spec.topicName` (`<topic_prefix>.<schema>.<canary table>`), `spec.partitions` (1), `spec.replicas` (≤ the broker count), `spec.config` (`cleanup.policy`, `retention.ms` only) | anything else; the op exists only because Strimzi clusters often run with `auto.create.topics.enable=false` and the Topic Operator owns topics; when auto-create is on the plan skips it and the shell stays paused |
 | `Secret` (core/v1), **patch of the chart's object** | `db-credentials` | `stringData` keys from the source driver's `ConnectorConfig` secret keys, values materialised from `${secret:}` | `type`, `data`, labels, annotations, ownerReferences, any other name |
@@ -445,7 +509,10 @@ running pods until the CR is deleted by `helm uninstall`, which the card gives, 
 registry: the card names the tag); `KafkaUser` → `k8s_unapply`; the db-credentials Secret and the logging
 ConfigMap → a patch back to empty. The source-side steps (publication, canary table, read role) roll back through
 their own ops as on Compose. A rollback never touches the `Kafka` CR. The Job then exits 0, the room closes
-`rolled back`, and the card gives `helm uninstall piperoom-setup-<room> -n <ns>`.
+`rolled back`, and the **rollback card** gives two commands in order: `helm uninstall piperoom-setup-<room> -n <ns>`
+(the room release) and `helm uninstall piperoom-pipeline-<pipeline> -n <ns>` (the pipeline release: the re-paused
+shells, the users, `db-credentials`, the ConfigMaps and the connect Role go with it; the registry push Secret the
+person created stays and the card names it). The **close card** of a successful setup gives only the first.
 
 ## 9. Verification and watching afterwards
 
@@ -482,10 +549,13 @@ for free on Strimzi:
 
 ## 10. Tests and sandbox
 
-- **Unit (no cluster)**: the allow-list per field (§6, including the KafkaUser password source and ACL rows and the
-  KafkaConnect volume and Secret-reference rows), the ACL tables, the `argv`-free rule (no `os/exec` import in the
-  package, an AST test like `wiring/readonly_ast_test.go`), the API client against `httptest` (discovery, merge
-  patch with `dryRun=All`, the unpause patch ordering, the status codes of §5, token re-read, the 4 MB cap), the
+- **Unit (no cluster)**: the allow-list per field (§6, including the KafkaUser password source and ACL rows, the
+  KafkaConnect volume, push-Secret and Secret-reference rows and the KafkaConnector provider-reference row), the
+  ACL tables, the `argv`-free rule (no `os/exec` import in the package, an AST test like
+  `wiring/readonly_ast_test.go`), the API client against `httptest` (discovery, the JSON patch with `dryRun=All`,
+  the `resourceVersion` tests on steps 1 and 3, the read-back equality with a pre-seeded `spec.template`,
+  `spec.image` and extra `config.providers` key each refused before unpause, the status codes of §5, token
+  re-read, the 4 MB cap), the
   fingerprint flow with a fake API server and a fake Piperoom server (origin mismatch, pre-existing confirm Secret,
   early `creationTimestamp`, timeout, match), `k8s_get` and `k8s_logs` refusing any name outside the chart-fixed
   set before a request, `k8s_delete` refusing a kind outside `KafkaConnector`/`KafkaTopic`; in the chart, the
@@ -508,23 +578,27 @@ for free on Strimzi:
 **A. Conflicts with the board and the parent design (proposed amendments, carried by the leads' contracts PR):**
 
 - **A1, board U12a and parent §5 Strimzi row.** They say `kubectl` argv from typed params, `--dry-run=server` as
-  the preview, unit tests with a fake `kubectl` on `PATH`. This page: the Kubernetes API over `net/http`, merge
-  patches with `dryRun=All` as the preview, unit tests against an `httptest` API server, no `kubectl` in the image
-  (§5). Amend U12a's PR column and Done-when accordingly; the AST test becomes "no `os/exec` in the package".
+  the preview, unit tests with a fake `kubectl` on `PATH`. This page: the Kubernetes API over `net/http`, RFC 6902
+  JSON patches with `dryRun=All` as the preview and read-back equality before unpause, unit tests against an
+  `httptest` API server, no `kubectl` in the image (§5). Amend U12a's PR column and Done-when accordingly; the AST test becomes "no `os/exec` in the package".
 - **A2, board U12a and parent §2.5 table.** They allow `k8s_apply` kinds `KafkaConnect`, `KafkaConnector`, `Secret`,
   `ConfigMap` only, created by the runner. This page: `k8s_apply` is a patch of a chart-created shell, and adds
   `KafkaUser` (the Connect user and the watcher's read user) and `KafkaTopic` (the canary topic when auto-create is
   off) (§6). Amend both; `Role`/`RoleBinding` stay out of the runner.
 - **A3, ops not on any board row.** `k8s_delete`, `k8s_unapply`, `k8s_wait`, the `env_detect` Strimzi probes (§2),
   the KafkaUser Secret read of §9 and the `-confirm-*` Secret handling of §3.2 are new. Proposed: U12a gains
-  `k8s_unapply`, `k8s_delete`, `k8s_wait`, the confirm flow and the "patch, then unpause" ordering (+1.5 days, 4);
+  `k8s_unapply`, `k8s_delete`, `k8s_wait`, the confirm flow and the three-request write of §5 (JSON patch with the
+  `resourceVersion` test, read-back equality, unpause) with its pre-seeded-field tests (+1.5 days, 4);
   U12b gains the `KafkaUser` and `KafkaTopic` templates with the ACL and password-source rows and the Secret read
   (+0.5 day, 2.5).
-- **A4, board U12c (R1).** The chart pre-creates the SA, Role, RoleBinding, the empty `Opaque` Secret, the
-  ConfigMap, the `<pipeline>-connect-secrets` Role/RoleBinding **and every Strimzi CR as a paused shell** (values:
-  room, pipeline, Kafka name, connector list; `helm.sh/resource-policy: keep` on the pipeline's KafkaConnect and
-  KafkaConnectors); the golden-file Role test; the pause-annotation and `v1`-schema test of the shells; the kind
-  job's "no pods before unpause" and "403 outside the set" assertions (+1 day, 2.5).
+- **A4, board U12c (R1, B2, B3).** The chart becomes **two releases** (§3): the pipeline release
+  (`setup.pipeline.*`: every Strimzi CR as a paused shell, the empty `Opaque` Secret, the logging and metrics
+  ConfigMaps, the `<pipeline>-connect-secrets` Role/RoleBinding, and the optional D11 `ValidatingAdmissionPolicy`
+  and binding behind a cluster-admin value) and the room release (`setup.runner.*`: SA, runner Role, RoleBinding,
+  Job); the golden-file Role test; the pause-annotation and `v1`-schema test of the shells; a test that the room
+  release holds no pipeline-lifetime object and the pipeline release no runner RBAC; the kind job's "no pods before
+  unpause", "403 outside the set" and, with the policy installed, "a `spec.image` patch is denied by admission"
+  assertions (+1.5 days, 3).
 - **A5, parent §3.7 and the managed design §7.** The Strimzi Connect layer uses `unreachable_layers` (C8 below),
   not a `watched_by: local` variant.
 
@@ -555,6 +629,6 @@ for free on Strimzi:
 | D3 | U12-R sandbox | `kind` on the dev machine for the Linux real run **plus** one small managed cluster (EKS or GKE, one node pool) with an image registry the build can push to, owned like the plan §7 item 6 accounts | `kind` only (then "a real cluster" in U12-R's Done-when is dropped) |
 | D4 | Watching Connect on Strimzi | U12 requires an Ingress with basic auth for the Connect REST API, registered as a target; without it the Connect layer is `unreachable_layers` | fund a `CONNECT_KIND=strimzi` client (status from the `KafkaConnector` CR over the Kubernetes API with a read-only token on the server): a new config value and client package, after the first real run |
 | D10 | `maven` plugin artifacts | **refuse** `type: maven` in U12; only `tgz`/`jar`/`zip` artifacts with the index's `sha512sum` (the parent §2.5 rule holds) | allow `maven` with Maven Central as the trust root and the coordinates pinned in the index (no checksum; a documented exception to §2.5) |
+| D11 | Server-side field bound: a chart-shipped `ValidatingAdmissionPolicy` and binding (cluster-admin at install) pinning, on the room's named objects, `KafkaConnect` without `spec.image`/`spec.template`/`spec.externalConfiguration` and with `pushSecret == <pipeline>-registry-push`, `KafkaUser` without `spec.authentication.password` and without `cluster`/`transactionalId` ACLs (§4) | **opt-in, and required for the `production` class**: the room refuses T2 steps on a production target until the binding is found (or confirmed on the card) | always optional (the runner image is trusted as much as the namespace's Secrets); or always required (every pilot needs cluster-admin once at install) |
 
-(The numbering continues the managed design's D5–D9 so one owner reply can answer both pages. No decision is
-needed on an admission policy: every kind the room touches honours the pause annotation, §2.)
+(The numbering continues the managed design's D5–D9 so one owner reply can answer both pages.)
