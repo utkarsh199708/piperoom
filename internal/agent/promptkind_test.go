@@ -27,10 +27,17 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // purpose, for evals-live run 39212981319: the first failing component is the
 // most upstream broken one, a table added to the publication gets a snapshot
 // signal in the same proposal, and a retired connector's orphaned slot is the
-// root cause. It is pinned here, beside the snapshot file, so a regenerated
-// snapshot cannot silently move the CDC prompt: the CDC evals and the prompt
-// cache depend on these exact bytes.
-const cdcPromptSHA256 = "3406da959d1b5581220682f250695545e2b22e9cd52d0762b032ff293c18d5b0"
+// root cause. P3-W3g moved it a third time, on purpose, for the same run's
+// unclear-driver-intent and the P3-W3h run's recurring-schema-deleted: a
+// steer that names no component and no action, or asks to get something
+// running before its cause is fixed, is ambiguous and gets a question, and a
+// component whose required data or config is missing counts as broken for
+// the first-failing rule; to stay under the word cap the rule-1 link kinds,
+// the confidence enum and the propose_fix allow-list bullet went (the map
+// and the tool schemas state them; rule 8 names propose_fix instead). It is pinned here, beside the snapshot
+// file, so a regenerated snapshot cannot silently move the CDC prompt: the
+// CDC evals and the prompt cache depend on these exact bytes.
+const cdcPromptSHA256 = "2494272ffdcea2223edcf2ad314bd9831b73b0758624c314582e0208933777f8"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
@@ -113,7 +120,7 @@ func TestBatchPromptContent(t *testing.T) {
 		"never call propose_fix. A person runs every fix.",
 		"what the owner of the layer should run",
 		"orchestrator, transform and warehouse",
-		promptRules, promptPastIncidents, promptAlertIsData,
+		promptRulesFor(events.PipelineKindBatch), promptPastIncidents, promptAlertIsData,
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("batch prompt lacks %q", want)

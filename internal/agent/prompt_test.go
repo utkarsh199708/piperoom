@@ -38,7 +38,11 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// rules fit under it by cutting repeated wording. 1335 since P3-W2: the
 	// slot-drop rule's wording is the LEAD-ARCH ruling on #655, taken verbatim
 	// (1331 words), so it was not trimmed to fit. 1335 is a hard ceiling
-	// (LEAD-ARCH ruling on #659): P3-W2f's three rules fit by trimming.
+	// (LEAD-ARCH ruling on #659): P3-W2f's three rules fit by trimming, and so
+	// did P3-W3g's sharper ambiguous-steer rule and the missing-data clause of
+	// the first-failing rule (the rule-1 link kinds, the confidence enum and the
+	// propose_fix allow-list bullet went: the map and the tool schemas say them;
+	// rule 8 now names propose_fix).
 	if wc := len(strings.Fields(a)); wc > 1335 {
 		t.Fatalf("system prompt is %d words, over the 1335 limit", wc)
 	}
@@ -344,7 +348,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"what_changed", "pg_recent_ddl", "connect_status", "update_hypothesis", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "propose_fix", "pg_drop_replication_slot", "connect_update_connector_config", "pg_add_publication_table", "pg_snapshot_signal", "connect_config", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "pg_recent_ddl", "connect_status", "update_hypothesis", "propose_fix", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "pg_drop_replication_slot", "connect_update_connector_config", "pg_add_publication_table", "pg_snapshot_signal", "connect_config", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
@@ -397,9 +401,9 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 	for _, want := range []string{
 		"Postgres (WAL, slot) -> Debezium source connector in Kafka Connect -> Kafka topics -> consumers / sink connectors -> warehouse",
 		"Schema Registry is a dependency of connectors and consumers, not a stage",
-		`From the most downstream symptom, walk upstream links, both "from:" (data) and "depends on:", to the root cause`,
+		"From the most downstream symptom, walk upstream links to the root cause",
 		"Treat (unconfirmed) links as hypotheses to verify with tools",
-		"update_hypothesis must name the first failing component (the most upstream broken component, not the downstream symptom) and, separately, the root-cause component.",
+		"update_hypothesis must name the first failing component (the most upstream broken component, including one whose required data or config is missing, not the downstream symptom) and, separately, the root-cause component.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -419,7 +423,8 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		}
 	}
 
-	// The prompt's words for the map must be the words the map uses.
+	// The prompt's words for the map must be the words the map uses (the map
+	// itself names its link kinds, so the prompt no longer spells them out).
 	g := topology.Graph{
 		PipelineID: "p",
 		Nodes:      []topology.Node{{ID: "pg:t"}, {ID: "connect:c"}, {ID: "group:g"}, {ID: "sr:t-value"}},
@@ -711,7 +716,7 @@ func TestSystemPromptCarriesE5aPrinciples(t *testing.T) {
 		"Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (pg_replication_slots, connect_status, kafka_consumer_lag, warehouse_freshness); the pipeline map and list reads are summaries, not status reads",
 		"say the pipeline is healthy now and there is nothing to fix; put any earlier fault in the past tense",
 		"If no evidence names a cause, say in your closing message what you ruled out, what remains open and that the cause is not established; keep any hypothesis low, propose nothing",
-		"When a driver steer is ambiguous, ask one short question with post_message and propose nothing until they answer",
+		"is ambiguous: ask one short question with post_message and propose nothing until they answer",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -915,23 +920,49 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 	}
 }
 
-// TestSystemPromptCDCEvalFixes pins two CDC rules from evals-live run
+// TestSystemPromptCDCEvalFixes pins the CDC rules from evals-live run
 // 39212981319: a table added to the publication needs a backfill signal in the
-// same proposal (missed-table), and a retired connector's slot, not the stopped
-// connector, is the root cause (dead-slot-wal).
+// same proposal (missed-table), a retired connector's slot, not the stopped
+// connector, is the root cause (dead-slot-wal), a steer that names no
+// component and no action, or wants something running before its cause is
+// fixed, is ambiguous and gets a question (unclear-driver-intent, P3-W3g), and
+// a component whose required data or config is missing is broken even though
+// it answers requests, so Schema Registry with a deleted schema is the first
+// failing component, not the crash-looping consumer (recurring-schema-deleted,
+// the P3-W3h run). The batch prompt keeps its own wording of each.
 func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	prompt := systemPrompt()
+	batch := systemPromptFor(events.PipelineKindBatch)
 	for _, want := range []string{
 		"pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal",
 		"signal_table: signal.data.collection from connect_config",
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
+		"A driver steer that names no component and no action, or asks to get something running before its cause is fixed, is ambiguous: ask one short question with post_message and propose nothing until they answer.",
+		"the most upstream broken component, including one whose required data or config is missing, not the downstream symptom",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("CDC system prompt missing %q", want)
 		}
 	}
-	if strings.Contains(systemPromptFor(events.PipelineKindBatch), "pg_snapshot_signal") {
-		t.Error("batch prompt must not carry the CDC backfill rule")
+	for _, cdcOnly := range []string{
+		"pg_snapshot_signal",
+		"names no component and no action",
+		"including one whose required data or config is missing",
+	} {
+		if strings.Contains(batch, cdcOnly) {
+			t.Errorf("batch prompt must not carry the CDC rule %q", cdcOnly)
+		}
+	}
+	// The batch prompt keeps the shorter ambiguous-steer rule; the CDC one
+	// replaces it rather than adding a second bullet.
+	if !strings.Contains(batch, "When a driver steer is ambiguous, ask one short question with post_message and propose nothing until they answer.") {
+		t.Error("batch prompt lost its ambiguous-steer rule")
+	}
+	if strings.Contains(prompt, "When a driver steer is ambiguous") {
+		t.Error("CDC prompt carries both ambiguous-steer rules")
+	}
+	if n := strings.Count(prompt, "ask one short question with post_message"); n != 1 {
+		t.Errorf("CDC prompt has %d ambiguous-steer rules, want 1", n)
 	}
 }
 
