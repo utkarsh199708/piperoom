@@ -84,7 +84,7 @@ with the owners above, who carry any follow-up.
 | Tag | PR | Topic | Owns now |
 |---|---|---|---|
 | E1 | #109 | topology + prompt: one dependency graph | nothing (edited A2, A3, A4, A6 folders) |
-| E2 | #110 | evals: evidence scoring, calibration, abstention | `evals/score.go`, `evals/calibration.go` (`docs/design/cost.md`) |
+| E2 | #110 | evals: evidence scoring, calibration, abstention | `evals/score.go`, `evals/calibration.go` (`docs/design/cost.md`). C6's #674 one-field edit to `evals/score.go` (`RunResult.Writes`) was accepted under the P0 precedent; further `score.go`/`calibration.go` edits stay E2's, and scoring-behaviour changes need a lead ruling. |
 | E3 | #119 | evals: phased replay, held-out set | `evals/gen/**`, `evals/scenarios/heldout/**` |
 | E4 | #117 | usage telemetry, durable spend limits | nothing (A4, A5, A6, C6 folders); design `docs/design/cost.md` |
 | T1 | #112 | tenancy | nothing (A3, A4, A5, A7 folders); design `docs/design/tenancy.md` |
