@@ -136,3 +136,33 @@ func TestMarkdownExplainsFailedHealthyVerdict(t *testing.T) {
 		t.Errorf("want the note under h1 and h2 only:\n%s", out)
 	}
 }
+
+// TestMarkdownHealthyNoteRedactsTheClause: the tripping clause is made from
+// tokens with the punctuation gone, which the secret patterns no longer
+// match, so the text is redacted before the note, not after.
+func TestMarkdownHealthyNoteRedactsTheClause(t *testing.T) {
+	secret := "hunter2topsecret"
+	rep := Report{Results: []RunResult{{
+		Scenario: "h1", Run: 1, Outcome: OutcomeHealthy,
+		Failures:        []string{"final message does not say the pipeline is healthy or that there is nothing to fix"},
+		FinalHypothesis: "Healthy: the sink is stuck with password=" + secret + " in its config.",
+		Confidence:      "low",
+		LastMessage:     "The connector is stuck with password=" + secret,
+	}}}
+	var b bytes.Buffer
+	if err := rep.WriteMarkdown(&b); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	if strings.Contains(out, secret) {
+		t.Errorf("secret reached the markdown:\n%s", out)
+	}
+	for _, want := range []string{
+		`healthy verdict failed: last message: fault "stuck" in "`,
+		`hypothesis: fault "stuck" in "`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("markdown lacks %q:\n%s", want, out)
+		}
+	}
+}

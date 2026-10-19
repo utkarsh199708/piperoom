@@ -447,14 +447,19 @@ func failedRunDetails(res RunResult) []string {
 		out = append(out, "  - last message: "+mdCell(cutRedacted(res.LastMessage, maxFailedMessageRunes)))
 	}
 	// A healthy run that failed its verdict says which text tripped it: a
-	// transcript artifact is not always reachable, the job log is.
+	// transcript artifact is not always reachable, the job log is. The text
+	// is redacted before the note is made: faultClause returns a clause of
+	// tokens with the punctuation gone, which the secret patterns no longer
+	// match ("password=hunter2…" becomes "password hunter2…").
 	if res.Outcome == OutcomeHealthy && !res.SaysHealthy {
 		var notes []string
-		if n := healthyNote(res.LastMessage); n != "" {
+		last, _ := redact.Text(res.LastMessage)
+		if n := healthyNote(last); n != "" {
 			notes = append(notes, "last message: "+n)
 		}
 		if res.FinalHypothesis != "" {
-			if n := healthyNote(res.FinalHypothesis); n != "" {
+			hyp, _ := redact.Text(res.FinalHypothesis)
+			if n := healthyNote(hyp); n != "" {
 				notes = append(notes, "hypothesis: "+n)
 			}
 		}
