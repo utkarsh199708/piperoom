@@ -342,9 +342,39 @@ var faultTerms = []string{"stuck", "fail*", "error*", "crash*", "broken", "break
 // alert is stale".
 var alertWords = []string{"alert*", "notification*", "re notification*", "page"}
 
-// shortDurations before "behind" are normal replication delay, not a fault:
-// "warehouse 1 minute behind".
+// shortDurations next to "behind" or "stale" are normal replication delay,
+// not a fault: "warehouse 1 minute behind", "warehouse 1m stale", "stale for
+// 1m". Longer ones ("stale for 3h", "stale 41m") stay faults.
 var shortDurations = []string{"1 minute", "1 min", "2 minutes", "2 min", "1m", "2m", "seconds", "a few seconds"}
+
+// delayTerms are the fault terms a short duration turns into normal delay.
+// "behind" takes the duration before it; "stale" takes it on either side,
+// since the warehouse freshness tool's own summary says "stale for 1m" and the
+// model repeats that wording ("warehouse 1m stale", "stale for 1m", "stale 1m",
+// "1 minute stale").
+var delayTerms = map[string]bool{"behind": true, "stale": true}
+
+// shortDelay reports whether the fault term at j is a delayTerm with a short
+// duration right before it, or, for "stale", right after it with an optional
+// "for" in between, in the same sub.
+func shortDelay(c clauseToks, j int) bool {
+	if !delayTerms[c.toks[j]] {
+		return false
+	}
+	for i := max(0, j-3); i < j; i++ {
+		if l := phraseAt(c.toks, i, shortDurations); l > 0 && i+l == j && c.sub[i] == c.sub[j] {
+			return true
+		}
+	}
+	if c.toks[j] != "stale" {
+		return false
+	}
+	k := j + 1
+	if k < len(c.toks) && c.toks[k] == "for" {
+		k++
+	}
+	return k < len(c.toks) && c.sub[k] == c.sub[j] && phraseAt(c.toks, k, shortDurations) > 0
+}
 
 // faultNegators make a fault term a non-fault when they sit in the three words
 // before it: "no errors", "not stuck any more", "no longer lagging",
@@ -444,12 +474,8 @@ func hasFault(text string) bool {
 				!(c.toks[j-1] == "0" && j > 1 && c.sub[j-2] == c.sub[j] && isDigits(c.toks[j-2])) {
 				negated = true
 			}
-			if c.toks[j] == "behind" {
-				for i := max(0, j-3); i < j; i++ {
-					if l := phraseAt(c.toks, i, shortDurations); l > 0 && i+l == j {
-						negated = true
-					}
-				}
+			if shortDelay(c, j) {
+				negated = true
 			}
 			if !negated && !past && !alert {
 				return true
