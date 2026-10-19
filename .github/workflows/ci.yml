@@ -137,9 +137,13 @@ jobs:
           mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
           go run ./cmd/devctl lock --owner ci
           go run ./cmd/devctl up --owner ci
+      - name: Start the optional ClickHouse profile
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse up -d --wait clickhouse
       - name: go test -tags integration ./internal/... ./cmd/...
         env:
           PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
+          CLICKHOUSE_INTEGRATION_DSN: clickhouse://piperoom_reader:piperoom-clickhouse-reader@127.0.0.1:9001/analytics
+          CLICKHOUSE_INTEGRATION_ADMIN_DSN: clickhouse://piperoom_admin:piperoom-clickhouse-admin@127.0.0.1:9001/analytics
         run: |
           set +e
           go test -count=1 -timeout 25m -json -tags integration ./internal/... ./cmd/... > test.json
