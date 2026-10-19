@@ -8,7 +8,6 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/dbt"
 	"piperoom/internal/tools"
 )
 
@@ -76,7 +75,7 @@ func (t *modelSQL) Run(ctx context.Context, in json.RawMessage) (tools.Result, e
 	if t.d.Transform == nil {
 		return tools.Result{}, notConfigured(t.Name())
 	}
-	sr, ok := t.d.Transform.(dbt.SQLReader)
+	sr, ok := t.d.Transform.(clients.TransformSQLReader)
 	if !ok {
 		return tools.Result{}, fmt.Errorf("dbttools: %s: this dbt reader cannot read model SQL: %w", t.Name(), clients.ErrNotSupported)
 	}

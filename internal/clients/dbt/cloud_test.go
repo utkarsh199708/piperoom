@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -193,15 +194,23 @@ func status(code int, body string) http.HandlerFunc {
 	}
 }
 
-func TestCloudTimeout(t *testing.T) {
+// hangingClient returns a client whose server answers nothing until the test
+// ends. The handler ignores r.Context(): when it returned on the server-side
+// cancel it wrote an empty 200 that could reach the client before its
+// deadline did, so the test saw ErrMalformed instead of the timeout. Now the
+// client's own timeout is the only possible outcome. The release is
+// registered after cloudClient's srv.Close, so it runs first (cleanups are
+// LIFO) and srv.Close does not wait on a blocked handler.
+func hangingClient(t *testing.T, opts ...CloudOption) *Cloud {
+	t.Helper()
 	release := make(chan struct{})
-	c := cloudClient(t, func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-	})
-	defer close(release)
+	c := cloudClient(t, func(w http.ResponseWriter, r *http.Request) { <-release }, opts...)
+	t.Cleanup(func() { close(release) })
+	return c
+}
+
+func TestCloudTimeout(t *testing.T) {
+	c := hangingClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	if _, err := c.RunResults(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -210,20 +219,30 @@ func TestCloudTimeout(t *testing.T) {
 }
 
 func TestCloudClientTimeout(t *testing.T) {
-	release := make(chan struct{})
-	c := cloudClient(t, func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-	}, WithTimeout(50*time.Millisecond))
-	defer close(release)
+	c := hangingClient(t, WithTimeout(50*time.Millisecond))
 	start := time.Now()
-	if _, err := c.RunResults(context.Background()); err == nil {
-		t.Fatal("no error past the client timeout")
+	_, err := c.RunResults(context.Background())
+	// net/http's Client.Timeout error matches context.DeadlineExceeded.
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a timeout (context.DeadlineExceeded)", err)
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Error("client timeout not applied")
+	}
+}
+
+// A body that ends early because ctx expired mid-read must report the
+// deadline, not a malformed artifact.
+func TestCtxErrWrapsDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+	err := ctxErr(ctx, fmt.Errorf("runs list: %w: unexpected end of JSON input", ErrMalformed))
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrMalformed) {
+		t.Errorf("err = %v, want both context.DeadlineExceeded and ErrMalformed", err)
+	}
+	if got := ctxErr(context.Background(), ErrMalformed); got != ErrMalformed {
+		t.Errorf("live ctx: err = %v, want unchanged", got)
 	}
 }
 

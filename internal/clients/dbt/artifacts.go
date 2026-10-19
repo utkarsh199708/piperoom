@@ -213,18 +213,6 @@ type manifestNode struct {
 	RawCode      string  `json:"raw_code"`
 }
 
-// ModelSQL is one model's SQL from manifest.json.
-type ModelSQL struct {
-	Model    string `json:"model"`              // the model's unique_id
-	Path     string `json:"path,omitempty"`     // original_file_path, e.g. "models/fct_revenue.sql"
-	Language string `json:"language,omitempty"` // "sql" or "python"; "" when the manifest does not say
-	// Compiled is false when the manifest has no compiled_code for the
-	// model (dbt parsed but never compiled it); SQL is then the raw code,
-	// Jinja included.
-	Compiled bool   `json:"compiled"`
-	SQL      string `json:"sql"` // file text: untrusted, may quote literals and credentials
-}
-
 // parseManifest decodes manifest.json, version first (see parseRunResults).
 func parseManifest(b []byte) (manifest, error) {
 	var head struct {

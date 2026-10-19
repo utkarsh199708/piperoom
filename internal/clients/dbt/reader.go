@@ -1,7 +1,6 @@
 package dbt
 
 import (
-	"context"
 	"fmt"
 
 	"piperoom/internal/clients"
@@ -22,21 +21,18 @@ type (
 	ModelResult = clients.ModelResult
 	// Lineage is one node's direct parents and children, sorted unique_ids.
 	Lineage = clients.Lineage
+	// ModelSQL is one model's SQL from manifest.json. SQL is untrusted file
+	// text; Compiled is false when it is the raw (Jinja) code.
+	ModelSQL = clients.ModelSQL
 )
 
-// SQLReader reads one model's SQL from manifest.json. Both readers implement
-// it next to Reader; it is not part of clients.TransformReader (P4d-2's
-// contract change request proposes it there), so the dbt_model_sql tool
-// asserts it at use time, like clients.ClusterReader.
-type SQLReader interface {
-	ModelSQL(ctx context.Context, model string) (ModelSQL, error)
-}
-
+// Both readers implement the optional clients.TransformSQLReader next to
+// Reader; the dbt_model_sql tool asserts it at use time.
 var (
-	_ Reader    = (*Dir)(nil)
-	_ Reader    = (*Cloud)(nil)
-	_ SQLReader = (*Dir)(nil)
-	_ SQLReader = (*Cloud)(nil)
+	_ Reader                     = (*Dir)(nil)
+	_ Reader                     = (*Cloud)(nil)
+	_ clients.TransformSQLReader = (*Dir)(nil)
+	_ clients.TransformSQLReader = (*Cloud)(nil)
 )
 
 // FromConfig returns the reader the dbt settings select (config.ParseDBT's
