@@ -148,7 +148,8 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	}
 	// The room offers only the tools and the write actions of its pipeline's
 	// kind (P4b): every use below (tool list, worked examples, triage reads,
-	// propose_fix) goes through r.deps.
+	// propose_fix) goes through r.deps. A batch room is not offered
+	// propose_fix at all (roomToolsForKind, in run).
 	kind, err := RoomKind(alert.PipelineKind)
 	if err != nil {
 		return nil, err
@@ -195,7 +196,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, newRoomToolsWith(r.deps, r.proposals, r.steps))
+	r.toolList = buildToolList(r.deps.Tools, roomToolsForKind(newRoomToolsWith(r.deps, r.proposals, r.steps), r.kind, r.deps.Actions))
 	r.system = systemPromptFor(r.kind)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
@@ -18,8 +19,10 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/batchtools"
 	"piperoom/internal/tools/changes"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/dbttools"
 	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
@@ -120,7 +123,9 @@ func TestRegisterToolsBatchOnly(t *testing.T) {
 		}
 	}
 	for _, n := range []string{"pipeline_map", "warehouse_freshness", "warehouse_row", "warehouse_load_errors",
-		"runbook_lookup", "similar_incidents", "what_changed"} {
+		"runbook_lookup", "similar_incidents", "what_changed",
+		batchtools.NameDAGRuns, batchtools.NameTaskInstances, batchtools.NameTaskLogTail, batchtools.NameScheduleGap,
+		dbttools.RunResultsTool, dbttools.LineageTool, dbttools.SQLTool} {
 		if !slices.Contains(got, n) {
 			t.Fatalf("batch-only set lacks %s: %v", n, got)
 		}
@@ -152,8 +157,8 @@ func fakePackage(name string, kinds []string, toolNames ...string) toolPackage {
 	}}
 }
 
-// fakePackages stand for the real ones plus the batch packages that are not
-// on main yet (P4c-2 batchtools, P4d-2 dbttools), tagged by kind.
+// fakePackages stand for the real packages, the batch ones (P4c-2
+// batchtools, P4d-2 dbttools) included, tagged by kind.
 func fakePackages() []toolPackage {
 	return []toolPackage{
 		fakePackage("db tools", bothKinds, "pg_replication_slots", "warehouse_freshness", "reconcile", "pipeline_map", "trace_record"),
@@ -384,5 +389,141 @@ func TestPipelineConfigBatchKeys(t *testing.T) {
 	}
 	if pc.SourceDBURL != "" || pc.KafkaBrokers != "" || pc.ConnectURL != "" {
 		t.Fatalf("a batch pipeline's set got CDC settings: %+v", pc)
+	}
+}
+
+// batchFamilies are the batch tool families a CDC set must never register.
+var batchFamilies = []string{"dag_", "task_", "dbt_"}
+
+// A CDC-only set registers no batch or dbt tool, and its tool list is the one
+// it had before the batch packages were wired (TestRegisterToolsCDCUnchanged
+// pins the names and order).
+func TestRegisterToolsCDCHasNoBatchTools(t *testing.T) {
+	for _, o := range []*owners.Owners{ownersOf(), ownersOf(cdcPipe("orders"))} {
+		reg, _ := registered(t, &Wired{Owners: o, Orchestrator: &fakeOrch{}, Transform: &fakeTransform{}})
+		for _, n := range regNames(reg) {
+			if anyPrefix(n, batchFamilies) {
+				t.Fatalf("CDC set registers batch tool %s: %v", n, regNames(reg))
+			}
+		}
+	}
+}
+
+// fakeOrch is an Airflow reader that also reads a DAG's schedule.
+type fakeOrch struct{ runs, dags int }
+
+func (f *fakeOrch) DAGRuns(context.Context, string, int) ([]clients.DAGRun, error) {
+	f.runs++
+	return nil, nil
+}
+
+func (*fakeOrch) TaskInstances(context.Context, string, string) ([]clients.TaskInstance, error) {
+	return nil, nil
+}
+
+func (*fakeOrch) TaskLogTail(context.Context, string, string, string, int, int) (string, error) {
+	return "", nil
+}
+
+func (f *fakeOrch) DAG(_ context.Context, id string) (clients.DAG, error) {
+	f.dags++
+	return clients.DAG{ID: id, Schedule: "@daily"}, nil
+}
+
+// fakeOrchNoSchedule is an Airflow reader that cannot read a DAG's schedule.
+type fakeOrchNoSchedule struct{}
+
+func (fakeOrchNoSchedule) DAGRuns(context.Context, string, int) ([]clients.DAGRun, error) {
+	return nil, nil
+}
+
+func (fakeOrchNoSchedule) TaskInstances(context.Context, string, string) ([]clients.TaskInstance, error) {
+	return nil, nil
+}
+
+func (fakeOrchNoSchedule) TaskLogTail(context.Context, string, string, string, int, int) (string, error) {
+	return "", nil
+}
+
+// fakeTransform is a dbt reader.
+type fakeTransform struct{ results int }
+
+func (f *fakeTransform) RunResults(context.Context) (clients.RunResults, error) {
+	f.results++
+	return clients.RunResults{}, nil
+}
+
+func (*fakeTransform) ModelLineage(_ context.Context, m string) (clients.Lineage, error) {
+	return clients.Lineage{Model: m, Parents: []string{}, Children: []string{}}, nil
+}
+
+func runTool(t *testing.T, reg *tools.Registry, name, pipeline, in string) (tools.Result, error) {
+	t.Helper()
+	tool, ok := reg.Get(name)
+	if !ok {
+		t.Fatalf("%s not registered: %v", name, regNames(reg))
+	}
+	return tool.Run(tools.WithPipelineID(context.Background(), pipeline), json.RawMessage(in))
+}
+
+// A batch set's tools read through the readers Open built: the orchestrator
+// for the runs, the same client as the schedule reader for dag_schedule_gap,
+// the dbt reader for the run results; and dag_schedule_gap uses w.Now.
+func TestBatchToolsUseTheSetsReaders(t *testing.T) {
+	orch, tr := &fakeOrch{}, &fakeTransform{}
+	clock := 0
+	now := func() time.Time { clock++; return time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC) }
+	w := &Wired{Owners: ownersOf(batchPipe("rev")), Orchestrator: orch, Transform: tr, Now: now}
+	reg, _ := registered(t, w)
+
+	if _, err := runTool(t, reg, batchtools.NameDAGRuns, "rev", `{"dag_id":"revenue_daily"}`); err != nil {
+		t.Fatalf("dag_runs: %v", err)
+	}
+	if orch.runs == 0 {
+		t.Fatal("dag_runs did not read through w.Orchestrator")
+	}
+	if _, err := runTool(t, reg, batchtools.NameScheduleGap, "rev", `{"dag_id":"revenue_daily"}`); err != nil {
+		t.Fatalf("dag_schedule_gap: %v", err)
+	}
+	if orch.dags == 0 {
+		t.Fatal("dag_schedule_gap did not read the schedule through w.Orchestrator")
+	}
+	if clock == 0 {
+		t.Fatal("dag_schedule_gap did not use w.Now")
+	}
+	if _, err := runTool(t, reg, dbttools.RunResultsTool, "rev", `{}`); err != nil {
+		t.Fatalf("dbt_run_results: %v", err)
+	}
+	if tr.results == 0 {
+		t.Fatal("dbt_run_results did not read through w.Transform")
+	}
+}
+
+func TestScheduleReader(t *testing.T) {
+	if scheduleReader(nil) != nil {
+		t.Fatal("nil orchestrator: want no schedule reader")
+	}
+	o := &fakeOrch{}
+	if scheduleReader(o) != o {
+		t.Fatal("an orchestrator with DAG must be the schedule reader")
+	}
+	if scheduleReader(fakeOrchNoSchedule{}) != nil {
+		t.Fatal("an orchestrator without DAG must give no schedule reader")
+	}
+}
+
+// Without AIRFLOW_URL or dbt settings the batch tools stay registered (the
+// tool list does not depend on setup) and answer clients.ErrNotSupported.
+func TestBatchToolsWithoutReaders(t *testing.T) {
+	reg, _ := registered(t, &Wired{Owners: ownersOf(batchPipe("rev"))})
+	for _, c := range []struct{ name, in string }{
+		{batchtools.NameDAGRuns, `{"dag_id":"revenue_daily"}`},
+		{batchtools.NameScheduleGap, `{"dag_id":"revenue_daily"}`},
+		{dbttools.RunResultsTool, `{}`},
+	} {
+		_, err := runTool(t, reg, c.name, "rev", c.in)
+		if !errors.Is(err, clients.ErrNotSupported) {
+			t.Errorf("%s without a reader: err = %v, want clients.ErrNotSupported", c.name, err)
+		}
 	}
 }

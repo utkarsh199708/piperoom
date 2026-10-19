@@ -87,6 +87,19 @@ func TestListToolsByKind(t *testing.T) {
 			t.Fatalf("batch list lacks %s: %v", want, batch)
 		}
 	}
+	// The batch and dbt packages (P4c-2, P4d-2), wired by P4b-3, in
+	// registration order.
+	var batchOnly []string
+	for _, n := range batch {
+		if hasFamily([]string{n}, "dag_", "task_", "dbt_") != "" {
+			batchOnly = append(batchOnly, n)
+		}
+	}
+	wantBatch := []string{"dag_runs", "task_instances", "task_log_tail", "dag_schedule_gap",
+		"dbt_run_results", "dbt_model_lineage", "dbt_model_sql"}
+	if !slices.Equal(batchOnly, wantBatch) {
+		t.Fatalf("batch list's batch tools %v, want %v (full list %v)", batchOnly, wantBatch, batch)
+	}
 	// Without -kind, the pipeline's own kind.
 	if got := listOutput(t, runOptions{Pipeline: "daily-revenue"}); !slices.Equal(got, batch) {
 		t.Fatalf("daily-revenue list %v, want the batch list %v", got, batch)
