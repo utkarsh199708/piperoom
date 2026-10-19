@@ -34,6 +34,11 @@ infra exit code), #676 (C6: `evalrun` run errors and exit 3 on an API refusal), 
 signal and publication keys) and #679 (C7: `missed-table` `connect_config` shows the signal table). Rows merged
 in earlier rounds are now marked with their PR too.
 
+**Leads follow-up 8 (2026-10-19):** the evals diagnosis `reviews/evals-2026-10-19/diagnosis.md` (baseline 14 Oct,
+run 39212981319, smoke 39266884988) adds the P3-W3 rows below (`tasks/P3-W3-accuracy.md`): evals to 100% by targeted
+fixes, each verified with a per-scenario `evals-live only=…` run, then a 3-run confirmation (P3-W3z) and only then a
+full baseline. P3-W2e's re-baseline step is done by P3-W3z; nobody edits `evals/baseline/default.json` before it.
+
 ## Step 0
 
 | ID | Agent | Model | Days | PR | Done when | After |
@@ -169,6 +174,27 @@ action registry.
 
 **Follow-up, later wave (#608):** a `clients.OffsetTarget` "restore these offsets" mode, so `kafka_reset_consumer_offsets` can be reversible; a contract change, not a gap of P3a-3.
 
+## P3-W3 — evals to 100% (leads diagnosis 2026-10-19; `tasks/P3-W3-accuracy.md`)
+
+Order: safety guards, wrong root causes, budgets and misses, behaviour rules, then the confirmation. Each row's live
+run is `evals-live` with `only=` the list named, `runs=1`, on the row's branch; "100" means every listed line reads
+`PASS (score 100, …)` with misses 0. $0.21 per episode (the smoke run's mean; baseline $0.22, morning about $0.19). The prompt cap (1335 words, #659) binds W3b and W3g: text
+added is trimmed elsewhere.
+
+| ID | Agent | Model | Days | PR | Done when | After |
+|---|---|---|---|---|---|---|
+| P3-W3a | N6 | Opus 5.5 | 0.25 | injectscan: `Finding.End` and `ScanNames(s, names)` filling `Finding.Names` (the action and resource names a flagged span mentions); `Scan` unchanged | table tests over the four scenario injection texts; `go test ./internal/injectscan` | — |
+| P3-W3b | A4 | Opus 5.5 | 1 | agent: `propose_fix` refuses, before `Proposals.Create`, a step whose action a flagged span of this room names and whose params echo a value from a flagged span, or whose hypothesis cites no unflagged step; always on (no switch: `Options` is in `contract.go`); the refusal is logged and surfaced as the tool error so the driver sees it | unit tests: JsonConverter switch refused, `decimal.handling.mode` with an unflagged `connect_status` citation allowed, restart + target from the record key refused, room without flagged reads unchanged; `evals-live only=injection-ddl-comment,injection-ddl-comment-subtle,injection-kafka-record-key,injection-connect-trace` 1 run at 100, no misses ($0.84; `injection-ddl-comment-subtle` is not flagged by injectscan, so its line is a regression check) | P3-W3a |
+| P3-W3c | C6 | Opus 5.5 | 0.5 | evals: `expect.root_cause_layer_alt` (validated against `events.IncidentLayers()`), accepted by `layerGraded` and the judge; README row | table test (alternative named, neither named); `-validate` refuses an unknown layer, a duplicate of `root_cause_layer` and an alt equal to `first_failing_layer` | — |
+| P3-W3d | C7 | Opus 5.5 | 0.5 | scenarios: `root_cause_layer_alt: [consumer]` on `consumer-offsets-out-of-range-retention` (#684 ruling; not `sasl-credential-rotated`, whose label stays); `topic-retention-data-loss` group 2 adds `delet*`, `removed`, `purg*`, `unread`; `avro-schema-id-deleted-sink-failed` `max_tool_calls` 16 → 18; `dead-slot-wal` untouched (`retire*` is a documented trap) | `-validate` clean; corpus rows pin the traps; `evals-live only=consumer-offsets-out-of-range-retention,topic-retention-data-loss,avro-schema-id-deleted-sink-failed,dead-slot-wal` 1 run at 100, no misses ($0.84) | P3-W3c |
+| P3-W3e | C7 | Opus 5.5 | 0.25 | scenarios: the `similar_incidents` "no similar closed incident" recording in the five P3 scenarios; the other misses of run 39212981319's `cand` artifact recorded | `evals-live only=consumer-bad-deploy,dead-slot-wal-no-context,dlq-backlog,missed-table,ambiguous-lag-spike` 1 run at 100 with **misses 0** ($1.05) | — |
+| P3-W3f | C6 | Opus 5.5 | 0.25 | evals: `hasFault` treats "stale" with a short duration ("1m stale", "stale for 1m") like "behind" | table test (four healthy, two faulty phrasings); the baseline `healthy-after-recovery` hypothesis still fails; `evals-live only=healthy-after-recovery` 1 run at 100 ($0.21) | — |
+| P3-W3g | A4 | Opus 5.5 | 0.5 | agent: the ambiguous-steer rule names what is ambiguous (no component and no action, or "get it running" before the cause is fixed); words trimmed elsewhere; CDC hash and snapshot re-pinned | prompt ≤ 1335 words; `evals-live only=unclear-driver-intent` 1 run at 100 ($0.21) | P3-W3b |
+| P3-W3h | C6 | Opus 5.5 | 0.1 | evals: run only, no code: confirm #677 on the five layer scenarios | `evals-live only=consumer-bad-deploy,consumer-rebalance-storm,recurring-connector-paused,recurring-schema-deleted,replication-slot-lost-failover` 1 run, every line PASS at 100 (a `similar_incidents` miss on `consumer-bad-deploy` is expected until P3-W3e) ($1.05); run link on this row; a layer failure becomes an A4 prompt follow-up row | — |
+| P3-W3z | C6 | Opus 5.5 | 0.5 | evals: 3-run confirmation of all previously failing scenarios, then the full baseline | `evals-live runs=3 only=<the 26 scenarios named in the task file>` 78/78 at 100, misses 0 ($16.38); only then `make_baseline=true runs=3 only=all` ($18.90) committed as `evals/baseline/default.json` with `pass_rate` 1.0 and misses 0; a failing scenario goes back to the leads as a new row and is re-run alone before the baseline | P3-W3b, P3-W3d, P3-W3e, P3-W3f, P3-W3g, P3-W3h |
+
+Total re-test cost: $4.20 for the rows (20 episodes), $16.38 for the confirmation, $18.90 for the baseline ($39.48).
+
 ## Load per agent
 
 | Agent | PRs | Days | Opus days | Critical for |
@@ -177,21 +203,22 @@ action registry.
 | A6 | 10 | 11 | 1 | user-visible result of every step |
 | A3 | 8 | 9 | 6.5 | P2a (step 1), pgactions (step 2), kinds (step 3) |
 | A2 | 5 | 7 | 7 | step 2 |
-| A4 | 4 | 5.5 | 4.5 | steps 2 and 3 |
+| A4 | 6 | 7 | 6 | steps 2 and 3; P3-W3b, P3-W3g |
 | A1 | 4 | 6 | 0 | step 2 and 3 scenarios |
 | C3 | 2 | 5 | 0 | step 3 |
 | C15 | 2 | 4 | 2 | step 3 |
 | C16 | 2 | 3.5 | 0 | step 3 |
 | C14 | 4 | 3 | 0 | docs each step |
-| C6 | 2 | 2.5 | 0 | — |
-| C7 | 2 | 2.5 | 0 | — |
+| C6 | 6 | 3.85 | 1.35 | P3-W3c, P3-W3f, P3-W3h, P3-W3z (the evals-to-100% rows) |
+| C7 | 4 | 3.25 | 0.75 | P3-W3d, P3-W3e |
 | C1 | 3 | 1.5 | 0 | — |
 | C10 | 1 | 1.5 | 0 | step 1 |
 | C12 | 1 | 0.5 | 0 | — |
 | C5 | 1 | 0.5 | 0 | step 3 |
+| N6 | 1 | 0.25 | 0.25 | P3-W3a (before P3-W3b) |
 | leads | 1 | 1 | 1 | everything |
 
-Total about 75 agent-days over 59 PRs. The critical path is A5: P0 → P1a-1 → P2b-1 → P2b-3 → P2b-4 → P3c
+Total about 79 agent-days over 68 PRs (the nine P3-W3 rows add about 3.85 days). The critical path is A5: P0 → P1a-1 → P2b-1 → P2b-3 → P2b-4 → P3c
 (about 9 working days), then A6's P3d-* behind it. Everything in P4 except P4b-* and P4f-* can start the day
 P0 merges and run beside steps 1 and 2.
 
