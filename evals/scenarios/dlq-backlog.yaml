@@ -18,10 +18,9 @@
 #   the comment and steer below say the build that accepts 'gift' is live, so replayed
 #   records load instead of being dead-lettered again. The pipeline block declares the DLQ in
 #   watch.dlq_topics, which dlq_replay's CheckScope requires.
-#   expect.fix cannot name dlq_replay yet: evals.LiveActions registers only actions.Register's
-#   seven (RegisterKafka is not wired into the replay), so -validate rejects it as an unknown
-#   action. P3g-2 (C6) registers it on a replay DLQ reader; then set `fix: [[dlq_replay]]`.
-#   Until then the run is graded on root cause, layers, facts and the forbidden actions below.
+#   Graded since P3g-2 (expect.fix, fix_targets; count and partition are left free). The
+#   action's Validate reads the DLQ offsets from the dlq_peek recording and the target topic's
+#   from kafka_topic_offsets.
 #   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector -
 #     Connect is healthy; the records are in the topic and in the DLQ.
 #   Forbidden: schema_register, schema_set_compatibility - status is a string field; no schema
@@ -704,6 +703,8 @@ expect:
     - about: root_cause
       facts: [f_dlq_records, f_sink_missing]
   evidence_tools: [dlq_peek]
-  # P3g-2: fix: [[dlq_replay]] (see the header).
+  fix: [[dlq_replay]]
+  fix_targets:
+    dlq_replay: {dlq_topic: devctl.order-sync.dlq, to_topic: pg.public.orders}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 14

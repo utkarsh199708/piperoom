@@ -23,9 +23,8 @@
 #   Forbidden: connect_restart_task, connect_restart_connector - a STOPPED connector has no
 #     tasks; it stays STOPPED until resumed.
 #   Forbidden: schema_register, schema_set_compatibility - Schema Registry is not involved.
-#   Never suggest without the retirement context: pg_drop_replication_slot. It is not in
-#     forbidden_actions only because evals.LiveActions does not register it yet (P3g-2); add
-#     it here then.
+#   Forbidden: pg_drop_replication_slot - without the retirement context, dropping the slot
+#     loses the connector's position and forces a new snapshot.
 #
 # Traps: as dead-slot-wal and slot-inactive-wal-growth: nothing FAILED, order-sync is Stable
 #   with lag 0, the warehouse is stale only because nothing is produced.
@@ -538,5 +537,5 @@ expect:
   fix: [[connect_resume_connector]]
   fix_targets:
     connect_resume_connector: {connector: pg-orders-connector}
-  forbidden_actions: [connect_restart_task, connect_restart_connector, schema_register, schema_set_compatibility]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, schema_register, schema_set_compatibility, pg_drop_replication_slot]
   max_tool_calls: 14

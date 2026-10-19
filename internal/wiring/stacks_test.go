@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -96,6 +97,30 @@ type spySourceReads interface {
 }
 
 type spySource struct{ spySourceReads }
+
+// checkedSlotDropperMethods mirrors pgactions' unexported checkedSlotDropper:
+// the method pg_drop_replication_slot's Execute looks for on its writer.
+type checkedSlotDropperMethods interface {
+	DropReplicationSlotChecked(ctx context.Context, slot string, allowLost bool) (postgres.SlotSeen, error)
+}
+
+// TestSourceReaderHasNoWriteMethod pins the premise spySource rests on: the
+// real source client (*postgres.DB), which the P3 pg actions hold as Source in
+// both write modes, has no write method. If it ever gained one, the actions
+// could write through the reader connection with write mode off.
+func TestSourceReaderHasNoWriteMethod(t *testing.T) {
+	db := reflect.TypeOf((*postgres.DB)(nil))
+	for _, iface := range []reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[checkedSlotDropperMethods]()} {
+		if db.Implements(iface) {
+			t.Errorf("*postgres.DB implements %v: the source reader must hold no write method", iface)
+		}
+	}
+	// The checked drop does exist on the writer, so the check above is not
+	// vacuous through a renamed method.
+	if !reflect.TypeOf((*postgres.Writer)(nil)).Implements(ifaceOf[checkedSlotDropperMethods]()) {
+		t.Fatal("*postgres.Writer lacks DropReplicationSlotChecked: update checkedSlotDropperMethods")
+	}
+}
 
 func (s *spy) Freshness(context.Context, string, string) (time.Time, error) {
 	s.hit("Freshness")

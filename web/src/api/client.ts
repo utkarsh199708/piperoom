@@ -263,8 +263,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(extra),
     }),
+  // P2b: stops a pending policy countdown (proposal.cancelled). 409 not_scheduled when none is
+  // pending (the policy ran, or someone cancelled first); the proposal stays open either way.
+  cancelProposal: (proposalId: string, reason?: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   // paramsHash: the hash shown with the proposal, same rule as approve.
-  reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>
+  reject:(proposalId: string, layer: string, reason: string, paramsHash: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ layer, reason, params_hash: paramsHash }),

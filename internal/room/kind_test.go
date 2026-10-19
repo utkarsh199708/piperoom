@@ -185,7 +185,7 @@ func TestPipelineForDAG(t *testing.T) {
 	svc := kindService(t, loadOwnersFile(t, "pipelines:\n"+kindCDCPipeline+kindBatchPipeline+kindBatchOther), "", nil)
 	for dag, want := range map[string]string{
 		"revenue_daily":   "revenue",
-		" billing_daily ": "billing", // trimmed, as alertin's matchDAG
+		" billing_daily ": "billing", // trimmed, as alertin.MatchDAG
 		"shared_dag":      "",        // two pipelines list it: no guess
 		"Revenue_Daily":   "",        // case-sensitive
 		"unknown":         "",
@@ -197,5 +197,11 @@ func TestPipelineForDAG(t *testing.T) {
 	}
 	if got := kindService(t, nil, "", nil).PipelineForDAG("revenue_daily"); got != "" {
 		t.Fatalf("no owners: %q", got)
+	}
+	// owners.Load refuses dags on a cdc pipeline, but an Owners built in code
+	// is not checked: a dag_id must still never pick a CDC pipeline.
+	inCode := &owners.Owners{Pipelines: []owners.Pipeline{{ID: "orders", DAGs: []string{"orders_dag"}}}}
+	if got := kindService(t, inCode, "", nil).PipelineForDAG("orders_dag"); got != "" {
+		t.Fatalf("cdc pipeline with dags: %q, want none", got)
 	}
 }

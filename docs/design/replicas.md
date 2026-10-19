@@ -106,7 +106,7 @@ room_agent_leases (room_id PK → rooms ON DELETE CASCADE, owner text, pipeline_
   `proposal.scheduled`; while an older replica without that loop still holds the room's lease, the fire
   waits until the lease moves to a new replica. That is safe: the proposal stays open, approvable and
   cancellable by hand, and only runs late. A fire delayed past the 45 s view grace (P2b-4b, #652) runs with no
-  visible countdown; only the cancel route can still stop it.
+  visible countdown; only a cancel or a human decision can still stop it.
 
 ### 4.2 Input reaches the owner through the log
 

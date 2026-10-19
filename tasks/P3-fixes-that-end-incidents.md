@@ -134,8 +134,9 @@ P2b is not a dependency; when both are in, auto-approve simply never lists these
       `CheckScope` refuses an out-of-pipeline target without I/O; `Preview` never calls a writer (the
       `readonly_test.go` style check extended to `pgactions`); `Execute` against the dev stack does the write
       and reports it; `connect_update_connector_config` with two keys is one approval.
-- [ ] `devctl break missed-table` (A1, ask in thread) → the agent proposes `connect_snapshot_table` → approved
-      → the table's rows reach the sink; `devctl break dead-slot` → `pg_drop_replication_slot` → WAL retained
+- [ ] `devctl break missed-table` (A1, ask in thread) → the agent proposes `pg_add_publication_table` then
+      `pg_snapshot_signal` → approved → the table's rows reach the sink (the break leaves Kafka signalling off,
+      so `connect_snapshot_table` refuses; `[LEAD-ARCH]` ruling on #656); `devctl break dead-slot` → `pg_drop_replication_slot` → WAL retained
       drops; `consumer-bad-deploy` → reset → lag replays; `dlq-backlog` → replay → DLQ end offset unchanged,
       source topic end offset + N.
 - [ ] Driver proposal: created with `Origin: "driver"`, previewed, approved per layer, executed, verified by the

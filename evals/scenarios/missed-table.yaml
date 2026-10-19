@@ -16,19 +16,19 @@
 # Expected fix (the label): pg_add_publication_table {connector: pg-orders-connector,
 #   publication: dbz_publication, table: public.devctl_refunds} (postgres owner approves; new
 #   refunds flow from then on), then
-#   pg_snapshot_signal {connector: pg-orders-connector, tables: [public.devctl_refunds]} for
-#   the 25 rows written before (an incremental snapshot). pg_snapshot_signal, not
+#   pg_snapshot_signal {connector: pg-orders-connector, tables: [public.devctl_refunds],
+#   signal_table: public.devctl_signal} for the 25 rows written before (an incremental snapshot). pg_snapshot_signal, not
 #   connect_snapshot_table: the break registers the connector with
 #   signal.data.collection=public.devctl_signal and no signal.kafka.topic (Kafka signal channel
 #   off), so connect_snapshot_table (via signal_topic, the only via it accepts since #620)
 #   refuses with ErrSignalNotConfigured, and its via signal_table is refused at every stage in
 #   favour of the postgres-layer pg_snapshot_signal (#633). `devctl fix missed-table` writes the
 #   same execute-snapshot row.
-#   expect.fix cannot name these actions yet: evals.LiveActions registers only
-#   actions.Register's seven, so -validate rejects pgactions names as unknown actions. P3g-2
-#   (C6) registers the P3 actions on replay clients; then set
-#   `fix: [[pg_add_publication_table], [pg_snapshot_signal]]` (pg_snapshot_signal needs #633
-#   merged). Until then the run is graded on root cause, layers, facts and forbidden actions.
+#   Graded since P3g-2: expect.fix and fix_targets, in this order (the right-action score
+#   wants the publication change before the snapshot). Both actions' Validate read the stack:
+#   resources declares what connect_config hides (publication.autocreate.mode,
+#   signal.data.collection) and the tables and publication of the break (devctl_signal is in
+#   dbz_publication, devctl_refunds is not).
 #   Forbidden: connect_restart_task, connect_restart_connector - restarting changes nothing:
 #     with publication.autocreate.mode=disabled Debezium never adds the table, and nothing failed.
 #   Forbidden: connect_resume_connector - the connector is RUNNING (Validate refuses it anyway).
@@ -87,6 +87,17 @@ pipeline:
 resources:
   connectors: [pg-orders-connector]
   subjects: [pg.public.orders-key, pg.public.orders-value]
+  # What the P3 actions' Validate reads and no read tool shows (evals/README.md, "Resources").
+  connector_configs:
+    pg-orders-connector:
+      publication.autocreate.mode: disabled
+      signal.data.collection: public.devctl_signal
+  tables:
+    public.orders: {primary_key: true}
+    public.devctl_refunds: {primary_key: true, estimated_rows: 25}
+    public.devctl_signal: {primary_key: true, signal_columns: true}
+  publications:
+    dbz_publication: [public.orders, public.devctl_signal]
 
 # `devctl alert missed-table` posts this reconciliation alert; its description's facts are in
 # the title, since agent.Alert.Raw never reaches the model (evals/README.md).
@@ -583,6 +594,9 @@ expect:
     - about: root_cause
       facts: [f_not_in_publication]
   evidence_tools: [pg_publication_tables]
-  # P3g-2: fix: [[pg_add_publication_table], [pg_snapshot_signal]] (see the header).
+  fix: [[pg_add_publication_table], [pg_snapshot_signal]]
+  fix_targets:
+    pg_add_publication_table: {connector: pg-orders-connector, publication: dbz_publication, table: public.devctl_refunds}
+    pg_snapshot_signal: {connector: pg-orders-connector, tables: [public.devctl_refunds], signal_table: public.devctl_signal}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 14

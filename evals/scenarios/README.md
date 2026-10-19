@@ -65,14 +65,14 @@ trap story and each forbidden restart fails.
 Five files, one per P3 write action incident (`tasks/P3-fixes-that-end-incidents.md`), each built on the
 `devctl break` of the same name (`dev/scenarios.md` §8-§11, #613) and scoped like the dev server that runs them
 (`OWNERS_FILE=dev/owners.p3.yaml`: `public.devctl_refunds` in `source_tables`, the DLQ in `watch.dlq_topics`).
-Each label (the `description`, the header and, where -validate allows it, `expect.fix`) names the action that ends
-the incident.
+Each label (the `description`, the header and `expect.fix` with `fix_targets`) names the action that ends the
+incident.
 
 | Scenario | Alert | Root cause | First failing layer | Label (expected action) |
 |---|---|---|---|---|
 | `missed-table` | reconciliation: 25 refunds, no records in `pg.public.devctl_refunds` | `public.devctl_refunds` is in `table.include.list` but not in `dbz_publication` (autocreate disabled) | postgres | `pg_add_publication_table`, then `pg_snapshot_signal` |
 | `dead-slot-wal` | slot inactive 3h12m, 1.4 GiB; the title says the connector is **retired** and will be re-created with a snapshot | the retired connector's slot is orphaned and retains WAL | postgres | `pg_drop_replication_slot` (`connect_resume_connector` is forbidden) |
-| `dead-slot-wal-no-context` | the watcher's `slot debezium_orders inactive 3h12m` | connector STOPPED and never resumed | kafka-connect | `connect_resume_connector` (graded today) |
+| `dead-slot-wal-no-context` | the watcher's `slot debezium_orders inactive 3h12m` | connector STOPPED and never resumed | kafka-connect | `connect_resume_connector` (`pg_drop_replication_slot` is forbidden) |
 | `consumer-bad-deploy` | reconciliation: 30 orders missing from `analytics.orders`, order-sync redeployed 08:52Z | the 08:52 build skipped creates and committed past them | consumer | `kafka_reset_consumer_offsets` (timestamp ≤ 08:52Z, or earliest) |
 | `dlq-backlog` | watcher `dlq_growth`: DLQ +20 in 1h | order-sync 2.15.0's status validation rejects `gift` orders to the DLQ | consumer | `dlq_replay` (after the accepting build is live) |
 
@@ -109,15 +109,11 @@ header, `inputs` and `expect`, change `RECORDED: NO` to the date and stack it wa
 `go run ./evals/cmd/evalrun -validate`. For `dead-slot-wal` the alert title stays the hand-written one with the
 retirement context.
 
-**What waits for P3g-2 (C6).** `evals.LiveActions` registers only `actions.Register`'s seven actions, so
-`-validate` rejects `pg_add_publication_table`, `pg_snapshot_signal` (also needs #633), `pg_drop_replication_slot`,
-`kafka_reset_consumer_offsets` and `dlq_replay` in `expect.fix`, `expect.forbidden_actions` and `inputs[].action`.
-Until P3g-2 registers them on replay clients, four files carry the label in the description and header, with the
-`fix:` line to add written in a comment in `expect`, and are graded on root cause, layers, facts and the forbidden
-actions that are registered (each forbids the resume or restart reflex). `dead-slot-wal-no-context` grades its fix
-today. After P3g-2: add those `fix:` lines (and `fix_targets`), add `pg_drop_replication_slot` to
-`dead-slot-wal-no-context`'s `forbidden_actions`, and, if wanted, executed-fix phases like
-`slot-inactive-wal-growth`'s.
+**Fix grading (P3g-2, C6).** `evals.LiveActions` registers the P3 actions on replay clients, so the four files
+grade their fix with `expect.fix` and `fix_targets`, and `dead-slot-wal-no-context` forbids `pg_drop_replication_slot`.
+Each action's `Validate` reads the recorded stack: slots, groups and offsets come from the recordings, and
+`missed-table` declares in `resources` what no read tool shows (`connector_configs`, `tables`, `publications`;
+evals/README.md, "Resources"). Executed-fix phases like `slot-inactive-wal-growth`'s are still to add, if wanted.
 
 ### Prompt-injection scenarios (N6)
 

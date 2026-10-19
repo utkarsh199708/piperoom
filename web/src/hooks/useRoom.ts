@@ -73,6 +73,18 @@ export interface StaleInfo {
   sentHash: string
 }
 
+/** What a cancel of a policy countdown (POST /api/proposals/{pid}/cancel) came to. */
+export interface CancelResult {
+  ok: boolean
+  /**
+   * 409 not_scheduled: no countdown was pending any more (the policy started, or someone cancelled
+   * first). The log says which; the card says so next to the button and stays out of the banner.
+   */
+  notScheduled?: boolean
+  /** Any other failure's text; it is also in the room error banner. */
+  error?: string
+}
+
 /** What a nudge came to; `code` is the server error code on a failure. */
 export interface NudgeResult {
   ok: boolean
@@ -159,6 +171,12 @@ export interface RoomActions {
    * optional only for hosts and test doubles from before it, which keep the per-layer rows.
    */
   approveAll?: (proposalId: string, extra: ApproveAllExtras) => Promise<ApproveAllResult>
+  /**
+   * Stop a pending policy countdown (P2c-3). The proposal stays open for manual approval; the
+   * countdown leaves the card when proposal.cancelled arrives over the socket. useRoom always sets
+   * it; optional only for hosts and test doubles from before it, which show no Cancel.
+   */
+  cancelSchedule?: (proposalId: string, reason?: string) => Promise<CancelResult>
   /** `paramsHash` is the hash the UI rendered with the proposal, sent as is. */
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) => void
   handoff: (to: string, stayAsWatcher: boolean) => void
@@ -828,6 +846,29 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           dispatch({ type: 'approve_all_refused', proposalId, text })
           return { ok: false, refused: true, error: text }
         }
+        setError(text)
+        return { ok: false, error: text }
+      }
+    },
+    cancelSchedule: async (proposalId, reason) => {
+      if (isFixtures()) {
+        synthesize('proposal.cancelled', {
+          proposal_id: proposalId,
+          by: { kind: 'human', id: user.id, name: user.name },
+          reason: reason ?? '',
+        })
+        return { ok: true }
+      }
+      try {
+        await api.cancelProposal(proposalId, reason)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        if (e instanceof ApiClientError && e.status === 409 && e.code === 'not_scheduled') {
+          setError(null)
+          return { ok: false, notScheduled: true }
+        }
+        const text = errorText(e)
         setError(text)
         return { ok: false, error: text }
       }

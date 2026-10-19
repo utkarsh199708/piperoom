@@ -20,14 +20,16 @@ import (
 
 var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/system_prompt_*.txt from the current prompt")
 
-// cdcPromptSHA256 is the hash of the CDC system prompt as it stood before the
-// per-kind section existed (main at ab324e74). It is pinned here, beside the
-// snapshot file, so a regenerated snapshot cannot silently move the CDC
+// cdcPromptSHA256 is the hash of the CDC system prompt. It was first pinned
+// as the prompt stood before the per-kind section existed (main at ab324e74,
+// e8db4d7b...) and moved once, on purpose, by P3-W2: the slot rule now allows
+// pg_drop_replication_slot for a retired connector. It is pinned here, beside
+// the snapshot file, so a regenerated snapshot cannot silently move the CDC
 // prompt: the CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "e8db4d7bbb18feadd92b440558c6b912a62a3b8b6a8ce6808b6fee5b2efd7048"
+const cdcPromptSHA256 = "14d9fc2b3ef19e9908c4c30edcac4976275088f486775d8cd44e8d79f282a987"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
-// prompt before kinds: the snapshot file and the pinned hash must both match.
+// pinned one: the snapshot file and the pinned hash must both match.
 func TestSystemPromptSnapshotCDC(t *testing.T) {
 	got := systemPrompt()
 	checkPromptSnapshot(t, "system_prompt_cdc.txt", got)
