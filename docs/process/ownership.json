@@ -41,7 +41,7 @@
     "A7": { "folders": ["internal/watch/**", "internal/dlq/**"], "excluded": [] },
     "C1": { "folders": [".github/**", "README.md", "docs/runbook.md", "Makefile", "deploy/docker-compose.quickstart.yml", "Dockerfile", "deploy/helm/**"], "excluded": [] },
     "C2": { "folders": [], "excluded": [] },
-    "C3": { "folders": ["internal/clients/snowflake/**", "internal/clients/bigquery/**", "internal/clients/databricks/**"], "excluded": [] },
+    "C3": { "folders": ["internal/clients/snowflake/**", "internal/clients/bigquery/**", "internal/clients/databricks/**", "internal/clients/clickhouse/**"], "excluded": [] },
     "C4": { "folders": ["docs/security/**"], "excluded": [] },
     "C5": { "folders": ["internal/alertin/**"], "excluded": [] },
     "C6": {
