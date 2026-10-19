@@ -188,6 +188,7 @@ I/O (`tools.ErrOutOfScope`); without a scope it refuses with `tools.ErrNoScope` 
 - `var ErrAlreadyPublished = errors.New("clients: table is already in the publication")`, next to `ErrSlotActive`: returned (wrapped) by `SourceWriter.AddPublicationTables` when a table is already in the publication or the publication is `FOR ALL TABLES`; nothing is changed. (follow-up 1, accepted in review of #590/#591/#592/#587)
 - `GroupResetPlanner` (optional, read-only, implemented by the Kafka write client): `CheckGroupInactive(ctx, group) error`, `PlanGroupReset(ctx, group, to OffsetTarget) ([]OffsetMove, error)`, with `OffsetMove{Topic string; Partition int32; Committed, Target, End int64}` (json `topic`, `partition`, `committed`, `target`, `end`); an action's `Validate` and `Preview` hold it, never the writer. The Kafka client's own `OffsetMove` (#592) becomes `= clients.OffsetMove` in P3a-3, with `var _ clients.GroupResetPlanner = (*Writer)(nil)`; until then the assertion is false. (follow-up 1, accepted in review of #590/#591/#592/#587)
 - `clients.SnapshotSignaler` (optional, implemented by the Kafka write client): Kafka incremental-snapshot signals go through it, not `Produce`, whose scope allows CDC topics only; it can only build an execute-snapshot record for in-scope tables with key = `topic_prefix` (follow-up 3, #620 ruling).
+- As with `OffsetMove`: the Kafka client's own `SnapshotSignal` becomes `= clients.SnapshotSignal` (alias) in P3a-5c, with `var _ clients.SnapshotSignaler = (*Writer)(nil)`, and `connect_snapshot_table` swaps its local `snapshotSignaler` for `clients.SnapshotSignaler`; until then the assertion is false. (follow-up 5, after #627 and #642)
 - `RecordReader.ReadRecords` returns fewer than `limit` records when the partition ends first or 32 MiB were read. (follow-up 1, accepted in review of #590/#591/#592/#587)
 - Scope: the fail-closed rule is in the paragraph above, edited in place (it replaced "every method takes the scope from `ctx` and the actions re-check it"). (follow-up 1, accepted in review of #590/#591/#592/#587)
 
@@ -270,6 +271,7 @@ at a UTF-8 boundary. Log text, notes and messages are untrusted: the tool wraps 
 - `docs/api.md`: `GET /api/pipelines` gains `kind`; `GET /api/pipelines/{pid}/topology` nodes carry the new kinds
   and the graph `partial`; the P-wave events section says the two layers are valid wherever a layer is.
 - `TaskInstance.Try` is Airflow's `try_number` as reported; 0 when the task never ran (e.g. `upstream_failed`). (follow-up 1, accepted in review of #590/#591/#592/#587)
+- Batch actions (#644 ruling): which pipeline kinds an action serves is `agent.KindedAction` (`internal/agent/toolkind.go`) today, and every action without it is CDC-only. The first PR that adds a batch action brings a contract item that moves `PipelineKinds() []string` into `internal/actions/action.go` as an optional interface; `agent.KindedAction` then becomes an alias of it or is removed. (follow-up 5)
 
 ### 9. Deferred (not in this wave)
 

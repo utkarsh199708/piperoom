@@ -399,7 +399,9 @@ row (`service_proposals.go:131`), compute `params_hash` = hex SHA-256 of the **R
   kept because it is cheap and an auditor can follow it.
 - The executor recomputes the hash from the row before each `Execute`
   (next to `service_executor.go:205-214`) and refuses on mismatch: the step fails with output
-  `params hash mismatch`, the proposal becomes `failed`.
+  `params hash mismatch`, the proposal becomes `failed`. The same re-check (`recheckStep`, #638) refuses a step
+  when a required layer has no `approved` row (any grant): output `not approved by every required layer`, the
+  proposal becomes `failed` (`docs/design/replicas.md` §5).
 - `ApprovalGivenPayload` / `ApprovalRejectedPayload` gain `params_hash` and `identity`:
   `{iss, sub, session_id, method: "oidc"|"dev", grant: "user:…"|"group:…"|"backup:…"|"solo", auth_time}`.
   `session_id` is the public id, never the token. The `approvals` table gains the same columns.
