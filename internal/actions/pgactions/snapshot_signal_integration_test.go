@@ -95,7 +95,12 @@ func TestSnapshotSignalIntegration(t *testing.T) {
 		t.Fatalf("missing table: %v, want ErrNotFound", err)
 	}
 
-	raw := snapSigParams("it-pg", "public."+tbl)
+	raw, _ := json.Marshal(map[string]any{"connector": "it-pg", "tables": []string{"public." + tbl}, "signal_table": "public." + sig})
+	// The approved signal table is pinned: a step naming another one is refused.
+	other, _ := json.Marshal(map[string]any{"connector": "it-pg", "tables": []string{"public." + tbl}, "signal_table": "public." + unpub})
+	if _, err := a.Execute(sctx, other); !errors.Is(err, ErrSignalTableChanged) {
+		t.Fatalf("Execute with another signal_table: %v, want ErrSignalTableChanged", err)
+	}
 	if err := a.Validate(ctx, raw); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}

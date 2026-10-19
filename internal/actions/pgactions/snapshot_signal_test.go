@@ -154,7 +154,9 @@ func TestSnapshotSignalRefusesBadParamsBeforeIO(t *testing.T) {
 		raw  json.RawMessage
 	}{
 		{"not json", json.RawMessage(`{`)},
-		{"unknown field", json.RawMessage(`{"connector":"pg-orders","tables":["public.orders"],"signal_table":"public.evil"}`)},
+		{"unknown field", json.RawMessage(`{"connector":"pg-orders","tables":["public.orders"],"sql":"DROP TABLE x"}`)},
+		{"signal_table injection", json.RawMessage(`{"connector":"pg-orders","tables":["public.orders"],"signal_table":"debezium.signal; DROP TABLE x"}`)},
+		{"signal_table no schema", json.RawMessage(`{"connector":"pg-orders","tables":["public.orders"],"signal_table":"signal"}`)},
 		{"no connector", snapSigParams("", "public.orders")},
 		{"no tables", snapSigParams("pg-orders")},
 		{"too many tables", snapSigParams("pg-orders", many...)},
@@ -340,6 +342,113 @@ func TestSnapshotSignalExecute(t *testing.T) {
 	}
 	if !strings.Contains(out, "6f1c2a7e-0d3b-4c55-9a1e-2b7f0c9d8e11") || !strings.Contains(out, "debezium.signal") {
 		t.Fatalf("result %q must name the signal id and table", out)
+	}
+	if f.src.calls != 1 || f.src.sig != "debezium.signal" {
+		t.Fatalf("Execute must re-read the signal state before the write: %d reads of %q", f.src.calls, f.src.sig)
+	}
+}
+
+func snapSigWithSignal(signal string, tables ...string) json.RawMessage {
+	b, _ := json.Marshal(map[string]any{"connector": "pg-orders", "tables": tables, "signal_table": signal})
+	return b
+}
+
+func TestSnapshotSignalExecuteWithApprovedSignalTable(t *testing.T) {
+	f := newSnapSigFixture(nil)
+	raw := snapSigWithSignal("debezium.signal", "public.orders")
+	if err := f.a.Validate(snapSigScopedCtx(), raw); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if _, err := f.a.Execute(snapSigScopedCtx(), raw); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if f.w.calls != 1 || f.w.signal != "debezium.signal" {
+		t.Fatalf("writer got %d %q", f.w.calls, f.w.signal)
+	}
+}
+
+// The connector config moves between approval and Execute: the row must not
+// land in a table the approvers never saw.
+func TestSnapshotSignalExecuteConfigChangedAfterApproval(t *testing.T) {
+	cases := []struct {
+		name    string
+		raw     json.RawMessage
+		newSig  string
+		state   func(*postgres.SnapshotSignalState)
+		wantIs  error
+		wantSub string
+	}{
+		{"recorded signal table differs", snapSigWithSignal("debezium.signal", "public.orders"), "debezium.other_signal", nil, ErrSignalTableChanged, "config changed"},
+		{"now a source table, recorded", snapSigWithSignal("debezium.signal", "public.orders"), "public.customers", nil, ErrSignalTableChanged, "config changed"},
+		{"now a source table, not recorded", snapSigParams("pg-orders", "public.orders"), "public.customers", nil, ErrSignalIsSourceTable, "captured data table"},
+		{"now a table being snapshotted", snapSigParams("pg-orders", "public.orders"), "public.orders", nil, ErrSignalIsSourceTable, "captured data table"},
+		{"not recorded, new table missing", snapSigParams("pg-orders", "public.orders"), "debezium.other_signal",
+			func(s *postgres.SnapshotSignalState) { s.SignalExists = false }, clients.ErrNotFound, "refused at execute"},
+		{"not recorded, new table lacks columns", snapSigParams("pg-orders", "public.orders"), "debezium.other_signal",
+			func(s *postgres.SnapshotSignalState) { s.SignalColumns = false }, ErrSignalTableNotConfigured, "id, type and data"},
+		{"not recorded, new table not published", snapSigParams("pg-orders", "public.orders"), "debezium.other_signal",
+			func(s *postgres.SnapshotSignalState) { s.SignalPublished = false }, ErrSignalTableNotConfigured, "not in publication"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSnapSigFixture(nil)
+			// Approval: Validate passes against the config as it was.
+			if err := f.a.Validate(snapSigScopedCtx(), tc.raw); err != nil {
+				t.Fatalf("Validate at approval: %v", err)
+			}
+			// The config and the database move.
+			f.conn.cfg["pg-orders"]["signal.data.collection"] = tc.newSig
+			if tc.state != nil {
+				tc.state(&f.src.st)
+			}
+			_, err := f.a.Execute(snapSigScopedCtx(), tc.raw)
+			if !errors.Is(err, tc.wantIs) || !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("err = %v, want %v containing %q", err, tc.wantIs, tc.wantSub)
+			}
+			if f.w.calls != 0 {
+				t.Fatalf("wrote into %q after the config changed", f.w.signal)
+			}
+		})
+	}
+}
+
+func TestSnapshotSignalRefusesSourceTableAsSignalTable(t *testing.T) {
+	cfg := snapSigConfig()
+	cfg["signal.data.collection"] = "public.customers" // one of the pipeline's source_tables
+	f := newSnapSigFixture(cfg)
+	if err := f.a.Validate(snapSigScopedCtx(), snapSigGood); !errors.Is(err, ErrSignalIsSourceTable) {
+		t.Fatalf("Validate: %v, want ErrSignalIsSourceTable", err)
+	}
+	if _, err := f.a.Execute(snapSigScopedCtx(), snapSigGood); !errors.Is(err, ErrSignalIsSourceTable) {
+		t.Fatalf("Execute: %v, want ErrSignalIsSourceTable", err)
+	}
+	if _, err := f.a.Execute(tools.WithUnscoped(context.Background()), snapSigParams("pg-orders", "public.customers")); !errors.Is(err, ErrSignalIsSourceTable) {
+		t.Fatalf("unscoped Execute snapshotting the signal table: %v, want ErrSignalIsSourceTable", err)
+	}
+	if f.w.calls != 0 {
+		t.Fatal("wrote a signal row into a source table")
+	}
+	res, err := f.a.(actions.Preview).Preview(snapSigScopedCtx(), snapSigGood)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res.Expected, "no change: this step is refused") || !strings.Contains(res.Expected, "captured data table") || res.Rollback != "" {
+		t.Fatalf("preview = %+v", res)
+	}
+	// Without the pipeline in ctx Validate still refuses a signal table that
+	// is one of the tables being snapshotted.
+	if err := f.a.Validate(context.Background(), snapSigParams("pg-orders", "public.customers")); !errors.Is(err, ErrSignalIsSourceTable) {
+		t.Fatalf("Validate unscoped: %v, want ErrSignalIsSourceTable", err)
+	}
+}
+
+func TestSnapshotSignalValidateRefusesOtherRecordedSignalTable(t *testing.T) {
+	f := newSnapSigFixture(nil)
+	if err := f.a.Validate(context.Background(), snapSigWithSignal("debezium.elsewhere", "public.orders")); !errors.Is(err, ErrSignalTableChanged) {
+		t.Fatalf("err = %v, want ErrSignalTableChanged", err)
+	}
+	if f.src.calls != 0 {
+		t.Fatal("read the source for a step that is refused on its config")
 	}
 }
 

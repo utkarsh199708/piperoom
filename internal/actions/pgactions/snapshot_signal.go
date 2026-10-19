@@ -51,6 +51,14 @@ var (
 	// ErrSignalTableNotConfigured refuses a connector that cannot take a
 	// signal-table snapshot signal; the message names the keys to set.
 	ErrSignalTableNotConfigured = errors.New("pgactions: the connector is not configured for a signal-table snapshot signal")
+	// ErrSignalTableChanged refuses a step whose signal_table is not the
+	// connector's signal.data.collection any more: the row would land in a
+	// table the approvers never saw.
+	ErrSignalTableChanged = errors.New("pgactions: the connector's signal table is not the one in the step")
+	// ErrSignalIsSourceTable refuses a signal table that is one of the
+	// pipeline's source tables or a table being snapshotted: a signal row
+	// must never be written into a captured data table.
+	ErrSignalIsSourceTable = errors.New("pgactions: the signal table is a captured data table")
 	// errSnapSigNoWriter is Execute's refusal when wiring handed the action
 	// no SourceWriter (write mode off, or SOURCE_DB_WRITE_URL empty).
 	errSnapSigNoWriter = errors.New("no write credentials: the source Postgres writer is not configured (PIPEROOM_WRITE_MODE=on and SOURCE_DB_WRITE_URL are both needed)")
@@ -121,15 +129,29 @@ func (a *snapshotSignal) ParamsSchema() map[string]any {
 				"minItems":    1,
 				"maxItems":    snapSigMaxTables,
 			},
+			"signal_table": signalTableProp(),
 		},
 		"additionalProperties": false,
 		"required":             []string{"connector", "tables"},
 	}
 }
 
+// signalTableProp is the optional signal_table param: the table the proposer
+// and the approvers saw, so Execute can tell when the config moved since.
+func signalTableProp() map[string]any {
+	return map[string]any{
+		"type":        "string",
+		"description": "The connector's signal.data.collection (\"schema.table\") as seen when proposing. Recommended: Validate refuses it when it differs from the config, and Execute refuses when the config changed since approval.",
+		"pattern":     snapSigTableRe.String(),
+	}
+}
+
 type snapshotSignalParams struct {
 	Connector string   `json:"connector"`
 	Tables    []string `json:"tables"`
+	// SignalTable is the signal table the step was proposed and approved
+	// with; "" when the proposer did not record it.
+	SignalTable string `json:"signal_table,omitempty"`
 }
 
 // parseSnapshotSignal decodes params strictly and checks every identifier
@@ -149,6 +171,9 @@ func parseSnapshotSignal(raw json.RawMessage) (snapshotSignalParams, error) {
 	}
 	if len(p.Tables) > snapSigMaxTables {
 		return p, fmt.Errorf("pgactions: %s: %d tables, at most %d per signal", SnapshotSignalName, len(p.Tables), snapSigMaxTables)
+	}
+	if p.SignalTable != "" && !snapSigTableRe.MatchString(p.SignalTable) {
+		return p, fmt.Errorf("pgactions: %s: invalid signal_table %q: want \"schema.table\"", SnapshotSignalName, addPubCut(p.SignalTable))
 	}
 	uniq := make([]string, 0, len(p.Tables))
 	for _, t := range p.Tables {
@@ -240,6 +265,23 @@ func (a *snapshotSignal) connectorSignal(ctx context.Context, connector string) 
 	return sc, nil
 }
 
+// checkSignalTarget refuses a write target the approvers did not see or must
+// never get a signal row: a signal_table in the step that is not the
+// connector's signal.data.collection now (the config changed), and a signal
+// table that is one of the tables being snapshotted or, with the room's
+// pipeline known, one of its source_tables.
+func checkSignalTarget(p snapshotSignalParams, sc signalConfig, pl owners.Pipeline, scoped bool) error {
+	if p.SignalTable != "" && p.SignalTable != sc.table {
+		return fmt.Errorf("pgactions: %s: the step names signal table %s but connector %q's signal.data.collection is now %s; the connector config changed since the step was proposed: propose it again: %w",
+			SnapshotSignalName, p.SignalTable, addPubCut(p.Connector), sc.table, ErrSignalTableChanged)
+	}
+	if slices.Contains(p.Tables, sc.table) || (scoped && slices.Contains(pl.SourceTables, sc.table)) {
+		return fmt.Errorf("pgactions: %s: connector %q's signal.data.collection %s is one of the pipeline's source tables; a signal row is never written into a captured data table: %w",
+			SnapshotSignalName, addPubCut(p.Connector), sc.table, ErrSignalIsSourceTable)
+	}
+	return nil
+}
+
 // checkSignalState refuses a signal the connector would never see or a table
 // that does not exist.
 func checkSignalState(sc signalConfig, st postgres.SnapshotSignalState) error {
@@ -268,8 +310,9 @@ func checkSignalState(sc signalConfig, st postgres.SnapshotSignalState) error {
 }
 
 // Validate reads the connector config and the source on the read-only
-// clients and refuses a connector without a usable signal table and a table
-// that does not exist. It does not depend on the scope in ctx (CheckScope is
+// clients and refuses a connector without a usable signal table, a signal
+// table other than the step's signal_table or among the source tables (with
+// the room's pipeline in ctx), and a table that does not exist. It does not depend on the scope in ctx (CheckScope is
 // the scope gate) nor on the writer (Execute refuses without one).
 func (a *snapshotSignal) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseSnapshotSignal(raw)
@@ -284,6 +327,10 @@ func (a *snapshotSignal) Validate(ctx context.Context, raw json.RawMessage) erro
 	defer cancel()
 	sc, err := a.connectorSignal(ctx, p.Connector)
 	if err != nil {
+		return err
+	}
+	pl, scoped := tools.PipelineFrom(ctx)
+	if err := checkSignalTarget(p, sc, pl, scoped); err != nil {
 		return err
 	}
 	st, err := r.SnapshotSignalState(ctx, sc.publication, sc.table, p.Tables)
@@ -361,7 +408,7 @@ func (a *snapshotSignal) Preview(ctx context.Context, raw json.RawMessage) (acti
 	if err != nil {
 		return actions.PreviewResult{}, fmt.Errorf("pgactions: %s: preview: %w", SnapshotSignalName, err)
 	}
-	return snapSigPreview(p, pl, scoped, sc, st), nil
+	return snapSigPreview(p, pl, scoped, sc, st, checkSignalTarget(p, sc, pl, scoped)), nil
 }
 
 // snapSigData is the data column the writer inserts, rendered for the
@@ -378,7 +425,7 @@ func snapSigData(tables []string) string {
 }
 
 // snapSigPreview renders the preview from what was read.
-func snapSigPreview(p snapshotSignalParams, pl owners.Pipeline, scoped bool, sc signalConfig, st postgres.SnapshotSignalState) actions.PreviewResult {
+func snapSigPreview(p snapshotSignalParams, pl owners.Pipeline, scoped bool, sc signalConfig, st postgres.SnapshotSignalState, refused error) actions.PreviewResult {
 	res := actions.PreviewResult{
 		Target:     fmt.Sprintf("signal table %s of connector %s on the source Postgres", sc.table, p.Connector),
 		Current:    snapSigCurrent(sc, st),
@@ -386,7 +433,10 @@ func snapSigPreview(p snapshotSignalParams, pl owners.Pipeline, scoped bool, sc 
 		Rollback: fmt.Sprintf("a running incremental snapshot stops on a stop-snapshot signal: INSERT INTO %s (id, type, data) VALUES ('<new id>', 'stop-snapshot', '{\"data-collections\":[..],\"type\":\"INCREMENTAL\"}') (by a DBA; no registered action). Rows already re-emitted stay in Kafka.",
 			addPubQuoteTable(sc.table)),
 	}
-	if err := checkSignalState(sc, st); err != nil {
+	if refused == nil {
+		refused = checkSignalState(sc, st)
+	}
+	if err := refused; err != nil {
 		res.Expected = "no change: this step is refused (" + strings.TrimPrefix(err.Error(), "pgactions: "+SnapshotSignalName+": ") + ")"
 		res.Rollback = ""
 		return res
@@ -454,25 +504,45 @@ func snapSigCurrent(sc signalConfig, st postgres.SnapshotSignalState) string {
 	return b.String()
 }
 
-// Execute re-reads the connector's signal table from its config (it is not a
-// param, so the agent never chooses where the row goes) and inserts the
-// signal through the SourceWriter.
+// Execute re-reads the connector's signal table from its config (the agent
+// never chooses where the row goes; signal_table only pins what was
+// approved), re-runs the target and signal-state checks of Validate, and
+// only then inserts the signal through the SourceWriter.
 func (a *snapshotSignal) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	p, err := parseSnapshotSignal(raw)
 	if err != nil {
 		return "", err
 	}
-	if _, _, err := snapSigScope(ctx, p); err != nil {
+	pl, scoped, err := snapSigScope(ctx, p)
+	if err != nil {
 		return "", err
 	}
 	if a.d.Writer == nil {
 		return "", fmt.Errorf("pgactions: %s: %w", SnapshotSignalName, errSnapSigNoWriter)
+	}
+	r, err := a.reader()
+	if err != nil {
+		return "", err
 	}
 	ctx, cancel := a.ctx(ctx)
 	defer cancel()
 	sc, err := a.connectorSignal(ctx, p.Connector)
 	if err != nil {
 		return "", err
+	}
+	// The connector config may have changed since approval: the row goes
+	// only into the table the step names (when it names one), never into a
+	// source table, and only into a signal table that passes the same checks
+	// as at Validate, read again now.
+	if err := checkSignalTarget(p, sc, pl, scoped); err != nil {
+		return "", err
+	}
+	st, err := r.SnapshotSignalState(ctx, sc.publication, sc.table, p.Tables)
+	if err != nil {
+		return "", fmt.Errorf("pgactions: %s: re-check before the write: %w", SnapshotSignalName, err)
+	}
+	if err := checkSignalState(sc, st); err != nil {
+		return "", fmt.Errorf("pgactions: %s: refused at execute, nothing written: %w", SnapshotSignalName, err)
 	}
 	id, err := a.d.Writer.InsertSnapshotSignal(ctx, sc.table, p.Connector, p.Tables)
 	if err != nil {
