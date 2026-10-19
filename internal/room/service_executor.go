@@ -119,7 +119,7 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 			return
 		}
 		if !claimed {
-			s.log.Info("room: proposal already claimed by another executor; not queued here", "proposal", p.ProposalID)
+			s.log.Info("room: claim refused (claimed by another executor, not approved in full, or not open); not queued here", "proposal", p.ProposalID)
 			s.wg.Done()
 			return
 		}

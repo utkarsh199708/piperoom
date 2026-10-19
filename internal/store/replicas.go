@@ -358,12 +358,17 @@ func (s *PG) ClaimProposal(ctx context.Context, proposalID, owner string) (bool,
 // fullyApprovedSQL holds when every required layer of proposals row p has an
 // approved decision. The claim checks it in the same statement that takes the
 // claim, so no executor (whoever calls it, whenever) can ever claim, and so
-// run, a proposal that is not approved in full.
-const fullyApprovedSQL = `jsonb_array_length(p.required_layers) > 0
-     AND NOT EXISTS (
+// run, a proposal that is not approved in full. No required layers is never
+// approved: an empty array, and also a jsonb null (CreateProposal stores a nil
+// slice as null). The CASE branches run in order, so a non-array never reaches
+// the array functions: such a row is not approved, the statement does not fail.
+const fullyApprovedSQL = `CASE WHEN jsonb_typeof(p.required_layers) IS DISTINCT FROM 'array' THEN false
+     WHEN jsonb_array_length(p.required_layers) = 0 THEN false
+     ELSE NOT EXISTS (
          SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
          WHERE NOT EXISTS (SELECT 1 FROM approvals a
-                           WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer AND a.decision = 'approved'))`
+                           WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer AND a.decision = 'approved'))
+     END`
 
 // TouchProposalClaim implements Coordinator.
 func (s *PG) TouchProposalClaim(ctx context.Context, proposalID, owner string) (bool, error) {
@@ -379,7 +384,8 @@ func (s *PG) TouchProposalClaim(ctx context.Context, proposalID, owner string) (
 }
 
 // staleProposalSQL is the stale rule shared by StaleProposals and
-// InterruptProposal. $a is the claim staleness, $b the unclaimed staleness,
+// InterruptProposal; its unclaimed branch is fullyApprovedSQL, the rule the
+// claim uses. $a is the claim staleness, $b the unclaimed staleness,
 // both in milliseconds; p is the proposals row. 'blocked' is
 // ProposalStatusBlocked: such a row is never claimed, so only the unclaimed
 // branch can list it, and only while its room is open. In a closed room
@@ -390,11 +396,7 @@ const staleProposalSQL = `(
  OR ((p.status = 'open'
       OR (p.status = 'blocked' AND EXISTS (SELECT 1 FROM rooms rm WHERE rm.id = p.room_id AND rm.status = 'open')))
      AND p.claimed_by IS NULL
-     AND jsonb_array_length(p.required_layers) > 0
-     AND NOT EXISTS (
-         SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
-         WHERE NOT EXISTS (SELECT 1 FROM approvals a
-                           WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer AND a.decision = 'approved'))
+     AND ` + fullyApprovedSQL + `
      AND (SELECT max(a.decided_at) FROM approvals a WHERE a.proposal_id = p.proposal_id)
          < now() - %[2]s * interval '1 millisecond'))`
 

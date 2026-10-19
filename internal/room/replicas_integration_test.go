@@ -588,11 +588,19 @@ func TestReplicasExecutorExactlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Every replica has the room cached before it races, as the one that
-	// queues an executor in production always has (the approve path loads
-	// it): an executor on a replica that never loaded the room could neither
-	// check that it is open nor log the step's outcome.
+	// queues an executor in production always has (it claims under the room's
+	// lock, which loads the room). lockRoom loads it; syncProposalRoom would
+	// only refresh a room already cached. Without this, a racing executor on
+	// a replica that never loaded the room can win the claim in the window
+	// between the approval row and the approver's own claim, find the room
+	// "not open" and fail the proposal: an interleaving production cannot
+	// reach, since no replica claims a room it has not loaded.
 	for _, s := range svcs {
-		s.syncProposalRoom(ctx, pid)
+		st, err := s.lockRoom(ctx, room)
+		if err != nil {
+			t.Fatalf("load the room on %s: %v", s.replica, err)
+		}
+		s.unlockRoom(st)
 	}
 	// The executors below start before the approval: until it is recorded
 	// none of them may claim the proposal or run a step (claimExecution and

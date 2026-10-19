@@ -15,8 +15,8 @@ import (
 	"piperoom/internal/store/memstore"
 )
 
-// gateAct is a postgres action that records, at every run, whether the
-// proposal was approved in the store at that moment.
+// gateAct is a postgres action that records, at every run, whether every
+// required layer of the proposal had approved it in the store at that moment.
 type gateAct struct {
 	st         store.Store
 	pid        atomic.Value // string
@@ -33,8 +33,14 @@ func (*gateAct) CheckScope(owners.Pipeline, json.RawMessage) error { return nil 
 func (a *gateAct) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
 	a.runs.Add(1)
 	pid, _ := a.pid.Load().(string)
+	p, err := a.st.GetProposal(ctx, pid)
+	if err != nil {
+		a.unapproved.Add(1)
+		return "done", nil
+	}
 	apps, err := a.st.ListApprovals(ctx, pid)
-	if err != nil || len(apps) == 0 {
+	// Partial or rejected decisions count as unapproved too.
+	if err != nil || !layersApproved(p.RequiredLayers, apps) {
 		a.unapproved.Add(1)
 	}
 	return "done", nil
@@ -155,6 +161,66 @@ func TestExecutorRaceWithApprovalNeverRunsUnapproved(t *testing.T) {
 	wg.Wait()
 	if bad := r.act.unapproved.Load(); bad != 0 {
 		t.Fatalf("the action ran %d time(s) before the proposal was approved", bad)
+	}
+}
+
+// The executor's last guard: even with the claim already held (the queue
+// path, executeProposal(row, true)), recheckStep refuses a step on a proposal
+// that is not approved in full. Execute is never called; the step is recorded
+// failed with notApprovedOutput.
+func TestRecheckStepRefusesUnapprovedClaimedProposal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision string // "" records nothing
+	}{
+		{"no approval", ""},
+		{"rejected", "rejected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newGateRig(t)
+			ctx := context.Background()
+			if tc.decision != "" {
+				// Straight into the store: the room's reject path would
+				// also mark the proposal rejected, and this test is about
+				// the executor's own check.
+				if err := r.ms.RecordApproval(ctx, store.ApprovalRow{ProposalID: r.pid, Layer: "postgres", Decision: tc.decision, ParamsHash: r.row.ParamsHash}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := r.svc.executeProposal(r.row, true); err != nil {
+				t.Fatalf("executeProposal: %v", err)
+			}
+			if n := r.act.runs.Load(); n != 0 {
+				t.Fatalf("Execute ran %d time(s) on a proposal that is not approved in full", n)
+			}
+			if got := r.ms.ProposalStepStatus(r.pid, 0); got != "failed" {
+				t.Fatalf("step 0 status %q, want failed", got)
+			}
+			evs, err := r.ms.Since(ctx, r.row.RoomID, 0, 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var outs []string
+			for _, e := range evs {
+				if e.Type != events.ActionExecuted {
+					continue
+				}
+				p, ok := decode[events.ActionExecutedPayload](e)
+				if !ok {
+					t.Fatalf("undecodable action.executed: %+v", e)
+				}
+				if p.OK {
+					t.Fatalf("action.executed ok for an unapproved proposal: %+v", p)
+				}
+				outs = append(outs, p.Output)
+			}
+			if len(outs) != 1 || outs[0] != notApprovedOutput {
+				t.Fatalf("action.executed outputs %q, want [%q]", outs, notApprovedOutput)
+			}
+			if p, err := r.ms.GetProposal(ctx, r.pid); err != nil || p.Status != "failed" {
+				t.Fatalf("proposal %q (%v), want failed", p.Status, err)
+			}
+		})
 	}
 }
 
