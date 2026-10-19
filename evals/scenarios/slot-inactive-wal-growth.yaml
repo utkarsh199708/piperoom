@@ -528,6 +528,8 @@ expect:
       facts: [f_connector_stopped, f_slot_inactive]
   evidence_tools: [connect_status, pg_replication_slots]
   fix: [[connect_resume_connector]]
+  fix_targets:
+    connect_resume_connector: {connector: pg-orders-connector}
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
   # Reads after the executed resume (the re-check, including agent.Run's own verify pass)
   # count against max_verify_calls, not this budget. 8: see the header (E6b).
