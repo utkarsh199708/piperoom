@@ -358,14 +358,15 @@ func LoadScenario(path string) (Scenario, error) {
 	}
 	// The pipeline as the server loads it: its watch block resolved, which
 	// dlq_replay's and pg_drop_replication_slot's CheckScope read
-	// (watch.dlq_topics, watch.slot). A pipeline owners.Load refuses keeps
-	// the plain decode here; the room fixture reports that error at run
-	// time, as before.
+	// (watch.dlq_topics, watch.slot). A pipeline owners.Load refuses is an
+	// error of the scenario, not a silent plain decode.
 	if s.Pipeline.WatchSpec != nil {
-		if own, err := loadOwnersFor(s); err == nil {
-			if p, ok := own.Pipeline(s.Pipeline.ID); ok {
-				s.Pipeline = p
-			}
+		own, err := loadOwnersFor(s)
+		if err != nil {
+			return Scenario{}, fmt.Errorf("%s: owners: %w", path, err)
+		}
+		if p, ok := own.Pipeline(s.Pipeline.ID); ok {
+			s.Pipeline = p
 		}
 	}
 	return s, nil

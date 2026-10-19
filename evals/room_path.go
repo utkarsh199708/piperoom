@@ -268,6 +268,9 @@ func (w *harnessInbox) Wait(ctx context.Context) error {
 // the recorded stack to its next phase.
 type execScript struct {
 	rp *replayer
+	// log notes each executed step (action and target) for the report; nil
+	// in tests that do not read it.
+	log *writeLog
 
 	mu    sync.Mutex
 	armed *Input
@@ -282,6 +285,7 @@ func (x *execScript) arm(in Input) {
 func (x *execScript) execute(action string, params json.RawMessage) (string, error) {
 	x.mu.Lock()
 	defer x.mu.Unlock()
+	x.note(action, params)
 	if in := x.armed; in != nil && in.Action == action {
 		x.armed = nil
 		if in.Params != nil && !paramsMatch(in.Params, params) {
@@ -300,6 +304,23 @@ func (x *execScript) execute(action string, params json.RawMessage) (string, err
 	ok := true
 	x.rp.executed(action, &ok)
 	return "succeeded", nil
+}
+
+// note logs an executed step with its target names only: the params of a
+// step can carry record keys or config values, which a report must not.
+func (x *execScript) note(action string, params json.RawMessage) {
+	if x.log == nil {
+		return
+	}
+	var all map[string]any
+	_ = json.Unmarshal(params, &all) // not an object: logged without a target
+	args := map[string]any{}
+	for _, k := range writeTargetKeys {
+		if v, ok := all[k].(string); ok {
+			args[k] = v
+		}
+	}
+	x.log.record(action, args)
 }
 
 // roomRun is the state of one run on the room path.
@@ -330,11 +351,11 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	live, err := LiveActions(sc.Resources, sc.Recordings)
+	live, wl, err := liveActions(sc.Resources, sc.Recordings)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	exec := &execScript{rp: rp}
+	exec := &execScript{rp: rp, log: wl}
 	attempts := &attemptLog{exec: exec}
 	areg, err := attempts.wrap(live)
 	if err != nil {
@@ -380,7 +401,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		return RunResult{}, Transcript{}, ctx.Err()
 	}
 
-	tr := Transcript{Misses: rp.Misses(), Attempts: attempts.snapshot(), Replay: rp.trace()}
+	tr := Transcript{Misses: rp.Misses(), Attempts: attempts.snapshot(), Writes: wl.snapshot(), Replay: rp.trace()}
 	alert, idles := ag.snapshot()
 	tr.Idles = idles
 	if rr.roomID != "" {

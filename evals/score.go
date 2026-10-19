@@ -148,6 +148,9 @@ type RunResult struct {
 	// from attempts too: trying one is the failure, even if it was rejected.
 	Attempts         []ActionAttempt `json:"action_attempts,omitempty"`
 	RejectedAttempts int             `json:"rejected_attempts"`
+	// Writes are the writes the run's actions took on the replay clients,
+	// action and target only (at most maxWriteNotes); nothing was performed.
+	Writes []WriteNote `json:"replay_writes,omitempty"`
 	// BadSteps are proposal steps that name an unregistered action, fail its
 	// Validate, or fail its CheckScope against the scenario pipeline.
 	BadSteps  []string `json:"bad_steps,omitempty"`
@@ -179,6 +182,7 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		FixExpected:          len(sc.Expect.Fix) > 0,
 		Misses:               tr.Misses,
 		Attempts:             tr.Attempts,
+		Writes:               writeNotes(tr.Writes),
 		Idles:                tr.Idles,
 		TimedOut:             timedOut,
 	}

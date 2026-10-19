@@ -799,10 +799,6 @@ func describe(run *shadowRun, label events.ShadowLabelledPayload, graded json.Ra
 	return b.String()
 }
 
-// incidentLayers are the layers a cause can sit in: events.Layers without
-// `environment`, which is the layer of setup actions, never of an incident.
-func incidentLayers() []string { return events.IncidentLayers() }
-
 func contains(xs []string, x string) bool {
 	for _, e := range xs {
 		if e == x {

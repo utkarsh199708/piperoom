@@ -42,7 +42,10 @@ type Transcript struct {
 	// Attempts are every action Validate call, including the rejected ones
 	// that never became a proposal.
 	Attempts []ActionAttempt `json:"action_attempts,omitempty"`
-	Idles    int             `json:"idles"`
+	// Writes are the writes the replay clients took and the steps the room
+	// executed, performed nowhere (replay_actions.go).
+	Writes []ReplayWrite `json:"replay_writes,omitempty"`
+	Idles  int           `json:"idles"`
 	// Replay is what a phased or executing scenario's replay did: phases,
 	// executed steps, transitions and phase-tagged answers. Nil for a static
 	// scenario that executed nothing.
