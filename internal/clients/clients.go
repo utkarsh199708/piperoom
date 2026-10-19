@@ -505,6 +505,51 @@ type SourceWriter interface {
 	InsertSnapshotSignal(ctx context.Context, signalTable, connectorID string, tables []string) (signalID string, err error)
 }
 
+// SetupSourceWriter holds the writes only a setup makes on the source
+// database (docs/design/setup-agent.md §4 item 4): built only with write
+// mode on, on the write pool (SOURCE_DB_WRITE_URL for Postgres), never the
+// read-only SourceDB pool; not embedded in SourceDB or SourceWriter, so no
+// existing fake implements it. Postgres implements it in U1-9 (A3), MySQL in
+// U2a (A8), the other sources in A10's clients; a source with no equivalent
+// of a method returns ErrNotSupported from it. The fail-closed scope rule of
+// SourceWriter applies to every method (the room's pipeline scope in ctx,
+// tools.ErrOutOfScope / tools.ErrNoScope before any I/O), and identifiers
+// follow the same ^[a-zA-Z_][a-zA-Z0-9_]*$ plus Sanitize rule. In a setup
+// room the implementation is internal/setup/remoteclients (A9), one T2 or T3
+// op to the runner per call. No method deletes data or reads a secret. (U)
+type SetupSourceWriter interface {
+	// CreatePublication creates publication name FOR TABLE tables
+	// ("schema.table"); an existing publication of that name is an error,
+	// never altered (AddPublicationTables does that).
+	CreatePublication(ctx context.Context, name string, tables []string) error
+	// CreateCanaryTable creates the ladder's canary table ("schema.table":
+	// an id, a nonce column and a timestamp) with the replica identity the
+	// connector needs; it exists afterwards whether or not it did before.
+	CreateCanaryTable(ctx context.Context, table string) error
+	// InsertCanary inserts one row with nonce (16 random bytes, hex, from
+	// the ladder runner, never from the model) into the canary table, so the
+	// ladder can find the change event by key.
+	InsertCanary(ctx context.Context, table, nonce string) error
+	// CreateReadRole creates role with the grants of docs/pilot/permissions.md
+	// on tables (SELECT, and the replication-slot reads the watcher needs)
+	// and a password the implementation generates and stores in the runner's
+	// secret store; it returns only that store's name. The password is in no
+	// return value, log, event or prompt; it reaches the server only through
+	// the runner's Credentials frame after the person's click and terminal
+	// confirmation (design §3.7). An existing role is an error, never
+	// re-passworded.
+	CreateReadRole(ctx context.Context, role string, tables []string) (secretName string, err error)
+	// AlterSystem sets one server setting (ALTER SYSTEM SET name = value, or
+	// the source's equivalent) and reports whether the change needs a restart
+	// to take effect (pg_settings.pending_restart). name must be in the
+	// setup allow-list of design §2.5 (wal_level, max_replication_slots,
+	// max_wal_senders, max_slot_wal_keep_size, wal_sender_timeout, and the
+	// source's equivalents); any other name is refused before any I/O. It is
+	// a T3 op: the room service creates and executes it only inside a
+	// maintenance window.
+	AlterSystem(ctx context.Context, name, value string) (pendingRestart bool, err error)
+}
+
 type ReplicationSlot struct {
 	Name              string `json:"name"`
 	Plugin            string `json:"plugin"`

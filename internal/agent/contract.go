@@ -7,7 +7,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
@@ -103,7 +105,38 @@ type Alert struct {
 	// owners.yaml does not know). It decides which tools the room offers and
 	// the prompt's per-kind section (P4b). (P4)
 	PipelineKind string `json:"pipeline_kind,omitempty"`
+	// Mode is "" for an incident room and ModeSetup for a setup room
+	// (room.created.mode). In setup mode Raw holds the events.SetupRequest,
+	// PipelineID the pipeline being set up (no owners.yaml entry yet: the
+	// room scopes tools and actions to owners.Provisional(request)), and Run
+	// uses the setup prompt frame, the registries wiring.SetupStack built
+	// over the paired runner, and Options.Setup as its bounds
+	// (docs/design/setup-agent.md §3.1). The untrusted-data wrapper, receipts
+	// and hypothesis grounding apply unchanged. (U)
+	Mode string `json:"mode,omitempty"`
 }
+
+// ModeSetup is Alert.Mode of a setup room; it equals events.RoomModeSetup. (U)
+const ModeSetup = "setup"
+
+// SetupBounds are the stops of a setup run (Options.Setup). On any of them
+// Run emits setup.blocked with the reason and a question, goes idle, and
+// returns an error wrapping *BudgetError, which callers treat as a stop, not
+// a failure (as a token-budget stop today). Zero values take the defaults
+// of design §3.1: 3 attempts per step, 12 executed steps per plan, 45 min,
+// PIPEROOM_SETUP_TOKEN_BUDGET tokens. (U)
+type SetupBounds struct {
+	AttemptsPerStep int           // failed executions of one plan step before the run stops
+	StepsPerPlan    int           // executed steps (T1 and above) before the run stops
+	WallClock       time.Duration // from Run's start, over every turn and wait
+	TokenBudget     int64         // model tokens for this setup room, cache included; counted like Options.TokenBudget
+}
+
+// ErrNotInPlan is returned (wrapped) by Proposals.Create in a setup room when
+// a step's op is not in the current setup.plan: the model must emit a new
+// plan (setup_plan) before it proposes again (design §3.3). The agent treats
+// it as a tool error of propose_fix, not as a stop. (U)
+var ErrNotInPlan = errors.New("agent: proposal step is not in the current setup plan")
 
 // TriageResult is what the triage pass returns to its caller. (F6)
 type TriageResult struct {
@@ -155,6 +188,11 @@ type Options struct {
 	// and internal/wiring pass config.Limits.EventMaxDataBytes so the agent
 	// and the room agree on one limit. Consumed by R11 (#136).
 	MaxToolDataBytes int64
+	// Setup are the bounds of a setup run (Alert.Mode == ModeSetup). Nil
+	// outside setup mode; in setup mode nil means the SetupBounds defaults.
+	// The server fills it from PIPEROOM_SETUP_TOKEN_BUDGET and the design's
+	// fixed attempt, step and wall-clock bounds. (U)
+	Setup *SetupBounds
 }
 
 // Runner is implemented by A4 in run.go:

@@ -138,6 +138,19 @@ Every text field a person types (for example titles, comments, steers, resolutio
 driver-only endpoints answer `403 not_driver`. `stale_handoff`: the hand-off's creator is no longer the driver,
 or the hand-off was voided by a newer one. A second `send` of an already-sent suggestion → `409 already_decided`.
 
+Setup rooms (U0; see **Setup rooms** under REST endpoints) add: `400 not_in_plan` (a proposal step that is not in the
+current `setup.plan`), `400 address_refused` (a target address on the denylist of design §2.6), `400 class_lowered`
+(a class below the one the server derived), `400 window_too_long` (a maintenance window over 4 h or more than 24 h
+ahead), `400 not_setup_room` (a setup route on an incident room); `403 not_tenant_member` (`POST /api/setup` for a
+tenant the caller is not in), `403 not_admin` (a T2/T3 approval on a team server by someone who is neither a tenant
+admin nor an owner of an overlapping pipeline); `404 setup_disabled` (every setup route and `/api/runners/ws` while
+`PIPEROOM_SETUP_ENABLED` is off); `409 pipeline_exists` (`POST /api/setup` for a pipeline id `owners.yaml` already
+has), `409 no_runner` (a route that needs the paired runner while none is connected), `409 runner_paired` (a second
+pairing while the first runner is still attached), `409 overlap` (`pipeline_register` refused by the overlap check;
+the message names the overlap kind and the caller's own tenant's pipelines only), `409 not_verified`
+(`pipeline_register` without a green `setup.verified` for the current plan); `429 pairing_closed` (the pairing rate
+limit of design §2.1: pairing is closed for 10 minutes and audited).
+
 ## Objects
 
 ### Event
@@ -151,7 +164,8 @@ Exactly `events.Event` from `internal/events/events.go`:
 `actor.verified` is decided when the event is written (see **Verified people** under Login).
 
 `room.created` (`events.RoomCreatedPayload`) carries, besides `title`, `severity`, `pipeline_id`, `alert`,
-`alert_source`, `dedup_key` and `shadow`, the server's verification of the alert **sender** (R3 #135 contract change
+`alert_source`, `dedup_key`, `shadow` and `mode` (U0: `"setup"` for a setup room, absent otherwise), the server's
+verification of the alert **sender** (R3 #135 contract change
 request; A5 implements):
 
 - `alert_verified` (bool, omitted when false): `true` when the server checked the sender before opening the room, a
@@ -254,6 +268,56 @@ omitted when empty, so events written before P0 and their export hashes are unch
   says "one of the layers" (`approval.*.layer`, `room.labelled.actual_layer`, `agent.triage.suspected_layer`,
   topology `layer`), these two are valid too.
 
+### U-wave events (U0; payloads in `internal/events/events.go`, design `docs/design/setup-agent.md`)
+
+Additive like the F and P waves: unknown types are ignored by clients, and every new field on an existing payload is
+omitted when empty, so events written before U0 and their export hashes are unchanged. Every `setup.*` event is
+audit: **no event ever carries a secret value, a pairing code or a runner token**; the runner label stands for the
+runner, a name for a secret, a hash for the canary nonce.
+
+- **Setup rooms (`room.created.mode: "setup"`).** `POST /api/setup` opens a room with `mode: "setup"` next to
+  `shadow` (never both) and the `SetupRequest` as `alert`. The agent runs in setup mode (`agent.Alert.Mode`); the
+  room scopes tools and actions to the provisional pipeline (`owners.Provisional`) until `pipeline.registered`.
+- **Layer `environment` (`events.LayerEnvironment`).** `events.LayersOf("cdc")` gains `environment` **at the end**
+  (postgres, kafka-connect, schema-registry, kafka, consumer, warehouse, environment); `events.Layers` has nine
+  entries. It is the layer of the setup actions (compose, service, manifest, plugin, `pipeline_register`). An
+  `owners.yaml` that does not name it leaves it unowned (the driver approves it with `grant: "fallback"` in solo mode;
+  a tenant admin with `grant: "admin"` otherwise); every existing owners file still loads. Wherever a field says "one
+  of the layers", `environment` is valid too.
+- **Runner lifecycle.** `setup.pairing {outcome: ok | bad_code | expired | rate_limited | replaced | refused, source,
+  runner_label?}` for every pairing attempt (system actor); `setup.runner_attached {runner_label, os, arch, tools,
+  project_dir, catalogue_version, protocol_version}` (the runner's `Hello`, after the person confirmed on its
+  terminal); `setup.runner_lost {runner_label, last_seen}` (silent 90 s; every in-flight step is recorded with
+  `outcome_unknown: true`); `setup.runner_refused {op, reason, proposal_id?, step_index?}` (`reason` is a
+  `protocol.Refuse*` code, never runner text).
+- **Plan and bounds (agent actor).** `setup.plan {plan_id, supersedes?, phases: [{name, steps: [{index, op, target,
+  tier, layer, verify?}]}]}`: `target`, `tier` and `layer` are filled by the server from the resolved endpoint, never
+  from the model; a proposal whose step is not in the current plan is refused (`agent.ErrNotInPlan`, `400
+  not_in_plan`). `setup.blocked {reason: attempts | steps | wall_clock | budget | runner_lost | refused, step_index?,
+  question}`: a bound stopped the run and the agent is idle until a steer.
+- **Driver clicks (actor: the driver, also in `by`).** `setup.target_registered {kind, address, class, by}`,
+  `setup.pipeline_extended {add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?, by}`,
+  `setup.maintenance_window {start, end, by}`. `setup.target_classed {target, class, reason, by: "server" |
+  "person"}` records every class decision; a class only rises.
+- **Secrets, names only.** `setup.secret_set {name, actor}` (the runner's terminal or `POST
+  /api/rooms/{id}/setup/secret`); `setup.credentials_registered {pipeline_id, names, runner_label}` (the runner's
+  `Credentials` frame landed in `PIPEROOM_SECRETS_DIR/<pipeline>/`). The values are in no event, log, action result
+  or prompt.
+- **Verification (system actor, the ladder runner only).** `setup.verified {plan_id, nonce_hash, rungs: [{name, ok,
+  step_id?, receipt_id?, note?}], first_event_latency_ms?}` is written only by the server's ladder runner: the
+  agent's `Sink` refuses the type, so no model output can claim a pipeline verified. `setup.awaiting_change {table,
+  example_sql}` is rung 8 (the person's own change).
+- **Receipts.** `action.executed` gains `receipt` (`events.SetupReceipt`: `{kind: exec | http | sql | file, argv?,
+  target, exit_code, at, took_ms, out_mac}`) for a step of a `Receipted` action: the exact argv with every secret as
+  `${secret:name}`, the target, and an HMAC of the output under a key only the runner holds; never credentials or raw
+  output. Absent for every other action.
+- **Policies and grants.** `proposal.scheduled.policy` gains `"setup_local"` (a T1 step on a local-class target,
+  countdown `PIPEROOM_SETUP_LOCAL_DELAY`, cancellable like `auto_approve`); `approval.given.grant` gains `"admin"` (a
+  tenant admin, `tenants.<t>.admins`, approving a T2 or T3 step of a setup room on a team server).
+- **Registration.** `pipeline.registered {pipeline_id, tenant?, path | pull_request_url, watched_by: "server" |
+  "local", by, approved_by}` (system actor) after the `pipeline_register` step ran and the server reloaded; the room
+  then closes with resolution `pipeline live` and `room.labelled` gets `cause: setup`.
+
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
 ```json
@@ -338,7 +402,8 @@ Additive, same rule as the F-wave fields: absent until the task lands, and an ab
 ```
 - `mode` (item 1, item 4): `write` is the server's `PIPEROOM_WRITE_MODE` (`--demo` forces `true`); `solo` is
   **derived per caller**: true when the caller may approve every layer of the room's pipeline kind
-  (`events.LayersOf(kind)`), as owner or backup, or is `PIPEROOM_SOLO_USER`; `auto_approve` is the pipeline's
+  (`events.LayersOf(kind)` without the setup layer `environment`, U0: no incident action targets it, so an owners
+  file from before the U wave keeps its solo mode), as owner or backup, or is `PIPEROOM_SOLO_USER`; `auto_approve` is the pipeline's
   `auto_approve:` list from `owners.yaml` (`[]` when none, or when `PIPEROOM_AUTO_APPROVE_DELAY=0`). `GET /api/rooms`
   rows do not carry `mode` (room view only).
 - `open_proposals[].blocked` (item 1, P1a): `"write_mode_off"` when every required layer approved and the executor
@@ -347,6 +412,25 @@ Additive, same rule as the F-wave fields: absent until the task lands, and an ab
 - `open_proposals[].scheduled` (item 4, P2b): from the pending `proposal.scheduled`; cleared by
   `proposal.cancelled`, by the policy's approvals, or by any human `approval.*` on the proposal.
 - `open_proposals[].fallback_layers`, `open_proposals[].origin` (items 4, 5): copied from `proposal.created`.
+
+#### U-wave snapshot fields (U0; implemented by A5)
+
+Additive, same rule: absent until the row lands, and an absent field reads as its empty value. Present only on a
+setup room (`room.created.mode: "setup"`).
+```json
+  "setup": { "mode": true,
+             "runner": { "label": "arjun-laptop", "connected": true, "tools": { "docker": "27.1.1", "kubectl": "" } },  // setup.runner_attached / setup.runner_lost; null before pairing
+             "plan_id": "pl_…", "phase": "stack", "step_index": 3,              // the current setup.plan and the step the agent is on
+             "bounds": { "attempts_per_step": 3, "steps_per_plan": 12, "wall_clock_s": 2700, "token_budget": 2000000 },
+             "targets": [ { "kind": "postgres", "address": "db.acme:5432", "class": "shared" } ],   // the request's plus every setup.target_registered, classes after setup.target_classed
+             "provisional": { "topic_prefix": "orders", "tables": ["public.orders"], "connectors": ["orders-src"] },  // owners.Provisional after every setup.pipeline_extended
+             "maintenance_window": { "start": "...", "end": "..." },             // the latest setup.maintenance_window, absent when none or past
+             "verified": [ { "name": "connector_running", "ok": true } ],       // rungs of the latest setup.verified for plan_id; [] before one exists
+             "blocked": { "reason": "attempts", "question": "..." },            // the latest setup.blocked while the agent is idle on it; absent otherwise
+             "watched_by": "server" }                                           // after pipeline.registered: "server" | "local"; "" before
+```
+`GET /api/rooms` rows carry `setup.mode`, `setup.runner.connected` and `setup.phase` only. Nothing in the snapshot is
+a secret value, a pairing code or a token: `runner.tools` are versions, `targets[].address` is what the person typed.
 
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
 
@@ -435,7 +519,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
 | POST | `/api/rooms/{id}/hypothesis` | `{verdict: "confirmed"\|"disputed", note?}` | `Event` (`hypothesis.verdict`) | F9 (server F9b, implemented by A5; web F9c, A6). Any member (viewers `403 viewer`); open rooms only (`409 room_closed`); a shadow room `409 room_open`; no hypothesis yet `409 no_hypothesis`; the same person repeating the same verdict on the same hypothesis `409 already_decided`; `note` ≤ 500 characters, typed-text rule. The event carries `hypothesis_seq`; a new `agent.hypothesis` clears every verdict. The agent receives it as a comment and wakes. Renews the driver lease only when the caller is the driver |
 | POST | `/api/rooms/{id}/nudge` | `{proposal_id, layer}` | `Event` (`approval.nudged`) | F9 (implemented by A5). Any member (viewers `403 viewer`); open rooms (`409 room_closed`); the proposal must be open and `layer` pending on it (`409 already_decided`); one per proposal and layer per 10 minutes (`409 already_nudged`). Mirrored to the Slack thread when the bridge is on (C12 follow-up) |
-| POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the layers (`events.Layers`, eight since P0) or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
+| POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the layers (`events.Layers`, nine since U0) or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
 | POST | `/api/rooms/{id}/checklist` | `{step_id, tool_use_id, hit, item, done, note?}` | `Event` (`checklist.step_done`) | F8 (implemented by A5). Open rooms only (`409 room_closed`); any member (viewers `403 viewer`); `tool_use_id` must be a `runbook_lookup` result of this room and `hit`/`item` within its `data` (`400 validation`); `note` ≤ 300 characters, typed-text rule; idempotent (the same state again still appends) |
 | GET | `/api/rooms/{id}/postmortem.md` | – | `text/markdown` | F2 (server F2b, implemented by A5; web F2a, A6). The room rendered as a post-mortem draft: timeline, root cause, actions + approvers, verification, open items, risks, agent cost; see `docs/design/postmortem.md` for the section list. Same access as `GET /api/rooms/{id}/events` (viewers included; tenancy `404 not_found`). Open rooms answer the draft so far. `?download=1` adds `Content-Disposition: attachment`. Every string from the log is Markdown-escaped; clients show it as text, never as HTML. Own timeout like the export. Headers `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` |
 | POST | `/api/rooms/{id}/extend` | – | `Event` (`room.extended`) | driver only (`403 not_driver`); open rooms only (`409 room_closed`); once per room (`409 already_extended`); `400 validation` when `PIPEROOM_MAX_OPEN_DAYS=0`. Moves the auto-close deadline by `PIPEROOM_MAX_OPEN_DAYS` days and renews the driver lease. See Room limits |
@@ -635,6 +719,27 @@ export). Another user's request with the same value is a different key.
   must not re-send it without a key. A server without this feature ignores the field, so a client retries
   automatically only when the answer's event carries `client_id`.
 
+### Setup rooms (U0; server A5, runner A9, web A6; design `docs/design/setup-agent.md`)
+
+Every route below exists only while `PIPEROOM_SETUP_ENABLED=on` (which needs `PIPEROOM_WRITE_MODE=on`; the server
+refuses to start otherwise); with setup off they answer `404 setup_disabled` and `/api/runners/ws` is not served.
+Every `POST` under `/api/rooms/{id}/setup/` is **driver only** (`403 not_driver`; viewers `403 viewer`), open setup
+rooms only (`409 room_closed`; an incident room `400 not_setup_room`), under the same CSRF rule as every non-GET, and
+renews the driver lease. The model never calls them: it may ask for a click in a message.
+
+| Method | Path | Body | Result | Notes |
+|---|---|---|---|---|
+| POST | `/api/setup` | `SetupRequest` (`events.SetupRequest`: `{pipeline_id, tenant?, title, source_kind, target, topic_prefix, tables, connectors?, targets: [{kind, address, class?}], repos?}`) | `201 {room: RoomSnapshot, code, expires_at, command}` | opens a setup room (`room.created {mode: "setup"}`, the creator is driver, `control.granted`) and returns a single-use pairing code: 8 characters of `protocol.CodeAlphabet`, valid 10 min, bound to `(tenant, room, creator)`; `command` is the `piperoom-setup --server <origin> --code <code>` line to paste. With a `tenants:` block `tenant` is required and the caller must be a member (`403 not_tenant_member`); without one it must be absent. `pipeline_id` must match the owners id rule and must not exist (`409 pipeline_exists`); `targets[].address` goes through the denylist of design §2.6 (`400 address_refused`); classes are floors and never below `shared` once registered. Any member, viewers `403 viewer`. The code is never logged and never in an event (`setup.pairing` carries the outcome only) |
+| GET | `/api/runners/ws` | first frame `{type: "pair", pair: {code}}` or `{type: "pair", pair: {token}}` | WebSocket (`internal/setup/protocol` frames) | the runner's socket; see **Runner socket** under WebSocket. No session cookie: the code or token is the credential. TLS required unless loopback. Rate-limited (5 attempts per code, 20 per source address, 100 in all per 10 min, then `429 pairing_closed` for 10 min, audited); constant-time compare; one runner per room (`409 runner_paired`; a lost runner may be replaced, `setup.pairing {outcome: "replaced"}`) |
+| POST | `/api/rooms/{id}/setup/targets` | `{kind, address, class?}` | `Event` (`setup.target_registered`) | adds a target the ops may reach. The server resolves `address` and refuses loopback of another host, link-local, cloud metadata endpoints, multicast, unspecified and its own addresses (`400 address_refused`); `class` is a floor combined with `max` against the derived class and never below `shared` (`400 class_lowered`); the runner re-checks the resolved IP at dial time. Also emits `setup.target_classed` |
+| POST | `/api/rooms/{id}/setup/targets/{t}/class` | `{class}` | `Event` (`setup.target_classed {by: "person"}`) | raise only: `local` → `shared` → `production`; a lower value `400 class_lowered`; `{t}` is the target's address as registered (`404 not_found` otherwise) |
+| POST | `/api/rooms/{id}/setup/pipeline` | `{add_connectors?, add_tables?, add_consumer_groups?, add_sink_tables?}` | `Event` (`setup.pipeline_extended`) | extends the provisional pipeline; every name follows the owners.yaml rules for that list (`400 validation` names the entry); the room re-derives the tool and action scope. Hosts are targets, not here |
+| POST | `/api/rooms/{id}/setup/secret` | `{name, value}` | `204` | `name` matches `^[a-zA-Z_][a-zA-Z0-9_]*$`, `value` ≥ 6 bytes and ≤ 4 KiB (`400 validation`); forwarded to the paired runner in one `secret` frame (`409 no_runner` when none) and **stored nowhere on the server**; the route is excluded from request logging (a test asserts no log line carries the body); emits `setup.secret_set {name, actor}`. The value is in no event, log or prompt |
+| POST | `/api/rooms/{id}/setup/credentials` | – (no body) | `202` | asks the paired runner (`register_credentials` frame; `409 no_runner`) to register the read credentials it generated (design §3.7). The values travel in the runner's `credentials` frame after the person's `y` on the runner's terminal, never in this request; the server writes them to `PIPEROOM_SECRETS_DIR/<pipeline_id>/<name>` (0600) and emits `setup.credentials_registered {pipeline_id, names, runner_label}`; a refusal on the terminal is `setup.runner_refused {reason: "credentials"}`. `409 already_decided` while a request is pending |
+| POST | `/api/rooms/{id}/setup/maintenance-window` | `{start, end}` | `Event` (`setup.maintenance_window`) | RFC 3339 times; `end − start` ≤ 4 h and `start` ≤ 24 h ahead, `end` in the future (`400 window_too_long`, `400 validation`). A T3 step whose guard row needs a window is created and executed only inside the latest window; a later window replaces it |
+| POST | `/api/rooms/{id}/setup/verify` | – | `202` | asks the server's ladder runner to run the verification ladder now (the person's equivalent of the agent's `setup_request_verification`); `409 no_runner` when no runner is paired; `409 already_decided` while a ladder run is in flight. Its outcome is `setup.verified`, written by the ladder runner only |
+| GET | `/api/pipelines` | – | rows gain `setup: {room_id, target, registered_at, watched_by}` | present for a pipeline a setup room registered (the owners.yaml `setup:` block); absent otherwise |
+
 ## WebSocket
 
 `GET /api/rooms/{id}/ws?after=<seq>`
@@ -699,3 +804,30 @@ driver, agent state, triage, hypothesis text and confidence, open proposals and 
 count, `closed_at`, resolution), so step churn and `last_seq` alone send nothing; at most one frame per room per
 500 ms; a full send buffer closes the socket with a policy-violation status and the client reconnects (it gets a
 fresh `rooms` frame). Clients fall back to polling `GET /api/rooms` when the socket cannot be opened.
+
+### Runner socket (U0; implemented by A5, runner A9; frames in `internal/setup/protocol/protocol.go`)
+
+`GET /api/runners/ws` — the one outbound connection a `piperoom-setup` runner holds to the server. No session
+cookie and no `X-User`: the first frame carries the pairing code (first connection) or the runner token
+(reconnect), both compared in constant time, both absent from every log and event. Frames are JSON `protocol.Frame`
+objects, at most 1 MiB; exactly one payload field is set, the one `type` names. Served only with
+`PIPEROOM_SETUP_ENABLED=on`.
+
+Runner → server: `pair {code | token}` (first), `hello {os, arch, label, tools, project_dir, catalogue_version,
+protocol_version}` (only after the person confirmed the `welcome` on the runner's terminal), `result {id, ok,
+summary, data?, receipt, truncated?}`, `refused {id, op, reason, proposal_id?, step_index?}`, `resume {in_flight:
+[{id, proposal_id?, step_index, state: running | done, result?}]}` (first frame after a reconnect with a token),
+`credentials {pipeline_id, secrets: [{name, value}]}` (only after a `register_credentials` and the terminal `y`;
+the one frame that ever carries a secret value, written straight to `PIPEROOM_SECRETS_DIR`), `ping`/`pong`.
+
+Server → runner: `welcome {room_id, title, pipeline_id, tenant?, creator, protocol_version, targets?}` (what the
+runner shows before asking `y/N`), `token {token, expires_at}` (after `hello` and after every reconnect; idle expiry
+30 min), `op {id, op, params, tier, class, deadline, proposal_id?, step_index, params_hash?, proposal?}`, `cancel
+{id}`, `register_credentials {pipeline_id, names}`, `secret {name, value}` (one value the driver typed in the UI,
+stored nowhere on the server), `ping`/`pong`.
+
+Rules: ping every 20 s, a runner silent 90 s is `setup.runner_lost`; a `protocol_version` other than
+`protocol.Version` is refused at `hello` (`setup.pairing {outcome: "refused"}`); one runner per room; the server
+re-sends an `op` the runner never saw at most once after `resume` and never one the runner reports running or
+done (`docs/design/replicas.md` §5 holds with the runner on the path); every `result` and `refused` becomes an
+`action.executed` (with `receipt`) or `setup.runner_refused` in the room log.

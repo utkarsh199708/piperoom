@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-
-	"piperoom/internal/events"
 )
 
 // Judge modes. "terms" is the deterministic keyword grade; "claude" asks a
@@ -107,6 +105,11 @@ Rules:
 - root_cause_layer_correct is true only when the hypothesis places the root cause in the ground-truth root-cause layer (the layer the cause sits in, which can differ from the first failing layer). It is true when no root-cause layer is given.
 - If the hypothesis tells any of the listed wrong stories, root_cause_correct is false.`
 
+// judgeIncidentLayers are the layers an incident scenario can fail in, in
+// pipeline order. Part of every recorded verdict's truth hash: changing it
+// invalidates evals/judgecache.
+var judgeIncidentLayers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse"}
+
 // judgePrompt builds the user message: the ground truth, then the wrapped
 // hypothesis.
 func judgePrompt(sc Scenario, hypothesis string) string {
@@ -117,10 +120,13 @@ func judgePrompt(sc Scenario, hypothesis string) string {
 		b.WriteString("Description (the truth, including the root cause):\n" + d + "\n")
 	}
 	if l := sc.Expect.FirstFailingLayer; l != "" {
-		// The CDC layers, not events.Layers: every scenario is a CDC one until
-		// scenarios carry a kind (P4h), and the recorded verdicts are keyed on
-		// this exact prompt text.
-		b.WriteString("First failing layer: " + l + " (one of " + strings.Join(events.LayersOf(events.PipelineKindCDC), ", ") + ")\n")
+		// The six CDC incident layers, not events.Layers and not
+		// events.LayersOf("cdc"): every scenario is a CDC one until scenarios
+		// carry a kind (P4h), a scenario fails in one of the six systems and
+		// never in the setup layer "environment" that U0 appended to
+		// LayersOf("cdc"), and the recorded verdicts (evals/judgecache) are
+		// keyed on this exact prompt text, so the list is literal.
+		b.WriteString("First failing layer: " + l + " (one of " + strings.Join(judgeIncidentLayers, ", ") + ")\n")
 	}
 	if l := sc.Expect.RootCauseLayer; l != "" {
 		b.WriteString("Root-cause layer: " + l + "\n")

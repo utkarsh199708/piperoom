@@ -244,6 +244,24 @@ type Config struct {
 	// never executed and `action.executed` is never emitted; "on" wires the
 	// write clients. --demo forces "on" (fake clients only).
 	WriteMode string // PIPEROOM_WRITE_MODE: off | on
+
+	// Setup rooms (docs/design/setup-agent.md §3.8, §4 item 6; U wave).
+	// Server side. Raw strings; ParseSetup types them and refuses
+	// SetupEnabled "on" while write mode is off.
+	SetupEnabled      string // PIPEROOM_SETUP_ENABLED: off (default) | on; "on" requires PIPEROOM_WRITE_MODE=on
+	SetupProdPatterns string // PIPEROOM_SETUP_PROD_PATTERNS: comma list of host globs, kubectl context names and cloud account ids that class a target production
+	SetupTokenBudget  string // PIPEROOM_SETUP_TOKEN_BUDGET: model tokens per setup room; default 2000000
+	SetupLocalDelay   string // PIPEROOM_SETUP_LOCAL_DELAY: countdown before a T1 setup step runs (policy setup_local); default 20s; "0" = every T1 step waits for a click
+	SetupPluginHosts  string // PIPEROOM_SETUP_PLUGIN_HOSTS: comma list of hosts plugin_install may download from; default repo1.maven.org
+	SecretsDir        string // PIPEROOM_SECRETS_DIR: absolute directory where registered read credentials land (<dir>/<pipeline>/<name>, 0600); required when setup is on; secret files, never logged
+	OwnersDir         string // OWNERS_DIR: directory of per-pipeline owners files (<id>.yaml) a registration writes and the server hot-reloads; "" = registration writes nothing on this server (standalone writes next to the project)
+
+	// Runner side (cmd/setup). The runner reads these; the server ignores
+	// them. Only names of files and endpoints: the secret store's contents
+	// are never in the environment of anything the runner starts.
+	SetupSecretsFile string // PIPEROOM_SETUP_SECRETS_FILE: the runner's secret store; default <project dir>/.piperoom/secrets.env (0600)
+	SetupServerURL   string // PIPEROOM_SETUP_SERVER_URL: the server origin, same as --server; https unless loopback
+	SetupCode        string // PIPEROOM_SETUP_CODE: the pairing code, same as --code; single use, never logged
 }
 
 // Load reads the environment and applies dev defaults.
@@ -379,6 +397,18 @@ func Load() Config {
 		DevAck: get("PIPEROOM_DEV_ACK", ""),
 
 		WriteMode: get("PIPEROOM_WRITE_MODE", "off"),
+
+		SetupEnabled:      get("PIPEROOM_SETUP_ENABLED", "off"),
+		SetupProdPatterns: get("PIPEROOM_SETUP_PROD_PATTERNS", ""),
+		SetupTokenBudget:  get("PIPEROOM_SETUP_TOKEN_BUDGET", DefaultSetupTokenBudget),
+		SetupLocalDelay:   get("PIPEROOM_SETUP_LOCAL_DELAY", DefaultSetupLocalDelay),
+		SetupPluginHosts:  get("PIPEROOM_SETUP_PLUGIN_HOSTS", DefaultSetupPluginHosts),
+		SecretsDir:        get("PIPEROOM_SECRETS_DIR", ""),
+		OwnersDir:         get("OWNERS_DIR", ""),
+
+		SetupSecretsFile: get("PIPEROOM_SETUP_SECRETS_FILE", ""),
+		SetupServerURL:   get("PIPEROOM_SETUP_SERVER_URL", ""),
+		SetupCode:        get("PIPEROOM_SETUP_CODE", ""),
 	}
 	c.SlackPageNoDriver = splitList(get("PIPEROOM_SLACK_PAGE_NO_DRIVER", ""))
 	return c
@@ -1205,6 +1235,157 @@ func ParseDBT(c Config) (DBT, error) {
 		return DBT{}, err
 	}
 	return d, nil
+}
+
+// ---- U wave (setup rooms; docs/design/setup-agent.md §3.8, §4 item 6) ----
+
+// Setup defaults.
+const (
+	// DefaultSetupTokenBudget is the model tokens one setup room may use.
+	DefaultSetupTokenBudget = "2000000"
+	// DefaultSetupLocalDelay is the countdown before a T1 setup step runs on
+	// a local-class target (policy setup_local): long enough to read the
+	// card and cancel.
+	DefaultSetupLocalDelay = "20s"
+	// DefaultSetupPluginHosts is where plugin_install may download from; the
+	// digest it verifies comes from the knowledge index, never from the host.
+	DefaultSetupPluginHosts = "repo1.maven.org"
+	// MaxSetupLocalDelay bounds PIPEROOM_SETUP_LOCAL_DELAY like
+	// MaxAutoApproveDelay bounds the auto-approve countdown.
+	MaxSetupLocalDelay = time.Hour
+)
+
+// Setup holds the typed server-side setup settings. Enabled false means no
+// setup route, no runner endpoint, no setup action and no remote writer is
+// built, whatever the other fields say.
+type Setup struct {
+	Enabled      bool
+	ProdPatterns []string      // host globs, kubectl context names, cloud account ids; nil when none
+	TokenBudget  int64         // > 0
+	LocalDelay   time.Duration // 0 = every T1 step waits for a click
+	PluginHosts  []string      // never empty when Enabled
+	SecretsDir   string        // absolute; "" only when !Enabled
+	OwnersDir    string        // absolute or ""
+}
+
+// ParseSetup validates the setup variables. PIPEROOM_SETUP_ENABLED is "off"
+// (the default, also when empty) or "on"; anything else is an error naming
+// the variable. "on" is refused while ParseWriteMode(c) is false, with an
+// error that names both variables: with write mode off nothing in the tree
+// may reach a writer, and setup is all writes. With setup on,
+// PIPEROOM_SECRETS_DIR must be set and absolute (a replica that cannot write
+// to it refuses to start, which the server checks after this); OWNERS_DIR,
+// when set, must be absolute. The other variables are checked whether or not
+// setup is on, so a typo is caught before the day setup is switched on.
+func ParseSetup(c Config) (Setup, error) {
+	var s Setup
+	switch strings.TrimSpace(c.SetupEnabled) {
+	case "", "off":
+	case "on":
+		s.Enabled = true
+	default:
+		return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_ENABLED=%q: want off or on", c.SetupEnabled)
+	}
+	if s.Enabled {
+		on, err := ParseWriteMode(c)
+		if err != nil {
+			return Setup{}, err
+		}
+		if !on {
+			return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_ENABLED=on requires PIPEROOM_WRITE_MODE=on (setup executes writes through the runner; write mode is %q)", c.WriteMode)
+		}
+	}
+	var err error
+	if s.TokenBudget, err = parseWholeNumber("PIPEROOM_SETUP_TOKEN_BUDGET", c.SetupTokenBudget, DefaultSetupTokenBudget, false); err != nil {
+		return Setup{}, err
+	}
+	if s.LocalDelay, err = parseSetupLocalDelay(c.SetupLocalDelay); err != nil {
+		return Setup{}, err
+	}
+	s.ProdPatterns = splitList(c.SetupProdPatterns)
+	for _, p := range s.ProdPatterns {
+		if strings.ContainsAny(p, " \t\r\n") {
+			return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_PROD_PATTERNS: entry %q contains white space", p)
+		}
+	}
+	hosts := c.SetupPluginHosts
+	if strings.TrimSpace(hosts) == "" {
+		hosts = DefaultSetupPluginHosts
+	}
+	s.PluginHosts = splitList(hosts)
+	for _, h := range s.PluginHosts {
+		if strings.ContainsAny(h, "/:@ \t") {
+			return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_PLUGIN_HOSTS: entry %q is not a host name", h)
+		}
+	}
+	s.SecretsDir = strings.TrimSpace(c.SecretsDir)
+	if s.SecretsDir != "" && !filepath.IsAbs(s.SecretsDir) {
+		return Setup{}, fmt.Errorf("config: PIPEROOM_SECRETS_DIR: want an absolute directory")
+	}
+	if s.Enabled && s.SecretsDir == "" {
+		return Setup{}, fmt.Errorf("config: PIPEROOM_SETUP_ENABLED=on requires PIPEROOM_SECRETS_DIR (where registered read credentials are written)")
+	}
+	s.OwnersDir = strings.TrimSpace(c.OwnersDir)
+	if s.OwnersDir != "" && !filepath.IsAbs(s.OwnersDir) {
+		return Setup{}, fmt.Errorf("config: OWNERS_DIR: want an absolute directory")
+	}
+	return s, nil
+}
+
+// parseSetupLocalDelay is ParseAutoApproveDelay's rule for
+// PIPEROOM_SETUP_LOCAL_DELAY: "0" = off (every T1 step waits for a click),
+// else a Go duration above zero and at most MaxSetupLocalDelay; empty = 20s.
+func parseSetupLocalDelay(v string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	switch v {
+	case "0":
+		return 0, nil
+	case "":
+		v = DefaultSetupLocalDelay
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: PIPEROOM_SETUP_LOCAL_DELAY=%q: not a duration like 20s or 2m: %w", v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: PIPEROOM_SETUP_LOCAL_DELAY=%q: must be greater than zero; use \"0\" so every T1 step waits for a click", v)
+	}
+	if d > MaxSetupLocalDelay {
+		return 0, fmt.Errorf("config: PIPEROOM_SETUP_LOCAL_DELAY=%q: at most %s", v, MaxSetupLocalDelay)
+	}
+	return d, nil
+}
+
+// SetupRunner holds the typed runner-side settings (cmd/setup). Code is the
+// pairing code: it is used once and must never be logged or written to the
+// runner's op log.
+type SetupRunner struct {
+	SecretsFile string // "" = <project dir>/.piperoom/secrets.env
+	ServerURL   string // "" = --server must be given (or --standalone)
+	Code        string // "" = --code must be given (or --standalone)
+}
+
+// ParseSetupRunner validates the runner variables. PIPEROOM_SETUP_SERVER_URL,
+// when set, must be an http(s) URL without user info (the runner itself
+// refuses plain http to a non-loopback host, the netsec rule);
+// PIPEROOM_SETUP_CODE, when set, must be exactly 8 characters (the alphabet
+// is checked by the runner against protocol.CodeAlphabet). The error never
+// quotes the code.
+func ParseSetupRunner(c Config) (SetupRunner, error) {
+	r := SetupRunner{
+		SecretsFile: strings.TrimSpace(c.SetupSecretsFile),
+		ServerURL:   strings.TrimSpace(c.SetupServerURL),
+		Code:        strings.TrimSpace(c.SetupCode),
+	}
+	if r.ServerURL != "" {
+		if _, err := checkHTTPURL("PIPEROOM_SETUP_SERVER_URL", r.ServerURL); err != nil {
+			return SetupRunner{}, err
+		}
+	}
+	if r.Code != "" && len(r.Code) != 8 {
+		return SetupRunner{}, fmt.Errorf("config: PIPEROOM_SETUP_CODE: want the 8-character pairing code the Set up button showed")
+	}
+	return r, nil
 }
 
 // checkHTTPURL refuses anything but an absolute http(s) URL with a host and

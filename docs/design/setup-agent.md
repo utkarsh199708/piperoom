@@ -481,7 +481,13 @@ waits for `pr_merged` as Q7e does; the local writes of the same artifacts are th
 ### 1. A new contract file: `internal/setup/protocol/protocol.go` (leads)
 
 The wire types of §2.2 (`Hello`, `OpRequest`, `OpResult`, `OpStatus`, `Resume`, `Cancel`, `Version`, the
-compatibility rule) and:
+compatibility rule), the pairing frames of §2.1 (`Pair`, `Welcome`, `Token`), the runner's `Refusal` (a
+`Refuse*` reason code, never text; the server emits `setup.runner_refused` from it), the three credential frames
+(U0 after the #641 reviews): `RegisterCredentials` (server → runner: the click of §3.7; the runner prints the server
+origin and the secret names and waits for `y/N`), `Credentials` (runner → server: the names and values, after that
+confirmation, straight into `PIPEROOM_SECRETS_DIR/<pipeline>/`; the only frame that ever carries a secret value)
+and `SecretValue` (server → runner: one value the driver typed in the UI, `POST /api/rooms/{id}/setup/secret`,
+stored nowhere on the server), and:
 
 ```go
 // RunnerExecutor is how a setup action or remote client reaches the paired runner. The room service implements
