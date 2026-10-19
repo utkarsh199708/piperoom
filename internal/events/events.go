@@ -859,7 +859,7 @@ const (
 	PairingExpired     = "expired"
 	PairingRateLimited = "rate_limited"
 	PairingReplaced    = "replaced" // a lost runner was replaced by a new pairing
-	PairingRefused     = "refused"  // the person answered N on the runner, or the protocol version differs
+	PairingRefused     = "refused"  // the person answered N on the runner, or the protocol versions are not compatible (protocol.ServerAccepts, RunnerAccepts)
 )
 
 // SetupPairingPayload records one pairing attempt. Source is the client
@@ -873,6 +873,9 @@ type SetupPairingPayload struct {
 
 // SetupRunnerAttachedPayload is the runner's Hello as stored. Tools maps a
 // tool name to its version. ProjectDir is a path on the runner's machine.
+// ProtocolVersion and ProtocolMinor are the runner's version from Hello
+// (U1-0; the minor is absent, so 0, for a 1.0 runner); the session speaks
+// the lower of that minor and the server's.
 type SetupRunnerAttachedPayload struct {
 	RunnerLabel      string            `json:"runner_label"`
 	OS               string            `json:"os"`
@@ -881,6 +884,7 @@ type SetupRunnerAttachedPayload struct {
 	ProjectDir       string            `json:"project_dir"`
 	CatalogueVersion string            `json:"catalogue_version"`
 	ProtocolVersion  int               `json:"protocol_version"`
+	ProtocolMinor    int               `json:"protocol_minor,omitempty"`
 }
 
 // SetupRunnerLostPayload says the runner went silent (protocol.LostAfter).
