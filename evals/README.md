@@ -41,8 +41,9 @@ JSON is invisible to the agent; only its title is. `watcher-start` measures the 
 - Tool **definitions** (names, descriptions, input schemas) come from the live code: A2's
   `kafkatools`, A3's `dbtools` and A2's `actions`. A changed tool description is part of what gets
   measured. Only tool **results** are replayed.
-- Nothing can write anywhere. The actions get replay clients whose writes always fail, and the
-  agent can only propose a fix anyway.
+- Nothing can write anywhere. The actions get replay clients (`replay.go`, `replay_actions.go`) whose
+  writes are no-ops that only record the call (what the step would have run), and an approved step on
+  the room path is played by the scenario's script, never by a client.
 - Proposals go through each action's real `Validate`, checked against the scenario's `resources`,
   and its real `CheckScope`, checked against the scenario's `pipeline` (F10).
 
@@ -252,6 +253,9 @@ against the live tool and action names.
 | `pipeline` | object | yes (`id`, `topic_prefix`) | the room's pipeline, same fields as `owners.yaml`: `id`, `title`, `topic_prefix` (required: subject scope checks compare `<topic_prefix>.<source_table>`), `source_tables`, `connectors`, `consumer_groups`, `sink_tables`, `sink_ts_column`. Used for `alert.pipeline_id` and for `CheckScope` on every proposed step |
 | `resources.connectors` | []string | no | connectors that exist on the recorded stack (action `Validate` checks against these) |
 | `resources.subjects` | []string | no | Schema Registry subjects that exist |
+| `resources.connector_configs` | map | no | per connector, config keys merged over its `connect_config` recording; for the keys that tool hides (`publication.*`, `signal.*`), see [Resources for the P3 actions](#resources-for-the-p3-actions) |
+| `resources.tables` | map | no | source tables by `schema.table`: `relkind` (default `r`), `replica_identity` (default `d`), `primary_key`, `estimated_rows`, `signal_columns`. A table not listed does not exist |
+| `resources.publications` | map | no | publication name → its tables (each in `resources.tables`). A publication not listed does not exist |
 | `alert.title` | string | yes | alert title the room opens with |
 | `alert.pipeline_map` | string | no | topology text the model gets up front |
 | `phases` | []string | no | the states the recorded stack goes through, start phase first (e.g. `[broken, recovered]`). Absent = a static scenario. See [Phases, sequences and executed fixes](#phases-sequences-and-executed-fixes) |
@@ -800,6 +804,41 @@ With `fix_targets` set (`fixscore.go`):
 
 `-validate` notes every diagnose scenario with a `fix` and no `fix_targets`.
 
+### Right action proposed (P3g-2)
+
+`fix_ok` only asks that every `fix` group appears among the proposals. The **right-action** score
+(`rightaction.go`, result field `right_action`) also asks for the order: the agent's proposal steps, in
+the order proposed, must hold the `fix` groups as an ordered subsequence (a step for group 1, then a
+later step for group 2, ...), each step on its `fix_targets` target when the scenario sets them. Other
+steps may sit in between (`fix_targets` already fails a run on those). `missed-table` is the case it is
+for: a snapshot proposed before the table is in the publication snapshots nothing new.
+
+It is reported, not graded: pass, score and `fix_ok` do not change, so scenarios written before it keep
+their pass rate. The markdown table has a **right action** column (share of runs that expect a fix,
+`-` when none does), the JSON summaries `fix_runs`, `right_actions` and `right_action_rate` (-1 when no
+run expects a fix; overall averages it over the scenarios that do), and a failed run lists the group no
+step met.
+
+### Resources for the P3 actions
+
+The P3 actions (`pg_add_publication_table`, `pg_snapshot_signal`, `pg_drop_replication_slot`,
+`kafka_reset_consumer_offsets`, `dlq_replay`, `connect_snapshot_table`) are registered on replay clients
+(`replay_actions.go`), so `fix`, `forbidden_actions` and `inputs[].action` can name them. Their `Validate`
+reads more than names. It reads the recordings where a tool shows the state, first recording without a
+phase first:
+
+| read | from |
+|---|---|
+| connector config | the `connect_config` recording of the connector, with `resources.connector_configs` merged over it |
+| replication slots | the `pg_replication_slots` recording's data |
+| group state and committed offsets (`kafka_reset_consumer_offsets`) | the `kafka_consumer_lag` recording of the group (members, `worst_partitions`: the tool lists 5, so a plan covers at most those) and the log starts of `kafka_topic_offsets` |
+| topic and DLQ offsets (`dlq_replay`) | `kafka_topic_offsets`, else `dlq_peek` (`start_offsets` / `end_offsets` of an existing DLQ) |
+| tables and publications (`pg_add_publication_table`, `pg_snapshot_signal`) | `resources.tables` and `resources.publications` only: no read tool shows relkind, replica identity or the signal table |
+
+The seven older actions are unchanged: their Connect client still answers no config,
+so their `Validate` behaves as before. DLQ record values are not replayed: `dlq_replay`'s preview says
+so, and its `Validate` needs only the offsets. A timestamp offset reset is planned to the log start.
+
 ## Answers that list every cause
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from
@@ -892,6 +931,8 @@ Per run the result also gives:
   proposal and no `claims_cause`; on `ask`, asked after the steer and proposed nothing), `asked_driver`, `says_healthy`
 - `tool_calls_to_root_cause`: read-tool calls made before the first hypothesis that matched
 - `time_to_cause`, `cause_retracted`, `hedged`, `fix_unexpected`, `fix_ungrounded` (above)
+- `right_action` (when a fix is expected): `ok`, the steps that met the `fix` groups in order, and the
+  first group no later step met ([Right action proposed](#right-action-proposed-p3g-2))
 - misses, action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes"
   column), idles, duration
 

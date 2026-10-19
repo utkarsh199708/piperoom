@@ -54,7 +54,14 @@ type Summary struct {
 	MeanScore     float64 `json:"mean_score"`
 	RootCauseRate float64 `json:"root_cause_rate"`
 	LayerRate     float64 `json:"layer_rate"`
-	MeanToolCalls float64 `json:"mean_tool_calls"`
+	// FixRuns are the runs whose scenario expects a fix; RightActions of them
+	// proposed the right action (rightaction.go). RightActionRate is
+	// RightActions/FixRuns, -1 when no run expects a fix. Overall averages it
+	// over the scenarios that expect one.
+	FixRuns         int     `json:"fix_runs"`
+	RightActions    int     `json:"right_actions"`
+	RightActionRate float64 `json:"right_action_rate"`
+	MeanToolCalls   float64 `json:"mean_tool_calls"`
 	// MeanToolCallsToRootCause is over runs that found the cause; -1 if none did.
 	MeanToolCallsToRootCause float64 `json:"mean_tool_calls_to_root_cause"`
 	MeanDurationMS           float64 `json:"mean_duration_ms"`
@@ -114,9 +121,21 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 }
 
 func summarize(rs []RunResult) Summary {
-	s := Summary{Runs: len(rs), MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1}
+	s := Summary{Runs: len(rs), MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1, RightActionRate: -1}
 	if len(rs) == 0 {
 		return s
+	}
+	for _, r := range rs {
+		if r.RightAction == nil {
+			continue
+		}
+		s.FixRuns++
+		if r.RightAction.OK {
+			s.RightActions++
+		}
+	}
+	if s.FixRuns > 0 {
+		s.RightActionRate = float64(s.RightActions) / float64(s.FixRuns)
 	}
 	var ms, steps []float64
 	for _, r := range rs {
@@ -183,12 +202,14 @@ func median(xs []float64) float64 {
 
 // combine averages per-scenario summaries so each scenario weighs the same.
 func combine(ss []Summary) Summary {
-	out := Summary{MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1}
+	out := Summary{MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1, RightActionRate: -1}
 	if len(ss) == 0 {
 		return out
 	}
 	var toCause float64
 	var found int
+	var rightRate float64
+	var withFix int
 	// Overall time to cause is the median of the scenarios' medians, so
 	// each scenario weighs the same here too.
 	var ms, steps []float64
@@ -203,6 +224,12 @@ func combine(ss []Summary) Summary {
 		out.Misses += s.Misses
 		out.RejectedAttempts += s.RejectedAttempts
 		out.Errors += s.Errors
+		out.FixRuns += s.FixRuns
+		out.RightActions += s.RightActions
+		if s.FixRuns > 0 {
+			rightRate += s.RightActionRate
+			withFix++
+		}
 		out.PassRate += s.PassRate
 		out.MeanScore += s.MeanScore
 		out.RootCauseRate += s.RootCauseRate
@@ -223,6 +250,9 @@ func combine(ss []Summary) Summary {
 	out.MeanDurationMS /= n
 	if found > 0 {
 		out.MeanToolCallsToRootCause = toCause / float64(found)
+	}
+	if withFix > 0 {
+		out.RightActionRate = rightRate / float64(withFix)
 	}
 	out.MedianMSToCause, out.MedianStepsToCause = median(ms), median(steps)
 	return out
@@ -299,8 +329,8 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	if r.Commit != "" || len(r.PromptHashes) > 0 {
 		fmt.Fprintf(&b, "commit `%s` · prompt %s\n\n", mdCell(orDefault(r.Commit)), mdCell(promptCell(r.PromptHashes)))
 	}
-	b.WriteString("| scenario | pass | score | root cause | layer | tool calls | calls to cause | time to cause ms / steps | retracted | misses | rejected fixes | errors |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| scenario | pass | score | root cause | layer | right action | tool calls | calls to cause | time to cause ms / steps | retracted | misses | rejected fixes | errors |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, s := range r.Scenarios {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
@@ -354,6 +384,9 @@ func failedRunDetails(res RunResult) []string {
 	if len(res.ProposedActions) > 0 {
 		out = append(out, "  - proposed actions: "+mdCell(strings.Join(res.ProposedActions, ", ")))
 	}
+	if ra := res.RightAction; ra != nil && !ra.OK {
+		out = append(out, "  - right action not proposed: no step for "+mdCell(ra.Missing)+matchedSoFar(ra.Matched))
+	}
 	for _, g := range res.MissingCauseGroups {
 		out = append(out, "  - missing "+mdCell(g))
 	}
@@ -392,9 +425,26 @@ func writeSummaryRow(b *strings.Builder, name string, s Summary) {
 	if s.MedianMSToCause >= 0 {
 		ttc = fmt.Sprintf("%.0f / %.1f", s.MedianMSToCause, s.MedianStepsToCause)
 	}
-	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %.1f | %s | %s | %d | %d | %d | %d |\n",
-		mdCell(name), s.Passes, s.Runs, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate,
+	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %s | %.1f | %s | %s | %d | %d | %d | %d |\n",
+		mdCell(name), s.Passes, s.Runs, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate, rightActionCell(s),
 		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), ttc, s.CauseRetracted, s.Misses, s.RejectedAttempts, s.Errors)
+}
+
+// matchedSoFar names the steps that met the earlier fix groups.
+func matchedSoFar(matched []string) string {
+	if len(matched) == 0 {
+		return ""
+	}
+	return " after " + mdCell(strings.Join(matched, ", "))
+}
+
+// rightActionCell is the right-action rate, "-" when no run expected a fix
+// (and in reports written before the score existed, which have no fix runs).
+func rightActionCell(s Summary) string {
+	if s.FixRuns == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", 100*s.RightActionRate)
 }
 
 // promptCell lists the prompt hashes; more than one means runs saw
