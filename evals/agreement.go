@@ -7,8 +7,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-
-	"piperoom/internal/events"
 )
 
 // Agreement methods: "terms" is deterministic, "judge" asked an LLM judge.
@@ -72,12 +70,8 @@ func pipelineNames(m string) map[string]string {
 
 // Validate checks a label the way the server does (shadow.md 3.5).
 func (l Label) Validate() error {
-	ok := false
-	for _, x := range events.Layers {
-		ok = ok || x == l.Layer
-	}
-	if !ok {
-		return fmt.Errorf("evals: label layer %q is not one of %s", l.Layer, strings.Join(events.Layers, ", "))
+	if !contains(incidentLayers(), l.Layer) {
+		return fmt.Errorf("evals: label layer %q is not one of %s", l.Layer, strings.Join(incidentLayers(), ", "))
 	}
 	if n := len(l.RootCauseTerms); n < 1 || n > 20 {
 		return fmt.Errorf("evals: label has %d root_cause_terms, want 1-20", n)

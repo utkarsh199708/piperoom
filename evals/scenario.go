@@ -237,7 +237,7 @@ type Expect struct {
 	// matches. Optional; catches "names the right word, tells the wrong story".
 	RootCauseForbidden [][]string `yaml:"root_cause_forbidden"`
 	// FirstFailingLayer is the most upstream layer that is actually broken
-	// (one of events.Layers). The final hypothesis must name it.
+	// (one of events.IncidentLayers(); `environment` is refused). The final hypothesis must name it.
 	FirstFailingLayer string `yaml:"first_failing_layer"`
 	// EvidenceTools must each be called at least once (any input).
 	EvidenceTools []string `yaml:"evidence_tools"`
@@ -264,7 +264,7 @@ type Expect struct {
 	// layers, fix and claims; validation rejects them on any other outcome.
 	Outcome string `yaml:"outcome"`
 	// RootCauseLayer is the layer the root cause sits in (one of
-	// events.Layers), graded apart from FirstFailingLayer: in a schema change
+	// events.IncidentLayers()), graded apart from FirstFailingLayer: in a schema change
 	// Connect fails first, but the cause is a Postgres DDL.
 	RootCauseLayer string `yaml:"root_cause_layer"`
 	// ExpectedFacts are what the diagnosis must rest on, each one seen in a
@@ -478,11 +478,11 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q or %q)", s.Judge, JudgeTerms, JudgeClaude, JudgeAuto))
 	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
-	if l := s.Expect.FirstFailingLayer; l != "" && layerTerms[l] == nil {
-		errs = append(errs, fmt.Errorf("expect.first_failing_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
+	if l := s.Expect.FirstFailingLayer; l != "" && !contains(incidentLayers(), l) {
+		errs = append(errs, fmt.Errorf("expect.first_failing_layer: unknown layer %q (want one of %s)", l, strings.Join(incidentLayers(), ", ")))
 	}
-	if l := s.Expect.RootCauseLayer; l != "" && layerTerms[l] == nil {
-		errs = append(errs, fmt.Errorf("expect.root_cause_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
+	if l := s.Expect.RootCauseLayer; l != "" && !contains(incidentLayers(), l) {
+		errs = append(errs, fmt.Errorf("expect.root_cause_layer: unknown layer %q (want one of %s)", l, strings.Join(incidentLayers(), ", ")))
 	}
 
 	recKeys := map[string]int{}
