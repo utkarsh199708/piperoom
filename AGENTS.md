@@ -304,7 +304,9 @@ under `internal/agent/llm/**` is A4's except the contract file, and the whole fo
 risk tier (`HIGH`; `llm.go` in `CONTRACT`). V5 (Bedrock Converse) adds one module to `go.mod`, which no agent owns,
 so it is built outside the ship workflow and merged after the §7 two-lead review. Order: **V0 → V1a-0 (golden
 capture), V1t, V9r → V1a, V1b (Claude onto the interface, no behaviour change) → V2a, V2b → the adapters and V6 →
-evals and the picker**; the board's After column is the only hard dependency.
+evals and the picker**; the board's After column is the only hard dependency. The owner ruled the design's nine
+decisions on 2026-10-19 ("configure all of them", design §15): the leads' recommendations are the defaults and each
+is a setting where safe; the metadata deny list, the untrusted-data wrapper and key handling are never configurable.
 
 ### Contract files (read them, code against them, never edit them)
 

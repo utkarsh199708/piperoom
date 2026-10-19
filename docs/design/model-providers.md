@@ -4,7 +4,11 @@
 binding and Origin check (§11); context fit and silent truncation (§6.2); the P3 dependency made real and a 3-run
 reference (V-board); the `invalid_tool_calls` metric and noise-aware floors (§5); the supported-model check off for
 Claude providers (§5); `internal/agent/llm/**` in the high-risk tier (§4); retries and rate limits for every adapter
-(§7.4); the deprecation and alias policy (§5.4); lead recommendations on the open decisions (§15).
+(§7.4); the deprecation and alias policy (§5.4); lead recommendations on the decisions (§15), since ruled by the owner.
+
+**Owner rulings (2026-10-19)**: the owner ruled "configure all of them". The lead recommendations are the defaults,
+and each decision is a setting an admin can change where that is safe (§15, with the knobs in §9). The safety floors
+are never configurable (§15.1).
 
 Owner of the design: LEAD-ARCH. Board: `tasks/V-board.md` (the V wave). There is no separate plan file: the owner's
 decision of 2026-10-19, recorded in §0, is the plan. Contract changes land in V0 (§4). The Go shapes below are
@@ -50,7 +54,8 @@ The agreed shape is four adapters behind one model interface in `internal/agent`
 **Non-goals**
 
 - No per-provider system prompts or tool descriptions in this wave. A model that needs a different prompt to pass
-  the gate is not supported yet (open decision 3).
+  the gate is not supported yet (decision 3). `PIPEROOM_MODEL_PROMPT_VARIANT` is reserved for a later wave and is
+  not implemented: V0 refuses start when it is set to anything but empty.
 - No mixing of providers inside one investigation history: the main and the in-loop triage model
   (`PIPEROOM_TRIAGE_MODEL`) are on the same provider. Single-shot roles (first look, summary, judge) may use another
   provider (§9).
@@ -474,7 +479,10 @@ baseline per run). At 75 episodes the standard error of a rate p is `sqrt(p(1-p)
 - **no collapse**: no scenario that the reference passes in at least 2 of 3 runs fails in all 3.
 
 `SE_diff = sqrt(p_ref(1-p_ref)/n_ref + p_cand(1-p_cand)/n_cand)`, the standard error of the difference of two
-independent rates, so two standard errors is a 95% margin. These are the lead recommendation for open decision 1.
+independent rates, so two standard errors is a 95% margin. These are the defaults by the owner's ruling
+(decision 1). They live in the checked-in file `evals/gate.yaml` (C6, V10), which `-gate` reads: the gate is a repo
+policy, changed by a reviewed PR, never by a runtime variable. `-gate` refuses a file that sets a hard safety gate
+(forbidden actions or params, injection failures) above zero.
 
 **"Within noise"** (used by V1a and the rollout) means the evals-live comparison rule: `evalrun -compare` against
 the 3-run reference with the default `-tolerance 5`, on a 3-run candidate, regresses no scenario.
@@ -637,7 +645,9 @@ model of any role (main, triage, first look, summary, judge) has no price. Witho
 today's behaviour (cost omitted, never guessed). Token caps (`PIPEROOM_ROOM_TOKEN_BUDGET`,
 `PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET`) need no price and work on every provider, since usage is normalised. This
 would also change Claude deployments that set a cost cap and leave a role's model out of the table, so V6 applies
-it **only to the new providers**; Claude keeps today's warning (open decision 4, lead recommendation the same).
+it **by default only to the new providers**; Claude keeps today's warning (decision 4). `PIPEROOM_MODEL_PRICING_STRICT`
+chooses: `non-claude` (default), `all` (Claude too), or `off` (today's warning everywhere), and `off` is refused at
+start when `PIPEROOM_PIPELINE_DAILY_COST_USD` is set, so a cost cap never counts an unpriced model as free.
 
 ### 8.3 Missing usage
 
@@ -662,13 +672,17 @@ cap like real usage. Over-estimating is the safe side; the 3 bytes per token rat
 | `PIPEROOM_MODEL_MAX_CONCURRENCY` | `PIPEROOM_MAX_AGENTS` | requests in flight per provider endpoint, new providers only (§7.4) |
 | `PIPEROOM_MODEL_TPM` | — | optional tokens-per-minute budget per endpoint (§7.4) |
 | `PIPEROOM_MODEL_PROXY` | `off` | `on` sends model requests through `HTTPS_PROXY` with the target check of §10.3; off ignores the proxy variables for model clients |
-| `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP` | `off` | `on` allows `http` to a private-range host (an in-cluster vLLM), pending open decision 2; metadata addresses stay refused |
-| `PIPEROOM_MODEL_ACK_DATA_LOCATION` | — | must be `cn` to start with an endpoint operated in the People's Republic of China (DeepSeek's API, the DashScope China endpoint), pending open decision 7 |
+| `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP` | `off` | `on` allows plain `http` to RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), ULA (`fc00::/7`) and loopback hosts only, for an in-cluster vLLM (decision 2); the metadata deny list still applies and is not configurable |
+| `PIPEROOM_MODEL_ACK_CN_ENDPOINT` | — | must be `yes` to start with an endpoint operated in the People's Republic of China (DeepSeek's API, the DashScope China endpoint); a one-time acknowledgement (decision 7) |
+| `PIPEROOM_MODEL_PRICING_STRICT` | `non-claude` | `all \| non-claude \| off`: which models must be priced when a cost cap is set (§8.2, decision 4); `off` with a cost cap refuses start |
+| `PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS` | `all` | `all \| non-claude`: which providers get chat-template control tokens neutralised in untrusted text (§10.1, decision 6); there is no `off`, and the untrusted-data wrapper always applies |
+| `PIPEROOM_MODEL_PROMPT_VARIANT` | — | **reserved, not implemented** (decision 3); any non-empty value refuses start |
+| `PIPEROOM_POSTMORTEM_MODE` | `auto` | `auto \| off`: the post-mortem mode, renamed from `PIPEROOM_POSTMORTEM_MODEL` (decision 5); the old name is read as a deprecated alias with a startup warning, and setting both to different values refuses start |
 | `AWS_REGION` | — | `bedrock` and `bedrock-converse` |
 | `VERTEX_PROJECT_ID`, `VERTEX_REGION` | — | `vertex`, and `gemini` on Vertex (`PIPEROOM_GEMINI_BACKEND=vertex`; default `api`) |
 | `PIPEROOM_TRIAGE_MODEL` | — | unchanged: in-loop triage turns, **same provider as the main model** (they share one history) |
 | `PIPEROOM_TRIAGE_PASS_PROVIDER`, `PIPEROOM_TRIAGE_PASS_MODEL` | main provider; `claude-haiku-5-5` on Claude providers, else the main model | first look (single-shot) |
-| `PIPEROOM_SUMMARY_PROVIDER`, `PIPEROOM_SUMMARY_MODEL` | main provider and model | hand-off and post-mortem writer. `PIPEROOM_POSTMORTEM_MODEL` keeps its meaning (`auto \| off`, a mode); the lead recommendation (open decision 5) is to rename it `PIPEROOM_POSTMORTEM_MODE` in V0 and read the old name as an alias |
+| `PIPEROOM_SUMMARY_PROVIDER`, `PIPEROOM_SUMMARY_MODEL` | main provider and model | hand-off and post-mortem writer. The post-mortem mode is `PIPEROOM_POSTMORTEM_MODE` (below), not a model id |
 | `PIPEROOM_JUDGE_PROVIDER`, `PIPEROOM_JUDGE_MODEL` | main provider and model | the hand-off judge and the evals judge (`-judge-provider`, `-judge-model` override) |
 | `PIPEROOM_<ROLE>_BASE_URL` | the role provider's default | only when the role's provider differs from the main one; `ROLE` ∈ `TRIAGE_PASS`, `SUMMARY`, `JUDGE` |
 
@@ -677,7 +691,8 @@ belongs to the main provider). Start fails, with the variable named, on: an unkn
 or credentials for any configured role, an invalid base URL, a model on a new provider that is not supported
 (without `UNVERIFIED`) or failed the probe, a context that does not fit (§6.2), a role whose tool count or names
 break its adapter's limits, an unpriced model on a new provider under a cost cap (§8.2), and a China-operated
-endpoint without the acknowledgement. **None of these changes a Claude provider's start**: on `anthropic`,
+endpoint without `PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes`, a set `PIPEROOM_MODEL_PROMPT_VARIANT`, and
+`PIPEROOM_MODEL_PRICING_STRICT=off` with a cost cap. **None of these changes a Claude provider's start**: on `anthropic`,
 `bedrock` and `vertex` the model id is accepted as today.
 
 `cmd/investigate` and `evals/cmd/evalrun` read the same variables; `evalrun` adds `-provider` and
@@ -696,8 +711,9 @@ endpoint without the acknowledgement. **None of these changes a Claude provider'
 - Local and open-weight models are served through chat templates with control tokens. Untrusted text holding those
   tokens (`<|im_start|>`, `<|im_end|>`, `<|eot_id|>`, `<start_of_turn>`, `[INST]`, `<|tool_call|>` and the like)
   could break the template on a server that does not escape them. `internal/injectscan` gains a rule that flags them
-  (N6, V16), and the agent neutralises them in untrusted text for every provider (the tokens never matter to
-  Claude, so the Claude request changes only for text that holds them; open decision 6).
+  (N6, V16), and the agent neutralises them in untrusted text (A4, V2a): by default for every provider, so the
+  Claude request changes only for text that holds them; `PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS=non-claude` skips
+  the Claude providers (decision 6). There is no off: the wrapper and the scan always apply.
 - Tool arguments from any model are untrusted input: validated against the schema in code (§6), and the pipeline
   scope comes from the alert, never from the model (as today, `run.go` `toolScope`).
 
@@ -742,8 +758,9 @@ the key is sent, so it is validated at start and on every dial:
 - redirects are not followed (`CheckRedirect` returns an error), so a 3xx cannot send the key to another host;
 - the key is sent only to the configured host, and a stored key is bound to its provider, flavor and base URL host
   (§11);
-- a private-range `http` host (an in-cluster vLLM) is refused unless `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on` (open
-  decision 2); metadata addresses stay refused either way.
+- a private-range `http` host (an in-cluster vLLM) is refused unless `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on`
+  (decision 2), which allows RFC 1918, ULA and loopback only; the metadata deny list applies either way and has no
+  setting.
 
 Every adapter keeps AGENTS.md §4 rule 7: one `*http.Client` with a timeout, bodies closed, status checked, responses
 capped (`io.LimitReader`, 4 MB; a model turn is far smaller).
@@ -760,8 +777,8 @@ values), steers and comments. Choosing a provider makes it a processor of that d
 - Bedrock, Vertex and Azure keep data in the chosen region; the Gemini API, OpenAI, Groq, Together, xAI and
   OpenRouter process it where the provider decides; DeepSeek's API is operated in the People's Republic of China;
   DashScope has an international endpoint (the `qwen` default) and a China endpoint (explicit base URL only); an
-  endpoint operated in China starts only with `PIPEROOM_MODEL_ACK_DATA_LOCATION=cn`, a one-time acknowledgement in
-  config (open decision 7);
+  endpoint operated in China starts only with `PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes`, a one-time acknowledgement in
+  config (decision 7);
   Mistral's API is in the EU; Ollama and vLLM on the operator's own machine send nothing out;
 - OpenRouter forwards to third parties: the adapter always sends `provider: {data_collection: "deny"}`;
 - no provider is a default other than Anthropic; nothing switches provider on its own (no automatic failover
@@ -814,7 +831,8 @@ values), steers and comments. Choosing a provider makes it a processor of that d
 - **evals-live per provider** (C1, V12): `workflow_dispatch` inputs `provider`, `flavor`, `model`; one secret per
   provider in the `evals` environment (required reviewers, as today); a matrix job over `supported.json` for the
   nightly when it is turned back on; compare against that model's own baseline; artifacts named
-  `baseline-<provider>-<model>`.
+  `baseline-<provider>-<model>`. The order of gate runs is the workflow's `gate_order` input (default
+  `ollama,openai,gemini,deepseek,qwen`, decision 9).
 - **Free local runs**: `dev/docker-compose.yml` gains an `llm` profile with Ollama (A1, V17); `evalrun -provider
   openai -flavor ollama -model <id>` runs the whole set at no cost. A local run's report is valid for development,
   not for the gate unless the model is the one being admitted.
@@ -869,35 +887,38 @@ Gemini byte-equality conformance check compares the JSON-decoded `functionRespon
 | The supported list goes stale after a prompt change | re-gate rule (§5.3) and the CI check (V12) |
 | One new module (`bedrockruntime`) | V5 is built outside the ship workflow under the §7 two-lead review, since `go.mod` is not in any agent's folders in `ownership.json` |
 
-## 15. Open owner decisions
+## 15. Owner rulings (2026-10-19)
 
-Each item carries the leads' recommendation, **pending owner**. Items 1, 2 and 7 should be ruled before V0, since
-V0 writes their config and gate shapes.
+The owner ruled "configure all of them": each leads' recommendation is the **default**, and each decision becomes a
+setting an admin can change where that is safe. The rulings go into V0's config contract and the row named.
 
-1. **Gate thresholds.** *Lead recommendation, pending owner:* the noise-aware floors of §5.2 against the 3-run
-   reference of V9r: invalid tool calls ≤ 2%; root-cause and layer rates ≥ reference − max(0.10, 2·SE_diff) with
-   absolute minimums 0.50 and 0.70; pass rate gated the same way only once the reference passes at least 0.50,
-   reported until then; no scenario the reference passes 2 of 3 times failed 3 of 3.
-2. **Private-network `http` base URLs** (an in-cluster vLLM at `http://vllm.ml.svc:8000`). *Lead recommendation,
-   pending owner:* refused by default; allowed only with the explicit `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on`;
-   metadata addresses refused either way.
-3. **Per-model prompt variants.** *Lead recommendation, pending owner:* none in this wave: one prompt, comparable
-   evals. A model that needs a variant to pass stays experimental.
-4. **Fail-safe pricing for Claude too.** *Lead recommendation, pending owner:* fail-safe (refuse start under a cost
-   cap) for the new providers only; Claude keeps today's warning, so no Claude deployment breaks on upgrade.
-5. **`PIPEROOM_POSTMORTEM_MODEL`** is a mode (`auto | off`) that clashes with the `*_MODEL` names of the new roles.
-   *Lead recommendation, pending owner:* rename it `PIPEROOM_POSTMORTEM_MODE` in V0 and keep reading the old name
-   as an alias (a startup note when the alias is used).
-6. **Template control tokens.** *Lead recommendation, pending owner:* neutralise them in untrusted text for every
-   provider: one rule, and Claude requests change only for text that holds such tokens.
-7. **Endpoints operated in China** (DeepSeek's API, the DashScope China endpoint). *Lead recommendation, pending
-   owner:* supported, but each needs the one-time config acknowledgement `PIPEROOM_MODEL_ACK_DATA_LOCATION=cn`, and
-   the model panel shows the location.
-8. **OpenAI Responses API.** *Lead recommendation, pending owner:* later, as its own row, only if OpenAI models miss
-   the quality floor on chat completions.
-9. **Order of gate runs.** *Lead recommendation, pending owner:* Ollama first (free, proves the pipeline), then
-   OpenAI, Gemini, DeepSeek, Qwen. Each paid gate is about 75 episodes on that provider and needs the owner's
-   approval of the `evals` environment run.
+| # | Decision | Owner ruling 2026-10-19 (default) | Knob | Implemented in |
+|---|---|---|---|---|
+| 1 | Gate thresholds | invalid tool calls ≤ 2%; root-cause and layer rates ≥ reference − max(0.10, 2·SE_diff) with absolute minimums 0.50 and 0.70; pass rate not gated while the reference is below 0.50; the 2-of-3 / 3-of-3 collapse rule (§5.2) | the checked-in `evals/gate.yaml` (repo policy, changed by a reviewed PR; no runtime variable); the safety gates are not in it | C6, V10 |
+| 2 | Plain `http` on private networks | off | `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on` allows RFC 1918, ULA and loopback only | V0 (parser), V3a, V4 |
+| 3 | Per-model prompt variants | none this wave | `PIPEROOM_MODEL_PROMPT_VARIANT` reserved and documented as not implemented; a value refuses start. No row | V0 (reserved name only) |
+| 4 | Fail-safe pricing | new providers only | `PIPEROOM_MODEL_PRICING_STRICT=all\|non-claude\|off`, default `non-claude`; `off` refused with a cost cap | V0, V6 |
+| 5 | Post-mortem variable name | renamed | `PIPEROOM_POSTMORTEM_MODE` (`auto\|off`); `PIPEROOM_POSTMORTEM_MODEL` accepted as a deprecated alias with a warning | V0 (config); A5 updates its log and comment text in V1c |
+| 6 | Control-token neutralisation | on for every provider | `PIPEROOM_MODEL_NEUTRALISE_CONTROL_TOKENS=all\|non-claude`, default `all`; no off | V2a (agent), V16 (scan) |
+| 7 | China-hosted endpoints | allowed after acknowledgement | `PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes` required before DeepSeek's API or the DashScope China endpoint starts | V0, V3b, V6 |
+| 8 | OpenAI Responses API | later, not in this wave | none | — |
+| 9 | Gate run order | Ollama, OpenAI, Gemini, DeepSeek, Qwen | the evals-live `gate_order` matrix input | C1, V12 |
+
+None of the new names collides with a variable in `internal/config/config.go` on `main` (checked 2026-10-19).
+
+### 15.1 Never configurable
+
+These are safety floors; no variable, file or flag changes them, and V0's parsers refuse any attempt that would:
+
+- the metadata deny list and the dial-time check of §10.3 (the private-`http` knob widens only RFC 1918, ULA and
+  loopback, never a metadata address);
+- the untrusted-data wrapper, `escapeToolText`, the injection scan and secret redaction of untrusted text (§10.1);
+  the control-token knob chooses providers, never off;
+- keys: never in `Config`, a log line, an event, an error or the web (§10.2), and a stored key never sent to a host
+  it was not entered for (§11);
+- the hard safety gates of the eval gate: zero forbidden actions, zero forbidden params, zero injection failures
+  (`evals/gate.yaml` cannot raise them);
+- the approval model and write mode: no model setting changes who approves a fix.
 
 ## 16. References
 
