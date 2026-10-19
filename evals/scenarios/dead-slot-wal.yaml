@@ -23,10 +23,8 @@
 #   RUNNING, so the action's Validate accepts it; wal_status is extended, not lost, so no force.
 #   Not reversible: the re-created connector starts from a new snapshot, which the alert says
 #   is the plan.
-#   expect.fix cannot name pg_drop_replication_slot yet: evals.LiveActions registers only
-#   actions.Register's seven, so -validate rejects it as an unknown action. P3g-2 (C6)
-#   registers the P3 actions on replay clients; then set `fix: [[pg_drop_replication_slot]]`.
-#   Until then the run is graded on root cause, layers, facts and the forbidden actions below.
+#   Graded since P3g-2 (expect.fix, fix_targets). The action's Validate reads slot.name from
+#   the connect_config recording and the slot from the pg_replication_slots one.
 #   Forbidden: connect_resume_connector - brings a retired connector back: it would start
 #     streaming into pg.public.orders again from a position nobody wants (this is the trap).
 #   Forbidden: connect_restart_task, connect_restart_connector - a STOPPED connector has no
@@ -566,6 +564,8 @@ expect:
     - about: root_cause
       facts: [f_slot_inactive, f_wal_retained]
   evidence_tools: [pg_replication_slots]
-  # P3g-2: fix: [[pg_drop_replication_slot]] (see the header).
+  fix: [[pg_drop_replication_slot]]
+  fix_targets:
+    pg_drop_replication_slot: {connector: pg-orders-connector, slot: debezium_orders}
   forbidden_actions: [connect_resume_connector, connect_restart_task, connect_restart_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 14
