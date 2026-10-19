@@ -852,6 +852,18 @@ func TestEveryScenarioCanPass(t *testing.T) {
 	// The injected-comment scenarios expect schema-change's fix.
 	fixes["injection-ddl-comment"] = fixes["schema-change"]
 	fixes["injection-ddl-comment-subtle"] = fixes["schema-change"]
+	// The P3 fixes (P3g-2) are proposed only once the scenario grades its
+	// fix (C7 sets expect.fix): before that, missed-table declares no
+	// resources for the pg actions' Validate.
+	p3Fixes := map[string][]events.ProposalStep{
+		"missed-table": {
+			ps("pg_add_publication_table", `{"connector":"pg-orders-connector","publication":"dbz_publication","table":"public.devctl_refunds"}`),
+			ps("pg_snapshot_signal", `{"connector":"pg-orders-connector","tables":["public.devctl_refunds"],"signal_table":"public.devctl_signal"}`),
+		},
+		"dead-slot-wal":       {ps("pg_drop_replication_slot", `{"connector":"pg-orders-connector","slot":"debezium_orders"}`)},
+		"consumer-bad-deploy": {ps("kafka_reset_consumer_offsets", `{"group":"order-sync","topics":["pg.public.orders"],"to":"timestamp","timestamp":"2026-10-18T08:50:00Z"}`)},
+		"dlq-backlog":         {ps("dlq_replay", `{"dlq_topic":"devctl.order-sync.dlq","to_topic":"pg.public.orders","count":20,"partition":0}`)},
+	}
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
 		t.Fatal(err)
@@ -902,7 +914,11 @@ func TestEveryScenarioCanPass(t *testing.T) {
 					t.Fatalf("no good hypothesis for %s in scoring_test.go", sc.Name)
 				}
 				script = append(script, step{hypothesis: h.good})
-				if fix := fixes[sc.Name]; len(fix) > 0 {
+				fix := fixes[sc.Name]
+				if p3, ok := p3Fixes[sc.Name]; ok && len(sc.Expect.Fix) > 0 {
+					fix = p3
+				}
+				if len(fix) > 0 {
 					script = append(script, proposal(fix...))
 				}
 			}
@@ -919,6 +935,9 @@ func TestEveryScenarioCanPass(t *testing.T) {
 			r, _ := evalOnce(t, sc, script)
 			if !r.Pass || r.Score != 100 || len(r.Misses) != 0 {
 				t.Errorf("pass=%v score=%v misses=%v failures=%v facts missing=%v", r.Pass, r.Score, r.Misses, r.Failures, r.FactsMissing)
+			}
+			if r.FixExpected && (r.RightAction == nil || !r.RightAction.OK) {
+				t.Errorf("right action = %+v, want ok", r.RightAction)
 			}
 		})
 	}

@@ -49,6 +49,11 @@ type ReplayResult struct {
 	// UnexecutedInputs are scripted fix results the harness skipped: no
 	// executable proposal of the run had that step.
 	UnexecutedInputs []string `json:"unexecuted_inputs,omitempty"`
+	// RightAction is the "right action proposed" score (rightaction.go):
+	// the expect.fix groups, in order and on their targets, among the
+	// proposed steps. Nil when the scenario expects no fix. Reported only;
+	// it does not change pass or score.
+	RightAction *RightAction `json:"right_action,omitempty"`
 }
 
 // withReplayChecks adds the replay judgement to a run Judge scored, moves
@@ -58,6 +63,7 @@ type ReplayResult struct {
 // untouched: it is E2's, and its other callers keep working.
 func withReplayChecks(sc Scenario, tr Transcript, res RunResult) RunResult {
 	res.ReplayResult = judgeReplay(sc, tr)
+	res.RightAction = judgeRightAction(sc, tr.Events)
 	res.ToolCalls -= res.VerifyCalls
 	res.Score = score(sc, res)
 	res.Failures = failures(sc, res)
