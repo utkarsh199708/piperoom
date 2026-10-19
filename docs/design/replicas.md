@@ -195,12 +195,12 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
   proposal at a time (review item 10), so a second approved proposal can wait in the queue behind a
   long first one; the replica refreshes the claims of **queued** proposals on every lease renew
   (10 s), so a live replica's queue is never mistaken for a dead one.
-- **Only a proposal approved in full is claimed** (#638; the rule the code enforces once #638 merges):
+- **Only a proposal approved in full is claimed** (#638, merged):
   - "approved in full" means every entry of `required_layers` has an `approvals` row with
     `decision = 'approved'`, whatever the grant (owner, backup, solo, fallback, sole-member driver, policy);
   - a row whose `required_layers` is not a non-empty JSON array (empty, JSON `null`, or any other non-array value)
-    is never approved, so it is never claimed and never runs; this holds for the claim and for the unclaimed-stale
-    sweep alike: both use the same rule (`fullyApprovedSQL`);
+    is never approved, so it is never claimed and never runs (the claim and the stale sweep share
+    `fullyApprovedSQL`, above);
   - a rejection or a cancel blocks the claim for good: neither is undone, so the proposal never qualifies again;
   - the claim `UPDATE` enforces this itself, not only its caller, so a caller bug or a race cannot queue a
     proposal that is not approved in full;
