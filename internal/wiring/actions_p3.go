@@ -2,6 +2,7 @@ package wiring
 
 import (
 	"fmt"
+	"reflect"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/actions/pgactions"
@@ -52,9 +53,9 @@ func actionKafkaReads(w *Wired) (clients.GroupResetPlanner, actions.DLQRecordRea
 }
 
 // P3ActionDeps are the clients the six P3 actions read and write through
-// (RegisterP3Actions). Any field may be nil; an absent client must then be a
-// nil interface, never an interface holding a typed nil, because the actions
-// refuse on Writer == nil before any I/O.
+// (RegisterP3Actions). Any field may be nil. The actions refuse on
+// Writer == nil before any I/O, so RegisterP3Actions turns a field holding a
+// typed nil (say a (*kafka.Writer)(nil)) into a nil interface first.
 type P3ActionDeps struct {
 	// Connect reads connector configs and status for every P3 action. It
 	// should hold no Connect write: none of the six needs one.
@@ -82,6 +83,26 @@ type P3ActionDeps struct {
 // has SendSnapshotSignal), never a source writer: a signal table row is
 // pg_snapshot_signal's, approved by the postgres owner (#620).
 func RegisterP3Actions(areg *actions.Registry, d P3ActionDeps) error {
+	// A typed nil would pass the actions' == nil checks and then panic or
+	// fail oddly at Execute; as a nil interface the action refuses cleanly.
+	if isNilIface(d.Connect) {
+		d.Connect = nil
+	}
+	if isNilIface(d.Source) {
+		d.Source = nil
+	}
+	if isNilIface(d.Planner) {
+		d.Planner = nil
+	}
+	if isNilIface(d.Records) {
+		d.Records = nil
+	}
+	if isNilIface(d.SourceWriter) {
+		d.SourceWriter = nil
+	}
+	if isNilIface(d.KafkaWriter) {
+		d.KafkaWriter = nil
+	}
 	if err := actions.RegisterKafka(areg, actions.KafkaDeps{Writer: d.KafkaWriter, Planner: d.Planner, Records: d.Records}); err != nil {
 		return fmt.Errorf("wiring: register P3 kafka actions: %w", err)
 	}
@@ -114,4 +135,18 @@ func registerP3Actions(areg *actions.Registry, w *Wired) error {
 		Connect: connReader, Source: w.Source, Planner: planner, Records: records,
 		SourceWriter: sw, KafkaWriter: kw,
 	})
+}
+
+// isNilIface reports whether v is nil or an interface holding a nil value of
+// a nilable kind (a typed nil pointer, map, slice, func or chan).
+func isNilIface(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.UnsafePointer:
+		return rv.IsNil()
+	}
+	return false
 }

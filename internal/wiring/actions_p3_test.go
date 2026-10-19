@@ -361,7 +361,11 @@ func TestRegisterP3Actions(t *testing.T) {
 	sw := fakeSourceWriter{&fakeWriter{kind: "source"}}
 	kw := fakeKafkaWriter{&fakeWriter{kind: "kafka"}}
 	areg := actions.NewRegistry()
-	if err := RegisterP3Actions(areg, P3ActionDeps{Connect: &p3Connect{}, Source: &p3Source{}, SourceWriter: sw, KafkaWriter: kw}); err != nil {
+	planner, records := &p3Planner{}, &p3Records{}
+	if err := RegisterP3Actions(areg, P3ActionDeps{
+		Connect: &p3Connect{}, Source: &p3Source{}, Planner: planner, Records: records,
+		SourceWriter: sw, KafkaWriter: kw,
+	}); err != nil {
 		t.Fatalf("RegisterP3Actions: %v", err)
 	}
 	var got []string
@@ -378,6 +382,14 @@ func TestRegisterP3Actions(t *testing.T) {
 		if reach[swT] != wantSource || reach[kwT] != !wantSource {
 			t.Errorf("%s reaches source writer=%v kafka writer=%v, want %v %v", n, reach[swT], reach[kwT], wantSource, !wantSource)
 		}
+	}
+	// The harness's Planner and Records reach the Kafka action that reads
+	// through each.
+	if !reachableTypes(only(t, areg, "kafka_reset_consumer_offsets"))[reflect.TypeOf(planner)] {
+		t.Error("kafka_reset_consumer_offsets does not hold the Planner it was given")
+	}
+	if !reachableTypes(only(t, areg, "dlq_replay"))[reflect.TypeOf(records)] {
+		t.Error("dlq_replay does not hold the Records reader it was given")
 	}
 
 	// Wiring goes through the helper: its P3 actions come in the same order.
@@ -402,5 +414,102 @@ func TestRegisterP3Actions(t *testing.T) {
 
 	if err := RegisterP3Actions(empty, P3ActionDeps{}); err == nil {
 		t.Fatal("registering the P3 actions twice into one registry: want an error")
+	}
+}
+
+// p3Planner and p3Records are harness stand-ins for the Kafka read views
+// (kafka.Planner, kafka.ReplayReader) a caller passes to RegisterP3Actions.
+type p3Planner struct{}
+
+func (*p3Planner) CheckGroupInactive(context.Context, string) error { return nil }
+func (*p3Planner) PlanGroupReset(context.Context, string, clients.OffsetTarget) ([]clients.OffsetMove, error) {
+	return nil, nil
+}
+
+type p3Records struct{}
+
+func (*p3Records) ReadRecords(context.Context, string, int32, int64, int) ([]clients.Record, error) {
+	return nil, nil
+}
+func (*p3Records) DLQOffsets(context.Context, ...string) (map[string][]clients.PartitionOffsets, error) {
+	return nil, nil
+}
+
+// TestRegisterP3ActionsTypedNil: a caller that puts a typed nil into a
+// P3ActionDeps field (a (*kafka.Writer)(nil), a (*postgres.Writer)(nil), a
+// nil pointer reader) gets actions holding a nil interface there: no action
+// reaches the typed nil, and Execute refuses with the usual "no write
+// credentials" / "no Kafka write client" error instead of panicking.
+func TestRegisterP3ActionsTypedNil(t *testing.T) {
+	o := loadOwners(t, threeSetYAML())
+	pipe, ok := o.Pipeline("pa")
+	if !ok {
+		t.Fatal("no pipeline pa")
+	}
+	nilKW, nilSW := reflect.TypeOf((*kafka.Writer)(nil)), reflect.TypeOf((*postgres.Writer)(nil))
+	cases := []struct {
+		name string
+		deps P3ActionDeps
+		// nils are the typed-nil types no action may reach.
+		nils []reflect.Type
+	}{
+		{"kafka writer", P3ActionDeps{Connect: &p3Connect{}, Source: &p3Source{}, KafkaWriter: (*kafka.Writer)(nil)}, []reflect.Type{nilKW}},
+		{"source writer", P3ActionDeps{Connect: &p3Connect{}, Source: &p3Source{}, SourceWriter: (*postgres.Writer)(nil)}, []reflect.Type{nilSW}},
+		{"both writers", P3ActionDeps{
+			Connect: &p3Connect{}, Source: &p3Source{},
+			SourceWriter: (*postgres.Writer)(nil), KafkaWriter: (*kafka.Writer)(nil),
+		}, []reflect.Type{nilKW, nilSW}},
+		{"every field", P3ActionDeps{
+			Connect: (*p3Connect)(nil), Source: (*p3Source)(nil),
+			Planner: (*kafka.Planner)(nil), Records: (*kafka.ReplayReader)(nil),
+			SourceWriter: (*postgres.Writer)(nil), KafkaWriter: (*kafka.Writer)(nil),
+		}, []reflect.Type{
+			nilKW, nilSW, reflect.TypeOf((*p3Connect)(nil)), reflect.TypeOf((*p3Source)(nil)),
+			reflect.TypeOf((*kafka.Planner)(nil)), reflect.TypeOf((*kafka.ReplayReader)(nil)),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			areg := actions.NewRegistry()
+			if err := RegisterP3Actions(areg, tc.deps); err != nil {
+				t.Fatalf("RegisterP3Actions: %v", err)
+			}
+			reach := reachableTypes(areg)
+			for _, ty := range tc.nils {
+				if reach[ty] {
+					t.Errorf("an action holds a typed nil %s; want a nil interface", ty)
+				}
+			}
+			ctx, cancel := context.WithTimeout(tools.WithPipeline(context.Background(), pipe), 10*time.Second)
+			defer cancel()
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Execute panicked: %v", r)
+				}
+			}()
+			assertP3ExecuteRefuses(t, areg, ctx, p3Params("pa"))
+		})
+	}
+}
+
+func TestIsNilIface(t *testing.T) {
+	var nilMap map[string]int
+	cases := []struct {
+		name string
+		v    any
+		want bool
+	}{
+		{"nil", nil, true},
+		{"typed nil pointer", (*kafka.Writer)(nil), true},
+		{"typed nil in an interface", clients.KafkaWriter((*kafka.Writer)(nil)), true},
+		{"nil map", nilMap, true},
+		{"pointer", &p3Connect{}, false},
+		{"struct value", fakeSourceWriter{}, false},
+		{"string", "", false},
+	}
+	for _, tc := range cases {
+		if got := isNilIface(tc.v); got != tc.want {
+			t.Errorf("%s: isNilIface = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
