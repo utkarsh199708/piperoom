@@ -190,10 +190,14 @@ symlink that stays inside the root (it follows it), `.git` case and trailing-dot
 form as an ordinary name. So U1-2 keeps an explicit lexical check that runs on all three OSes (the reference is
 `explicitRefusal` in the spike), in this order:
 
-1. any control character (`r < 0x20` or `r == 0x7f`, NUL included) and the wildcards `? * < > " |`;
+1. any control character (`r < 0x20` or `r == 0x7f`, NUL included), any format character
+   (`unicode.Is(unicode.Cf, r)`: zero-width space, joiner and non-joiner, BOM, soft hyphen, bidi controls, word
+   joiner) or the combining grapheme joiner U+034F, and the wildcards `? * < > " |`. macOS HFS+ ignores the format
+   characters when it compares names, so `.g` U+200C `it` is `.git` there (git CVE-2014-9390);
 2. the NFKC-normal look-alikes of `/`, `\`, `:` and `.`, and the characters an ANSI best-fit code page maps to
    them (U+2215, U+2044, U+29F8, U+2216, U+29F5, U+29F9, U+00A5 (`\` in code page 932), U+20A9 (`\` in code page
-   949), U+2236, U+02D0);
+   949), U+2236, U+02D0). This table is defence in depth only: it cannot be complete, and the rule that keeps a
+   name out of argv and ANSI APIs (below) is what closes WorstFit;
 3. any name that is not NFKC-normal (`golang.org/x/text/unicode/norm`, already a direct dependency): fullwidth
    `．／＼：`, the small full stop, ligatures, the Kelvin sign, superscript digits;
 4. a leading separator, any `:`;
@@ -202,11 +206,15 @@ form as an ordinary name. So U1-2 keeps an explicit lexical check that runs on a
    U+0131, whose upper case is `I`, so `.gıt` must still be refused; whether NTFS's upcase table opens `.git`
    through `.gıt` is a logged row of the spike's Windows test).
 
-After the name check, a per-component `Root.Lstat` walk refuses `ModeSymlink` and `ModeIrregular` (a junction or
-other reparse point since Go 1.23). And because a name rule can only list the aliases someone thought of, U1-2 also
-checks identity: before any write or delete, and on every `file_read`, `os.SameFile` between the opened file's (or
-its parent directory's) `Stat` and the root's `.git` and `.piperoom` directories (stat once at start), refusing a
-match. Hard links are not refused by the name or the walk; `file_write` opens with `O_CREATE|O_EXCL` to a temporary
+After the name check, a walk over **every** component of the path (each directory on the way, then the leaf, as far
+as they exist) runs `Root.Lstat` on the prefix and refuses `ModeSymlink` and `ModeIrregular` (a junction or other
+reparse point since Go 1.23). Because a name rule can only list the aliases someone thought of, the same walk also
+checks identity: each component's `Lstat` is compared with `os.SameFile` against the root's `.git` and `.piperoom`
+(stat'ed once at start), and a match is refused. Checking only the opened file or its parent is not enough: a
+nested `<alias of .git>/hooks/pre-commit` would pass. The walk runs for every file op (`file_read`, `dir_list`,
+`file_write`, `file_delete`, `properties_write`, renders); the spike's `walkRefusal` is the reference, tested with
+a fake file system for the nested alias (no portable unprivileged way exists to alias a directory) and on a real
+directory through `os.Root` and `os.SameFile`. Hard links are not refused by the name or the walk; `file_write` opens with `O_CREATE|O_EXCL` to a temporary
 name and renames, so a planted hard link is replaced, never written through.
 
 **Never pass a confined name onward.** A name that passed this check is safe only for `os.Root` methods. U1-2 must
@@ -214,6 +222,10 @@ never put it, or a path built from it, into a child process's argv or any ANSI (
 converts such strings with the best-fit code page ("WorstFit"), which can turn U+FF02 into `"` and U+00A5 into `\`
 and split or escape an argument. Ops that run a program pass it paths the runner built itself (the project dir, a
 template's fixed names), never a name from the request.
+
+**Show the approver what the bytes are.** The web UI (preview, approval card, op log) flags every non-ASCII
+character in a path it shows to an approver, rendering it as its `U+XXXX` code next to the glyph, so a look-alike
+that slipped past the rule is visible before the click.
 
 ### 2.4 Secrets on the runner (S4)
 

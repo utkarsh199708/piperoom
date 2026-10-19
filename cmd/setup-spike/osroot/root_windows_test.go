@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -77,11 +76,12 @@ func TestRootWindowsForms(t *testing.T) {
 		{name: `PIPERO~1\secrets.json`, root: "varies"}, // opens when the volume generates 8.3 names
 		// Does NTFS's upcase table fold the dotless ı to I? If these open,
 		// the name rule is the only thing between a path and .git/.piperoom.
-		{name: ".gıt\\config", root: "varies"},
-		{name: ".pıperoom\\secrets.json", root: "varies"},
-		{name: "．git\\config", root: "varies"}, // fullwidth full stop: NT does not normalise, expect not found
-		{name: "a∕b", root: "varies"},          // division slash: a plain character to NT
-		{name: "a\x01b", root: "varies"},       // control character: NTFS refuses most of them
+		{name: ".g\u0131t\\config", root: "varies"},
+		{name: ".p\u0131peroom\\secrets.json", root: "varies"},
+		{name: "\uff0egit\\config", root: "varies"},  // fullwidth full stop: NT does not normalise, expect not found
+		{name: "a\u2215b", root: "varies"},           // division slash: a plain character to NT
+		{name: "a\x01b", root: "varies"},             // control character: NTFS refuses most of them
+		{name: ".g\u200cit\\config", root: "varies"}, // zero-width non-joiner: NTFS does not ignore it (HFS+ does), expect not found
 	}
 	if haveSymlink {
 		// os.Root follows a relative link that stays inside the root.
@@ -112,25 +112,19 @@ func TestRootWindowsForms(t *testing.T) {
 	}
 }
 
-// explicitCheck is explicitRefusal plus the per-component walk U1-2 needs:
-// any component that is a symlink or another reparse point (a junction is
-// ModeIrregular since Go 1.23) is refused, existing or not at its end.
+// explicitCheck is explicitRefusal plus the per-component walk U1-2 needs
+// (walkRefusal): any component that is a symlink or another reparse point (a
+// junction is ModeIrregular since Go 1.23), or that os.SameFile matches with
+// the root's .git or .piperoom, is refused.
 func explicitCheck(r *os.Root, name string) string {
 	if why := explicitRefusal(name); why != "" {
 		return why
 	}
-	parts := strings.FieldsFunc(name, func(c rune) bool { return c == '/' || c == '\\' })
-	for i := range parts {
-		fi, err := r.Lstat(strings.Join(parts[:i+1], `\`))
-		if err != nil {
-			if os.IsNotExist(err) {
-				return ""
-			}
-			return "lstat: " + err.Error()
-		}
-		if fi.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-			return "symlink, junction or reparse point"
+	var denied []fs.FileInfo
+	for _, d := range []string{".git", ".piperoom"} {
+		if fi, err := r.Lstat(d); err == nil {
+			denied = append(denied, fi)
 		}
 	}
-	return ""
+	return walkRefusal(name, r.Lstat, denied, os.SameFile)
 }

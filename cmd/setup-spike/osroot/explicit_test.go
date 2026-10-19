@@ -9,17 +9,144 @@
 package osroot
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"strings"
 	"testing"
+	"time"
+	"unicode"
 
 	"golang.org/x/text/unicode/norm"
 )
 
+// walkRefusal is the per-component walk U1-2 runs after explicitRefusal: for
+// EVERY component of name (each directory on the way, then the leaf) it
+// lstats the prefix and refuses a symlink or reparse point and anything that
+// is the same file as one of denied (the root's .git and .piperoom, stat'ed
+// once at start). Checking only the opened file or its parent would let
+// "<alias of .git>/hooks/pre-commit" through. lstat is Root.Lstat and same
+// is os.SameFile in production; the tests inject them.
+func walkRefusal(name string, lstat func(string) (fs.FileInfo, error), denied []fs.FileInfo, same func(a, b fs.FileInfo) bool) string {
+	parts := strings.FieldsFunc(name, func(c rune) bool { return c == '/' || c == '\\' })
+	for i := range parts {
+		fi, err := lstat(strings.Join(parts[:i+1], "/"))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return "" // the rest does not exist yet: a create, under checked parents
+			}
+			return "lstat: " + err.Error()
+		}
+		if fi.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			return "symlink, junction or reparse point"
+		}
+		for _, d := range denied {
+			if same(fi, d) {
+				return "alias of a denied directory"
+			}
+		}
+	}
+	return ""
+}
+
+// fakeInfo is a FileInfo whose identity is id, compared by sameID: an alias
+// of a directory (a bind mount, an HFS+ ignorable-character twin, an 8.3
+// name) cannot be built portably without privileges, so the nested-alias
+// test fakes the file system and the real-FS test below checks the wiring
+// with os.SameFile.
+type fakeInfo struct {
+	id   int
+	mode fs.FileMode
+}
+
+func (f fakeInfo) Name() string       { return "" }
+func (f fakeInfo) Size() int64        { return 0 }
+func (f fakeInfo) Mode() fs.FileMode  { return f.mode }
+func (f fakeInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f fakeInfo) Sys() any           { return f.id }
+
+func sameID(a, b fs.FileInfo) bool { return a.Sys() == b.Sys() }
+
+// A nested alias of .git or .piperoom is refused at whichever component it
+// appears, not only as the leaf or its parent.
+func TestWalkRefusesNestedAlias(t *testing.T) {
+	git, pr := fakeInfo{id: 1, mode: fs.ModeDir}, fakeInfo{id: 2, mode: fs.ModeDir}
+	files := map[string]fakeInfo{
+		".git": git, ".piperoom": pr,
+		"a": {id: 10, mode: fs.ModeDir}, "a/gitalias": git, "a/gitalias/hooks": {id: 11, mode: fs.ModeDir},
+		"a/gitalias/hooks/pre-commit": {id: 12},
+		"a/b":                         {id: 13, mode: fs.ModeDir}, "a/b/c.yaml": {id: 14},
+		"a/b/sec": pr, "a/link": {id: 15, mode: fs.ModeSymlink}, "a/junction": {id: 16, mode: fs.ModeIrregular},
+	}
+	lstat := func(p string) (fs.FileInfo, error) {
+		if fi, ok := files[p]; ok {
+			return fi, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	denied := []fs.FileInfo{git, pr}
+	cases := []struct{ name, want string }{
+		{"a/b/c.yaml", ""},
+		{"a/b/new.yaml", ""},
+		{`a\b\c.yaml`, ""},
+		{"a/gitalias/hooks/pre-commit", "alias of a denied directory"},
+		{"a/gitalias/hooks/new-hook", "alias of a denied directory"},
+		{"a/gitalias", "alias of a denied directory"},
+		{"a/b/sec/secrets.json", "alias of a denied directory"},
+		{"a/link/x", "symlink, junction or reparse point"},
+		{"a/junction/x", "symlink, junction or reparse point"},
+	}
+	for _, c := range cases {
+		if got := walkRefusal(c.name, lstat, denied, sameID); got != c.want {
+			t.Errorf("walkRefusal(%q) = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// The same walk on a real directory through os.Root and os.SameFile: a
+// directory registered as denied is refused as a middle component.
+func TestWalkRealFS(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{".git", "sub/deep"} {
+		if err := os.MkdirAll(dir+"/"+d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	git, err := r.Lstat(".git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := walkRefusal("sub/deep/x.yaml", r.Lstat, []fs.FileInfo{git}, os.SameFile); got != "" {
+		t.Errorf("clean path refused: %q", got)
+	}
+	sub, err := r.Lstat("sub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := walkRefusal("sub/deep/x.yaml", r.Lstat, []fs.FileInfo{git, sub}, os.SameFile); got != "alias of a denied directory" {
+		t.Errorf("denied middle component: %q", got)
+	}
+}
+
 // lookAlikes are NFKC-normal runes that read as, or that an ANSI best-fit
 // code page maps to, "/", "\", ":" or "." (the WorstFit class). Fullwidth
 // forms such as U+FF0F need no entry: NFKC folds them, so the NFKC rule
-// refuses them.
-const lookAlikes = "∕⁄⧸∖⧵⧹¥₩∶ː"
+// refuses them. The table is defence in depth only: no op passes a name to
+// argv or an ANSI API (design §2.3), and the list cannot be complete.
+const lookAlikes = "\u2215\u2044\u29f8\u2216\u29f5\u29f9\u00a5\u20a9\u2236\u02d0"
+
+// formatChar is a Unicode format character (category Cf: zero-width space,
+// joiner and non-joiner, BOM, soft hyphen, bidi controls, word joiner) or the
+// combining grapheme joiner U+034F (category Mn). macOS HFS+ ignores these
+// when it compares names, so ".g\u200cit" is ".git" there (git
+// CVE-2014-9390).
+func formatChar(r rune) bool { return unicode.Is(unicode.Cf, r) || r == 0x034f }
 
 // explicitRefusal returns why name is refused before any open, or "".
 func explicitRefusal(name string) string {
@@ -28,6 +155,8 @@ func explicitRefusal(name string) string {
 		return "empty"
 	case strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }):
 		return "control character"
+	case strings.ContainsFunc(name, formatChar):
+		return "format character"
 	case strings.ContainsAny(name, "?*<>\"|"):
 		return "wildcard"
 	case strings.ContainsAny(name, lookAlikes):
@@ -142,25 +271,35 @@ func TestExplicitRefusal(t *testing.T) {
 		{"a\x1fb", "control character"},
 		{"a\x7fb", "control character"},
 		{"*.yaml", "wildcard"},
+		// Format characters inside ".git": HFS+ ignores them (CVE-2014-9390).
+		{".g\u200bit/config", "format character"},            // zero-width space
+		{".g\u200cit/config", "format character"},            // zero-width non-joiner
+		{".g\u200dit/config", "format character"},            // zero-width joiner
+		{".g\u202eit/config", "format character"},            // right-to-left override
+		{"\ufeff.git/config", "format character"},            // BOM
+		{".g\u00adit/config", "format character"},            // soft hyphen
+		{".g\u2060it/config", "format character"},            // word joiner
+		{".g\u034fit/config", "format character"},            // combining grapheme joiner (Mn)
+		{".pipe\u200croom/secrets.json", "format character"}, // and inside ".piperoom"
 		// Unicode: the dotless ı upper-cases to I (EqualFold misses it).
-		{".gıt/config", "denied directory"},
-		{".GıT/config", "denied directory"},
-		{".pıperoom/secrets.json", "denied directory"},
+		{".g\u0131t/config", "denied directory"},
+		{".G\u0131T/config", "denied directory"},
+		{".p\u0131peroom/secrets.json", "denied directory"},
 		// NFKC folds these to ".", "/", "\" or ":".
-		{"．git/config", "not NFKC-normal"},      // fullwidth full stop
-		{"a／b", "not NFKC-normal"},              // fullwidth solidus
-		{"a＼b", "not NFKC-normal"},              // fullwidth reverse solidus
-		{"a.yaml：x", "not NFKC-normal"},         // fullwidth colon
-		{"﹒git/config", "not NFKC-normal"},      // small full stop
-		{"Kafka.properties", "not NFKC-normal"}, // Kelvin sign
-		{"coﬁg.yaml", "not NFKC-normal"},        // fi ligature
+		{"\uff0egit/config", "not NFKC-normal"},      // fullwidth full stop
+		{"a\uff0fb", "not NFKC-normal"},              // fullwidth solidus
+		{"a\uff3cb", "not NFKC-normal"},              // fullwidth reverse solidus
+		{"a.yaml\uff1ax", "not NFKC-normal"},         // fullwidth colon
+		{"\ufe52git/config", "not NFKC-normal"},      // small full stop
+		{"\u212aafka.properties", "not NFKC-normal"}, // Kelvin sign
+		{"co\ufb01g.yaml", "not NFKC-normal"},        // fi ligature
 		// NFKC-normal look-alikes and ANSI best-fit targets (WorstFit).
-		{"a∕b", "slash, colon or dot look-alike"}, // division slash
-		{"a⁄b", "slash, colon or dot look-alike"}, // fraction slash
-		{"a¥b", "slash, colon or dot look-alike"}, // yen sign: "\" in code page 932
-		{"a₩b", "slash, colon or dot look-alike"}, // won sign: "\" in code page 949
-		{"a∶b", "slash, colon or dot look-alike"}, // ratio
-		{"café.yaml", ""},                         // NFC-composed, NFKC-normal: allowed
+		{"a\u2215b", "slash, colon or dot look-alike"}, // division slash
+		{"a\u2044b", "slash, colon or dot look-alike"}, // fraction slash
+		{"a\u00a5b", "slash, colon or dot look-alike"}, // yen sign: "\" in code page 932
+		{"a\u20a9b", "slash, colon or dot look-alike"}, // won sign: "\" in code page 949
+		{"a\u2236b", "slash, colon or dot look-alike"}, // ratio
+		{"caf\u00e9.yaml", ""},                         // NFC-composed, NFKC-normal: allowed
 	}
 	for _, c := range cases {
 		if got := explicitRefusal(c.name); got != c.want {
