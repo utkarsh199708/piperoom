@@ -199,6 +199,8 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
     `decision = 'approved'`, whatever the grant (owner, backup, solo, fallback, sole-member driver, policy);
   - a proposal with no required layers is never claimed, so it never runs: `required_layers` an empty array, a jsonb
     `null`, or any other non-array value is refused the same way;
+  - a row whose `required_layers` is not a non-empty JSON array (empty, or JSON `null`) is never approved, for the
+    claim and for the unclaimed-stale sweep alike: both use the same rule (`fullyApprovedSQL`);
   - a rejection or a cancel blocks the claim for good: neither is undone, so the proposal never qualifies again;
   - the claim `UPDATE` enforces this itself, not only its caller, so a caller bug or a race cannot queue a
     proposal that is not approved in full;
