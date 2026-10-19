@@ -338,6 +338,7 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)
 	writeUsageTable(&b, r)
+	writeReplayWrites(&b, r.Results)
 	var failed []string
 	for _, res := range r.Results {
 		if !res.Pass {
@@ -352,6 +353,26 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		return fmt.Errorf("evals: write report: %w", err)
 	}
 	return nil
+}
+
+// writeReplayWrites lists, per run, the writes its actions took on the replay
+// clients. Nothing was performed; the line says what the executed fix would
+// have touched. Action and target only, never a value.
+func writeReplayWrites(b *strings.Builder, results []RunResult) {
+	var lines []string
+	for _, res := range results {
+		if len(res.Writes) == 0 {
+			continue
+		}
+		parts := make([]string, 0, len(res.Writes))
+		for _, w := range res.Writes {
+			parts = append(parts, strings.TrimSpace(w.Action+" "+w.Target))
+		}
+		lines = append(lines, fmt.Sprintf("- %s #%d: %s", mdCell(res.Scenario), res.Run, mdCell(strings.Join(parts, ", "))))
+	}
+	if len(lines) > 0 {
+		fmt.Fprintf(b, "\n**Replay writes** (recorded, not performed)\n\n%s\n", strings.Join(lines, "\n"))
+	}
 }
 
 // maxFailedHypothesisRunes bounds the hypothesis text printed under a failed

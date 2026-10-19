@@ -15,13 +15,15 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/wiring"
 )
 
 // The P3 actions on replay clients (P3g-2).
 //
 // pg_add_publication_table, pg_snapshot_signal, pg_drop_replication_slot,
 // kafka_reset_consumer_offsets, dlq_replay and connect_snapshot_table are
-// registered next to actions.Register's seven, so a scenario can name them
+// registered through wiring.RegisterP3Actions (production's order: Kafka,
+// snapshot, then pg) after actions.Register's seven, so a scenario can name them
 // in expect.fix, expect.forbidden_actions and inputs[].action, and the agent
 // can propose them. Their Validate reads the recorded stack: the reads below
 // answer from the scenario's recordings and resources, the first recording
@@ -38,6 +40,41 @@ type ReplayWrite struct {
 	Method string `json:"method"`
 	// Args are its arguments by name, without the context.
 	Args map[string]any `json:"args"`
+}
+
+// WriteNote is a replay write as a report shows it: the action or client
+// method and the object it would have touched. It never carries a record
+// value, a config value or a SQL text.
+type WriteNote struct {
+	Action string `json:"action"`
+	Target string `json:"target,omitempty"`
+}
+
+// maxWriteNotes bounds the notes one run shows.
+const maxWriteNotes = 20
+
+// writeTargetKeys are the argument names that name a write's object, in the
+// order the first present one is shown.
+var writeTargetKeys = []string{"connector", "group", "topic", "slot", "publication", "subject", "signal_table"}
+
+// writeNotes reduces a write log to what a report shows: the method and one
+// target name each, at most maxWriteNotes of them.
+func writeNotes(ws []ReplayWrite) []WriteNote {
+	var out []WriteNote
+	for _, w := range ws {
+		if len(out) == maxWriteNotes {
+			break
+		}
+		n := WriteNote{Action: w.Method}
+		for _, k := range writeTargetKeys {
+			if v, ok := w.Args[k].(string); ok && v != "" {
+				n.Target = v
+				break
+			}
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // writeLog records the writes of one set of replay clients.
@@ -58,27 +95,21 @@ func (l *writeLog) snapshot() []ReplayWrite {
 	return append([]ReplayWrite(nil), l.writes...)
 }
 
-// registerP3 adds the P3 actions to reg over replay clients that read res
-// and recs and record every write in wl.
+// registerP3 adds the P3 actions to reg through wiring.RegisterP3Actions, the
+// one registration production uses, over replay clients that read res and
+// recs and record every write in wl. The replay writer is never a typed nil.
 func registerP3(reg *actions.Registry, res Resources, recs []Recording, wl *writeLog) error {
-	cfg := replayConfig{res: res, recs: recs}
-	src := replaySource{res: res, recs: recs}
-	w := replayWriter{log: wl}
 	kr := replayKafkaReads{recs: recs}
-	for _, a := range []actions.Action{
-		pgactions.NewAddPublicationTable(pgactions.AddPublicationTableDeps{Connect: cfg, Source: src, Writer: w}),
-		pgactions.NewSnapshotSignal(pgactions.SnapshotSignalDeps{Connect: cfg, Source: src, Writer: w}),
-		pgactions.NewDropReplicationSlot(pgactions.DropSlotDeps{Connect: cfg, Source: src, Writer: w}),
-	} {
-		if err := reg.Register(a); err != nil {
-			return fmt.Errorf("evals: pg action definitions: %w", err)
-		}
-	}
-	if err := actions.RegisterKafka(reg, actions.KafkaDeps{Writer: w, Planner: kr, Records: kr}); err != nil {
-		return fmt.Errorf("evals: kafka action definitions: %w", err)
-	}
-	if err := actions.RegisterSnapshot(reg, actions.SnapshotDeps{Connect: cfg, Source: src, Kafka: w}); err != nil {
-		return fmt.Errorf("evals: snapshot action definition: %w", err)
+	w := replayWriter{log: wl}
+	if err := wiring.RegisterP3Actions(reg, wiring.P3ActionDeps{
+		Connect:      replayConfig{res: res, recs: recs},
+		Source:       replaySource{res: res, recs: recs},
+		Planner:      kr,
+		Records:      kr,
+		SourceWriter: w,
+		KafkaWriter:  w,
+	}); err != nil {
+		return fmt.Errorf("evals: P3 action definitions: %w", err)
 	}
 	return nil
 }

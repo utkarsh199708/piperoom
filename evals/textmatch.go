@@ -268,7 +268,7 @@ func occursUndenied(cls []clauseToks, terms []string, layers bool) bool {
 	return false
 }
 
-// layerTerms are the words that name each pipeline layer (events.Layers) in a
+// layerTerms are the words that name each pipeline layer (events.IncidentLayers) in a
 // hypothesis. Kafka itself is matched by its parts, not the word "kafka",
 // because "Kafka Connect" would otherwise name both layers. Postgres also
 // covers the source-side objects a root cause lives in (DDL, migrations,
