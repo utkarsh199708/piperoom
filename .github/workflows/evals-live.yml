@@ -293,8 +293,10 @@ jobs:
         run: |
           go build -tags claude -o "$RUNNER_TEMP/evalrun" ./evals/cmd/evalrun
           "$RUNNER_TEMP/evalrun" -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 60
-      # Keep the result instead of failing here, so the filled cache is still
-      # uploaded for inspection; the Gate step fails the job after the upload.
+      # Keep the result instead of failing here: a refill often changes which
+      # texts the known-judge-miss pins must list, and the pins can only be
+      # updated after seeing the verdicts. The paid cache is still uploaded and
+      # pushed; the Gate step fails the job after the upload.
       - name: Test the evals
         id: test
         if: steps.key.outputs.run == 'true'
@@ -330,18 +332,23 @@ jobs:
           TESTS_OK: ${{ steps.test.outputs.ok }}
         run: |
           if [ "$TESTS_OK" != "true" ]; then
-            echo "::error::go test ./evals/... failed after the fill; the cache is in the judgecache artifact (if it changed) and is not pushed."
+            echo "::error::go test ./evals/... failed after the fill; the cache is pushed to the branch anyway (if it changed): update the known-judge-miss pins from the test log above before merging."
             exit 1
           fi
 
   # Pushes the filled cache to the dispatched branch. No environment and no
   # secret: this job sees only the artifact and a contents:write token.
+  # It runs even when judge-fill failed on its tests (run 39320779238 dropped
+  # 18 paid verdicts that way): the branch's own CI is the merge gate, so a
+  # cache that fails the tests on a non-main branch is safe. It never runs when
+  # the fill itself failed: the steps after it then skip, "Check for new
+  # verdicts" included, so `changed` is empty and this condition is false.
   push-judgecache:
     name: push-judgecache
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: judge-fill
-    if: needs.judge-fill.outputs.changed == 'true' && needs.judge-fill.outputs.tests_ok == 'true'
+    if: ${{ !cancelled() && needs.judge-fill.outputs.changed == 'true' }}
     permissions:
       contents: write
     steps:
@@ -399,10 +406,18 @@ jobs:
           fi
       - name: Commit and push
         if: steps.paths.outputs.push == 'true'
+        env:
+          TESTS_OK: ${{ needs.judge-fill.outputs.tests_ok }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
-          git commit -m "evals: refill judge verdicts (evals-live judge_fill)"
+          msg=(-m "evals: refill judge verdicts (evals-live judge_fill)")
+          if [ "$TESTS_OK" != "true" ]; then
+            note="go test ./evals/... failed after this fill; update the known-judge-miss pins from the judge-fill log before merging."
+            echo "::warning::${note}"
+            msg+=(-m "$note")
+          fi
+          git commit "${msg[@]}"
           git push origin "HEAD:${GITHUB_REF_NAME}"
           # A push made with GITHUB_TOKEN starts no workflow run.
           echo "::notice::Pushed the refilled judge cache to ${GITHUB_REF_NAME}. A GITHUB_TOKEN push triggers no CI: re-run CI on the branch (or the next push runs it)."
