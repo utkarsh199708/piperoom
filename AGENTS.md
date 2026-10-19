@@ -249,7 +249,7 @@ New folders of the wave (owned from the first PR that creates them):
 
 | Agent | Owns (new in the U wave) |
 |---|---|
-| leads | `internal/setup/protocol/**` (a contract file; listed below) |
+| leads | `internal/setup/protocol/**` (a contract file; listed below), `cmd/setup-spike/**` (the U1-0 spikes; deleted after U1-2 and U8b land) |
 | A9 (Qoder, new) | `cmd/setup/**`, `cmd/piperoom/**`, `internal/setup/**` except `internal/setup/protocol/**`, `internal/setup/targets/**`, `internal/setup/sources/**` and `internal/setup/knowledge/**` |
 | A5 | `internal/quickstart/**` (the `--quickstart` server moved out of `cmd/server`) |
 | C1 | `Dockerfile`, `deploy/helm/**` (a grant for the U rows that name them: U1-22, U12c) |
