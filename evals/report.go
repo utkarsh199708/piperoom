@@ -411,8 +411,20 @@ func writeReplayWrites(b *strings.Builder, results []RunResult) {
 }
 
 // maxFailedHypothesisRunes bounds the hypothesis text printed under a failed
-// run.
-const maxFailedHypothesisRunes = 300
+// run; maxFailedMessageRunes bounds its last message.
+const (
+	maxFailedHypothesisRunes = 300
+	maxFailedMessageRunes    = 400
+)
+
+// cutRedacted masks secrets in model text and cuts it to n runes.
+func cutRedacted(text string, n int) string {
+	text, _ = redact.Text(text)
+	if r := []rune(text); len(r) > n {
+		text = string(r[:n]) + "…"
+	}
+	return text
+}
 
 // failedRunDetails are the lines printed under a failed run: its final
 // hypothesis (confidence, whether it named the expected layers, the first
@@ -427,12 +439,28 @@ func failedRunDetails(res RunResult) []string {
 		out = append(out, "  - error: "+mdCell(RunErrorText(res.Error)))
 	}
 	if res.FinalHypothesis != "" {
-		text, _ := redact.Text(res.FinalHypothesis)
-		if r := []rune(text); len(r) > maxFailedHypothesisRunes {
-			text = string(r[:maxFailedHypothesisRunes]) + "…"
-		}
+		text := cutRedacted(res.FinalHypothesis, maxFailedHypothesisRunes)
 		out = append(out, fmt.Sprintf("  - hypothesis (confidence %s, first layer named %t, root-cause layer named %t): %s",
 			orDefault(res.Confidence), res.LayerNamed, res.RootCauseLayerNamed, mdCell(text)))
+	}
+	if res.LastMessage != "" {
+		out = append(out, "  - last message: "+mdCell(cutRedacted(res.LastMessage, maxFailedMessageRunes)))
+	}
+	// A healthy run that failed its verdict says which text tripped it: a
+	// transcript artifact is not always reachable, the job log is.
+	if res.Outcome == OutcomeHealthy && !res.SaysHealthy {
+		var notes []string
+		if n := healthyNote(res.LastMessage); n != "" {
+			notes = append(notes, "last message: "+n)
+		}
+		if res.FinalHypothesis != "" {
+			if n := healthyNote(res.FinalHypothesis); n != "" {
+				notes = append(notes, "hypothesis: "+n)
+			}
+		}
+		if len(notes) > 0 {
+			out = append(out, "  - healthy verdict failed: "+mdCell(strings.Join(notes, "; ")))
+		}
 	}
 	if a := res.Ambiguity; a != nil {
 		settled := a.Source

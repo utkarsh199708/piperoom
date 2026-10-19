@@ -72,6 +72,12 @@ func TestHasFaultShortStale(t *testing.T) {
 	if hasFault(recoveredHyp) {
 		t.Errorf("hasFault(recoveredHyp) = true")
 	}
+	if term, clause, ok := faultClause("Healthy now, but the warehouse is stale for 3h."); !ok || term != "stale" || clause != "the warehouse is stale for 3h" {
+		t.Errorf("faultClause = %q, %q, %v", term, clause, ok)
+	}
+	if n := healthyNote("warehouse 1m stale; nothing to fix"); n != "" {
+		t.Errorf("healthyNote on a healthy text = %q", n)
+	}
 	// A medium-confidence hypothesis that names a long staleness still claims a cause.
 	if !hasFault("Failing component: wh:analytics.orders, stale for 3h. Root-cause component: not established.") {
 		t.Errorf("a long staleness no longer counts as a fault")

@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -447,6 +448,14 @@ func bareNo(c clauseToks) bool {
 
 // hasFault reports whether text states a current fault (see faultTerms).
 func hasFault(text string) bool {
+	_, _, found := faultClause(text)
+	return found
+}
+
+// faultClause finds the first current fault in text and returns the fault
+// term and the part of the sentence (the sub) that holds it, so a report can
+// say what cancelled a healthy verdict: "stale" in "warehouse 41m stale".
+func faultClause(text string) (term, clause string, found bool) {
 	for _, c := range clausesOf(text) {
 		for j := range c.toks {
 			if phraseAt(c.toks, j, faultTerms) == 0 || isLabel(subToks(c, j)) {
@@ -479,11 +488,24 @@ func hasFault(text string) bool {
 				negated = true
 			}
 			if !negated && !past && !alert {
-				return true
+				return c.toks[j], strings.Join(subToks(c, j), " "), true
 			}
 		}
 	}
-	return false
+	return "", "", false
+}
+
+// healthyNote explains in a few words how text grades for a healthy verdict,
+// for the failed-runs section of the report: the fault that cancels it, or
+// that it has no healthy phrase. Empty when text is a healthy verdict.
+func healthyNote(text string) string {
+	if term, clause, ok := faultClause(text); ok {
+		return fmt.Sprintf("fault %q in %q", term, clause)
+	}
+	if !saysHealthy(text) {
+		return "no healthy phrase"
+	}
+	return ""
 }
 
 // isDigits reports whether s is a non-empty run of ASCII digits.
