@@ -119,3 +119,55 @@ budget to raise is `avro` (16 → 18), because the correct path sits on the ceil
    in depth, and must not refuse that legitimate change.
 3. **Every remaining miss is a recording gap in the five new P3 scenarios** (`similar_incidents`), which the
    smoke's 90-point passes show; a one-line recording per scenario takes them to 100.
+
+## 5. Ruling of 2026-10-19 (pm): one definition of the first failing layer
+
+Three of the day's row runs failed on the same grade, "first failing layer not named: schema-registry", with the
+model reading the scenario the same way every time:
+
+| run | scenario | the model's hypothesis | label before |
+|---|---|---|---|
+| [39275250624](https://github.com/utkarsh199708/piperoom/actions/runs/39275250624) (W3h, `main` `4ee27d6c`) | `recurring-schema-deleted` | first failing: consumer `order-sync`, crash-looping on "Schema 2 not found (40403)"; root cause: Schema Registry, id 2 deleted | first failing schema-registry, root cause schema-registry |
+| [39279106156](https://github.com/utkarsh199708/piperoom/actions/runs/39279106156) (W3g first version) | `recurring-schema-deleted` | the same reading, under a prompt clause that said the opposite | the same |
+| [39279866979](https://github.com/utkarsh199708/piperoom/actions/runs/39279866979) (W3d, `a17f1531`) | `avro-schema-id-deleted-sink-failed` | first failing: `wh-orders-sink` task 0, FAILED on "Schema 7 not found"; root cause: Schema Registry, version 3 hard-deleted | first failing schema-registry, root cause schema-registry |
+
+The three labels put the first failing layer where the cause is. The README's own example and the rest of the corpus
+do not: "a schema change fails in Connect first, but the cause is a Postgres DDL" (`schema-change`: first failing
+kafka-connect, root cause postgres), `publication-permission-denied` (first failing kafka-connect, root cause
+postgres), `sasl-credential-rotated` (first failing kafka-connect, root cause kafka), `users-compat-none-consumer`
+(first failing consumer, root cause schema-registry). In each the component where the human change happened still
+answers requests; the component that stops doing its job is downstream of it.
+
+**Ruling.** The first failing layer is the most upstream component that is **broken**, that is, no longer does its
+job. **A component that still answers requests is not broken even when a change made there is the cause**; the cause
+is `root_cause_layer`. A registry missing a schema answers 404 and serves every other subject: the sink task or the
+consumer that fails on the 404 is the first failing component. The two grades of `first_failing_layer` and
+`root_cause_layer` exist to tell these apart (the same reason W3c refuses an alt equal to `first_failing_layer`).
+
+What follows from it:
+
+- **Labels, not the prompt** (W3d-2, C7, PR #692): `recurring-schema-deleted` first failing → consumer;
+  `avro-schema-id-deleted-sink-failed` first failing → kafka-connect; both keep root cause schema-registry. The
+  first version of W3g's prompt clause ("including one whose required data or config is missing") pointed the other
+  way and is reverted; the clause now says the definition in this direction. The relabels change the judge truth
+  hash of both scenarios (and the W3d alt that of `consumer-offsets-out-of-range-retention`), so 18 recorded verdicts
+  in `evals/judgecache` go stale and the owner refills them locally (about $0.18) before the live run.
+- **The README `first_failing_layer` row** (C6) carries the definition in one line.
+- **Risk:** the morning's three `avro` runs named the registry as first failing (they passed on the old label). If
+  the model keeps doing that under the new label, the W3d-2 line fails on the layer and the prompt clause is the
+  lever; W3z's three runs give the reading. The ruling is kept either way: a label is a fact about the scenario, not
+  about the model.
+- **W3d's term group is dropped** (same day, same row): `topic-retention-data-loss` group 2 cannot take `delet*`,
+  `removed`, `purg*`, `unread` because `forwardDenial` does not deny "did not delete" / "not deleted by" before a
+  verb, so 11 pinned negatives in `evals/scenario_terms_test.go` would pass the keyword grade; the test already pins
+  the baseline hypothesis as a `knownGap` that the judge decides. W3z's three runs decide the scenario; a
+  keyword-only failure there is a scorer row (C6), not a term row. The row's budget change (avro 16 → 18) is
+  confirmed by its run (17 calls).
+- **The ambiguous-steer rule** (W3g): "names no component and no action" did not fire on "Sort out the owner thing
+  and get it running again." because the model reads "the owner thing" as Postgres and "get it running" as the
+  action. The rule now keys on what the model can tell: no listed action can fix the cause the evidence names, or
+  several could be what the driver means: ask one question, propose nothing. One more $0.21 run decides it.
+
+Run log of the day (per row; cost from the job's report): W3h 39275250624 4/5 $1.36; W3e 39276231008 5/5 $0.78;
+W3f 39276211437 0/1 $0.14 and 39278071128 1/1 $0.14; W3d 39279866979 1/2 $0.48; W3b 39279638327 4/4 $0.66; W3g
+39279106156 0/2 $0.44. Spent $4.00; remaining about $36.42 (W3d-2 $0.93, W3g $0.21, W3z $35.28).
