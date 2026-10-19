@@ -128,7 +128,9 @@ jobs:
           # regressed; the Gate step fails the job. Never -learned: that set is private.
           # Build first: `go run` reports any non-zero child exit as 1, which
           # hid evalrun's "regressed" exit code 2 from the Gate step.
-          go build -o "$RUNNER_TEMP/evalrun" ./evals/cmd/evalrun
+          # -tags claude links the live LLM judge; the default -judge auto needs it
+          # for ambiguous hypotheses with no verdict in evals/judgecache.
+          go build -tags claude -o "$RUNNER_TEMP/evalrun" ./evals/cmd/evalrun
           set +e
           "$RUNNER_TEMP/evalrun" "${args[@]}"
           echo "rc=$?" >> "$GITHUB_OUTPUT"
