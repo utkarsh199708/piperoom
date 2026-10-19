@@ -204,7 +204,7 @@ added is trimmed elsewhere.
 | P3-W3z | C6 | Opus 5.5 | 0.5 | evals: 3-run confirmation of all previously failing scenarios, then the full baseline; the `only=` list is unchanged by the day's rulings and also decides `topic-retention-data-loss` (terms dropped, judge-owned) and `sasl-credential-rotated` (label kept) | `evals-live runs=3 only=<the 26 scenarios named in the task file>` 78/78 at 100, misses 0 ($16.38); only then `make_baseline=true runs=3 only=all` ($18.90) committed as `evals/baseline/default.json` with `pass_rate` 1.0 and misses 0; a failing scenario goes back to the leads as a new row and is re-run alone before the baseline | P3-W3b, P3-W3d-2, P3-W3e, P3-W3f, P3-W3g, P3-W3h |
 
 Costs (2026-10-19 pm): spent on the rows' runs **$4.00** (W3h $1.36, W3e $0.78, W3f $0.28, W3d $0.48, W3b $0.66, W3g
-$0.44; 18 episodes); remaining **$36.42** (W3d-2 $0.93 with the judge refill, W3g re-run $0.21, W3z $16.38 +
+$0.44; 20 episodes); remaining **$36.42** (W3d-2 $0.93 with the judge refill, W3g re-run $0.21, W3z $16.38 +
 $18.90); total about $40.42 against the plan's $39.48.
 
 ## Load per agent
@@ -230,7 +230,7 @@ $18.90); total about $40.42 against the plan's $39.48.
 | N6 | 2 | 0.5 | 0.5 | P3-W3a (before P3-W3b), P3-W3a-2 (after it) |
 | leads | 1 | 1 | 1 | everything |
 
-Total about 80 agent-days over 70 PRs (the eleven P3-W3 rows add about 4.35 days). The critical path is A5: P0 → P1a-1 → P2b-1 → P2b-3 → P2b-4 → P3c
+Total about 80 agent-days over 70 PRs (the eleven P3-W3 rows add about 4.60 days). The critical path is A5: P0 → P1a-1 → P2b-1 → P2b-3 → P2b-4 → P3c
 (about 9 working days), then A6's P3d-* behind it. Everything in P4 except P4b-* and P4f-* can start the day
 P0 merges and run beside steps 1 and 2.
 

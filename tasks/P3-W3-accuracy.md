@@ -405,7 +405,7 @@ refill before the live run), W3e part 2, W3a-2.
 Every row above green; P3-W3z step 2 committed.
 
 Costs (2026-10-19 pm). Spent on the rows' live runs: W3h $1.36, W3e $0.78, W3f $0.28 (two runs), W3d $0.48, W3b
-$0.66, W3g $0.44 — **$4.00** (the plan said $4.20 for the rows; 18 episodes run, $0.14–$0.36 each). Remaining:
+$0.66, W3g $0.44 — **$4.00** (the plan said $4.20 for the rows; 20 episodes run, $0.14–$0.36 each). Remaining:
 W3d-2 $0.93 ($0.18 judge refill + $0.75 live), W3g re-run $0.21, W3z step 1 $16.38, W3z step 2 $18.90 — **$36.42**.
 Total about **$40.42** against the plan's $39.48 (the $0.94 over is the two re-runs of failed lines and the judge
 refill). A second W3b run is not planned (round 2 is unit-tested; the evals run with the triage pass off).
