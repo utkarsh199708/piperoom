@@ -49,7 +49,7 @@ The agreed shape is four adapters behind one model interface in `internal/agent`
   provider (§9).
 - No fine-tuning, embeddings, or provider-hosted tools (web search, code execution, file search).
 - No OpenAI Responses API, no Gemini explicit context caching (`cachedContents`) and no streaming in the new
-  adapters in this wave (§3.4); each is a later row if the evals show a need.
+  adapters in this wave (§3.1); each is a later row if the evals show a need.
 - No change to who may approve what. The model choice changes nothing in the approval model, write mode, or the
   read-only guarantees of tools (`internal/wiring/readonly*.go`).
 - No new runtime dependency where the standard library does: adapters 2 and 3 are `net/http` + `encoding/json`
@@ -117,7 +117,7 @@ page. A cell marked *per model* means the adapter decides by model id (with a co
 | Streaming | used today (required by the SDK for long requests) | SSE; not used in this wave | SSE; not used | `ConverseStream`; not used |
 | Prompt caching | explicit `cache_control` breakpoints; cache write and read priced | automatic prefix caching on OpenAI, Azure, DeepSeek, some others; reported as `prompt_tokens_details.cached_tokens` (DeepSeek: `prompt_cache_hit_tokens`); no write premium; none on local servers | implicit caching on current models, reported as `cachedContentTokenCount` | `cachePoint` blocks on models that support it; `cacheReadInputTokens` / `cacheWriteInputTokens` |
 | Reasoning / effort | adaptive thinking + `effort` low…max | `reasoning_effort` on reasoning models (OpenAI, Azure, Groq, xAI *per model*); DeepSeek and Qwen pick reasoning by model or flag; dropped elsewhere | `thinkingConfig` (`thinkingLevel` on Gemini 3, `thinkingBudget` on 2.5) | `additionalModelRequestFields` *per model*, else dropped |
-| Server-side compaction | yes (beta `compact-2026-01-12`) | no: client-side compaction (§6.4) | no: client-side | no: client-side |
+| Server-side compaction | yes (beta `compact-2026-01-12`) | no: client-side compaction (§6.1) | no: client-side | no: client-side |
 | Context window | 200k (1M on some) | *per model* (128k typical; less on local models unless configured) | 1M on current models | *per model* |
 | Usage report | `input_tokens` (uncached), `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`, compaction `iterations` | `prompt_tokens` (cached included), `completion_tokens` (reasoning included), cached tokens in details; some local servers report nothing | `promptTokenCount` (cached included), `candidatesTokenCount`, `thoughtsTokenCount` (billed as output), `cachedContentTokenCount` | `inputTokens`, `outputTokens`, `cacheReadInputTokens`, `cacheWriteInputTokens` |
 | Refusal signal | `stop_reason: refusal` + `stop_details` | `finish_reason: content_filter`, a `message.refusal` string; Azure answers a filtered prompt with HTTP 400 `content_filter` | `finishReason` `SAFETY`, `PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `RECITATION`; `promptFeedback.blockReason` | `stopReason` `guardrail_intervened`, `content_filtered` |
@@ -141,7 +141,7 @@ always override the base URL. A flavor never changes the prompt or the tools.
 | `vllm` | `http://localhost:8000/v1` | `PIPEROOM_MODEL_API_KEY` if the server has one | as `ollama`; tool calling needs the server's tool parser enabled (doc note) |
 | `generic` | none (required) | `PIPEROOM_MODEL_API_KEY` | no reasoning, no strict, no `json_schema` unless `PIPEROOM_MODEL_CAPS` turns them on (§9) |
 
-### 3.4 Why no streaming in the new adapters
+### 3.1 Why no streaming in the new adapters
 
 The room shows a model turn when it is complete (the loop emits `agent.message` after the turn), so streaming buys
 no UI. A non-streaming request reports usage reliably on every compatible host (in a stream, usage needs
@@ -428,7 +428,7 @@ by definition (the reference).
 4. **Context window** ≥ 128k tokens (declared or configured) and **max output** ≥ 8k tokens.
 5. **System prompt** honoured as a system or developer message (not folded into the first user turn).
 6. **Summaries parse**: ≥ 95% of hand-off and first-look verdicts validate against their schema within the one
-   retry (§6.3).
+   retry (§6).
 
 ### 5.2 Quality floor (supported vs experimental)
 
@@ -460,12 +460,12 @@ reported.**
 | Strict tool schemas | sends the schema without `strict` | nothing to report: every tool input is validated in code before `Run`, room tools included (V2a makes this universal; today read tools are validated and `propose_fix` checks its steps). An invalid input becomes an error `tool_result` with the validation message, and counts as a rejected attempt |
 | Structured output | (a) forced tool call: one tool `emit_<what>` whose schema is the output schema, `tool_choice: required`; else (b) plain text with the schema in the prompt, the first JSON object parsed | a parse or schema failure gets the existing one retry (`handoff.go` `retryNote`); a second failure is the existing failure path (`postmortem.failed`, triage `reason: model_error`, judge verdict unjudged) |
 | Effort / reasoning | the adapter maps the effort it can (§3) and drops the rest | the startup log names the dropped parameter once |
-| Server-side compaction | client-side compaction (§6.4) | an `agent.usage` event with role `compaction` for the summary call |
+| Server-side compaction | client-side compaction (§6.1) | an `agent.usage` event with role `compaction` for the summary call |
 | Parallel tool calls | none: the loop already handles one call per turn | — |
 | Usage report | estimate (§8.3) | `estimated: true` on the event |
 | Refusal detail | `StopDetail` empty | "model refused the request", as today |
 
-### 6.4 Client-side compaction
+### 6.1 Client-side compaction
 
 For a provider without server compaction, before each turn the agent estimates the request's input tokens (the
 last turn's reported input plus the bytes added since, at 3 bytes per token). Above 70% of
