@@ -70,7 +70,9 @@ go run ./evals/cmd/evalrun -compare base.json,cand.json -fail-on-regression   # 
 ```
 
 Optional LLM judge: `judge: claude` in a scenario, or `-judge claude` (overrides the scenario;
-`-judge terms` forces the default). It needs a build with `-tags claude` and `ANTHROPIC_API_KEY`:
+`-judge terms` forces the default). It needs a build with `-tags claude` and the model provider's
+credentials: `ANTHROPIC_API_KEY`, or Vertex or Bedrock (below). The judge uses the same provider as the
+agent (`PIPEROOM_MODEL_PROVIDER`):
 
 ```sh
 go run -tags claude ./evals/cmd/evalrun -judge claude -out report.json   # model: PIPEROOM_MODEL, or -judge-model
@@ -88,6 +90,40 @@ denying them, and accept the common ways a correct agent writes, but they are no
 English: when the two disagree, trust the judge.
 `go test -tags claude ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
 agreement. Default tests and CI never call the network.
+
+### On Vertex AI or Bedrock
+
+`PIPEROOM_MODEL_PROVIDER=vertex` or `bedrock` sends both the agent and the judge there; the judge mirrors
+`internal/agent/endpoint.go` (`evals/judge_provider.go`), so a missing project, region or credential stops
+evalrun before the first episode with an error. The model ids must be the provider's: `PIPEROOM_MODEL` (the
+agent and, without `-judge-model`, the judge), `-model`, `-judge-model`, and `PIPEROOM_TRIAGE_MODEL` and
+`PIPEROOM_TRIAGE_PASS_MODEL` wherever they are used (the pass model defaults to a first-party id). The
+model tap only sees the Anthropic API, so results record `prompt_hash: untapped`.
+
+A first Vertex run (one cheap scenario, one run; set `PIPEROOM_MODEL` to the model's id in the Vertex Model
+Garden and make sure the model is enabled for the project and region):
+
+```sh
+gcloud auth application-default login          # once: application default credentials
+export PIPEROOM_MODEL_PROVIDER=vertex
+export VERTEX_PROJECT_ID=my-gcp-project
+export VERTEX_REGION=us-east5                  # a region the model is offered in, or global
+export PIPEROOM_MODEL=<vertex model id>
+go run -tags claude ./evals/cmd/evalrun -only missed-table -runs 1 -out vertex.json
+```
+
+`ANTHROPIC_API_KEY` is not needed. Bedrock is the same with `PIPEROOM_MODEL_PROVIDER=bedrock`, `AWS_REGION`,
+AWS credentials from the usual chain (or `AWS_BEARER_TOKEN_BEDROCK`) and Bedrock model or inference-profile ids.
+Add `-prices` with the provider's prices to price the run.
+
+Filling the judge cache (below) works the same way: with the variables above set, the judge of `-judge-fill`
+calls Vertex (or Bedrock), and each recorded verdict names the provider model id that gave it. It is still a paid run
+that needs the owner's approval; estimate it first:
+
+```sh
+go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run -prices prices.json   # estimate only
+go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
+```
 
 ### Ambiguous answers: tri-state keyword pass and the cached judge (#454)
 
@@ -637,8 +673,10 @@ paired comparison and the cost-per-run delta, and never fails on cost alone.
 
 The job builds `evalrun` with `-tags claude`, which links the live LLM judge that the default `-judge auto`
 needs for an ambiguous hypothesis with no verdict in `evals/judgecache`. The judge is capped by
-`-judge-max-calls` (default 50 live calls per run); past the cap an ambiguous hypothesis is reported
-`ambiguous (unjudged)` and counts as not passed.
+`-judge-max-calls`: the job sets it to 2 × scenarios × runs (at most two judge calls per episode: root cause
+and layer), since evalrun's own default of 50 ran out after about 77 of 90 episodes. Past the cap an ambiguous
+hypothesis is reported `ambiguous (unjudged)` and counts as not passed. The job calls the Anthropic API; a
+Vertex or Bedrock run is a local run (above).
 
 With `runs: 1`, one flipped result fails the job: missing the expected fix alone costs 20 points, over the
 tolerance of 5. Treat a 1-run failure as a lead, not a verdict: run the same scenarios again with `runs: 3`
