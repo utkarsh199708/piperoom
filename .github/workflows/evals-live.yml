@@ -239,6 +239,8 @@ jobs:
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
       tests_ok: ${{ steps.test.outputs.ok }}
+      # The commit the fill was tested on; push-judgecache pushes only onto it.
+      sha: ${{ github.sha }}
     steps:
       # The cache is pushed back to the dispatched ref: only a branch, never main
       # (main changes only through a reviewed merge).
@@ -359,6 +361,18 @@ jobs:
         with:
           ref: ${{ github.ref }}
           persist-credentials: true
+      # The verdicts were tested on judge-fill's commit. Pushing only onto that
+      # commit makes the push a fast-forward of what was tested; a concurrent
+      # push to the branch makes the run fail instead of clobbering it.
+      - name: Check the branch did not move
+        env:
+          TESTED: ${{ needs.judge-fill.outputs.sha }}
+        run: |
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$TESTED" ]; then
+            echo "::error::${GITHUB_REF_NAME} moved from ${TESTED} to ${head} during the fill; dispatch judge_fill again"
+            exit 1
+          fi
       - name: Download the judge cache
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
