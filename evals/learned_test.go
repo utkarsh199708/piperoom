@@ -675,3 +675,25 @@ func TestLearnedInputKeepsNumbersWhenRedacted(t *testing.T) {
 		t.Fatalf("learned recording input no longer matches the same call:\n%s", b)
 	}
 }
+
+// The label's layer is an incident layer: "environment" belongs to setup actions.
+func TestLearnedEligibleLayers(t *testing.T) {
+	for _, tc := range []struct {
+		layer string
+		ok    bool
+	}{
+		{"kafka-connect", true},
+		{"postgres", true},
+		{"environment", false},
+		{"network", false},
+	} {
+		f := roomFacts{closed: true, hasLabel: true, label: events.RoomLabelledPayload{Cause: "c", ActualLayer: tc.layer}}
+		_, err := f.eligible()
+		if tc.ok && errors.Is(err, ErrLearnedUnlabelled) {
+			t.Errorf("layer %q refused: %v", tc.layer, err)
+		}
+		if !tc.ok && !errors.Is(err, ErrLearnedUnlabelled) {
+			t.Errorf("layer %q: err = %v, want ErrLearnedUnlabelled", tc.layer, err)
+		}
+	}
+}

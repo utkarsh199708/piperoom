@@ -99,6 +99,7 @@ func TestAgreementPipelineMapNames(t *testing.T) {
 func TestLabelValidate(t *testing.T) {
 	bad := []Label{
 		{"nowhere", []string{"x"}},
+		{"environment", []string{"x"}},
 		{"kafka", nil},
 		{"kafka", make([]string, 21)},
 		{"kafka", []string{"!!!"}},
