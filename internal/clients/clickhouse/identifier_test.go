@@ -47,7 +47,7 @@ func TestSQLBuildersValidateIdentifiersAndBindValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "SELECT max(" + tick + "updated_at" + tick + ") FROM " + tick + "analytics" + tick + "." + tick + "orders" + tick; got != want {
+	if want := "SELECT maxOrNull(" + tick + "updated_at" + tick + ") FROM " + tick + "analytics" + tick + "." + tick + "orders" + tick; got != want {
 		t.Fatalf("freshness SQL = %q, want %q", got, want)
 	}
 
@@ -63,7 +63,7 @@ func TestSQLBuildersValidateIdentifiersAndBindValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, fragment := range []string{"toStartOfInterval(", "INTERVAL ? SECOND", ">= ?", "< ?", "count()"} {
+	for _, fragment := range []string{"toStartOfInterval(", "INTERVAL ? SECOND", ">= fromUnixTimestamp64Nano(?)", "< fromUnixTimestamp64Nano(?)", "count()"} {
 		if !strings.Contains(got, fragment) {
 			t.Errorf("count SQL %q is missing %q", got, fragment)
 		}

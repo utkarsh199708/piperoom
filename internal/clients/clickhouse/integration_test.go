@@ -61,6 +61,17 @@ func TestClickHouseIntegration(t *testing.T) {
 		_, _ = admin.ExecContext(ctx, "DROP TABLE IF EXISTS "+qualified)
 		_ = admin.Close()
 	})
+	plainTable := readOpts.Auth.Database + "." + tableName + "_plain"
+	plainQualified, err := quoteTable(plainTable)
+	if err != nil {
+		_ = admin.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+		defer cancel()
+		_, _ = admin.ExecContext(ctx, "DROP TABLE IF EXISTS "+plainQualified)
+	})
 
 	create := fmt.Sprintf(
 		"CREATE TABLE %s (id UInt64, version UInt64, amount Decimal(18, 4), loaded_at DateTime64(6, 'Asia/Kolkata')) ENGINE = ReplacingMergeTree(version) ORDER BY id",
@@ -71,6 +82,36 @@ func TestClickHouseIntegration(t *testing.T) {
 	execCancel()
 	if err != nil {
 		t.Fatalf("create integration table: %v", Redact(err, adminDSN))
+	}
+	createPlain := fmt.Sprintf(
+		"CREATE TABLE %s (id UInt64, version UInt64, amount Decimal(18, 4), loaded_at DateTime64(6, 'Asia/Kolkata')) ENGINE = MergeTree ORDER BY id",
+		plainQualified,
+	)
+	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
+	_, err = admin.ExecContext(execCtx, createPlain)
+	execCancel()
+	if err != nil {
+		t.Fatalf("create plain MergeTree integration table: %v", Redact(err, adminDSN))
+	}
+
+	readClient, err := New(context.Background(), readDSN)
+	if err != nil {
+		t.Fatalf("open read-only client: %v", err)
+	}
+	t.Cleanup(func() { _ = readClient.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	emptyFresh, err := readClient.Freshness(ctx, table, "loaded_at")
+	cancel()
+	if err != nil || !emptyFresh.IsZero() {
+		t.Fatalf("empty-table Freshness = %s, %v; want zero time", emptyFresh, err)
+	}
+	var readonly int
+	ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
+	err = readClient.db.QueryRowContext(ctx, "SELECT getSetting('readonly')").Scan(&readonly)
+	cancel()
+	if err != nil || readonly != 2 {
+		t.Fatalf("session readonly = %d, %v; want 2 for query timeout settings", readonly, err)
 	}
 
 	insert := "INSERT INTO " + qualified + " (id, version, amount, loaded_at) VALUES " +
@@ -83,13 +124,7 @@ func TestClickHouseIntegration(t *testing.T) {
 		t.Fatalf("insert integration rows: %v", Redact(err, adminDSN))
 	}
 
-	readClient, err := New(context.Background(), readDSN)
-	if err != nil {
-		t.Fatalf("open read-only client: %v", err)
-	}
-	t.Cleanup(func() { _ = readClient.Close() })
-
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
 	fresh, err := readClient.Freshness(ctx, table, "loaded_at")
 	cancel()
 	wantFresh := time.Date(2026, 10, 19, 12, 0, 1, 123456000, time.FixedZone("IST", 5*60*60+30*60)).UTC()
@@ -111,6 +146,20 @@ func TestClickHouseIntegration(t *testing.T) {
 		t.Fatalf("ReplacingMergeTree amount = %#v, want exact decimal 2.75", row["amount"])
 	}
 
+	plainInsert := "INSERT INTO " + plainQualified + " (id, version, amount, loaded_at) VALUES (7, 1, 3.5, '2026-10-19 12:00:00.123456')"
+	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
+	_, err = admin.ExecContext(execCtx, plainInsert)
+	execCancel()
+	if err != nil {
+		t.Fatalf("insert plain MergeTree integration row: %v", Redact(err, adminDSN))
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
+	plainRow, plainFound, plainErr := readClient.Row(ctx, plainTable, "id", "7")
+	cancel()
+	if plainErr != nil || !plainFound || plainRow["id"] != "7" {
+		t.Fatalf("plain MergeTree Row = %#v, found=%t, err=%v", plainRow, plainFound, plainErr)
+	}
+
 	since := time.Date(2026, 10, 19, 11, 59, 30, 250000000, time.FixedZone("IST", 5*60*60+30*60))
 	ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
 	counts, err := readClient.CountByBucket(ctx, table, "loaded_at", since, since.Add(2*time.Minute), time.Minute)
@@ -123,7 +172,7 @@ func TestClickHouseIntegration(t *testing.T) {
 	}
 
 	loadSince := time.Now().UTC().Add(-time.Minute)
-	badInsert := "INSERT INTO " + qualified + " (id, version, amount, loaded_at) VALUES ('not_uint', 3, 3.0, '2026-10-19 12:00:02')"
+	badInsert := "INSERT INTO " + qualified + " (id, version, amount, loaded_at) SELECT toUInt64('not_uint'), toUInt64(3), toDecimal64(3.0, 4), toDateTime64('2026-10-19 12:00:02', 6, 'Asia/Kolkata')"
 	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
 	_, insertErr := admin.ExecContext(execCtx, badInsert)
 	execCancel()

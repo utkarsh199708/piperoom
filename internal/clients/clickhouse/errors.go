@@ -14,11 +14,23 @@ import (
 const (
 	errUnknownTable    = 60
 	errUnknownDatabase = 81
+	errIllegalFinal    = 181
+	errAccessDenied    = 497
 )
 
 func missingObject(err error) bool {
 	var chErr *driver.Exception
 	return errors.As(err, &chErr) && (chErr.Code == errUnknownTable || chErr.Code == errUnknownDatabase)
+}
+
+func illegalFinal(err error) bool {
+	var chErr *driver.Exception
+	return errors.As(err, &chErr) && chErr.Code == errIllegalFinal
+}
+
+func accessDenied(err error) bool {
+	var chErr *driver.Exception
+	return errors.As(err, &chErr) && chErr.Code == errAccessDenied
 }
 
 func (c *Client) queryError(operation, table string, err error) error {

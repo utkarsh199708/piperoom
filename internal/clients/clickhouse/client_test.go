@@ -13,12 +13,15 @@ import (
 )
 
 func TestOptionsForDSNEnforcesReadonlyAndTimeouts(t *testing.T) {
-	opts, err := optionsForDSN("clickhouse://reader:secret@localhost:9000/analytics?secure=true")
+	opts, err := optionsForDSN("clickhouse://reader:secret@localhost:9000/analytics?secure=true&readonly=1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.Settings["readonly"] != 1 {
-		t.Fatalf("readonly setting = %v, want 1", opts.Settings["readonly"])
+	if opts.Settings["readonly"] != 2 {
+		t.Fatalf("readonly setting = %v, want 2", opts.Settings["readonly"])
+	}
+	if opts.Settings["max_result_bytes"] != 4*1024*1024 {
+		t.Fatalf("max_result_bytes = %v, want 4 MiB", opts.Settings["max_result_bytes"])
 	}
 	if opts.DialTimeout != defaultTimeout || opts.ReadTimeout != defaultTimeout {
 		t.Fatalf("timeouts = %s/%s, want %s", opts.DialTimeout, opts.ReadTimeout, defaultTimeout)
@@ -44,8 +47,8 @@ func TestFreshnessDateTimesAndEmptyTable(t *testing.T) {
 	if !got.Equal(want.UTC()) || got.Location() != time.UTC || got.Nanosecond() != want.Nanosecond() {
 		t.Fatalf("Freshness = %s, want %s in UTC", got.Format(time.RFC3339Nano), want.UTC().Format(time.RFC3339Nano))
 	}
-	if !strings.Contains(q.calls[0].query, "max(") {
-		t.Fatalf("query = %q, want max", q.calls[0].query)
+	if !strings.Contains(q.calls[0].query, "maxOrNull(") {
+		t.Fatalf("query = %q, want maxOrNull", q.calls[0].query)
 	}
 
 	empty, err := client.Freshness(context.Background(), "analytics.orders", "loaded_at")
@@ -131,6 +134,26 @@ func TestRowUsesFinalAndConvertsValues(t *testing.T) {
 	}
 }
 
+func TestRowRetriesWithoutFinalForUnsupportedEngine(t *testing.T) {
+	q := &fakeQuerier{responses: []queryResponse{
+		{err: &driver.Exception{Code: errIllegalFinal, Name: "ILLEGAL_FINAL"}},
+		{rows: &fakeRows{columns: []string{"id"}, data: [][]any{{"order-1"}}}},
+	}}
+	row, found, err := newTestClient(q).Row(context.Background(), "analytics.orders", "id", "order-1")
+	if err != nil || !found || row["id"] != "order-1" {
+		t.Fatalf("Row = %#v, found=%t, err=%v; want row after fallback", row, found, err)
+	}
+	if len(q.calls) != 2 {
+		t.Fatalf("query calls = %d, want FINAL attempt and fallback", len(q.calls))
+	}
+	if !strings.Contains(q.calls[0].query, " FINAL WHERE ") || strings.Contains(q.calls[1].query, " FINAL ") {
+		t.Fatalf("queries = %q / %q, want FINAL then plain SELECT", q.calls[0].query, q.calls[1].query)
+	}
+	if q.calls[0].args[0] != "order-1" || q.calls[1].args[0] != "order-1" {
+		t.Fatalf("fallback key args = %#v / %#v, want bound key on both queries", q.calls[0].args, q.calls[1].args)
+	}
+}
+
 func TestCountByBucket(t *testing.T) {
 	since := time.Date(2026, 10, 19, 10, 0, 0, 0, time.FixedZone("east", 5*60*60+30*60)).Add(30*time.Second + 250*time.Millisecond)
 	bucket := since.UTC()
@@ -151,6 +174,9 @@ func TestCountByBucket(t *testing.T) {
 	}
 	if q.calls[0].args[0] != int64(30_250_000_000) || q.calls[0].args[1] != int64(60) || q.calls[0].args[2] != int64(30_250_000_000) {
 		t.Fatalf("bucket origin/width arguments = %#v, want offset 30.25s and width 60s", q.calls[0].args[:3])
+	}
+	if q.calls[0].args[3] != since.UTC().UnixNano() || q.calls[0].args[4] != since.Add(2*time.Minute).UTC().UnixNano() || !strings.Contains(q.calls[0].query, "fromUnixTimestamp64Nano(?)") {
+		t.Fatalf("time bounds/query = %#v / %q, want nanosecond bounds", q.calls[0].args[3:], q.calls[0].query)
 	}
 
 	if _, err := client.CountByBucket(context.Background(), "analytics.orders", "loaded_at", since, since.Add(time.Minute), 1500*time.Millisecond); err == nil {

@@ -19,8 +19,9 @@ const loadErrorsSQL = "SELECT event_time, exception_code, written_rows\n" +
 	"FROM system.query_log\n" +
 	"WHERE type IN ('ExceptionBeforeStart', 'ExceptionWhileProcessing')\n" +
 	"  AND query_kind = 'Insert'\n" +
+	"  AND event_date >= toDate(?)\n" +
 	"  AND event_time >= ?\n" +
-	"  AND arrayExists((db, tbl) -> db = ? AND tbl = ?, arrayZip(databases, tables))\n" +
+	"  AND has(tables, ?)\n" +
 	"ORDER BY event_time DESC\n" +
 	"LIMIT ?"
 
@@ -56,7 +57,7 @@ func (c *Client) LoadErrors(ctx context.Context, table string, since time.Time, 
 		limit = maxLoadLimit
 	}
 
-	rows, err := c.query(ctx, loadErrorsSQL, since.UTC(), database, tableName, limit)
+	rows, err := c.query(ctx, loadErrorsSQL, since.UTC(), since.UTC(), database+"."+tableName, limit)
 	if err != nil {
 		if missingObject(err) {
 			return nil, fmt.Errorf("clickhouse: load history: %w", clients.ErrNotSupported)
@@ -104,8 +105,8 @@ func (c *Client) LoadErrors(ctx context.Context, table string, since time.Time, 
 	kafkaRows, err := c.query(ctx, kafkaConsumerErrorsSQL, since.UTC(), database, tableName, limit)
 	if err != nil {
 		// system.kafka_consumers is optional on builds without Kafka support.
-		// Other failures (including missing grants) remain visible to operators.
-		if !missingObject(err) {
+		// A missing grant should not discard query-log evidence already read.
+		if !missingObject(err) && !accessDenied(err) {
 			return nil, c.queryError("read Kafka consumer errors of", table, err)
 		}
 	} else {

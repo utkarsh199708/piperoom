@@ -32,7 +32,7 @@ func (c *Client) CountByBucket(ctx context.Context, table, tsColumn string, sinc
 		return nil, err
 	}
 	offset := bucketOriginOffset(since, width)
-	rows, err := c.query(ctx, query, offset, int64(width/time.Second), offset, since.UTC(), until.UTC())
+	rows, err := c.query(ctx, query, offset, int64(width/time.Second), offset, since.UTC().UnixNano(), until.UTC().UnixNano())
 	if err != nil {
 		return nil, c.queryError("count rows of", table, err)
 	}

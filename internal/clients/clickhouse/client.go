@@ -56,9 +56,12 @@ func optionsForDSN(dsn string) (*driver.Options, error) {
 	if opts.Settings == nil {
 		opts.Settings = driver.Settings{}
 	}
-	// The role should also have SELECT-only grants. Pinning this session
-	// setting prevents accidental writes if those grants are broader.
-	opts.Settings["readonly"] = 1
+	// readonly=2 blocks writes and DDL while allowing the driver's per-query
+	// max_execution_time setting required by context deadlines.
+	opts.Settings["readonly"] = 2
+	// One oversized row must not turn a warehouse lookup into an unbounded
+	// result handed to the agent.
+	opts.Settings["max_result_bytes"] = 4 * 1024 * 1024
 	opts.DialTimeout = defaultTimeout
 	opts.ReadTimeout = defaultTimeout
 	opts.MaxOpenConns = 5

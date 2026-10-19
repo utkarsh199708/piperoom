@@ -47,11 +47,29 @@ func TestLoadErrorsReturnsSafeQueryAndKafkaFailures(t *testing.T) {
 			t.Fatalf("FirstError leaked record text: %q", item.FirstError)
 		}
 	}
-	if !strings.Contains(q.calls[0].query, "ExceptionBeforeStart") || !strings.Contains(q.calls[0].query, "arrayZip(databases, tables)") {
+	if !strings.Contains(q.calls[0].query, "ExceptionBeforeStart") || !strings.Contains(q.calls[0].query, "event_date >= toDate(?)") || !strings.Contains(q.calls[0].query, "has(tables, ?)") {
 		t.Fatalf("query-log SQL = %q", q.calls[0].query)
+	}
+	if q.calls[0].args[2] != "analytics.orders" {
+		t.Fatalf("query-log table filter = %#v, want qualified table", q.calls[0].args[2])
 	}
 	if strings.Contains(strings.ToLower(q.calls[0].query), "exception,") {
 		t.Fatalf("query-log SQL reads raw exception text: %q", q.calls[0].query)
+	}
+}
+
+func TestLoadErrorsKeepsQueryLogEvidenceWhenKafkaTableIsDenied(t *testing.T) {
+	since := time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)
+	q := &fakeQuerier{responses: []queryResponse{
+		{rows: &fakeRows{columns: []string{"event_time", "exception_code", "written_rows"}, data: [][]any{{since.Add(time.Minute), int32(252), uint64(0)}}}},
+		{err: &driver.Exception{Code: errAccessDenied, Name: "ACCESS_DENIED"}},
+	}}
+	got, err := newTestClient(q).LoadErrors(context.Background(), "analytics.orders", since, 5)
+	if err != nil {
+		t.Fatalf("LoadErrors with inaccessible kafka_consumers: %v", err)
+	}
+	if len(got) != 1 || got[0].Status != "LOAD_FAILED" {
+		t.Fatalf("LoadErrors = %#v, want query-log evidence only", got)
 	}
 }
 

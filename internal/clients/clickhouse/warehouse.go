@@ -48,7 +48,8 @@ func (c *Client) Freshness(ctx context.Context, table, tsColumn string) (time.Ti
 }
 
 // Row returns one row matching pkColumn. FINAL ensures a ReplacingMergeTree
-// lookup sees the current deduplicated row before background merges finish.
+// lookup sees the current deduplicated row before background merges finish. If
+// the engine rejects FINAL, it retries without FINAL for compatible engines.
 func (c *Client) Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
@@ -58,6 +59,12 @@ func (c *Client) Row(ctx context.Context, table, pkColumn, pk string) (map[strin
 		return nil, false, err
 	}
 	rows, err := c.query(ctx, query, pk)
+	if illegalFinal(err) {
+		query, err = rowFallbackSQL(table, pkColumn)
+		if err == nil {
+			rows, err = c.query(ctx, query, pk)
+		}
+	}
 	if err != nil {
 		return nil, false, c.queryError("query row from", table, err)
 	}

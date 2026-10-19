@@ -26,6 +26,7 @@ type dbQuerier struct {
 }
 
 func (q dbQuerier) QueryContext(ctx context.Context, query string, args ...any) (sqlRows, error) {
+	// clickhouse-go safely binds the '?' values client-side before sending SQL.
 	rows, err := q.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
