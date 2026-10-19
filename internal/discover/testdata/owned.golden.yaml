@@ -33,6 +33,7 @@ layers:
   kafka: user:alice
   consumer: user:alice
   warehouse: user:alice
+  environment: user:alice
 
 # skipped connectors:
 #   wh-sink: not a Debezium Postgres source (class io.confluent.connect.jdbc.JdbcSinkConnector)

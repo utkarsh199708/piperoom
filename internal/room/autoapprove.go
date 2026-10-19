@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -112,11 +113,15 @@ func (s *Service) autoApproveFor(pipelineID string) []string {
 // pipeline's kind alone (events.LayersOf), as owner or backup by the rules
 // approve applies (authorizeLayer), or is PIPEROOM_SOLO_USER. The driver's
 // fallback on unowned layers does not count: it is a per-proposal right.
+// The setup layer (events.LayerEnvironment, U0) is left out: no incident
+// action targets it, so an owners file written before the U wave, which
+// cannot name it, keeps its solo mode; a setup room's own solo rule is
+// docs/design/setup-agent.md §3.6 (the U rows).
 func (s *Service) soloFor(u User, pipelineID string) bool {
 	if s.IsSolo(u.ID) {
 		return true
 	}
-	layers := events.LayersOf(s.pipelineKind(pipelineID))
+	layers := slices.DeleteFunc(events.LayersOf(s.pipelineKind(pipelineID)), func(l string) bool { return l == events.LayerEnvironment })
 	if len(layers) == 0 {
 		return false // fail closed, like approve-all: "every layer of nothing" is not solo
 	}

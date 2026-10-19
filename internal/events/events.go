@@ -124,6 +124,32 @@ const (
 	ShadowRevealed Type = "shadow.revealed"
 	ShadowLabelled Type = "shadow.labelled"
 	ShadowGraded   Type = "shadow.graded"
+
+	// Setup rooms (docs/design/setup-agent.md; U wave). Every setup.* event
+	// is audit: it names what happened, who did it and the runner label, and
+	// never a secret value, a pairing code or a runner token. All are written
+	// by the room service (system actor, or the person who clicked) except
+	// setup.plan and setup.blocked, which the agent emits through its Sink.
+	// The Sink refuses setup.verified from the agent: only the server's
+	// ladder runner writes it.
+	SetupPairing               Type = "setup.pairing"                // every pairing attempt, success or not, and a replacement of a lost runner
+	SetupRunnerAttached        Type = "setup.runner_attached"        // the runner's Hello, after the person confirmed on its terminal
+	SetupRunnerLost            Type = "setup.runner_lost"            // silent for protocol.LostAfter; in-flight steps become unknown
+	SetupRunnerRefused         Type = "setup.runner_refused"         // the runner did not run an op; reason is a protocol.Refuse* code
+	SetupPlan                  Type = "setup.plan"                   // the agent's plan (setup_plan); tiers filled by the server
+	SetupTargetRegistered      Type = "setup.target_registered"      // a driver click added a target (POST /api/rooms/{id}/setup/targets)
+	SetupTargetClassed         Type = "setup.target_classed"         // a target's class was set or raised, by the server or the person
+	SetupPipelineExtended      Type = "setup.pipeline_extended"      // a driver click grew the provisional pipeline
+	SetupSecretSet             Type = "setup.secret_set"             // a secret name entered the runner's store; the value is nowhere
+	SetupCredentialsRegistered Type = "setup.credentials_registered" // read credentials reached PIPEROOM_SECRETS_DIR; names only
+	SetupMaintenanceWindow     Type = "setup.maintenance_window"     // the driver recorded a window for T3 steps
+	SetupVerified              Type = "setup.verified"               // the ladder's outcome; emitted by the ladder runner only
+	SetupAwaitingChange        Type = "setup.awaiting_change"        // rung 8: the ladder waits for a change the person makes
+	SetupBlocked               Type = "setup.blocked"                // a bound stopped the run; it asks the person a question
+	// PipelineRegistered says the owners entry of a setup room's pipeline was
+	// written (or its pull request opened) and the server reloaded. The room
+	// then closes with resolution "pipeline live".
+	PipelineRegistered Type = "pipeline.registered"
 )
 
 // ActorKind says who caused an event.
@@ -212,7 +238,15 @@ type RoomCreatedPayload struct {
 	// is revealed after the room closes. Frozen here so a restart keeps it.
 	// Never set by CreateRoom (POST /api/rooms).
 	Shadow bool `json:"shadow,omitempty"`
+	// Mode is RoomModeSetup for a room POST /api/setup opened: the agent runs
+	// in setup mode (agent.ModeSetup) and Alert holds the SetupRequest.
+	// Empty (omitted) for every incident room, so events from before the U
+	// wave serialise exactly as before. Never set together with Shadow. (U)
+	Mode string `json:"mode,omitempty"`
 }
+
+// RoomModeSetup is RoomCreatedPayload.Mode of a setup room. (U)
+const RoomModeSetup = "setup"
 
 // RoomClosedPayload ends a room. A room closed by the open-room limit
 // (PIPEROOM_MAX_OPEN_DAYS) is closed by the system actor with the resolution
@@ -642,8 +676,8 @@ const (
 	ProposalOriginDriver = "driver"
 )
 
-// ProposalScheduledPayload: the auto-approve policy (Policy, always
-// PolicyAutoApprove in this wave) runs the proposal at RunAt. The driver or
+// ProposalScheduledPayload: the policy Policy (PolicyAutoApprove, or
+// PolicySetupLocal for a T1 setup step) runs the proposal at RunAt. The driver or
 // any required-layer owner may cancel it until the policy starts (its first
 // approval is logged); CancelUntil (equal to RunAt in this wave) is the
 // advertised deadline, and a cancel after it still wins if it lands first.
@@ -709,11 +743,25 @@ const (
 	// GrantPolicy: the pipeline's auto-approve policy, after the
 	// proposal.scheduled countdown ran out uncancelled. System actor.
 	GrantPolicy = "policy"
+	// GrantAdmin: the actor is a tenant admin (owners.yaml tenants.<t>.admins)
+	// approving a T2 or T3 step of a setup room whose provisional pipeline
+	// nobody owns yet (docs/design/setup-agent.md §3.6). On a team server it
+	// is the only grant for such a step besides an overlapping pipeline's
+	// owners; the driver's fallback applies in solo mode only. (U)
+	GrantAdmin = "admin"
 )
 
-// PolicyAutoApprove names the owners.yaml auto_approve: list in
-// ApprovalGivenPayload.Policy and ProposalScheduledPayload.Policy. (P2)
-const PolicyAutoApprove = "auto_approve"
+// Policies in ApprovalGivenPayload.Policy and ProposalScheduledPayload.Policy.
+const (
+	// PolicyAutoApprove names the owners.yaml auto_approve: list. (P2)
+	PolicyAutoApprove = "auto_approve"
+	// PolicySetupLocal schedules a T1 step of a setup room (a write under the
+	// project directory on a local-class target) after
+	// PIPEROOM_SETUP_LOCAL_DELAY, cancellable like any scheduled proposal;
+	// with the delay "0" every T1 step waits for a click instead. Never for
+	// T2 or T3, never on a shared or production target. (U)
+	PolicySetupLocal = "setup_local"
+)
 
 // ApprovalRejectedPayload is one layer owner's rejection.
 type ApprovalRejectedPayload struct {
@@ -746,6 +794,268 @@ type ActionExecutedPayload struct {
 	// never run again, and the agent is told the outcome is unknown
 	// (HumanInput.OK nil): the target must be checked before a retry.
 	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
+	// Receipt is what the runner did for a setup step (actions.Receipted):
+	// the exact argv, target and output MAC, never credentials or raw output.
+	// Nil for every action that is not Receipted, so events from before the
+	// U wave serialise exactly as before. (U)
+	Receipt *SetupReceipt `json:"receipt,omitempty"`
+}
+
+// ---- Setup rooms (U wave; docs/design/setup-agent.md §2.2, §4 item 2) ----
+
+// SetupReceipt is the setup equivalent of ToolCall: proof of what the runner
+// executed for one step. Argv is the exact argv of an exec op with every
+// secret as ${secret:name}; Target is the host, URL, file path or database
+// the op reached, never credentials; OutMAC is HMAC-SHA256 of the raw output
+// under a key only the runner holds, so the output itself never leaves the
+// runner and a dispute is settled by re-running the receipt there. A receipt
+// never holds a secret value, a token or raw output.
+type SetupReceipt struct {
+	Kind     string    `json:"kind"`           // "exec" | "http" | "sql" | "file"
+	Argv     []string  `json:"argv,omitempty"` // exec only
+	Target   string    `json:"target"`
+	ExitCode int       `json:"exit_code"`
+	At       time.Time `json:"at"`
+	TookMS   int64     `json:"took_ms"`
+	OutMAC   string    `json:"out_mac"`
+}
+
+// SetupRequest opens a setup room (POST /api/setup); RoomCreatedPayload.Alert
+// holds it and the agent reads it from Alert.Raw. Everything in it is typed
+// by the person: hosts become the room's first targets (SetupTarget), tables
+// and connectors the provisional pipeline's scope (owners.Provisional). The
+// model never extends any of it; only a driver click does
+// (setup.target_registered, setup.pipeline_extended).
+type SetupRequest struct {
+	PipelineID  string        `json:"pipeline_id"`
+	Tenant      string        `json:"tenant,omitempty"` // "" without a tenants: block; else a tenant the creator belongs to
+	Title       string        `json:"title"`
+	SourceKind  string        `json:"source_kind"` // postgres | mysql | sqlserver | mongodb | oracle
+	Target      string        `json:"target"`      // compose | host | strimzi | msk | confluent | aiven | dbzserver | embedded
+	TopicPrefix string        `json:"topic_prefix"`
+	Tables      []string      `json:"tables"`
+	Connectors  []string      `json:"connectors,omitempty"`
+	Targets     []SetupTarget `json:"targets"`
+	Repos       []string      `json:"repos,omitempty"` // repo ids of owners.yaml repos:, or the tenant default
+}
+
+// SetupTarget is one host or account a setup room may reach. Kind says what
+// it is ("postgres", "kafka", "connect", "registry", "kubernetes", "aws",
+// "confluent", "aiven", "host"); Address is a host:port, a URL, a kubectl
+// context and namespace, or an account id. Class is a floor: the person may
+// raise a class above what the server derives, never lower it, and a
+// registered target is never below "shared" (docs/design/setup-agent.md
+// §2.6, §3.5). Empty means "let the server derive it".
+type SetupTarget struct {
+	Kind    string `json:"kind"`
+	Address string `json:"address"`
+	Class   string `json:"class,omitempty"` // "local" | "shared" | "production"
+}
+
+// Outcomes of SetupPairingPayload.Outcome.
+const (
+	PairingOK          = "ok"
+	PairingBadCode     = "bad_code"
+	PairingExpired     = "expired"
+	PairingRateLimited = "rate_limited"
+	PairingReplaced    = "replaced" // a lost runner was replaced by a new pairing
+	PairingRefused     = "refused"  // the person answered N on the runner, or the protocol version differs
+)
+
+// SetupPairingPayload records one pairing attempt. Source is the client
+// address as the server saw it (through the trusted-proxy rule); RunnerLabel
+// is set on success. The code and the token are never in it.
+type SetupPairingPayload struct {
+	Outcome     string `json:"outcome"` // see Pairing*
+	Source      string `json:"source"`
+	RunnerLabel string `json:"runner_label,omitempty"`
+}
+
+// SetupRunnerAttachedPayload is the runner's Hello as stored. Tools maps a
+// tool name to its version. ProjectDir is a path on the runner's machine.
+type SetupRunnerAttachedPayload struct {
+	RunnerLabel      string            `json:"runner_label"`
+	OS               string            `json:"os"`
+	Arch             string            `json:"arch"`
+	Tools            map[string]string `json:"tools"`
+	ProjectDir       string            `json:"project_dir"`
+	CatalogueVersion string            `json:"catalogue_version"`
+	ProtocolVersion  int               `json:"protocol_version"`
+}
+
+// SetupRunnerLostPayload says the runner went silent (protocol.LostAfter).
+// Every in-flight step is then recorded with OutcomeUnknown.
+type SetupRunnerLostPayload struct {
+	RunnerLabel string    `json:"runner_label"`
+	LastSeen    time.Time `json:"last_seen"`
+}
+
+// SetupRunnerRefusedPayload mirrors protocol.Refusal: Reason is a
+// protocol.Refuse* code, never text from the runner.
+type SetupRunnerRefusedPayload struct {
+	Op         string `json:"op"`
+	Reason     string `json:"reason"`
+	ProposalID string `json:"proposal_id,omitempty"`
+	StepIndex  *int   `json:"step_index,omitempty"`
+}
+
+// SetupPlanStep is one step of a setup plan. Op and Verify are the model's;
+// Target, Tier and Layer are filled by the server from the resolved endpoint
+// (docs/design/setup-agent.md §3.3) and never from the model's text.
+type SetupPlanStep struct {
+	Index  int    `json:"index"`
+	Op     string `json:"op"`
+	Target string `json:"target"`
+	Tier   string `json:"tier"` // protocol.TierT0..TierT3
+	Layer  string `json:"layer"`
+	Verify string `json:"verify,omitempty"` // one sentence, agent text, ≤ 200 chars after sanitizing
+}
+
+// SetupPlanPhase groups steps under a name ("prerequisites", "stack",
+// "connector", "verify").
+type SetupPlanPhase struct {
+	Name  string          `json:"name"`
+	Steps []SetupPlanStep `json:"steps"`
+}
+
+// SetupPlanPayload is the current plan. A new plan after a failed step names
+// the one it replaces in Supersedes; a proposal whose step is not in the
+// current plan is refused (agent.ErrNotInPlan).
+type SetupPlanPayload struct {
+	PlanID     string           `json:"plan_id"`
+	Supersedes string           `json:"supersedes,omitempty"`
+	Phases     []SetupPlanPhase `json:"phases"`
+}
+
+// SetupTargetRegisteredPayload: a driver click added a target. Class is the
+// class the server derived combined with the person's floor, never below
+// "shared". By is also the event actor.
+type SetupTargetRegisteredPayload struct {
+	Kind    string `json:"kind"`
+	Address string `json:"address"`
+	Class   string `json:"class"`
+	By      Actor  `json:"by"`
+}
+
+// SetupTargetClassedPayload: a target's class was set or raised. By is
+// "server" (derived from Hello and env_detect) or "person" (the raise route
+// or the SetupRequest floor); Reason is a fixed code ("loopback",
+// "created_by_room", "prod_pattern", "person", "default").
+type SetupTargetClassedPayload struct {
+	Target string `json:"target"`
+	Class  string `json:"class"`
+	Reason string `json:"reason"`
+	By     string `json:"by"` // "server" | "person"
+}
+
+// SetupPipelineExtendedPayload: a driver click grew the provisional
+// pipeline (POST /api/rooms/{id}/setup/pipeline). Hosts are targets, not
+// here. By is also the event actor.
+type SetupPipelineExtendedPayload struct {
+	AddConnectors     []string `json:"add_connectors,omitempty"`
+	AddTables         []string `json:"add_tables,omitempty"`
+	AddConsumerGroups []string `json:"add_consumer_groups,omitempty"`
+	AddSinkTables     []string `json:"add_sink_tables,omitempty"`
+	By                Actor    `json:"by"`
+}
+
+// SetupSecretSetPayload: a secret entered the runner's store under Name,
+// from the runner's terminal (Actor "runner") or the UI route (Actor the
+// driver). The value is in no event, no log and no prompt.
+type SetupSecretSetPayload struct {
+	Name  string `json:"name"`
+	Actor Actor  `json:"actor"`
+}
+
+// SetupCredentialsRegisteredPayload: the runner's Credentials frame was
+// written to PIPEROOM_SECRETS_DIR/<pipeline>/. Names only; values nowhere.
+type SetupCredentialsRegisteredPayload struct {
+	PipelineID  string   `json:"pipeline_id"`
+	Names       []string `json:"names"`
+	RunnerLabel string   `json:"runner_label"`
+}
+
+// SetupMaintenanceWindowPayload: the driver recorded the window inside which
+// a T3 step of the guard table may be created and executed (at most 4 h, at
+// most 24 h ahead). By is also the event actor.
+type SetupMaintenanceWindowPayload struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	By    Actor     `json:"by"`
+}
+
+// SetupRung is one rung of the verification ladder as the ladder runner
+// evaluated it on structured Data, never on a summary. StepID and ReceiptID
+// name the read it issued in this room's log.
+type SetupRung struct {
+	Name      string `json:"name"`
+	OK        bool   `json:"ok"`
+	StepID    string `json:"step_id,omitempty"`
+	ReceiptID string `json:"receipt_id,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
+// SetupVerifiedPayload is the ladder's outcome for the plan PlanID. It is
+// written by the server's ladder runner only: the agent's Sink refuses the
+// type, so no model output can claim a pipeline verified. NonceHash is
+// SHA-256 of the canary nonce the runner inserted; the nonce itself is in
+// the proposal params and the receipt, never here. Rungs are in ladder
+// order (design §3.4); pipeline_register needs rungs 1 to 7 OK with no
+// executed step after this event.
+type SetupVerifiedPayload struct {
+	PlanID              string      `json:"plan_id"`
+	NonceHash           string      `json:"nonce_hash"`
+	Rungs               []SetupRung `json:"rungs"`
+	FirstEventLatencyMS *int64      `json:"first_event_latency_ms,omitempty"`
+}
+
+// SetupAwaitingChangePayload: rung 8 waits for a change the person makes to
+// Table; ExampleSQL is the statement the UI shows (from the source driver,
+// never from the model).
+type SetupAwaitingChangePayload struct {
+	Table      string `json:"table"`
+	ExampleSQL string `json:"example_sql"`
+}
+
+// Reasons of SetupBlockedPayload.Reason.
+const (
+	SetupBlockedAttempts   = "attempts"    // SetupBounds.AttemptsPerStep reached on one step
+	SetupBlockedSteps      = "steps"       // SetupBounds.StepsPerPlan reached
+	SetupBlockedWallClock  = "wall_clock"  // SetupBounds.WallClock reached
+	SetupBlockedBudget     = "budget"      // the setup token budget reached
+	SetupBlockedRunnerLost = "runner_lost" // the runner was lost and did not return
+	SetupBlockedRefused    = "refused"     // the runner refused a step twice
+)
+
+// SetupBlockedPayload: a bound stopped the run (agent.SetupBounds); the agent
+// goes idle as after a budget stop and asks Question (agent text, ≤ 500
+// chars after sanitizing).
+type SetupBlockedPayload struct {
+	Reason    string `json:"reason"`
+	StepIndex *int   `json:"step_index,omitempty"`
+	Question  string `json:"question"`
+}
+
+// Who watches a registered pipeline (PipelineRegisteredPayload.WatchedBy and
+// the owners.yaml setup: block; docs/design/setup-agent.md §3.7).
+const (
+	WatchedByServer = "server" // the team server reads it through the registered read credentials
+	WatchedByLocal  = "local"  // a local target: the standalone server on the same machine
+)
+
+// PipelineRegisteredPayload: the owners entry was written to Path
+// (OWNERS_DIR/<id>.yaml, or the file next to the project in standalone
+// mode) or opened as PullRequestURL (repos: set), and the server reloaded.
+// ApprovedBy are the approvers of the pipeline_register proposal; on a team
+// server at least one is not By.
+type PipelineRegisteredPayload struct {
+	PipelineID     string  `json:"pipeline_id"`
+	Tenant         string  `json:"tenant,omitempty"`
+	Path           string  `json:"path,omitempty"`
+	PullRequestURL string  `json:"pull_request_url,omitempty"`
+	WatchedBy      string  `json:"watched_by"` // WatchedByServer | WatchedByLocal
+	By             Actor   `json:"by"`
+	ApprovedBy     []Actor `json:"approved_by"`
 }
 
 // HandoffSummary is the agent-written shift hand-off.
@@ -933,10 +1243,35 @@ type ShadowGradedPayload struct {
 }
 
 // Layers are the pipeline layers that own nodes and approve fixes, of every
-// pipeline kind: the six CDC layers first, then the batch-only ones (P4). A
-// check of "is this a known layer" uses Layers; the layers of one pipeline
-// come from LayersOf(its kind).
-var Layers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform"}
+// pipeline kind: the six CDC layers first, then the batch-only ones (P4),
+// then the setup layer (U). A check of "is this a known layer" uses Layers;
+// the layers of one pipeline come from LayersOf(its kind).
+var Layers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform", LayerEnvironment}
+
+// IncidentLayers are the layers an incident can be in: Layers without the
+// setup layer. The triage schema's suspected_layer enum, the room label,
+// shadow label, scenario, learned-example, agreement and similar_incidents
+// validators mean this set (a cause is never "environment"); they keep
+// checking Layers until their rows switch, which only widens what they
+// accept. Approvals, required and fallback layers, and owners entries use
+// Layers and LayersOf, where environment is valid. New slice per call. (U)
+func IncidentLayers() []string {
+	out := make([]string, 0, len(Layers)-1)
+	for _, l := range Layers {
+		if l != LayerEnvironment {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// LayerEnvironment is the layer of the setup actions that change the user's
+// environment rather than one pipeline system: compose files, services,
+// manifests, plugin installs and pipeline_register (docs/design/setup-agent.md
+// §2.5, §3.9). It is the last layer of a CDC pipeline. An owners.yaml that
+// does not name it leaves it unowned: the driver approves it with
+// GrantFallback in solo mode, a tenant admin with GrantAdmin otherwise. (U)
+const LayerEnvironment = "environment"
 
 // Pipeline kinds (owners.yaml kind:). (P4)
 const (
@@ -949,13 +1284,15 @@ const (
 )
 
 // LayersOf returns the layers of a pipeline of the given kind, upstream
-// first: "cdc" (and "", the default kind) gives the six CDC layers, "batch"
-// gives orchestrator, transform, warehouse. An unknown kind gives nil. The
-// slice is new on every call, so a caller may keep or change it. (P4)
+// first: "cdc" (and "", the default kind) gives the six CDC layers and then
+// LayerEnvironment (U: at the end, so code that indexes the six by position
+// is unchanged), "batch" gives orchestrator, transform, warehouse. An unknown
+// kind gives nil. The slice is new on every call, so a caller may keep or
+// change it. (P4)
 func LayersOf(kind string) []string {
 	switch kind {
 	case "", PipelineKindCDC:
-		return []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse"}
+		return []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", LayerEnvironment}
 	case PipelineKindBatch:
 		return []string{"orchestrator", "transform", "warehouse"}
 	}

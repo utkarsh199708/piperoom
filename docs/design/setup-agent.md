@@ -35,7 +35,7 @@ browser ──► server (cmd/server) ◄──── runner (cmd/setup) ── 
 
 | Folder | Owner | Holds |
 |---|---|---|
-| `internal/setup/protocol/**` | leads (**contract file**, see §4) | the wire types between server and runner (`Hello`, `OpRequest`, `OpResult`, `Resume`, `Cancel`), `RunnerExecutor`, the protocol version and its compatibility rule |
+| `internal/setup/protocol/**` | leads (**contract file**, see §4) | the wire types between server and runner (`Frame`; `Pair`, `Welcome`, `Hello`, `Token`, `OpRequest`, `OpResult`, `Refusal`, `OpStatus`, `Resume`, `Cancel`, `RegisterCredentials`, `Credentials`, `SecretValue`, ping/pong), `RunnerExecutor`, the protocol version and its compatibility rule |
 | `cmd/setup/**` | A9 (new) | the runner binary: `piperoom-setup [--server URL --code XXXX] [--standalone] [--project DIR]` |
 | `internal/setup/runner/**` | A9 | the runner: WebSocket client, pairing with local confirmation, capability detection, op dispatch, replay checks, the local op log, the secret store, literal redaction before transport |
 | `internal/setup/ops/**` | A9 | the operation catalogue: one Go type per op with its JSON Schema, `argv` builder or API call, tier floor, preview, rollback; the artifact validators; `ops.Registry` |
@@ -476,12 +476,18 @@ person in the form) or from the tenant's default (`tenants.<t>.repos:`, a new ow
 compose file, manifests and the owners entry go out as one PR through `repo_open_pull_request` (Q7c) and the room
 waits for `pr_merged` as Q7e does; the local writes of the same artifacts are then T1 only for a local target.
 
-## 4. Contract additions (U0 lands items 1 to 8; the design rows the rest)
+## 4. Contract additions (U0 lands items 1 to 6; the design rows item 7)
 
 ### 1. A new contract file: `internal/setup/protocol/protocol.go` (leads)
 
 The wire types of §2.2 (`Hello`, `OpRequest`, `OpResult`, `OpStatus`, `Resume`, `Cancel`, `Version`, the
-compatibility rule) and:
+compatibility rule), the pairing frames of §2.1 (`Pair`, `Welcome`, `Token`), the runner's `Refusal` (a
+`Refuse*` reason code, never text; the server emits `setup.runner_refused` from it), the three credential frames
+(U0 after the #641 reviews): `RegisterCredentials` (server → runner: the click of §3.7; the runner prints the server
+origin and the secret names and waits for `y/N`), `Credentials` (runner → server: the names and values, after that
+confirmation, answering the request's `request_id`, accepted once per pending request with exactly the requested names, the pipeline id being the room's; the server validates names and pipeline id before any path is built and writes through `os.Root`, no symlink followed, 0600, temp file then rename, into `PIPEROOM_SECRETS_DIR/<pipeline>/`; the only frame that ever carries a secret value)
+and `SecretValue` (server → runner: one value the driver typed in the UI, `POST /api/rooms/{id}/setup/secret`,
+stored nowhere on the server), and:
 
 ```go
 // RunnerExecutor is how a setup action or remote client reaches the paired runner. The room service implements

@@ -340,7 +340,7 @@ func TestLayersPerKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	cdc := []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse"}
+	cdc := []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "environment"} // U0: the setup layer last
 	batch := []string{"orchestrator", "transform", "warehouse"}
 	for id, want := range map[string][]string{"orders": cdc, "legacy": cdc, "daily-revenue": batch} {
 		p, ok := o.Pipeline(id)
@@ -698,7 +698,7 @@ func TestOwnersBlockMustNameLayersOfTheKind(t *testing.T) {
 		{
 			name:     "cdc naming a batch layer (implied kind)",
 			pipeline: pipelineYAML("orders", "    owners:\n      orchestrator: {approvers: [alice]}\n"),
-			wantErr:  `pipeline "orders": owners: layer "orchestrator" is not a cdc layer (want one of postgres, kafka-connect, schema-registry, kafka, consumer, warehouse)`,
+			wantErr:  `pipeline "orders": owners: layer "orchestrator" is not a cdc layer (want one of postgres, kafka-connect, schema-registry, kafka, consumer, warehouse, environment)`,
 		},
 		{
 			name:     "cdc naming a batch layer (explicit kind)",

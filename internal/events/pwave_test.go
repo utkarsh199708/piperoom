@@ -10,7 +10,8 @@ import (
 )
 
 func TestLayersOf(t *testing.T) {
-	cdc := []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse"}
+	// The U wave adds the setup layer at the end (events.LayerEnvironment).
+	cdc := []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "environment"}
 	tests := []struct {
 		kind string
 		want []string
