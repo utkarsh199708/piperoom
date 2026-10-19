@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -22,7 +23,8 @@ import (
 	"piperoom/internal/tools"
 )
 
-// p3ActionNames are the P3 write actions registerP3Actions adds (P3a, P3b).
+// p3ActionNames are the P3 write actions RegisterP3Actions adds (P3a, P3b),
+// in its registration order.
 var p3ActionNames = []string{
 	"kafka_reset_consumer_offsets", "dlq_replay", "connect_snapshot_table",
 	"pg_drop_replication_slot", "pg_add_publication_table", "pg_snapshot_signal",
@@ -347,5 +349,58 @@ func TestP3ActionsOnlyForCDC(t *testing.T) {
 	}
 	if len(breg.All()) != 0 {
 		t.Errorf("a batch-only set registered %d actions", len(breg.All()))
+	}
+}
+
+// TestRegisterP3Actions: the exported helper, called with the clients a
+// harness passes (as evals.LiveActions will with replay clients), registers
+// the six P3 actions in the order wiring's own registration lists them, each
+// holding the writer of its kind; with no client at all it still registers
+// all six; and a second registration into the same registry is an error.
+func TestRegisterP3Actions(t *testing.T) {
+	sw := fakeSourceWriter{&fakeWriter{kind: "source"}}
+	kw := fakeKafkaWriter{&fakeWriter{kind: "kafka"}}
+	areg := actions.NewRegistry()
+	if err := RegisterP3Actions(areg, P3ActionDeps{Connect: &p3Connect{}, Source: &p3Source{}, SourceWriter: sw, KafkaWriter: kw}); err != nil {
+		t.Fatalf("RegisterP3Actions: %v", err)
+	}
+	var got []string
+	for _, a := range areg.All() {
+		got = append(got, a.Name())
+	}
+	if !slices.Equal(got, p3ActionNames) {
+		t.Fatalf("registered %v, want %v", got, p3ActionNames)
+	}
+	swT, kwT := reflect.TypeOf(sw), reflect.TypeOf(kw)
+	for _, n := range p3ActionNames {
+		reach := reachableTypes(only(t, areg, n))
+		wantSource := strings.HasPrefix(n, "pg_")
+		if reach[swT] != wantSource || reach[kwT] != !wantSource {
+			t.Errorf("%s reaches source writer=%v kafka writer=%v, want %v %v", n, reach[swT], reach[kwT], wantSource, !wantSource)
+		}
+	}
+
+	// Wiring goes through the helper: its P3 actions come in the same order.
+	w, _, _, _ := p3Wired(t, false, writeClients{})
+	var wired []string
+	for _, a := range registerP3(t, w).All() {
+		if slices.Contains(p3ActionNames, a.Name()) {
+			wired = append(wired, a.Name())
+		}
+	}
+	if !slices.Equal(wired, p3ActionNames) {
+		t.Fatalf("wiring registered the P3 actions as %v, want %v", wired, p3ActionNames)
+	}
+
+	empty := actions.NewRegistry()
+	if err := RegisterP3Actions(empty, P3ActionDeps{}); err != nil {
+		t.Fatalf("RegisterP3Actions with no clients: %v", err)
+	}
+	if n := len(empty.All()); n != len(p3ActionNames) {
+		t.Fatalf("with no clients: %d actions, want %d", n, len(p3ActionNames))
+	}
+
+	if err := RegisterP3Actions(empty, P3ActionDeps{}); err == nil {
+		t.Fatal("registering the P3 actions twice into one registry: want an error")
 	}
 }

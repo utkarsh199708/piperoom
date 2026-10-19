@@ -433,7 +433,7 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 // and dry-runs of Validate and Preview still work, so the agent proposes and
 // the room previews as before. The room's executor already runs nothing then
 // (P1a-1); this keeps an action that got past it from writing anyway. The
-// P3 actions follow (registerP3Actions, actions_p3.go).
+// P3 actions follow (registerP3Actions over RegisterP3Actions, actions_p3.go).
 func registerActions(areg *actions.Registry, w *Wired) error {
 	if w.write {
 		if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
