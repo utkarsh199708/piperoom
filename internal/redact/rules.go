@@ -910,6 +910,7 @@ func urlFind(s, lower string) [][]int {
 		for te < limit && !isURLStop(s[te]) {
 			te++
 		}
+		stop := te
 		if i := strings.IndexByte(s[ps:te], '/'); i >= 0 && allDigits(s[ps:ps+i]) {
 			continue
 		}
@@ -933,7 +934,16 @@ func urlFind(s, lower string) [][]int {
 		}
 		if end < 0 {
 			i := strings.IndexByte(s[ps:te], '@')
-			if i <= 0 || strings.IndexByte(s[ps:ps+i], '/') >= 0 {
+			if i < 0 {
+				// No "@host" follows: the text was cut inside the
+				// password (a capped log tail, a field boundary).
+				if pe := urlCutPass(s, ps, stop); pe > ps {
+					out = append(out, []int{m[0], pe, m[2], m[3], ps, pe})
+					last = pe
+				}
+				continue
+			}
+			if i == 0 || strings.IndexByte(s[ps:ps+i], '/') >= 0 {
 				continue
 			}
 			end = ps + i
@@ -942,6 +952,26 @@ func urlFind(s, lower string) [][]int {
 		last = end + 1
 	}
 	return out
+}
+
+// urlCutPass returns where the password of a URL cut before its "@host"
+// ends: at stop (a blank, a quote, '<', '>', the end of the text or the cap).
+// It returns ps, masking nothing, when s[ps:stop] reads as a port (one to
+// five digits, then the end or a delimiter: host:8080, db:1433;database=,
+// broker-1:9093,broker-2:9093) or as a path (file://C:/x, host:/path), as no
+// password follows there.
+func urlCutPass(s string, ps, stop int) int {
+	if ps >= stop || s[ps] == '/' {
+		return ps
+	}
+	d := ps
+	for d < stop && d-ps < 6 && s[d] >= '0' && s[d] <= '9' {
+		d++
+	}
+	if n := d - ps; n >= 1 && n <= 5 && (d == stop || strings.IndexByte("/;,?#:.)]}&|\\", s[d]) >= 0) {
+		return ps
+	}
+	return stop
 }
 
 // urlStarts finds scheme://user: prefixes.
