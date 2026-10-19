@@ -296,11 +296,14 @@ against the Claude baseline. V0 (the leads) carries the contract changes: the ne
 `internal/agent/llm/llm.go`, `AgentUsagePayload.Provider`/`.Estimated`, the model config variables, `docs/api.md`.
 Every V row runs on Opus 5.5, cloud rows included.
 
-**Code rows start after P3 closes:** V0 is After P3-W2e (the live eval run that re-baselines
-`evals/baseline/default.json`), the reference score every other model is gated against. The wave creates no new
-folders: everything under `internal/agent/llm/**` is A4's except the contract file. V5 (Bedrock Converse) adds one
-module to `go.mod`, which no agent owns, so it is built outside the ship workflow and merged after the §7 two-lead
-review. Order: **V0 → V1a, V1b (Claude onto the interface, no behaviour change) → V2a, V2b → the adapters and V6 →
+**Code rows start after P3 closes:** V0 is After every P3 row still open (P3c, P3d-1, P3d-2, P3e, P3f, P3g-1r,
+P3g-1s-a, P3g-1s, P3g-1c, P3-W2e), and V1a also after P3e. The reference every other model is gated against is a
+3-run Claude baseline recorded after P3 closes (V9r). On the Claude providers (`anthropic`, `bedrock`, `vertex`)
+nothing changes: any model id, profile id or ARN is accepted as today. The wave creates no new folders: everything
+under `internal/agent/llm/**` is A4's except the contract file, and the whole folder is in the ship workflow's high
+risk tier (`HIGH`; `llm.go` in `CONTRACT`). V5 (Bedrock Converse) adds one module to `go.mod`, which no agent owns,
+so it is built outside the ship workflow and merged after the §7 two-lead review. Order: **V0 → V1a-0 (golden
+capture), V1t, V9r → V1a, V1b (Claude onto the interface, no behaviour change) → V2a, V2b → the adapters and V6 →
 evals and the picker**; the board's After column is the only hard dependency.
 
 ### Contract files (read them, code against them, never edit them)

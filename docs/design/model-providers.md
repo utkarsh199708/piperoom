@@ -1,5 +1,11 @@
 # Model providers: design (main @ 48a974f4, 2026-10-19)
 
+**Rev 2** (after the #681 reviews): metadata deny list, proxy and Vertex transports (§10.3); `PUT /api/models` key
+binding and Origin check (§11); context fit and silent truncation (§6.2); the P3 dependency made real and a 3-run
+reference (V-board); the `invalid_tool_calls` metric and noise-aware floors (§5); the supported-model check off for
+Claude providers (§5); `internal/agent/llm/**` in the high-risk tier (§4); retries and rate limits for every adapter
+(§7.4); the deprecation and alias policy (§5.4); lead recommendations on the open decisions (§15).
+
 Owner of the design: LEAD-ARCH. Board: `tasks/V-board.md` (the V wave). There is no separate plan file: the owner's
 decision of 2026-10-19, recorded in §0, is the plan. Contract changes land in V0 (§4). The Go shapes below are
 proposals in the style of `tasks/P0-contracts.md`. Where this text and merged code differ, the code and its doc
@@ -11,8 +17,9 @@ Piperoom must run on every major model provider, not only Claude: OpenAI, Azure 
 Qwen (Alibaba DashScope), Mistral, Groq, Together, OpenRouter, xAI, local Ollama and vLLM, and the non-Claude models
 on AWS Bedrock. Claude (Anthropic API, Bedrock, Vertex) stays fully supported and remains the **reference model**:
 every other model is measured against its eval baseline. Timing: the design and the board are written now. Code
-rows start after P3 closes, because the P3 Claude eval baseline (`P3-W2e`, `evals/baseline/default.json`) is the
-reference score.
+rows start after P3 closes: V0 waits on every P3 row still open on `tasks/P-board.md` (P3c, P3d-1, P3d-2, P3e, P3f,
+P3g-1r, P3g-1s-a, P3g-1s, P3g-1c and P3-W2e), because the P3 scenarios and prompt are what the reference is measured
+on. The reference score itself is a 3-run Claude baseline recorded after P3 closes (V9r, §5.2).
 
 The agreed shape is four adapters behind one model interface in `internal/agent`:
 
@@ -153,7 +160,10 @@ flavor quirk in a later row.
 
 The neutral types go in a **new contract file, `internal/agent/llm/llm.go`** (package `llm`), written by the leads
 in V0 and added to the contract list in AGENTS.md §2 and to the leads' folders in `docs/process/ownership.json`
-(done in this PR, so A4 cannot edit it before V0). It is a sub-package, not `contract.go`, because the adapters
+(done in this PR, so A4 cannot edit it before V0). This PR also adds `internal/agent/llm/llm.go` to the ship
+workflow's `CONTRACT` regex and `^internal/agent/llm/` to its `HIGH` list (`docs/process/piperoom-ship.workflow.js`,
+the leads' file; ship-check evaluates the same block), so every V row that touches the adapters, which hold keys,
+the SSRF dialer and the wire translation, gets the high-risk review before V1a. It is a sub-package, not `contract.go`, because the adapters
 (`internal/agent/llm/<adapter>/`) must import the types and `internal/agent` must import the adapters; putting the
 types in package `agent` would be an import cycle. `internal/room` and `evals` import `llm` for error kinds and the
 judge. Everything else under `internal/agent/llm/**` is A4's.
@@ -368,6 +378,7 @@ const (
 	ErrRateLimited   ErrorKind = "rate_limited"   // 429 after the adapter's retries
 	ErrOverloaded    ErrorKind = "overloaded"     // 5xx, 529 after retries
 	ErrNetwork       ErrorKind = "network"        // no HTTP answer
+	ErrTruncated     ErrorKind = "truncated"      // the server cut the prompt to fit its context (§6.2)
 )
 
 // APIError is every adapter's error for a failed request. Err keeps the
@@ -385,8 +396,8 @@ func (e *APIError) Error() string
 func (e *APIError) Unwrap() error
 
 // Unretryable reports an error a fresh run repeats: auth, billing,
-// model_not_found and bad_request. too_long, rate_limited, overloaded and
-// network are not.
+// model_not_found, bad_request and truncated. too_long, rate_limited,
+// overloaded and network are not.
 func Unretryable(err error) bool
 ```
 
@@ -400,11 +411,11 @@ that gives today's decision).
 
 | File | Change |
 |---|---|
-| `internal/events/events.go` | `AgentUsagePayload` gains `Provider string \`json:"provider,omitempty"\`` and `Estimated bool \`json:"estimated,omitempty"\``; `ShadowRun` and the usage rows keep `model` |
-| `internal/config/config.go` | the variables of §9 and their parse functions (`ParseModelRoles`, `ParseBaseURL`) |
+| `internal/events/events.go` | `AgentToolResultPayload` gains `Rejected string` with JSON tag `rejected,omitempty`, one of `unknown_tool`, `invalid_json`, `invalid_input`: a tool call the agent refused before running it (set by V1t, counted by V9r, §5.1); `AgentUsagePayload` gains `Provider string` (tag `provider,omitempty`) and `Estimated bool` (tag `estimated,omitempty`); `ShadowRun` and the usage rows keep `model` |
+| `internal/config/config.go` | the variables of §9 and their parse functions (`ParseModelRoles`, `ParseBaseURL`). `config.Load` stops filling `PIPEROOM_TRIAGE_PASS_MODEL` with `claude-haiku-5-5` at load time; the default moves into `ParseModelRoles`, which can then tell "unset" on a non-Claude provider (a Claude provider gets the same value as today) |
 | `internal/agent/contract.go` | no change: `Options.Model` and `Options.Effort` keep their meaning for the main model |
 | `docs/api.md` | `agent.usage` fields `provider`, `estimated`; `GET /api/models` and, for standalone only, `PUT /api/models` (§11) |
-| AGENTS.md §2 | `internal/agent/llm/llm.go` in the contract list (this PR) |
+| AGENTS.md §2, `docs/process/` | `internal/agent/llm/llm.go` in the contract list, in `ownership.json` and in the workflow's `CONTRACT` regex; `internal/agent/llm/` in `HIGH` (all in this PR) |
 
 New methods go on new types; every existing fake and the eval replay compile unchanged, because the old `model`
 seam is unexported and the refactor (V1a) changes it in one PR with its fakes.
@@ -412,17 +423,32 @@ seam is unexported and the refactor (V1a) changes it in one PR with its fakes.
 ## 5. Minimum requirements and the eval gate
 
 A model is **supported** when it passes the gate; **experimental** when it passes the hard gates only; **refused**
-otherwise. The server refuses to start on a model that is not in the supported list
+otherwise.
+
+**The supported-model check applies only to the new providers** (`openai`, `gemini`, `bedrock-converse`). On
+`anthropic`, `bedrock` and `vertex` the server accepts any model id, Bedrock inference-profile id or application ARN
+(`internal/wiring/model.go` `warnIfNotBedrockModelID`) and versioned Vertex id exactly as today, with today's
+warnings; Claude is the reference and is never refused by this list (V6 test over each form).
+
+On the new providers the server refuses to start on a model that is not in the supported list
 (`internal/agent/llm/supported.json`, §5.3) unless `PIPEROOM_MODEL_UNVERIFIED=on`, which logs a warning at start
-and shows "unverified model" in the room header and the web model panel. Claude models listed today are supported
-by definition (the reference).
+and shows "unverified model" in the room header and the web model panel. `UNVERIFIED` skips only the list: an
+unverified model must still pass the start checks of §5.1 items 1, 4 and 5 and the context fit of §6.2, and a
+**one-request tool-call probe** at start (one tool, a fixed prompt, the call must name the tool with arguments that
+validate; about 300 tokens, reported as an `agent.usage` event with role `judge` on no room). The probe also runs
+for every `generic`, `ollama` and `vllm` model, listed or not, because their behaviour depends on the server's
+template and tool parser.
 
 ### 5.1 Hard requirements (all must hold; one failure means refused)
 
 1. **Tool calling with JSON arguments**, several tools in one request, and a tool result fed back. Checked by the
    adapter's conformance suite (`internal/agent/llm/llmtest`, V1a) against recorded fixtures, then live.
-2. **Reliable tool calls**: over the CDC eval set (3 runs per scenario), at least 98% of tool calls name a real
-   tool and pass input validation the first time (the report's `rejected_attempts` over tool calls).
+2. **Reliable tool calls**: over the CDC eval set (3 runs per scenario), `invalid_tool_calls / tool_calls ≤ 2%`.
+   `invalid_tool_calls` is a new per-run counter: tool calls the agent refused before running them because they
+   named no registered tool, carried arguments that are not valid JSON, or failed schema validation. The agent marks
+   each such result with `AgentToolResultPayload.Rejected` (V0 field, set by A4 in V1t at `run.go` `failReadTool`
+   and the room-tool checks) and C6 counts it (V9r). It is **not** `rejected_attempts`, which counts proposal
+   `Validate` refusals (`evals/score.go`), a different failure. The reference's own rate is measured by V9r.
 3. **Safety**: zero forbidden actions and zero forbidden params (`evals/forbidden.go`) over the set; zero failures
    on the injection scenarios (`evals/injection_test.go` set and the V15 scenarios).
 4. **Context window** ≥ 128k tokens (declared or configured) and **max output** ≥ 8k tokens.
@@ -432,14 +458,30 @@ by definition (the reference).
 
 ### 5.2 Quality floor (supported vs experimental)
 
-Against the Claude reference baseline of the same scenario set (P3-W2e's `default.json`, the reference model at
-`effort: high`), on 3 runs per scenario: root-cause rate ≥ 0.8 × reference, layer rate ≥ 0.8 × reference, pass rate
-≥ 0.7 × reference, and no scenario that the reference passes 3/3 failed 3/3. The ratios are the owner's to change
-(open decision 1).
+**The reference.** Today's `evals/baseline/default.json` is one run per scenario: 25 runs, pass rate 0.24,
+root-cause rate 0.72, layer rate 0.88. A gate needs a 3-run reference on the full CDC set, so V9r (C6, after P3
+closes) runs the reference model (`claude-opus-5-5`, `effort: high`) 3 times per scenario and commits it as
+`evals/baseline/default.json`, replacing the 1-run file (evals-live already compares a 1-run candidate with a 3-run
+baseline per run). At 75 episodes the standard error of a rate p is `sqrt(p(1-p)/75)`: about 0.05 at 0.24, 0.05 at 0.72 and
+0.04 at 0.88. A ratio floor such as 0.7 × 0.24 = 0.17 sits inside that noise and means nothing.
+
+**The floors**, measured on 3 runs per scenario against the 3-run reference, each margin printed by `-gate`:
+
+- **root-cause rate** ≥ reference − max(0.10, 2·SE_diff), and ≥ 0.50 absolute;
+- **layer rate** ≥ reference − max(0.10, 2·SE_diff), and ≥ 0.70 absolute;
+- **pass rate**: gated the same way (reference − max(0.10, 2·SE_diff)) only once the reference pass rate is at least
+  0.50; below that it is reported, not gated, because the difference is mostly noise;
+- **no collapse**: no scenario that the reference passes in at least 2 of 3 runs fails in all 3.
+
+`SE_diff = sqrt(p_ref(1-p_ref)/n_ref + p_cand(1-p_cand)/n_cand)`, the standard error of the difference of two
+independent rates, so two standard errors is a 95% margin. These are the lead recommendation for open decision 1.
+
+**"Within noise"** (used by V1a and the rollout) means the evals-live comparison rule: `evalrun -compare` against
+the 3-run reference with the default `-tolerance 5`, on a 3-run candidate, regresses no scenario.
 
 ### 5.3 How the gate is run and recorded
 
-- `evalrun -provider P -model M -runs 3 -gate evals/baseline/default.json` (V10) prints each gate with the measured
+- `evalrun -provider P -model M -runs 3 -gate <3-run reference>` (V10) prints each gate with the measured
   value and exits 4 on a hard-gate failure, 5 on a quality-floor miss.
 - A passing run is committed as `evals/baseline/<provider>-<model>.json` (C6, V10) by the same PR flow as the
   reference baseline (workflow artifact, reviewed diff).
@@ -449,6 +491,19 @@ Against the Claude reference baseline of the same scenario set (P3-W2e's `defaul
 - A supported model is re-gated whenever the reference baseline is re-baselined after a prompt change; one that
   then fails drops to experimental in the same PR as the new reference.
 
+### 5.4 Deprecation and floating aliases
+
+- `supported.json` lists **pinned** ids (dated or versioned, for example a `-2026-08-01` suffix) wherever the
+  provider offers one. A floating alias (`…-latest`, `deepseek-chat`, an OpenRouter route) may be listed only with
+  `"alias": true` and status `experimental`, because the model behind it can change without a gate; it is re-gated
+  monthly and whenever the provider announces a change behind the alias.
+- Each entry may carry `"sunset": "YYYY-MM-DD"`, set by a V13 PR when the provider announces a deprecation. From 30
+  days before the date the server logs a warning at start and the model panel shows it; after the date the model
+  counts as not listed (refused on the new providers unless `UNVERIFIED`). The PR that sets a sunset names the
+  replacement and its gate run, or says there is none.
+- Claude ids follow today's rule (§5): never refused, so Anthropic deprecations are handled as today by changing
+  `PIPEROOM_MODEL`.
+
 ## 6. Degradation rules
 
 The rule: **a missing feature never weakens a safety check; it only costs money or a retry, and the cost is
@@ -457,7 +512,7 @@ reported.**
 | Missing | What the agent does | How it is reported |
 |---|---|---|
 | Prompt caching | sends the same prompt; history is re-billed at the input price each turn | `agent.usage` has `cache_read_input_tokens: 0`; the startup log says "no prompt cache: each turn re-sends the full history at the input price"; `GET /api/models` has `prompt_cache: false`; the per-model eval report shows cost per run |
-| Strict tool schemas | sends the schema without `strict` | nothing to report: every tool input is validated in code before `Run`, room tools included (V2a makes this universal; today read tools are validated and `propose_fix` checks its steps). An invalid input becomes an error `tool_result` with the validation message, and counts as a rejected attempt |
+| Strict tool schemas | sends the schema without `strict` | nothing to report: every tool input is validated in code before `Run`, room tools included (V2a makes this universal; today read tools are validated and `propose_fix` checks its steps). An invalid input becomes an error `tool_result` with the validation message, marked `rejected: invalid_input`, and counts in `invalid_tool_calls` (§5.1) |
 | Structured output | (a) forced tool call: one tool `emit_<what>` whose schema is the output schema, `tool_choice: required`; else (b) plain text with the schema in the prompt, the first JSON object parsed | a parse or schema failure gets the existing one retry (`handoff.go` `retryNote`); a second failure is the existing failure path (`postmortem.failed`, triage `reason: model_error`, judge verdict unjudged) |
 | Effort / reasoning | the adapter maps the effort it can (§3) and drops the rest | the startup log names the dropped parameter once |
 | Server-side compaction | client-side compaction (§6.1) | an `agent.usage` event with role `compaction` for the summary call |
@@ -476,6 +531,26 @@ human input verbatim. The summary replaces the oldest messages as one user messa
 output, so it is data, never instructions (the same rule the compaction instructions give Claude). Step ids,
 hypotheses, proposals and driver instructions must survive (a test over a recorded long room). A
 `context_exceeded` stop after compaction keeps today's behaviour: report and wait for a human.
+
+### 6.2 Context fit and silent truncation
+
+Some servers do not reject a prompt that is too long: they cut it. Ollama truncates to its `num_ctx` (2k to 4k
+tokens by default) without an error, and the reference averages about 16k tokens per turn, so the system prompt
+and its untrusted-data rules would be the first text lost. Client configuration (`PIPEROOM_MODEL_CONTEXT_TOKENS`)
+cannot fix a server setting, so the agent checks both ends:
+
+- **At start**, for every role: system prompt + tool definitions (marshalled, at 3 bytes per token) + `MaxTokens`
+  (16000 for the loop) + a 16k headroom for the opening message must fit `Capabilities.ContextTokens`; otherwise the
+  server refuses to start and names the role, the model and both numbers. For `ollama`, `vllm` and `generic` the
+  start probe (§5) also sends a prompt of a known size (the real system prompt and tools) and fails start when the
+  reported prompt tokens are below half of the local lower-bound estimate (request bytes / 4).
+- **Every turn**: when a provider reports prompt tokens (`Input + CacheRead + CacheWrite`) below half of the
+  lower-bound estimate of the request just sent, the adapter returns `APIError{Kind: ErrTruncated}`. The run stops
+  with status `error` and the detail "the model server truncated the prompt; raise its context length"; the room
+  does not retry it (it is unretryable, §4.2). An estimated usage (§8.3) skips the check, since it has nothing to
+  compare.
+- **V17** starts Ollama with `OLLAMA_CONTEXT_LENGTH` set to 131072 (or the largest the chosen model supports, at
+  least 65536) and `docs/pilot/models.md` gives the same setting for vLLM (`--max-model-len`).
 
 ## 7. Tool-call translation and limits
 
@@ -520,6 +595,24 @@ The agent sends each tool's `InputSchema()` plus the injected `why` property, as
 A tool call whose arguments are not valid JSON is not dropped: it becomes an error `tool_result` ("arguments are not
 valid JSON") so the call and its result stay paired, which every provider requires.
 
+### 7.4 Retries and rate limits (every adapter)
+
+- **Retries** are one shared policy in `internal/agent/llm/retry` (A4, V3a), used by V3a, V3b and V4; V5 sets the AWS
+  SDK's retryer to the same bounds. Retry 408, 429, 500, 502, 503, 504 and 529 (and a connection reset before any
+  response byte) at most twice, backoff 1 s then 4 s with ±20% jitter, honouring `Retry-After` up to 60 s, and never
+  past the turn's 10 min deadline. Never retried: a 429 that means quota or billing (`insufficient_quota`,
+  `RESOURCE_EXHAUSTED` with a quota reason), every other 4xx, and a request whose response had started. The
+  Anthropic adapter keeps the SDK's own retries (unchanged).
+- **Concurrency**: `PIPEROOM_MODEL_MAX_CONCURRENCY` (new providers only; default `PIPEROOM_MAX_AGENTS`) bounds
+  requests in flight per provider endpoint, shared by every role on that endpoint.
+- **Tokens per minute**: low tiers (Groq's free and developer tiers, new OpenAI and Gemini projects) allow fewer
+  tokens per minute than one busy room uses (about 16k tokens per turn, several turns a minute). `PIPEROOM_MODEL_TPM`
+  (optional) sets a token bucket per endpoint: a request whose estimated input would overdraw it waits for refill,
+  bounded by the turn deadline, instead of being sent into a 429. On OpenAI-compatible hosts the adapter also reads
+  `x-ratelimit-remaining-tokens` and `x-ratelimit-reset-tokens` and waits before the next request when the
+  remainder is below the estimate. A wait longer than 60 s is logged once per endpoint. `docs/pilot/models.md`
+  states the minimum tier: tokens per minute of at least 100k × the number of rooms expected to run at once.
+
 ## 8. Pricing and spend limits
 
 ### 8.1 The price table
@@ -543,8 +636,8 @@ new rule (V6): when `PIPEROOM_PIPELINE_DAILY_COST_USD` is set, the server **refu
 model of any role (main, triage, first look, summary, judge) has no price. Without a cost cap, a missing price keeps
 today's behaviour (cost omitted, never guessed). Token caps (`PIPEROOM_ROOM_TOKEN_BUDGET`,
 `PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET`) need no price and work on every provider, since usage is normalised. This
-also applies to Claude, which is a behaviour change for a deployment that sets a cost cap and leaves a role's model
-out of the table (open decision 4; until it is decided, V6 applies it only to non-Claude providers).
+would also change Claude deployments that set a cost cap and leave a role's model out of the table, so V6 applies
+it **only to the new providers**; Claude keeps today's warning (open decision 4, lead recommendation the same).
 
 ### 8.3 Missing usage
 
@@ -565,19 +658,27 @@ cap like real usage. Over-estimating is the safe side; the 3 bytes per token rat
 | standard key variables | — | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`, `DASHSCOPE_API_KEY`, `MISTRAL_API_KEY`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`; used when `PIPEROOM_MODEL_API_KEY` is empty |
 | `PIPEROOM_MODEL_CONTEXT_TOKENS` | the adapter's table, else 128000 | the main model's context window, for client-side compaction |
 | `PIPEROOM_MODEL_CAPS` | — | comma list that turns capabilities on for a `generic`, `ollama` or `vllm` host the adapter cannot know: `parallel_tools,structured_output,reasoning`. It cannot turn on anything that lowers a check |
-| `PIPEROOM_MODEL_UNVERIFIED` | `off` | `on` allows a model not in `supported.json` (§5) |
+| `PIPEROOM_MODEL_UNVERIFIED` | `off` | `on` allows a model not in `supported.json` on a new provider (§5); the start checks and the probe still run |
+| `PIPEROOM_MODEL_MAX_CONCURRENCY` | `PIPEROOM_MAX_AGENTS` | requests in flight per provider endpoint, new providers only (§7.4) |
+| `PIPEROOM_MODEL_TPM` | — | optional tokens-per-minute budget per endpoint (§7.4) |
+| `PIPEROOM_MODEL_PROXY` | `off` | `on` sends model requests through `HTTPS_PROXY` with the target check of §10.3; off ignores the proxy variables for model clients |
+| `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP` | `off` | `on` allows `http` to a private-range host (an in-cluster vLLM), pending open decision 2; metadata addresses stay refused |
+| `PIPEROOM_MODEL_ACK_DATA_LOCATION` | — | must be `cn` to start with an endpoint operated in the People's Republic of China (DeepSeek's API, the DashScope China endpoint), pending open decision 7 |
 | `AWS_REGION` | — | `bedrock` and `bedrock-converse` |
 | `VERTEX_PROJECT_ID`, `VERTEX_REGION` | — | `vertex`, and `gemini` on Vertex (`PIPEROOM_GEMINI_BACKEND=vertex`; default `api`) |
 | `PIPEROOM_TRIAGE_MODEL` | — | unchanged: in-loop triage turns, **same provider as the main model** (they share one history) |
 | `PIPEROOM_TRIAGE_PASS_PROVIDER`, `PIPEROOM_TRIAGE_PASS_MODEL` | main provider; `claude-haiku-5-5` on Claude providers, else the main model | first look (single-shot) |
-| `PIPEROOM_SUMMARY_PROVIDER`, `PIPEROOM_SUMMARY_MODEL` | main provider and model | hand-off and post-mortem writer. `PIPEROOM_POSTMORTEM_MODEL` keeps its meaning (`auto \| off`, a mode); it is not renamed in this wave (open decision 5) |
+| `PIPEROOM_SUMMARY_PROVIDER`, `PIPEROOM_SUMMARY_MODEL` | main provider and model | hand-off and post-mortem writer. `PIPEROOM_POSTMORTEM_MODEL` keeps its meaning (`auto \| off`, a mode); the lead recommendation (open decision 5) is to rename it `PIPEROOM_POSTMORTEM_MODE` in V0 and read the old name as an alias |
 | `PIPEROOM_JUDGE_PROVIDER`, `PIPEROOM_JUDGE_MODEL` | main provider and model | the hand-off judge and the evals judge (`-judge-provider`, `-judge-model` override) |
 | `PIPEROOM_<ROLE>_BASE_URL` | the role provider's default | only when the role's provider differs from the main one; `ROLE` ∈ `TRIAGE_PASS`, `SUMMARY`, `JUDGE` |
 
 A role on another provider reads that provider's standard key variable (never `PIPEROOM_MODEL_API_KEY`, which
 belongs to the main provider). Start fails, with the variable named, on: an unknown provider or flavor, a missing key
-or credentials for any configured role, an invalid base URL, a model not supported (without `UNVERIFIED`), a role
-whose tool count or names break its adapter's limits, and an unpriced model under a cost cap (§8.2).
+or credentials for any configured role, an invalid base URL, a model on a new provider that is not supported
+(without `UNVERIFIED`) or failed the probe, a context that does not fit (§6.2), a role whose tool count or names
+break its adapter's limits, an unpriced model on a new provider under a cost cap (§8.2), and a China-operated
+endpoint without the acknowledgement. **None of these changes a Claude provider's start**: on `anthropic`,
+`bedrock` and `vertex` the model id is accepted as today.
 
 `cmd/investigate` and `evals/cmd/evalrun` read the same variables; `evalrun` adds `-provider` and
 `-judge-provider` flags (V10).
@@ -606,7 +707,9 @@ Keys come only from the environment or a mounted file; they are never in `Config
 (`APIError.Body` is redacted and the request is never logged), the web, or an eval transcript. Adapters hold the key
 as `netsec.Secret` (`internal/clients/netsec`), whose `String`, `GoString`, `LogValue` and `MarshalText` redact. A
 test per adapter makes a request against `httptest` that fails, and greps the error, the log output (a capturing
-`slog` handler) and the event payloads for the key.
+`slog` handler) and the event payloads for the key. `APIError.Body` can echo prompt content (OpenAI and Azure
+400s quote the request), and `redact` removes secrets only, so the body is logged at debug level only and never in
+an event or a room status; the room sees the kind and the status code.
 
 ### 10.3 Base URL validation (no SSRF through a configurable base URL)
 
@@ -616,12 +719,31 @@ the key is sent, so it is validated at start and on every dial:
 - scheme `https`; `http` only when the host is a loopback name or address (`localhost`, `127.0.0.0/8`, `::1`), for
   Ollama and vLLM on the same machine;
 - no user info, no query, no fragment; the path is kept (Azure and proxies need it);
-- the dialer (one `net.Dialer` with a `Control` hook, as U1-2 does for the runner) refuses link-local
-  (`169.254.0.0/16`, `fe80::/10`, which covers the cloud metadata services), multicast and unspecified addresses for
-  the address actually dialed, so a name that resolves to the metadata service is refused;
+- **an explicit deny list**, checked after normalising the address (`netip.Addr.Unmap`, so `::ffff:169.254.169.254`
+  is the IPv4 address): link-local `169.254.0.0/16` and `fe80::/10` (AWS, GCP, Azure and Oracle IMDS at
+  `169.254.169.254`, ECS task metadata at `169.254.170.2`), AWS IMDS over IPv6 `fd00:ec2::254` (a ULA address, not
+  link-local), Alibaba Cloud metadata `100.100.100.200` (DashScope users run on Alibaba Cloud), multicast,
+  broadcast and unspecified addresses; the names `metadata.google.internal` and `metadata` are refused by name
+  before any lookup;
+- **the dialer** (one `net.Dialer` with a `Control` hook, as U1-2 does for the runner) applies the deny list to the
+  address actually dialed, so a name that resolves to a metadata address is refused;
+- **proxies**: the model clients' transport sets `Proxy: nil` by default, because with `HTTPS_PROXY` set the dial
+  hook sees only the proxy's address and the proxy resolves the target. With `PIPEROOM_MODEL_PROXY=on` the
+  transport's `Proxy` function first resolves the target host and refuses it when the name or any resolved address
+  is on the deny list, then returns the proxy (whose own address passes the dial hook). The proxy resolves the name
+  again, so DNS rebinding between the two lookups is a residual risk: the doc tells operators to deny metadata
+  addresses at the proxy too;
+- **Gemini on Vertex** uses two transports: the model client's (the deny-listed dialer above) and the credential
+  transport that Google ADC needs, which on GCE must reach the metadata server for tokens. The token source is built
+  with its own `*http.Client` (passed through the `oauth2.HTTPClient` context key) and only its tokens cross over:
+  the model transport wraps the deny-listed base with `oauth2.Transport`, so no model request can reach the
+  metadata server and no token request goes to the model host (a test on each side). The Claude providers
+  (`bedrock`, `vertex`) keep their SDK transports as today;
 - redirects are not followed (`CheckRedirect` returns an error), so a 3xx cannot send the key to another host;
-- the key is sent only to the configured host;
-- a private-range `http` vLLM inside a cluster is refused by default (open decision 2).
+- the key is sent only to the configured host, and a stored key is bound to its provider, flavor and base URL host
+  (§11);
+- a private-range `http` host (an in-cluster vLLM) is refused unless `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on` (open
+  decision 2); metadata addresses stay refused either way.
 
 Every adapter keeps AGENTS.md §4 rule 7: one `*http.Client` with a timeout, bodies closed, status checked, responses
 capped (`io.LimitReader`, 4 MB; a model turn is far smaller).
@@ -637,7 +759,9 @@ values), steers and comments. Choosing a provider makes it a processor of that d
   training terms as the provider publishes them, and the setting that keeps data out of training where one exists;
 - Bedrock, Vertex and Azure keep data in the chosen region; the Gemini API, OpenAI, Groq, Together, xAI and
   OpenRouter process it where the provider decides; DeepSeek's API is operated in the People's Republic of China;
-  DashScope has an international endpoint (the `qwen` default) and a China endpoint (explicit base URL only);
+  DashScope has an international endpoint (the `qwen` default) and a China endpoint (explicit base URL only); an
+  endpoint operated in China starts only with `PIPEROOM_MODEL_ACK_DATA_LOCATION=cn`, a one-time acknowledgement in
+  config (open decision 7);
   Mistral's API is in the EU; Ollama and vLLM on the operator's own machine send nothing out;
 - OpenRouter forwards to third parties: the adapter always sends `provider: {data_collection: "deny"}`;
 - no provider is a default other than Anthropic; nothing switches provider on its own (no automatic failover
@@ -657,6 +781,14 @@ values), steers and comments. Choosing a provider makes it a processor of that d
   quickstart only, the solo user only; the key is excluded from request logging and never echoed), which validates
   provider, flavor, base URL and model, writes `.piperoom/model.env` 0600 through `os.Root` (U1-4's store rules),
   rebuilds the endpoint and returns the panel. A team server answers `PUT` with `404`.
+- **`PUT /api/models` never moves a stored key to a new host.** The stored key is bound to the provider, flavor and
+  base URL host it was entered with. A request that changes any of the three must carry the key in the same request,
+  else `400 key_required`; a request that changes only the model or a role may omit it. A key is never sent to a host
+  other than the one it is bound to (a test changes the base URL without a key and asserts no request leaves for the
+  new host). The route also refuses cross-site requests, since any page in a browser on the same machine can reach a
+  loopback server: the `Origin` header is required and must equal the server's own origin (scheme, host, port), a
+  `Sec-Fetch-Site` other than `same-origin` is refused when present, and the body must be `application/json` (no
+  simple-request form posts). Each refusal is `403 origin` with a test.
 - **Docs**: `docs/pilot/models.md` (C14, V14) is the published table: provider, model, status, pass rate and
   root-cause rate against the reference, cost per run, gate date, the environment block to copy, and the data
   residency line; `README.md` and `docs/runbook.md` (C1, V12) link it; `evals/README.md` (C6) explains per-model
@@ -672,7 +804,7 @@ values), steers and comments. Choosing a provider makes it a processor of that d
 - **One baseline per model** at `evals/baseline/<provider>-<model>.json`, the model id with `/` and `:` replaced by
   `_`. `default.json` stays the Claude reference until the workflow reads the new names, then becomes
   `anthropic-claude-opus-5-5.json` in one C6 + C1 pair of PRs. A report records `provider`, `flavor`, `model`,
-  `effort` and the prompt hash.
+  `effort`, the prompt hash and, per run and overall, `invalid_tool_calls` (V9r, §5.1).
 - **Prompt hash**: for the Anthropic adapter the existing tap hash (system + tools as sent) is unchanged. Other
   providers hash the neutral `System` and `Tools` (canonical JSON), prefixed `neutral-sha256:` so the two kinds never
   compare; `agent.PromptHash()` (system text only) is the same for every provider and is the value that proves the
@@ -689,12 +821,17 @@ values), steers and comments. Choosing a provider makes it a processor of that d
 
 ## 13. Rollout
 
+0. **P3 closes**: every open P3 row is merged (the list is V0's After column on the board), P3e included, since it
+   edits `internal/agent` and may change the prompt hash. V9r then records the 3-run Claude reference.
 1. **V0** (leads): the contract file and config, events and API fields. No behaviour change: nothing uses them.
 2. **V1a/V1b** (A4): the refactor onto `llm` with the Anthropic adapter. Proven by: every existing test in
    `internal/agent`, `internal/room`, `internal/wiring`, `evals` passing with no assertion loosened; a golden test
    that the marshalled Anthropic request for a recorded room (main turn, triage turn, first look, hand-off, judge)
    is byte-identical to the one main sends today (golden captured on main before the refactor); `agent.PromptHash()`
-   and the evals tap hash unchanged; the CDC pass rate on one live `evals-live` run within noise of the reference.
+   and the evals tap hash unchanged; the CDC pass rate on a 3-run `evals-live` run within noise of the reference
+   (§5.2). The golden capture lands first, alone, on `main` (V1a-0): request body, path and query (`?beta=true`), and
+   the `anthropic-beta` and `anthropic-workspace-id` headers, so the refactor is compared with what `main` really
+   sends.
 3. **V1c** (A5) and V9's error part (C6): the room and evals classify by `llm.APIError`.
 4. **V2a/V2b** (A4): universal code validation, structured-output fallback, client-side compaction (no effect on
    Claude: compaction stays server-side there; code validation already passes every valid Claude input).
@@ -703,6 +840,16 @@ values), steers and comments. Choosing a provider makes it a processor of that d
 7. Per model: a gated baseline (V10 run), then the `supported.json` line (V13), then the docs table row (V14).
 
 Claude stays the default and the reference throughout; a deployment that sets nothing new sees no change.
+
+**Load tests stay Claude-only.** `internal/loadtest` (S2) fakes the Anthropic wire format, so `cmd/loadtest` drives
+the Anthropic adapter only. A provider-neutral fake (an `llm.Model` that answers from a script) is a later S2 row if
+load tests on another provider are needed.
+
+**Implementation notes for the A4 rows.** Adapters never import `internal/wiring` (wiring imports `agent`, which
+imports the adapters): V5 takes an `*aws.Config` the way `EndpointConfig.AWSConfig` does today. Adapter tests over
+the full production registry live in external test packages (`package openai_test`) or in `internal/wiring`. The
+Gemini byte-equality conformance check compares the JSON-decoded `functionResponse.response.content` string with
+`ToolResult.Content`, since the wire form is JSON-escaped.
 
 ## 14. Risks
 
@@ -714,32 +861,43 @@ Claude stays the default and the reference throughout; a deployment that sets no
 | Prompt injection is easier on some models | the same wrapper and scan; injection scenarios are a hard gate; template control tokens neutralised |
 | Costs higher than expected (no cache) | reported per event and per eval run; token caps work everywhere; unpriced under a cost cap refuses start |
 | Incident data sent to a processor the customer did not approve | no default other than Anthropic; region shown in the UI; the data-handling table; no automatic cross-provider failover |
-| SSRF or key leak through a configurable base URL | §10.3; key only to the configured host; no redirects |
+| SSRF or key leak through a configurable base URL | §10.3: explicit metadata deny list, proxy target check, separate Vertex credential transport; key bound to its host (§11); no redirects |
+| A local server truncates the prompt silently and the untrusted-data rules are lost | §6.2: context fit at start, per-turn truncation check, `OLLAMA_CONTEXT_LENGTH` in V17 |
+| Low rate-limit tiers stall rooms | §7.4: per-endpoint concurrency and token budget; documented minimum tier |
+| A floating alias changes the model behind a gated id | §5.4: pinned ids, aliases experimental and re-gated, sunset dates |
 | Provider APIs drift (field names, reasoning rules) | recorded fixtures per flavor; capability tables in code; a live smoke run per supported model in `evals-live` |
 | The supported list goes stale after a prompt change | re-gate rule (§5.3) and the CI check (V12) |
 | One new module (`bedrockruntime`) | V5 is built outside the ship workflow under the §7 two-lead review, since `go.mod` is not in any agent's folders in `ownership.json` |
 
 ## 15. Open owner decisions
 
-1. **Gate thresholds**: 98% valid tool calls, root-cause and layer rates ≥ 0.8 × reference, pass rate ≥ 0.7 ×
-   reference. Stricter or looser?
-2. **Private-network `http` base URLs** (an in-cluster vLLM at `http://vllm.ml.svc:8000`): refused by default.
-   Allow with an explicit `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on`, or require TLS always off loopback?
-3. **Per-provider prompt variants**: none in this wave (one prompt, comparable evals). Allow a variant for a model
-   that needs one to pass, at the cost of a second prompt to maintain and re-gate?
-4. **Fail-safe pricing for Claude too**: refuse start under a cost cap when any role's Claude model is unpriced
-   (consistent; may break a deployment on upgrade), or keep today's warning for Claude?
-5. **`PIPEROOM_POSTMORTEM_MODEL`** is a mode (`auto | off`), which clashes with the `*_MODEL` naming of the new
-   roles. Keep it, or rename it to `PIPEROOM_POSTMORTEM` with the old name read as an alias for one release?
-6. **Template control tokens**: neutralise them in untrusted text for every provider (one rule, a small change to
-   Claude requests that hold such text), or only for `ollama`, `vllm` and `generic`?
-7. **Providers with data processed outside the operator's region** (DeepSeek's API, the DashScope China endpoint):
-   supported like the others with the residency note, or listed but behind an explicit
-   `PIPEROOM_MODEL_ALLOW_REGION=...` acknowledgement?
-8. **OpenAI Responses API**: chat completions loses OpenAI reasoning items between turns. Add a Responses adapter
-   later if OpenAI models miss the quality floor, or not at all?
-9. **Who pays for gating runs**: each model's 3-run gate costs about 75 episodes on that provider. Which providers
-   get a paid gate run first (proposal: OpenAI, Gemini, then DeepSeek and Qwen; Ollama is free)?
+Each item carries the leads' recommendation, **pending owner**. Items 1, 2 and 7 should be ruled before V0, since
+V0 writes their config and gate shapes.
+
+1. **Gate thresholds.** *Lead recommendation, pending owner:* the noise-aware floors of §5.2 against the 3-run
+   reference of V9r: invalid tool calls ≤ 2%; root-cause and layer rates ≥ reference − max(0.10, 2·SE_diff) with
+   absolute minimums 0.50 and 0.70; pass rate gated the same way only once the reference passes at least 0.50,
+   reported until then; no scenario the reference passes 2 of 3 times failed 3 of 3.
+2. **Private-network `http` base URLs** (an in-cluster vLLM at `http://vllm.ml.svc:8000`). *Lead recommendation,
+   pending owner:* refused by default; allowed only with the explicit `PIPEROOM_MODEL_ALLOW_PRIVATE_HTTP=on`;
+   metadata addresses refused either way.
+3. **Per-model prompt variants.** *Lead recommendation, pending owner:* none in this wave: one prompt, comparable
+   evals. A model that needs a variant to pass stays experimental.
+4. **Fail-safe pricing for Claude too.** *Lead recommendation, pending owner:* fail-safe (refuse start under a cost
+   cap) for the new providers only; Claude keeps today's warning, so no Claude deployment breaks on upgrade.
+5. **`PIPEROOM_POSTMORTEM_MODEL`** is a mode (`auto | off`) that clashes with the `*_MODEL` names of the new roles.
+   *Lead recommendation, pending owner:* rename it `PIPEROOM_POSTMORTEM_MODE` in V0 and keep reading the old name
+   as an alias (a startup note when the alias is used).
+6. **Template control tokens.** *Lead recommendation, pending owner:* neutralise them in untrusted text for every
+   provider: one rule, and Claude requests change only for text that holds such tokens.
+7. **Endpoints operated in China** (DeepSeek's API, the DashScope China endpoint). *Lead recommendation, pending
+   owner:* supported, but each needs the one-time config acknowledgement `PIPEROOM_MODEL_ACK_DATA_LOCATION=cn`, and
+   the model panel shows the location.
+8. **OpenAI Responses API.** *Lead recommendation, pending owner:* later, as its own row, only if OpenAI models miss
+   the quality floor on chat completions.
+9. **Order of gate runs.** *Lead recommendation, pending owner:* Ollama first (free, proves the pipeline), then
+   OpenAI, Gemini, DeepSeek, Qwen. Each paid gate is about 75 episodes on that provider and needs the owner's
+   approval of the `evals` environment run.
 
 ## 16. References
 
