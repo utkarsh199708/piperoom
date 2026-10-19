@@ -37,7 +37,8 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// before raising it again. E6a's pause, healthy-outcome and per-stage read
 	// rules fit under it by cutting repeated wording. 1335 since P3-W2: the
 	// slot-drop rule's wording is the LEAD-ARCH ruling on #655, taken verbatim
-	// (1331 words), so it was not trimmed to fit.
+	// (1331 words), so it was not trimmed to fit. 1335 is a hard ceiling
+	// (LEAD-ARCH ruling on #659): P3-W2f's three rules fit by trimming.
 	if wc := len(strings.Fields(a)); wc > 1335 {
 		t.Fatalf("system prompt is %d words, over the 1335 limit", wc)
 	}
@@ -343,7 +344,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"what_changed", "pg_recent_ddl", "connect_status", "update_hypothesis", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "propose_fix", "pg_drop_replication_slot", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "pg_recent_ddl", "connect_status", "update_hypothesis", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "propose_fix", "pg_drop_replication_slot", "connect_update_connector_config", "pg_add_publication_table", "pg_snapshot_signal", "connect_config", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
@@ -367,15 +368,15 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 		"Name the table, column and key instead",
 		// Scope: stay in the alert's pipeline; out-of-scope means stop.
 		"Stay inside the alert's pipeline",
-		"not in the pipeline, that is the answer: stop",
+		"A tool or action saying a resource is outside the pipeline is the answer: stop",
 		// Fix hygiene: no premature restart, one fix at a time, schema risk.
 		"Never restart anything before the cause is fixed or ruled out",
 		"schema_set_compatibility set to NONE and schema_register are high-risk",
 		"only one fix at a time",
 		// A rejection means re-think and ask, not retry.
-		"After a rejection or a failed action, read the reason, update your hypothesis, and ask the driver in the room",
+		"After a rejection or failed action, read the reason, update your hypothesis and ask the driver; never re-propose the same fix unchanged",
 		// When to stop: state what remains open and wait.
-		"post a short summary of what remains open and wait",
+		"what remains open and that the cause is not established; keep any hypothesis low, propose nothing and wait",
 		// Tool errors are findings, cited as evidence.
 		"A tool error or timeout is a finding, not proof",
 		"cite it as evidence for what is unknown or blocked",
@@ -396,9 +397,9 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 	for _, want := range []string{
 		"Postgres (WAL, slot) -> Debezium source connector in Kafka Connect -> Kafka topics -> consumers / sink connectors -> warehouse",
 		"Schema Registry is a dependency of connectors and consumers, not a stage",
-		`Find the most downstream failing component, then walk its upstream links, both "from:" (data) and "depends on:", to the root cause`,
+		`From the most downstream symptom, walk upstream links, both "from:" (data) and "depends on:", to the root cause`,
 		"Treat (unconfirmed) links as hypotheses to verify with tools",
-		"update_hypothesis must name the failing component and, separately, the root-cause component.",
+		"update_hypothesis must name the first failing component (the most upstream broken component, not the downstream symptom) and, separately, the root-cause component.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -409,6 +410,9 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		"warehouse -> consumer -> Kafka -> Connect -> Schema Registry -> Postgres",
 		"first unhealthy layer going downstream to upstream",
 		"Kafka -> Connect",
+		// P3-W2f: the evals grade first_failing_layer as the most upstream
+		// broken layer, so the downstream symptom is not the failing component.
+		"Find the most downstream failing component",
 	} {
 		if strings.Contains(prompt, gone) {
 			t.Errorf("system prompt still says %q", gone)
@@ -706,7 +710,7 @@ func TestSystemPromptCarriesE5aPrinciples(t *testing.T) {
 		"Once cited evidence establishes the cause, stop reading",
 		"Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (pg_replication_slots, connect_status, kafka_consumer_lag, warehouse_freshness); the pipeline map and list reads are summaries, not status reads",
 		"say the pipeline is healthy now and there is nothing to fix; put any earlier fault in the past tense",
-		"If no evidence names a cause, say in your closing message what you ruled out and that the cause is not established; keep any hypothesis low and propose nothing",
+		"If no evidence names a cause, say in your closing message what you ruled out, what remains open and that the cause is not established; keep any hypothesis low, propose nothing",
 		"When a driver steer is ambiguous, ask one short question with post_message and propose nothing until they answer",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -735,7 +739,7 @@ func TestSystemPromptCarriesE6aRules(t *testing.T) {
 		"A pause a failed job left may be resumed after the checks above",
 		"If every stage reads healthy, your closing message must say the pipeline is healthy now and there is nothing to fix",
 		"keep any hypothesis naming a current failing component low",
-		"Each read tests a hypothesis; re-reading an unchanged component is waste",
+		"Re-reading an unchanged component, or re-running an answered read with other versions or windows, is waste",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -775,7 +779,7 @@ func TestSystemPromptCarriesE7aRules(t *testing.T) {
 		"Do a read the driver asks for next, on the component they name, or say in one line why you can't.",
 		"Say so in the hypothesis; post nothing after.",
 		"without it, read pg_recent_ddl",
-		`as is re-running a read with other versions or windows once it has answered; "not found" is the finding.`,
+		`re-running an answered read with other versions or windows, is waste; "not found" is the finding.`,
 		"the pipeline map and list reads are summaries, not status reads",
 		"Connect never pauses itself: without a record (comments, past rooms) that a failed job left it, a pause is on purpose.",
 	} {
@@ -791,7 +795,7 @@ func TestSystemPromptCarriesE7aRules(t *testing.T) {
 		t.Errorf("past-fix rule must sit in the similar_incidents bullet before its no-match guard: %s", sim)
 	}
 	// The healthy rule must come after the open-items summary it overrides.
-	if i, j := strings.Index(prompt, "Then post a short summary of what remains open and wait."), strings.Index(prompt, "post nothing after."); i < 0 || j < i {
+	if i, j := strings.Index(prompt, "what remains open and that the cause is not established"), strings.Index(prompt, "post nothing after."); i < 0 || j < i {
 		t.Error("the healthy closing rule must follow the open-items summary it overrides")
 	}
 	// The driver-read rule is about drivers: it sits in the driver bullet, not
@@ -908,6 +912,26 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt lost safety rail %q", want)
 		}
+	}
+}
+
+// TestSystemPromptCDCEvalFixes pins two CDC rules from evals-live run
+// 39212981319: a table added to the publication needs a backfill signal in the
+// same proposal (missed-table), and a retired connector's slot, not the stopped
+// connector, is the root cause (dead-slot-wal).
+func TestSystemPromptCDCEvalFixes(t *testing.T) {
+	prompt := systemPrompt()
+	for _, want := range []string{
+		"pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal",
+		"signal_table: signal.data.collection from connect_config",
+		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("CDC system prompt missing %q", want)
+		}
+	}
+	if strings.Contains(systemPromptFor(events.PipelineKindBatch), "pg_snapshot_signal") {
+		t.Error("batch prompt must not carry the CDC backfill rule")
 	}
 }
 
