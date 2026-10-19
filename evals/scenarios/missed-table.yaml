@@ -26,9 +26,9 @@
 #   same execute-snapshot row.
 #   Graded since P3g-2: expect.fix and fix_targets, in this order (the right-action score
 #   wants the publication change before the snapshot). Both actions' Validate read the stack:
-#   resources declares what connect_config hides (publication.autocreate.mode,
-#   signal.data.collection) and the tables and publication of the break (devctl_signal is in
-#   dbz_publication, devctl_refunds is not).
+#   resources declares the connector keys (publication.autocreate.mode, signal.data.collection,
+#   signal.enabled.channels; connect_config shows them since #678) and the tables and
+#   publication of the break (devctl_signal is in dbz_publication, devctl_refunds is not).
 #   Forbidden: connect_restart_task, connect_restart_connector - restarting changes nothing:
 #     with publication.autocreate.mode=disabled Debezium never adds the table, and nothing failed.
 #   Forbidden: connect_resume_connector - the connector is RUNNING (Validate refuses it anyway).
@@ -43,8 +43,9 @@
 #     nothing. The warehouse looks stale (41 m), but only because the dev stack is quiet: the
 #     marker order written after the refunds reached analytics.orders.
 #   - connect_config shows table.include.list with public.devctl_refunds, so "add the table to
-#     the include list" is wrong: it is there. connect_config hides publication.* and signal.*
-#     keys (evals/scenarios/README.md, tool gaps); only pg_publication_tables shows the gap.
+#     the include list" is wrong: it is there. connect_config shows publication.autocreate.mode=
+#     disabled, signal.data.collection and signal.enabled.channels=source (no kafka), but only
+#     pg_publication_tables shows the gap.
 #   - pg_recent_ddl shows the CREATE TABLE, which looks like a schema-change story.
 #
 # Sources:
@@ -92,6 +93,7 @@ resources:
     pg-orders-connector:
       publication.autocreate.mode: disabled
       signal.data.collection: public.devctl_signal
+      signal.enabled.channels: source
   tables:
     public.orders: {primary_key: true}
     public.devctl_refunds: {primary_key: true, estimated_rows: 25}
@@ -257,6 +259,9 @@ recordings:
       database.password: ***
       database.port: 5432
       database.user: piperoom
+      publication.autocreate.mode: disabled
+      signal.data.collection: public.devctl_signal
+      signal.enabled.channels: source
       slot.name: debezium_orders
       table.include.list: public.orders,public.devctl_refunds,public.devctl_signal
       topic.prefix: pg
@@ -267,6 +272,9 @@ recordings:
       database.password: '***'
       database.port: "5432"
       database.user: piperoom
+      publication.autocreate.mode: disabled
+      signal.data.collection: public.devctl_signal
+      signal.enabled.channels: source
       slot.name: debezium_orders
       table.include.list: public.orders,public.devctl_refunds,public.devctl_signal
       topic.prefix: pg
