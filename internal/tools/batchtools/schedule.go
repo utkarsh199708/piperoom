@@ -130,8 +130,13 @@ func (t *scheduleGap) Run(ctx context.Context, in json.RawMessage) (tools.Result
 
 // computeGap is the tool's arithmetic, apart from I/O for tests.
 func computeGap(dagID string, dag clients.DAG, runs []clients.DAGRun, now time.Time) GapData {
-	g := GapData{DAGID: dagID, Schedule: dag.Schedule, Paused: dag.Paused, NextRunAt: dag.NextRunAt, RunsRead: len(runs)}
-	interval, approx, unscheduled := parseSchedule(dag.Schedule)
+	cleaned := make([]clients.DAGRun, len(runs))
+	for i, r := range runs {
+		cleaned[i] = sanitizeRun(r)
+	}
+	runs = cleaned
+	g := GapData{DAGID: dagID, Schedule: clean(dag.Schedule, maxScheduleRunes), Paused: dag.Paused, NextRunAt: dag.NextRunAt, RunsRead: len(runs)}
+	interval, approx, unscheduled := parseSchedule(g.Schedule)
 	if interval > 0 {
 		g.IntervalSource, g.IntervalApprox = sourceSchedule, approx
 	} else if !unscheduled {
@@ -203,11 +208,11 @@ func successTime(r clients.DAGRun) time.Time {
 
 func renderGap(g GapData) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "DAG %s: verdict %s.", g.DAGID, g.Verdict)
+	fmt.Fprintf(&sb, "DAG %s: verdict %s.", clean(g.DAGID, maxIDBytes), g.Verdict)
 	sched := "none"
 	if g.Schedule != "" {
 		// DAG-author text: quoted and folded to one line.
-		sched = strconv.Quote(clean(g.Schedule, 120))
+		sched = strconv.Quote(oneLine(g.Schedule, 120))
 	}
 	fmt.Fprintf(&sb, " Schedule %s", sched)
 	if g.IntervalSeconds > 0 {
@@ -224,12 +229,12 @@ func renderGap(g GapData) string {
 	}
 	sb.WriteString(".")
 	if g.LastRun != nil {
-		fmt.Fprintf(&sb, " Last run %s: %s, logical %s, started %s.", oneLine(g.LastRun.ID, 120), g.LastRun.State, stamp(g.LastRun.LogicalDate), stamp(g.LastRun.StartedAt))
+		fmt.Fprintf(&sb, " Last run %s: %s, logical %s, started %s.", g.LastRun.ID, orNone(g.LastRun.State), stamp(g.LastRun.LogicalDate), stamp(g.LastRun.StartedAt))
 	} else {
 		sb.WriteString(" No runs.")
 	}
 	if g.LastSuccess != nil {
-		fmt.Fprintf(&sb, " Last success %s: logical %s, ended %s (%s ago).", oneLine(g.LastSuccess.ID, 120), stamp(g.LastSuccess.LogicalDate),
+		fmt.Fprintf(&sb, " Last success %s: logical %s, ended %s (%s ago).", g.LastSuccess.ID, stamp(g.LastSuccess.LogicalDate),
 			stamp(g.LastSuccess.EndedAt), human(time.Duration(g.SinceLastSuccessSeconds*float64(time.Second))))
 	} else if g.RunsRead > 0 {
 		fmt.Fprintf(&sb, " No successful run in the last %d run(s).", g.RunsRead)

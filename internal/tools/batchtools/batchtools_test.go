@@ -306,7 +306,8 @@ func TestDAGRuns(t *testing.T) {
 	if strings.Contains(res.Summary, "fixture-note-secret") {
 		t.Errorf("secret in the note reached the summary:\n%s", res.Summary)
 	}
-	if strings.Count(res.Summary, "\n") != 3 {
+	// Three run lines plus the WARNING the note's injection raises.
+	if strings.Count(res.Summary, "\n") != 4 || !strings.Contains(res.Summary, "WARNING: a run note") {
 		t.Errorf("a note broke the one-line-per-run layout:\n%s", res.Summary)
 	}
 	data := res.Data.(RunsData)

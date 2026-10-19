@@ -157,12 +157,39 @@ func (d Deps) reader(tool string) (clients.OrchestratorReader, error) {
 	return d.Orchestrator, nil
 }
 
-// clean makes untrusted orchestrator text (a run note) safe for one summary
-// line: secrets masked, control characters and line breaks folded to single
-// spaces, cut to n runes.
+// Caps of server strings (sanitizeRun, sanitizeTask).
+const (
+	maxStateRunes    = 40   // state, run_type
+	maxOperatorRunes = 80   // operator class name
+	maxNoteRunes     = 2000 // a run note in Data
+	maxScheduleRunes = 300  // schedule text in Data
+)
+
+// clean makes one string from the orchestrator safe for the summary and
+// Data: the log's sanitiser (invalid UTF-8, ANSI sequences, control
+// characters), secrets masked, folded to one line, cut to n runes. Every
+// server-sourced string goes through it: ids, states, operators, run types,
+// notes, schedules.
 func clean(s string, n int) string {
-	s, _ = redact.Text(s)
+	s, _ = redact.Text(sanitizeLog(s))
 	return oneLine(s, n)
+}
+
+// sanitizeRun cleans every string of a run as the server sent it.
+func sanitizeRun(r clients.DAGRun) clients.DAGRun {
+	r.ID = clean(r.ID, maxIDBytes)
+	r.State = clean(r.State, maxStateRunes)
+	r.RunType = clean(r.RunType, maxStateRunes)
+	r.Note = clean(r.Note, maxNoteRunes)
+	return r
+}
+
+// sanitizeTask cleans every string of a task instance as the server sent it.
+func sanitizeTask(t clients.TaskInstance) clients.TaskInstance {
+	t.TaskID = clean(t.TaskID, maxIDBytes)
+	t.State = clean(t.State, maxStateRunes)
+	t.Operator = clean(t.Operator, maxOperatorRunes)
+	return t
 }
 
 // oneLine folds whitespace and control characters to single spaces and cuts
