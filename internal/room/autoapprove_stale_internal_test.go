@@ -15,8 +15,8 @@ import (
 // P2b-4b: a countdown that will never fire leaves the caller's view once
 // run_at is StaleCountdownGrace in the past. The log, the published snapshot
 // and mode.auto_approve do not change, the proposal stays approvable by hand,
-// and the cancel route answers as the view does unless the policy can still
-// fire.
+// and a countdown that is still cancellable in the log is cancelled whether
+// the view shows it or not.
 
 // viewOf is RoomFor for arjun (the driver, owner of kafka-connect).
 func (r *aaRig) viewOf(roomID string) RoomSnapshot {
@@ -76,17 +76,20 @@ func eventCount(t *testing.T, st store.Store, roomID string) int {
 }
 
 func TestStaleCountdownGraceValue(t *testing.T) {
-	if StaleCountdownGrace < 2*AutoApproveCheckEvery {
-		t.Fatalf("grace %v is under two loop ticks", StaleCountdownGrace)
+	// It must outlast a crashed lease holder's takeover plus two loop ticks
+	// (docs/design/replicas.md), and stay short enough that a dead countdown
+	// does not linger.
+	if floor := DefaultLeaseTTL + DefaultTakeoverScan + 2*AutoApproveCheckEvery; StaleCountdownGrace <= floor {
+		t.Fatalf("grace %v does not outlast lease TTL + takeover scan + 2 ticks (%v)", StaleCountdownGrace, floor)
 	}
-	if StaleCountdownGrace != 10*time.Second {
-		t.Fatalf("grace = %v, want 10s", StaleCountdownGrace)
+	if StaleCountdownGrace > time.Minute {
+		t.Fatalf("grace %v is over a minute", StaleCountdownGrace)
 	}
 }
 
 // The fire check refuses the countdown (the preview turned bad after it was
-// scheduled): shown before run_at and within the grace, hidden after it, the
-// cancel answers 409 not_scheduled, and a person approves and runs it.
+// scheduled): shown before run_at and within the grace, hidden after it, a
+// person approves and runs it.
 func TestStaleCountdownHiddenWhenPolicyRefuses(t *testing.T) {
 	c := &testClock{t: aaT0}
 	ms := memstore.NewWithClock(c.Now)
@@ -147,14 +150,6 @@ func TestStaleCountdownHiddenWhenPolicyRefuses(t *testing.T) {
 		t.Fatalf("log grew from %d to %d by hiding the countdown", logLen, n)
 	}
 
-	// The cancel agrees with the view: nothing left to cancel.
-	if _, err := r.svc.CancelProposal(ctx, r.user("arjun"), pid, ""); !isCode(err, "not_scheduled") {
-		t.Fatalf("cancel of a hidden countdown the policy refuses = %v, want 409 not_scheduled", err)
-	}
-	if n := len(logOf(t, ms, roomID, events.ProposalCancelled)); n != 0 {
-		t.Fatalf("%d proposal.cancelled, want 0", n)
-	}
-
 	// Still open and approvable by hand.
 	p := viewProposal(t, r.viewOf(roomID), pid)
 	if p.Approvals["kafka-connect"] != "pending" {
@@ -173,34 +168,55 @@ func TestStaleCountdownHiddenWhenPolicyRefuses(t *testing.T) {
 	}
 }
 
-// No replica fired the countdown (stuck), though the policy still could: the
-// view hides it past the grace, yet the cancel is still taken, since the fix
-// can still run ("cancellable until the policy starts").
-func TestStaleCountdownCancelTakenWhilePolicyCanFire(t *testing.T) {
-	c := &testClock{t: aaT0}
-	ms := memstore.NewWithClock(c.Now)
-	r := newAARig(t, ms, c, newAAActions(t), aaOpts{})
-	ctx := context.Background()
-	roomID := r.open()
-	pid := r.propose(roomID, "", "connect_restart_task")
+// A countdown hidden past the grace is still cancellable in the log, so the
+// cancel is taken whether the policy on this replica could still fire it (the
+// loop was stuck) or refuses it (the preview turned bad): another replica's
+// config decides that, not this one's. The policy then never fires it, and a
+// second cancel answers 409 not_scheduled.
+func TestStaleCountdownCancelAlwaysTaken(t *testing.T) {
+	for _, refuses := range []bool{false, true} {
+		name := "loop stuck"
+		if refuses {
+			name = "policy refuses"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := &testClock{t: aaT0}
+			ms := memstore.NewWithClock(c.Now)
+			r := newAARig(t, ms, c, newAAActions(t), aaOpts{})
+			ctx := context.Background()
+			roomID := r.open()
+			pid := r.propose(roomID, "", "connect_restart_task")
+			if refuses {
+				emitEvent(t, r.svc, roomID, systemActor, events.ProposalPreviewed, events.ProposalPreviewedPayload{
+					ProposalID: pid, Steps: []events.StepPreview{{StepIndex: 0, Error: "connect down"}}, At: aaT0,
+				})
+			}
 
-	c.Advance(aaDelay + StaleCountdownGrace + time.Second) // no tick: the loop is stuck
-	if sc := viewProposal(t, r.viewOf(roomID), pid).Scheduled; sc != nil {
-		t.Fatalf("scheduled past the grace = %+v, want none", sc)
-	}
-	ev, err := r.svc.CancelProposal(ctx, r.user("arjun"), pid, "stop it")
-	if err != nil {
-		t.Fatalf("cancel while the policy can still fire = %v, want taken", err)
-	}
-	if ev.Type != events.ProposalCancelled {
-		t.Fatalf("cancel event = %s", ev.Type)
-	}
-	r.tick()
-	if n := len(logOf(t, ms, roomID, events.ApprovalGiven)); n != 0 || r.acts.restart.count() != 0 {
-		t.Fatalf("%d approvals, %d runs after the cancel, want 0", n, r.acts.restart.count())
-	}
-	if _, err := r.svc.CancelProposal(ctx, r.user("arjun"), pid, ""); !isCode(err, "not_scheduled") {
-		t.Fatalf("second cancel = %v, want 409 not_scheduled", err)
+			c.Advance(aaDelay + StaleCountdownGrace + time.Second)
+			if refuses {
+				r.tick() // refused: nothing approved
+			}
+			if sc := viewProposal(t, r.viewOf(roomID), pid).Scheduled; sc != nil {
+				t.Fatalf("scheduled past the grace = %+v, want none", sc)
+			}
+			ev, err := r.svc.CancelProposal(ctx, r.user("arjun"), pid, "stop it")
+			if err != nil {
+				t.Fatalf("cancel of a hidden but cancellable countdown = %v, want taken", err)
+			}
+			if ev.Type != events.ProposalCancelled {
+				t.Fatalf("cancel event = %s", ev.Type)
+			}
+			r.tick()
+			if n := len(logOf(t, ms, roomID, events.ApprovalGiven)); n != 0 || r.acts.restart.count() != 0 {
+				t.Fatalf("%d approvals, %d runs after the cancel, want 0", n, r.acts.restart.count())
+			}
+			if p := viewProposal(t, r.viewOf(roomID), pid); p.Scheduled != nil || p.Approvals["kafka-connect"] != "pending" {
+				t.Fatalf("after the cancel: scheduled %+v, approvals %v; want none, pending", p.Scheduled, p.Approvals)
+			}
+			if _, err := r.svc.CancelProposal(ctx, r.user("arjun"), pid, ""); !isCode(err, "not_scheduled") {
+				t.Fatalf("second cancel = %v, want 409 not_scheduled", err)
+			}
+		})
 	}
 }
 

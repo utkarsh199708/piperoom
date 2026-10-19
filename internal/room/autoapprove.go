@@ -44,16 +44,22 @@ import (
 const AutoApproveCheckEvery = time.Second
 
 // StaleCountdownGrace is how long past run_at the room view (RoomFor) keeps
-// showing a countdown the policy has not fired. A healthy replica fires
-// within one loop tick (AutoApproveCheckEvery) of run_at; two ticks cover a
-// missed check, and the rest is margin for a fire that waits on the room
-// lock, the lease lookup or a slow store. Past it the countdown will most
-// likely never fire (the fire check refused it, or the replica that holds
-// the room is stuck), and a card that shows "Runs in 0:00" forever misleads:
-// the view drops open_proposals[].scheduled, and the proposal waits for a
-// person as it would without the policy. Only the view changes; the log, the
-// fold and the published snapshot do not, and no event is written.
-const StaleCountdownGrace = 2*AutoApproveCheckEvery + 8*time.Second
+// showing a countdown the policy has not fired. It must outlast every delay
+// docs/design/replicas.md allows a fire: the replica that holds the room's
+// agent lease fires it (checkSchedules skips rooms another replica holds),
+// and when that holder crashes another replica takes the room over only
+// after the lease expires (DefaultLeaseTTL, 30 s) and its next takeover scan
+// runs (DefaultTakeoverScan, 10 s); a graceful roll is faster (the lease is
+// expired at shutdown, ~11 s). Two loop ticks (AutoApproveCheckEvery) cover a
+// missed check after the takeover, and 3 s covers a fire waiting on the room
+// lock or a slow store: 30 + 10 + 2 + 3 = 45 s with the production timings.
+// Past it the countdown will most likely never fire (the fire check refused
+// it, or no replica can), and a card that shows "Runs in 0:00" forever
+// misleads: the view drops open_proposals[].scheduled, and the proposal
+// waits for a person as it would without the policy. Only the view changes;
+// the log, the fold and the published snapshot do not, no event is written,
+// and the countdown can still fire or be cancelled (CancelProposal).
+const StaleCountdownGrace = DefaultLeaseTTL + DefaultTakeoverScan + 2*AutoApproveCheckEvery + 3*time.Second
 
 // countdownStale reports a countdown whose run_at is more than
 // StaleCountdownGrace before now.
@@ -579,21 +585,12 @@ func (s *Service) CancelProposal(ctx context.Context, user User, proposalID, rea
 		if !ok || !p.sched.cancellable() {
 			return notScheduled("no auto-approve countdown of this proposal is pending")
 		}
-		// A stale countdown (past run_at plus StaleCountdownGrace) is gone
-		// from the room view (RoomFor), and the cancel answers as the view
-		// does, 409 not_scheduled, unless the policy can still fire it
-		// (fireCheckLocked passes, so a late or stuck replica could still
-		// approve it). Then the cancel is taken: docs/api.md says the
-		// proposal is "cancellable until the policy starts", and a person
-		// who wants a fix stopped is never refused while it can still run.
-		// A countdown the policy refuses (preview turned bad, auto_approve:
-		// list narrowed, policy off at restart) can never fire, so there is
-		// nothing left to cancel: the proposal already waits for a person.
-		if countdownStale(p.sched.runAt, s.now()) {
-			if _, err := s.fireCheckLocked(st, proposalID); err != nil {
-				return notScheduled("the auto-approve countdown ran out and the policy will not approve this proposal; it waits for manual approval")
-			}
-		}
+		// A countdown hidden from the room view as stale (past run_at plus
+		// StaleCountdownGrace) is still cancelled: docs/api.md makes it
+		// "cancellable until the policy starts", and whether the policy can
+		// still fire depends on the lease holder's config, not this
+		// replica's (a rolling config change can differ), so the log's
+		// cancellable() is the one rule.
 		return nil
 	}
 	if err := check(); err != nil {
