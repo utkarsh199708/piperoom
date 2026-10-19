@@ -293,7 +293,7 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		}
 	}
 	res.LayerNamed = layerGraded(sc, sc.Expect.FirstFailingLayer, last)
-	res.RootCauseLayerNamed = layerGraded(sc, sc.Expect.RootCauseLayer, last)
+	res.RootCauseLayerNamed = rootCauseLayerGraded(sc, last)
 	// The healthy verdict may come from the final hypothesis or the last
 	// message; a current fault in the last message cancels it.
 	res.SaysHealthy = (healthyVerdict(lastMessage) || (last != nil && healthyVerdict(last.Text))) && !hasFault(lastMessage)

@@ -267,6 +267,14 @@ type Expect struct {
 	// events.IncidentLayers()), graded apart from FirstFailingLayer: in a schema change
 	// Connect fails first, but the cause is a Postgres DDL.
 	RootCauseLayer string `yaml:"root_cause_layer"`
+	// RootCauseLayerAlt are further layers the root cause may defensibly be
+	// placed in (each one of events.IncidentLayers(), distinct from
+	// RootCauseLayer and never FirstFailingLayer): a hypothesis naming
+	// RootCauseLayer or any of them passes the root-cause-layer grade. Only
+	// for a scenario with two readings of where the cause sits, such as a
+	// consumer down for longer than the topic's retention; never to paper
+	// over a wrong label. See evals/README.md.
+	RootCauseLayerAlt []string `yaml:"root_cause_layer_alt"`
 	// ExpectedFacts are what the diagnosis must rest on, each one seen in a
 	// successful result of its tool.
 	ExpectedFacts []Fact `yaml:"expected_facts"`
@@ -485,6 +493,7 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	if l := s.Expect.RootCauseLayer; l != "" && !contains(incidentLayers(), l) {
 		errs = append(errs, fmt.Errorf("expect.root_cause_layer: unknown layer %q (want one of %s)", l, strings.Join(incidentLayers(), ", ")))
 	}
+	errs = append(errs, s.Expect.checkRootCauseLayerAlt()...)
 
 	recKeys := map[string]int{}
 	for i, r := range s.Recordings {
@@ -606,6 +615,7 @@ func (s Scenario) checkOutcome() []error {
 		"root_cause_forbidden": len(e.RootCauseForbidden) > 0,
 		"first_failing_layer":  e.FirstFailingLayer != "",
 		"root_cause_layer":     e.RootCauseLayer != "",
+		"root_cause_layer_alt": len(e.RootCauseLayerAlt) > 0,
 		"fix":                  len(e.Fix) > 0,
 		"fix_targets":          len(e.FixTargets) > 0,
 		"claims":               len(e.Claims) > 0,
