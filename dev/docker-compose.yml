@@ -99,6 +99,13 @@ services:
       PIPEROOM_LOG_FORMAT: ${PIPEROOM_LOG_FORMAT:-text}
       FAIL_ON_ID: ${DEVCONSUMER_FAIL_ON_ID:-0}
       DELAY: ${DEVCONSUMER_DELAY:-0s}
+      # Bad-build knobs for `devctl break consumer-bad-deploy` / `dlq-backlog`
+      # (dev/scenarios.md §8, §9). Empty = the good build.
+      SKIP_OPS: ${DEVCONSUMER_SKIP_OPS:-}
+      REJECT_STATUS: ${DEVCONSUMER_REJECT_STATUS:-}
+      # The pipeline's DLQ (dev/owners.yaml watch.dlq_topics). It exists only
+      # while dlq-backlog is broken; nothing is written to it otherwise.
+      DLQ_TOPIC: devctl.order-sync.dlq
 
   # Piperoom server in shadow mode, against this stack (dev/shadow.md).
   # Profile "shadow": `devctl up` does not start it; `devctl shadow up` does.
@@ -138,6 +145,11 @@ services:
       PIPEROOM_AUTH_MODE: dev
       PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1"
       PIPEROOM_DEV_ACK: ${PIPEROOM_DEV_ACK:-}
+      # Write mode on when your environment does not set it, as before the setting existed
+      # (the server's default is off). An explicitly empty value stays empty, which the
+      # server reads as off: hence "-on", not ":-on". Shadow rooms propose nothing; a
+      # non-shadow pipeline in the file runs approved fixes.
+      PIPEROOM_WRITE_MODE: ${PIPEROOM_WRITE_MODE-on}
       # The watcher opens the rooms: `devctl break <scenario>` trips it within a few
       # intervals (dev/owners.shadow.yaml has short `for:` values).
       PIPEROOM_WATCH_MODE: rooms

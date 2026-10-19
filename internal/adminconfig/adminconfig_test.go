@@ -496,11 +496,26 @@ func TestExport(t *testing.T) {
 	}
 }
 
+// A file that cannot be read never stops the server (--quickstart runs with a
+// users file elsewhere): New succeeds, the view works, and only Export fails.
 func TestNewMissingFile(t *testing.T) {
 	dir := t.TempDir()
+	op := writeFile(t, dir, "owners.yaml", "x")
 	up := writeFile(t, dir, "users.yaml", testUsersYAML)
-	if _, err := New(devConfig(), nil, nil, filepath.Join(dir, "missing.yaml"), up); err == nil {
-		t.Fatal("New with a missing owners file: no error")
+	for name, paths := range map[string][2]string{
+		"owners": {filepath.Join(dir, "missing.yaml"), up},
+		"users":  {op, filepath.Join(dir, "missing.yaml")},
+	} {
+		p, err := New(devConfig(), nil, nil, paths[0], paths[1])
+		if err != nil {
+			t.Fatalf("%s missing: New: %v", name, err)
+		}
+		if got := p.Config(); got.Source != "file" {
+			t.Fatalf("%s missing: view source %q", name, got.Source)
+		}
+		if b, err := p.Export(); err == nil || b != nil || !strings.Contains(err.Error(), name+" file") {
+			t.Fatalf("%s missing: Export = %q, %v", name, b, err)
+		}
 	}
 }
 

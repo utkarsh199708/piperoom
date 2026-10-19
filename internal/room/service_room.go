@@ -163,7 +163,8 @@ const webhookKeyPrefix = "webhook:"
 // propose a fix against a pipeline it knows nothing about. The 400 for an
 // unknown pipeline stays only on POST /api/rooms (CreateRoom). With no owners
 // config (unit tests) there is nothing to validate against, so every pipeline
-// is treated as known. No driver until someone takes control. created is false
+// is treated as known. No driver until its first member joins (sole member,
+// service_solemember.go) or someone takes control. created is false
 // when the alert joined the open room for it (see alertIndexKey) instead of
 // opening one. A resolved alert (a.Status) that matches no open room returns
 // ErrResolvedAlertNoRoom and changes nothing: it never opens a room. An empty

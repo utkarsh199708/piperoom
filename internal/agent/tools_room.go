@@ -45,6 +45,35 @@ func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools
 	}
 }
 
+// roomToolServesKind reports whether a room of pipeline kind (already
+// normalised, see RoomKind) whose propose_fix would list nActions write
+// actions offers the room tool called name. A batch room with no action
+// (ActionsForKind keeps no CDC action, and no action declares batch yet) is
+// not offered propose_fix at all: its prompt says a person runs every fix, and
+// an empty action enum with CDC examples would invite the call it forbids.
+// Every other room tool serves every kind, and a CDC room keeps all three
+// whatever its actions, so its tool list is unchanged.
+func roomToolServesKind(name, kind string, nActions int) bool {
+	return !(name == "propose_fix" && kind == events.PipelineKindBatch && nActions == 0)
+}
+
+// roomToolsForKind returns the room tools of all that a room of kind with
+// acts (its kind's actions, ActionsForKind; nil is none) offers, in all's
+// order, so the tool list of every room of one kind is the same.
+func roomToolsForKind(all []tools.Tool, kind string, acts *actions.Registry) []tools.Tool {
+	n := 0
+	if acts != nil {
+		n = len(acts.All())
+	}
+	out := make([]tools.Tool, 0, len(all))
+	for _, t := range all {
+		if roomToolServesKind(t.Name(), kind, n) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // RoomToolNames returns the names of the room tools the agent adds on top of
 // the read-tool registry, from the static list above. Exported for
 // cmd/investigate's wiring test, which checks the system prompt only ever

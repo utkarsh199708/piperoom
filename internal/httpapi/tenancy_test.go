@@ -32,7 +32,7 @@ func tenancyOwnersYAML(withTenants bool) string {
 	own := func(user string) string {
 		var b strings.Builder
 		b.WriteString("\n    owners:")
-		for _, l := range events.Layers {
+		for _, l := range events.LayersOf(events.PipelineKindCDC) {
 			b.WriteString("\n      " + l + ": {approvers: [user:" + user + "]}")
 		}
 		return b.String()
@@ -225,6 +225,8 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/shadow/grade", "/api/rooms/" + f.rbs + "/shadow/grade", `{"layer_correct":true,"root_cause":"yes"}`},
 		{"POST", "/api/proposals/{pid}/approve", "/api/proposals/" + f.open + "/approve", `{"layer":"kafka-connect","params_hash":"x"}`},
 		{"POST", "/api/proposals/{pid}/reject", "/api/proposals/" + f.open + "/reject", `{"layer":"kafka-connect","reason":"no","params_hash":"x"}`},
+		{"POST", "/api/proposals/{pid}/approve-all", "/api/proposals/" + f.open + "/approve-all", `{"params_hash":"x"}`},
+		{"POST", "/api/proposals/{pid}/cancel", "/api/proposals/" + f.open + "/cancel", `{"reason":"no"}`},
 		{"POST", "/api/handoffs/{hid}/accept", "/api/handoffs/" + f.handoff + "/accept", ""},
 		{"GET", "/api/pipelines/{pid}/topology", "/api/pipelines/pb/topology", ""},
 		{"GET", "/api/pipelines/{pid}/agent-stats", "/api/pipelines/pb/agent-stats", ""},

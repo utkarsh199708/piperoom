@@ -44,6 +44,7 @@ func Register(reg *Registry, d Deps) error {
 		&restartTask{d: d},
 		&restartConnector{d: d},
 		&resumeConnector{d: d},
+		&pauseConnector{d: d},
 		&updateConnectorConfig{d: d},
 		&setCompatibility{d: d},
 		&registerSchema{d: d},
@@ -166,6 +167,11 @@ func pollEvery(override time.Duration) time.Duration {
 // and whether RUNNING was reached. A read error is returned unless ctx has
 // already ended, which is reported as a timeout instead.
 func awaitRunning(ctx context.Context, interval time.Duration, read func(context.Context) (string, error)) (string, bool, error) {
+	return awaitState(ctx, interval, "RUNNING", read)
+}
+
+// awaitState is awaitRunning for any target state.
+func awaitState(ctx context.Context, interval time.Duration, want string, read func(context.Context) (string, error)) (string, bool, error) {
 	last := ""
 	for {
 		state, err := read(ctx)
@@ -178,7 +184,7 @@ func awaitRunning(ctx context.Context, interval time.Duration, read func(context
 		if state != "" {
 			last = state
 		}
-		if state == "RUNNING" {
+		if state == want {
 			return state, true, nil
 		}
 		select {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"piperoom/internal/actions"
@@ -115,7 +116,7 @@ func TestReplayRejectsUnmarshalableData(t *testing.T) {
 }
 
 func TestLiveActionsValidateButNeverWrite(t *testing.T) {
-	reg, err := LiveActions(Resources{Connectors: []string{"pg-orders-connector"}, Subjects: []string{"pg.public.orders-value"}}, nil)
+	reg, wl, err := liveActions(Resources{Connectors: []string{"pg-orders-connector"}, Subjects: []string{"pg.public.orders-value"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,15 +128,21 @@ func TestLiveActionsValidateButNeverWrite(t *testing.T) {
 	if err := restart.Validate(t.Context(), json.RawMessage(`{"connector":"nope","task":0}`)); err == nil {
 		t.Error("unknown connector accepted")
 	}
-	if _, err := restart.Execute(ctx, json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)); err == nil {
-		t.Error("restart executed in replay")
-	}
+	// Execute reaches the replay client, which records the write and does
+	// nothing; what Execute makes of the recorded status afterwards does not
+	// matter here.
+	_, _ = restart.Execute(ctx, json.RawMessage(`{"connector":"pg-orders-connector","task":0}`))
 	compat, _ := reg.Get("schema_set_compatibility")
 	if err := compat.Validate(t.Context(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err != nil {
 		t.Errorf("valid params refused: %v", err)
 	}
-	if _, err := compat.Execute(ctx, json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err == nil {
-		t.Error("set compatibility executed in replay")
+	_, _ = compat.Execute(ctx, json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`))
+	var methods []string
+	for _, w := range wl.snapshot() {
+		methods = append(methods, w.Method)
+	}
+	if strings.Join(methods, ",") != "RestartTask,SetCompatibility" {
+		t.Errorf("recorded writes = %v, want RestartTask,SetCompatibility", methods)
 	}
 }
 

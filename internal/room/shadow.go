@@ -138,7 +138,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	if err != nil {
 		return ""
 	}
-	alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
+	alert := s.newAlert(roomID, title, pipelineID, raw)
 	// Actions and Proposals stay nil: propose_fix lists "(none)" and refuses,
 	// so a shadow run can never reach a write (design section 4).
 	deps := agent.Deps{

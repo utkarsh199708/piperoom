@@ -225,3 +225,45 @@ func TestApproveAllChecksPGSSLMODE(t *testing.T) {
 		t.Fatalf("PGSSLMODE=disable: err = %v, want nil", err)
 	}
 }
+
+// SOURCE_DB_WRITE_URL is where wiring opens the source writer with write mode
+// on (P1a-3), so -approve-all checks it like the other addresses; unset is
+// fine (no source writer).
+func TestApproveAllChecksSourceWriteURL(t *testing.T) {
+	const secret = "s3cr3t-pw"
+	cfg := devCfg()
+	cfg.SourceDBWriteURL = "postgres://writer:pw@localhost:5432/orders?sslmode=disable"
+	if err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv); err != nil {
+		t.Fatalf("local write URL: err = %v, want nil", err)
+	}
+	for name, v := range map[string]string{
+		"remote":       "postgres://writer:" + secret + "@db.prod.example.com:5432/orders",
+		"requires TLS": "postgres://writer:" + secret + "@localhost/orders?sslmode=require",
+		"no parse":     "host=localhost port=notaport password=" + secret,
+	} {
+		cfg.SourceDBWriteURL = v
+		err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv)
+		if !errors.Is(err, errApproveAllRefused) || !strings.Contains(err.Error(), "SOURCE_DB_WRITE_URL") {
+			t.Errorf("%s: err = %v, want SOURCE_DB_WRITE_URL refused", name, err)
+		}
+		if err != nil && strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: err leaks the password: %q", name, err)
+		}
+	}
+}
+
+// -approve-all executes fixes, which needs PIPEROOM_WRITE_MODE=on: with it off
+// the actions hold read-only clients and every fix would fail.
+func TestApproveAllNeedsWriteMode(t *testing.T) {
+	for v, ok := range map[string]bool{"on": true, " on ": true, "": false, "off": false, "true": false, "ON": false} {
+		cfg := devCfg()
+		cfg.WriteMode = v
+		err := checkApproveAllWriteMode(cfg)
+		if ok != (err == nil) {
+			t.Errorf("WriteMode=%q: err = %v, want allowed=%v", v, err, ok)
+		}
+		if err != nil && (!errors.Is(err, errApproveAllRefused) || !strings.Contains(err.Error(), "PIPEROOM_WRITE_MODE")) {
+			t.Errorf("WriteMode=%q: err = %v, want a refusal naming PIPEROOM_WRITE_MODE", v, err)
+		}
+	}
+}

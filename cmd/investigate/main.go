@@ -35,14 +35,17 @@ func main() {
 		effort    = flag.String("effort", "", "effort override (default from config)")
 		maxTurns  = flag.Int("max-turns", 0, "max turns (default 40)")
 		record    = flag.String("record", "", "write a recording of the run (events, tool calls, model, prompt hash, commit, timings) to this new directory")
-		approve   = flag.Bool("approve-all", false, "DEV STACK ONLY: approve and EXECUTE every proposal. Refused unless every address is local and -confirm-dev-stack (or "+approveConfirmEnv+") is set")
+		approve   = flag.Bool("approve-all", false, "DEV STACK ONLY: approve and EXECUTE every proposal. Refused unless every address is local, -confirm-dev-stack (or "+approveConfirmEnv+") is set and PIPEROOM_WRITE_MODE=on")
 		confirm   = flag.Bool("confirm-dev-stack", false, "confirm that -approve-all runs against the local dev stack")
+		kind      = flag.String("kind", "", "pipeline kind, cdc or batch. It overrides the pipeline's kind only for -list-tools; a run takes the pipeline's kind from the owners file, and -kind must then match it (it is the kind only when the owners file lacks the pipeline, e.g. with fake tools)")
+		listOnly  = flag.Bool("list-tools", false, "print the read tools a room of -kind (default: the pipeline's kind) offers, one per line, and exit; opens no client")
 	)
 	flag.Parse()
 
 	o := runOptions{
 		Pipeline: *pipeline, Title: *title, FakeTools: *fakeTools, Model: *model, Effort: *effort,
 		MaxTurns: *maxTurns, RecordDir: *record, ApproveAll: *approve, ConfirmDevStack: *confirm,
+		Kind: *kind, ListTools: *listOnly,
 	}
 	os.Exit(exitCode(run(o), os.Stderr))
 }
@@ -73,6 +76,11 @@ type runOptions struct {
 	RecordDir       string
 	ApproveAll      bool
 	ConfirmDevStack bool
+	// Kind is -kind: "" (the pipeline's), cdc or batch.
+	Kind string
+	// ListTools is -list-tools; Stdout is where the list goes (nil: os.Stdout).
+	ListTools bool
+	Stdout    io.Writer
 }
 
 func run(o runOptions) (err error) {
@@ -94,8 +102,33 @@ func run(o runOptions) (err error) {
 	if own != nil {
 		pipe, havePipe = own.Pipeline(pipeline)
 	}
+	if o.ListTools {
+		k, err := listKind(o.Kind, pipe, havePipe)
+		if err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
+		reg, err := listToolsRegistry(own, fakeTools)
+		if err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
+		out := o.Stdout
+		if out == nil {
+			out = os.Stdout
+		}
+		if err := listTools(out, reg, k); err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
+		return nil
+	}
+	kind, err := roomKind(o.Kind, pipe, havePipe)
+	if err != nil {
+		return fmt.Errorf("investigate: %w", err)
+	}
 	if o.ApproveAll {
 		if err := checkApproveAll(cfg, pipe, havePipe, o.ConfirmDevStack, os.Getenv); err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
+		if err := checkApproveAllWriteMode(cfg); err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
 		fmt.Fprint(os.Stderr, approveAllWarning)
@@ -127,7 +160,9 @@ func run(o runOptions) (err error) {
 		// Only the investigated pipeline's client set is opened: its own
 		// connections: from owners.yaml, or the process-wide settings
 		// (docs/design/tenancy.md). No other pipeline's credentials are read.
-		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{Only: []string{pipeline}})
+		// Without -approve-all nothing runs a fix, so no write client is
+		// built whatever PIPEROOM_WRITE_MODE says.
+		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{Only: []string{pipeline}, ReadOnly: !o.ApproveAll})
 		if err != nil {
 			return fmt.Errorf("investigate: %w", err)
 		}
@@ -159,9 +194,13 @@ func run(o runOptions) (err error) {
 		if commit == "" {
 			commit = "unknown"
 		}
+		promptHash, herr := agent.PromptHashFor(kind)
+		if herr != nil {
+			return fmt.Errorf("investigate: %w", herr)
+		}
 		rec, rerr := newRecorder(o.RecordDir, sink, recordMeta{
 			Pipeline: pipeline, Title: title, Model: opts.Model, Effort: opts.Effort, MaxTurns: opts.MaxTurns,
-			SystemPromptSHA256: agent.PromptHash(), Commit: commit, FakeTools: fakeTools, ApproveAll: o.ApproveAll,
+			SystemPromptSHA256: promptHash, Commit: commit, FakeTools: fakeTools, ApproveAll: o.ApproveAll,
 		}, time.Now)
 		if rerr != nil {
 			return fmt.Errorf("investigate: %w", rerr)
@@ -178,6 +217,8 @@ func run(o runOptions) (err error) {
 		Title:       title,
 		PipelineID:  pipeline,
 		PipelineMap: pipelineMapFor(ctx, topo, pipeline, slog.Default()),
+		// The agent offers only this kind's tools (agent.ToolsForKind).
+		PipelineKind: kind,
 	}
 
 	err = ep.Run(ctx, alert, agent.Deps{

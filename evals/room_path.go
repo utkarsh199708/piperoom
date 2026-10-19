@@ -69,10 +69,9 @@ func ownerUserID(layer string) string { return evalOwnerPfx + layer }
 // unsafeUserChars are characters a users.yaml id may not hold.
 var unsafeUserChars = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
 
-// newRoomFixture writes the scenario's pipeline into an owners file and loads
-// it with owners.Load, so the room sees a pipeline validated (and its watch
-// block resolved) exactly as the server's would be.
-func newRoomFixture(sc Scenario) (*roomFixture, error) {
+// loadOwnersFor writes the scenario's pipeline into an owners file, every
+// layer owned by its eval owner, and loads it with owners.Load.
+func loadOwnersFor(sc Scenario) (*owners.Owners, error) {
 	pipe, err := sc.pipelineNode()
 	if err != nil {
 		return nil, err
@@ -101,6 +100,17 @@ func newRoomFixture(sc Scenario) (*roomFixture, error) {
 	own, err := owners.Load(path)
 	if err != nil {
 		return nil, fmt.Errorf("evals: scenario %q: pipeline is not a valid owners.yaml entry: %w", sc.Name, err)
+	}
+	return own, nil
+}
+
+// newRoomFixture writes the scenario's pipeline into an owners file and loads
+// it with owners.Load, so the room sees a pipeline validated (and its watch
+// block resolved) exactly as the server's would be.
+func newRoomFixture(sc Scenario) (*roomFixture, error) {
+	own, err := loadOwnersFor(sc)
+	if err != nil {
+		return nil, err
 	}
 
 	type userEntry struct {

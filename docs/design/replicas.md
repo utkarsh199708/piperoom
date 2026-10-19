@@ -102,6 +102,11 @@ room_agent_leases (room_id PK → rooms ON DELETE CASCADE, owner text, pipeline_
   when the room closes (a shadow room: when its run has finished, grace included), when the
   supervisor gives up after its retries, and set to expire **now** on graceful shutdown so another
   replica takes over at its next scan instead of after 30 s.
+- **Policy auto-approve (P2b-4) in a rolling deploy.** The lease owner's loop fires a room's
+  `proposal.scheduled`; while an older replica without that loop still holds the room's lease, the fire
+  waits until the lease moves to a new replica. That is safe: the proposal stays open, approvable and
+  cancellable by hand, and only runs late. A fire delayed past the 45 s view grace (P2b-4b, #652) runs with no
+  visible countdown; only the cancel route can still stop it.
 
 ### 4.2 Input reaches the owner through the log
 
@@ -167,11 +172,43 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
 
 - The proposal is claimed **when it is queued** on the room's executor (the replica that recorded the
   last approval), not when its turn comes:
-  `UPDATE proposals SET claimed_by = $me, claimed_at = now() WHERE proposal_id = $1 AND claimed_by IS NULL AND status = 'open' RETURNING`.
+  ```sql
+  UPDATE proposals p SET claimed_by = $me, claimed_at = now()
+   WHERE p.proposal_id = $1 AND p.claimed_by IS NULL AND p.status = 'open'
+     AND CASE WHEN jsonb_typeof(p.required_layers) IS DISTINCT FROM 'array' THEN false
+              WHEN jsonb_array_length(p.required_layers) = 0 THEN false
+              ELSE NOT EXISTS (
+                  SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
+                  WHERE NOT EXISTS (SELECT 1 FROM approvals a
+                                    WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer
+                                      AND a.decision = 'approved'))
+         END
+  ```
+  The `CASE` is `fullyApprovedSQL` in `internal/store/replicas.go` (#638). It is a `CASE`, not three `AND`ed
+  conditions, because Postgres does not promise to evaluate `AND` operands in order, and `jsonb_array_length`
+  raises an error on a jsonb `null` or any other non-array (`CreateProposal` stores a nil `RequiredLayers` slice as
+  jsonb `null`). `CASE` branches run in order, so a non-array never reaches the array functions: the row is simply
+  not approved and the statement does not fail. The stale sweep (`staleProposalSQL`, used by `StaleProposals` and
+  `InterruptProposal`) reuses the same `fullyApprovedSQL` for its unclaimed branch, so "approved, nobody claimed it"
+  means exactly what the claim means.
   No row: another executor has it (or had it) and nothing is queued or written. Each room runs one
   proposal at a time (review item 10), so a second approved proposal can wait in the queue behind a
   long first one; the replica refreshes the claims of **queued** proposals on every lease renew
   (10 s), so a live replica's queue is never mistaken for a dead one.
+- **Only a proposal approved in full is claimed** (#638; the rule the code enforces once #638 merges):
+  - "approved in full" means every entry of `required_layers` has an `approvals` row with
+    `decision = 'approved'`, whatever the grant (owner, backup, solo, fallback, sole-member driver, policy);
+  - a row whose `required_layers` is not a non-empty JSON array (empty, JSON `null`, or any other non-array value)
+    is never approved, so it is never claimed and never runs; this holds for the claim and for the unclaimed-stale
+    sweep alike: both use the same rule (`fullyApprovedSQL`);
+  - a rejection or a cancel blocks the claim for good: neither is undone, so the proposal never qualifies again;
+  - the claim `UPDATE` enforces this itself, not only its caller, so a caller bug or a race cannot queue a
+    proposal that is not approved in full;
+  - the room re-checks the same rule before the claim and before every step (`recheckStep`, after the claim
+    refresh and the step start); a step that fails it is not run and records `action.executed {ok: false}` with
+    output `not approved by every required layer`;
+  - hash freshness (`params_hash`) is not part of the claim, because `recheckStep` checks it before every step
+    (output `params hash mismatch`; `docs/design/auth.md` §3.2).
 - Every write of the executor is conditional on the claim (`claimed_by = $me AND status = 'open'`):
   - the claim refresh before each step (no row: the claim was declared dead, the step does not run);
   - the per-step start (`proposal_steps` insert happens only while the claim holds; the existing

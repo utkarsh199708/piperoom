@@ -21,8 +21,21 @@ import (
 const maxConnFileBytes = 64 << 10
 
 // connFields maps each connections: key (owners.ConnectionKeys) to the field
-// of config.Config it fills. A test keeps the two lists equal.
+// of config.Config it fills. A test keeps every owners key mapped here; the
+// Airflow and dbt keys of a batch pipeline (P4b-1) are mapped first and A3's
+// owners follow-up adds them to owners.connKeys, after which the test asks for
+// the two lists to be equal again.
 var connFields = map[string]func(*config.Config) *string{
+	"airflow_url":          func(c *config.Config) *string { return &c.AirflowURL },
+	"airflow_username":     func(c *config.Config) *string { return &c.AirflowUsername },
+	"airflow_password":     func(c *config.Config) *string { return &c.AirflowPassword },
+	"airflow_token":        func(c *config.Config) *string { return &c.AirflowToken },
+	"dbt_artifacts_dir":    func(c *config.Config) *string { return &c.DBTArtifactsDir },
+	"dbt_cloud_url":        func(c *config.Config) *string { return &c.DBTCloudURL },
+	"dbt_cloud_token":      func(c *config.Config) *string { return &c.DBTCloudToken },
+	"dbt_cloud_account_id": func(c *config.Config) *string { return &c.DBTCloudAccount },
+	"dbt_cloud_job_id":     func(c *config.Config) *string { return &c.DBTCloudJobID },
+
 	"source_db_url":                 func(c *config.Config) *string { return &c.SourceDBURL },
 	"warehouse_db_url":              func(c *config.Config) *string { return &c.WarehouseDBURL },
 	"warehouse_kind":                func(c *config.Config) *string { return &c.WarehouseKind },

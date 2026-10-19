@@ -5,7 +5,7 @@ import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { Eye, Lock } from 'lucide-react'
 import type { RoomState, SuggestionState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
+import { canRequestControl, canSteer, canTakeControl, isViewer, roomPeopleCount } from '../state/permissions'
 import type { ConnState, RoomActions } from '../hooks/useRoom'
 import { useRetryId } from '../hooks/useRetryId'
 import { modKeyLabel } from '@/lib/envLabel'
@@ -214,11 +214,14 @@ export function SteerBox({
   actions,
   prefill,
   conn,
+  people,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
   conn?: ConnState
+  /** roomPeopleCount from RoomScreen (presence included); without it, the log's members plus you. */
+  people?: number
   /** Text to put in the field ("Ask the agent" on a checklist item); `n` makes the same text count again. */
   prefill?: { text: string; n: number }
 }) {
@@ -381,7 +384,7 @@ export function SteerBox({
 
   const noDriver = state.driver === null
   const take = !isDriver && canTakeControl(state, user)
-  const request = !isDriver && !take && canRequestControl(state, user)
+  const request = !isDriver && !take && canRequestControl(state, user, people ?? roomPeopleCount(state, [], user.id))
   const mod = modKeyLabel()
   const leaseIso = state.driver?.lease_until
   const left = minutesLeft(leaseIso, now)
@@ -474,6 +477,8 @@ export function SteerBox({
   // `status` is the plain text (a tooltip); `statusNode` is what is drawn, with the driver's server badge.
   let status: string
   let statusNode: ReactNode
+  // P2b: the server made the only person here the driver on join; nobody asked or granted.
+  const drivingText = state.driver?.reason === 'sole_member' ? 'You are the driver' : 'You are driving'
   if (isDriver) {
     status = signalled
       ? 'Your lease expired — you still drive until someone takes over'
@@ -482,8 +487,8 @@ export function SteerBox({
           ? `Lease ends in ${left}m — any action renews`
           : 'Lease ends in under a minute — any action renews'
         : leaseText
-          ? `You are driving · ${leaseText}`
-          : 'You are driving'
+          ? `${drivingText} · ${leaseText}`
+          : drivingText
     statusNode = <span className="min-w-0 truncate">{status}</span>
   } else if (noDriver) {
     status = 'No driver · your suggestion is queued for whoever takes control'

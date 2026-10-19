@@ -3,11 +3,11 @@ package evals
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -111,9 +111,9 @@ func TestConnectStatusDataDrivesResumeValidation(t *testing.T) {
 }
 
 // TestLiveActionsStatusIsReadOnly keeps the replayed Connect client honest:
-// resume reads the recorded status and never writes.
+// resume reads the recorded status, and its write is only recorded.
 func TestLiveActionsStatusIsReadOnly(t *testing.T) {
-	reg, err := LiveActions(Resources{Connectors: []string{"pg-orders-connector"}}, []Recording{{
+	reg, wl, err := liveActions(Resources{Connectors: []string{"pg-orders-connector"}}, []Recording{{
 		Tool: "connect_status", Input: map[string]any{"connector": "pg-orders-connector"},
 		Summary: "x", Data: map[string]any{"name": "pg-orders-connector", "state": "STOPPED", "tasks": nil},
 	}})
@@ -125,9 +125,15 @@ func TestLiveActionsStatusIsReadOnly(t *testing.T) {
 	if err := a.Validate(t.Context(), params); err != nil {
 		t.Fatalf("resume of a recorded STOPPED connector refused: %v", err)
 	}
-	_, err = a.Execute(context.Background(), params)
-	if !errors.Is(err, errWritesDisabled) {
-		t.Errorf("resume Execute err = %v, want the replay write refusal", err)
+	// The recorded status stays STOPPED, so Execute polls until its context
+	// ends; a short one keeps the test fast.
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := a.Execute(ctx, params); err != nil {
+		t.Errorf("resume Execute: %v", err)
+	}
+	if got := wl.snapshot(); len(got) != 1 || got[0].Method != "Resume" || got[0].Args["connector"] != "pg-orders-connector" {
+		t.Errorf("writes = %+v, want the one recorded Resume", got)
 	}
 }
 

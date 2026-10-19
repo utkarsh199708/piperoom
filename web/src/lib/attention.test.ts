@@ -31,6 +31,17 @@ describe('attentionItems', () => {
     expect(attentionItems(prev, next, arjun)[0].kind).toBe('proposal')
   })
 
+  it('a fallback-only layer is "approval needed" for the driver of an open room, not for others or a closed room', () => {
+    // Nobody owns "consumer": the driver (Arjun, who does not own it) decides it (P2b fallback_layers).
+    const p = { ...proposal(['consumer']), fallback_layers: ['consumer'] }
+    const next = { ...prev, proposals: [p] }
+    expect(attentionItems(prev, next, arjun)[0]).toMatchObject({ kind: 'approval_needed', layer: 'consumer', forMe: true })
+    expect(attentionItems(prev, next, meera)[0]).toMatchObject({ kind: 'proposal', forMe: false })
+    const closedPrev = { ...prev, status: 'closed' as const }
+    const closed = { ...closedPrev, proposals: [p] }
+    expect(attentionItems(closedPrev, closed, arjun)[0].kind).toBe('proposal')
+  })
+
   it('a known proposal does not notify twice', () => {
     const withP = { ...prev, proposals: [proposal(['warehouse'])] }
     expect(attentionItems(withP, { ...withP }, meera)).toEqual([])

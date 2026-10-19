@@ -5,13 +5,15 @@
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
+//	devctl alert <scenario> [--server URL] [--as user]   for breaks the watcher cannot see
 //	devctl demo [--fix] <scenario> | devctl demo --rehearse [scenario]
 //	devctl identities unbind <user>   move a user to a new IdP account
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
 //	devctl shadow up|down|status|env   Piperoom server in shadow mode (dev/shadow.md)
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
-// slot-inactive, consumer-lag, connector-auth.
+// slot-inactive, consumer-lag, connector-auth, and the P3 ones missed-table,
+// dead-slot, consumer-bad-deploy, dlq-backlog.
 // See dev/scenarios.md for what each one does and what it looks like.
 package main
 
@@ -38,6 +40,7 @@ const usage = `devctl — local pipeline control
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
+  devctl alert <scenario> [--server URL] [--as user]   post the scenario's alert to the dev webhook (missed-table, consumer-bad-deploy)
   devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
   devctl demo --rehearse    run the schema-change demo once against the server (reset, break, wait for room, reset)
   devctl lock --owner <tag> take the shared stack lock
@@ -47,6 +50,9 @@ const usage = `devctl — local pipeline control
   devctl rooms delete <id> --reason <text> --as <admin> [--archive]   erase one room through the running server (admin only; --archive keeps a copy)
   devctl shadow up|down|status|env   run the server in shadow mode on this stack (dev/shadow.md)
   devctl lock --steal       steal a stale (>15m) lock
+
+missed-table, dead-slot, consumer-bad-deploy and dlq-backlog need the server
+started with OWNERS_FILE=dev/owners.p3.yaml (dev/scenarios.md, P3 scenarios).
 
 up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
 (or PIPEROOM_STACK_OWNER) to match the current lock holder.
@@ -170,10 +176,17 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		if err := requireLock(owner); err != nil {
 			return err
 		}
+		if sc.owners != "" {
+			// The baseline owners file has neither the scenario's table nor its
+			// DLQ: a server on it opens no room and its actions refuse the fix.
+			st.log.Info("devctl: scenario "+rest[0]+" needs the server started with OWNERS_FILE="+sc.owners, "owners_file", sc.owners)
+		}
 		if cmd == "break" {
 			return sc.breakIt(ctx, st)
 		}
 		return sc.fix(ctx, st)
+	case "alert":
+		return alertCmd(ctx, st, args, os.Stdout)
 	case "demo":
 		return demoCmd(ctx, st, args)
 	case "identities":

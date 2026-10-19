@@ -1,0 +1,639 @@
+# C7 incident scenario (P3g-1): a bad consumer build dropped create events but committed
+# their offsets, so 30 new orders never reached the warehouse while lag reads 0. Format:
+# evals/README.md (C6). Built on `devctl break consumer-bad-deploy` (dev/scenarios.md §10,
+# PR #613).
+#
+# RECORDED: NO. Every summary and data payload below is the exact output of the real
+# kafkatools, dbtools and topology code from main, run by a throwaway generator (not
+# committed) over fake clients holding the state `devctl break consumer-bad-deploy` leaves on
+# the dev stack, scoped by dev/owners.p3.yaml. Clock: 2026-10-18T09:40:00Z. Nothing was read
+# from a running stack. The reconcile bucket labels (HH:MM) were relabelled from the
+# generator's wall clock to the fixed clock; every other byte is the tools'. See
+# evals/scenarios/README.md, "P3 scenarios (P3g-1)".
+#
+# First failing layer: consumer. Root-cause layer: consumer (the 08:52 deploy of order-sync).
+#
+# Expected fix (the label): kafka_reset_consumer_offsets {group: order-sync, topics:
+#   [pg.public.orders], to: timestamp, timestamp: a time at or before 2026-10-18T08:52:00Z}
+#   (consumer owner approves), or to: earliest (the load is an upsert by id, so a full replay
+#   is safe; `devctl fix consumer-bad-deploy` does that). The group is Empty with 0 members, so
+#   the action's Validate accepts it; then the good build starts and replays.
+#   Graded since P3g-2 (expect.fix, fix_targets; `to` is left free). The action's Validate
+#   reads the group from the kafka_consumer_lag recording (Empty, 0 members).
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - the
+#     source side is healthy; the topic holds all 30 orders.
+#   Forbidden: schema_register, schema_set_compatibility - no schema changed.
+#   Never suggest: starting the good build without a reset (it resumes after the committed
+#     offsets and never sees the 30 creates), or a reset to latest.
+#
+# Traps:
+#   - Lag is 0 and nothing errors: the bad build committed past what it skipped.
+#   - The group is Empty because on-call stopped devconsumer at 09:31, not because it crashed.
+#   - Updates loaded after the deploy, so only creates are missing; warehouse_freshness looks
+#     like a quiet dev stack, not an outage.
+#   - Only reconcile (sink lacks 30 rows the topic has: consumer side) and trace_record for a
+#     missing id (seen in Kafka, committed past by order-sync, not in the warehouse) show it.
+#
+# Sources:
+#   - cmd/devctl/scenarios_p3.go breakConsumerBadDeploy (#613): SKIP_OPS=c, 30 inserts, lag
+#     back to 0, none of the ids in analytics.orders, then `docker compose stop devconsumer`.
+#   - dev/scenarios.md §10: expected symptoms and the fix.
+#   - internal/actions/kafka_reset_offsets.go: the group must have no active members; every
+#     topic the group has offsets on must be listed.
+
+name: consumer-bad-deploy
+description: |
+  At 08:52 UTC order-sync was redeployed with a build that drops create events but still
+  commits their offsets (updates load). 30 orders inserted at 08:55 reached pg.public.orders,
+  were consumed and committed, and never reached analytics.orders; lag went back to 0. On-call
+  stopped the consumer at 09:31 when a reconciliation alert fired, so the group is Empty with
+  0 members. Connect, the slot and the topic are healthy.
+
+  Root cause: the 08:52 order-sync build skipped create events and committed offsets past
+  orders it never loaded.
+
+  Expected fix (label): kafka_reset_consumer_offsets for order-sync on pg.public.orders, to a
+  time at or before the 08:52 deploy (or earliest), then start the good build.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders, public.devctl_refunds]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+  watch:
+    dlq_topics:
+      - {topic: devctl.order-sync.dlq, written_by: order-sync}
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+# `devctl alert consumer-bad-deploy` posts this reconciliation alert; its description's facts
+# (and a sample id a real reconciliation payload carries) are in the title, since
+# agent.Alert.Raw never reaches the model (evals/README.md).
+alert:
+  title: 'orders: new orders missing from analytics.orders (reconciliation: 30 orders created since 08:52Z are in the source and in pg.public.orders but not in the warehouse, e.g. id 1388; order-sync was redeployed at 08:52Z and stopped at 09:31Z)'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB wal_status=reserved
+    2 pg:public.devctl_refunds [postgres, owner priya] UNKNOWN slot=unknown
+    3 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=30m ago
+      from: connect:pg-orders-connector
+    5 group:order-sync [consumer, owner kabir] WARN lag=0 state=Empty
+      from: topic:pg.public.orders
+    6 dlq:devctl.order-sync.dlq [consumer, owner kabir] OK exists=false records=0 writer=order-sync
+      from: group:order-sync
+    7 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=30m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB wal_status=reserved
+      2 pg:public.devctl_refunds [postgres, owner priya] UNKNOWN slot=unknown
+      3 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=30m ago
+        from: connect:pg-orders-connector
+      5 group:order-sync [consumer, owner kabir] WARN lag=0 state=Empty
+        from: topic:pg.public.orders
+      6 dlq:devctl.order-sync.dlq [consumer, owner kabir] OK exists=false records=0 writer=order-sync
+        from: group:order-sync
+      7 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=30m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+        - from: group:order-sync
+          to: dlq:devctl.order-sync.dlq
+      nodes:
+        - facts:
+            slot_active: "true"
+            slot_retained: 1.1 MiB
+            wal_status: reserved
+          health: ok
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - facts:
+            slot: unknown
+          health: unknown
+          id: pg:public.devctl_refunds
+          kind: source_table
+          layer: postgres
+          name: public.devctl_refunds
+          owner: priya
+        - health: ok
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 30m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            exists: "false"
+            records: "0"
+            writer: order-sync
+          health: ok
+          id: dlq:devctl.order-sync.dlq
+          kind: dlq_topic
+          layer: consumer
+          name: devctl.order-sync.dlq
+          owner: kabir
+        - facts:
+            lag: "0"
+            state: Empty
+          health: warn
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 30m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 1
+      subject: pg.public.orders-key
+      versions:
+        - 1
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1426 (1426 records), newest 30 min ago
+      partition 1: 0–1414 (1414 records), newest 30 min ago
+      partition 2: 0–1401 (1401 records), newest 30 min ago
+    data:
+      partitions:
+        - end: 1426
+          last_timestamp: "2026-10-18T09:09:09Z"
+          partition: 0
+          start: 0
+        - end: 1414
+          last_timestamp: "2026-10-18T09:09:09Z"
+          partition: 1
+          start: 0
+        - end: 1401
+          last_timestamp: "2026-10-18T09:09:09Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4241
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders, table: public.orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=1, 3 partitions, replication factor 1
+    data:
+      cleanup_policy: delete
+      min_insync_replicas: "1"
+      partitions: 3
+      replication_factor: 1
+      retention_bytes: "-1"
+      retention_ms: "604800000"
+      topic: pg.public.orders
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.devctl_refunds}
+    error: 'kafka: topic pg.public.devctl_refunds: not found'
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders, table: public.devctl_refunds}
+    error: 'kafkatools: kafka_topic_config pg.public.devctl_refunds: kafka: describe topic configs pg.public.devctl_refunds: not found'
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Empty
+    data:
+      - group: order-sync
+        state: Empty
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Empty, 0 members, total lag 0
+        pg.public.orders/0: committed 1426, end 1426, lag 0
+        pg.public.orders/1: committed 1414, end 1414, lag 0
+        pg.public.orders/2: committed 1401, end 1401, lag 0
+    data:
+      group: order-sync
+      members: 0
+      state: Empty
+      total_lag: 0
+      worst_partitions:
+        - committed: 1426
+          end: 1426
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1414
+          end: 1414
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1401
+          end: 1401
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=1.1 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 3B/4C0BB078
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3B/4C0BAE80
+        retained_wal_bytes: 1146880
+        wal_status: reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-17T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-17T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.devctl_refunds}
+    summary: |
+      (no DDL since 2026-10-17T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+      public.devctl_refunds: in_publication=no, selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      publication: dbz_publication
+      publication_source: default
+      publication_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+      source_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+        - in_publication: false
+          schema: public
+          selectable: true
+          table: devctl_refunds
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-18T09:09:10Z (stale for 30m)
+    data:
+      newest: "2026-10-18T09:09:10Z"
+      stale_for: 30m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: pg_row
+    input: {key: "1388", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-18T08:55:10.041Z, columns=[amount, customer_id, id=1388, status, updated_at=2026-10-18T08:55:10.041Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1388"
+      status: null
+      updated_at: "2026-10-18T08:55:10.041Z"
+  - tool: warehouse_row
+    input: {key: "1388", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: kafka_find_by_key
+    input: {key: "1388", topic: pg.public.orders}
+    summary: |-
+      found 1 record(s) with key "1388"
+        partition 2, offset 1391, 2026-10-18T08:55:10Z
+    data:
+      found: true
+      key: "1388"
+      records:
+        - key: "1388"
+          offset: 1391
+          partition: 2
+          timestamp: "2026-10-18T08:55:10.212Z"
+          topic: pg.public.orders
+      topic: pg.public.orders
+      truncated: false
+  - tool: trace_record
+    input: {key: "1388", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-18T08:55:10.041Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=1391 partition=2
+      consumer order-sync: seen committed=1401
+      warehouse analytics.orders: stopped_here
+      stopped at: warehouse analytics.orders
+    data:
+      - facts:
+          updated_at: "2026-10-18T08:55:10.041Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: seen
+      - facts:
+          offset: "1391"
+          partition: "2"
+        layer: kafka
+        name: pg.public.orders
+        status: seen
+      - facts:
+          committed: "1401"
+        layer: consumer
+        name: order-sync
+        status: seen
+      - layer: warehouse
+        name: analytics.orders
+        status: stopped_here
+  - tool: reconcile
+    input: {table: public.orders}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 8m0s from 2026-10-18T08:10:00Z
+      bucket | source | topic | sink | sink−source
+      08:10 | 0 | 0 | 0 | +0
+      08:18 | 0 | 0 | 0 | +0
+      08:26 | 0 | 0 | 0 | +0
+      08:34 | 0 | 0 | 0 | +0
+      08:42 | 0 | 0 | 0 | +0
+      08:50 | 30 | 30 | 0 | -30
+      08:58 | 22 | 22 | 22 | +0
+      09:06 | 19 | 19 | 19 | +0
+      09:14 | 0 | 0 | 0 | +0
+      09:22 | 0 | 0 | 0 | +0
+      09:30 | 0 | 0 | 0 | +0
+      09:38 | 0 | 0 | 0 | +0
+      verdict: sink is missing 30 rows in 08:50–08:58; topic has them (consumer side)
+      note: rows newer than 2026-10-18T09:38:00.035678987Z (the last 2m0s) are in flight and not judged
+    data:
+      - bucket: "2026-10-18T08:10:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T08:18:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T08:26:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T08:34:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T08:42:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T08:50:00Z"
+        sink: 0
+        source: 30
+        topic: 30
+      - bucket: "2026-10-18T08:58:00Z"
+        sink: 22
+        source: 22
+        topic: 22
+      - bucket: "2026-10-18T09:06:00Z"
+        sink: 19
+        source: 19
+        topic: 19
+      - bucket: "2026-10-18T09:14:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T09:22:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T09:30:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+      - bucket: "2026-10-18T09:38:00Z"
+        sink: 0
+        source: 0
+        topic: 0
+  - tool: dlq_peek
+    input: {topic: devctl.order-sync.dlq}
+    summary: |-
+      devctl.order-sync.dlq (DLQ of order-sync) does not exist (a declared consumer DLQ is created when the application first needs it)
+    data:
+      declared: true
+      exists: false
+      header_mode: classes
+      other_writers: 0
+      partitions: 0
+      records: 0
+      sampled: 0
+      topic: devctl.order-sync.dlq
+      writer: order-sync
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: connect_status
+    error: 'out of scope: connector "orders-connector" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: connect_config
+    error: 'out of scope: connector "orders-connector" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: schema_registry_versions
+    error: 'out of scope: subject "orders-value" is not part of this room''s pipeline "orders" (allowed subjects: pg.public.orders-key, pg.public.orders-value, pg.public.devctl_refunds-key, pg.public.devctl_refunds-value)'
+  - tool: schema_registry_diff
+    error: 'out of scope: subject "orders-value" is not part of this room''s pipeline "orders" (allowed subjects: pg.public.orders-key, pg.public.orders-value, pg.public.devctl_refunds-key, pg.public.devctl_refunds-value)'
+  - tool: kafka_topic_offsets
+    error: 'out of scope: topic "orders.events" is not part of this room''s pipeline "orders" (allowed topics: pg.public.orders, pg.public.devctl_refunds)'
+  - tool: kafka_consumer_lag
+    error: 'out of scope: consumer group "orders-consumer" is not part of this room''s pipeline "orders" (allowed consumer groups: order-sync)'
+  - tool: kafka_find_by_key
+    summary: |-
+      not found: no record with key "1" since 2026-10-18T09:30:00Z
+    data:
+      found: false
+      key: "1"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: pg_row
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - layer: postgres
+        name: public.orders
+        status: not_seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+
+inputs:
+  - kind: comment
+    from: kabir
+    text: "order-sync 2.14.0 went out at 08:52Z and we stopped it at 09:31Z. 2.13.4 is ready to start again. The warehouse load is an upsert by id."
+  - kind: steer
+    text: "The consumer stays stopped until we agree. Propose what gets the missing orders into the warehouse."
+
+expect:
+  root_cause:
+    - [deploy*, redeploy*, build, release, version, 2.14.0]
+    - [commit*, offset*]
+  # Wrong stories: a crash, a poison record or retention. Assertive phrases only.
+  root_cause_forbidden:
+    - ['poison pill']
+    - ['retention deleted']
+    - ['task failed']
+    - ['consumer crashed']
+  first_failing_layer: consumer
+  root_cause_layer: consumer
+  expected_facts:
+    - id: f_group_empty
+      tool: kafka_consumer_lag
+      match: [empty, 0 members, total lag 0]
+      required: true
+    - id: f_sink_missing
+      tool: reconcile
+      match: [sink is missing 30 rows, consumer side]
+    - id: f_trace_committed
+      tool: trace_record
+      match: [consumer order sync seen committed, stopped at warehouse]
+  claims:
+    - about: root_cause
+      facts: [f_sink_missing, f_trace_committed]
+  evidence_tools: [kafka_consumer_lag]
+  fix: [[kafka_reset_consumer_offsets]]
+  fix_targets:
+    kafka_reset_consumer_offsets: {group: order-sync, topics: [pg.public.orders]}
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
+  max_tool_calls: 14

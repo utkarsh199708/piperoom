@@ -19,15 +19,31 @@ const pgSourceClass = "io.debezium.connector.postgresql.PostgresConnector"
 // plainTable is a schema.table include entry with no regex metacharacters.
 var plainTable = regexp.MustCompile(`^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$`)
 
+// sinkTable is a warehouse table name as written in a sink connector's
+// table.name.format: exactly schema.table of plain identifiers, so a
+// "${topic}" template, a bare table name (schema unknown) or hostile text is
+// never taken as a name. A plain-identifier match also keeps the name safe to
+// print in a comment.
+var sinkTable = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$`)
+
+// sink is what discovery keeps of a sink connector: the topics it reads and,
+// when its config names one literally, the table it writes. Only these two
+// non-secret keys are read.
+type sink struct {
+	topics []string
+	table  string // "" = not found
+}
+
 // draft is a pipeline under construction, before IDs are assigned.
 type draft struct {
-	connector string
-	prefix    string
-	slot      string
-	tables    []string
-	topics    map[string]bool
-	groups    []string
-	notes     []string
+	connector  string
+	prefix     string
+	slot       string
+	tables     []string
+	topics     map[string]bool
+	groups     []string
+	sinkTables []string
+	notes      []string
 }
 
 func (d *draft) note(format string, args ...any) {
@@ -84,14 +100,14 @@ func Discover(ctx context.Context, d Deps, o Options) (Result, error) {
 	}
 
 	var drafts []*draft
-	sinkTopics := map[string][]string{} // sink connector -> topics it reads
+	sinks := map[string]sink{} // sink connector -> what it reads and writes
 	for _, name := range sortedUnique(names) {
-		dr, sink := r.connector(name, topics)
+		dr, sk := r.connector(name, topics)
 		if dr != nil {
 			drafts = append(drafts, dr)
 		}
-		if len(sink) > 0 {
-			sinkTopics[name] = sink
+		if len(sk.topics) > 0 {
+			sinks[name] = sk
 		}
 	}
 	r.warnSharedPrefixes(drafts)
@@ -100,7 +116,7 @@ func Discover(ctx context.Context, d Deps, o Options) (Result, error) {
 		r.checkSubjects(drafts)
 		r.matchGroups(drafts)
 		r.checkSlots(drafts)
-		noteSinks(drafts, sinkTopics)
+		noteSinks(drafts, sinks)
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, fmt.Errorf("discover: %w", err)
@@ -117,18 +133,18 @@ func (r *runner) skip(name, reason string) {
 }
 
 // connector reads one connector's config. It returns a draft for a Debezium
-// Postgres source, or the topics a sink connector reads (only the non-secret
-// "topics" key is looked at).
-func (r *runner) connector(name string, topics map[string]bool) (*draft, []string) {
+// Postgres source, or what a sink connector reads and writes (only the
+// non-secret "topics" and "table.name.format" keys are looked at).
+func (r *runner) connector(name string, topics map[string]bool) (*draft, sink) {
 	cfg, err := call(r, func(ctx context.Context) (map[string]string, error) { return r.d.Connect.Config(ctx, name) })
 	switch {
 	case errors.Is(err, clients.ErrNotFound):
 		r.skip(name, "deleted during discovery")
-		return nil, nil
+		return nil, sink{}
 	case err != nil:
 		r.o.Logger.Warn("discover: connector config read failed", "connector", name, "err", err)
 		r.skip(name, "config read failed")
-		return nil, nil
+		return nil, sink{}
 	}
 	class := cfg["connector.class"]
 	if class != pgSourceClass {
@@ -137,7 +153,11 @@ func (r *runner) connector(name string, topics map[string]bool) (*draft, []strin
 		} else {
 			r.skip(name, fmt.Sprintf("not a Debezium Postgres source (class %s)", class))
 		}
-		return nil, splitList(cfg["topics"])
+		sk := sink{topics: splitList(cfg["topics"])}
+		if t := strings.TrimSpace(cfg["table.name.format"]); sinkTable.MatchString(t) {
+			sk.table = t
+		}
+		return nil, sk
 	}
 
 	dr := &draft{connector: name, topics: map[string]bool{}, slot: cmp.Or(cfg["slot.name"], "debezium")}
@@ -146,7 +166,7 @@ func (r *runner) connector(name string, topics map[string]bool) (*draft, []strin
 		dr.prefix = cfg["database.server.name"]
 		if dr.prefix == "" {
 			r.skip(name, "no topic.prefix or database.server.name")
-			return nil, nil
+			return nil, sink{}
 		}
 		dr.note("topic prefix taken from database.server.name (Debezium 1.x key)")
 	}
@@ -180,7 +200,7 @@ func (r *runner) connector(name string, topics map[string]bool) (*draft, []strin
 	if len(custom) > 0 {
 		dr.note("custom topic naming (%s): check topic names by hand", strings.Join(custom, ", "))
 	}
-	return dr, nil
+	return dr, sink{}
 }
 
 // derivedTables returns the schema.table names of the prefix's topics. The
@@ -384,13 +404,18 @@ func (r *runner) checkSlots(drafts []*draft) {
 
 // noteSinks flags sink connectors that read a pipeline topic. owners
 // "connectors" is the CheckScope list for connect_restart_*, so a human
-// decides whether to add them.
-func noteSinks(drafts []*draft, sinkTopics map[string][]string) {
-	for _, sink := range sortedKeys(sinkTopics) {
-		for _, t := range sinkTopics[sink] {
+// decides whether to add them. A sink that names its table literally also
+// gives the pipeline a found sink table.
+func noteSinks(drafts []*draft, sinks map[string]sink) {
+	for _, name := range sortedKeys(sinks) {
+		for _, t := range sinks[name].topics {
 			for _, dr := range drafts {
-				if dr.topics[t] {
-					dr.note("sink connector %s reads %s: add it to connectors if connect_restart_* should cover it", sink, t)
+				if !dr.topics[t] {
+					continue
+				}
+				dr.note("sink connector %s reads %s: add it to connectors if connect_restart_* should cover it", name, t)
+				if tbl := sinks[name].table; tbl != "" {
+					dr.sinkTables = append(dr.sinkTables, tbl)
 				}
 			}
 		}
@@ -427,7 +452,9 @@ func assignIDs(drafts []*draft) []Pipeline {
 			Connector:      dr.connector,
 			TopicPrefix:    dr.prefix,
 			SourceTables:   sortedUnique(dr.tables),
+			Topics:         sortedKeys(dr.topics),
 			ConsumerGroups: sortedUnique(dr.groups),
+			SinkTables:     sortedUnique(dr.sinkTables),
 			Notes:          sortedUnique(dr.notes),
 		})
 	}

@@ -7,12 +7,16 @@
 // methods that read. A read-only tool (tools.KindRead), the topology builder,
 // the watcher and discovery take Readers only, so the compiler keeps writes
 // out of them. A type assertion from a Reader to a Writer or a *Client in such
-// a package defeats this and fails review. Writers exist only for Kafka
-// Connect and Schema Registry, and only package actions (and wiring, which
-// builds them) may hold one. The full *Client
-// interfaces are Reader + Writer, so one concrete client implements both.
-// KafkaAdmin, SourceDB and Warehouse have no write methods: their Reader is
-// the same method set under the name tools should use.
+// a package defeats this and fails review. Writers exist for Kafka Connect,
+// Schema Registry and, from the P wave, Kafka (KafkaWriter) and the source
+// Postgres (SourceWriter); only package actions (and wiring, which builds
+// them, and only when PIPEROOM_WRITE_MODE is on) may hold one. The full
+// *Client interfaces are Reader + Writer, so one concrete client implements
+// both. KafkaAdmin, SourceDB and Warehouse have no write methods: their
+// Reader is the same method set under the name tools should use, and the P
+// wave writers (ConnectFixWriter, KafkaWriter, SourceWriter) are separate
+// interfaces, not embedded in the *Client ones, so fakes and the eval replay
+// need not implement them.
 //
 // CONTRACT FILE — owned by the reviewer. Do not edit; request changes in your PR.
 package clients
@@ -40,11 +44,26 @@ type ConnectReader interface {
 }
 
 // ConnectWriter is the write half: used only by actions after approval.
-// (Resume and UpdateConfig are still optional adapter interfaces in package
-// actions until a contract change request moves them here.)
+// (Resume and the one-key UpdateConfig are still optional adapter interfaces
+// in package actions; the P3 writes are ConnectFixWriter below.)
 type ConnectWriter interface {
 	RestartTask(ctx context.Context, name string, task int) error
 	RestartConnector(ctx context.Context, name string) error
+}
+
+// ConnectFixWriter is the P3 part of the Kafka Connect write half (P0 item 7):
+// implemented by internal/clients/connect (P3a-1) and asserted by the actions
+// at use time, so the existing ConnectClient fakes need not grow. Only
+// package actions may hold one. A later contract change may fold it into
+// ConnectWriter once every fake has the methods.
+type ConnectFixWriter interface {
+	// PauseConnector pauses the connector and its tasks
+	// (PUT /connectors/{name}/pause); connect_resume_connector undoes it.
+	PauseConnector(ctx context.Context, name string) error
+	// UpdateConnectorConfigKeys changes every key of changes in one request
+	// (PATCH /connectors/{name}/config) and leaves the other keys as they
+	// are. The action has refused secret-looking keys and values before.
+	UpdateConnectorConfigKeys(ctx context.Context, name string, changes map[string]string) error
 }
 
 // ConnectClient is the whole Kafka Connect client.
@@ -235,6 +254,123 @@ type DLQReader interface {
 	PeekDLQ(ctx context.Context, topic string, limit int) ([]DLQRecord, error)
 }
 
+// ---- Kafka: writes and whole records (actions only, P3) ----
+//
+// Not embedded in KafkaAdmin: a read-only tool, the topology builder, the
+// watcher and discovery can never reach them through a KafkaReader, and fakes
+// and the eval replay need not implement them. Every write method requires the
+// room's pipeline scope in ctx (tools.WithPipeline) and refuses a target
+// outside it before any I/O (tools.ErrOutOfScope); without a scope it refuses
+// with tools.ErrNoScope unless the caller opted out with tools.WithUnscoped
+// (tests, CLI). Read helpers on the same type are scoped by the action's
+// CheckScope instead.
+
+// ErrGroupActive is returned (wrapped) by ResetGroupOffsets when the group
+// has active members: committed offsets of a live group are overwritten by
+// its next commit, so a reset would silently not happen.
+var ErrGroupActive = errors.New("clients: consumer group has active members")
+
+// OffsetTarget is where ResetGroupOffsets moves a group. Exactly one of
+// Earliest and Timestamp is set; the action refuses both, neither, and a
+// Timestamp in the future.
+type OffsetTarget struct {
+	Earliest  bool      `json:"earliest,omitempty"`
+	Timestamp time.Time `json:"timestamp,omitzero"` // first offset at or after this time
+}
+
+// RecordHeader is one Kafka record header.
+type RecordHeader struct {
+	Key   string `json:"key"`
+	Value []byte `json:"value"`
+}
+
+// Record is one whole Kafka record: key, value and headers included. Unlike
+// DLQRecord it carries record bytes, so only package actions may hold one, and
+// never put one into a log line, an event, a summary or tool Data
+// (docs/pilot/data-handling.md). Produce ignores Topic, Partition, Offset and
+// Timestamp: the topic argument wins, the producer's partitioner places each
+// record by key as the original producer did, and the record gets the produce
+// time, so a replayed record is not dropped at once by time-based retention.
+type Record struct {
+	Topic     string         `json:"topic"`
+	Partition int32          `json:"partition"`
+	Offset    int64          `json:"offset"`
+	Timestamp time.Time      `json:"timestamp"`
+	Key       []byte         `json:"key"`
+	Value     []byte         `json:"value"`
+	Headers   []RecordHeader `json:"headers,omitempty"`
+}
+
+// KafkaWriter is implemented by the Kafka client (internal/clients/kafka,
+// P3a-2); wiring hands it to the actions only when write mode is on.
+type KafkaWriter interface {
+	// ResetGroupOffsets moves every partition of the group's committed topics to
+	// the target; the group must have no active members (ErrGroupActive).
+	ResetGroupOffsets(ctx context.Context, group string, to OffsetTarget) (moved int, err error)
+	// Produce writes records to topic in order and returns how many were acked.
+	// It stops at the first record that is not acked.
+	Produce(ctx context.Context, topic string, recs []Record) (acked int, err error)
+}
+
+// GroupResetPlanner is implemented by the Kafka write client; an action's
+// Validate and Preview hold it (never the writer) to refuse an active group
+// and to show per-partition moves before anything is committed. Read-only.
+// Optional: asserted at use time, like RecordReader; a nil or absent planner
+// makes the action refuse at Validate. The Kafka client satisfies it from
+// P3a-3, when its own OffsetMove becomes an alias of the type below; until
+// then the assertion is false and the action refuses.
+type GroupResetPlanner interface {
+	CheckGroupInactive(ctx context.Context, group string) error
+	PlanGroupReset(ctx context.Context, group string, to OffsetTarget) ([]OffsetMove, error)
+}
+
+// OffsetMove is one partition's planned move for a group reset.
+type OffsetMove struct {
+	Topic     string `json:"topic"`
+	Partition int32  `json:"partition"`
+	Committed int64  `json:"committed"` // the group's committed offset before the reset; -1 when nothing was committed
+	Target    int64  `json:"target"`    // the offset the reset commits
+	End       int64  `json:"end"`       // the high watermark at planning time; End-Target is the lag the reset leaves
+}
+
+// SnapshotSignaler sends one Debezium incremental-snapshot signal to the
+// connector's Kafka signal topic (signal.kafka.topic). It builds the record
+// itself, so it can only ever request an execute-snapshot of tables: key = the
+// connector's topic.prefix, value {"type":"execute-snapshot","data":
+// {"data-collections":[..],"type":"INCREMENTAL"}}, partition 0 of a
+// single-partition topic. It is a write method: it requires the room's
+// pipeline scope in ctx (connector in connectors, every table in
+// source_tables, key equal to topic_prefix) and refuses before any I/O
+// otherwise, as KafkaWriter does. Implemented by the Kafka write client
+// (internal/clients/kafka, #620); optional, asserted by connect_snapshot_table,
+// so fakes and the eval replay need not implement it. KafkaWriter.Produce is not
+// used for signals: its scope allows CDC topics only. The Kafka client's own
+// type becomes an alias of SnapshotSignal (A2 follow-up), as with OffsetMove.
+type SnapshotSignaler interface {
+	SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (SnapshotSignal, error)
+}
+
+// SnapshotSignal is the record SendSnapshotSignal produced. ID is the signal id
+// Debezium logs for it (the record offset).
+type SnapshotSignal struct {
+	ID        string `json:"id"`
+	Topic     string `json:"topic"`
+	Partition int32  `json:"partition"`
+	Offset    int64  `json:"offset"`
+}
+
+// RecordReader reads whole records for dlq_replay (P3a): at most limit
+// records of one partition of topic from offset from, in offset order (fewer
+// when the partition ends first or 32 MiB were read). It changes nothing, so
+// an action's Preview may call it, but it returns keys and values: only
+// package actions may assert it on a Kafka client, never a read-only tool,
+// the topology builder or the watcher (that is what DLQReader's key-free
+// DLQRecord is for).
+// Optional, asserted at use time; implemented with KafkaWriter (P3a-2).
+type RecordReader interface {
+	ReadRecords(ctx context.Context, topic string, partition int32, from int64, limit int) ([]Record, error)
+}
+
 // ---- Kafka: cluster and partition reads (optional on a KafkaAdmin, F12) ----
 //
 // Asserted at use time like DLQReader. These interfaces are not embedded in
@@ -334,6 +470,86 @@ type SourceDB interface {
 	SourceReader
 }
 
+// ErrSlotActive is returned (wrapped) by DropReplicationSlot when the slot
+// is active: dropping the slot of a running connector loses its position.
+var ErrSlotActive = errors.New("clients: replication slot is active")
+
+// ErrAlreadyPublished is returned (wrapped) by SourceWriter.AddPublicationTables
+// when a table is already in the publication or the publication is FOR ALL
+// TABLES; nothing is changed. The postgres client returns it from P3b-2;
+// until then errors.Is against this sentinel is false for the writer's
+// errors, so no action or fake branches on it before that lands.
+var ErrAlreadyPublished = errors.New("clients: table is already in the publication")
+
+// SourceWriter is implemented by the source Postgres client when write mode is
+// on (P3b): a separate pool on SOURCE_DB_WRITE_URL with its own role, never
+// the read-only SourceDB pool. No SOURCE_DB_WRITE_URL = no SourceWriter. Not
+// embedded in SourceDB. Identifiers are checked against
+// ^[a-zA-Z_][a-zA-Z0-9_]*$ and quoted with pgx.Identifier.Sanitize; no
+// statement is built from untrusted text. Every write method requires the
+// room's pipeline scope in ctx (tools.WithPipeline) and refuses a target
+// outside it before any I/O (tools.ErrOutOfScope); without a scope it refuses
+// with tools.ErrNoScope unless the caller opted out with tools.WithUnscoped
+// (tests, CLI). Read helpers on the same type are scoped by the action's
+// CheckScope instead.
+type SourceWriter interface {
+	// AddPublicationTables runs ALTER PUBLICATION … ADD TABLE for each of
+	// tables ("schema.table").
+	AddPublicationTables(ctx context.Context, publication string, tables []string) error
+	// DropReplicationSlot drops an inactive slot (ErrSlotActive otherwise).
+	DropReplicationSlot(ctx context.Context, slot string) error
+	// InsertSnapshotSignal inserts one Debezium execute-snapshot row (id, type,
+	// data) asking for an incremental snapshot of tables into signalTable (the
+	// connector's signal.data.collection, "schema.table") and returns the row
+	// id. connectorID names the connector the signal is for.
+	InsertSnapshotSignal(ctx context.Context, signalTable, connectorID string, tables []string) (signalID string, err error)
+}
+
+// SetupSourceWriter holds the writes only a setup makes on the source
+// database (docs/design/setup-agent.md §4 item 4): built only with write
+// mode on, on the write pool (SOURCE_DB_WRITE_URL for Postgres), never the
+// read-only SourceDB pool; not embedded in SourceDB or SourceWriter, so no
+// existing fake implements it. Postgres implements it in U1-9 (A3), MySQL in
+// U2a (A8), the other sources in A10's clients; a source with no equivalent
+// of a method returns ErrNotSupported from it. The fail-closed scope rule of
+// SourceWriter applies to every method (the room's pipeline scope in ctx,
+// tools.ErrOutOfScope / tools.ErrNoScope before any I/O), and identifiers
+// follow the same ^[a-zA-Z_][a-zA-Z0-9_]*$ plus Sanitize rule. In a setup
+// room the implementation is internal/setup/remoteclients (A9), one T2 or T3
+// op to the runner per call. No method deletes data or reads a secret. (U)
+type SetupSourceWriter interface {
+	// CreatePublication creates publication name FOR TABLE tables
+	// ("schema.table"); an existing publication of that name is an error,
+	// never altered (AddPublicationTables does that).
+	CreatePublication(ctx context.Context, name string, tables []string) error
+	// CreateCanaryTable creates the ladder's canary table ("schema.table":
+	// an id, a nonce column and a timestamp) with the replica identity the
+	// connector needs; it exists afterwards whether or not it did before.
+	CreateCanaryTable(ctx context.Context, table string) error
+	// InsertCanary inserts one row with nonce (16 random bytes, hex, from
+	// the ladder runner, never from the model) into the canary table, so the
+	// ladder can find the change event by key.
+	InsertCanary(ctx context.Context, table, nonce string) error
+	// CreateReadRole creates role with the grants of docs/pilot/permissions.md
+	// on tables (SELECT, and the replication-slot reads the watcher needs)
+	// and a password the implementation generates and stores in the runner's
+	// secret store; it returns only that store's name. The password is in no
+	// return value, log, event or prompt; it reaches the server only through
+	// the runner's Credentials frame after the person's click and terminal
+	// confirmation (design §3.7). An existing role is an error, never
+	// re-passworded.
+	CreateReadRole(ctx context.Context, role string, tables []string) (secretName string, err error)
+	// AlterSystem sets one server setting (ALTER SYSTEM SET name = value, or
+	// the source's equivalent) and reports whether the change needs a restart
+	// to take effect (pg_settings.pending_restart). name must be in the
+	// setup allow-list of design §2.5 (wal_level, max_replication_slots,
+	// max_wal_senders, max_slot_wal_keep_size, wal_sender_timeout, and the
+	// source's equivalents); any other name is refused before any I/O. It is
+	// a T3 op: the room service creates and executes it only inside a
+	// maintenance window.
+	AlterSystem(ctx context.Context, name, value string) (pendingRestart bool, err error)
+}
+
 type ReplicationSlot struct {
 	Name              string `json:"name"`
 	Plugin            string `json:"plugin"`
@@ -422,6 +638,114 @@ type MinuteCount struct {
 // (optional on a SourceDB and a Warehouse). Counts only, never values.
 type CountReader interface {
 	CountByBucket(ctx context.Context, table, tsColumn string, since, until time.Time, width time.Duration) ([]MinuteCount, error)
+}
+
+// ---- Batch pipelines: orchestrator and transform (P4) ----
+//
+// Optional readers, like ClusterReader: wiring holds nil when the system is
+// not configured (AIRFLOW_URL, DBT_ARTIFACTS_DIR / DBT_CLOUD_URL), and a tool
+// with a nil reader answers ErrNotSupported. Read-only by construction: there
+// is no batch writer in this wave. Every text field below that the system
+// wrote (notes, messages, log text) is untrusted: a tool wraps, redacts and
+// scans it like every other read before it reaches a summary or the model.
+
+// DAGRun is one run of an orchestrator DAG (Airflow dagRun). Note is the
+// run's free-text note, written by whoever triggered or annotated the run:
+// untrusted text.
+type DAGRun struct {
+	ID          string    `json:"id"`             // the run id (Airflow dag_run_id)
+	State       string    `json:"state"`          // as the orchestrator reports it: queued | running | success | failed
+	StartedAt   time.Time `json:"started_at"`     // zero while queued
+	EndedAt     time.Time `json:"ended_at"`       // zero while not finished
+	Note        string    `json:"note,omitempty"` // untrusted text
+	LogicalDate time.Time `json:"logical_date"`   // the data interval the run is for (dag_schedule_gap, late-batch, backfill-overlap)
+	RunType     string    `json:"run_type"`       // scheduled | manual | backfill | dataset_triggered
+}
+
+// TaskInstance is one try of one task in a DAG run.
+type TaskInstance struct {
+	TaskID    string    `json:"task_id"`
+	Try       int       `json:"try"`   // Airflow try_number as reported; 0 when the task never ran (e.g. upstream_failed)
+	State     string    `json:"state"` // as reported: success | failed | up_for_retry | running | skipped | upstream_failed | …
+	StartedAt time.Time `json:"started_at"`
+	EndedAt   time.Time `json:"ended_at"`
+	Operator  string    `json:"operator"`  // e.g. "BashOperator"
+	MapIndex  int       `json:"map_index"` // -1 for an unmapped task; the index of a mapped (dynamic) task instance
+}
+
+// DAG is one orchestrator DAG's schedule state (Airflow GET /api/v1/dags/{dag_id}).
+type DAG struct {
+	ID        string    `json:"id"`
+	Schedule  string    `json:"schedule"`    // the schedule as the orchestrator shows it (cron, preset or timetable summary); "" when unscheduled
+	Paused    bool      `json:"paused"`      // a paused DAG schedules no runs
+	NextRunAt time.Time `json:"next_run_at"` // next scheduled run; zero when none
+}
+
+// DAGScheduleReader is optional next to OrchestratorReader, asserted at use
+// time like ClusterReader: without it (nil, or a client that cannot) the
+// dag_schedule_gap tool answers ErrNotSupported. An unknown DAG is
+// ErrNotFound.
+type DAGScheduleReader interface {
+	DAG(ctx context.Context, dagID string) (DAG, error)
+}
+
+// OrchestratorReader reads DAG runs, task instances and task logs (Airflow
+// REST API v1 in P4c). An unknown DAG, run or task is ErrNotFound.
+type OrchestratorReader interface {
+	// DAGRuns returns the newest runs of dagID first, at most limit.
+	DAGRuns(ctx context.Context, dagID string, limit int) ([]DAGRun, error)
+	// TaskInstances returns the task instances of one run.
+	TaskInstances(ctx context.Context, dagID, runID string) ([]TaskInstance, error)
+	// TaskLogTail returns at most maxBytes from the END of one try's log,
+	// cut at a UTF-8 boundary. Untrusted text.
+	TaskLogTail(ctx context.Context, dagID, runID, taskID string, try int, maxBytes int) (string, error)
+}
+
+// ModelResult is one node's result in a dbt run_results.json.
+type ModelResult struct {
+	Model   string  `json:"model"`             // the node's unique_id, e.g. "model.analytics.fct_revenue"
+	Status  string  `json:"status"`            // as dbt reports it: success | error | fail | warn | skipped | pass
+	Message string  `json:"message,omitempty"` // dbt's message; untrusted text (may quote SQL or data)
+	Rows    int64   `json:"rows"`              // adapter_response.rows_affected; -1 when the adapter does not report it
+	Seconds float64 `json:"seconds"`           // execution_time
+}
+
+// RunResults is the latest dbt run_results.json.
+type RunResults struct {
+	GeneratedAt time.Time     `json:"generated_at"` // metadata.generated_at
+	Results     []ModelResult `json:"results"`
+}
+
+// Lineage is one model's direct parents and children from manifest.json, as
+// unique_ids; never nil slices.
+type Lineage struct {
+	Model    string   `json:"model"`
+	Parents  []string `json:"parents"`
+	Children []string `json:"children"`
+}
+
+// TransformReader reads dbt artifacts (a local artifacts directory or dbt
+// Cloud in P4d). An unknown model is ErrNotFound.
+type TransformReader interface {
+	RunResults(ctx context.Context) (RunResults, error)              // latest run_results.json
+	ModelLineage(ctx context.Context, model string) (Lineage, error) // parents and children from manifest.json; model is a name as owners.yaml lists it, or a dbt unique_id; a short name that matches several nodes is an error (dbt.ErrAmbiguous), and the caller retries with the unique_id
+}
+
+// ModelSQL is one dbt model's SQL from manifest.json.
+type ModelSQL struct {
+	Model    string `json:"model"`              // unique_id
+	Path     string `json:"path,omitempty"`     // original_file_path
+	Language string `json:"language,omitempty"` // sql | python
+	Compiled bool   `json:"compiled"`           // false: raw_code (dbt never compiled the model)
+	SQL      string `json:"sql"`                // untrusted text
+}
+
+// TransformSQLReader is optional next to TransformReader, asserted at use
+// time like ClusterReader: without it (nil, or a client that cannot) a tool
+// answers ErrNotSupported. An unknown model, or a node that is not a model,
+// is ErrNotFound.
+type TransformSQLReader interface {
+	ModelSQL(ctx context.Context, model string) (ModelSQL, error)
 }
 
 // ---- Pipeline change log (Piperoom's own table, fed by the watcher, F8) ----

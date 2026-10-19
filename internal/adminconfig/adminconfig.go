@@ -116,6 +116,8 @@ type Provider struct {
 	ownersFile string
 	usersFile  string
 	export     []byte
+	// exportErr is why the files could not be read at start; Export returns it.
+	exportErr error
 
 	// resolve returns a pipeline's resolved settings (wiring.PipelineConfig).
 	resolve func(owners.Pipeline) (config.Config, error)
@@ -129,19 +131,28 @@ type Provider struct {
 // New builds a Provider over the loaded config, owners and users, and reads
 // the owners and users files at their paths for Export, so the export is the
 // files as read at start. users may be nil (no people).
+//
+// The settings pages are an optional admin feature, so a file that cannot be
+// read never stops the server: the view still works and only Export reports
+// the failure. --quickstart, for one, writes its users file to a temporary
+// path while USERS_FILE keeps naming a file that may not exist.
 func New(cfg config.Config, own *owners.Owners, users *room.Users, ownersPath, usersPath string) (*Provider, error) {
+	var export []byte
+	var exportErr error
 	ob, err := os.ReadFile(ownersPath)
 	if err != nil {
-		return nil, fmt.Errorf("adminconfig: read owners file: %w", err)
+		exportErr = fmt.Errorf("adminconfig: export: read owners file: %w", err)
 	}
 	ub, err := os.ReadFile(usersPath)
-	if err != nil {
-		return nil, fmt.Errorf("adminconfig: read users file: %w", err)
+	if err != nil && exportErr == nil {
+		exportErr = fmt.Errorf("adminconfig: export: read users file: %w", err)
 	}
-	export := make([]byte, 0, len(ob)+len(ub)+5)
-	export = append(export, ob...)
-	export = append(export, "\n---\n"...)
-	export = append(export, ub...)
+	if exportErr == nil {
+		export = make([]byte, 0, len(ob)+len(ub)+5)
+		export = append(export, ob...)
+		export = append(export, "\n---\n"...)
+		export = append(export, ub...)
+	}
 	if own == nil {
 		own = &owners.Owners{}
 	}
@@ -153,6 +164,7 @@ func New(cfg config.Config, own *owners.Owners, users *room.Users, ownersPath, u
 		cfg: cfg, own: own, users: us,
 		ownersFile: filepath.Base(ownersPath), usersFile: filepath.Base(usersPath),
 		export:    export,
+		exportErr: exportErr,
 		resolve:   wiring.PipelineConfig,
 		lookupEnv: os.LookupEnv,
 		stat:      os.Stat,
@@ -164,6 +176,9 @@ func New(cfg config.Config, own *owners.Owners, users *room.Users, ownersPath, u
 // at start. They hold no secrets by design: connection settings in owners.yaml
 // are env:/file: references, and users.yaml holds no credential.
 func (p *Provider) Export() ([]byte, error) {
+	if p.exportErr != nil {
+		return nil, p.exportErr
+	}
 	return append([]byte(nil), p.export...), nil
 }
 

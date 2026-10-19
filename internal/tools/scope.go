@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/owners"
 )
 
@@ -283,6 +284,91 @@ func (s Scope) CheckSinkTable(table string) error {
 	return refuse("table", table, s, "allowed sink tables: "+strings.Join(s.p.SinkTables, ", "))
 }
 
+// ---- batch pipelines (P4) ----
+//
+// A batch pipeline's scope is its dags, models and sink_tables (CheckSinkTable
+// above serves both kinds). It has no topic prefix, source tables, connectors
+// or consumer groups, so every cdc check refuses on it, and a cdc pipeline has
+// no dags or models, so CheckDAG and CheckModel refuse on it.
+
+// Kind returns the room pipeline's kind, events.PipelineKindCDC or
+// events.PipelineKindBatch; "" when unscoped, where no pipeline applies.
+func (s Scope) Kind() string {
+	if s.unscoped {
+		return ""
+	}
+	return s.p.KindOrDefault()
+}
+
+// CheckDAG refuses a DAG id that is not one of the pipeline's dags.
+func (s Scope) CheckDAG(dagID string) error {
+	if s.unscoped || contains(s.p.DAGs, dagID) {
+		return nil
+	}
+	return refuse("DAG", dagID, s, allowed("DAGs", s.p.DAGs))
+}
+
+// CheckModel refuses a model that is not one of the pipeline's models. name
+// is a model name as owners.yaml writes it; a tool that takes a unique_id
+// converts it with owners.ModelName first and passes the name on.
+func (s Scope) CheckModel(name string) error {
+	if s.unscoped || contains(s.p.Models, name) {
+		return nil
+	}
+	return refuse("model", name, s, allowed("models", s.p.Models))
+}
+
+// LineageReader reads one model's direct parents and children.
+// clients.TransformReader satisfies it.
+type LineageReader interface {
+	ModelLineage(ctx context.Context, model string) (clients.Lineage, error)
+}
+
+// CheckModelOrAdjacent allows one of the pipeline's models or a direct parent
+// or child of one, by the manifest's lineage: the rule of the dbt tools that
+// read a model's lineage or SQL. Lineage is read only for a name that is not a
+// pipeline model. It fails closed: a lineage read that fails is an error,
+// never "in scope". A pipeline model that the manifest no longer has
+// (clients.ErrNotFound) only has no neighbours. A nil reader is an error that
+// wraps clients.ErrNotSupported.
+func (s Scope) CheckModelOrAdjacent(ctx context.Context, name string, lr LineageReader) error {
+	if s.unscoped || contains(s.p.Models, name) {
+		return nil
+	}
+	why := allowed("models", s.p.Models) + " and their direct parents and children"
+	// A plain name only: a unique_id would let "model.other_pkg.x" pass as x.
+	if n, ok := owners.ModelName(name); !ok || n != name {
+		return refuse("model", name, s, why)
+	}
+	if len(s.p.Models) > 0 && lr == nil {
+		return fmt.Errorf("tools: pipeline %q: no transform reader to read the lineage of its models: %w", s.p.ID, clients.ErrNotSupported)
+	}
+	for _, m := range s.p.Models {
+		l, err := lr.ModelLineage(ctx, m)
+		if errors.Is(err, clients.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("tools: pipeline %q: read the lineage of model %q to check %q: %w", s.p.ID, m, shorten(name), err)
+		}
+		for _, ref := range slices.Concat(l.Parents, l.Children) {
+			if n, ok := owners.ModelName(ref); ok && n == name {
+				return nil
+			}
+		}
+	}
+	return refuse("model", name, s, why)
+}
+
+// allowed lists names for a refusal, or says there are none: a cdc pipeline
+// asked for a DAG gets "this pipeline has no DAGs", not an empty list.
+func allowed(what string, names []string) string {
+	if len(names) == 0 {
+		return "this pipeline has no " + what
+	}
+	return "allowed " + what + ": " + strings.Join(names, ", ")
+}
+
 // TopicInScope reports whether topic is one of the pipeline's topics (always
 // true when unscoped).
 func (s Scope) TopicInScope(topic string) bool {
@@ -376,6 +462,10 @@ func (s Scope) Slots(ctx context.Context, cr ConfigReader) ([]string, error) {
 	}
 	if declared := s.p.Watch().Slot; declared != "" {
 		return []string{declared}, nil
+	}
+	if len(s.p.Connectors) == 0 {
+		// A batch pipeline: no connector, so no slot, whatever Connect says.
+		return nil, nil
 	}
 	if cr == nil {
 		return nil, fmt.Errorf("tools: pipeline %q: no Connect client to read the connector configs, and owners.yaml sets no watch.slot", s.p.ID)

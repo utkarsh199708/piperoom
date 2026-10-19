@@ -107,11 +107,59 @@ type Proposal struct {
 	// sends it back with approve and reject. "" only for a proposal that
 	// predates the hash and cannot be hashed.
 	ParamsHash string `json:"params_hash"`
+	// FallbackLayers is proposal.created.fallback_layers: the required
+	// layers nobody owns, which the room's driver approves (grant
+	// "fallback", P2b). [] when every layer has an owner.
+	FallbackLayers []string `json:"fallback_layers"`
 	// Preview is what each step would do, written once by the system after
 	// the proposal exists (proposal.previewed, F4). Informational: it is not
 	// part of ParamsHash. nil until the event arrives.
 	Preview *events.ProposalPreviewedPayload `json:"preview,omitempty"`
+	// Blocked says why a fully approved proposal does not run:
+	// BlockedWriteModeOff. Empty otherwise. Set on the room view only
+	// (RoomFor), never by Apply: it depends on the server, not on the log.
+	Blocked string `json:"blocked,omitempty"`
+	// Scheduled is the pending policy countdown (proposal.scheduled, P2b):
+	// set while the policy has neither run nor been stopped; nil otherwise.
+	Scheduled *Scheduled `json:"scheduled,omitempty"`
+
+	// origin is proposal.created.origin ("" reads as agent). Unexported until
+	// P3c exposes it; the auto-approve policy never schedules a driver's
+	// proposal (autoapprove.go).
+	origin string
+	// sched is the fold of the proposal's policy countdown (autoapprove.go).
+	sched schedState
 }
+
+// Scheduled mirrors the pending proposal.scheduled of a proposal
+// (open_proposals[].scheduled, docs/api.md).
+type Scheduled struct {
+	RunAt       time.Time `json:"run_at"`
+	CancelUntil time.Time `json:"cancel_until"`
+}
+
+// schedState is the log's answer to "is the policy countdown of this
+// proposal still live?". set: a proposal.scheduled was folded (at most one
+// counts). stopped: a proposal.cancelled or a person's approval.given came
+// after it, so the policy never runs. policyN: how many policy
+// approvals landed; once above 0 the countdown is over but the policy may
+// still owe the remaining layers (a replica that stopped part-way), and every
+// approved layer must be one of them (fireCheckLocked). A value type, so a
+// proposal copy never shares it.
+type schedState struct {
+	set         bool
+	runAt       time.Time
+	cancelUntil time.Time
+	stopped     bool
+	policyN     int
+}
+
+// pending reports whether the policy still owes this proposal its approvals.
+func (s schedState) pending() bool { return s.set && !s.stopped }
+
+// cancellable reports whether a person may still cancel the countdown: it is
+// pending and the policy has not started approving.
+func (s schedState) cancellable() bool { return s.pending() && s.policyN == 0 }
 
 // ChecklistTick says who ticked one runbook item and when.
 type ChecklistTick struct {
@@ -155,6 +203,10 @@ type RoomSnapshot struct {
 	Members            []Member     `json:"members"`
 	// Insight is the room's cost and clock facts (F11), folded from the log.
 	Insight Insight `json:"insight"`
+	// Mode is what the server does with the caller's approvals (P0 items 1
+	// and 4). Set on the room view only (RoomFor), never by Apply; nil, and
+	// left out of the JSON, everywhere else.
+	Mode *Mode `json:"mode,omitempty"`
 
 	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
 	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
@@ -211,6 +263,14 @@ type RoomSnapshot struct {
 	// It is in flight while set and before its expires_at (docs/api.md,
 	// Hand-off requests). Unexported, like the shadow facts.
 	handoffReq handoffRequest
+
+	// alertRoom is true for a room an alert opened (room.created carries an
+	// alert_source or an alert). controlRequested is true once a
+	// control.requested was logged while the room had no driver. Together
+	// with Driver and Shadow they decide the sole-member grant (P2b,
+	// service_solemember.go). Unexported: not part of the snapshot JSON.
+	alertRoom        bool
+	controlRequested bool
 }
 
 // PostmortemState mirrors the snapshot's postmortem member (docs/api.md).
@@ -299,6 +359,11 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 			c.pendingPreviews[k] = v
 		}
 	}
+	if s.Mode != nil {
+		m := *s.Mode
+		m.AutoApprove = append([]string{}, s.Mode.AutoApprove...)
+		c.Mode = &m
+	}
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)
 	c.warnedFor = cloneTime(s.warnedFor)
@@ -352,7 +417,12 @@ func cloneProposals(in []Proposal) []Proposal {
 		out[i] = p
 		out[i].Steps = append([]events.ProposalStep{}, p.Steps...)
 		out[i].RequiredLayers = append([]string{}, p.RequiredLayers...)
+		out[i].FallbackLayers = append([]string{}, p.FallbackLayers...)
 		out[i].Preview = clonePreview(p.Preview)
+		if p.Scheduled != nil {
+			sc := *p.Scheduled
+			out[i].Scheduled = &sc
+		}
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
 			for k, v := range p.Approvals {
@@ -392,6 +462,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Severity = p.Severity
 		snap.PipelineID = p.PipelineID
 		snap.Shadow = p.Shadow
+		snap.alertRoom = p.AlertSource != "" || len(p.Alert) > 0
 		snap.Status = "open"
 		snap.OpenedAt = e.At
 
@@ -567,6 +638,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			snap.handoffReq = handoffRequest{}
 		}
 
+	case events.ControlRequested:
+		if snap.Driver == nil {
+			snap.controlRequested = true
+		}
+
 	case events.ControlGranted:
 		p, ok := decode[events.ControlGrantedPayload](e)
 		if !ok {
@@ -600,6 +676,8 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			RequiredLayers: p.RequiredLayers,
 			Approvals:      approvals,
 			ParamsHash:     eventParamsHash(e.RoomID, p),
+			FallbackLayers: append([]string{}, p.FallbackLayers...),
+			origin:         p.Origin,
 		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv
@@ -643,6 +721,17 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			break
 		}
 		setApproval(snap.OpenProposals, p.ProposalID, p.Layer, "approved")
+		foldScheduleDecision(snap.OpenProposals, p.ProposalID, e.Actor.Kind == events.ActorSystem && p.Grant == events.GrantPolicy)
+
+	case events.ProposalScheduled:
+		if p, ok := decode[events.ProposalScheduledPayload](e); ok {
+			foldScheduled(snap.OpenProposals, p)
+		}
+
+	case events.ProposalCancelled:
+		if p, ok := decode[events.ProposalCancelledPayload](e); ok {
+			foldScheduleDecision(snap.OpenProposals, p.ProposalID, false)
+		}
 
 	case events.ApprovalRejected:
 		p, ok := decode[events.ApprovalRejectedPayload](e)
@@ -821,5 +910,49 @@ func setApproval(proposals []Proposal, proposalID, layer, decision string) {
 			proposals[i].Approvals = m
 			return
 		}
+	}
+}
+
+// foldScheduled folds a proposal.scheduled into its open proposal. Only the
+// first one counts (at most one per proposal), and a proposal a person has
+// already decided on is not given one.
+func foldScheduled(proposals []Proposal, p events.ProposalScheduledPayload) {
+	for i := range proposals {
+		if proposals[i].ProposalID != p.ProposalID || proposals[i].sched.set {
+			continue
+		}
+		proposals[i].sched = schedState{set: true, runAt: p.RunAt, cancelUntil: p.CancelUntil}
+		for _, d := range proposals[i].Approvals {
+			if d != "pending" {
+				// Never written by the service (the schedule check wants
+				// every layer pending); a log that has it anyway gets no
+				// policy run.
+				proposals[i].sched.stopped = true
+				return
+			}
+		}
+		proposals[i].Scheduled = &Scheduled{RunAt: p.RunAt, CancelUntil: p.CancelUntil}
+		return
+	}
+}
+
+// foldScheduleDecision ends the visible countdown of a proposal. policy is
+// true for the policy's own approval.given: the countdown ran out, and the
+// policy goes on with the remaining layers. Anything else (a person's
+// approval, a proposal.cancelled) stops the policy for good: the explicit
+// stop lives here, in the fold every replica runs, so the fire path
+// (fireCheckLocked) sees it whichever replica logged the decision.
+func foldScheduleDecision(proposals []Proposal, proposalID string, policy bool) {
+	for i := range proposals {
+		if proposals[i].ProposalID != proposalID {
+			continue
+		}
+		proposals[i].Scheduled = nil
+		if policy {
+			proposals[i].sched.policyN++
+		} else if proposals[i].sched.set {
+			proposals[i].sched.stopped = true
+		}
+		return
 	}
 }

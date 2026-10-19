@@ -9,7 +9,7 @@ import type {
   WsServerMessage,
 } from '../api/types'
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
-import type { ApproveExtras } from '../api/client'
+import type { ApproveAllExtras, ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
 import { classifyAuthProblem, getSessionChanges, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
@@ -20,11 +20,14 @@ import { newClientId } from '../lib/clientId'
 import { SendLedger } from './sendLedger'
 import type { DeliveredListener, SendItem } from './sendLedger'
 import { mentionsAgent } from '../lib/mentions'
-import { applyEvent } from '../state/reducer'
+import { applyEvent, applyModeRefresh } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
 import { hideStaleToast, showStaleToast } from '../lib/staleToast'
 import { equalJitter } from '../lib/backoff'
+
+// How long a reconnect waits for GET /api/rooms/{id} (the write mode) before it resumes the replay.
+const MODE_WAIT_MS = 4000
 
 // HTTP status an error frame code stands for (docs/api.md, Errors).
 const WS_FRAME_STATUS: Record<string, number> = {
@@ -43,6 +46,17 @@ export interface ApproveResult {
    * stale banner and reloads the room; the caller must not retry.
    */
   mismatch?: boolean
+}
+
+/** What an approve-all (POST /api/proposals/{pid}/approve-all) came to. */
+export interface ApproveAllResult extends ApproveResult {
+  /**
+   * 403 not_layer_owner: the person may not approve every layer. The hook keeps the server's text
+   * in `approve_all_refused`, so the card and the decision bar go back to the per-layer rows.
+   */
+  refused?: boolean
+  /** Any other failure, for the confirm dialog, which covers the room error banner. */
+  error?: string
 }
 
 /** True for the 409 the server sends when the params_hash sent is not the proposal's. */
@@ -137,6 +151,14 @@ export interface RoomActions {
    * `extra.params_hash` is the hash the UI rendered with the proposal, sent as is.
    */
   approve: (proposalId: string, layer: string, extra: ApproveExtras) => Promise<ApproveResult>
+  /**
+   * Approve every pending required layer in one call (P2c "Approve and run"). Same rules as
+   * `approve` (the hash on screen, `needsConfirm` for the solo user's "<pipeline_id>/*",
+   * `mismatch` and no retry); a 403 not_layer_owner is `refused` and recorded on the room state;
+   * any other error is in the room error banner and in `error`. useRoom always sets it; it is
+   * optional only for hosts and test doubles from before it, which keep the per-layer rows.
+   */
+  approveAll?: (proposalId: string, extra: ApproveAllExtras) => Promise<ApproveAllResult>
   /** `paramsHash` is the hash the UI rendered with the proposal, sent as is. */
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) => void
   handoff: (to: string, stayAsWatcher: boolean) => void
@@ -155,6 +177,10 @@ export interface RoomActions {
 type RoomAction =
   | { type: 'init'; snapshot: RoomSnapshot }
   | { type: 'event'; event: Event }
+  // A reconnect asked the server for the room again: only the write mode in its answer is used.
+  | { type: 'mode_refreshed'; snapshot: RoomSnapshot }
+  // The server refused this person's approve-all (403 not_layer_owner): kept until the room reloads.
+  | { type: 'approve_all_refused'; proposalId: string; text: string }
   | { type: 'reset' }
 
 function roomReducer(state: RoomState | null, action: RoomAction): RoomState | null {
@@ -165,6 +191,12 @@ function roomReducer(state: RoomState | null, action: RoomAction): RoomState | n
       return fromSnapshot(action.snapshot)
     case 'event':
       return state ? applyEvent(state, action.event) : state
+    case 'mode_refreshed':
+      return state ? applyModeRefresh(state, action.snapshot) : state
+    case 'approve_all_refused':
+      return state
+        ? { ...state, approve_all_refused: { ...state.approve_all_refused, [action.proposalId]: action.text } }
+        : state
   }
 }
 
@@ -388,9 +420,39 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       applyEventSeq(ev)
     }
 
-    const connect = () => {
+    // Write mode changes only when the server restarts, and a restart drops the socket. So every
+    // reconnect (not the first connect, whose snapshot is fresh) asks for the room again and takes
+    // its `mode` and `blocked` marks before the replay resumes, in both directions. A failed ask
+    // changes nothing: the replay goes on with the mode already known, and the next reconnect asks
+    // again. The reconnect waits for the answer only briefly (MODE_WAIT_MS): a server that is up
+    // for the socket but slow to answer must not hold the replay back, and a late answer is still
+    // applied, because applyModeRefresh re-judges what the replay has already folded in.
+    const refreshMode = async () => {
+      try {
+        const snapshot = await api.room(roomId)
+        if (cancelled || !snapshot) return
+        dispatch({ type: 'mode_refreshed', snapshot })
+      } catch {
+        // see above
+      }
+    }
+
+    const connect = async () => {
       if (cancelled) return
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      if (!firstConnect) {
+        let waitTimer: number | undefined
+        await Promise.race([
+          refreshMode(),
+          new Promise<void>((resolve) => {
+            waitTimer = window.setTimeout(resolve, MODE_WAIT_MS)
+          }),
+        ])
+        window.clearTimeout(waitTimer)
+        if (cancelled) return
+        // Another connect may have opened a socket while the room was being fetched.
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      }
       const sock = openRoomWs(roomId, firstConnect ? 0 : lastSeqRef.current)
       ws = sock
       firstConnect = false
@@ -479,7 +541,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           void api.me().catch(() => undefined)
         }
         setConn('reconnecting')
-        reconnectTimer = window.setTimeout(connect, equalJitter(backoff, randomRef.current))
+        reconnectTimer = window.setTimeout(() => void connect(), equalJitter(backoff, randomRef.current))
         backoff = Math.min(backoff * 2, 10000)
       }
       sock.onerror = () => {
@@ -495,7 +557,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         // lastSeqRef stays 0: open with after=0 so the full log replays and the
         // reducer rebuilds timeline/comments/proposals/trace/handoffs (item D).
         setConn('connecting')
-        connect()
+        void connect()
       } catch (e) {
         if (cancelled) return
         setConn(e instanceof ApiClientError && e.status === 404 ? 'not_found' : 'error')
@@ -728,6 +790,46 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         }
         setError(errorText(e))
         return { ok: false }
+      }
+    },
+    approveAll: async (proposalId, extra) => {
+      if (isFixtures()) {
+        const p = stateRef.current?.proposals.find((x) => x.proposal_id === proposalId)
+        for (const layer of p?.required_layers ?? []) {
+          if ((p?.approvals[layer] ?? 'pending') !== 'pending') continue
+          synthesize('approval.given', {
+            proposal_id: proposalId,
+            layer,
+            params_hash: extra.params_hash,
+            identity: { method: 'dev', grant: `user:${user.id}` },
+          })
+        }
+        return { ok: true }
+      }
+      try {
+        await api.approveAll(proposalId, extra)
+        setError(null)
+        clearStale()
+        return { ok: true }
+      } catch (e) {
+        if (isParamsMismatch(e)) {
+          setError(null)
+          onMismatch(proposalId, extra.params_hash)
+          return { ok: false, mismatch: true }
+        }
+        if (isSoloConfirmError(e)) {
+          setError(null)
+          return { ok: false, needsConfirm: true }
+        }
+        const text = errorText(e)
+        if (e instanceof ApiClientError && e.status === 403 && e.code === 'not_layer_owner') {
+          // The card says it, next to the rows that are back; the banner would say it twice.
+          setError(null)
+          dispatch({ type: 'approve_all_refused', proposalId, text })
+          return { ok: false, refused: true, error: text }
+        }
+        setError(text)
+        return { ok: false, error: text }
       }
     },
     reject: (proposalId, layer, reason, paramsHash) => {

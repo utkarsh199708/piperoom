@@ -28,10 +28,6 @@ import (
 // author can add a recording.
 var errNoRecording = errors.New("no data available for this request")
 
-// errWritesDisabled guards the replay clients: an eval must never write, and
-// no write can reach a real system from here anyway.
-var errWritesDisabled = errors.New("evals: writes are disabled in replay")
-
 // errNotReplayed is returned by replay client reads that action validation
 // does not need.
 var errNotReplayed = errors.New("evals: not available in replay")
@@ -92,22 +88,33 @@ func (definitionKafka) ACLs(context.Context, []string, []string) ([]clients.ACLE
 }
 
 // LiveActions returns the production write actions, backed by replay clients
-// that know only res and the connector states in recs. The agent can propose
-// them (their real Validate runs against that) but nothing can execute: every
-// write returns an error.
+// that know only res and what recs recorded: actions.Register's seven and
+// the P3 actions (replay_actions.go). The agent can propose them (their real
+// Validate runs against that) but nothing is ever written: every write of a
+// replay client is a no-op that only records the call.
 func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
+	reg, _, err := liveActions(res, recs)
+	return reg, err
+}
+
+// liveActions is LiveActions plus the log of the writes its clients took.
+func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog, error) {
 	statuses, err := connectStatuses(recs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	wl := &writeLog{}
 	reg := actions.NewRegistry()
 	if err := actions.Register(reg, actions.Deps{
-		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses},
-		Registry: replayRegistry{subjects: res.Subjects},
+		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses, log: wl},
+		Registry: replayRegistry{subjects: res.Subjects, log: wl},
 	}); err != nil {
-		return nil, fmt.Errorf("evals: action definitions: %w", err)
+		return nil, nil, fmt.Errorf("evals: action definitions: %w", err)
 	}
-	return reg, nil
+	if err := registerP3(reg, res, recs, wl); err != nil {
+		return nil, nil, err
+	}
+	return reg, wl, nil
 }
 
 // connectStatusData is the part of connect_status's Data that action
@@ -603,10 +610,14 @@ func (t *replayTool) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 
 // replayConnect answers the Connect reads that action validation needs: the
 // connector names and, where a recording gives it, each connector's status.
+// Its writes are recorded no-ops.
 type replayConnect struct {
 	connectors []string
 	statuses   map[string]clients.ConnectorStatus
+	log        *writeLog
 }
+
+var _ clients.ConnectFixWriter = replayConnect{}
 
 func (c replayConnect) ListConnectors(context.Context) ([]string, error) {
 	return append([]string(nil), c.connectors...), nil
@@ -620,17 +631,40 @@ func (c replayConnect) Status(_ context.Context, name string) (clients.Connector
 func (replayConnect) Config(context.Context, string) (map[string]string, error) {
 	return nil, errNotReplayed
 }
-func (replayConnect) RestartTask(context.Context, string, int) error { return errWritesDisabled }
-func (replayConnect) RestartConnector(context.Context, string) error { return errWritesDisabled }
+func (c replayConnect) RestartTask(_ context.Context, name string, task int) error {
+	c.log.record("RestartTask", map[string]any{"connector": name, "task": task})
+	return nil
+}
+
+func (c replayConnect) RestartConnector(_ context.Context, name string) error {
+	c.log.record("RestartConnector", map[string]any{"connector": name})
+	return nil
+}
 
 // Resume matches the connectorResumer interface that connect_resume_connector
-// Execute asserts for, so a replayed resume reaches this refusal and never a
-// client that does not know the method.
-func (replayConnect) Resume(context.Context, string) error { return errWritesDisabled }
+// Execute asserts for, so a replayed resume is recorded here and never
+// refused for a client that does not know the method.
+func (c replayConnect) Resume(_ context.Context, name string) error {
+	c.log.record("Resume", map[string]any{"connector": name})
+	return nil
+}
+
+func (c replayConnect) PauseConnector(_ context.Context, name string) error {
+	c.log.record("PauseConnector", map[string]any{"connector": name})
+	return nil
+}
+
+func (c replayConnect) UpdateConnectorConfigKeys(_ context.Context, name string, changes map[string]string) error {
+	c.log.record("UpdateConnectorConfigKeys", map[string]any{"connector": name, "changes": len(changes)})
+	return nil
+}
 
 // replayRegistry answers the one Schema Registry read that action validation
-// needs.
-type replayRegistry struct{ subjects []string }
+// needs. Its writes are recorded no-ops.
+type replayRegistry struct {
+	subjects []string
+	log      *writeLog
+}
 
 func (r replayRegistry) Subjects(context.Context) ([]string, error) {
 	return append([]string(nil), r.subjects...), nil
@@ -642,11 +676,13 @@ func (replayRegistry) Schema(context.Context, string, int) (clients.SchemaVersio
 func (replayRegistry) Compatibility(context.Context, string) (string, bool, error) {
 	return "", false, errNotReplayed
 }
-func (replayRegistry) SetCompatibility(context.Context, string, string) error {
-	return errWritesDisabled
+func (r replayRegistry) SetCompatibility(_ context.Context, subject, level string) error {
+	r.log.record("SetCompatibility", map[string]any{"subject": subject, "level": level})
+	return nil
 }
-func (replayRegistry) Register(context.Context, string, string) (int, error) {
-	return 0, errWritesDisabled
+func (r replayRegistry) Register(_ context.Context, subject, _ string) (int, error) {
+	r.log.record("Register", map[string]any{"subject": subject})
+	return 0, nil
 }
 
 // ActionAttempt is one Validate call made while the agent proposed a fix.

@@ -41,21 +41,22 @@ One team, clear roles:
 | **Claude Lead 3 — Cloud lead** | `[LEAD-CLOUD]` | leads the cloud agents (C1…): watches their cloud sessions, relays their status to Slack, code-reviews their GitHub PRs (instead of Lead 2), starts round-N fix runs | merge, write feature code |
 
 A PR is merged only when **both** leads approve: `[LEAD-REVIEW] APPROVED` (code) and
-`[LEAD-ARCH] APPROVED` (architecture + completeness). Then Lead 1 merges.
+`[LEAD-ARCH] APPROVED` (architecture + completeness), or, for a row shipped by §6a, a `ready` manifest that passes
+ship-check. Then Lead 1 merges.
 For cloud-agent (C*) PRs the code approval comes from `[LEAD-CLOUD]` instead of `[LEAD-REVIEW]`.
 Each agent owns folders. **Never edit a file you do not own.**
 
 | Agent | Task file | Owns |
 |---|---|---|
 | A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
-| A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`) |
+| A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`; not `pgactions/**`, A3's from the P wave; not `sourceactions/**` (A3) or `fixpr/**` (C17), from the Q wave) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/tools/scope.go`, `internal/topology/**` (not `graph.go`), `internal/owners/**`, `internal/clients/pgconv/**` |
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**`, `internal/auth/**` (A5 created it in auth PR 2, `e6dc2a1`) |
 | A6 | `tasks/A6-web.md` | `web/**` |
 | A7 | `docs/design/watcher.md` (watcher), `docs/design/dlq.md` | `internal/watch/**`, `internal/dlq/**` |
 | A3 (F wave, new folders) | `tasks/F8-what-changed-checklist.md`, `tasks/F12-deep-signals-scenarios.md` | `internal/tools/changes/**` (F8b), `internal/clients/prom/**` and `internal/tools/debeziumtools/**` (F12b) |
-| C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
+| C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile`, `deploy/docker-compose.quickstart.yml` (P1c) |
 | C2 (cloud) | `tasks/C2-agent-memory.md` | done — merged `9519d23`; `internal/agent/**` belongs to A4 again |
 | C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |
 | C4 (cloud) | `tasks/C4-security.md` | `docs/security/**` (no code changes) |
@@ -167,6 +168,121 @@ Merge order (vision §4): **F0 → F1, F5, F7, F10 in parallel → F3, F4 → F2
 task, the task file's "Dependencies and merge order" section rules. A task split between agents is one PR per
 agent (and per sub-task when the task file says so).
 
+### P wave (dispatched 2026-10-18; plan `docs/product/fit-2026-10.md`)
+
+PR titles start with `[P<N><letter>]` (e.g. `[P2b] room: approve-all, sole-member driver, policy auto-approve`).
+Same rules as the F wave: each sub-task stays inside its agent's folders (the rows above plus the new folders
+below); a file outside them is asked for in the thread, never edited. P0 (the leads) carries every contract
+change; "Uses" names the P0 items (`tasks/P0-contracts.md`) each task codes against. The wave answers the four
+reasons a data engineer does not install Piperoom today (plan §1): setup cost, a NOC-sized ceremony, too few
+fixes, one pipeline shape.
+
+| Task | Agents (sub-tasks) | Task file | Uses (P0) |
+|---|---|---|---|
+| P0 | leads (`[LEAD-ARCH]`) | `tasks/P0-contracts.md` | — (contract files, `AGENTS.md`, `docs/api.md`, `docs/product/fit-2026-10.md`) |
+| P1 | A5 (P1a), C10 (P1b), C1 (P1c), C14 (P1d), A6 (P1e), A1 (P1f) | `tasks/P1-quickstart-readonly.md` | 1, 3 |
+| P2 | A3 (P2a), A5 (P2b), A6 (P2c), A4 (P2d), C12 (P2e) | `tasks/P2-solo-ceremony.md` | 2, 3, 4, 6 |
+| P3 | A2 (P3a), A3 (P3b), A5 (P3c), A6 (P3d), A4 (P3e), C14 (P3f), C7 + C6 (P3g) | `tasks/P3-fixes-that-end-incidents.md` | 5, 6, 7 |
+| P4 | A3 (P4a), A4 (P4b), C15 (P4c), C16 (P4d), C3 (P4e), A6 (P4f), A1 (P4g), C7 + C6 (P4h), C14 + C1 (P4i) | `tasks/P4-pipeline-kinds-batch.md` | 3, 6, 8 |
+
+New folders of the wave (owned from the first PR that creates them):
+
+| Agent | Owns (new in the P wave) |
+|---|---|
+| A3 | `internal/actions/pgactions/**` (A2 keeps the rest of `internal/actions/**` except `action.go`) |
+| C3 (cloud) | `internal/clients/bigquery/**`, `internal/clients/databricks/**` |
+| C15 (cloud, new) | `internal/clients/airflow/**`, `internal/tools/batchtools/**` |
+| C16 (cloud, new) | `internal/clients/dbt/**`, `internal/tools/dbttools/**` |
+
+Merge order (plan §4): **P0 → P1 and P2 in parallel → P3 → P4.** Inside a task, the task file's "Dependencies and
+merge order" section rules; inside P1 and P2 the `a` sub-task (the server or owners change) lands before the rest.
+A task split between agents is one PR per agent and per sub-task. `tasks/P-board.md` splits every sub-task into
+PR-sized rows with the model, the days and the rows it waits on; the PR tag is the board row's ID (`[P2b-1]`).
+
+### Q wave (planned 2026-10-18; plan `docs/product/so-gaps-2026-10.md`, board `tasks/Q-board.md`)
+
+PR titles start with the board row's ID: `[Q<N><letter>]`, or `[Q<N>-0]` for a design row (e.g.
+`[Q2c] sourceactions: replica identity and heartbeat table`). Same rules as the P wave: each row stays inside its
+agent's folders (the rows above plus the new folders below); a file outside them is asked for in the thread, never
+edited. Q0 (the leads) carries the contract changes of steps 1 to 6; the design rows Q7-0 (pull-request fix,
+`docs/design/fix-pr.md`) and Q8-0 (MySQL source, `docs/design/mysql-source.md`) carry their own. The board's
+"Q0 items" section names the item each row codes against. The wave comes from a measured analysis of 722 Stack
+Overflow Debezium problems: resolved goes from 7.1% to 18.8% (up to 26.5% with the pull-request fix), diagnosed from
+7.5% to 26.5%. New interfaces, tools and actions are source-neutral, so MySQL implements them instead of copying them. Every Q row runs on Opus 5.5, cloud
+rows included (the owner's standing instruction; this overrides "Sonnet 5" for cloud agents in §2 for this wave).
+
+New folders of the wave (owned from the first PR that creates them):
+
+| Agent | Owns (new in the Q wave) |
+|---|---|
+| A3 | `internal/actions/sourceactions/**` |
+| A8 (Qoder, new; if no eighth local agent runs, A3 takes its rows after step 2) | `internal/clients/mysql/**`, `internal/tools/mysqltools/**` |
+| C17 (cloud, new) | `internal/clients/forge/**`, `internal/tools/forgetools/**`, `internal/actions/fixpr/**` |
+| C18 (cloud, new) | `internal/clients/workerlogs/**`, `internal/tools/logtools/**`, `internal/tools/nettools/**` |
+
+A2 keeps the rest of `internal/actions/**` except `action.go`, `pgactions/**`, `sourceactions/**` and `fixpr/**`.
+The known-issues index of step 1 lives in `internal/tools/runbooks/**` (C11).
+
+Order: **Q0 first, alone**; then steps 1 to 8 in priority order (version knowledge, database settings and admin
+actions, Connect worker visibility, config validation before registration, connector lifecycle and source offsets,
+network and TLS probes, pull-request fix, MySQL). The board's After column is the only hard dependency; Q0 waits on
+the P wave's open contract follow-ups, and every row that adds a write action waits on P3-0.
+
+### U wave (planned 2026-10-18; plan `docs/product/setup-2026-10.md`, design `docs/design/setup-agent.md`, board `tasks/U-board.md`)
+
+PR titles start with the board row's ID: `[U<N><letter>]` or `[U1-<n>]` for the core rows, `[U<N>-0]` for a design
+row (e.g. `[U1-3] setup/compose: driver and T1 ops`). Same rules as the P and Q waves: each row stays inside its
+agent's folders (the rows above plus the new folders below); a file outside them is asked for in the thread, never
+edited. The wave adds **setup as a functionality of Piperoom** (the owner's decision: not a separate product): the
+same agent, room, approval model, `owners.yaml` and web UI take a user from nothing to a watched Debezium pipeline.
+Commands run through a **runner** (`cmd/setup`, `piperoom-setup`) that executes only typed operations from an
+allow-listed catalogue where the user's Docker, `kubectl` and cloud credentials are; the server never holds them;
+every artifact that executes (compose files, unit files, manifests) is templated or validated, never free text.
+U0 (the leads) carries the contract changes (the new contract file `internal/setup/protocol/protocol.go`, events,
+`SetupRequest`, `Alert.Mode`, `actions.Receipted`/`Tiered`/`LooksSecret`, `clients.SetupSourceWriter`, the owners
+schema, config, API); the design rows U1-0 (protocol, Windows service), U12-0 (Strimzi) and U13-0 (managed) carry
+their own.
+The wave comes from the same 722-problem Stack Overflow analysis as the Q wave: 572 are setup problems, and the
+wave makes 473 of them (82.7%) agent-fixable. Every U row runs on Opus 5.5, cloud rows included.
+
+New folders of the wave (owned from the first PR that creates them):
+
+| Agent | Owns (new in the U wave) |
+|---|---|
+| leads | `internal/setup/protocol/**` (a contract file; listed below) |
+| A9 (Qoder, new) | `cmd/setup/**`, `cmd/piperoom/**`, `internal/setup/**` except `internal/setup/protocol/**`, `internal/setup/targets/**`, `internal/setup/sources/**` and `internal/setup/knowledge/**` |
+| A5 | `internal/quickstart/**` (the `--quickstart` server moved out of `cmd/server`) |
+| C1 | `Dockerfile`, `deploy/helm/**` (a grant for the U rows that name them: U1-22, U12c) |
+| A10 (Qoder, new) | `internal/clients/sqlserver/**`, `internal/clients/mongodb/**`, `internal/clients/oracle/**`, `internal/setup/sources/sqlserver/**`, `internal/setup/sources/mongodb/**`, `internal/setup/sources/oracle/**` |
+| A3 | `internal/setup/sources/postgres/**` |
+| A8 | `internal/setup/sources/mysql/**` |
+| C19 (cloud, new) | `internal/setup/targets/compose/**`, `internal/setup/targets/host/**` |
+| C20 (cloud, new) | `internal/setup/targets/strimzi/**`, `internal/setup/targets/server/**` |
+| C21 (cloud, new) | `internal/setup/targets/managed/**`, `internal/clients/mskconnect/**`, `internal/clients/confluentcloud/**`, `internal/clients/aiven/**` |
+| C22 (cloud, new) | `internal/setup/knowledge/**` |
+| C7 | `evals/scenarios/setup/**` (C6 keeps the rest of `evals/**`) |
+
+If no ninth or tenth local agent runs, the leads switch A9's rows to A2 and A10's rows to A3 (in that order of
+priority) on the board and in `docs/process/ownership.json` in one PR, since `ship-check.mjs` reads both; the
+After column does not change.
+
+Setup rules that every U row follows: no op takes a shell string, only typed params (an AST test guards it); an
+executed artifact comes from a template with typed params or passes its validator, else it is never auto-run; every
+file op opens through `os.Root` under the project directory and refuses symlinks, junctions and reparse points; no
+op can read the secret store or a materialised secret file; the runner refuses a T1+ op without a valid proposal,
+recomputes `params_hash` and refuses duplicates; targets, classes and the provisional pipeline change only by a
+driver click or the server's derivation, never by model text; secrets are `${secret:name}` references materialised
+on the runner only; every runner output is redacted literally and by pattern before transport and wrapped as
+untrusted on the server; only the server's ladder runner writes `setup.verified`; the production guard table is
+checked at create, execute, rollback and on the runner and is never relaxed by a row.
+
+Order: **U0 first, after Q0**; then U1-0 and the U1 rows (runner, catalogue, Compose, Postgres, verification);
+then steps 2 to 13 by coverage per day as the plan's §4 table orders them (U2 MySQL, U3 transforms and sinks, U5
+logs, U4 SQL Server, U6 embedded, U7 MongoDB, U8 plain hosts, U10 tuning, U9 Oracle, U11 Debezium Server, U12
+Strimzi, U13 managed); U12-0 and U13-0 start as soon as U0 merges. The board's
+After column is the only hard dependency. Every target row's "Done when" includes a real run on the named OS and
+target with the room export attached to the PR.
+
 ### Contract files (read them, code against them, never edit them)
 
 - `internal/tools/tool.go` — `Tool`, `Result`, `Registry`
@@ -178,6 +294,7 @@ agent (and per sub-task when the task file says so).
 - `internal/topology/graph.go` — `Graph`, `Node`, `Edge`, `Builder`
 - `internal/config/config.go` — environment variables
 - `internal/version/version.go` — build version (`-ldflags -X`), reported by `/healthz`
+- `internal/setup/protocol/protocol.go` — the setup runner protocol: `OpRequest`, `OpResult`, `Resume`, `RunnerExecutor` (U wave)
 - `docs/api.md` — HTTP + WebSocket API
 
 If a contract is wrong or missing something, **do not work around it silently**. Write a
@@ -234,8 +351,8 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 
 - **Talking to the reviewer happens in Slack #piperoom-agents — read `docs/collab.md` now.**
 - Work in your own **git worktree** (`docs/collab.md` §1), never in the main folder.
-- **Only Lead 1 (Claude, `[LEAD-ARCH]`) merges into `main`**, after both leads approve. Agents never commit, merge, rebase onto, reset or
-  push `main`. You raise a PR: commit on your branch, then post `[A<N>] READY FOR REVIEW` (local repo)
+- **Only Lead 1 (Claude, `[LEAD-ARCH]`) merges into `main`**, after both leads approve or, for a row shipped by §6a,
+  a `ready` manifest that passes ship-check. Agents never commit, merge, rebase onto, reset or push `main`. You raise a PR: commit on your branch, then post `[A<N>] READY FOR REVIEW` (local repo)
   or open a pull request (if the repo is on GitHub). A git hook rejects any change to `main` from agents.
 - Base branch: `main`. Your branch: `a<N>/<short-topic>` (e.g. `a2/connect-client`).
 - Small PRs (aim < 600 changed lines, excluding generated code and lockfiles).
@@ -248,10 +365,34 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 ## What
 ## Why
 ## How I tested   (exact commands + short output)
+## Risk   (tier from §6a and why; what a bug here would break)
+## How to revert   (what reverting the merge undoes; any data or config to undo too)
 ## Not done / known gaps
 ## New dependencies   (module, version, why)
 ## Contract change request   (only if needed)
 ```
+
+### 6a. Ship workflow (from 2026-10-18): no human approval
+
+Board rows are built and reviewed by the ship workflow, [`docs/process/ship-workflow.md`](docs/process/ship-workflow.md)
+(script `docs/process/piperoom-ship.workflow.js`). For a row it ships, a `ready` manifest that passes ship-check
+replaces the two leads' approvals of §2, §6 and §7. The owner chose to run without a human approver.
+
+- The workflow's builder acts as the row's owner agent: it edits only that agent's folders (§2) and uses the row's
+  tag. A file outside them, or a contract file on a row that is not the leads', blocks the row.
+- Lead 1 runs the workflow and ships its rows as the doc's §5 says, and writes no feature code. Both the workflow
+  and ship-check run from a checkout detached at `origin/main`, never from a row's branch, so a PR cannot be graded
+  by rules it edits. Ownership in ship-check comes from `docs/process/ownership.json` (kept in step with §2) and the
+  board's Agent cell, not from the workflow's own planner.
+- The workflow builds every row on Opus 5.5 at xhigh. The board's Model column applies only to rows built outside
+  the workflow.
+- The risk tier and the approvals it needs are in the doc's §2 table.
+- Approvals stand while the row's own patch is unchanged: the first field of
+  `git diff $(git merge-base origin/main HEAD) HEAD | git patch-id --verbatim`, run in the row's worktree after
+  `git fetch origin main`, equals the manifest's `patchId`. A conflict resolution or any other change means
+  rerunning the workflow on that row with resume (`args.resume = {ROW: {worktree, branch}}`).
+
+Rows the workflow returns `blocked` go back to the leads. PRs made outside the workflow keep the §7 two-lead review.
 
 ## 7. How the leads check your PR
 

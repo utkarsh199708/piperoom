@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
+	"piperoom/internal/tools"
 )
 
 // execQueue serializes proposal execution per room: approvals released while
@@ -90,8 +91,15 @@ func (q *execQueue) busy() bool {
 // here, when it is queued (docs/design/replicas.md section 5): a proposal that
 // waits behind a long one in this room's queue is then a live claim this
 // replica refreshes, never "approved and unclaimed". A claim another executor
-// already holds queues nothing. Caller holds st's lock.
+// already holds queues nothing. With write mode off nothing is queued or
+// claimed: the proposal stays open and fully approved (BlockedWriteModeOff),
+// and its row is marked store.ProposalStatusBlocked. Caller holds st's lock.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
+	if s.writeOff {
+		s.log.Info("room: proposal fully approved; not run: write mode is off", "room", p.RoomID, "proposal", p.ProposalID)
+		s.markWriteBlocked(p.ProposalID)
+		return
+	}
 	// The worker's place in wg is reserved before the claim, so a closing
 	// service claims nothing; it is given back when the room has its worker
 	// already or nothing is queued.
@@ -111,7 +119,7 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 			return
 		}
 		if !claimed {
-			s.log.Info("room: proposal already claimed by another executor; not queued here", "proposal", p.ProposalID)
+			s.log.Info("room: claim refused (claimed by another executor, not approved in full, or not open); not queued here", "proposal", p.ProposalID)
 			s.wg.Done()
 			return
 		}
@@ -176,6 +184,26 @@ func (s *Service) abandonQueued(roomID string, q *execQueue) {
 		q.done()
 	}
 }
+
+// markWriteBlocked marks the row of a proposal fully approved with write mode
+// off, so a later run with write mode on can tell it from one whose server
+// stopped before it started (writeOffNotRunOutput). Best effort: a row left
+// "open" is still kept out of the off-mode sweep by its window, and reads as
+// never claimed later.
+func (s *Service) markWriteBlocked(proposalID string) {
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	if err := s.store.SetProposalStatus(rctx, proposalID, store.ProposalStatusBlocked); err != nil {
+		s.log.Warn("room: mark proposal blocked by write mode failed", "proposal", proposalID, "err", err)
+	}
+}
+
+// writeOffNotRunOutput is the failed outcome recorded, once write mode is
+// on, for a proposal that was fully approved while it was off.
+const writeOffNotRunOutput = "approved while write mode was off, so it was not run; create a new proposal to run it"
+
+// errWriteModeOff is executeProposal's refusal with write mode off.
+var errWriteModeOff = errors.New("write mode is off (PIPEROOM_WRITE_MODE): approved proposals do not run")
 
 // stepStatus is one state of the explicit per-step state machine.
 type stepStatus int
@@ -260,6 +288,13 @@ func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
 func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 	ctx := s.ctx
 
+	// The queue never holds a proposal with write mode off; this guards a
+	// caller that reaches the executor some other way. It runs before the
+	// claim, so the proposal stays as it was and nothing is recorded.
+	if s.writeOff {
+		return fmt.Errorf("room: proposal %s: %w", p.ProposalID, errWriteModeOff)
+	}
+
 	// One executor per approved proposal across replicas
 	// (docs/design/replicas.md section 5): the claim comes before anything
 	// that writes, so a losing executor leaves no trace. With an error the
@@ -271,7 +306,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return fmt.Errorf("room: proposal %s: claim: %w", p.ProposalID, err)
 		}
 		if !ok {
-			s.log.Info("room: proposal already claimed by another executor; not run here", "proposal", p.ProposalID)
+			s.log.Info("room: proposal not approved in full, not open, or claimed by another executor; not run here", "proposal", p.ProposalID)
 			return nil
 		}
 	}
@@ -354,7 +389,11 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
 		}
-		if err := action.Validate(ctx, step.Params); err != nil {
+		// Validate and Execute run under the room's whole pipeline: the
+		// write clients refuse a write without it (fail closed), and
+		// Validate sees the same scope the write will run under.
+		actx := s.pipelineCtx(ctx, pipelineID)
+		if err := action.Validate(actx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
 		}
@@ -365,7 +404,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			return nil
 		}
 
-		sctx, cancel := context.WithTimeout(ctx, stepTimeout)
+		sctx, cancel := context.WithTimeout(actx, stepTimeout)
 		out, err := action.Execute(sctx, step.Params)
 		cancel()
 		output := out
@@ -419,6 +458,10 @@ func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output 
 // run a step (design section 3.2).
 const paramsHashMismatchOutput = "params hash mismatch"
 
+// notApprovedOutput is the step output when a required layer has no approved
+// decision right before the step runs.
+const notApprovedOutput = "not approved by every required layer"
+
 // recheckStep is the executor's integrity check (design section 3.2). It
 // re-reads the proposal row and recomputes the hash from what the row holds
 // now. The step runs only if the recomputed hash equals BOTH the row's stored
@@ -456,6 +499,12 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 		if a.Decision == "approved" && a.ParamsHash != approved {
 			return events.ProposalStep{}, paramsHashMismatchOutput
 		}
+	}
+	// The claim checked this already; checked again before every write so a
+	// step never runs on a proposal that is not approved in full, whatever
+	// path reached the executor.
+	if !layersApproved(cur.RequiredLayers, apps) {
+		return events.ProposalStep{}, notApprovedOutput
 	}
 	return steps[i], ""
 }
@@ -579,6 +628,23 @@ func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.Ra
 		return fmt.Errorf("action %q: %w", a.Name(), err)
 	}
 	return nil
+}
+
+// pipelineCtx scopes ctx to the room's pipeline for an action call. The
+// Postgres and Kafka write clients need the whole pipeline in ctx
+// (tools.WithPipeline) and refuse a write without it (P0 item 7), so the
+// executor's Validate and Execute and the preview all scope through here.
+// A pipeline the owners config does not resolve (no config, an unknown id, no
+// pipeline at all) gets its id only (tools.WithPipelineID): the writers refuse
+// that as tools.ErrNoScope, and "" also clears a pipeline ctx already carried.
+// It never opts out with tools.WithUnscoped.
+func (s *Service) pipelineCtx(ctx context.Context, pipelineID string) context.Context {
+	if pipelineID != "" && s.owners != nil {
+		if p, ok := s.owners.Pipeline(pipelineID); ok {
+			return tools.WithPipeline(ctx, p)
+		}
+	}
+	return tools.WithPipelineID(ctx, pipelineID)
 }
 
 // roomPipeline returns the pipeline of a room ("" when unknown).

@@ -2,6 +2,11 @@
 // it reads Debezium change events for public.orders from Kafka and upserts
 // them into warehouse.analytics.orders. It can be told to fail or slow down,
 // so the failure scenarios in dev/scenarios.md have a realistic consumer.
+//
+// Two knobs play a bad release: SKIP_OPS (a build that drops some change
+// events but commits their offsets: consumer-bad-deploy) and REJECT_STATUS (a
+// build that rejects a status value and routes those records to DLQ_TOPIC:
+// dlq-backlog).
 package main
 
 import (
@@ -32,6 +37,11 @@ type options struct {
 	group     string
 	failOnID  int64
 	delay     time.Duration
+	// skipOps are Debezium ops (c, u, d, r) this build silently drops.
+	skipOps map[string]bool
+	// rejectStatus: an order with this status is rejected to dlqTopic.
+	rejectStatus string
+	dlqTopic     string
 }
 
 func main() {
@@ -61,7 +71,18 @@ func main() {
 		os.Exit(2)
 	}
 	flag.DurationVar(&o.delay, "delay", delay, "sleep per record (to build lag)")
+	skipRaw := flag.String("skip-ops", env("SKIP_OPS", ""), "Debezium ops to drop without loading, comma separated (c,u,d,r); a bad build")
+	flag.StringVar(&o.rejectStatus, "reject-status", env("REJECT_STATUS", ""), "reject orders with this status to the DLQ; a bad build")
+	flag.StringVar(&o.dlqTopic, "dlq-topic", env("DLQ_TOPIC", ""), "dead-letter topic for rejected records")
 	flag.Parse()
+	if o.skipOps, err = parseSkipOps(*skipRaw); err != nil {
+		fmt.Fprintf(os.Stderr, "devconsumer: %v\n", err)
+		os.Exit(2)
+	}
+	if o.rejectStatus != "" && o.dlqTopic == "" {
+		fmt.Fprintln(os.Stderr, "devconsumer: REJECT_STATUS needs DLQ_TOPIC")
+		os.Exit(2)
+	}
 
 	log := newLogger(os.Stderr, config.Load())
 	// SIGTERM is what `docker stop` sends; handling it lets the client leave
@@ -95,7 +116,8 @@ func run(ctx context.Context, o options, log *slog.Logger) error {
 	defer cl.Close()
 
 	schemas := newSchemaCache(o.registry)
-	log.Info("devconsumer started", "topic", o.topic, "group", o.group, "fail_on_id", o.failOnID, "delay", o.delay)
+	log.Info("devconsumer started", "topic", o.topic, "group", o.group, "fail_on_id", o.failOnID, "delay", o.delay,
+		"skip_ops", joinOps(o.skipOps), "reject_status", o.rejectStatus, "dlq_topic", o.dlqTopic)
 
 	for {
 		// PollRecords caps each batch, so a large --delay cannot make a single
@@ -113,6 +135,15 @@ func run(ctx context.Context, o options, log *slog.Logger) error {
 				return
 			}
 			procErr = handle(ctx, r, schemas, pool, o)
+			var rj *rejection
+			if errors.As(procErr, &rj) {
+				// Produced before the commit below: a crash in between
+				// re-delivers the record, so the DLQ never misses one.
+				procErr = sendDLQ(ctx, cl, o.dlqTopic, r, rj)
+				if procErr == nil {
+					log.Warn("record rejected to the DLQ", "topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "reason", rj.reason)
+				}
+			}
 			if o.delay > 0 {
 				// Wait in a ctx-aware way so SIGTERM stops a delayed batch.
 				select {
@@ -154,6 +185,12 @@ func handle(ctx context.Context, r *kgo.Record, schemas *schemaCache, pool *pgxp
 	}
 	if o.failOnID != 0 && c.ID == o.failOnID {
 		return fmt.Errorf("devconsumer: cannot process order %d at %s/%d@%d (poison pill)", c.ID, r.Topic, r.Partition, r.Offset)
+	}
+	if err := check(c, o); err != nil {
+		return err
+	}
+	if o.skipOps[c.Op] {
+		return nil
 	}
 	return apply(ctx, pool, c)
 }

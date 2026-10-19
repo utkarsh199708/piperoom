@@ -4,17 +4,19 @@
 //  - Approve and Reject send the params_hash that is ON SCREEN, never one fetched at click time.
 //  - The server checks the hash (409 params_mismatch) before it asks for the solo confirm.
 //    A 409 is never retried: the stale banner and toast tell the person, they look again.
-//  - `canDecideLayer` is the only gate for the buttons (plus "no hash" and "busy", which only
-//    switch them off). A viewer or a non-owner gets no buttons at all.
+//  - `canDecideLayer` is the only gate for a layer row's buttons, and `approveAllFor` for the card's
+//    one "Approve and run" that replaces them (plus "no hash" and "busy", which only switch them
+//    off). A viewer or a non-owner gets no buttons at all.
 import { PersonName } from '@/components/VerifiedBadge'
 import { neutralizeBadgeText, personVerification } from '@/lib/verification'
 import { useContext, useEffect, useId, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import { Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canDecideLayer, isViewer } from '../state/permissions'
+import { canDecideLayer, isFallbackLayer, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
+import { approveAllFor, approveAllLabel, soloAllConfirmText } from '../lib/approveAll'
 import { describeIdentity, identityDetails } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
 import { Clock } from './room/Clock'
@@ -27,11 +29,12 @@ import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
 import { DecisionHandleContext } from './shell/context'
 import { completesSet } from '../lib/decision'
+import { writeModeOff } from '../lib/writeMode'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
 import { WaitingFor } from './room/WaitingFor'
 import type { Person, PresenceMember, Topology } from '../api/types'
-import type { NudgeState } from '../state/types'
+import type { DriverInfo, NudgeState } from '../state/types'
 
 /** What a pending layer row needs to say who it waits on and to nudge them (F9). */
 export interface WaitingContext {
@@ -277,17 +280,10 @@ function SoloConfirmDialog({
 }) {
   const [typed, setTyped] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
-  const inputId = useId()
-  const hintId = `${inputId}-hint`
   const match = typed === want
   const submit = () => {
     if (match && !busy) onConfirm(typed)
   }
-  const progress = match
-    ? 'It matches.'
-    : want.startsWith(typed)
-      ? `${want.length - typed.length} character${want.length - typed.length === 1 ? '' : 's'} to go`
-      : 'This does not match yet.'
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
       <DialogContent
@@ -327,40 +323,15 @@ function SoloConfirmDialog({
               <span className="font-mono text-xs text-subtle-foreground">fingerprint {fingerprint(proposal.params_hash)}</span>
             )}
           </div>
-          <div className="flex flex-col gap-1.5">
-            {/* The label holds the exact string, so a screen reader announces what to type. */}
-            <label htmlFor={inputId} className="text-sm font-medium">
-              Solo mode: type <code className="font-mono">{want}</code> to approve
-            </label>
-            <Input
-              ref={inputRef}
-              id={inputId}
-              value={typed}
-              onChange={(e) => setTyped(e.target.value)}
-              onPaste={(e) => e.preventDefault()}
-              onDrop={(e) => e.preventDefault()}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault()
-                  submit()
-                }
-              }}
-              aria-describedby={hintId}
-              aria-invalid={rejected || undefined}
-              autoComplete="off"
-              spellCheck={false}
-              className="h-9 font-mono text-base font-medium"
-            />
-            <span id={hintId} className="text-xs text-subtle-foreground">
-              Type it by hand. Paste is off.
-            </span>
-            <span className="text-xs text-muted-foreground">{progress}</span>
-            {rejected && (
-              <span className="text-xs font-medium text-destructive-fg" role="alert">
-                The server did not accept that text.
-              </span>
-            )}
-          </div>
+          <TypedConfirm
+            want={want}
+            what="to approve"
+            value={typed}
+            onChange={setTyped}
+            onSubmit={submit}
+            rejected={rejected}
+            inputRef={inputRef}
+          />
           <DialogFooter className="items-center">
             <Button variant="ghost" onClick={onCancel}>
               Cancel
@@ -377,12 +348,83 @@ function SoloConfirmDialog({
   )
 }
 
+// The typed text of solo mode (docs/design/auth.md 5.3), for one layer or for approve-all. The
+// label holds the exact string, so a screen reader announces what to type; there is no copy button,
+// paste and drop are off, and Ctrl/⌘⏎ submits.
+function TypedConfirm({
+  want,
+  what,
+  value,
+  onChange,
+  onSubmit,
+  rejected,
+  inputRef,
+}: {
+  want: string
+  /** The end of the label: "to approve", "to approve every layer". */
+  what: string
+  value: string
+  onChange: (typed: string) => void
+  onSubmit: () => void
+  /** The server refused the typed text once already. */
+  rejected: boolean
+  inputRef: RefObject<HTMLInputElement | null>
+}) {
+  const inputId = useId()
+  const hintId = `${inputId}-hint`
+  const left = want.length - value.length
+  const progress =
+    value === want
+      ? 'It matches.'
+      : want.startsWith(value)
+        ? `${left} character${left === 1 ? '' : 's'} to go`
+        : 'This does not match yet.'
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={inputId} className="text-sm font-medium">
+        Solo mode: type <code className="font-mono">{want}</code> {what}
+      </label>
+      <Input
+        ref={inputRef}
+        id={inputId}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onPaste={(e) => e.preventDefault()}
+        onDrop={(e) => e.preventDefault()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault()
+            onSubmit()
+          }
+        }}
+        aria-describedby={hintId}
+        aria-invalid={rejected || undefined}
+        autoComplete="off"
+        spellCheck={false}
+        className="h-9 font-mono text-base font-medium"
+      />
+      <span id={hintId} className="text-xs text-subtle-foreground">
+        Type it by hand. Paste is off.
+      </span>
+      <span className="text-xs text-muted-foreground">{progress}</span>
+      {rejected && (
+        <span className="text-xs font-medium text-destructive-fg" role="alert">
+          The server did not accept that text.
+        </span>
+      )}
+    </div>
+  )
+}
+
 // The approval that completes the set runs the fix right away. One more look, with the steps
-// that will run, before a production change (Enter or Ctrl/⌘⏎ confirms, Esc cancels).
+// that will run, before a production change (Enter or Ctrl/⌘⏎ confirms, Esc cancels). With write
+// mode off the step stays, because the approval is still a decision on record, but the words say
+// that nothing runs: the dialog must never promise what the server will not do.
 function RunConfirmDialog({
   proposal,
   layer,
   busy,
+  writeOff,
   onConfirm,
   onCancel,
   onClosed,
@@ -390,6 +432,7 @@ function RunConfirmDialog({
   proposal: ProposalState
   layer: string
   busy: boolean
+  writeOff: boolean
   onConfirm: () => void
   onCancel: () => void
   onClosed: () => void
@@ -420,10 +463,16 @@ function RunConfirmDialog({
         }}
       >
         <DialogHeader className="gap-1.5">
-          <DialogTitle>Run this fix now?</DialogTitle>
+          <DialogTitle>{writeOff ? 'Approve this fix?' : 'Run this fix now?'}</DialogTitle>
           <DialogDescription>
-            Your approval completes the set. Piperoom runs {n} {n === 1 ? 'step' : 'steps'} on {layers.join(' and ') || layer}{' '}
-            right away.
+            {writeOff ? (
+              'Your approval completes the set. Write mode is off, so nothing runs: the fix waits for write mode.'
+            ) : (
+              <>
+                Your approval completes the set. Piperoom runs {n} {n === 1 ? 'step' : 'steps'} on{' '}
+                {layers.join(' and ') || layer} right away.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         <ul className="m-0 flex list-none flex-col gap-1 rounded-lg border border-border bg-muted p-3 font-mono text-xs">
@@ -439,12 +488,382 @@ function RunConfirmDialog({
             <Kbd aria-hidden="true">esc</Kbd>
           </Button>
           <Button variant="success" disabled={busy} autoFocus onClick={onConfirm}>
-            Approve and run
+            {writeOff ? 'Approve (will not run)' : 'Approve and run'}
             <Kbd aria-hidden="true">⏎</Kbd>
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// A and R, and the decision bar's buttons, for the one place of the room that owns them (a layer
+// row, or the card's "Approve and run"). The listener is added once and calls the handler of the
+// latest render; `handle` answers whether it acted, so a key it ignores is left alone.
+function useDecisionKeys(shortcuts: boolean, headingId: string, handle: (key: 'a' | 'r') => boolean) {
+  const latest = useRef(handle)
+  useEffect(() => {
+    latest.current = handle
+  })
+  useEffect(() => {
+    if (!shortcuts) return
+    const onKey = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase()
+      if (key !== 'a' && key !== 'r') return
+      if (!keyIsForTheCard(e)) return
+      if (latest.current(key)) e.preventDefault()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [shortcuts])
+
+  // The decision bar acts through the same handler, so A, R, the bar and the buttons share one path.
+  const registry = useContext(DecisionHandleContext)
+  useEffect(() => {
+    if (!shortcuts) return
+    registry?.set({
+      approve: () => void latest.current('a'),
+      reject: () => void latest.current('r'),
+      scrollTo: () => {
+        const el = document.getElementById(PROPOSAL_ANCHOR)
+        const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+        el?.scrollIntoView?.({ behavior: calm ? 'auto' : 'smooth', block: 'start' })
+        document.getElementById(headingId)?.focus({ preventScroll: true })
+      },
+    })
+    return () => registry?.set(null)
+  })
+}
+
+// The reason a rejection needs (Esc or Cancel drops it).
+function RejectForm({
+  label,
+  onReject,
+  onCancel,
+}: {
+  label: string
+  onReject: (reason: string) => void
+  onCancel: () => void
+}) {
+  const [reason, setReason] = useState('')
+  return (
+    <form
+      className="ml-auto flex min-w-0 flex-1 basis-72 items-center justify-end gap-2"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (!reason.trim()) return
+        onReject(reason.trim())
+      }}
+    >
+      <Input
+        value={reason}
+        onChange={(e) => setReason(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            e.stopPropagation()
+            onCancel()
+          }
+        }}
+        placeholder="Reason"
+        aria-label={label}
+        className="min-w-0 flex-1"
+        autoComplete="off"
+        autoFocus
+      />
+      <Button type="submit" variant="destructive" size="sm" className="coarse:h-11 coarse:px-4" disabled={!reason.trim()}>
+        Confirm
+      </Button>
+      <Button variant="ghost" size="sm" className="coarse:h-11 coarse:px-4" onClick={onCancel}>
+        Cancel
+      </Button>
+    </form>
+  )
+}
+
+// The last look before one call records every layer (P2c). It names each layer with what the fix
+// does there and the fingerprint the approvals bind to, and asks the solo user for
+// "<pipeline_id>/*" typed by hand once (docs/design/auth.md 5.3; paste off, as for one layer).
+// With write mode off it says that nothing runs, in the run confirm's words (P1e).
+function ApproveAllDialog({
+  proposal,
+  layers,
+  want,
+  busy,
+  refusedText,
+  error,
+  writeOff,
+  onConfirm,
+  onCancel,
+  onClosed,
+}: {
+  proposal: ProposalState
+  /** The layers this call records, in required_layers order. */
+  layers: string[]
+  /** The text the solo user must type, or null when no typed confirm is needed. */
+  want: string | null
+  busy: boolean
+  /** The server refused the typed text once already. */
+  refusedText: boolean
+  /** Why the last call failed (it is also in the room banner, which this dialog covers). */
+  error: string | null
+  writeOff: boolean
+  onConfirm: (typed?: string) => void
+  onCancel: () => void
+  onClosed: () => void
+}) {
+  const [typed, setTyped] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const match = want === null || typed === want
+  const submit = () => {
+    if (match && !busy) onConfirm(want === null ? undefined : typed)
+  }
+  const n = proposal.steps.length
+  const these = layers.length === 1 ? 'the layer' : `all ${layers.length} layers`
+  const before = proposal.required_layers.filter((l) => !layers.includes(l))
+  return (
+    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+      <DialogContent
+        hideClose
+        role="alertdialog"
+        className="max-w-[520px]"
+        onOpenAutoFocus={(e) => {
+          if (want === null) return
+          e.preventDefault()
+          inputRef.current?.focus()
+        }}
+        onCloseAutoFocus={(e) => {
+          e.preventDefault()
+          onClosed()
+        }}
+        onKeyDown={(e) => {
+          // A held Enter that opened this dialog must not also confirm it on the focused button.
+          if (e.key === 'Enter' && e.repeat) e.preventDefault()
+        }}
+      >
+        <form
+          className="grid gap-4"
+          onSubmit={(e) => {
+            e.preventDefault()
+            submit()
+          }}
+        >
+          <DialogHeader className="gap-1.5">
+            <DialogTitle>{writeOff ? 'Approve this fix?' : 'Approve and run this fix?'}</DialogTitle>
+            <DialogDescription>
+              {writeOff
+                ? `This records your approval for ${these} below. Write mode is off, so nothing runs: the fix waits for write mode.`
+                : `This records your approval for ${these} below, then Piperoom runs ${n} ${n === 1 ? 'step' : 'steps'} right away.`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-muted px-3 py-2.5">
+            <span className="text-xs text-subtle-foreground">You are approving</span>
+            <ul className="m-0 flex list-none flex-col gap-1 p-0" aria-label="Layers you are approving">
+              {layers.map((layer) => (
+                <li key={layer} className="flex flex-col gap-0.5" data-layer={layer}>
+                  {layerSummary(proposal, layer).map((line, i) => (
+                    <span key={i} className="font-medium">
+                      {line}
+                    </span>
+                  ))}
+                </li>
+              ))}
+            </ul>
+            {before.length > 0 && (
+              <span className="text-xs text-subtle-foreground">Already approved: {before.join(', ')}</span>
+            )}
+            {proposal.params_hash && (
+              <span className="font-mono text-xs text-subtle-foreground">fingerprint {fingerprint(proposal.params_hash)}</span>
+            )}
+            <span className="text-xs text-subtle-foreground">
+              if the steps change, this fingerprint changes and your approval is void
+            </span>
+          </div>
+          {want !== null && (
+            <TypedConfirm
+              want={want}
+              what="to approve every layer"
+              value={typed}
+              onChange={setTyped}
+              onSubmit={submit}
+              rejected={refusedText}
+              inputRef={inputRef}
+            />
+          )}
+          {error && (
+            <p className="text-sm font-medium text-destructive-fg" role="alert">
+              {error}
+            </p>
+          )}
+          <DialogFooter className="items-center">
+            <Button variant="ghost" onClick={onCancel}>
+              Cancel
+              <Kbd aria-hidden="true">esc</Kbd>
+            </Button>
+            <Button type="submit" variant="success" disabled={busy || !match} autoFocus={want === null}>
+              {approveAllLabel(writeOff)}
+              <Kbd aria-hidden="true">{want === null ? '⏎' : '⌘⏎'}</Kbd>
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// "Approve and run" (P2c): the person may approve every layer the proposal needs, so one button
+// records them all with one call (POST /api/proposals/{pid}/approve-all) behind one confirm, in
+// place of the per-layer buttons. Reject stays one click away; it is recorded on the first pending
+// layer, which is enough to reject the whole proposal.
+function ApproveAll({
+  proposal,
+  layers,
+  user,
+  actions,
+  pipelineId,
+  writeOff,
+  shortcuts,
+  noHashNoteId,
+  headingId,
+  onSolo,
+}: {
+  proposal: ProposalState
+  /** The pending layers the call records (approveAllFor). */
+  layers: string[]
+  user: CurrentUser
+  actions: RoomActions
+  pipelineId: string
+  writeOff: boolean
+  /** The card's A and R keys and the decision bar act here. */
+  shortcuts: boolean
+  noHashNoteId: string
+  headingId: string
+  /** The server asked for a solo confirm: the panel shows the solo banner. */
+  onSolo: () => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const [rejecting, setRejecting] = useState(false)
+  const [busy, setBusy] = useState(false)
+  // The server asked for the typed "<pipeline_id>/*" (an older /api/me did not say solo).
+  const [asked, setAsked] = useState(false)
+  const [refusedText, setRefusedText] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const approveRef = useRef<HTMLButtonElement>(null)
+  const hashed = proposal.params_hash !== ''
+  const want = user.solo || asked ? soloAllConfirmText(pipelineId) : null
+
+  const restoreFocus = () => {
+    const button = approveRef.current
+    if (button && !button.disabled) button.focus()
+    else document.getElementById(headingId)?.focus()
+  }
+  const openConfirm = () => {
+    setError(null)
+    setRefusedText(false)
+    setConfirming(true)
+  }
+  const closeConfirm = () => {
+    setConfirming(false)
+    setError(null)
+    setRefusedText(false)
+  }
+
+  // The hash on screen is sent as it is, never fetched at click time: a fix that changed under the
+  // screen answers 409 params_mismatch and the stale banner takes over (no retry).
+  const approveAll = async (confirm?: string) => {
+    if (!actions.approveAll) return
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await actions.approveAll(proposal.proposal_id, {
+        params_hash: proposal.params_hash,
+        ...(confirm !== undefined ? { confirm } : {}),
+      })
+      if (res.needsConfirm) {
+        onSolo()
+        setRefusedText(confirm !== undefined)
+        setAsked(true)
+      } else if (res.ok || res.mismatch || res.refused) {
+        // Done, stale (the room reloads) or refused (the card goes back to the per-layer rows and
+        // says why): the dialog has nothing more to ask.
+        closeConfirm()
+      } else {
+        setError(res.error ?? 'Piperoom did not record the approvals. Try again.')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  useDecisionKeys(shortcuts, headingId, (key) => {
+    if (rejecting || confirming || busy) return false
+    if (key === 'a') {
+      if (!hashed) return false
+      openConfirm()
+    } else {
+      setRejecting(true)
+    }
+    return true
+  })
+
+  return (
+    <div
+      className="flex min-h-11 flex-wrap items-center gap-x-2.5 gap-y-1.5 bg-warning-subtle px-3.5 py-1.5"
+      data-testid="approve-all"
+    >
+      <span className="text-xs text-muted-foreground">Records your approval for {layers.join(', ')} at once</span>
+      {!rejecting && (
+        <span className="ml-auto inline-flex items-center gap-2">
+          <Button
+            variant="ghost-danger"
+            size="sm"
+            className="coarse:h-11 coarse:px-4"
+            onClick={() => setRejecting(true)}
+            aria-keyshortcuts={shortcuts ? 'R' : undefined}
+          >
+            Reject
+            {shortcuts && <Kbd aria-hidden="true">R</Kbd>}
+          </Button>
+          <Button
+            variant="success"
+            size="sm"
+            className="coarse:h-11 coarse:px-4"
+            ref={approveRef}
+            disabled={busy || !hashed}
+            aria-describedby={hashed ? undefined : noHashNoteId}
+            aria-keyshortcuts={shortcuts ? 'A' : undefined}
+            onClick={openConfirm}
+          >
+            {approveAllLabel(writeOff)}
+            {shortcuts && <Kbd aria-hidden="true">A</Kbd>}
+          </Button>
+        </span>
+      )}
+      {rejecting && (
+        <RejectForm
+          label="Rejection reason"
+          onReject={(reason) => {
+            // The hash on screen goes with the reason, as on a layer row.
+            actions.reject(proposal.proposal_id, layers[0], reason, proposal.params_hash)
+            setRejecting(false)
+          }}
+          onCancel={() => setRejecting(false)}
+        />
+      )}
+      {confirming && (
+        <ApproveAllDialog
+          proposal={proposal}
+          layers={layers}
+          want={want}
+          busy={busy}
+          refusedText={refusedText}
+          error={error}
+          writeOff={writeOff}
+          onConfirm={(typed) => void approveAll(typed)}
+          onCancel={closeConfirm}
+          onClosed={restoreFocus}
+        />
+      )}
+    </div>
   )
 }
 
@@ -461,12 +880,24 @@ function LayerRow({
   headingId,
   onSolo,
   waiting,
+  writeOff,
+  driver,
+  bundled,
 }: {
   proposal: ProposalState
   layer: string
   user: CurrentUser
   actions: RoomActions
   pipelineId: string
+  /** The room's driver while the room is open (null otherwise): they approve a layer nobody owns (P2b). */
+  driver: DriverInfo | null
+  /** Write mode is off (P1a): an approval is recorded and nothing runs, and the button says so. */
+  writeOff: boolean
+  /**
+   * The card's "Approve and run" decides this proposal (P2c): the row only says whose layer it is,
+   * with no buttons, dialogs or keys of its own.
+   */
+  bundled: boolean
   /** This row's buttons answer to A and R (the first layer you can decide). */
   shortcuts: boolean
   noHashNoteId: string
@@ -477,7 +908,6 @@ function LayerRow({
   waiting?: WaitingContext
 }) {
   const [rejecting, setRejecting] = useState(false)
-  const [reason, setReason] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [runConfirm, setRunConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -530,53 +960,27 @@ function LayerRow({
   // a hash the server would accept, so Approve stays off. Reject stays on: the server
   // takes a rejection with an empty hash for exactly this open proposal (params_hash.go).
   const hashed = proposal.params_hash !== ''
-  const canDecide = canDecideLayer(proposal, user, layer)
+  const canDecide = !bundled && canDecideLayer(proposal, user, layer, driver?.id)
+  // Pending and part of the card's one approval: shown as the person's own layer, decided below.
+  const inBundle = bundled && state === 'pending'
+  // Nobody owns this layer (P2b): the driver approves it, and the row says so instead of naming owners.
+  const fallback = isFallbackLayer(proposal, layer)
+  const driverName = driver ? neutralizeBadgeText(driver.name || driver.id) : ''
 
   // Solo: the typed box. The approval that completes the set: the run confirm. Otherwise at once.
   const completing = completesSet(proposal, layer)
   const startApprove = () => (user.solo ? setConfirming(true) : completing ? setRunConfirm(true) : void approve())
 
-  // A and R. The listener is added once; it calls the handler of the latest render.
-  const latest = useRef<(key: 'a' | 'r') => boolean>(() => false)
-  useEffect(() => {
-    latest.current = (key) => {
-      if (!canDecide || rejecting || confirming || runConfirm || busy) return false
-      if (key === 'a') {
-        if (!hashed) return false
-        startApprove()
-      } else {
-        setRejecting(true)
-      }
-      return true
+  // A and R, and the decision bar: they share startApprove with the buttons.
+  useDecisionKeys(shortcuts, headingId, (key) => {
+    if (!canDecide || rejecting || confirming || runConfirm || busy) return false
+    if (key === 'a') {
+      if (!hashed) return false
+      startApprove()
+    } else {
+      setRejecting(true)
     }
-  })
-  useEffect(() => {
-    if (!shortcuts) return
-    const onKey = (e: KeyboardEvent) => {
-      const key = e.key.toLowerCase()
-      if (key !== 'a' && key !== 'r') return
-      if (!keyIsForTheCard(e)) return
-      if (latest.current(key)) e.preventDefault()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [shortcuts])
-
-  // The decision bar acts through this row, so A, R, the bar and the buttons share startApprove.
-  const registry = useContext(DecisionHandleContext)
-  useEffect(() => {
-    if (!shortcuts) return
-    registry?.set({
-      approve: () => void latest.current('a'),
-      reject: () => void latest.current('r'),
-      scrollTo: () => {
-        const el = document.getElementById(PROPOSAL_ANCHOR)
-        const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-        el?.scrollIntoView?.({ behavior: calm ? 'auto' : 'smooth', block: 'start' })
-        document.getElementById(headingId)?.focus({ preventScroll: true })
-      },
-    })
-    return () => registry?.set(null)
+    return true
   })
 
   const reasonText = decision?.outcome === 'rejected' ? decision.reason : undefined
@@ -587,7 +991,7 @@ function LayerRow({
     <div
       className={cn(
         'flex min-h-11 flex-wrap items-center gap-x-2.5 gap-y-1.5 px-3.5 py-1.5',
-        canDecide && 'bg-warning-subtle',
+        (canDecide || inBundle) && 'bg-warning-subtle',
       )}
       data-layer={layer}
       data-state={state}
@@ -637,15 +1041,36 @@ function LayerRow({
             </span>
           )}
         </>
-      ) : canDecide ? (
+      ) : canDecide || inBundle ? (
         <>
           <PersonAvatar actor={{ id: user.id, name: user.name }} size={20} />
           <PersonName person={{ id: user.id, name: user.name, kind: 'human', verified: user.verified }} nameClassName="font-medium" />
           <span className="text-xs text-muted-foreground">you</span>
           {/* muted, not subtle: subtle text is 4.2:1 on the amber tint of this row */}
           <span className="font-mono text-xs text-muted-foreground">user:{user.id}</span>
-          <span className="text-xs font-medium text-warning-foreground">pending · your layer</span>
+          {fallback ? (
+            <span className="text-xs font-medium text-warning-foreground" data-testid={`fallback-${layer}`}>
+              no owner for <span className="font-mono">{layer}</span> · driver approves
+            </span>
+          ) : (
+            <span className="text-xs font-medium text-warning-foreground">pending · your layer</span>
+          )}
         </>
+      ) : fallback && state === 'pending' ? (
+        // Greyed for everyone but the driver: no owner to wait on or nudge.
+        <span className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+          <span data-testid={`fallback-${layer}`}>
+            no owner for <span className="font-mono">{layer}</span> · driver approves
+          </span>
+          {driver ? (
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              <PersonAvatar actor={{ id: driver.id, name: driverName }} size={20} />
+              <PersonName person={{ ...driver, kind: 'human' }} name={driverName} />
+            </span>
+          ) : (
+            <span>no driver yet</span>
+          )}
+        </span>
       ) : waiting && state === 'pending' ? (
         <WaitingFor
           proposalId={proposal.proposal_id}
@@ -681,60 +1106,28 @@ function LayerRow({
             aria-keyshortcuts={shortcuts ? 'A' : undefined}
             onClick={startApprove}
           >
-            Approve
+            Approve{writeOff ? ' (will not run)' : ''}
             {shortcuts && <Kbd aria-hidden="true">A</Kbd>}
           </Button>
         </span>
       )}
       {canDecide && rejecting && (
-        <form
-          className="ml-auto flex min-w-0 flex-1 basis-72 items-center justify-end gap-2"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (!reason.trim()) return
+        <RejectForm
+          label={`Rejection reason for ${layer}`}
+          onReject={(reason) => {
             // The hash on screen goes with the reason, "" included for an unhashable open proposal.
-            actions.reject(proposal.proposal_id, layer, reason.trim(), proposal.params_hash)
+            actions.reject(proposal.proposal_id, layer, reason, proposal.params_hash)
             setRejecting(false)
-            setReason('')
           }}
-        >
-          <Input
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape') {
-                e.stopPropagation()
-                setRejecting(false)
-                setReason('')
-              }
-            }}
-            placeholder="Reason"
-            aria-label={`Rejection reason for ${layer}`}
-            className="min-w-0 flex-1"
-            autoComplete="off"
-            autoFocus
-          />
-          <Button type="submit" variant="destructive" size="sm" className="coarse:h-11 coarse:px-4" disabled={!reason.trim()}>
-            Confirm
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="coarse:h-11 coarse:px-4"
-            onClick={() => {
-              setRejecting(false)
-              setReason('')
-            }}
-          >
-            Cancel
-          </Button>
-        </form>
+          onCancel={() => setRejecting(false)}
+        />
       )}
       {canDecide && runConfirm && (
         <RunConfirmDialog
           proposal={proposal}
           layer={layer}
           busy={busy}
+          writeOff={writeOff}
           onCancel={() => setRunConfirm(false)}
           onConfirm={() => {
             setRunConfirm(false)
@@ -791,14 +1184,24 @@ function Proposal({
   waiting,
   topology,
   nudge,
+  writeOff,
+  driver,
+  bundle,
+  refused,
 }: {
+  /** The room's driver while the room is open, else null (see LayerRow). */
+  driver: DriverInfo | null
   nudge: CloseNudge
   topology: Topology | null
   proposal: ProposalState
   user: CurrentUser
   actions: RoomActions
   pipelineId: string
-  /** The layer whose buttons answer to A and R in this card, if any. */
+  /** The layers one "Approve and run" records (approveAllFor), or null for the per-layer rows. */
+  bundle: string[] | null
+  /** The server's 403 text when it refused this person's approve-all (state.approve_all_refused). */
+  refused: string | undefined
+  /** The layer whose buttons answer to A and R in this card ("*": the card's "Approve and run"), if any. */
   shortcutLayer: string | undefined
   /** The hash the person looked at when the server answered 409 for this proposal (kept by useRoom). */
   sentHash: string | null
@@ -806,6 +1209,7 @@ function Proposal({
   ribbon: boolean
   onSolo: () => void
   waiting: WaitingContext
+  writeOff: boolean
 }) {
   const titleId = useId()
   const noteId = useId()
@@ -813,12 +1217,18 @@ function Proposal({
   // useRoom keeps across the room reload (this card is unmounted while the room loads).
   const [acknowledged, setAcknowledged] = useState<string | null>(null)
 
-  const mine = proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l))
+  const mine = bundle ?? proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l, driver?.id))
   const open = proposal.status === 'open'
   const hashed = proposal.params_hash !== ''
   const pending = proposal.required_layers.filter((l) => (proposal.approvals[l] ?? 'pending') === 'pending')
   const approved = proposal.required_layers.filter((l) => proposal.approvals[l] === 'approved').length
   const previous = latestDecision(proposal)
+  // A layer nobody owns waits on the driver, not on an owner (P2b).
+  const ownersPending = pending.filter((l) => !isFallbackLayer(proposal, l))
+  const waitingOn = [
+    ...(ownersPending.length > 0 ? [`${ownersPending.join(', ')} ${ownersPending.length === 1 ? 'owner' : 'owners'}`] : []),
+    ...(ownersPending.length < pending.length ? ['the driver'] : []),
+  ].join(' and ')
 
   return (
     <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
@@ -851,7 +1261,7 @@ function Proposal({
             {proposal.status === 'approved' && <Badge variant="success">approved</Badge>}
             {proposal.status === 'rejected' && <Badge variant="destructive">rejected</Badge>}
             {open && mine.length === 0 && pending.length > 0
-              ? `waiting for ${pending.join(', ')} ${pending.length === 1 ? 'owner' : 'owners'} · ${approved} of ${proposal.required_layers.length} approved`
+              ? `waiting for ${waitingOn} · ${approved} of ${proposal.required_layers.length} approved`
               : 'proposed by the agent'}
           </span>
         </div>
@@ -916,6 +1326,11 @@ function Proposal({
       </div>
 
       <Separator />
+      {refused !== undefined && open && (
+        <p className="px-3.5 py-2 text-xs font-medium text-destructive-fg" role="alert" data-testid="approve-all-refused">
+          Approve and run was refused: {refused}. Approve the layers you own one at a time below.
+        </p>
+      )}
       <div className="flex flex-col divide-y divide-border">
         {proposal.required_layers.map((layer) => (
           <LayerRow
@@ -930,8 +1345,25 @@ function Proposal({
             headingId={titleId}
             onSolo={onSolo}
             waiting={waiting}
+            writeOff={writeOff}
+            driver={driver}
+            bundled={bundle !== null}
           />
         ))}
+        {bundle && (
+          <ApproveAll
+            proposal={proposal}
+            layers={bundle}
+            user={user}
+            actions={actions}
+            pipelineId={pipelineId}
+            writeOff={writeOff}
+            shortcuts={shortcutLayer === '*'}
+            noHashNoteId={noteId}
+            headingId={titleId}
+            onSolo={onSolo}
+          />
+        )}
       </div>
       <ExecutionCard
         proposal={proposal}
@@ -985,6 +1417,8 @@ export function ProposalsPanel({
   // status "open": with no decidable layers no card shows Approve, Reject or a "your layer" row,
   // and A and R do nothing, matching the decision bar, which already hides on a closed room.
   const decider: CurrentUser = state.status === 'open' ? user : { ...user, layers: [] }
+  // Same for the driver's right to a layer nobody owns: none on a closed room.
+  const driver = state.status === 'open' ? state.driver : null
   const nudge: CloseNudge = {
     roomOpen: state.status === 'open',
     driver: state.driver ?? undefined,
@@ -996,10 +1430,15 @@ export function ProposalsPanel({
   const [soloSeen, setSoloSeen] = useState(false)
   const solo = user.solo === true || soloSeen
 
-  // A and R belong to one row at a time: the first layer you can decide, in the first such proposal.
+  // "Approve and run" (P2c) where the person may approve every layer of a proposal. The same rule
+  // as the decision bar's (lib/decision.ts); a host without approveAll keeps the per-layer rows.
+  const bundleFor = (p: ProposalState) => (actions.approveAll ? approveAllFor(state, p, decider) : null)
+
+  // A and R belong to one place at a time, in the first proposal that has one: its "Approve and
+  // run" ("*"), else the first layer you can decide.
   let shortcutKey = ''
   for (const p of proposals) {
-    const layer = p.required_layers.find((l) => canDecideLayer(p, decider, l))
+    const layer = bundleFor(p) ? '*' : p.required_layers.find((l) => canDecideLayer(p, decider, l, driver?.id))
     if (layer) {
       shortcutKey = `${p.proposal_id}/${layer}`
       break
@@ -1038,6 +1477,10 @@ export function ProposalsPanel({
               waiting={waiting}
               topology={topology}
               nudge={nudge}
+              writeOff={writeModeOff(state.mode)}
+              driver={driver}
+              bundle={bundleFor(p)}
+              refused={state.approve_all_refused?.[p.proposal_id]}
             />
           ))}
         </div>
