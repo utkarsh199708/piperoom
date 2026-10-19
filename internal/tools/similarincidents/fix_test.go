@@ -146,3 +146,23 @@ func TestHitCauseAndLabelFix(t *testing.T) {
 		})
 	}
 }
+
+// The setup layer is never where an incident was, so a stored label that names
+// it is not shown as the hit's layer (U0-IL3); a real layer still is.
+func TestSimilarRefusesEnvironmentLayer(t *testing.T) {
+	for name, tc := range map[string]struct {
+		room fake.Room
+		want string
+	}{
+		"room label, environment":   {fake.Room{Label: &events.RoomLabelledPayload{ActualLayer: events.LayerEnvironment, Cause: "x"}}, ""},
+		"room label, kafka":         {fake.Room{Label: &events.RoomLabelledPayload{ActualLayer: "kafka", Cause: "x"}}, "kafka"},
+		"shadow label, environment": {fake.Room{Shadow: true, Layer: events.LayerEnvironment, LabelTerms: []string{"x"}}, ""},
+		"shadow label, kafka":       {fake.Room{Shadow: true, Layer: "kafka", LabelTerms: []string{"x"}}, "kafka"},
+	} {
+		tc.room.ID, tc.room.Title, tc.room.ClosedAt, tc.room.Resolution = "r", "zebrafish pipeline stalled", day(9, 30), "done"
+		hits, _ := hitsOf(t, tc.room)
+		if len(hits) != 1 || hits[0].Layer != tc.want {
+			t.Errorf("%s: hits = %+v, want layer %q", name, hits, tc.want)
+		}
+	}
+}
