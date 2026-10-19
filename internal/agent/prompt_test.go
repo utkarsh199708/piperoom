@@ -930,8 +930,12 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 			t.Errorf("CDC system prompt missing %q", want)
 		}
 	}
-	if strings.Contains(systemPromptFor(events.PipelineKindBatch), "pg_snapshot_signal") {
+	batch := systemPromptFor(events.PipelineKindBatch)
+	if strings.Contains(batch, "pg_snapshot_signal") {
 		t.Error("batch prompt must not carry the CDC backfill rule")
+	}
+	if strings.Contains(batch, "orphaned slot") {
+		t.Error("batch prompt must not carry the CDC orphaned-slot rule")
 	}
 }
 

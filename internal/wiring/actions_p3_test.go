@@ -493,7 +493,12 @@ func TestRegisterP3ActionsTypedNil(t *testing.T) {
 }
 
 func TestIsNilIface(t *testing.T) {
-	var nilMap map[string]int
+	var (
+		nilMap   map[string]int
+		nilSlice []string
+		nilFunc  func()
+		nilChan  chan int
+	)
 	cases := []struct {
 		name string
 		v    any
@@ -503,6 +508,10 @@ func TestIsNilIface(t *testing.T) {
 		{"typed nil pointer", (*kafka.Writer)(nil), true},
 		{"typed nil in an interface", clients.KafkaWriter((*kafka.Writer)(nil)), true},
 		{"nil map", nilMap, true},
+		{"nil slice", nilSlice, true},
+		{"nil func", nilFunc, true},
+		{"nil chan", nilChan, true},
+		{"empty slice", []string{}, false},
 		{"pointer", &p3Connect{}, false},
 		{"struct value", fakeSourceWriter{}, false},
 		{"string", "", false},

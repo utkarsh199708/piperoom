@@ -138,7 +138,10 @@ func registerP3Actions(areg *actions.Registry, w *Wired) error {
 }
 
 // isNilIface reports whether v is nil or an interface holding a nil value of
-// a nilable kind (a typed nil pointer, map, slice, func or chan).
+// a nilable kind (a typed nil pointer, map, slice, func or chan). A typed nil
+// whose methods are safe on a nil receiver is reported nil too, on purpose:
+// RegisterP3Actions then drops it, so an action refuses cleanly instead of
+// relying on each method's nil-receiver handling.
 func isNilIface(v any) bool {
 	if v == nil {
 		return true
