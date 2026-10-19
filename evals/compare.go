@@ -97,10 +97,16 @@ func ComparePaired(base, cand Report) PairedComparison {
 func pairRuns(base, cand Report) (b, c []bool, unmatched int) {
 	baseBy := map[runKey]bool{}
 	for _, r := range base.Results {
+		if r.Infra() {
+			continue // an outage is not a pass or a fail
+		}
 		baseBy[runKey{r.Scenario, r.Run}] = r.Pass
 	}
 	candBy := map[runKey]bool{}
 	for _, r := range cand.Results {
+		if r.Infra() {
+			continue
+		}
 		candBy[runKey{r.Scenario, r.Run}] = r.Pass
 	}
 	// Keys from the map, so a run listed twice pairs once.

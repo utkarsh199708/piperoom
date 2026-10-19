@@ -159,6 +159,13 @@ with its correct, judge-checked label instead.
 | `-judge-max-calls N` | 50 | live judge calls per run in `auto` (and per `-judge-fill`); past it, ambiguous (unjudged) |
 | `-judge-fill MANIFEST` / `-dry-run` | — | record verdicts for the manifest's texts (paid, owner approval) / estimate only |
 
+Exit codes: 0 ok, 1 broken (bad input, runner error), 2 regression (`-fail-on-regression`), 3 the model API refused
+the request in a way no retry fixes (a 400 whose body says "credit balance", a 401, a 403). On 3 evalrun starts no
+further run, marks the affected and remaining runs `infra` (their error starts `infra: `), writes the report and
+skips `-baseline`. Infra runs are in no pass rate, score, comparison or paired comparison, and the tables label them
+`infra`, so an outage never reads as REGRESSED. A 429 or 5xx is still retried by the SDK as before. Every failing
+run line and the "Failed runs" list print the run error, redacted and cut to 200 characters.
+
 A scenario **regresses** when its pass rate drops, its mean score drops by more than `-tolerance`,
 or it is missing from the candidate report.
 

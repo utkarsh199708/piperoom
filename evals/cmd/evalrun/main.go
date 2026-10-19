@@ -39,6 +39,11 @@ import (
 // tell "worse" apart from "broken" (exit 1).
 const exitRegressed = 2
 
+// exitInfra is the exit code when the model API refused the run (an empty
+// credit balance, a bad key): nothing was measured, so CI reads it as an
+// outage, not as a worse agent (2) or a broken tool (1).
+const exitInfra = 3
+
 var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 type flags struct {
@@ -328,8 +333,15 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		OnRun: func(r evals.RunResult, tr evals.Transcript) {
 			usage.Add(r, tr)
 			verdict := "PASS"
-			if !r.Pass {
+			switch {
+			case r.Infra():
+				verdict = "INFRA (not scored): " + evals.RunErrorText(r.Error)
+			case !r.Pass:
 				verdict = "FAIL " + strings.Join(r.Failures, "; ")
+				if r.Error != "" {
+					// Redacted and cut to 200 characters.
+					verdict += ": " + evals.RunErrorText(r.Error)
+				}
 			}
 			fmt.Fprintf(stderr, "%s #%d: %s (score %.0f, %d tool calls, %s)\n",
 				r.Scenario, r.Run, verdict, r.Score, r.ToolCalls, time.Duration(r.DurationMS)*time.Millisecond)
@@ -347,6 +359,11 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	// A stopped or partly failed evaluation still writes what finished.
 	if err := writeReport(rep, f, stdout); err != nil {
 		return 1, errors.Join(runErr, err)
+	}
+	if errors.Is(runErr, evals.ErrAPIRefused) {
+		// Skip -baseline: the runs it would compare were never scored.
+		fmt.Fprintln(stderr, "evalrun:", runErr)
+		return exitInfra, nil
 	}
 	if runErr != nil {
 		return 1, runErr
