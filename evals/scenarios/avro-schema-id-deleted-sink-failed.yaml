@@ -5,7 +5,15 @@
 # generated from fake clients, so regenerate them if a tool's output format changes.
 # kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
-# First failing layer: schema-registry. Alert fired at: kafka-connect (the sink task).
+# First failing layer: kafka-connect. Alert fired at: kafka-connect (the sink task).
+#   The sink connector wh-orders-sink task 0 FAILED with "Schema 7 not found; error code: 40403";
+#   the registry still answers every request (versions [1 2], latest id 5). One corpus rule for every
+#   scenario (lead ruling, 2026-10-19, after run 39279866979 named the sink task as first failing with
+#   the root cause right, while the morning's 3/3 named the registry): a layer that still serves
+#   requests is not the first failing layer even when the human change there is the cause (README
+#   example: "a schema change fails in Connect first, but the cause is a Postgres DDL"; same shape as
+#   publication-permission-denied and sasl-credential-rotated). The hard delete is the cause, so the
+#   root-cause layer stays schema-registry. Relabelled in P3-W3d-2.
 #   Root cause: schema registry. A cleanup job permanently deleted version 3 of
 #   pg.public.orders-value (schema id 7) 25 minutes after the producer-side DDL that created it.
 #   Debezium caches its schema id and still writes id 7 into every record. The sink worker restarted,
@@ -309,7 +317,8 @@ expect:
     - [ddl, 'broke the']
     - [ddl, 'broke avro']
     - ['change broke the']
-  first_failing_layer: schema-registry
+  # The registry answers; the sink task is the component that fails (ruling in the header).
+  first_failing_layer: kafka-connect
   root_cause_layer: schema-registry
   # The sink's cold cache asks for id 7 and gets 40403; the subject no longer
   # lists version 3. The audit log line (who deleted it) is only in Arjun's
