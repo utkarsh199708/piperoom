@@ -244,8 +244,8 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)
-      // The policy's approvals have the system as actor: name the policy, not "system".
-      if (p.grant === 'policy') return { text: `${capitalize(policyLabel(p.policy ?? ''))} approved ${clip(p.layer, 40)}`, kind: 'decision' }
+      // The policy's approvals have the system as actor (the server's rule): name the policy, not "system". A person's approval never takes this wording, whatever its grant says.
+      if (p.grant === 'policy' && e.actor.kind === 'system') return { text: `${capitalize(policyLabel(p.policy ?? ''))} approved ${clip(p.layer, 40)}`, kind: 'decision' }
       return { text: `${who} approved ${clip(p.layer, 40)}`, kind: 'decision' }
     }
     // cancel_until is advertised, never a deadline (#629): "may run from", never "cancel by".

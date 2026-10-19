@@ -196,6 +196,11 @@ export interface ProposalState {
    * however late it is: lib/countdown.ts decides whether the card still shows it (#652).
    */
   scheduled?: ScheduledState
+  /**
+   * A proposal.scheduled was folded once. The server counts only the first per proposal, even after
+   * a cancel, so a later one is ignored (internal/room foldScheduled).
+   */
+  schedule_seen?: boolean
 }
 
 /** A pending proposal.scheduled (P2b). */

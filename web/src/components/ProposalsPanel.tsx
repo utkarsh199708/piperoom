@@ -1239,7 +1239,7 @@ function Proposal({
   return (
     <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
       {/* A closed room runs nothing more, so no countdown there (its proposals keep status "open"). */}
-      {open && nudge.roomOpen && proposal.scheduled && <PolicyCountdown scheduled={proposal.scheduled} onCancel={onCancelSchedule} />}
+      {open && nudge.roomOpen && proposal.scheduled && <PolicyCountdown key={proposal.scheduled.run_at} scheduled={proposal.scheduled} onCancel={onCancelSchedule} />}
       {ribbon && mine.length > 0 && (
         <div className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-t-lg border-b border-border bg-warning-subtle px-3.5 py-1.5 text-sm font-medium text-warning-foreground">
           <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />

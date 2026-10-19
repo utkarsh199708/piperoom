@@ -59,6 +59,19 @@ describe('reducer: the policy countdown', () => {
     expect(s.proposals[0].status).toBe('rejected')
   })
 
+  it('only the first schedule counts, even after a cancel', () => {
+    const later = ev(4, 'proposal.scheduled', { proposal_id: 'p1', run_at: '2026-10-19T11:00:00Z', policy: 'auto_approve' })
+    const twice = fold(created, scheduled, later)
+    expect(twice.proposals[0].scheduled?.run_at).toBe(RUN_AT)
+    const afterCancel = fold(created, scheduled, ev(3, 'proposal.cancelled', { proposal_id: 'p1', by: priya }, priya), later)
+    expect(afterCancel.proposals[0].scheduled).toBeUndefined()
+  })
+
+  it('a proposal that already has a decision gets no countdown', () => {
+    const s = fold(created, ev(2, 'approval.given', { proposal_id: 'p1', layer: 'consumer', grant: 'owner' }, priya), ev(3, 'proposal.scheduled', { proposal_id: 'p1', run_at: RUN_AT, policy: 'auto_approve' }))
+    expect(s.proposals[0].scheduled).toBeUndefined()
+  })
+
   it('a schedule for another or an unknown proposal changes nothing; a missing cancel_until reads as run_at', () => {
     const s = fold(created, ev(2, 'proposal.scheduled', { proposal_id: 'p9', run_at: RUN_AT, policy: 'auto_approve', cancel_until: RUN_AT }))
     expect(s.proposals[0].scheduled).toBeUndefined()
@@ -90,5 +103,10 @@ describe('feed lines', () => {
       ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect', grant: 'policy', policy: 'auto_approve' }),
     )
     expect(s.activity[0].text).toBe('Policy auto_approve approved kafka-connect')
+  })
+
+  it('a person\'s approval is never worded as the policy, whatever its grant says', () => {
+    const s = fold(created, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect', grant: 'policy', policy: 'auto_approve' }, priya))
+    expect(s.activity[0].text).toBe('Priya approved kafka-connect')
   })
 })
