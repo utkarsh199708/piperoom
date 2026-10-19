@@ -633,6 +633,12 @@ expect:
       facts: [f_sink_missing, f_trace_committed]
   evidence_tools: [kafka_consumer_lag]
   fix: [[kafka_reset_consumer_offsets]]
+  # `to` is left out of the target on purpose. The label allows `to: earliest` or `to: timestamp`
+  # at or before 2026-10-18T08:52:00Z, and fix_targets matches equal values only (no bound on a
+  # timestamp, no either-or), so no `to` value here would accept both. Pinning `earliest` would
+  # fail evals/score_test.go's solved run (a timestamp of 08:50Z). Until C6 adds a one-of or a
+  # timestamp bound to the fix_targets matcher, a reset `to: latest` or to a time after the
+  # deploy passes the fix check; the header names both as never-suggest.
   fix_targets:
     kafka_reset_consumer_offsets: {group: order-sync, topics: [pg.public.orders]}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]

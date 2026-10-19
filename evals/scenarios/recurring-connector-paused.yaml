@@ -262,5 +262,7 @@ expect:
       facts: [f_connector_paused, f_past_room_nightly_job]
   evidence_tools: [connect_status, similar_incidents]
   fix: [[connect_resume_connector]]
+  fix_targets:
+    connect_resume_connector: {connector: pg-orders-connector}
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 12

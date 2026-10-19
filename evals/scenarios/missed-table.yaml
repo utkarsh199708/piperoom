@@ -17,8 +17,8 @@
 #   publication: dbz_publication, table: public.devctl_refunds} (postgres owner approves; new
 #   refunds flow from then on), then
 #   pg_snapshot_signal {connector: pg-orders-connector, tables: [public.devctl_refunds],
-#   signal_table: public.devctl_signal} for the 25 rows written before (an incremental snapshot). pg_snapshot_signal, not
-#   connect_snapshot_table: the break registers the connector with
+#   signal_table: public.devctl_signal} for the 25 rows written before (an incremental
+#   snapshot). pg_snapshot_signal, not connect_snapshot_table: the break registers the connector with
 #   signal.data.collection=public.devctl_signal and no signal.kafka.topic (Kafka signal channel
 #   off), so connect_snapshot_table (via signal_topic, the only via it accepts since #620)
 #   refuses with ErrSignalNotConfigured, and its via signal_table is refused at every stage in
