@@ -181,6 +181,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_publication
       slot.name: debezium_users
       table.include.list: public.users
       topic.prefix: usr
@@ -194,6 +195,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_publication
       slot.name: debezium_users
       table.include.list: public.users
       topic.prefix: usr

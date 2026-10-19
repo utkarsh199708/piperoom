@@ -236,6 +236,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_publication
       slot.name: debezium_payments
       table.include.list: public.payments
       topic.prefix: pay
@@ -249,6 +250,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_publication
       slot.name: debezium_payments
       table.include.list: public.payments
       topic.prefix: pay

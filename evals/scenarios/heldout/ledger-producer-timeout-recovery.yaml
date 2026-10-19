@@ -291,6 +291,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_publication
       slot.name: debezium_ledger
       table.include.list: public.ledger_entries
       topic.prefix: ldg
@@ -304,6 +305,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_publication
       slot.name: debezium_ledger
       table.include.list: public.ledger_entries
       topic.prefix: ldg
