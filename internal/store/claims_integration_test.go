@@ -98,6 +98,7 @@ func TestClaimedStepWrites(t *testing.T) {
 	if err := s.StartClaimedStep(ctx, "p_c", 0, "me"); !errors.Is(err, store.ErrClaimLost) {
 		t.Fatalf("start without a claim: %v, want ErrClaimLost", err)
 	}
+	approveTestProposal(t, s, "p_c")
 	if ok, _ := s.ClaimProposal(ctx, "p_c", "me"); !ok {
 		t.Fatal("claim")
 	}
@@ -211,6 +212,7 @@ func TestDeleteRoomRefusedWhileClaimed(t *testing.T) {
 	s, _, _ := requireStoreSchema(t)
 	roomID := createTestRoom(t, s)
 	createTestProposal(t, s, roomID, "p_del")
+	approveTestProposal(t, s, "p_del")
 	ctx := context.Background()
 	if ok, _ := s.ClaimProposal(ctx, "p_del", "replica-a"); !ok {
 		t.Fatal("claim")
