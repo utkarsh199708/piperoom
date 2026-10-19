@@ -28,16 +28,16 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // most upstream broken one, a table added to the publication gets a snapshot
 // signal in the same proposal, and a retired connector's orphaned slot is the
 // root cause. P3-W3g moved it a third time, on purpose, for the same run's
-// unclear-driver-intent and the P3-W3h run's recurring-schema-deleted: a
-// steer that names no component and no action, or asks to get something
-// running before its cause is fixed, is ambiguous and gets a question, and a
-// component whose required data or config is missing counts as broken for
-// the first-failing rule; to stay under the word cap the rule-1 link kinds,
-// the confidence enum and the propose_fix allow-list bullet went (the map
-// and the tool schemas state them; rule 8 names propose_fix instead). It is pinned here, beside the snapshot
+// unclear-driver-intent: a steer whose ask needs a fix no listed action can
+// make, or could mean more than one action, gets a question before any
+// proposal, and a component that still answers requests is not broken even
+// when a change there is the cause; to stay under the word cap the rule-1 link kinds, the confidence
+// enum and the propose_fix allow-list bullet went (the map and the tool
+// schemas state them; rule 8 names propose_fix instead), with three one-word
+// trims. It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "2494272ffdcea2223edcf2ad314bd9831b73b0758624c314582e0208933777f8"
+const cdcPromptSHA256 = "150f33b924a55a23c5cfc3763f19f81457f2e5190afa68c6a4ec5042a1c323de"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

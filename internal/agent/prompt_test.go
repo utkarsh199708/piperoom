@@ -39,10 +39,10 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// slot-drop rule's wording is the LEAD-ARCH ruling on #655, taken verbatim
 	// (1331 words), so it was not trimmed to fit. 1335 is a hard ceiling
 	// (LEAD-ARCH ruling on #659): P3-W2f's three rules fit by trimming, and so
-	// did P3-W3g's sharper ambiguous-steer rule and the missing-data clause of
-	// the first-failing rule (the rule-1 link kinds, the confidence enum and the
-	// propose_fix allow-list bullet went: the map and the tool schemas say them;
-	// rule 8 now names propose_fix).
+	// did P3-W3g's ambiguous-steer rule keyed on the action gap (the rule-1
+	// link kinds, the confidence enum and the propose_fix allow-list bullet
+	// went: the map and the tool schemas say them; rule 8 now names
+	// propose_fix).
 	if wc := len(strings.Fields(a)); wc > 1335 {
 		t.Fatalf("system prompt is %d words, over the 1335 limit", wc)
 	}
@@ -372,7 +372,7 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 		"Name the table, column and key instead",
 		// Scope: stay in the alert's pipeline; out-of-scope means stop.
 		"Stay inside the alert's pipeline",
-		"A tool or action saying a resource is outside the pipeline is the answer: stop",
+		"or a tool or action says a resource is outside it, say so and stop",
 		// Fix hygiene: no premature restart, one fix at a time, schema risk.
 		"Never restart anything before the cause is fixed or ruled out",
 		"schema_set_compatibility set to NONE and schema_register are high-risk",
@@ -403,7 +403,7 @@ func TestSystemPromptPipelineModel(t *testing.T) {
 		"Schema Registry is a dependency of connectors and consumers, not a stage",
 		"From the most downstream symptom, walk upstream links to the root cause",
 		"Treat (unconfirmed) links as hypotheses to verify with tools",
-		"update_hypothesis must name the first failing component (the most upstream broken component, including one whose required data or config is missing, not the downstream symptom) and, separately, the root-cause component.",
+		"update_hypothesis must name the first failing component (the most upstream broken component, not the downstream symptom) and, separately, the root-cause component",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -716,7 +716,7 @@ func TestSystemPromptCarriesE5aPrinciples(t *testing.T) {
 		"Before abstaining or calling the pipeline healthy, confirm each stage with its own status read (pg_replication_slots, connect_status, kafka_consumer_lag, warehouse_freshness); the pipeline map and list reads are summaries, not status reads",
 		"say the pipeline is healthy now and there is nothing to fix; put any earlier fault in the past tense",
 		"If no evidence names a cause, say in your closing message what you ruled out, what remains open and that the cause is not established; keep any hypothesis low, propose nothing",
-		"is ambiguous: ask one short question with post_message and propose nothing until they answer",
+		"one short question with post_message and propose nothing until they answer",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -923,13 +923,15 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 // TestSystemPromptCDCEvalFixes pins the CDC rules from evals-live run
 // 39212981319: a table added to the publication needs a backfill signal in the
 // same proposal (missed-table), a retired connector's slot, not the stopped
-// connector, is the root cause (dead-slot-wal), a steer that names no
-// component and no action, or wants something running before its cause is
-// fixed, is ambiguous and gets a question (unclear-driver-intent, P3-W3g), and
-// a component whose required data or config is missing is broken even though
-// it answers requests, so Schema Registry with a deleted schema is the first
-// failing component, not the crash-looping consumer (recurring-schema-deleted,
-// the P3-W3h run). The batch prompt keeps its own wording of each.
+// connector, is the root cause (dead-slot-wal), and a steer whose ask needs a
+// fix no listed action can make, or could mean more than one action, gets a
+// question before any proposal (unclear-driver-intent, P3-W3g: the ambiguity
+// is about the action, not the component). A component that still answers
+// requests is not broken even when a change there is the cause, so the
+// failing consumer or sink task, not the registry a schema was deleted from,
+// is the first failing component (the deleted-schema scenarios, LEAD-ARCH on
+// #691; the README's own example: a schema change fails in Connect first, the
+// cause is a Postgres DDL). The batch prompt keeps its own wording of each.
 func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	prompt := systemPrompt()
 	batch := systemPromptFor(events.PipelineKindBatch)
@@ -937,8 +939,8 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 		"pg_add_publication_table misses rows written before it: add a pg_snapshot_signal step for that table to the same proposal",
 		"signal_table: signal.data.collection from connect_config",
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
-		"A driver steer that names no component and no action, or asks to get something running before its cause is fixed, is ambiguous: ask one short question with post_message and propose nothing until they answer.",
-		"the most upstream broken component, including one whose required data or config is missing, not the downstream symptom",
+		"If what a driver steer asks for needs a fix no listed action can make (ownership, a grant, a schema), or could mean more than one action (wait, restart, change config), ask the driver one short question with post_message and propose nothing until they answer.",
+		"the root-cause component; a component that still answers requests is not broken even when a change there is the cause.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("CDC system prompt missing %q", want)
@@ -946,8 +948,9 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	}
 	for _, cdcOnly := range []string{
 		"pg_snapshot_signal",
-		"names no component and no action",
-		"including one whose required data or config is missing",
+		"needs a fix no listed action can make",
+		"could mean more than one action",
+		"still answers requests is not broken",
 	} {
 		if strings.Contains(batch, cdcOnly) {
 			t.Errorf("batch prompt must not carry the CDC rule %q", cdcOnly)
@@ -961,7 +964,7 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	if strings.Contains(prompt, "When a driver steer is ambiguous") {
 		t.Error("CDC prompt carries both ambiguous-steer rules")
 	}
-	if n := strings.Count(prompt, "ask one short question with post_message"); n != 1 {
+	if n := strings.Count(prompt, "one short question with post_message"); n != 1 {
 		t.Errorf("CDC prompt has %d ambiguous-steer rules, want 1", n)
 	}
 }
