@@ -105,7 +105,8 @@ room_agent_leases (room_id PK → rooms ON DELETE CASCADE, owner text, pipeline_
 - **Policy auto-approve (P2b-4) in a rolling deploy.** The lease owner's loop fires a room's
   `proposal.scheduled`; while an older replica without that loop still holds the room's lease, the fire
   waits until the lease moves to a new replica. That is safe: the proposal stays open, approvable and
-  cancellable by hand, and only runs late.
+  cancellable by hand, and only runs late. A fire delayed past the 45 s view grace (P2b-4b, #652) runs with no
+  visible countdown; only the cancel route can still stop it.
 
 ### 4.2 Input reaches the owner through the log
 
@@ -197,10 +198,9 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
 - **Only a proposal approved in full is claimed** (#638; the rule the code enforces once #638 merges):
   - "approved in full" means every entry of `required_layers` has an `approvals` row with
     `decision = 'approved'`, whatever the grant (owner, backup, solo, fallback, sole-member driver, policy);
-  - a proposal with no required layers is never claimed, so it never runs: `required_layers` an empty array, a jsonb
-    `null`, or any other non-array value is refused the same way;
-  - a row whose `required_layers` is not a non-empty JSON array (empty, or JSON `null`) is never approved, for the
-    claim and for the unclaimed-stale sweep alike: both use the same rule (`fullyApprovedSQL`);
+  - a row whose `required_layers` is not a non-empty JSON array (empty, JSON `null`, or any other non-array value)
+    is never approved, so it is never claimed and never runs; this holds for the claim and for the unclaimed-stale
+    sweep alike: both use the same rule (`fullyApprovedSQL`);
   - a rejection or a cancel blocks the claim for good: neither is undone, so the proposal never qualifies again;
   - the claim `UPDATE` enforces this itself, not only its caller, so a caller bug or a race cannot queue a
     proposal that is not approved in full;
