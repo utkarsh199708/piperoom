@@ -6,9 +6,11 @@ import { neutralizeBadgeText } from './verification'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer, isViewer } from '../state/permissions'
 import { waitingForWriteMode } from './writeMode'
+import { approveAllFor } from './approveAll'
 
 export type Decision =
-  | { kind: 'needs-you'; proposal: ProposalState; layer: string; completing: boolean }
+  /** `all`: the card offers one "Approve and run" for these layers (P2c); `layer` is the first of them. */
+  | { kind: 'needs-you'; proposal: ProposalState; layer: string; completing: boolean; all?: string[] }
   | { kind: 'waiting'; proposal: ProposalState; pending: string[]; approved: number; total: number }
   | { kind: 'executing'; proposal: ProposalState; step: number; total: number; action: string }
   | { kind: 'done'; proposal: ProposalState; ok: boolean; failedStep?: number }
@@ -27,9 +29,12 @@ export function decisionFor(state: RoomState, user: CurrentUser): Decision | nul
   if (state.status !== 'open') return null
   const proposals = state.proposals
 
-  // The same row ProposalsPanel gives the A and R keys: first proposal, first layer you can decide.
+  // The same place ProposalsPanel gives the A and R keys: the first proposal with its "Approve and
+  // run", or with a layer you can decide.
   if (!isViewer(user)) {
     for (const p of proposals) {
+      const all = approveAllFor(state, p, user)
+      if (all) return { kind: 'needs-you', proposal: p, layer: all[0], completing: true, all }
       const layer = p.required_layers.find((l) => canDecideLayer(p, user, l, state.driver?.id))
       if (layer) return { kind: 'needs-you', proposal: p, layer, completing: completesSet(p, layer) }
     }

@@ -50,7 +50,7 @@ shows "Fixes are suggestions until write mode is on" and every approval records 
 3. **P1c (C1): the one command and the short README.** A `cmd/piperoom/` launcher is **not** added (one binary per
    command is the repo's shape); instead `Makefile` gains `quickstart` (`go run ./cmd/discover -write-owners
    owners.yaml … && go run ./cmd/server --quickstart`), `deploy/docker-compose.quickstart.yml` runs the same two
-   steps in the image with the room Postgres in the compose file, and `README.md` §"Running the dev stack" is
+   steps in the image (no room Postgres: `--quickstart` keeps rooms in memory; #618 ruling), and `README.md` §"Running the dev stack" is
    preceded by a §"Quickstart (5 minutes)" of at most 25 lines: prerequisites (Go or Docker, a reachable
    Connect), the command, what you see, how to turn write mode on (`PIPEROOM_WRITE_MODE=on` plus the Connect
    role from `permissions.md`). `.github/workflows/ci.yml` gains a job that runs `make quickstart` against the

@@ -9,7 +9,7 @@ import type {
   WsServerMessage,
 } from '../api/types'
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
-import type { ApproveExtras } from '../api/client'
+import type { ApproveAllExtras, ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
 import { classifyAuthProblem, getSessionChanges, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
@@ -46,6 +46,17 @@ export interface ApproveResult {
    * stale banner and reloads the room; the caller must not retry.
    */
   mismatch?: boolean
+}
+
+/** What an approve-all (POST /api/proposals/{pid}/approve-all) came to. */
+export interface ApproveAllResult extends ApproveResult {
+  /**
+   * 403 not_layer_owner: the person may not approve every layer. The hook keeps the server's text
+   * in `approve_all_refused`, so the card and the decision bar go back to the per-layer rows.
+   */
+  refused?: boolean
+  /** Any other failure, for the confirm dialog, which covers the room error banner. */
+  error?: string
 }
 
 /** True for the 409 the server sends when the params_hash sent is not the proposal's. */
@@ -140,6 +151,14 @@ export interface RoomActions {
    * `extra.params_hash` is the hash the UI rendered with the proposal, sent as is.
    */
   approve: (proposalId: string, layer: string, extra: ApproveExtras) => Promise<ApproveResult>
+  /**
+   * Approve every pending required layer in one call (P2c "Approve and run"). Same rules as
+   * `approve` (the hash on screen, `needsConfirm` for the solo user's "<pipeline_id>/*",
+   * `mismatch` and no retry); a 403 not_layer_owner is `refused` and recorded on the room state;
+   * any other error is in the room error banner and in `error`. useRoom always sets it; it is
+   * optional only for hosts and test doubles from before it, which keep the per-layer rows.
+   */
+  approveAll?: (proposalId: string, extra: ApproveAllExtras) => Promise<ApproveAllResult>
   /** `paramsHash` is the hash the UI rendered with the proposal, sent as is. */
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) => void
   handoff: (to: string, stayAsWatcher: boolean) => void
@@ -160,6 +179,8 @@ type RoomAction =
   | { type: 'event'; event: Event }
   // A reconnect asked the server for the room again: only the write mode in its answer is used.
   | { type: 'mode_refreshed'; snapshot: RoomSnapshot }
+  // The server refused this person's approve-all (403 not_layer_owner): kept until the room reloads.
+  | { type: 'approve_all_refused'; proposalId: string; text: string }
   | { type: 'reset' }
 
 function roomReducer(state: RoomState | null, action: RoomAction): RoomState | null {
@@ -172,6 +193,10 @@ function roomReducer(state: RoomState | null, action: RoomAction): RoomState | n
       return state ? applyEvent(state, action.event) : state
     case 'mode_refreshed':
       return state ? applyModeRefresh(state, action.snapshot) : state
+    case 'approve_all_refused':
+      return state
+        ? { ...state, approve_all_refused: { ...state.approve_all_refused, [action.proposalId]: action.text } }
+        : state
   }
 }
 
@@ -765,6 +790,46 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         }
         setError(errorText(e))
         return { ok: false }
+      }
+    },
+    approveAll: async (proposalId, extra) => {
+      if (isFixtures()) {
+        const p = stateRef.current?.proposals.find((x) => x.proposal_id === proposalId)
+        for (const layer of p?.required_layers ?? []) {
+          if ((p?.approvals[layer] ?? 'pending') !== 'pending') continue
+          synthesize('approval.given', {
+            proposal_id: proposalId,
+            layer,
+            params_hash: extra.params_hash,
+            identity: { method: 'dev', grant: `user:${user.id}` },
+          })
+        }
+        return { ok: true }
+      }
+      try {
+        await api.approveAll(proposalId, extra)
+        setError(null)
+        clearStale()
+        return { ok: true }
+      } catch (e) {
+        if (isParamsMismatch(e)) {
+          setError(null)
+          onMismatch(proposalId, extra.params_hash)
+          return { ok: false, mismatch: true }
+        }
+        if (isSoloConfirmError(e)) {
+          setError(null)
+          return { ok: false, needsConfirm: true }
+        }
+        const text = errorText(e)
+        if (e instanceof ApiClientError && e.status === 403 && e.code === 'not_layer_owner') {
+          // The card says it, next to the rows that are back; the banner would say it twice.
+          setError(null)
+          dispatch({ type: 'approve_all_refused', proposalId, text })
+          return { ok: false, refused: true, error: text }
+        }
+        setError(text)
+        return { ok: false, error: text }
       }
     },
     reject: (proposalId, layer, reason, paramsHash) => {

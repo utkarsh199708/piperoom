@@ -63,6 +63,7 @@ export function RoomHeader({
   state,
   user,
   members,
+  handoffTargets,
   conn,
   copied,
   onHandoff,
@@ -80,6 +81,8 @@ export function RoomHeader({
   conn: ConnState
   copied: boolean
   onHandoff: () => void
+  /** handoffTargetCount from RoomScreen (/api/people included); without it, the members shown. */
+  handoffTargets?: number
   onCloseRoom: () => void
   onInvite: () => void
   /** Download the room transcript. Left out for viewers (read-only users); the server can still refuse with not_allowed. */
@@ -96,8 +99,8 @@ export function RoomHeader({
   // useRoomShortcuts does not depend on the buttons.
   const roomy = useMediaQuery('(min-width: 768px)')
   const status = roomStatus(statusInputFromState(state))
-  // Hand-off needs someone to take it (P2): same count as RoomScreen's.
-  const peopleHere = roomPeopleCount(state, members.map((m) => m.id), user.id)
+  // Hand-off needs someone to take it (P2): RoomScreen's count of targets, else the people shown here.
+  const peopleHere = handoffTargets ?? roomPeopleCount(state, members.map((m) => m.id), user.id)
   const ordered = [...members].sort((a, b) => Number(b.id === state.driver?.id) - Number(a.id === state.driver?.id))
   const shown = ordered.slice(0, MAX_AVATARS)
   const extra = ordered.length - shown.length

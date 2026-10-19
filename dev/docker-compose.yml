@@ -99,6 +99,13 @@ services:
       PIPEROOM_LOG_FORMAT: ${PIPEROOM_LOG_FORMAT:-text}
       FAIL_ON_ID: ${DEVCONSUMER_FAIL_ON_ID:-0}
       DELAY: ${DEVCONSUMER_DELAY:-0s}
+      # Bad-build knobs for `devctl break consumer-bad-deploy` / `dlq-backlog`
+      # (dev/scenarios.md §8, §9). Empty = the good build.
+      SKIP_OPS: ${DEVCONSUMER_SKIP_OPS:-}
+      REJECT_STATUS: ${DEVCONSUMER_REJECT_STATUS:-}
+      # The pipeline's DLQ (dev/owners.yaml watch.dlq_topics). It exists only
+      # while dlq-backlog is broken; nothing is written to it otherwise.
+      DLQ_TOPIC: devctl.order-sync.dlq
 
   # Piperoom server in shadow mode, against this stack (dev/shadow.md).
   # Profile "shadow": `devctl up` does not start it; `devctl shadow up` does.

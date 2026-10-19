@@ -172,6 +172,22 @@ func (c *Cloud) ModelLineage(ctx context.Context, model string) (Lineage, error)
 	return m.lineage(model)
 }
 
+// ModelSQL reads manifest.json of the job's newest finished run and returns
+// model's compiled SQL (its raw code when dbt never compiled it). An unknown
+// model, or a node that is not a model, is clients.ErrNotFound. The SQL is
+// untrusted file text.
+func (c *Cloud) ModelSQL(ctx context.Context, model string) (ModelSQL, error) {
+	b, err := c.artifact(ctx, ManifestFile)
+	if err != nil {
+		return ModelSQL{}, err
+	}
+	m, err := parseManifest(b)
+	if err != nil {
+		return ModelSQL{}, err
+	}
+	return m.modelSQL(model)
+}
+
 // artifact fetches one artifact of the newest finished run. It does not fall
 // back to an older run when the newest has no such artifact: older results
 // presented as the latest would mislead the investigation.

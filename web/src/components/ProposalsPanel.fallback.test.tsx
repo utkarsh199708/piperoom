@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ProposalsPanel } from './ProposalsPanel'
+import { DecisionBar } from './room/DecisionBar'
+import { DecisionHandleContext } from './shell/context'
+import type { DecisionHandle } from './shell/context'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
@@ -132,5 +135,64 @@ describe('fallback approval row (P2b-3)', () => {
     render(<ProposalsPanel state={room({}, plain)} user={meera} actions={actions} />)
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     expect(screen.getByText('waiting for kafka-connect, consumer owners · 0 of 2 approved')).toBeInTheDocument()
+  })
+})
+
+function holder() {
+  let h: DecisionHandle | null = null
+  return { get: () => h, set: (next: DecisionHandle | null) => void (h = next) }
+}
+
+describe('the driver approves a fallback layer from the decision bar', () => {
+  it("the bar names the layer and its Approve goes through the card's row", async () => {
+    approve.mockResolvedValue({ ok: true })
+    const state = room()
+    render(
+      <DecisionHandleContext.Provider value={holder()}>
+        <DecisionBar state={state} user={meera} />
+        <ProposalsPanel state={state} user={meera} actions={actions} ribbon={false} />
+      </DecisionHandleContext.Provider>,
+    )
+    const bar = screen.getByRole('region', { name: 'Decision' })
+    fireEvent.click(within(bar).getByRole('button', { name: /^Approve consumer/ }))
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'consumer', { params_hash: HASH }))
+  })
+
+  it('a non-driver gets no bar question for the fallback layer', () => {
+    render(<DecisionBar state={room()} user={{ ...meera, id: 'kabir', name: 'Kabir' }} />)
+    expect(screen.queryByRole('button', { name: /^Approve consumer/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('Approve and run covers a fallback layer for the driver', () => {
+  const approveAll = vi.fn()
+  const withAll: RoomActions = { ...actions, approveAll }
+  // Arjun drives and owns kafka-connect; nobody owns consumer.
+  const lone = room({ driver: { id: 'arjun', name: 'Arjun' } })
+
+  beforeEach(() => approveAll.mockReset())
+
+  it('one owned layer plus one unowned layer is one button, not two rows', async () => {
+    approveAll.mockResolvedValue({ ok: true })
+    render(<ProposalsPanel state={lone} user={arjun} actions={withAll} />)
+    expect(screen.getAllByRole('button', { name: 'Approve and run' })).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('fallback-consumer')).toHaveTextContent('no owner for consumer · driver approves')
+    fireEvent.click(screen.getByRole('button', { name: 'Approve and run' }))
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Approve and run' }))
+    await waitFor(() => expect(approveAll).toHaveBeenCalledWith('p1', { params_hash: HASH }))
+    expect(approve).not.toHaveBeenCalled()
+  })
+
+  it('the same owner who does not drive keeps the per-layer row', () => {
+    render(<ProposalsPanel state={room()} user={arjun} actions={withAll} />)
+    expect(screen.queryByRole('button', { name: 'Approve and run' })).not.toBeInTheDocument()
+    expect(within(row('kafka-connect')).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it('the decision bar offers the same one button', () => {
+    render(<DecisionBar state={lone} user={arjun} />)
+    const bar = screen.getByRole('region', { name: 'Decision' })
+    expect(within(bar).getByRole('button', { name: /^Approve and run/ })).toBeInTheDocument()
   })
 })

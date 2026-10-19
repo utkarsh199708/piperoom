@@ -60,6 +60,22 @@ export function roomPeopleCount(state: RoomState, presenceIds: readonly string[]
 }
 
 /**
+ * How many people a hand-off could go to, you included: once `GET /api/people` (the documented
+ * hand-off targets the dialog picks from) has loaded, those plus the log's members, the driver and
+ * you. Presence is left out then: a viewer watching is no one to hand off to, and a member with a live
+ * session is already in /api/people. Until it loads (or when it fails), roomPeopleCount.
+ */
+export function handoffTargetCount(
+  state: RoomState,
+  presenceIds: readonly string[],
+  userId: string,
+  people: readonly { id: string }[] | undefined,
+): number {
+  if (!people) return roomPeopleCount(state, presenceIds, userId)
+  return roomPeopleCount(state, people.map((p) => p.id), userId)
+}
+
+/**
  * `people` is roomPeopleCount: the room's sole member never asks for control (P2: the server makes
  * the first member of a driverless alert room its driver).
  */
@@ -88,7 +104,7 @@ export function canGrantControl(state: RoomState, user: CurrentUser): boolean {
   return !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
-/** A hand-off needs someone to take it: offered only when `people` (roomPeopleCount) is above one (P2). */
+/** A hand-off needs someone to take it: offered only when `people` (handoffTargetCount) is above one (P2). */
 export function canHandoff(state: RoomState, user: CurrentUser, people: number): boolean {
   return people > 1 && !isViewer(user) && isOpen(state) && isDriver(state, user)
 }

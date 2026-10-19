@@ -102,6 +102,10 @@ room_agent_leases (room_id PK → rooms ON DELETE CASCADE, owner text, pipeline_
   when the room closes (a shadow room: when its run has finished, grace included), when the
   supervisor gives up after its retries, and set to expire **now** on graceful shutdown so another
   replica takes over at its next scan instead of after 30 s.
+- **Policy auto-approve (P2b-4) in a rolling deploy.** The lease owner's loop fires a room's
+  `proposal.scheduled`; while an older replica without that loop still holds the room's lease, the fire
+  waits until the lease moves to a new replica. That is safe: the proposal stays open, approvable and
+  cancellable by hand, and only runs late.
 
 ### 4.2 Input reaches the owner through the log
 

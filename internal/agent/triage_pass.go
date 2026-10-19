@@ -19,6 +19,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/injectscan"
 	"piperoom/internal/redact"
+	"piperoom/internal/tools"
 	"piperoom/internal/tools/runbooks"
 )
 
@@ -99,6 +100,21 @@ func (e *Endpoint) Triage(ctx context.Context, alert Alert, deps Deps, opts Opti
 		return TriageResult{}, fmt.Errorf("agent: triage pass: %w", err)
 	}
 	opts = opts.withDefaults()
+	// The first look reads only the tools of the room's kind, as the loop
+	// does (newRunnerWith). An unknown kind leaves it no tool, so the pass
+	// reports "no tools" rather than reading with the wrong ones.
+	if deps.Tools != nil {
+		kt, err := ToolsForKind(deps.Tools, alert.PipelineKind)
+		if err != nil {
+			log := deps.Logger
+			if log == nil {
+				log = slog.Default()
+			}
+			log.Warn("agent: first look has no tools for the room's kind", "room", alert.RoomID, "err", err)
+			kt = tools.NewReadOnlyRegistry()
+		}
+		deps.Tools = kt
+	}
 	cfg := e.triagePass
 	p := &triagePass{
 		ep:    e,
@@ -200,7 +216,7 @@ func (p *triagePass) setup() error {
 		return err
 	}
 	r.prices = p.ep.prices()
-	r.toolList = buildToolList(deps.Tools, nil)
+	r.toolList = buildToolList(r.deps.Tools, nil)
 	p.r = r
 	return nil
 }

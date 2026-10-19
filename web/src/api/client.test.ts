@@ -247,6 +247,29 @@ describe('people and approve (auth PR 3)', () => {
     })
   })
 
+  it('approveAll posts {params_hash, confirm?} to approve-all and answers the events', async () => {
+    const events = [{ seq: 7, type: 'approval.given' }, { seq: 8, type: 'approval.given' }]
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, events)))
+    await expect(api.approveAll('p 1', { params_hash: 'h1' })).resolves.toEqual(events)
+    expect(lastCall().url).toBe('/api/proposals/p%201/approve-all')
+    expect(lastCall().init.method).toBe('POST')
+    expect(lastCall().headers.get('Content-Type')).toBe('application/json')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({ params_hash: 'h1' })
+    await api.approveAll('p_1', { params_hash: 'h1', confirm: 'orders/*' })
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({ params_hash: 'h1', confirm: 'orders/*' })
+  })
+
+  it('approveAll rejects with the route error code (403 not_layer_owner)', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(403, { error: { code: 'not_layer_owner', message: 'layer "kafka": user sam does not own layer "kafka"' } }),
+    )
+    const err = await api.approveAll('p_1', { params_hash: 'h1' }).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiClientError)
+    expect((err as ApiClientError).status).toBe(403)
+    expect((err as ApiClientError).code).toBe('not_layer_owner')
+    expect((err as ApiClientError).message).toContain('layer "kafka"')
+  })
+
   it('reject sends {layer, reason, params_hash}', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, {})))
     await api.reject('p_1', 'kafka', 'wrong subject', 'h1')

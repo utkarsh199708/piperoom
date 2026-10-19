@@ -7,6 +7,7 @@ import {
   canDecideLayer,
   canHandoff,
   canRequestControl,
+  handoffTargetCount,
   canSendSuggestionToAgent,
   canSteer,
   canSuggest,
@@ -79,6 +80,13 @@ describe('permissions', () => {
     expect(roomPeopleCount(s, ['arjun'], 'arjun')).toBe(1)
     expect(roomPeopleCount(s, ['arjun', 'kabir'], 'arjun')).toBe(2)
     expect(roomPeopleCount(s, [], 'kabir')).toBe(2)
+  })
+
+  it('handoffTargetCount: /api/people once loaded (presence left out), else the room', () => {
+    const s = room('arjun', { members: [{ id: 'arjun', name: 'Arjun', role: 'driver' }] })
+    expect(handoffTargetCount(s, ['arjun', 'vera'], 'arjun', undefined)).toBe(2)
+    expect(handoffTargetCount(s, ['arjun', 'vera'], 'arjun', [{ id: 'arjun' }])).toBe(1)
+    expect(handoffTargetCount(s, ['arjun'], 'arjun', [{ id: 'arjun' }, { id: 'meera' }])).toBe(2)
   })
 
   it('the driver decides a layer nobody owns; nobody else does (P2b fallback)', () => {

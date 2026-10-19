@@ -143,6 +143,13 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	if err := checkReadOnly(deps.Tools); err != nil {
 		return nil, err
 	}
+	// The room offers only the tools of its pipeline's kind (P4b): every use
+	// below (tool list, worked examples, triage reads) goes through r.deps.
+	kindTools, err := ToolsForKind(deps.Tools, alert.PipelineKind)
+	if err != nil {
+		return nil, err
+	}
+	deps.Tools = kindTools
 	if deps.Sink == nil {
 		return nil, errors.New("agent: Deps.Sink is nil")
 	}

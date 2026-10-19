@@ -369,6 +369,12 @@ export interface RoomState {
    * socket never carries it. Absent on a server from before P1a, which has write mode on.
    */
   mode?: RoomMode
+  /**
+   * P2c: proposal_id -> the text of the 403 not_layer_owner the server gave this person's
+   * approve-all. Never from the log: useRoom sets it, a room reload clears it. While set, the card
+   * and the decision bar offer that proposal's per-layer rows instead of "Approve and run".
+   */
+  approve_all_refused?: Record<string, string>
   members: MemberState[]
   control_requests: ControlRequestState[]
   trace: TraceState | null

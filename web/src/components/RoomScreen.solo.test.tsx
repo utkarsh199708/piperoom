@@ -5,7 +5,7 @@ import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
 import type { RoomState } from '../state/types'
-import type { PresenceMember } from '../api/types'
+import type { Person, PresenceMember } from '../api/types'
 
 // P2: a room of one has nobody to ask for control and nobody to hand off to.
 
@@ -18,9 +18,12 @@ vi.mock('../context/user', () => ({
 }))
 vi.mock('../hooks/useRoom', () => ({ useRoom: vi.fn() }))
 vi.mock('../hooks/useTopology', () => ({ useTopology: vi.fn() }))
+vi.mock('../hooks/usePeople', () => ({ usePeople: vi.fn() }))
 
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
+import { usePeople } from '../hooks/usePeople'
+import type { PeopleState } from '../hooks/usePeople'
 import { RoomScreen } from './RoomScreen'
 
 const actions: RoomActions = {
@@ -80,8 +83,15 @@ function show(state: RoomState, presence: PresenceMember[] = []) {
   )
 }
 
+// GET /api/people: still loading unless a test says otherwise (the hand-off then counts the room).
+function people(state: PeopleState) {
+  vi.mocked(usePeople).mockReturnValue({ ...state, reload: vi.fn() })
+}
+const person = (id: string, name: string): Person => ({ id, name, verified: true, layers: [] })
+
 beforeEach(() => {
   ctx.user = { id: 'kabir', name: 'Kabir', layers: ['consumer'], role: 'member' }
+  people({ status: 'loading' })
 })
 
 describe('sole member (P2)', () => {
@@ -116,5 +126,34 @@ describe('sole member (P2)', () => {
     show(room(), [here('kabir', 'Kabir'), here('arjun', 'Arjun')])
     expect(screen.getByRole('button', { name: /Request control/ })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Hand off/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('hand-off targets come from /api/people once it loads (P2)', () => {
+  it('someone in /api/people who is not in the room: Hand off is shown', () => {
+    people({ status: 'ready', people: [person('kabir', 'Kabir'), person('meera', 'Meera')] })
+    show(room(), [here('kabir', 'Kabir')])
+    expect(screen.getByRole('button', { name: /Hand off/ })).toBeInTheDocument()
+    // Request control still counts the room: nobody here to ask.
+    expect(screen.queryByRole('button', { name: /Request control/ })).not.toBeInTheDocument()
+  })
+
+  it('/api/people lists only you: Hand off is hidden', () => {
+    people({ status: 'ready', people: [person('kabir', 'Kabir')] })
+    show(room(), [here('kabir', 'Kabir')])
+    expect(screen.queryByRole('button', { name: /Hand off/ })).not.toBeInTheDocument()
+  })
+
+  it('a viewer watching in presence is no one to hand off to', () => {
+    // A viewer is not in /api/people (members only) and never in the log (a viewer cannot write).
+    people({ status: 'ready', people: [person('kabir', 'Kabir')] })
+    show(room(), [here('kabir', 'Kabir'), here('vera', 'Vera')])
+    expect(screen.queryByRole('button', { name: /Hand off/ })).not.toBeInTheDocument()
+  })
+
+  it('/api/people failed: the room count decides', () => {
+    people({ status: 'error', message: 'down' })
+    show(room(), [here('kabir', 'Kabir'), here('arjun', 'Arjun')])
+    expect(screen.getByRole('button', { name: /Hand off/ })).toBeInTheDocument()
   })
 })

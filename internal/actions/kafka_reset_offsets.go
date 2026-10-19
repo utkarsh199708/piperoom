@@ -27,6 +27,9 @@ type KafkaDeps struct {
 	// Planner reads the group's state and planned moves: kafka.NewPlanner on
 	// the reader client (write mode off or on), or the *kafka.Writer.
 	Planner clients.GroupResetPlanner
+	// Records reads the DLQ for dlq_replay (Validate, Preview and Execute):
+	// kafka.NewReplayReader on the reader client (write mode off or on).
+	Records DLQRecordReader
 
 	// validateTimeout overrides timeout for Validate's I/O; now overrides
 	// time.Now. Tests only; zero values mean the defaults.
@@ -34,10 +37,16 @@ type KafkaDeps struct {
 	now             func() time.Time
 }
 
-// RegisterKafka adds the Kafka write actions to reg. It is separate from
-// Register so the Kafka clients are wired on their own (write mode).
+// RegisterKafka adds the Kafka write actions to reg: kafka_reset_consumer_offsets
+// and dlq_replay. It is separate from Register so the Kafka clients are wired
+// on their own (write mode).
 func RegisterKafka(reg *Registry, d KafkaDeps) error {
-	return reg.Register(&resetConsumerOffsets{d: d})
+	for _, a := range []Action{&resetConsumerOffsets{d: d}, &dlqReplay{d: d}} {
+		if err := reg.Register(a); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (d KafkaDeps) clock() time.Time {
