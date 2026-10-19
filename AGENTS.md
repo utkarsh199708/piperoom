@@ -51,7 +51,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
 | A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`; not `pgactions/**`, A3's from the P wave; not `sourceactions/**` (A3) or `fixpr/**` (C17), from the Q wave) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/tools/scope.go`, `internal/topology/**` (not `graph.go`), `internal/owners/**`, `internal/clients/pgconv/**` |
-| A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
+| A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`; not `llm/llm.go`, a contract file from the V wave), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**`, `internal/auth/**` (A5 created it in auth PR 2, `e6dc2a1`) |
 | A6 | `tasks/A6-web.md` | `web/**` |
 | A7 | `docs/design/watcher.md` (watcher), `docs/design/dlq.md` | `internal/watch/**`, `internal/dlq/**` |
@@ -283,6 +283,26 @@ Strimzi, U13 managed); U12-0 and U13-0 start as soon as U0 merges. The board's
 After column is the only hard dependency. Every target row's "Done when" includes a real run on the named OS and
 target with the room export attached to the PR.
 
+### V wave (planned 2026-10-19; owner decision recorded in design `docs/design/model-providers.md` §0, board `tasks/V-board.md`)
+
+PR titles start with the board row's ID: `[V<N>]` or `[V<N><letter>]` (e.g. `[V3a] llm/openai: chat completions
+adapter`); the design PR is `[V0-design]`. Same rules as the P, Q and U waves: each row stays inside its agent's
+folders; a file outside them is asked for in the thread, never edited. The wave makes Piperoom run on every major
+model provider (OpenAI, Azure OpenAI, Gemini, DeepSeek, Qwen, Mistral, Groq, Together, OpenRouter, xAI, Ollama and
+vLLM, non-Claude Bedrock models) through four adapters (Anthropic, OpenAI-compatible, Gemini, Bedrock Converse)
+behind one model interface in `internal/agent/llm`. Claude (Anthropic API, Bedrock, Vertex) stays fully supported and
+is the reference model: its requests do not change, and every other model is admitted only by its own eval gate
+against the Claude baseline. V0 (the leads) carries the contract changes: the new contract file
+`internal/agent/llm/llm.go`, `AgentUsagePayload.Provider`/`.Estimated`, the model config variables, `docs/api.md`.
+Every V row runs on Opus 5.5, cloud rows included.
+
+**Code rows start after P3 closes:** V0 is After P3-W2e (the live eval run that re-baselines
+`evals/baseline/default.json`), the reference score every other model is gated against. The wave creates no new
+folders: everything under `internal/agent/llm/**` is A4's except the contract file. V5 (Bedrock Converse) adds one
+module to `go.mod`, which no agent owns, so it is built outside the ship workflow and merged after the §7 two-lead
+review. Order: **V0 → V1a, V1b (Claude onto the interface, no behaviour change) → V2a, V2b → the adapters and V6 →
+evals and the picker**; the board's After column is the only hard dependency.
+
 ### Contract files (read them, code against them, never edit them)
 
 - `internal/tools/tool.go` — `Tool`, `Result`, `Registry`
@@ -295,6 +315,8 @@ target with the room export attached to the PR.
 - `internal/config/config.go` — environment variables
 - `internal/version/version.go` — build version (`-ldflags -X`), reported by `/healthz`
 - `internal/setup/protocol/protocol.go` — the setup runner protocol: `OpRequest`, `OpResult`, `Resume`, `RunnerExecutor` (U wave)
+- `internal/agent/llm/llm.go` — the provider-neutral model interface: `Model`, `Request`, `Message`, `Part`, `Response`,
+  `Usage`, `Capabilities`, `APIError` (V wave; created by V0, `docs/design/model-providers.md` §4)
 - `docs/api.md` — HTTP + WebSocket API
 
 If a contract is wrong or missing something, **do not work around it silently**. Write a
