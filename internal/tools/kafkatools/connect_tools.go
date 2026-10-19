@@ -277,6 +277,12 @@ func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.R
 		"errors.deadletterqueue.context.headers.enable": true,
 		"errors.retry.timeout":                          true,
 		"event.processing.failure.handling.mode":        true,
+		// Debezium signalling and publication: a table name, a channel list,
+		// a publication name and an enum, never credentials. The prompt and
+		// pg_snapshot_signal's signal_table tell the agent to read
+		// signal.data.collection here; without them it cannot.
+		"signal.data.collection": true, "signal.enabled.channels": true,
+		"publication.name": true, "publication.autocreate.mode": true,
 	}
 	shown := map[string]string{}
 	for k, v := range cfg {
