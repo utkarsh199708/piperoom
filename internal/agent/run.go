@@ -177,9 +177,12 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		m = newModel(opts, deps.Logger)
 	}
 	steps := newStepLedger()
+	// The names go in before the triage seeds: seedTriage scans each seeded
+	// read for the echo guard, and the triage pass's own ledger (it runs in
+	// its own runner) is not this one.
+	steps.setScanNames(scanNamesFor(deps, alert.PipelineMap))
 	steps.seedTriage(alert.Triage)
 	steps.setBackground(alertBackground(alert))
-	steps.setScanNames(scanNamesFor(deps, alert.PipelineMap))
 	return &runner{
 		alert:     alert,
 		kind:      kind,

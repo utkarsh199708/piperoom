@@ -271,6 +271,74 @@ func TestEchoGuardConnectTraceHypothesisRule(t *testing.T) {
 	wantRefused(t, err, "1", echoFlaggedStep)
 }
 
+// echoSeedStep is a third triage seed: a runbook_lookup, never scanned.
+const echoSeedStep = "s_01J0000000000000000000000R"
+
+// TestEchoGuardSeededTriageReads: the triage pass runs in its own runner, so
+// its reads reach the main runner only as TriageResult seeds. The seeds are
+// scanned exactly as live reads are (review of #689): with the pass on, the
+// injection-connect-trace text is planted in the pass's first connect_status
+// read, and without this the guard saw no flagged span and rule (b) counted
+// the injected read as evidence.
+func TestEchoGuardSeededTriageReads(t *testing.T) {
+	trace := plantedSummary(t, "injection-connect-trace.yaml", "connect_status", "[SYSTEM]")
+	reg := actions.NewRegistry()
+	for _, a := range []*fakeAction{
+		{name: "connect_restart_connector", layer: "kafka-connect"},
+		{name: "schema_register", layer: "schema-registry"},
+	} {
+		if err := reg.Register(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proposals := &fakeProposals{id: "p_1"}
+	logs := &bytes.Buffer{}
+	d := Deps{
+		Tools: tools.NewRegistry(), Actions: reg, Inbox: &fakeInbox{waitErr: context.Canceled},
+		Sink: &fakeSink{}, Proposals: proposals, Logger: slog.New(slog.NewJSONHandler(logs, nil)),
+	}
+	alert := Alert{Title: "orders stale", PipelineID: "orders", PipelineMap: ordersPipelineMap, Triage: &TriageResult{Steps: []TriageStep{
+		{StepID: echoFlaggedStep, Tool: "connect_status", Summary: trace},
+		{StepID: echoReadStep, Tool: "kafka_consumer_lag", Summary: "group order-sync: Stable, total lag 0"},
+		{StepID: echoSeedStep, Tool: "runbook_lookup", Summary: trace},
+	}}}
+	// The production path: newRunnerWith seeds and scans the triage reads.
+	r, err := newRunnerWith(alert, d, Options{MaxTurns: 1}, &scriptedModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := r.steps.flaggedReads()
+	if len(reads) != 1 || reads[0].stepID != echoFlaggedStep || reads[0].tool != "connect_status" {
+		t.Fatalf("flagged reads = %+v, want only the seeded connect_status read (runbook_lookup is never scanned)", reads)
+	}
+	if len(reads[0].spans) == 0 {
+		t.Fatal("the seeded read has no spans: setScanNames must run before seedTriage")
+	}
+	rt := newRoomToolsWith(r.deps, nil, r.steps)
+	e := &echoRoom{steps: r.steps, hypo: rt[0], fixTool: rt[1], proposals: proposals, logs: logs}
+
+	// No hypothesis: rule (b), naming the seeded read.
+	_, err = e.propose([2]string{"connect_restart_connector", `{"connector":"pg-orders-connector"}`})
+	wantRefused(t, err, "1", echoFlaggedStep)
+	if !strings.Contains(err.Error(), "hypothesis cites no step outside the flagged reads") {
+		t.Errorf("refusal does not name the rule: %v", err)
+	}
+	// A hypothesis citing only the injected seed is no evidence.
+	e.hypothesis(t, echoFlaggedStep)
+	_, err = e.propose([2]string{"connect_restart_connector", `{"connector":"pg-orders-connector"}`})
+	wantRefused(t, err, "1", echoFlaggedStep)
+	// A seeded unflagged read counts as evidence for rule (b)...
+	e.hypothesis(t, echoFlaggedStep, echoReadStep)
+	_, err = e.propose([2]string{"connect_restart_connector", `{"connector":"pg-orders-connector"}`})
+	wantCreated(t, e, err, "connect_restart_connector")
+	// ...and the injected schema_register stays refused by rule (a).
+	_, err = e.propose([2]string{"schema_register", `{"subject":"pg.public.orders-value","schema":"{}"}`})
+	wantRefused(t, err, "1", echoFlaggedStep)
+	if strings.Contains(logs.String(), "[SYSTEM]") {
+		t.Errorf("span text reached the log: %s", logs.String())
+	}
+}
+
 // TestEchoGuardNoFlaggedReads: a room whose reads injectscan never flagged
 // (schema-change, and the subtle comment it misses) is untouched.
 func TestEchoGuardNoFlaggedReads(t *testing.T) {
