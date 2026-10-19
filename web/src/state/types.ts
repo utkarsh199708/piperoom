@@ -190,6 +190,20 @@ export interface ProposalState {
    * approves them. Absent when every layer has an owner.
    */
   fallback_layers?: string[]
+  /**
+   * P2b: the pending policy countdown (proposal.scheduled), until a proposal.cancelled, any
+   * approval.given (the policy's or a person's) or a rejection of the proposal. Kept in the fold
+   * however late it is: lib/countdown.ts decides whether the card still shows it (#652).
+   */
+  scheduled?: ScheduledState
+}
+
+/** A pending proposal.scheduled (P2b). */
+export interface ScheduledState {
+  run_at: string
+  /** Advertised only: the card says "the policy may run from <time>", never a deadline (#629). */
+  cancel_until: string
+  policy: string
 }
 
 export interface MemberState {

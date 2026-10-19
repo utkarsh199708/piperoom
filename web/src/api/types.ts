@@ -56,6 +56,8 @@ export type EventType =
   | 'agent.verification'
   | 'postmortem.drafted'
   | 'postmortem.failed'
+  | 'proposal.scheduled'
+  | 'proposal.cancelled'
 
 export interface Event {
   room_id: string
@@ -355,6 +357,25 @@ export interface ApprovalGivenPayload {
   policy?: string
 }
 
+/**
+ * proposal.scheduled (P2b): system actor, after proposal.previewed, at most once per proposal. Unless
+ * cancelled, the policy approves every required layer at `run_at` and the steps run. `cancel_until`
+ * equals `run_at` in this wave and is advertised only: a cancel after it still wins if it lands first.
+ */
+export interface ProposalScheduledPayload {
+  proposal_id: string
+  run_at: string
+  policy: 'auto_approve' | string
+  cancel_until: string
+}
+
+/** proposal.cancelled (P2b): `by` (also the actor) stopped the countdown; the proposal stays open. */
+export interface ProposalCancelledPayload {
+  proposal_id: string
+  by: Actor
+  reason: string
+}
+
 export interface ApprovalRejectedPayload {
   proposal_id: string
   layer: string
@@ -471,6 +492,11 @@ export interface ProposalSummary {
   blocked?: 'write_mode_off'
   /** P2b: copied from proposal.created.fallback_layers; [] when every layer has an owner, absent before P2b. */
   fallback_layers?: string[]
+  /**
+   * P2b: while a proposal.scheduled is pending. The room GET leaves it out once run_at is more than
+   * 45 s in the past (#652); the web folds proposal.scheduled itself and never reads this field.
+   */
+  scheduled?: { run_at: string; cancel_until: string }
 }
 
 /**

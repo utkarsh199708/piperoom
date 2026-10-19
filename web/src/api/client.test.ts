@@ -270,6 +270,22 @@ describe('people and approve (auth PR 3)', () => {
     expect((err as ApiClientError).message).toContain('layer "kafka"')
   })
 
+  it('cancelProposal posts {reason?} to cancel and rejects 409 not_scheduled with its code', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, { seq: 9, type: 'proposal.cancelled' })))
+    await api.cancelProposal('p 1')
+    expect(lastCall().url).toBe('/api/proposals/p%201/cancel')
+    expect(lastCall().init.method).toBe('POST')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({})
+    await api.cancelProposal('p_1', 'not during the backfill')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({ reason: 'not during the backfill' })
+
+    fetchMock.mockResolvedValue(jsonResponse(409, { error: { code: 'not_scheduled', message: 'no countdown is pending' } }))
+    const err = await api.cancelProposal('p_1').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiClientError)
+    expect((err as ApiClientError).status).toBe(409)
+    expect((err as ApiClientError).code).toBe('not_scheduled')
+  })
+
   it('reject sends {layer, reason, params_hash}', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, {})))
     await api.reject('p_1', 'kafka', 'wrong subject', 'h1')
