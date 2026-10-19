@@ -82,6 +82,81 @@ type EndpointConfig struct {
 type providerLoaders struct {
 	awsConfig   func(ctx context.Context, region string) (aws.Config, error)
 	googleCreds func(ctx context.Context) (*google.Credentials, error)
+	// googleWait bounds the Google lookup; 0 = credentialCheckTimeout.
+	googleWait time.Duration
+}
+
+// findGoogleCreds runs the Google credential lookup but waits for it at most
+// googleWait. The lookup gets ctx itself, not a deadline-bound child:
+// oauth2/google keeps that context in the token source it returns and uses it
+// for every later token refresh, so cancelling it after the check would break
+// Vertex calls. A lookup still running at the deadline ends on its own (file
+// reads and the metadata probe have their own timeouts); the buffered channel
+// never blocks it.
+func (ld providerLoaders) findGoogleCreds(ctx context.Context) (*google.Credentials, error) {
+	wait := ld.googleWait
+	if wait <= 0 {
+		wait = credentialCheckTimeout
+	}
+	type result struct {
+		creds *google.Credentials
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		creds, err := ld.googleCreds(ctx)
+		done <- result{creds, err}
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.creds, r.err
+	case <-timer.C:
+		return nil, fmt.Errorf("lookup still running after %s: %w", wait, context.DeadlineExceeded)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// ProviderLoaders replace the cloud-credential lookups ProviderOptions makes.
+// A nil field means the real lookup (the AWS default config chain, Google
+// application default credentials), so production callers pass the zero value
+// and tests set both to keep the machine's credentials out.
+type ProviderLoaders struct {
+	AWSConfig   func(ctx context.Context, region string) (aws.Config, error)
+	GoogleCreds func(ctx context.Context) (*google.Credentials, error)
+}
+
+func (l ProviderLoaders) loaders() providerLoaders {
+	ld := defaultLoaders()
+	if l.AWSConfig != nil {
+		ld.awsConfig = l.AWSConfig
+	}
+	if l.GoogleCreds != nil {
+		ld.googleCreds = l.GoogleCreds
+	}
+	return ld
+}
+
+// ProviderOptions checks cfg as NewEndpoint does and returns the normalized
+// provider name and the SDK request options that reach that provider, for a
+// caller that needs its own client on the agent's provider (the eval judge).
+// It runs the same credential checks as NewEndpoint but sends no request.
+// getenv nil means os.Getenv.
+func ProviderOptions(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld ProviderLoaders) (string, []option.RequestOption, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	cfg, _, err := cfg.normalized()
+	if err != nil {
+		return cfg.Provider, nil, err
+	}
+	opts, err := cfg.providerOptions(ctx, getenv, ld.loaders())
+	if err != nil {
+		return cfg.Provider, nil, err
+	}
+	return cfg.Provider, opts, nil
 }
 
 func defaultLoaders() providerLoaders {
@@ -149,6 +224,7 @@ func (c EndpointConfig) normalized() (EndpointConfig, int64, error) {
 // credentialCheckTimeout) so that missing or broken AWS credentials stop the
 // server at startup instead of failing the first alert. That is a credential
 // lookup (environment, shared files, instance/role metadata), not a model call.
+// The Google credential lookup is bounded by the same timeout (findGoogleCreds).
 func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string) string, ld providerLoaders) (opts []option.RequestOption, err error) {
 	switch c.Provider {
 	case ProviderBedrock:
@@ -179,9 +255,12 @@ func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string)
 		return []option.RequestOption{bedrock.WithConfig(cfg)}, nil
 	case ProviderVertex:
 		var creds *google.Credentials
-		creds, err = ld.googleCreds(ctx)
+		creds, err = ld.findGoogleCreds(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("agent: find Google application default credentials for vertex: %w", err)
+		}
+		if creds == nil {
+			return nil, errors.New("agent: no Google application default credentials for vertex")
 		}
 		// vertex.WithCredentials panics on a failure it cannot report.
 		defer func() {
