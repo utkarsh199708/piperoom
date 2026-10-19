@@ -228,6 +228,61 @@ actions, Connect worker visibility, config validation before registration, conne
 network and TLS probes, pull-request fix, MySQL). The board's After column is the only hard dependency; Q0 waits on
 the P wave's open contract follow-ups, and every row that adds a write action waits on P3-0.
 
+### U wave (planned 2026-10-18; plan `docs/product/setup-2026-10.md`, design `docs/design/setup-agent.md`, board `tasks/U-board.md`)
+
+PR titles start with the board row's ID: `[U<N><letter>]` or `[U1-<n>]` for the core rows, `[U<N>-0]` for a design
+row (e.g. `[U1-3] setup/compose: driver and T1 ops`). Same rules as the P and Q waves: each row stays inside its
+agent's folders (the rows above plus the new folders below); a file outside them is asked for in the thread, never
+edited. The wave adds **setup as a functionality of Piperoom** (the owner's decision: not a separate product): the
+same agent, room, approval model, `owners.yaml` and web UI take a user from nothing to a watched Debezium pipeline.
+Commands run through a **runner** (`cmd/setup`, `piperoom-setup`) that executes only typed operations from an
+allow-listed catalogue where the user's Docker, `kubectl` and cloud credentials are; the server never holds them;
+every artifact that executes (compose files, unit files, manifests) is templated or validated, never free text.
+U0 (the leads) carries the contract changes (the new contract file `internal/setup/protocol/protocol.go`, events,
+`SetupRequest`, `Alert.Mode`, `actions.Receipted`/`Tiered`/`LooksSecret`, `clients.SetupSourceWriter`, the owners
+schema, config, API); the design rows U1-0 (protocol, Windows service), U12-0 (Strimzi) and U13-0 (managed) carry
+their own.
+The wave comes from the same 722-problem Stack Overflow analysis as the Q wave: 572 are setup problems, and the
+wave makes 473 of them (82.7%) agent-fixable. Every U row runs on Opus 5.5, cloud rows included.
+
+New folders of the wave (owned from the first PR that creates them):
+
+| Agent | Owns (new in the U wave) |
+|---|---|
+| leads | `internal/setup/protocol/**` (a contract file; listed below) |
+| A9 (Qoder, new) | `cmd/setup/**`, `cmd/piperoom/**`, `internal/setup/**` except `internal/setup/protocol/**`, `internal/setup/targets/**`, `internal/setup/sources/**` and `internal/setup/knowledge/**` |
+| A5 | `internal/quickstart/**` (the `--quickstart` server moved out of `cmd/server`) |
+| C1 | `Dockerfile`, `deploy/helm/**` (a grant for the U rows that name them: U1-22, U12c) |
+| A10 (Qoder, new) | `internal/clients/sqlserver/**`, `internal/clients/mongodb/**`, `internal/clients/oracle/**`, `internal/setup/sources/sqlserver/**`, `internal/setup/sources/mongodb/**`, `internal/setup/sources/oracle/**` |
+| A3 | `internal/setup/sources/postgres/**` |
+| A8 | `internal/setup/sources/mysql/**` |
+| C19 (cloud, new) | `internal/setup/targets/compose/**`, `internal/setup/targets/host/**` |
+| C20 (cloud, new) | `internal/setup/targets/strimzi/**`, `internal/setup/targets/server/**` |
+| C21 (cloud, new) | `internal/setup/targets/managed/**`, `internal/clients/mskconnect/**`, `internal/clients/confluentcloud/**`, `internal/clients/aiven/**` |
+| C22 (cloud, new) | `internal/setup/knowledge/**` |
+| C7 | `evals/scenarios/setup/**` (C6 keeps the rest of `evals/**`) |
+
+If no ninth or tenth local agent runs, the leads switch A9's rows to A2 and A10's rows to A3 (in that order of
+priority) on the board and in `docs/process/ownership.json` in one PR, since `ship-check.mjs` reads both; the
+After column does not change.
+
+Setup rules that every U row follows: no op takes a shell string, only typed params (an AST test guards it); an
+executed artifact comes from a template with typed params or passes its validator, else it is never auto-run; every
+file op opens through `os.Root` under the project directory and refuses symlinks, junctions and reparse points; no
+op can read the secret store or a materialised secret file; the runner refuses a T1+ op without a valid proposal,
+recomputes `params_hash` and refuses duplicates; targets, classes and the provisional pipeline change only by a
+driver click or the server's derivation, never by model text; secrets are `${secret:name}` references materialised
+on the runner only; every runner output is redacted literally and by pattern before transport and wrapped as
+untrusted on the server; only the server's ladder runner writes `setup.verified`; the production guard table is
+checked at create, execute, rollback and on the runner and is never relaxed by a row.
+
+Order: **U0 first, after Q0**; then U1-0 and the U1 rows (runner, catalogue, Compose, Postgres, verification);
+then steps 2 to 13 by coverage per day as the plan's §4 table orders them (U2 MySQL, U3 transforms and sinks, U5
+logs, U4 SQL Server, U6 embedded, U7 MongoDB, U8 plain hosts, U10 tuning, U9 Oracle, U11 Debezium Server, U12
+Strimzi, U13 managed); U12-0 and U13-0 start as soon as U0 merges. The board's
+After column is the only hard dependency. Every target row's "Done when" includes a real run on the named OS and
+target with the room export attached to the PR.
+
 ### Contract files (read them, code against them, never edit them)
 
 - `internal/tools/tool.go` — `Tool`, `Result`, `Registry`
@@ -239,6 +294,7 @@ the P wave's open contract follow-ups, and every row that adds a write action wa
 - `internal/topology/graph.go` — `Graph`, `Node`, `Edge`, `Builder`
 - `internal/config/config.go` — environment variables
 - `internal/version/version.go` — build version (`-ldflags -X`), reported by `/healthz`
+- `internal/setup/protocol/protocol.go` — the setup runner protocol: `OpRequest`, `OpResult`, `Resume`, `RunnerExecutor` (U wave)
 - `docs/api.md` — HTTP + WebSocket API
 
 If a contract is wrong or missing something, **do not work around it silently**. Write a
