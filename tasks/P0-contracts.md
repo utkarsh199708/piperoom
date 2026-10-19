@@ -271,7 +271,7 @@ at a UTF-8 boundary. Log text, notes and messages are untrusted: the tool wraps 
 - `docs/api.md`: `GET /api/pipelines` gains `kind`; `GET /api/pipelines/{pid}/topology` nodes carry the new kinds
   and the graph `partial`; the P-wave events section says the two layers are valid wherever a layer is.
 - `TaskInstance.Try` is Airflow's `try_number` as reported; 0 when the task never ran (e.g. `upstream_failed`). (follow-up 1, accepted in review of #590/#591/#592/#587)
-- Batch actions (#644 ruling): which pipeline kinds an action serves is `agent.KindedAction` (`internal/agent/toolkind.go`) today, and every action without it is CDC-only. The first PR that adds a batch action brings a contract item that moves `PipelineKinds() []string` into `internal/actions/action.go` as an optional interface; `agent.KindedAction` then becomes an alias of it or is removed. (follow-up 5)
+- Batch actions (#644 ruling): which pipeline kinds an action serves is `agent.KindedAction` (`internal/agent/toolkind.go`) today, and every action without it is CDC-only. The first PR that adds a batch action brings a contract item that moves `PipelineKinds() []string` into `internal/actions/action.go` as an optional interface; `agent.KindedAction` then becomes an alias of it or is removed. The same PR makes the batch prompt depend on whether the room has actions, replacing the `promptkind_test` `nActions=0` guard with a test over the real wired action registry. (follow-up 5; prompt condition follow-up 6)
 
 ### 9. Deferred (not in this wave)
 
