@@ -70,7 +70,21 @@ func TestBatchProfile(t *testing.T) {
 		}
 	}
 
-	// Cleanups run last-registered first: logs (on failure) before removal.
+	// Cleanups run last-registered first: logs (on failure), then the airflow
+	// service, then what the run left in the shared warehouse and artifacts dir
+	// (after the service is gone, so the scheduler cannot rebuild them).
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer ccancel()
+		if err := dropBatchModels(cctx, cfg.WarehouseDBURL); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+		for _, f := range []string{dbt.RunResultsFile, dbt.ManifestFile} {
+			if err := os.Remove(filepath.Join(artifacts, f)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("cleanup: remove %s: %v", f, err)
+			}
+		}
+	})
 	t.Cleanup(func() {
 		cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer ccancel()
@@ -95,11 +109,13 @@ func TestBatchProfile(t *testing.T) {
 		t.Fatalf("compose up airflow: %v\n%s", err, out)
 	}
 	upDone := time.Now()
+	// Logged before the health wait so CI shows the build cost even on a failure.
+	t.Logf("batch profile: compose up --build airflow took %s (image build included)", upDone.Sub(start).Round(time.Second))
 
 	waitHealthy(ctx, t, compose)
 	healthy := time.Now()
-	t.Logf("batch profile: compose up (build included) %s; healthy %s after up returned, %s after start",
-		upDone.Sub(start).Round(time.Second), healthy.Sub(upDone).Round(time.Second), healthy.Sub(start).Round(time.Second))
+	t.Logf("batch profile: healthy %s after up returned, %s after start",
+		healthy.Sub(upDone).Round(time.Second), healthy.Sub(start).Round(time.Second))
 
 	assertNoLogin(ctx, t)
 
@@ -208,7 +224,10 @@ func waitHealthy(ctx context.Context, t *testing.T, compose func(context.Context
 		case state == "running healthy":
 			return true, nil
 		case strings.HasPrefix(state, "exited"), strings.HasPrefix(state, "dead"), strings.HasSuffix(state, "unhealthy"):
-			return false, fmt.Errorf("container %s", state)
+			// The healthcheck's own output says why (status code, connection refused).
+			hl, _ := exec.CommandContext(ictx, "docker", "inspect", "--format",
+				"{{range .State.Health.Log}}exit {{.ExitCode}}: {{.Output}}\n{{end}}", id).CombinedOutput()
+			return false, fmt.Errorf("container %s; healthcheck log:\n%s", state, hl)
 		}
 		return false, nil
 	})
@@ -231,51 +250,40 @@ func assertNoLogin(ctx context.Context, t *testing.T) {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<20))
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /api/v1/dags/%s without login: status %d, want 200 (AIRFLOW__API__AUTH_BACKENDS)", batchDAG, resp.StatusCode)
+		t.Fatalf("GET /api/v1/dags/%s without login: status %d, want 200 (AIRFLOW__API__AUTH_BACKENDS and AUTH_ROLE_PUBLIC in webserver_config.py)", batchDAG, resp.StatusCode)
 	}
 }
 
-// triggerRun starts a manual run; used only when the scheduler has not
-// created one on its own (catchup=False should make one at start).
-func triggerRun(ctx context.Context) error {
-	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, http.MethodPost, batchAirflowURL+"/api/v1/dags/"+batchDAG+"/dagRuns", strings.NewReader("{}"))
+// dropBatchModels removes the two relations dbt built in the shared warehouse.
+// fct_revenue is a table, not a view over stg_orders, so the order is free.
+func dropBatchModels(ctx context.Context, dsn string) error {
+	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return err
+		return fmt.Errorf("connect warehouse: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("trigger %s: status %d: %s", batchDAG, resp.StatusCode, body)
+	defer conn.Close(context.Background())
+	for _, q := range []string{
+		"DROP TABLE IF EXISTS analytics.fct_revenue",
+		"DROP VIEW IF EXISTS analytics.stg_orders",
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			return fmt.Errorf("%s: %w", q, err)
+		}
 	}
 	return nil
 }
 
-// waitRunSuccess waits for a revenue_daily run to succeed. A failed run fails
-// the test with each task's state and the failed task's log tail.
+// waitRunSuccess waits for a revenue_daily run to succeed: the scheduler makes
+// one at start (catchup=False). The API is read-only for anonymous callers
+// (Viewer), so the test cannot trigger one and does not need to. A failed run
+// fails the test with each task's state and the failed task's log tail.
 func waitRunSuccess(ctx context.Context, t *testing.T, c *airflow.Client) airflow.DAGRun {
 	t.Helper()
 	var ok airflow.DAGRun
-	since := time.Now()
-	triggered := false
 	poll(ctx, t, "a successful "+batchDAG+" run", 3*time.Second, func() (bool, error) {
 		runs, err := c.DAGRuns(ctx, batchDAG, 5)
 		if err != nil {
 			return false, fmt.Errorf("DAGRuns: %w", err)
-		}
-		if len(runs) == 0 {
-			if !triggered && time.Since(since) > 45*time.Second {
-				t.Log("no scheduled run after 45s; triggering one")
-				triggered = true
-				return false, triggerRun(ctx)
-			}
-			return false, nil
 		}
 		for _, r := range runs {
 			switch r.State {

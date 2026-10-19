@@ -10,6 +10,7 @@ import (
 
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
+	"piperoom/internal/room"
 )
 
 // TestOwnersBatchLoads keeps dev/owners.batch.yaml loadable and in step with
@@ -42,6 +43,22 @@ func TestOwnersBatchLoads(t *testing.T) {
 	}
 }
 
+// TestUsersBatchMatchesOwners runs the server's start-up check on the pair
+// dev/batch.md tells you to start the server with.
+func TestUsersBatchMatchesOwners(t *testing.T) {
+	o, err := owners.Load("../../dev/owners.batch.yaml")
+	if err != nil {
+		t.Fatalf("owners.Load: %v", err)
+	}
+	u, err := room.LoadUsers("../../dev/users.batch.yaml")
+	if err != nil {
+		t.Fatalf("room.LoadUsers: %v", err)
+	}
+	if err := room.ValidateUsers(u, o); err != nil {
+		t.Fatalf("users/owners config: %v", err)
+	}
+}
+
 // composeFile is the part of dev/docker-compose.yml these checks read.
 type composeFile struct {
 	Services map[string]struct {
@@ -49,6 +66,7 @@ type composeFile struct {
 		Image       string            `yaml:"image"`
 		Build       any               `yaml:"build"`
 		Ports       []string          `yaml:"ports"`
+		Volumes     []string          `yaml:"volumes"`
 		Environment map[string]string `yaml:"environment"`
 	} `yaml:"services"`
 }
@@ -84,6 +102,17 @@ func TestComposeBatchProfile(t *testing.T) {
 	}
 	if got := af.Environment["AIRFLOW__API__AUTH_BACKENDS"]; got != "airflow.api.auth.backend.default" {
 		t.Errorf("AIRFLOW__API__AUTH_BACKENDS = %q", got)
+	}
+	// Without a public role the no-login API answers 403 (Airflow >= 2.8 authorizes every call).
+	if !strings.Contains(strings.Join(af.Volumes, " "), "webserver_config.py:/opt/airflow/webserver_config.py") {
+		t.Errorf("airflow volumes = %v: want dev/batch/airflow/webserver_config.py mounted", af.Volumes)
+	}
+	wc, err := os.ReadFile("../../dev/batch/airflow/webserver_config.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wc), `AUTH_ROLE_PUBLIC = "Viewer"`) {
+		t.Error(`webserver_config.py: want AUTH_ROLE_PUBLIC = "Viewer" (read-only, all the client needs)`)
 	}
 	if strings.HasSuffix(af.Image, ":latest") || !strings.Contains(af.Image, ":") {
 		t.Errorf("airflow image %q: want a pinned tag", af.Image)

@@ -24,14 +24,19 @@ at creation, so one run starts right away (`catchup=False`) and then daily.
 
 `go test -tags integration -run TestBatchProfile ./internal/testenv/` does the same against a running dev stack,
 waits for one successful `revenue_daily` run, checks `analytics.fct_revenue` and the artifacts, logs the
-timings, and removes only the `airflow` service afterwards.
+timings, and afterwards removes the `airflow` service, drops `analytics.stg_orders` and `analytics.fct_revenue`
+and deletes the two artifacts (the base stack stays up).
+
+Build cost: the image build (pull `apache/airflow`, pip install dbt) is not cached between CI runs; the test
+logs `compose up --build airflow took ...` so the integration job shows what it adds. If it is large, the job
+can move to its own CI job with a build cache (C1's `.github/**`).
 
 ## What is where
 
 | What | Value |
 |---|---|
 | Image | `piperoom-dev/airflow:2.10.5-dbt1.9.0`, built from `apache/airflow:2.10.5-python3.12` + `dbt-postgres==1.9.0` in `/opt/dbt-venv` |
-| Airflow UI and REST API v1 | `http://127.0.0.1:8080` (loopback only); `/api/v1/...` takes **no login** (`AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.default`), because the Airflow client refuses to send a password or token over `http://` (#587). The UI login is `admin` with the password `airflow standalone` prints in the container log |
+| Airflow UI and REST API v1 | `http://127.0.0.1:8080` (loopback only); `/api/v1/...` takes **no login** (`AIRFLOW__API__AUTH_BACKENDS=airflow.api.auth.backend.default`, plus `AUTH_ROLE_PUBLIC = "Viewer"` in `dev/batch/airflow/webserver_config.py`: since Airflow 2.8 every API call is also authorized, and an anonymous caller with no public role gets 403), because the Airflow client refuses to send a password or token over `http://` (#587). The UI login is `admin` with the password `airflow standalone` prints in the container log |
 | Airflow metadata | SQLite inside the container (standalone mode); `down` forgets the run history |
 | DAG | `dev/batch/dags/revenue_daily.py` |
 | dbt project | `dev/batch/dbt/analytics` (`profiles.yml` targets database `warehouse`, schema `analytics`) |
@@ -39,14 +44,17 @@ timings, and removes only the `airflow` service afterwards.
 
 ## Point Piperoom at it
 
-Run the server on the host with:
+Run the server on the host as for the default stack, plus:
 
 ```powershell
 $env:OWNERS_FILE = "dev/owners.batch.yaml"
+$env:USERS_FILE = "dev/users.batch.yaml"   # the users who own orchestrator, transform, warehouse
 $env:AIRFLOW_URL = "http://127.0.0.1:8080"
 $env:DBT_ARTIFACTS_DIR = (Resolve-Path dev/batch/artifacts).Path   # must be absolute
 ```
 
-Leave `AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` and `AIRFLOW_TOKEN` unset (config refuses a login over `http://`).
-`dev/users.yaml` gives no one the `orchestrator` or `transform` layer yet; `devctl break dag-failed`,
-`dbt-model-broken`, `late-batch` and `daily-revenue` in `dev/owners.yaml` come with P4g-2.
+The server refuses to start when the users and owners files disagree in either direction, so the two batch
+files go together (`TestUsersBatchMatchesOwners` in `cmd/devctl` runs that check on them). Leave
+`AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` and `AIRFLOW_TOKEN` unset (config refuses a login over `http://`).
+`devctl break dag-failed`, `dbt-model-broken`, `late-batch` and `daily-revenue` in `dev/owners.yaml` come with
+P4g-2.
