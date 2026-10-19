@@ -391,11 +391,24 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		tr.Events = evs
 		tr.Room = &RoomTrace{RoomID: rr.roomID, Entry: sc.entry(), Alert: alert}
 	}
+	if status, refused := APIRefusal(runErr); refused {
+		// A refused run says nothing about the agent: latch it so no new run
+		// starts, and keep it out of the grade (and the live judge).
+		cfg.refusal.set(status, runErr)
+		res := infraResult(sc.Name, run, fmt.Sprintf("HTTP %d: %s", status, runErr))
+		res.DurationMS = took.Milliseconds()
+		res.Provenance = provenanceFor(cfg, sc, rr.roomID)
+		return res, tr, nil
+	}
 	res, err := gradeFinal(ctx, cfg, cfg.gate(), sc, Judge(sc, tr, runErr, timedOut))
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
 	res.Run = run
+	if res.Error != "" {
+		// Redacted and short: the error reaches the CI log and the report.
+		res.Error = RunErrorText(res.Error)
+	}
 	res.DurationMS = took.Milliseconds()
 	res = withReplayChecks(sc, tr, res)
 	res.Provenance = provenanceFor(cfg, sc, rr.roomID)

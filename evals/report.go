@@ -43,11 +43,19 @@ type Report struct {
 	// the cache or live, unjudged ones, live calls and their tokens
 	// (judge_auto.go). Nil when no hypothesis was ambiguous or judged.
 	Judge *JudgeStats `json:"judge,omitempty"`
+	// InfraStop says why the evaluation stopped early: the model API refused
+	// a request in a way no retry fixes (infra.go). The runs it kept from
+	// being scored are in Results with an "infra: " error, in no rate and in
+	// no comparison.
+	InfraStop string `json:"infra_stop,omitempty"`
 }
 
 // Summary aggregates runs. Rates are 0..1. In Report.Overall every scenario
 // weighs the same, however many runs finished.
 type Summary struct {
+	// Runs are the scored runs. Infra counts the runs the model API's refusal
+	// kept from being scored: they are in neither Runs nor any rate.
+	Infra         int     `json:"infra,omitempty"`
 	Runs          int     `json:"runs"`
 	Passes        int     `json:"passes"`
 	PassRate      float64 `json:"pass_rate"`
@@ -111,17 +119,30 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 		}
 	}
 	rep.Overall = combine(withRuns)
+	rep.Overall.Infra = totalInfra(rep.Scenarios)
 	if cfg.Tap != nil {
 		rep.PromptHashes = cfg.Tap.PromptHashes()
 	}
-	cal, ev := calibrate(results), evidenceTotals(results)
+	scored := make([]RunResult, 0, len(results))
+	for _, r := range results {
+		if !r.Infra() {
+			scored = append(scored, r)
+		}
+	}
+	cal, ev := calibrate(scored), evidenceTotals(scored)
 	rep.Calibration, rep.Evidence = &cal, &ev
 	rep.Judge = cfg.judge.snapshot()
 	return rep
 }
 
-func summarize(rs []RunResult) Summary {
-	s := Summary{Runs: len(rs), MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1, RightActionRate: -1}
+func summarize(all []RunResult) Summary {
+	rs := make([]RunResult, 0, len(all))
+	for _, r := range all {
+		if !r.Infra() {
+			rs = append(rs, r)
+		}
+	}
+	s := Summary{Infra: len(all) - len(rs), Runs: len(rs), MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1, RightActionRate: -1}
 	if len(rs) == 0 {
 		return s
 	}
@@ -293,7 +314,18 @@ func (r Report) Restrict(names []string) Report {
 		}
 	}
 	out.Overall = combine(withRuns)
+	out.Overall.Infra = totalInfra(out.Scenarios)
 	return out
+}
+
+// totalInfra is the infra runs over all scenario rows, including the rows with
+// no scored run that combine leaves out.
+func totalInfra(ss []ScenarioSummary) int {
+	n := 0
+	for _, s := range ss {
+		n += s.Infra
+	}
+	return n
 }
 
 // WriteJSON writes the report as indented JSON.
@@ -338,6 +370,9 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)
 	writeUsageTable(&b, r)
+	if r.InfraStop != "" {
+		fmt.Fprintf(&b, "\n**Evaluation stopped: the model API refused the request (%s).** Runs marked infra were not scored and are not a regression of the agent.\n", mdCell(RunErrorText(r.InfraStop)))
+	}
 	var failed []string
 	for _, res := range r.Results {
 		if !res.Pass {
@@ -366,6 +401,10 @@ const maxFailedHypothesisRunes = 300
 // printed in a public CI log.
 func failedRunDetails(res RunResult) []string {
 	var out []string
+	if res.Error != "" {
+		// Redacted again: an older report may hold the raw text.
+		out = append(out, "  - error: "+mdCell(RunErrorText(res.Error)))
+	}
 	if res.FinalHypothesis != "" {
 		text, _ := redact.Text(res.FinalHypothesis)
 		if r := []rune(text); len(r) > maxFailedHypothesisRunes {
@@ -421,12 +460,21 @@ func writeJudgeLine(b *strings.Builder, j *JudgeStats) {
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {
+	if s.Runs == 0 && s.Infra > 0 {
+		// Not scored: say so instead of printing a 0/0 row of zeros.
+		fmt.Fprintf(b, "| %s | infra (%d, not scored) | - | - | - | - | - | - | - | - | - | - | %d |\n", mdCell(name), s.Infra, s.Infra)
+		return
+	}
+	pass := fmt.Sprintf("%d/%d", s.Passes, s.Runs)
+	if s.Infra > 0 {
+		pass += fmt.Sprintf(" (+%d infra)", s.Infra)
+	}
 	ttc := "-"
 	if s.MedianMSToCause >= 0 {
 		ttc = fmt.Sprintf("%.0f / %.1f", s.MedianMSToCause, s.MedianStepsToCause)
 	}
-	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %s | %.1f | %s | %s | %d | %d | %d | %d |\n",
-		mdCell(name), s.Passes, s.Runs, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate, rightActionCell(s),
+	fmt.Fprintf(b, "| %s | %s | %.1f | %.0f%% | %.0f%% | %s | %.1f | %s | %s | %d | %d | %d | %d |\n",
+		mdCell(name), pass, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate, rightActionCell(s),
 		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), ttc, s.CauseRetracted, s.Misses, s.RejectedAttempts, s.Errors)
 }
 
@@ -567,7 +615,7 @@ func Compare(base, cand Report, tolerance float64) Comparison {
 		inBase[s.Name] = true
 		b := s.Summary
 		row := CompareRow{Scenario: s.Name, Base: &b}
-		if cs, ok := candBy[s.Name]; ok && cs.Runs > 0 {
+		if cs, ok := candBy[s.Name]; ok && (cs.Runs > 0 || cs.Infra > 0) {
 			row.Candidate = &cs
 		}
 		judgeRow(&row, tolerance)
@@ -588,6 +636,9 @@ func Compare(base, cand Report, tolerance float64) Comparison {
 	c.Overall = CompareRow{Scenario: "OVERALL", Base: &bo, Candidate: &co}
 	judgeRow(&c.Overall, tolerance)
 
+	if n := cand.Overall.Infra; n > 0 {
+		c.Notes = append(c.Notes, fmt.Sprintf("%d candidate run(s) were infra failures (the model API refused them): left out of every rate and verdict, never a regression", n))
+	}
 	if base.Runs < 3 || cand.Runs < 3 {
 		c.Notes = append(c.Notes, "fewer than 3 runs per scenario: the model is not deterministic, so small differences may be noise")
 	}
@@ -604,6 +655,11 @@ func judgeRow(row *CompareRow, tolerance float64) {
 	b, cs := row.Base, row.Candidate
 	switch {
 	case b == nil || b.Runs == 0:
+		return
+	case cs != nil && cs.Runs == 0 && cs.Infra > 0:
+		// Every run of the candidate was kept from scoring by an outage: no
+		// verdict, and certainly not a regression.
+		row.Reason = fmt.Sprintf("infra: %d run(s) not scored", cs.Infra)
 		return
 	case cs == nil:
 		row.Regressed = true
@@ -646,7 +702,7 @@ func (c Comparison) WriteMarkdown(w io.Writer) error {
 			verdict = r.Reason
 		}
 		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", mdCell(r.Scenario),
-			pair(r.Base, r.Candidate, func(s *Summary) string { return fmt.Sprintf("%d/%d", s.Passes, s.Runs) }),
+			pair(r.Base, r.Candidate, passCell),
 			delta(r.Base, r.Candidate, func(s *Summary) float64 { return s.MeanScore }),
 			delta(r.Base, r.Candidate, func(s *Summary) float64 { return s.MeanToolCalls }),
 			pair(r.Base, r.Candidate, func(s *Summary) string { return callsToCause(s.MeanToolCallsToRootCause) }),
@@ -664,6 +720,18 @@ func (c Comparison) WriteMarkdown(w io.Writer) error {
 
 func pair(b, c *Summary, f func(*Summary) string) string {
 	return side(b, f) + " → " + side(c, f)
+}
+
+// passCell is passes/runs of a scored side, "infra" when an outage left it
+// with no scored run.
+func passCell(s *Summary) string {
+	if s.Runs == 0 && s.Infra > 0 {
+		return "infra"
+	}
+	if s.Infra > 0 {
+		return fmt.Sprintf("%d/%d (+%d infra)", s.Passes, s.Runs, s.Infra)
+	}
+	return fmt.Sprintf("%d/%d", s.Passes, s.Runs)
 }
 
 func side(s *Summary, f func(*Summary) string) string {
