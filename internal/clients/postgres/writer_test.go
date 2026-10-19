@@ -544,11 +544,11 @@ func TestInsertSnapshotSignalSQL(t *testing.T) {
 	if got, want := tx.sqls(), []string{`INSERT INTO "debezium"."signal" (id, type, data) VALUES ($1, 'execute-snapshot', $2)`}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("statements:\n got %q\nwant %q", got, want)
 	}
-	if got, want := tx.stmts[1].args, []any{id, `{"data-collections":["public.orders","public.items"],"type":"incremental"}`}; !reflect.DeepEqual(got, want) {
+	if got, want := tx.stmts[1].args, []any{id, `{"data-collections":["public.orders","public.items"],"type":"INCREMENTAL"}`}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("insert args = %#v, want %#v", got, want)
 	}
 	var data snapshotSignal
-	if err := json.Unmarshal([]byte(tx.stmts[1].args[1].(string)), &data); err != nil || data.Type != "incremental" {
+	if err := json.Unmarshal([]byte(tx.stmts[1].args[1].(string)), &data); err != nil || data.Type != "INCREMENTAL" {
 		t.Fatalf("data does not parse: %v %+v", err, data)
 	}
 }

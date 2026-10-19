@@ -551,7 +551,10 @@ func checkWriteScope(ctx context.Context, connector string, tables []sourceTable
 // than the signal table's data column, naming how many of the tables fit.
 func signalData(collections []string) ([]byte, error) {
 	encode := func(c []string) ([]byte, error) {
-		b, err := json.Marshal(snapshotSignal{DataCollections: c, Type: "incremental"})
+		// Upper case as in Debezium's documented examples and the Kafka
+		// signal of connect_snapshot_table (#620 ruling): one format for both
+		// channels.
+		b, err := json.Marshal(snapshotSignal{DataCollections: c, Type: "INCREMENTAL"})
 		if err != nil {
 			return nil, fmt.Errorf("postgres: snapshot signal: encode data: %w", err)
 		}

@@ -186,7 +186,7 @@ func TestWriterInsertSnapshotSignalIntegration(t *testing.T) {
 	if err := json.Unmarshal([]byte(data), &got); err != nil {
 		t.Fatalf("data %q: %v", data, err)
 	}
-	want := snapshotSignal{DataCollections: []string{f.tableIn}, Type: "incremental"}
+	want := snapshotSignal{DataCollections: []string{f.tableIn}, Type: "INCREMENTAL"}
 	if typ != "execute-snapshot" || !reflect.DeepEqual(got, want) {
 		t.Fatalf("row = %q %+v, want execute-snapshot %+v", typ, got, want)
 	}
