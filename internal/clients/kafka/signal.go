@@ -34,14 +34,12 @@ const maxSignalTables = 50
 // table and no other.
 var signalTableRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$`)
 
-// SnapshotSignal is the record SendSnapshotSignal produced.
-type SnapshotSignal struct {
-	// ID is the signal id Debezium logs for it: the record offset.
-	ID        string `json:"id"`
-	Topic     string `json:"topic"`
-	Partition int32  `json:"partition"`
-	Offset    int64  `json:"offset"`
-}
+// SnapshotSignal is the record SendSnapshotSignal produced; ID is the signal
+// id Debezium logs for it (the record offset). An alias, so the Writer
+// satisfies clients.SnapshotSignaler (P0 item 7), as with OffsetMove.
+type SnapshotSignal = clients.SnapshotSignal
+
+var _ clients.SnapshotSignaler = (*Writer)(nil)
 
 type snapshotSignalValue struct {
 	Type string             `json:"type"`
