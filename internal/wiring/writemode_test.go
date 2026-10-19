@@ -292,8 +292,8 @@ func TestWriteModeOffNoWriterReachableFromActions(t *testing.T) {
 // only the process-wide set gets a source writer, from SOURCE_DB_WRITE_URL: the
 // fixture's pipelines with their own connections: block set no
 // source_db_write_url, and never get the process-wide one (writeurl_test.go
-// covers the key). The P3
-// rows hand the writers to their actions; Close closes them.
+// covers the key). The P3 rows hand the writers to their actions; Close closes
+// them.
 func TestWriteModeOnBuildsWriters(t *testing.T) {
 	f := newFakeOpener()
 	cfg := config.Config{SourceDBURL: readerDSN, SourceDBWriteURL: writerDSN, WriteMode: "on"}

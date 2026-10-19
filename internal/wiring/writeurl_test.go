@@ -44,8 +44,9 @@ func heldSourceWriters(t *testing.T, f *fakeOpener, a actions.Action) []*fakeWri
 			return
 		}
 		// Values reached through unexported fields cannot be Interface()d,
-		// so the writer is matched by its pointer.
-		p := v.Field(0).Pointer()
+		// so the writer is matched by its pointer. FieldByName keeps this
+		// right if fakeSourceWriter gains fields.
+		p := v.FieldByName("fakeWriter").Pointer()
 		for _, w := range f.writers {
 			if reflect.ValueOf(w).Pointer() == p {
 				held = append(held, w)

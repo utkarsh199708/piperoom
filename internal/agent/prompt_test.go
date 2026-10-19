@@ -951,6 +951,7 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 		"needs a fix no listed action can make",
 		"could mean more than one action",
 		"still answers requests is not broken",
+		"orphaned slot",
 	} {
 		if strings.Contains(batch, cdcOnly) {
 			t.Errorf("batch prompt must not carry the CDC rule %q", cdcOnly)
