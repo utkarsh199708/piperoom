@@ -27,6 +27,13 @@ export function clockTime(iso: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** clockTime with seconds, for times a person acts on within a minute (the policy countdown). */
+export function clockTimeSeconds(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+}
+
 /** "2026-10-14 06:06:12 UTC" for hover titles; an invalid time comes back unchanged. */
 export function utcLabel(iso: string): string {
   const t = Date.parse(iso)

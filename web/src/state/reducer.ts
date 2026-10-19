@@ -30,7 +30,9 @@ import type {
   PostmortemDraftedPayload,
   PostmortemFailedPayload,
   ApprovalNudgedPayload,
+  ProposalCancelledPayload,
   ProposalCreatedPayload,
+  ProposalScheduledPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   RoomLabelledPayload,
@@ -45,7 +47,7 @@ import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
 import { stripBidi } from '../lib/title'
 import { checklistKey, snapshotWriteMode } from './types'
-import type { HypothesisHistoryEntry, InsightState, MemberState, RoomState, StepState, VerdictState } from './types'
+import type { HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -195,6 +197,14 @@ function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: n
     if (h && h.items[item] !== undefined) return { section: h.section, text: h.items[item] }
   }
   return null
+}
+
+// The proposal without its policy countdown.
+function unschedule(prop: ProposalState): ProposalState {
+  if (!prop.scheduled) return prop
+  const rest = { ...prop }
+  delete rest.scheduled
+  return rest
 }
 
 function voidPending(handoffs: RoomState['handoffs'], when: (h: RoomState['handoffs'][number]) => boolean) {
@@ -603,6 +613,30 @@ function applyCore(state: RoomState, event: Event): RoomState {
       break
     }
 
+    // The policy countdown (P2b). The fold keeps it however late it gets, like the server's fold;
+    // whether the card still shows it is a question of the clock (lib/countdown.ts, #652).
+    case 'proposal.scheduled': {
+      const p = as<ProposalScheduledPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) =>
+          prop.proposal_id === p.proposal_id && prop.status === 'open'
+            ? { ...prop, scheduled: { run_at: p.run_at, cancel_until: p.cancel_until || p.run_at, policy: p.policy } }
+            : prop,
+        ),
+      }
+      break
+    }
+
+    case 'proposal.cancelled': {
+      const p = as<ProposalCancelledPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? unschedule(prop) : prop)),
+      }
+      break
+    }
+
     // A "repeat" (already verified, no checks) never overwrites a full verdict.
     case 'agent.verification': {
       const p = as<AgentVerificationPayload>(event)
@@ -627,8 +661,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
           const allApproved = (prop.required_layers ?? []).every(
             (l) => approvals[l] === 'approved',
           )
+          // Any approval ends the countdown: the policy's own (it has started) or a person's.
           return {
-            ...prop,
+            ...unschedule(prop),
             approvals,
             decisions: {
               ...prop.decisions,
@@ -657,7 +692,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         proposals: state.proposals.map((prop) =>
           prop.proposal_id === p.proposal_id
             ? {
-                ...prop,
+                ...unschedule(prop),
                 approvals: { ...prop.approvals, [p.layer]: 'rejected' as const },
                 decisions: {
                   ...prop.decisions,

@@ -32,6 +32,9 @@ import { completesSet } from '../lib/decision'
 import { writeModeOff } from '../lib/writeMode'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
+import { PolicyCountdown } from './room/PolicyCountdown'
+import { canCancelSchedule } from '../lib/countdown'
+import type { CancelResult } from '../hooks/useRoom'
 import { WaitingFor } from './room/WaitingFor'
 import type { Person, PresenceMember, Topology } from '../api/types'
 import type { DriverInfo, NudgeState } from '../state/types'
@@ -1188,7 +1191,10 @@ function Proposal({
   driver,
   bundle,
   refused,
+  onCancelSchedule,
 }: {
+  /** Set when this person may cancel the proposal's policy countdown (canCancelSchedule). */
+  onCancelSchedule?: () => Promise<CancelResult>
   /** The room's driver while the room is open, else null (see LayerRow). */
   driver: DriverInfo | null
   nudge: CloseNudge
@@ -1232,6 +1238,8 @@ function Proposal({
 
   return (
     <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
+      {/* A closed room runs nothing more, so no countdown there (its proposals keep status "open"). */}
+      {open && nudge.roomOpen && proposal.scheduled && <PolicyCountdown scheduled={proposal.scheduled} onCancel={onCancelSchedule} />}
       {ribbon && mine.length > 0 && (
         <div className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-t-lg border-b border-border bg-warning-subtle px-3.5 py-1.5 text-sm font-medium text-warning-foreground">
           <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
@@ -1433,6 +1441,13 @@ export function ProposalsPanel({
   // "Approve and run" (P2c) where the person may approve every layer of a proposal. The same rule
   // as the decision bar's (lib/decision.ts); a host without approveAll keeps the per-layer rows.
   const bundleFor = (p: ProposalState) => (actions.approveAll ? approveAllFor(state, p, decider) : null)
+  // Cancel of a policy countdown (P2c-3): the driver or an owner of any of its layers. `decider` and
+  // `driver` already carry no rights on a closed room.
+  const ownsEveryLayer = state.status === 'open' && (state.mode?.solo === true || user.solo === true)
+  const cancelFor = (p: ProposalState) => {
+    const cancel = actions.cancelSchedule
+    return cancel && canCancelSchedule(p, decider, driver, ownsEveryLayer) ? () => cancel(p.proposal_id) : undefined
+  }
 
   // A and R belong to one place at a time, in the first proposal that has one: its "Approve and
   // run" ("*"), else the first layer you can decide.
@@ -1481,6 +1496,7 @@ export function ProposalsPanel({
               driver={driver}
               bundle={bundleFor(p)}
               refused={state.approve_all_refused?.[p.proposal_id]}
+              onCancelSchedule={cancelFor(p)}
             />
           ))}
         </div>
