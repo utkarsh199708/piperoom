@@ -18,11 +18,8 @@
 #   (consumer owner approves), or to: earliest (the load is an upsert by id, so a full replay
 #   is safe; `devctl fix consumer-bad-deploy` does that). The group is Empty with 0 members, so
 #   the action's Validate accepts it; then the good build starts and replays.
-#   expect.fix cannot name kafka_reset_consumer_offsets yet: evals.LiveActions registers only
-#   actions.Register's seven (RegisterKafka is not wired into the replay), so -validate rejects
-#   it as an unknown action. P3g-2 (C6) registers it on a replay planner; then set
-#   `fix: [[kafka_reset_consumer_offsets]]`. Until then the run is graded on root cause,
-#   layers, facts and the forbidden actions below.
+#   Graded since P3g-2 (expect.fix, fix_targets; `to` is left free). The action's Validate
+#   reads the group from the kafka_consumer_lag recording (Empty, 0 members).
 #   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - the
 #     source side is healthy; the topic holds all 30 orders.
 #   Forbidden: schema_register, schema_set_compatibility - no schema changed.
@@ -635,6 +632,8 @@ expect:
     - about: root_cause
       facts: [f_sink_missing, f_trace_committed]
   evidence_tools: [kafka_consumer_lag]
-  # P3g-2: fix: [[kafka_reset_consumer_offsets]] (see the header).
+  fix: [[kafka_reset_consumer_offsets]]
+  fix_targets:
+    kafka_reset_consumer_offsets: {group: order-sync, topics: [pg.public.orders]}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 14
