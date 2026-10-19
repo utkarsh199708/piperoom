@@ -1,0 +1,3 @@
+# dbt writes run_results.json, manifest.json and compiled SQL here (dev/batch.md).
+*
+!.gitignore
