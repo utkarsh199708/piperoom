@@ -47,16 +47,5 @@ func (s *Service) RoomFor(ctx context.Context, u User, roomID string) (RoomSnaps
 	return snap, nil
 }
 
-// soloFor reports whether u may approve every layer of the pipeline alone.
-// Today only PIPEROOM_SOLO_USER does. P2b-4 adds the derived rule here (u
-// owns, or may approve, every layer of the pipeline), so the view and the
-// approve-all route share one answer.
-func (s *Service) soloFor(u User, _ string) bool {
-	return s.IsSolo(u.ID)
-}
-
-// autoApproveFor lists the pipeline's auto_approve actions. Empty until the
-// policy lands (P2b-4, owners.yaml `auto_approve:`).
-func (s *Service) autoApproveFor(string) []string {
-	return []string{}
-}
+// soloFor and autoApproveFor, the mode's solo and auto_approve, are in
+// autoapprove.go.

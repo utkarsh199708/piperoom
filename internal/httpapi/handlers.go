@@ -356,6 +356,27 @@ func (s *Server) handleApproveAllProposal(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, evs)
 }
 
+// handleCancelProposal serves POST /api/proposals/{pid}/cancel (P0 item 4):
+// the driver or an owner of a required layer stops the proposal's pending
+// auto-approve countdown; answered with the proposal.cancelled event.
+// Viewers never get here (viewerGuard: 403 viewer).
+func (s *Server) handleCancelProposal(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		// Reason is optional typed text, at most 500 characters.
+		Reason string `json:"reason"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.CancelProposal(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.Reason)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
 func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Layer      string `json:"layer"`

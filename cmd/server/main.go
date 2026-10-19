@@ -186,6 +186,12 @@ func runWith(d startDeps) error {
 	if err != nil {
 		return err
 	}
+	// Auto-approve delay (P0 item 2): a bad value stops the server here; the
+	// owners.yaml lists are checked once the action registries exist.
+	autoDelay, err := autoApproveDelay(cfg)
+	if err != nil {
+		return err
+	}
 
 	// Spend limits and the price table (docs/design/cost.md): a bad value
 	// stops the server before it connects to anything.
@@ -439,6 +445,19 @@ func runWith(d startDeps) error {
 		topo = sets
 	}
 
+	// The auto-approve lists name actions of the proposal registry: acts in
+	// --demo, every client set's actions otherwise (registered whatever the
+	// write mode; only their clients change).
+	regs := []*actions.Registry{acts}
+	if stacks != nil {
+		for _, s := range stacks.All() {
+			regs = append(regs, s.Actions)
+		}
+	}
+	if err := checkAutoApprove(own, regs, autoDelay, log); err != nil {
+		return err
+	}
+
 	svc := newRoomService(room.Deps{
 		Store:             st,
 		Actions:           acts,
@@ -463,6 +482,7 @@ func runWith(d startDeps) error {
 		Sessions:          sessions,
 		SoloUser:          soloUser,
 		WriteModeOff:      !writeOn,
+		AutoApproveDelay:  autoDelay,
 		Limits:            limits,
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,
