@@ -76,20 +76,20 @@ describe('PipelineMap — batch lane', () => {
   it('shows tasks_skipped as a note on the DAG node, compact and expanded, not as a fact', () => {
     render(<PipelineMap topology={fixture} />)
     const dag = () => nodeByName('revenue_daily')
-    expect(within(dag()).getByText('2 tasks skipped')).toBeInTheDocument()
+    expect(within(dag()).getByText('2 tasks not drawn')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Expand' }))
-    expect(within(dag()).getByText('2 tasks skipped')).toBeInTheDocument()
+    expect(within(dag()).getByText('2 tasks not drawn')).toBeInTheDocument()
     expect(within(dag()).queryByText('tasks_skipped')).not.toBeInTheDocument()
     expect(document.querySelectorAll('[data-skipped]')).toHaveLength(1)
   })
 
-  it('says "1 task skipped" for one, and nothing for zero or a non-number', () => {
+  it('says "1 task not drawn" for one, and nothing for zero or a non-number', () => {
     const withSkipped = (v: string): Topology => ({
       ...fixture,
       nodes: fixture.nodes.map((n) => (n.kind === 'dag' ? { ...n, facts: { ...n.facts, tasks_skipped: v } } : n)),
     })
     const { rerender } = render(<PipelineMap topology={withSkipped('1')} />)
-    expect(screen.getByText('1 task skipped')).toBeInTheDocument()
+    expect(screen.getByText('1 task not drawn')).toBeInTheDocument()
     rerender(<PipelineMap topology={withSkipped('0')} />)
     expect(document.querySelector('[data-skipped]')).toBeNull()
     rerender(<PipelineMap topology={withSkipped('lots')} />)

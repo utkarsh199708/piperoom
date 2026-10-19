@@ -57,10 +57,10 @@ function SkippedNote({ count }: { count: number }) {
   return (
     <span
       data-skipped=""
-      title="Tasks of the latest run whose id the server could not read are not drawn"
+      title="Tasks of the latest run whose id is not a valid Airflow id are not drawn"
       className="whitespace-nowrap rounded-sm border border-dashed border-border px-1 text-[11px] leading-4 text-muted-foreground"
     >
-      {count === 1 ? '1 task skipped' : `${count} tasks skipped`}
+      {count === 1 ? '1 task not drawn' : `${count} tasks not drawn`}
     </span>
   )
 }
