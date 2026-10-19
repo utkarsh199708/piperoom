@@ -9,12 +9,15 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/batchtools"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/dbttools"
 	"piperoom/internal/tools/kafkatools"
 )
 
-// fullRegistry registers every real read tool. Registration needs no live
-// clients, only a non-nil Owners.
+// fullRegistry registers every real read tool of the packages agent can
+// import without a cycle (db, Kafka, batch and dbt tools). Registration needs
+// no live clients, only a non-nil Owners.
 func fullRegistry(t *testing.T) *tools.Registry {
 	t.Helper()
 	reg := tools.NewRegistry()
@@ -22,6 +25,14 @@ func fullRegistry(t *testing.T) *tools.Registry {
 		t.Fatal(err)
 	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{}); err != nil {
+		t.Fatal(err)
+	}
+	// The batch packages (P4c-2, P4d-2): a set with both kinds registers
+	// them next to the CDC ones, so the cap must hold with them too.
+	if err := batchtools.Register(reg, batchtools.Deps{Owners: &owners.Owners{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbttools.Register(reg, dbttools.Deps{Owners: &owners.Owners{}}); err != nil {
 		t.Fatal(err)
 	}
 	return reg

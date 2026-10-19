@@ -148,6 +148,13 @@ func TestBatchPromptNamesOnlyBatchTools(t *testing.T) {
 	room := RoomToolNames()
 	for _, name := range got {
 		if slices.Contains(room, name) {
+			if !roomToolServesKind(name, events.PipelineKindBatch, 0) {
+				// propose_fix is named only to forbid it; a batch room is
+				// not offered it (roomToolsForKind).
+				if !strings.Contains(systemPromptFor(events.PipelineKindBatch), "never call "+name) {
+					t.Errorf("batch prompt names %s, which a batch room is not offered, without forbidding it", name)
+				}
+			}
 			continue
 		}
 		kinds, known := ToolPipelineKinds(name)
@@ -244,16 +251,82 @@ func TestRunnerActionsAndPromptByKind(t *testing.T) {
 			t.Fatalf("kind %q: the shared registry was changed", tt.kind)
 		}
 		_ = r.run(context.Background())
-		if len(m.system) == 0 || len(m.propose) == 0 {
+		if len(m.system) == 0 {
 			t.Fatalf("kind %q: no model call captured", tt.kind)
 		}
 		if m.system[0] != tt.wantPrompt {
 			t.Fatalf("kind %q: wrong system prompt", tt.kind)
 		}
+		// A batch room has no action, so it is not offered propose_fix at
+		// all (the #644 review); a CDC room is, with every CDC action.
+		if tt.kind == events.PipelineKindBatch {
+			if len(m.propose) != 0 {
+				t.Fatalf("batch room is offered propose_fix: %q", m.propose[0])
+			}
+			continue
+		}
+		if len(m.propose) == 0 {
+			t.Fatalf("kind %q: propose_fix not offered", tt.kind)
+		}
 		for _, name := range []string{"connect_restart_task", "schema_set_compatibility"} {
-			offered := strings.Contains(m.propose[0], name)
-			if want := tt.kind != events.PipelineKindBatch; offered != want {
-				t.Errorf("kind %q: propose_fix offers %s = %v, want %v", tt.kind, name, offered, want)
+			if !strings.Contains(m.propose[0], name) {
+				t.Errorf("kind %q: propose_fix does not offer %s", tt.kind, name)
+			}
+		}
+	}
+}
+
+// toolNamesSent are the tool names of the request's tool list, in order.
+func toolNamesSent(r *runner) []string {
+	var out []string
+	for _, p := range r.toolList.params {
+		if p.OfTool != nil {
+			out = append(out, p.OfTool.Name)
+		}
+	}
+	return out
+}
+
+// Room tools by kind: a CDC room keeps all three whatever its actions (its
+// tool list is unchanged), a batch room without an action loses only
+// propose_fix, and a batch room with an action that declares batch keeps it.
+func TestRoomToolsForKind(t *testing.T) {
+	all := RoomToolNames()
+	batchAct := &batchKindAction{fakeAction{name: "airflow_clear_task", layer: "orchestrator", params: map[string]any{"type": "object"}}}
+	for _, tt := range []struct {
+		name string
+		kind string
+		acts *actions.Registry
+		want []string
+	}{
+		{"cdc, actions", events.PipelineKindCDC, kindTestActions(t), all},
+		{"cdc, empty registry", events.PipelineKindCDC, actions.NewRegistry(), all},
+		{"cdc, nil registry", events.PipelineKindCDC, nil, all},
+		{"batch, nil registry", events.PipelineKindBatch, nil, []string{"update_hypothesis", "post_message"}},
+		{"batch, only CDC actions", events.PipelineKindBatch, kindTestActions(t), []string{"update_hypothesis", "post_message"}},
+		{"batch, a batch action", events.PipelineKindBatch, kindTestActions(t, batchAct), all},
+	} {
+		reg, _ := kindTestRegistry(t)
+		r, err := newRunnerWith(Alert{Title: "t", PipelineID: "p", PipelineKind: tt.kind}, Deps{
+			Tools: reg, Actions: tt.acts, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: &fakeSink{}, Logger: discardLogger(),
+		}, Options{MaxTurns: 3}, &promptCapture{})
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		_ = r.run(context.Background())
+		var room []string
+		for _, n := range toolNamesSent(r) {
+			if slices.Contains(all, n) {
+				room = append(room, n)
+			}
+		}
+		if !slices.Equal(room, tt.want) {
+			t.Errorf("%s: room tools %v, want %v", tt.name, room, tt.want)
+		}
+		// A call to a tool the room does not offer runs nothing.
+		if !slices.Contains(tt.want, "propose_fix") {
+			if _, ok := r.toolList.byName["propose_fix"]; ok {
+				t.Errorf("%s: propose_fix is callable", tt.name)
 			}
 		}
 	}

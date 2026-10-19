@@ -13,8 +13,10 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/batchtools"
 	"piperoom/internal/tools/changes"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/dbttools"
 	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
@@ -94,15 +96,13 @@ var (
 // toolPackages are the read tool packages in registration order, which is
 // the order of the model's tool list: a new package goes where its tools
 // should appear, and the CDC order stays as it was before kinds (a batch
-// package's tools are not in a CDC room's list at all). A batch package is
-// one entry: P4c-2 adds
-//
-//	{name: "batch tools", kinds: batchKind, register: func(reg *tools.Registry, w *Wired) error {
-//		return batchtools.Register(reg, batchtools.Deps{Orchestrator: w.Orchestrator, Owners: w.Owners}) }},
-//
-// and P4d-2 the same for dbttools with w.Transform, both after debezium
-// tools. Their readers are nil when AIRFLOW_URL or the dbt settings are off;
-// the tools then answer clients.ErrNotSupported.
+// package's tools are not in a CDC room's list at all). The batch packages
+// (P4c-2 batchtools, P4d-2 dbttools) come after debezium tools and are
+// registered only for a set with a batch pipeline, so a CDC-only set's
+// registry, and its rooms' tool list, stay byte-identical. Their readers are
+// nil when AIRFLOW_URL or the dbt settings are off; the tools are registered
+// anyway (the list does not depend on setup) and answer
+// clients.ErrNotSupported.
 //
 // dbtools serves both kinds: its warehouse tools (freshness is batch
 // verification) and pipeline_map are batch tools too. registerToolsWith keeps
@@ -118,6 +118,12 @@ func toolPackages() []toolPackage {
 		}},
 		{name: "debezium tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
 			return debeziumtools.Register(reg, debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners})
+		}},
+		{name: "batch tools", kinds: batchKind, register: func(reg *tools.Registry, w *Wired) error {
+			return batchtools.Register(reg, batchtools.Deps{Orchestrator: w.Orchestrator, Schedule: scheduleReader(w.Orchestrator), Owners: w.Owners, Now: w.Now})
+		}},
+		{name: "dbt tools", kinds: batchKind, register: func(reg *tools.Registry, w *Wired) error {
+			return dbttools.Register(reg, dbttools.Deps{Transform: w.Transform, Owners: w.Owners})
 		}},
 		// The runbook library is embedded in the binary, so it needs no client.
 		{name: "runbooks", register: func(reg *tools.Registry, _ *Wired) error {
@@ -144,6 +150,16 @@ func toolPackages() []toolPackage {
 			return changes.Register(reg, chg)
 		}},
 	}
+}
+
+// scheduleReader is orch's schedule reader when it has one (*airflow.Client
+// does), for dag_schedule_gap; nil otherwise, and the tool then answers
+// clients.ErrNotSupported.
+func scheduleReader(orch clients.OrchestratorReader) clients.DAGScheduleReader {
+	if s, ok := orch.(clients.DAGScheduleReader); ok {
+		return s
+	}
+	return nil
 }
 
 // registerToolsWith registers the packages the set's kinds need, each into a

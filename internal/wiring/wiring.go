@@ -60,6 +60,9 @@ type Wired struct {
 	// Registry stay nil (kinds.go).
 	Orchestrator clients.OrchestratorReader
 	Transform    clients.TransformReader
+	// Now is the batch tools' clock (dag_schedule_gap, run durations); nil
+	// is time.Now. Tests set it.
+	Now func() time.Time
 
 	// Builder derives pipeline graphs with live health from the clients above.
 	Builder topology.Builder
