@@ -23,10 +23,14 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // cdcPromptSHA256 is the hash of the CDC system prompt. It was first pinned
 // as the prompt stood before the per-kind section existed (main at ab324e74,
 // e8db4d7b...) and moved once, on purpose, by P3-W2: the slot rule now allows
-// pg_drop_replication_slot for a retired connector. It is pinned here, beside
-// the snapshot file, so a regenerated snapshot cannot silently move the CDC
-// prompt: the CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "14d9fc2b3ef19e9908c4c30edcac4976275088f486775d8cd44e8d79f282a987"
+// pg_drop_replication_slot for a retired connector. P3-W2f moved it again, on
+// purpose, for evals-live run 39212981319: the first failing component is the
+// most upstream broken one, a table added to the publication gets a snapshot
+// signal in the same proposal, and a retired connector's orphaned slot is the
+// root cause. It is pinned here, beside the snapshot file, so a regenerated
+// snapshot cannot silently move the CDC prompt: the CDC evals and the prompt
+// cache depend on these exact bytes.
+const cdcPromptSHA256 = "3406da959d1b5581220682f250695545e2b22e9cd52d0762b032ff293c18d5b0"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
