@@ -88,8 +88,15 @@ const (
 // another package: that is how this package's read-only adapters keep the
 // whole client out of the actions' reach. Func values are opaque.
 func reachableTypes(areg *actions.Registry) map[reflect.Type]bool {
-	const actionsPkg = "piperoom/internal/actions"
 	seen := map[reflect.Type]bool{}
+	walkReachable(areg.All(), func(v reflect.Value) { seen[v.Type()] = true })
+	return seen
+}
+
+// walkReachable calls visit on every value reachable from roots by the rules
+// of reachableTypes.
+func walkReachable(roots []actions.Action, visit func(reflect.Value)) {
+	const actionsPkg = "piperoom/internal/actions"
 	ptrs := map[uintptr]bool{}
 	var walk func(v reflect.Value, depth int)
 	walk = func(v reflect.Value, depth int) {
@@ -102,7 +109,7 @@ func reachableTypes(areg *actions.Registry) map[reflect.Type]bool {
 			}
 			return
 		}
-		seen[v.Type()] = true
+		visit(v)
 		switch v.Kind() {
 		case reflect.Pointer:
 			if v.IsNil() || ptrs[v.Pointer()] {
@@ -128,10 +135,9 @@ func reachableTypes(areg *actions.Registry) map[reflect.Type]bool {
 			}
 		}
 	}
-	for _, a := range areg.All() {
+	for _, a := range roots {
 		walk(reflect.ValueOf(a), 0)
 	}
-	return seen
 }
 
 func ifaceOf[T any]() reflect.Type { return reflect.TypeOf((*T)(nil)).Elem() }
@@ -312,6 +318,49 @@ func TestWriteModeOnBuildsWriters(t *testing.T) {
 		// The actions hold the whole client: a write reaches it.
 		if !reachableTypes(s.Actions)[reflect.TypeOf(&spy{})] {
 			t.Errorf("set %q: the actions do not hold the whole client with write mode on", s.Name)
+		}
+	}
+	// Each set's P3 Kafka actions hold that set's own Kafka writer, never
+	// another set's: a reset or replay approved for pipeline pa must not run
+	// on tenant b's brokers.
+	for _, s := range st.All() {
+		own, ok := s.Clients.writers.kafka.(fakeKafkaWriter)
+		if !ok {
+			t.Fatalf("set %q: kafka writer = %#v, want a fake", s.Name, s.Clients.writers.kafka)
+		}
+		if want := s.Clients.Kafka.(*spy).label; own.label != want {
+			t.Errorf("set %q: its kafka writer was built for %q, want %q", s.Name, own.label, want)
+		}
+		for _, name := range []string{"kafka_reset_consumer_offsets", "dlq_replay", "connect_snapshot_table"} {
+			a, ok := s.Actions.Get(name)
+			if !ok {
+				t.Errorf("set %q: %s not registered", s.Name, name)
+				continue
+			}
+			// Values reached through an action's unexported fields cannot be
+			// Interface()d, so match the writer by its pointer.
+			var held []*fakeWriter
+			walkReachable([]actions.Action{a}, func(v reflect.Value) {
+				if v.Type() != reflect.TypeOf(fakeKafkaWriter{}) {
+					return
+				}
+				p := v.Field(0).Pointer()
+				for _, w := range f.writers {
+					if reflect.ValueOf(w).Pointer() == p {
+						held = append(held, w)
+						return
+					}
+				}
+				t.Errorf("set %q: %s holds a Kafka writer the fakes did not build", s.Name, name)
+			})
+			if len(held) == 0 {
+				t.Errorf("set %q: %s holds no Kafka writer with write mode on", s.Name, name)
+			}
+			for _, h := range held {
+				if h != own.fakeWriter {
+					t.Errorf("set %q: %s holds the Kafka writer of %q, want its own (%q)", s.Name, name, h.label, own.label)
+				}
+			}
 		}
 	}
 	act, _ := st.For("pa").Actions.Get("connect_restart_connector")

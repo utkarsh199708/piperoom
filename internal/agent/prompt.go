@@ -60,7 +60,8 @@ const (
 
 	promptCDCFixes = `Fixes
 - Propose fixes only with the actions propose_fix lists.
-- Never propose dropping a replication slot or deleting data.
+- Never propose deleting data.
+- Propose pg_drop_replication_slot only for an inactive slot whose connector the alert or the driver says is retired or will be re-created with a new snapshot; say the drop is not reversible and the connector needs a new snapshot. Without that context, a slot retaining WAL behind a stopped connector calls for the resume checks below, never a drop. Set force only when wal_status reads lost.
 - Never restart anything before the cause is fixed or ruled out. Propose only one fix at a time.
 - Before proposing a resume or restart, confirm with reads that a source connector's slot still exists and holds its position, and that no maintenance or migration still runs (comments, change records). If a needed read fails, propose nothing and say what is missing; if the checks pass, propose it, saying why it stopped (for a STOPPED or FAILED connector, that nobody recorded why), so approvers confirm.
 - A pause a person made on purpose and has not released is theirs to undo: name it as the cause, never propose the resume, ask that person, and report the backlog and retention headroom. Connect never pauses itself: without a record (comments, past rooms) that a failed job left it, a pause is on purpose. A pause a failed job left may be resumed after the checks above.
@@ -715,9 +716,10 @@ func actorName(a events.Actor) string {
 var promptTokenRe = regexp.MustCompile(`\b[a-z][a-z0-9]+(?:_[a-z0-9]+)+\b`)
 
 // isPromptNonToolToken reports the snake_case tokens in the prompt that are not
-// callable names: the tool-output wrapper tag and the reply_to tool parameter.
+// callable names: the tool-output wrapper tag and its attribute, the reply_to
+// tool parameter, and the wal_status column of a pg_replication_slots read.
 func isPromptNonToolToken(tok string) bool {
-	return tok == "tool_output" || tok == "reply_to" || tok == "suspected_instructions"
+	return tok == "tool_output" || tok == "reply_to" || tok == "suspected_instructions" || tok == "wal_status"
 }
 
 // PromptToolNames returns every callable name (tool or write action) the
