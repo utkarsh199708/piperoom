@@ -46,12 +46,14 @@ High-risk paths, copied from the script's `RULES-BEGIN`..`RULES-END` block (if t
   `internal/alertin/**`; `internal/store/**`; `internal/redact/**`; `internal/injectscan/**`; the agent's
   untrusted-text, read-only guard and approval/prompt files (files in `internal/agent/` whose names start with
   `alerttext`, `alertevidence`, `injectflag`, `approvals`, `prompt`, `readonly` or `redact`, and `run.go`, which wraps
-  untrusted tool output).
+  untrusted tool output); `internal/agent/llm/**` (the model adapters: provider keys, the SSRF dialer, the wire
+  translation; V wave).
 - Build and deploy: `migrations/**`; `deploy/**`; every `Dockerfile`; `go.mod` and `go.sum`; `web/package.json` and
   `web/package-lock.json`.
 - Contract files (AGENTS.md §2): `internal/tools/tool.go`, `internal/events/events.go`,
   `internal/clients/clients.go`, `internal/actions/action.go`, `internal/agent/contract.go`,
-  `internal/topology/graph.go`, `internal/config/config.go`, `internal/version/version.go`, `docs/api.md`.
+  `internal/topology/graph.go`, `internal/config/config.go`, `internal/version/version.go`, `internal/agent/llm/llm.go`,
+  `docs/api.md`.
 - Pipeline files: `docs/process/**`, `docs/collab.md`, `.claude/**`, `.github/**`, `tasks/**` (the board and the task files'
   Done-when), `Makefile`, `.gitattributes`, the web lint, Vite, Vitest and TypeScript configs (`web/eslint.config*`,
   `web/.eslintrc*`, `web/vite.config*`, `web/vitest.config*`, `web/tsconfig*`), and any `AGENTS.md`, `CLAUDE.md` or `REVIEW.md` in any folder.

@@ -56,9 +56,24 @@ type Finding struct {
 	Kind Kind `json:"kind"`
 	// Offset is the byte offset of the match in the scanned string.
 	Offset int `json:"offset"`
+	// End is the byte offset in the scanned string just past the flagged
+	// span, so s[Offset:End] is the span (both are rune boundaries of the
+	// string the caller passed, not of the normalised text). For a pattern
+	// match the span runs from the match to the end of the clause that holds
+	// it (the sentence or line, at most SpanTailBytes past the match), so it
+	// carries the names and values the instruction refers to ("propose
+	// connect_restart_connector for pg-orders-connector"); a hidden comment,
+	// a base64 blob and a run of tag characters span the whole comment, blob
+	// or run. Invisible characters the normalisation dropped stay inside the
+	// span. It is untrusted data too: never log it.
+	End int `json:"end"`
 	// Excerpt is a short, normalised copy of the matched text (at most
 	// MaxExcerptBytes). It is untrusted data too: never log it.
 	Excerpt string `json:"excerpt"`
+	// Names are the caller's names (actions, connectors, topics, groups)
+	// that occur inside the span, in the caller's order. Only ScanNames
+	// fills it; Scan leaves it nil.
+	Names []string `json:"names,omitempty"`
 }
 
 const (
@@ -71,6 +86,9 @@ const (
 	MaxFindings = 32
 	// MaxExcerptBytes caps Finding.Excerpt.
 	MaxExcerptBytes = 80
+	// SpanTailBytes is how far past a pattern match Finding.End may reach
+	// when no clause end comes first.
+	SpanTailBytes = 400
 
 	maxBlobs       = 8    // base64 candidates decoded per window
 	maxBlobBytes   = 2048 // encoded bytes decoded per candidate
@@ -95,6 +113,98 @@ func Scan(s string) []Finding {
 	found := scanWindow(head, 0)
 	found = append(found, scanWindow(s[tailStart:], tailStart)...)
 	return finish(found)
+}
+
+// ScanNames is Scan with Finding.Names filled: for each finding, the entries
+// of names that occur inside its span s[Offset:End], compared ASCII
+// case-insensitively on the span after the normalisation Scan applies, and
+// word-bounded: a name does not match inside a longer identifier ("orders"
+// in "pg-orders-connector", "pg.public.orders" in "pg.public.orders-value").
+// Names come back in the order given, each once, empty entries skipped; the
+// findings are otherwise exactly Scan's.
+func ScanNames(s string, names []string) []Finding {
+	fs := Scan(s)
+	if len(fs) == 0 || len(names) == 0 {
+		return fs
+	}
+	for i, f := range fs {
+		if f.Offset < 0 || f.End > len(s) || f.End < f.Offset {
+			continue // cannot happen; never slice out of range on untrusted text
+		}
+		fs[i].Names = namesIn(s[f.Offset:f.End], names)
+	}
+	return fs
+}
+
+// namesIn returns the entries of names that occur word-bounded in span,
+// normalised as Scan normalises it (both readings of format characters).
+func namesIn(span string, names []string) []string {
+	norm, _, _, hadCf := normalize(span, false)
+	texts := []string{lowerASCII(norm)}
+	if hadCf {
+		spaced, _, _, _ := normalize(span, true)
+		texts = append(texts, lowerASCII(spaced))
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range names {
+		key := lowerASCII(name)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		for _, text := range texts {
+			if containsWord(text, key) {
+				out = append(out, name)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// containsWord reports whether key occurs in text with neither end joined to
+// a longer identifier.
+func containsWord(text, key string) bool {
+	for from := 0; from < len(text); {
+		i := strings.Index(text[from:], key)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		if !joinsBefore(text, start) && !joinsAfter(text, start+len(key)) {
+			return true
+		}
+		from = start + 1
+	}
+	return false
+}
+
+// joinsBefore reports whether text[i] continues an identifier: the byte
+// before it is a word byte, or a '-' or '.' that itself follows one
+// ("pg-orders", "pg.public.orders"). A trailing '-' or '.' before a space or
+// the end is punctuation, not part of a name.
+func joinsBefore(text string, i int) bool {
+	if i == 0 {
+		return false
+	}
+	c := text[i-1]
+	if isWordByte(c) {
+		return true
+	}
+	return (c == '-' || c == '.') && i >= 2 && isWordByte(text[i-2])
+}
+
+// joinsAfter is joinsBefore for the byte at i, the one after a candidate.
+func joinsAfter(text string, i int) bool {
+	if i >= len(text) {
+		return false
+	}
+	c := text[i]
+	if isWordByte(c) {
+		return true
+	}
+	return (c == '-' || c == '.') && i+1 < len(text) && isWordByte(text[i+1])
 }
 
 // Kinds returns the distinct kinds of fs, sorted, for logs that must not carry
@@ -131,7 +241,7 @@ func scanWindow(s string, base int) []Finding {
 		}
 		for _, f := range found {
 			if !raw[[2]any{f.Kind, f.Offset}] {
-				found = append(found, Finding{Kind: KindObfuscated, Offset: f.Offset, Excerpt: f.Excerpt})
+				found = append(found, Finding{Kind: KindObfuscated, Offset: f.Offset, End: f.End, Excerpt: f.Excerpt})
 				break
 			}
 		}
@@ -141,6 +251,7 @@ func scanWindow(s string, base int) []Finding {
 	found = append(found, scanStrayTags(s)...)
 	for i := range found {
 		found[i].Offset += base
+		found[i].End += base
 	}
 	return found
 }
@@ -163,7 +274,7 @@ func scanBase64(norm string, origin []int) []Finding {
 		if len(hits) == 0 {
 			continue
 		}
-		out = append(out, Finding{Kind: KindEncoded, Offset: origin[loc[0]], Excerpt: excerpt("base64: " + hits[0].Excerpt)})
+		out = append(out, Finding{Kind: KindEncoded, Offset: origin[loc[0]], End: origin[loc[1]], Excerpt: excerpt("base64: " + hits[0].Excerpt)})
 	}
 	return out
 }

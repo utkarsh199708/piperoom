@@ -36,6 +36,54 @@ func TestHasFaultLabelsAndHistory(t *testing.T) {
 	}
 }
 
+// TestHasFaultShortStale: a short duration next to "stale" is normal
+// replication delay, as for "behind" (P3-W3f). The warehouse freshness tool's
+// summary says "stale for 1m" and the model repeats it: "Healthy now: no
+// component is failing ... warehouse 1m stale (s_01M59FT50JDCP8J1WVQD6MSG60)"
+// (reviews/evals-2026-10-19/diagnosis.md, three runs out of three).
+func TestHasFaultShortStale(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"Healthy now: no component is failing. order-sync lag 0, warehouse 1m stale (s_01M59FT50JDCP8J1WVQD6MSG60).", false},
+		{"The warehouse is stale for 1m, which is normal.", false},
+		{"warehouse stale 1m", false},
+		{"analytics.orders stale for 2 minutes", false},
+		{"warehouse 1 minute stale", false},
+		{"warehouse stale (1m)", false},
+		{"warehouse stale by 1m", false},
+		{"warehouse 1 minute behind", false},
+		// Still faults.
+		{"The warehouse is stale for 3h.", true},
+		{"warehouse stale 41m", true},
+		{"warehouse 41m stale", true},
+		{"The warehouse is stale.", true},
+		{"warehouse 41 minutes behind", true},
+	}
+	for _, tt := range tests {
+		if got := hasFault(tt.text); got != tt.want {
+			t.Errorf("hasFault(%q) = %v, want %v", tt.text, got, tt.want)
+		}
+	}
+	// The baseline hypothesis of healthy-after-recovery (evals/baseline/default.json,
+	// score 55, "claimed a cause at medium confidence on a healthy pipeline") is
+	// unchanged by the short-stale rule: it states no fault either way.
+	if hasFault(recoveredHyp) {
+		t.Errorf("hasFault(recoveredHyp) = true")
+	}
+	if term, clause, ok := faultClause("Healthy now, but the warehouse is stale for 3h."); !ok || term != "stale" || clause != "the warehouse is stale for 3h" {
+		t.Errorf("faultClause = %q, %q, %v", term, clause, ok)
+	}
+	if n := healthyNote("warehouse 1m stale; nothing to fix"); n != "" {
+		t.Errorf("healthyNote on a healthy text = %q", n)
+	}
+	// A medium-confidence hypothesis that names a long staleness still claims a cause.
+	if !hasFault("Failing component: wh:analytics.orders, stale for 3h. Root-cause component: not established.") {
+		t.Errorf("a long staleness no longer counts as a fault")
+	}
+}
+
 // TestHealthyAfterRecoveryNotACause: a medium-confidence hypothesis that says
 // the root cause is not established, the consumer is caught up and nothing
 // needs fixing is a healthy verdict, not a cause claim; one that names a

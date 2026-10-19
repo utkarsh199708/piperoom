@@ -27,10 +27,17 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // purpose, for evals-live run 39212981319: the first failing component is the
 // most upstream broken one, a table added to the publication gets a snapshot
 // signal in the same proposal, and a retired connector's orphaned slot is the
-// root cause. It is pinned here, beside the snapshot file, so a regenerated
-// snapshot cannot silently move the CDC prompt: the CDC evals and the prompt
-// cache depend on these exact bytes.
-const cdcPromptSHA256 = "3406da959d1b5581220682f250695545e2b22e9cd52d0762b032ff293c18d5b0"
+// root cause. P3-W3g moved it a third time, on purpose, for the same run's
+// unclear-driver-intent: a steer whose ask needs a fix no listed action can
+// make, or could mean more than one action, gets a question before any
+// proposal, and a component that still answers requests is not broken even
+// when a change there is the cause; to stay under the word cap the rule-1 link kinds, the confidence
+// enum and the propose_fix allow-list bullet went (the map and the tool
+// schemas state them; rule 8 names propose_fix instead), with three one-word
+// trims. It is pinned here, beside the snapshot
+// file, so a regenerated snapshot cannot silently move the CDC prompt: the
+// CDC evals and the prompt cache depend on these exact bytes.
+const cdcPromptSHA256 = "150f33b924a55a23c5cfc3763f19f81457f2e5190afa68c6a4ec5042a1c323de"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
@@ -113,7 +120,7 @@ func TestBatchPromptContent(t *testing.T) {
 		"never call propose_fix. A person runs every fix.",
 		"what the owner of the layer should run",
 		"orchestrator, transform and warehouse",
-		promptRules, promptPastIncidents, promptAlertIsData,
+		promptRulesFor(events.PipelineKindBatch), promptPastIncidents, promptAlertIsData,
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("batch prompt lacks %q", want)

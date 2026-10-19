@@ -38,7 +38,7 @@ if (!ROWS.length) {
 
 // RULES-BEGIN (docs/process/ship-check.mjs evaluates this block, so Lead 1 re-checks a PR with the same rules)
 // The change sets the tier, not the author. Paths are repo-relative after norm().
-const CONTRACT = /^(internal\/tools\/tool\.go|internal\/events\/events\.go|internal\/clients\/clients\.go|internal\/actions\/action\.go|internal\/agent\/contract\.go|internal\/topology\/graph\.go|internal\/config\/config\.go|internal\/version\/version\.go|docs\/api\.md)$/
+const CONTRACT = /^(internal\/tools\/tool\.go|internal\/events\/events\.go|internal\/clients\/clients\.go|internal\/actions\/action\.go|internal\/agent\/contract\.go|internal\/agent\/llm\/llm\.go|internal\/topology\/graph\.go|internal\/config\/config\.go|internal\/version\/version\.go|docs\/api\.md)$/
 const PIPELINE = /^(docs\/process\/|docs\/collab\.md$|\.claude\/|\.github\/|tasks\/|Makefile$|\.gitattributes$|web\/(eslint|vite|vitest)\.config|web\/\.eslintrc|web\/tsconfig)|(^|\/)(AGENTS|CLAUDE|REVIEW)\.md$/
 const HIGH = [
   /^internal\/actions\//,                                        // everything that writes to a customer system
@@ -47,6 +47,7 @@ const HIGH = [
   /^internal\/room\//,                                            // approvals, write gate, executor, preview, replicas, control, policies
   /^internal\/owners\//, /^internal\/wiring\//, /^cmd\/server\//, /^internal\/tools\/scope\.go$/,
   /^internal\/auth\//, /^internal\/httpapi\/(auth|server)/, /^internal\/alertin\//, /^internal\/store\//,
+  /^internal\/agent\/llm\//,                                      // model adapters: provider keys, the SSRF dialer, wire translation (V wave)
   /^internal\/redact\//, /^internal\/injectscan\//, /^internal\/agent\/(alerttext|alertevidence|injectflag|approvals|prompt|readonly|redact|run\.go$)/,
   /^migrations\//, /^deploy\//, /Dockerfile$/, /^go\.(mod|sum)$/, /^web\/package(-lock)?\.json$/,
   CONTRACT, PIPELINE,

@@ -75,6 +75,10 @@ type RunResult struct {
 	HedgedOn        string `json:"hedged_on,omitempty"`
 	FinalHypothesis string `json:"final_hypothesis,omitempty"`
 	Confidence      string `json:"confidence,omitempty"`
+	// LastMessage is the agent's last room message, the text SaysHealthy
+	// checks for a current fault; the failed-runs section of the report
+	// prints it so a CI log shows what cancelled a healthy verdict.
+	LastMessage string `json:"last_message,omitempty"`
 	// ProposedActions are the actions of every proposed step, sorted. The
 	// failed-runs section of the markdown report prints them so a CI log shows
 	// what a failing run proposed.
@@ -293,9 +297,10 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		}
 	}
 	res.LayerNamed = layerGraded(sc, sc.Expect.FirstFailingLayer, last)
-	res.RootCauseLayerNamed = layerGraded(sc, sc.Expect.RootCauseLayer, last)
+	res.RootCauseLayerNamed = rootCauseLayerGraded(sc, last)
 	// The healthy verdict may come from the final hypothesis or the last
 	// message; a current fault in the last message cancels it.
+	res.LastMessage = lastMessage
 	res.SaysHealthy = (healthyVerdict(lastMessage) || (last != nil && healthyVerdict(last.Text))) && !hasFault(lastMessage)
 	res.ClaimsCause = last != nil && (last.Confidence == "medium" || last.Confidence == "high") &&
 		!(res.Outcome == OutcomeHealthy && healthyVerdict(last.Text))

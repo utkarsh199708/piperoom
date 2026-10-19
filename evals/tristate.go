@@ -3,6 +3,8 @@ package evals
 import (
 	"fmt"
 	"strings"
+
+	"piperoom/internal/events"
 )
 
 // The tri-state keyword pass (#454). The keyword grader decides the clear
@@ -108,7 +110,7 @@ func GradeKeywords(sc Scenario, text string) KeywordGrades {
 	a := ambiguityOf(sc, text)
 	a.KeywordRootCause = rootCauseMatches(sc.Expect, text)
 	a.KeywordLayer = keywordLayer(sc, sc.Expect.FirstFailingLayer, text)
-	a.KeywordRootCauseLayer = keywordLayer(sc, sc.Expect.RootCauseLayer, text)
+	a.KeywordRootCauseLayer = keywordRootCauseLayer(sc, text)
 	return KeywordGrades{
 		RootCause:      triGrade(a.RootCause, a.KeywordRootCause),
 		Layer:          triGrade(a.Layer, a.KeywordLayer),
@@ -120,6 +122,23 @@ func GradeKeywords(sc Scenario, text string) KeywordGrades {
 // keywordLayer is layerGraded for a text: true when the scenario sets no layer.
 func keywordLayer(sc Scenario, layer, text string) bool {
 	return layer == "" || namesLayer(layerTermsFor(sc.Pipeline, layer), text)
+}
+
+// keywordRootCauseLayer is the root-cause-layer grade of a text: true when
+// the scenario sets no root_cause_layer, else when text names it or one of
+// root_cause_layer_alt.
+func keywordRootCauseLayer(sc Scenario, text string) bool {
+	layers := sc.Expect.rootCauseLayers()
+	return len(layers) == 0 || namesAnyLayer(sc.Pipeline, layers, text)
+}
+
+// rootCauseLayerGraded is keywordRootCauseLayer for a final hypothesis (the
+// root-cause-layer half of layerGraded in score.go).
+func rootCauseLayerGraded(sc Scenario, last *events.AgentHypothesisPayload) bool {
+	if sc.Expect.RootCauseLayer == "" {
+		return true
+	}
+	return last != nil && keywordRootCauseLayer(sc, last.Text)
 }
 
 func triGrade(ambiguous, ok bool) Grade {
@@ -144,8 +163,8 @@ func ambiguityOf(sc Scenario, text string) Ambiguity {
 	if l := sc.Expect.FirstFailingLayer; l != "" {
 		first = layerTermsFor(sc.Pipeline, l)
 	}
-	if l := sc.Expect.RootCauseLayer; l != "" {
-		rcLayer = layerTermsFor(sc.Pipeline, l)
+	for _, l := range sc.Expect.rootCauseLayers() {
+		rcLayer = append(rcLayer, layerTermsFor(sc.Pipeline, l)...)
 	}
 	for n, clause := range clauseSplit.Split(text, -1) {
 		toks := tokenize(clause)

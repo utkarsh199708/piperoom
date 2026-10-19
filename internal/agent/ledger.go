@@ -3,6 +3,8 @@ package agent
 import (
 	"strings"
 	"sync"
+
+	"piperoom/internal/tools/runbooks"
 )
 
 // maxLedgerSummaryBytes caps the summary kept per step. It is the summary the
@@ -32,6 +34,13 @@ type stepLedger struct {
 	// background is the text the model was given up front (alert, pipeline map),
 	// lower-cased once. A term in it needs no step to back it (see groundTerms).
 	background string
+
+	// scanNames, flagged and cited serve the echo guard (echoguard.go):
+	// the names ScanNames looks for in a read, the reads injectscan flagged
+	// by step id, and the steps the latest hypothesis cites.
+	scanNames []string
+	flagged   map[string]flaggedRead
+	cited     []string
 }
 
 // stepFact is what the ledger keeps of one step.
@@ -94,6 +103,7 @@ func (l *stepLedger) evictOldest() {
 			continue
 		}
 		delete(l.steps, id)
+		delete(l.flagged, id)
 		l.order = append(l.order[:i], l.order[i+1:]...)
 		return
 	}
@@ -124,6 +134,13 @@ func s8(b byte) bool { return b&0xC0 == 0x80 }
 // <tool_output step="s_..."> and tells the model to cite instead of repeating.
 // It applies firstLookBlock's own filter (a real step id, at most triagePassReads),
 // so the ledger holds exactly the ids the model was shown.
+//
+// Each seeded read is also scanned for the echo guard (scanRead), exactly as
+// a live read is by wrapReadToolOutput: the triage pass ran in its own runner,
+// so its flagged spans never reach this ledger otherwise, and with the pass on
+// an injection in its first connect_status read would be unguarded. Call
+// setScanNames first, or the spans carry no names. runbook_lookup is skipped
+// as wrapReadToolOutput skips it.
 func (l *stepLedger) seedTriage(t *TriageResult) {
 	if t == nil {
 		return
@@ -142,6 +159,9 @@ func (l *stepLedger) seedTriage(t *TriageResult) {
 			text = "error: " + text
 		}
 		l.put(s.StepID, s.Tool, "", text, s.IsError, true)
+		if s.Tool != runbooks.ToolName {
+			l.scanRead(s.StepID, s.Tool, s.Summary)
+		}
 	}
 }
 
