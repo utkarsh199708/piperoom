@@ -67,6 +67,8 @@ type Config struct {
 	JudgeMaxCalls int
 	// judge is the evaluation's shared judge gate (Evaluate sets it).
 	judge *judgeGate
+	// refusal latches the first API refusal of the evaluation (infra.go).
+	refusal *refusalLatch
 	// OnRun, if set, is called after each run, for progress output. Calls are
 	// serialized.
 	OnRun func(RunResult, Transcript)
@@ -87,6 +89,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.judge == nil {
 		c.judge = newJudgeGate(c)
+	}
+	if c.refusal == nil {
+		c.refusal = &refusalLatch{}
 	}
 	return c
 }
@@ -167,12 +172,29 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 				if ctx.Err() != nil {
 					continue
 				}
-				res, tr, err := runOne(ctx, j.sc, j.run, defs, cfg)
-				if err != nil {
-					errMu.Lock()
-					runErr = errors.Join(runErr, err)
-					errMu.Unlock()
-					continue
+				var (
+					res RunResult
+					tr  Transcript
+				)
+				if s := cfg.refusal.get(); s != nil {
+					// The API refused an earlier run: start no model run, and
+					// do not let the rest read as failures of the agent.
+					res = infraResult(j.sc.Name, j.run, "not started: the API refused an earlier run ("+s.String()+")")
+				} else {
+					var err error
+					res, tr, err = runOne(ctx, j.sc, j.run, defs, cfg)
+					if err != nil {
+						status, refused := APIRefusal(err)
+						if !refused {
+							errMu.Lock()
+							runErr = errors.Join(runErr, err)
+							errMu.Unlock()
+							continue
+						}
+						// The live judge was refused after the run.
+						cfg.refusal.set(status, err)
+						res = infraResult(j.sc.Name, j.run, fmt.Sprintf("HTTP %d: %s", status, err))
+					}
 				}
 				results[j.idx] = &res
 				if cfg.OnRun != nil {
@@ -203,6 +225,10 @@ feeding:
 	rep := buildReport(cfg, scenarios, done, started)
 	if err := ctx.Err(); err != nil {
 		return rep, fmt.Errorf("evals: evaluation stopped: %w", err)
+	}
+	if s := cfg.refusal.get(); s != nil {
+		rep.InfraStop = s.String()
+		return rep, fmt.Errorf("%w (%s): the affected and remaining runs are infra, not scored", ErrAPIRefused, s)
 	}
 	if runErr != nil {
 		return rep, runErr

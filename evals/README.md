@@ -43,7 +43,9 @@ JSON is invisible to the agent; only its title is. `watcher-start` measures the 
   measured. Only tool **results** are replayed.
 - Nothing can write anywhere. The actions get replay clients (`replay.go`, `replay_actions.go`) whose
   writes are no-ops that only record the call (what the step would have run), and an approved step on
-  the room path is played by the scenario's script, never by a client.
+  the room path is played by the scenario's script, never by a client. The report lists each run's
+  recorded writes (JSON `replay_writes`, and the "Replay writes" list under the table): action and
+  target only, never a record or config value, at most 20 per run.
 - Proposals go through each action's real `Validate`, checked against the scenario's `resources`,
   and its real `CheckScope`, checked against the scenario's `pipeline` (F10).
 
@@ -156,6 +158,13 @@ with its correct, judge-checked label instead.
 | `-judge-cache-only` | off | `auto` reads only the cache; a miss fails the run |
 | `-judge-max-calls N` | 50 | live judge calls per run in `auto` (and per `-judge-fill`); past it, ambiguous (unjudged) |
 | `-judge-fill MANIFEST` / `-dry-run` | — | record verdicts for the manifest's texts (paid, owner approval) / estimate only |
+
+Exit codes: 0 ok, 1 broken (bad input, runner error), 2 regression (`-fail-on-regression`), 3 the model API refused
+the request in a way no retry fixes (a 400 whose body says "credit balance", a 401, a 403). On 3 evalrun starts no
+further run, marks the affected and remaining runs `infra` (their error starts `infra: `), writes the report and
+skips `-baseline`. Infra runs are in no pass rate, score, comparison or paired comparison, and the tables label them
+`infra`, so an outage never reads as REGRESSED. A 429 or 5xx is still retried by the SDK as before. Every failing
+run line and the "Failed runs" list print the run error, redacted and cut to 200 characters.
 
 A scenario **regresses** when its pass rate drops, its mean score drops by more than `-tolerance`,
 or it is missing from the candidate report.
@@ -625,6 +634,11 @@ or when misses per run grew over the scenarios both reports ran (an `-only` run 
 scenarios of the baseline, and a 3-run report with a 1-run baseline per run, not by totals). It prints the
 paired comparison and the cost-per-run delta, and never fails on cost alone.
 
+The job builds `evalrun` with `-tags claude`, which links the live LLM judge that the default `-judge auto`
+needs for an ambiguous hypothesis with no verdict in `evals/judgecache`. The judge is capped by
+`-judge-max-calls` (default 50 live calls per run); past the cap an ambiguous hypothesis is reported
+`ambiguous (unjudged)` and counts as not passed.
+
 With `runs: 1`, one flipped result fails the job: missing the expected fix alone costs 20 points, over the
 tolerance of 5. Treat a 1-run failure as a lead, not a verdict: run the same scenarios again with `runs: 3`
 on the branch and on `main`, and compare the two.
@@ -836,7 +850,12 @@ phase first:
 | tables and publications (`pg_add_publication_table`, `pg_snapshot_signal`) | `resources.tables` and `resources.publications` only: no read tool shows relkind, replica identity or the signal table |
 
 The seven older actions are unchanged: their Connect client still answers no config,
-so their `Validate` behaves as before. DLQ record values are not replayed: `dlq_replay`'s preview says
+so their `Validate` behaves as before. The P3 registration is `wiring.RegisterP3Actions`, the call production
+makes, so the action order is production's (the seven, then Kafka, snapshot and pg).
+
+The group-reset plan covers only the 5 recorded partitions (`worst_partitions`), not every partition of the
+group's topics: a scenario that needs a partition outside the 5 cannot record it, and the plan misses it.
+DLQ record values are not replayed: `dlq_replay`'s preview says
 so, and its `Validate` needs only the offsets. A timestamp offset reset is planned to the log start.
 
 ## Answers that list every cause

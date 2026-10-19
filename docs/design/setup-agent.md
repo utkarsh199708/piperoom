@@ -178,6 +178,55 @@ a `\\?\` path, an alternate data stream (`a.yaml:x`), a reserved device name (`C
 or without an extension), a junction and a reparse point. The runner is built with `go doc os.Root` output in the
 U1-2 PR.
 
+What `os.Root` does by itself (U1-0, from `go doc os.Root` and `os/root_windows.go`, `os/root_openat.go`,
+`internal/filepathlite/path_windows.go` in Go 1.27.2; spike `cmd/setup-spike/osroot`): on Windows it **refuses**
+drive-relative (`C:foo`) and every path with a colon (so ADS too: `filepathlite.IsLocal` rejects `:`), every path
+starting with a separator (UNC `\\host\share`, `//host/share`, `\\?\`, `\\.\`, `\x`), any `?`, an escape by `..`,
+the reserved names (`CON`, `NUL`, `COM1`, `CONIN$`, with trailing spaces), and a junction (its target is absolute
+and links must not be absolute). It **does not** refuse: `..` that stays inside the root (`a\..\b`), a relative
+symlink that stays inside the root (it follows it), `.git` case and trailing-dot variants, `CON.txt` on Windows 11
+(`RtlIsDosDeviceName_U` frees reserved names with an extension; Windows 10 still refuses them), 8.3 aliases
+(`PIPERO~1` opens `.piperoom` on a volume with short names), and hard links. Off Windows it accepts every Windows
+form as an ordinary name. So U1-2 keeps an explicit lexical check that runs on all three OSes (the reference is
+`explicitRefusal` in the spike), in this order:
+
+1. any control character (`r < 0x20` or `r == 0x7f`, NUL included), any format character
+   (`unicode.Is(unicode.Cf, r)`: zero-width space, joiner and non-joiner, BOM, soft hyphen, bidi controls, word
+   joiner) or the combining grapheme joiner U+034F, and the wildcards `? * < > " |`. macOS HFS+ ignores the format
+   characters when it compares names, so `.g` U+200C `it` is `.git` there (git CVE-2014-9390);
+2. the NFKC-normal look-alikes of `/`, `\`, `:` and `.`, and the characters an ANSI best-fit code page maps to
+   them (U+2215, U+2044, U+29F8, U+2216, U+29F5, U+29F9, U+00A5 (`\` in code page 932), U+20A9 (`\` in code page
+   949), U+2236, U+02D0). This table is defence in depth only: it cannot be complete, and the rule that keeps a
+   name out of argv and ANSI APIs (below) is what closes WorstFit;
+3. any name that is not NFKC-normal (`golang.org/x/text/unicode/norm`, already a direct dependency): fullwidth
+   `．／＼：`, the small full stop, ligatures, the Kelvin sign, superscript digits;
+4. a leading separator, any `:`;
+5. per component: `..`, a trailing dot or space, a reserved name with any extension, `~<digit>`, and `.git` or
+   `.piperoom` compared both with `strings.EqualFold` and with `strings.ToUpper` (EqualFold misses the dotless `ı`,
+   U+0131, whose upper case is `I`, so `.gıt` must still be refused; whether NTFS's upcase table opens `.git`
+   through `.gıt` is a logged row of the spike's Windows test).
+
+After the name check, a walk over **every** component of the path (each directory on the way, then the leaf, as far
+as they exist) runs `Root.Lstat` on the prefix and refuses `ModeSymlink` and `ModeIrregular` (a junction or other
+reparse point since Go 1.23). Because a name rule can only list the aliases someone thought of, the same walk also
+checks identity: each component's `Lstat` is compared with `os.SameFile` against the root's `.git` and `.piperoom`
+(stat'ed once at start), and a match is refused. Checking only the opened file or its parent is not enough: a
+nested `<alias of .git>/hooks/pre-commit` would pass. The walk runs for every file op (`file_read`, `dir_list`,
+`file_write`, `file_delete`, `properties_write`, renders); the spike's `walkRefusal` is the reference, tested with
+a fake file system for the nested alias (no portable unprivileged way exists to alias a directory) and on a real
+directory through `os.Root` and `os.SameFile`. Hard links are not refused by the name or the walk; `file_write` opens with `O_CREATE|O_EXCL` to a temporary
+name and renames, so a planted hard link is replaced, never written through.
+
+**Never pass a confined name onward.** A name that passed this check is safe only for `os.Root` methods. U1-2 must
+never put it, or a path built from it, into a child process's argv or any ANSI (`...A`) Windows API: Windows
+converts such strings with the best-fit code page ("WorstFit"), which can turn U+FF02 into `"` and U+00A5 into `\`
+and split or escape an argument. Ops that run a program pass it paths the runner built itself (the project dir, a
+template's fixed names), never a name from the request.
+
+**Show the approver what the bytes are.** The web UI (preview, approval card, op log) flags every non-ASCII
+character in a path it shows to an approver, rendering it as its `U+XXXX` code next to the glyph, so a look-alike
+that slipped past the rule is visible before the click.
+
 ### 2.4 Secrets on the runner (S4)
 
 - The store is `PIPEROOM_SETUP_SECRETS_FILE` (default `<project dir>/.piperoom/secrets.env`, created 0600, listed
@@ -489,6 +538,29 @@ confirmation, answering the request's `request_id`, accepted once per pending re
 and `SecretValue` (server → runner: one value the driver typed in the UI, `POST /api/rooms/{id}/setup/secret`,
 stored nowhere on the server), and:
 
+**Versioning (settled by U1-0).** `protocol.Version{Major, Minor}`, this build `protocol.Current()` = 1.1. On the
+wire it stays two integers so U0's shapes decode unchanged: `protocol_version` (the major, U0's field) and
+`protocol_minor` (absent = 0) on `pair` (new in 1.1, so the server can refuse before the runner sees the room),
+`welcome` and `hello`; `setup.runner_attached` records both. The compatibility rule: same major, and each side's
+minor at most one behind the other's (`ServerAccepts(server, runner)`: runner minor ≥ server minor − 1;
+`RunnerAccepts(runner, server)`: the mirror), so a runner one minor behind (or ahead) still pairs; the session speaks
+the lower minor (`Negotiate`). The server refuses at `pair` (when versioned) or `hello` with close status 4001 and a
+reason naming both versions; the runner refuses a `welcome` with `RefuseProtocolVersion`. A minor bump only adds
+(a frame type, an optional field whose absence keeps the old meaning, an op, a `Refuse*` code); removing, renaming,
+retyping or re-meaning a field, or adding one a receiver must understand to stay safe, is a major bump. Toward a
+newer peer, unknown fields are ignored, an unknown frame type is dropped unread and never executed
+(`Frame.Check` → `ErrUnknownFrame`), an unknown op is refused; neither side sends a frame type (`FrameSince`), nor
+the server an op (the op's `since` minor in the catalogue, U1-2), that the negotiated minor lacks. Table tests in
+`internal/setup/protocol/version_test.go`. A version with a major below 1 or a negative minor is refused by both
+rules; a peer's frame type reaches a log line or error only through `FrameType.Short` (32 bytes); `Frame.Check`
+runs before any handler sees a frame (U1-1 and U1-5a each test that).
+
+A 1.0 runner sends no version in `pair`, so it receives `welcome` (room id, title, pipeline id, tenant, creator,
+targets) before the server refuses it at `hello`. That is accepted: the runner already presented a valid single-use
+pairing code, which only the room's creator had and which the server consumed, so `welcome` tells it nothing the
+code's holder was not shown in the UI; no op, token or secret is sent before `hello` passes; and no 1.0 runner was
+ever released (U0 shipped the types, not a runner), so the case exists only for a hand-built client.
+
 ```go
 // RunnerExecutor is how a setup action or remote client reaches the paired runner. The room service implements
 // it over the runner registry; wiring hands it to the setup stack of a room. ErrNoRunner when none is paired.
@@ -505,7 +577,7 @@ var ErrDuplicateStep = errors.New("setup: step already executed on this runner")
 
 ```go
 SetupPairing            Type = "setup.pairing"            // {outcome: ok | bad_code | expired | rate_limited | replaced, source, runner_label?}
-SetupRunnerAttached     Type = "setup.runner_attached"    // {runner_label, os, arch, tools: {name: version}, project_dir, catalogue_version, protocol_version}
+SetupRunnerAttached     Type = "setup.runner_attached"    // {runner_label, os, arch, tools: {name: version}, project_dir, catalogue_version, protocol_version, protocol_minor?}
 SetupRunnerLost         Type = "setup.runner_lost"        // {runner_label, last_seen}
 SetupRunnerRefused      Type = "setup.runner_refused"     // {op, reason, proposal_id?, step_index?}
 SetupPlan               Type = "setup.plan"               // {plan_id, supersedes?, phases: [{name, steps: [{index, op, target, tier, layer, verify}]}]}
@@ -608,7 +680,12 @@ Snapshot gains `setup: {mode: true, runner: {label, connected, tools}, plan_id, 
 
 ### 7. Settled by the design rows
 
-`U1-0`: the protocol's final field list and the compatibility rule; the Windows service API. `U12-0`: the Strimzi
+`U1-0` (done): the protocol's final field list and the compatibility rule (item 1 above); the Windows service API
+(`golang.org/x/sys/windows/svc/mgr`: `Connect`, `CreateService`, `Service.Start`, `Query`, `Control`, `Delete`,
+spike `cmd/setup-spike/winsvc`; `CreateService` builds the command line with `syscall.EscapeArg` from an exe path
+and an args slice, so no free-form command line exists; a plain `java.exe` cannot answer the service control
+manager, so U8b's Connect service runs `piperoom-setup` itself as the service (`svc.Run`) supervising the Java child
+by argv); the `os.Root` analysis of §2.3 (spike `cmd/setup-spike/osroot`). `U12-0`: the Strimzi
 CRD versions, the in-cluster runner Job and its RBAC, how the pairing code reaches a Job. `U13-0`: the three managed
 clients' auth and operations.
 

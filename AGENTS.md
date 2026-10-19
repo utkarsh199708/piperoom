@@ -249,7 +249,7 @@ New folders of the wave (owned from the first PR that creates them):
 
 | Agent | Owns (new in the U wave) |
 |---|---|
-| leads | `internal/setup/protocol/**` (a contract file; listed below) |
+| leads | `internal/setup/protocol/**` (a contract file; listed below), `cmd/setup-spike/**` (the U1-0 spikes; deleted after U1-2 and U8b land) |
 | A9 (Qoder, new) | `cmd/setup/**`, `cmd/piperoom/**`, `internal/setup/**` except `internal/setup/protocol/**`, `internal/setup/targets/**`, `internal/setup/sources/**` and `internal/setup/knowledge/**` |
 | A5 | `internal/quickstart/**` (the `--quickstart` server moved out of `cmd/server`) |
 | C1 | `Dockerfile`, `deploy/helm/**` (a grant for the U rows that name them: U1-22, U12c) |
@@ -278,7 +278,7 @@ checked at create, execute, rollback and on the runner and is never relaxed by a
 
 Order: **U0 first, after Q0**; then U1-0 and the U1 rows (runner, catalogue, Compose, Postgres, verification);
 then steps 2 to 13 by coverage per day as the plan's §4 table orders them (U2 MySQL, U3 transforms and sinks, U5
-logs, U4 SQL Server, U6 embedded, U7 MongoDB, U8 plain hosts, U10 tuning, U9 Oracle, U11 Debezium Server, U12
+logs, U4 SQL Server, U6 embedded, U7 MongoDB, U10 tuning, U9 Oracle, U8 plain hosts, U11 Debezium Server, U12
 Strimzi, U13 managed); U12-0 and U13-0 start as soon as U0 merges. The board's
 After column is the only hard dependency. Every target row's "Done when" includes a real run on the named OS and
 target with the room export attached to the PR.

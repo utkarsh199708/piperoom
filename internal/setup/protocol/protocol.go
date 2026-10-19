@@ -15,27 +15,126 @@
 // name only (String, LogValue), so a frame that slips into a log by value
 // still shows no secret; that is a last line of defence, not permission.
 //
+// Versioning (U1-0): the protocol is Major.Minor (Version, Current). A runner
+// and a server pair when the majors are equal and each side's minor is at
+// most one behind the other's (ServerAccepts, RunnerAccepts); the session
+// then speaks the lower minor (Negotiate). The rule for changing this file:
+//
+//   - A minor bump only adds: a new frame type, a new optional field, a new
+//     op in the catalogue, a new Refuse* code. Each addition says "since
+//     1.N" in its doc comment, and an absent field means exactly what it
+//     meant before the field existed.
+//   - Anything else is a major bump: removing or renaming a field, changing
+//     a field's type or meaning, a field the receiver must understand to
+//     stay safe (a new guard input, a new confinement rule), or tightening
+//     what a peer may send.
+//
+// What each side does with a newer peer (each is a test in A5's or A9's
+// PR): an unknown field is ignored (no decoder on either side uses
+// DisallowUnknownFields on a Frame); an unknown frame type is dropped
+// without acting on its payload (Frame.Check answers ErrUnknownFrame) and
+// is never executed; an unknown op is refused (RefuseUnknownOp). The server
+// never sends a frame type or an op that the negotiated minor lacks
+// (Version.Has with FrameSince, or with the op's "since" minor in the
+// catalogue), and the runner never sends a frame type the negotiated minor
+// lacks.
+//
 // CONTRACT FILE — owned by the leads. Do not edit; request changes in your PR.
-// The design row U1-0 settles the final field list and the compatibility
-// rule; until it lands, Version 1 is the only version and a different one is
-// refused at Hello.
 package protocol
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strconv"
+	"strings"
 	"time"
 
 	"piperoom/internal/events"
 )
 
-// Version is the protocol version both sides send in Hello and Welcome. A
-// server refuses a Hello whose ProtocolVersion differs (RefuseProtocolVersion
-// in the pairing outcome) until U1-0 defines a compatibility rule; a runner
-// refuses a Welcome the same way. Bumped only by a leads PR to this file.
-const Version = 1
+// The protocol version this build speaks. Bumped only by a leads PR to this
+// file, under the rule in the package comment. 1.0 is the U0 shape (Pair
+// without a version; Hello and Welcome with protocol_version only); 1.1
+// (U1-0) adds protocol_version to Pair and protocol_minor to Pair, Welcome
+// and Hello, and nothing else.
+const (
+	CurrentMajor = 1
+	CurrentMinor = 1
+)
+
+// Version is a protocol version, Major.Minor. On the wire it is two integer
+// fields, protocol_version (the major, the U0 field) and protocol_minor
+// (since 1.1; absent means 0), so a 1.0 peer's frames decode unchanged.
+type Version struct {
+	Major int
+	Minor int
+}
+
+// Current is the version this build speaks.
+func Current() Version { return Version{Major: CurrentMajor, Minor: CurrentMinor} }
+
+// String prints "1.1".
+func (v Version) String() string {
+	return strconv.Itoa(v.Major) + "." + strconv.Itoa(v.Minor)
+}
+
+// Has reports whether a session at v may use something added in minor since
+// of the same major: a frame type (FrameSince) or an op (its catalogue
+// "since" minor). A sender checks it against the negotiated version before
+// it sends; the receiver's own checks (unknown frame dropped, unknown op
+// refused) stay as the second line.
+func (v Version) Has(since int) bool { return v.Minor >= since }
+
+// ErrProtocolVersion is the error ServerAccepts and RunnerAccepts wrap; the
+// message names both versions so the person knows which side to upgrade.
+var ErrProtocolVersion = errors.New("setup: protocol version not compatible")
+
+// valid is false for a version no build ever speaks: a major below 1 (also
+// what an absent field decodes to) or a negative minor. Without it a peer
+// claiming minor -1 would pass "minor >= own minor - 1" against a 1.0 side.
+func (v Version) valid() bool { return v.Major >= 1 && v.Minor >= 0 }
+
+// ServerAccepts is the server's rule: a runner pairs when its major equals
+// the server's and its minor is at least the server's minor minus one. A
+// runner newer than the server passes here; the runner's own rule
+// (RunnerAccepts) bounds that side. The server checks it at Pair when the
+// Pair carries a version (1.1 and later) and at Hello always; a refusal is
+// setup.pairing {outcome: "refused"} and a close with CloseProtocolVersion.
+func ServerAccepts(server, runner Version) error {
+	if !runner.valid() || !server.valid() || runner.Major != server.Major || runner.Minor < server.Minor-1 {
+		return fmt.Errorf("%w: server %s accepts runner %d.%d or later, runner is %s",
+			ErrProtocolVersion, server, server.Major, max(server.Minor-1, 0), runner)
+	}
+	return nil
+}
+
+// RunnerAccepts is the runner's rule, the mirror image: a server pairs when
+// its major equals the runner's and its minor is at least the runner's minor
+// minus one. The runner checks it at Welcome, before it prints the room or
+// asks the person for "y", and refuses with RefuseProtocolVersion.
+func RunnerAccepts(runner, server Version) error {
+	if !runner.valid() || !server.valid() || server.Major != runner.Major || server.Minor < runner.Minor-1 {
+		return fmt.Errorf("%w: runner %s needs server %d.%d or later, server is %s",
+			ErrProtocolVersion, runner, runner.Major, max(runner.Minor-1, 0), server)
+	}
+	return nil
+}
+
+// Negotiate is the version a paired session speaks: the shared major and
+// the lower minor. Call it only after both Accepts checks passed.
+func Negotiate(a, b Version) Version {
+	return Version{Major: a.Major, Minor: min(a.Minor, b.Minor)}
+}
+
+// CloseProtocolVersion is the WebSocket close status (the private range of
+// RFC 6455) the server closes with when ServerAccepts refuses. The close
+// reason is the error text after "setup: protocol version not compatible: ",
+// at most 123 bytes, e.g. "server 1.3 accepts runner 1.2 or later, runner
+// is 1.0"; the runner prints it.
+const CloseProtocolVersion = 4001
 
 // Limits of the transport (§2.1). The server closes a socket that sends a
 // larger frame; the runner cuts an OpResult to fit (Truncated true).
@@ -88,10 +187,26 @@ const (
 	ClassProduction = "production"
 )
 
-// FrameType names what a Frame carries. Exactly one of the Frame's pointer
-// fields is set, the one the type names; a frame with none or more than one
-// is a protocol error and the socket is closed.
+// FrameType names what a Frame carries. For a known type exactly one of the
+// Frame's pointer fields is set, the one the type names (none for ping and
+// pong); anything else is a protocol error and the socket is closed. A type
+// this build does not know comes from a newer minor and is dropped
+// (Frame.Check).
 type FrameType string
+
+// MaxLoggedTypeBytes caps how much of a peer's frame type reaches a log
+// line or an error: the type of an unknown frame is peer text.
+const MaxLoggedTypeBytes = 32
+
+// Short is the type as a receiver may log it: at most MaxLoggedTypeBytes
+// bytes, valid UTF-8, "…" appended when cut.
+func (t FrameType) Short() string {
+	s := string(t)
+	if len(s) <= MaxLoggedTypeBytes {
+		return strings.ToValidUTF8(s, "?")
+	}
+	return strings.ToValidUTF8(s[:MaxLoggedTypeBytes], "?") + "…"
+}
 
 // Frame types, runner → server (R) and server → runner (S).
 const (
@@ -151,17 +266,89 @@ type Frame struct {
 	Secret              *SecretValue         `json:"secret,omitempty"`
 }
 
+// Errors of Frame.Check.
+var (
+	// ErrUnknownFrame: the type is not one this build knows (a newer
+	// minor). The receiver drops the frame, logs its type only (Short, or
+	// this error, which carries Short), and keeps the socket open; the
+	// payload is never acted on. Check runs before any handler sees a frame.
+	ErrUnknownFrame = errors.New("setup: unknown frame type")
+	// ErrMalformedFrame: a known type whose payload field is missing, or
+	// with another payload field set. The receiver closes the socket.
+	ErrMalformedFrame = errors.New("setup: malformed frame")
+)
+
+// FrameSince reports the minor of CurrentMajor a frame type was added in,
+// and false for a type this build does not know. A sender never sends a
+// type whose minor the negotiated version lacks (Version.Has).
+func FrameSince(t FrameType) (minor int, known bool) {
+	switch t {
+	case FramePair, FrameWelcome, FrameHello, FrameToken, FrameOp, FrameResult, FrameRefused,
+		FrameResume, FrameCancel, FrameRegisterCredentials, FrameCredentials, FrameSecret,
+		FramePing, FramePong:
+		return 0, true
+	}
+	return 0, false
+}
+
+// Check classifies a decoded frame: nil when the type is known and exactly
+// its own payload field is set (none for ping and pong), ErrUnknownFrame
+// when the type is unknown (drop it), ErrMalformedFrame otherwise (close the
+// socket). Which side may send which type is the receiver's check, not this
+// one.
+func (f *Frame) Check() error {
+	if _, known := FrameSince(f.Type); !known {
+		return fmt.Errorf("%w: %q", ErrUnknownFrame, f.Type.Short())
+	}
+	set := []struct {
+		t     FrameType
+		isSet bool
+	}{
+		{FramePair, f.Pair != nil}, {FrameWelcome, f.Welcome != nil}, {FrameHello, f.Hello != nil},
+		{FrameToken, f.Token != nil}, {FrameOp, f.Op != nil}, {FrameResult, f.Result != nil},
+		{FrameRefused, f.Refused != nil}, {FrameResume, f.Resume != nil}, {FrameCancel, f.Cancel != nil},
+		{FrameRegisterCredentials, f.RegisterCredentials != nil}, {FrameCredentials, f.Credentials != nil},
+		{FrameSecret, f.Secret != nil},
+	}
+	for _, p := range set {
+		if p.isSet != (p.t == f.Type) {
+			return fmt.Errorf("%w: type %q", ErrMalformedFrame, f.Type.Short())
+		}
+	}
+	return nil
+}
+
 // Pair is the runner's first frame. Exactly one of Code and Token is set.
 // Both are compared in constant time and appear in no log and no event.
+//
+// ProtocolVersion and ProtocolMinor (since 1.1) are the runner's Current, so
+// the server can refuse an incompatible runner before it tells the runner
+// anything about the room. A Pair without them is a 1.0 runner: the server
+// defers the check to Hello. When a Pair carries a version, Hello must carry
+// the same one, else the server closes the socket as malformed.
 type Pair struct {
-	Code  string `json:"code,omitempty"`
-	Token string `json:"token,omitempty"`
+	Code            string `json:"code,omitempty"`
+	Token           string `json:"token,omitempty"`
+	ProtocolVersion int    `json:"protocol_version,omitempty"`
+	ProtocolMinor   int    `json:"protocol_minor,omitempty"`
+}
+
+// Version is the runner's version as this Pair states it, and false for a
+// 1.0 Pair that states none.
+func (p Pair) Version() (Version, bool) {
+	if p.ProtocolVersion == 0 {
+		return Version{}, false
+	}
+	return Version{Major: p.ProtocolVersion, Minor: p.ProtocolMinor}, true
 }
 
 // Welcome is what the runner prints before it asks the person for "y/N":
 // the server origin as the runner dialed it is already on the person's
 // screen; this adds what the server claims. A runner started with --yes
 // skips the question only when the server is loopback (standalone mode).
+// ProtocolVersion and ProtocolMinor (since 1.1; absent is 0) are the
+// server's Current; the runner checks RunnerAccepts before it prints
+// anything else and refuses with RefuseProtocolVersion.
 type Welcome struct {
 	RoomID          string       `json:"room_id"`
 	Title           string       `json:"title"`
@@ -169,10 +356,16 @@ type Welcome struct {
 	Tenant          string       `json:"tenant,omitempty"`
 	Creator         events.Actor `json:"creator"`
 	ProtocolVersion int          `json:"protocol_version"`
+	ProtocolMinor   int          `json:"protocol_minor,omitempty"`
 	// Targets are the targets the room knows (the SetupRequest's and every
 	// setup.target_registered so far) with their classes: the runner's own
 	// floor registry starts from them.
 	Targets []events.SetupTarget `json:"targets,omitempty"`
+}
+
+// Version is the server's version as this Welcome states it.
+func (w Welcome) Version() Version {
+	return Version{Major: w.ProtocolVersion, Minor: w.ProtocolMinor}
 }
 
 // Hello describes the runner. Label is a name the person may change and is
@@ -180,6 +373,9 @@ type Welcome struct {
 // "docker compose", "kubectl", "helm", "aws", "confluent", "avn", "java",
 // "systemctl") to its version string. The server stores it on
 // setup.runner_attached. Nothing in Hello is a credential.
+// ProtocolVersion and ProtocolMinor (since 1.1; absent is 0) are the
+// runner's Current; the server always checks ServerAccepts on them and
+// stores both on setup.runner_attached.
 type Hello struct {
 	OS               string            `json:"os"`
 	Arch             string            `json:"arch"`
@@ -188,6 +384,12 @@ type Hello struct {
 	ProjectDir       string            `json:"project_dir"`
 	CatalogueVersion string            `json:"catalogue_version"`
 	ProtocolVersion  int               `json:"protocol_version"`
+	ProtocolMinor    int               `json:"protocol_minor,omitempty"`
+}
+
+// Version is the runner's version as this Hello states it.
+func (h Hello) Version() Version {
+	return Version{Major: h.ProtocolVersion, Minor: h.ProtocolMinor}
 }
 
 // Token is the runner's session token: 32 random bytes, in memory on both
@@ -260,7 +462,7 @@ const (
 	RefuseGuard           = "guard"            // the guard table forbids the op on this class
 	RefuseTarget          = "target"           // the op would reach a host outside the registered targets, or a denylisted address
 	RefuseNotConfirmed    = "not_confirmed"    // the person answered "N" on the runner's terminal (T3)
-	RefuseProtocolVersion = "protocol_version" // Hello or Welcome carried another Version
+	RefuseProtocolVersion = "protocol_version" // RunnerAccepts refused the Welcome's version; the runner closes after it
 	RefuseSecretsRead     = "secrets_read"     // a file op touched the secret store or a materialised path
 	RefuseCredentials     = "credentials"      // RegisterCredentials declined on the terminal or the names are unknown
 	RefuseDeadline        = "deadline"         // the op did not finish by OpRequest.Deadline

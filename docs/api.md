@@ -291,7 +291,7 @@ runner, a name for a secret, a hash for the canary nonce.
   what a label may say).
 - **Runner lifecycle.** `setup.pairing {outcome: ok | bad_code | expired | rate_limited | replaced | refused, source,
   runner_label?}` for every pairing attempt (system actor); `setup.runner_attached {runner_label, os, arch, tools,
-  project_dir, catalogue_version, protocol_version}` (the runner's `Hello`, after the person confirmed on its
+  project_dir, catalogue_version, protocol_version, protocol_minor?}` (the runner's `Hello`, after the person confirmed on its
   terminal); `setup.runner_lost {runner_label, last_seen}` (silent 90 s; every in-flight step is recorded with
   `outcome_unknown: true`); `setup.runner_refused {op, reason, proposal_id?, step_index?}` (`reason` is a
   `protocol.Refuse*` code, never runner text).
@@ -820,8 +820,8 @@ cookie and no `X-User`: the first frame carries the pairing code (first connecti
 objects, at most 1 MiB; exactly one payload field is set, the one `type` names. Served only with
 `PIPEROOM_SETUP_ENABLED=on`.
 
-Runner → server: `pair {code | token}` (first), `hello {os, arch, label, tools, project_dir, catalogue_version,
-protocol_version}` (only after the person confirmed the `welcome` on the runner's terminal), `result {id, ok,
+Runner → server: `pair {code | token, protocol_version?, protocol_minor?}` (first; the version since 1.1),
+`hello {os, arch, label, tools, project_dir, catalogue_version, protocol_version, protocol_minor?}` (only after the person confirmed the `welcome` on the runner's terminal), `result {id, ok,
 summary, data?, receipt, truncated?}`, `refused {id, op, reason, proposal_id?, step_index?}`, `resume {in_flight:
 [{id, proposal_id?, step_index, state: running | done, result?}]}` (first frame after a reconnect with a token),
 `credentials {request_id, secrets: [{name, value}]}` (only after a `register_credentials` and the terminal `y`;
@@ -832,14 +832,29 @@ runner's; names and the pipeline id are validated before any path is built; each
 `os.Root` at `PIPEROOM_SECRETS_DIR`, no symlink followed, as `<pipeline>/<name>` 0600, temp file then rename),
 `ping`/`pong`.
 
-Server → runner: `welcome {room_id, title, pipeline_id, tenant?, creator, protocol_version, targets?}` (what the
+Server → runner: `welcome {room_id, title, pipeline_id, tenant?, creator, protocol_version, protocol_minor?, targets?}` (what the
 runner shows before asking `y/N`), `token {token, expires_at}` (after `hello` and after every reconnect; idle expiry
 30 min), `op {id, op, params, tier, class, deadline, proposal_id?, step_index, params_hash?, proposal?}`, `cancel
 {id}`, `register_credentials {request_id, pipeline_id, names}` (one pending per room), `secret {name, value}` (one value the driver typed in the UI,
 stored nowhere on the server), `ping`/`pong`.
 
-Rules: ping every 20 s, a runner silent 90 s is `setup.runner_lost`; a `protocol_version` other than
-`protocol.Version` is refused at `hello` (`setup.pairing {outcome: "refused"}`); one runner per room; the server
+**Versions (U1-0).** The protocol is `major.minor`: `protocol_version` is the major (the U0 field) and
+`protocol_minor` the minor (absent means 0); this build is `protocol.Current()`, 1.1. 1.0 is the U0 shape (no
+version in `pair`). Compatibility rule: a runner and a server pair when the majors are equal and each side's minor
+is at most one behind the other's, so a runner one minor behind the server still pairs, and so does one a minor
+ahead; a major below 1 or a negative minor never pairs. The server checks `protocol.ServerAccepts` at `pair` when it carries a version (a 1.0 `pair` does not, so
+the check waits for `hello`) and always at `hello` (which must repeat the `pair`'s version); a refusal is
+`setup.pairing {outcome: "refused"}` and a close with status 4001 (`protocol.CloseProtocolVersion`) whose reason
+names both versions, before the runner learns anything about the room. The runner checks `protocol.RunnerAccepts`
+on `welcome` before it prints the room and answers `refused {reason: "protocol_version"}`. A paired session speaks
+the lower minor (`protocol.Negotiate`). A minor bump only adds (a frame type, an optional field whose absence keeps
+the old meaning, an op, a refusal code); anything else, including a field a receiver must understand to stay safe,
+is a major bump. Toward a newer peer: unknown fields are ignored, an unknown frame type is dropped unread and never
+executed (`Frame.Check`, run before any handler → `ErrUnknownFrame`, the type logged at most 32 bytes; a known type with a missing or extra payload closes the socket), an
+unknown op is refused (`unknown_op`); neither side sends a frame type, nor the server an op, that the negotiated
+minor lacks (`Version.Has`, `protocol.FrameSince`, the op's `since` minor in the catalogue).
+
+Rules: ping every 20 s, a runner silent 90 s is `setup.runner_lost`; versions as above; one runner per room; the server
 re-sends an `op` the runner never saw at most once after `resume` and never one the runner reports running or
 done (`docs/design/replicas.md` §5 holds with the runner on the path); every `result` and `refused` becomes an
 `action.executed` (with `receipt`) or `setup.runner_refused` in the room log.

@@ -116,7 +116,19 @@ jobs:
           # Episodes run 6 at a time with a 10-minute cap each; one at a time
           # (the evalrun default) cannot finish 75 episodes inside the job limit.
           args=(-runs "$RUNS" -max-turns "$MAX_TURNS" -parallel 6 -timeout 10m -prices "$RUNNER_TEMP/prices.json" -label ci -out cand.json)
-          if [ -n "$ONLY" ] && [ "$ONLY" != "all" ]; then args+=(-only "$ONLY"); fi
+          if [ -n "$ONLY" ] && [ "$ONLY" != "all" ]; then
+            args+=(-only "$ONLY")
+            n_scenarios="$(printf '%s' "$ONLY" | tr ',' '\n' | grep -c .)"
+          else
+            # evalrun's default set is the top-level *.yaml of evals/scenarios;
+            # heldout/ and learned/ are subdirectories and are not run.
+            n_scenarios="$(find evals/scenarios -maxdepth 1 -name '*.yaml' | wc -l)"
+          fi
+          # Live judge calls: at most 2 per episode (an episode judges root cause
+          # and layer). The evalrun default of 50 ran out after ~77 of 90 episodes.
+          judge_cap=$((2 * n_scenarios * RUNS))
+          echo "::notice::${n_scenarios} scenario(s) x ${RUNS} run(s): -judge-max-calls ${judge_cap}"
+          args+=(-judge-max-calls "$judge_cap" -transcripts transcripts)
           if [ "$MAKE_BASELINE" = "true" ]; then
             echo "::notice::make_baseline: no comparison; the report is uploaded as baseline-default."
           elif [ -f evals/baseline/default.json ]; then
@@ -141,6 +153,16 @@ jobs:
           name: cand
           path: cand.json
           retention-days: 14
+      # Each run's transcript and result (replayed synthetic tool output and the
+      # agent's text). The API key is only in the environment of the process and
+      # is never part of a transcript.
+      - name: Upload transcripts
+        if: steps.key.outputs.run == 'true' && hashFiles('transcripts/**') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: transcripts
+          path: transcripts
+          retention-days: 14
       - name: Upload baseline candidate
         if: steps.key.outputs.run == 'true' && inputs.make_baseline == true && hashFiles('cand.json') != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -156,6 +178,9 @@ jobs:
         run: |
           if [ "$RC" = "2" ]; then
             echo "::error::A scenario regressed against evals/baseline/default.json (see the comparison above)."
+            exit 1
+          elif [ "$RC" = "3" ]; then
+            echo "::error::evalrun stopped on an API error (billing/auth); not a regression."
             exit 1
           elif [ "$RC" != "0" ]; then
             echo "::error::evalrun failed (exit ${RC:-unknown}) before it could compare."
