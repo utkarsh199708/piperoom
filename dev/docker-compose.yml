@@ -209,7 +209,8 @@ services:
   # Optional ClickHouse warehouse and Kafka Engine sink (dev/clickhouse/README.md).
   clickhouse:
     profiles: ["clickhouse"]
-    image: clickhouse/clickhouse-server:25.8
+    # 25.8 LTS, exact release and multi-arch index digest (verified on Docker Hub).
+    image: clickhouse/clickhouse-server:25.8.33.6@sha256:0152dd511befe6a2c2ef53e930726179669b08116da78500b37c51c96ff5ee77
     depends_on:
       kafka: { condition: service_healthy }
       schema-registry: { condition: service_healthy }
