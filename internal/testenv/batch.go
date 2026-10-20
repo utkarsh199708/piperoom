@@ -20,6 +20,7 @@ import (
 	"piperoom/internal/clients/airflow"
 	"piperoom/internal/clients/dbt"
 	"piperoom/internal/config"
+	"piperoom/internal/stacklock"
 )
 
 const (
@@ -27,7 +28,55 @@ const (
 	batchDAG        = "revenue_daily"
 	// Whole test: a cold build installs dbt with pip before Airflow starts.
 	batchTimeout = 8 * time.Minute
+
+	// batchProfileOwner names who holds the batch-profile lock. Both tests that
+	// own the airflow lifecycle (TestBatchProfile here and cmd/devctl's batch
+	// scenario test) use the same owner, so a second acquire in one process is
+	// re-entrant while a second process waits for the first to finish.
+	batchProfileOwner = "batch-profile"
 )
+
+// batchProfileLockPath returns the cross-process lock file that serializes the
+// batch profile's airflow service across test binaries. It sits next to the
+// shared stack lock (PIPEROOM_STACK_LOCK / piperoom-bus/stack.lock) so the two
+// owners agree on one file.
+func batchProfileLockPath() string {
+	base := stacklock.Path()
+	if base == "" {
+		return ""
+	}
+	return base + ".airflow"
+}
+
+// lockBatchProfile takes the cross-process batch-profile lock and holds it for
+// the whole test (t.Cleanup releases it), i.e. around start, assertions and
+// teardown. It waits for the other test binary instead of skipping: the
+// full-stack job treats a skipped integration test as a failure, and both
+// tests must really run. Without the lock the two tests race for
+// piperoom-dev-airflow-1 (one --force-recreates while the other tears down).
+func lockBatchProfile(t *testing.T) {
+	t.Helper()
+	lk := stacklock.New(batchProfileLockPath())
+	if lk.Path() == "" {
+		t.Fatalf("testenv: no batch profile lock path (git unavailable and %s is not set)", stacklock.EnvPath)
+	}
+	// One profile lifecycle is bounded by batchTimeout; allow two so the waiter
+	// never gives up just before the holder's teardown releases it.
+	deadline := time.Now().Add(2 * batchTimeout)
+	for {
+		if _, err := lk.Acquire(batchProfileOwner); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("testenv: batch profile lock: %v", err)
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Cleanup(func() {
+		if err := lk.Release(batchProfileOwner); err != nil {
+			t.Errorf("testenv: release batch profile lock: %v", err)
+		}
+	})
+}
 
 // StartBatchProfile starts the `batch` compose profile's airflow service next
 // to the running dev stack, waits for it to become healthy and for one
@@ -38,6 +87,7 @@ const (
 // step-by-step assertions.
 func StartBatchProfile(t *testing.T, cfg config.Config) func() {
 	t.Helper()
+	lockBatchProfile(t)
 	root := repoRoot(t)
 	artifacts := filepath.Join(root, "dev", "batch", "artifacts")
 	compose := batchCompose(root)

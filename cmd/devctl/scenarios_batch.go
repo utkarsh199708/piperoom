@@ -37,21 +37,16 @@ const (
 // into the airflow container (dev/docker-compose.yml).
 var batchModelsRel = filepath.Join("dev", "batch", "dbt", "analytics", "models")
 
-// SQL the batch scenarios run against the warehouse; the unit tests' fake
-// Postgres answers exactly these statements.
+// The dag-failed break points check_source at a missing table through an
+// Airflow Variable rather than renaming the real source table: analytics.orders
+// is the CDC sink (devconsumer upserts there and other integration packages
+// read it), so the break must not touch it. The DAG reads the variable's value
+// as a bare (unqualified) table name under schema analytics
+// (dev/batch/dags/revenue_daily.py).
 const (
-	sqlRenameOrdersAway = `DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'analytics' AND tablename = 'orders') THEN
-    ALTER TABLE analytics.orders RENAME TO analytics.orders_broken;
-  END IF;
-END $$`
-	sqlRenameOrdersBack = `DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'analytics' AND tablename = 'orders_broken') THEN
-    ALTER TABLE analytics.orders_broken RENAME TO analytics.orders;
-  END IF;
-END $$`
+	batchSourceVar     = "revenue_source_table"
+	batchSourceDefault = "orders"
+	batchSourceMissing = "orders_missing"
 )
 
 // brokenModelSQL is what the dbt-model-broken break writes into the models
@@ -75,7 +70,7 @@ const (
   "pipeline_id": "daily-revenue",
   "dedup_key": "devctl-dag-failed",
   "source": "reconciliation",
-  "description": "The latest revenue_daily DAG run failed at check_source: the dbt source table analytics.orders is missing."
+  "description": "The latest revenue_daily DAG run failed at the check_source task."
 }`
 	dbtModelBrokenAlert = `{
   "title": "daily-revenue: a dbt model failed to build",
@@ -83,7 +78,7 @@ const (
   "pipeline_id": "daily-revenue",
   "dedup_key": "devctl-dbt-model-broken",
   "source": "reconciliation",
-  "description": "The latest revenue_daily run failed in dbt_run: model fct_revenue_v2 references a column that does not exist."
+  "description": "The latest revenue_daily DAG run failed at the dbt_run task."
 }`
 	lateBatchAlert = `{
   "title": "daily-revenue: analytics.fct_revenue is stale",
@@ -91,17 +86,19 @@ const (
   "pipeline_id": "daily-revenue",
   "dedup_key": "devctl-late-batch",
   "source": "freshness",
-  "description": "analytics.fct_revenue has not been refreshed: the revenue_daily DAG is paused and no new run is scheduled."
+  "description": "analytics.fct_revenue has not been refreshed: no new revenue_daily run has landed."
 }`
 )
 
 // ------------------------------------------------------------- dag-failed
 
-// dag-failed: a bad migration renamed the dbt source table, so the DAG's first
-// task (check_source, which counts analytics.orders) fails and the run is
-// failed before dbt ever starts. Layer: orchestrator.
+// dag-failed: the Airflow Variable check_source reads for the dbt source table
+// is pointed at a missing table, so the DAG's first task (check_source) fails
+// and the run is failed before dbt ever starts. The break never renames the
+// real source table: analytics.orders is the CDC sink shared by the rest of
+// the stack. Layer: orchestrator.
 func breakDagFailed(ctx context.Context, s *stack) error {
-	if _, err := s.psql(ctx, "warehouse", sqlRenameOrdersAway); err != nil {
+	if _, err := s.airflowCLI(ctx, "variables", "set", batchSourceVar, batchSourceMissing); err != nil {
 		return err
 	}
 	after, err := s.triggerBatchRun(ctx)
@@ -111,13 +108,14 @@ func breakDagFailed(ctx context.Context, s *stack) error {
 	if _, err := s.waitBatchRun(ctx, "failed", after, batchRunTimeout); err != nil {
 		return err
 	}
-	s.log.Info("broken: analytics.orders renamed so check_source fails — the latest " + batchDAG + " run is failed")
+	s.log.Info("broken: " + batchSourceVar + "=" + batchSourceMissing + " so check_source fails — the latest " + batchDAG + " run is failed")
 	return nil
 }
 
-// The fix: rename the table back, then prove the pipeline runs again.
+// The fix: restore the variable to the real source table, then prove the
+// pipeline runs again.
 func fixDagFailed(ctx context.Context, s *stack) error {
-	if _, err := s.psql(ctx, "warehouse", sqlRenameOrdersBack); err != nil {
+	if _, err := s.airflowCLI(ctx, "variables", "set", batchSourceVar, batchSourceDefault); err != nil {
 		return err
 	}
 	after, err := s.triggerBatchRun(ctx)
@@ -127,7 +125,7 @@ func fixDagFailed(ctx context.Context, s *stack) error {
 	if _, err := s.waitBatchRun(ctx, "success", after, batchRunTimeout); err != nil {
 		return err
 	}
-	s.log.Info("fixed: analytics.orders restored, " + batchDAG + " run succeeded")
+	s.log.Info("fixed: " + batchSourceVar + " restored to " + batchSourceDefault + ", " + batchDAG + " run succeeded")
 	return nil
 }
 

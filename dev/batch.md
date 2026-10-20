@@ -45,8 +45,8 @@ can move to its own CI job with a build cache (C1's `.github/**`).
 ## Point Piperoom at it
 
 Run the server on the host as for the default stack, plus the batch reader env vars (the `daily-revenue`
-pipeline is already in `dev/owners.yaml`, and `dev/users.yaml` already names its `orchestrator` and
-`transform` owners):
+pipeline and its per-pipeline `orchestrator`, `transform` and `warehouse` owners are already in
+`dev/owners.yaml`):
 
 ```powershell
 $env:AIRFLOW_URL = "http://127.0.0.1:8080"
@@ -57,4 +57,4 @@ The server refuses to start when the users and owners files disagree in either d
 `dev/users.yaml` and `dev/owners.yaml` go together (`TestUsersBatchMatchesOwners` in `cmd/devctl` runs
 that check on them). Leave `AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` and `AIRFLOW_TOKEN` unset (config refuses
 a login over `http://`). `devctl break dag-failed`, `dbt-model-broken` and `late-batch` exercise the three
-batch failure modes (dev/scenarios.md §13).
+batch failure modes (dev/scenarios.md §12).

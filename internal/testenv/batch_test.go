@@ -26,6 +26,7 @@ import (
 // service is stopped and removed afterwards; the base stack stays up.
 func TestBatchProfile(t *testing.T) {
 	cfg := Require(t)
+	lockBatchProfile(t)
 	ctx, cancel := context.WithTimeout(context.Background(), batchTimeout)
 	defer cancel()
 

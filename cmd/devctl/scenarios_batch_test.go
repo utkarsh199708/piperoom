@@ -116,13 +116,27 @@ func (w *batchWorld) modelPath() string {
 }
 
 func TestDagFailedBreakAndFix(t *testing.T) {
+	// The variable values are bare (unqualified) table names: check_source
+	// builds "analytics.<value>", so a schema-qualified value would not parse
+	// and would not be a valid break anyway.
+	for _, v := range []string{batchSourceDefault, batchSourceMissing} {
+		if strings.Contains(v, ".") {
+			t.Fatalf("batch source table %q must be unqualified", v)
+		}
+	}
+
 	w := newBatchWorld(t, "failed")
 	ctx := w.ctx()
 	if err := breakDagFailed(ctx, w.stack); err != nil {
 		t.Fatalf("break: %v\n%s", err, w.logsBuf())
 	}
-	if !contains(w.sql, sqlRenameOrdersAway) {
-		t.Errorf("break did not rename analytics.orders away (%v)", w.sql)
+	if !contains(w.cli, "variables set "+batchSourceVar+" "+batchSourceMissing) {
+		t.Errorf("break did not point %s at a missing table (%v)", batchSourceVar, w.cli)
+	}
+	// The break must not touch the warehouse: analytics.orders is the shared CDC
+	// sink, and a rename would break devconsumer and every other reader.
+	if len(w.sql) != 0 {
+		t.Errorf("break ran warehouse SQL (%v), want none: analytics.orders is shared", w.sql)
 	}
 	if !contains(w.cli, "dags trigger revenue_daily") {
 		t.Errorf("break did not trigger a run (%v)", w.cli)
@@ -134,8 +148,8 @@ func TestDagFailedBreakAndFix(t *testing.T) {
 	if err := fixDagFailed(ctx, w.stack); err != nil {
 		t.Fatalf("fix: %v\n%s", err, w.logsBuf())
 	}
-	if !contains(w.sql, sqlRenameOrdersBack) {
-		t.Errorf("fix did not rename analytics.orders back (%v)", w.sql)
+	if !contains(w.cli, "variables set "+batchSourceVar+" "+batchSourceDefault) {
+		t.Errorf("fix did not restore %s to %s (%v)", batchSourceVar, batchSourceDefault, w.cli)
 	}
 	// Idempotent: running the fix again succeeds.
 	if err := fixDagFailed(ctx, w.stack); err != nil {

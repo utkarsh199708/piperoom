@@ -441,7 +441,7 @@ is in `dev/owners.yaml`. They need the batch profile up and `AIRFLOW_URL` set (`
 
 | Scenario | Break | Symptom (tool receipt) | Fix |
 |---|---|---|---|
-| `dag-failed` | rename `analytics.orders` → `analytics.orders_broken` (a bad migration), trigger `revenue_daily` | the run is `failed` at `check_source` (`dag_runs`, then `task_instances` + `task_log_tail`); layer orchestrator | rename the table back, trigger a run, wait for `success` |
+| `dag-failed` | point `check_source` at a missing table (Airflow Variable `revenue_source_table` = `orders_missing`), trigger `revenue_daily` | the run is `failed` at `check_source` (`dag_runs`, then `task_instances` + `task_log_tail`); layer orchestrator | restore the variable to `orders`, trigger a run, wait for `success` |
 | `dbt-model-broken` | write a broken model `fct_revenue_v2.sql` into `dev/batch/dbt/analytics/models/`, trigger | `check_source` passes but `dbt_run` fails; `dbt_run_results` shows `fct_revenue_v2` error and `task_log_tail` shows dbt's error; layer transform, model named | remove the broken model, trigger a run, wait for `success` |
 | `late-batch` | `airflow dags pause revenue_daily` | `dag_schedule_gap` verdict `paused`; `analytics.fct_revenue` goes stale; layer orchestrator | `airflow dags unpause revenue_daily`, trigger a run, wait for `success` |
 
@@ -453,10 +453,10 @@ late-batch:       dag_schedule_gap revenue_daily: verdict paused; the DAG is PAU
 ```
 
 **Notes:**
-- `dag-failed` renames the batch's source table, which is also the CDC sink `analytics.orders`. With the
-  stack idle devconsumer stays up (it only touches the table on a new record); if `devctl load` runs during
-  the break, devconsumer crash-loops on the missing table and the fix should restart it too.
+- `dag-failed` does not touch the CDC sink: it repoints `check_source` at a missing table through the
+  Airflow Variable `revenue_source_table` (default `orders`), so `analytics.orders` keeps loading while the
+  DAG fails and devconsumer never notices the break.
 - Each fix triggers a run and waits for `success`, so the break's failed state is overwritten and the fix is
-  idempotent (the rename and the broken-model removal are both guarded against already-restored stacks).
+  idempotent (restoring the variable and removing the broken model are both safe on an already-restored stack).
 - The alerts are reconciliation/freshness checks, the kind a team's own monitoring would send; none of them
   can come from the watcher (a batch pipeline has no Kafka/Connect/slot to watch).
