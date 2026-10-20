@@ -246,6 +246,13 @@ func runWith(d startDeps) error {
 	if err != nil {
 		return fmt.Errorf("server: load owners file %s: %w", cfg.OwnersFile, err)
 	}
+	// --solo resolves the solo user from the flags before the users file is
+	// written, so a --quickstart owners file that names several owners is
+	// refused with the --solo message (not a users-file message), and the users
+	// file quickstartUsers writes is for exactly that user.
+	if err := applySoloFlag(&cfg, own, *demoMode, *quickstart, *solo, log); err != nil {
+		return err
+	}
 	if *quickstart {
 		var removeUsers func()
 		users, removeUsers, err = quickstartUsers(cfg, own, "", log)
@@ -275,14 +282,16 @@ func runWith(d startDeps) error {
 			"token_budget", shadowCfg.TokenBudget, "max_turns", shadowCfg.MaxTurns)
 	}
 	// Solo mode: refuse to start when the solo user is unknown or owners.yaml
-	// names anyone else (design section 5.3). --solo sets the solo user to the
-	// demo presenter, through the same path as PIPEROOM_SOLO_USER.
-	if *solo {
-		cfg.SoloUser = demoPresenterID
-	}
-	soloUser, err := soloSetup(cfg, users, own, *solo, log)
+	// names anyone else (design section 5.3). The solo user was resolved from
+	// the flags above (--demo -> the presenter, --quickstart -> the sole owner,
+	// otherwise PIPEROOM_SOLO_USER); only --demo relaxes the single-owner rule,
+	// so --quickstart runs the real check against the owners file.
+	soloUser, err := soloSetup(cfg, users, own, *demoMode, log)
 	if err != nil {
 		return err
+	}
+	if *demoMode && *solo && soloUser != "" && authSettings.DevNonLoopback {
+		log.Warn("server: --demo --solo on a non-loopback address: anyone who can reach this port can drive as the solo user", "addr", cfg.HTTPAddr)
 	}
 	// The OIDC relying party (nil in dev mode). Discovery runs in the
 	// background and is retried, so an IdP that is down now does not stop the

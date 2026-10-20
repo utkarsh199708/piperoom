@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -50,22 +51,66 @@ func oidcSetup(cfg config.Config, settings auth.Settings, public httpapi.PublicO
 }
 
 // demoPresenterID is the demo's presenter and driver (docs/demo/schema-change.md
-// roles, and the first user of room.DefaultUsers). --solo gives this user the
-// solo ceremony.
+// roles, and the first user of room.DefaultUsers). --demo --solo gives this
+// user the solo ceremony.
 const demoPresenterID = "arjun"
+
+// soloFlagsUser resolves the solo user the --solo flag names. With --demo it is
+// the demo presenter; with --quickstart it is the owners file's sole user,
+// refused when there is not exactly one. Without --solo the solo user comes
+// from PIPEROOM_SOLO_USER (config.SoloUser).
+func soloFlagsUser(cfg config.Config, own *owners.Owners, demoMode, quickstart, soloFlag bool) (string, error) {
+	if !soloFlag {
+		return strings.TrimSpace(cfg.SoloUser), nil
+	}
+	switch {
+	case demoMode:
+		return demoPresenterID, nil
+	case quickstart:
+		id, ok := soleUser(own)
+		if !ok {
+			return "", errors.New("server: --solo needs an owners file that names one user")
+		}
+		return id, nil
+	default:
+		return strings.TrimSpace(cfg.SoloUser), nil
+	}
+}
+
+// applySoloFlag resolves --solo into cfg.SoloUser (see soloFlagsUser) and warns
+// when --solo overrides a PIPEROOM_SOLO_USER that was already set. It runs
+// before the users file is written, so --quickstart --solo on an owners file
+// that names several owners is refused with the --solo message, not a
+// users-file message, and the users file quickstartUsers writes is for exactly
+// that user.
+func applySoloFlag(cfg *config.Config, own *owners.Owners, demoMode, quickstart, solo bool, log *slog.Logger) error {
+	if !solo {
+		return nil
+	}
+	if got := strings.TrimSpace(cfg.SoloUser); got != "" {
+		log.Warn("server: --solo and PIPEROOM_SOLO_USER are both set; --solo wins", "solo_user", got)
+	}
+	user, err := soloFlagsUser(*cfg, own, demoMode, quickstart, true)
+	if err != nil {
+		return err
+	}
+	cfg.SoloUser = user
+	return nil
+}
 
 // soloSetup runs the solo-mode start check (design section 5.3). It returns the
 // trimmed solo user ("" when solo mode is off). A violation refuses the start;
 // a pass logs a warning, because solo mode drops the second pair of eyes.
-// soloFlag is the --solo flag: it gives the demo presenter the solo ceremony
-// even though owners.yaml names other principals (a try-it convenience, not the
-// production single-owner rule), so it only checks that the user is known.
-func soloSetup(cfg config.Config, users *room.Users, own *owners.Owners, soloFlag bool, log *slog.Logger) (string, error) {
+// demoMode is the --demo flag: it relaxes the single-owner rule so the demo
+// presenter gets the solo ceremony even though the demo's owners file names
+// several principals (a try-it convenience). Every other mode -- --quickstart
+// included -- runs the real single-owner check.
+func soloSetup(cfg config.Config, users *room.Users, own *owners.Owners, demoMode bool, log *slog.Logger) (string, error) {
 	solo := strings.TrimSpace(cfg.SoloUser)
 	if solo == "" {
 		return "", nil
 	}
-	if soloFlag {
+	if demoMode {
 		if err := checkDemoSoloUser(solo, users); err != nil {
 			return "", fmt.Errorf("server: %w", err)
 		}
@@ -76,10 +121,10 @@ func soloSetup(cfg config.Config, users *room.Users, own *owners.Owners, soloFla
 	return solo, nil
 }
 
-// checkDemoSoloUser is the --solo (demo and quickstart) check: the presenter
-// must be a known user. owners.yaml may name other principals (the demo's
-// owners file names four owners), because --solo exists to show the solo
-// ceremony on the try-it track, not to relax the production single-owner rule.
+// checkDemoSoloUser is the --demo --solo check: the presenter must be a known
+// user. owners.yaml may name other principals (the demo's owners file names
+// four owners), because --solo exists to show the solo ceremony on the demo,
+// not to relax the production single-owner rule.
 func checkDemoSoloUser(solo string, users *room.Users) error {
 	if users == nil {
 		return fmt.Errorf("solo mode: --solo user %q but there is no users file", solo)

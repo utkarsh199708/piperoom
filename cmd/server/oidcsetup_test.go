@@ -86,9 +86,9 @@ func TestSoloSetupPassesAndWarns(t *testing.T) {
 	}
 }
 
-// --solo (soloFlag) gives the demo presenter the solo ceremony even though the
-// demo's owners file names four owners; the same user via PIPEROOM_SOLO_USER
-// (soloFlag false) is refused as a multi-owner install.
+// demoMode gives the demo presenter the solo ceremony even though the demo's
+// owners file names four owners; the same user via PIPEROOM_SOLO_USER
+// (demoMode false) is refused as a multi-owner install.
 func TestSoloSetupDemoPresenter(t *testing.T) {
 	log, buf := testLog()
 	own := loadOwners(t, "layers:\n  postgres: priya\n  kafka-connect: arjun\n  schema-registry: priya\n  kafka: arjun\n  consumer: kabir\n  warehouse: meera\n")
