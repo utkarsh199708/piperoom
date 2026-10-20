@@ -61,7 +61,15 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 	if r.yes {
 		return true, nil
 	}
-	fmt.Fprintf(r.stdout, "continue? [y/N] ")
+	return r.ask(ctx, "continue? [y/N] ")
+}
+
+// ask prints prompt and reads one line from the runner's terminal, returning
+// true on y/yes and false on anything else. The read happens on a goroutine
+// and returns as soon as a line arrives or ctx ends, so a Ctrl-C stops the
+// prompt (the caller returns ctx.Err()).
+func (r *Runner) ask(ctx context.Context, prompt string) (bool, error) {
+	fmt.Fprint(r.stdout, prompt)
 
 	type result struct {
 		line string
