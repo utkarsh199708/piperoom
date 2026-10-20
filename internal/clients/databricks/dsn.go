@@ -10,15 +10,6 @@ import (
 	"strings"
 )
 
-// errM2MRefused explains why OAuth M2M DSNs are refused. In
-// databricks-sql-go v1.16.0 the M2M authenticator fetches its token (and runs
-// OIDC discovery) with context.Background() and the default HTTP client,
-// under the authenticator's lock: no deadline, no 4 MB cap, not through the
-// guarded transport, so one hung token endpoint stalls every query past the
-// 10 s deadline. Rebuilding that flow here (cloud inference, Azure endpoints,
-// account-rooted discovery) is a reimplementation, not a wrapper.
-var errM2MRefused = errors.New("databricks: dsn OAuth M2M (authType=OAuthM2M, clientId, clientSecret) is not supported yet: the driver fetches its token without a deadline or size cap; use a personal access token of the service principal (token:<pat>@host)")
-
 var (
 	// hostRe is a DNS host name or IPv4 address: the workspace host, such as
 	// dbc-1234abcd-5678.cloud.databricks.com or adb-123.4.azuredatabricks.net.
@@ -43,6 +34,18 @@ type Config struct {
 	// Token is the personal access token. It is never printed: Config has a
 	// String method that leaves it out.
 	Token string
+
+	// ClientID and ClientSecret are the OAuth M2M (service principal)
+	// credentials; when either is set the DSN is M2M, not PAT. They are never
+	// printed: Config.String leaves them out, and errors scrub them.
+	ClientID     string
+	ClientSecret string
+}
+
+// isM2M reports whether the DSN is OAuth M2M (service principal) rather than
+// a personal access token.
+func (c Config) isM2M() bool {
+	return c.ClientID != "" || c.ClientSecret != ""
 }
 
 // String leaves the token out, so a Config printed by mistake (%v in a log
@@ -64,13 +67,18 @@ func (c Config) target() string {
 //
 //	token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]
 //
+// or, for OAuth M2M (service principal):
+//
+//	<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]&clientId=<id>&clientSecret=<secret>[&authType=OAuthM2M]
+//
 // An optional https:// prefix is accepted; http:// is refused (the token
 // would travel in clear text). The port defaults to 443. accessToken=<pat>
-// (with optional authType=Pat) may stand in for the token: user info.
-// catalog is required. Any other parameter is refused: the driver would pass
-// it on as a session parameter. So are a user name other than "token", OAuth
-// M2M (see errM2MRefused), OAuth U2M (interactive, it opens a browser), a
-// repeated parameter and a #fragment.
+// (with optional authType=Pat) may stand in for the token: user info, and
+// clientID (capital ID) for clientId. catalog is required. Any other
+// parameter is refused: the driver would pass it on as a session parameter.
+// So are a user name other than "token", OAuth U2M (interactive, it opens a
+// browser), mixing a token with client credentials, a repeated parameter and
+// a #fragment.
 //
 // Error messages never quote the DSN or any part of it: a token pasted in
 // the wrong place (the path, the host) must not reach a log.
@@ -112,6 +120,7 @@ func ParseDSN(dsn string) (Config, error) {
 	if err != nil {
 		return Config{}, errors.New("databricks: dsn query string does not parse")
 	}
+	var m2mAuth bool
 	for k, v := range q {
 		if len(v) != 1 {
 			return Config{}, fmt.Errorf("databricks: dsn parameter %s is repeated", safeKey(k))
@@ -132,18 +141,26 @@ func ParseDSN(dsn string) (Config, error) {
 			switch strings.ToLower(val) {
 			case "pat":
 			case "oauthm2m":
-				return Config{}, errM2MRefused
+				m2mAuth = true
 			case "oauthu2m":
-				return Config{}, errors.New("databricks: dsn authType=OAuthU2M is not supported: it opens a browser; use a personal access token")
+				return Config{}, errors.New("databricks: dsn authType=OAuthU2M is not supported: it opens a browser; use OAuth M2M (clientId+clientSecret) or a personal access token")
 			default:
-				return Config{}, errors.New("databricks: dsn authType must be Pat")
+				return Config{}, errors.New("databricks: dsn authType must be Pat or OAuthM2M")
 			}
 		case "accessToken":
 			cfg.Token = val
-		case "clientId", "clientID", "clientSecret":
-			return Config{}, errM2MRefused
+		case "clientId", "clientID":
+			if cfg.ClientID != "" {
+				return Config{}, errors.New("databricks: dsn parameter clientId is repeated")
+			}
+			cfg.ClientID = val
+		case "clientSecret":
+			if cfg.ClientSecret != "" {
+				return Config{}, errors.New("databricks: dsn parameter clientSecret is repeated")
+			}
+			cfg.ClientSecret = val
 		default:
-			return Config{}, fmt.Errorf("databricks: dsn parameter %s is not allowed (allowed: catalog, schema, authType=Pat, accessToken)", safeKey(k))
+			return Config{}, fmt.Errorf("databricks: dsn parameter %s is not allowed (allowed: catalog, schema, authType=Pat|OAuthM2M, accessToken, clientId, clientSecret)", safeKey(k))
 		}
 	}
 	if cfg.Catalog == "" {
@@ -163,8 +180,20 @@ func ParseDSN(dsn string) (Config, error) {
 		}
 	}
 
+	// An OAuth M2M DSN is one with client credentials (explicit authType or
+	// inferred from clientId/clientSecret, as the driver infers it).
+	if isM2M := m2mAuth || cfg.ClientID != "" || cfg.ClientSecret != ""; isM2M {
+		if cfg.Token != "" {
+			return Config{}, errors.New("databricks: dsn mixes a personal access token with OAuth M2M; use one credential")
+		}
+		if cfg.ClientID == "" || cfg.ClientSecret == "" {
+			return Config{}, errors.New("databricks: dsn OAuth M2M needs both clientId and clientSecret")
+		}
+		return cfg, nil
+	}
+
 	if cfg.Token == "" {
-		return Config{}, errors.New("databricks: dsn has no credential; want token:<pat>@host")
+		return Config{}, errors.New("databricks: dsn has no credential; want token:<pat>@host, or clientId+clientSecret for OAuth M2M")
 	}
 	return cfg, nil
 }
@@ -268,6 +297,7 @@ func dsnSecrets(dsn string) []string {
 	}
 	if cfg, err := ParseDSN(dsn); err == nil {
 		add(cfg.Token)
+		add(cfg.ClientSecret)
 	}
 	return out
 }
