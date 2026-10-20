@@ -43,7 +43,6 @@ import (
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
-	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/version"
 	"piperoom/internal/watch"
@@ -184,6 +183,14 @@ func runWith(d startDeps) error {
 	// before it connects to anything; off (the default) records approvals
 	// and runs nothing; --demo forces on.
 	writeOn, err := writeModeSetup(cfg, *demoMode, log)
+	if err != nil {
+		return err
+	}
+	// The scripted agent on a real stack (PIPEROOM_FAKE_AGENT=scripted) is
+	// read only outside --demo and --quickstart. A bad value, or a scripted
+	// request that would reach real users or run fixes, refuses the start
+	// before anything connects (config.ParseFakeAgent).
+	fakeAgent, err := fakeAgentSetup(cfg, *demoMode, *quickstart, log)
 	if err != nil {
 		return err
 	}
@@ -399,51 +406,32 @@ func runWith(d startDeps) error {
 			writePM = demo.WritePostmortem
 		}
 	} else {
-		// The model endpoint first: a wrong provider, region, project or token
-		// budget should stop the server before it opens any connection.
-		// One AWS config for the process, shared by Bedrock and MSK IAM.
-		awsCfg, err := wiring.LoadAWS(ctx, cfg)
-		if err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log, awsCfg)
-		if err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		// Spend limits are checked against the room database, so a restart
-		// does not reset them.
-		if err := ep.SetSpend(spend.options(spendStore, usage)); err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		run = ep.Run
-		write = ep.WriteHandoff
-		// With PIPEROOM_TRIAGE_PASS=off the pass still writes agent.triage
-		// "failed"/"off" (no model call), so the UI never waits for one.
-		triage = ep.Triage
-		_, _, triageTimeout = ep.FirstLook()
-		closedHook.setForget(ep)
-
-		// One client set per pipeline with connections: in owners.yaml, plus
-		// the process-wide set when a pipeline uses it (docs/design/tenancy.md
-		// section 5). Each room, the topology and the watcher reach only the
-		// set of their own pipeline.
-		sets, err := d.openStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
-			// Defence in depth, no change in behaviour: with write mode off
-			// the executor already runs nothing; this also keeps the write
-			// clients from being built.
-			ReadOnly: !writeOn,
-			// similar_incidents reads past closed rooms from the room store;
-			// each set's Owners holds only its own pipelines.
-			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
+		w, err := wireAgent(ctx, d.openStacks, wiring.NewAgentEndpoint, wireAgentInput{
+			cfg:        cfg,
+			log:        log,
+			own:        own,
+			st:         st,
+			spendStore: spendStore,
+			spend:      spend,
+			usage:      usage,
+			hook:       closedHook,
+			fakeAgent:  fakeAgent,
+			pmMode:     pmMode,
+			writeOn:    writeOn,
 		})
 		if err != nil {
-			return fmt.Errorf("server: open the data stack: %w", err)
+			return err
 		}
-		defer sets.Close()
-		logStacks(log, sets)
-		stacks = sets
-		stackFor = roomStacks(sets)
-		topo = sets
+		defer w.stacks.Close()
+		logStacks(log, w.stacks)
+		run = w.run
+		write = w.write
+		writePM = w.writePM
+		triage = w.triage
+		triageTimeout = w.triageTimeout
+		stacks = w.stacks
+		stackFor = w.stackFor
+		topo = w.topo
 	}
 
 	// The auto-approve lists name actions of the proposal registry: acts in
