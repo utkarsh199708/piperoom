@@ -51,7 +51,8 @@ function Badge({
   return <span data-slot="badge" className={cn(badgeVariants({ variant, mono }), className)} {...props} />
 }
 
-const LAYER_VARIANTS: Record<string, BadgeVariant> = {
+/** Badge variant per pipeline layer name. Keys must stay in sync with `theme.extend.colors.layer` in tailwind.config.ts. */
+export const LAYER_VARIANTS: Record<string, BadgeVariant> = {
   postgres: 'layer-postgres',
   'kafka-connect': 'layer-kafka-connect',
   'schema-registry': 'layer-schema-registry',
