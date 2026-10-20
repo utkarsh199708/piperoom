@@ -12,6 +12,15 @@ import (
 // refused before it can reach a statement.
 var oracleIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$#]*$`)
 
+// validateIdent applies the rule 6 check to name and returns it unchanged for
+// use as a bind value. Anything that does not match is refused.
+func validateIdent(name string) (string, error) {
+	if !oracleIdentRe.MatchString(name) {
+		return "", fmt.Errorf("oracle: invalid identifier %q", name)
+	}
+	return name, nil
+}
+
 // quoteIdent validates name against the rule 6 check and returns it quoted with
 // double quotes, the way Oracle quotes identifiers. Quoting is applied even for
 // plain names so the statement is never built from an untrusted fragment; note
@@ -20,8 +29,8 @@ var oracleIdentRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$#]*$`)
 // quotes). Embedded double quotes are doubled, as Oracle requires, though the
 // validation regexp never admits one.
 func quoteIdent(name string) (string, error) {
-	if !oracleIdentRe.MatchString(name) {
-		return "", fmt.Errorf("oracle: invalid identifier %q", name)
+	if _, err := validateIdent(name); err != nil {
+		return "", err
 	}
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`, nil
 }
@@ -36,21 +45,39 @@ func quoteTable(table string) (string, error) {
 	return owner + "." + name, nil
 }
 
-// quoteTableParts returns the two quoted identifiers of an "owner.table" name,
-// so a caller can splice them into a WHERE clause without re-splitting a
-// quoted string.
-func quoteTableParts(table string) (owner, name string, err error) {
+// tableParts validates an "owner.table" name and returns its two parts
+// unchanged for use as bind values.
+func tableParts(table string) (owner, name string, err error) {
 	parts := strings.Split(table, ".")
 	if len(parts) != 2 {
 		return "", "", fmt.Errorf("oracle: table must be owner.table, got %q", table)
 	}
-	owner, err = quoteIdent(parts[0])
+	owner, err = validateIdent(parts[0])
 	if err != nil {
 		return "", "", fmt.Errorf("oracle: table %q: %w", table, err)
 	}
-	name, err = quoteIdent(parts[1])
+	name, err = validateIdent(parts[1])
 	if err != nil {
 		return "", "", fmt.Errorf("oracle: table %q: %w", table, err)
+	}
+	return owner, name, nil
+}
+
+// quoteTableParts returns the two quoted identifiers of an "owner.table" name,
+// so a caller can splice them into a WHERE clause without re-splitting a
+// quoted string.
+func quoteTableParts(table string) (owner, name string, err error) {
+	owner, name, err = tableParts(table)
+	if err != nil {
+		return "", "", err
+	}
+	owner, err = quoteIdent(owner)
+	if err != nil {
+		return "", "", err
+	}
+	name, err = quoteIdent(name)
+	if err != nil {
+		return "", "", err
 	}
 	return owner, name, nil
 }

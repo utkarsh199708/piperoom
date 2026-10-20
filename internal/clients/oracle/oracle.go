@@ -9,6 +9,7 @@ package oracle
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -27,12 +28,18 @@ type Client struct {
 // deadline. The DSN is a go-ora URL: oracle://user:password@host:port/service.
 func New(ctx context.Context, dsn string) (*Client, error) {
 	if _, err := go_ora.ParseConfig(dsn); err != nil {
+		// go-ora returns url.Parse's error unchanged, and *url.Error prints the
+		// full URL (including the password). Report only the inner cause.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("oracle: parse config: %w", ue.Err)
+		}
 		return nil, fmt.Errorf("oracle: parse config: %w", err)
 	}
 
 	db := sql.OpenDB(go_ora.NewConnector(dsn))
-	// go-ora multiplexes one physical connection; a pool larger than one adds
-	// nothing and would open extra sessions against the source.
+	// One session against the source is enough for the read-only checks; a
+	// larger pool would open extra sessions for no benefit.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxIdleTime(queryTimeout)
@@ -129,45 +136,40 @@ func (c *Client) Database(ctx context.Context) (DatabaseInfo, error) {
 // pdbs lists the pluggable database names in CON_ID order, excluding the CDB
 // root (1) and the seed (2).
 func (c *Client) pdbs(ctx context.Context) ([]string, error) {
-	rows, err := c.query(ctx, `SELECT NAME FROM V$CONTAINERS WHERE CON_ID > 2 ORDER BY CON_ID`)
-	if err != nil {
-		return nil, fmt.Errorf("oracle: list pdbs: %w", err)
-	}
-	defer rows.Close()
-
 	var out []string
-	for rows.Next() {
+	err := c.each(ctx, `SELECT NAME FROM V$CONTAINERS WHERE CON_ID > 2 ORDER BY CON_ID`, nil, func(rows sqlRows) error {
 		var name sql.NullString
 		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("oracle: scan pdb: %w", err)
+			return fmt.Errorf("oracle: scan pdb: %w", err)
 		}
 		out = append(out, nullStr(name))
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("oracle: read pdbs: %w", err)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("oracle: list pdbs: %w", err)
 	}
 	return out, nil
 }
 
 // versionBanner returns the first "Oracle Database …" banner from V$VERSION.
 func (c *Client) versionBanner(ctx context.Context) (string, error) {
-	rows, err := c.query(ctx, `SELECT BANNER FROM V$VERSION ORDER BY ROWNUM`)
+	var banner string
+	err := c.each(ctx, `SELECT BANNER FROM V$VERSION ORDER BY ROWNUM`, nil, func(rows sqlRows) error {
+		var b sql.NullString
+		if err := rows.Scan(&b); err != nil {
+			return fmt.Errorf("oracle: scan version: %w", err)
+		}
+		if strings.HasPrefix(nullStr(b), "Oracle Database ") {
+			banner = nullStr(b)
+			return errStop
+		}
+		return nil
+	})
 	if err != nil {
 		return "", fmt.Errorf("oracle: read version: %w", err)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var banner sql.NullString
-		if err := rows.Scan(&banner); err != nil {
-			return "", fmt.Errorf("oracle: scan version: %w", err)
-		}
-		if strings.HasPrefix(nullStr(banner), "Oracle Database ") {
-			return nullStr(banner), nil
-		}
+	if banner == "" {
+		return "", fmt.Errorf("oracle: no Oracle Database banner in V$VERSION")
 	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("oracle: read version: %w", err)
-	}
-	return "", fmt.Errorf("oracle: no Oracle Database banner in V$VERSION")
+	return banner, nil
 }

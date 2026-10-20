@@ -47,7 +47,10 @@ type SupplementalLogging struct {
 
 // TableSupplementalLogging is one table's supplemental logging from
 // DBA_LOG_GROUPS: whether an "ALL COLUMN LOGGING" log group exists (the form
-// the Debezium Oracle connector needs) and whether it always logs.
+// the Debezium Oracle connector needs) and whether it always logs. Debezium
+// also accepts database-level SUPPLEMENTAL_LOG_DATA_ALL = YES instead of
+// per-table ALL COLUMN groups; the U9b driver should treat either as
+// satisfying the requirement (see SupplementalLogging.All).
 type TableSupplementalLogging struct {
 	Table      string `json:"table"`
 	AllColumns bool   `json:"all_columns"` // an ALL COLUMN LOGGING group exists
@@ -63,7 +66,7 @@ type LogMinerGrants struct {
 }
 
 // TablePrivilege is one object privilege the LogMiner user holds on a table
-// (e.g. LOGMINING, SELECT).
+// (e.g. SELECT).
 type TablePrivilege struct {
 	Table     string `json:"table"`
 	Privilege string `json:"privilege"`
