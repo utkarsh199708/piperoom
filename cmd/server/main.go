@@ -74,6 +74,7 @@ func run() error {
 func runWith(d startDeps) error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	quickstart := flag.Bool("quickstart", false, "read-only quickstart: the real agent and tools, in-memory room store, dev login on loopback only, write mode off, a one-user users file for this run; prints the URL to open")
+	solo := flag.Bool("solo", false, "with --demo or --quickstart: give the demo presenter the solo ceremony (sole driver, approve-all)")
 	ownersPath := flag.String("owners", "", "with --quickstart: the owners file (default ./"+quickstartDefaultOwners+"); without --quickstart, set OWNERS_FILE instead")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
@@ -93,7 +94,7 @@ func runWith(d startDeps) error {
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
 	}
-	if err := checkStartFlags(*demoMode, *quickstart, *allowRemote, *ownersPath); err != nil {
+	if err := checkStartFlags(*demoMode, *quickstart, *solo, *allowRemote, *ownersPath); err != nil {
 		return err
 	}
 	if down.n != 0 || down.apply || down.confirm != "" || down.dropEvents {
@@ -274,8 +275,12 @@ func runWith(d startDeps) error {
 			"token_budget", shadowCfg.TokenBudget, "max_turns", shadowCfg.MaxTurns)
 	}
 	// Solo mode: refuse to start when the solo user is unknown or owners.yaml
-	// names anyone else (design section 5.3).
-	soloUser, err := soloSetup(cfg, users, own, log)
+	// names anyone else (design section 5.3). --solo sets the solo user to the
+	// demo presenter, through the same path as PIPEROOM_SOLO_USER.
+	if *solo {
+		cfg.SoloUser = demoPresenterID
+	}
+	soloUser, err := soloSetup(cfg, users, own, *solo, log)
 	if err != nil {
 		return err
 	}

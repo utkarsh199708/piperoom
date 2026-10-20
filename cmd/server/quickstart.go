@@ -43,7 +43,7 @@ var errQuickstartWriteMode = errors.New("server: --quickstart is read-only, so P
 
 // checkStartFlags refuses flag combinations that cannot mean what they say,
 // before anything is read or opened.
-func checkStartFlags(demo, quickstart, allowRemote bool, ownersPath string) error {
+func checkStartFlags(demo, quickstart, solo, allowRemote bool, ownersPath string) error {
 	switch {
 	case quickstart && demo:
 		return errors.New("server: --quickstart and --demo cannot be combined: --quickstart runs the real agent on your pipelines, --demo a scripted one on fake data")
@@ -51,6 +51,8 @@ func checkStartFlags(demo, quickstart, allowRemote bool, ownersPath string) erro
 		return errors.New("server: --quickstart listens on loopback only; --allow-remote cannot be combined with it")
 	case ownersPath != "" && !quickstart:
 		return errors.New("server: --owners needs --quickstart; without it, set OWNERS_FILE")
+	case solo && !demo && !quickstart:
+		return errors.New("server: --solo needs --demo or --quickstart: it gives the demo presenter the solo ceremony; the full server takes the solo user from PIPEROOM_SOLO_USER")
 	}
 	return nil
 }

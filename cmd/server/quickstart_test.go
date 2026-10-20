@@ -62,10 +62,10 @@ layers:
 
 func TestCheckStartFlags(t *testing.T) {
 	for _, tc := range []struct {
-		name                          string
-		demo, quickstart, allowRemote bool
-		owners                        string
-		wantErr                       string // "" = allowed
+		name                                string
+		demo, quickstart, solo, allowRemote bool
+		owners                              string
+		wantErr                             string // "" = allowed
 	}{
 		{name: "no flags"},
 		{name: "demo", demo: true},
@@ -76,9 +76,12 @@ func TestCheckStartFlags(t *testing.T) {
 		{name: "quickstart and allow-remote", quickstart: true, allowRemote: true, wantErr: "loopback only"},
 		{name: "owners without quickstart", owners: "x.yaml", wantErr: "--owners needs --quickstart"},
 		{name: "owners with demo", demo: true, owners: "x.yaml", wantErr: "--owners needs --quickstart"},
+		{name: "solo alone", solo: true, wantErr: "--solo needs --demo or --quickstart"},
+		{name: "demo with solo", demo: true, solo: true},
+		{name: "quickstart with solo", quickstart: true, solo: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkStartFlags(tc.demo, tc.quickstart, tc.allowRemote, tc.owners)
+			err := checkStartFlags(tc.demo, tc.quickstart, tc.solo, tc.allowRemote, tc.owners)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("want no error, got %v", err)

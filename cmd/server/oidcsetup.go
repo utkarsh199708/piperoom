@@ -49,17 +49,43 @@ func oidcSetup(cfg config.Config, settings auth.Settings, public httpapi.PublicO
 	return o, nil
 }
 
+// demoPresenterID is the demo's presenter and driver (docs/demo/schema-change.md
+// roles, and the first user of room.DefaultUsers). --solo gives this user the
+// solo ceremony.
+const demoPresenterID = "arjun"
+
 // soloSetup runs the solo-mode start check (design section 5.3). It returns the
 // trimmed solo user ("" when solo mode is off). A violation refuses the start;
 // a pass logs a warning, because solo mode drops the second pair of eyes.
-func soloSetup(cfg config.Config, users *room.Users, own *owners.Owners, log *slog.Logger) (string, error) {
+// soloFlag is the --solo flag: it gives the demo presenter the solo ceremony
+// even though owners.yaml names other principals (a try-it convenience, not the
+// production single-owner rule), so it only checks that the user is known.
+func soloSetup(cfg config.Config, users *room.Users, own *owners.Owners, soloFlag bool, log *slog.Logger) (string, error) {
 	solo := strings.TrimSpace(cfg.SoloUser)
 	if solo == "" {
 		return "", nil
 	}
-	if err := room.CheckSoloUser(solo, users, own); err != nil {
+	if soloFlag {
+		if err := checkDemoSoloUser(solo, users); err != nil {
+			return "", fmt.Errorf("server: %w", err)
+		}
+	} else if err := room.CheckSoloUser(solo, users, own); err != nil {
 		return "", fmt.Errorf("server: %w", err)
 	}
 	log.Warn("server: SOLO MODE: one user may approve every layer, with a typed confirm; use it only for a single owner", "user", solo)
 	return solo, nil
+}
+
+// checkDemoSoloUser is the --solo (demo and quickstart) check: the presenter
+// must be a known user. owners.yaml may name other principals (the demo's
+// owners file names four owners), because --solo exists to show the solo
+// ceremony on the try-it track, not to relax the production single-owner rule.
+func checkDemoSoloUser(solo string, users *room.Users) error {
+	if users == nil {
+		return fmt.Errorf("solo mode: --solo user %q but there is no users file", solo)
+	}
+	if _, ok := users.Get(solo); !ok {
+		return fmt.Errorf("solo mode: --solo user %q is not in the users file", solo)
+	}
+	return nil
 }

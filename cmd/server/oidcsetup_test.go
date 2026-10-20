@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
+	"piperoom/internal/store/memstore"
 )
 
 func loadOwners(t *testing.T, yaml string) *owners.Owners {
@@ -54,7 +56,7 @@ func TestSoloSetupRefusesOtherOwners(t *testing.T) {
 				"kafka": {Approvers: owners.Principals{{Kind: owners.KindUser, Name: "arjun"}}},
 			}
 		}
-		if _, err := soloSetup(cfg, users, own, log); err == nil || !strings.Contains(err.Error(), "solo mode") {
+		if _, err := soloSetup(cfg, users, own, false, log); err == nil || !strings.Contains(err.Error(), "solo mode") {
 			t.Errorf("%s: soloSetup = %v, want a solo mode refusal", name, err)
 		}
 	}
@@ -63,14 +65,14 @@ func TestSoloSetupRefusesOtherOwners(t *testing.T) {
 	}
 
 	// The solo user must be in users.yaml.
-	if _, err := soloSetup(config.Config{SoloUser: "ghost"}, users, loadOwners(t, "layers:\n  postgres: priya\n"), log); err == nil {
+	if _, err := soloSetup(config.Config{SoloUser: "ghost"}, users, loadOwners(t, "layers:\n  postgres: priya\n"), false, log); err == nil {
 		t.Error("an unknown solo user started")
 	}
 }
 
 func TestSoloSetupPassesAndWarns(t *testing.T) {
 	log, buf := testLog()
-	got, err := soloSetup(config.Config{SoloUser: " priya "}, soloUsers(t), loadOwners(t, "layers:\n  postgres: priya\n  kafka: [user:priya]\n"), log)
+	got, err := soloSetup(config.Config{SoloUser: " priya "}, soloUsers(t), loadOwners(t, "layers:\n  postgres: priya\n  kafka: [user:priya]\n"), false, log)
 	if err != nil || got != "priya" {
 		t.Fatalf("soloSetup = %q, %v", got, err)
 	}
@@ -79,8 +81,56 @@ func TestSoloSetupPassesAndWarns(t *testing.T) {
 	}
 	// Off by default and silent.
 	log2, buf2 := testLog()
-	if got, err := soloSetup(config.Config{}, soloUsers(t), nil, log2); err != nil || got != "" || buf2.Len() != 0 {
+	if got, err := soloSetup(config.Config{}, soloUsers(t), nil, false, log2); err != nil || got != "" || buf2.Len() != 0 {
 		t.Fatalf("solo off: %q, %v, log %q", got, err, buf2.String())
+	}
+}
+
+// --solo (soloFlag) gives the demo presenter the solo ceremony even though the
+// demo's owners file names four owners; the same user via PIPEROOM_SOLO_USER
+// (soloFlag false) is refused as a multi-owner install.
+func TestSoloSetupDemoPresenter(t *testing.T) {
+	log, buf := testLog()
+	own := loadOwners(t, "layers:\n  postgres: priya\n  kafka-connect: arjun\n  schema-registry: priya\n  kafka: arjun\n  consumer: kabir\n  warehouse: meera\n")
+	users := room.DefaultUsers()
+	cfg := config.Config{SoloUser: demoPresenterID}
+
+	if _, err := soloSetup(cfg, users, own, false, log); err == nil || !strings.Contains(err.Error(), "solo mode") {
+		t.Fatalf("PIPEROOM_SOLO_USER=%q on the multi-owner demo owners file: soloSetup = %v, want a solo mode refusal", demoPresenterID, err)
+	}
+	got, err := soloSetup(cfg, users, own, true, log)
+	if err != nil || got != demoPresenterID {
+		t.Fatalf("--solo: soloSetup = %q, %v, want %q", got, err, demoPresenterID)
+	}
+	if !strings.Contains(buf.String(), "SOLO MODE") {
+		t.Fatalf("--solo pass logged no warning:\n%s", buf.String())
+	}
+
+	// --solo still refuses a presenter that is not in the users directory.
+	if _, err := soloSetup(config.Config{SoloUser: "ghost"}, users, own, true, log); err == nil || !strings.Contains(err.Error(), "not in the users file") {
+		t.Fatalf("--solo with an unknown presenter: soloSetup = %v, want a users-file refusal", err)
+	}
+}
+
+// With --demo --solo the snapshot's mode.solo is true for the demo presenter
+// and false for another user (X-8g done-when).
+func TestDemoSoloSnapshot(t *testing.T) {
+	svc := room.New(room.Deps{Store: memstore.New(), Users: room.DefaultUsers(), Run: fakeRun, SoloUser: demoPresenterID})
+	t.Cleanup(svc.Close)
+
+	ctx := context.Background()
+	snap, err := svc.CreateRoom(ctx, mustUser(t, svc, demoPresenterID), "solo demo", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for user, want := range map[string]bool{demoPresenterID: true, "priya": false} {
+		got, err := svc.RoomFor(ctx, mustUser(t, svc, user), snap.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Mode == nil || got.Mode.Solo != want {
+			t.Errorf("%s: mode = %+v, want solo %v", user, got.Mode, want)
+		}
 	}
 }
 
