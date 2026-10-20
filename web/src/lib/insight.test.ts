@@ -12,7 +12,9 @@ describe('insight formatting', () => {
   it('elapsedLabel', () => {
     expect(elapsedLabel(12_900)).toBe('12s')
     expect(elapsedLabel(130_000)).toBe('2m 10s')
-    expect(elapsedLabel(3_720_000)).toBe('1 h 02 min')
+    expect(elapsedLabel(3_720_000)).toBe('1 h 2 min')
+    expect(elapsedLabel(3_600_000)).toBe('1 h')
+    expect(elapsedLabel(526_200_000)).toBe('6 d 2 h')
     expect(elapsedLabel(-5)).toBe('0s')
   })
 
