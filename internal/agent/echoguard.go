@@ -32,7 +32,10 @@ import (
 const echoMinBytes = 8
 
 // flaggedSpan is one finding of a flagged read: the span text (untrusted,
-// never logged) and the caller's names found inside it.
+// never logged) and the caller's names found inside it. The text is the
+// finding's Block when injectscan computed one, so an injection whose action
+// and value sit in different sentences of the same record still lands both in
+// one span; the names are the clause-span names ScanNames filled.
 type flaggedSpan struct {
 	text  string
 	names []string
@@ -73,10 +76,19 @@ func (l *stepLedger) scanRead(stepID, tool, text string) []injectscan.Finding {
 	}
 	fr := flaggedRead{stepID: stepID, tool: tool, kinds: injectscan.Kinds(findings)}
 	for _, f := range findings {
-		if f.Offset < 0 || f.End > len(text) || f.End <= f.Offset {
+		// Prefer the clause-split Block: the clause span stops at the sentence
+		// end, so an injection that names its action in one sentence and its
+		// value in the next would leave the value outside the span and the
+		// echo rule (a) would miss it. ScanNames fills Block for every finding
+		// (the zero value means "the span is its own block").
+		start, end := f.Offset, f.End
+		if f.Block.Start < f.Block.End {
+			start, end = f.Block.Start, f.Block.End
+		}
+		if start < 0 || end > len(text) || end <= start {
 			continue
 		}
-		fr.spans = append(fr.spans, flaggedSpan{text: text[f.Offset:f.End], names: f.Names})
+		fr.spans = append(fr.spans, flaggedSpan{text: text[start:end], names: f.Names})
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -178,9 +190,17 @@ func spansName(spans []flaggedSpan, action string) bool {
 	return false
 }
 
-// containsFold reports whether sub occurs in s, ASCII case-insensitively.
+// containsFold reports whether sub occurs in s, case-insensitively, after
+// both sides are normalised as injectscan normalises them (zero-width and
+// format characters dropped, lookalike letters mapped to ASCII). A flagged
+// span that hides a value with a zero-width space or a Cyrillic/Greek
+// lookalike still matches the value the model typed clean, and the value the
+// model typed with one still matches a clean span.
 func containsFold(s, sub string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+	return strings.Contains(
+		strings.ToLower(injectscan.Normalize(s)),
+		strings.ToLower(injectscan.Normalize(sub)),
+	)
 }
 
 // paramEchoValues lists the texts of params the echo rule compares with the
