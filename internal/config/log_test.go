@@ -93,6 +93,8 @@ func TestParseFakeAgent(t *testing.T) {
 		{name: "bad ack", c: with(func(c *Config) { c.DevAck = "1" }), wantErr: "PIPEROOM_DEV_ACK"},
 		{name: "write mode on", c: with(func(c *Config) { c.WriteMode = "on" }), wantErr: "PIPEROOM_WRITE_MODE"},
 		{name: "bad write mode", c: with(func(c *Config) { c.WriteMode = "yes" }), wantErr: "PIPEROOM_WRITE_MODE"},
+		{name: "auth mode in capitals", c: with(func(c *Config) { c.AuthMode = "DEV" }), want: true},
+		{name: "slack token", c: with(func(c *Config) { c.SlackBotToken = "xoxb-test" }), wantErr: "SLACK_BOT_TOKEN"},
 	}
 	for _, tt := range tests {
 		got, err := ParseFakeAgent(tt.c)

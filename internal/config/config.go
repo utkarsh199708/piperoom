@@ -529,12 +529,18 @@ const FakeAgentScripted = "scripted"
 
 // ParseFakeAgent validates PIPEROOM_FAKE_AGENT and reports whether the server
 // runs the scripted agent instead of the real one. Empty is false. "scripted"
-// is true only in dev auth mode with PIPEROOM_DEV_ACK=DevAckValue and with
-// write mode off: a scripted agent shows people an investigation that did not
-// happen, so it must never reach a deployment with real users, and its
-// proposals must never run against real systems. Anything else is an error
-// naming the variable, so a typo stops the start instead of running the real
-// agent unnoticed.
+// is true only in dev auth mode with PIPEROOM_DEV_ACK=DevAckValue, with write
+// mode off and with no Slack bot token: a scripted agent shows people an
+// investigation that did not happen, so it must never reach a deployment with
+// real users or a real channel, and its proposals must never run against real
+// systems. Anything else is an error naming the variable, so a typo stops the
+// start instead of running the real agent unnoticed.
+//
+// cmd/server reads it only outside --demo and --quickstart (--demo already
+// runs the scripted agent and forces write mode on). When it is true the
+// server replaces every model path, not only the runner: the hand-off and
+// post-mortem writers are the scripted ones, triage is off and no model
+// endpoint is built.
 func ParseFakeAgent(c Config) (bool, error) {
 	switch v := strings.TrimSpace(c.FakeAgent); v {
 	case "":
@@ -543,7 +549,7 @@ func ParseFakeAgent(c Config) (bool, error) {
 	default:
 		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%q: want %q (or unset)", c.FakeAgent, FakeAgentScripted)
 	}
-	if mode := strings.TrimSpace(c.AuthMode); mode != "" && mode != DefaultAuthMode {
+	if mode := strings.ToLower(strings.TrimSpace(c.AuthMode)); mode != "" && mode != DefaultAuthMode {
 		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_AUTH_MODE=%s, not %q", FakeAgentScripted, DefaultAuthMode, mode)
 	}
 	ack, err := ParseDevAck(c)
@@ -559,6 +565,9 @@ func ParseFakeAgent(c Config) (bool, error) {
 	}
 	if write {
 		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_WRITE_MODE=off", FakeAgentScripted)
+	}
+	if strings.TrimSpace(c.SlackBotToken) != "" {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs SLACK_BOT_TOKEN unset", FakeAgentScripted)
 	}
 	return true, nil
 }
