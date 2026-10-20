@@ -47,9 +47,11 @@ type Coordinator interface {
 	// ReleaseAgentSlot clears the slot flag of owner's lease on roomID.
 	ReleaseAgentSlot(ctx context.Context, roomID, owner string) error
 
-	// ClaimProposal claims an open, unclaimed proposal for owner's executor.
-	// ok is false when another executor claimed it first (or it is no longer
-	// open): the caller must not run any step.
+	// ClaimProposal claims an open, unclaimed proposal for owner's executor,
+	// only when every required layer has approved it (a proposal with no
+	// required layers is never claimed). ok is false when another executor
+	// claimed it first, it is no longer open, or it is not approved in full:
+	// the caller must not run any step.
 	ClaimProposal(ctx context.Context, proposalID, owner string) (ok bool, err error)
 	// TouchProposalClaim refreshes owner's claim before a step. ok is false
 	// when owner no longer holds the claim (the stale sweep took it): the
@@ -118,7 +120,18 @@ type StaleProposal struct {
 	ProposalID string
 	RoomID     string
 	ClaimedBy  string // "" when it was never claimed
+	// WriteBlocked: the status is ProposalStatusBlocked, so the proposal was
+	// fully approved while write mode was off and never ran.
+	WriteBlocked bool
 }
+
+// ProposalStatusBlocked is the status of a proposal fully approved while
+// write mode was off (PIPEROOM_WRITE_MODE): never claimed, never run. Once
+// its unclaimed window passes, the stale rule lists it like an approved,
+// unclaimed open proposal, flagged WriteBlocked, so a replica with write mode
+// on records why it did not run instead of running it. Only while its room is
+// open: a closed room's blocked row stays blocked.
+const ProposalStatusBlocked = "blocked"
 
 var _ Coordinator = (*PG)(nil)
 
@@ -334,13 +347,28 @@ func (s *PG) ClaimProposal(ctx context.Context, proposalID, owner string) (bool,
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE proposals SET claimed_by = $2, claimed_at = now()
-		 WHERE proposal_id = $1 AND claimed_by IS NULL AND status = 'open'`, proposalID, owner)
+		`UPDATE proposals p SET claimed_by = $2, claimed_at = now()
+		 WHERE p.proposal_id = $1 AND p.claimed_by IS NULL AND p.status = 'open' AND `+fullyApprovedSQL, proposalID, owner)
 	if err != nil {
 		return false, fmt.Errorf("store: claim proposal %s: %w", proposalID, err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
+
+// fullyApprovedSQL holds when every required layer of proposals row p has an
+// approved decision. The claim checks it in the same statement that takes the
+// claim, so no executor (whoever calls it, whenever) can ever claim, and so
+// run, a proposal that is not approved in full. No required layers is never
+// approved: an empty array, and also a jsonb null (CreateProposal stores a nil
+// slice as null). The CASE branches run in order, so a non-array never reaches
+// the array functions: such a row is not approved, the statement does not fail.
+const fullyApprovedSQL = `CASE WHEN jsonb_typeof(p.required_layers) IS DISTINCT FROM 'array' THEN false
+     WHEN jsonb_array_length(p.required_layers) = 0 THEN false
+     ELSE NOT EXISTS (
+         SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
+         WHERE NOT EXISTS (SELECT 1 FROM approvals a
+                           WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer AND a.decision = 'approved'))
+     END`
 
 // TouchProposalClaim implements Coordinator.
 func (s *PG) TouchProposalClaim(ctx context.Context, proposalID, owner string) (bool, error) {
@@ -356,16 +384,19 @@ func (s *PG) TouchProposalClaim(ctx context.Context, proposalID, owner string) (
 }
 
 // staleProposalSQL is the stale rule shared by StaleProposals and
-// InterruptProposal. $a is the claim staleness, $b the unclaimed staleness,
-// both in milliseconds; p is the proposals row.
-const staleProposalSQL = `p.status = 'open' AND (
-    (p.claimed_by IS NOT NULL AND p.claimed_at < now() - %[1]s * interval '1 millisecond')
- OR (p.claimed_by IS NULL
-     AND jsonb_array_length(p.required_layers) > 0
-     AND NOT EXISTS (
-         SELECT 1 FROM jsonb_array_elements_text(p.required_layers) AS r(layer)
-         WHERE NOT EXISTS (SELECT 1 FROM approvals a
-                           WHERE a.proposal_id = p.proposal_id AND a.layer = r.layer AND a.decision = 'approved'))
+// InterruptProposal; its unclaimed branch is fullyApprovedSQL, the rule the
+// claim uses. $a is the claim staleness, $b the unclaimed staleness,
+// both in milliseconds; p is the proposals row. 'blocked' is
+// ProposalStatusBlocked: such a row is never claimed, so only the unclaimed
+// branch can list it, and only while its room is open. In a closed room
+// "blocked" is the accurate last word, and no action.executed should land
+// after the room's post-mortem.
+const staleProposalSQL = `(
+    (p.status = 'open' AND p.claimed_by IS NOT NULL AND p.claimed_at < now() - %[1]s * interval '1 millisecond')
+ OR ((p.status = 'open'
+      OR (p.status = 'blocked' AND EXISTS (SELECT 1 FROM rooms rm WHERE rm.id = p.room_id AND rm.status = 'open')))
+     AND p.claimed_by IS NULL
+     AND ` + fullyApprovedSQL + `
      AND (SELECT max(a.decided_at) FROM approvals a WHERE a.proposal_id = p.proposal_id)
          < now() - %[2]s * interval '1 millisecond'))`
 
@@ -377,7 +408,7 @@ func (s *PG) StaleProposals(ctx context.Context, claimStale, unclaimedStale time
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		`SELECT p.proposal_id, p.room_id, coalesce(p.claimed_by, '') FROM proposals p
+		`SELECT p.proposal_id, p.room_id, coalesce(p.claimed_by, ''), p.status = 'blocked' FROM proposals p
 		 WHERE `+fmt.Sprintf(staleProposalSQL, "$1", "$2")+`
 		 ORDER BY p.proposal_id LIMIT $3`, millis(claimStale), millis(unclaimedStale), limit)
 	if err != nil {
@@ -387,7 +418,7 @@ func (s *PG) StaleProposals(ctx context.Context, claimStale, unclaimedStale time
 	var out []StaleProposal
 	for rows.Next() {
 		var sp StaleProposal
-		if err := rows.Scan(&sp.ProposalID, &sp.RoomID, &sp.ClaimedBy); err != nil {
+		if err := rows.Scan(&sp.ProposalID, &sp.RoomID, &sp.ClaimedBy, &sp.WriteBlocked); err != nil {
 			return nil, fmt.Errorf("store: scan stale proposal: %w", err)
 		}
 		out = append(out, sp)

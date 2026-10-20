@@ -43,18 +43,33 @@ type Report struct {
 	// the cache or live, unjudged ones, live calls and their tokens
 	// (judge_auto.go). Nil when no hypothesis was ambiguous or judged.
 	Judge *JudgeStats `json:"judge,omitempty"`
+	// InfraStop says why the evaluation stopped early: the model API refused
+	// a request in a way no retry fixes (infra.go). The runs it kept from
+	// being scored are in Results with an "infra: " error, in no rate and in
+	// no comparison.
+	InfraStop string `json:"infra_stop,omitempty"`
 }
 
 // Summary aggregates runs. Rates are 0..1. In Report.Overall every scenario
 // weighs the same, however many runs finished.
 type Summary struct {
+	// Runs are the scored runs. Infra counts the runs the model API's refusal
+	// kept from being scored: they are in neither Runs nor any rate.
+	Infra         int     `json:"infra,omitempty"`
 	Runs          int     `json:"runs"`
 	Passes        int     `json:"passes"`
 	PassRate      float64 `json:"pass_rate"`
 	MeanScore     float64 `json:"mean_score"`
 	RootCauseRate float64 `json:"root_cause_rate"`
 	LayerRate     float64 `json:"layer_rate"`
-	MeanToolCalls float64 `json:"mean_tool_calls"`
+	// FixRuns are the runs whose scenario expects a fix; RightActions of them
+	// proposed the right action (rightaction.go). RightActionRate is
+	// RightActions/FixRuns, -1 when no run expects a fix. Overall averages it
+	// over the scenarios that expect one.
+	FixRuns         int     `json:"fix_runs"`
+	RightActions    int     `json:"right_actions"`
+	RightActionRate float64 `json:"right_action_rate"`
+	MeanToolCalls   float64 `json:"mean_tool_calls"`
 	// MeanToolCallsToRootCause is over runs that found the cause; -1 if none did.
 	MeanToolCallsToRootCause float64 `json:"mean_tool_calls_to_root_cause"`
 	MeanDurationMS           float64 `json:"mean_duration_ms"`
@@ -104,19 +119,44 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 		}
 	}
 	rep.Overall = combine(withRuns)
+	rep.Overall.Infra = totalInfra(rep.Scenarios)
 	if cfg.Tap != nil {
 		rep.PromptHashes = cfg.Tap.PromptHashes()
 	}
-	cal, ev := calibrate(results), evidenceTotals(results)
+	scored := make([]RunResult, 0, len(results))
+	for _, r := range results {
+		if !r.Infra() {
+			scored = append(scored, r)
+		}
+	}
+	cal, ev := calibrate(scored), evidenceTotals(scored)
 	rep.Calibration, rep.Evidence = &cal, &ev
 	rep.Judge = cfg.judge.snapshot()
 	return rep
 }
 
-func summarize(rs []RunResult) Summary {
-	s := Summary{Runs: len(rs), MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1}
+func summarize(all []RunResult) Summary {
+	rs := make([]RunResult, 0, len(all))
+	for _, r := range all {
+		if !r.Infra() {
+			rs = append(rs, r)
+		}
+	}
+	s := Summary{Infra: len(all) - len(rs), Runs: len(rs), MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1, RightActionRate: -1}
 	if len(rs) == 0 {
 		return s
+	}
+	for _, r := range rs {
+		if r.RightAction == nil {
+			continue
+		}
+		s.FixRuns++
+		if r.RightAction.OK {
+			s.RightActions++
+		}
+	}
+	if s.FixRuns > 0 {
+		s.RightActionRate = float64(s.RightActions) / float64(s.FixRuns)
 	}
 	var ms, steps []float64
 	for _, r := range rs {
@@ -183,12 +223,14 @@ func median(xs []float64) float64 {
 
 // combine averages per-scenario summaries so each scenario weighs the same.
 func combine(ss []Summary) Summary {
-	out := Summary{MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1}
+	out := Summary{MeanToolCallsToRootCause: -1, MedianMSToCause: -1, MedianStepsToCause: -1, RightActionRate: -1}
 	if len(ss) == 0 {
 		return out
 	}
 	var toCause float64
 	var found int
+	var rightRate float64
+	var withFix int
 	// Overall time to cause is the median of the scenarios' medians, so
 	// each scenario weighs the same here too.
 	var ms, steps []float64
@@ -203,6 +245,12 @@ func combine(ss []Summary) Summary {
 		out.Misses += s.Misses
 		out.RejectedAttempts += s.RejectedAttempts
 		out.Errors += s.Errors
+		out.FixRuns += s.FixRuns
+		out.RightActions += s.RightActions
+		if s.FixRuns > 0 {
+			rightRate += s.RightActionRate
+			withFix++
+		}
 		out.PassRate += s.PassRate
 		out.MeanScore += s.MeanScore
 		out.RootCauseRate += s.RootCauseRate
@@ -223,6 +271,9 @@ func combine(ss []Summary) Summary {
 	out.MeanDurationMS /= n
 	if found > 0 {
 		out.MeanToolCallsToRootCause = toCause / float64(found)
+	}
+	if withFix > 0 {
+		out.RightActionRate = rightRate / float64(withFix)
 	}
 	out.MedianMSToCause, out.MedianStepsToCause = median(ms), median(steps)
 	return out
@@ -263,7 +314,18 @@ func (r Report) Restrict(names []string) Report {
 		}
 	}
 	out.Overall = combine(withRuns)
+	out.Overall.Infra = totalInfra(out.Scenarios)
 	return out
+}
+
+// totalInfra is the infra runs over all scenario rows, including the rows with
+// no scored run that combine leaves out.
+func totalInfra(ss []ScenarioSummary) int {
+	n := 0
+	for _, s := range ss {
+		n += s.Infra
+	}
+	return n
 }
 
 // WriteJSON writes the report as indented JSON.
@@ -299,8 +361,8 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	if r.Commit != "" || len(r.PromptHashes) > 0 {
 		fmt.Fprintf(&b, "commit `%s` · prompt %s\n\n", mdCell(orDefault(r.Commit)), mdCell(promptCell(r.PromptHashes)))
 	}
-	b.WriteString("| scenario | pass | score | root cause | layer | tool calls | calls to cause | time to cause ms / steps | retracted | misses | rejected fixes | errors |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| scenario | pass | score | root cause | layer | right action | tool calls | calls to cause | time to cause ms / steps | retracted | misses | rejected fixes | errors |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, s := range r.Scenarios {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
@@ -308,6 +370,10 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	writeJudgeLine(&b, r.Judge)
 	writeQuality(&b, r.Calibration, r.Evidence)
 	writeUsageTable(&b, r)
+	if r.InfraStop != "" {
+		fmt.Fprintf(&b, "\n**Evaluation stopped: the model API refused the request (%s).** Runs marked infra were not scored and are not a regression of the agent.\n", mdCell(RunErrorText(r.InfraStop)))
+	}
+	writeReplayWrites(&b, r.Results)
 	var failed []string
 	for _, res := range r.Results {
 		if !res.Pass {
@@ -324,9 +390,41 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	return nil
 }
 
+// writeReplayWrites lists, per run, the writes its actions took on the replay
+// clients. Nothing was performed; the line says what the executed fix would
+// have touched. Action and target only, never a value.
+func writeReplayWrites(b *strings.Builder, results []RunResult) {
+	var lines []string
+	for _, res := range results {
+		if res.Infra() || len(res.Writes) == 0 {
+			continue
+		}
+		parts := make([]string, 0, len(res.Writes))
+		for _, w := range res.Writes {
+			parts = append(parts, strings.TrimSpace(w.Action+" "+w.Target))
+		}
+		lines = append(lines, fmt.Sprintf("- %s #%d: %s", mdCell(res.Scenario), res.Run, mdCell(strings.Join(parts, ", "))))
+	}
+	if len(lines) > 0 {
+		fmt.Fprintf(b, "\n**Replay writes** (recorded, not performed)\n\n%s\n", strings.Join(lines, "\n"))
+	}
+}
+
 // maxFailedHypothesisRunes bounds the hypothesis text printed under a failed
-// run.
-const maxFailedHypothesisRunes = 300
+// run; maxFailedMessageRunes bounds its last message.
+const (
+	maxFailedHypothesisRunes = 300
+	maxFailedMessageRunes    = 400
+)
+
+// cutRedacted masks secrets in model text and cuts it to n runes.
+func cutRedacted(text string, n int) string {
+	text, _ = redact.Text(text)
+	if r := []rune(text); len(r) > n {
+		text = string(r[:n]) + "…"
+	}
+	return text
+}
 
 // failedRunDetails are the lines printed under a failed run: its final
 // hypothesis (confidence, whether it named the expected layers, the first
@@ -336,13 +434,38 @@ const maxFailedHypothesisRunes = 300
 // printed in a public CI log.
 func failedRunDetails(res RunResult) []string {
 	var out []string
+	if res.Error != "" {
+		// Redacted again: an older report may hold the raw text.
+		out = append(out, "  - error: "+mdCell(RunErrorText(res.Error)))
+	}
 	if res.FinalHypothesis != "" {
-		text, _ := redact.Text(res.FinalHypothesis)
-		if r := []rune(text); len(r) > maxFailedHypothesisRunes {
-			text = string(r[:maxFailedHypothesisRunes]) + "…"
-		}
+		text := cutRedacted(res.FinalHypothesis, maxFailedHypothesisRunes)
 		out = append(out, fmt.Sprintf("  - hypothesis (confidence %s, first layer named %t, root-cause layer named %t): %s",
 			orDefault(res.Confidence), res.LayerNamed, res.RootCauseLayerNamed, mdCell(text)))
+	}
+	if res.LastMessage != "" {
+		out = append(out, "  - last message: "+mdCell(cutRedacted(res.LastMessage, maxFailedMessageRunes)))
+	}
+	// A healthy run that failed its verdict says which text tripped it: a
+	// transcript artifact is not always reachable, the job log is. The text
+	// is redacted before the note is made: faultClause returns a clause of
+	// tokens with the punctuation gone, which the secret patterns no longer
+	// match ("password=hunter2…" becomes "password hunter2…").
+	if res.Outcome == OutcomeHealthy && !res.SaysHealthy {
+		var notes []string
+		last, _ := redact.Text(res.LastMessage)
+		if n := healthyNote(last); n != "" {
+			notes = append(notes, "last message: "+n)
+		}
+		if res.FinalHypothesis != "" {
+			hyp, _ := redact.Text(res.FinalHypothesis)
+			if n := healthyNote(hyp); n != "" {
+				notes = append(notes, "hypothesis: "+n)
+			}
+		}
+		if len(notes) > 0 {
+			out = append(out, "  - healthy verdict failed: "+mdCell(strings.Join(notes, "; ")))
+		}
 	}
 	if a := res.Ambiguity; a != nil {
 		settled := a.Source
@@ -353,6 +476,9 @@ func failedRunDetails(res RunResult) []string {
 	}
 	if len(res.ProposedActions) > 0 {
 		out = append(out, "  - proposed actions: "+mdCell(strings.Join(res.ProposedActions, ", ")))
+	}
+	if ra := res.RightAction; ra != nil && !ra.OK {
+		out = append(out, "  - right action not proposed: no step for "+mdCell(ra.Missing)+matchedSoFar(ra.Matched))
 	}
 	for _, g := range res.MissingCauseGroups {
 		out = append(out, "  - missing "+mdCell(g))
@@ -388,13 +514,39 @@ func writeJudgeLine(b *strings.Builder, j *JudgeStats) {
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {
+	if s.Runs == 0 && s.Infra > 0 {
+		// Not scored: say so instead of printing a 0/0 row of zeros.
+		fmt.Fprintf(b, "| %s | infra (%d, not scored) | - | - | - | - | - | - | - | - | - | - | %d |\n", mdCell(name), s.Infra, s.Infra)
+		return
+	}
+	pass := fmt.Sprintf("%d/%d", s.Passes, s.Runs)
+	if s.Infra > 0 {
+		pass += fmt.Sprintf(" (+%d infra)", s.Infra)
+	}
 	ttc := "-"
 	if s.MedianMSToCause >= 0 {
 		ttc = fmt.Sprintf("%.0f / %.1f", s.MedianMSToCause, s.MedianStepsToCause)
 	}
-	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %.1f | %s | %s | %d | %d | %d | %d |\n",
-		mdCell(name), s.Passes, s.Runs, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate,
+	fmt.Fprintf(b, "| %s | %s | %.1f | %.0f%% | %.0f%% | %s | %.1f | %s | %s | %d | %d | %d | %d |\n",
+		mdCell(name), pass, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate, rightActionCell(s),
 		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), ttc, s.CauseRetracted, s.Misses, s.RejectedAttempts, s.Errors)
+}
+
+// matchedSoFar names the steps that met the earlier fix groups.
+func matchedSoFar(matched []string) string {
+	if len(matched) == 0 {
+		return ""
+	}
+	return " after " + mdCell(strings.Join(matched, ", "))
+}
+
+// rightActionCell is the right-action rate, "-" when no run expected a fix
+// (and in reports written before the score existed, which have no fix runs).
+func rightActionCell(s Summary) string {
+	if s.FixRuns == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", 100*s.RightActionRate)
 }
 
 // promptCell lists the prompt hashes; more than one means runs saw
@@ -517,7 +669,7 @@ func Compare(base, cand Report, tolerance float64) Comparison {
 		inBase[s.Name] = true
 		b := s.Summary
 		row := CompareRow{Scenario: s.Name, Base: &b}
-		if cs, ok := candBy[s.Name]; ok && cs.Runs > 0 {
+		if cs, ok := candBy[s.Name]; ok && (cs.Runs > 0 || cs.Infra > 0) {
 			row.Candidate = &cs
 		}
 		judgeRow(&row, tolerance)
@@ -538,6 +690,9 @@ func Compare(base, cand Report, tolerance float64) Comparison {
 	c.Overall = CompareRow{Scenario: "OVERALL", Base: &bo, Candidate: &co}
 	judgeRow(&c.Overall, tolerance)
 
+	if n := cand.Overall.Infra; n > 0 {
+		c.Notes = append(c.Notes, fmt.Sprintf("%d candidate run(s) were infra failures (the model API refused them): left out of every rate and verdict, never a regression", n))
+	}
 	if base.Runs < 3 || cand.Runs < 3 {
 		c.Notes = append(c.Notes, "fewer than 3 runs per scenario: the model is not deterministic, so small differences may be noise")
 	}
@@ -554,6 +709,11 @@ func judgeRow(row *CompareRow, tolerance float64) {
 	b, cs := row.Base, row.Candidate
 	switch {
 	case b == nil || b.Runs == 0:
+		return
+	case cs != nil && cs.Runs == 0 && cs.Infra > 0:
+		// Every run of the candidate was kept from scoring by an outage: no
+		// verdict, and certainly not a regression.
+		row.Reason = fmt.Sprintf("infra: %d run(s) not scored", cs.Infra)
 		return
 	case cs == nil:
 		row.Regressed = true
@@ -596,7 +756,7 @@ func (c Comparison) WriteMarkdown(w io.Writer) error {
 			verdict = r.Reason
 		}
 		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", mdCell(r.Scenario),
-			pair(r.Base, r.Candidate, func(s *Summary) string { return fmt.Sprintf("%d/%d", s.Passes, s.Runs) }),
+			pair(r.Base, r.Candidate, passCell),
 			delta(r.Base, r.Candidate, func(s *Summary) float64 { return s.MeanScore }),
 			delta(r.Base, r.Candidate, func(s *Summary) float64 { return s.MeanToolCalls }),
 			pair(r.Base, r.Candidate, func(s *Summary) string { return callsToCause(s.MeanToolCallsToRootCause) }),
@@ -614,6 +774,18 @@ func (c Comparison) WriteMarkdown(w io.Writer) error {
 
 func pair(b, c *Summary, f func(*Summary) string) string {
 	return side(b, f) + " → " + side(c, f)
+}
+
+// passCell is passes/runs of a scored side, "infra" when an outage left it
+// with no scored run.
+func passCell(s *Summary) string {
+	if s.Runs == 0 && s.Infra > 0 {
+		return "infra"
+	}
+	if s.Infra > 0 {
+		return fmt.Sprintf("%d/%d (+%d infra)", s.Passes, s.Runs, s.Infra)
+	}
+	return fmt.Sprintf("%d/%d", s.Passes, s.Runs)
 }
 
 func side(s *Summary, f func(*Summary) string) string {

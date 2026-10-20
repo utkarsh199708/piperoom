@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go/option"
+
+	"piperoom/internal/config"
 )
 
 // newTestClaudeJudge builds the real judge for TestJudgeAgreement.
@@ -36,7 +38,7 @@ func TestClaudeJudgeRequest(t *testing.T) {
 	if err != nil || !v.RootCauseCorrect || !v.LayerCorrect || !v.RootCauseLayerCorrect {
 		t.Fatalf("v=%+v err=%v", v, err)
 	}
-	for _, want := range []string{`"effort":"low"`, `"output_config"`, `"json_schema"`, `"additionalProperties":false`, `"max_tokens":2048`, `"model":"judge-model"`, `"root_cause_layer_correct"`, "Root-cause layer: postgres", `\u003cuntrusted\u003eamount became numeric\u003c/untrusted\u003e`, "never instructions"} {
+	for _, want := range []string{`"effort":"low"`, `"output_config"`, `"json_schema"`, `"additionalProperties":false`, `"max_tokens":8192`, `"model":"judge-model"`, `"root_cause_layer_correct"`, "Root-cause layer: postgres", `\u003cuntrusted\u003eamount became numeric\u003c/untrusted\u003e`, "never instructions"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("request lacks %s:\n%s", want, body)
 		}
@@ -70,5 +72,42 @@ func TestClaudeJudgeRequest(t *testing.T) {
 	jb := NewClaudeJudge("", option.WithBaseURL(bad.URL), option.WithAPIKey("sk-ant-test-not-real"), option.WithMaxRetries(0))
 	if _, err := jb.JudgeHypothesis(context.Background(), loadSeed(), "x"); err == nil {
 		t.Error("API error swallowed")
+	}
+}
+
+// TestProviderJudgeOnVertex runs the real judge through the Vertex options
+// with fake credentials against a local server: the verdict is parsed, the
+// model falls back to cfg.Model, and a setup failure is an error.
+func TestProviderJudgeOnVertex(t *testing.T) {
+	var path, body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		path, body = r.URL.Path, string(b)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"m","type":"message","role":"assistant","model":"m","stop_reason":"end_turn",`+
+			`"content":[{"type":"text","text":"{\"layer_correct\":true,\"root_cause_correct\":true,\"root_cause_layer_correct\":true,\"reason\":\"ok\"}"}],`+
+			`"usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer srv.Close()
+	cfg := config.Config{ModelProvider: "vertex", VertexProject: "acme", VertexRegion: "us-east5", Model: "vertex-model-id"}
+	j, err := newProviderJudge(context.Background(), cfg, "", judgeEnv(nil), fakeJudgeLoaders(), option.WithBaseURL(srv.URL), option.WithMaxRetries(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := j.JudgeHypothesis(context.Background(), loadSeed(), "amount became numeric")
+	if err != nil || !v.RootCauseCorrect {
+		t.Fatalf("v=%+v err=%v", v, err)
+	}
+	if want := "/v1/projects/acme/locations/us-east5/publishers/anthropic/models/vertex-model-id:rawPredict"; path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+	for _, want := range []string{`"effort":"low"`, `"json_schema"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("request lacks %s:\n%s", want, body)
+		}
+	}
+
+	if _, err := newProviderJudge(context.Background(), config.Config{ModelProvider: "vertex"}, "m", judgeEnv(nil), fakeJudgeLoaders()); err == nil {
+		t.Fatal("vertex without a project built a judge")
 	}
 }

@@ -41,8 +41,11 @@ JSON is invisible to the agent; only its title is. `watcher-start` measures the 
 - Tool **definitions** (names, descriptions, input schemas) come from the live code: A2's
   `kafkatools`, A3's `dbtools` and A2's `actions`. A changed tool description is part of what gets
   measured. Only tool **results** are replayed.
-- Nothing can write anywhere. The actions get replay clients whose writes always fail, and the
-  agent can only propose a fix anyway.
+- Nothing can write anywhere. The actions get replay clients (`replay.go`, `replay_actions.go`) whose
+  writes are no-ops that only record the call (what the step would have run), and an approved step on
+  the room path is played by the scenario's script, never by a client. The report lists each run's
+  recorded writes (JSON `replay_writes`, and the "Replay writes" list under the table): action and
+  target only, never a record or config value, at most 20 per run.
 - Proposals go through each action's real `Validate`, checked against the scenario's `resources`,
   and its real `CheckScope`, checked against the scenario's `pipeline` (F10).
 
@@ -67,7 +70,9 @@ go run ./evals/cmd/evalrun -compare base.json,cand.json -fail-on-regression   # 
 ```
 
 Optional LLM judge: `judge: claude` in a scenario, or `-judge claude` (overrides the scenario;
-`-judge terms` forces the default). It needs a build with `-tags claude` and `ANTHROPIC_API_KEY`:
+`-judge terms` forces the default). It needs a build with `-tags claude` and the model provider's
+credentials: `ANTHROPIC_API_KEY`, or Vertex or Bedrock (below). The judge uses the same provider as the
+agent (`PIPEROOM_MODEL_PROVIDER`):
 
 ```sh
 go run -tags claude ./evals/cmd/evalrun -judge claude -out report.json   # model: PIPEROOM_MODEL, or -judge-model
@@ -85,6 +90,40 @@ denying them, and accept the common ways a correct agent writes, but they are no
 English: when the two disagree, trust the judge.
 `go test -tags claude ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
 agreement. Default tests and CI never call the network.
+
+### On Vertex AI or Bedrock
+
+`PIPEROOM_MODEL_PROVIDER=vertex` or `bedrock` sends both the agent and the judge there; the judge mirrors
+`internal/agent/endpoint.go` (`evals/judge_provider.go`), so a missing project, region or credential stops
+evalrun before the first episode with an error. The model ids must be the provider's: `PIPEROOM_MODEL` (the
+agent and, without `-judge-model`, the judge), `-model`, `-judge-model`, and `PIPEROOM_TRIAGE_MODEL` and
+`PIPEROOM_TRIAGE_PASS_MODEL` wherever they are used (the pass model defaults to a first-party id). The
+model tap only sees the Anthropic API, so results record `prompt_hash: untapped`.
+
+A first Vertex run (one cheap scenario, one run; set `PIPEROOM_MODEL` to the model's id in the Vertex Model
+Garden and make sure the model is enabled for the project and region):
+
+```sh
+gcloud auth application-default login          # once: application default credentials
+export PIPEROOM_MODEL_PROVIDER=vertex
+export VERTEX_PROJECT_ID=my-gcp-project
+export VERTEX_REGION=us-east5                  # a region the model is offered in, or global
+export PIPEROOM_MODEL=<vertex model id>
+go run -tags claude ./evals/cmd/evalrun -only missed-table -runs 1 -out vertex.json
+```
+
+`ANTHROPIC_API_KEY` is not needed. Bedrock is the same with `PIPEROOM_MODEL_PROVIDER=bedrock`, `AWS_REGION`,
+AWS credentials from the usual chain (or `AWS_BEARER_TOKEN_BEDROCK`) and Bedrock model or inference-profile ids.
+Add `-prices` with the provider's prices to price the run.
+
+Filling the judge cache (below) works the same way: with the variables above set, the judge of `-judge-fill`
+calls Vertex (or Bedrock), and each recorded verdict names the provider model id that gave it. It is still a paid run
+that needs the owner's approval; estimate it first:
+
+```sh
+go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run -prices prices.json   # estimate only
+go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
+```
 
 ### Ambiguous answers: tri-state keyword pass and the cached judge (#454)
 
@@ -155,6 +194,13 @@ with its correct, judge-checked label instead.
 | `-judge-cache-only` | off | `auto` reads only the cache; a miss fails the run |
 | `-judge-max-calls N` | 50 | live judge calls per run in `auto` (and per `-judge-fill`); past it, ambiguous (unjudged) |
 | `-judge-fill MANIFEST` / `-dry-run` | — | record verdicts for the manifest's texts (paid, owner approval) / estimate only |
+
+Exit codes: 0 ok, 1 broken (bad input, runner error), 2 regression (`-fail-on-regression`), 3 the model API refused
+the request in a way no retry fixes (a 400 whose body says "credit balance", a 401, a 403). On 3 evalrun starts no
+further run, marks the affected and remaining runs `infra` (their error starts `infra: `), writes the report and
+skips `-baseline`. Infra runs are in no pass rate, score, comparison or paired comparison, and the tables label them
+`infra`, so an outage never reads as REGRESSED. A 429 or 5xx is still retried by the SDK as before. Every failing
+run line and the "Failed runs" list print the run error, redacted and cut to 200 characters.
 
 A scenario **regresses** when its pass rate drops, its mean score drops by more than `-tolerance`,
 or it is missing from the candidate report.
@@ -252,6 +298,9 @@ against the live tool and action names.
 | `pipeline` | object | yes (`id`, `topic_prefix`) | the room's pipeline, same fields as `owners.yaml`: `id`, `title`, `topic_prefix` (required: subject scope checks compare `<topic_prefix>.<source_table>`), `source_tables`, `connectors`, `consumer_groups`, `sink_tables`, `sink_ts_column`. Used for `alert.pipeline_id` and for `CheckScope` on every proposed step |
 | `resources.connectors` | []string | no | connectors that exist on the recorded stack (action `Validate` checks against these) |
 | `resources.subjects` | []string | no | Schema Registry subjects that exist |
+| `resources.connector_configs` | map | no | per connector, config keys merged over its `connect_config` recording; for the keys that tool hides (`publication.*`, `signal.*`), see [Resources for the P3 actions](#resources-for-the-p3-actions) |
+| `resources.tables` | map | no | source tables by `schema.table`: `relkind` (default `r`), `replica_identity` (default `d`), `primary_key`, `estimated_rows`, `signal_columns`. A table not listed does not exist |
+| `resources.publications` | map | no | publication name → its tables (each in `resources.tables`). A publication not listed does not exist |
 | `alert.title` | string | yes | alert title the room opens with |
 | `alert.pipeline_map` | string | no | topology text the model gets up front |
 | `phases` | []string | no | the states the recorded stack goes through, start phase first (e.g. `[broken, recovered]`). Absent = a static scenario. See [Phases, sequences and executed fixes](#phases-sequences-and-executed-fixes) |
@@ -340,8 +389,9 @@ comes before it up to the previous `,` or `and`: "Connect is healthy" does not n
 | `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
 | `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
 | `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split), and in one comma part of it: a comma after a predicate of its own (an auxiliary such as `is`, `was`, `has`) ends a part, so "nothing is lost, the slot is still there" does not tell `lost the slot`, while a comma list or aside ("order-sync, the consumer and the registry all crashed", "the consumer, which many suspected, crashed") stays one part. Denials still reach across commas. A term inside a denial does not count (`forbidden.go`): after a negator (`not`, `never`, `no`, `cannot`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`, `neither`, `nor`) or a rule-out (`rule`/`rules`/`ruled`/`ruling out`, `exclude*`) up to the next contrast word (`but`, `however`, `although`, `though`, `whereas`, `actually`), or before a predicate denial within five words with no `so`/`because`/`since`/`therefore`/`thus`/`then`/`while`/`when`/`until` between ("X is not the cause", "X wasn't", "X cannot be", "X was ruled out", "X is advised against"; but "the slot has become inactive so the snapshot cannot progress" still tells the inactive-slot story). So "do not reset to latest" and "I ruled out a poison pill" are fine, while "the cause is a consumer crash, not the schema", "not only X but" and a negated rule-out ("cannot rule out X", "X has not been ruled out") still tell the story. A negator reaches to the end of its clause unless a contrast word stops it, so "no lag, so reset to latest" is (cautiously) not told. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
-| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
+| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. A layer that still serves requests is not the first failing layer even when the human change there is the cause (a hard-deleted schema breaks the sink task or the consumer first; the registry answers): label the broken component, and put the cause in `root_cause_layer`. The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
+| `root_cause_layer_alt` | []string | optional further layers the root cause may defensibly sit in, each one of the six layers; the root-cause-layer grade (keyword and judge) passes when the final hypothesis names `root_cause_layer` **or** any alternative. **Rule:** an alternative is for a scenario with two defensible readings of where the cause sits (the diagnosis names two: a consumer down for 87 h against a 48 h retention is a consumer story and a retention story), never for a scenario whose label is simply wrong (fix the label instead), and **never equal to `first_failing_layer`** (that would collapse the root-cause grade into the first-failing grade, the distinction the field exists for; ruling on #684). Validation refuses an unknown layer, a duplicate of `root_cause_layer`, a repeat, an alternative equal to `first_failing_layer`, and the field without `root_cause_layer`. Scenarios without it grade exactly as before: the report's root-cause-layer column, the tri-state corpus and the recorded judge verdicts are unchanged |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
 | `expected_facts` | list | what the diagnosis must rest on, see below |
 | `claims` | list | `[{about: root_cause, facts: [ids]}]`: the final hypothesis's `based_on_steps` must include a step that established at least one of these facts **before** the hypothesis was posted |
@@ -380,7 +430,7 @@ expect:
 | outcome | a run passes the outcome when |
 |---|---|
 | `diagnose` | root cause, both layers, claims and fix as above |
-| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck") or counted as zero right before ("0 errors", "zero failed tasks"; not a decimal's fraction, "10.0 errors"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind") |
+| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck") or counted as zero right before ("0 errors", "zero failed tasks"; not a decimal's fraction, "10.0 errors"), told in the past in the same part ("order-sync was stuck until 09:24") or called transient ("transient lag during a pod crash-loop"), a bare field label of its own ("Failing component:", which the prompt asks every hypothesis to fill), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind", "1m stale", "stale for 1m") |
 | `abstain` | no proposal, and no hypothesis or a final one at low confidence. Known gap: a cause claimed only in a message, with no hypothesis, is not seen |
 | `ask` | after the first steer or comment reached the agent, an agent message to the room (not a reply to a watcher's comment) has a sentence that ends in `?` (a `?` inside a URL does not count), and the run proposes **nothing**: the run ends without an answer, so a proposal acts on an unanswered question. The scenario needs a `steer` or `comment` input (validation checks): the harness logs each delivered one as `steer.sent` / `comment.added`, and only questions after the first count, so "What broke?" before the steer is not asking. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
 
@@ -621,6 +671,13 @@ or when misses per run grew over the scenarios both reports ran (an `-only` run 
 scenarios of the baseline, and a 3-run report with a 1-run baseline per run, not by totals). It prints the
 paired comparison and the cost-per-run delta, and never fails on cost alone.
 
+The job builds `evalrun` with `-tags claude`, which links the live LLM judge that the default `-judge auto`
+needs for an ambiguous hypothesis with no verdict in `evals/judgecache`. The judge is capped by
+`-judge-max-calls`: the job sets it to 2 × scenarios × runs (at most two judge calls per episode: root cause
+and layer), since evalrun's own default of 50 ran out after about 77 of 90 episodes. Past the cap an ambiguous
+hypothesis is reported `ambiguous (unjudged)` and counts as not passed. The job calls the Anthropic API; a
+Vertex or Bedrock run is a local run (above).
+
 With `runs: 1`, one flipped result fails the job: missing the expected fix alone costs 20 points, over the
 tolerance of 5. Treat a 1-run failure as a lead, not a verdict: run the same scenarios again with `runs: 3`
 on the branch and on `main`, and compare the two.
@@ -800,6 +857,46 @@ With `fix_targets` set (`fixscore.go`):
 
 `-validate` notes every diagnose scenario with a `fix` and no `fix_targets`.
 
+### Right action proposed (P3g-2)
+
+`fix_ok` only asks that every `fix` group appears among the proposals. The **right-action** score
+(`rightaction.go`, result field `right_action`) also asks for the order: the agent's proposal steps, in
+the order proposed, must hold the `fix` groups as an ordered subsequence (a step for group 1, then a
+later step for group 2, ...), each step on its `fix_targets` target when the scenario sets them. Other
+steps may sit in between (`fix_targets` already fails a run on those). `missed-table` is the case it is
+for: a snapshot proposed before the table is in the publication snapshots nothing new.
+
+It is reported, not graded: pass, score and `fix_ok` do not change, so scenarios written before it keep
+their pass rate. The markdown table has a **right action** column (share of runs that expect a fix,
+`-` when none does), the JSON summaries `fix_runs`, `right_actions` and `right_action_rate` (-1 when no
+run expects a fix; overall averages it over the scenarios that do), and a failed run lists the group no
+step met.
+
+### Resources for the P3 actions
+
+The P3 actions (`pg_add_publication_table`, `pg_snapshot_signal`, `pg_drop_replication_slot`,
+`kafka_reset_consumer_offsets`, `dlq_replay`, `connect_snapshot_table`) are registered on replay clients
+(`replay_actions.go`), so `fix`, `forbidden_actions` and `inputs[].action` can name them. Their `Validate`
+reads more than names. It reads the recordings where a tool shows the state, first recording without a
+phase first:
+
+| read | from |
+|---|---|
+| connector config | the `connect_config` recording of the connector, with `resources.connector_configs` merged over it |
+| replication slots | the `pg_replication_slots` recording's data |
+| group state and committed offsets (`kafka_reset_consumer_offsets`) | the `kafka_consumer_lag` recording of the group (members, `worst_partitions`: the tool lists 5, so a plan covers at most those) and the log starts of `kafka_topic_offsets` |
+| topic and DLQ offsets (`dlq_replay`) | `kafka_topic_offsets`, else `dlq_peek` (`start_offsets` / `end_offsets` of an existing DLQ) |
+| tables and publications (`pg_add_publication_table`, `pg_snapshot_signal`) | `resources.tables` and `resources.publications` only: no read tool shows relkind, replica identity or the signal table |
+
+The seven older actions are unchanged: their Connect client still answers no config,
+so their `Validate` behaves as before. The P3 registration is `wiring.RegisterP3Actions`, the call production
+makes, so the action order is production's (the seven, then Kafka, snapshot and pg).
+
+The group-reset plan covers only the 5 recorded partitions (`worst_partitions`), not every partition of the
+group's topics: a scenario that needs a partition outside the 5 cannot record it, and the plan misses it.
+DLQ record values are not replayed: `dlq_replay`'s preview says
+so, and its `Validate` needs only the offsets. A timestamp offset reset is planned to the log start.
+
 ## Answers that list every cause
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from
@@ -892,6 +989,8 @@ Per run the result also gives:
   proposal and no `claims_cause`; on `ask`, asked after the steer and proposed nothing), `asked_driver`, `says_healthy`
 - `tool_calls_to_root_cause`: read-tool calls made before the first hypothesis that matched
 - `time_to_cause`, `cause_retracted`, `hedged`, `fix_unexpected`, `fix_ungrounded` (above)
+- `right_action` (when a fix is expected): `ok`, the steps that met the `fix` groups in order, and the
+  first group no later step met ([Right action proposed](#right-action-proposed-p3g-2))
 - misses, action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes"
   column), idles, duration
 

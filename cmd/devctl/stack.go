@@ -33,6 +33,18 @@ type stack struct {
 	cfg  config.Config
 	http *http.Client
 	log  *slog.Logger
+
+	// Test seams; nil or zero means the real thing. Unit tests play Postgres
+	// and docker compose with them, since neither runs without Docker.
+	sqlFn            func(ctx context.Context, db string, sql ...string) (string, error)
+	composeFn        func(ctx context.Context, env map[string]string, args ...string) error
+	clickhouseExecFn func(ctx context.Context, query string) error
+	groupFn          func(ctx context.Context, group string) (groupView, error)
+	// poll is how often waitFor checks its condition (default 2 s).
+	poll time.Duration
+	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init
+	// retry (default every 2 s for up to 60 s).
+	clickhouseRetryEvery, clickhouseRetryFor time.Duration
 }
 
 func newStack(log *slog.Logger) (*stack, error) {
@@ -63,6 +75,9 @@ func repoRoot() (string, error) {
 
 // compose runs docker compose on dev/docker-compose.yml with extra env vars.
 func (s *stack) compose(ctx context.Context, env map[string]string, args ...string) error {
+	if s.composeFn != nil {
+		return s.composeFn(ctx, env, args...)
+	}
 	full := append([]string{"compose", "-f", filepath.Join(s.root, "dev", "docker-compose.yml")}, args...)
 	cmd := exec.CommandContext(ctx, "docker", full...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
@@ -78,6 +93,9 @@ func (s *stack) compose(ctx context.Context, env map[string]string, args ...stri
 
 // psql runs SQL inside the Postgres container as the superuser.
 func (s *stack) psql(ctx context.Context, db string, sql ...string) (string, error) {
+	if s.sqlFn != nil {
+		return s.sqlFn(ctx, db, sql...)
+	}
 	args := []string{"exec", pgContainer, "psql", "-U", "piperoom", "-d", db, "-v", "ON_ERROR_STOP=1", "-At"}
 	for _, q := range sql {
 		args = append(args, "-c", q)
@@ -139,22 +157,7 @@ func (s *stack) registerConnector(ctx context.Context) error {
 // registerConnectorUser re-registers the connector with database.user/password
 // overridden, so a scenario can point the connector at a different role.
 func (s *stack) registerConnectorUser(ctx context.Context, user, pass string) error {
-	body, err := os.ReadFile(filepath.Join(s.root, "dev", "connectors", connectorName+".json"))
-	if err != nil {
-		return fmt.Errorf("devctl: read connector config: %w", err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(body, &cfg); err != nil {
-		return fmt.Errorf("devctl: decode connector config: %w", err)
-	}
-	cfg["database.user"] = user
-	cfg["database.password"] = pass
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("devctl: encode connector config: %w", err)
-	}
-	_, err = s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", b, http.StatusOK, http.StatusCreated)
-	return err
+	return s.registerConnectorWith(ctx, map[string]string{"database.user": user, "database.password": pass})
 }
 
 type connectorStatus struct {
@@ -254,7 +257,11 @@ func (s *stack) waitHTTP(ctx context.Context, u string, timeout time.Duration) e
 func (s *stack) waitFor(ctx context.Context, timeout time.Duration, cond func() (bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	t := time.NewTicker(2 * time.Second)
+	every := s.poll
+	if every <= 0 {
+		every = 2 * time.Second
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		ok, err := cond()

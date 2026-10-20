@@ -84,7 +84,11 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	}
 	// The actions of the room's own pipeline (docs/design/tenancy.md): their
 	// Validate reads that pipeline's systems only.
-	acts := s.actionsFor(s.roomPipeline(ctx, roomID))
+	pipelineID := s.roomPipeline(ctx, roomID)
+	acts := s.actionsFor(pipelineID)
+	// Validate runs under the room's pipeline scope, as the executor and the
+	// preview do, so an action reads that pipeline's whole config.
+	vctx := s.pipelineCtx(ctx, pipelineID)
 	// Structural checks first: they do not need the room state.
 	for i, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
@@ -97,7 +101,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		if !isKnownLayer(step.Layer) {
 			return "", validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
 		}
-		if err := a.Validate(ctx, step.Params); err != nil {
+		if err := a.Validate(vctx, step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 		// Exact, case-sensitive keys only: the decoder would fold case and the
@@ -150,6 +154,8 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 	}
 	p.RequiredLayers = required
+	// Fixed at creation like the required layers; never set by the caller.
+	p.FallbackLayers = s.fallbackLayersFor(st.snap.PipelineID, required)
 
 	p.ProposalID = NewID("p_")
 	stepsJSON, err := json.Marshal(p.Steps)
@@ -244,7 +250,7 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		// The solo confirm text is checked after the hash (below), so a stale
 		// solo user is told params_mismatch first.
-		grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, confirm, false)
+		grant, err := s.authorizeProposalLayer(st, p, user, layer, confirm, false)
 		if err != nil {
 			return err
 		}
@@ -265,28 +271,8 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 			}
 		}
 		prow = p
-		ident := s.identityFor(user, grant)
-		if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "approved", "", p.ParamsHash, ident)); err != nil {
-			if errors.Is(err, store.ErrAlreadyExists) {
-				return alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
-			}
+		if ev, err = s.appendApprovalLocked(ctx, st, p, layer, s.personApprover(st, proposalID, user, layer, grant)); err != nil {
 			return err
-		}
-		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
-			ProposalID: proposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident,
-		})
-		if err != nil {
-			dctx, cancel := compensateCtx(ctx)
-			defer cancel()
-			if delErr := s.store.DeleteApproval(dctx, proposalID, layer); delErr != nil {
-				s.log.Warn("room: compensate failed approval", "proposal", proposalID, "layer", layer, "err", delErr)
-			}
-			return err
-		}
-		s.log.Info("room: approval given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
-		if strings.HasPrefix(grant, owners.GrantBackupPrefix) {
-			_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)})
-			s.afterAppend(p.RoomID, "backup approval note", err, "proposal", proposalID)
 		}
 		if allApproved(st.snap, proposalID) {
 			// Approved in full: queue the steps on the room's single executor so
@@ -301,9 +287,117 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	return ev, nil
 }
 
+// approver is who gives one approval and on what right: the event actor,
+// the identity recorded with it (nil for the policy, which has none),
+// authorizeLayer's principal detail ("user:priya", "backup:user:meera",
+// "solo", "fallback", or GrantPolicy for the auto-approve policy), the person
+// (nil for the policy) and the condition the append is made under (nil: none
+// beyond the caller's checks).
+type approver struct {
+	actor  events.Actor
+	ident  *events.Identity
+	detail string
+	user   *User
+	check  func() error
+}
+
+// personApprover is the approver of a person's approve or approve-all. A
+// fallback approval is appended only while checkFallbackLocked still holds,
+// so a driver change logged after the caller's check refuses it.
+func (s *Service) personApprover(st *roomState, proposalID string, user User, layer, detail string) approver {
+	ident := s.identityFor(user, detail)
+	a := approver{actor: s.humanActor(user), ident: &ident, detail: detail, user: &user}
+	if approvalGrant(detail) == events.GrantFallback {
+		a.check = func() error { return s.checkFallbackLocked(st, proposalID, user, layer) }
+	}
+	return a
+}
+
+// appendApprovalLocked records one layer's approval: the approvals row first,
+// so the store's one-decision-per-layer rule refuses a second one
+// (409 already_decided), then approval.given, removing the row again when the
+// event cannot be appended. a.detail is identity.grant, and
+// approvalGrant(a.detail) is the event's grant (P0 item 4). A backup's
+// approval also gets the room's backup note. ApproveProposalConfirm,
+// ApproveAllProposal and the auto-approve policy (firePolicyLocked) all
+// record through here, so an approval is the same record, log line and
+// metric whichever path gave it. The caller has checked that the proposal is
+// open, the layer pending and the params hash; it holds st's lock and queues
+// the executor once allApproved. With a.check set the event is appended only
+// while it holds (emitCheckedLocked).
+//
+// A person's approval also stops a pending policy countdown of the proposal:
+// the fold of its approval.given does (foldScheduleDecision), on every
+// replica, and the policy's fire path re-checks that fold under the room's
+// lock, so there is no timer here to stop.
+func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p store.ProposalRow, layer string, a approver) (events.Event, error) {
+	grant := approvalGrant(a.detail)
+	rowIdent := events.Identity{Grant: a.detail}
+	if a.ident != nil {
+		rowIdent = *a.ident
+	}
+	if err := s.store.RecordApproval(ctx, approvalRow(p.ProposalID, layer, "approved", "", p.ParamsHash, rowIdent)); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
+		}
+		// Named, so a failure part-way through approve-all says which layer.
+		return events.Event{}, fmt.Errorf("room: record approval of %s: %w", layer, err)
+	}
+	payload := events.ApprovalGivenPayload{
+		ProposalID: p.ProposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: a.ident, Grant: grant,
+	}
+	if grant == events.GrantPolicy {
+		payload.Policy = events.PolicyAutoApprove
+	}
+	var ev events.Event
+	var err error
+	if a.check != nil {
+		ev, err = s.emitCheckedLocked(ctx, st, p.RoomID, a.check, events.ApprovalGiven, a.actor, payload)
+	} else {
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, a.actor, payload)
+	}
+	if err != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if delErr := s.store.DeleteApproval(dctx, p.ProposalID, layer); delErr != nil {
+			s.log.Warn("room: compensate failed approval", "proposal", p.ProposalID, "layer", layer, "err", delErr)
+		}
+		return events.Event{}, err
+	}
+	s.approvals.inc(grant)
+	s.log.Info("room: approval given", "proposal", p.ProposalID, "layer", layer, "user", a.actor.ID, "grant", a.detail)
+	if a.user != nil && strings.HasPrefix(a.detail, owners.GrantBackupPrefix) {
+		_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(*a.user, layer, a.detail)})
+		s.afterAppend(p.RoomID, "backup approval note", err, "proposal", p.ProposalID)
+	}
+	return ev, nil
+}
+
+// approvalGrant maps authorizeLayer's principal detail to approval.given's
+// grant: the solo user's detail is "solo", the driver's on an unowned layer
+// is "fallback" (authorizeProposalLayer), every other detail is an owner
+// right (owners.yaml principal or backup, or the users.yaml layers list).
+func approvalGrant(detail string) string {
+	switch detail {
+	case events.GrantSolo:
+		return events.GrantSolo
+	case events.GrantFallback:
+		return events.GrantFallback
+	case events.GrantPolicy:
+		return events.GrantPolicy
+	}
+	return events.GrantOwner
+}
+
 // RejectProposal records a layer owner's rejection. paramsHash follows the same
 // rule as in ApproveProposal: required, and 409 params_mismatch when it is not
 // the proposal's hash.
+//
+// Whoever may approve a layer may reject it (authorizeProposalLayer), so the
+// room's driver may reject a fallback_layers entry (P2b-3b); otherwise a layer
+// nobody owns would keep the proposal open until the room closes. As for a
+// fallback approval, the fallback rule is checked again when the event is
+// appended (emitCheckedLocked), so a driver change logged in between refuses it.
 func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, layer, reason, paramsHash string) (events.Event, error) {
 	if err := rejectUnstorable(layer, reason, paramsHash); err != nil {
 		return events.Event{}, err
@@ -322,7 +416,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, "", false)
+	grant, err := s.authorizeProposalLayer(st, p, user, layer, "", false)
 	if err != nil {
 		return events.Event{}, err
 	}
@@ -342,9 +436,17 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		}
 		return events.Event{}, err
 	}
-	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), events.ApprovalRejectedPayload{
+	payload := events.ApprovalRejectedPayload{
 		ProposalID: proposalID, Layer: layer, Reason: reason, ParamsHash: p.ParamsHash, Identity: &ident,
-	})
+	}
+	var ev events.Event
+	if grant == events.GrantFallback {
+		ev, err = s.emitCheckedLocked(ctx, st, p.RoomID, func() error {
+			return s.checkFallbackLocked(st, proposalID, user, layer)
+		}, events.ApprovalRejected, s.humanActor(user), payload)
+	} else {
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), payload)
+	}
 	if err != nil {
 		dctx, cancel := compensateCtx(ctx)
 		defer cancel()

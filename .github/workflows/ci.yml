@@ -60,6 +60,14 @@ jobs:
         run: go vet -tags claude ./internal/agent/... ./evals/...
       - name: go vet (evalgen- and e2e-tagged files; compile only, nothing else builds them)
         run: go vet -tags evalgen,e2e ./...
+      - name: go vet (warehouse-tagged files; compile only, these need a real BigQuery or Databricks)
+        # Tags of their own (not integration), so no other vet step builds
+        # them. Databricks is vetted once its package lands (P4e).
+        run: |
+          go vet -tags bigquery_integration ./internal/clients/bigquery/
+          if [ -d internal/clients/databricks ]; then
+            go vet -tags databricks_integration ./internal/clients/databricks/
+          fi
       - name: go build
         run: go build ./...
       - name: go test (unit only; integration tests are build-tagged and need the dev stack)
@@ -129,9 +137,15 @@ jobs:
           mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
           go run ./cmd/devctl lock --owner ci
           go run ./cmd/devctl up --owner ci
+      - name: Start the optional ClickHouse profile
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse up -d --wait clickhouse
+      - name: Create the ClickHouse sink (devctl clickhouse init)
+        run: go run ./cmd/devctl clickhouse init --owner ci
       - name: go test -tags integration ./internal/... ./cmd/...
         env:
           PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
+          CLICKHOUSE_INTEGRATION_DSN: clickhouse://piperoom_reader:piperoom-clickhouse-reader@127.0.0.1:9001/analytics
+          CLICKHOUSE_INTEGRATION_ADMIN_DSN: clickhouse://piperoom_admin:piperoom-clickhouse-admin@127.0.0.1:9001/analytics
         run: |
           set +e
           go test -count=1 -timeout 25m -json -tags integration ./internal/... ./cmd/... > test.json
@@ -168,7 +182,7 @@ jobs:
         run: .github/scripts/wait-healthy.sh 180
       - name: Dump stack logs
         if: failure()
-        run: docker compose -f dev/docker-compose.yml logs --no-color --tail=300
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse logs --no-color --tail=300
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -179,7 +193,121 @@ jobs:
           retention-days: 7
       - name: Tear down
         if: always()
-        run: docker compose -f dev/docker-compose.yml down -v --remove-orphans
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse down -v --remove-orphans
+
+  # P1c-2: the README's "Quickstart (5 minutes)" path, timed. `make quickstart`
+  # runs discover, builds the UI and starts `server --quickstart` against the
+  # dev stack; the job fails unless /healthz answers within the budget with
+  # write_mode "off" and the printed URL answers 200. The clock starts at
+  # `make quickstart`: the dev stack and the Go/Node toolchains are the
+  # README's prerequisites, not part of the five minutes.
+  quickstart:
+    name: Quickstart (read-only, 5-minute budget)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      PIPEROOM_STACK_OWNER: ci
+      PIPEROOM_STACK_LOCK: /tmp/piperoom-ci/stack.lock
+      QUICKSTART_DIR: /tmp/piperoom-quickstart
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Start the dev stack (postgres, kafka, schema registry, connect, devconsumer)
+        run: docker compose -f dev/docker-compose.yml up -d --build
+      - name: Wait until Connect and the Schema Registry answer
+        run: .github/scripts/wait-for-stack.sh 300
+      - name: Register the connector (discover finds pipelines through it)
+        run: |
+          mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
+          go run ./cmd/devctl lock --owner ci
+          go run ./cmd/devctl up --owner ci
+      - name: make quickstart, timed to /healthz OK (budget 300 s)
+        timeout-minutes: 7
+        env:
+          BUDGET_SECONDS: "300"
+          # No ANTHROPIC_API_KEY: the server starts without one. As in
+          # internal/testenv (quickstartEnv), the model endpoint is a closed
+          # loopback port, so nothing in this job can reach a real model API.
+          ANTHROPIC_BASE_URL: http://127.0.0.1:1
+        run: |
+          mkdir -p "$QUICKSTART_DIR"
+          start=$SECONDS
+          # setsid: make, go run and the server share one new process group,
+          # so the tear-down stops all of them, not only make.
+          setsid make quickstart >"$QUICKSTART_DIR/stdout.log" 2>"$QUICKSTART_DIR/stderr.log" &
+          echo $! >"$QUICKSTART_DIR/pgid"
+          url=""
+          until [ -n "$url" ] && curl -fsS --max-time 5 -o /dev/null "${url%/}/healthz"; do
+            if ! kill -0 "$(cat "$QUICKSTART_DIR/pgid")" 2>/dev/null; then
+              echo "::error::make quickstart exited before /healthz answered"
+              exit 1
+            fi
+            if (( SECONDS - start >= BUDGET_SECONDS )); then
+              echo "::error::/healthz did not answer within ${BUDGET_SECONDS}s of make quickstart (URL: ${url:-none printed})"
+              exit 1
+            fi
+            if [ -z "$url" ]; then
+              url="$(grep -m1 -E '^http://' "$QUICKSTART_DIR/stdout.log" || true)"
+            fi
+            sleep 2
+          done
+          elapsed=$((SECONDS - start))
+          echo "quickstart: $url, /healthz OK ${elapsed}s after make quickstart (budget ${BUDGET_SECONDS}s)"
+          echo "### Quickstart: /healthz OK in ${elapsed}s (budget ${BUDGET_SECONDS}s)" >>"$GITHUB_STEP_SUMMARY"
+          echo "$url" >"$QUICKSTART_DIR/url"
+      - name: /healthz reports write_mode off
+        run: |
+          url="$(cat "$QUICKSTART_DIR/url")"
+          body="$(curl -fsS --max-time 10 "${url%/}/healthz")"
+          echo "$body"
+          if ! jq -e '.status == "ok" and .write_mode == "off"' <<<"$body" >/dev/null; then
+            echo "::error::/healthz = $body, want status ok and write_mode off"
+            exit 1
+          fi
+      - name: The printed URL answers 200
+        run: |
+          url="$(cat "$QUICKSTART_DIR/url")"
+          code="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$url")"
+          echo "GET $url: $code"
+          if [ "$code" != 200 ]; then
+            echo "::error::GET $url returned $code, want 200"
+            exit 1
+          fi
+      - name: Dump quickstart and stack logs
+        if: failure()
+        run: |
+          for f in stdout stderr; do
+            echo "::group::make quickstart $f"
+            cat "$QUICKSTART_DIR/$f.log" 2>/dev/null || echo "(no $f.log)"
+            echo "::endgroup::"
+          done
+          echo "::group::owners.yaml"
+          cat owners.yaml 2>/dev/null || echo "(no owners.yaml)"
+          echo "::endgroup::"
+          docker compose -f dev/docker-compose.yml logs --no-color --tail=300
+      - name: Tear down
+        if: always()
+        run: |
+          if [ -f "$QUICKSTART_DIR/pgid" ]; then
+            kill -TERM -- "-$(cat "$QUICKSTART_DIR/pgid")" 2>/dev/null || true
+          fi
+          docker compose -f dev/docker-compose.yml down -v --remove-orphans
 
   race:
     name: Go race detector

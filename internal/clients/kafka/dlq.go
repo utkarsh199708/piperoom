@@ -529,8 +529,8 @@ func (c *Client) lister() offsetLister {
 // end offset (clamped to the last stable offset, see clampToStable) and a
 // marker can sit right there; kgo drops markers by default, and the read
 // would then wait for a record that never comes. No reader returns a marker
-// as data.
-func (c *Client) newConsumer(parts map[string]map[int32]kgo.Offset) (pollConsumer, error) {
+// as data. extra adds options for one read (Writer.ReadRecords).
+func (c *Client) newConsumer(parts map[string]map[int32]kgo.Offset, extra ...kgo.Opt) (pollConsumer, error) {
 	opts := []kgo.Opt{
 		kgo.ConsumePartitions(parts),
 		kgo.FetchMaxBytes(4 << 20),
@@ -538,6 +538,7 @@ func (c *Client) newConsumer(parts map[string]map[int32]kgo.Offset) (pollConsume
 		kgo.KeepControlRecords(),
 		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 	}
+	opts = append(opts, extra...)
 	if c.consumerFn != nil {
 		return c.consumerFn(opts)
 	}

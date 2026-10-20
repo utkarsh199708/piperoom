@@ -102,6 +102,8 @@ func TestValidate(t *testing.T) {
 		{"unknown fix action", func(s *Scenario) { s.Expect.Fix = [][]string{{"drop_slot"}} }, `unknown action "drop_slot"`},
 		{"unknown forbidden", func(s *Scenario) { s.Expect.ForbiddenActions = []string{"x"} }, "forbidden_actions"},
 		{"unknown layer", func(s *Scenario) { s.Expect.FirstFailingLayer = "network" }, "unknown layer"},
+		{"environment is not an incident layer", func(s *Scenario) { s.Expect.FirstFailingLayer = "environment" }, `expect.first_failing_layer: unknown layer "environment"`},
+		{"environment is not a root cause layer", func(s *Scenario) { s.Expect.RootCauseLayer = "environment" }, `expect.root_cause_layer: unknown layer "environment"`},
 		{"bad input kind", func(s *Scenario) { s.Inputs = []Input{{Kind: "shout", Text: "hi"}} }, "unknown kind"},
 		{"empty input", func(s *Scenario) { s.Inputs = []Input{{Kind: "steer"}} }, "text is empty"},
 		{"negative budget", func(s *Scenario) { s.Expect.MaxToolCalls = -1 }, "negative"},

@@ -1,0 +1,122 @@
+# Piperoom read-only quickstart in containers: the two steps of `make quickstart`
+# (README.md, "Quickstart (5 minutes)") for a machine with Docker but no Go or Node.
+#
+#   docker compose -f deploy/docker-compose.quickstart.yml up --build
+#   # open the URL the piperoom service prints (http://127.0.0.1:8090/)
+#
+#   1. discover   reads your Connect, Kafka, Schema Registry (and with
+#                 DISCOVER_FLAGS=-source-db the source Postgres) and writes
+#                 owners.yaml + a one-user users.yaml, every layer owned by
+#                 PIPEROOM_QUICKSTART_OWNER (default: your $USER). It never
+#                 writes to the cluster.
+#   2. piperoom   the pilot image (Dockerfile at the repo root, web UI built in)
+#                 with --quickstart: in-memory rooms (nothing to migrate, gone
+#                 on stop), dev login on loopback only, write mode off.
+#
+# Networking: --quickstart refuses any listen address that is not loopback (dev
+# login has no password), and a published port cannot reach a container's own
+# 127.0.0.1. So both services use the host's network: the server listens on the
+# HOST's 127.0.0.1:8090 only, and "localhost" in the URLs below is your machine,
+# so the dev stack (dev/docker-compose.yml) works with no settings. Host
+# networking is native on Linux; Docker Desktop needs Settings > Resources >
+# Network > "Enable host networking" (4.34 or later).
+#
+# Settings come from your shell or deploy/.env, the same names as config.Load():
+# CONNECT_URL, KAFKA_BROKERS, SCHEMA_REGISTRY_URL (or off), SOURCE_DB_URL,
+# WAREHOUSE_DB_URL, ANTHROPIC_API_KEY. Empty means the server's default (the
+# local dev stack). Use the read-only roles of docs/pilot/permissions.md.
+#
+# Rediscover: docker compose -f deploy/docker-compose.quickstart.yml run --rm -e FORCE=1 discover
+# Clean up:   docker compose -f deploy/docker-compose.quickstart.yml down -v
+
+name: piperoom-quickstart
+
+x-data-stack: &data-stack
+  CONNECT_URL: ${CONNECT_URL:-}
+  KAFKA_BROKERS: ${KAFKA_BROKERS:-}
+  # "-" without a colon: an explicit empty value (no registry) is kept.
+  SCHEMA_REGISTRY_URL: ${SCHEMA_REGISTRY_URL-http://localhost:8081}
+  SOURCE_DB_URL: ${SOURCE_DB_URL:-}
+  WAREHOUSE_DB_URL: ${WAREHOUSE_DB_URL:-}
+  CONNECT_USERNAME: ${CONNECT_USERNAME:-}
+  CONNECT_PASSWORD: ${CONNECT_PASSWORD:-}
+  SCHEMA_REGISTRY_USERNAME: ${SCHEMA_REGISTRY_USERNAME:-}
+  SCHEMA_REGISTRY_PASSWORD: ${SCHEMA_REGISTRY_PASSWORD:-}
+  KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-}
+  KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-}
+  KAFKA_SASL_USERNAME: ${KAFKA_SASL_USERNAME:-}
+  KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-}
+
+services:
+  # Step 1. cmd/discover is not in the pilot image (one binary per image), so it
+  # runs from the source tree, mounted read-only, in the Go image the Dockerfile
+  # builds with. Its output goes to the quickstart-config volume, which step 2
+  # mounts. An existing owners.yaml is kept unless FORCE=1.
+  discover:
+    image: golang:1.27.2-alpine
+    network_mode: host
+    working_dir: /src
+    environment:
+      <<: *data-stack
+      # No git in the image and a source tree owned by another uid: skip VCS stamping.
+      GOFLAGS: -buildvcs=false
+      GOCACHE: /go/cache
+      FORCE: ${FORCE:-}
+      OWNER: ${PIPEROOM_QUICKSTART_OWNER:-${USER:-me}}
+      DISCOVER_FLAGS: ${DISCOVER_FLAGS:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    command:
+      - sh
+      - -ec
+      - |
+        if [ -e /config/owners.yaml ] && [ "$$FORCE" != 1 ]; then
+          echo "discover: using the existing owners.yaml in the quickstart-config volume (FORCE=1 rediscovers)"
+          exit 0
+        fi
+        force=""; [ "$$FORCE" = 1 ] && force=-force
+        go run ./cmd/discover -write-owners /config/owners.yaml -users /config/users.yaml \
+          -owner "$$OWNER" $$force $$DISCOVER_FLAGS
+    volumes:
+      - ..:/src:ro
+      - quickstart-config:/config
+      - quickstart-gocache:/go
+
+  # Step 2. The pilot image, read-only quickstart. PIPEROOM_WRITE_MODE is not
+  # passed: the server's default is off, and --quickstart refuses on.
+  piperoom:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: piperoom:pilot
+    network_mode: host
+    depends_on:
+      discover:
+        condition: service_completed_successfully
+    command: ["--quickstart", "--owners", "/config/owners.yaml"]
+    environment:
+      <<: *data-stack
+      # Loopback of the host (network_mode: host): only this machine can reach it.
+      PIPEROOM_HTTP_ADDR: 127.0.0.1:${PIPEROOM_PORT:-8090}
+      PIPEROOM_AUTH_MODE: dev
+      PIPEROOM_WEB_DIR: /web
+      USERS_FILE: /config/users.yaml
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      PIPEROOM_MODEL: ${PIPEROOM_MODEL:-}
+      PIPEROOM_LOG_LEVEL: ${PIPEROOM_LOG_LEVEL:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      - quickstart-config:/config:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  quickstart-config:
+  quickstart-gocache:

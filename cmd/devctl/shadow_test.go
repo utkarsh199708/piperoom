@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -32,10 +33,10 @@ func TestParseShadowFlags(t *testing.T) {
 		want    shadowOpts
 		wantErr string
 	}{
-		{"none", nil, shadowOpts{Shell: "sh"}, ""},
+		{"none", nil, shadowOpts{Shell: defaultShell(runtime.GOOS)}, ""},
 		{"all set", []string{"--grace", "10m", "--token-budget", "100000", "--max-turns", "8", "--watch-interval", "20s", "--watch-cooldown", "2m", "--shell", "powershell"},
 			shadowOpts{Grace: "10m", TokenBudget: "100000", MaxTurns: "8", WatchInterval: "20s", WatchCooldown: "2m", Shell: "powershell"}, ""},
-		{"grace zero", []string{"--grace", "0"}, shadowOpts{Grace: "0", Shell: "sh"}, ""},
+		{"grace zero", []string{"--grace", "0"}, shadowOpts{Grace: "0", Shell: defaultShell(runtime.GOOS)}, ""},
 		{"bad grace", []string{"--grace", "soon"}, shadowOpts{}, "PIPEROOM_SHADOW_GRACE"},
 		{"negative grace", []string{"--grace", "-5s"}, shadowOpts{}, "PIPEROOM_SHADOW_GRACE"},
 		{"bad budget", []string{"--token-budget", "12k"}, shadowOpts{}, "PIPEROOM_SHADOW_TOKEN_BUDGET"},
@@ -86,7 +87,7 @@ func TestHostEnvLines(t *testing.T) {
 	t.Run("sh is sorted and quoted", func(t *testing.T) {
 		got := hostEnvLines("/repo with 'quote", shadowOpts{Shell: "sh", Grace: "1m"})
 		want := []string{
-			`export OWNERS_FILE='/repo with '\''quote/dev/owners.shadow.yaml'`,
+			"export OWNERS_FILE=" + shQuote(filepath.Join("/repo with 'quote", "dev", "owners.shadow.yaml")),
 			`export PIPEROOM_SHADOW_GRACE='1m'`,
 			`export PIPEROOM_WATCH_COOLDOWN='5m'`,
 			`export PIPEROOM_WATCH_INTERVAL='15s'`,
@@ -245,9 +246,12 @@ func TestComposeShadowService(t *testing.T) {
 	if !reflect.DeepEqual(svc.Profiles, []string{shadowProfile}) {
 		t.Fatalf("profiles = %v, want [%s]", svc.Profiles, shadowProfile)
 	}
+	// The batch profile's services are opt-in too (dev/batch.md, TestComposeBatchProfile).
 	for name, s := range doc.Services {
-		if name != shadowService && len(s.Profiles) != 0 {
-			t.Errorf("service %q has profiles %v: only the shadow server may be opt-in", name, s.Profiles)
+		allowedProfile := reflect.DeepEqual(s.Profiles, []string{"batch"}) ||
+			reflect.DeepEqual(s.Profiles, []string{"clickhouse"})
+		if name != shadowService && len(s.Profiles) != 0 && !allowedProfile {
+			t.Errorf("service %q has profiles %v: only the shadow server, batch, and clickhouse profiles may be opt-in", name, s.Profiles)
 		}
 	}
 	if len(svc.Ports) != 1 || !strings.HasPrefix(svc.Ports[0], "127.0.0.1:") {

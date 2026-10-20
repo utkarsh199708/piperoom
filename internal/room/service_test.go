@@ -2176,10 +2176,15 @@ func TestConcurrentIdenticalAlertsOpenOneRoom(t *testing.T) {
 }
 
 // giveUpSetup opens a room whose agent fails on every run, waits until its
-// supervisor has given up (three runs), and returns the service, the room and a
-// run counter. The give-up is followed by the slot release, which the tests
-// below wait for through a steer.
-func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
+// supervisor has given up (three runs), and returns the service, the room, a
+// run counter and parked. The give-up is followed by the slot release, which
+// the tests below wait for through a steer.
+//
+// The first supervisor's backoffs are short so it gives up quickly. A later
+// supervisor's backoff never ends (until the service closes): it signals
+// parked and waits. So once it has parked, no retry can add a run, and the
+// counts the callers check are final however slow the machine is.
+func giveUpSetup(t *testing.T) (*room.Service, string, func() int, <-chan struct{}) {
 	t.Helper()
 	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
 	st := memstore.NewWithClock(c.Now)
@@ -2195,14 +2200,17 @@ func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
 		},
 	})
 	t.Cleanup(svc.Close)
-	// The first supervisor's backoffs are short so it gives up quickly; later
-	// supervisors wait the production backoff, which the callers rely on.
-	var slow atomic.Bool
+	var gaveUp atomic.Bool
+	parked := make(chan struct{}, 8)
 	room.SetRetryAfterForTest(svc, func(d time.Duration) <-chan time.Time {
-		if slow.Load() {
-			return time.After(d)
+		if !gaveUp.Load() {
+			return time.After(d / 100)
 		}
-		return time.After(d / 100)
+		select {
+		case parked <- struct{}{}:
+		default: // more parks than the buffer: a caller's count fails anyway
+		}
+		return nil // a nil channel never fires; the supervisor's context ends it
 	})
 	roomID := createRoom(t, svc, "arjun").ID
 	runsOf := func() int {
@@ -2211,14 +2219,25 @@ func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
 		return runs
 	}
 	waitFor(t, 15*time.Second, func() bool { return runsOf() >= 3 })
-	slow.Store(true)
-	return svc, roomID, runsOf
+	gaveUp.Store(true)
+	return svc, roomID, runsOf, parked
+}
+
+// waitParked waits until an agent supervisor started after the give-up has
+// failed its run and is waiting for a retry (see giveUpSetup).
+func waitParked(t *testing.T, parked <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-parked:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the resumed agent never reached its retry wait within 15s")
+	}
 }
 
 // TestGaveUpAgentResumesOnSteer pins that an agent whose supervisor gave up is
 // not stuck: the next driver steer starts a new run (the fourth run overall).
 func TestGaveUpAgentResumesOnSteer(t *testing.T) {
-	svc, roomID, runsOf := giveUpSetup(t)
+	svc, roomID, runsOf, parked := giveUpSetup(t)
 	arjun := mustUser(t, svc, "arjun")
 	waitFor(t, 15*time.Second, func() bool {
 		if _, err := svc.Steer(context.Background(), arjun, roomID, "try again"); err != nil {
@@ -2226,8 +2245,16 @@ func TestGaveUpAgentResumesOnSteer(t *testing.T) {
 		}
 		return runsOf() >= 4
 	})
-	// The new run's retry backoff is one second, so the count is stable here.
-	time.Sleep(300 * time.Millisecond)
+	// The fourth run failed too, and its supervisor now waits for a retry
+	// that never comes here, so the counts below are final.
+	waitParked(t, parked)
+	// A steer to the live agent starts nothing.
+	if _, err := svc.Steer(context.Background(), arjun, roomID, "still there?"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	if n, err := room.AgentStartsForTest(svc, roomID); err != nil || n != 2 {
+		t.Fatalf("agent supervisors started: %d, %v; want 2 (the first and the resumed one)", n, err)
+	}
 	if n := runsOf(); n != 4 {
 		t.Fatalf("runs after resume: %d, want 4", n)
 	}
@@ -2236,7 +2263,7 @@ func TestGaveUpAgentResumesOnSteer(t *testing.T) {
 // TestConcurrentSteersStartOneRun pins that two steers racing on a gave-up
 // agent start at most one new run.
 func TestConcurrentSteersStartOneRun(t *testing.T) {
-	svc, roomID, runsOf := giveUpSetup(t)
+	svc, roomID, runsOf, parked := giveUpSetup(t)
 	arjun := mustUser(t, svc, "arjun")
 	waitFor(t, 15*time.Second, func() bool {
 		var wg sync.WaitGroup
@@ -2250,7 +2277,10 @@ func TestConcurrentSteersStartOneRun(t *testing.T) {
 		wg.Wait()
 		return runsOf() >= 4
 	})
-	time.Sleep(300 * time.Millisecond)
+	waitParked(t, parked)
+	if n, err := room.AgentStartsForTest(svc, roomID); err != nil || n != 2 {
+		t.Fatalf("agent supervisors after two concurrent steers: %d, %v; want 2 (the first and one resumed)", n, err)
+	}
 	if n := runsOf(); n != 4 {
 		t.Fatalf("runs after two concurrent steers: %d, want 4", n)
 	}

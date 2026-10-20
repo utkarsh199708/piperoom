@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -83,6 +84,46 @@ func (s *spy) PublicationTables(_ context.Context, _, _ string, tables []string)
 	}
 	return out, nil
 }
+
+// spySourceReads are the source methods of spy. spySource holds the spy
+// behind them only, as the real source client (*postgres.DB) has no write
+// method: the P3 pg actions hold the source client, and the reachability
+// check must not see the spy's Connect and Registry writes through it.
+type spySourceReads interface {
+	clients.SourceDB
+	LongTransactionsOnTables(context.Context, time.Duration, []string) (postgres.TableTransactions, error)
+	PublicationTables(context.Context, string, string, []string) ([]postgres.PublicationTable, error)
+	clients.CountReader
+}
+
+type spySource struct{ spySourceReads }
+
+// checkedSlotDropperMethods mirrors pgactions' unexported checkedSlotDropper
+// (internal/actions/pgactions/drop_replication_slot.go): the method
+// pg_drop_replication_slot's Execute looks for on its writer. Keep the two
+// method sets equal; a change there must be copied here.
+type checkedSlotDropperMethods interface {
+	DropReplicationSlotChecked(ctx context.Context, slot string, allowLost bool) (postgres.SlotSeen, error)
+}
+
+// TestSourceReaderHasNoWriteMethod pins the premise spySource rests on: the
+// real source client (*postgres.DB), which the P3 pg actions hold as Source in
+// both write modes, has no write method. If it ever gained one, the actions
+// could write through the reader connection with write mode off.
+func TestSourceReaderHasNoWriteMethod(t *testing.T) {
+	db := reflect.TypeOf((*postgres.DB)(nil))
+	for _, iface := range []reflect.Type{ifaceOf[clients.SourceWriter](), ifaceOf[checkedSlotDropperMethods]()} {
+		if db.Implements(iface) {
+			t.Errorf("*postgres.DB implements %v: the source reader must hold no write method", iface)
+		}
+	}
+	// The checked drop does exist on the writer, so the check above is not
+	// vacuous through a renamed method.
+	if !reflect.TypeOf((*postgres.Writer)(nil)).Implements(ifaceOf[checkedSlotDropperMethods]()) {
+		t.Fatal("*postgres.Writer lacks DropReplicationSlotChecked: update checkedSlotDropperMethods")
+	}
+}
+
 func (s *spy) Freshness(context.Context, string, string) (time.Time, error) {
 	s.hit("Freshness")
 	return time.Now(), nil
@@ -258,7 +299,10 @@ func twoTenantEnv() map[string]string {
 }
 
 // fakeOpener records each set's settings and gives it a spy labelled by its
-// source DSN, wired exactly as openClients wires real clients.
+// source DSN, wired exactly as openClients wires real clients: with write
+// mode on, the writers come from the real openWriters over fake constructors
+// (writemode_test.go), so a set gets a source writer only when its own
+// settings hold SOURCE_DB_WRITE_URL.
 type fakeOpener struct {
 	mu      sync.Mutex
 	cfgs    []config.Config
@@ -266,11 +310,13 @@ type fakeOpener struct {
 	closed  []string
 	failOn  string // a source DSN whose open fails
 	openErr error
+	// writers lists every fake write client built, in order.
+	writers []*fakeWriter
 }
 
 func newFakeOpener() *fakeOpener { return &fakeOpener{spies: map[string]*spy{}} }
 
-func (f *fakeOpener) open(_ context.Context, cfg config.Config, _ *aws.Config, o *owners.Owners) (*Wired, error) {
+func (f *fakeOpener) open(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners, write bool) (*Wired, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cfgs = append(f.cfgs, cfg)
@@ -280,11 +326,24 @@ func (f *fakeOpener) open(_ context.Context, cfg config.Config, _ *aws.Config, o
 	s := &spy{label: cfg.SourceDBURL}
 	f.spies[cfg.SourceDBURL] = s
 	label := cfg.SourceDBURL
+	closeWriters := func() {}
+	var wc writeClients
+	if write {
+		var err error
+		// The fake constructors append to f.writers; f.mu is already held.
+		wc, closeWriters, err = openWriters(ctx, cfg, awsCfg, fakeWriterOpeners(label, &f.writers))
+		if err != nil {
+			return nil, err
+		}
+	}
 	return &Wired{
-		Source: s, Warehouse: s, Connect: s, Kafka: s, Registry: s,
+		Source: spySource{s}, Warehouse: s, Connect: s, Kafka: s, Registry: s,
 		Builder: topology.NewBuilder(o, s, s, s, s),
 		Owners:  o,
+		write:   write,
+		writers: wc,
 		close: func() {
+			closeWriters()
 			f.mu.Lock()
 			f.closed = append(f.closed, label)
 			f.mu.Unlock()
@@ -366,7 +425,9 @@ var clientFree = []string{"runbook_lookup", "debezium_metrics"}
 func TestTwoTenantsToolsHitOnlyTheirOwnClients(t *testing.T) {
 	own := loadOwners(t, twoTenantYAML(""))
 	f := newFakeOpener()
-	st, err := openStacks(context.Background(), config.Config{SourceDBURL: "src-process"}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
+	// Write mode on: the actions part below runs a restart through each set
+	// (with it off the actions hold read-only clients; writemode_test.go).
+	st, err := openStacks(context.Background(), config.Config{SourceDBURL: "src-process", WriteMode: "on"}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
 	if err != nil {
 		t.Fatalf("openStacks: %v", err)
 	}
@@ -760,7 +821,7 @@ func TestBadWarehouseKindNamesPipeline(t *testing.T) {
 	y := strings.Replace(twoTenantYAML(""), "      kafka_sasl_password: {env: B_KAFKA_PASSWORD}", "      kafka_sasl_password: {env: B_KAFKA_PASSWORD}\n      warehouse_kind: {value: oracle}", 1)
 	own := loadOwners(t, y)
 	_, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, newFakeOpener().deps(env(twoTenantEnv())))
-	if err == nil || !strings.Contains(err.Error(), `pipeline "pb"`) || !strings.Contains(err.Error(), "connections.warehouse_kind") || !strings.Contains(err.Error(), "postgres or snowflake") {
+	if err == nil || !strings.Contains(err.Error(), `pipeline "pb"`) || !strings.Contains(err.Error(), "connections.warehouse_kind") || !strings.Contains(err.Error(), "postgres, snowflake, bigquery, databricks or clickhouse") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -1060,8 +1121,28 @@ func TestConnFieldsMatchOwnersKeys(t *testing.T) {
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
-	if !slices.Equal(keys, owners.ConnectionKeys()) {
-		t.Fatalf("wiring keys %v\nowners keys %v", keys, owners.ConnectionKeys())
+	// Relaxed for P4b-1 (LEAD-ARCH ruling on #611): wiring maps the Airflow
+	// and dbt keys before owners accepts them, so for now every owners key
+	// must have a connFields entry (a key owners accepts but wiring cannot
+	// fill would be dropped silently). A3's owners follow-up adds the keys to
+	// owners.connKeys and restores the equality check:
+	//	if !slices.Equal(keys, owners.ConnectionKeys()) { t.Fatalf(...) }
+	for _, k := range owners.ConnectionKeys() {
+		if _, ok := connFields[k]; !ok {
+			t.Fatalf("owners key %s has no connFields entry\nwiring keys %v\nowners keys %v", k, keys, owners.ConnectionKeys())
+		}
+	}
+	// The keys wiring maps ahead of owners are exactly the batch ones.
+	var ahead []string
+	for _, k := range keys {
+		if !slices.Contains(owners.ConnectionKeys(), k) {
+			ahead = append(ahead, k)
+		}
+	}
+	for _, k := range ahead {
+		if !strings.HasPrefix(k, "airflow_") && !strings.HasPrefix(k, "dbt_") {
+			t.Fatalf("connFields key %s is not an owners key and not an Airflow or dbt key", k)
+		}
 	}
 	// Every setter reaches a distinct field.
 	var c config.Config

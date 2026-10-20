@@ -20,6 +20,50 @@ const KIND_LABEL: Record<TopologyNode['kind'], string> = {
   dlq_topic: 'DLQ topic',
   consumer_group: 'Consumer',
   sink_table: 'Sink',
+  dag: 'DAG',
+  task: 'Task',
+  model: 'Model',
+}
+
+// A batch node's run state is one of its facts (internal/topology/batch.go); the lane shows it first, under a
+// readable label, so the state is what a compact node shows next to its health.
+const RUN_STATE: Partial<Record<TopologyNode['kind'], { key: string; label: string }>> = {
+  dag: { key: 'last_run_state', label: 'last run' },
+  task: { key: 'state', label: 'state' },
+  model: { key: 'last_run_status', label: 'last run' },
+}
+
+/**
+ * The facts a node shows, lead fact first. CDC nodes keep the server's order untouched; a batch node leads with its
+ * run state, and a DAG's tasks_skipped is drawn as its own note instead of a fact.
+ */
+function displayFacts(node: TopologyNode): [string, string][] {
+  const entries = node.facts ? Object.entries(node.facts) : []
+  const run = RUN_STATE[node.kind]
+  if (!run) return entries
+  const rest = entries.filter(([k]) => k !== run.key && !(node.kind === 'dag' && k === 'tasks_skipped'))
+  const state = node.facts?.[run.key]
+  return state === undefined ? rest : [[run.label, state], ...rest]
+}
+
+/** Tasks of the DAG's latest run the server did not draw (their id is not an Airflow id); 0 when none. */
+function skippedTasks(node: TopologyNode): number {
+  if (node.kind !== 'dag') return 0
+  const n = Number.parseInt(node.facts?.tasks_skipped ?? '', 10)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+function SkippedNote({ count }: { count: number }) {
+  if (count === 0) return null
+  return (
+    <span
+      data-skipped=""
+      title="Tasks of the latest run whose id is not a valid Airflow id are not drawn"
+      className="whitespace-nowrap rounded-sm border border-dashed border-border px-1 text-[11px] leading-4 text-muted-foreground"
+    >
+      {count === 1 ? '1 task not drawn' : `${count} tasks not drawn`}
+    </span>
+  )
 }
 
 // The compact node's left edge in its layer colour (full class names, so Tailwind sees them).
@@ -70,7 +114,10 @@ function Node({
   onSelect?: () => void
 }) {
   const health = HEALTH[node.health] ?? HEALTH.unknown
-  const facts = node.facts ? Object.entries(node.facts) : []
+  const facts = displayFacts(node)
+  const skipped = skippedTasks(node)
+  const runKey = RUN_STATE[node.kind]?.key
+  const runState = runKey !== undefined && node.facts?.[runKey] !== undefined ? facts[0] : undefined
   // The hover names the owner and, where the compact strip has no room for them, the facts.
   const tip = [`owner: ${node.owner}`, ...facts.map(([k, v]) => factPhrase(k, v))].join('\n')
   const shared = cn(
@@ -98,6 +145,14 @@ function Node({
             is a coloured left edge here and a badge in the expanded lane; its name is in the tooltip. */}
         <span className="flex items-center gap-1.5 text-xs">
           <span className="whitespace-nowrap text-subtle-foreground">{KIND_LABEL[node.kind] ?? node.kind}</span>
+          {/* A batch node's run state is what tells a failed run from a failed scheduler, so it stays on the
+              strip; every other fact is in the tooltip. */}
+          {runState && (
+            <span className="min-w-0 truncate tabular-nums">
+              <span className="text-subtle-foreground">{runState[0]}</span> {factValue(runState[1])}
+            </span>
+          )}
+          <SkippedNote count={skipped} />
           <span className="sr-only">, {node.layer},</span>
           <StatusDot tone={health.tone} className="ml-auto" />
           <span className={cn('whitespace-nowrap', node.health === 'fail' ? 'text-destructive-fg' : 'text-muted-foreground')}>
@@ -123,6 +178,7 @@ function Node({
     >
       <div className="flex items-center gap-2">
         <span className="whitespace-nowrap text-xs text-subtle-foreground">{KIND_LABEL[node.kind] ?? node.kind}</span>
+        <SkippedNote count={skipped} />
         <Badge variant={layerVariant(node.layer)} mono className="ml-auto">
           {node.layer}
         </Badge>
@@ -307,6 +363,15 @@ export function PipelineMap({
         )}
         {dlqHidden && (
           <span className="rounded-sm border border-border px-1.5 text-xs leading-5 text-muted-foreground">DLQ empty</span>
+        )}
+        {topology?.partial && (
+          <span
+            data-partial=""
+            title="Some nodes are left out: a reader this pipeline needs (orchestrator or transform) is not configured or not supported. The map is incomplete, not healthy."
+            className="rounded-sm border border-dashed border-border px-1.5 text-xs leading-5 text-muted-foreground"
+          >
+            partial
+          </span>
         )}
         <div className="ml-auto flex items-center gap-1">
           <Button variant="ghost" className="h-7 px-2.5" aria-pressed={expanded} onClick={toggle}>

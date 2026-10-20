@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -268,7 +269,7 @@ func occursUndenied(cls []clauseToks, terms []string, layers bool) bool {
 	return false
 }
 
-// layerTerms are the words that name each pipeline layer (events.Layers) in a
+// layerTerms are the words that name each pipeline layer (events.IncidentLayers) in a
 // hypothesis. Kafka itself is matched by its parts, not the word "kafka",
 // because "Kafka Connect" would otherwise name both layers. Postgres also
 // covers the source-side objects a root cause lives in (DDL, migrations,
@@ -342,9 +343,40 @@ var faultTerms = []string{"stuck", "fail*", "error*", "crash*", "broken", "break
 // alert is stale".
 var alertWords = []string{"alert*", "notification*", "re notification*", "page"}
 
-// shortDurations before "behind" are normal replication delay, not a fault:
-// "warehouse 1 minute behind".
+// shortDurations next to "behind" or "stale" are normal replication delay,
+// not a fault: "warehouse 1 minute behind", "warehouse 1m stale", "stale for
+// 1m". Longer ones ("stale for 3h", "stale 41m") stay faults.
 var shortDurations = []string{"1 minute", "1 min", "2 minutes", "2 min", "1m", "2m", "seconds", "a few seconds"}
+
+// delayTerms are the fault terms a short duration turns into normal delay.
+// "behind" takes the duration before it; "stale" takes it on either side,
+// since the warehouse freshness tool's own summary says "stale for 1m" and the
+// model repeats that wording ("warehouse 1m stale", "stale for 1m", "stale 1m",
+// "1 minute stale").
+var delayTerms = map[string]bool{"behind": true, "stale": true}
+
+// shortDelay reports whether the fault term at j is a delayTerm with a short
+// duration right before it, or, for "stale", right after it with an optional
+// "for" or "by" in between. Punctuation between them does not matter
+// ("stale (1m)", "freshness: 1m stale"), as for "behind".
+func shortDelay(c clauseToks, j int) bool {
+	if !delayTerms[c.toks[j]] {
+		return false
+	}
+	for i := max(0, j-3); i < j; i++ {
+		if l := phraseAt(c.toks, i, shortDurations); l > 0 && i+l == j {
+			return true
+		}
+	}
+	if c.toks[j] != "stale" {
+		return false
+	}
+	k := j + 1
+	if k < len(c.toks) && (c.toks[k] == "for" || c.toks[k] == "by") {
+		k++
+	}
+	return k < len(c.toks) && phraseAt(c.toks, k, shortDurations) > 0
+}
 
 // faultNegators make a fault term a non-fault when they sit in the three words
 // before it: "no errors", "not stuck any more", "no longer lagging",
@@ -416,6 +448,14 @@ func bareNo(c clauseToks) bool {
 
 // hasFault reports whether text states a current fault (see faultTerms).
 func hasFault(text string) bool {
+	_, _, found := faultClause(text)
+	return found
+}
+
+// faultClause finds the first current fault in text and returns the fault
+// term and the part of the sentence (the sub) that holds it, so a report can
+// say what cancelled a healthy verdict: "stale" in "warehouse 41m stale".
+func faultClause(text string) (term, clause string, found bool) {
 	for _, c := range clausesOf(text) {
 		for j := range c.toks {
 			if phraseAt(c.toks, j, faultTerms) == 0 || isLabel(subToks(c, j)) {
@@ -444,19 +484,28 @@ func hasFault(text string) bool {
 				!(c.toks[j-1] == "0" && j > 1 && c.sub[j-2] == c.sub[j] && isDigits(c.toks[j-2])) {
 				negated = true
 			}
-			if c.toks[j] == "behind" {
-				for i := max(0, j-3); i < j; i++ {
-					if l := phraseAt(c.toks, i, shortDurations); l > 0 && i+l == j {
-						negated = true
-					}
-				}
+			if shortDelay(c, j) {
+				negated = true
 			}
 			if !negated && !past && !alert {
-				return true
+				return c.toks[j], strings.Join(subToks(c, j), " "), true
 			}
 		}
 	}
-	return false
+	return "", "", false
+}
+
+// healthyNote explains in a few words how text grades for a healthy verdict,
+// for the failed-runs section of the report: the fault that cancels it, or
+// that it has no healthy phrase. Empty when text is a healthy verdict.
+func healthyNote(text string) string {
+	if term, clause, ok := faultClause(text); ok {
+		return fmt.Sprintf("fault %q in %q", term, clause)
+	}
+	if !saysHealthy(text) {
+		return "no healthy phrase"
+	}
+	return ""
 }
 
 // isDigits reports whether s is a non-empty run of ASCII digits.

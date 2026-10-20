@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -40,9 +41,38 @@ func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools.Tool {
 	return []tools.Tool{
 		&updateHypothesisTool{sink: d.Sink, steps: steps},
-		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track},
+		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, steps: steps, log: d.Logger},
 		&postMessageTool{sink: d.Sink},
 	}
+}
+
+// roomToolServesKind reports whether a room of pipeline kind (already
+// normalised, see RoomKind) whose propose_fix would list nActions write
+// actions offers the room tool called name. A batch room with no action
+// (ActionsForKind keeps no CDC action, and no action declares batch yet) is
+// not offered propose_fix at all: its prompt says a person runs every fix, and
+// an empty action enum with CDC examples would invite the call it forbids.
+// Every other room tool serves every kind, and a CDC room keeps all three
+// whatever its actions, so its tool list is unchanged.
+func roomToolServesKind(name, kind string, nActions int) bool {
+	return !(name == "propose_fix" && kind == events.PipelineKindBatch && nActions == 0)
+}
+
+// roomToolsForKind returns the room tools of all that a room of kind with
+// acts (its kind's actions, ActionsForKind; nil is none) offers, in all's
+// order, so the tool list of every room of one kind is the same.
+func roomToolsForKind(all []tools.Tool, kind string, acts *actions.Registry) []tools.Tool {
+	n := 0
+	if acts != nil {
+		n = len(acts.All())
+	}
+	out := make([]tools.Tool, 0, len(all))
+	for _, t := range all {
+		if roomToolServesKind(t.Name(), kind, n) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // RoomToolNames returns the names of the room tools the agent adds on top of
@@ -220,6 +250,7 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit hypothesis: %w", err)
 	}
+	t.steps.setHypothesisSteps(in.BasedOnSteps)
 	return tools.Result{Summary: "hypothesis recorded" + unbackedNote(unbacked)}, nil
 }
 
@@ -275,6 +306,13 @@ type proposeFixTool struct {
 	proposals Proposals
 	sink      Sink
 	track     *proposalTracker
+	// steps is the run's step ledger, which holds the injection-flagged
+	// reads the echo guard checks each step against (echoguard.go); nil
+	// turns the guard off, for harnesses that build the tool without a
+	// runner.
+	steps *stepLedger
+	// log takes the guard's one warn line per refused step; nil logs nothing.
+	log *slog.Logger
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -515,6 +553,16 @@ func (t *proposeFixTool) checkStep(ctx context.Context, i int, action string, ra
 	}
 	if err := a.Validate(ctx, params); err != nil {
 		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
+	}
+	if kinds, err := t.steps.echoedInjection(i+1, action, params); err != nil {
+		// The echo guard (P3-W3b): the step repeats what an injection-flagged
+		// read asked for. The model sees the error; the room sees nothing
+		// but this failed tool call. The log line carries no span text.
+		if t.log != nil {
+			t.log.Warn("agent: propose_fix step echoes injection-flagged text", "tool", t.Name(), "step", i+1, "action", action, "kinds", kinds)
+		}
+		observeStep(a, params, err)
+		return nil, nil, err
 	}
 	return a, params, nil
 }

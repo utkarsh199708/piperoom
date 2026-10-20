@@ -1,0 +1,13 @@
+# Two models on the dev warehouse: stg_orders (view) -> fct_revenue (table).
+name: analytics
+version: "1.0.0"
+config-version: 2
+profile: analytics
+model-paths: ["models"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+models:
+  analytics:
+    +materialized: view

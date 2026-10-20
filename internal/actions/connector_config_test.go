@@ -10,10 +10,12 @@ import (
 	"testing"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/tools"
 )
 
-// configConnect is a Connect fake with a mutable config. It implements the
-// local connectorConfigUpdater interface the action asserts for.
+// configConnect is a Connect fake with a mutable config. It implements
+// clients.ConnectFixWriter, which the action asserts for, and the older
+// one-key UpdateConfig.
 type configConnect struct {
 	scriptedConnect
 	cfg       map[string]string
@@ -49,6 +51,32 @@ func (f *configConnect) UpdateConfig(_ context.Context, name, key, value string)
 	}
 	f.cfg[key] = value
 	return nil
+}
+
+// UpdateConnectorConfigKeys is the N-key write the action uses
+// (clients.ConnectFixWriter). It records one "name key=value" per key, sorted,
+// so the one-key tests read the same as with UpdateConfig.
+func (f *configConnect) UpdateConnectorConfigKeys(_ context.Context, name string, changes map[string]string) error {
+	if !f.allowWrites {
+		return refuseWrite(&f.refusals, "configConnect", "UpdateConnectorConfigKeys")
+	}
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	for _, k := range sortedStringKeys(changes) {
+		v := changes[k]
+		f.updates = append(f.updates, name+" "+k+"="+v)
+		if f.storeAs != "" {
+			v = f.storeAs
+		}
+		f.cfg[k] = v
+	}
+	return nil
+}
+
+// PauseConnector completes clients.ConnectFixWriter; config tests never pause.
+func (f *configConnect) PauseConnector(context.Context, string) error {
+	return refuseWrite(&f.refusals, "configConnect", "PauseConnector")
 }
 
 func newConfigConnect(script ...clients.ConnectorStatus) *configConnect {
@@ -139,7 +167,8 @@ func TestUpdateConnectorConfigSendsOnlyOneKey(t *testing.T) {
 	if err := a.Validate(t.Context(), json.RawMessage(updateIn)); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	out, err := a.Execute(context.Background(), json.RawMessage(updateIn))
+	// The real client's write fails closed without the room's pipeline (P0 item 7).
+	out, err := a.Execute(tools.WithPipeline(context.Background(), testPipeline()), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

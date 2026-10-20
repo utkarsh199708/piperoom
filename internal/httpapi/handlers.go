@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"piperoom/internal/alertin"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
 )
@@ -85,7 +86,7 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAlertWebhook accepts any JSON body, maps title/severity/pipeline_id
-// when present and stores the raw body verbatim in room.created.alert
+// (or, without a valid pipeline_id, a top-level dag_id) when present and stores the raw body verbatim in room.created.alert
 // (docs/api.md). A resolved alert with no open room to join is 202 and opens
 // nothing.
 func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
@@ -104,8 +105,18 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 		Title      string `json:"title"`
 		Severity   string `json:"severity"`
 		PipelineID string `json:"pipeline_id"`
+		DAGID      string `json:"dag_id"`
 	}
 	_ = json.Unmarshal(raw, &probe)
+	// The signed routes' order (alertin resolvePipeline): a valid explicit
+	// pipeline_id first, then the one batch pipeline whose dags list dag_id.
+	// An unknown or shared dag_id changes nothing, so the body resolves as it
+	// did before dag_id was read.
+	if !alertin.ValidPipelineID(probe.PipelineID) {
+		if id := s.svc.PipelineForDAG(probe.DAGID); id != "" {
+			probe.PipelineID = id
+		}
+	}
 	// The dev webhook has a session: it may open or join rooms only in the
 	// caller's tenants (an unknown pipeline is in none). The answer is the
 	// 404 of an unknown pipeline.
@@ -118,7 +129,8 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRoom(w http.ResponseWriter, r *http.Request) {
-	snap, err := s.svc.GetRoom(r.Context(), chi.URLParam(r, "id"))
+	// The caller's view: mode and open_proposals[].blocked (P0 item 1).
+	snap, err := s.svc.RoomFor(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"))
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -314,6 +326,50 @@ func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ev, err := s.svc.ApproveProposalConfirm(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.Layer, body.ParamsHash, body.Confirm)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
+// handleApproveAllProposal serves POST /api/proposals/{pid}/approve-all
+// (P0 item 4): one approval.given per required layer still pending, answered
+// as the list of those events in required_layers order.
+func (s *Server) handleApproveAllProposal(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		// ParamsHash follows approve's rule: missing is 400, different 409.
+		ParamsHash string `json:"params_hash"`
+		// Confirm is the solo user's "<pipeline_id>/*", typed once for every
+		// layer of the call. Ignored for anyone else.
+		Confirm string `json:"confirm"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	evs, err := s.svc.ApproveAllProposal(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.ParamsHash, body.Confirm)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, evs)
+}
+
+// handleCancelProposal serves POST /api/proposals/{pid}/cancel (P0 item 4):
+// the driver or an owner of a required layer stops the proposal's pending
+// auto-approve countdown; answered with the proposal.cancelled event.
+// Viewers never get here (viewerGuard: 403 viewer).
+func (s *Server) handleCancelProposal(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		// Reason is optional typed text, at most 500 characters.
+		Reason string `json:"reason"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.CancelProposal(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.Reason)
 	if err != nil {
 		s.writeErr(w, err)
 		return

@@ -17,9 +17,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -81,9 +84,83 @@ type Alert struct {
 }
 
 // Resources are the names that exist on the recorded stack.
+//
+// The P3 actions' Validate reads more than names (P3g-2). Most of it comes
+// from the recordings, first recording first (replay_actions.go): a
+// connector's config from connect_config, slots from pg_replication_slots, a
+// group from kafka_consumer_lag, offsets from kafka_topic_offsets and
+// dlq_peek. The fields below declare what no read tool shows; only a
+// scenario whose fix is pg_add_publication_table or pg_snapshot_signal needs
+// them.
 type Resources struct {
 	Connectors []string `yaml:"connectors"`
 	Subjects   []string `yaml:"subjects"`
+	// ConnectorConfigs are config keys merged over a connector's
+	// connect_config recording: connect_config hides publication.* and
+	// signal.* keys, which pg_add_publication_table and pg_snapshot_signal
+	// read.
+	ConnectorConfigs map[string]map[string]string `yaml:"connector_configs"`
+	// Tables are the source database's tables as the pg actions see them,
+	// by "schema.table". A table not listed does not exist.
+	Tables map[string]TableState `yaml:"tables"`
+	// Publications list each publication's tables ("schema.table"). A
+	// publication not listed does not exist.
+	Publications map[string][]string `yaml:"publications"`
+}
+
+// TableState is one source table as pg_add_publication_table and
+// pg_snapshot_signal read it (postgres.PublicationAddState and
+// postgres.SnapshotSignalState).
+type TableState struct {
+	// RelKind is pg_class.relkind; empty means "r" (an ordinary table).
+	RelKind string `yaml:"relkind"`
+	// ReplicaIdentity is pg_class.relreplident; empty means "d" (default:
+	// the primary key).
+	ReplicaIdentity string `yaml:"replica_identity"`
+	PrimaryKey      bool   `yaml:"primary_key"`
+	// EstimatedRows is pg_class.reltuples; unset means never analysed (-1).
+	EstimatedRows *int64 `yaml:"estimated_rows"`
+	// SignalColumns: the table has the id, type and data columns of a
+	// Debezium signal table.
+	SignalColumns bool `yaml:"signal_columns"`
+}
+
+// tableRe is a "schema.table" as owners.yaml lists source tables.
+var tableRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// validate checks the action-read state of resources.
+func (r Resources) validate() []error {
+	var errs []error
+	known := set(r.Connectors)
+	for _, c := range slices.Sorted(maps.Keys(r.ConnectorConfigs)) {
+		if !known[c] {
+			errs = append(errs, fmt.Errorf("resources.connector_configs: connector %q is not in resources.connectors", c))
+		}
+	}
+	for _, t := range slices.Sorted(maps.Keys(r.Tables)) {
+		st := r.Tables[t]
+		if !tableRe.MatchString(t) {
+			errs = append(errs, fmt.Errorf("resources.tables: %q is not \"schema.table\"", t))
+		}
+		switch st.RelKind {
+		case "", "r", "p", "v", "m", "f":
+		default:
+			errs = append(errs, fmt.Errorf("resources.tables.%s: relkind %q is not one of r, p, v, m, f", t, st.RelKind))
+		}
+		switch st.ReplicaIdentity {
+		case "", "d", "n", "f", "i":
+		default:
+			errs = append(errs, fmt.Errorf("resources.tables.%s: replica_identity %q is not one of d, n, f, i", t, st.ReplicaIdentity))
+		}
+	}
+	for _, p := range slices.Sorted(maps.Keys(r.Publications)) {
+		for _, t := range r.Publications[p] {
+			if _, ok := r.Tables[t]; !ok {
+				errs = append(errs, fmt.Errorf("resources.publications.%s: table %q is not in resources.tables", p, t))
+			}
+		}
+	}
+	return errs
 }
 
 // Recording is one replayed tool result.
@@ -160,7 +237,7 @@ type Expect struct {
 	// matches. Optional; catches "names the right word, tells the wrong story".
 	RootCauseForbidden [][]string `yaml:"root_cause_forbidden"`
 	// FirstFailingLayer is the most upstream layer that is actually broken
-	// (one of events.Layers). The final hypothesis must name it.
+	// (one of events.IncidentLayers(); `environment` is refused). The final hypothesis must name it.
 	FirstFailingLayer string `yaml:"first_failing_layer"`
 	// EvidenceTools must each be called at least once (any input).
 	EvidenceTools []string `yaml:"evidence_tools"`
@@ -187,9 +264,17 @@ type Expect struct {
 	// layers, fix and claims; validation rejects them on any other outcome.
 	Outcome string `yaml:"outcome"`
 	// RootCauseLayer is the layer the root cause sits in (one of
-	// events.Layers), graded apart from FirstFailingLayer: in a schema change
+	// events.IncidentLayers()), graded apart from FirstFailingLayer: in a schema change
 	// Connect fails first, but the cause is a Postgres DDL.
 	RootCauseLayer string `yaml:"root_cause_layer"`
+	// RootCauseLayerAlt are further layers the root cause may defensibly be
+	// placed in (each one of events.IncidentLayers(), distinct from
+	// RootCauseLayer and never FirstFailingLayer): a hypothesis naming
+	// RootCauseLayer or any of them passes the root-cause-layer grade. Only
+	// for a scenario with two readings of where the cause sits, such as a
+	// consumer down for longer than the topic's retention; never to paper
+	// over a wrong label. See evals/README.md.
+	RootCauseLayerAlt []string `yaml:"root_cause_layer_alt"`
 	// ExpectedFacts are what the diagnosis must rest on, each one seen in a
 	// successful result of its tool.
 	ExpectedFacts []Fact `yaml:"expected_facts"`
@@ -278,6 +363,19 @@ func LoadScenario(path string) (Scenario, error) {
 	}
 	if s.Name == "" {
 		s.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	// The pipeline as the server loads it: its watch block resolved, which
+	// dlq_replay's and pg_drop_replication_slot's CheckScope read
+	// (watch.dlq_topics, watch.slot). A pipeline owners.Load refuses is an
+	// error of the scenario, not a silent plain decode.
+	if s.Pipeline.WatchSpec != nil {
+		own, err := loadOwnersFor(s)
+		if err != nil {
+			return Scenario{}, fmt.Errorf("%s: owners: %w", path, err)
+		}
+		if p, ok := own.Pipeline(s.Pipeline.ID); ok {
+			s.Pipeline = p
+		}
 	}
 	return s, nil
 }
@@ -389,12 +487,13 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q, %q or %q)", s.Judge, JudgeTerms, JudgeClaude, JudgeAuto))
 	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
-	if l := s.Expect.FirstFailingLayer; l != "" && layerTerms[l] == nil {
-		errs = append(errs, fmt.Errorf("expect.first_failing_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
+	if l := s.Expect.FirstFailingLayer; l != "" && !contains(incidentLayers(), l) {
+		errs = append(errs, fmt.Errorf("expect.first_failing_layer: unknown layer %q (want one of %s)", l, strings.Join(incidentLayers(), ", ")))
 	}
-	if l := s.Expect.RootCauseLayer; l != "" && layerTerms[l] == nil {
-		errs = append(errs, fmt.Errorf("expect.root_cause_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
+	if l := s.Expect.RootCauseLayer; l != "" && !contains(incidentLayers(), l) {
+		errs = append(errs, fmt.Errorf("expect.root_cause_layer: unknown layer %q (want one of %s)", l, strings.Join(incidentLayers(), ", ")))
 	}
+	errs = append(errs, s.Expect.checkRootCauseLayerAlt()...)
 
 	recKeys := map[string]int{}
 	for i, r := range s.Recordings {
@@ -448,6 +547,7 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 		}
 	}
 	errs = append(errs, s.validatePhases(toolInputs, actionNames)...)
+	errs = append(errs, s.Resources.validate()...)
 	for _, t := range s.Expect.EvidenceTools {
 		if _, ok := toolInputs[t]; !ok {
 			errs = append(errs, fmt.Errorf("expect.evidence_tools: unknown tool %q", t))
@@ -515,6 +615,7 @@ func (s Scenario) checkOutcome() []error {
 		"root_cause_forbidden": len(e.RootCauseForbidden) > 0,
 		"first_failing_layer":  e.FirstFailingLayer != "",
 		"root_cause_layer":     e.RootCauseLayer != "",
+		"root_cause_layer_alt": len(e.RootCauseLayerAlt) > 0,
 		"fix":                  len(e.Fix) > 0,
 		"fix_targets":          len(e.FixTargets) > 0,
 		"claims":               len(e.Claims) > 0,

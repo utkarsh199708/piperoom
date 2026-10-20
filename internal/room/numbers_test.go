@@ -136,10 +136,18 @@ func TestClassifyNumberIsStableAcrossSpellings(t *testing.T) {
 // padded with zeros used to parse as a small number while its value is huge
 // (or tiny), and big.Rat then built 10^999899 (about 32 ms a token). The
 // decision is now made on the significant form.
+//
+// Cheap is measured against work timed on the same machine in the same loop,
+// not against a wall-clock limit, so a slow or loaded runner (or -race) slows
+// both sides alike: classifying a token may cost at most cheapFactor times one
+// jsonnum.Significant pass over it (which classifyNumber makes first) plus
+// classifying a short number ("0.1", which takes the whole exact path). The
+// padded tokens cost about 1x that; building 10^999899 cost over 1000x.
 func TestClassifyNumberPaddedTokensAreCheapAndRight(t *testing.T) {
 	zeros := func(n int) string { return strings.Repeat("0", n) }
 	hugePos := "0." + zeros(10098) + "1e1009998" // value 1e999899, beyond every double
 	hugeNeg := "1" + zeros(10099) + "e-1009998"  // value 1e-999899, rounds to zero
+	step := clockStep()
 	for _, tc := range []struct {
 		name string
 		tok  string
@@ -153,12 +161,10 @@ func TestClassifyNumberPaddedTokensAreCheapAndRight(t *testing.T) {
 		{"value 1 in the plain spelling", "1", numberExact},
 		{"value 0.1 in the plain spelling", "0.1", numberExact},
 	} {
-		start := time.Now()
-		got := classifyNumber(tc.tok)
-		if d := time.Since(start); d > 20*time.Millisecond {
-			t.Errorf("%s: took %v, want a few ms at most", tc.name, d)
+		if cost, base := classifyCost(tc.tok); cost > cheapFactor*max(base, step) {
+			t.Errorf("%s: took %v, want at most %dx %v (one scan of the token plus a short number)", tc.name, cost, cheapFactor, base)
 		}
-		if got != tc.want {
+		if got := classifyNumber(tc.tok); got != tc.want {
 			t.Errorf("%s: classifyNumber = %d, want %d", tc.name, got, tc.want)
 		}
 	}
@@ -172,6 +178,48 @@ func TestClassifyNumberPaddedTokensAreCheapAndRight(t *testing.T) {
 	if classifyNumber("0."+zeros(99999)+"1e100000") != classifyNumber("1") {
 		t.Error("padded and plain spellings of 1 differ")
 	}
+}
+
+// cheapFactor bounds classifyNumber's cost as a multiple of classifyCost's
+// base: generous, since linear work measures about 1.
+const cheapFactor = 10
+
+// classifyCost times classifyNumber(tok) and its base, one jsonnum.Significant
+// pass over tok plus classifyNumber("0.1"). Each is the best of rounds that
+// alternate between the two, so a pause on a busy machine is not counted on
+// one side only.
+func classifyCost(tok string) (cost, base time.Duration) {
+	cost, base = time.Duration(1<<62), time.Duration(1<<62)
+	for range 9 {
+		start := time.Now()
+		classifyNumber(tok)
+		cost = min(cost, time.Since(start))
+		start = time.Now()
+		jsonnum.Significant(tok)
+		classifyNumber("0.1")
+		base = min(base, time.Since(start))
+	}
+	return cost, base
+}
+
+// clockStep is the smallest step time.Now takes on this machine: well under a
+// microsecond on Linux, up to 15.6 ms on Windows. A timing shorter than a step
+// can read as zero, so the base is counted as at least one step.
+func clockStep() time.Duration {
+	step := time.Duration(1 << 62)
+	for range 3 {
+		t0 := time.Now()
+		t1 := time.Now()
+		for t1.Sub(t0) == 0 {
+			t1 = time.Now()
+		}
+		t2 := time.Now()
+		for t2.Sub(t1) == 0 {
+			t2 = time.Now()
+		}
+		step = min(step, t2.Sub(t1))
+	}
+	return step
 }
 
 // 1 MiB of the slow tokens must go through the guard and the hash form fast.

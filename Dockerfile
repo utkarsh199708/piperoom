@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Piperoom pilot image: the Go server plus the built web UI, in one container.
 #
 #   docker build -t piperoom:pilot .
@@ -23,7 +24,10 @@ RUN npm run build
 FROM golang:1.27.2-alpine AS server
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+# No separate "go mod download": it fetches every module in go.sum, including
+# ones the server never links (the Databricks driver's kernel-bindings modules,
+# ~133 MB zipped). go build below downloads only what it compiles; the cache
+# mounts keep those modules and the build cache between builds (BuildKit).
 COPY cmd/server ./cmd/server
 COPY internal ./internal
 COPY migrations ./migrations
@@ -34,7 +38,9 @@ COPY migrations ./migrations
 # ignores -X for a symbol that does not exist, so this is safe on a tree
 # without internal/version.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=${VERSION}" -o /out/piperoom ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=${VERSION}" -o /out/piperoom ./cmd/server
 
 # ---- stage 3: runtime --------------------------------------------------------
 # distroless/static has CA certificates (needed for api.anthropic.com and TLS to

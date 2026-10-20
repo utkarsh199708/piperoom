@@ -5,6 +5,7 @@ import { AppShell } from './components/shell/AppShell'
 import { RoomList } from './components/RoomList'
 import { RoomScreen } from './components/RoomScreen'
 import { ShadowMetricsPage } from './components/shadow/ShadowMetricsPage'
+import { SettingsPage } from './components/settings/SettingsPage'
 
 // Keyed by the room id, so every per-room useState (dialogs, tabs, filters) resets on a jump to another room.
 export function RoomScreenRoute() {
@@ -22,6 +23,7 @@ export default function App() {
               <Route path="/" element={<RoomList />} />
               <Route path="/rooms/:roomId" element={<RoomScreenRoute />} />
               <Route path="/shadow" element={<ShadowMetricsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
               <Route path="*" element={<RoomList />} />
             </Route>
           </Routes>

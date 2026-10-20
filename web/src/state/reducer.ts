@@ -5,6 +5,7 @@ import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
   ProposalPreviewedPayload,
+  RoomSnapshot,
   Actor,
   AgentHypothesisPayload,
   AgentTriagePayload,
@@ -29,7 +30,9 @@ import type {
   PostmortemDraftedPayload,
   PostmortemFailedPayload,
   ApprovalNudgedPayload,
+  ProposalCancelledPayload,
   ProposalCreatedPayload,
+  ProposalScheduledPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   RoomLabelledPayload,
@@ -43,11 +46,39 @@ import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
 import { stripBidi } from '../lib/title'
-import { checklistKey } from './types'
-import type { HypothesisHistoryEntry, InsightState, MemberState, RoomState, StepState, VerdictState } from './types'
+import { checklistKey, snapshotWriteMode } from './types'
+import type { HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
+}
+
+/**
+ * Write mode as the server says it now. It changes only when the server restarts, so the hook asks
+ * again on every reconnect and calls this with the fresh room GET. Everything derived from the old
+ * answer is redone: a `blocked` mark the new mode no longer backs is dropped (off to on), and an
+ * approved proposal that has run nothing is marked (on to off). It does not matter whether the
+ * answer lands before or after the replayed events, since each is judged against the mode in hand
+ * and this pass re-judges all of them. Everything else in the state is left alone.
+ */
+export function applyModeRefresh(state: RoomState, snapshot: RoomSnapshot): RoomState {
+  const fresh = snapshotWriteMode(snapshot)
+  const next: RoomState = {
+    ...state,
+    ...fresh,
+    proposals: state.proposals.map((p) => {
+      const blocked =
+        fresh.snapshot_blocked?.[p.proposal_id] ?? (p.status === 'approved' && fresh.mode?.write === false ? 'write_mode_off' : undefined)
+      const proposal = { ...p }
+      delete proposal.blocked
+      if (blocked) proposal.blocked = blocked
+      return proposal
+    }),
+  }
+  // A snapshot without them (a server from before P1a, or one with nothing blocked) clears the old ones.
+  if (!fresh.mode) delete next.mode
+  if (!fresh.snapshot_blocked) delete next.snapshot_blocked
+  return next
 }
 
 // True when the event's seq skips ahead — the transport must fetch the missing
@@ -166,6 +197,14 @@ function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: n
     if (h && h.items[item] !== undefined) return { section: h.section, text: h.items[item] }
   }
   return null
+}
+
+// The proposal without its policy countdown.
+function unschedule(prop: ProposalState): ProposalState {
+  if (!prop.scheduled) return prop
+  const rest = { ...prop }
+  delete rest.scheduled
+  return rest
 }
 
 function voidPending(handoffs: RoomState['handoffs'], when: (h: RoomState['handoffs'][number]) => boolean) {
@@ -503,7 +542,13 @@ function applyCore(state: RoomState, event: Event): RoomState {
           ]
       next = {
         ...state,
-        driver: { id: p.to.id, name: p.to.name, verified: p.to.verified === true, lease_until: p.lease_until },
+        driver: {
+          id: p.to.id,
+          name: p.to.name,
+          verified: p.to.verified === true,
+          lease_until: p.lease_until,
+          ...(p.reason ? { reason: p.reason } : {}),
+        },
         members,
         control_requests: state.control_requests.filter((r) => r.from.id !== p.to.id),
         // A hand-off is accepted only while its creator drives (409 stale_handoff). The receiver's
@@ -548,6 +593,10 @@ function applyCore(state: RoomState, event: Event): RoomState {
             status: 'open',
             executed: [],
             created_at: event.at,
+            // Only the snapshot says so for a proposal that was already blocked when it was taken.
+            ...(state.snapshot_blocked?.[p.proposal_id] ? { blocked: state.snapshot_blocked[p.proposal_id] } : {}),
+            // Left off when every layer has an owner, so such a proposal folds as before P2b.
+            ...(p.fallback_layers && p.fallback_layers.length > 0 ? { fallback_layers: [...p.fallback_layers] } : {}),
           },
         ],
       }
@@ -560,6 +609,37 @@ function applyCore(state: RoomState, event: Event): RoomState {
       next = {
         ...state,
         proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? { ...prop, preview: p } : prop)),
+      }
+      break
+    }
+
+    // The policy countdown (P2b). Only the first schedule counts. The fold keeps it however late it gets, like the server's fold;
+    // whether the card still shows it is a question of the clock (lib/countdown.ts, #652).
+    case 'proposal.scheduled': {
+      const p = as<ProposalScheduledPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) =>
+          prop.proposal_id === p.proposal_id && prop.status === 'open' && !prop.schedule_seen
+            ? {
+                ...prop,
+                schedule_seen: true,
+                // A proposal someone already decided on gets no countdown (the server's foldScheduled).
+                ...(Object.values(prop.approvals).every((v) => v === 'pending')
+                  ? { scheduled: { run_at: p.run_at, cancel_until: p.cancel_until || p.run_at, policy: p.policy } }
+                  : {}),
+              }
+            : prop,
+        ),
+      }
+      break
+    }
+
+    case 'proposal.cancelled': {
+      const p = as<ProposalCancelledPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? unschedule(prop) : prop)),
       }
       break
     }
@@ -588,8 +668,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
           const allApproved = (prop.required_layers ?? []).every(
             (l) => approvals[l] === 'approved',
           )
+          // Any approval ends the countdown: the policy's own (it has started) or a person's.
           return {
-            ...prop,
+            ...unschedule(prop),
             approvals,
             decisions: {
               ...prop.decisions,
@@ -602,6 +683,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
               },
             },
             status: allApproved ? 'approved' : 'open',
+            // The snapshot's `blocked` is not refreshed over the socket: an approval that completes the
+            // set while write mode is off leaves nothing to run (docs/api.md, P1a), so mark it here.
+            ...(allApproved && !prop.blocked && state.mode?.write === false ? { blocked: 'write_mode_off' as const } : {}),
           }
         }),
       }
@@ -615,7 +699,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         proposals: state.proposals.map((prop) =>
           prop.proposal_id === p.proposal_id
             ? {
-                ...prop,
+                ...unschedule(prop),
                 approvals: { ...prop.approvals, [p.layer]: 'rejected' as const },
                 decisions: {
                   ...prop.decisions,

@@ -124,13 +124,13 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 			pr.Cause = clipBytes(scrub(p.Cause), maxFieldBytes)
 			pr.FixThatWorked = clipBytes(scrub(p.FixThatWorked), maxFieldBytes)
 			pr.FixProposalID = p.FixProposalID
-			if slices.Contains(events.Layers, p.ActualLayer) {
+			if slices.Contains(events.IncidentLayers(), p.ActualLayer) {
 				pr.Layer = p.ActualLayer
 			}
 		case events.ShadowLabelled:
 			// One label per room; the last wins if there were ever two.
 			p, err := events.Decode[events.ShadowLabelledPayload](e)
-			if err != nil || !slices.Contains(events.Layers, p.ActualLayer) {
+			if err != nil || !slices.Contains(events.IncidentLayers(), p.ActualLayer) {
 				continue
 			}
 			pr.Layer, pr.Terms = p.ActualLayer, nil

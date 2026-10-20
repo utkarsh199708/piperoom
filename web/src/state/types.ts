@@ -13,6 +13,7 @@ import type {
   ProposalPreviewedPayload,
   ProposalStep,
   RoomLabelledPayload,
+  RoomMode,
   RoomSnapshot,
   ToolCall,
   TraceStage,
@@ -32,6 +33,8 @@ export interface DriverInfo {
    * Lease expiry). The driver stays the driver; the next control.granted clears it.
    */
   lease_expired?: boolean
+  /** control.granted.reason (P2b): "sole_member" when the server made the only person here the driver. */
+  reason?: string
 }
 
 export interface AgentStatusState {
@@ -176,6 +179,36 @@ export interface ProposalState {
   preview?: ProposalPreviewedPayload
   /** The agent's verdict after the last step ran. */
   verification?: AgentVerificationPayload
+  /**
+   * P1a: every required layer approved while write mode is off, so no step runs. From the snapshot
+   * (`open_proposals[].blocked`) or, for an approval that arrives over the socket, from `mode.write`
+   * (see the reducer). Read it through `waitingForWriteMode`, which also checks that nothing ran.
+   */
+  blocked?: 'write_mode_off'
+  /**
+   * P2b: proposal.created.fallback_layers, the required layers nobody owns. The room's driver
+   * approves them. Absent when every layer has an owner.
+   */
+  fallback_layers?: string[]
+  /**
+   * P2b: the pending policy countdown (proposal.scheduled), until a proposal.cancelled, any
+   * approval.given (the policy's or a person's) or a rejection of the proposal. Kept in the fold
+   * however late it is: lib/countdown.ts decides whether the card still shows it (#652).
+   */
+  scheduled?: ScheduledState
+  /**
+   * A proposal.scheduled was folded once. The server counts only the first per proposal, even after
+   * a cancel, so a later one is ignored (internal/room foldScheduled).
+   */
+  schedule_seen?: boolean
+}
+
+/** A pending proposal.scheduled (P2b). */
+export interface ScheduledState {
+  run_at: string
+  /** Advertised only: the card says "the policy may run from <time>", never a deadline (#629). */
+  cancel_until: string
+  policy: string
 }
 
 export interface MemberState {
@@ -343,6 +376,24 @@ export interface RoomState {
    * falls back to it when the event has none.
    */
   snapshot_hashes: Record<string, string>
+  /**
+   * proposal_id -> "write_mode_off" from the snapshot's open_proposals[].blocked (refreshed with
+   * `mode` on a reconnect). The reducer copies it onto the proposal when proposal.created replays
+   * (same reason as snapshot_hashes).
+   */
+  snapshot_blocked?: Record<string, 'write_mode_off'>
+  /**
+   * The room GET's `mode` (P1a, P2b). Write mode changes only when the server restarts, which drops
+   * the socket, so it is read again on every reconnect (`mode_refreshed`, applyModeRefresh). The
+   * socket never carries it. Absent on a server from before P1a, which has write mode on.
+   */
+  mode?: RoomMode
+  /**
+   * P2c: proposal_id -> the text of the 403 not_layer_owner the server gave this person's
+   * approve-all. Never from the log: useRoom sets it, a room reload clears it. While set, the card
+   * and the decision bar offer that proposal's per-layer rows instead of "Approve and run".
+   */
+  approve_all_refused?: Record<string, string>
   members: MemberState[]
   control_requests: ControlRequestState[]
   trace: TraceState | null
@@ -432,6 +483,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
         .filter((p) => p.params_hash)
         .map((p) => [p.proposal_id, p.params_hash as string]),
     ),
+    ...snapshotWriteMode(snapshot),
     driver: snapshot.driver
       ? {
           id: snapshot.driver.id,
@@ -459,6 +511,20 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     triage: snapshot.triage && snapshot.shadow !== true
       ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
+  }
+}
+
+// The P1a fields, left off entirely when the server sent none so a snapshot from an older server
+// folds to the same state as before.
+export function snapshotWriteMode(snapshot: RoomSnapshot): Pick<RoomState, 'mode' | 'snapshot_blocked'> {
+  const blocked = Object.fromEntries(
+    (snapshot.open_proposals ?? [])
+      .filter((p) => p.blocked === 'write_mode_off')
+      .map((p) => [p.proposal_id, 'write_mode_off' as const]),
+  )
+  return {
+    ...(snapshot.mode ? { mode: snapshot.mode } : {}),
+    ...(Object.keys(blocked).length > 0 ? { snapshot_blocked: blocked } : {}),
   }
 }
 

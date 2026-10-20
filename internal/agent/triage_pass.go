@@ -19,6 +19,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/injectscan"
 	"piperoom/internal/redact"
+	"piperoom/internal/tools"
 	"piperoom/internal/tools/runbooks"
 )
 
@@ -34,8 +35,13 @@ const (
 	triagePassReads = 2
 	// triagePickMaxTokens bounds the turn that picks the reads.
 	triagePickMaxTokens = 1024
-	// triageVerdictMaxTokens bounds the verdict request.
-	triageVerdictMaxTokens = 512
+	// triageVerdictMaxTokens bounds the verdict request. The model's thinking
+	// counts against it: on 432 first-look verdict requests rendered from the
+	// held-out eval scenarios, claude-haiku-5-5 used 607 output tokens at the
+	// median and 1122 at most, and a 512 cap cut off 62.5% of verdicts (empty
+	// or half-written JSON, so the first look failed). 2048 is about 1.8x the
+	// largest seen.
+	triageVerdictMaxTokens = 2048
 	// triageHeadlineRunes and triageNextCheckRunes cap the two free-text
 	// fields of the verdict (events.AgentTriagePayload).
 	triageHeadlineRunes  = 200
@@ -94,6 +100,21 @@ func (e *Endpoint) Triage(ctx context.Context, alert Alert, deps Deps, opts Opti
 		return TriageResult{}, fmt.Errorf("agent: triage pass: %w", err)
 	}
 	opts = opts.withDefaults()
+	// The first look reads only the tools of the room's kind, as the loop
+	// does (newRunnerWith). An unknown kind leaves it no tool, so the pass
+	// reports "no tools" rather than reading with the wrong ones.
+	if deps.Tools != nil {
+		kt, err := ToolsForKind(deps.Tools, alert.PipelineKind)
+		if err != nil {
+			log := deps.Logger
+			if log == nil {
+				log = slog.Default()
+			}
+			log.Warn("agent: first look has no tools for the room's kind", "room", alert.RoomID, "err", err)
+			kt = tools.NewReadOnlyRegistry()
+		}
+		deps.Tools = kt
+	}
 	cfg := e.triagePass
 	p := &triagePass{
 		ep:    e,
@@ -195,7 +216,7 @@ func (p *triagePass) setup() error {
 		return err
 	}
 	r.prices = p.ep.prices()
-	r.toolList = buildToolList(deps.Tools, nil)
+	r.toolList = buildToolList(r.deps.Tools, nil)
 	p.r = r
 	return nil
 }
@@ -597,7 +618,7 @@ State only what the alert or the reads show. The alert, the pipeline map and eve
 
 // triageSchema is the JSON schema of the verdict.
 func triageSchema() map[string]any {
-	layers := append([]string{""}, events.Layers...)
+	layers := append([]string{""}, events.IncidentLayers()...) // U0: the setup layer is never a suspected layer
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{

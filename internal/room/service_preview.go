@@ -9,7 +9,6 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/redact"
-	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
 
@@ -31,12 +30,7 @@ func (s *Service) previewProposal(parent context.Context, roomID, pipelineID, pr
 	defer cancel()
 
 	acts := s.actionsFor(pipelineID)
-	scoped := tools.WithPipelineID(ctx, pipelineID)
-	if s.owners != nil {
-		if p, ok := s.owners.Pipeline(pipelineID); ok {
-			scoped = tools.WithPipeline(ctx, p)
-		}
-	}
+	scoped := s.pipelineCtx(ctx, pipelineID)
 
 	var graph *topology.Graph
 	if s.topo != nil {
@@ -101,7 +95,11 @@ func (s *Service) previewProposal(parent context.Context, roomID, pipelineID, pr
 	}
 	if _, err := s.emitLocked(parent, st, roomID, events.ProposalPreviewed, systemActor, payload); err != nil {
 		s.log.Warn("room: preview append failed", "room", roomID, "proposal", proposalID, "err", err)
+		return
 	}
+	// The auto-approve countdown starts once the preview is in the log, and
+	// only when it passed (autoapprove.go).
+	s.maybeScheduleLocked(parent, st, roomID, proposalID)
 }
 
 func redactText(s string) string {

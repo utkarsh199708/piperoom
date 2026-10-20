@@ -99,6 +99,13 @@ services:
       PIPEROOM_LOG_FORMAT: ${PIPEROOM_LOG_FORMAT:-text}
       FAIL_ON_ID: ${DEVCONSUMER_FAIL_ON_ID:-0}
       DELAY: ${DEVCONSUMER_DELAY:-0s}
+      # Bad-build knobs for `devctl break consumer-bad-deploy` / `dlq-backlog`
+      # (dev/scenarios.md §8, §9). Empty = the good build.
+      SKIP_OPS: ${DEVCONSUMER_SKIP_OPS:-}
+      REJECT_STATUS: ${DEVCONSUMER_REJECT_STATUS:-}
+      # The pipeline's DLQ (dev/owners.yaml watch.dlq_topics). It exists only
+      # while dlq-backlog is broken; nothing is written to it otherwise.
+      DLQ_TOPIC: devctl.order-sync.dlq
 
   # Piperoom server in shadow mode, against this stack (dev/shadow.md).
   # Profile "shadow": `devctl up` does not start it; `devctl shadow up` does.
@@ -138,6 +145,11 @@ services:
       PIPEROOM_AUTH_MODE: dev
       PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1"
       PIPEROOM_DEV_ACK: ${PIPEROOM_DEV_ACK:-}
+      # Write mode on when your environment does not set it, as before the setting existed
+      # (the server's default is off). An explicitly empty value stays empty, which the
+      # server reads as off: hence "-on", not ":-on". Shadow rooms propose nothing; a
+      # non-shadow pipeline in the file runs approved fixes.
+      PIPEROOM_WRITE_MODE: ${PIPEROOM_WRITE_MODE-on}
       # The watcher opens the rooms: `devctl break <scenario>` trips it within a few
       # intervals (dev/owners.shadow.yaml has short `for:` values).
       PIPEROOM_WATCH_MODE: rooms
@@ -147,3 +159,70 @@ services:
       PIPEROOM_SHADOW_GRACE: ${PIPEROOM_SHADOW_GRACE:-0}
       PIPEROOM_SHADOW_TOKEN_BUDGET: ${PIPEROOM_SHADOW_TOKEN_BUDGET:-500000}
       PIPEROOM_SHADOW_MAX_TURNS: ${PIPEROOM_SHADOW_MAX_TURNS:-20}
+
+  # Batch pipeline "daily-revenue" (dev/batch.md, dev/owners.batch.yaml):
+  # Airflow standalone runs DAG revenue_daily, whose dbt run builds
+  # analytics.stg_orders -> analytics.fct_revenue in the warehouse database.
+  # Profile "batch": `docker compose --profile batch up -d --wait` starts it
+  # with the default services; without the profile nothing here starts.
+  airflow:
+    profiles: ["batch"]
+    build: ./batch/airflow
+    image: piperoom-dev/airflow:2.10.5-dbt1.9.0
+    command: ["standalone"]
+    # Linux: export AIRFLOW_UID=$(id -u) so dbt can write the bind-mounted artifacts dir.
+    user: "${AIRFLOW_UID:-50000}:0"
+    depends_on:
+      postgres: { condition: service_healthy }
+    # Host loopback only: the REST API below takes no login.
+    ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      - ./batch/dags:/opt/airflow/dags:ro
+      - ./batch/dbt:/opt/airflow/dbt:ro
+      # AUTH_ROLE_PUBLIC=Viewer: without it the no-login API answers 403.
+      - ./batch/airflow/webserver_config.py:/opt/airflow/webserver_config.py:ro
+      # dbt's target/ (run_results.json, manifest.json); the host server reads it
+      # as DBT_ARTIFACTS_DIR=<absolute path of dev/batch/artifacts>.
+      - ./batch/artifacts:/opt/airflow/dbt-artifacts
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+      # No login on /api/v1: internal/clients/airflow refuses to send a password
+      # or token over http:// (#587), and the port is bound to 127.0.0.1.
+      # Anonymous callers get the Viewer role (batch/airflow/webserver_config.py).
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.default
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "10"
+      WAREHOUSE_HOST: postgres
+      WAREHOUSE_USER: piperoom
+      WAREHOUSE_PASSWORD: piperoom-dev
+      DBT_PROFILES_DIR: /opt/airflow/dbt/analytics
+      DBT_TARGET_PATH: /opt/airflow/dbt-artifacts
+      DBT_LOG_PATH: /tmp/dbt-logs
+    healthcheck:
+      # Healthy once the API answers without login and the DAG is parsed
+      # (urlopen raises on 401/403/404). Python, not curl: no tool assumptions.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/dags/revenue_daily', timeout=5)"]
+      start_period: 60s
+      interval: 5s
+      retries: 40
+
+  # Optional ClickHouse warehouse and Kafka Engine sink (dev/clickhouse/README.md).
+  clickhouse:
+    profiles: ["clickhouse"]
+    # 25.8 LTS, exact release and multi-arch index digest (verified on Docker Hub).
+    image: clickhouse/clickhouse-server:25.8.33.6@sha256:0152dd511befe6a2c2ef53e930726179669b08116da78500b37c51c96ff5ee77
+    depends_on:
+      kafka: { condition: service_healthy }
+      schema-registry: { condition: service_healthy }
+    environment:
+      CLICKHOUSE_DB: analytics
+      CLICKHOUSE_USER: piperoom_admin
+      CLICKHOUSE_PASSWORD: piperoom-clickhouse-admin
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["127.0.0.1:9001:9000"]
+    volumes:
+      - ./clickhouse/init/01-reader.sql:/docker-entrypoint-initdb.d/01-reader.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8123/ping"]
+      interval: 5s
+      retries: 40

@@ -53,6 +53,11 @@ function room(over: Partial<RoomState> = {}): RoomState {
     status: 'open',
     // The lease is far in the future: only the driver can steer.
     driver: { id: 'kabir', name: 'Kabir', lease_until: new Date(Date.now() + 3_600_000).toISOString() },
+    // Two people: a hand-off has someone to go to (P2 hides it from a room of one).
+    members: [
+      { id: 'kabir', name: 'Kabir', role: 'driver' },
+      { id: 'arjun', name: 'Arjun', role: 'watching' },
+    ],
     ...over,
   }
 }
@@ -108,6 +113,11 @@ describe('RoomScreen registers ⌘K room commands', () => {
     expect(offered(c)).toEqual(['exportJson', 'invite', 'postmortem', 'requestControl', 'trace'])
     c?.requestControl?.()
     expect(actions.requestControl).toHaveBeenCalledTimes(1)
+  })
+
+  it('the driver alone in the room is offered no hand-off (P2)', () => {
+    const c = registered(driver, room({ members: [{ id: 'kabir', name: 'Kabir', role: 'driver' }] }))
+    expect(offered(c)).toEqual(['closeRoom', 'exportJson', 'invite', 'postmortem', 'trace'])
   })
 
   it('with no driver anyone can take control (it grants control to themselves)', () => {

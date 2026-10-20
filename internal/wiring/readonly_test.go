@@ -181,6 +181,7 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 
 	connW := reflect.TypeOf((*clients.ConnectWriter)(nil)).Elem()
 	regW := reflect.TypeOf((*clients.SchemaRegistryWriter)(nil)).Elem()
+	fixW := reflect.TypeOf((*clients.ConnectFixWriter)(nil)).Elem()
 	allowed := map[reflect.Type]bool{
 		reflect.TypeOf(readOnlyConnect{}):  true,
 		reflect.TypeOf(readOnlyRegistry{}): true,
@@ -189,10 +190,12 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 		if allowed[ty] {
 			return false
 		}
-		if ty.Implements(connW) || ty.Implements(regW) {
+		if ty.Implements(connW) || ty.Implements(regW) || ty.Implements(fixW) {
 			return true
 		}
-		for _, m := range []string{"Resume", "UpdateConfig"} {
+		// Any one write method is enough, even on a type that implements
+		// none of the writer interfaces in full.
+		for _, m := range []string{"Resume", "UpdateConfig", "PauseConnector", "UpdateConnectorConfigKeys"} {
 			if _, ok := ty.MethodByName(m); ok {
 				return true
 			}

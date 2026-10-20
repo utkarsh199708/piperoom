@@ -348,6 +348,11 @@ func TestClaimProposalExactlyOnce(t *testing.T) {
 	roomID := createTestRoom(t, s0)
 	createTestProposal(t, s0, roomID, "p_claim")
 	ctx := context.Background()
+	// Not approved yet: nobody may claim it.
+	if ok, err := s0.ClaimProposal(ctx, "p_claim", "early"); err != nil || ok {
+		t.Fatalf("claim before the approval: ok=%v err=%v, want false", ok, err)
+	}
+	approveTestProposal(t, s0, "p_claim")
 	var won atomic.Int32
 	var winner atomic.Value
 	var wg sync.WaitGroup

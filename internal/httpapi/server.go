@@ -68,6 +68,10 @@ type Server struct {
 
 	// GET /metrics: metrics.go.
 	metrics *metrics
+
+	// Admin settings and connection tests (WithAdmin): admin.go.
+	admin      AdminSettings
+	adminLimit *rateLimiter
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -92,7 +96,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	s.normalizeAuth()
 	s.gw.Identify = wsIdentify
 	s.gw.SessionAlive = s.sessionAlive
-	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentSlotStats, openRooms: svc.OpenRooms})
+	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentSlotStats, openRooms: svc.OpenRooms, approvals: svc.ApprovalsByGrant,
+		soleMembers: svc.SoleMemberGrants})
 
 	r := chi.NewRouter()
 	// Outside Recoverer, so a handler that panics is counted with the 500
@@ -225,6 +230,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/rooms/{id}/usage", visible(s.handleRoomUsage))
 				short.Get("/usage", s.handlePipelineUsage)
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
+				short.Post("/proposals/{pid}/approve-all", s.handleApproveAllProposal)
+				short.Post("/proposals/{pid}/cancel", s.handleCancelProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
 				short.Get("/pipelines", s.handlePipelines)
@@ -232,6 +239,10 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 			})
 		})
+
+		// Admin settings (WithAdmin; admin.go): their own group, so the
+		// admin check answers before the content type and body checks.
+		s.mountAdmin(api)
 	})
 	s.gw.OriginPatterns = s.wsOriginPatterns()
 	s.handler = r

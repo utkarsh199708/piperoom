@@ -11,7 +11,33 @@ Nothing in this repo measures setup time. The slow part is usually the credentia
 requests in [permissions.md](permissions.md), and naming a reachable owner for each layer. Plan
 for those before you plan the install.
 
-## 0. Prerequisites
+New here? Start with [quickstart.md](quickstart.md): two commands, read-only, no room database.
+
+## Which variables matter first
+
+These ten settings are what a first install sets. Every other setting is under [Reference](#reference).
+All are read by `config.Load()` in `internal/config/config.go`, except `ANTHROPIC_API_KEY`, which the SDK reads.
+
+| Variable | Default | What it does | Required? |
+|---|---|---|---|
+| `PIPEROOM_HTTP_ADDR` | `127.0.0.1:8090` | Listen address. Dev login off loopback is refused unless both dev variables are set ([section 1](#1-configure-the-environment)); `--quickstart` always refuses it (`cmd/server/quickstart.go`). | No |
+| `PIPEROOM_AUTH_MODE` | `dev` | `dev` (pick a user, no password) or `oidc` (single sign-on; see [deploy/README.md](../../deploy/README.md#2-settings-in-deployenv)). `--quickstart` forces `dev`. | Yes on any shared network: `oidc` |
+| `OWNERS_FILE`, `USERS_FILE` | `dev/owners.yaml`, `dev/users.yaml` | Who owns each layer, and who may log in, drive and approve. The server refuses to start when the two disagree ([section 2](#2-describe-your-pipeline-ownersyaml-and-usersyaml)). `discover -write-owners` writes both; `--quickstart` takes `--owners` and writes its own users file when `USERS_FILE` is unset. | Yes |
+| `CONNECT_URL` | `http://localhost:8083` | Kafka Connect REST. Not contacted at start-up, so a wrong URL shows on the first tool call. | Yes |
+| `KAFKA_BROKERS` | `localhost:29092` | Kafka bootstrap brokers, comma separated. | Yes |
+| `SCHEMA_REGISTRY_URL` | `http://localhost:8081` | Schema Registry. `""` or `off` means you have none. | Yes, or `off` |
+| `SOURCE_DB_URL` | the dev stack's `orders` database | The CDC source Postgres, read-only role. Pinged at start-up (`internal/clients/postgres/postgres.go`). | Yes |
+| `WAREHOUSE_DB_URL` | the dev stack's `warehouse` database | The warehouse (Postgres; Snowflake with `WAREHOUSE_KIND`), read-only role. Pinged at start-up. | Yes |
+| `PIPEROOM_WRITE_MODE` | `off` | `off`: approved fixes are recorded but never run. `on`: they run. Any other value stops the start (`config.ParseWriteMode`). One switch per process ([section 7](#7-run-the-pilot)). | No |
+| `ANTHROPIC_API_KEY` | none | The model key for the default `anthropic` provider. Other providers: [section 1](#1-configure-the-environment). | Yes (`anthropic` provider) |
+
+Each URL and file setting falls back to the local dev stack when unset, so set every one you rely on.
+The full server (without `--quickstart`) also needs `PIPEROOM_DB_URL`, its own room database ([section 0](#0-prerequisites)).
+To serve the web UI, set `PIPEROOM_WEB_DIR` to the built `web/dist` ([section 4](#4-start-the-service)).
+
+## Reference
+
+### 0. Prerequisites
 
 - **Go 1.27** to build `cmd/server` (`go.mod:3`: `go 1.27.2`), or **Docker with Compose v2** for the
   image in [deploy/README.md](../../deploy/README.md).
@@ -45,7 +71,7 @@ for those before you plan the install.
 - Read [README.md](README.md#read-this-first-pilot-limits) for the current limits, and
   [Supported scale](#supported-scale) for what one replica is tested to carry.
 
-## 1. Configure the environment
+### 1. Configure the environment
 
 All settings are environment variables read by `internal/config/config.go` (`config.Load()`).
 `config.go` holds the fields and `config.go` the defaults. The settings are grouped below.
@@ -176,7 +202,7 @@ Put secrets in your secret manager and inject them into the process environment.
 commit them, and do not put DSNs with passwords in shell history or tickets. Use
 `sslmode=require` (or stricter) for remote Postgres, not the dev default `sslmode=disable`.
 
-### 1a. Triage model and the token budget
+#### 1a. Triage model and the token budget
 
 **Triage model** (`PIPEROOM_TRIAGE_MODEL`, optional). The first turns of an investigation run on the
 triage model. The main model (`PIPEROOM_MODEL`) takes over for good when any of these happens
@@ -207,7 +233,7 @@ summary (`budget.go`; `internal/agent/endpoint.go`). Closing a room drops
 its count: the server calls `Endpoint.Forget` (`internal/agent/endpoint.go`) from the room-closed
 hook (`cmd/server/watch.go`), so the counts of closed rooms do not pile up in memory. Set `0` only if you accept an uncapped cost per room.
 
-## 2. Describe your pipeline: `owners.yaml` and `users.yaml`
+### 2. Describe your pipeline: `owners.yaml` and `users.yaml`
 
 Start from `dev/owners.yaml` and `dev/users.yaml`. The loader refuses a pipeline that has no
 `topic_prefix`, no `source_tables` or no `connectors`, and refuses `sink_tables` without
@@ -267,7 +293,7 @@ Rules of thumb:
   nothing until the room is closed and labelled. This is not the watcher's `log` mode. See
   [shadow-rooms.md](shadow-rooms.md).
 
-### 2a. Tenancy
+#### 2a. Tenancy
 
 Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
 
@@ -305,7 +331,7 @@ Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
 - Not per tenant in one deployment: the model key and its cost, `PIPEROOM_MAX_AGENTS`, the room
   database, the Slack channel and the people list.
 
-## 3. Prepare the source database
+### 3. Prepare the source database
 
 1. Create the read-only role and grants ([permissions.md](permissions.md#source-postgres)).
 2. (Optional) have your DBA install the DDL audit trigger (`dev/postgres-init/02-ddl-audit.sql`)
@@ -314,7 +340,7 @@ Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
    `PIPEROOM_DB_URL`. You do not run migrations by hand: `cmd/server` applies them at start-up
    (see step 4 and [permissions.md](permissions.md#room-database)).
 
-## 4. Start the service
+### 4. Start the service
 
 `cmd/server` is the room service: HTTP API, WebSocket, agent runner, the Slack mirror (if
 configured), the model endpoint, the web UI (if `PIPEROOM_WEB_DIR` is set) and the executor for
@@ -401,7 +427,7 @@ unknown id returns `401`. Every `POST` from curl needs `-H 'Content-Type: applic
 content type. In dev mode more than one `X-User` value (several header lines, or a comma in one
 line) answers `403 proxy_identity`.
 
-### Routes you need
+#### Routes you need
 
 All under `/api`, all JSON, and all need a logged-in user: the session cookie, or in dev mode `X-User`
 when curl sends no cookie. The signed alert routes need neither. (The full contract is `docs/api.md`.)
@@ -420,7 +446,7 @@ when curl sends no cookie. The signed alert routes need neither. (The full contr
 | pipeline map | `GET /api/pipelines/{pid}/topology` |
 | probes (no `X-User`, outside `/api`) | `GET /healthz`, `GET /readyz`; `/readyz` checks the room store with a timeout (`server.go`; `internal/httpapi/health.go`) |
 
-### What happens on a restart
+#### What happens on a restart
 
 On start-up the service reloads every room from the event log (`Load` in `internal/room/service.go`).
 **It starts no agent by itself**, because a restart must not spend model calls on rooms nobody is
@@ -473,7 +499,7 @@ marked failed, but not immediately: a sweep fails a fix once it has been stale l
 - Only the in-memory `--demo` store uses the older text "proposal was interrupted by a service restart
   before it finished; create a new proposal to retry".
 
-### Network exposure
+#### Network exposure
 
 The server has two login modes (F1; `docs/api.md` §Login; `docs/design/auth.md`).
 
@@ -502,7 +528,7 @@ authentication. The Docker image does not set it: it starts in `oidc` mode, whic
 switch. To run the image in dev mode on purpose, use `deploy/docker-compose.dev-auth.yml` and put the
 acknowledgement in `deploy/.env` ([deploy/README.md](../../deploy/README.md)).
 
-### Supported scale
+#### Supported scale
 
 What one Piperoom replica is proposed to carry, from what was tested. These are floors measured on a shared 4-vCPU VM with
 Postgres on the same machine, not limits and not a target. The run on managed Postgres over the network,
@@ -547,7 +573,7 @@ A first pilot of one or two pipelines and a handful of engineers is far inside t
   hit a 30-second replay limit; reconnecting finishes the replay (review §6.4). The tested case is 20
   people at once.
 
-## 5. Verify with a dry run (no real alert needed)
+### 5. Verify with a dry run (no real alert needed)
 
 1. Check the agent can read every system without opening a room:
    `go run ./cmd/investigate` with a test alert for your `pipeline_id`
@@ -561,7 +587,8 @@ A first pilot of one or two pipelines and a handful of engineers is far inside t
    sink table. Both must fail. Do not test with the room-database role (`PIPEROOM_DB_URL`); that
    role is meant to write. Same for Kafka produce with the Piperoom principal.
 4. Confirm the approval gate: have the agent propose a fix and confirm it does not run
-   until every required owner has approved. Reject it, and confirm nothing changed.
+   until every required owner has approved. Reject it, and confirm nothing changed. With write mode
+   off (the default) an approved fix never runs at all (section 7).
    In dev mode, dev login is not proof of identity (F1), so the approval check is only as good as
    your network control. In `oidc` mode the approver is the signed-in person.
 5. Practise a hand-off between two engineers.
@@ -570,7 +597,7 @@ A first pilot of one or two pipelines and a handful of engineers is far inside t
 7. If you run the container: `docker compose` health reports `healthy` once `/healthz` answers
    (`Dockerfile`), and the UI loads from the published port.
 
-## 6. Wire up alerts
+### 6. Wire up alerts
 
 Use the signed route when you can: `POST /api/alerts/{source}`, where `{source}` is one of
 `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (`internal/alertin/alertin.go`,
@@ -627,7 +654,7 @@ an identical body (`service_room.go`; index key);
   differs. The generic key is a hash of the body (`internal/alertin/parse.go`).
 - **Driver.** The room has no driver until someone takes control (`POST /api/rooms/{id}/control/grant`).
 
-## 6b. Slack (optional, outbound only)
+### 6b. Slack (optional, outbound only)
 
 - Turn it on by setting `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` (section 1), then restart. The log
   says "slack bridge enabled" (`cmd/server/slack.go`). With neither set, it logs "slack bridge
@@ -643,7 +670,7 @@ an identical body (`service_room.go`; index key);
 - What it posts, including approver names, the close resolution and the byte limits, is in
   [data-handling.md](data-handling.md#1-where-data-goes).
 
-## 6c. Status of the login design and other features
+### 6c. Status of the login design and other features
 
 - **The login design is built** (`docs/design/auth.md`), including auth PR 4 (merged at `8283a58`):
   an approve must send the `params_hash` of the proposal the approver saw (a missing one is `400`,
@@ -657,20 +684,29 @@ an identical body (`service_room.go`; index key);
 - **Snowflake** is selectable with `WAREHOUSE_KIND=snowflake` (section 1 and
   [permissions.md](permissions.md#warehouse)).
 
-## 7. Run the pilot
+### 7. Run the pilot
 
-- Before live rooms, consider running the agent **blind** on one or two pipelines for a few weeks
-  ([shadow-rooms.md](shadow-rooms.md)): it proposes nothing, nobody sees its output until after the
-  incident, and you get a measured hit rate at the end. Turn it on per pipeline in `owners.yaml`.
-- Start in **read-only mode** for Connect and Registry (no write grants). Let proposals show
-  what the agent would do, and have the owners make the change by hand.
-- After a few incidents, enable write mode for one layer at a time. The exact calls to allow are
-  in [permissions.md](permissions.md#kafka-connect) and [permissions.md](permissions.md#schema-registry).
+- Start **read-only**: live rooms, with `PIPEROOM_WRITE_MODE` unset or `off` (the default). The agent still
+  proposes and people still approve, but a fully approved proposal never runs: the room shows
+  `open_proposals[].blocked: "write_mode_off"` and `GET /healthz` reports `"write_mode": "off"`
+  (`cmd/server/writemode.go`: `writeModeSetup`; `internal/room/writemode.go`; `internal/httpapi/health.go`).
+  Owners make the change by hand. Grant read-only credentials too: the switch stops the executor, it does
+  not take write rights away from a role that has them ([decision.md §4](decision.md#4-recommendation-read-only-by-default-shadow-as-a-toggle-then-write-mode)).
+- **Shadow is an opt-in toggle per pipeline, not a phase.** With `shadow: {enabled: true}` on a pipeline in
+  `owners.yaml`, the agent runs blind on that pipeline's alerts, proposes nothing, and its output is shown
+  only after the room closes ([shadow-rooms.md](shadow-rooms.md)). Other pipelines stay live and read-only.
+- After the approvers have used read-only rooms, set `PIPEROOM_WRITE_MODE=on` and restart. It is **one
+  switch per process**; every replica that shares the room database must use the same value
+  (`cmd/server/writemode.go`). Write mode per layer is not built (out of scope in
+  `tasks/P1-quickstart-readonly.md`). To limit the first layer, limit the credentials: grant the Kafka
+  Connect restart calls first. The exact calls are in [permissions.md](permissions.md#kafka-connect) and
+  [permissions.md](permissions.md#schema-registry). `--quickstart` never runs with write mode on
+  (`cmd/server/quickstart.go`).
 - Start with the cheapest model you trust for triage (section 1a), and keep the token budget on.
   Watch the per-room token use until you know what an investigation costs.
 - Keep a list of every wrong or unhelpful agent answer and send it to the Piperoom team.
 
-## Troubleshooting
+### Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
@@ -679,7 +715,13 @@ an identical body (`service_room.go`; index key);
 | `kafka_topic_config` permission error | missing `DescribeConfigs` on the pipeline's topics (see [permissions.md](permissions.md#kafka)) |
 | `pg_row` / `warehouse_row` "table is not in pipeline" | table is missing from `source_tables` / `sink_tables`, or the `pipeline_id` the agent used is not the room's pipeline |
 | `connect_config` shows `***` | expected: secret-looking keys are redacted; their values are never shown (`internal/tools/kafkatools/connect_tools.go`) |
-| Proposal cannot execute | write mode not granted on Connect/Registry (by design) |
+| Proposal approved by every layer but nothing runs; the room shows "waiting for write mode" (`blocked: "write_mode_off"`) | `PIPEROOM_WRITE_MODE` is unset or `off`, the default, by design. Set `on` and restart the full server (section 7). It is one switch per process, not per layer (`cmd/server/writemode.go`) |
+| Write mode is on, but a fix step fails with a permission error | the Connect or Registry role has no write grant for that call ([permissions.md](permissions.md#kafka-connect)) |
+| Server exits at start with "PIPEROOM_WRITE_MODE=... want off or on" | the value is not `off` or `on`; `true` and `1` are refused too (`internal/config/config.go`: `ParseWriteMode`) |
+| `--quickstart` exits with "PIPEROOM_WRITE_MODE=on cannot be used with it" | the quickstart is read-only; unset the variable, or run the full server (`cmd/server/quickstart.go`) |
+| `--quickstart` exits with "listens on loopback only" | `PIPEROOM_HTTP_ADDR` is not a loopback address; use `127.0.0.1:<port>` (`cmd/server/quickstart.go`: `checkQuickstartAddr`) |
+| `--quickstart` exits with "writes a users file only when the owners file names one user" | the owners file names several owners or a group; set `USERS_FILE` to a users file that lists them (`cmd/server/quickstart.go`: `quickstartUsers`) |
+| `discover -write-owners` wrote `owners.yaml.draft` and exited 1 | the draft failed `owners.Load`; the error is at the top of the `.draft` file (`cmd/discover/write.go`: `installOwners`) |
 | `connect_update_connector_config` fails with a 405 | Connect older than 3.5 does not support `PATCH /connectors/{name}/config` (`connect.go`) |
 | Server exits at start with "users/owners config" | `users.yaml` and `owners.yaml` disagree about a layer owner (step 4). The message names the user and layer |
 | Server exits at start with "topic_prefix is required", "no source tables", "no connectors" or "sink_ts_column is required" | fix the named pipeline in `owners.yaml` (`internal/owners/owners.go`) |

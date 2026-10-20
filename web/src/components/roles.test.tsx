@@ -62,6 +62,11 @@ function busyRoom(): RoomState {
     title: 'Orders stale',
     pipeline_id: 'orders',
     driver: { id: 'arjun', name: 'Arjun' },
+    // Two people, so the driver is offered a hand-off (P2).
+    members: [
+      { id: 'arjun', name: 'Arjun', role: 'driver' },
+      { id: 'priya', name: 'Priya', role: 'watching' },
+    ],
     steps: [{ id: 's1', title: 'Check lag', tool_calls: [], messages: [] }],
     proposals: [
       {

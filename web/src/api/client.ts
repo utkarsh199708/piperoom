@@ -16,6 +16,8 @@ import type {
   LabelInput,
   Me,
   Person,
+  ProbeResult,
+  AdminConfig,
   AgentStats,
   PipelineInfo,
   RoomSnapshot,
@@ -143,6 +145,12 @@ export interface ApproveExtras {
 }
 
 /**
+ * Body of POST /api/proposals/{pid}/approve-all (P2b): the same `params_hash` rule as approve, and
+ * for the solo user `confirm: "<pipeline_id>/*"`, typed once for every layer of the call.
+ */
+export type ApproveAllExtras = ApproveExtras
+
+/**
  * Download the room's export document (GET /api/rooms/{id}/export). Returned as text, not parsed, so the
  * saved file is byte-for-byte what the server hashed; `sha256` is the X-Piperoom-Export-SHA256 header.
  */
@@ -180,6 +188,13 @@ async function fetchText(url: string, accept?: string): Promise<Response> {
   }
   return res
 }
+
+/**
+ * The config export (GET /api/admin/config/export, admin only): the owners file, `---`, the users file, as a
+ * `piperoom-config.yaml` attachment. The page links to it instead of fetching it, so the browser saves the
+ * bytes the server sent and the session cookie authorises it.
+ */
+export const ADMIN_CONFIG_EXPORT_URL = '/api/admin/config/export'
 
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
@@ -250,6 +265,20 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ layer, ...extra }),
     }),
+  // One approval.given per pending required layer, in required_layers order, then the steps run
+  // as after the last approve. Answers those events.
+  approveAll: (proposalId: string, extra: ApproveAllExtras) =>
+    request<Event[]>(`/api/proposals/${encodeURIComponent(proposalId)}/approve-all`, {
+      method: 'POST',
+      body: JSON.stringify(extra),
+    }),
+  // P2b: stops a pending policy countdown (proposal.cancelled). 409 not_scheduled when none is
+  // pending (the policy ran, or someone cancelled first); the proposal stays open either way.
+  cancelProposal: (proposalId: string, reason?: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   // paramsHash: the hash shown with the proposal, same rule as approve.
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
@@ -281,6 +310,11 @@ export const api = {
     request<ShadowResponse>(`${room(roomId)}/shadow${include.length ? `?include=${include.join(',')}` : ''}`),
   shadowGrade: (roomId: string, body: ShadowGradeBody) =>
     request<Event>(`${room(roomId)}/shadow/grade`, { method: 'POST', body: JSON.stringify(body) }),
+  // Admin only: any other member gets 403 not_allowed, a viewer 403 viewer. Nothing here changes configuration.
+  adminConfig: () => request<AdminConfig>('/api/admin/config'),
+  // A failed check is a 200 with ok: false. 404 not_found: unknown id. 429 rate_limited: 10 tests a minute.
+  testConnection: (id: string) =>
+    request<ProbeResult>('/api/admin/connections/test', { method: 'POST', body: JSON.stringify({ id }) }),
   shadowMetrics: (filter: { pipeline?: string; since?: string } = {}) => {
     const q = new URLSearchParams()
     if (filter.pipeline) q.set('pipeline', filter.pipeline)

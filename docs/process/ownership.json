@@ -1,0 +1,78 @@
+{
+  "_note": [
+    "Machine-readable copy of the ownership tables in AGENTS.md section 2: the main Agent/Owns table, the earlier waves' 'Owns now' column (E, N, S rows that still own folders) and the P wave's new folders. Taken from origin/main eab2da9d.",
+    "AGENTS.md wins. If this file and AGENTS.md differ, AGENTS.md is right and this file is wrong: change this file in the same PR that changes an ownership table in AGENTS.md.",
+    "Read by docs/process/ship-check.mjs: every file of a row must be under one of its board agent's folders and under none of its exclusions, and a contract file may change only on a leads row.",
+    "Paths are repo-relative. 'dir/**' (or 'dir') covers everything under dir; a path without a wildcard is that file. A '*' inside a path matches within one segment only: 'evals/scenarios/*.yaml' is the YAML files directly in evals/scenarios. A file listed exactly in folders wins over a '*' pattern in excluded (C6 keeps evals/scenarios/schema-change.yaml).",
+    "Not encoded: task-scoped grants of the R wave table (R2: docs/demo/** for A1; R6: Dockerfile, cmd/devconsumer/Dockerfile, deploy/** and the go line of go.mod for C1), R0's concurrency: block of .github/workflows/ci.yml (part of a file), and the done rows C2 and C8 (no folders). A row that needs such a path asks the leads, as AGENTS.md section 2 says.",
+    "U wave (tasks/U-board.md): A9, A10, C19, C20, C21, C22 and the A3, A5, A8, C1, C6, C7 and leads lines mirror the U wave table of AGENTS.md section 2. internal/setup/protocol/** is a contract file (leads). The A9 to A2 and A10 to A3 fallbacks of AGENTS.md are applied here by the leads in the same PR that switches the board rows; until then ship-check rejects them, as intended.",
+    "V wave (tasks/V-board.md): internal/agent/llm/llm.go is a contract file (leads), excluded from A4; the rest of internal/agent/llm/** stays A4's. No other new folders. go.mod and go.sum stay in no agent's folders: V5 adds a module and is built outside the ship workflow under the AGENTS.md section 7 two-lead review."
+  ],
+  "agents": {
+    "leads": {
+      "folders": ["AGENTS.md", "tasks/**", "docs/**", "reviews/**",
+        "internal/tools/tool.go", "internal/events/events.go", "internal/clients/clients.go", "internal/actions/action.go",
+        "internal/agent/contract.go", "internal/topology/graph.go", "internal/config/config.go", "internal/version/version.go",
+        "docs/api.md", "internal/setup/protocol/**", "cmd/setup-spike/**", "internal/agent/llm/llm.go"],
+      "excluded": []
+    },
+    "A1": { "folders": ["dev/**", "cmd/devctl/**", "cmd/devconsumer/**", "internal/testenv/**"], "excluded": [] },
+    "A2": {
+      "folders": ["internal/clients/connect/**", "internal/clients/schemareg/**", "internal/clients/kafka/**", "internal/tools/kafkatools/**",
+        "internal/actions/**", "internal/clients/netsec/**"],
+      "excluded": ["internal/actions/action.go", "internal/actions/pgactions/**", "internal/actions/sourceactions/**", "internal/actions/fixpr/**"]
+    },
+    "A3": {
+      "folders": ["internal/clients/postgres/**", "internal/clients/warehouse/**", "internal/tools/dbtools/**", "internal/tools/scope.go",
+        "internal/topology/**", "internal/owners/**", "internal/clients/pgconv/**",
+        "internal/tools/changes/**", "internal/clients/prom/**", "internal/tools/debeziumtools/**",
+        "internal/actions/pgactions/**", "internal/actions/sourceactions/**", "internal/setup/sources/postgres/**"],
+      "excluded": ["internal/topology/graph.go"]
+    },
+    "A4": { "folders": ["internal/agent/**", "cmd/investigate/**", "internal/wiring/**"], "excluded": ["internal/agent/contract.go", "internal/agent/llm/llm.go"] },
+    "A5": {
+      "folders": ["migrations/**", "internal/store/**", "internal/room/**", "internal/httpapi/**", "internal/ws/**", "cmd/server/**", "internal/auth/**", "internal/quickstart/**"],
+      "excluded": []
+    },
+    "A6": { "folders": ["web/**"], "excluded": [] },
+    "A8": { "folders": ["internal/clients/mysql/**", "internal/tools/mysqltools/**", "internal/setup/sources/mysql/**"], "excluded": [] },
+    "A9": { "folders": ["cmd/setup/**", "cmd/piperoom/**", "internal/setup/**"], "excluded": ["internal/setup/protocol/**", "internal/setup/targets/**", "internal/setup/sources/**", "internal/setup/knowledge/**"] },
+    "A10": { "folders": ["internal/clients/sqlserver/**", "internal/clients/mongodb/**", "internal/clients/oracle/**", "internal/setup/sources/sqlserver/**", "internal/setup/sources/mongodb/**", "internal/setup/sources/oracle/**"], "excluded": [] },
+    "A7": { "folders": ["internal/watch/**", "internal/dlq/**"], "excluded": [] },
+    "C1": { "folders": [".github/**", "README.md", "docs/runbook.md", "Makefile", "deploy/docker-compose.quickstart.yml", "Dockerfile", "deploy/helm/**"], "excluded": [] },
+    "C2": { "folders": [], "excluded": [] },
+    "C3": { "folders": ["internal/clients/snowflake/**", "internal/clients/bigquery/**", "internal/clients/databricks/**", "internal/clients/clickhouse/**"], "excluded": [] },
+    "C4": { "folders": ["docs/security/**"], "excluded": [] },
+    "C5": { "folders": ["internal/alertin/**"], "excluded": [] },
+    "C6": {
+      "folders": ["evals/**", "evals/scenarios/schema-change.yaml"],
+      "excluded": ["evals/scenarios/*.yaml", "evals/scenarios/README.md", "evals/scenarios/setup/**"]
+    },
+    "C7": {
+      "folders": ["evals/scenarios/*.yaml", "evals/scenarios/README.md", "evals/scenarios/setup/**"],
+      "excluded": ["evals/scenarios/schema-change.yaml"]
+    },
+    "C8": { "folders": [], "excluded": [] },
+    "C9": { "folders": ["docs/design/**"], "excluded": [] },
+    "C10": { "folders": ["cmd/discover/**", "internal/discover/**"], "excluded": [] },
+    "C11": { "folders": ["internal/tools/runbooks/**"], "excluded": [] },
+    "C12": { "folders": ["internal/slackbridge/**"], "excluded": [] },
+    "C13": { "folders": ["docs/audits/**"], "excluded": [] },
+    "C14": { "folders": ["docs/pilot/**"], "excluded": [] },
+    "C15": { "folders": ["internal/clients/airflow/**", "internal/tools/batchtools/**"], "excluded": [] },
+    "C16": { "folders": ["internal/clients/dbt/**", "internal/tools/dbttools/**"], "excluded": [] },
+    "C17": { "folders": ["internal/clients/forge/**", "internal/tools/forgetools/**", "internal/actions/fixpr/**"], "excluded": [] },
+    "C18": { "folders": ["internal/clients/workerlogs/**", "internal/tools/logtools/**", "internal/tools/nettools/**"], "excluded": [] },
+    "C19": { "folders": ["internal/setup/targets/compose/**", "internal/setup/targets/host/**"], "excluded": [] },
+    "C20": { "folders": ["internal/setup/targets/strimzi/**", "internal/setup/targets/server/**"], "excluded": [] },
+    "C21": { "folders": ["internal/setup/targets/managed/**", "internal/clients/mskconnect/**", "internal/clients/confluentcloud/**", "internal/clients/aiven/**"], "excluded": [] },
+    "C22": { "folders": ["internal/setup/knowledge/**"], "excluded": [] },
+    "E2": { "folders": ["evals/score.go", "evals/calibration.go"], "excluded": [] },
+    "E3": { "folders": ["evals/gen/**", "evals/scenarios/heldout/**"], "excluded": [] },
+    "N3": { "folders": ["internal/textnorm/**"], "excluded": [] },
+    "N4": { "folders": ["internal/tools/similarincidents/**", "internal/textsearch/**"], "excluded": [] },
+    "N5": { "folders": ["internal/redact/**"], "excluded": [] },
+    "N6": { "folders": ["internal/injectscan/**"], "excluded": [] },
+    "S2": { "folders": ["cmd/loadtest/**", "internal/loadtest/**"], "excluded": [] }
+  }
+}

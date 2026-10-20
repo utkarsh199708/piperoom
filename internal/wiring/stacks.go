@@ -50,7 +50,8 @@ type Stack struct {
 	Clients *Wired
 	// Tools are the agent's read tools over Clients.
 	Tools *tools.Registry
-	// Actions are the write actions over Clients.
+	// Actions are the write actions over Clients: over read-only clients
+	// unless write mode is on (registerActions).
 	Actions *actions.Registry
 	// Topology builds graphs and traces over Clients.
 	Topology topology.Builder
@@ -82,12 +83,18 @@ type StackOptions struct {
 	// store reader of similar_incidents (#100: w.Rooms = ...). It must not
 	// replace the clients.
 	Prepare func(w *Wired)
+	// ReadOnly, when true, opens every set read-only whatever
+	// PIPEROOM_WRITE_MODE says: no write client is built and the actions are
+	// registered over read-only clients. It can only narrow: writes need
+	// PIPEROOM_WRITE_MODE=on and ReadOnly false. cmd/investigate sets it
+	// unless -approve-all.
+	ReadOnly bool
 }
 
 // stackDeps are OpenStacks' collaborators; tests replace them so no stack,
 // variable or file is needed.
 type stackDeps struct {
-	open    func(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners) (*Wired, error)
+	open    func(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners, write bool) (*Wired, error)
 	src     connSource
 	loadAWS func(ctx context.Context, cfg config.Config) (*aws.Config, error)
 }
@@ -97,9 +104,12 @@ type stackDeps struct {
 // pipeline has none. awsCfg is LoadAWS's result; when it is nil and a
 // pipeline's connections use MSK IAM, the AWS chain is loaded here. When any
 // opened pipeline has a connections: block, the libpq PG* variables and home
-// files are refused (checkLibpqDefaults). Any failure closes what was opened
-// and returns an error that names the pipeline and the reference, never a
-// value. The caller must Close the result.
+// files are refused (checkLibpqDefaults). PIPEROOM_WRITE_MODE (cfg.WriteMode,
+// and opts.ReadOnly) decides for every set whether write clients are built:
+// a bad value, or a SOURCE_DB_WRITE_URL equal to SOURCE_DB_URL, stops the
+// start before anything is opened. Any failure closes what was opened and
+// returns an error that names the pipeline and the reference, never a value.
+// The caller must Close the result.
 func OpenStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts StackOptions) (*Stacks, error) {
 	return openStacks(ctx, cfg, awsCfg, own, opts, stackDeps{
 		open: openClients,
@@ -113,6 +123,12 @@ func OpenStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts StackOptions, d stackDeps) (*Stacks, error) {
 	if own == nil {
 		return nil, errors.New("wiring: open stacks: no owners config")
+	}
+	// Write mode is one switch for the process: read here once, never from a
+	// pipeline's own settings (pipelineConfig leaves it empty).
+	write, err := openWriteMode(cfg, opts.ReadOnly)
+	if err != nil {
+		return nil, err
 	}
 	selected := own.Pipelines
 	if opts.Only != nil {
@@ -151,6 +167,16 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		if _, err := warehouseKind(pc); err != nil {
 			return nil, fmt.Errorf("wiring: pipeline %q: %w", p.ID, err)
 		}
+		// The pipeline's own write URL is checked in both write modes, like
+		// SOURCE_DB_WRITE_URL, so the mistake stops the start before anyone
+		// turns write mode on. Off, the set's settings drop it: no writer can
+		// be built from it and the set does not keep the secret.
+		if err := checkPipelineWriteURL(p.ID, pc); err != nil {
+			return nil, err
+		}
+		if !write {
+			pc.SourceDBWriteURL = ""
+		}
 		// Settings that are not connections (the AWS region) stay process-wide.
 		pc.AWSRegion = cfg.AWSRegion
 		extra[p.ID] = append(extra[p.ID], tlsPathRefs(pc)...)
@@ -188,7 +214,7 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 	}
 	s := &Stacks{byPipeline: map[string]*Stack{}, empty: empty}
 	add := func(name string, ids []string, c config.Config) error {
-		w, err := d.open(ctx, c, awsCfg, own.Only(ids...))
+		w, err := d.open(ctx, c, awsCfg, own.Only(ids...), write)
 		if err != nil {
 			return err
 		}

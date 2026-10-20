@@ -34,6 +34,10 @@ const (
 	// DefaultUnclaimedStale is how long a fully approved proposal may wait for
 	// an executor to claim it.
 	DefaultUnclaimedStale = 2 * time.Minute
+	// writeOffUnclaimedStale is the unclaimed window of the stale sweep with
+	// write mode off (sweepStaleProposals): about a century, so no blocked
+	// proposal ever reaches it.
+	writeOffUnclaimedStale = 100 * 365 * 24 * time.Hour
 )
 
 // maxPendingInputs caps the human inputs a room keeps for priming the inbox
@@ -534,16 +538,63 @@ func (s *Service) interruptShadowRunLocked(ctx context.Context, roomID string, s
 
 // ---- executor claims ----
 
-// claimExecution claims a proposal for this replica's executor. With a
-// single-process store there is nothing to claim. ok false: another executor
-// has it, run nothing.
+// claimExecution claims a proposal for this replica's executor. ok false:
+// the proposal is not approved in full (or no longer open), or another
+// executor has it; run nothing. The approval check comes first and reads the
+// store, not the room's snapshot, so a caller that reaches the executor
+// without the approve path's allApproved check (a replica that never loaded
+// the room) cannot run, or fail, a proposal the owners have not approved. With
+// a shared store the claim itself checks the approvals again in the same
+// statement (store.Coordinator.ClaimProposal); with a single-process store
+// there is nothing more to claim.
 func (s *Service) claimExecution(ctx context.Context, proposalID string) (bool, error) {
+	cctx, cancel := context.WithTimeout(ctx, coordTimeout)
+	defer cancel()
+	ok, err := s.approvedInStore(cctx, proposalID)
+	if err != nil || !ok {
+		return false, err
+	}
 	if s.coord == nil {
 		return true, nil
 	}
-	cctx, cancel := context.WithTimeout(ctx, coordTimeout)
-	defer cancel()
 	return s.coord.ClaimProposal(cctx, proposalID, s.replica)
+}
+
+// approvedInStore reports whether the stored proposal is open and every
+// required layer has an approved decision.
+func (s *Service) approvedInStore(ctx context.Context, proposalID string) (bool, error) {
+	p, err := s.store.GetProposal(ctx, proposalID)
+	if err != nil {
+		return false, fmt.Errorf("room: read proposal %s before claim: %w", proposalID, err)
+	}
+	if p.Status != "open" {
+		return false, nil
+	}
+	apps, err := s.store.ListApprovals(ctx, proposalID)
+	if err != nil {
+		return false, fmt.Errorf("room: read approvals of %s before claim: %w", proposalID, err)
+	}
+	return layersApproved(p.RequiredLayers, apps), nil
+}
+
+// layersApproved reports whether every required layer has an approved
+// decision. No required layers is never approved.
+func layersApproved(required []string, apps []store.ApprovalRow) bool {
+	if len(required) == 0 {
+		return false
+	}
+	approved := make(map[string]bool, len(apps))
+	for _, a := range apps {
+		if a.Decision == "approved" {
+			approved[a.Layer] = true
+		}
+	}
+	for _, l := range required {
+		if !approved[l] {
+			return false
+		}
+	}
+	return true
 }
 
 // touchExecution refreshes this replica's claim before a step. false: the
@@ -563,8 +614,16 @@ func (s *Service) touchExecution(ctx context.Context, proposalID string) (bool, 
 // conditional UPDATE, so exactly one replica writes its event. A step that was
 // started is never run again: its outcome is unknown and recorded as failed.
 func (s *Service) sweepStaleProposals() {
+	unclaimed := s.timing.UnclaimedStale
+	if s.writeOff {
+		// With write mode off a fully approved proposal is never claimed by
+		// design: it is blocked, not stale. A window no proposal reaches
+		// keeps the store from listing (and spending the LIMIT on) them,
+		// while claims a write-on run left behind are still swept.
+		unclaimed = writeOffUnclaimedStale
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
-	stale, err := s.coord.StaleProposals(ctx, s.timing.ClaimStale, s.timing.UnclaimedStale, 100)
+	stale, err := s.coord.StaleProposals(ctx, s.timing.ClaimStale, unclaimed, 100)
 	cancel()
 	if err != nil {
 		if s.ctx.Err() == nil {
@@ -584,7 +643,7 @@ func (s *Service) sweepStaleProposals() {
 			return
 		}
 		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
-		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, s.timing.UnclaimedStale)
+		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, unclaimed)
 		cancel()
 		if err != nil || !ok {
 			s.wg.Done()
@@ -634,7 +693,10 @@ func (s *Service) recordInterruption(sp store.StaleProposal) {
 	}
 	next := s.interruptedStep(ctx, sp.RoomID, p)
 	output := fmt.Sprintf("outcome unknown: the server running this proposal stopped before it recorded the result of step %d; check the target before you retry with a new proposal", next+1)
-	if sp.ClaimedBy == "" {
+	switch {
+	case sp.WriteBlocked:
+		output = writeOffNotRunOutput
+	case sp.ClaimedBy == "":
 		output = "the proposal was approved, but the server that should have run it stopped before it started; create a new proposal to retry"
 	}
 	for i := range p.Steps {

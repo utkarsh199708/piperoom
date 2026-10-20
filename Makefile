@@ -12,7 +12,7 @@ go_pkgs = $$(go list $(1) ./... | grep -v '/web/node_modules/')
 GO_PKGS = $(call go_pkgs,)
 TAGGED_ONLY := evalgen,e2e
 
-.PHONY: ci go-ci web-ci fmt vet build build-server test evals evals-gen-check discover-draft web-install web-lint web-build web-test
+.PHONY: ci go-ci web-ci fmt vet build build-server test evals evals-gen-check discover-draft quickstart web-install web-lint web-build web-test
 
 ci: go-ci web-ci
 
@@ -30,6 +30,8 @@ vet:
 	go vet -tags integration $(call go_pkgs,-tags integration)
 	go vet -tags claude ./internal/agent/... ./evals/...
 	go vet -tags $(TAGGED_ONLY) $(call go_pkgs,-tags $(TAGGED_ONLY))
+	go vet -tags bigquery_integration ./internal/clients/bigquery/
+	@if [ -d internal/clients/databricks ]; then go vet -tags databricks_integration ./internal/clients/databricks/; fi
 
 build:
 	go build $(GO_PKGS)
@@ -55,6 +57,35 @@ evals-gen-check:
 # draft (run cmd/discover with -force for that). Not part of ci: needs a cluster.
 discover-draft:
 	go run ./cmd/discover -out owners.draft.yaml
+
+# Read-only quickstart (tasks/P1-quickstart-readonly.md): discover the pipelines
+# behind CONNECT_URL (and the other config env vars) into $(QUICKSTART_OWNERS),
+# every layer owned by you, then start the server with --quickstart: in-memory
+# rooms, dev login on 127.0.0.1 only, write mode off. It prints the URL to open.
+#   make quickstart                       # reuses an existing owners file
+#   make quickstart FORCE=1               # rediscovers and overwrites it
+#   make quickstart DISCOVER_FLAGS=-source-db
+# The UI: PIPEROOM_WEB_DIR when set; else web/dist, built here first when npm is
+# on PATH and web/dist has no index.html; else the URL serves the API only.
+QUICKSTART_OWNERS ?= owners.yaml
+DISCOVER_FLAGS ?=
+FORCE ?=
+
+quickstart:
+	@if [ -e "$(QUICKSTART_OWNERS)" ] && [ "$(FORCE)" != 1 ]; then \
+		echo "make quickstart: using the existing $(QUICKSTART_OWNERS) (FORCE=1 rediscovers and overwrites it)"; \
+	else \
+		go run ./cmd/discover -write-owners "$(QUICKSTART_OWNERS)" $(if $(filter 1,$(FORCE)),-force) $(DISCOVER_FLAGS) || exit 1; \
+	fi
+	@if [ -z "$$PIPEROOM_WEB_DIR" ] && [ ! -f web/dist/index.html ]; then \
+		if command -v npm >/dev/null 2>&1; then \
+			$(MAKE) --no-print-directory web-install web-build || exit 1; \
+		else \
+			echo "make quickstart: npm not found, so the URL serves the API only; install Node 24, or use deploy/docker-compose.quickstart.yml" >&2; \
+		fi; \
+	fi
+	@if [ -z "$$PIPEROOM_WEB_DIR" ] && [ -f web/dist/index.html ]; then export PIPEROOM_WEB_DIR=web/dist; fi; \
+	exec go run ./cmd/server --quickstart --owners "$(QUICKSTART_OWNERS)"
 
 web-ci: web-install web-lint web-build web-test
 

@@ -199,6 +199,9 @@ func NewUsageCollector(prices agent.Prices) *UsageCollector {
 
 // Add records one finished run.
 func (c *UsageCollector) Add(r RunResult, tr Transcript) {
+	if r.Infra() {
+		return // never measured the agent
+	}
 	u := RunUsageOf(r, tr, c.prices)
 	c.mu.Lock()
 	c.runs = append(c.runs, u)

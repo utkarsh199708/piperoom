@@ -1,0 +1,37 @@
+{
+  "dag_runs": [
+    {
+      "conf": {},
+      "dag_id": "revenue_daily",
+      "dag_run_id": "manual__2026-10-18T09:12:44.102938+00:00",
+      "data_interval_end": "2026-10-18T00:00:00+00:00",
+      "data_interval_start": "2026-10-17T00:00:00+00:00",
+      "end_date": null,
+      "execution_date": "2026-10-18T09:12:44.102938+00:00",
+      "external_trigger": true,
+      "last_scheduling_decision": "2026-10-18T09:12:46.881204+00:00",
+      "logical_date": "2026-10-18T09:12:44.102938+00:00",
+      "note": null,
+      "run_type": "manual",
+      "start_date": "2026-10-18T09:12:45.000391+00:00",
+      "state": "running"
+    },
+    {
+      "conf": {},
+      "dag_id": "revenue_daily",
+      "dag_run_id": "scheduled__2026-10-17T00:00:00+00:00",
+      "data_interval_end": "2026-10-18T00:00:00+00:00",
+      "data_interval_start": "2026-10-17T00:00:00+00:00",
+      "end_date": "2026-10-18T00:07:41.204512+00:00",
+      "execution_date": "2026-10-17T00:00:00+00:00",
+      "external_trigger": false,
+      "last_scheduling_decision": "2026-10-18T00:07:41.198003+00:00",
+      "logical_date": "2026-10-17T00:00:00+00:00",
+      "note": "paged on-call: fct_revenue broke",
+      "run_type": "scheduled",
+      "start_date": "2026-10-18T00:00:02.511873+00:00",
+      "state": "failed"
+    }
+  ],
+  "total_entries": 2
+}

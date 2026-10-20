@@ -74,12 +74,19 @@ const (
 // Pipeline is one drafted owners.yaml pipeline. Lists are sorted and
 // de-duplicated. Notes are fixed text plus names only, never config values.
 type Pipeline struct {
-	ID             string
-	Connector      string // connector name; also the draft title
-	TopicPrefix    string
-	SourceTables   []string
+	ID           string
+	Connector    string // connector name; also the draft title
+	TopicPrefix  string
+	SourceTables []string
+	// Topics are the "<prefix>.<schema>.<table>" topics that exist for
+	// SourceTables; a table with no topic yet has none.
+	Topics         []string
 	ConsumerGroups []string
-	Notes          []string
+	// SinkTables are warehouse tables (schema.table) that a sink connector
+	// reading one of Topics names literally in its config. Empty means "not
+	// found", never "none": the name is never guessed.
+	SinkTables []string
+	Notes      []string
 }
 
 // Skipped is a connector that produced no pipeline, with a short reason.

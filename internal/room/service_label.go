@@ -79,7 +79,7 @@ func (s *Service) Label(ctx context.Context, user User, roomID string, in LabelI
 
 func validateLabel(in LabelInput) error {
 	if in.ActualLayer != "" && !isLayer(in.ActualLayer) {
-		return validation(fmt.Sprintf("actual_layer must be one of %s", strings.Join(events.Layers, ", ")))
+		return validation(fmt.Sprintf("actual_layer must be one of %s", strings.Join(events.IncidentLayers(), ", ")))
 	}
 	if strings.TrimSpace(in.Cause) == "" {
 		return validation("cause is required")

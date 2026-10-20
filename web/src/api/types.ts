@@ -56,6 +56,8 @@ export type EventType =
   | 'agent.verification'
   | 'postmortem.drafted'
   | 'postmortem.failed'
+  | 'proposal.scheduled'
+  | 'proposal.cancelled'
 
 export interface Event {
   room_id: string
@@ -235,6 +237,11 @@ export type ControlRequestedPayload = Record<string, never>
 export interface ControlGrantedPayload {
   to: Actor
   lease_until: string
+  /**
+   * P2b: "sole_member" when the first member to join a driverless alert room became its driver
+   * without asking (system actor). Absent for every other grant.
+   */
+  reason?: 'sole_member' | string
 }
 
 export interface ProposalStep {
@@ -319,6 +326,11 @@ export interface ProposalCreatedPayload {
   required_layers: string[]
   /** Hex SHA-256 of the frozen proposal (auth PR 4). Absent on events written before it. */
   params_hash?: string
+  /**
+   * P2b: the required_layers nobody owns; the room's driver approves them (`grant: "fallback"`).
+   * Absent when every layer has an owner.
+   */
+  fallback_layers?: string[]
 }
 
 /**
@@ -339,6 +351,29 @@ export interface ApprovalGivenPayload {
   layer: string
   params_hash?: string
   identity?: Identity
+  /** P2b: what gave the right to approve. Absent before P2: read `identity.grant` instead. */
+  grant?: 'owner' | 'solo' | 'fallback' | 'policy' | string
+  /** P2b: "auto_approve" with `grant: "policy"`. */
+  policy?: string
+}
+
+/**
+ * proposal.scheduled (P2b): system actor, after proposal.previewed, at most once per proposal. Unless
+ * cancelled, the policy approves every required layer at `run_at` and the steps run. `cancel_until`
+ * equals `run_at` in this wave and is advertised only: a cancel after it still wins if it lands first.
+ */
+export interface ProposalScheduledPayload {
+  proposal_id: string
+  run_at: string
+  policy: 'auto_approve' | string
+  cancel_until: string
+}
+
+/** proposal.cancelled (P2b): `by` (also the actor) stopped the countdown; the proposal stays open. */
+export interface ProposalCancelledPayload {
+  proposal_id: string
+  by: Actor
+  reason: string
 }
 
 export interface ApprovalRejectedPayload {
@@ -450,6 +485,31 @@ export interface ProposalSummary {
   approvals: Record<string, ApprovalValue>
   /** After auth PR 4. "" only for a proposal that cannot be hashed. */
   params_hash?: string
+  /**
+   * P1a: every required layer approved and nothing ran because write mode is off. Absent
+   * otherwise, and on a server from before P1a. The only value in the P wave.
+   */
+  blocked?: 'write_mode_off'
+  /** P2b: copied from proposal.created.fallback_layers; [] when every layer has an owner, absent before P2b. */
+  fallback_layers?: string[]
+  /**
+   * P2b: while a proposal.scheduled is pending. The room GET leaves it out once run_at is more than
+   * 45 s in the past (#652); the web folds proposal.scheduled itself and never reads this field.
+   */
+  scheduled?: { run_at: string; cancel_until: string }
+}
+
+/**
+ * RoomSnapshot.mode (docs/api.md, P-wave snapshot fields; P1a, P2b). It arrives with the room GET
+ * and does not change over the socket. A server without it (before P1a) has write mode on.
+ */
+export interface RoomMode {
+  /** The server's PIPEROOM_WRITE_MODE: false means approved fixes are recorded and never run. */
+  write: boolean
+  /** True when the caller may approve every layer of the room's pipeline. */
+  solo: boolean
+  /** The pipeline's auto_approve: list from owners.yaml. */
+  auto_approve: string[]
 }
 
 export interface SuggestionSummary {
@@ -545,6 +605,8 @@ export interface RoomSnapshot {
   closed_by?: Actor
   /** F2: the post-mortem draft's state; absent on an older server. */
   postmortem?: PostmortemSummary
+  /** P1a/P2b: on the room GET only (list rows have none); absent on an older server, which means write mode on. */
+  mode?: RoomMode
 }
 
 /** RoomSnapshot.postmortem (docs/api.md, F2). */
@@ -609,7 +671,8 @@ export interface AgentStats {
 
 export interface TopologyNode {
   id: string
-  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table'
+  /** 'dag', 'task' and 'model' are a batch pipeline's nodes (P4), drawn dag → task → model → sink_table. */
+  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table' | 'dag' | 'task' | 'model'
   name: string
   layer: string
   owner: string
@@ -630,6 +693,8 @@ export interface Topology {
   pipeline_id: string
   nodes: TopologyNode[]
   edges: TopologyEdge[]
+  /** P4: a reader the pipeline's kind needs is missing or not supported, so some nodes are left out. Absent when false. */
+  partial?: boolean
 }
 
 export interface Me {
@@ -643,6 +708,8 @@ export interface Me {
   groups_missing?: boolean
   /** This user is PIPEROOM_SOLO_USER (omitted otherwise): approvals need a typed confirm. */
   solo?: boolean
+  /** `admin: true` in users.yaml (omitted otherwise): may open the Settings pages (/api/admin/*). */
+  admin?: boolean
 }
 
 /** One row of GET /api/people: a person a driver may grant control or hand off to. */
@@ -658,6 +725,8 @@ export interface PipelineInfo {
   id: string
   title: string
   shadow: boolean
+  /** P0 item 8 (server P4a-4): `cdc` or `batch`. Missing (an older server) means `cdc`. */
+  kind?: 'cdc' | 'batch'
 }
 
 export interface Person {
@@ -809,4 +878,100 @@ export interface ShadowMetrics {
   total_tokens: number
   tokens_available: boolean
   per_room: ShadowMetricsRoom[]
+}
+
+// Admin settings and connection tests (docs/api.md, "Admin: settings and connection tests").
+// Field names are the server's JSON names. A Go server may send `null` for an empty list, so
+// the list fields are read through `lines()` in lib/settings.ts, never indexed directly.
+
+/** Where a connection applies. */
+export type ConnectionScope = 'process-wide' | 'pipeline'
+
+/** The kinds of connection the server probes; an unknown kind from a newer server is still shown. */
+export type ConnectionKind = 'source_db' | 'kafka' | 'connect' | 'schema_registry' | 'warehouse'
+
+/** One row of a connection's settings table. A secret never carries a value: `set` says whether one is present. */
+export interface ConnectionSetting {
+  key: string
+  /** Empty for a secret. URLs and brokers come without user info, query or fragment. */
+  display: string
+  secret: boolean
+  /** Only for a secret: whether a value is present. */
+  set?: boolean
+  /** `env NAME`, `file /path` or `value`. */
+  from: string
+}
+
+/** One connection the server runs with. `id` is what POST /api/admin/connections/test takes. */
+export interface AdminConnection {
+  id: string
+  scope: ConnectionScope
+  /** Set when `scope` is `pipeline`, otherwise empty. */
+  pipeline_id: string
+  kind: ConnectionKind | (string & {})
+  used_by: string[]
+  settings: ConnectionSetting[]
+}
+
+/** The principals that own one layer of a pipeline, as written in owners.yaml (`user:<id>`, `group:<name>`). */
+export interface AdminLayerOwners {
+  layer: string
+  principals: string[]
+}
+
+/** One pipeline of owners.yaml. */
+export interface AdminPipeline {
+  id: string
+  title: string
+  tenant: string
+  /** `own` or `process-wide`. */
+  connections: string
+  connectors: string[]
+  consumer_groups: string[]
+  source_tables: string[]
+  sink_tables: string[]
+  owners: AdminLayerOwners[]
+  shadow: boolean
+}
+
+/** One person of users.yaml. */
+export interface AdminPerson {
+  id: string
+  name: string
+  layers: string[]
+  admin: boolean
+}
+
+/** GET /api/admin/config: what the server runs with now. */
+export interface AdminConfig {
+  /** `file` in phase 1. */
+  source: string
+  /** Base name only. */
+  owners_file: string
+  /** Base name only. */
+  users_file: string
+  connections: AdminConnection[]
+  pipelines: AdminPipeline[]
+  people: AdminPerson[]
+}
+
+/** `ok`, `fail`, `warn` (works, but should change) or `skip` (an earlier check failed). */
+export type ProbeStatus = 'ok' | 'fail' | 'warn' | 'skip'
+
+/** One check of a connection test. `problem`, `fix` and `detail` are fixed text, never a server's raw error. */
+export interface ProbeCheck {
+  id: string
+  status: ProbeStatus
+  ms: number
+  problem?: string
+  fix?: string
+  detail?: string
+}
+
+/** POST /api/admin/connections/test: `ok` is false when any check failed. */
+export interface ProbeResult {
+  kind: string
+  ok: boolean
+  took_ms: number
+  checks: ProbeCheck[]
 }

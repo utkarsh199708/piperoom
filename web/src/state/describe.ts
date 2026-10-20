@@ -3,6 +3,8 @@
 import { neutralizeBadgeText } from '../lib/verification'
 import { verdictKind, verdictWords } from '../lib/execution'
 import { stripBidi } from '../lib/title'
+import { policyLabel } from '../lib/countdown'
+import { clockTimeSeconds } from '../lib/time'
 import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
@@ -24,7 +26,9 @@ import type {
   HandoffRequestedPayload,
   HypothesisVerdictPayload,
   ApprovalNudgedPayload,
+  ProposalCancelledPayload,
   ProposalCreatedPayload,
+  ProposalScheduledPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
   SteerDeclinedPayload,
@@ -90,6 +94,10 @@ const STATE_WORDS: Record<string, string> = {
 }
 
 const RANK: Record<string, number> = { low: 0, medium: 1, high: 2 }
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
 
 function took(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`
@@ -207,6 +215,8 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       return { text: `${who} asked for control`, kind: 'control' }
     case 'control.granted': {
       const p = as<ControlGrantedPayload>(e)
+      // P2b: the system made the first member of a driverless room its driver.
+      if (p.reason === 'sole_member') return { text: `${nm(p.to.name)} is the driver · the only one here`, kind: 'control' }
       if (e.actor.id === p.to.id) {
         // A self-grant is either the sitting driver renewing their lease or
         // someone taking over (no driver, or an expired lease), never a hand-over.
@@ -234,7 +244,28 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)
+      // The policy's approvals have the system as actor (the server's rule): name the policy, not "system". A person's approval never takes this wording, whatever its grant says.
+      if (p.grant === 'policy' && e.actor.kind === 'system') return { text: `${capitalize(policyLabel(p.policy ?? ''))} approved ${clip(p.layer, 40)}`, kind: 'decision' }
       return { text: `${who} approved ${clip(p.layer, 40)}`, kind: 'decision' }
+    }
+    // cancel_until is advertised, never a deadline (#629): "may run from", never "cancel by".
+    case 'proposal.scheduled': {
+      const p = as<ProposalScheduledPayload>(e)
+      const title = ctx.proposalTitles[p.proposal_id]
+      return {
+        text: `${capitalize(policyLabel(p.policy))} may run the fix from ${clockTimeSeconds(p.cancel_until || p.run_at)} unless cancelled`,
+        detail: title ? clip(title, 200) : undefined,
+        kind: 'decision',
+      }
+    }
+    case 'proposal.cancelled': {
+      const p = as<ProposalCancelledPayload>(e)
+      const title = ctx.proposalTitles[p.proposal_id]
+      return {
+        text: `${who} cancelled the policy countdown · the fix waits for approval`,
+        detail: p.reason ? clip(p.reason, 200) : title ? clip(title, 200) : undefined,
+        kind: 'decision',
+      }
     }
     case 'approval.rejected': {
       const p = as<ApprovalRejectedPayload>(e)

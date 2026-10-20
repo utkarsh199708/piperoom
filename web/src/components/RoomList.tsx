@@ -55,6 +55,7 @@ import { Input } from './ui/input'
 import { Kbd } from './ui/kbd'
 import { Skeleton } from './ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
+import { FirstRunPanel } from './FirstRunPanel'
 import { TopBarSlot } from './shell/TopBarSlot'
 import { PersonName } from './VerifiedBadge'
 import { neutralizeBadgeText } from '../lib/verification'
@@ -270,6 +271,10 @@ export function RoomList() {
               </Button>
             </p>
           )}
+
+          {/* First run (P1e-2): no room at all on this server, not just none in this tab or filter.
+              It goes away with the first room the list receives. A viewer cannot post an alert. */}
+          {rooms.length === 0 && !viewer && <FirstRunPanel userId={user.id} />}
 
           <StatStrip stats={stats} />
 

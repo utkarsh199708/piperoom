@@ -126,6 +126,25 @@ type Deps struct {
 	// typed confirm and the grant "solo". The caller has already run
 	// CheckSoloUser.
 	SoloUser string
+	// WriteModeOff is PIPEROOM_WRITE_MODE=off (config.ParseWriteMode, P0 item
+	// 1): proposals are still created, previewed and approved, but a fully
+	// approved one is never queued for the executor, so nothing runs and no
+	// action.executed is written; the room view says why
+	// (open_proposals[].blocked). The zero value is write mode on, the
+	// behaviour before the switch, so callers that predate it keep running
+	// fixes; cmd/server always sets it from the config, whose default is off.
+	WriteModeOff bool
+	// AutoApproveDelay is PIPEROOM_AUTO_APPROVE_DELAY
+	// (config.ParseAutoApproveDelay, P0 item 2): how long a proposal whose
+	// every step is on its pipeline's owners.yaml auto_approve: list waits,
+	// cancellable, before the policy approves it (autoapprove.go). 0 turns
+	// the policy off, which is also the zero value: callers that predate it
+	// never auto-approve. cmd/server has already refused a schema_* entry and
+	// an entry that names no action of the proposal registry.
+	AutoApproveDelay time.Duration
+	// AutoApproveTicker, when set, replaces the ticker of the policy loop
+	// (autoapprove.go), like LeaseTicker. Nil uses time.NewTicker.
+	AutoApproveTicker func(d time.Duration) (<-chan time.Time, func())
 
 	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
 	// CreateRoomFromAlert, after room.created is appended. Each call runs in
@@ -286,7 +305,19 @@ type Service struct {
 	sessionLive     auth.Liveness
 	viewerGroups    map[string]struct{}
 	soloUser        string
+	writeOff        bool // Deps.WriteModeOff
 	limits          config.Limits
+	// Auto-approve policy (autoapprove.go). autoDelay is
+	// Deps.AutoApproveDelay (0 = off). autoTickDone, when set (tests only),
+	// runs after each check of the loop. autoSkip remembers what the loop
+	// logged about each due proposal it did not approve, so each kind is
+	// logged once (notePolicyOnce).
+	autoDelay    time.Duration
+	autoTicker   func(d time.Duration) (<-chan time.Time, func())
+	autoOnce     sync.Once
+	autoTickDone func()
+	autoSkipMu   sync.Mutex
+	autoSkip     map[string]map[string]bool // proposal -> notePolicyOnce kinds logged
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex
@@ -345,6 +376,11 @@ type Service struct {
 	list *listHub
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
+	// approvals counts approval.given by grant for /metrics (metrics.go).
+	approvals approvalCounts
+	// soleMembers counts the sole-member grants for /metrics
+	// (service_solemember.go).
+	soleMembers soleMemberCounter
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -413,7 +449,10 @@ func New(d Deps) *Service {
 		sessionLive:     d.SessionLive,
 		viewerGroups:    groupSet(d.ViewerGroups),
 		soloUser:        d.SoloUser,
+		writeOff:        d.WriteModeOff,
 		limits:          d.Limits,
+		autoDelay:       d.AutoApproveDelay,
+		autoTicker:      d.AutoApproveTicker,
 		leaseTicker:     d.LeaseTicker,
 		ctx:             ctx,
 		cancel:          cancel,
@@ -497,6 +536,7 @@ func (s *Service) Load(ctx context.Context) error {
 	s.sweepPostmortems()
 	s.startCoordination()
 	s.startLeaseExpiry()
+	s.startAutoApprove()
 	return nil
 }
 
@@ -565,8 +605,12 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, w
 		// With a shared store a proposal may be running on another replica
 		// right now; the stale-claim sweep decides instead. The store reads
 		// are made before the lock (staleProposals), the writes after it.
+		// With write mode off a fully approved proposal is blocked, not
+		// interrupted: it stays open and the room view says why. A
+		// single-process store does not outlive its process, so no proposal
+		// a write-on run left half done can reach here.
 		var stale []staleProposal
-		if s.coord == nil {
+		if s.coord == nil && !s.writeOff {
 			if p := st.pub.Load(); p != nil && p.Status == "open" {
 				stale = s.staleProposals(ctx, r.ID, *p)
 			}
@@ -646,6 +690,9 @@ func (s *Service) ensureAgentLocked(roomID string, st *roomState) {
 type staleProposal struct {
 	p    Proposal
 	next int
+	// writeBlocked: the row is store.ProposalStatusBlocked, approved while
+	// write mode was off; it never ran.
+	writeBlocked bool
 }
 
 // staleProposals finds the stale proposals of a room just loaded, from its
@@ -663,10 +710,13 @@ func (s *Service) staleProposals(ctx context.Context, roomID string, snap RoomSn
 		// says executed/failed/rejected while the snapshot still shows the
 		// proposal open. Skip those — do not re-mark a finished proposal failed
 		// (review item 6).
-		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil && row.Status != "open" {
-			continue
+		blocked := false
+		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil {
+			if blocked = row.Status == store.ProposalStatusBlocked; !blocked && row.Status != "open" {
+				continue
+			}
 		}
-		out = append(out, staleProposal{p: p, next: s.interruptedStep(ctx, roomID, p)})
+		out = append(out, staleProposal{p: p, next: s.interruptedStep(ctx, roomID, p), writeBlocked: blocked})
 	}
 	return out
 }
@@ -688,12 +738,16 @@ func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID stri
 		if !ok || !fullyApproved(p) {
 			continue
 		}
+		output := "proposal was interrupted by a service restart before it finished; create a new proposal to retry"
+		if sp.writeBlocked {
+			output = writeOffNotRunOutput
+		}
 		if _, err := s.emitLocked(ctx, st, roomID, events.ActionExecuted, executorActor, events.ActionExecutedPayload{
 			ProposalID: p.ProposalID,
 			StepIndex:  sp.next,
 			OK:         false,
 			ParamsHash: p.ParamsHash,
-			Output:     "proposal was interrupted by a service restart before it finished; create a new proposal to retry",
+			Output:     output,
 		}); err != nil {
 			s.log.Warn("room: emit interruption failed", "proposal", p.ProposalID, "err", err)
 		}
@@ -1469,14 +1523,14 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	if st.firstLook && s.triage != nil {
 		// Before the slot: a room queued behind the cap still gets its
 		// diagnosis. It runs once per room, never on a restart.
-		firstLook = s.startTriageLocked(ctx, roomID, run, agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw})
+		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, raw))
 	}
 	st.firstLook = false
 	go func() {
 		defer s.wg.Done()
 		// However the supervisor ends, its slot or queue entry goes back.
 		defer gate.release()
-		alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
+		alert := s.newAlert(roomID, title, pipelineID, raw)
 		deps := agent.Deps{
 			Tools:     s.toolsFor(pipelineID),
 			Actions:   s.actionsFor(pipelineID),

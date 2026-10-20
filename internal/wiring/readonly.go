@@ -5,6 +5,8 @@ import (
 	"errors"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
+	"piperoom/internal/clients/schemareg"
 )
 
 // Read tools and the topology builder get only the read half of each client
@@ -76,4 +78,79 @@ func readRegistry(w *Wired) clients.SchemaRegistryClient {
 		return nil
 	}
 	return readOnlyRegistry{r: w.Registry}
+}
+
+// With write mode off the actions get read-only clients too (writemode.go).
+// Their Validate and Preview only read, but Preview also calls two dry-run
+// endpoints that change nothing (actions.Preview: "the documented dry-run
+// endpoints"): Connect's config validate and the Registry's compatibility
+// check. The actions find them by a type assertion on their client, so the
+// read-only value keeps each one exactly when the real client has it, and the
+// proposal card shows the same dry-run verdict in both modes. These two
+// interfaces mirror package actions' configValidator and compatibilityChecker;
+// TestWriteModeOffKeepsDryRuns fails if they drift apart.
+type (
+	connectValidator interface {
+		ValidateConfig(ctx context.Context, class string, cfg map[string]string) (connect.ValidateResult, error)
+	}
+	registryChecker interface {
+		CheckCompatibility(ctx context.Context, subject, schema string) (ok bool, messages []string, err error)
+	}
+)
+
+// The real clients have both dry-runs, so with write mode off the preview of
+// a config change or a new schema keeps its verdict.
+var (
+	_ connectValidator = (*connect.Client)(nil)
+	_ registryChecker  = (*schemareg.Client)(nil)
+)
+
+// readOnlyConnectDryRun is readOnlyConnect plus Connect's config validate.
+type readOnlyConnectDryRun struct {
+	readOnlyConnect
+	v connectValidator
+}
+
+func (c readOnlyConnectDryRun) ValidateConfig(ctx context.Context, class string, cfg map[string]string) (connect.ValidateResult, error) {
+	return c.v.ValidateConfig(ctx, class, cfg)
+}
+
+// readOnlyRegistryDryRun is readOnlyRegistry plus the compatibility check.
+type readOnlyRegistryDryRun struct {
+	readOnlyRegistry
+	c registryChecker
+}
+
+func (s readOnlyRegistryDryRun) CheckCompatibility(ctx context.Context, subject, schema string) (bool, []string, error) {
+	return s.c.CheckCompatibility(ctx, subject, schema)
+}
+
+// readOnlyActionConnect is w's Connect client for the actions with write mode
+// off: nil when none is configured (as with write mode on), else read-only,
+// with config validate when the client has it.
+func readOnlyActionConnect(w *Wired) clients.ConnectClient {
+	c := readConnect(w)
+	ro, ok := c.(readOnlyConnect)
+	if !ok {
+		return c
+	}
+	if v, ok := ro.r.(connectValidator); ok {
+		return readOnlyConnectDryRun{readOnlyConnect: ro, v: v}
+	}
+	return ro
+}
+
+// readOnlyActionRegistry is w's Schema Registry client for the actions with
+// write mode off, never nil: noRegistry when none is configured (as with
+// write mode on), else read-only, with the compatibility check when the
+// client has it.
+func readOnlyActionRegistry(w *Wired) clients.SchemaRegistryClient {
+	ro, ok := readRegistry(w).(readOnlyRegistry)
+	if !ok {
+		return noRegistry{}
+	}
+	if c, ok := ro.r.(registryChecker); ok {
+		return readOnlyRegistryDryRun{readOnlyRegistry: ro, c: c}
+	}
+	return ro
 }

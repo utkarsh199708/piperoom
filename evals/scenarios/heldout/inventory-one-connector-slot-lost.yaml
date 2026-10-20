@@ -257,6 +257,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_inv_stock
       slot.name: debezium_inv_stock
       table.include.list: public.stock_levels
       topic.prefix: inv
@@ -270,6 +271,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_inv_stock
       slot.name: debezium_inv_stock
       table.include.list: public.stock_levels
       topic.prefix: inv
@@ -297,6 +299,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_inv_sites
       slot.name: debezium_inv_sites
       table.include.list: public.sites
       topic.prefix: inv
@@ -310,6 +313,7 @@ recordings:
       database.user: debezium
       decimal.handling.mode: precise
       key.converter: io.confluent.connect.avro.AvroConverter
+      publication.name: dbz_inv_sites
       slot.name: debezium_inv_sites
       table.include.list: public.sites
       topic.prefix: inv

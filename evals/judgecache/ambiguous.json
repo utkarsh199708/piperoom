@@ -9,7 +9,6 @@
       "keyword": true,
       "items": [
         "root_cause",
-        "first_failing_layer",
         "root_cause_layer"
       ],
       "sources": [

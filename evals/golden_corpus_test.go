@@ -619,7 +619,7 @@ func (r corpusRow) eval(t *testing.T, scs map[string]Scenario) (bool, error) {
 		if !ok {
 			return false, fmt.Errorf("unknown scenario %q", r.scenario)
 		}
-		return rootCauseMatches(s.Expect, r.text) && namesLayer(layerTermsFor(s.Pipeline, s.Expect.RootCauseLayer), r.text), nil
+		return rootCauseMatches(s.Expect, r.text) && keywordRootCauseLayer(s, r.text), nil
 	case "scenario":
 		s, ok := scs[r.scenario]
 		if !ok {

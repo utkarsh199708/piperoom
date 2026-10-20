@@ -465,6 +465,9 @@ func (f flowResult) dataFlowCheck(detail string) *events.DataFlowCheck {
 // model note, and the structured checks. The data-flow check runs only after
 // the layer checks pass.
 func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyResult {
+	if r.kind == events.PipelineKindBatch {
+		return r.verifyBatch(ctx, rec)
+	}
 	var lines []string
 	var checks []events.VerificationCheck
 	layersOK := true
@@ -908,27 +911,40 @@ func (r *runner) readNewest(ctx context.Context, verb string, input json.RawMess
 // timestamp column each one carries in its facts. It is a read tool like any
 // other, so the call is traced in the room.
 func (r *runner) sinkTables(ctx context.Context, verb, pipelineID string) ([]sinkTable, error) {
-	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", pipelineID))
+	nodes, err := r.pipelineNodes(ctx, verb, pipelineID)
 	if err != nil {
 		return nil, err
 	}
-	var g struct {
-		Nodes []struct {
-			Kind  string            `json:"kind"`
-			Name  string            `json:"name"`
-			Facts map[string]string `json:"facts"`
-		} `json:"nodes"`
-	}
-	if err := decodeData(res.Data, &g); err != nil {
-		return nil, fmt.Errorf("pipeline_map gave no readable topology: %w", err)
-	}
 	var out []sinkTable
-	for _, n := range g.Nodes {
+	for _, n := range nodes {
 		if n.Kind == "sink_table" && n.Name != "" {
 			out = append(out, sinkTable{name: n.Name, tsColumn: n.Facts["ts_column"]})
 		}
 	}
 	return out, nil
+}
+
+// mapNode is the part of a pipeline_map node the verification reads.
+type mapNode struct {
+	Kind  string            `json:"kind"`
+	Name  string            `json:"name"`
+	Facts map[string]string `json:"facts"`
+}
+
+// pipelineNodes reads the nodes of one pipeline from pipeline_map, as a traced
+// read step of the room.
+func (r *runner) pipelineNodes(ctx context.Context, verb, pipelineID string) ([]mapNode, error) {
+	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", pipelineID))
+	if err != nil {
+		return nil, err
+	}
+	var g struct {
+		Nodes []mapNode `json:"nodes"`
+	}
+	if err := decodeData(res.Data, &g); err != nil {
+		return nil, fmt.Errorf("pipeline_map gave no readable topology: %w", err)
+	}
+	return g.Nodes, nil
 }
 
 // decodeData round-trips a tool's Data through JSON so judges can read it

@@ -134,7 +134,7 @@ func (s *Service) refireTriageLocked(roomID string, st *roomState, raw json.RawM
 	if state := st.snap.AgentStatus.State; state != "idle" && state != "queued" {
 		return
 	}
-	alert := agent.Alert{RoomID: roomID, Title: st.snap.Title, PipelineID: st.snap.PipelineID, Raw: raw}
+	alert := s.newAlert(roomID, st.snap.Title, st.snap.PipelineID, raw)
 	// A newer agent.triage lands in the log and the snapshot; the running
 	// agent already has the numbers from the alert update.
 	_ = s.startTriageLocked(s.ctx, roomID, st.agentRun, alert)
