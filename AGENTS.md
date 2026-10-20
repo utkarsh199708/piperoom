@@ -58,7 +58,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A3 (F wave, new folders) | `tasks/F8-what-changed-checklist.md`, `tasks/F12-deep-signals-scenarios.md` | `internal/tools/changes/**` (F8b), `internal/clients/prom/**` and `internal/tools/debeziumtools/**` (F12b) |
 | C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile`, `deploy/docker-compose.quickstart.yml` (P1c) |
 | C2 (cloud) | `tasks/C2-agent-memory.md` | done — merged `9519d23`; `internal/agent/**` belongs to A4 again |
-| C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |
+| C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**`, `internal/clients/clickhouse/**` |
 | C4 (cloud) | `tasks/C4-security.md` | `docs/security/**` (no code changes) |
 | C5 (cloud) | `tasks/C5-alert-ingest.md` | `internal/alertin/**` |
 | C6 (cloud) | `tasks/C6-agent-evals.md` | `evals/**` except `evals/scenarios/*.yaml` (other than `schema-change.yaml`) and `evals/scenarios/README.md` |

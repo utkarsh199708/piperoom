@@ -84,6 +84,50 @@ type providerLoaders struct {
 	googleCreds func(ctx context.Context) (*google.Credentials, error)
 }
 
+// ProviderLoaders replace the cloud-credential lookups ProviderOptions makes.
+// A nil field means the real lookup (the AWS default config chain, Google
+// application default credentials), so production callers pass the zero value
+// and tests set both to keep the machine's credentials out.
+type ProviderLoaders struct {
+	AWSConfig   func(ctx context.Context, region string) (aws.Config, error)
+	GoogleCreds func(ctx context.Context) (*google.Credentials, error)
+}
+
+func (l ProviderLoaders) loaders() providerLoaders {
+	ld := defaultLoaders()
+	if l.AWSConfig != nil {
+		ld.awsConfig = l.AWSConfig
+	}
+	if l.GoogleCreds != nil {
+		ld.googleCreds = l.GoogleCreds
+	}
+	return ld
+}
+
+// ProviderOptions checks cfg as NewEndpoint does and returns the normalized
+// provider name and the SDK request options that reach that provider, for a
+// caller that needs its own client on the agent's provider (the eval judge).
+// It runs the same credential checks as NewEndpoint but sends no request.
+// getenv nil means os.Getenv.
+//
+// For vertex, ctx must outlive the returned options: vertex.WithCredentials
+// and the oauth2 token source it wraps keep ctx and use it for every later
+// token refresh, so a cancelled ctx breaks the client's calls.
+func ProviderOptions(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld ProviderLoaders) (string, []option.RequestOption, error) {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	cfg, _, err := cfg.normalized()
+	if err != nil {
+		return cfg.Provider, nil, err
+	}
+	opts, err := cfg.providerOptions(ctx, getenv, ld.loaders())
+	if err != nil {
+		return cfg.Provider, nil, err
+	}
+	return cfg.Provider, opts, nil
+}
+
 func defaultLoaders() providerLoaders {
 	return providerLoaders{
 		awsConfig: func(ctx context.Context, region string) (aws.Config, error) {
@@ -182,6 +226,9 @@ func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string)
 		creds, err = ld.googleCreds(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("agent: find Google application default credentials for vertex: %w", err)
+		}
+		if creds == nil {
+			return nil, errors.New("agent: no Google application default credentials for vertex")
 		}
 		// vertex.WithCredentials panics on a failure it cannot report.
 		defer func() {
