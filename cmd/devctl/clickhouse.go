@@ -33,6 +33,8 @@ ORDER BY id;
 -- land as 49.69. The view converts it. After the schema-change scenario the
 -- field becomes an Avro decimal (bytes) and this read fails on purpose: the
 -- sink breaks on the schema change (dev/clickhouse/README.md).
+-- There is no offset-reset table setting: ClickHouse's Kafka consumer already
+-- defaults auto.offset.reset to earliest, so a new group reads the snapshot.
 CREATE TABLE IF NOT EXISTS analytics.orders_kafka
 (
     "before" Tuple(
@@ -81,7 +83,6 @@ SETTINGS
     kafka_topic_list = 'pg.public.orders',
     kafka_group_name = 'piperoom-clickhouse-orders',
     kafka_format = 'AvroConfluent',
-    kafka_auto_offset_reset = 'earliest',
     format_avro_schema_registry_url = 'http://schema-registry:8081',
     input_format_avro_null_as_default = 1,
     input_format_avro_allow_missing_fields = 1;
