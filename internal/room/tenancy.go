@@ -41,12 +41,39 @@ func (s *Service) actionsFor(pipelineID string) *actions.Registry {
 	return actions.NewRegistry()
 }
 
-// AllActions returns the full write-action registry in registration order:
-// what GET /api/actions lists (docs/api.md, P3c). It is the process-wide
-// registry, not a pipeline's own client set, and is listed whether or not
-// write mode is on.
+// AllActions returns the full write-action catalogue in registration order:
+// what GET /api/actions lists (docs/api.md, P3c), whether or not write mode is
+// on. Without per-pipeline client sets it is the process-wide registry; with
+// them (StackFor) it is the union of every set's actions (Deps.ActionCatalogue),
+// deduplicated by name with the first registration kept.
 func (s *Service) AllActions() []actions.Action {
+	if s.stackFor != nil {
+		if s.actionCatalogue == nil {
+			return nil
+		}
+		return dedupeActions(s.actionCatalogue())
+	}
 	return s.actions.All()
+}
+
+// dedupeActions keeps the first action of each name, in order. The same action
+// is registered in every pipeline's client set, so the catalogue carries it
+// once per set; GET /api/actions lists each action once.
+func dedupeActions(all []actions.Action) []actions.Action {
+	out := make([]actions.Action, 0, len(all))
+	seen := make(map[string]bool, len(all))
+	for _, a := range all {
+		if a == nil {
+			continue
+		}
+		name := a.Name()
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, a)
+	}
+	return out
 }
 
 // TenancyOn reports whether owners.yaml has a tenants: block. Without one

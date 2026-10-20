@@ -459,11 +459,25 @@ func runWith(d startDeps) error {
 		return err
 	}
 
+	// GET /api/actions lists every action once, across every client set, in
+	// stack order (process-wide first); room.AllActions deduplicates by name.
+	var actionCatalogue func() []actions.Action
+	if stacks != nil {
+		actionCatalogue = func() []actions.Action {
+			var out []actions.Action
+			for _, s := range stacks.All() {
+				out = append(out, s.Actions.All()...)
+			}
+			return out
+		}
+	}
+
 	svc := newRoomService(room.Deps{
 		Store:             st,
 		Actions:           acts,
 		Tools:             toolsReg,
 		StackFor:          stackFor,
+		ActionCatalogue:   actionCatalogue,
 		Topology:          topo,
 		Users:             users,
 		Owners:            own,

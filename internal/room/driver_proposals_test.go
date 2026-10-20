@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,10 +18,12 @@ import (
 )
 
 // validateAction is an action whose Validate fails with a fixed error, for the
-// driver-proposal param test.
+// driver-proposal param test. It counts Validate calls so a test can pin that
+// the driver check runs before Validate.
 type validateAction struct {
 	name, layer string
 	err         error
+	calls       atomic.Int32
 }
 
 func (a *validateAction) Name() string     { return a.name }
@@ -29,13 +32,19 @@ func (a *validateAction) Describe() string { return a.name }
 func (a *validateAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (a *validateAction) Validate(context.Context, json.RawMessage) error { return a.err }
+func (a *validateAction) Validate(context.Context, json.RawMessage) error {
+	a.calls.Add(1)
+	return a.err
+}
 func (a *validateAction) CheckScope(owners.Pipeline, json.RawMessage) error {
 	return nil
 }
 func (a *validateAction) Execute(context.Context, json.RawMessage) (string, error) {
 	return "", nil
 }
+
+// validateCalls reports how many times Validate ran.
+func (a *validateAction) validateCalls() int { return int(a.calls.Load()) }
 
 // driverProposal builds the POST /api/rooms/{id}/proposals body as a payload.
 func driverProposal(title string) events.ProposalCreatedPayload {
@@ -58,6 +67,30 @@ func TestDriverProposalNonDriverForbidden(t *testing.T) {
 	var re *room.Error
 	if !errors.As(err, &re) || re.Status != http.StatusForbidden {
 		t.Fatalf("non-driver proposal: %v, want 403", err)
+	}
+	if got := len(allEvents(t, st, roomID)); got != before {
+		t.Fatalf("a refused proposal appended %d events", got-before)
+	}
+}
+
+// TestDriverProposalNonDriverFailingValidate pins that the driver check runs
+// before the action's Validate: a non-driver whose action Validate would fail
+// gets 403 not_driver (not the pipeline's Validate error text) and Validate is
+// never called.
+func TestDriverProposalNonDriverFailingValidate(t *testing.T) {
+	act := &validateAction{name: "pg_act", layer: "postgres", err: errors.New("missing table")}
+	svc, st, _ := newTestService(t, act)
+	roomID := createRoom(t, svc, "arjun").ID
+	before := len(allEvents(t, st, roomID))
+
+	_, err := svc.CreateDriverProposal(context.Background(), mustUser(t, svc, "priya"), roomID, driverProposal("fix"))
+	wantCode(t, err, "not_driver")
+	var re *room.Error
+	if !errors.As(err, &re) || re.Status != http.StatusForbidden {
+		t.Fatalf("non-driver proposal: %v, want 403", err)
+	}
+	if act.validateCalls() != 0 {
+		t.Fatalf("Validate ran %d times for a non-driver", act.validateCalls())
 	}
 	if got := len(allEvents(t, st, roomID)); got != before {
 		t.Fatalf("a refused proposal appended %d events", got-before)

@@ -95,6 +95,15 @@ func (s *Service) CreateDriverProposal(ctx context.Context, user User, roomID st
 		}
 	}
 	p.Origin = events.ProposalOriginDriver
+	// The fence below re-checks under the room's lock and is authoritative, but
+	// createProposal runs the structural and Validate checks first: Validate
+	// reads the pipeline's own systems, so a non-driver (or a call to a closed,
+	// shadow or capped room) must be refused before that. precheckDriverProposal
+	// does those checks under a short lock; the fence repeats them where the
+	// write lands.
+	if err := s.precheckDriverProposal(ctx, user, roomID); err != nil {
+		return events.Event{}, err
+	}
 	_, ev, err := s.createProposal(ctx, roomID, p, s.humanActor(user), func(st *roomState) error {
 		if !s.isDriver(st, user.ID) {
 			return ErrNotDriver()
@@ -108,6 +117,34 @@ func (s *Service) CreateDriverProposal(ctx context.Context, user User, roomID st
 		return nil
 	})
 	return ev, err
+}
+
+// precheckDriverProposal refuses, before any action Validate runs, the calls
+// createProposal's fence would refuse under the lock: a non-driver, a closed
+// room, a shadow room, or a room at its driver-proposal cap. The fence still
+// re-checks under the lock (the room may change between the checks); this
+// pass only keeps a refused caller from reading the pipeline's systems through
+// Validate and seeing their error text.
+func (s *Service) precheckDriverProposal(ctx context.Context, user User, roomID string) error {
+	s.syncRoom(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer s.unlockRoom(st)
+	if !s.isDriver(st, user.ID) {
+		return ErrNotDriver()
+	}
+	if !s.roomOpen(st) {
+		return roomClosed("room is closed")
+	}
+	if st.snap.Shadow {
+		return validation("a shadow room has no proposals")
+	}
+	if openDriverProposals(st.snap) >= maxOpenDriverProposals {
+		return tooManyProposals()
+	}
+	return nil
 }
 
 // openDriverProposals counts the open driver-authored proposals of a snapshot

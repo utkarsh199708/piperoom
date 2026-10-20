@@ -52,12 +52,17 @@ type Deps struct {
 	// built over its own pipeline's clients (docs/design/tenancy.md section
 	// 5), and Tools and Actions are not used. A nil field in the result
 	// means none (fail closed), never the process-wide registry.
-	StackFor     func(pipelineID string) PipelineStack
-	Topology     topology.Builder
-	Users        *Users
-	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
-	Run          agent.Runner
-	WriteHandoff agent.HandoffWriter
+	StackFor func(pipelineID string) PipelineStack
+	// ActionCatalogue, when set, lists every write action for GET /api/actions
+	// across every pipeline's client set (the union of every stack's Actions,
+	// in stack order). AllActions deduplicates it by name. Nil falls back to
+	// Actions.All(); with StackFor set it must be set too (cmd/server does).
+	ActionCatalogue func() []actions.Action
+	Topology        topology.Builder
+	Users           *Users
+	Owners          *owners.Owners // pipeline definitions for actions.Scoped checks
+	Run             agent.Runner
+	WriteHandoff    agent.HandoffWriter
 	// WritePostmortem writes the closing summary of a room that never handed
 	// off after its fix (F2). Nil gives the events-only draft:
 	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODEL=off.
@@ -276,15 +281,16 @@ type roomState struct {
 // Service is the room domain logic. All state derives from the event log; the
 // in-memory cache is rebuilt from the log on start.
 type Service struct {
-	store        store.Store
-	actions      *actions.Registry
-	tools        *tools.Registry
-	stackFor     func(pipelineID string) PipelineStack
-	topo         topology.Builder
-	users        *Users
-	owners       *owners.Owners
-	run          agent.Runner
-	writeHandoff agent.HandoffWriter
+	store           store.Store
+	actions         *actions.Registry
+	tools           *tools.Registry
+	stackFor        func(pipelineID string) PipelineStack
+	actionCatalogue func() []actions.Action
+	topo            topology.Builder
+	users           *Users
+	owners          *owners.Owners
+	run             agent.Runner
+	writeHandoff    agent.HandoffWriter
 	// writePostmortem is nil for an events-only draft (Deps.WritePostmortem).
 	writePostmortem agent.PostmortemWriter
 	triage          agent.Triager
@@ -424,6 +430,7 @@ func New(d Deps) *Service {
 		actions:         acts,
 		tools:           tls,
 		stackFor:        d.StackFor,
+		actionCatalogue: d.ActionCatalogue,
 		topo:            topo,
 		users:           users,
 		owners:          d.Owners,
