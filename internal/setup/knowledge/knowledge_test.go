@@ -48,6 +48,25 @@ func TestValidateRejectsBadDigest(t *testing.T) {
 		{"duplicate plugin", func(_ []Image, pl []Plugin) { pl[1] = pl[0] }, "duplicate plugin"},
 		{"image registry not allow-listed", func(im []Image, _ []Plugin) { im[0].Registry = "evil.example" }, "not allow-listed"},
 		{"image source not its manifest URL", func(im []Image, _ []Plugin) { im[0].Source = "https://quay.io/v2/other/manifests/3.2.0.Final" }, "source must be"},
+		{"image source on a foreign host", func(im []Image, _ []Plugin) { im[0].Source = "https://evil.example/anything" }, "source must be"},
+		{"image source cites another registry", func(im []Image, _ []Plugin) {
+			im[0].Source = "https://registry-1.docker.io/v2/debezium/connect/manifests/3.2.0.Final"
+		}, "source must be"},
+		{"image source another tag", func(im []Image, _ []Plugin) { im[0].Source = "https://quay.io/v2/debezium/connect/manifests/latest" }, "source must be"},
+		{"official image source without library", func(im []Image, _ []Plugin) {
+			i := imageIndex(im, "postgres")
+			im[i].Source = "https://registry-1.docker.io/v2/postgres/manifests/17"
+		}, "source must be"},
+		{"image registry empty", func(im []Image, _ []Plugin) { im[0].Registry = "" }, "required"},
+		{"plugin artifact of another connector", func(_ []Image, pl []Plugin) { pl[0].Artifact = "debezium-connector-mysql" }, "artifact must be"},
+		{"plugin source of another release", func(_ []Image, pl []Plugin) {
+			pl[0].Source = strings.ReplaceAll(pl[0].Source, pl[0].Release, "3.1.3.Final")
+		}, "source must be"},
+		{"plugin source evil host same path", func(_ []Image, pl []Plugin) {
+			pl[0].Source = strings.Replace(pl[0].Source, "repo1.maven.org", "evil.example", 1)
+		}, "source must be"},
+		{"plugin source .sha1 file", func(_ []Image, pl []Plugin) { pl[0].Source = pl[0].ArtifactURL() + ".sha1" }, "source must be"},
+		{"plugin sha512 digest too short", func(_ []Image, pl []Plugin) { pl[0].Digest = "sha512:" + strings.Repeat("a", 64) }, "want 128"},
 		{"duplicate image name", func(im []Image, _ []Plugin) { im[1].Name = "connect" }, "duplicate image name"},
 		{"plugin digest must be sha512", func(_ []Image, pl []Plugin) { pl[0].Digest = "sha1:f441be4331e281ebc554f194d90fafe7ba82086e" }, "must be sha512"},
 		{"plugin artifact mismatch", func(_ []Image, pl []Plugin) { pl[0].Artifact = "not-debezium" }, "artifact must be"},
@@ -105,6 +124,15 @@ func TestResolvePluginPerRelease(t *testing.T) {
 			}
 		}
 	}
+}
+
+func imageIndex(im []Image, name string) int {
+	for i := range im {
+		if im[i].Name == name {
+			return i
+		}
+	}
+	panic("test: no image named " + name)
 }
 
 func pluginDigest(release, connector string) string {
