@@ -21,7 +21,7 @@ type Config struct {
 	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
 	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
 	SourceDBWriteURL  string // SOURCE_DB_WRITE_URL (P0 item 7): the source Postgres as a separate WRITE role for the pg write actions, never the read-only SOURCE_DB_URL role; empty = no writer (those actions refuse at Execute: "no write credentials"; #606); secret
-	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
+	WarehouseDBURL    string // WAREHOUSE_DB_URL (DSN for the selected warehouse kind)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
 	ConnectURL        string // CONNECT_URL
 	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
@@ -70,9 +70,10 @@ type Config struct {
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
 	// "snowflake" uses it as a gosnowflake DSN; "bigquery" and "databricks"
-	// (P0 item 8, readers in P4e) use it as that driver's DSN. internal/wiring
-	// validates the value and refuses a kind it has no reader for yet.
-	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake | bigquery | databricks
+	// (P0 item 8, readers in P4e) use it as that driver's DSN; "clickhouse"
+	// uses it as a clickhouse-go/v2 DSN. internal/wiring validates the value
+	// and refuses a kind it has no reader for yet.
+	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake | bigquery | databricks | clickhouse
 
 	// Batch pipelines (P0 item 8): the orchestrator and transform readers.
 	// An empty URL or directory turns that reader off, and its tools answer
