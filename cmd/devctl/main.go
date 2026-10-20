@@ -14,7 +14,7 @@
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
 // slot-inactive, consumer-lag, connector-auth, and the P3 ones missed-table,
-// dead-slot, consumer-bad-deploy, dlq-backlog.
+// missed-table-kafka-signal, dead-slot, consumer-bad-deploy, dlq-backlog.
 // See dev/scenarios.md for what each one does and what it looks like.
 package main
 
