@@ -52,7 +52,7 @@ describe('ExecutionCard', () => {
   it('keeps the exec-hash test ids and the hash-differs badge', () => {
     render(<ExecutionCard proposal={proposal({ executed: [ran(0, true, { params_hash: 'hash-b' })] })} />)
     expect(screen.getByTestId('exec-hash-0')).toBeInTheDocument()
-    expect(screen.getByText('hash differs from proposal')).toBeInTheDocument()
+    expect(screen.getByText('fingerprint differs from proposal')).toBeInTheDocument()
   })
 })
 
