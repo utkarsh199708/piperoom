@@ -1,6 +1,7 @@
 package owners
 
 import (
+	"net/url"
 	"sort"
 	"strings"
 )
@@ -15,8 +16,8 @@ const (
 	// OverlapTable: two pipelines read the same source table on the same
 	// source host.
 	OverlapTable = "source_table"
-	// OverlapHost: two pipelines reach the same host (the same connection
-	// reference).
+	// OverlapHost: two pipelines reach the same host (the same resolved
+	// endpoint's host:port).
 	OverlapHost = "host"
 )
 
@@ -29,8 +30,8 @@ type Overlap struct {
 	// OverlapHost.
 	Kind string
 	// Value is the shared name: the topic prefix, the connector, the source
-	// table, or the host reference. It is always the requester's own name,
-	// never another tenant's.
+	// table, or the host. It is always the requester's own name, never another
+	// tenant's.
 	Value string
 	// PipelineID is the other pipeline's id when it is in the requester's own
 	// tenant. It is "" when the other pipeline is in another tenant: the
@@ -46,7 +47,16 @@ type Overlap struct {
 // returns one Overlap per shared thing, in a stable order: kind first, then
 // the shared value. It never names a pipeline or tenant of another tenant:
 // such an Overlap has an empty PipelineID and the tenant's admins in Contact.
-func (o *Owners) Overlap(p Pipeline) []Overlap {
+//
+// Hosts are compared by the resolved endpoints, not the raw references: a
+// loaded pipeline holds env:/file: references and a provisional pipeline holds
+// value: literals, so only the caller can know they name the same host.
+// endpoints resolves a pipeline's connection references to the endpoint each
+// connection key reaches (e.g. "source_db_url" -> "postgres://…:5432/db"); a
+// nil resolver, or a key it does not resolve, falls back to the pipeline's own
+// value: literal. Every endpoint is reduced to a normalized host:port before it
+// is compared.
+func (o *Owners) Overlap(p Pipeline, endpoints func(Pipeline) map[string]string) []Overlap {
 	if o == nil {
 		return nil
 	}
@@ -57,14 +67,14 @@ func (o *Owners) Overlap(p Pipeline) []Overlap {
 		if q.ID == p.ID {
 			continue
 		}
-		out = append(out, overlapBetween(p, *q, reqTenant, o)...)
+		out = append(out, overlapBetween(p, *q, reqTenant, o, endpoints)...)
 	}
 	return out
 }
 
 // overlapBetween returns the overlaps of p (the requester) with one loaded
 // pipeline q. reqTenant is p's tenant.
-func overlapBetween(p, q Pipeline, reqTenant string, o *Owners) []Overlap {
+func overlapBetween(p, q Pipeline, reqTenant string, o *Owners, endpoints func(Pipeline) map[string]string) []Overlap {
 	var other string
 	var contact Principals
 	if reqTenant != q.TenantName() {
@@ -84,12 +94,12 @@ func overlapBetween(p, q Pipeline, reqTenant string, o *Owners) []Overlap {
 	for _, c := range sortedIntersect(p.Connectors, q.Connectors) {
 		add(OverlapConnector, c)
 	}
-	if sameSourceHost(p, q) {
+	if sameSourceHost(p, q, endpoints) {
 		for _, t := range sortedIntersect(p.SourceTables, q.SourceTables) {
 			add(OverlapTable, t)
 		}
 	}
-	for _, h := range sortedIntersect(p.hostRefs(), q.hostRefs()) {
+	for _, h := range sortedIntersect(p.hostPorts(endpoints), q.hostPorts(endpoints)) {
 		add(OverlapHost, h)
 	}
 	return out
@@ -100,58 +110,88 @@ func overlapBetween(p, q Pipeline, reqTenant string, o *Owners) []Overlap {
 // kafka security/sasl/tls-server-name knobs) do not name a host.
 var hostConnKeys = []string{"source_db_url", "source_db_write_url", "warehouse_db_url", "kafka_brokers", "connect_url", "schema_registry_url"}
 
-// hostRef returns the canonical form of one connection reference, for the
-// overlap check: env:NAME (upper), file:<path> (FileRef) or, for a literal
-// host address, the trimmed lower-case value. A zero reference answers "".
-func hostRef(r ConnRef) string {
-	switch {
-	case r.Env != "":
-		return refEnv(r.Env)
-	case r.File != "":
-		return FileRef(r.File)
-	case r.Value != "":
-		return strings.ToLower(strings.TrimSpace(r.Value))
+// resolvedEndpoint returns the resolved endpoint of pipeline p for connection
+// key k: endpoints(p)[k] when the caller provides a resolver, else the literal
+// value:, trimmed. "" when the pipeline has neither.
+func resolvedEndpoint(p Pipeline, k string, endpoints func(Pipeline) map[string]string) string {
+	if endpoints != nil {
+		if m := endpoints(p); m != nil {
+			if v := strings.TrimSpace(m[k]); v != "" {
+				return v
+			}
+		}
 	}
-	return ""
+	return strings.TrimSpace(p.Connections[k].Value)
 }
 
-// sourceHostRef is the pipeline's source host reference: the source_db_url
-// connection, canonical. "" when the pipeline has no connections: block (it
-// then uses the process-wide settings, which are not "its" host here).
-func (p Pipeline) sourceHostRef() string {
+// sourceHostPort is the pipeline's source host as a normalized host:port, from
+// its resolved source_db_url endpoint. "" when the pipeline has no connections:
+// block (it then uses the process-wide settings, which are not "its" host here).
+func (p Pipeline) sourceHostPort(endpoints func(Pipeline) map[string]string) string {
 	if !p.HasConnections() {
 		return ""
 	}
-	return hostRef(p.Connections["source_db_url"])
+	return hostPort(resolvedEndpoint(p, "source_db_url", endpoints))
 }
 
 // sameSourceHost reports whether p and q read their source tables from the
-// same host, by their source_db_url reference.
-func sameSourceHost(p, q Pipeline) bool {
-	ph, qh := p.sourceHostRef(), q.sourceHostRef()
+// same host, by their resolved source_db_url endpoint's normalized host:port.
+func sameSourceHost(p, q Pipeline, endpoints func(Pipeline) map[string]string) bool {
+	ph, qh := p.sourceHostPort(endpoints), q.sourceHostPort(endpoints)
 	return ph != "" && ph == qh
 }
 
-// hostRefs returns the pipeline's host references, sorted and without
-// duplicates, for the overlap check. A pipeline with no connections: block has
-// none (process-wide settings are not compared here; CheckSharedRefs covers
-// them).
-func (p Pipeline) hostRefs() []string {
+// hostPorts returns the pipeline's resolved host endpoints as normalized
+// host:port values, sorted and without duplicates, for the overlap check. A
+// pipeline with no connections: block has none (process-wide settings are not
+// compared here; CheckSharedRefs covers them).
+func (p Pipeline) hostPorts(endpoints func(Pipeline) map[string]string) []string {
 	if !p.HasConnections() {
 		return nil
 	}
 	set := map[string]bool{}
 	for _, k := range hostConnKeys {
-		if r := hostRef(p.Connections[k]); r != "" {
-			set[r] = true
+		if v := hostPort(resolvedEndpoint(p, k, endpoints)); v != "" {
+			set[v] = true
 		}
 	}
 	out := make([]string, 0, len(set))
-	for r := range set {
-		out = append(out, r)
+	for v := range set {
+		out = append(out, v)
 	}
 	sort.Strings(out)
 	return out
+}
+
+// hostPort reduces an endpoint to its normalized host:port: scheme, userinfo,
+// path, query and fragment are removed and the host is lower-cased, so a full
+// DSN (postgres://user:pass@DB.Acme:5432/db?x=y) and a bare host:port
+// (DB.Acme:5432) both reduce to "db.acme:5432".
+func hostPort(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if i := strings.Index(s, "://"); i >= 0 {
+		if u, err := url.Parse(s); err == nil {
+			host := strings.ToLower(u.Hostname())
+			if host == "" {
+				return ""
+			}
+			if port := u.Port(); port != "" {
+				return host + ":" + port
+			}
+			return host
+		}
+	}
+	// A bare host[:port], possibly with userinfo and a path/query/fragment.
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // sortedIntersect returns the values present in both slices, sorted and

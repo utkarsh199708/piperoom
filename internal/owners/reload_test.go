@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -112,13 +113,110 @@ func TestLoadDirEmptyDirIsLoad(t *testing.T) {
 	}
 }
 
-func TestReloadSwapsAtomically(t *testing.T) {
-	dir := writeDir(t, map[string]string{"a.yaml": dirPipeline("a")})
-	o, err := LoadDir(writeTemp(t, mainYAML), dir)
+// TestLoadDirTenantDirFileLoads pins the merge-validation fix: a dir pipeline
+// with a tenant: is validated against the main file's tenants: block, so a
+// declared tenant loads instead of being skipped.
+func TestLoadDirTenantDirFileLoads(t *testing.T) {
+	main := "pipelines:\n  - {id: orders, topic_prefix: pg, source_tables: [public.orders], connectors: [c1], tenant: foo}\ntenants:\n  foo: {admins: [user:ann]}\nlayers: {}\n"
+	dir := writeDir(t, map[string]string{
+		"foo.yaml": "pipelines:\n  - {id: foo1, topic_prefix: fg, source_tables: [public.foo], connectors: [f1], tenant: foo}\n",
+	})
+	o, err := LoadDir(writeTemp(t, main), dir)
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
 	}
-	if _, ok := o.Pipeline("a"); !ok {
+	if _, ok := o.Pipeline("foo1"); !ok {
+		t.Fatal("a tenant dir file must load when the main file declares the tenant")
+	}
+	if len(o.DirSkips()) != 0 {
+		t.Fatalf("skips = %+v", o.DirSkips())
+	}
+}
+
+// TestLoadDirSkipsUndeclaredTenant pins the same fix from the other side: a dir
+// file whose tenant: the main file does not declare is skipped, not loaded.
+func TestLoadDirSkipsUndeclaredTenant(t *testing.T) {
+	main := "pipelines:\n  - {id: orders, topic_prefix: pg, source_tables: [public.orders], connectors: [c1], tenant: foo}\ntenants:\n  foo: {admins: [user:ann]}\nlayers: {}\n"
+	dir := writeDir(t, map[string]string{
+		"bar.yaml": "pipelines:\n  - {id: bar1, topic_prefix: bg, source_tables: [public.bar], connectors: [b1], tenant: bar}\n",
+	})
+	o, err := LoadDir(writeTemp(t, main), dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if _, ok := o.Pipeline("bar1"); ok {
+		t.Fatal("a dir file with an undeclared tenant must be skipped")
+	}
+	skips := o.DirSkips()
+	if len(skips) != 1 {
+		t.Fatalf("skips = %+v, want 1", skips)
+	}
+	if !strings.Contains(skips[0].Reason, "bar") {
+		t.Fatalf("skip reason = %q, want it to name the undeclared tenant", skips[0].Reason)
+	}
+}
+
+// TestLoadDirSkipsSharedRefAcrossTenants pins the cross-pipeline check: a dir
+// file that shares a non-shared_connections reference with a pipeline of
+// another tenant is skipped with the CheckSharedRefs reason.
+func TestLoadDirSkipsSharedRefAcrossTenants(t *testing.T) {
+	main := `
+pipelines:
+  - id: main1
+    topic_prefix: pg
+    source_tables: [public.orders]
+    connectors: [c1]
+    tenant: a
+    connections:
+      source_db_url: {env: SRC_DB}
+      kafka_brokers: {env: KAFKA}
+      connect_url: {env: CONNECT}
+      schema_registry_url: {env: REGISTRY}
+      warehouse_db_url: {env: WH}
+tenants:
+  a: {admins: [user:ann]}
+  b: {admins: [user:ben]}
+layers: {}
+`
+	dir := writeDir(t, map[string]string{
+		"shared.yaml": `
+pipelines:
+  - id: dir1
+    topic_prefix: dg
+    source_tables: [public.dir]
+    connectors: [d1]
+    tenant: b
+    connections:
+      source_db_url: {env: SRC_DB}
+      kafka_brokers: {env: KAFKA2}
+      connect_url: {env: CONNECT2}
+      schema_registry_url: {env: REGISTRY2}
+      warehouse_db_url: {env: WH2}
+`,
+	})
+	o, err := LoadDir(writeTemp(t, main), dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if _, ok := o.Pipeline("dir1"); ok {
+		t.Fatal("a dir file sharing a non-shared_connections ref with another tenant must be skipped")
+	}
+	skips := o.DirSkips()
+	if len(skips) != 1 {
+		t.Fatalf("skips = %+v, want 1", skips)
+	}
+	if !strings.Contains(skips[0].Reason, "connection reference") {
+		t.Fatalf("skip reason = %q, want the CheckSharedRefs reason", skips[0].Reason)
+	}
+}
+
+func TestReloadSwapsAtomically(t *testing.T) {
+	dir := writeDir(t, map[string]string{"a.yaml": dirPipeline("a")})
+	l, err := NewLive(writeTemp(t, mainYAML), dir)
+	if err != nil {
+		t.Fatalf("NewLive: %v", err)
+	}
+	if _, ok := l.Load().Pipeline("a"); !ok {
 		t.Fatal("a must load")
 	}
 	// Swap the directory contents: a goes, b arrives, and one bad file is
@@ -132,9 +230,10 @@ func TestReloadSwapsAtomically(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "bad.yaml"), []byte("pipelines:\n  - {id: bad}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := o.Reload(); err != nil {
+	if err := l.Reload(); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
+	o := l.Load()
 	if _, ok := o.Pipeline("a"); ok {
 		t.Fatal("a must be gone after the swap")
 	}
@@ -148,24 +247,64 @@ func TestReloadSwapsAtomically(t *testing.T) {
 		t.Fatalf("skips = %+v", got)
 	}
 
-	// A refused reload leaves the set unchanged.
+	// A refused reload leaves the published set unchanged.
 	if err := os.WriteFile(filepath.Join(dir, "dup.yaml"), []byte(dirPipeline("orders")), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := o.Reload(); err == nil || !strings.Contains(err.Error(), "orders") {
+	if err := l.Reload(); err == nil || !strings.Contains(err.Error(), "orders") {
 		t.Fatalf("Reload with duplicate = %v, want a refusal", err)
 	}
-	if _, ok := o.Pipeline("b"); !ok {
+	if _, ok := l.Load().Pipeline("b"); !ok {
 		t.Fatal("a refused reload must not change the set (b is gone)")
 	}
 }
 
 func TestReloadNeedsLoadDir(t *testing.T) {
-	o, err := Load(writeTemp(t, mainYAML))
+	l, err := NewLive(writeTemp(t, mainYAML), "")
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("NewLive: %v", err)
 	}
-	if err := o.Reload(); err == nil || !strings.Contains(err.Error(), "OWNERS_DIR") {
-		t.Fatalf("Reload without LoadDir = %v, want an OWNERS_DIR error", err)
+	if err := l.Reload(); err == nil || !strings.Contains(err.Error(), "OWNERS_DIR") {
+		t.Fatalf("Reload without OWNERS_DIR = %v, want an OWNERS_DIR error", err)
 	}
+}
+
+// TestLiveReloadConcurrentReaders is the -race regression test for the old
+// `*o = *fresh` Reload: readers take a snapshot and keep reading it while a
+// Reload publishes a new set. With the atomic pointer there is no race.
+func TestLiveReloadConcurrentReaders(t *testing.T) {
+	dir := writeDir(t, map[string]string{"a.yaml": dirPipeline("a")})
+	l, err := NewLive(writeTemp(t, mainYAML), dir)
+	if err != nil {
+		t.Fatalf("NewLive: %v", err)
+	}
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				o := l.Load()
+				if o == nil {
+					continue
+				}
+				_, _ = o.Pipeline("orders")
+				_ = len(o.Pipelines)
+				_ = o.DirSkips()
+			}
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		if err := l.Reload(); err != nil {
+			t.Fatalf("Reload: %v", err)
+		}
+	}
+	close(done)
+	wg.Wait()
 }

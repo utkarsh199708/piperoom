@@ -129,9 +129,10 @@ type Owners struct {
 	// the tenant filter on.
 	Tenants map[string]Tenant `yaml:"tenants"`
 
-	// path and dir are where LoadDir read the config from, so Reload can
-	// re-read it. dir is "" when there is no OWNERS_DIR. skips records the
-	// per-pipeline files the last LoadDir/Reload skipped, for DirSkips.
+	// path and dir are where LoadDir read the config from, so a Live built
+	// over this Owners can re-read it on Reload. dir is "" when there is no
+	// OWNERS_DIR. skips records the per-pipeline files the last
+	// LoadDir/Reload skipped, for DirSkips.
 	path  string
 	dir   string
 	skips []DirSkip
@@ -142,6 +143,21 @@ type Owners struct {
 // exists (the CLI tools do); a server that has the registry calls
 // LoadWithActions, or ValidateAutoApprove after Load.
 func Load(path string) (*Owners, error) {
+	o, err := parse(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := o.validate(); err != nil {
+		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
+	}
+	return o, nil
+}
+
+// parse reads and decodes the owners file at path: unknown keys and null blocks
+// are refused, but the decoded config is not validated. LoadDir uses it for the
+// per-pipeline OWNERS_DIR files, whose validation runs against the main file's
+// top-level blocks rather than the file alone.
+func parse(path string) (*Owners, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("owners: read %s: %w", path, err)
@@ -163,9 +179,6 @@ func Load(path string) (*Owners, error) {
 		return nil, fmt.Errorf("owners: parse %s: %w", path, err)
 	}
 	if err := checkNullBlocks(&root); err != nil {
-		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
-	}
-	if err := o.validate(); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}
 	return &o, nil
