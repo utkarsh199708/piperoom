@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"piperoom/internal/clients/databricks"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/config"
 	"piperoom/internal/tools"
@@ -51,8 +53,8 @@ func CertTargets(cfg config.Config) []CertTarget {
 	if t, ok := urlTarget("schema registry", cfg.SchemaRegistryURL, cfg.SchemaRegistryTLSCAFile); ok {
 		out = append(out, t)
 	}
-	if host := warehouseTLSHost(cfg.WarehouseKind, cfg.WarehouseDBURL); host != "" {
-		out = append(out, CertTarget{Label: "warehouse", Addr: host, TLS: true})
+	if t, ok := warehouseTarget(cfg.WarehouseKind, cfg.WarehouseDBURL); ok {
+		out = append(out, t)
 	}
 	return out
 }
@@ -103,78 +105,96 @@ func snowflakeHost(dsn string) string {
 	return acct + ":443"
 }
 
-// warehouseTLSHost returns the host:port the warehouse TLS check probes for
-// the given kind, read from the DSN host only; DSN credentials are never
-// parsed or returned. It returns "" when the kind has no per-customer host to
-// check — BigQuery talks to Google's shared endpoints, which hold no customer
+// warehouseTarget builds the warehouse endpoint tls_cert_expiry probes for the
+// given kind, from the DSN host only; DSN credentials are never parsed or
+// returned. ok is false when the kind has no per-customer host to check —
+// BigQuery talks to Google's shared endpoints, which hold no customer
 // certificate, and Postgres has no TLS-expiry check here — or when the DSN
 // does not name a usable host, so a bad DSN yields no target and no error text
 // that could carry the DSN.
-func warehouseTLSHost(kind, dsn string) string {
+func warehouseTarget(kind, dsn string) (CertTarget, bool) {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "snowflake":
-		return snowflakeHost(dsn)
+		if h := snowflakeHost(dsn); h != "" {
+			return CertTarget{Label: "warehouse", Addr: h, TLS: true}, true
+		}
 	case "clickhouse":
-		return clickhouseHost(dsn)
+		return clickhouseTarget(dsn)
 	case "databricks":
-		return databricksHost(dsn)
+		if h := databricksHost(dsn); h != "" {
+			return CertTarget{Label: "warehouse", Addr: h, TLS: true}, true
+		}
 	}
-	return ""
+	return CertTarget{}, false
 }
 
-// clickhouseHost reads only the first host:port of a clickhouse-go DSN
-// ("clickhouse://user:password@host:port/database?..."); the credentials and
-// any further HA hosts are dropped. It returns "" when the DSN does not name a
-// host with a port, so a bad DSN yields no target and no error text.
-func clickhouseHost(dsn string) string {
+// clickhouseTarget reads the first host:port of a clickhouse-go DSN
+// ("clickhouse://user:password@host:port/database?...", or an http(s) URL
+// form); the credentials and any further HA hosts are dropped. TLS is on only
+// when clickhouse-go would use it: an https:// scheme, or a secure query
+// parameter that is empty or parses to true. ok is false when the DSN does not
+// name a host with a port, so a bad DSN yields no target and no error text.
+func clickhouseTarget(dsn string) (CertTarget, bool) {
 	u, err := url.Parse(dsn)
 	if err != nil {
-		return ""
+		return CertTarget{}, false
+	}
+	if strings.Contains(dsn, "@") && u.User == nil {
+		// The credentials hold an unescaped "/": url.Parse ended the authority
+		// before the "@", so u.Host would be a fragment of the credentials.
+		return CertTarget{}, false
 	}
 	authority := strings.Split(u.Host, ",")[0]
 	host, port, err := net.SplitHostPort(authority)
 	if err != nil || host == "" || port == "" {
-		return ""
+		return CertTarget{}, false
 	}
-	return net.JoinHostPort(host, port)
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return CertTarget{}, false
+	}
+	tlsOn := u.Scheme == "https"
+	if v, ok := q["secure"]; ok {
+		switch {
+		case len(v) == 0 || v[0] == "":
+			tlsOn = true
+		default:
+			if b, err := strconv.ParseBool(v[0]); err == nil && b {
+				tlsOn = true
+			}
+		}
+	}
+	t := CertTarget{Label: "warehouse", Addr: net.JoinHostPort(host, port), TLS: tlsOn}
+	if tlsOn {
+		t.Config = tlsRoots("", q.Get("tls_server_name"))
+	}
+	return t, true
 }
 
 // databricksHost reads only the workspace host (and port) of a Databricks DSN
-// ("token:<pat>@<host>[:<port>]/<http-path>?catalog=<catalog>", with an
-// optional https:// prefix); the token is dropped and a missing port defaults
-// to 443. It returns "" when the DSN does not name a host, so a bad DSN yields
-// no target and no error text.
+// via the client's own parser, so a host or port the client refuses (a port
+// outside 1..65535, a host that is not a host name) yields no target; the
+// token is dropped. It returns "" when the DSN does not parse, so a bad DSN
+// yields no target and no error text.
 func databricksHost(dsn string) string {
 	if dsn == "" {
 		return ""
 	}
+	// The DSN form token:<pat>@<host>/... may also carry an https:// prefix. An
+	// unescaped "/" in the token ends url.Parse's authority before the "@", so
+	// the parsed host would be a fragment of the token.
 	raw := dsn
-	switch {
-	case hasFoldPrefix(dsn, "https://"):
-	case hasFoldPrefix(dsn, "http://"):
-		return "" // plaintext: the databricks client refuses http:// anyway
-	case strings.Contains(dsn, "://"):
-		return "" // a scheme other than https:// is not a Databricks DSN
-	default:
+	if !strings.Contains(dsn, "://") {
 		raw = "https://" + dsn
 	}
-	u, err := url.Parse(raw)
+	if u, err := url.Parse(raw); err == nil && strings.Contains(dsn, "@") && u.User == nil {
+		return ""
+	}
+	cfg, err := databricks.ParseDSN(dsn)
 	if err != nil {
 		return ""
 	}
-	host := u.Hostname()
-	if host == "" {
-		return ""
-	}
-	port := u.Port()
-	if port == "" {
-		port = "443"
-	}
-	return net.JoinHostPort(host, port)
-}
-
-func hasFoldPrefix(s, prefix string) bool {
-	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+	return net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 }
 
 // ---- tls_cert_expiry ----
