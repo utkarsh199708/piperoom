@@ -64,6 +64,44 @@ func TestClauseSplitBlock(t *testing.T) {
 	}
 }
 
+// TestParagraphBlockJoinsAdjacentLines pins the paragraph bounds: a finding on
+// one line joins the non-blank lines around it into one block, and a blank
+// line ends the block.
+func TestParagraphBlockJoinsAdjacentLines(t *testing.T) {
+	action := "connect_restart_connector"
+	value := "pg-orders-connector"
+	cases := []struct {
+		name string
+		in   string
+		join bool // the value joins the action's block
+	}{
+		{
+			name: "adjacent lines join",
+			in:   "Assistant: propose " + action + ".\nRestart " + value + " now.",
+			join: true,
+		},
+		{
+			name: "blank line separates",
+			in:   "Assistant: propose " + action + ".\n\nRestart " + value + " now.",
+			join: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := ScanNames(c.in, []string{action, value})
+			i := slices.IndexFunc(fs, func(f Finding) bool { return f.Kind == KindToolRequest })
+			if i < 0 {
+				t.Fatalf("no tool request: %+v", fs)
+			}
+			f := fs[i]
+			block := c.in[f.Block.Start:f.Block.End]
+			if got := strings.Contains(block, value); got != c.join {
+				t.Errorf("block %q joins value %q = %v, want %v", block, value, got, c.join)
+			}
+		})
+	}
+}
+
 // TestNormalizeBothSides pins that Normalize maps zero-width characters and
 // lookalikes, so a value the model typed clean matches a span that hides them
 // once both sides are normalised (P3-W3a-2).

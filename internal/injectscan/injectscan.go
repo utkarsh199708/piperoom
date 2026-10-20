@@ -56,10 +56,12 @@ const (
 // the span, or the whole comment, blob or tag run for kinds whose span is
 // already the whole unit. It lets a caller compare values against a wider
 // region than the clause when an injection puts its action in one sentence and
-// its value in the next. Start and End are byte offsets into the string the
-// caller passed to ScanNames (rune boundaries, Start <= Offset <= End <=
-// len(s)); the zero value means the span is its own block. It is untrusted
-// data too: never log it.
+// its value in the next. The paragraph block is capped at WindowBytes on each
+// side of the span, cut on a rune boundary, so it stays bounded however long
+// the input is. Start and End are byte offsets into the string the caller
+// passed to ScanNames (rune boundaries, Start <= Offset <= End <= len(s)); the
+// zero value means the span is its own block. It is untrusted data too: never
+// log it.
 type Block struct {
 	Start int `json:"start"`
 	End   int `json:"end"`
@@ -92,7 +94,7 @@ type Finding struct {
 	// the Block type). Only ScanNames fills it; Scan leaves it zero, which
 	// means "the span is its own block". A caller comparing a value the model
 	// typed against the block must Normalize both sides first.
-	Block Block `json:"block,omitempty"`
+	Block Block `json:"block,omitzero"`
 }
 
 const (
@@ -172,39 +174,61 @@ func blockFor(s string, f Finding) Block {
 	return Block{Start: start, End: end}
 }
 
-// paragraphBounds returns the maximal run of non-blank lines around the span
-// [start, end): the enclosing record or trace block. Both returned offsets
-// are rune boundaries of s and the block encloses the span.
+// paragraphBounds returns the enclosing paragraph of the span [start, end):
+// the maximal run of non-blank lines around it, capped at WindowBytes past the
+// span on each side so the block stays bounded however long s is. Both
+// returned offsets are rune boundaries of s and the block encloses the span.
 func paragraphBounds(s string, start, end int) (int, int) {
+	floor := max(0, start-WindowBytes)
+	ceil := min(len(s), end+WindowBytes)
+
+	// The span's own line, never more than WindowBytes past the span.
 	lo := start
-	for lo > 0 && s[lo-1] != '\n' {
+	for lo > floor && s[lo-1] != '\n' {
 		lo--
 	}
 	hi := end
-	for hi < len(s) && s[hi] != '\n' {
+	for hi < ceil && s[hi] != '\n' {
 		hi++
 	}
-	// Grow past blank lines above: a blank line is a paragraph break.
-	for lo > 0 {
-		prevStart := lo - 1
-		for prevStart > 0 && s[prevStart-1] != '\n' {
-			prevStart--
+
+	// Grow up over adjacent non-blank lines; a blank line or the cap ends it.
+	for lo > floor {
+		p := lo - 1
+		for p > floor && s[p-1] != '\n' {
+			p--
 		}
-		if !isBlankLine(s[prevStart : lo-1]) {
+		if p == floor && p > 0 && s[p-1] != '\n' {
+			lo = floor // the line above runs past the cap
 			break
 		}
-		lo = prevStart
+		if isBlankLine(s[p : lo-1]) {
+			break
+		}
+		lo = p
 	}
-	// Grow past blank lines below.
-	for hi < len(s) {
-		nextEnd := hi + 1
-		for nextEnd < len(s) && s[nextEnd] != '\n' {
-			nextEnd++
+	// Grow down over adjacent non-blank lines.
+	for hi < ceil {
+		n := hi + 1
+		for n < ceil && s[n] != '\n' {
+			n++
 		}
-		if !isBlankLine(s[hi+1 : nextEnd]) {
+		if n == ceil && n < len(s) && s[n] != '\n' {
+			hi = ceil // the line below runs past the cap
 			break
 		}
-		hi = nextEnd
+		if isBlankLine(s[hi+1 : n]) {
+			break
+		}
+		hi = n
+	}
+
+	// Both edges land on rune boundaries.
+	for lo < start && !utf8.RuneStart(s[lo]) {
+		lo++
+	}
+	for hi > end && hi < len(s) && !utf8.RuneStart(s[hi]) {
+		hi--
 	}
 	return lo, hi
 }
