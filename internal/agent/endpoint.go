@@ -82,41 +82,6 @@ type EndpointConfig struct {
 type providerLoaders struct {
 	awsConfig   func(ctx context.Context, region string) (aws.Config, error)
 	googleCreds func(ctx context.Context) (*google.Credentials, error)
-	// googleWait bounds the Google lookup; 0 = credentialCheckTimeout.
-	googleWait time.Duration
-}
-
-// findGoogleCreds runs the Google credential lookup but waits for it at most
-// googleWait. The lookup gets ctx itself, not a deadline-bound child:
-// oauth2/google keeps that context in the token source it returns and uses it
-// for every later token refresh, so cancelling it after the check would break
-// Vertex calls. A lookup still running at the deadline ends on its own (file
-// reads and the metadata probe have their own timeouts); the buffered channel
-// never blocks it.
-func (ld providerLoaders) findGoogleCreds(ctx context.Context) (*google.Credentials, error) {
-	wait := ld.googleWait
-	if wait <= 0 {
-		wait = credentialCheckTimeout
-	}
-	type result struct {
-		creds *google.Credentials
-		err   error
-	}
-	done := make(chan result, 1)
-	go func() {
-		creds, err := ld.googleCreds(ctx)
-		done <- result{creds, err}
-	}()
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case r := <-done:
-		return r.creds, r.err
-	case <-timer.C:
-		return nil, fmt.Errorf("lookup still running after %s: %w", wait, context.DeadlineExceeded)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 }
 
 // ProviderLoaders replace the cloud-credential lookups ProviderOptions makes.
@@ -144,6 +109,10 @@ func (l ProviderLoaders) loaders() providerLoaders {
 // caller that needs its own client on the agent's provider (the eval judge).
 // It runs the same credential checks as NewEndpoint but sends no request.
 // getenv nil means os.Getenv.
+//
+// For vertex, ctx must outlive the returned options: vertex.WithCredentials
+// and the oauth2 token source it wraps keep ctx and use it for every later
+// token refresh, so a cancelled ctx breaks the client's calls.
 func ProviderOptions(ctx context.Context, cfg EndpointConfig, getenv func(string) string, ld ProviderLoaders) (string, []option.RequestOption, error) {
 	if getenv == nil {
 		getenv = os.Getenv
@@ -224,7 +193,6 @@ func (c EndpointConfig) normalized() (EndpointConfig, int64, error) {
 // credentialCheckTimeout) so that missing or broken AWS credentials stop the
 // server at startup instead of failing the first alert. That is a credential
 // lookup (environment, shared files, instance/role metadata), not a model call.
-// The Google credential lookup is bounded by the same timeout (findGoogleCreds).
 func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string) string, ld providerLoaders) (opts []option.RequestOption, err error) {
 	switch c.Provider {
 	case ProviderBedrock:
@@ -255,7 +223,7 @@ func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string)
 		return []option.RequestOption{bedrock.WithConfig(cfg)}, nil
 	case ProviderVertex:
 		var creds *google.Credentials
-		creds, err = ld.findGoogleCreds(ctx)
+		creds, err = ld.googleCreds(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("agent: find Google application default credentials for vertex: %w", err)
 		}

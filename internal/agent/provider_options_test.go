@@ -2,10 +2,8 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -122,64 +120,4 @@ func TestProviderOptionsVertexNilCredentials(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "application default credentials") || opts != nil {
 		t.Fatalf("err = %v, opts = %d; want a credentials error and no options", err, len(opts))
 	}
-}
-
-// A hung Google lookup stops startup after the wait instead of blocking it,
-// and the lookup's context is never cancelled by the check: the token source
-// keeps it for later refreshes.
-func TestGoogleCredentialLookupIsBounded(t *testing.T) {
-	cfg := EndpointConfig{Provider: "vertex", VertexProject: "p", VertexRegion: "global"}
-
-	t.Run("hung lookup times out", func(t *testing.T) {
-		release := make(chan struct{})
-		t.Cleanup(func() { close(release) })
-		ld := testLoaders(nil)
-		ld.googleWait = 20 * time.Millisecond
-		ld.googleCreds = func(context.Context) (*google.Credentials, error) {
-			<-release
-			return nil, errors.New("too late")
-		}
-		start := time.Now()
-		_, err := cfg.providerOptions(context.Background(), envOf(nil), ld)
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("err = %v, want a deadline error", err)
-		}
-		if d := time.Since(start); d > 2*time.Second {
-			t.Fatalf("took %s, want about the 20ms wait", d)
-		}
-	})
-
-	t.Run("caller cancels", func(t *testing.T) {
-		release := make(chan struct{})
-		t.Cleanup(func() { close(release) })
-		ld := testLoaders(nil)
-		ld.googleCreds = func(context.Context) (*google.Credentials, error) {
-			<-release
-			return nil, errors.New("too late")
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		if _, err := cfg.providerOptions(ctx, envOf(nil), ld); !errors.Is(err, context.Canceled) {
-			t.Fatalf("err = %v, want context.Canceled", err)
-		}
-	})
-
-	t.Run("lookup context outlives the check", func(t *testing.T) {
-		var seen context.Context
-		ld := testLoaders(nil)
-		inner := ld.googleCreds
-		ld.googleCreds = func(ctx context.Context) (*google.Credentials, error) {
-			seen = ctx
-			return inner(ctx)
-		}
-		if _, err := cfg.providerOptions(context.Background(), envOf(nil), ld); err != nil {
-			t.Fatal(err)
-		}
-		if seen == nil || seen.Err() != nil {
-			t.Fatalf("lookup context = %v, want one still live after the check", seen)
-		}
-		if _, ok := seen.Deadline(); ok {
-			t.Fatal("lookup context has a deadline; the token source would stop refreshing after it")
-		}
-	})
 }
