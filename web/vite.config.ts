@@ -9,6 +9,10 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const api = process.env.PIPEROOM_API ?? env.PIPEROOM_API ?? 'http://127.0.0.1:8090'
 
+  // Where the dev-only `devctl serve` break/fix API listens (loopback, no auth).
+  // Override with PIPEROOM_DEVCTL, e.g. `PIPEROOM_DEVCTL=http://127.0.0.1:7071 npm run dev`.
+  const devctl = process.env.PIPEROOM_DEVCTL ?? env.PIPEROOM_DEVCTL ?? 'http://127.0.0.1:7071'
+
   // The session is an HttpOnly cookie, so the browser must talk to ONE origin.
   // The dev server proxies /api and /auth to the Go server (docs/design/auth.md
   // section 1.4). `changeOrigin` stays off on purpose: the server then sees
@@ -38,7 +42,22 @@ export default defineConfig(({ mode }) => {
         },
       },
     },
-    server: { proxy },
+    server: {
+      proxy: {
+        ...proxy,
+        // The dev-only "Break something" menu (web/src/components/shell/BreakSomethingMenu.tsx)
+        // drives `devctl serve` (cmd/devctl/serve.go). devctl serves at the ROOT
+        // (/scenarios, /break/..., /fix/...), so the /devctl prefix is stripped here.
+        // changeOrigin is on so devctl sees Host 127.0.0.1:7071: its Host allow-list is
+        // port-exact (unlike the Go server, which accepts any loopback port). Deliberately
+        // absent from preview.proxy: preview serves the production bundle, which has no menu.
+        '^/devctl(/|$)': {
+          target: devctl,
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/devctl/, ''),
+        },
+      },
+    },
     preview: { proxy },
   }
 })
