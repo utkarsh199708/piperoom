@@ -2,7 +2,7 @@
 import type { AgentStats } from '../api/types'
 import type { InsightState } from '../state/types'
 
-/** "12s", "2m 10s", "1 h 02 min": whole seconds, no rounding up. */
+/** "12s", "2m 10s", "1 h 2 min", "6 d 2 h": whole seconds, no rounding up. */
 export function elapsedLabel(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
   const d = Math.floor(total / 86400)

@@ -98,7 +98,7 @@ export function ExecutionCard({
               )}
               {ex?.params_hash && (
                 <code
-                  className="exec__hash ml-auto font-mono text-[11px] text-subtle-foreground"
+                  className="ml-auto font-mono text-[11px] text-subtle-foreground"
                   data-testid={`exec-hash-${ex.step_index}`}
                   title={`Ran with fingerprint ${ex.params_hash}`}
                 >

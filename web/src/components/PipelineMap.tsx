@@ -196,7 +196,7 @@ function Node({
         <StatusDot tone={health.tone} />
         <span>{health.word}</span>
         {facts.length > 0 && (
-          <span className="ml-auto tabular-nums" title={facts[0][0]}>
+          <span className="ml-auto tabular-nums" title={runKey !== undefined && runState ? runKey : facts[0][0]}>
             <span className="text-subtle-foreground">{factLabel(facts[0][0])}</span> {factValue(facts[0][1])}
           </span>
         )}

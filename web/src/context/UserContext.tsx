@@ -277,7 +277,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
           </NoticeScreen>
         ) : (
           <NoticeScreen title="You are signed out" action={reload} alert>
-            You are signed out. Reload the page to sign in again.
+            Reload the page to sign in again.
           </NoticeScreen>
         )}
       </div>
