@@ -264,6 +264,23 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "order-sync 2.15.0's new status validation rejects orders with the new status 'gift' and routes them to its DLQ devctl.order-sync.dlq (20 records, devconsumer.ValidationError), then commits them, so lag is 0 while the 20 gift orders are missing from analytics.orders. 2.15.1 accepts gift; replay the DLQ into pg.public.orders.",
 		wrong: "The Kafka Connect source task 0 failed and dropped 20 change events before they reached the topic.",
 	},
+	// CH-4 ClickHouse warehouse scenarios (C7).
+	"clickhouse-kafka-engine-stalled": {
+		good:  "The ClickHouse Kafka engine table analytics.orders_queue has a stalled consumer, so the materialized view mv_orders stopped loading new rows into the MergeTree sink table analytics.orders and the warehouse is 45 minutes stale while the topic and order-sync stay healthy.",
+		wrong: "order-sync crashed on a poison pill after the 09:00 deploy, so the warehouse stopped receiving rows.",
+	},
+	"clickhouse-mv-schema-change": {
+		good:  "The ClickHouse sink table analytics.orders and materialized view mv_orders are missing the risk_score column that schema version 4 added, so every INSERT fails with code 47 and the warehouse goes stale.",
+		wrong: "The Schema Registry rejected schema version 4 as an incompatible, breaking change, so order-sync crashed and the warehouse is stale.",
+	},
+	"clickhouse-readonly-profile": {
+		good:  "The ClickHouse warehouse is unreadable because the service account's profile is readonly=1, which rejects the per-query settings every warehouse query sends.",
+		wrong: "The Connect source task 0 failed and cannot reach the broker, so the warehouse queries fail.",
+	},
+	"clickhouse-sink-table-dropped": {
+		good:  "The ClickHouse sink table analytics.orders was dropped during a cleanup, so the materialized view's loads fail with code 60 (unknown table) and the warehouse answers 'not found'.",
+		wrong: "order-sync crashed on a poison pill after the 09:00 deploy, so it never read the new orders and the sink fell behind.",
+	},
 	"slot-inactive-wal-growth": {
 		good:  slotInactiveHypothesis,
 		wrong: "A long-running transaction holds back the WAL; the connector is running and the slot is fine.",
@@ -373,6 +390,24 @@ func TestScoringOldVsNew(t *testing.T) {
 				oldMark = mark(o)
 			}
 			fmt.Fprintf(&tab, "| %s | %s | %s | %s |\n", sc.Name, tx.kind, oldMark, mark(n))
+			// Copying the pipeline map is not cheating when the map itself
+			// states the cause, and a lazy parrot that hands back the alert
+			// title is no better when the title itself names the cause. Known
+			// gaps: the slot-inactive map says state=STOPPED and
+			// slot_active=false; dead-slot-wal-no-context is the same stack
+			// state (P3g-1); the ClickHouse maps and titles state the cause
+			// outright. The kafka-engine title names the engine but not the
+			// warehouse, so only the map (which adds "warehouse") passes;
+			// readonly-profile and sink-table-dropped name the warehouse in
+			// their own titles. Terms cannot tell any of that from an
+			// understanding; the LLM judge can.
+			mapStatesCause := sc.Name == "slot-inactive-wal-growth" ||
+				sc.Name == "dead-slot-wal-no-context" ||
+				sc.Name == "clickhouse-kafka-engine-stalled" ||
+				sc.Name == "clickhouse-readonly-profile" ||
+				sc.Name == "clickhouse-sink-table-dropped"
+			titleStatesCause := sc.Name == "clickhouse-readonly-profile" ||
+				sc.Name == "clickhouse-sink-table-dropped"
 			switch tx.kind {
 			case "good":
 				if hasOld && !o {
@@ -381,14 +416,13 @@ func TestScoringOldVsNew(t *testing.T) {
 				if !n {
 					t.Errorf("%s: good text fails the new matcher (terms too tight?)", sc.Name)
 				}
+			case "lazy-parrot":
+				if n != titleStatesCause {
+					t.Errorf("%s: lazy-parrot passes = %v, want %v", sc.Name, n, titleStatesCause)
+				}
 			case "parrot+map":
-				// Copying the pipeline map is not cheating when the map itself
-				// states the cause. Known gap: the slot-inactive map says
-				// state=STOPPED and slot_active=false. Terms cannot tell that
-				// from an understanding; the LLM judge can. dead-slot-wal-no-context
-				// is the same stack state (P3g-1).
-				if want := sc.Name == "slot-inactive-wal-growth" || sc.Name == "dead-slot-wal-no-context"; n != want {
-					t.Errorf("%s: parrot+map passes = %v, want %v", sc.Name, n, want)
+				if n != mapStatesCause {
+					t.Errorf("%s: parrot+map passes = %v, want %v", sc.Name, n, mapStatesCause)
 				}
 			default:
 				if n {

@@ -352,6 +352,12 @@ var syntheticLabels = map[string]Label{
 	"dead-slot-wal-no-context": {"kafka-connect", []string{"stopped", "never resumed", "retains all wal"}},
 	"consumer-bad-deploy":      {"consumer", []string{"deploy", "committed", "offsets"}},
 	"dlq-backlog":              {"consumer", []string{"validation", "gift"}},
+	// The CH-4 ClickHouse warehouse scenarios (C7): every first failing layer
+	// is warehouse.
+	"clickhouse-kafka-engine-stalled": {"warehouse", []string{"kafka engine", "consumer exception", "stalled"}},
+	"clickhouse-mv-schema-change":     {"warehouse", []string{"risk_score", "missing column", "code 47"}},
+	"clickhouse-readonly-profile":     {"warehouse", []string{"readonly", "profile"}},
+	"clickhouse-sink-table-dropped":   {"warehouse", []string{"dropped", "code 60", "unknown table"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -403,6 +409,15 @@ var syntheticTruth = map[string]map[string]truth{
 	"dead-slot-wal-no-context": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"consumer-bad-deploy":      {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"dlq-backlog":              {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// CH-4: lazy texts are the alert titles. Three of the four titles name the
+	// cause outright ("ClickHouse Kafka engine stopped consuming", "profile
+	// readonly=1", "missing ... code 60"), so their lazy layer and cause both
+	// agree; mv-schema-change's title names only the warehouse (its "materialized
+	// view insert failing" is not a "missing column"), so its lazy cause misses.
+	"clickhouse-kafka-engine-stalled": {"good": {true, true}, "lazy": {true, true}, "wrong": {false, false}},
+	"clickhouse-mv-schema-change":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"clickhouse-readonly-profile":     {"good": {true, true}, "lazy": {true, true}, "wrong": {false, false}},
+	"clickhouse-sink-table-dropped":   {"good": {true, true}, "lazy": {true, true}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.
