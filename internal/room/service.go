@@ -1479,9 +1479,10 @@ type proposalCreator struct {
 }
 
 func (p proposalCreator) Create(ctx context.Context, payload events.ProposalCreatedPayload) (string, error) {
-	return p.s.createProposal(ctx, p.roomID, payload, events.AgentActor, func(st *roomState) error {
+	id, _, err := p.s.createProposal(ctx, p.roomID, payload, events.AgentActor, func(st *roomState) error {
 		return p.s.fenceLocked(p.roomID, st, p.run)
 	})
+	return id, err
 }
 
 // Agent auto-restart bounds (LEAD-ARCH round 4, arch should-fix): a failed

@@ -41,6 +41,14 @@ func (s *Service) actionsFor(pipelineID string) *actions.Registry {
 	return actions.NewRegistry()
 }
 
+// AllActions returns the full write-action registry in registration order:
+// what GET /api/actions lists (docs/api.md, P3c). It is the process-wide
+// registry, not a pipeline's own client set, and is listed whether or not
+// write mode is on.
+func (s *Service) AllActions() []actions.Action {
+	return s.actions.All()
+}
+
 // TenancyOn reports whether owners.yaml has a tenants: block. Without one
 // every signed-in user sees every room.
 func (s *Service) TenancyOn() bool { return s.owners.TenancyOn() }
