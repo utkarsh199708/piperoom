@@ -72,6 +72,9 @@ type Server struct {
 	// Admin settings and connection tests (WithAdmin): admin.go.
 	admin      AdminSettings
 	adminLimit *rateLimiter
+
+	// Setup runner endpoint (WithSetup): runners.go.
+	setupEnabled bool
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -164,6 +167,13 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		// no session. They take the sender's own content type (no requireJSON).
 		// A source without a secret answers 401.
 		api.With(middleware.Timeout(requestTimeout)).Post("/alerts/{source}", s.handleSignedAlert)
+
+		// The setup runner's WebSocket (PIPEROOM_SETUP_ENABLED=on): the
+		// credential is the pairing code in its first frame, not a session, so
+		// it sits outside the protected group like the signed alerts.
+		if s.setupEnabled {
+			api.Get("/runners/ws", s.handleRunnerWS)
+		}
 
 		api.Group(func(protected chi.Router) {
 			protected.Use(s.authenticate)
