@@ -11,7 +11,7 @@
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
 //	devctl shadow up|down|status|env   Piperoom server in shadow mode (dev/shadow.md)
 //	devctl clickhouse init [--owner <tag>]  start ClickHouse and create the Kafka-backed orders sink
-//	devctl serve [-addr 127.0.0.1:7071]   loopback-only break/fix API for the dev web menu (no auth)
+//	devctl serve [-addr 127.0.0.1:7071] [-allow-origin URL] [--owner <tag>]   loopback-only break/fix API for the dev web menu (no auth)
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
 // slot-inactive, consumer-lag, connector-auth, and the P3 ones missed-table,
@@ -53,12 +53,12 @@ const usage = `devctl — local pipeline control
   devctl shadow up|down|status|env   run the server in shadow mode on this stack (dev/shadow.md)
   devctl clickhouse init [--owner <tag>]   start ClickHouse and create the Kafka-backed orders sink
   devctl lock --steal       steal a stale (>15m) lock
-  devctl serve [-addr 127.0.0.1:7071]   loopback-only break/fix HTTP API for the dev web menu (no auth)
+  devctl serve [-addr 127.0.0.1:7071] [-allow-origin URL] [--owner <tag>]   loopback-only break/fix HTTP API for the dev web menu (no auth)
 
 missed-table, dead-slot, consumer-bad-deploy and dlq-backlog need the server
 started with OWNERS_FILE=dev/owners.p3.yaml (dev/scenarios.md, P3 scenarios).
 
-up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
+up/down/reset/load/break/fix/serve mutate the shared stack and require --owner <tag>
 (or PIPEROOM_STACK_OWNER) to match the current lock holder.
 
 scenarios: %s

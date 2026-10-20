@@ -57,13 +57,19 @@ and start from a fresh stack (`devctl reset`): `break` needs `orders.amount` sti
 For the web "Break something" menu (A6) there is a tiny local HTTP API:
 
 ```
-go run ./cmd/devctl serve -addr 127.0.0.1:7071
+go run ./cmd/devctl serve -addr 127.0.0.1:7071 --owner me
 ```
 
 It serves `GET /scenarios`, `POST /break/{name}` and `POST /fix/{name}` over JSON, one run at a
-time (a second while busy gets `409`). It has **no authentication**, so it refuses to bind anything
+time (a second while busy gets `409`). Like every mutating command it requires the shared-stack
+lock (`--owner <tag>` or `PIPEROOM_STACK_OWNER`), re-checked before each run; a caller who no
+longer holds the lock gets `423`. It has **no authentication**, so it refuses to bind anything
 but a loopback address (`127.0.0.1`, `::1`) and is never built into the image (the Dockerfile builds
-only `cmd/server`). Stop it with Ctrl-C.
+only `cmd/server`). On top of the loopback bind it defends against CSRF and DNS rebinding: it
+rejects any request whose `Host` is not a loopback host on the listen port, answers CORS only for
+the web menu's origin (`-allow-origin`, default `http://localhost:5173`), and requires every POST
+to carry a non-simple marker (`Content-Type: application/json` or `X-Piperoom-Dev: 1`) so a
+cross-site request always needs a preflight that fails. Stop it with Ctrl-C.
 
 ## Everything else here
 
