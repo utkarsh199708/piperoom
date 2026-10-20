@@ -821,7 +821,7 @@ func TestBadWarehouseKindNamesPipeline(t *testing.T) {
 	y := strings.Replace(twoTenantYAML(""), "      kafka_sasl_password: {env: B_KAFKA_PASSWORD}", "      kafka_sasl_password: {env: B_KAFKA_PASSWORD}\n      warehouse_kind: {value: oracle}", 1)
 	own := loadOwners(t, y)
 	_, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, newFakeOpener().deps(env(twoTenantEnv())))
-	if err == nil || !strings.Contains(err.Error(), `pipeline "pb"`) || !strings.Contains(err.Error(), "connections.warehouse_kind") || !strings.Contains(err.Error(), "postgres or snowflake") {
+	if err == nil || !strings.Contains(err.Error(), `pipeline "pb"`) || !strings.Contains(err.Error(), "connections.warehouse_kind") || !strings.Contains(err.Error(), "postgres, snowflake, bigquery, databricks or clickhouse") {
 		t.Fatalf("err = %v", err)
 	}
 }

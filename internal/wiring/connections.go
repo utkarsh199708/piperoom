@@ -152,7 +152,7 @@ func pipelineConfig(p owners.Pipeline, src connSource) (config.Config, error) {
 
 // literalWant says, per non-secret key, what literalOK accepts.
 var literalWant = map[string]string{
-	"warehouse_kind":          "postgres or snowflake",
+	"warehouse_kind":          "postgres, snowflake, bigquery, databricks or clickhouse",
 	"kafka_security_protocol": "PLAINTEXT, SSL, SASL_PLAINTEXT or SASL_SSL",
 	"kafka_sasl_mechanism":    "PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 or AWS_MSK_IAM",
 	"kafka_tls_server_name":   "a host name",
@@ -169,7 +169,7 @@ func literalOK(key, v string) bool {
 	v = strings.TrimSpace(v)
 	switch key {
 	case "warehouse_kind":
-		return slices.Contains([]string{WarehousePostgres, WarehouseSnowflake}, strings.ToLower(v))
+		return slices.Contains(warehouseKinds, strings.ToLower(v))
 	case "kafka_security_protocol":
 		return slices.Contains([]string{netsec.Plaintext, netsec.SSL, netsec.SASLPlaintext, netsec.SASLSSL}, strings.ToUpper(v))
 	case "kafka_sasl_mechanism":
