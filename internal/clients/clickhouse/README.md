@@ -59,6 +59,8 @@ The integration test creates and removes a unique it_ table. Set
 CLICKHOUSE_INTEGRATION_DSN to the read-only client DSN and
 CLICKHOUSE_INTEGRATION_ADMIN_DSN to a test-only DSN that can create/drop tables
 and flush system logs. Run `go test -tags integration ./internal/clients/clickhouse`.
-The test covers empty-table freshness, ReplacingMergeTree and plain MergeTree
-row lookup, subsecond count bounds, and an `INSERT ... SELECT` failure in the
-query log.
+The test covers empty-table freshness, FINAL row lookup over two inserted
+versions of one ReplacingMergeTree key, plain MergeTree row lookup and
+subsecond count bounds, and one INSERT failure of each query-log kind: a
+missing column (ExceptionBeforeStart, empty `tables`) and a bad value
+(ExceptionWhileProcessing). CI provides both DSNs.

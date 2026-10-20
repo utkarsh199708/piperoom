@@ -114,14 +114,19 @@ func TestClickHouseIntegration(t *testing.T) {
 		t.Fatalf("session readonly = %d, %v; want 2 for query timeout settings", readonly, err)
 	}
 
-	insert := "INSERT INTO " + qualified + " (id, version, amount, loaded_at) VALUES " +
-		"(1, 1, 1.2500, '2026-10-19 12:00:00.123456'), " +
-		"(1, 2, 2.7500, '2026-10-19 12:00:01.123456')"
-	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
-	_, err = admin.ExecContext(execCtx, insert)
-	execCancel()
-	if err != nil {
-		t.Fatalf("insert integration rows: %v", Redact(err, adminDSN))
+	// Two INSERTs make two parts holding two versions of id 1. One INSERT would
+	// be deduplicated at insert time (optimize_on_insert), leaving FINAL
+	// nothing to do.
+	for _, insert := range []string{
+		"INSERT INTO " + qualified + " (id, version, amount, loaded_at) VALUES (1, 1, 1.2500, '2026-10-19 12:00:00.123456')",
+		"INSERT INTO " + qualified + " (id, version, amount, loaded_at) VALUES (1, 2, 2.7500, '2026-10-19 12:00:01.123456')",
+	} {
+		execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
+		_, err = admin.ExecContext(execCtx, insert)
+		execCancel()
+		if err != nil {
+			t.Fatalf("insert integration row: %v", Redact(err, adminDSN))
+		}
 	}
 
 	ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
@@ -146,12 +151,14 @@ func TestClickHouseIntegration(t *testing.T) {
 		t.Fatalf("ReplacingMergeTree amount = %#v, want exact decimal 2.75", row["amount"])
 	}
 
-	plainInsert := "INSERT INTO " + plainQualified + " (id, version, amount, loaded_at) VALUES (7, 1, 3.5, '2026-10-19 12:00:00.123456')"
+	plainInsert := "INSERT INTO " + plainQualified + " (id, version, amount, loaded_at) VALUES " +
+		"(7, 1, 3.5, '2026-10-19 12:00:00.123456'), " +
+		"(8, 1, 4.5, '2026-10-19 12:00:01.123456')"
 	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
 	_, err = admin.ExecContext(execCtx, plainInsert)
 	execCancel()
 	if err != nil {
-		t.Fatalf("insert plain MergeTree integration row: %v", Redact(err, adminDSN))
+		t.Fatalf("insert plain MergeTree integration rows: %v", Redact(err, adminDSN))
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
 	plainRow, plainFound, plainErr := readClient.Row(ctx, plainTable, "id", "7")
@@ -162,7 +169,9 @@ func TestClickHouseIntegration(t *testing.T) {
 
 	since := time.Date(2026, 10, 19, 11, 59, 30, 250000000, time.FixedZone("IST", 5*60*60+30*60))
 	ctx, cancel = context.WithTimeout(context.Background(), defaultTimeout)
-	counts, err := readClient.CountByBucket(ctx, table, "loaded_at", since, since.Add(2*time.Minute), time.Minute)
+	// Counted on the plain MergeTree table: a background merge may fold the
+	// ReplacingMergeTree versions at any time.
+	counts, err := readClient.CountByBucket(ctx, plainTable, "loaded_at", since, since.Add(2*time.Minute), time.Minute)
 	cancel()
 	if err != nil {
 		t.Fatalf("CountByBucket: %v", err)
@@ -172,12 +181,19 @@ func TestClickHouseIntegration(t *testing.T) {
 	}
 
 	loadSince := time.Now().UTC().Add(-time.Minute)
-	badInsert := "INSERT INTO " + qualified + " (id, version, amount, loaded_at) SELECT toUInt64('not_uint'), toUInt64(3), toDecimal64(3.0, 4), toDateTime64('2026-10-19 12:00:02', 6, 'Asia/Kolkata')"
-	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
-	_, insertErr := admin.ExecContext(execCtx, badInsert)
-	execCancel()
-	if insertErr == nil {
-		t.Fatal("invalid integration insert succeeded")
+	// One failure of each kind: a missing column fails before the INSERT starts
+	// (query_log tables is empty), a bad value fails while it is processed.
+	badInserts := []string{
+		"INSERT INTO " + qualified + " (id, nosuch) VALUES (9, 9)",
+		"INSERT INTO " + qualified + " (id, version, amount, loaded_at) VALUES ('not_uint', 3, 3.0, '2026-10-19 12:00:02')",
+	}
+	for _, badInsert := range badInserts {
+		execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
+		_, insertErr := admin.ExecContext(execCtx, badInsert)
+		execCancel()
+		if insertErr == nil {
+			t.Fatalf("invalid integration insert succeeded: %s", badInsert)
+		}
 	}
 	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
 	_, err = admin.ExecContext(execCtx, "SYSTEM FLUSH LOGS")
@@ -192,17 +208,21 @@ func TestClickHouseIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadErrors: %v", err)
 	}
-	foundFailure := false
+	failures, missingColumn := 0, 0
 	for _, loadError := range loadErrors {
-		if loadError.Status == "LOAD_FAILED" && strings.Contains(loadError.FirstError, "code") {
-			foundFailure = true
-			if strings.Contains(loadError.FirstError, "not_uint") {
-				t.Fatalf("load error leaked failed row text: %q", loadError.FirstError)
-			}
+		if strings.Contains(loadError.FirstError, "not_uint") || strings.Contains(loadError.FirstError, "nosuch") {
+			t.Fatalf("load error leaked failed statement text: %q", loadError.FirstError)
+		}
+		if loadError.Status != "LOAD_FAILED" || !strings.HasPrefix(loadError.FirstError, "ClickHouse INSERT exception") {
+			continue
+		}
+		failures++
+		// 16 is NO_SUCH_COLUMN_IN_TABLE, logged as ExceptionBeforeStart.
+		if strings.Contains(loadError.FirstError, "(code 16)") {
+			missingColumn++
 		}
 	}
-	if !foundFailure {
-		t.Fatalf("LoadErrors did not report the failed INSERT: %#v", loadErrors)
+	if failures != 2 || missingColumn != 1 {
+		t.Fatalf("LoadErrors = %#v; want the missing-column and the bad-value INSERT", loadErrors)
 	}
-
 }
