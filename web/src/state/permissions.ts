@@ -18,6 +18,8 @@ export interface CurrentUser {
   solo?: boolean
   /** `/api/me.verified` (server-set); absent in fixture mode, which counts as unverified. */
   verified?: boolean
+  /** `/api/me.admin`: may open the Settings pages. Absent in fixture mode and old servers. */
+  admin?: boolean
 }
 
 /** A viewer sees everything and changes nothing; the server enforces it, the UI hides the controls. */
