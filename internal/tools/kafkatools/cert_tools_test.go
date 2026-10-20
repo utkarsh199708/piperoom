@@ -104,3 +104,152 @@ func TestCertExpiryOnlyConfiguredEndpoints(t *testing.T) {
 		}
 	}
 }
+
+func TestWarehouseTLSHosts(t *testing.T) {
+	tests := []struct {
+		name   string
+		kind   string
+		dsn    string
+		secret string // a credential substring that must never appear in the result
+		want   string // host:port, or "" for no target
+	}{
+		{
+			name:   "snowflake account",
+			kind:   "snowflake",
+			dsn:    "user:s3cret@myacct/db/schema?warehouse=w",
+			secret: "s3cret",
+			want:   "myacct.snowflakecomputing.com:443",
+		},
+		{
+			name:   "snowflake dotted account",
+			kind:   "snowflake",
+			dsn:    "user:s3cret@xy12345.eu-central-1.aws/db",
+			secret: "s3cret",
+			want:   "xy12345.eu-central-1.aws:443",
+		},
+		{
+			name: "snowflake bad dsn no host",
+			kind: "snowflake",
+			dsn:  "user:s3cret@/db",
+			want: "",
+		},
+		{
+			name:   "clickhouse native tls",
+			kind:   "clickhouse",
+			dsn:    "clickhouse://reader:s3cret@ch.example:9440/analytics?secure=true",
+			secret: "s3cret",
+			want:   "ch.example:9440",
+		},
+		{
+			name:   "clickhouse https",
+			kind:   "clickhouse",
+			dsn:    "https://reader:s3cret@ch.example:8443/analytics",
+			secret: "s3cret",
+			want:   "ch.example:8443",
+		},
+		{
+			name: "clickhouse bad dsn no port",
+			kind: "clickhouse",
+			dsn:  "clickhouse://reader:s3cret@ch.example/analytics",
+			want: "",
+		},
+		{
+			name: "clickhouse bad dsn no host",
+			kind: "clickhouse",
+			dsn:  "clickhouse://:9440/analytics",
+			want: "",
+		},
+		{
+			name: "clickhouse bad dsn unparseable",
+			kind: "clickhouse",
+			dsn:  "not a dsn",
+			want: "",
+		},
+		{
+			name:   "databricks default port",
+			kind:   "databricks",
+			dsn:    "token:dapi123abc@dbc-abc.cloud.databricks.com/sql/1.0/warehouses/xyz?catalog=main",
+			secret: "dapi123abc",
+			want:   "dbc-abc.cloud.databricks.com:443",
+		},
+		{
+			name:   "databricks explicit port",
+			kind:   "databricks",
+			dsn:    "token:dapi123abc@dbc-abc.cloud.databricks.com:8443/sql/1.0/warehouses/xyz?catalog=main",
+			secret: "dapi123abc",
+			want:   "dbc-abc.cloud.databricks.com:8443",
+		},
+		{
+			name:   "databricks https prefix",
+			kind:   "databricks",
+			dsn:    "https://token:dapi123abc@adb-1.azuredatabricks.net/sql/1.0/warehouses/x?catalog=main",
+			secret: "dapi123abc",
+			want:   "adb-1.azuredatabricks.net:443",
+		},
+		{
+			name: "databricks bad dsn no host",
+			kind: "databricks",
+			dsn:  "token:dapi123abc@",
+			want: "",
+		},
+		{
+			name: "bigquery skipped",
+			kind: "bigquery",
+			dsn:  "bigquery://my-project/us",
+			want: "",
+		},
+		{
+			name: "postgres skipped",
+			kind: "postgres",
+			dsn:  "postgres://u:p@h:5432/db",
+			want: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := warehouseTLSHost(tc.kind, tc.dsn)
+			if got != tc.want {
+				t.Fatalf("warehouseTLSHost(%q, %q) = %q, want %q", tc.kind, tc.dsn, got, tc.want)
+			}
+			if tc.secret != "" && strings.Contains(got, tc.secret) {
+				t.Fatalf("credential %q leaked into target %q", tc.secret, got)
+			}
+		})
+	}
+}
+
+func TestCertTargetsWarehouseKinds(t *testing.T) {
+	tests := []struct {
+		kind string
+		dsn  string
+		want string // warehouse host:port, or "" for no warehouse target
+	}{
+		{"snowflake", "u:p@acct/db", "acct.snowflakecomputing.com:443"},
+		{"clickhouse", "clickhouse://u:p@ch.example:9440/db?secure=true", "ch.example:9440"},
+		{"databricks", "token:t@dbc.example/sql/1.0/warehouses/x?catalog=main", "dbc.example:443"},
+		{"bigquery", "bigquery://proj/us", ""},
+		{"postgres", "postgres://u:p@h/db", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.kind, func(t *testing.T) {
+			var wh *CertTarget
+			for _, tg := range CertTargets(config.Config{WarehouseKind: tc.kind, WarehouseDBURL: tc.dsn}) {
+				if tg.Label == "warehouse" {
+					wh = &tg
+				}
+			}
+			if tc.want == "" {
+				if wh != nil {
+					t.Fatalf("unexpected warehouse target %+v", wh)
+				}
+				return
+			}
+			if wh == nil {
+				t.Fatalf("no warehouse target for kind %q", tc.kind)
+			}
+			if wh.Addr != tc.want || !wh.TLS {
+				t.Fatalf("warehouse target = %+v, want addr %q with TLS", wh, tc.want)
+			}
+		})
+	}
+}
