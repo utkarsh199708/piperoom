@@ -142,14 +142,15 @@ func TestScanNamesScenarios(t *testing.T) {
 			if !slices.Equal(all, c.allNames) {
 				t.Errorf("names over all findings = %v, want %v", all, c.allNames)
 			}
-			// Scan is ScanNames without the names.
+			// Scan is ScanNames without the names and the block.
 			plain := Scan(s)
 			stripped := slices.Clone(fs)
 			for i := range stripped {
 				stripped[i].Names = nil
+				stripped[i].Block = Block{}
 			}
 			if !reflect.DeepEqual(plain, stripped) {
-				t.Errorf("Scan = %+v, want ScanNames without Names %+v", plain, stripped)
+				t.Errorf("Scan = %+v, want ScanNames without Names and Block %+v", plain, stripped)
 			}
 			for _, f := range plain {
 				if f.Names != nil {
