@@ -20,8 +20,10 @@ import (
 const judgeTimeout = 2 * time.Minute
 
 // judgeMaxTokens leaves room for the thinking that is on by default on newer
-// models; the verdict itself is a few dozen tokens.
-const judgeMaxTokens = 2048
+// models; the verdict itself is a few dozen tokens. Thinking at low effort
+// usually takes a few hundred tokens, but one outlier passed 2048 in CI run
+// 39317961277 and lost its verdict. The ceiling is billed only as used.
+const judgeMaxTokens = 8192
 
 // verdictSchema is the structured-output schema of the verdict. The judge is
 // not given a temperature: current models reject non-default sampling
