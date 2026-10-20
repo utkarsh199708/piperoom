@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 
@@ -15,13 +16,23 @@ const (
 	maxLoadLimit     = 100
 )
 
+// loadErrorsSQL matches failed INSERTs into one table. An INSERT that fails
+// before it starts (an unknown column, a bad INSERT ... SELECT: the classic
+// schema-drift sink failure) is logged with an empty tables array, so those
+// rows are matched on the statement's target instead: the qualified name, or
+// the bare name when the session's current database is the table's. The query
+// text is only matched, never selected.
+//
+// event_date is the server's local date while since is UTC, so the partition
+// filter starts a day early and event_time keeps the exact bound. toDate32
+// keeps the day before 1970-01-01 from wrapping around to 2149.
 const loadErrorsSQL = "SELECT event_time, exception_code, written_rows\n" +
 	"FROM system.query_log\n" +
 	"WHERE type IN ('ExceptionBeforeStart', 'ExceptionWhileProcessing')\n" +
 	"  AND query_kind = 'Insert'\n" +
-	"  AND event_date >= toDate(?)\n" +
+	"  AND event_date >= toDate32(?) - 1\n" +
 	"  AND event_time >= ?\n" +
-	"  AND has(tables, ?)\n" +
+	"  AND (has(tables, ?) OR (empty(tables) AND (match(query, ?) OR (current_database = ? AND match(query, ?)))))\n" +
 	"ORDER BY event_time DESC\n" +
 	"LIMIT ?"
 
@@ -30,6 +41,20 @@ const kafkaConsumerErrorsSQL = "SELECT arrayJoin(arrayFilter(at -> at >= ?, exce
 	"WHERE database = ? AND table = ?\n" +
 	"ORDER BY at DESC\n" +
 	"LIMIT ?"
+
+// insertTargetPattern matches the start of an INSERT whose target is the given
+// table, with optional backticks and the TABLE keyword, case-insensitively. It
+// is an RE2 pattern for ClickHouse's match(). The names are already validated
+// identifiers; QuoteMeta still quotes them so a looser validator later cannot
+// turn a name into a pattern. An empty database matches the bare table name.
+func insertTargetPattern(database, table string) string {
+	const tick = "`?"
+	target := tick + regexp.QuoteMeta(table) + tick
+	if database != "" {
+		target = tick + regexp.QuoteMeta(database) + tick + `\.` + target
+	}
+	return `(?i)^\s*INSERT\s+INTO\s+(TABLE\s+)?` + target + `([\s(]|$)`
+}
 
 // LoadErrors returns failed or partial INSERTs since the given time. It reads
 // only exception codes and write counts from query_log; raw query and exception
@@ -57,7 +82,12 @@ func (c *Client) LoadErrors(ctx context.Context, table string, since time.Time, 
 		limit = maxLoadLimit
 	}
 
-	rows, err := c.query(ctx, loadErrorsSQL, since.UTC(), since.UTC(), database+"."+tableName, limit)
+	rows, err := c.query(ctx, loadErrorsSQL,
+		since.UTC(), since.UTC(),
+		database+"."+tableName,
+		insertTargetPattern(database, tableName),
+		database, insertTargetPattern("", tableName),
+		limit)
 	if err != nil {
 		if missingObject(err) {
 			return nil, fmt.Errorf("clickhouse: load history: %w", clients.ErrNotSupported)

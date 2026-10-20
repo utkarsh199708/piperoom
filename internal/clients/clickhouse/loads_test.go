@@ -3,6 +3,8 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +49,7 @@ func TestLoadErrorsReturnsSafeQueryAndKafkaFailures(t *testing.T) {
 			t.Fatalf("FirstError leaked record text: %q", item.FirstError)
 		}
 	}
-	if !strings.Contains(q.calls[0].query, "ExceptionBeforeStart") || !strings.Contains(q.calls[0].query, "event_date >= toDate(?)") || !strings.Contains(q.calls[0].query, "has(tables, ?)") {
+	if !strings.Contains(q.calls[0].query, "ExceptionBeforeStart") || !strings.Contains(q.calls[0].query, "event_date >= toDate32(?) - 1") || !strings.Contains(q.calls[0].query, "has(tables, ?)") {
 		t.Fatalf("query-log SQL = %q", q.calls[0].query)
 	}
 	if q.calls[0].args[2] != "analytics.orders" {
@@ -86,8 +88,8 @@ func TestLoadErrorsOptionalKafkaTableAndUnsupportedQueryLog(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("LoadErrors = %#v, want no errors", got)
 	}
-	if q.calls[0].args[3] != defaultLoadLimit {
-		t.Fatalf("default limit = %#v, want %d", q.calls[0].args[3], defaultLoadLimit)
+	if q.calls[0].args[6] != defaultLoadLimit {
+		t.Fatalf("default limit = %#v, want %d", q.calls[0].args[6], defaultLoadLimit)
 	}
 
 	q = &fakeQuerier{responses: []queryResponse{{err: &driver.Exception{Code: errUnknownTable, Name: "UNKNOWN_TABLE"}}}}
@@ -116,4 +118,71 @@ func TestLoadErrorsBadInputAndTargetDown(t *testing.T) {
 			t.Fatalf("LoadErrors error = %v, want safe target-down error", err)
 		}
 	})
+}
+
+func TestLoadErrorsMatchesInsertsThatFailBeforeStart(t *testing.T) {
+	since := time.Date(2026, 10, 19, 23, 30, 0, 0, time.FixedZone("IST", 5*60*60+30*60))
+	q := &fakeQuerier{responses: []queryResponse{
+		{rows: &fakeRows{columns: []string{"event_time", "exception_code", "written_rows"}}},
+		{rows: &fakeRows{columns: []string{"at"}}},
+	}}
+	if _, err := newTestClient(q).LoadErrors(context.Background(), "orders", since, 7); err != nil {
+		t.Fatal(err)
+	}
+	query := q.calls[0].query
+	for _, want := range []string{
+		"has(tables, ?) OR (empty(tables) AND (match(query, ?) OR (current_database = ? AND match(query, ?))))",
+		"event_date >= toDate32(?) - 1",
+		"AND event_time >= ?",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("query-log SQL = %q, want %q", query, want)
+		}
+	}
+	// The query text may hold record values: it is matched, never selected.
+	if selected := strings.SplitN(query, "FROM", 2)[0]; strings.Contains(selected, "query") {
+		t.Fatalf("query-log SQL selects query text: %q", selected)
+	}
+	wantArgs := []any{
+		since.UTC(), since.UTC(),
+		"analytics.orders",
+		"(?i)^\\s*INSERT\\s+INTO\\s+(TABLE\\s+)?`?analytics`?\\.`?orders`?([\\s(]|$)",
+		"analytics",
+		"(?i)^\\s*INSERT\\s+INTO\\s+(TABLE\\s+)?`?orders`?([\\s(]|$)",
+		7,
+	}
+	if !reflect.DeepEqual(q.calls[0].args, wantArgs) {
+		t.Fatalf("query-log args = %#v, want %#v", q.calls[0].args, wantArgs)
+	}
+}
+
+func TestInsertTargetPattern(t *testing.T) {
+	qualified := regexp.MustCompile(insertTargetPattern("analytics", "orders"))
+	bare := regexp.MustCompile(insertTargetPattern("", "orders"))
+	tests := []struct {
+		query         string
+		wantQualified bool
+		wantBare      bool
+	}{
+		{"INSERT INTO analytics.orders (id, nosuch) VALUES", true, false},
+		{"  insert into table `analytics`.`orders`(id) values", true, false},
+		{"INSERT INTO analytics.orders FORMAT RowBinary", true, false},
+		{"INSERT INTO analytics.orders", true, false},
+		{"INSERT INTO analytics.orders\nSELECT 1", true, false},
+		{"INSERT INTO orders (id) VALUES", false, true},
+		{"INSERT INTO `orders` SELECT toUInt64('x')", false, true},
+		{"INSERT INTO analytics.orders_v2 (id) VALUES", false, false},
+		{"INSERT INTO other.orders (id) VALUES", false, false},
+		{"INSERT INTO analyticsXorders (id) VALUES", false, false},
+		{"SELECT * FROM analytics.orders", false, false},
+		{"-- INSERT INTO analytics.orders\nSELECT 1", false, false},
+	}
+	for _, tt := range tests {
+		if got := qualified.MatchString(tt.query); got != tt.wantQualified {
+			t.Errorf("qualified pattern on %q = %t, want %t", tt.query, got, tt.wantQualified)
+		}
+		if got := bare.MatchString(tt.query); got != tt.wantBare {
+			t.Errorf("bare pattern on %q = %t, want %t", tt.query, got, tt.wantBare)
+		}
+	}
 }
