@@ -125,21 +125,46 @@ function RanLine({ call }: { call: ToolCall }) {
   )
 }
 
-function Evidence({ step, checklist }: { step: StepState; checklist?: ChecklistWiring }) {
+// `header` says what the step's own header row already shows for its first call: "md" (a finished
+// step: first arg from md, time from sm), "all" (the running card: tool and first arg at every width).
+// A step with one call drops only that from its call row, so nothing prints twice; the other args are
+// evidence and always stay.
+function CallRow({ t, single, header }: { t: ToolCallState; single: boolean; header: 'md' | 'all' }) {
+  const args = argTags(t.input)
+  const extra = args.length > 1
+  return (
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-x-2 gap-y-1',
+        single && header === 'md' && !extra && 'md:hidden',
+        single && header === 'all' && !extra && t.took_ms == null && 'hidden',
+      )}
+      data-testid="call-row"
+    >
+      <span className={cn('contents', single && (header === 'md' ? '[&>*]:md:hidden' : '[&>*]:hidden'))}>
+        <ToolBadge tool={t.tool} />
+        {args[0] && <ArgTag>{args[0]}</ArgTag>}
+      </span>
+      {args.slice(1).map((a) => (
+        <ArgTag key={a}>{a}</ArgTag>
+      ))}
+      {t.took_ms != null && (
+        <span className={cn('ml-auto font-mono text-xs text-subtle-foreground', single && header === 'md' && 'sm:hidden')}>
+          {formatMs(t.took_ms)}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function Evidence({ step, checklist, header }: { step: StepState; checklist?: ChecklistWiring; header: 'md' | 'all' }) {
   if (step.tool_calls.length === 0) return null
+  const single = step.tool_calls.length === 1
   return (
     <ul className="m-0 flex list-none flex-col gap-3 p-0">
       {step.tool_calls.map((t) => (
         <li key={t.tool_use_id} className="flex flex-col gap-1.5">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <ToolBadge tool={t.tool} />
-            {argTags(t.input).map((a) => (
-              <ArgTag key={a}>{a}</ArgTag>
-            ))}
-            {t.took_ms != null && (
-              <span className="ml-auto font-mono text-xs text-subtle-foreground">{formatMs(t.took_ms)}</span>
-            )}
-          </div>
+          <CallRow t={t} single={single} header={header} />
           {t.provenance?.map((c, i) => <RanLine key={i} call={c} />)}
           {t.summary != null && <ToolSummary t={t} />}
           {checklist && t.tool === 'runbook_lookup' && !t.is_error && (
@@ -466,7 +491,7 @@ function DoneStep({
       </button>
 
       <div id={regionId} hidden={!open} className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}>
-        <Evidence step={step} checklist={checklist} />
+        <Evidence step={step} checklist={checklist} header="md" />
         {!readOnly && <ReplyBox onSubmit={(t, clientId) => onComment(t, step.id, { clientId })} />}
       </div>
 
@@ -533,7 +558,7 @@ function LiveStep({
         className="h-0.5 rounded-sm bg-agent-subtle"
         indicatorClassName="rounded-sm bg-agent"
       />
-      <Evidence step={step} checklist={checklist} />
+      <Evidence step={step} checklist={checklist} header="all" />
       <StepExtras step={step} comments={comments} onComment={onComment} readOnly={readOnly} showReplyBox />
     </li>
   )

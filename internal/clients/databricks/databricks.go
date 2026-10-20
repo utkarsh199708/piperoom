@@ -72,8 +72,32 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 // open builds the connector from cfg. host carries the scheme: always
 // https:// in New; tests pass an httptest http:// URL.
 func open(ctx context.Context, cfg Config, host string, base http.RoundTripper) (*DB, error) {
+	return openWith(ctx, cfg, host, "", base)
+}
+
+// openWith is open with the OAuth M2M token endpoint supplied: New resolves
+// it from the workspace host, tests pass an httptest URL. base is the
+// transport the query traffic rides on; the M2M token client is separate.
+func openWith(ctx context.Context, cfg Config, host, tokenURL string, base http.RoundTripper) (*DB, error) {
 	if err := silenceDriverLog(); err != nil {
 		return nil, fmt.Errorf("databricks: set driver log level: %w", err)
+	}
+	var auth dbsql.ConnOption
+	if cfg.isM2M() {
+		if tokenURL == "" {
+			var err error
+			tokenURL, err = resolveM2MTokenURL(ctx, cfg.Host)
+			if err != nil {
+				return nil, err
+			}
+		}
+		// A service principal's OAuth M2M token, minted by our own
+		// authenticator over one bounded client (10 s timeout, 4 MB cap).
+		// The driver's built-in M2M fetches its token with no deadline, so
+		// it is not used.
+		auth = dbsql.WithAuthenticator(newOAuthM2M(cfg.ClientID, cfg.ClientSecret, tokenURL, newM2MClient(base)))
+	} else {
+		auth = dbsql.WithAccessToken(cfg.Token)
 	}
 	opts := []dbsql.ConnOption{
 		dbsql.WithServerHostname(host),
@@ -92,9 +116,7 @@ func open(ctx context.Context, cfg Config, host string, base http.RoundTripper) 
 		dbsql.WithRetries(2, 250*time.Millisecond, 2*time.Second),
 		dbsql.WithUserAgentEntry("piperoom"),
 		dbsql.WithTransport(guardTransport{base: base}),
-		// A personal access token only: the driver's OAuth M2M token fetch
-		// has no deadline or cap (see errM2MRefused).
-		dbsql.WithAccessToken(cfg.Token),
+		auth,
 	}
 	connector, err := dbsql.NewConnector(opts...)
 	if err != nil {
@@ -124,10 +146,14 @@ func newWithRunner(cfg Config, r runner) *DB {
 
 // credentialStrings are the secrets of cfg, as they could appear in text.
 func credentialStrings(cfg Config) []string {
+	var out []string
 	if len(cfg.Token) >= minSecretLen {
-		return []string{cfg.Token}
+		out = append(out, cfg.Token)
 	}
-	return nil
+	if len(cfg.ClientSecret) >= minSecretLen {
+		out = append(out, cfg.ClientSecret)
+	}
+	return out
 }
 
 // The driver's logger is process-wide; switch it off once, not on every

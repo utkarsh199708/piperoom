@@ -62,8 +62,6 @@ func TestParseDSNRefuses(t *testing.T) {
 		{"unknown auth", host + path + "?catalog=main&authType=basic&accessToken=" + testToken},
 		{"m2m without secret", host + path + "?catalog=main&authType=OAuthM2M&clientId=app"},
 		{"token and m2m", tok + host + path + "?catalog=main&clientId=app&clientSecret=" + testSecret},
-		{"m2m", host + path + "?catalog=main&authType=OAuthM2M&clientId=app&clientSecret=" + testSecret},
-		{"m2m inferred", host + path + "?catalog=main&clientID=app&clientSecret=" + testSecret},
 		{"token twice", tok + host + path + "?catalog=main&accessToken=" + testToken},
 		{"no path", tok + host + "?catalog=main"},
 		{"dotdot path", tok + host + "/sql/../x?catalog=main"},
@@ -86,23 +84,52 @@ func TestParseDSNRefuses(t *testing.T) {
 	}
 }
 
-// OAuth M2M is refused until its token fetch can be bounded (errM2MRefused),
-// with the reason, and without echoing the secret.
-func TestParseDSNRefusesM2M(t *testing.T) {
-	base := "dbc-1234abcd-5678.cloud.databricks.com/sql/1.0/warehouses/a?catalog=main"
-	for _, q := range []string{
-		"&authType=OAuthM2M&clientId=app&clientSecret=" + testSecret,
-		"&clientId=app&clientSecret=" + testSecret,
-		"&clientSecret=" + testSecret,
-		"&authType=oauthm2m",
+// OAuth M2M DSNs parse when the client credentials are complete (explicit
+// authType or inferred), and are refused without echoing the secret when they
+// are incomplete or mixed with a personal access token.
+func TestParseDSNM2M(t *testing.T) {
+	host := "dbc-1234abcd-5678.cloud.databricks.com"
+	path := "/sql/1.0/warehouses/abc123"
+	for _, c := range []struct {
+		name, dsn string
+		want      Config
+	}{
+		{"explicit", host + path + "?catalog=main&authType=OAuthM2M&clientId=app&clientSecret=" + testSecret,
+			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", ClientID: "app", ClientSecret: testSecret}},
+		{"inferred clientID", host + path + "?catalog=main&clientID=app&clientSecret=" + testSecret,
+			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", ClientID: "app", ClientSecret: testSecret}},
+		{"case-insensitive auth", host + path + "?catalog=main&authType=oauthm2m&clientId=app&clientSecret=" + testSecret,
+			Config{Host: host, Port: 443, HTTPPath: path, Catalog: "main", ClientID: "app", ClientSecret: testSecret}},
 	} {
-		_, err := ParseDSN(base + q)
-		if !errors.Is(err, errM2MRefused) {
-			t.Errorf("%s: err = %v, want errM2MRefused", q, err)
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ParseDSN(c.dsn)
+			if err != nil {
+				t.Fatalf("ParseDSN: %v", err)
+			}
+			if got != c.want {
+				t.Fatalf("got %+v\nwant %+v", got, c.want)
+			}
+			if !got.isM2M() {
+				t.Fatal("not marked M2M")
+			}
+		})
+	}
+
+	for _, dsn := range []string{
+		host + path + "?catalog=main&authType=OAuthM2M&clientId=app",                                           // no secret
+		host + path + "?catalog=main&authType=OAuthM2M",                                                        // neither
+		host + path + "?catalog=main&clientSecret=" + testSecret,                                               // no id
+		"token:" + testToken + "@" + host + path + "?catalog=main&clientId=app&clientSecret=" + testSecret,     // token + m2m
+		host + path + "?catalog=main&authType=OAuthM2M&clientId=app&clientId=app2&clientSecret=" + testSecret,  // repeated id
+		host + path + "?catalog=main&authType=OAuthM2M&clientId=app&clientSecret=x&clientSecret=" + testSecret, // repeated secret
+	} {
+		_, err := ParseDSN(dsn)
+		if err == nil {
+			t.Errorf("%s: want error", dsn)
 			continue
 		}
-		if strings.Contains(err.Error(), testSecret) {
-			t.Errorf("%s: secret in error", q)
+		if strings.Contains(err.Error(), testSecret) || strings.Contains(err.Error(), testToken) {
+			t.Errorf("%s: secret in error: %v", dsn, err)
 		}
 	}
 }
@@ -112,6 +139,12 @@ func TestConfigStringHidesSecrets(t *testing.T) {
 	for _, s := range []string{fmt.Sprint(c), fmt.Sprintf("%+v", c), fmt.Sprintf("%#v", c), c.target()} {
 		if strings.Contains(s, testToken) || strings.Contains(s, testSecret) {
 			t.Fatalf("secret printed: %s", s)
+		}
+	}
+	m2m := Config{Host: "dbc-1234abcd-5678.cloud.databricks.com", Port: 443, HTTPPath: "/sql/1.0/warehouses/a", Catalog: "main", ClientID: "app", ClientSecret: testSecret}
+	for _, s := range []string{fmt.Sprint(m2m), fmt.Sprintf("%+v", m2m), fmt.Sprintf("%#v", m2m), m2m.target()} {
+		if strings.Contains(s, testSecret) {
+			t.Fatalf("m2m secret printed: %s", s)
 		}
 	}
 }

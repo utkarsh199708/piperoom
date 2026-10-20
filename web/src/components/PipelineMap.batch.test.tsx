@@ -54,10 +54,10 @@ describe('PipelineMap — batch lane', () => {
     const { container } = render(<PipelineMap topology={fixture} />)
     fireEvent.click(screen.getByRole('button', { name: 'Expand' }))
     const task = nodeByName('revenue_daily.publish')
-    expect(within(task).getByText('mapped_instances')).toBeInTheDocument()
+    expect(within(task).getByText('mapped instances')).toBeInTheDocument()
     expect(within(task).getByText('operator')).toBeInTheDocument()
     const dag = nodeByName('revenue_daily')
-    expect(within(dag).getByText('previous_run_state')).toBeInTheDocument()
+    expect(within(dag).getByText('previous run state')).toBeInTheDocument()
     // The raw state key is not repeated under the readable label.
     expect(within(dag).queryByText('last_run_state')).not.toBeInTheDocument()
     const danger = [...container.querySelectorAll<HTMLElement>('[data-health]')].filter((n) =>

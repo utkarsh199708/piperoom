@@ -1,4 +1,5 @@
 import type { TraceState } from '../state/types'
+import { factPhrase } from './facts'
 
 export interface TraceVerdict {
   tone: 'fail' | 'ok' | 'warn' | 'muted'
@@ -18,7 +19,7 @@ export function traceVerdict(trace: TraceState): TraceVerdict {
   if (stopped) {
     const fact = stopped.facts ? Object.entries(stopped.facts)[0] : undefined
     const where = `Stopped at ${stopped.layer} ${stopped.name}`
-    return { tone: 'fail', text: fact ? `${where} — ${clip(`${fact[0]}=${fact[1]}`)}` : where }
+    return { tone: 'fail', text: fact ? `${where} — ${clip(factPhrase(fact[0], fact[1]))}` : where }
   }
   const last = stages[stages.length - 1]
   if (last?.status === 'seen') {
