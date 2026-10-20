@@ -57,7 +57,7 @@ resources:
   subjects: [pg.public.orders-key, pg.public.orders-value]
 
 alert:
-  title: 'analytics.orders unreadable; ClickHouse profile readonly=1'
+  title: 'analytics.orders unreadable'
   pipeline_map: |
     pipeline orders
     1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=12.0 MiB

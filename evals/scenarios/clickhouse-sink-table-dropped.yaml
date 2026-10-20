@@ -52,7 +52,7 @@ resources:
   subjects: [pg.public.orders-key, pg.public.orders-value]
 
 alert:
-  title: 'analytics.orders missing; ClickHouse load errors: code 60'
+  title: 'analytics.orders stale 50m'
   pipeline_map: |
     pipeline orders
     1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=22.1 MiB
