@@ -68,6 +68,10 @@ type Server struct {
 
 	// GET /metrics: metrics.go.
 	metrics *metrics
+
+	// Admin settings and connection tests (WithAdmin): admin.go.
+	admin      AdminSettings
+	adminLimit *rateLimiter
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -235,6 +239,10 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 			})
 		})
+
+		// Admin settings (WithAdmin; admin.go): their own group, so the
+		// admin check answers before the content type and body checks.
+		s.mountAdmin(api)
 	})
 	s.gw.OriginPatterns = s.wsOriginPatterns()
 	s.handler = r

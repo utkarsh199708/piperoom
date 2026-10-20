@@ -159,10 +159,11 @@ describe('header ⋯ menu (open room)', () => {
 })
 
 describe('closed room', () => {
-  it('header reads Closed · duration · closed by, without the agent pill or the driver line', () => {
+  it('header reads duration (in the cost chip) · Closed · closed by, once each, without the agent pill or the driver line', () => {
     show(member, closedRoom())
     const h = header()
-    expect(h).toHaveTextContent(/Closed\s*\S+.*1 h 12 min.*closed by\s*Priya/)
+    expect(h).toHaveTextContent(/1 h 12 min.*Closed\s*\S+.*closed by\s*Priya/)
+    expect(h.textContent?.match(/1 h 12 min/g)).toHaveLength(1)
     expect(h).not.toHaveTextContent('is driving')
     expect(h.querySelector('[data-tone]')).toBeNull()
     expect(within(h).getByRole('button', { name: 'Export JSON' })).toBeInTheDocument()

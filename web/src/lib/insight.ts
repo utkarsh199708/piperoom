@@ -2,13 +2,16 @@
 import type { AgentStats } from '../api/types'
 import type { InsightState } from '../state/types'
 
-/** "12s", "2m 10s", "1 h 02 min": whole seconds, no rounding up. */
+/** "12s", "2m 10s", "1 h 2 min", "6 d 2 h": whole seconds, no rounding up. */
 export function elapsedLabel(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
-  const h = Math.floor(total / 3600)
+  const d = Math.floor(total / 86400)
+  const h = Math.floor((total % 86400) / 3600)
   const m = Math.floor((total % 3600) / 60)
   const s = total % 60
-  if (h > 0) return `${h} h ${String(m).padStart(2, '0')} min`
+  // Same words as durationLabel past an hour ("1 h 2 min", "6 d 2 h"); a stopwatch below it.
+  if (d > 0) return h ? `${d} d ${h} h` : `${d} d`
+  if (h > 0) return m ? `${h} h ${m} min` : `${h} h`
   if (m > 0) return `${m}m ${s}s`
   return `${s}s`
 }

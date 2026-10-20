@@ -205,5 +205,18 @@ func FuzzScan(f *testing.F) {
 				t.Fatalf("bad excerpt %q", x.Excerpt)
 			}
 		}
+		ns := ScanNames(s, nil)
+		for _, x := range ns {
+			if !(0 <= x.Block.Start && x.Block.Start <= x.Offset && x.Offset <= x.End &&
+				x.End <= x.Block.End && x.Block.End <= len(s)) {
+				t.Fatalf("block %+v does not enclose span [%d,%d) in %d bytes", x.Block, x.Offset, x.End, len(s))
+			}
+			if x.Block.Start < len(s) && !utf8.RuneStart(s[x.Block.Start]) {
+				t.Fatalf("block start %d is not a rune boundary", x.Block.Start)
+			}
+			if x.Block.End < len(s) && !utf8.RuneStart(s[x.Block.End]) {
+				t.Fatalf("block end %d is not a rune boundary", x.Block.End)
+			}
+		}
 	})
 }

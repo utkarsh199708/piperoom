@@ -223,6 +223,23 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "pg-orders-connector is still running its initial snapshot of public.orders (snapshot running=true, rows scanned rising); streaming has not started and nothing failed. A restart would restart the snapshot from zero.",
 		wrong: "The replication slot debezium_orders is inactive and retains 61.4 GiB of WAL, so pg-orders-connector stopped streaming.",
 	},
+	// CH-4 ClickHouse warehouse scenarios (C7, #715).
+	"clickhouse-kafka-engine-stalled": {
+		good:  "The ClickHouse warehouse stopped loading at 08:15: the Kafka engine table analytics.orders_queue stalled and system.kafka_consumers reports an exception, so mv_orders stopped receiving batches and analytics.orders is 45 minutes stale. The topic is fresh and order-sync is at lag 0. Meera should recreate the Kafka engine table.",
+		wrong: "order-sync crashed on a poison pill and stopped writing to analytics.orders; reset its offsets past the bad record.",
+	},
+	"clickhouse-mv-schema-change": {
+		good:  "The column risk_score, which schema version 4 added, is missing from the ClickHouse sink table analytics.orders and its materialized view mv_orders, so every INSERT ... SELECT fails with code 47 (unknown identifier) and the warehouse is 41 minutes stale. Add the column and recreate mv_orders.",
+		wrong: "Schema version 4 of pg.public.orders-value is an incompatible, breaking schema change, so the ClickHouse loads fail; set the subject's compatibility to NONE.",
+	},
+	"clickhouse-readonly-profile": {
+		good:  "Every warehouse query fails with code 164: the piperoom service account's ClickHouse profile was changed to readonly=1, which rejects the readonly=2 and max_execution_time settings the client sends. Upstream is healthy. Meera should set the profile to readonly=2.",
+		wrong: "pg-orders-connector task 0 failed and stopped producing, so analytics.orders went stale; restart the task.",
+	},
+	"clickhouse-sink-table-dropped": {
+		good:  "The ClickHouse sink table analytics.orders was dropped at 08:30 by a cleanup, so mv_orders' INSERT ... SELECT fails with code 60 (unknown table). Upstream is healthy. Recreate the table and reattach mv_orders.",
+		wrong: "Kafka retention deleted pg.public.orders records before order-sync read them, so the warehouse lost the rows.",
+	},
 	"snowflake-sink-column-missing": {
 		good:  "The wh-orders-sink connector failed on task 0: every load into Snowflake fails with invalid identifier 'RISK_SCORE', because the sink table has no risk_score column that schema version 4 added.",
 		wrong: "wh-orders-sink task 0 failed because schema version 4 of pg.public.orders-value is an incompatible, breaking schema change.",

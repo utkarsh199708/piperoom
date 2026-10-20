@@ -4,7 +4,9 @@ import { useShadowRun } from '@/hooks/useShadowRun'
 import { isViewer } from '@/state/permissions'
 import type { CurrentUser } from '@/state/permissions'
 import type { RoomState } from '@/state/types'
+import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Skeleton } from '@/components/ui/skeleton'
 import { BlindLabelForm } from './BlindLabelForm'
 import { GradeForm } from './GradeForm'
 import { RunReveal } from './RunReveal'
@@ -22,9 +24,12 @@ export function ShadowPanel({ state, user }: { state: RoomState; user: CurrentUs
 
   if (view.phase === 'loading') {
     return (
-      <p role="status" className="m-0 px-4 py-3 text-sm text-muted-foreground sm:px-6">
-        Loading the shadow run…
-      </p>
+      <Card role="status" aria-label="Loading the shadow run" className="m-4 flex flex-col gap-2.5 p-4 sm:mx-6">
+        <span className="sr-only">Loading the shadow run…</span>
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="h-3 w-full" />
+        <Skeleton className="h-3 w-2/3" />
+      </Card>
     )
   }
   if (view.phase === 'error') {
@@ -32,9 +37,9 @@ export function ShadowPanel({ state, user }: { state: RoomState; user: CurrentUs
       <Card className="m-4 flex flex-col gap-2 p-4 sm:mx-6" role="alert">
         <p className="m-0 text-sm font-medium text-destructive-fg">{view.message}</p>
         <div>
-          <button type="button" className="text-sm underline" onClick={reload}>
+          <Button variant="secondary" size="sm" onClick={reload}>
             Try again
-          </button>
+          </Button>
         </div>
       </Card>
     )

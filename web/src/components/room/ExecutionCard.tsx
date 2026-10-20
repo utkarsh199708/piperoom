@@ -89,7 +89,7 @@ export function ExecutionCard({
                   ○
                 </span>
               )}
-              <span className="font-mono text-xs text-subtle-foreground">step {i + 1}</span>
+              <span className="text-xs tabular-nums text-subtle-foreground">Step {i + 1}</span>
               {s && <span className="font-mono text-xs">{s.action}</span>}
               {ex?.outcome_unknown ? (
                 <span className="text-xs text-warning-foreground">Result unknown — check the target before retrying</span>
@@ -98,17 +98,17 @@ export function ExecutionCard({
               )}
               {ex?.params_hash && (
                 <code
-                  className="mono exec__hash rounded-md border border-input bg-muted px-1.5 py-0.5 font-mono text-xs"
+                  className="ml-auto font-mono text-[11px] text-subtle-foreground"
                   data-testid={`exec-hash-${ex.step_index}`}
-                  title={ex.params_hash}
+                  title={`Ran with fingerprint ${ex.params_hash}`}
                 >
                   {shortHash(ex.params_hash)}
                 </code>
               )}
               {differs && (
-                <Badge variant="destructive" title="The step ran with a different params_hash than this proposal shows">
+                <Badge variant="destructive" title="The step ran with a different fingerprint than this proposal shows">
                   <TriangleAlert className="size-3" aria-hidden="true" />
-                  hash differs from proposal
+                  fingerprint differs from proposal
                 </Badge>
               )}
             </li>
