@@ -1,5 +1,13 @@
 package topology
 
+import (
+	"errors"
+	"strings"
+
+	"piperoom/internal/clients"
+	"piperoom/internal/owners"
+)
+
 // ClickHouse Kafka-ingestion hop (CH-3).
 //
 // A ClickHouse warehouse ingests a CDC topic through three objects
@@ -44,13 +52,14 @@ const (
 // name the topic, and the view's SELECT names both the engine table and the
 // sink table.
 //
-// owner is the warehouse layer owner. The nodes are HealthUnknown: there is no
-// reader yet that reports the freshness or lag of a Kafka engine table or a
-// materialized view, so Build draws them without a live reading.
+// owner is the warehouse layer owner. Both nodes are HealthUnknown here: Build
+// replaces the engine node's health from the ClickHouse load-error reader
+// (kafkaEngineNode) and leaves the view unknown (no reader reports a view's
+// freshness).
 func clickhouseHop(owner, topic, sink, engine, view string) (nodes []Node, edges []Edge) {
 	nodes = []Node{
 		{
-			ID:     "kafka_engine:" + engine,
+			ID:     engineNodeID(engine),
 			Kind:   KindKafkaEngine,
 			Name:   engine,
 			Layer:  "warehouse",
@@ -58,7 +67,7 @@ func clickhouseHop(owner, topic, sink, engine, view string) (nodes []Node, edges
 			Health: HealthUnknown,
 		},
 		{
-			ID:     "materialized_view:" + view,
+			ID:     viewNodeID(view),
 			Kind:   KindMaterializedView,
 			Name:   view,
 			Layer:  "warehouse",
@@ -72,4 +81,146 @@ func clickhouseHop(owner, topic, sink, engine, view string) (nodes []Node, edges
 		{From: nodes[1].ID, To: sink},
 	}
 	return nodes, edges
+}
+
+// clickhouseLoadLimit is how many recent load errors the builder reads to judge
+// a Kafka engine table. It matches the clickhouse client's default.
+const clickhouseLoadLimit = 20
+
+// engineNodeID and viewNodeID name a ClickHouse hop node. They are the single
+// source of the id prefixes for the two new node kinds.
+func engineNodeID(engine string) string { return "kafka_engine:" + engine }
+func viewNodeID(view string) string     { return "materialized_view:" + view }
+
+// clickhouseNames returns the ClickHouse object names of one Kafka-ingestion
+// hop by the dev naming convention (dev/clickhouse): the Kafka engine table is
+// "<sink>_kafka" and the materialized view "<sink>_mv". There is no owners.yaml
+// declaration for these names yet; the contract change request in the PR body
+// asks the leads for one, so a team with another convention can name them.
+func clickhouseNames(sink string) (engine, view string) {
+	return sink + "_kafka", sink + "_mv"
+}
+
+// lastSegment is the part of a qualified name after the final dot.
+func lastSegment(s string) string {
+	if i := strings.LastIndexByte(s, '.'); i >= 0 {
+		return s[i+1:]
+	}
+	return s
+}
+
+// clickhouseEngineTopic returns the pipeline topic a sink table's Kafka engine
+// consumes, by the convention that the topic's table part matches the sink's:
+// sink "analytics.orders" is filled from topic "pg.public.orders" (both end in
+// "orders"). ok is false when no topic matches, so the hop is left out rather
+// than drawn with a guessed topic.
+func clickhouseEngineTopic(topics []string, sink string) (string, bool) {
+	seg := lastSegment(sink)
+	for _, t := range topics {
+		if lastSegment(t) == seg {
+			return t, true
+		}
+	}
+	return "", false
+}
+
+// clickhouseHopSpec is one Kafka-ingestion hop to wire into a graph.
+type clickhouseHopSpec struct {
+	sink, engine, view, topic string
+}
+
+// clickhouseHopSpecs plans the hop for every sink table of a ClickHouse
+// pipeline. A sink whose topic cannot be matched has topic "" and its hop is
+// left out (no engine/view nodes, no replacement edges).
+func clickhouseHopSpecs(p owners.Pipeline, topics []string) []clickhouseHopSpec {
+	specs := make([]clickhouseHopSpec, 0, len(p.SinkTables))
+	for _, s := range p.SinkTables {
+		engine, view := clickhouseNames(s)
+		topic, _ := clickhouseEngineTopic(topics, s)
+		specs = append(specs, clickhouseHopSpec{sink: s, engine: engine, view: view, topic: topic})
+	}
+	return specs
+}
+
+// wireClickhouseHops replaces the edges that carried data into each sink
+// ("topic/group -> wh:sink") with the Kafka-ingestion hop
+// "topic -> kafka_engine:<engine> -> materialized_view:<view> -> wh:sink".
+// The engine table consumes the topic directly, so the sink's old readers no
+// longer feed it. The hop edges are proven (mapped), like connector config:
+// the engine's Kafka settings name the topic and the view's SELECT names both
+// the engine and the sink.
+func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
+	for _, h := range specs {
+		if h.topic == "" {
+			continue
+		}
+		sinkID := "wh:" + h.sink
+		kept := make([]Edge, 0, len(fp.edges))
+		for _, e := range fp.edges {
+			if e.To == sinkID {
+				continue
+			}
+			kept = append(kept, e)
+		}
+		_, edges := clickhouseHop(b.layerOwner("warehouse"), "topic:"+h.topic, sinkID, h.engine, h.view)
+		fp.edges = append(kept, edges...)
+	}
+}
+
+// kafkaEngineNode draws a Kafka engine table's node, with its health derived
+// from the ClickHouse load-error reader (clients.LoadErrorReader): a Kafka
+// consumer exception in the engine's recent history means the engine stopped
+// consuming, which fails this node before the sink it no longer fills goes
+// stale (first-failing semantics). No reader, or a warehouse that cannot
+// report load history, leaves the node unknown.
+func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
+	n := Node{
+		ID:     engineNodeID(engine),
+		Kind:   KindKafkaEngine,
+		Name:   engine,
+		Layer:  "warehouse",
+		Owner:  b.layerOwner("warehouse"),
+		Health: HealthUnknown,
+	}
+	snap, ok := info.engineLoads[engine]
+	if !ok {
+		return n
+	}
+	switch {
+	case errors.Is(snap.err, clients.ErrNotSupported):
+		return n
+	case snap.err != nil:
+		n.Facts = map[string]string{"error": "unreachable"}
+		return n
+	}
+	for _, le := range snap.loads {
+		// LoadErrors returns only entries since the window we asked for, so any
+		// entry is a recent failed ingestion into the engine table.
+		n.Health = HealthFail
+		n.Facts = map[string]string{"consumer_error": HumanAge(info.now.Sub(le.At)) + " ago"}
+		break
+	}
+	if n.Health != HealthFail {
+		n.Health = HealthOK
+	}
+	return n
+}
+
+// materializedViewNode draws a materialized view's node. No reader reports a
+// view's freshness, so it stays unknown.
+func (b *builder) materializedViewNode(view string) Node {
+	return Node{
+		ID:     viewNodeID(view),
+		Kind:   KindMaterializedView,
+		Name:   view,
+		Layer:  "warehouse",
+		Owner:  b.layerOwner("warehouse"),
+		Health: HealthUnknown,
+	}
+}
+
+// engineLoadSnapshot is one engine table's load-error reading.
+type engineLoadSnapshot struct {
+	loads []clients.LoadError
+	err   error
 }
