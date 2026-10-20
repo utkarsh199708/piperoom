@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import type { Topology } from '../api/types'
 import { PipelineMap } from './PipelineMap'
 
@@ -81,6 +81,39 @@ describe('PipelineMap — lane', () => {
     render(<PipelineMap topology={withDLQ} />)
     expect(screen.getByText('DLQ topic')).toBeInTheDocument()
     expect(screen.getByText('orders-dlq')).toBeInTheDocument()
+  })
+
+  it('labels a schema_subject node and keeps it in lane order with its health', () => {
+    const withSubject: Topology = {
+      ...five,
+      nodes: [
+        five.nodes[0],
+        {
+          id: 'sr:pg.public.orders-value',
+          kind: 'schema_subject',
+          name: 'pg.public.orders-value',
+          layer: 'schema-registry',
+          owner: 'arjun',
+          health: 'fail',
+          facts: { compatibility: 'BACKWARD', latest_version: '1' },
+        },
+        ...five.nodes.slice(1),
+      ],
+    }
+    const { container } = render(<PipelineMap topology={withSubject} />)
+    const names = [...container.querySelectorAll('[data-node] .font-mono.text-sm')].map((n) => n.textContent)
+    expect(names).toEqual([
+      'public.orders',
+      'pg.public.orders-value',
+      'pg-orders-connector',
+      'pg.public.orders',
+      'orders-sync',
+      'analytics.orders',
+    ])
+    const subject = screen.getByText('pg.public.orders-value').closest('button')!
+    expect(within(subject).getByText('Schema subject')).toBeInTheDocument()
+    expect(subject).toHaveAttribute('data-health', 'fail')
+    expect(within(subject).getByText('failed')).toBeInTheDocument()
   })
 
   it('shows health as a word, not only a colour', () => {
