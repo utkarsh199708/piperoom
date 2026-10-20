@@ -51,6 +51,20 @@ const (
 	KindHiddenText Kind = "hidden_text"
 )
 
+// Block is the enclosing unit of untrusted data around a finding's span: the
+// whole record or trace block (the maximal run of non-blank lines) that holds
+// the span, or the whole comment, blob or tag run for kinds whose span is
+// already the whole unit. It lets a caller compare values against a wider
+// region than the clause when an injection puts its action in one sentence and
+// its value in the next. Start and End are byte offsets into the string the
+// caller passed to ScanNames (rune boundaries, Start <= Offset <= End <=
+// len(s)); the zero value means the span is its own block. It is untrusted
+// data too: never log it.
+type Block struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
 // Finding is one match.
 type Finding struct {
 	Kind Kind `json:"kind"`
@@ -74,6 +88,11 @@ type Finding struct {
 	// that occur inside the span, in the caller's order. Only ScanNames
 	// fills it; Scan leaves it nil.
 	Names []string `json:"names,omitempty"`
+	// Block is the enclosing unit of untrusted data the span sits in (see
+	// the Block type). Only ScanNames fills it; Scan leaves it zero, which
+	// means "the span is its own block". A caller comparing a value the model
+	// typed against the block must Normalize both sides first.
+	Block Block `json:"block,omitempty"`
 }
 
 const (
@@ -124,16 +143,83 @@ func Scan(s string) []Finding {
 // findings are otherwise exactly Scan's.
 func ScanNames(s string, names []string) []Finding {
 	fs := Scan(s)
-	if len(fs) == 0 || len(names) == 0 {
+	if len(fs) == 0 {
 		return fs
 	}
 	for i, f := range fs {
 		if f.Offset < 0 || f.End > len(s) || f.End < f.Offset {
 			continue // cannot happen; never slice out of range on untrusted text
 		}
-		fs[i].Names = namesIn(s[f.Offset:f.End], names)
+		fs[i].Block = blockFor(s, f)
+		if len(names) > 0 {
+			fs[i].Names = namesIn(s[f.Offset:f.End], names)
+		}
 	}
 	return fs
+}
+
+// blockFor returns the enclosing unit of untrusted text around a finding's
+// span. A hidden comment, an encoded blob or a run of hidden tag text is
+// already its own unit, so its block is its span. Anything else widens to the
+// enclosing paragraph (the maximal run of non-blank lines), so an injection
+// whose action and value sit in different sentences of the same record or
+// trace block still lands them in one block.
+func blockFor(s string, f Finding) Block {
+	if f.Kind == KindHiddenComment || f.Kind == KindEncoded || f.Kind == KindHiddenText {
+		return Block{Start: f.Offset, End: f.End}
+	}
+	start, end := paragraphBounds(s, f.Offset, f.End)
+	return Block{Start: start, End: end}
+}
+
+// paragraphBounds returns the maximal run of non-blank lines around the span
+// [start, end): the enclosing record or trace block. Both returned offsets
+// are rune boundaries of s and the block encloses the span.
+func paragraphBounds(s string, start, end int) (int, int) {
+	lo := start
+	for lo > 0 && s[lo-1] != '\n' {
+		lo--
+	}
+	hi := end
+	for hi < len(s) && s[hi] != '\n' {
+		hi++
+	}
+	// Grow past blank lines above: a blank line is a paragraph break.
+	for lo > 0 {
+		prevStart := lo - 1
+		for prevStart > 0 && s[prevStart-1] != '\n' {
+			prevStart--
+		}
+		if !isBlankLine(s[prevStart : lo-1]) {
+			break
+		}
+		lo = prevStart
+	}
+	// Grow past blank lines below.
+	for hi < len(s) {
+		nextEnd := hi + 1
+		for nextEnd < len(s) && s[nextEnd] != '\n' {
+			nextEnd++
+		}
+		if !isBlankLine(s[hi+1 : nextEnd]) {
+			break
+		}
+		hi = nextEnd
+	}
+	return lo, hi
+}
+
+// isBlankLine reports whether line is empty or only horizontal whitespace: a
+// blank line, the paragraph break between records and trace blocks.
+func isBlankLine(line string) bool {
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ' ', '\t', '\r':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // namesIn returns the entries of names that occur word-bounded in span,
