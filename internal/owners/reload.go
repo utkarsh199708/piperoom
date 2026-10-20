@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 )
 
@@ -19,8 +20,11 @@ type DirSkip struct {
 // take a snapshot once per request with Load; Reload builds a complete new set
 // and publishes it only on success, so a reader never sees a half-updated
 // config and a reload never mutates the snapshot a reader already holds.
+// Concurrent Reloads are serialized by mu so two reloads cannot interleave and
+// lose an update (the last one to load the directory wins, whole).
 type Live struct {
-	p atomic.Pointer[Owners]
+	mu sync.Mutex
+	p  atomic.Pointer[Owners]
 }
 
 // NewLive loads the owners config at path with OWNERS_DIR dir (dir may be "")
@@ -46,11 +50,15 @@ func (l *Live) Load() *Owners {
 
 // Reload re-reads the main file and OWNERS_DIR and publishes the new set only
 // on success; a refused load leaves the published set unchanged. It errors when
-// the Live was created without an OWNERS_DIR (NewLive with dir "").
+// the Live was created without an OWNERS_DIR (NewLive with dir ""). Reloads are
+// serialized: the mutex is held across the whole load-and-publish so concurrent
+// reloads cannot interleave and publish a stale set.
 func (l *Live) Reload() error {
 	if l == nil {
 		return fmt.Errorf("owners: Reload: nil Live")
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	cur := l.p.Load()
 	if cur == nil || cur.dir == "" {
 		return fmt.Errorf("owners: Reload: no OWNERS_DIR was loaded (call NewLive)")

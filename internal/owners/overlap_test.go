@@ -170,24 +170,83 @@ func TestOverlapResolvesReferences(t *testing.T) {
 }
 
 // TestHostPort pins the endpoint normalization: a full DSN and a bare host:port
-// naming the same host reduce to the same normalized value.
+// naming the same host reduce to the same normalized value, and a default port
+// is filled in only when the endpoint names a host without one.
 func TestHostPort(t *testing.T) {
 	cases := []struct {
-		in   string
-		want string
+		in      string
+		defPort string
+		want    string
 	}{
-		{"db.acme:5432", "db.acme:5432"},
-		{"DB.ACME:5432", "db.acme:5432"},
-		{"  db.acme:5432  ", "db.acme:5432"},
-		{"postgres://user:pass@DB.Acme:5432/orders?sslmode=require", "db.acme:5432"},
-		{"postgres://db.acme/orders", "db.acme"},
-		{"user:pass@db.acme:5432", "db.acme:5432"},
-		{"db.acme:5432/orders", "db.acme:5432"},
-		{"", ""},
+		{"db.acme:5432", "", "db.acme:5432"},
+		{"DB.ACME:5432", "", "db.acme:5432"},
+		{"  db.acme:5432  ", "", "db.acme:5432"},
+		{"postgres://user:pass@DB.Acme:5432/orders?sslmode=require", "", "db.acme:5432"},
+		{"postgres://db.acme/orders", "", "db.acme"},
+		{"postgres://db.acme/orders", "5432", "db.acme:5432"},
+		{"user:pass@db.acme:5432", "", "db.acme:5432"},
+		{"db.acme:5432/orders", "", "db.acme:5432"},
+		{"db.acme", "5432", "db.acme:5432"},
+		{"db.acme", "", "db.acme"},
+		{"", "", ""},
 	}
 	for _, tc := range cases {
-		if got := hostPort(tc.in); got != tc.want {
-			t.Errorf("hostPort(%q) = %q, want %q", tc.in, got, tc.want)
+		if got := hostPort(tc.in, tc.defPort); got != tc.want {
+			t.Errorf("hostPort(%q, %q) = %q, want %q", tc.in, tc.defPort, got, tc.want)
 		}
+	}
+}
+
+// TestOverlapKafkaBrokerList pins the broker-list host overlap: kafka_brokers is
+// a comma-separated list and overlap on any one broker is a host overlap, in any
+// order and with or without a Kafka protocol prefix per entry.
+func TestOverlapKafkaBrokerList(t *testing.T) {
+	tenants := map[string]Tenant{
+		"a": {Admins: Principals{{Kind: KindUser, Name: "ann"}}},
+	}
+	loaded := Pipeline{ID: "qa", Tenant: "a", TopicPrefix: "other", SourceTables: []string{"public.x"}, Connectors: []string{"x"},
+		Connections: Connections{"kafka_brokers": {Value: "b1:9092,b2:9092,b3:9092"}}}
+
+	cases := []struct {
+		name    string
+		brokers string
+		want    string // the shared broker, in normalized host:port form
+	}{
+		{"list against a single broker", "b2:9092", "b2:9092"},
+		{"same list in a different order", "b3:9092,b2:9092,b1:9092", "b1:9092"},
+		{"SASL_SSL prefixes", "SASL_SSL://b1:9092,PLAINTEXT://b2:9092", "b2:9092"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Pipeline{ID: "new", Tenant: "a", TopicPrefix: "zz", SourceTables: []string{"public.z"}, Connectors: []string{"z"},
+				Connections: Connections{"kafka_brokers": {Value: tc.brokers}}}
+			out := loadedOwners(tenants, loaded).Overlap(p, nil)
+			if !hasOverlap(out, OverlapHost, tc.want, "qa") {
+				t.Fatalf("overlaps = %+v, want a host overlap on %q", out, tc.want)
+			}
+		})
+	}
+}
+
+// TestOverlapDefaultPort pins the default-port fill: a source DSN without a
+// port matches a typed host:port for the same connection key, so the two name
+// the same host and the host overlap fires.
+func TestOverlapDefaultPort(t *testing.T) {
+	tenants := map[string]Tenant{
+		"a": {Admins: Principals{{Kind: KindUser, Name: "ann"}}},
+	}
+	loaded := Pipeline{ID: "qa", Tenant: "a", TopicPrefix: "other", SourceTables: []string{"public.x"}, Connectors: []string{"x"},
+		Connections: Connections{"source_db_url": {Value: "postgres://db.acme/orders"}}}
+	p, err := Provisional(events.SetupRequest{
+		PipelineID: "new", Tenant: "a", TopicPrefix: "pg",
+		Tables: []string{"public.z"}, Connectors: []string{"z"},
+		Targets: []events.SetupTarget{{Kind: "postgres", Address: "db.acme:5432"}},
+	})
+	if err != nil {
+		t.Fatalf("Provisional: %v", err)
+	}
+	out := loadedOwners(tenants, loaded).Overlap(p, nil)
+	if !hasOverlap(out, OverlapHost, "db.acme:5432", "qa") {
+		t.Fatalf("overlaps = %+v, want a host overlap on db.acme:5432 via default port", out)
 	}
 }

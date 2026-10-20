@@ -131,7 +131,7 @@ func (p Pipeline) sourceHostPort(endpoints func(Pipeline) map[string]string) str
 	if !p.HasConnections() {
 		return ""
 	}
-	return hostPort(resolvedEndpoint(p, "source_db_url", endpoints))
+	return hostPort(resolvedEndpoint(p, "source_db_url", endpoints), defaultPort("source_db_url"))
 }
 
 // sameSourceHost reports whether p and q read their source tables from the
@@ -151,7 +151,15 @@ func (p Pipeline) hostPorts(endpoints func(Pipeline) map[string]string) []string
 	}
 	set := map[string]bool{}
 	for _, k := range hostConnKeys {
-		if v := hostPort(resolvedEndpoint(p, k, endpoints)); v != "" {
+		if k == "kafka_brokers" {
+			// kafka_brokers is a comma-separated list of broker addresses; a
+			// pipeline reaches every broker it names, so each entry is a host.
+			for _, h := range kafkaHostPorts(resolvedEndpoint(p, k, endpoints)) {
+				set[h] = true
+			}
+			continue
+		}
+		if v := hostPort(resolvedEndpoint(p, k, endpoints), defaultPort(k)); v != "" {
 			set[v] = true
 		}
 	}
@@ -163,11 +171,53 @@ func (p Pipeline) hostPorts(endpoints func(Pipeline) map[string]string) []string
 	return out
 }
 
+// defaultPort is the standard port for a connection key, used when an endpoint
+// names a host without a port, so a DSN without a port matches a typed
+// host:port.
+func defaultPort(key string) string {
+	switch key {
+	case "source_db_url", "source_db_write_url", "warehouse_db_url":
+		return "5432"
+	case "connect_url":
+		return "8083"
+	case "schema_registry_url":
+		return "8081"
+	case "kafka_brokers":
+		return "9092"
+	}
+	return ""
+}
+
+// kafkaHostPorts reduces a kafka_brokers value to its host:port values. The
+// value is a comma-separated list (e.g. "b1:9092,b2:9092"); each entry may
+// carry a Kafka protocol prefix ("SASL_SSL://b1:9092"), which is stripped before
+// the usual endpoint normalization. Overlap on any one broker is a host overlap.
+func kafkaHostPorts(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, entry := range strings.Split(s, ",") {
+		entry = strings.TrimSpace(entry)
+		if i := strings.Index(entry, "://"); i >= 0 {
+			entry = entry[i+3:]
+		}
+		if h := hostPort(entry, defaultPort("kafka_brokers")); h != "" {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // hostPort reduces an endpoint to its normalized host:port: scheme, userinfo,
 // path, query and fragment are removed and the host is lower-cased, so a full
 // DSN (postgres://user:pass@DB.Acme:5432/db?x=y) and a bare host:port
-// (DB.Acme:5432) both reduce to "db.acme:5432".
-func hostPort(s string) string {
+// (DB.Acme:5432) both reduce to "db.acme:5432". When the endpoint names a host
+// without a port, defaultPort (the connection key's standard port) is filled in
+// so a DSN without a port matches a typed host:port; an empty defaultPort keeps
+// the host as written.
+func hostPort(s, defaultPort string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
@@ -181,7 +231,7 @@ func hostPort(s string) string {
 			if port := u.Port(); port != "" {
 				return host + ":" + port
 			}
-			return host
+			return withDefaultPort(host, defaultPort)
 		}
 	}
 	// A bare host[:port], possibly with userinfo and a path/query/fragment.
@@ -191,7 +241,30 @@ func hostPort(s string) string {
 	if i := strings.IndexAny(s, "/?#"); i >= 0 {
 		s = s[:i]
 	}
-	return strings.ToLower(strings.TrimSpace(s))
+	return withDefaultPort(strings.ToLower(strings.TrimSpace(s)), defaultPort)
+}
+
+// withDefaultPort returns host with defaultPort appended when the host carries
+// no port of its own; a bracketed IPv6 literal counts as having no port unless
+// a port follows the closing bracket.
+func withDefaultPort(host, defaultPort string) string {
+	if host == "" || defaultPort == "" || hasPort(host) {
+		return host
+	}
+	return host + ":" + defaultPort
+}
+
+// hasPort reports whether host carries a :port.
+func hasPort(host string) bool {
+	colon := strings.LastIndex(host, ":")
+	if colon < 0 {
+		return false
+	}
+	if i := strings.Index(host, "]"); i >= 0 {
+		// A bracketed IPv6 literal: only a colon after the bracket is a port.
+		return colon > i
+	}
+	return true
 }
 
 // sortedIntersect returns the values present in both slices, sorted and
