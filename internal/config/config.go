@@ -240,6 +240,11 @@ type Config struct {
 	// non-loopback address. See ParseDevAck. Never baked into an image.
 	DevAck string // PIPEROOM_DEV_ACK: "" (default) | DevAckValue
 
+	// FakeAgent swaps the real agent for the scripted one of internal/room/demo
+	// on a server wired to a real stack, so a full-stack test can run the demo
+	// story without a model or an API key. Dev only: see ParseFakeAgent.
+	FakeAgent string // PIPEROOM_FAKE_AGENT: "" (default, the real agent) | FakeAgentScripted
+
 	// WriteMode is PIPEROOM_WRITE_MODE: "off" (default) makes the executor
 	// refuse to queue or run any step, so an approved proposal is recorded but
 	// never executed and `action.executed` is never emitted; "on" wires the
@@ -404,7 +409,8 @@ func Load() Config {
 		LogLevel:  get("PIPEROOM_LOG_LEVEL", DefaultLogLevel),
 		LogFormat: get("PIPEROOM_LOG_FORMAT", DefaultLogFormat),
 
-		DevAck: get("PIPEROOM_DEV_ACK", ""),
+		DevAck:    get("PIPEROOM_DEV_ACK", ""),
+		FakeAgent: get("PIPEROOM_FAKE_AGENT", ""),
 
 		WriteMode: get("PIPEROOM_WRITE_MODE", "off"),
 
@@ -516,6 +522,45 @@ func ParseWriteMode(c Config) (bool, error) {
 		return true, nil
 	}
 	return false, fmt.Errorf("config: PIPEROOM_WRITE_MODE=%q: want off or on", c.WriteMode)
+}
+
+// FakeAgentScripted is the only accepted value of PIPEROOM_FAKE_AGENT.
+const FakeAgentScripted = "scripted"
+
+// ParseFakeAgent validates PIPEROOM_FAKE_AGENT and reports whether the server
+// runs the scripted agent instead of the real one. Empty is false. "scripted"
+// is true only in dev auth mode with PIPEROOM_DEV_ACK=DevAckValue and with
+// write mode off: a scripted agent shows people an investigation that did not
+// happen, so it must never reach a deployment with real users, and its
+// proposals must never run against real systems. Anything else is an error
+// naming the variable, so a typo stops the start instead of running the real
+// agent unnoticed.
+func ParseFakeAgent(c Config) (bool, error) {
+	switch v := strings.TrimSpace(c.FakeAgent); v {
+	case "":
+		return false, nil
+	case FakeAgentScripted:
+	default:
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%q: want %q (or unset)", c.FakeAgent, FakeAgentScripted)
+	}
+	if mode := strings.TrimSpace(c.AuthMode); mode != "" && mode != DefaultAuthMode {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_AUTH_MODE=%s, not %q", FakeAgentScripted, DefaultAuthMode, mode)
+	}
+	ack, err := ParseDevAck(c)
+	if err != nil {
+		return false, err
+	}
+	if !ack {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_DEV_ACK=%s", FakeAgentScripted, DevAckValue)
+	}
+	write, err := ParseWriteMode(c)
+	if err != nil {
+		return false, err
+	}
+	if write {
+		return false, fmt.Errorf("config: PIPEROOM_FAKE_AGENT=%s needs PIPEROOM_WRITE_MODE=off", FakeAgentScripted)
+	}
+	return true, nil
 }
 
 // slackMemberID is the shape of a Slack member ID ("U0…" for users, "W0…"
