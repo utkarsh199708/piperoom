@@ -52,6 +52,19 @@ The same path is tested end to end by `go test -tags integration -run TestQuicks
 `devctl break schema-change` and `devctl fix schema-change`, so hold the stack lock as `PIPEROOM_STACK_OWNER`
 and start from a fresh stack (`devctl reset`): `break` needs `orders.amount` still `integer`.
 
+## The dev-only break/fix API (`devctl serve`)
+
+For the web "Break something" menu (A6) there is a tiny local HTTP API:
+
+```
+go run ./cmd/devctl serve -addr 127.0.0.1:7071
+```
+
+It serves `GET /scenarios`, `POST /break/{name}` and `POST /fix/{name}` over JSON, one run at a
+time (a second while busy gets `409`). It has **no authentication**, so it refuses to bind anything
+but a loopback address (`127.0.0.1`, `::1`) and is never built into the image (the Dockerfile builds
+only `cmd/server`). Stop it with Ctrl-C.
+
 ## Everything else here
 
 | File | What it is for |
