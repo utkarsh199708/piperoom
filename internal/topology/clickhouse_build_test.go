@@ -105,13 +105,23 @@ func TestBuildClickhouseReplacesWarehouseEdges(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"kafka_engine:analytics.orders_kafka>materialized_view:analytics.orders_mv",
-		"materialized_view:analytics.orders_mv>wh:analytics.orders",
-		"topic:pg.public.orders>kafka_engine:analytics.orders_kafka",
+		"kafka_engine:analytics.orders_kafka>materialized_view:analytics.orders_mv ~",
+		"materialized_view:analytics.orders_mv>wh:analytics.orders ~",
+		"topic:pg.public.orders>kafka_engine:analytics.orders_kafka ~",
 		"topic:pg.public.orders>group:order-sync",
 	} {
 		if !slices.Contains(got, want) {
 			t.Fatalf("missing edge %q:\n%v", want, got)
+		}
+	}
+	// The three hop edges are naming-convention guesses, so they must be
+	// inferred, not proven.
+	for _, e := range g.Edges {
+		hop := (e.From == "topic:pg.public.orders" && e.To == "kafka_engine:analytics.orders_kafka") ||
+			(e.From == "kafka_engine:analytics.orders_kafka" && e.To == "materialized_view:analytics.orders_mv") ||
+			(e.From == "materialized_view:analytics.orders_mv" && e.To == "wh:analytics.orders")
+		if hop && !e.IsInferred() {
+			t.Fatalf("hop edge %+v must be inferred (naming convention)", e)
 		}
 	}
 }

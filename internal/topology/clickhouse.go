@@ -48,9 +48,9 @@ const (
 // returned; sink is its id ("wh:analytics.orders"), topic the topic id
 // ("topic:pg.public.orders"), and engine/view the ClickHouse object names
 // ("analytics.orders_kafka", "analytics.orders_mv"). All three edges are
-// proven (mapped), like connector config: the engine table's Kafka settings
-// name the topic, and the view's SELECT names both the engine table and the
-// sink table.
+// inferred: the engine, the view and their topic all come from the dev naming
+// convention (clickhouseNames, clickhouseEngineTopic), not from live
+// ClickHouse config, so the agent must verify them.
 //
 // owner is the warehouse layer owner. Both nodes are HealthUnknown here: Build
 // replaces the engine node's health from the ClickHouse load-error reader
@@ -76,9 +76,9 @@ func clickhouseHop(owner, topic, sink, engine, view string) (nodes []Node, edges
 		},
 	}
 	edges = []Edge{
-		{From: topic, To: nodes[0].ID},
-		{From: nodes[0].ID, To: nodes[1].ID},
-		{From: nodes[1].ID, To: sink},
+		{From: topic, To: nodes[0].ID, Mapping: MappingInferred},
+		{From: nodes[0].ID, To: nodes[1].ID, Mapping: MappingInferred},
+		{From: nodes[1].ID, To: sink, Mapping: MappingInferred},
 	}
 	return nodes, edges
 }
@@ -112,16 +112,22 @@ func lastSegment(s string) string {
 // clickhouseEngineTopic returns the pipeline topic a sink table's Kafka engine
 // consumes, by the convention that the topic's table part matches the sink's:
 // sink "analytics.orders" is filled from topic "pg.public.orders" (both end in
-// "orders"). ok is false when no topic matches, so the hop is left out rather
-// than drawn with a guessed topic.
+// "orders"). ok is false when no topic matches or when more than one topic
+// matches (e.g. "pg.public.orders" and "pg.sales.orders" both end in
+// "orders"): the last-segment convention then cannot say which one the engine
+// reads, so the hop is left out rather than drawn with a guessed topic.
 func clickhouseEngineTopic(topics []string, sink string) (string, bool) {
 	seg := lastSegment(sink)
+	match := ""
 	for _, t := range topics {
 		if lastSegment(t) == seg {
-			return t, true
+			if match != "" {
+				return "", false // ambiguous: two topics share the table name
+			}
+			match = t
 		}
 	}
-	return "", false
+	return match, match != ""
 }
 
 // clickhouseHopSpec is one Kafka-ingestion hop to wire into a graph.
@@ -146,9 +152,8 @@ func clickhouseHopSpecs(p owners.Pipeline, topics []string) []clickhouseHopSpec 
 // ("topic/group -> wh:sink") with the Kafka-ingestion hop
 // "topic -> kafka_engine:<engine> -> materialized_view:<view> -> wh:sink".
 // The engine table consumes the topic directly, so the sink's old readers no
-// longer feed it. The hop edges are proven (mapped), like connector config:
-// the engine's Kafka settings name the topic and the view's SELECT names both
-// the engine and the sink.
+// longer feed it. The hop edges are inferred: engine, view and topic all come
+// from the dev naming convention, not from live ClickHouse config.
 func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
 	for _, h := range specs {
 		if h.topic == "" {
@@ -171,8 +176,11 @@ func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
 // from the ClickHouse load-error reader (clients.LoadErrorReader): a Kafka
 // consumer exception in the engine's recent history means the engine stopped
 // consuming, which fails this node before the sink it no longer fills goes
-// stale (first-failing semantics). No reader, or a warehouse that cannot
-// report load history, leaves the node unknown.
+// stale (first-failing semantics). The reader reports only exceptions, never
+// that the engine exists, and the engine's name is a naming-convention guess,
+// so a reading without exceptions leaves the node unknown (inferred), not OK:
+// the table may not exist. No reader, an unreachable reader, or a warehouse
+// that cannot report load history leaves the node unknown too.
 func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
 	n := Node{
 		ID:     engineNodeID(engine),
@@ -181,6 +189,7 @@ func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
 		Layer:  "warehouse",
 		Owner:  b.layerOwner("warehouse"),
 		Health: HealthUnknown,
+		Facts:  map[string]string{"inferred": "naming convention"},
 	}
 	snap, ok := info.engineLoads[engine]
 	if !ok {
@@ -199,9 +208,6 @@ func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
 		n.Health = HealthFail
 		n.Facts = map[string]string{"consumer_error": HumanAge(info.now.Sub(le.At)) + " ago"}
 		break
-	}
-	if n.Health != HealthFail {
-		n.Health = HealthOK
 	}
 	return n
 }

@@ -33,9 +33,9 @@ func TestClickhouseHopFixture(t *testing.T) {
 	// Expected nodes and edges.
 	got := edgeStrings(g.Edges)
 	want := []string{
-		"kafka_engine:analytics.orders_kafka>materialized_view:analytics.orders_mv",
-		"materialized_view:analytics.orders_mv>wh:analytics.orders",
-		"topic:pg.public.orders>kafka_engine:analytics.orders_kafka",
+		"kafka_engine:analytics.orders_kafka>materialized_view:analytics.orders_mv ~",
+		"materialized_view:analytics.orders_mv>wh:analytics.orders ~",
+		"topic:pg.public.orders>kafka_engine:analytics.orders_kafka ~",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("edges:\n got %v\nwant %v", got, want)
@@ -63,9 +63,9 @@ func TestClickhouseHopFixture(t *testing.T) {
 		t.Fatalf("render order wrong (topic=%d engine=%d view=%d sink=%d):\n%s", idxTopic, idxEngine, idxView, idxSink, out)
 	}
 	for _, line := range []string{
-		"  from: topic:pg.public.orders\n",
-		"  from: kafka_engine:analytics.orders_kafka\n",
-		"  from: materialized_view:analytics.orders_mv\n",
+		"  from: topic:pg.public.orders (unconfirmed)\n",
+		"  from: kafka_engine:analytics.orders_kafka (unconfirmed)\n",
+		"  from: materialized_view:analytics.orders_mv (unconfirmed)\n",
 	} {
 		if !strings.Contains(out, line) {
 			t.Fatalf("render missing %q:\n%s", line, out)
@@ -73,17 +73,32 @@ func TestClickhouseHopFixture(t *testing.T) {
 	}
 }
 
-// TestClickhouseHopEdgesAreMapped: every hop edge is proven data flow, never
-// inferred and never a dependency.
-func TestClickhouseHopEdgesAreMapped(t *testing.T) {
+// TestClickhouseHopEdgesAreInferred: every hop edge is a naming-convention
+// guess, never proven data flow and never a dependency, so the agent treats it
+// as a hypothesis to verify.
+func TestClickhouseHopEdgesAreInferred(t *testing.T) {
 	_, edges := clickhouseHop("meera", "topic:t", "wh:s", "s_kafka", "s_mv")
 	if len(edges) != 3 {
 		t.Fatalf("edges = %d, want 3", len(edges))
 	}
 	for _, e := range edges {
-		if e.IsDependency() || e.IsInferred() {
-			t.Fatalf("edge %+v must be mapped data flow", e)
+		if e.IsDependency() || !e.IsInferred() {
+			t.Fatalf("edge %+v must be inferred data flow", e)
 		}
+	}
+}
+
+// TestClickhouseEngineTopicAmbiguous: when two pipeline topics share the table
+// name (e.g. pg.public.orders and pg.sales.orders), the last-segment
+// convention cannot say which one the engine reads, so the hop is left out
+// (ok=false) rather than drawn with an arbitrary topic.
+func TestClickhouseEngineTopicAmbiguous(t *testing.T) {
+	topics := []string{"pg.public.orders", "pg.sales.orders"}
+	if topic, ok := clickhouseEngineTopic(topics, "analytics.orders"); ok || topic != "" {
+		t.Fatalf("clickhouseEngineTopic(%v, analytics.orders) = %q, %v; want no match", topics, topic, ok)
+	}
+	if topic, ok := clickhouseEngineTopic([]string{"pg.public.orders"}, "analytics.orders"); !ok || topic != "pg.public.orders" {
+		t.Fatalf("single match = %q, %v; want pg.public.orders, true", topic, ok)
 	}
 }
 
@@ -110,12 +125,13 @@ func TestClickhouseHopJSON(t *testing.T) {
 			t.Fatalf("graph JSON has no %s: %s", kind, raw)
 		}
 	}
-	// A proven data edge keeps its original shape.
-	proven, err := json.Marshal(edges[0])
+	// An inferred hop edge carries its mapping, so a client reads it as a
+	// hypothesis, not proven flow.
+	inferred, err := json.Marshal(edges[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(proven) != `{"from":"topic:pg.public.orders","to":"kafka_engine:analytics.orders_kafka"}` {
-		t.Fatalf("proven hop edge JSON = %s", proven)
+	if string(inferred) != `{"from":"topic:pg.public.orders","to":"kafka_engine:analytics.orders_kafka","mapping":"inferred"}` {
+		t.Fatalf("inferred hop edge JSON = %s", inferred)
 	}
 }
