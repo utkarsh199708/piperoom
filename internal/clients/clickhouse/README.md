@@ -15,6 +15,13 @@ results at 4 MiB and uses a 10 second connect, read, ping, and query deadline.
 Give the service account only SELECT on the sink tables; the session setting
 is defense in depth and does not replace least-privilege grants.
 
+Do not give the service account a profile with readonly=1. The client sends
+readonly=2 and max_execution_time with every query, and a readonly=1 profile
+rejects both, so every query fails with code 164 (READONLY), while `New` still
+succeeds because its ping sends no settings. Use a profile with readonly=2,
+or readonly=0 with SELECT-only grants. The client reports code 164 as a
+readonly=1 profile error.
+
 For the optional load-error tool, also grant SELECT on system.query_log and
 system.kafka_consumers. Some ClickHouse builds do not include Kafka support;
 if system.kafka_consumers is absent or access is denied, query-log results are

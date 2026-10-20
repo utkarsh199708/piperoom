@@ -193,3 +193,24 @@ func TestCountByBucket(t *testing.T) {
 type testDecimal string
 
 func (d testDecimal) String() string { return string(d) }
+
+func TestReadonlyProfileErrorIsExplained(t *testing.T) {
+	cause := &driver.Exception{Code: errReadonly, Name: "DB::Exception", Message: "Cannot modify 'readonly' setting in readonly mode"}
+	q := &fakeQuerier{responses: []queryResponse{{err: cause}}}
+	_, err := newTestClient(q).Freshness(context.Background(), "analytics.orders", "loaded_at")
+	if err == nil {
+		t.Fatal("Freshness succeeded on a readonly=1 profile")
+	}
+	for _, want := range []string{"readonly=1", "use readonly=2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to mention %q", err, want)
+		}
+	}
+	var chErr *driver.Exception
+	if !errors.As(err, &chErr) || chErr.Code != errReadonly {
+		t.Fatalf("error = %v, want the server exception kept in the chain", err)
+	}
+	if errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("error = %v, must not read as a missing table", err)
+	}
+}
