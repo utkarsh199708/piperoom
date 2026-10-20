@@ -17,6 +17,7 @@ require (
 	github.com/hamba/avro/v2 v2.31.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/pressly/goose/v3 v3.28.0
+	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/snowflakedb/gosnowflake/v2 v2.3.0
 	github.com/twmb/franz-go v1.22.1
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
