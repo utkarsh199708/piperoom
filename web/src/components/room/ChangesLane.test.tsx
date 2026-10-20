@@ -94,4 +94,73 @@ describe('ChangesLane', () => {
     fireEvent.click(screen.getByRole('button', { name: /Show only kafka-connect steps/ }))
     expect(onSelectLayer).toHaveBeenLastCalledWith(null)
   })
+
+  it('lists batch DAG and model changes next to pipeline changes, newest first', () => {
+    const data = {
+      changes: [
+        change({ id: 1, kind: 'ddl', at: '2026-10-14T02:00:00Z', object: 'public.orders' }),
+        change({ id: 2, kind: 'model', at: '2026-10-14T03:05:00Z', object: 'fct_revenue' }),
+        change({ id: 3, kind: 'dag', at: '2026-10-14T03:06:00Z', object: 'revenue_daily' }),
+      ],
+    }
+    render(<ChangesLane steps={stepWith(data)} alertAt="2026-10-14T03:10:00Z" now={NOW} />)
+    const region = screen.getByRole('region', { name: 'What changed' })
+    const items = within(region).getAllByRole('listitem').filter((li) => li.dataset.testid !== 'alert-rule')
+    expect(items).toHaveLength(3)
+    expect(items[0]).toHaveTextContent('revenue_daily')
+    expect(items[1]).toHaveTextContent('fct_revenue')
+    expect(items[2]).toHaveTextContent('public.orders')
+    expect(within(items[0]).getByText('dag')).toBeInTheDocument()
+    expect(within(items[1]).getByText('model')).toBeInTheDocument()
+    expect(within(items[2]).getByText('ddl')).toBeInTheDocument()
+  })
+
+  it('a DAG row filters the stream to orchestrator and a model row to transform', () => {
+    const onSelectLayer = vi.fn()
+    const data = {
+      changes: [
+        change({ id: 1, kind: 'model', at: '2026-10-14T03:05:00Z', object: 'fct_revenue' }),
+        change({ id: 2, kind: 'dag', at: '2026-10-14T03:06:00Z', object: 'revenue_daily' }),
+      ],
+    }
+    render(<ChangesLane steps={stepWith(data)} alertAt="2026-10-14T03:10:00Z" now={NOW} onSelectLayer={onSelectLayer} />)
+    fireEvent.click(screen.getByRole('button', { name: /Show only orchestrator steps/ }))
+    expect(onSelectLayer).toHaveBeenLastCalledWith('orchestrator')
+    fireEvent.click(screen.getByRole('button', { name: /Show only transform steps/ }))
+    expect(onSelectLayer).toHaveBeenLastCalledWith('transform')
+  })
+
+  it('renders a change kind the lane does not know without breaking', () => {
+    const data = { changes: [change({ kind: 'oracle_patch', object: 'web-orders' })] }
+    render(<ChangesLane steps={stepWith(data)} alertAt="2026-10-14T03:10:00Z" now={NOW} />)
+    expect(screen.getByText('web-orders')).toBeInTheDocument()
+    expect(screen.getByText('oracle_patch')).toBeInTheDocument()
+  })
+
+  it('renders a hostile object name as text, never as HTML', () => {
+    const hostile = '<img src=x onerror="alert(1)"><b>orders</b>'
+    const { container } = render(
+      <ChangesLane steps={stepWith({ changes: [change({ object: hostile })] })} alertAt="2026-10-14T03:10:00Z" now={NOW} />,
+    )
+    expect(container.querySelector('img, b')).toBeNull()
+    expect(screen.getByText(hostile)).toBeInTheDocument()
+  })
+
+  it('keeps the CDC layer mapping unchanged', () => {
+    const onSelectLayer = vi.fn()
+    const data = {
+      changes: [
+        change({ kind: 'schema_version', object: 'pg.public.orders-value' }),
+        change({ kind: 'connector_config', object: 'pg-orders' }),
+        change({ kind: 'ddl', object: 'public.orders' }),
+      ],
+    }
+    render(<ChangesLane steps={stepWith(data)} alertAt="2026-10-14T03:10:00Z" now={NOW} onSelectLayer={onSelectLayer} />)
+    fireEvent.click(screen.getByRole('button', { name: /Show only schema-registry steps/ }))
+    expect(onSelectLayer).toHaveBeenLastCalledWith('schema-registry')
+    fireEvent.click(screen.getByRole('button', { name: /Show only kafka-connect steps/ }))
+    expect(onSelectLayer).toHaveBeenLastCalledWith('kafka-connect')
+    fireEvent.click(screen.getByRole('button', { name: /Show only postgres steps/ }))
+    expect(onSelectLayer).toHaveBeenLastCalledWith('postgres')
+  })
 })

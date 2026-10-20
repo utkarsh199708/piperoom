@@ -10,7 +10,7 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 /** Cap of one before/after document shown in the lane (the server stores at most 4 KiB). */
 export const MAX_DIFF_CHARS = 4096
 
-export type ChangeKind = 'ddl' | 'connector_config' | 'connector_state' | 'schema_version'
+export type ChangeKind = 'ddl' | 'connector_config' | 'connector_state' | 'schema_version' | 'dag' | 'model'
 
 export interface ChangeRow {
   id: number
@@ -52,7 +52,11 @@ export function parseChanges(data: unknown): ChangeRow[] {
   return rows.sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
 }
 
-/** The layer a change belongs to, for its colour (docs: ddl → postgres, connector_* → kafka-connect). */
+/**
+ * The layer a change belongs to, for its colour: ddl → postgres, connector_* → kafka-connect,
+ * schema_version → schema-registry, and the batch kinds dag → orchestrator, model → transform.
+ * An unknown kind gets '' (the neutral badge) so the lane never breaks on a kind it does not know.
+ */
 export function changeLayer(kind: string): string {
   switch (kind) {
     case 'ddl':
@@ -62,8 +66,12 @@ export function changeLayer(kind: string): string {
       return 'kafka-connect'
     case 'schema_version':
       return 'schema-registry'
+    case 'dag':
+      return 'orchestrator'
+    case 'model':
+      return 'transform'
     default:
-      return 'kafka'
+      return ''
   }
 }
 
