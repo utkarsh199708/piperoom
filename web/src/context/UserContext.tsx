@@ -131,6 +131,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         groupsMissing: me.groups_missing === true,
         solo: me.solo === true,
         verified: me.verified === true,
+        admin: me.admin === true,
       })
       setPhase('ready')
       setFailure(null)
