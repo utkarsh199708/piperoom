@@ -106,10 +106,13 @@ func (c *Client) ServerInfo(ctx context.Context) (ServerInfo, error) {
 	return info, nil
 }
 
-// AgentState reads whether SQL Server Agent is running. The service row lives in
-// sys.dm_server_services, which needs VIEW SERVER STATE; a caller without it
-// gets the wrapped error, never a false "stopped". A missing row (a named
-// instance reporting differently) reads as not running with Status "Unknown".
+// AgentState reads whether SQL Server Agent is running. sys.dm_server_services
+// (VIEW SERVER STATE) holds the agent's display name in servicename, e.g.
+// "SQL Server Agent (MSSQLSERVER)", so it is matched with a LIKE prefix. On
+// Linux containers that DMV has no agent row, so it falls back to counting
+// active agent sessions in sys.dm_exec_sessions (also VIEW SERVER STATE). A
+// caller without VIEW SERVER STATE gets the wrapped error, never a false
+// "stopped"; Status is "Unknown" only when neither read sees the agent.
 func (c *Client) AgentState(ctx context.Context) (AgentState, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -117,15 +120,31 @@ func (c *Client) AgentState(ctx context.Context) (AgentState, error) {
 	const q = `
 		SELECT COALESCE(status_desc, '')
 		FROM sys.dm_server_services
-		WHERE servicename = N'SQLSERVERAGENT'`
+		WHERE servicename LIKE N'SQL Server Agent%'`
 	var status string
 	if err := c.db.QueryRow(ctx, q).Scan(&status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return AgentState{Running: false, Status: "Unknown"}, nil
+			return c.agentStateFromSessions(ctx)
 		}
 		return AgentState{}, fmt.Errorf("sqlserver: read SQL Server Agent state: %w", err)
 	}
 	return AgentState{Running: status == "Running", Status: status}, nil
+}
+
+// agentStateFromSessions is the Linux-container fallback for AgentState: no
+// sys.dm_server_services row exists there, so it counts sessions whose
+// program_name starts with "SQLAgent - ". Zero sessions means the agent is not
+// running, with Status "Unknown".
+func (c *Client) agentStateFromSessions(ctx context.Context) (AgentState, error) {
+	const q = `SELECT COUNT(*) FROM sys.dm_exec_sessions WHERE program_name LIKE N'SQLAgent - %'`
+	var n int64
+	if err := c.db.QueryRow(ctx, q).Scan(&n); err != nil {
+		return AgentState{}, fmt.Errorf("sqlserver: read SQL Server Agent sessions: %w", err)
+	}
+	if n == 0 {
+		return AgentState{Running: false, Status: "Unknown"}, nil
+	}
+	return AgentState{Running: true, Status: "Running"}, nil
 }
 
 // DatabaseCDC reports whether CDC is enabled on one database. The database name
@@ -206,11 +225,11 @@ func (c *Client) TableCDC(ctx context.Context, tables []string) ([]TableCDC, err
 	return out, nil
 }
 
-// RoleInfo reports the capture login's grants. Exists, Disabled, DBOwner and
-// Sysadmin come from one read; Selectable overlays direct SELECT grants from
-// sys.database_permissions (permission_name 'SELECT', state granted) onto the
-// fixed-role membership. The login name is a value and is passed as a
-// parameter, never interpolated.
+// RoleInfo reports the capture login's grants. Exists, Disabled, DBOwner,
+// DataReader and Sysadmin come from one read; Selectable overlays direct and
+// schema-level SELECT grants from sys.database_permissions (permission_name
+// 'SELECT', state granted) onto the fixed-role membership. The login name is a
+// value and is passed as a parameter, never interpolated.
 func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (RoleInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -231,9 +250,17 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 		           JOIN sys.database_principals u ON u.principal_id = rm.member_principal_id
 		           JOIN sys.server_principals sp ON sp.sid = u.sid
 		           WHERE sp.name = @p1
+		       ) THEN 1 ELSE 0 END AS int),
+		       CAST(CASE WHEN EXISTS (
+		           SELECT 1
+		           FROM sys.database_role_members rm
+		           JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id AND r.name = N'db_datareader'
+		           JOIN sys.database_principals u ON u.principal_id = rm.member_principal_id
+		           JOIN sys.server_principals sp ON sp.sid = u.sid
+		           WHERE sp.name = @p1
 		       ) THEN 1 ELSE 0 END AS int)`
-	var exists, disabled, sysadmin, dbOwner int64
-	if err := c.db.QueryRow(ctx, infoQ, login).Scan(&exists, &disabled, &sysadmin, &dbOwner); err != nil {
+	var exists, disabled, sysadmin, dbOwner, dataReader int64
+	if err := c.db.QueryRow(ctx, infoQ, login).Scan(&exists, &disabled, &sysadmin, &dbOwner, &dataReader); err != nil {
 		return RoleInfo{}, fmt.Errorf("sqlserver: read role info for %q: %w", login, err)
 	}
 
@@ -243,6 +270,7 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 		Disabled:   disabled == 1,
 		Sysadmin:   sysadmin == 1,
 		DBOwner:    dbOwner == 1,
+		DataReader: dataReader == 1,
 		Selectable: make(map[string]bool, len(pairs)),
 	}
 	// A missing login has no database user to hold grants, so there is nothing
@@ -250,10 +278,11 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 	if !info.Exists {
 		return info, nil
 	}
-	// Fixed-role members can SELECT anything; direct grants add the rest.
+	// Fixed-role members can SELECT anything; direct and schema grants add the
+	// rest.
 	for _, p := range pairs {
 		key := p[0] + "." + p[1]
-		info.Selectable[key] = info.DBOwner || info.Sysadmin
+		info.Selectable[key] = info.DBOwner || info.DataReader || info.Sysadmin
 	}
 	if len(pairs) > 0 {
 		direct, err := c.directSelectGrants(ctx, login, pairs)
@@ -268,21 +297,28 @@ func (c *Client) RoleInfo(ctx context.Context, login string, tables []string) (R
 }
 
 // directSelectGrants returns the "schema.table" set on which the login's
-// database user holds a direct SELECT grant (state granted or grant-with-grant).
+// database user holds a direct SELECT grant, either on the object
+// (permission class 1) or on the schema (class 3, GRANT SELECT ON SCHEMA::x,
+// which covers every table in that schema). A schema grant has no table, so
+// its table column comes back empty and is expanded to every requested pair in
+// that schema.
 func (c *Client) directSelectGrants(ctx context.Context, login string, pairs [][2]string) (map[string]bool, error) {
 	pred, targs := tablePredicate(2, pairs)
 	args := append([]any{login}, targs...)
 	q := `
-		SELECT s.name, t.name
+		SELECT s.name, COALESCE(t.name, '')
 		FROM sys.database_permissions p
 		JOIN sys.database_principals u ON u.principal_id = p.grantee_principal_id
 		JOIN sys.server_principals sp ON sp.sid = u.sid
-		JOIN sys.tables t ON t.object_id = p.major_id
-		JOIN sys.schemas s ON s.schema_id = t.schema_id
+		LEFT JOIN sys.tables t ON p.class = 1 AND t.object_id = p.major_id
+		JOIN sys.schemas s ON s.schema_id = COALESCE(t.schema_id, p.major_id)
 		WHERE sp.name = @p1
 		  AND p.permission_name = N'SELECT'
 		  AND p.state IN (N'G', N'W')
-		  AND (` + pred + `)`
+		  AND (
+		      (p.class = 1 AND p.major_id = t.object_id AND (` + pred + `))
+		      OR (p.class = 3 AND p.major_id = s.schema_id)
+		  )`
 
 	rws, err := c.db.Query(ctx, q, args...)
 	if err != nil {
@@ -291,15 +327,27 @@ func (c *Client) directSelectGrants(ctx context.Context, login string, pairs [][
 	defer rws.Close()
 
 	out := make(map[string]bool)
+	schemaGrants := make(map[string]bool)
 	for rws.Next() {
 		var schema, table string
 		if err := rws.Scan(&schema, &table); err != nil {
 			return nil, fmt.Errorf("sqlserver: scan SELECT grant for %q: %w", login, err)
 		}
+		if table == "" {
+			schemaGrants[schema] = true
+			continue
+		}
 		out[schema+"."+table] = true
 	}
 	if err := rws.Err(); err != nil {
 		return nil, fmt.Errorf("sqlserver: read SELECT grants for %q: %w", login, err)
+	}
+	for schema := range schemaGrants {
+		for _, p := range pairs {
+			if p[0] == schema {
+				out[p[0]+"."+p[1]] = true
+			}
+		}
 	}
 	return out, nil
 }

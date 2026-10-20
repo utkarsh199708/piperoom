@@ -218,13 +218,17 @@ func TestServerInfo(t *testing.T) {
 
 func TestAgentState(t *testing.T) {
 	t.Run("running", func(t *testing.T) {
-		c := testClient(&fakeDB{qrows: []*fakeRow{{vals: []any{"Running"}}}})
+		f := &fakeDB{qrows: []*fakeRow{{vals: []any{"Running"}}}}
+		c := testClient(f)
 		st, err := c.AgentState(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !st.Running || st.Status != "Running" {
 			t.Fatalf("state = %+v", st)
+		}
+		if !strings.Contains(f.lastSQL(), "LIKE N'SQL Server Agent%'") {
+			t.Fatalf("services query does not use the LIKE form: %q", f.lastSQL())
 		}
 	})
 	t.Run("stopped", func(t *testing.T) {
@@ -237,13 +241,34 @@ func TestAgentState(t *testing.T) {
 			t.Fatalf("state = %+v", st)
 		}
 	})
-	t.Run("no row", func(t *testing.T) {
-		c := testClient(&fakeDB{}) // QueryRow defaults to ErrNoRows
+	t.Run("no service row and no sessions", func(t *testing.T) {
+		f := &fakeDB{qrows: []*fakeRow{
+			{err: sql.ErrNoRows},    // sys.dm_server_services has no agent row
+			{vals: []any{int64(0)}}, // sys.dm_exec_sessions has no agent session
+		}}
+		c := testClient(f)
 		st, err := c.AgentState(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if st.Running || st.Status != "Unknown" {
+			t.Fatalf("state = %+v", st)
+		}
+		if len(f.sqls) != 2 {
+			t.Fatalf("ran %d queries, want the session fallback", len(f.sqls))
+		}
+	})
+	t.Run("no service row but agent sessions", func(t *testing.T) {
+		f := &fakeDB{qrows: []*fakeRow{
+			{err: sql.ErrNoRows},
+			{vals: []any{int64(3)}},
+		}}
+		c := testClient(f)
+		st, err := c.AgentState(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.Running || st.Status != "Running" {
 			t.Fatalf("state = %+v", st)
 		}
 	})
@@ -347,8 +372,8 @@ func TestTableCDC(t *testing.T) {
 func TestRoleInfo(t *testing.T) {
 	t.Run("full grants", func(t *testing.T) {
 		f := &fakeDB{
-			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(1)}}}, // exists, not disabled, not sysadmin, db_owner
-			rows:  []*fakeRows{{vals: [][]any{{"dbo", "orders"}}}},                   // direct SELECT on orders
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(1), int64(0)}}}, // exists, not disabled, not sysadmin, db_owner, not datareader
+			rows:  []*fakeRows{{vals: [][]any{{"dbo", "orders"}}}},                             // direct SELECT on orders
 		}
 		c := testClient(f)
 		info, err := c.RoleInfo(context.Background(), "piperoom_capture", []string{"dbo.orders", "dbo.other"})
@@ -363,9 +388,25 @@ func TestRoleInfo(t *testing.T) {
 			t.Fatalf("selectable = %+v", info.Selectable)
 		}
 	})
+	t.Run("db_datareader", func(t *testing.T) {
+		f := &fakeDB{
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(1)}}}, // datareader only
+		}
+		c := testClient(f)
+		info, err := c.RoleInfo(context.Background(), "reader", []string{"dbo.orders", "dbo.other"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.DataReader {
+			t.Fatalf("info = %+v", info)
+		}
+		if !info.Selectable["dbo.orders"] || !info.Selectable["dbo.other"] {
+			t.Fatalf("selectable = %+v", info.Selectable)
+		}
+	})
 	t.Run("direct grant only", func(t *testing.T) {
 		f := &fakeDB{
-			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0)}}}, // exists, no fixed roles
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0)}}}, // exists, no fixed roles
 			rows:  []*fakeRows{{vals: [][]any{{"dbo", "orders"}}}},
 		}
 		c := testClient(f)
@@ -377,8 +418,25 @@ func TestRoleInfo(t *testing.T) {
 			t.Fatalf("selectable = %+v", info.Selectable)
 		}
 	})
+	t.Run("schema grant", func(t *testing.T) {
+		f := &fakeDB{
+			qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0)}}},
+			rows:  []*fakeRows{{vals: [][]any{{"dbo", ""}}}}, // GRANT SELECT ON SCHEMA::dbo
+		}
+		c := testClient(f)
+		info, err := c.RoleInfo(context.Background(), "reader", []string{"dbo.orders", "dbo.other", "sales.items"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.Selectable["dbo.orders"] || !info.Selectable["dbo.other"] {
+			t.Fatalf("schema grant should cover every dbo table: %+v", info.Selectable)
+		}
+		if info.Selectable["sales.items"] {
+			t.Fatalf("schema grant leaked into sales: %+v", info.Selectable)
+		}
+	})
 	t.Run("no login", func(t *testing.T) {
-		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(0), int64(0), int64(0), int64(0)}}}}
+		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(0), int64(0), int64(0), int64(0), int64(0)}}}}
 		c := testClient(f)
 		info, err := c.RoleInfo(context.Background(), "ghost", []string{"dbo.orders"})
 		if err != nil {
@@ -392,7 +450,7 @@ func TestRoleInfo(t *testing.T) {
 		}
 	})
 	t.Run("empty tables", func(t *testing.T) {
-		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(1), int64(0)}}}}
+		f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(1), int64(0), int64(1), int64(0), int64(0)}}}}
 		c := testClient(f)
 		info, err := c.RoleInfo(context.Background(), "sa", nil)
 		if err != nil {
@@ -428,10 +486,10 @@ func TestRoleInfo(t *testing.T) {
 func TestAllQueriesAreSelects(t *testing.T) {
 	f := &fakeDB{
 		qrows: []*fakeRow{
-			{vals: []any{"16.0.0.0", "Developer", ""}},            // ServerInfo
-			{vals: []any{"Running"}},                              // AgentState
-			{vals: []any{true}},                                   // DatabaseCDC
-			{vals: []any{int64(1), int64(0), int64(0), int64(0)}}, // RoleInfo
+			{vals: []any{"16.0.0.0", "Developer", ""}},                      // ServerInfo
+			{vals: []any{"Running"}},                                        // AgentState
+			{vals: []any{true}},                                             // DatabaseCDC
+			{vals: []any{int64(1), int64(0), int64(0), int64(0), int64(0)}}, // RoleInfo
 		},
 		rows: []*fakeRows{
 			{vals: [][]any{{"dbo", "orders", true, true}}}, // TableCDC

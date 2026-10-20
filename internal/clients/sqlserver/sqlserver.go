@@ -72,7 +72,7 @@ type ServerInfo struct {
 // AgentState reports whether SQL Server Agent is running.
 type AgentState struct {
 	Running bool   `json:"running"`
-	Status  string `json:"status"` // sys.dm_server_services.status_desc; "Unknown" when the service row is absent
+	Status  string `json:"status"` // sys.dm_server_services.status_desc; "Unknown" when neither the service row nor an agent session is seen
 }
 
 // TableCDC reports CDC enablement and the primary key for one table.
@@ -85,14 +85,16 @@ type TableCDC struct {
 
 // RoleInfo reports the capture login's grants in the client's database.
 type RoleInfo struct {
-	Login    string `json:"login"`
-	Exists   bool   `json:"exists"`   // a server principal (login) of that name exists
-	Disabled bool   `json:"disabled"` // the login exists but is disabled
-	DBOwner  bool   `json:"db_owner"` // the login's database user is a member of db_owner
-	Sysadmin bool   `json:"sysadmin"` // the login is a member of sysadmin
+	Login      string `json:"login"`
+	Exists     bool   `json:"exists"`        // a server principal (login) of that name exists
+	Disabled   bool   `json:"disabled"`      // the login exists but is disabled
+	DBOwner    bool   `json:"db_owner"`      // the login's database user is a member of db_owner
+	DataReader bool   `json:"db_datareader"` // the login's database user is a member of db_datareader
+	Sysadmin   bool   `json:"sysadmin"`      // the login is a member of sysadmin
 	// Selectable maps each table to whether the login's database user has SELECT
-	// (a direct grant, or inherited from db_owner/sysadmin). SELECT granted only
-	// through a custom role is not traced.
+	// (a direct grant, a schema-level grant, or inherited from
+	// db_owner/db_datareader/sysadmin). SELECT granted only through a custom
+	// role is not traced.
 	Selectable map[string]bool `json:"selectable"`
 }
 
