@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"piperoom/internal/clients"
 )
@@ -171,6 +171,19 @@ func TestReplicaSetStatusFallsBackWhenGetStatusFails(t *testing.T) {
 	}
 }
 
+func TestReplicaSetStatusPropagatesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f := &fakeRunner{
+		replies: map[string]bson.M{"admin.isMaster": primaryRS()},
+		fail:    map[string]error{"admin.replSetGetStatus": context.Canceled},
+	}
+	_, err := newClient(f).ReplicaSetStatus(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
 func TestChangeStreamSupport(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -236,7 +249,8 @@ func TestRoleInfo(t *testing.T) {
 	f := &fakeRunner{replies: map[string]bson.M{"admin.connectionStatus": connStatusWithPrivileges()}}
 	c := newClient(f)
 
-	ri, err := c.RoleInfo(context.Background(), "read", []string{"orders.customers", "orders.missing"})
+	// The authenticated user, named bare.
+	ri, err := c.RoleInfo(context.Background(), "debezium", []string{"orders.customers", "orders.missing"})
 	if err != nil {
 		t.Fatalf("RoleInfo: %v", err)
 	}
@@ -253,8 +267,70 @@ func TestRoleInfo(t *testing.T) {
 		t.Fatalf("Selectable = %+v", ri.Selectable)
 	}
 
-	// A role the user does not hold.
-	ri, err = c.RoleInfo(context.Background(), "dbAdmin", nil)
+	// The authenticated user, named authDb.user.
+	ri, err = c.RoleInfo(context.Background(), "orders.debezium", nil)
+	if err != nil {
+		t.Fatalf("RoleInfo: %v", err)
+	}
+	if !ri.Exists {
+		t.Fatalf("RoleInfo = %+v, want Exists for orders.debezium", ri)
+	}
+
+	// A user the connection is not authenticated as, found via usersInfo.
+	f2 := &fakeRunner{replies: map[string]bson.M{
+		"admin.connectionStatus": connStatusWithPrivileges(),
+		"admin.usersInfo": {
+			"users": bson.A{bson.M{
+				"user": "alice",
+				"db":   "admin",
+				"inheritedPrivileges": bson.A{
+					bson.M{"resource": bson.M{"db": "app", "collection": ""}, "actions": bson.A{"find"}},
+					bson.M{"resource": bson.M{"db": "local", "collection": "oplog.rs"}, "actions": bson.A{"find"}},
+				},
+			}},
+		},
+	}}
+	ri, err = newClient(f2).RoleInfo(context.Background(), "alice", []string{"app.things", "otherdb.things"})
+	if err != nil {
+		t.Fatalf("RoleInfo: %v", err)
+	}
+	if !ri.Exists || !ri.CanLogin {
+		t.Fatalf("RoleInfo = %+v, want Exists/CanLogin for alice", ri)
+	}
+	if !ri.Replication {
+		t.Fatalf("RoleInfo = %+v, want Replication (oplog read)", ri)
+	}
+	if !ri.Selectable["app.things"] || ri.Selectable["otherdb.things"] {
+		t.Fatalf("Selectable = %+v", ri.Selectable)
+	}
+
+	// A user named authDb.user, found via usersInfo against that auth db.
+	f2b := &fakeRunner{replies: map[string]bson.M{
+		"admin.connectionStatus": connStatusWithPrivileges(),
+		"app.usersInfo": {
+			"users": bson.A{bson.M{
+				"user": "alice",
+				"db":   "app",
+				"inheritedPrivileges": bson.A{
+					bson.M{"resource": bson.M{"db": "app", "collection": "things"}, "actions": bson.A{"find"}},
+				},
+			}},
+		},
+	}}
+	ri, err = newClient(f2b).RoleInfo(context.Background(), "app.alice", []string{"app.things", "app.other"})
+	if err != nil {
+		t.Fatalf("RoleInfo: %v", err)
+	}
+	if !ri.Exists || !ri.Selectable["app.things"] || ri.Selectable["app.other"] {
+		t.Fatalf("RoleInfo = %+v, want Exists and only app.things selectable", ri)
+	}
+
+	// A user nobody holds: usersInfo finds nothing.
+	f3 := &fakeRunner{replies: map[string]bson.M{
+		"admin.connectionStatus": connStatusWithPrivileges(),
+		"admin.usersInfo":        {"users": bson.A{}},
+	}}
+	ri, err = newClient(f3).RoleInfo(context.Background(), "ghost", nil)
 	if err != nil {
 		t.Fatalf("RoleInfo: %v", err)
 	}
@@ -263,14 +339,33 @@ func TestRoleInfo(t *testing.T) {
 	}
 }
 
-func TestRoleInfoMatchesDBDotRole(t *testing.T) {
-	f := &fakeRunner{replies: map[string]bson.M{"admin.connectionStatus": connStatusWithPrivileges()}}
-	ri, err := newClient(f).RoleInfo(context.Background(), "orders.read", nil)
-	if err != nil {
-		t.Fatalf("RoleInfo: %v", err)
+func TestCan(t *testing.T) {
+	tests := []struct {
+		name  string
+		privs []privilege
+		db    string
+		coll  string
+		want  bool
+	}{
+		{"readAnyDatabase matches any collection", []privilege{{actions: []string{"find", "changeStream"}}}, "orders", "customers", true},
+		{"readAnyDatabase matches the oplog", []privilege{{actions: []string{"find", "changeStream"}}}, "local", "oplog.rs", true},
+		{"readAnyDatabase excludes system collections", []privilege{{actions: []string{"find", "changeStream"}}}, "admin", "system.users", false},
+		{"read on a db matches its collections", []privilege{{db: "orders", actions: []string{"find"}}}, "orders", "customers", true},
+		{"read on a db does not match other dbs", []privilege{{db: "orders", actions: []string{"find"}}}, "local", "oplog.rs", false},
+		{"read on a db excludes system collections", []privilege{{db: "orders", actions: []string{"find"}}}, "orders", "system.profile", false},
+		{"root anyResource matches anything", []privilege{{anyResource: true, actions: []string{"anyAction"}}}, "local", "oplog.rs", true},
+		{"anyResource without anyAction does not match", []privilege{{anyResource: true, actions: []string{"find"}}}, "orders", "customers", false},
+		{"cluster-only role matches no collection", []privilege{{cluster: true, actions: []string{"anyAction"}}}, "orders", "customers", false},
+		{"specific collection matches exactly", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find"}}}, "local", "oplog.rs", true},
+		{"specific collection does not match siblings", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find"}}}, "local", "startup_log", false},
 	}
-	if !ri.Exists {
-		t.Fatalf("RoleInfo = %+v, want Exists for orders.read", ri)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ai := authInfo{privileges: tt.privs}
+			if got := ai.can(tt.db, tt.coll); got != tt.want {
+				t.Fatalf("can(%q, %q) = %v, want %v (privs %+v)", tt.db, tt.coll, got, tt.want, tt.privs)
+			}
+		})
 	}
 }
 
@@ -341,5 +436,21 @@ func TestRedactErr(t *testing.T) {
 	}
 	if redactErr(nil, uri) != nil {
 		t.Fatal("redactErr(nil) must be nil")
+	}
+}
+
+func TestRedactErrDecodedPassword(t *testing.T) {
+	// The URI carries the percent-encoded password; the driver error carries
+	// the decoded form. Both must be redacted.
+	uri := "mongodb://debezium:sek%40ret@h:27017/orders"
+	inner := errors.New("connect failed: mongodb://debezium:sek@ret@h:27017/orders: auth failed")
+	got := redactErr(inner, uri)
+	for _, leak := range []string{"sek%40ret", "sek@ret"} {
+		if strings.Contains(got.Error(), leak) {
+			t.Fatalf("redacted error still leaks %q: %v", leak, got)
+		}
+	}
+	if !errors.Is(got, inner) {
+		t.Fatal("redacted error lost the wrapped error")
 	}
 }

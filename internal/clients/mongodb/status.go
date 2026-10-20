@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // ReplicaSetStatus is the replica set state of the source as seen from the
@@ -65,6 +65,9 @@ func (c *Client) ReplicaSetStatus(ctx context.Context) (ReplicaSetStatus, error)
 	rs := ReplicaSetStatus{IsReplicaSet: true, SetName: setName, State: stateFromHello(h)}
 	g, err := c.cmd(ctx, "admin", bson.D{{Key: "replSetGetStatus", Value: 1}})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ReplicaSetStatus{}, fmt.Errorf("mongodb: replSetGetStatus: %w", ctxErr)
+		}
 		// Still report what isMaster told us; the member list is empty.
 		return rs, nil
 	}

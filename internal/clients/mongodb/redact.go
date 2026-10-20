@@ -1,6 +1,9 @@
 package mongodb
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // splitURI splits a MongoDB connection string into scheme (including ://),
 // authority and the rest (database and options). It is a plain string split:
@@ -71,12 +74,21 @@ func (e *redactedError) Error() string {
 func (e *redactedError) Unwrap() error { return e.err }
 
 // redactErr wraps err so a driver error that echoes the connection string
-// cannot leak the password. It returns err unchanged when err is nil.
+// cannot leak the password. It redacts both the raw password and its
+// percent-decoded form, so a message carrying either is covered. It returns
+// err unchanged when err is nil.
 func redactErr(err error, uri string) error {
 	if err == nil {
 		return nil
 	}
-	return &redactedError{err: err, secrets: []string{passwordOf(uri)}}
+	var secrets []string
+	if pw := passwordOf(uri); pw != "" {
+		secrets = append(secrets, pw)
+		if dec, derr := url.PathUnescape(pw); derr == nil && dec != pw {
+			secrets = append(secrets, dec)
+		}
+	}
+	return &redactedError{err: err, secrets: secrets}
 }
 
 var _ error = (*redactedError)(nil)

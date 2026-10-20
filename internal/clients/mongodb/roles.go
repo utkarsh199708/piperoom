@@ -3,8 +3,9 @@ package mongodb
 import (
 	"context"
 	"fmt"
+	"strings"
 
-	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
 // Role is one role the authenticated user holds, as connectionStatus reports it.
@@ -13,11 +14,16 @@ type Role struct {
 	DB   string `json:"db,omitempty"`
 }
 
-// privilege is one effective privilege from connectionStatus.authInfo.
+// privilege is one effective privilege from connectionStatus.authInfo (or one
+// inherited privilege from usersInfo). A privilege names a resource as either a
+// specific db.collection, an empty db (any database) with an empty collection
+// (any non-system collection), a cluster resource, or the special anyResource.
 type privilege struct {
-	db         string // resource.db ("" = any resource when collection is also "")
-	collection string // resource.collection ("" = the whole db)
-	actions    []string
+	db          string // resource.db ("" = any database when anyResource is unset)
+	collection  string // resource.collection ("" = every non-system collection in db)
+	anyResource bool   // resource.anyResource: any resource (cluster excepted)
+	cluster     bool   // resource.cluster: a cluster-level resource
+	actions     []string
 }
 
 // authInfo is the connectionStatus.authInfo document.
@@ -67,21 +73,66 @@ func (c *Client) auth(ctx context.Context) (authInfo, error) {
 			ai.roles = append(ai.roles, Role{Role: stringOf(m["role"]), DB: stringOf(m["db"])})
 		}
 	}
-	if privs, ok := asSlice(doc["authenticatedUserPrivileges"]); ok {
-		for _, p := range privs {
-			m, ok := asMap(p)
-			if !ok {
-				continue
-			}
-			res, _ := asMap(m["resource"])
-			ai.privileges = append(ai.privileges, privilege{
-				db:         stringOf(res["db"]),
-				collection: stringOf(res["collection"]),
-				actions:    stringSlice(m["actions"]),
-			})
-		}
-	}
+	ai.privileges = parsePrivileges(doc["authenticatedUserPrivileges"])
 	return ai, nil
+}
+
+// userInfo reads another user's effective privileges with the read-only
+// usersInfo command (which requires the viewUser action). found reports whether
+// the user exists. A bare user (no auth database) is looked up in the admin
+// database, where MongoDB service accounts live by convention.
+func (c *Client) userInfo(ctx context.Context, user, authDB string) (authInfo, bool, error) {
+	spec := any(user)
+	db := "admin"
+	if authDB != "" {
+		spec = bson.M{"user": user, "db": authDB}
+		db = authDB
+	}
+	reply, err := c.cmd(ctx, db, bson.D{
+		{Key: "usersInfo", Value: spec},
+		{Key: "showPrivileges", Value: true},
+	})
+	if err != nil {
+		return authInfo{}, false, fmt.Errorf("mongodb: usersInfo: %w", err)
+	}
+	users, ok := asSlice(reply["users"])
+	if !ok || len(users) == 0 {
+		return authInfo{}, false, nil
+	}
+	u, ok := asMap(users[0])
+	if !ok {
+		return authInfo{}, false, fmt.Errorf("mongodb: usersInfo: unexpected users element")
+	}
+	return authInfo{
+		user:       stringOf(u["user"]),
+		db:         stringOf(u["db"]),
+		privileges: parsePrivileges(u["inheritedPrivileges"]),
+	}, true, nil
+}
+
+// parsePrivileges converts a decoded privileges array (the
+// authenticatedUserPrivileges or inheritedPrivileges field) into []privilege.
+func parsePrivileges(v any) []privilege {
+	raw, ok := asSlice(v)
+	if !ok {
+		return nil
+	}
+	out := make([]privilege, 0, len(raw))
+	for _, p := range raw {
+		m, ok := asMap(p)
+		if !ok {
+			continue
+		}
+		res, _ := asMap(m["resource"])
+		out = append(out, privilege{
+			db:          stringOf(res["db"]),
+			collection:  stringOf(res["collection"]),
+			anyResource: asBool(res["anyResource"]),
+			cluster:     asBool(res["cluster"]),
+			actions:     stringSlice(m["actions"]),
+		})
+	}
+	return out
 }
 
 // canReadOplog reports whether the user can read the oplog (local.oplog.rs),
@@ -91,20 +142,30 @@ func (ai authInfo) canReadOplog() bool {
 }
 
 // can reports whether the user holds find, changeStream or anyAction on
-// db.col (or on the whole db, or on any resource).
+// db.coll. A privilege matches when it names db.coll exactly, names the whole
+// database (collection == "" matches any non-system collection), names any
+// database (db == ""), or grants anyResource with anyAction. Cluster-level
+// privileges never grant collection read access.
 func (ai authInfo) can(db, coll string) bool {
 	for _, p := range ai.privileges {
-		if p.db == "" && p.collection == "" {
-			// anyResource (e.g. the root role).
+		if p.cluster {
+			continue
+		}
+		if p.anyResource {
 			if hasAction(p.actions, "anyAction") {
 				return true
 			}
 			continue
 		}
-		if p.db != db {
+		if p.db != "" && p.db != db {
 			continue
 		}
-		if p.collection != "" && p.collection != coll {
+		if p.collection != "" {
+			if p.collection != coll {
+				continue
+			}
+		} else if strings.HasPrefix(coll, "system.") {
+			// collection == "" covers every non-system collection in the db.
 			continue
 		}
 		if hasAction(p.actions, "find", "changeStream", "anyAction") {

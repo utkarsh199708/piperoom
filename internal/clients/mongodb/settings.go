@@ -112,23 +112,34 @@ func (c *Client) TableReplication(ctx context.Context, tables []string) ([]Table
 	return nil, clients.ErrNotSupported
 }
 
-// RoleInfo reports the authenticated user's roles and what they can read.
-// role matches a Role entry by name or by "db.role". Replication is whether
-// the user can read the oplog; Selectable is per-collection read ability for
-// the requested tables (a MongoDB "table" is a "db.collection").
+// RoleInfo reports what the named user can read. role is a MongoDB user, as
+// either the bare user name or "authDb.user". When it names the authenticated
+// user the connectionStatus privileges are used; otherwise the user's
+// inheritedPrivileges are read with usersInfo (requires viewUser). Exists is
+// whether the user was found; Replication is whether they can read the oplog;
+// Selectable is per-collection read ability for the requested tables (a
+// MongoDB "table" is a "db.collection").
 func (c *Client) RoleInfo(ctx context.Context, role string, tables []string) (RoleInfo, error) {
+	user, authDB := splitUser(role)
 	ai, err := c.auth(ctx)
 	if err != nil {
 		return RoleInfo{}, err
 	}
-	ri := RoleInfo{Role: role, CanLogin: ai.user != ""}
-	for _, r := range ai.roles {
-		if r.Role == role || r.DB+"."+r.Role == role {
-			ri.Exists = true
-			break
+	ri := RoleInfo{Role: role}
+	switch {
+	case user != "" && user == ai.user && (authDB == "" || authDB == ai.db):
+		// role names the authenticated user; connectionStatus has their
+		// effective privileges.
+		ri.Exists = true
+	default:
+		ui, found, err := c.userInfo(ctx, user, authDB)
+		if err != nil {
+			return RoleInfo{}, err
 		}
+		ai, ri.Exists = ui, found
 	}
-	ri.Replication = ai.canReadOplog()
+	ri.CanLogin = ri.Exists
+	ri.Replication = ri.Exists && ai.canReadOplog()
 	if len(tables) > 0 {
 		ri.Selectable = make(map[string]bool, len(tables))
 		for _, t := range tables {
@@ -154,4 +165,13 @@ func splitCollection(name string) (db, coll string) {
 		return name[:i], name[i+1:]
 	}
 	return "", name
+}
+
+// splitUser splits "authDb.user" into its two parts; a bare name is a user in
+// an unspecified auth database.
+func splitUser(name string) (user, authDB string) {
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		return name[i+1:], name[:i]
+	}
+	return name, ""
 }

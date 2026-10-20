@@ -1,6 +1,6 @@
 package mongodb
 
-import "go.mongodb.org/mongo-driver/bson"
+import "go.mongodb.org/mongo-driver/v2/bson"
 
 // Helpers to read values out of a decoded command reply (bson.M, whose nested
 // documents are bson.M and arrays are bson.A).

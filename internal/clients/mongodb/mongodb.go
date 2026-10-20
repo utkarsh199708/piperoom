@@ -6,11 +6,14 @@
 // needs (read on the captured databases, and find/changeStream on
 // local.oplog.rs for the cursor mode).
 //
-// Driver: go.mongodb.org/mongo-driver/mongo v1.17.10, the official MongoDB Go
-// driver (see the PR's "New dependencies"). Each call runs under its own 10 s
-// deadline (defaultTimeout). The connection string may carry credentials, so it
-// is never put into an error message or log line: errors are wrapped through
-// redactErr and any logging uses redactURI.
+// Driver: go.mongodb.org/mongo-driver/v2 v2.9.2, the official MongoDB Go
+// driver (see the PR's "New dependencies"). v2's mongo.Connect takes no ctx
+// and v2 decodes nested documents in a bson.M as bson.D by default, so the
+// client opts in to options.BSONOptions{DefaultDocumentM: true} to keep the
+// asMap/asSlice helpers decoding documents into bson.M. Each call runs under
+// its own 10 s deadline (defaultTimeout). The connection string may carry
+// credentials, so it is never put into an error message or log line: errors
+// are wrapped through redactErr and any logging uses redactURI.
 //
 // The client implements SourceSettingsReader, a local mirror of the interface
 // proposed for clients.SourceSettingsReader in tasks/Q-board.md Q2a (it is not
@@ -27,10 +30,10 @@ import (
 	"fmt"
 	"time"
 
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 // defaultTimeout is the per-call deadline (10 s per call, AGENTS.md rule 4).
@@ -72,15 +75,18 @@ func (d *driverClient) disconnect(ctx context.Context) error {
 func New(ctx context.Context, uri string) (*Client, error) {
 	opts := options.Client().ApplyURI(uri).
 		SetConnectTimeout(defaultTimeout).
-		SetServerSelectionTimeout(defaultTimeout)
-	cli, err := mongo.Connect(ctx, opts)
+		SetServerSelectionTimeout(defaultTimeout).
+		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true})
+	cli, err := mongo.Connect(opts)
 	if err != nil {
 		return nil, fmt.Errorf("mongodb: connect: %w", redactErr(err, uri))
 	}
 	pctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 	if err := cli.Ping(pctx, readpref.Primary()); err != nil {
-		_ = cli.Disconnect(ctx)
+		dctx, dcancel := context.WithTimeout(ctx, defaultTimeout)
+		_ = cli.Disconnect(dctx)
+		dcancel()
 		return nil, fmt.Errorf("mongodb: ping: %w", redactErr(err, uri))
 	}
 	return &Client{run: &driverClient{cli: cli}}, nil
