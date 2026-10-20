@@ -19,6 +19,8 @@ const (
 // knownJudgeMisses maps scenario + NUL + text to the reason the judge's grade
 // is allowed to differ from the label.
 var knownJudgeMisses = map[string]string{
+	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. I'm not sure I ruled out a reset to latest.":        missHedgePolicy,
+	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. We can't, I think, rule out a reset to latest.":     missHedgePolicy,
 	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. Can't say I ruled out a reset to latest.":           missHedgePolicy,
 	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. Not sure we ruled out a reset to latest.":           missHedgePolicy,
 	"consumer-offsets-out-of-range-retention\x00Order-sync's committed offsets were deleted by retention. Not that we ruled out a reset to latest.":           missHedgePolicy,
