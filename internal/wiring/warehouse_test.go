@@ -33,7 +33,7 @@ func fakeOpeners(calls *[]string, urls *[]string) warehouseOpeners {
 			return whFake{kind: kind}, func() { *calls = append(*calls, "close-"+kind) }, nil
 		}
 	}
-	return warehouseOpeners{postgres: mk("postgres"), snowflake: mk("snowflake")}
+	return warehouseOpeners{postgres: mk("postgres"), snowflake: mk("snowflake"), bigquery: mk("bigquery"), databricks: mk("databricks"), clickhouse: mk("clickhouse")}
 }
 
 func TestOpenWarehousePicksClientByKind(t *testing.T) {
@@ -70,14 +70,14 @@ func TestOpenWarehousePicksClientByKind(t *testing.T) {
 }
 
 func TestOpenWarehouseRejectsUnknownKind(t *testing.T) {
-	for _, kind := range []string{"bigquery", "mysql", "postgresql", "snow flake"} {
+	for _, kind := range []string{"oracle", "mysql", "postgresql", "snow flake", "redshift"} {
 		var calls, urls []string
 		_, _, err := openWarehouse(context.Background(), config.Config{WarehouseKind: kind}, fakeOpeners(&calls, &urls))
 		if err == nil {
 			t.Fatalf("kind %q: want error, got nil", kind)
 		}
 		msg := err.Error()
-		for _, want := range []string{"WAREHOUSE_KIND", kind, WarehousePostgres, WarehouseSnowflake} {
+		for _, want := range append([]string{"WAREHOUSE_KIND", kind}, warehouseKinds...) {
 			if !strings.Contains(msg, want) {
 				t.Errorf("kind %q: error %q does not mention %q", kind, msg, want)
 			}

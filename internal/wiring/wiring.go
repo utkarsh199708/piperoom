@@ -42,8 +42,9 @@ const (
 type Wired struct {
 	Source    clients.SourceDB
 	Warehouse clients.Warehouse
-	// WarehouseKind is the normalised WAREHOUSE_KIND ("postgres" or
-	// "snowflake"). Empty means postgres.
+	// WarehouseKind is the normalised WAREHOUSE_KIND (one of
+	// warehouseKinds: postgres, snowflake, bigquery, databricks or
+	// clickhouse). Empty means postgres.
 	WarehouseKind string
 	Connect       clients.ConnectClient
 	Kafka         clients.KafkaAdmin
