@@ -30,6 +30,10 @@ on:
         description: "Agent turns per episode (caps the cost of a runaway episode)"
         type: string
         default: "25"
+      judge_fill:
+        description: "Refill evals/judgecache verdicts for the dispatched branch (PAID, ~$0.01 per call) and push the cache back to that branch; runs no episodes"
+        type: boolean
+        default: false
   # Nightly full run (75 episodes) is off while the API budget is small; turn it
   # back on, or make it a cheap canary, once the cost per episode is measured.
   # schedule:
@@ -59,9 +63,10 @@ jobs:
     # The pull_request path stays off until evals/baseline/default.json is on
     # main (tasks/L1-learn-from-rooms.md, L1c): without a baseline a PR run has
     # nothing to compare with and would only spend money. A later C1 PR removes
-    # the `false &&`.
+    # the `false &&`. A judge_fill dispatch runs the judge-fill jobs below
+    # instead of episodes.
     if: >-
-      github.event_name != 'pull_request' ||
+      (github.event_name != 'pull_request' && !inputs.judge_fill) ||
       (false && github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - name: Check for the API key
@@ -217,3 +222,202 @@ jobs:
             echo "::error::misses per run grew from ${base_miss} to ${cand_miss} over ${n_shared} shared scenario(s)."
             exit 1
           fi
+
+  # judge_fill: record the LLM-judge verdicts a label change needs
+  # (evals/cmd/evalrun/judgefill.go), because the API key exists only in the
+  # "evals" environment. Two jobs, so the API key and a write token are never in
+  # the same job: this one holds the key and a read-only token and hands the
+  # cache over as an artifact; push-judgecache holds the write token and no secret.
+  judge-fill:
+    name: judge-fill
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: evals
+    if: github.event_name == 'workflow_dispatch' && inputs.judge_fill
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      tests_ok: ${{ steps.test.outputs.ok }}
+      # The commit the fill was tested on; push-judgecache pushes only onto it.
+      sha: ${{ github.sha }}
+    steps:
+      # The cache is pushed back to the dispatched ref: only a branch, never main
+      # (main changes only through a reviewed merge).
+      - name: Check the ref
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          case "$REF" in
+            refs/heads/main) echo "::error::judge_fill refuses main; dispatch it on the branch whose labels changed."; exit 1;;
+            refs/heads/?*) ;;
+            *) echo "::error::judge_fill needs a branch, not ${REF}."; exit 1;;
+          esac
+      - name: Check for the API key
+        id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::ANTHROPIC_API_KEY is not set in the evals environment; skipping the judge fill."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Checkout
+        if: steps.key.outputs.run == 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        if: steps.key.outputs.run == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      # The dry run makes no call and needs no key: the log shows how many
+      # verdicts are missing and what they cost before any money is spent.
+      - name: Estimate the fill
+        if: steps.key.outputs.run == 'true'
+        run: go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run
+      # A relabel of a few scenarios needs tens of judge calls; the hard cap of
+      # 60 bounds what one approved run can spend. A bigger refill is dispatched
+      # again: each run fills only the verdicts still missing.
+      - name: Fill the judge cache
+        if: steps.key.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          go build -tags claude -o "$RUNNER_TEMP/evalrun" ./evals/cmd/evalrun
+          "$RUNNER_TEMP/evalrun" -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 60
+      # Keep the result instead of failing here: a refill often changes which
+      # texts the known-judge-miss pins must list, and the pins can only be
+      # updated after seeing the verdicts. The paid cache is still uploaded and
+      # pushed; the Gate step fails the job after the upload.
+      - name: Test the evals
+        id: test
+        if: steps.key.outputs.run == 'true'
+        run: |
+          set +e
+          go test ./evals/...
+          if [ "$?" = "0" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check for new verdicts
+        id: diff
+        if: steps.key.outputs.run == 'true'
+        run: |
+          if [ -n "$(git status --porcelain evals/judgecache)" ]; then
+            git status --porcelain evals/judgecache
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::evals/judgecache is unchanged; nothing to push."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload the judge cache
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: judgecache
+          path: evals/judgecache/
+          retention-days: 3
+      - name: Gate
+        if: steps.key.outputs.run == 'true'
+        env:
+          TESTS_OK: ${{ steps.test.outputs.ok }}
+        run: |
+          if [ "$TESTS_OK" != "true" ]; then
+            echo "::error::go test ./evals/... failed after the fill; the cache is pushed to the branch anyway (if it changed): update the known-judge-miss pins from the test log above before merging."
+            exit 1
+          fi
+
+  # Pushes the filled cache to the dispatched branch. No environment and no
+  # secret: this job sees only the artifact and a contents:write token.
+  # It runs even when judge-fill failed on its tests (run 39320779238 dropped
+  # 18 paid verdicts that way): the branch's own CI is the merge gate, so a
+  # cache that fails the tests on a non-main branch is safe. It never runs when
+  # the fill itself failed: the steps after it then skip, "Check for new
+  # verdicts" included, so `changed` is empty and this condition is false.
+  push-judgecache:
+    name: push-judgecache
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: judge-fill
+    if: ${{ !cancelled() && needs.judge-fill.outputs.changed == 'true' }}
+    permissions:
+      contents: write
+    steps:
+      - name: Check the ref
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          case "$REF" in
+            refs/heads/main) echo "::error::judge_fill refuses to push to main."; exit 1;;
+            refs/heads/?*) ;;
+            *) echo "::error::judge_fill needs a branch, not ${REF}."; exit 1;;
+          esac
+      # The token stays in the checkout for the push below; this is the only
+      # job of the workflow that can write.
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: true
+      # The verdicts were tested on judge-fill's commit. Pushing only onto that
+      # commit makes the push a fast-forward of what was tested; a concurrent
+      # push to the branch makes the run fail instead of clobbering it.
+      - name: Check the branch did not move
+        env:
+          TESTED: ${{ needs.judge-fill.outputs.sha }}
+        run: |
+          head="$(git rev-parse HEAD)"
+          if [ "$head" != "$TESTED" ]; then
+            echo "::error::${GITHUB_REF_NAME} moved from ${TESTED} to ${head} during the fill; dispatch judge_fill again"
+            exit 1
+          fi
+      - name: Download the judge cache
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: judgecache
+          path: evals/judgecache/
+      # The commit must hold recorded verdicts only: anything else would land
+      # on the branch without review.
+      - name: Check the changed paths
+        id: paths
+        run: |
+          git add -A
+          others="$(git diff --cached --name-only | grep -v '^evals/judgecache/' || true)"
+          if [ -n "$others" ]; then
+            echo "::error::the judgecache artifact changes paths outside evals/judgecache/:"
+            printf '%s\n' "$others"
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo "::notice::the branch already has these verdicts; nothing to push."
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --cached --stat
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Commit and push
+        if: steps.paths.outputs.push == 'true'
+        env:
+          TESTS_OK: ${{ needs.judge-fill.outputs.tests_ok }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          msg=(-m "evals: refill judge verdicts (evals-live judge_fill)")
+          if [ "$TESTS_OK" != "true" ]; then
+            note="go test ./evals/... failed after this fill; update the known-judge-miss pins from the judge-fill log before merging."
+            echo "::warning::${note}"
+            msg+=(-m "$note")
+          fi
+          git commit "${msg[@]}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          # A push made with GITHUB_TOKEN starts no workflow run.
+          echo "::notice::Pushed the refilled judge cache to ${GITHUB_REF_NAME}. A GITHUB_TOKEN push triggers no CI: re-run CI on the branch (or the next push runs it)."

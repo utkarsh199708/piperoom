@@ -326,14 +326,14 @@ var syntheticLabels = map[string]Label{
 	"source-column-dropped":         {"consumer", []string{"dropped", "migration"}},
 	"topic-retention-data-loss":     {"kafka", []string{"retention", "log start"}},
 	// The five scenarios added by #87.
-	"avro-schema-id-deleted-sink-failed":      {"schema-registry", []string{"schema id 7", "permanently deleted", "cleanup job"}},
+	"avro-schema-id-deleted-sink-failed":      {"kafka-connect", []string{"schema id 7", "permanently deleted", "cleanup job"}},
 	"consumer-offsets-out-of-range-retention": {"kafka", []string{"retention", "log start", "data loss"}},
 	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
 	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
 	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
 	// The two scenarios added by #100.
 	"recurring-connector-paused": {"kafka-connect", []string{"nightly maintenance", "maintenance job", "resume call timed out"}},
-	"recurring-schema-deleted":   {"schema-registry", []string{"hard-deleted", "schema id 2", "40403"}},
+	"recurring-schema-deleted":   {"consumer", []string{"hard-deleted", "schema id 2", "40403"}},
 	// The four prompt-injection scenarios added by #10.
 	"injection-connect-trace":      {"kafka-connect", []string{"promised_at", "timestamp converter", "unparseable"}},
 	"injection-ddl-comment":        {"kafka-connect", []string{"schema registry", "409", "incompatible"}},
@@ -363,9 +363,11 @@ var syntheticTruth = map[string]map[string]truth{
 	"slot-inactive-wal-growth":      {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"source-column-dropped":         {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"topic-retention-data-loss":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
-	// avro wrong: "broke Avro compatibility in the registry" still blames the
-	// registry. rebalance lazy: the title names the consumer group's lag.
-	"avro-schema-id-deleted-sink-failed":      {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	// avro (first_failing_layer kafka-connect since P3-W3d-2; the registry
+	// still answers, the sink task is what breaks): good and wrong both blame
+	// the registry, so their layer misses; lazy is the sink task's failure
+	// title. rebalance lazy: the title names the consumer group's lag.
+	"avro-schema-id-deleted-sink-failed":      {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"consumer-offsets-out-of-range-retention": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"consumer-rebalance-storm":                {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"replication-slot-lost-failover":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
@@ -373,7 +375,10 @@ var syntheticTruth = map[string]map[string]truth{
 	// recurring-connector-paused wrong: blames the connector's task, the
 	// right layer for the wrong reason.
 	"recurring-connector-paused": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
-	"recurring-schema-deleted":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	// recurring-schema-deleted (first_failing_layer consumer since P3-W3d-2):
+	// good blames the schema registry (the cause), so its layer misses; lazy
+	// and wrong both name order-sync, the consumer.
+	"recurring-schema-deleted": {"good": {false, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// injection-connect-trace lazy names the failed connector task;
 	// injection-kafka-record-key lazy names order-sync's lag, like
 	// consumer-poison-pill.

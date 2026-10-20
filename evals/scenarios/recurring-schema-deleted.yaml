@@ -3,7 +3,14 @@
 # other scenarios (clock: 2026-10-11T09:40:00Z). Example-only values: every id, offset, count and
 # age, and the two past rooms.
 #
-# First failing layer: schema-registry. Alert fired at: consumer.
+# First failing layer: consumer. Root-cause layer: schema-registry. Alert fired at: consumer.
+#   The registry still answers every request (the subject lists version 2, id 3, and is healthy);
+#   the consumer group order-sync crash-loops on "Schema 2 not found (40403)" and is the most
+#   upstream component that is broken, so it is the first failing layer. The deleted schema is the
+#   cause, so the root-cause layer stays schema-registry. Same split as the README's example (a
+#   schema change fails in Connect first, but the cause is a Postgres DDL) and the #677 rule that a
+#   root cause which does not break its own layer is not the first failing layer. Ruled on W3g
+#   (2026-10-19); relabelled in P3-W3d-2.
 #
 # What the live tools show: order-sync is Empty with lag on all partitions, Connect, the slot and
 # the topic are healthy, and pg.public.orders-value has only version 2 (id 3). The consumer owner
@@ -239,7 +246,9 @@ expect:
   root_cause_forbidden:
     - [poison pill, stuck]
     - [poison pill, crash*]
-  first_failing_layer: schema-registry
+  # The registry is healthy and answers; order-sync is the component that fails (W3g ruling, see the
+  # header). The cause is the hard-deleted schema, so the root-cause layer differs.
+  first_failing_layer: consumer
   root_cause_layer: schema-registry
   # The 40403 is only in Kabir's comment; the subject no longer lists
   # version 1, and only the closed room says how to restore the id.
