@@ -40,6 +40,8 @@ type stack struct {
 	composeFn        func(ctx context.Context, env map[string]string, args ...string) error
 	clickhouseExecFn func(ctx context.Context, query string) error
 	groupFn          func(ctx context.Context, group string) (groupView, error)
+	// airflowCLIFn replaces `docker exec … airflow …` in unit tests.
+	airflowCLIFn func(ctx context.Context, args ...string) (string, error)
 	// poll is how often waitFor checks its condition (default 2 s).
 	poll time.Duration
 	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init

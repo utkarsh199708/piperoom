@@ -182,7 +182,7 @@ func TestScenarioNamesListed(t *testing.T) {
 	if !slices.IsSorted(names) {
 		t.Errorf("scenarioNames() not sorted: %v", names)
 	}
-	if got := alertScenarios(); !slices.Equal(got, []string{"consumer-bad-deploy", "missed-table"}) {
+	if got := alertScenarios(); !slices.Equal(got, []string{"consumer-bad-deploy", "dag-failed", "dbt-model-broken", "late-batch", "missed-table"}) {
 		t.Errorf("alertScenarios() = %v", got)
 	}
 }

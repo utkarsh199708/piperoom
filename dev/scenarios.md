@@ -431,3 +431,32 @@ watcher: dlq_growth fires after 30 s and clears once no new DLQ record arrived f
 end offset does not change, `pg.public.orders` grows by 20, the orders load. `devctl fix dlq-backlog` does
 both, then deletes the DLQ topic so a second run replays nothing. If the agent already replayed, the fix's
 replay is a duplicate the upsert absorbs.
+
+## 12. Batch scenarios — `dag-failed`, `dbt-model-broken`, `late-batch`
+
+These break the `daily-revenue` batch pipeline (dev/batch.md): Airflow DAG `revenue_daily` runs dbt, which
+builds `analytics.stg_orders` → `analytics.fct_revenue` in the warehouse. A batch pipeline has no watcher
+signals (owners.batchWatch), so each break raises its alert through `devctl alert <scenario>`; the pipeline
+is in `dev/owners.yaml`. They need the batch profile up and `AIRFLOW_URL` set (`dev/batch.md`).
+
+| Scenario | Break | Symptom (tool receipt) | Fix |
+|---|---|---|---|
+| `dag-failed` | rename `analytics.orders` → `analytics.orders_broken` (a bad migration), trigger `revenue_daily` | the run is `failed` at `check_source` (`dag_runs`, then `task_instances` + `task_log_tail`); layer orchestrator | rename the table back, trigger a run, wait for `success` |
+| `dbt-model-broken` | write a broken model `fct_revenue_v2.sql` into `dev/batch/dbt/analytics/models/`, trigger | `check_source` passes but `dbt_run` fails; `dbt_run_results` shows `fct_revenue_v2` error and `task_log_tail` shows dbt's error; layer transform, model named | remove the broken model, trigger a run, wait for `success` |
+| `late-batch` | `airflow dags pause revenue_daily` | `dag_schedule_gap` verdict `paused`; `analytics.fct_revenue` goes stale; layer orchestrator | `airflow dags unpause revenue_daily`, trigger a run, wait for `success` |
+
+**Expected symptoms (not yet observed — no Docker in the session that wrote this):**
+```
+dag-failed:       dag_runs revenue_daily: 1 failed; task_instances: check_source failed (UndefinedTable), dbt_run upstream_failed
+dbt-model-broken: dag_runs revenue_daily: 1 failed; dbt_run_results: fct_revenue_v2 error | message: column "revenue_amt" does not exist
+late-batch:       dag_schedule_gap revenue_daily: verdict paused; the DAG is PAUSED, so no runs are scheduled
+```
+
+**Notes:**
+- `dag-failed` renames the batch's source table, which is also the CDC sink `analytics.orders`. With the
+  stack idle devconsumer stays up (it only touches the table on a new record); if `devctl load` runs during
+  the break, devconsumer crash-loops on the missing table and the fix should restart it too.
+- Each fix triggers a run and waits for `success`, so the break's failed state is overwritten and the fix is
+  idempotent (the rename and the broken-model removal are both guarded against already-restored stacks).
+- The alerts are reconciliation/freshness checks, the kind a team's own monitoring would send; none of them
+  can come from the watcher (a batch pipeline has no Kafka/Connect/slot to watch).
