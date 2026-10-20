@@ -114,6 +114,10 @@ func TestPeekDLQTransactionLeftOpen(t *testing.T) {
 	ow := &txnWriter{t: t, cl: other, topic: w.topic}
 	ow.begin(3, "committed")
 	ow.end(kgo.TryCommit) // offsets 0..2, commit marker at 3
+	// The commit marker is written asynchronously and nothing orders it
+	// before records from a different producer: wait for it so w's records
+	// land at 4..5 and the LSO check below is deterministic.
+	waitForBrokerOffsets(t, adm, w.topic, 4, 4)
 
 	w.begin(2, "open") // offsets 4..5 stay undecided
 	waitForTopic(t, c, w.topic)
