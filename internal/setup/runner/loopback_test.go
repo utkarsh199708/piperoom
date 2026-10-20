@@ -37,6 +37,8 @@ func TestIsLoopbackHost(t *testing.T) {
 		{"non-loopback literal", "192.0.2.1", failingResolver(), false},
 		{"name resolving to loopback", "runner.internal", fixedResolver("127.0.0.1"), true},
 		{"name resolving elsewhere", "piperoom.acme", fixedResolver("192.0.2.5"), false},
+		{"mixed loopback and public answers", "rebind.example", fixedResolver("127.0.0.1", "192.0.2.1"), false},
+		{"name resolving to no addresses", "empty.example", fixedResolver(), false},
 		{"unresolvable name fails closed", "gone.example", failingResolver(), false},
 		{"empty host fails closed", "", failingResolver(), false},
 	}
@@ -44,6 +46,31 @@ func TestIsLoopbackHost(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			if got := isLoopbackHost(context.Background(), c.host, c.lookup); got != c.want {
 				t.Errorf("isLoopbackHost(%q) = %v, want %v", c.host, got, c.want)
+			}
+		})
+	}
+}
+
+// TestLoopbackControl: the dial pin refuses a non-loopback remote address,
+// which is what stops a rebinding answer that re-resolves off loopback after
+// the loopback check passed.
+func TestLoopbackControl(t *testing.T) {
+	cases := []struct {
+		name    string
+		address string
+		wantErr error
+	}{
+		{"v4 loopback allowed", "127.0.0.1:8080", nil},
+		{"v6 loopback allowed", "[::1]:8080", nil},
+		{"v4 public refused", "192.0.2.1:8080", ErrDialNotLoopback},
+		{"v6 public refused", "[2001:db8::1]:8080", ErrDialNotLoopback},
+		{"empty host refused", ":8080", ErrDialNotLoopback},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := loopbackControl("tcp", c.address, nil)
+			if !errors.Is(err, c.wantErr) {
+				t.Errorf("loopbackControl(%q) = %v, want %v", c.address, err, c.wantErr)
 			}
 		})
 	}

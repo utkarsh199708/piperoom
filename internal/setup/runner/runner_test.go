@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -242,4 +243,123 @@ func TestOversizedFrameRefused(t *testing.T) {
 		t.Fatalf("Run = %v, want ErrFrameTooBig", err)
 	}
 	<-done
+}
+
+// TestServerTextScrubbed: a Welcome whose title carries terminal control
+// sequences (here one that would clear the line and overwrite the origin) is
+// printed scrubbed, so the pairing confirmation cannot be spoofed.
+func TestServerTextScrubbed(t *testing.T) {
+	const evilTitle = "\x1b[2K\rpair with https://good"
+	var outBuf bytes.Buffer
+
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		if _, _, err := conn.Read(ctx); err != nil { // Pair
+			return
+		}
+		_ = conn.Write(ctx, websocket.MessageText, mustFrame(protocol.Frame{Type: protocol.FrameWelcome, Welcome: &protocol.Welcome{
+			RoomID: "r1", Title: evilTitle, PipelineID: "orders",
+			Creator:         events.Actor{Kind: events.ActorHuman, ID: "u1", Name: "Ada"},
+			ProtocolVersion: 1, ProtocolMinor: 1,
+		}}))
+		_, _, _ = conn.Read(ctx) // waits for Hello; the runner answers N instead
+	})
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Stdin: strings.NewReader("n\n"), Stdout: &outBuf, Log: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); !errors.Is(err, runner.ErrDeclined) {
+		t.Fatalf("Run = %v, want ErrDeclined", err)
+	}
+	<-done
+
+	out := outBuf.String()
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "\r") {
+		t.Fatalf("raw control characters reached the terminal: %q", out)
+	}
+	if !strings.Contains(out, `\x1b`) {
+		t.Fatalf("scrubbed output missing the escaped ESC: %q", out)
+	}
+}
+
+// blockingReader never returns, standing in for a terminal whose stdin has
+// nothing to say while the runner waits for the y/N answer. started closes
+// once the runner actually begins reading.
+type blockingReader struct{ started chan struct{} }
+
+func (b blockingReader) Read([]byte) (int, error) {
+	select {
+	case <-b.started:
+	default:
+		close(b.started)
+	}
+	select {}
+}
+
+// TestConfirmStopsOnCancel: cancelling the context (Ctrl-C) while the runner
+// waits for the y/N answer stops Run promptly instead of blocking on stdin.
+func TestConfirmStopsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	welcomed := make(chan struct{})
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		if _, _, err := conn.Read(ctx); err != nil { // Pair
+			return
+		}
+		if err := conn.Write(ctx, websocket.MessageText, mustFrame(protocol.Frame{Type: protocol.FrameWelcome, Welcome: &protocol.Welcome{
+			RoomID: "r1", Title: "orders", PipelineID: "orders",
+			Creator:         events.Actor{Kind: events.ActorHuman, ID: "u1", Name: "Ada"},
+			ProtocolVersion: 1, ProtocolMinor: 1,
+		}})); err != nil {
+			return
+		}
+		close(welcomed)
+		_, _, _ = conn.Read(ctx) // waits for Hello; returns when the runner cancels
+	})
+	defer srv.Close()
+
+	started := make(chan struct{})
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Stdin: blockingReader{started: started}, Stdout: io.Discard, Log: quiet()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.Run(ctx) }()
+
+	<-welcomed // the server has sent Welcome
+	<-started  // the runner is now blocked on the y/N prompt
+
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after ctx cancel")
+	}
+	<-done
+}
+
+// TestDialRefusesRedirect: a server that answers the handshake with a
+// redirect is refused rather than followed, so the pairing cannot be moved off
+// the origin the person confirmed.
+func TestDialRefusesRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run succeeded, want a redirect refusal")
+	}
+	if !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("Run error = %v, want it to name the redirect refusal", err)
+	}
 }

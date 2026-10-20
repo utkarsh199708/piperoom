@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"runtime"
@@ -44,6 +46,10 @@ var (
 	ErrYesOffLoopback = errors.New("setup: --yes is refused unless the server is loopback")
 	ErrFrameTooBig    = errors.New("setup: frame exceeds the 1 MiB cap")
 )
+
+// errRedirectRefused fails a handshake that answers with a redirect, so a
+// server cannot move the pairing off the origin the person confirmed.
+var errRedirectRefused = errors.New("setup: refusing a redirect during the handshake")
 
 // Options configures a Runner. ServerURL and Code are required.
 type Options struct {
@@ -133,7 +139,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-	conn, _, err := websocket.Dial(dialCtx, wsURL, nil)
+	conn, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{HTTPClient: r.httpClient(loopback)})
 	cancel()
 	if err != nil {
 		return fmt.Errorf("setup: dialing %s: %w", r.serverURL, err)
@@ -147,6 +153,40 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	return r.serve(ctx)
+}
+
+// httpClient builds the *http.Client for the WebSocket dial. It always refuses
+// redirects (a redirect could move the handshake off the origin the person
+// confirmed). When loopback is true the transport's dialer also refuses any
+// non-loopback remote address, pinning the connection to loopback even if the
+// name re-resolves to a public address between the loopback check and the
+// connect; proxy handling is disabled on loopback so the connection cannot be
+// steered through a proxy either.
+func (r *Runner) httpClient(loopback bool) *http.Client {
+	tr := &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return r.dial(ctx, network, addr, loopback)
+		},
+	}
+	if !loopback {
+		tr.Proxy = http.ProxyFromEnvironment
+	}
+	return &http.Client{
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return errRedirectRefused
+		},
+	}
+}
+
+// dial opens the TCP connection for the WebSocket dial. On loopback it pins
+// each connection attempt to a loopback address (see loopbackControl).
+func (r *Runner) dial(ctx context.Context, network, addr string, loopback bool) (net.Conn, error) {
+	d := &net.Dialer{Timeout: dialTimeout}
+	if loopback {
+		d.Control = loopbackControl
+	}
+	return d.DialContext(ctx, network, addr)
 }
 
 // pair sends Pair, confirms the Welcome on the person's terminal, sends
@@ -183,7 +223,7 @@ func (r *Runner) pair(ctx context.Context) error {
 	r.negotiated = protocol.Negotiate(cur, welcome.Version())
 	r.roomID = welcome.RoomID
 
-	ok, err := r.confirm(welcome)
+	ok, err := r.confirm(ctx, welcome)
 	if err != nil {
 		return err
 	}
@@ -372,7 +412,7 @@ func pairingRefused(err error) error {
 	if sc := websocket.CloseStatus(err); sc == protocol.CloseProtocolVersion {
 		var ce websocket.CloseError
 		if errors.As(err, &ce) && ce.Reason != "" {
-			return fmt.Errorf("setup: server refused: %s", ce.Reason)
+			return fmt.Errorf("setup: server refused: %s", scrub(ce.Reason, maxPrintedFieldLen))
 		}
 		return fmt.Errorf("setup: server refused the protocol version (close %d)", sc)
 	}
