@@ -43,6 +43,13 @@ var (
 	ErrDigestMismatch = errors.New("setup/knowledge: digest mismatch")
 )
 
+// knownRegistries is the allow-list of image registries an entry may cite.
+var knownRegistries = map[string]bool{
+	"docker.io":         true,
+	"quay.io":           true,
+	"mcr.microsoft.com": true,
+}
+
 // Image is one pinned container image in the allow-list. Digest is the
 // registry manifest digest (the multi-arch index digest where the image is
 // multi-arch), always "sha256:<64 hex>". Repo is the image path without the
@@ -64,15 +71,15 @@ func (i Image) Ref() string {
 }
 
 // Plugin is one Debezium connector plugin archive, pinned by digest. Digest
-// is "sha512:<128 hex>" for releases Maven Central publishes SHA-512 for
-// (3.1 and later) and "sha1:<40 hex>" for the older releases, whose .sha1 is
-// the strongest digest Maven Central serves.
+// is always "sha512:<128 hex>": the SHA-512 of the -plugin.tar.gz bytes, read
+// from Maven Central's .sha512 file where it exists (Debezium 3.1 onwards) or
+// computed over the downloaded archive bytes for the older releases.
 type Plugin struct {
 	Release   string // Debezium release, e.g. "3.2.0.Final"
 	Connector string // short source name, e.g. "postgres", "mysql", "oracle"
 	Artifact  string // Maven artifact id, e.g. "debezium-connector-postgres"
-	Digest    string // "sha512:<128 hex>" or "sha1:<40 hex>"
-	Source    string // Maven Central URL the digest was fetched from
+	Digest    string // "sha512:<128 hex>"
+	Source    string // Maven Central URL: the .sha512 file, or the archive itself
 }
 
 // ArtifactURL is the plugin archive the digest pins: the -plugin.tar.gz of
@@ -83,8 +90,9 @@ func (p Plugin) ArtifactURL() string {
 }
 
 // parseDigest splits "algo:hex" and checks the hex is well-formed for the
-// algorithm. sha256 is the registry manifest digest; sha512 and sha1 are the
-// two Maven Central digest kinds for these artifacts.
+// algorithm. sha256 is the registry manifest digest; sha512 is the plugin
+// archive digest. sha1 remains parseable so a stray or legacy digest is
+// rejected with a clear error rather than a panic.
 func parseDigest(s string) (alg, hex string, err error) {
 	alg, hex, ok := strings.Cut(s, ":")
 	if !ok {
@@ -113,25 +121,57 @@ func parseDigest(s string) (alg, hex string, err error) {
 	return alg, hex, nil
 }
 
+// registryManifestURL derives the manifest URL an image's Source must equal,
+// from its registry, repo and tag. Docker official images (a repo with no
+// slash) live under registry-1.docker.io/v2/library/; everything else uses
+// the repo path as-is under the registry's /v2/ namespace.
+func registryManifestURL(im Image) string {
+	switch im.Registry {
+	case "quay.io":
+		return "https://quay.io/v2/" + im.Repo + "/manifests/" + im.Tag
+	case "mcr.microsoft.com":
+		return "https://mcr.microsoft.com/v2/" + im.Repo + "/manifests/" + im.Tag
+	case "docker.io":
+		if strings.Contains(im.Repo, "/") {
+			return "https://registry-1.docker.io/v2/" + im.Repo + "/manifests/" + im.Tag
+		}
+		return "https://registry-1.docker.io/v2/library/" + im.Repo + "/manifests/" + im.Tag
+	default:
+		return ""
+	}
+}
+
 // Validate checks the entries for structural validity and returns the first
-// error it finds: a missing field, a malformed digest (an image must be a
-// sha256 and a plugin a sha512, sha256 or sha1), a non-https source, or a
-// duplicate image (repo, tag) or plugin (release, connector). It is the
-// start-up check; Check calls it over the shipped tables.
+// error it finds. An image must have name, registry, repo, tag, a sha256
+// manifest digest and a Source equal to its registry's manifest URL for that
+// repo and tag; the registry must be allow-listed and no two images may share
+// a name or a (repo, tag) pair. A plugin must have release, connector,
+// artifact and a sha512 digest; its Artifact must be
+// "debezium-connector-"+connector, its Source must be the artifact's .sha512
+// or archive URL, and no two plugins may share a (release, connector) pair.
+// It is the start-up check; Check calls it over the shipped tables.
 func Validate(images []Image, plugins []Plugin) error {
 	seenImg := make(map[string]struct{}, len(images))
+	seenName := make(map[string]struct{}, len(images))
 	for _, im := range images {
 		if im.Name == "" || im.Registry == "" || im.Repo == "" || im.Tag == "" {
 			return fmt.Errorf("knowledge: image %q: name, registry, repo and tag are required", im.Name)
+		}
+		if !knownRegistries[im.Registry] {
+			return fmt.Errorf("knowledge: image %s/%s:%s: registry %q is not allow-listed (docker.io, quay.io or mcr.microsoft.com)", im.Registry, im.Repo, im.Tag, im.Registry)
 		}
 		if alg, _, err := parseDigest(im.Digest); err != nil {
 			return fmt.Errorf("knowledge: image %s/%s:%s: %v", im.Registry, im.Repo, im.Tag, err)
 		} else if alg != "sha256" {
 			return fmt.Errorf("knowledge: image %s/%s:%s: digest must be sha256, got %s", im.Registry, im.Repo, im.Tag, alg)
 		}
-		if !strings.HasPrefix(im.Source, "https://") {
-			return fmt.Errorf("knowledge: image %s/%s:%s: source must be an https URL", im.Registry, im.Repo, im.Tag)
+		if want := registryManifestURL(im); im.Source != want {
+			return fmt.Errorf("knowledge: image %s/%s:%s: source must be %s, got %s", im.Registry, im.Repo, im.Tag, want, im.Source)
 		}
+		if _, dup := seenName[im.Name]; dup {
+			return fmt.Errorf("knowledge: duplicate image name %q", im.Name)
+		}
+		seenName[im.Name] = struct{}{}
 		key := im.Repo + "\x00" + im.Tag
 		if _, dup := seenImg[key]; dup {
 			return fmt.Errorf("knowledge: duplicate image %s:%s", im.Repo, im.Tag)
@@ -143,11 +183,16 @@ func Validate(images []Image, plugins []Plugin) error {
 		if p.Release == "" || p.Connector == "" || p.Artifact == "" {
 			return fmt.Errorf("knowledge: plugin %q/%q: release, connector and artifact are required", p.Release, p.Connector)
 		}
-		if _, _, err := parseDigest(p.Digest); err != nil {
+		if alg, _, err := parseDigest(p.Digest); err != nil {
 			return fmt.Errorf("knowledge: plugin %s %s: %v", p.Release, p.Connector, err)
+		} else if alg != "sha512" {
+			return fmt.Errorf("knowledge: plugin %s %s: digest must be sha512, got %s", p.Release, p.Connector, alg)
 		}
-		if !strings.HasPrefix(p.Source, "https://") {
-			return fmt.Errorf("knowledge: plugin %s %s: source must be an https URL", p.Release, p.Connector)
+		if want := "debezium-connector-" + p.Connector; p.Artifact != want {
+			return fmt.Errorf("knowledge: plugin %s %s: artifact must be %q, got %q", p.Release, p.Connector, want, p.Artifact)
+		}
+		if p.Source != p.ArtifactURL()+".sha512" && p.Source != p.ArtifactURL() {
+			return fmt.Errorf("knowledge: plugin %s %s: source must be the artifact's .sha512 or archive URL, got %s", p.Release, p.Connector, p.Source)
 		}
 		key := p.Release + "\x00" + p.Connector
 		if _, dup := seenPl[key]; dup {
@@ -186,6 +231,19 @@ func LookupImage(repo, tag string) (Image, error) {
 		}
 	}
 	return Image{}, fmt.Errorf("%w: %s:%s", ErrUnknownImage, repo, tag)
+}
+
+// ImageByName returns the allow-listed image for a stable family name ("connect",
+// "server", "kafka", "schema-registry", "postgres", "mysql", "sqlserver",
+// "mongodb", "oracle"). It returns ErrUnknownImage when the name is not
+// allow-listed.
+func ImageByName(name string) (Image, error) {
+	for _, im := range images {
+		if im.Name == name {
+			return im, nil
+		}
+	}
+	return Image{}, fmt.Errorf("%w: name %q", ErrUnknownImage, name)
 }
 
 // VerifyImage is LookupImage plus a digest check: it returns ErrDigestMismatch

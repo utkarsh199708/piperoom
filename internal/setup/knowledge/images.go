@@ -17,6 +17,11 @@ package knowledge
 // agree; Kafka 4.1.0 and Schema Registry 8.0.0 are the KRaft/Confluent pair
 // of dev/docker-compose.yml; the five source databases are one pinned image
 // each for the U wave sources (Postgres, MySQL, SQL Server, MongoDB, Oracle).
+//
+// Moving tags: postgres:17 and mssql/server:2022-latest are floating tags the
+// registries re-publish, so a refresh may report a mismatch against the live
+// tag until the pin here is re-fetched. The pin stays valid for the exact
+// manifest the digest was read from.
 var images = []Image{
 	{
 		// Debezium Connect (Kafka Connect with the Debezium connectors).

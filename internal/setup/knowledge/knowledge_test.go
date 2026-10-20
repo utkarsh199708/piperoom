@@ -46,6 +46,12 @@ func TestValidateRejectsBadDigest(t *testing.T) {
 		{"plugin digest unknown algorithm", func(_ []Image, pl []Plugin) { pl[0].Digest = "md5:abcd" }, "unknown algorithm"},
 		{"plugin missing source", func(_ []Image, pl []Plugin) { pl[0].Source = "" }, "source must be"},
 		{"duplicate plugin", func(_ []Image, pl []Plugin) { pl[1] = pl[0] }, "duplicate plugin"},
+		{"image registry not allow-listed", func(im []Image, _ []Plugin) { im[0].Registry = "evil.example" }, "not allow-listed"},
+		{"image source not its manifest URL", func(im []Image, _ []Plugin) { im[0].Source = "https://quay.io/v2/other/manifests/3.2.0.Final" }, "source must be"},
+		{"duplicate image name", func(im []Image, _ []Plugin) { im[1].Name = "connect" }, "duplicate image name"},
+		{"plugin digest must be sha512", func(_ []Image, pl []Plugin) { pl[0].Digest = "sha1:f441be4331e281ebc554f194d90fafe7ba82086e" }, "must be sha512"},
+		{"plugin artifact mismatch", func(_ []Image, pl []Plugin) { pl[0].Artifact = "not-debezium" }, "artifact must be"},
+		{"plugin source mismatch", func(_ []Image, pl []Plugin) { pl[0].Source = "https://evil.example/x.sha512" }, "source must be"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -88,16 +94,14 @@ func TestResolvePluginPerRelease(t *testing.T) {
 				t.Errorf("ResolvePlugin(%s, %s).Artifact = %s, want %s", release, connector, got.Artifact, wantArtifact)
 			}
 			// The pinned digest must equal the table's own entry and the
-			// source URL must be that artifact's digest file.
+			// source URL must be the artifact's digest file (releases with a
+			// Maven Central .sha512) or the archive itself (releases hashed
+			// from the downloaded bytes).
 			if want := pluginDigest(release, connector); got.Digest != want {
 				t.Errorf("ResolvePlugin(%s, %s).Digest = %s, want %s", release, connector, got.Digest, want)
 			}
-			suffix := got.ArtifactURL() + ".sha512"
-			if strings.HasPrefix(got.Digest, "sha1:") {
-				suffix = got.ArtifactURL() + ".sha1"
-			}
-			if got.Source != suffix {
-				t.Errorf("ResolvePlugin(%s, %s).Source = %s, want %s", release, connector, got.Source, suffix)
+			if got.Source != got.ArtifactURL()+".sha512" && got.Source != got.ArtifactURL() {
+				t.Errorf("ResolvePlugin(%s, %s).Source = %s, want %s or %s", release, connector, got.Source, got.ArtifactURL()+".sha512", got.ArtifactURL())
 			}
 		}
 	}
@@ -149,5 +153,54 @@ func TestLookupAndVerifyImage(t *testing.T) {
 	// A malformed digest never matches, even the pinned image.
 	if _, err := VerifyImage("debezium/connect", "3.2.0.Final", "not-a-digest"); !errors.Is(err, ErrDigestMismatch) {
 		t.Errorf("VerifyImage with a malformed digest: err = %v, want ErrDigestMismatch", err)
+	}
+}
+
+// Every required image family must resolve by its stable name, so downstream
+// rows (compose templates, U11, U12b) can look the index up without hard-coding
+// a repo:tag.
+func TestImageByNameResolvesEveryFamily(t *testing.T) {
+	want := []string{"connect", "server", "kafka", "schema-registry", "postgres", "mysql", "sqlserver", "mongodb", "oracle"}
+	for _, name := range want {
+		got, err := ImageByName(name)
+		if err != nil {
+			t.Errorf("ImageByName(%q) = %v", name, err)
+			continue
+		}
+		if got.Name != name {
+			t.Errorf("ImageByName(%q).Name = %q, want %q", name, got.Name, name)
+		}
+		if got.Digest == "" {
+			t.Errorf("ImageByName(%q).Digest is empty", name)
+		}
+	}
+	if _, err := ImageByName("no-such-family"); !errors.Is(err, ErrUnknownImage) {
+		t.Errorf("ImageByName(unknown): err = %v, want ErrUnknownImage", err)
+	}
+}
+
+// A corrupt shipped table fails the start-up check. This pins gap 4 at package
+// level: Check must not silently accept a table whose entries no longer
+// validate. The package-level tables are swapped for corrupt copies and
+// restored afterwards, so this must not run in parallel with other tests.
+func TestCheckFailsOnCorruptTable(t *testing.T) {
+	origImages, origPlugins := images, plugins
+	defer func() { images, plugins = origImages, origPlugins }()
+
+	corruptImages := make([]Image, len(origImages))
+	copy(corruptImages, origImages)
+	corruptImages[0].Digest = "sha256:abcd"
+	images = corruptImages
+	if err := Check(); err == nil {
+		t.Fatal("Check() on a corrupt image table = nil, want an error")
+	}
+
+	images = origImages
+	corruptPlugins := make([]Plugin, len(origPlugins))
+	copy(corruptPlugins, origPlugins)
+	corruptPlugins[0].Digest = "sha512:abcd"
+	plugins = corruptPlugins
+	if err := Check(); err == nil {
+		t.Fatal("Check() on a corrupt plugin table = nil, want an error")
 	}
 }
