@@ -463,6 +463,10 @@ export const LAYERS = [
   'kafka',
   'consumer',
   'warehouse',
+  // Batch pipelines (P4): the orchestration and transform steps own their own
+  // incident layers, alongside the shared warehouse layer.
+  'orchestrator',
+  'transform',
 ] as const
 
 export type Layer = (typeof LAYERS)[number]

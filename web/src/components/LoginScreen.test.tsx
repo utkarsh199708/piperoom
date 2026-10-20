@@ -31,6 +31,18 @@ describe('LoginScreen', () => {
     expect(screen.getByRole('button', { name: 'Priya' })).toHaveAccessibleDescription('postgres schema-registry')
   })
 
+  it('renders the batch layers orchestrator and transform with their own badge colours', () => {
+    loaded.value = {
+      status: 'ready',
+      reload: vi.fn(),
+      data: [{ id: 'nina', name: 'Nina', layers: ['orchestrator', 'transform'] }],
+    }
+    render(<LoginScreen onPick={vi.fn()} busy={false} />)
+    expect(screen.getByText('orchestrator')).toHaveClass('text-layer-orchestrator')
+    expect(screen.getByText('transform')).toHaveClass('text-layer-transform')
+    expect(screen.getByRole('button', { name: 'Nina' })).toHaveAccessibleDescription('orchestrator transform')
+  })
+
   it('picking a user calls onPick with the id; busy disables the picker', () => {
     const onPick = vi.fn()
     const { rerender } = render(<LoginScreen onPick={onPick} busy={false} />)

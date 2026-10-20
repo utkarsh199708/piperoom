@@ -392,6 +392,25 @@ describe('New room', () => {
     expect(options.map((o) => o.textContent)).toEqual(['payments · Payments', 'orders'])
   })
 
+  it('shows the selected pipeline kind next to the pipeline picker', () => {
+    pipelinesState.value = {
+      status: 'ready',
+      reload: vi.fn(),
+      data: [
+        { id: 'payments', title: 'Payments', shadow: false, kind: 'cdc' },
+        { id: 'nightly', title: 'Nightly', shadow: false, kind: 'batch' },
+      ],
+    }
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    const dialog = screen.getByRole('dialog', { name: 'New room' })
+    // The first pipeline is the default; its kind is a cdc badge.
+    expect(within(dialog).getByText('cdc')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Pipeline'), { target: { value: 'nightly' } })
+    expect(within(dialog).getByText('batch')).toBeInTheDocument()
+    expect(within(dialog).queryByText('cdc')).not.toBeInTheDocument()
+  })
+
   it('with no pipelines it says so and cannot open a room (no made-up "orders")', () => {
     pipelinesState.value = { status: 'ready', reload: vi.fn(), data: [] }
     renderList()
