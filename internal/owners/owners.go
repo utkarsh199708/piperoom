@@ -49,6 +49,9 @@ type Pipeline struct {
 	// ShadowSpec is the optional `shadow:` block (see shadow.go). Read it with
 	// Shadow(). Allowed on both kinds.
 	ShadowSpec *ShadowSpec `yaml:"shadow"`
+	// SetupSpec is the optional `setup:` block (see setup.go), written by
+	// pipeline_register. Read it with Setup(). Allowed on both kinds.
+	SetupSpec *SetupSpec `yaml:"setup"`
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
 	// replaces the top-level `layers:` entry for this pipeline. Load refuses a
 	// layer that is not one of the pipeline's Layers().
@@ -125,6 +128,13 @@ type Owners struct {
 	// Tenants is the optional tenants: block (tenancy.go). Present, it turns
 	// the tenant filter on.
 	Tenants map[string]Tenant `yaml:"tenants"`
+
+	// path and dir are where LoadDir read the config from, so Reload can
+	// re-read it. dir is "" when there is no OWNERS_DIR. skips records the
+	// per-pipeline files the last LoadDir/Reload skipped, for DirSkips.
+	path  string
+	dir   string
+	skips []DirSkip
 }
 
 // Load reads and validates the owners file at path. An `auto_approve:` entry
@@ -202,6 +212,9 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.checkOwnerLayers(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.validateSetup(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		// validateKind has already refused the cdc fields on a batch pipeline.
