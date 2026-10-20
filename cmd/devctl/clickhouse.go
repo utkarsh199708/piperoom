@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,25 +21,31 @@ CREATE TABLE IF NOT EXISTS analytics.orders
     status String,
     updated_at DateTime64(6, 'UTC'),
     version UInt64,
+    is_deleted UInt8,
     loaded_at DateTime64(6, 'UTC') DEFAULT now64(6)
 )
-ENGINE = ReplacingMergeTree(version)
+ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY id;
 
 -- These columns mirror the Debezium Avro envelope; null unions become defaults.
+-- amount is read as Int64 because the source column is INTEGER (Avro int):
+-- ClickHouse stores an Avro int into a Decimal column unscaled, so 4969 would
+-- land as 49.69. The view converts it. After the schema-change scenario the
+-- field becomes an Avro decimal (bytes) and this read fails on purpose: the
+-- sink breaks on the schema change (dev/clickhouse/README.md).
 CREATE TABLE IF NOT EXISTS analytics.orders_kafka
 (
     "before" Tuple(
         id Int64,
         customer_id Int64,
-        amount Decimal(12, 2),
+        amount Int64,
         status String,
         updated_at String
     ),
     "after" Tuple(
         id Int64,
         customer_id Int64,
-        amount Decimal(12, 2),
+        amount Int64,
         status String,
         updated_at String
     ),
@@ -79,18 +86,20 @@ SETTINGS
     input_format_avro_null_as_default = 1,
     input_format_avro_allow_missing_fields = 1;
 
+-- A delete carries the row only in "before" (REPLICA IDENTITY FULL), so the
+-- view reads that side for op='d' and marks it is_deleted; FINAL then hides it.
 CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.orders_mv
 TO analytics.orders
 AS
 SELECT
-    toUInt64(tupleElement("after", 'id')) AS id,
-    tupleElement("after", 'customer_id') AS customer_id,
-    tupleElement("after", 'amount') AS amount,
-    tupleElement("after", 'status') AS status,
-    parseDateTime64BestEffort(tupleElement("after", 'updated_at'), 6, 'UTC') AS updated_at,
-    toUInt64(ifNull(ts_ms, 0)) AS version
-FROM analytics.orders_kafka
-WHERE op != 'd';`
+    toUInt64(tupleElement(if(op = 'd', "before", "after"), 'id')) AS id,
+    tupleElement(if(op = 'd', "before", "after"), 'customer_id') AS customer_id,
+    toDecimal64(tupleElement(if(op = 'd', "before", "after"), 'amount'), 2) AS amount,
+    tupleElement(if(op = 'd', "before", "after"), 'status') AS status,
+    parseDateTime64BestEffort(tupleElement(if(op = 'd', "before", "after"), 'updated_at'), 6, 'UTC') AS updated_at,
+    toUInt64(ifNull(ts_ms, 0)) AS version,
+    toUInt8(op = 'd') AS is_deleted
+FROM analytics.orders_kafka;`
 
 // clickhouseInit starts the optional ClickHouse profile and creates its
 // orders sink, Kafka engine source and materialized view.
@@ -101,24 +110,85 @@ func (s *stack) clickhouseInit(ctx context.Context) error {
 	if err := s.compose(ctx, nil, "--profile", "clickhouse", "up", "-d", "--wait", "clickhouse"); err != nil {
 		return err
 	}
-	if s.clickhouseExecFn != nil {
-		if err := s.clickhouseExecFn(ctx, clickhouseInitSQL); err != nil {
-			return fmt.Errorf("devctl: initialize ClickHouse orders tables: %w", err)
-		}
-		return nil
+	exec := s.clickhouseExecFn
+	if exec == nil {
+		exec = s.clickhouseExec
 	}
+	every, limit := s.clickhouseRetryEvery, s.clickhouseRetryFor
+	if every <= 0 {
+		every = 2 * time.Second
+	}
+	if limit <= 0 {
+		limit = 60 * time.Second
+	}
+	if err := retryClickHouse(ctx, every, limit, func(ctx context.Context) error {
+		return exec(ctx, clickhouseInitSQL)
+	}); err != nil {
+		return fmt.Errorf("devctl: initialize ClickHouse orders tables: %w", err)
+	}
+	return nil
+}
 
+// errClickHouseNotReady marks a clickhouse-client failure to reach the server.
+// The image's entrypoint first runs a temporary server on 127.0.0.1 for the
+// init scripts, which also answers the healthcheck, then stops it and starts
+// the real one; `up --wait` can return in that gap.
+var errClickHouseNotReady = errors.New("ClickHouse server not accepting connections")
+
+// clickhouseConnExitCodes are clickhouse-client exit codes (the server error
+// code, mod 256) that mean the connection failed or dropped, not that the SQL
+// was rejected: NETWORK_ERROR (210), SOCKET_TIMEOUT (209) and
+// ATTEMPT_TO_READ_AFTER_EOF (32, the temporary server stopping mid-query).
+// The init SQL is idempotent, so a retry after any of them is safe.
+var clickhouseConnExitCodes = map[int]bool{210: true, 209: true, 32: true}
+
+// clickhouseExec pipes query into clickhouse-client inside the container.
+func (s *stack) clickhouseExec(ctx context.Context, query string) error {
 	args := []string{
 		"compose", "-f", filepath.Join(s.root, "dev", "docker-compose.yml"),
 		"exec", "-T", "clickhouse", "bash", "-ceu",
 		"exec clickhouse-client --multiquery --user \"$CLICKHOUSE_USER\" --password \"$CLICKHOUSE_PASSWORD\"",
 	}
-	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdin = strings.NewReader(clickhouseInitSQL)
+	cmd := osexec.CommandContext(ctx, "docker", args...)
+	cmd.Stdin = strings.NewReader(query)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	cmd.Env = os.Environ()
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("devctl: initialize ClickHouse orders tables: %w", err)
+	return classifyClickHouseExit(cmd.Run())
+}
+
+// classifyClickHouseExit marks connection-type clickhouse-client exits with
+// errClickHouseNotReady so the caller retries them.
+func classifyClickHouseExit(err error) error {
+	if err == nil {
+		return nil
 	}
-	return nil
+	var ee *osexec.ExitError
+	if errors.As(err, &ee) && clickhouseConnExitCodes[ee.ExitCode()] {
+		return fmt.Errorf("%w (clickhouse-client exit %d): %w", errClickHouseNotReady, ee.ExitCode(), err)
+	}
+	return fmt.Errorf("devctl: clickhouse-client: %w", err)
+}
+
+// retryClickHouse runs fn, and again every `every` while it fails with
+// errClickHouseNotReady, until `limit` has passed or ctx ends. Any other error
+// is returned at once.
+func retryClickHouse(ctx context.Context, every, limit time.Duration, fn func(context.Context) error) error {
+	giveUp := time.NewTimer(limit)
+	defer giveUp.Stop()
+	for attempt := 1; ; attempt++ {
+		err := fn(ctx)
+		if err == nil || !errors.Is(err, errClickHouseNotReady) {
+			return err
+		}
+		wait := time.NewTimer(every)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return fmt.Errorf("devctl: waiting for ClickHouse: %w (last error: %w)", ctx.Err(), err)
+		case <-giveUp.C:
+			wait.Stop()
+			return fmt.Errorf("devctl: ClickHouse still not accepting connections after %d attempts in %s: %w", attempt, limit, err)
+		case <-wait.C:
+		}
+	}
 }

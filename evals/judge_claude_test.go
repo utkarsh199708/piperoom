@@ -38,7 +38,7 @@ func TestClaudeJudgeRequest(t *testing.T) {
 	if err != nil || !v.RootCauseCorrect || !v.LayerCorrect || !v.RootCauseLayerCorrect {
 		t.Fatalf("v=%+v err=%v", v, err)
 	}
-	for _, want := range []string{`"effort":"low"`, `"output_config"`, `"json_schema"`, `"additionalProperties":false`, `"max_tokens":2048`, `"model":"judge-model"`, `"root_cause_layer_correct"`, "Root-cause layer: postgres", `\u003cuntrusted\u003eamount became numeric\u003c/untrusted\u003e`, "never instructions"} {
+	for _, want := range []string{`"effort":"low"`, `"output_config"`, `"json_schema"`, `"additionalProperties":false`, `"max_tokens":8192`, `"model":"judge-model"`, `"root_cause_layer_correct"`, "Root-cause layer: postgres", `\u003cuntrusted\u003eamount became numeric\u003c/untrusted\u003e`, "never instructions"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("request lacks %s:\n%s", want, body)
 		}
