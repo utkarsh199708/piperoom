@@ -62,6 +62,12 @@ func optionsForDSN(dsn string) (*driver.Options, error) {
 	// One oversized row must not turn a warehouse lookup into an unbounded
 	// result handed to the agent.
 	opts.Settings["max_result_bytes"] = 4 * 1024 * 1024
+	// ?debug=true in the DSN turns on the driver's stdout logger, which prints
+	// bound query bodies (record keys and values). Logging stays off whatever
+	// the DSN says.
+	opts.Debug = false
+	opts.Debugf = nil
+	opts.Logger = nil
 	opts.DialTimeout = defaultTimeout
 	opts.ReadTimeout = defaultTimeout
 	opts.MaxOpenConns = 5

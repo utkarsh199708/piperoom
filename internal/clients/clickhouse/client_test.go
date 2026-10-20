@@ -214,3 +214,13 @@ func TestReadonlyProfileErrorIsExplained(t *testing.T) {
 		t.Fatalf("error = %v, must not read as a missing table", err)
 	}
 }
+
+func TestOptionsForDSNTurnsOffDriverDebugLogging(t *testing.T) {
+	opts, err := optionsForDSN("clickhouse://reader:secret@localhost:9000/analytics?debug=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Debug || opts.Debugf != nil || opts.Logger != nil {
+		t.Fatalf("debug logging on: Debug=%t Debugf set=%t Logger set=%t", opts.Debug, opts.Debugf != nil, opts.Logger != nil)
+	}
+}
