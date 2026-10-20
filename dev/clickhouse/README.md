@@ -28,6 +28,13 @@ ClickHouse stores an Avro `int` read into a `Decimal` column without scaling
 `Int64` and the view converts it with `toDecimal64(amount, 2)`: 4969 lands as
 4969.00, the same value Postgres holds.
 
+The Kafka table sets no offset-reset option: ClickHouse has no such table
+setting (`kafka_auto_offset_reset` fails with `UNKNOWN_SETTING`), and its Kafka
+consumer already sets librdkafka's `auto.offset.reset` to `earliest`
+(`KafkaConfigLoader::getConsumerConfiguration` in 25.8). A new consumer group
+therefore reads the snapshot rows that are already in the topic when
+`devctl clickhouse init` runs.
+
 Deletes are kept. A delete event carries the row only in `before`
 (the table has `REPLICA IDENTITY FULL`), so the view reads `before` for
 `op = 'd'` and sets `is_deleted = 1`. `analytics.orders` is a

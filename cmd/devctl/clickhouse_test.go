@@ -72,6 +72,11 @@ func TestClickHouseInitSQLDoesNotScaleIntoDecimal(t *testing.T) {
 	if strings.Contains(clickhouseInitSQL, "kafka_handle_error_mode") {
 		t.Fatal("init SQL sets kafka_handle_error_mode; the sink must stop on the schema change, not skip rows")
 	}
+	// Not a Kafka engine setting in 25.8 (UNKNOWN_SETTING, code 115); the
+	// engine's consumer already starts a new group at earliest.
+	if strings.Contains(clickhouseInitSQL, "kafka_auto_offset_reset") {
+		t.Fatal("init SQL sets kafka_auto_offset_reset, which ClickHouse rejects")
+	}
 	if strings.Contains(clickhouseInitSQL, "WHERE op != 'd'") {
 		t.Fatal("the view drops deletes; it must keep them as is_deleted rows")
 	}
