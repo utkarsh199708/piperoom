@@ -17,7 +17,7 @@ import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer, isFallbackLayer, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
 import { approveAllFor, approveAllLabel, soloAllConfirmText } from '../lib/approveAll'
-import { describeIdentity, identityDetails } from '../lib/hash'
+import { describeIdentity, grantLabel, identityDetails } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
 import { Clock } from './room/Clock'
 import { BlastRadius } from './room/BlastRadius'
@@ -1016,7 +1016,9 @@ function LayerRow({
             <PersonAvatar actor={{ id: decision.by.id, name: decidedName }} size={20} />
             <PersonName person={decision.by} name={decidedName} nameClassName="font-medium" />
             {decision.identity?.grant && (
-              <span className="font-mono text-xs text-subtle-foreground">{decision.identity.grant}</span>
+              <span className="text-xs text-subtle-foreground" title={decision.identity.grant}>
+                {grantLabel(decision.identity.grant)}
+              </span>
             )}
           </span>
           <Badge
@@ -1048,9 +1050,9 @@ function LayerRow({
         <>
           <PersonAvatar actor={{ id: user.id, name: user.name }} size={20} />
           <PersonName person={{ id: user.id, name: user.name, kind: 'human', verified: user.verified }} nameClassName="font-medium" />
+          {/* muted, not subtle: subtle text is 4.2:1 on the amber tint of this row. No principal id
+              here: the decided rows word the grant, and before the decision it is not known yet. */}
           <span className="text-xs text-muted-foreground">you</span>
-          {/* muted, not subtle: subtle text is 4.2:1 on the amber tint of this row */}
-          <span className="font-mono text-xs text-muted-foreground">user:{user.id}</span>
           {fallback ? (
             <span className="text-xs font-medium text-warning-foreground" data-testid={`fallback-${layer}`}>
               no owner for <span className="font-mono">{layer}</span> · driver approves

@@ -91,6 +91,16 @@ describe('PipelineMap — lane', () => {
     expect(screen.getByText('unknown')).toBeInTheDocument()
   })
 
+  it('words facts for people, keeps the server key as a tooltip, and gives the name its own line', () => {
+    render(<PipelineMap topology={five} />)
+    const node = screen.getByText('pg-orders-connector').closest('button')!
+    expect(node.title).toContain('failed tasks 1')
+    expect(node).not.toHaveTextContent('tasks_failed')
+    fireEvent.click(screen.getByRole('button', { name: /Expand/ }))
+    expect(screen.getByText('failed tasks').closest('[title]')).toHaveAttribute('title', 'tasks_failed')
+    expect(screen.queryByText('tasks_failed')).not.toBeInTheDocument()
+  })
+
   it('gives only the failed node a danger border', () => {
     const { container } = render(<PipelineMap topology={five} />)
     const nodes = container.querySelectorAll<HTMLElement>('[data-health]')
