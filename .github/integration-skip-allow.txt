@@ -7,3 +7,6 @@ piperoom/internal/clients/sqlserver TestServerInfoIntegration | needs PIPEROOM_M
 piperoom/internal/clients/sqlserver TestAgentStateIntegration | needs PIPEROOM_MSSQL_DSN; the mssql dev profile (U4c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
 piperoom/internal/clients/oracle TestDatabaseIntegration | needs ORACLE_DSN; the oracle dev profile (U9c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
 piperoom/internal/clients/mongodb TestMongoIntegration | needs PIPEROOM_IT_MONGODB_URI; the mongo dev profile (U7c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/sqlserver TestAlterSystemNotSupportedIntegration | needs PIPEROOM_MSSQL_DSN; the mssql dev profile (U4c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/sqlserver TestSetupWriterCanaryIntegration | needs PIPEROOM_MSSQL_DSN; the mssql dev profile (U4c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/oracle TestWriterRefusesIntegration | needs ORACLE_DSN; the oracle dev profile (U9c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
