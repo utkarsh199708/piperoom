@@ -42,6 +42,9 @@ type stack struct {
 	groupFn          func(ctx context.Context, group string) (groupView, error)
 	// airflowCLIFn replaces `docker exec … airflow …` in unit tests.
 	airflowCLIFn func(ctx context.Context, args ...string) (string, error)
+	// belowLogStartFn replaces the committed-below-log-start read (retention-loss)
+	// in unit tests, since the fake broker does not delete retained segments.
+	belowLogStartFn func(ctx context.Context, group, topic string) (bool, []int32, error)
 	// poll is how often waitFor checks its condition (default 2 s).
 	poll time.Duration
 	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init

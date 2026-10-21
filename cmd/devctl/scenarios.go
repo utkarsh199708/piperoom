@@ -40,6 +40,12 @@ var scenarios = map[string]scenario{
 	"consumer-lag":     {breakIt: breakConsumerLag, fix: fixConsumerLag},
 	"connector-auth":   {breakIt: breakConnectorAuth, fix: fixConnectorAuth},
 
+	// retention-loss (tasks/P-board.md X-9c): the topic's retention cut so the
+	// consumer's committed offset falls below the log start. The watcher's
+	// offset_below_log_start signal (default enabled) opens the room.
+	"retention-loss": {breakIt: breakRetentionLoss, fix: fixRetentionLoss,
+		signals: []string{owners.SignalOffsetBelowLogStart}},
+
 	// P3 (tasks/P3-fixes-that-end-incidents.md): one per write action.
 	// They need the server on dev/owners.p3.yaml (p3OwnersFile).
 	"missed-table": {breakIt: breakMissedTable, fix: fixMissedTable, alert: missedTableAlert, owners: p3OwnersFile},

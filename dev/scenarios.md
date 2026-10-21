@@ -462,7 +462,41 @@ end offset does not change, `pg.public.orders` grows by 20, the orders load. `de
 both, then deletes the DLQ topic so a second run replays nothing. If the agent already replayed, the fix's
 replay is a duplicate the upsert absorbs.
 
-## 12. Batch scenarios — `dag-failed`, `dbt-model-broken`, `late-batch`
+## 12. `retention-loss` — the topic's retention deleted records before the consumer read them
+
+**Break (`devctl break retention-loss`):**
+1. `docker compose stop devconsumer` — `order-sync` leaves the group, so its committed offsets stay put.
+2. Set `retention.ms=1000` and `segment.ms=1000` on `pg.public.orders` (a misconfigured retention window,
+   seconds instead of days), then insert 50 orders. Debezium streams them, the active segment rolls and the
+   broker deletes the old segment holding the group's committed offset. The dev broker's
+   `log.retention.check.interval.ms` and `log.segment.delete.delay.ms` are 1 s (`dev/docker-compose.yml`), so
+   the deletion happens within seconds instead of the 5-minute + 1-minute production defaults.
+3. The break waits until the log start offset has moved past `order-sync`'s committed offset on a partition,
+   then logs the affected partitions.
+
+**Root cause:** the topic's `retention.ms` was set too low, so Kafka deleted records before `order-sync`
+consumed them. The group's committed offset now points **below** the log start: there are no records at that
+offset any more, and the consumer cannot resume where it left off.
+
+**Expected symptoms (not yet observed — no Docker in the session that wrote this):**
+```
+consumer    order-sync: state Empty, members 0          ← stopped by the break
+kafka       pg.public.orders: log start offset moved past the committed offset
+watcher     offset_below_log_start fires at once (sev1); devctl break logs partitions_below
+```
+The real Kafka symptom the agent would see: `kafka_consumer_lag` reports the group's committed offset below
+the log start (`committed < start`, negative lag), and `kafka_topic_config` shows `retention.ms=1000` and
+`segment.ms=1000`.
+
+**Fix (`devctl fix retention-loss`):** restore `retention.ms` and `segment.ms` to the broker defaults
+(delete the overrides) and `docker compose start devconsumer`. The consumer resets to the earliest offset
+still on the topic (`auto.offset.reset=earliest`) and catches up; no new rows are lost from then on. The
+rows deleted during the break are gone — in production the real fix is a backfill (a Debezium
+`execute-snapshot` incremental snapshot), which is exactly what the agent should propose; `devctl fix` only
+puts the stack back so the demo can run again. Idempotent: deleting already-deleted overrides and starting
+an already-running consumer are both safe.
+
+## 13. Batch scenarios — `dag-failed`, `dbt-model-broken`, `late-batch`
 
 These break the `daily-revenue` batch pipeline (dev/batch.md): Airflow DAG `revenue_daily` runs dbt, which
 builds `analytics.stg_orders` → `analytics.fct_revenue` in the warehouse. A batch pipeline has no watcher
