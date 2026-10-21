@@ -62,7 +62,7 @@ export function RollbackButton({
   return (
     <>
       <Button variant="ghost-danger" size="sm" className="h-7" onClick={() => setOpen(true)}>
-        <RotateCcw aria-hidden="true" className="!size-3.5" />
+        <RotateCcw aria-hidden="true" className="size-3.5!" />
         {asDriver ? 'Roll back' : 'Suggest roll back'}
       </Button>
       <Dialog open={open} onOpenChange={onOpenChange}>
