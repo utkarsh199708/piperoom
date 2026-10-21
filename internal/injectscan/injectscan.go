@@ -51,6 +51,22 @@ const (
 	KindHiddenText Kind = "hidden_text"
 )
 
+// Block is the enclosing unit of untrusted data around a finding's span: the
+// whole record or trace block (the maximal run of non-blank lines) that holds
+// the span, or the whole comment, blob or tag run for kinds whose span is
+// already the whole unit. It lets a caller compare values against a wider
+// region than the clause when an injection puts its action in one sentence and
+// its value in the next. The paragraph block is capped at WindowBytes on each
+// side of the span, cut on a rune boundary, so it stays bounded however long
+// the input is. Start and End are byte offsets into the string the caller
+// passed to ScanNames (rune boundaries, Start <= Offset <= End <= len(s)); the
+// zero value means the span is its own block. It is untrusted data too: never
+// log it.
+type Block struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
 // Finding is one match.
 type Finding struct {
 	Kind Kind `json:"kind"`
@@ -74,6 +90,11 @@ type Finding struct {
 	// that occur inside the span, in the caller's order. Only ScanNames
 	// fills it; Scan leaves it nil.
 	Names []string `json:"names,omitempty"`
+	// Block is the enclosing unit of untrusted data the span sits in (see
+	// the Block type). Only ScanNames fills it; Scan leaves it zero, which
+	// means "the span is its own block". A caller comparing a value the model
+	// typed against the block must Normalize both sides first.
+	Block Block `json:"block,omitzero"`
 }
 
 const (
@@ -124,16 +145,105 @@ func Scan(s string) []Finding {
 // findings are otherwise exactly Scan's.
 func ScanNames(s string, names []string) []Finding {
 	fs := Scan(s)
-	if len(fs) == 0 || len(names) == 0 {
+	if len(fs) == 0 {
 		return fs
 	}
 	for i, f := range fs {
 		if f.Offset < 0 || f.End > len(s) || f.End < f.Offset {
 			continue // cannot happen; never slice out of range on untrusted text
 		}
-		fs[i].Names = namesIn(s[f.Offset:f.End], names)
+		fs[i].Block = blockFor(s, f)
+		if len(names) > 0 {
+			fs[i].Names = namesIn(s[f.Offset:f.End], names)
+		}
 	}
 	return fs
+}
+
+// blockFor returns the enclosing unit of untrusted text around a finding's
+// span. A hidden comment, an encoded blob or a run of hidden tag text is
+// already its own unit, so its block is its span. Anything else widens to the
+// enclosing paragraph (the maximal run of non-blank lines), so an injection
+// whose action and value sit in different sentences of the same record or
+// trace block still lands them in one block.
+func blockFor(s string, f Finding) Block {
+	if f.Kind == KindHiddenComment || f.Kind == KindEncoded || f.Kind == KindHiddenText {
+		return Block{Start: f.Offset, End: f.End}
+	}
+	start, end := paragraphBounds(s, f.Offset, f.End)
+	return Block{Start: start, End: end}
+}
+
+// paragraphBounds returns the enclosing paragraph of the span [start, end):
+// the maximal run of non-blank lines around it, capped at WindowBytes past the
+// span on each side so the block stays bounded however long s is. Both
+// returned offsets are rune boundaries of s and the block encloses the span.
+func paragraphBounds(s string, start, end int) (int, int) {
+	floor := max(0, start-WindowBytes)
+	ceil := min(len(s), end+WindowBytes)
+
+	// The span's own line, never more than WindowBytes past the span.
+	lo := start
+	for lo > floor && s[lo-1] != '\n' {
+		lo--
+	}
+	hi := end
+	for hi < ceil && s[hi] != '\n' {
+		hi++
+	}
+
+	// Grow up over adjacent non-blank lines; a blank line or the cap ends it.
+	for lo > floor {
+		p := lo - 1
+		for p > floor && s[p-1] != '\n' {
+			p--
+		}
+		if p == floor && p > 0 && s[p-1] != '\n' {
+			lo = floor // the line above runs past the cap
+			break
+		}
+		if isBlankLine(s[p : lo-1]) {
+			break
+		}
+		lo = p
+	}
+	// Grow down over adjacent non-blank lines.
+	for hi < ceil {
+		n := hi + 1
+		for n < ceil && s[n] != '\n' {
+			n++
+		}
+		if n == ceil && n < len(s) && s[n] != '\n' {
+			hi = ceil // the line below runs past the cap
+			break
+		}
+		if isBlankLine(s[hi+1 : n]) {
+			break
+		}
+		hi = n
+	}
+
+	// Both edges land on rune boundaries.
+	for lo < start && !utf8.RuneStart(s[lo]) {
+		lo++
+	}
+	for hi > end && hi < len(s) && !utf8.RuneStart(s[hi]) {
+		hi--
+	}
+	return lo, hi
+}
+
+// isBlankLine reports whether line is empty or only horizontal whitespace: a
+// blank line, the paragraph break between records and trace blocks.
+func isBlankLine(line string) bool {
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ' ', '\t', '\r':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // namesIn returns the entries of names that occur word-bounded in span,

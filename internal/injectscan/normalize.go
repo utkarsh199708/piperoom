@@ -6,6 +6,23 @@ import (
 	"unicode/utf8"
 )
 
+// Normalize returns the text Scan runs its rules on: zero-width and format
+// characters dropped, lookalike letters (Cyrillic, Greek, fullwidth,
+// Mathematical Alphanumeric, Unicode tag characters) mapped to ASCII, unusual
+// spaces collapsed. It is the same transform Scan and ScanNames apply
+// internally (namesIn matches names on the normalised text), exported so a
+// caller such as the agent's echo guard can normalise both sides before
+// comparing a value the model typed with a flagged span: a span that hides a
+// zero-width space or a lookalike still matches a cleanly typed value.
+//
+// The result is for comparing text, not for indexing into s: byte offsets
+// into the result do not map back to offsets in s, and Finding offsets are
+// into the string the caller passed, not the normalised one.
+func Normalize(s string) string {
+	out, _, _, _ := normalize(s, false)
+	return out
+}
+
 // normalize undoes the cheap tricks that hide an instruction from a plain
 // pattern match. The standard library has no NFKC, so this is a small, fixed
 // mapping:

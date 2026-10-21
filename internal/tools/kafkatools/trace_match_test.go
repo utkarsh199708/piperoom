@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"math/rand/v2"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -72,32 +73,54 @@ func TestMatchesRecordSnippetIsTheRegexp(t *testing.T) {
 	}
 }
 
-// TestSanitizeTraceHostileSpeed: #533. On a 64 KiB line of any repeated
-// unit, sanitizeTrace's own passes take under 10 ms (28-44 ms on main). The
-// budget is 10 ms on top of what redact.Text and dlq.RedactMessage, main's
-// passes from other packages, take on the same line on the same machine:
-// on lines they really mask (URLs, Oracle, "Key (a)=(") they are most of the
-// time, about 2-5 ms here and twice that on a CI runner. Time is the
-// thread's work (workTime), since CI runs packages in parallel. Under -race
-// everything is several times slower, so the budget is wider.
+// TestSanitizeTraceHostileSpeed: #533. On a long line of any repeated unit,
+// sanitizeTrace and condenseTrace stay linear: main's regexps took 28-44 ms
+// on 64 KiB, growing with the square of the length. An absolute budget on
+// shared CI runners flaked (#698: 12.9 ms against 10 ms), so the test checks
+// how time scales instead: the same unit on 4x the bytes must take under 8x
+// the time. Linear work gives about 4x; quadratic work gives about 16x, so 8x
+// leaves room for noise on either side without letting a blowup through.
+// Each time is the best of several runs of the thread's work (workTime),
+// since CI runs packages in parallel. A generous absolute bound on top, over
+// what redact.Text and dlq.RedactMessage (main's passes from other packages)
+// take on the same line, still catches a linear pass that got much slower.
 func TestSanitizeTraceHostileSpeed(t *testing.T) {
-	budget := 10 * time.Millisecond
+	const (
+		small    = 64 << 10 // the line of #533
+		large    = 4 * small
+		maxRatio = 8.0
+		// Below this the large run is too short for its ratio to mean
+		// anything (timer and scheduler noise), and too short to matter.
+		noiseFloor = time.Millisecond
+	)
+	budget := 100 * time.Millisecond
 	if raceEnabled {
-		budget = 150 * time.Millisecond
+		budget = 1500 * time.Millisecond
 	}
 	for _, unit := range []string{
 		"x", "a b c d ", "key (", "Key (a)=(", "value \"", "value \"x\" ", "set ", "set x ", "incorrect x ", "values ",
-		"detail: ", "record ", "Key (", "ſet x ", "password={", "Password={x", "jdbc:oracle:thin:a/", "jdbc:oracle:thin:a/b@",
+		"detail: ", "record ", "\u212aey (", "ſet x ", "password={", "Password={x", "jdbc:oracle:thin:a/", "jdbc:oracle:thin:a/b@",
 		"oldSchema: '", "Error registering Avro schema{", "{\"a\":", "Text '", "Text 'x' could not be parsed ", "Text '\n",
 		"malformed array literal: \"", "failed to parse date field [", "postgresql://u:p@h/", "Failing row contains (",
 		"Not in union [", "Not in union [\"a\"]: ", "in document with id '", "\"reason\":\"in document with id '",
 		"invalid byte sequence for encoding \"", "Got VALUE_", "invalid value \"",
 	} {
-		line := "Caused by: x: " + strings.Repeat(unit, (64<<10)/len(unit)) + "Leak"
+		hostile := func(size int) string { return "Caused by: x: " + strings.Repeat(unit, size/len(unit)) + "Leak" }
+		short, line := hostile(small), hostile(large)
 		other := bestWorkTime(func() { redact.Text(line) }) + bestWorkTime(func() { dlq.RedactMessage(line) })
 		for name, f := range map[string]func(string) string{"sanitizeTrace": sanitizeTrace, "condenseTrace": condenseTrace} {
-			if took := bestWorkTime(func() { f(line) }); took > budget+other {
-				t.Errorf("%s: %q x 64 KiB took %v, want < %v (+ %v in redact.Text and dlq.RedactMessage)", name, unit, took, budget, other)
+			tSmall := bestWorkTime(func() { f(short) })
+			tLarge := bestWorkTime(func() { f(line) })
+			if tLarge > budget+other {
+				t.Errorf("%s: %q x %d KiB took %v, want < %v (+ %v in redact.Text and dlq.RedactMessage)",
+					name, unit, large>>10, tLarge, budget, other)
+			}
+			if tLarge < noiseFloor {
+				continue
+			}
+			if ratio := float64(tLarge) / float64(max(tSmall, time.Microsecond)); ratio > maxRatio {
+				t.Errorf("%s: %q x %d KiB took %v, x %d KiB took %v: %.1fx for 4x the bytes, want < %.0fx (linear)",
+					name, unit, large>>10, tLarge, small>>10, tSmall, ratio, maxRatio)
 			}
 		}
 	}
@@ -108,6 +131,7 @@ func TestSanitizeTraceHostileSpeed(t *testing.T) {
 func bestWorkTime(f func()) time.Duration {
 	best := time.Hour
 	for range 5 {
+		runtime.GC()
 		best = min(best, workTime(f))
 	}
 	return best
