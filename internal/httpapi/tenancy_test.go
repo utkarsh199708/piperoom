@@ -212,6 +212,7 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/suggestions/{sid}/decline", "/api/rooms/" + f.rb + "/suggestions/g_x/decline", ""},
 		{"POST", "/api/rooms/{id}/hypothesis", "/api/rooms/" + f.rb + "/hypothesis", `{"verdict":"confirmed"}`},
 		{"POST", "/api/rooms/{id}/nudge", "/api/rooms/" + f.rb + "/nudge", `{"proposal_id":"p_x","layer":"kafka"}`},
+		{"POST", "/api/rooms/{id}/proposals", "/api/rooms/" + f.rb + "/proposals", `{"title":"x","risk":"low","rollback":"r","steps":[]}`},
 		{"POST", "/api/rooms/{id}/control/request", "/api/rooms/" + f.rb + "/control/request", ""},
 		{"POST", "/api/rooms/{id}/control/grant", "/api/rooms/" + f.rb + "/control/grant", `{"to":"alice"}`},
 		{"POST", "/api/rooms/{id}/close", "/api/rooms/" + f.rb + "/close", `{"resolution":"x"}`},
@@ -269,6 +270,7 @@ var publicRoutes = []string{
 	"HEAD /rooms/{id}",
 	"GET /api/me",
 	"GET /api/people",
+	"GET /api/actions",
 }
 
 // TestTenantRoutesClassified walks the router: every route must be a room-id

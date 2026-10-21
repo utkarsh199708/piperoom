@@ -1,0 +1,2 @@
+go test fuzz v1
+string("postgres://app:p%40ss%3Aw0rd@db.example:5432/orders")

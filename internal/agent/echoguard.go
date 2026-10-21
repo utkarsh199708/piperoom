@@ -22,20 +22,29 @@ import (
 // A step is refused when its action is named inside a flagged span of this
 // room and either (a) one of its param values of echoMinBytes or more occurs
 // verbatim inside a flagged span, or (b) the latest hypothesis cites no step
-// outside the flagged reads. A step whose action the injection named but
-// whose params echo nothing of it, backed by a hypothesis that cites an
-// unflagged read, is the model's own fix and stays allowed.
+// outside the flagged reads. A param value that is one of the room's own scan
+// names (an action or a pipeline component) is compared against the clause
+// span only, not the widened block, so a component name that sits only in the
+// header of a connect/Kafka/DDL block does not make every fix naming that
+// component an echo. A step whose action the injection named but whose params
+// echo nothing of it, backed by a hypothesis that cites an unflagged read, is
+// the model's own fix and stays allowed.
 
 // echoMinBytes is the shortest param value the echo rule (a) considers: a
 // shorter one ("double", "NONE", a task number) is too common to tell an echo
 // from a coincidence.
 const echoMinBytes = 8
 
-// flaggedSpan is one finding of a flagged read: the span text (untrusted,
-// never logged) and the caller's names found inside it.
+// flaggedSpan is one finding of a flagged read: the clause span and its
+// widened block (both untrusted, never logged), and the caller's names found
+// inside the clause span. block is the finding's Block, so an injection whose
+// action and value sit in different sentences of the same record still lands
+// both in one span; clause is the finding's own span (Offset:End); names are
+// the clause-span names ScanNames filled.
 type flaggedSpan struct {
-	text  string
-	names []string
+	block  string
+	clause string
+	names  []string
 }
 
 // flaggedRead is what the ledger keeps of a read injectscan flagged.
@@ -57,6 +66,17 @@ func (l *stepLedger) setScanNames(names []string) {
 	l.scanNames = append([]string(nil), names...)
 }
 
+// scanNameList returns a copy of the room's scan names so callers can read
+// them without holding the lock.
+func (l *stepLedger) scanNameList() []string {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.scanNames...)
+}
+
 // scanRead scans a read's text and, when injectscan flags it, remembers the
 // flagged spans under the read's step. It returns the findings so the caller
 // can log their kinds. A nil ledger scans without remembering.
@@ -73,10 +93,31 @@ func (l *stepLedger) scanRead(stepID, tool, text string) []injectscan.Finding {
 	}
 	fr := flaggedRead{stepID: stepID, tool: tool, kinds: injectscan.Kinds(findings)}
 	for _, f := range findings {
-		if f.Offset < 0 || f.End > len(text) || f.End <= f.Offset {
+		// Keep both spans. The clause span stops at the sentence end, so an
+		// injection that names its action in one sentence and its value in the
+		// next would leave the value outside the span and the echo rule (a)
+		// would miss it; the Block (when injectscan computed a wider one)
+		// covers the value. A param value that is one of the room's scan names
+		// is compared against clause instead, so a component name sitting only
+		// in the widened part of a block (the header of a connect trace) is not
+		// an echo. ScanNames fills Block for every finding (the zero value
+		// means "the span is its own block").
+		clauseStart, clauseEnd := f.Offset, f.End
+		if clauseStart < 0 || clauseEnd > len(text) || clauseEnd <= clauseStart {
 			continue
 		}
-		fr.spans = append(fr.spans, flaggedSpan{text: text[f.Offset:f.End], names: f.Names})
+		blockStart, blockEnd := clauseStart, clauseEnd
+		if f.Block.Start < f.Block.End {
+			blockStart, blockEnd = f.Block.Start, f.Block.End
+		}
+		if blockStart < 0 || blockEnd > len(text) || blockEnd <= blockStart {
+			continue
+		}
+		fr.spans = append(fr.spans, flaggedSpan{
+			block:  text[blockStart:blockEnd],
+			clause: text[clauseStart:clauseEnd],
+			names:  f.Names,
+		})
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -149,10 +190,20 @@ func (l *stepLedger) echoedInjection(stepNum int, action string, params json.Raw
 		return nil, nil
 	}
 	values := paramEchoValues(params)
+	names := l.scanNameList()
 	for _, r := range reads {
 		for _, sp := range r.spans {
 			for _, v := range values {
-				if containsFold(sp.text, v) {
+				// A scan name (an action or a pipeline component) is the step's
+				// target, not the injection's payload: compare it against the
+				// clause span only, so a component name sitting merely in the
+				// widened part of the block (the header of a connect trace) is
+				// not an echo. Every other value is compared against the block.
+				span := sp.block
+				if isScanName(v, names) {
+					span = sp.clause
+				}
+				if containsFold(span, v) {
 					return r.kinds, fmt.Errorf("%w: step %d (%s) echoes text the read %s flagged as an injection; cite evidence of your own or drop the step",
 						tools.ErrBadInput, stepNum, action, r.stepID)
 				}
@@ -166,11 +217,15 @@ func (l *stepLedger) echoedInjection(stepNum int, action string, params json.Raw
 	return nil, nil
 }
 
-// spansName reports whether one of the spans names action.
+// spansName reports whether one of the spans names action. Both sides are
+// normalised as injectscan normalises them before the fold — the same
+// transform the value echo (containsFold) applies — so a name or an action
+// carrying a zero-width or lookalike character still matches its clean form.
 func spansName(spans []flaggedSpan, action string) bool {
+	act := injectscan.Normalize(action)
 	for _, sp := range spans {
 		for _, n := range sp.names {
-			if strings.EqualFold(n, action) {
+			if strings.EqualFold(injectscan.Normalize(n), act) {
 				return true
 			}
 		}
@@ -178,9 +233,34 @@ func spansName(spans []flaggedSpan, action string) bool {
 	return false
 }
 
-// containsFold reports whether sub occurs in s, ASCII case-insensitively.
+// containsFold reports whether sub occurs in s, case-insensitively, after
+// both sides are normalised as injectscan normalises them (zero-width and
+// format characters dropped, lookalike letters mapped to ASCII). A flagged
+// span that hides a value with a zero-width space or a Cyrillic/Greek
+// lookalike still matches the value the model typed clean, and the value the
+// model typed with one still matches a clean span.
 func containsFold(s, sub string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
+	return strings.Contains(
+		strings.ToLower(injectscan.Normalize(s)),
+		strings.ToLower(injectscan.Normalize(sub)),
+	)
+}
+
+// isScanName reports whether v is one of the room's scan names (an action
+// name or a pipeline component), case-insensitively and after the same
+// Normalize containsFold applies. A param value that is one of these is the
+// step's target, not the injection's payload, so the echo check compares it
+// against the clause span rather than the widened block: a component name
+// that sits only in the header of a connect/Kafka/DDL block does not make
+// every fix naming that component an echo.
+func isScanName(v string, names []string) bool {
+	nv := injectscan.Normalize(v)
+	for _, n := range names {
+		if strings.EqualFold(injectscan.Normalize(n), nv) {
+			return true
+		}
+	}
+	return false
 }
 
 // paramEchoValues lists the texts of params the echo rule compares with the

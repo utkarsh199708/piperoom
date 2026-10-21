@@ -461,3 +461,66 @@ watcher: dlq_growth fires after 30 s and clears once no new DLQ record arrived f
 end offset does not change, `pg.public.orders` grows by 20, the orders load. `devctl fix dlq-backlog` does
 both, then deletes the DLQ topic so a second run replays nothing. If the agent already replayed, the fix's
 replay is a duplicate the upsert absorbs.
+
+## 12. `retention-loss` — the topic's retention deleted records before the consumer read them
+
+**Break (`devctl break retention-loss`):**
+1. `docker compose stop devconsumer` — `order-sync` leaves the group, so its committed offsets stay put.
+2. Set `retention.ms=1000` and `segment.ms=1000` on `pg.public.orders` (a misconfigured retention window,
+   seconds instead of days), then insert 50 orders. Debezium streams them, the active segment rolls and the
+   broker deletes the old segment holding the group's committed offset. The dev broker's
+   `log.retention.check.interval.ms` and `log.segment.delete.delay.ms` are 1 s (`dev/docker-compose.yml`), so
+   the deletion happens within seconds instead of the 5-minute + 1-minute production defaults.
+3. The break waits until the log start offset has moved past `order-sync`'s committed offset on a partition,
+   then logs the affected partitions.
+
+**Root cause:** the topic's `retention.ms` was set too low, so Kafka deleted records before `order-sync`
+consumed them. The group's committed offset now points **below** the log start: there are no records at that
+offset any more, and the consumer cannot resume where it left off.
+
+**Expected symptoms (not yet observed — no Docker in the session that wrote this):**
+```
+consumer    order-sync: state Empty, members 0          ← stopped by the break
+kafka       pg.public.orders: log start offset moved past the committed offset
+watcher     offset_below_log_start fires at once (sev1); devctl break logs partitions_below
+```
+The real Kafka symptom the agent would see: `kafka_consumer_lag` reports the group's committed offset below
+the log start (`committed < start`, negative lag), and `kafka_topic_config` shows `retention.ms=1000` and
+`segment.ms=1000`.
+
+**Fix (`devctl fix retention-loss`):** restore `retention.ms` and `segment.ms` to the broker defaults
+(delete the overrides) and `docker compose start devconsumer`. The consumer resets to the earliest offset
+still on the topic (`auto.offset.reset=earliest`) and catches up; no new rows are lost from then on. The
+rows deleted during the break are gone — in production the real fix is a backfill (a Debezium
+`execute-snapshot` incremental snapshot), which is exactly what the agent should propose; `devctl fix` only
+puts the stack back so the demo can run again. Idempotent: deleting already-deleted overrides and starting
+an already-running consumer are both safe.
+
+## 13. Batch scenarios — `dag-failed`, `dbt-model-broken`, `late-batch`
+
+These break the `daily-revenue` batch pipeline (dev/batch.md): Airflow DAG `revenue_daily` runs dbt, which
+builds `analytics.stg_orders` → `analytics.fct_revenue` in the warehouse. A batch pipeline has no watcher
+signals (owners.batchWatch), so each break raises its alert through `devctl alert <scenario>`; the pipeline
+is in `dev/owners.yaml`. They need the batch profile up and `AIRFLOW_URL` set (`dev/batch.md`).
+
+| Scenario | Break | Symptom (tool receipt) | Fix |
+|---|---|---|---|
+| `dag-failed` | point `check_source` at a missing table (Airflow Variable `revenue_source_table` = `orders_missing`), trigger `revenue_daily` | the run is `failed` at `check_source` (`dag_runs`, then `task_instances` + `task_log_tail`); layer orchestrator | restore the variable to `orders`, trigger a run, wait for `success` |
+| `dbt-model-broken` | write a broken model `fct_revenue_v2.sql` into `dev/batch/dbt/analytics/models/`, trigger | `check_source` passes but `dbt_run` fails; `dbt_run_results` shows `fct_revenue_v2` error and `task_log_tail` shows dbt's error; layer transform, model named | remove the broken model, trigger a run, wait for `success` |
+| `late-batch` | `airflow dags pause revenue_daily` | `dag_schedule_gap` verdict `paused`; `analytics.fct_revenue` goes stale; layer orchestrator | `airflow dags unpause revenue_daily`, trigger a run, wait for `success` |
+
+**Expected symptoms (not yet observed — no Docker in the session that wrote this):**
+```
+dag-failed:       dag_runs revenue_daily: 1 failed; task_instances: check_source failed (UndefinedTable), dbt_run upstream_failed
+dbt-model-broken: dag_runs revenue_daily: 1 failed; dbt_run_results: fct_revenue_v2 error | message: column "revenue_amt" does not exist
+late-batch:       dag_schedule_gap revenue_daily: verdict paused; the DAG is PAUSED, so no runs are scheduled
+```
+
+**Notes:**
+- `dag-failed` does not touch the CDC sink: it repoints `check_source` at a missing table through the
+  Airflow Variable `revenue_source_table` (default `orders`), so `analytics.orders` keeps loading while the
+  DAG fails and devconsumer never notices the break.
+- Each fix triggers a run and waits for `success`, so the break's failed state is overwritten and the fix is
+  idempotent (restoring the variable and removing the broken model are both safe on an already-restored stack).
+- The alerts are reconciliation/freshness checks, the kind a team's own monitoring would send; none of them
+  can come from the watcher (a batch pipeline has no Kafka/Connect/slot to watch).

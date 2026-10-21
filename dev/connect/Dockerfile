@@ -1,6 +1,10 @@
 # Debezium Connect plus the Confluent Avro converter, so Debezium registers
 # schemas in Schema Registry (needed to reproduce schema-compatibility failures).
-FROM quay.io/debezium/connect:3.2.0.Final
+# The Debezium version is a build arg (dev/docker-compose.yml passes it through
+# from DEBEZIUM_VERSION, defaulting to the value here), so the stack's Connect
+# image can be swapped without editing this file.
+ARG DEBEZIUM_VERSION=3.2.0.Final
+FROM quay.io/debezium/connect:${DEBEZIUM_VERSION}
 
 ARG AVRO_CONVERTER_VERSION=8.0.0
 RUN cd /tmp \

@@ -72,6 +72,13 @@ type Server struct {
 	// Admin settings and connection tests (WithAdmin): admin.go.
 	admin      AdminSettings
 	adminLimit *rateLimiter
+
+	// Setup runner endpoint (WithSetup): runners.go.
+	setupEnabled bool
+	// runnerCtx is the lifecycle of the runner WebSocket connections: Close
+	// cancels it, so a runner that keeps pinging cannot outlive the server.
+	runnerCtx    context.Context
+	runnerCancel context.CancelFunc
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -82,6 +89,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	if log == nil {
 		log = slog.Default()
 	}
+	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	s := &Server{
 		svc:          svc,
 		gw:           ws.NewGateway(svc, st, log),
@@ -89,6 +97,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		probeTimeout: DefaultProbeTimeout,
 		readyWarn:    readyWarner{every: readyWarnEvery, now: time.Now},
 		refuseWarn:   refuseWarner{every: refuseWarnEvery, now: time.Now},
+		runnerCtx:    runnerCtx,
+		runnerCancel: runnerCancel,
 	}
 	for _, o := range opts {
 		o(s)
@@ -165,6 +175,13 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		// A source without a secret answers 401.
 		api.With(middleware.Timeout(requestTimeout)).Post("/alerts/{source}", s.handleSignedAlert)
 
+		// The setup runner's WebSocket (PIPEROOM_SETUP_ENABLED=on): the
+		// credential is the pairing code in its first frame, not a session, so
+		// it sits outside the protected group like the signed alerts.
+		if s.setupEnabled {
+			api.Get("/runners/ws", s.handleRunnerWS)
+		}
+
 		api.Group(func(protected chi.Router) {
 			protected.Use(s.authenticate)
 			protected.Use(viewerGuard)
@@ -202,6 +219,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/people", s.handlePeople)
 				short.Get("/rooms", s.handleListRooms)
 				short.Post("/rooms", s.handleCreateRoom)
+				short.Get("/actions", s.handleActions)
 				if !s.authSettings.IsOIDC() {
 					// Unsigned: dev mode only (design §4). In oidc mode this
 					// path is not mounted and falls to /alerts/{source}, which
@@ -216,6 +234,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/suggestions/{sid}/decline", visible(s.handleDeclineSuggestion))
 				short.Post("/rooms/{id}/hypothesis", visible(s.handleHypothesisVerdict))
 				short.Post("/rooms/{id}/nudge", visible(s.handleNudge))
+				short.Post("/rooms/{id}/proposals", visible(s.handleCreateProposal))
 				short.Post("/rooms/{id}/control/request", visible(s.handleRequestControl))
 				short.Post("/rooms/{id}/control/grant", visible(s.handleGrantControl))
 				short.Post("/rooms/{id}/close", visible(s.handleCloseRoom))
@@ -260,11 +279,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Close shuts the WebSocket gateway down (closing every live connection) and
-// stops the room service.
+// stops the room service. It also cancels every runner WebSocket connection
+// context, so a runner that keeps pinging cannot leave its handler or socket
+// alive through shutdown.
 func (s *Server) Close() {
 	if s.webRoot != nil {
 		_ = s.webRoot.Close()
 	}
+	s.runnerCancel()
 	s.gw.Close()
 	s.svc.Close()
 }

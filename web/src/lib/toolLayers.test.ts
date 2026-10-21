@@ -10,6 +10,12 @@ describe('toolLayer', () => {
     expect(toolLayer('warehouse_freshness')).toBe('warehouse')
     expect(toolLayer('wh_backfill')).toBe('warehouse')
   })
+  it('maps the batch and dbt tool prefixes to their layers', () => {
+    expect(toolLayer('dag_runs')).toBe('orchestrator')
+    expect(toolLayer('dag_schedule_gap')).toBe('orchestrator')
+    expect(toolLayer('dbt_run_results')).toBe('transform')
+    expect(toolLayer('dbt_model_sql')).toBe('transform')
+  })
   it('gives an empty layer for an unknown tool', () => {
     expect(toolLayer('mystery')).toBe('')
   })

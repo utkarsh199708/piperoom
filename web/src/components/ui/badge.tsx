@@ -28,6 +28,8 @@ const badgeVariants = cva(
         'layer-kafka': 'bg-layer-kafka/[.12] text-layer-kafka',
         'layer-consumer': 'bg-layer-consumer/[.12] text-layer-consumer',
         'layer-warehouse': 'bg-layer-warehouse/[.12] text-layer-warehouse',
+        'layer-orchestrator': 'bg-layer-orchestrator/[.12] text-layer-orchestrator',
+        'layer-transform': 'bg-layer-transform/[.12] text-layer-transform',
       },
       mono: {
         true: 'font-mono text-[11.5px]',
@@ -49,13 +51,16 @@ function Badge({
   return <span data-slot="badge" className={cn(badgeVariants({ variant, mono }), className)} {...props} />
 }
 
-const LAYER_VARIANTS: Record<string, BadgeVariant> = {
+/** Badge variant per pipeline layer name. Keys must stay in sync with `theme.extend.colors.layer` in tailwind.config.ts. */
+export const LAYER_VARIANTS: Record<string, BadgeVariant> = {
   postgres: 'layer-postgres',
   'kafka-connect': 'layer-kafka-connect',
   'schema-registry': 'layer-schema-registry',
   kafka: 'layer-kafka',
   consumer: 'layer-consumer',
   warehouse: 'layer-warehouse',
+  orchestrator: 'layer-orchestrator',
+  transform: 'layer-transform',
 }
 
 /** The badge variant for a pipeline layer name; unknown layers get the neutral badge. */

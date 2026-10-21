@@ -2,9 +2,8 @@ package actions
 
 import "testing"
 
-// LooksSecret is the shared rule (U0): it errs towards true, and it agrees
-// with the connector-config action's private looksSecret until A2 switches
-// that copy to it (U1-23).
+// LooksSecret is the shared rule (U0): it errs towards true, and the
+// connector-config action now uses it (U1-23) instead of a private copy.
 func TestLooksSecretRule(t *testing.T) {
 	secret := []string{
 		"database.password", "DATABASE.PASSWORD", "db.passwd", "sasl.jaas.config", "client.secret",
@@ -20,16 +19,10 @@ func TestLooksSecretRule(t *testing.T) {
 		if !LooksSecret(k) {
 			t.Errorf("LooksSecret(%q) = false", k)
 		}
-		if looksSecret(k) != LooksSecret(k) {
-			t.Errorf("LooksSecret(%q) disagrees with the private copy", k)
-		}
 	}
 	for _, k := range plain {
 		if LooksSecret(k) {
 			t.Errorf("LooksSecret(%q) = true", k)
-		}
-		if looksSecret(k) != LooksSecret(k) {
-			t.Errorf("LooksSecret(%q) disagrees with the private copy", k)
 		}
 	}
 }

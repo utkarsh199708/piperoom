@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test": "vitest run",
+    "e2e": "npm run build && playwright test",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -33,6 +34,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
+    "@playwright/test": "^1.64.1",
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.3.0",
     "@types/node": "22.15.0",
@@ -55,5 +57,9 @@
   },
   "allowScripts": {
     "esbuild@0.28.2": true
+  },
+  "//": "postcss-selector-parser override clears 2 moderate PostCSS advisories; remove once Tailwind v4 lands",
+  "overrides": {
+    "postcss-selector-parser": "^7.1.6"
   }
 }

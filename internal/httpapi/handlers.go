@@ -395,6 +395,38 @@ func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request) {
 	writeEvent(w, http.StatusOK, ev)
 }
 
+// proposalRequest is the body of POST /api/rooms/{id}/proposals (P3c): only
+// the fields a person types; origin, required_layers, params_hash and the id
+// are always set by the server, never read from the body.
+type proposalRequest struct {
+	Title    string                `json:"title"`
+	Risk     string                `json:"risk"`
+	Rollback string                `json:"rollback"`
+	Steps    []events.ProposalStep `json:"steps"`
+}
+
+// handleCreateProposal serves POST /api/rooms/{id}/proposals (P3c): the driver
+// authors a fix proposal, answered with the proposal.created event
+// (origin "driver").
+func (s *Server) handleCreateProposal(w http.ResponseWriter, r *http.Request) {
+	var body proposalRequest
+	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.CreateDriverProposal(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), events.ProposalCreatedPayload{
+		Title:    body.Title,
+		Risk:     body.Risk,
+		Rollback: body.Rollback,
+		Steps:    body.Steps,
+	})
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
 func (s *Server) handleAcceptHandoff(w http.ResponseWriter, r *http.Request) {
 	ev, err := s.svc.AcceptHandoff(r.Context(), userFrom(r.Context()), chi.URLParam(r, "hid"))
 	if err != nil {

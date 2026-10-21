@@ -216,7 +216,7 @@ func (s *Service) scheduleCheckLocked(st *roomState, proposalID string) error {
 		return errNotAutoApprovable
 	}
 	p, ok := openProposal(st.snap, proposalID)
-	if !ok || p.origin == events.ProposalOriginDriver || p.sched.set {
+	if !ok || p.Origin == events.ProposalOriginDriver || p.sched.set {
 		return errNotAutoApprovable
 	}
 	for _, l := range p.RequiredLayers {
