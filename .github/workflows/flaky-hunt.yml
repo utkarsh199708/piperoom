@@ -14,8 +14,6 @@ name: Flaky-test hunt
 # PR run would only re-report flakes from one branch's unmerged state.
 
 on:
-  push:
-    branches: ["c1/flaky-hunt"]
   schedule:
     - cron: "30 2 * * *"   # nightly, 02:30 UTC
   workflow_dispatch:
@@ -158,7 +156,7 @@ jobs:
 
   summary:
     name: Summarize
-    needs: hunt
+    needs: [shards, hunt]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
@@ -223,7 +221,7 @@ jobs:
               fi
               if [ "$nbuild" != "0" ]; then
                 echo "Packages that failed to build:"
-                jq -r '.build_failures[] | "- \`\(.)\`"' combined.json
+                jq -r '.build_failures[] | "- `\(.)`"' combined.json
                 echo
               fi
               if [ "$nerr" != "0" ]; then
