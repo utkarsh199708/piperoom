@@ -74,7 +74,7 @@ func run() error {
 func runWith(d startDeps) error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	quickstart := flag.Bool("quickstart", false, "read-only quickstart: the real agent and tools, in-memory room store, dev login on loopback only, write mode off, a one-user users file for this run; prints the URL to open")
-	solo := flag.Bool("solo", false, "with --demo or --quickstart: give the demo presenter the solo ceremony (sole driver, approve-all)")
+	solo := flag.Bool("solo", false, "with --demo: give the demo presenter the solo ceremony (sole driver, approve-all); with --quickstart: give the sole owner from the owners file the solo ceremony (sole driver, approve-all)")
 	ownersPath := flag.String("owners", "", "with --quickstart: the owners file (default ./"+quickstartDefaultOwners+"); without --quickstart, set OWNERS_FILE instead")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
