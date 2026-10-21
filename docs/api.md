@@ -473,7 +473,12 @@ and `by_confidence` come from shadow rooms until a grade for live rooms is added
 Node `kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table | schema_subject`, and for a
 `batch` pipeline (P0 item 8, builder P4a) `dag` (id `dag:<dag_id>`, layer `orchestrator`), `task` (id
 `task:<dag_id>.<task_id>`, layer `orchestrator`, one per task instance of the latest run, its state in `facts`) and
-`model` (id `model:<name>`, layer `transform`), drawn `dag → task → model → sink_table` with data edges. `health`:
+`model` (id `model:<name>`, layer `transform`), drawn `dag → task → model → sink_table` with data edges. With a
+ClickHouse warehouse (`warehouse_kind: clickhouse`, CH-3) the Kafka ingestion hop adds `kafka_engine` (id
+`kafka_engine:<db>.<table>`) and `materialized_view` (id `materialized_view:<db>.<view>`), both on the warehouse's
+layer, drawn `topic → kafka_engine → materialized_view → sink_table` with data edges; edges found by naming
+convention rather than read from the view's definition are `mapping: "inferred"`, and a Kafka engine table not
+confirmed to exist is `health: "unknown"`. `health`:
 `ok | warn | fail | unknown`. `partial` (P4, omitted when false): an optional reader the pipeline's kind needs is not
 configured or not supported (no Airflow or dbt reader), so its nodes are left out; clients say the map is incomplete
 rather than healthy.
