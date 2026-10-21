@@ -112,6 +112,31 @@ Two more things follow from this list:
   (`prompt.go`). Steers are sent verbatim, unwrapped. Tell the team not to paste
   secrets or customer data.
 
+### Driver-authored proposals (P3c)
+
+A driver can also author a proposal (`POST /api/rooms/{id}/proposals`); it enters the same path as an
+agent proposal — the same `Validate`, scope check, `params_hash`, preview, per-layer approval, execution
+record and agent verification — with `Origin: "driver"` (`internal/events/events.go`). It is never
+auto-approved (`internal/room/autoapprove.go`).
+
+- **What the params contain.** A step's `params` are the action's own typed fields only — connector,
+  topic, group and table names, a timestamp, a boolean, a count — the same values the agent would
+  propose. They never contain secrets: every action validates them before anything is stored, and
+  `connect_update_connector_config` refuses a credential-looking key **or** value
+  (`looksSecret`/`valueLooksSecret`, `internal/actions/connector_config.go`). Read the params, not just
+  the description, before you approve (F2).
+- **Where stored.** The params are stored in the proposal row (`proposals.steps`,
+  `internal/store/store.go` `ProposalRow`) and, as part of the `proposal.created` event with
+  `origin: "driver"`, in the room log (`internal/room/service_proposals.go`). They are therefore part of
+  the permanent room history everyone in the room can see. `params_hash` (SHA-256 over the RFC 8785
+  form) covers the params, so an approver's `params_hash` echo binds their approval to exactly the values
+  on screen.
+- **Where shown.** The proposal card renders each step's `params` as key/value rows (one row per field);
+  raw JSON is shown only when `params` is not an object (`web/src/components/ProposalsPanel.tsx`). The
+  params also reach the model — the agent hears about a driver proposal as `proposal_created` and
+  verifies it after execution (`proposal_executed`; `internal/agent/contract.go`) — and, like any
+  proposal, up to 600 bytes of each step's params are posted to Slack when it is configured (section 1).
+
 ## 2. What each tool exposes
 
 | Tool | Exposes to the agent and the room | Does **not** expose |
