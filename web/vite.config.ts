@@ -1,29 +1,7 @@
-import { defineConfig, loadEnv, type Plugin } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
-import { isLoopbackHost } from './src/lib/loopback'
-
-// The Vite dev server proxies /devctl to `devctl serve` (cmd/devctl/serve.go), an
-// unauthenticated, loopback-only break/fix API, so the dev-only "Break something"
-// menu can call it same-origin. The proxy below uses `changeOrigin: true` so the
-// proxied Host is 127.0.0.1:7071, which is what lets it pass devctl's loopback
-// allow-list — but that also means that if Vite is bound beyond loopback
-// (`vite --host`), anyone on the network reaches that API and the Host/Origin
-// checks are satisfied. devctl's loopback boundary must not depend on Vite's bind
-// address, so this plugin removes the /devctl proxy whenever the resolved server
-// host is not loopback, unless the developer explicitly opts in with
-// PIPEROOM_DEVCTL_ALLOW_REMOTE=1.
-const DEVCTL_PROXY_KEY = '^/devctl(/|$)'
-
-const devctlLoopbackGuard = (): Plugin => ({
-  name: 'piperoom:devctl-loopback-guard',
-  config(config) {
-    if (isLoopbackHost(config.server?.host)) return
-    if (process.env.PIPEROOM_DEVCTL_ALLOW_REMOTE === '1') return
-    const proxy = config.server?.proxy
-    if (proxy) delete proxy[DEVCTL_PROXY_KEY]
-  },
-})
+import { DEVCTL_PROXY_KEY, devctlLoopbackGuard, devctlProxyOptions } from './src/lib/devctlProxy'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -69,16 +47,9 @@ export default defineConfig(({ mode }) => {
       proxy: {
         ...proxy,
         // The dev-only "Break something" menu (web/src/components/shell/BreakSomethingMenu.tsx)
-        // drives `devctl serve` (cmd/devctl/serve.go). devctl serves at the ROOT
-        // (/scenarios, /break/..., /fix/...), so the /devctl prefix is stripped here.
-        // changeOrigin is on so devctl sees Host 127.0.0.1:7071: its Host allow-list is
-        // port-exact (unlike the Go server, which accepts any loopback port). Deliberately
-        // absent from preview.proxy: preview serves the production bundle, which has no menu.
-        [DEVCTL_PROXY_KEY]: {
-          target: devctl,
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/devctl/, ''),
-        },
+        // drives `devctl serve` (cmd/devctl/serve.go); see src/lib/devctlProxy.ts for the
+        // prefix rewrite and the "not running" response.
+        [DEVCTL_PROXY_KEY]: devctlProxyOptions(devctl),
       },
     },
     preview: { proxy },
