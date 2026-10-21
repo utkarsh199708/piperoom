@@ -28,13 +28,16 @@ const (
 	batchDAG        = "revenue_daily"
 	// Whole test: a cold build installs dbt with pip before Airflow starts.
 	batchTimeout = 8 * time.Minute
-
-	// batchProfileOwner names who holds the batch-profile lock. Both tests that
-	// own the airflow lifecycle (TestBatchProfile here and cmd/devctl's batch
-	// scenario test) use the same owner, so a second acquire in one process is
-	// re-entrant while a second process waits for the first to finish.
-	batchProfileOwner = "batch-profile"
 )
+
+// batchProfileOwner names who holds the batch-profile lock. It is unique to
+// this test binary (the process id), because stacklock treats a second acquire
+// with the same owner as re-entrant: two processes sharing one fixed owner
+// would both believe they hold the lock and race for the single
+// piperoom-dev-airflow-1 container. A per-process owner keeps a second acquire
+// in one process re-entrant while a second process waits for the first to
+// finish and release.
+var batchProfileOwner = "batch-profile-" + strconv.Itoa(os.Getpid())
 
 // batchProfileLockPath returns the cross-process lock file that serializes the
 // batch profile's airflow service across test binaries. It sits next to the
