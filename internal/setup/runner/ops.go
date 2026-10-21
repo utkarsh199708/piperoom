@@ -15,6 +15,13 @@ import (
 // a RefuseDuplicateStep refusal.
 var errDuplicateStep = errors.New("setup: step already started")
 
+// refuseStartPersist is the reason the runner refuses a T1+ op whose durable
+// "started" marker could not be written or synced: running it would break the
+// exactly-once ledger, since the step could be replayed after a restart. This
+// reason is not yet one of protocol.Refuse*; see the contract change request
+// in the PR for adding it there.
+const refuseStartPersist = "start_persist"
+
 // tierRank orders tiers T0..T3; an unknown tier string ranks as T0.
 func tierRank(t string) int {
 	switch t {
@@ -118,6 +125,11 @@ func (r *Runner) storeToken(tok *protocol.Token) error {
 func (r *Runner) setInflight(st *protocol.OpStatus, cancel context.CancelFunc) {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
+	r.setInflightLocked(st, cancel)
+}
+
+// setInflightLocked is setInflight with opMu already held.
+func (r *Runner) setInflightLocked(st *protocol.OpStatus, cancel context.CancelFunc) {
 	if cur, ok := r.inflight[st.ID]; ok {
 		cur.status.State = st.State
 		return
@@ -204,6 +216,13 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 			r.refuse(ctx, req, protocol.RefuseParamsHash)
 			return
 		}
+		// A matching hash only proves the cached frozen proposal is the one
+		// the approver saw; it does not say the request is asking to execute
+		// that step. Bind the request to the frozen step before anything runs.
+		if err := r.checkStep(req); err != nil {
+			r.refuse(ctx, req, protocol.RefuseParamsHash)
+			return
+		}
 
 		// Every T3 op needs a y on the runner's terminal.
 		if req.Tier == protocol.TierT3 {
@@ -218,12 +237,15 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		}
 
 		if err := r.markStarted(req, target, eff, cancel); err != nil {
-			// The only error markStarted returns is the duplicate refusal.
 			if errors.Is(err, errDuplicateStep) {
 				r.refuse(ctx, req, protocol.RefuseDuplicateStep)
 				return
 			}
+			// A start record that cannot be durably persisted means the op
+			// must not run: without it a destructive step could run and later
+			// be replayed after a restart. Refuse rather than execute.
 			r.log.Error("marking op started failed", "op", req.Op, "err", err)
+			r.refuse(ctx, req, refuseStartPersist)
 			return
 		}
 		r.printOp(req, target)
@@ -258,60 +280,118 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 	}
 }
 
-// proposalHash returns the params_hash the runner recomputes for req: over the
-// frozen proposal it was shown (the first request of a proposal carries it, and
-// the runner caches it for the later requests of the same proposal).
-func (r *Runner) proposalHash(req *protocol.OpRequest) (string, error) {
+// frozenProposal returns the frozen proposal the runner cached for req,
+// caching it from req.Proposal on the first request of a proposal.
+func (r *Runner) frozenProposal(req *protocol.OpRequest) (events.ProposalCreatedPayload, error) {
 	r.opMu.Lock()
 	if len(req.Proposal) > 0 {
 		var p events.ProposalCreatedPayload
 		if err := json.Unmarshal(req.Proposal, &p); err != nil {
 			r.opMu.Unlock()
-			return "", fmt.Errorf("setup: decoding frozen proposal: %w", err)
+			return events.ProposalCreatedPayload{}, fmt.Errorf("setup: decoding frozen proposal: %w", err)
 		}
 		if p.ProposalID != req.ProposalID {
 			r.opMu.Unlock()
-			return "", errors.New("setup: frozen proposal id does not match the request")
+			return events.ProposalCreatedPayload{}, errors.New("setup: frozen proposal id does not match the request")
 		}
 		r.proposals[req.ProposalID] = p
 	}
 	p, ok := r.proposals[req.ProposalID]
 	r.opMu.Unlock()
 	if !ok {
-		return "", errors.New("setup: no frozen proposal to recompute params_hash")
+		return events.ProposalCreatedPayload{}, errors.New("setup: no frozen proposal to recompute params_hash")
+	}
+	return p, nil
+}
+
+// proposalHash returns the params_hash the runner recomputes for req: over the
+// frozen proposal it was shown (the first request of a proposal carries it, and
+// the runner caches it for the later requests of the same proposal).
+func (r *Runner) proposalHash(req *protocol.OpRequest) (string, error) {
+	p, err := r.frozenProposal(req)
+	if err != nil {
+		return "", err
 	}
 	return ComputeParamsHash(r.roomID, p.ProposalID, p.Title, p.Risk, p.Rollback, p.RequiredLayers, p.Steps)
 }
 
+// checkStep binds a T1+ request to the frozen proposal step it names: the step
+// index must be in range, the op must be the catalogue's op for that step's
+// action, and the params must be the step's params under the hash's own
+// canonicalization. It returns an error the caller turns into RefuseParamsHash.
+func (r *Runner) checkStep(req *protocol.OpRequest) error {
+	p, err := r.frozenProposal(req)
+	if err != nil {
+		return err
+	}
+	step := *req.StepIndex
+	if step < 0 || step >= len(p.Steps) {
+		return errors.New("setup: step index outside the frozen proposal")
+	}
+	frozen := p.Steps[step]
+	action, ok := r.catalogue.StepAction(req.Op)
+	if !ok {
+		return errors.New("setup: op is not in the catalogue")
+	}
+	if action != frozen.Action {
+		return errors.New("setup: op does not execute the frozen step's action")
+	}
+	if !stepParamsEqual(req.Params, frozen.Params) {
+		return errors.New("setup: params differ from the frozen step")
+	}
+	return nil
+}
+
+// stepParamsEqual reports whether the request's params are the same JSON as
+// the frozen step's params under the canonicalization params_hash uses, so a
+// request cannot run a step with different parameters while quoting the
+// approved hash.
+func stepParamsEqual(a, b json.RawMessage) bool {
+	ca, err := canonicalParams(a)
+	if err != nil {
+		return false
+	}
+	cb, err := canonicalParams(b)
+	if err != nil {
+		return false
+	}
+	return string(ca) == string(cb)
+}
+
 // markStarted checks the duplicate ledger and records the op as started before
-// it runs. The duplicate set is in memory and, through the op log, on disk, so
-// the refusal survives a restart.
+// it runs. The durable "started" marker is written and synced before the
+// in-memory ledger is updated, so an op runs only once its start survives a
+// restart; a write or sync failure fails the op (the caller refuses it) instead
+// of running a step that could later be replayed.
 func (r *Runner) markStarted(req *protocol.OpRequest, target, eff string, cancel context.CancelFunc) error {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+
 	// Load the durable ledger before the duplicate check, so a step started by
 	// a previous run of this runner is refused even after a restart.
-	if err := r.ensureOpLog(); err != nil {
+	if err := r.ensureOpLogLocked(); err != nil {
 		return err
 	}
 	key := stepKey{proposalID: req.ProposalID, step: *req.StepIndex}
-	r.opMu.Lock()
 	if _, dup := r.started[key]; dup {
-		r.opMu.Unlock()
 		return errDuplicateStep
 	}
-	r.started[key] = struct{}{}
-	r.opMu.Unlock()
+	if r.opLog == nil {
+		return errors.New("setup: op log is closed")
+	}
 
-	// The durable "started" marker is best effort: the in-memory set above
-	// still protects against a duplicate within this process, and a disk
-	// failure is logged rather than blocking every op.
-	if err := r.logEntry(opLogEntry{
+	// The durable marker comes first; the in-memory set below is only updated
+	// after it is on disk.
+	if err := r.opLog.append(opLogEntry{
 		ID: req.ID, Op: req.Op, Target: target, ProposalID: req.ProposalID,
 		StepIndex: req.StepIndex, Tier: req.Tier, Class: eff,
 		State: opLogStarted, At: r.now(),
 	}, true); err != nil {
-		r.log.Error("op log write failed; started marker is in memory only", "op", req.Op, "err", err)
+		return fmt.Errorf("setup: persisting started marker: %w", err)
 	}
-	r.setInflight(&protocol.OpStatus{
+	r.started[key] = struct{}{}
+
+	r.setInflightLocked(&protocol.OpStatus{
 		ID: req.ID, ProposalID: req.ProposalID, StepIndex: req.StepIndex, State: protocol.StateRunning,
 	}, cancel)
 	return nil
@@ -337,11 +417,11 @@ func (r *Runner) refuse(ctx context.Context, req *protocol.OpRequest, reason str
 // failure is returned to the caller; it never aborts the runner. After the
 // runner has finished (closeOpLog), appends are no-ops.
 func (r *Runner) logEntry(e opLogEntry, sync bool) error {
-	if err := r.ensureOpLog(); err != nil {
-		return err
-	}
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
+	if err := r.ensureOpLogLocked(); err != nil {
+		return err
+	}
 	if r.opLog == nil {
 		return nil
 	}
@@ -360,10 +440,9 @@ func (r *Runner) closeOpLog() {
 	}
 }
 
-// ensureOpLog opens the op log and loads the durable duplicate set, once.
-func (r *Runner) ensureOpLog() error {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
+// ensureOpLogLocked opens the op log and loads the durable duplicate set,
+// once. opMu must be held.
+func (r *Runner) ensureOpLogLocked() error {
 	if r.opLogDone || r.opLog != nil {
 		return nil
 	}

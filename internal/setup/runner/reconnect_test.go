@@ -7,8 +7,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,7 +55,17 @@ func TestReconnectSendsResume(t *testing.T) {
 	handler1 := func(conn *websocket.Conn) {
 		ctx := context.Background()
 		doHandshake(t, conn, ctx, "tok1", clock.Now, nil)
-		p1 := testProposal("p1")
+		p1 := events.ProposalCreatedPayload{
+			ProposalID:     "p1",
+			Title:          "fix the stack",
+			Risk:           "low",
+			Rollback:       "revert",
+			RequiredLayers: []string{"environment"},
+			Steps: []events.ProposalStep{
+				{Action: "fast", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`)},
+				{Action: "slow", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`)},
+			},
+		}
 		h := proposalHash(t, p1)
 		raw := proposalRaw(t, p1)
 
@@ -344,6 +357,103 @@ func TestTokenRotatesOnReconnect(t *testing.T) {
 		if tokens[i] != want[i] {
 			t.Fatalf("reconnect tokens = %v, want %v", tokens, want)
 		}
+	}
+}
+
+// TestConnectTransientRetried: a transient reconnect failure (an abrupt TCP
+// drop during the token handshake) does not terminate the runner; the next
+// reconnect succeeds and Run returns cleanly.
+func TestConnectTransientRetried(t *testing.T) {
+	clock := newTestClock()
+	var conns atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
+		n := conns.Add(1)
+		switch n {
+		case 1:
+			doHandshake(t, conn, context.Background(), "tok1", clock.Now, nil)
+			_ = conn.Close(websocket.StatusPolicyViolation, "drop")
+		case 2:
+			// Abrupt drop before the token handshake completes: transient.
+			readFrameJSON(t, conn, context.Background())
+			_ = conn.CloseNow()
+		case 3:
+			doReconnect(t, conn, context.Background(), "tok1", "tok2", clock.Now)
+		}
+	}))
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{
+		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(),
+		Stdout: io.Discard, Log: quiet(), Now: clock.Now,
+		Backoff: func(int) time.Duration { return 0 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v, want nil (a transient connect failure must not terminate the runner)", err)
+	}
+	if got := conns.Load(); got != 3 {
+		t.Fatalf("connections = %d, want 3 (pair, one transient failure, one success)", got)
+	}
+}
+
+// TestConnectRetriesBounded: when every reconnect fails transiently the runner
+// gives up after a bounded number of attempts rather than retrying forever.
+func TestConnectRetriesBounded(t *testing.T) {
+	clock := newTestClock()
+	var conns atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
+		n := conns.Add(1)
+		if n == 1 {
+			doHandshake(t, conn, context.Background(), "tok1", clock.Now, nil)
+			_ = conn.Close(websocket.StatusPolicyViolation, "drop")
+			return
+		}
+		readFrameJSON(t, conn, context.Background())
+		_ = conn.CloseNow()
+	}))
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{
+		ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(),
+		Stdout: io.Discard, Log: quiet(), Now: clock.Now,
+		Backoff: func(int) time.Duration { return 0 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.Run(context.Background()) }()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("Run = nil, want a connect error after the bounded retries")
+		}
+		if errors.Is(err, runner.ErrTokenExpired) {
+			t.Fatalf("Run = %v, want the connect error, not ErrTokenExpired (the token is still valid)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return; connect retries were not bounded")
+	}
+
+	// 1 pairing + 6 connect attempts (the runner's maxConnectRetries is 5).
+	if got := conns.Load(); got != 7 {
+		t.Fatalf("connections = %d, want 7", got)
 	}
 }
 

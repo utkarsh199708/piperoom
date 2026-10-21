@@ -42,6 +42,9 @@ type fakeCatalogue struct {
 	floor     map[string]string
 	target    map[string]string
 	guard     map[string]bool
+	// action maps an op name to its proposal-step action name where the two
+	// differ; unset (or absent) means the op name is the action name.
+	action map[string]string
 }
 
 func (f *fakeCatalogue) Execute(ctx context.Context, req protocol.OpRequest) (protocol.OpResult, error) {
@@ -69,6 +72,15 @@ func (f *fakeCatalogue) Target(req protocol.OpRequest) string { return f.target[
 
 func (f *fakeCatalogue) GuardForbidden(op, class string) bool { return f.guard[op+"|"+class] }
 
+func (f *fakeCatalogue) StepAction(op string) (string, bool) {
+	if f.action != nil {
+		if a, ok := f.action[op]; ok {
+			return a, true
+		}
+	}
+	return op, true
+}
+
 // testProposal builds a frozen proposal with one step and a stable shape.
 func testProposal(proposalID string) events.ProposalCreatedPayload {
 	return events.ProposalCreatedPayload{
@@ -81,6 +93,14 @@ func testProposal(proposalID string) events.ProposalCreatedPayload {
 			{Action: "compose_up", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`), Description: "start connect"},
 		},
 	}
+}
+
+// testProposalWithAction builds a frozen proposal whose single step runs the
+// given action, keeping the stable shape (and params) of testProposal.
+func testProposalWithAction(proposalID, action string) events.ProposalCreatedPayload {
+	p := testProposal(proposalID)
+	p.Steps[0].Action = action
+	return p
 }
 
 // proposalHash computes the runner's hash for a frozen proposal in room r1.

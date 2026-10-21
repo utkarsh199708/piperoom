@@ -28,6 +28,13 @@ type Catalogue interface {
 	// guard table of docs/design/setup-agent.md §3.5). Class is already raised
 	// to the runner's own floor.
 	GuardForbidden(op, class string) bool
+	// StepAction returns the proposal-step action name that op executes, and
+	// false when op is not in the catalogue. events.ProposalStep.Action is an
+	// actions.Action name and OpRequest.Op an ops.Registry name; the two are
+	// usually the same string, but this is the explicit mapping for the cases
+	// where they differ, so the runner can bind a request to the frozen step
+	// it names.
+	StepAction(op string) (action string, ok bool)
 }
 
 // nopCatalogue is the default catalogue until internal/setup/ops lands: it
@@ -41,3 +48,4 @@ func (nopCatalogue) Execute(context.Context, protocol.OpRequest) (protocol.OpRes
 func (nopCatalogue) Floor(string) (string, bool)        { return "", false }
 func (nopCatalogue) Target(protocol.OpRequest) string   { return "" }
 func (nopCatalogue) GuardForbidden(string, string) bool { return false }
+func (nopCatalogue) StepAction(string) (string, bool)   { return "", false }

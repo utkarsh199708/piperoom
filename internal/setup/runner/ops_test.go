@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -238,7 +240,7 @@ func TestT3WaitsForY(t *testing.T) {
 		cat := &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT3}}
 		srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
 			doHandshake(t, conn, ctx, "tok", time.Now, nil)
-			p1 := testProposal("p1")
+			p1 := testProposalWithAction("p1", "source_restart")
 			writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))})
 			f := readFrameJSON(t, conn, ctx)
 			if f.Type != protocol.FrameResult || f.Result == nil {
@@ -264,7 +266,7 @@ func TestT3WaitsForY(t *testing.T) {
 		cat := &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT3}}
 		srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
 			doHandshake(t, conn, ctx, "tok", time.Now, nil)
-			p1 := testProposal("p1")
+			p1 := testProposalWithAction("p1", "source_restart")
 			writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))})
 			assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
 		})
@@ -289,7 +291,7 @@ func TestT3WaitsForY(t *testing.T) {
 		opSent := make(chan struct{})
 		srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
 			doHandshake(t, conn, ctx, "tok", time.Now, nil)
-			p1 := testProposal("p1")
+			p1 := testProposalWithAction("p1", "source_restart")
 			writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))})
 			close(opSent)
 			// Wait for the runner to close the connection (its ctx ended).
@@ -363,6 +365,145 @@ func TestOpPrintedOnTerminal(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("terminal output missing %q: %q", want, out)
 		}
+	}
+}
+
+// TestStepBindingRefused: a T1+ request that carries the valid params_hash but
+// names a different op, params or step than the frozen proposal step it claims
+// is refused — the hash alone does not bind the request to the step.
+func TestStepBindingRefused(t *testing.T) {
+	cat := &fakeCatalogue{
+		floor: map[string]string{
+			"compose_up": protocol.TierT1,
+			"other_op":   protocol.TierT1,
+		},
+	}
+
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposal("p1")
+		h := proposalHash(t, p1)
+		raw := proposalRaw(t, p1)
+
+		// 1. A different op, quoting the valid hash and the step's params.
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("a", "other_op", protocol.TierT1, "p1", 0, h, raw)})
+		assertRefused(t, conn, ctx, protocol.RefuseParamsHash)
+
+		// 2. The right op but different params.
+		req := opReq("b", "compose_up", protocol.TierT1, "p1", 0, h, raw)
+		req.Params = json.RawMessage(`{"service":"kafka"}`)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &req})
+		assertRefused(t, conn, ctx, protocol.RefuseParamsHash)
+
+		// 3. A step index outside the frozen proposal.
+		req = opReq("c", "compose_up", protocol.TierT1, "p1", 3, h, raw)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &req})
+		assertRefused(t, conn, ctx, protocol.RefuseParamsHash)
+	})
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 0 {
+		t.Fatalf("executor called %d times, want 0", n)
+	}
+}
+
+// TestStepActionMapping: when an op name and a proposal step's action name
+// differ, the catalogue's explicit mapping binds them, and the matching op
+// runs; a mapped op whose params still differ is refused.
+func TestStepActionMapping(t *testing.T) {
+	p := events.ProposalCreatedPayload{
+		ProposalID:     "p1",
+		Title:          "fix the stack",
+		Risk:           "low",
+		Rollback:       "revert",
+		RequiredLayers: []string{"environment"},
+		Steps: []events.ProposalStep{
+			{Action: "start_service", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`)},
+		},
+	}
+	h := proposalHash(t, p)
+	raw := proposalRaw(t, p)
+
+	cat := &fakeCatalogue{
+		floor:  map[string]string{"compose_up": protocol.TierT1},
+		action: map[string]string{"compose_up": "start_service"},
+	}
+
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+
+		// Matching params -> runs.
+		req := opReq("a", "compose_up", protocol.TierT1, "p1", 0, h, raw)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &req})
+		if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FrameResult || f.Result == nil || !f.Result.OK {
+			t.Fatalf("expected a result, got %+v", f)
+		}
+
+		// Mapped op but differing params -> refused.
+		req = opReq("b", "compose_up", protocol.TierT1, "p1", 0, h, raw)
+		req.Params = json.RawMessage(`{"service":"kafka"}`)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &req})
+		assertRefused(t, conn, ctx, protocol.RefuseParamsHash)
+	})
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 1 {
+		t.Fatalf("executor called %d times, want 1", n)
+	}
+}
+
+// TestOpRefusedWhenStartRecordNotPersisted: a T1+ op whose durable "started"
+// marker cannot be written is refused (not executed). A directory in place of
+// the op log file stands in for a disk that refuses the write or sync.
+func TestOpRefusedWhenStartRecordNotPersisted(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".piperoom", "ops.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cat := &fakeCatalogue{floor: map[string]string{"compose_up": protocol.TierT1}}
+
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposal("p1")
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("a", "compose_up", protocol.TierT1, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))})
+		f := readFrameJSON(t, conn, ctx)
+		if f.Type != protocol.FrameRefused || f.Refused == nil {
+			t.Fatalf("expected refusal, got %+v", f)
+		}
+		if f.Refused.Reason != "start_persist" {
+			t.Fatalf("refusal reason = %q, want %q", f.Refused.Reason, "start_persist")
+		}
+	})
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: dir, Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 0 {
+		t.Fatalf("executor called %d times, want 0", n)
 	}
 }
 

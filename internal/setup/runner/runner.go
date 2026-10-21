@@ -40,6 +40,13 @@ const (
 	defaultLabel = "piperoom-runner"
 	// catalogueVersion is "0" until the ops catalogue lands (a later wave).
 	catalogueVersion = "0"
+
+	// connectBackoffBase, connectBackoffMax and maxConnectRetries bound the
+	// retries of a transient connect or handshake failure: the runner waits
+	// exponentially longer (capped) and gives up after maxConnectRetries.
+	connectBackoffBase = time.Second
+	connectBackoffMax  = 30 * time.Second
+	maxConnectRetries  = 5
 )
 
 // Errors the caller branches on.
@@ -70,6 +77,10 @@ type Options struct {
 	LookupIP   LookupIPFunc     // nil = the system resolver
 	Now        func() time.Time // nil = time.Now; the runner's clock (tests inject one)
 	Catalogue  Catalogue        // nil = nopCatalogue (no op runs until ops lands)
+	// Backoff returns how long to wait before the attempt-th retry (1-based)
+	// of a transient connect or handshake failure; nil = exponential backoff
+	// from connectBackoffBase, capped at connectBackoffMax.
+	Backoff func(attempt int) time.Duration
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -85,6 +96,7 @@ type Runner struct {
 	lookupIP   LookupIPFunc
 	now        func() time.Time
 	catalogue  Catalogue
+	backoff    func(attempt int) time.Duration
 	url        *url.URL
 
 	connMu sync.Mutex
@@ -121,6 +133,7 @@ func New(o Options) (*Runner, error) {
 		lookupIP:   o.LookupIP,
 		now:        o.Now,
 		catalogue:  o.Catalogue,
+		backoff:    o.Backoff,
 		started:    make(map[stepKey]struct{}),
 		proposals:  make(map[string]events.ProposalCreatedPayload),
 		floors:     make(map[string]string),
@@ -179,7 +192,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	for {
-		if err := r.connect(ctx, loopback, wsURL); err != nil {
+		if err := r.connectLoop(ctx, loopback, wsURL); err != nil {
 			return err
 		}
 		err := r.serve(ctx)
@@ -200,6 +213,81 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		r.log.Info("connection lost; reconnecting", "room_id", r.roomID, "err", err)
 	}
+}
+
+// connectLoop dials and authenticates, retrying transient dial and handshake
+// failures with bounded backoff. A refused pairing, a declined confirmation,
+// an expired or rejected token, a protocol refusal, a dial that resolved off
+// loopback, and a ctx that ended all return immediately.
+func (r *Runner) connectLoop(ctx context.Context, loopback bool, wsURL string) error {
+	for attempt := 0; ; attempt++ {
+		err := r.connect(ctx, loopback, wsURL)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		if !connectTransient(err) {
+			return err
+		}
+		if r.token != "" && r.tokenExpired() {
+			r.log.Info("runner token expired; a new pairing code is required", "room_id", r.roomID)
+			return ErrTokenExpired
+		}
+		if attempt >= maxConnectRetries {
+			return err
+		}
+		d := r.backoffDelay(attempt + 1)
+		r.log.Info("connect failed; retrying", "room_id", r.roomID, "attempt", attempt+1, "backoff", d, "err", err)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(d):
+		}
+	}
+}
+
+// connectTransient reports whether a connect error is a transient dial or
+// handshake failure the runner should retry. Terminal errors — a refused
+// pairing, a declined confirmation, an expired or rejected token, a protocol
+// version or frame refusal, a dial that resolved off loopback — return false.
+func connectTransient(err error) bool {
+	if websocket.CloseStatus(err) == protocol.CloseProtocolVersion {
+		return false
+	}
+	switch {
+	case errors.Is(err, ErrPairingRefused),
+		errors.Is(err, ErrDeclined),
+		errors.Is(err, ErrTokenExpired),
+		errors.Is(err, ErrDialNotLoopback),
+		errors.Is(err, ErrFrameTooBig),
+		errors.Is(err, errRedirectRefused),
+		errors.Is(err, protocol.ErrProtocolVersion),
+		errors.Is(err, protocol.ErrMalformedFrame):
+		return false
+	}
+	return true
+}
+
+// backoffDelay returns the wait before the attempt-th retry (1-based): the
+// injected Options.Backoff when set, else exponential backoff from
+// connectBackoffBase, capped at connectBackoffMax.
+func (r *Runner) backoffDelay(attempt int) time.Duration {
+	if r.backoff != nil {
+		return r.backoff(attempt)
+	}
+	d := connectBackoffBase
+	for i := 1; i < attempt; i++ {
+		if d >= connectBackoffMax {
+			return connectBackoffMax
+		}
+		d *= 2
+		if d > connectBackoffMax {
+			d = connectBackoffMax
+		}
+	}
+	return d
 }
 
 // reconnectable reports whether a serve error means the connection dropped

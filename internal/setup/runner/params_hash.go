@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -74,6 +75,30 @@ func nonNilStrings(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// canonicalParams returns the canonical form two params are compared in: the
+// RFC 8785 (JCS) form of the params after the number rewrite params_hash
+// applies. A step's params are always exact (a proposal holding a number a
+// double cannot carry was already refused by the hash check), so a request
+// whose params contain an inexact number is simply a mismatch.
+func canonicalParams(raw json.RawMessage) ([]byte, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage("null")
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, raw); err != nil {
+		return nil, fmt.Errorf("setup: compact params: %w", err)
+	}
+	form, inexact := hashForm(buf.Bytes())
+	if inexact > 0 {
+		return nil, errParamsNumber
+	}
+	canon, err := jcs.Transform(form)
+	if err != nil {
+		return nil, fmt.Errorf("setup: canonicalize params: %w", err)
+	}
+	return canon, nil
 }
 
 // The number handling below is copied from internal/room/numbers.go and must
