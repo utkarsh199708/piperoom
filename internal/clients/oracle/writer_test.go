@@ -162,6 +162,94 @@ func TestCreateCanaryAndInsert(t *testing.T) {
 	}
 }
 
+func TestCreateCanaryTableExistingRepairsLogging(t *testing.T) {
+	t.Run("already logged is ready without writes", func(t *testing.T) {
+		f := &fakeWriteDB{responses: []sqlRows{
+			rows([]string{"1"}),                            // table exists
+			rows([]string{"ALL COLUMN LOGGING", "ALWAYS"}), // logging present
+		}}
+		w := testWriter(f)
+		if err := w.CreateCanaryTable(unscopedCtx(), "APP.CANARY"); err != nil {
+			t.Fatalf("CreateCanaryTable: %v", err)
+		}
+		if len(f.execs) != 0 {
+			t.Fatalf("execs = %d, want 0 (already logged)", len(f.execs))
+		}
+		if len(f.queries) != 2 {
+			t.Fatalf("queries = %d, want 2 (existence, logging)", len(f.queries))
+		}
+	})
+
+	t.Run("missing logging is repaired and confirmed", func(t *testing.T) {
+		f := &fakeWriteDB{responses: []sqlRows{
+			rows([]string{"1"}), // table exists
+			rows(),              // no supplemental logging
+			rows([]string{"ALL COLUMN LOGGING", "ALWAYS"}), // after repair
+		}}
+		w := testWriter(f)
+		if err := w.CreateCanaryTable(unscopedCtx(), "APP.CANARY"); err != nil {
+			t.Fatalf("CreateCanaryTable: %v", err)
+		}
+		if len(f.execs) != 1 || f.execs[0].stmt != `ALTER TABLE "APP"."CANARY" ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS` {
+			t.Fatalf("execs = %+v, want one supplemental logging ALTER", f.execs)
+		}
+	})
+
+	t.Run("unrepairable logging is an error", func(t *testing.T) {
+		f := &fakeWriteDB{responses: []sqlRows{
+			rows([]string{"1"}), // table exists
+			rows(),              // no supplemental logging
+		}}
+		f.execErr = errors.New("ORA-32588: cannot alter")
+		w := testWriter(f)
+		if err := w.CreateCanaryTable(unscopedCtx(), "APP.CANARY"); err == nil {
+			t.Fatal("CreateCanaryTable succeeded, want error")
+		}
+		if len(f.execs) != 1 {
+			t.Fatalf("execs = %d, want 1 attempted repair", len(f.execs))
+		}
+	})
+}
+
+func TestCanaryTableScope(t *testing.T) {
+	pipeline := owners.Pipeline{ID: "orders", SourceTables: []string{"APP.ORDERS"}}
+	ctx := tools.WithPipeline(context.Background(), pipeline)
+
+	t.Run("create refused outside source tables", func(t *testing.T) {
+		f := &fakeWriteDB{responses: []sqlRows{rows()}}
+		w := testWriter(f)
+		if err := w.CreateCanaryTable(ctx, "APP.CANARY"); !errors.Is(err, tools.ErrOutOfScope) {
+			t.Fatalf("CreateCanaryTable: err = %v, want tools.ErrOutOfScope", err)
+		}
+		if len(f.execs) != 0 || len(f.queries) != 0 {
+			t.Fatalf("out-of-scope canary reached the database: execs %d, queries %d", len(f.execs), len(f.queries))
+		}
+	})
+
+	t.Run("insert refused outside source tables", func(t *testing.T) {
+		f := &fakeWriteDB{}
+		w := testWriter(f)
+		if err := w.InsertCanary(ctx, "APP.CANARY", "nonce"); !errors.Is(err, tools.ErrOutOfScope) {
+			t.Fatalf("InsertCanary: err = %v, want tools.ErrOutOfScope", err)
+		}
+		if len(f.execs) != 0 || len(f.queries) != 0 {
+			t.Fatalf("out-of-scope canary reached the database: execs %d, queries %d", len(f.execs), len(f.queries))
+		}
+	})
+
+	t.Run("canary within source tables is allowed", func(t *testing.T) {
+		canaryPipeline := owners.Pipeline{ID: "orders", SourceTables: []string{"APP.ORDERS", "APP.CANARY"}}
+		f := &fakeWriteDB{responses: []sqlRows{rows()}} // does not exist yet
+		w := testWriter(f)
+		if err := w.CreateCanaryTable(tools.WithPipeline(context.Background(), canaryPipeline), "APP.CANARY"); err != nil {
+			t.Fatalf("CreateCanaryTable in-scope: %v", err)
+		}
+		if len(f.execs) != 2 {
+			t.Fatalf("execs = %d, want 2 (create + supplemental logging)", len(f.execs))
+		}
+	})
+}
+
 func TestCreateReadRoleReturnsOnlySecretName(t *testing.T) {
 	f := &fakeWriteDB{responses: []sqlRows{rows()}} // role does not exist
 	store := &fakeSecretStore{}
@@ -277,7 +365,11 @@ func TestSetupWriterRefusesBadIdentifiers(t *testing.T) {
 
 func TestSetupWriterScopeFailsClosed(t *testing.T) {
 	bg := context.Background()
-	pipeline := owners.Pipeline{ID: "orders", SourceTables: []string{"APP.ORDERS"}}
+	// The canary table must be one of the pipeline's source tables (P1), so
+	// the scope-gate test declares it alongside APP.ORDERS; otherwise the
+	// canary calls below would fail closed with ErrOutOfScope, not exercise
+	// the gate this test is about.
+	pipeline := owners.Pipeline{ID: "orders", SourceTables: []string{"APP.ORDERS", "APP.CANARY"}}
 	cases := []struct {
 		name string
 		ctx  context.Context
