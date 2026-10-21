@@ -1,6 +1,37 @@
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig, loadEnv, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
+
+// The Vite dev server proxies /devctl to `devctl serve` (cmd/devctl/serve.go), an
+// unauthenticated, loopback-only break/fix API, so the dev-only "Break something"
+// menu can call it same-origin. The proxy below uses `changeOrigin: true` so the
+// proxied Host is 127.0.0.1:7071, which is what lets it pass devctl's loopback
+// allow-list — but that also means that if Vite is bound beyond loopback
+// (`vite --host`), anyone on the network reaches that API and the Host/Origin
+// checks are satisfied. devctl's loopback boundary must not depend on Vite's bind
+// address, so this plugin removes the /devctl proxy whenever the resolved server
+// host is not loopback, unless the developer explicitly opts in with
+// PIPEROOM_DEVCTL_ALLOW_REMOTE=1.
+const DEVCTL_PROXY_KEY = '^/devctl(/|$)'
+
+function isLoopbackHost(host: string | boolean | undefined): boolean {
+  // Vite's default host is localhost; `false` resolves the same way.
+  if (host === undefined || host === false) return true
+  // A bare `vite --host` binds 0.0.0.0.
+  if (host === true) return false
+  const h = host.trim().toLowerCase()
+  return h === 'localhost' || h === '::1' || h.startsWith('127.')
+}
+
+const devctlLoopbackGuard = (): Plugin => ({
+  name: 'piperoom:devctl-loopback-guard',
+  config(config) {
+    if (isLoopbackHost(config.server?.host)) return
+    if (process.env.PIPEROOM_DEVCTL_ALLOW_REMOTE === '1') return
+    const proxy = config.server?.proxy
+    if (proxy) delete proxy[DEVCTL_PROXY_KEY]
+  },
+})
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -26,7 +57,7 @@ export default defineConfig(({ mode }) => {
   }
 
   return {
-    plugins: [react()],
+    plugins: [react(), devctlLoopbackGuard()],
     resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
     build: {
       rollupOptions: {
@@ -51,7 +82,7 @@ export default defineConfig(({ mode }) => {
         // changeOrigin is on so devctl sees Host 127.0.0.1:7071: its Host allow-list is
         // port-exact (unlike the Go server, which accepts any loopback port). Deliberately
         // absent from preview.proxy: preview serves the production bundle, which has no menu.
-        '^/devctl(/|$)': {
+        [DEVCTL_PROXY_KEY]: {
           target: devctl,
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/devctl/, ''),
