@@ -473,7 +473,12 @@ and `by_confidence` come from shadow rooms until a grade for live rooms is added
 Node `kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table | schema_subject`, and for a
 `batch` pipeline (P0 item 8, builder P4a) `dag` (id `dag:<dag_id>`, layer `orchestrator`), `task` (id
 `task:<dag_id>.<task_id>`, layer `orchestrator`, one per task instance of the latest run, its state in `facts`) and
-`model` (id `model:<name>`, layer `transform`), drawn `dag → task → model → sink_table` with data edges. `health`:
+`model` (id `model:<name>`, layer `transform`), drawn `dag → task → model → sink_table` with data edges. With a
+ClickHouse warehouse (`warehouse_kind: clickhouse`, CH-3) the Kafka ingestion hop adds `kafka_engine` (id
+`kafka_engine:<db>.<table>`) and `materialized_view` (id `materialized_view:<db>.<view>`), both on the warehouse's
+layer, drawn `topic → kafka_engine → materialized_view → sink_table` with data edges; edges found by naming
+convention rather than read from the view's definition are `mapping: "inferred"`, and a Kafka engine table not
+confirmed to exist is `health: "unknown"`. `health`:
 `ok | warn | fail | unknown`. `partial` (P4, omitted when false): an optional reader the pipeline's kind needs is not
 configured or not supported (no Airflow or dbt reader), so its nodes are left out; clients say the map is incomplete
 rather than healthy.
@@ -724,6 +729,93 @@ export). Another user's request with the same value is a different key.
 - **Without a key** nothing changes: every request appends, so a client that cannot tell whether a request landed
   must not re-send it without a key. A server without this feature ignores the field, so a client retries
   automatically only when the answer's event carries `client_id`.
+
+### Admin: settings and connection tests (onboarding phase 1, design `docs/design/onboarding.md`)
+
+Read-only views of what the server runs with, and live tests of its connections. **Admin only**
+(`admin: true` in users.yaml): any other member gets `403 not_allowed`, a viewer `403 viewer`, checked before
+anything else. Phase 1 changes no configuration: the files and environment stay the source of truth, and nothing
+here writes them. **No response ever contains a secret value**: DSNs, passwords, user names and tokens are shown as
+`set`/`unset` with where they come from; URLs and brokers are shown without user info, query or fragment.
+
+| Method | Route | Body | Response | Notes |
+|---|---|---|---|---|
+| GET | `/api/admin/config` | – | `AdminConfig` | what the server runs with now |
+| POST | `/api/admin/connections/test` | `{"id": "<connection id>"}` | `ProbeResult` | `404 not_found` for an unknown id; `429 rate_limited` after 10 tests per minute per admin; the test itself never answers 5xx for a failed check, a failed check is `ok: false` |
+| GET | `/api/admin/config/export` | – | `text/yaml` attachment `piperoom-config.yaml` | the owners file, then `---`, then the users file, as read at start (they hold no secrets by design: connection settings are `env:`/`file:` references) |
+
+`AdminConfig`:
+
+```json
+{
+  "source": "file",
+  "owners_file": "owners.yaml",
+  "users_file": "users.yaml",
+  "connections": [
+    {
+      "id": "process-wide.kafka",
+      "scope": "process-wide",
+      "pipeline_id": "",
+      "kind": "kafka",
+      "used_by": ["orders"],
+      "settings": [
+        {"key": "kafka_brokers", "display": "localhost:29092", "secret": false, "from": "env KAFKA_BROKERS"},
+        {"key": "kafka_sasl_password", "display": "", "secret": true, "set": true, "from": "env KAFKA_SASL_PASSWORD"}
+      ]
+    }
+  ],
+  "pipelines": [
+    {
+      "id": "orders", "title": "Orders CDC", "tenant": "default",
+      "connections": "process-wide",
+      "connectors": ["pg-orders-connector"], "consumer_groups": ["order-sync"],
+      "source_tables": ["public.orders"], "sink_tables": ["analytics.orders"],
+      "owners": [{"layer": "postgres", "principals": ["user:priya"]}],
+      "shadow": false
+    }
+  ],
+  "people": [{"id": "priya", "name": "Priya", "layers": ["postgres", "schema-registry"], "admin": false}]
+}
+```
+
+- `source` is `file` in phase 1. `owners_file` / `users_file` are base names only.
+- **Connections.** One per kind (`source_db`, `kafka`, `connect`, `schema_registry`, `warehouse`) for the
+  process-wide settings (`id` `process-wide.<kind>`, `scope` `process-wide`) and one per kind for each pipeline
+  with a `connections:` block (`id` `pipeline.<pipeline id>.<kind>`, `scope` `pipeline`, `pipeline_id` set). A kind
+  whose required setting (the DSN, brokers or URL) is empty is left out. `used_by` lists the pipelines whose client
+  set the connection serves, in owners order.
+- **Settings.** One row per `owners.ConnectionKeys()` key of the kind that is set or required (so a process-wide
+  secret row always has `set: true`; `set: false` appears for a pipeline reference whose variable or file is
+  missing). `secret` is true for
+  every key that may hold a credential (DSNs, user names, passwords); then `display` is `""` and `set` says whether
+  a value is present. For URLs and `kafka_brokers`, `display` is scheme, host, port and path only. For literal keys
+  (`owners.IsLiteralKey`) and TLS file paths, `display` is the value. `from` is `env NAME`, `file /path` or `value`
+  for a pipeline reference, and `env NAME` for a process-wide setting.
+- **Pipelines and people** mirror owners.yaml and users.yaml; `owners` lists each layer's principals as written
+  (`user:<id>`, `group:<name>`); `connections` is `own` or `process-wide`.
+
+`ProbeResult` (`internal/connprobe.Result`):
+
+```json
+{"kind": "source_db", "ok": false, "took_ms": 212, "checks": [
+  {"id": "reach", "status": "ok", "ms": 4},
+  {"id": "login", "status": "ok", "ms": 31},
+  {"id": "read_only", "status": "ok", "ms": 2, "detail": "default_transaction_read_only = on"},
+  {"id": "read_slots", "status": "fail", "ms": 3, "problem": "role piperoom_ro cannot read pg_replication_slots",
+   "fix": "GRANT SELECT ON pg_catalog.pg_replication_slots TO piperoom_ro;"}]}
+```
+
+Check ids are stable per kind. Every kind starts with `config` (the settings are present and parse; a pipeline
+reference that cannot be resolved is a failed `config` check naming the key and its reference, never a value), then
+`reach` and `login`; later checks are `skip` when one of those three fails. Kind-specific ids: `source_db`
+`read_only`, `statement_timeout`, `read_slots`, `read_publications`, `select_tables`, `can_write`; `warehouse`
+`read_only` (Postgres only), `select_sink`; `kafka`, `connect` and `schema_registry` as their probes document.
+
+`status` is `ok`, `fail`, `warn` (works, but should change, e.g. the login can write) or `skip` (not run because an
+earlier check failed). `ok` is false when any check failed. `problem`, `fix` and `detail` are fixed text with object
+names only, never a server's raw error. Every dial goes through an address guard that refuses link-local and cloud
+metadata addresses; phase 1 allows loopback and private addresses because it tests only operator-configured
+connections. A test is logged (`admin: connection test`, actor, id, ok), never with settings.
 
 ### Setup rooms (U0; server A5, runner A9, web A6; design `docs/design/setup-agent.md`)
 
