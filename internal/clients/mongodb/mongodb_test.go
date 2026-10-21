@@ -284,7 +284,7 @@ func TestRoleInfo(t *testing.T) {
 				"user": "alice",
 				"db":   "admin",
 				"inheritedPrivileges": bson.A{
-					bson.M{"resource": bson.M{"db": "app", "collection": ""}, "actions": bson.A{"find"}},
+					bson.M{"resource": bson.M{"db": "app", "collection": ""}, "actions": bson.A{"find", "changeStream"}},
 					bson.M{"resource": bson.M{"db": "local", "collection": "oplog.rs"}, "actions": bson.A{"find"}},
 				},
 			}},
@@ -312,7 +312,7 @@ func TestRoleInfo(t *testing.T) {
 				"user": "alice",
 				"db":   "app",
 				"inheritedPrivileges": bson.A{
-					bson.M{"resource": bson.M{"db": "app", "collection": "things"}, "actions": bson.A{"find"}},
+					bson.M{"resource": bson.M{"db": "app", "collection": "things"}, "actions": bson.A{"find", "changeStream"}},
 				},
 			}},
 		},
@@ -347,23 +347,53 @@ func TestCan(t *testing.T) {
 		coll  string
 		want  bool
 	}{
-		{"readAnyDatabase matches any collection", []privilege{{actions: []string{"find", "changeStream"}}}, "orders", "customers", true},
-		{"readAnyDatabase matches the oplog", []privilege{{actions: []string{"find", "changeStream"}}}, "local", "oplog.rs", true},
+		{"find and changeStream match any collection", []privilege{{actions: []string{"find", "changeStream"}}}, "orders", "customers", true},
+		{"find and changeStream match the oplog", []privilege{{actions: []string{"find", "changeStream"}}}, "local", "oplog.rs", true},
+		{"only find is not selectable", []privilege{{actions: []string{"find"}}}, "orders", "customers", false},
+		{"only changeStream is not selectable", []privilege{{actions: []string{"changeStream"}}}, "orders", "customers", false},
+		{"find and changeStream across two matching privileges", []privilege{
+			{actions: []string{"find"}},
+			{actions: []string{"changeStream"}},
+		}, "orders", "customers", true},
+		{"anyAction alone grants both", []privilege{{actions: []string{"anyAction"}}}, "orders", "customers", true},
 		{"readAnyDatabase excludes system collections", []privilege{{actions: []string{"find", "changeStream"}}}, "admin", "system.users", false},
-		{"read on a db matches its collections", []privilege{{db: "orders", actions: []string{"find"}}}, "orders", "customers", true},
-		{"read on a db does not match other dbs", []privilege{{db: "orders", actions: []string{"find"}}}, "local", "oplog.rs", false},
-		{"read on a db excludes system collections", []privilege{{db: "orders", actions: []string{"find"}}}, "orders", "system.profile", false},
-		{"root anyResource matches anything", []privilege{{anyResource: true, actions: []string{"anyAction"}}}, "local", "oplog.rs", true},
-		{"anyResource without anyAction does not match", []privilege{{anyResource: true, actions: []string{"find"}}}, "orders", "customers", false},
+		{"db-wide privilege matches its collections", []privilege{{db: "orders", actions: []string{"find", "changeStream"}}}, "orders", "customers", true},
+		{"db-wide privilege does not match other dbs", []privilege{{db: "orders", actions: []string{"find", "changeStream"}}}, "local", "oplog.rs", false},
+		{"db-wide privilege excludes system collections", []privilege{{db: "orders", actions: []string{"find", "changeStream"}}}, "orders", "system.profile", false},
+		{"anyResource with anyAction matches anything", []privilege{{anyResource: true, actions: []string{"anyAction"}}}, "local", "oplog.rs", true},
+		{"anyResource without anyAction does not match", []privilege{{anyResource: true, actions: []string{"find", "changeStream"}}}, "orders", "customers", false},
 		{"cluster-only role matches no collection", []privilege{{cluster: true, actions: []string{"anyAction"}}}, "orders", "customers", false},
-		{"specific collection matches exactly", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find"}}}, "local", "oplog.rs", true},
-		{"specific collection does not match siblings", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find"}}}, "local", "startup_log", false},
+		{"specific collection matches exactly", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find", "changeStream"}}}, "local", "oplog.rs", true},
+		{"specific collection does not match siblings", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find", "changeStream"}}}, "local", "startup_log", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ai := authInfo{privileges: tt.privs}
 			if got := ai.can(tt.db, tt.coll); got != tt.want {
 				t.Fatalf("can(%q, %q) = %v, want %v (privs %+v)", tt.db, tt.coll, got, tt.want, tt.privs)
+			}
+		})
+	}
+}
+
+func TestCanReadOplog(t *testing.T) {
+	tests := []struct {
+		name  string
+		privs []privilege
+		want  bool
+	}{
+		{"find on the oplog", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find"}}}, true},
+		{"changeStream alone does not read the oplog", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"changeStream"}}}, false},
+		{"find and changeStream on the oplog", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"find", "changeStream"}}}, true},
+		{"anyAction on the oplog", []privilege{{db: "local", collection: "oplog.rs", actions: []string{"anyAction"}}}, true},
+		{"anyResource with anyAction reads the oplog", []privilege{{anyResource: true, actions: []string{"anyAction"}}}, true},
+		{"find on another collection does not read the oplog", []privilege{{db: "local", collection: "startup_log", actions: []string{"find"}}}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ai := authInfo{privileges: tt.privs}
+			if got := ai.canReadOplog(); got != tt.want {
+				t.Fatalf("canReadOplog() = %v, want %v (privs %+v)", got, tt.want, tt.privs)
 			}
 		})
 	}

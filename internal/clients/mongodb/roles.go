@@ -136,24 +136,37 @@ func parsePrivileges(v any) []privilege {
 }
 
 // canReadOplog reports whether the user can read the oplog (local.oplog.rs),
-// which the connector's cursor mode needs.
+// which the connector's cursor mode needs. Reading the oplog requires find;
+// changeStream never counts toward oplog read access.
 func (ai authInfo) canReadOplog() bool {
-	return ai.can("local", "oplog.rs")
+	find, _ := ai.effectiveActions("local", "oplog.rs")
+	return find
 }
 
-// can reports whether the user holds find, changeStream or anyAction on
-// db.coll. A privilege matches when it names db.coll exactly, names the whole
-// database (collection == "" matches any non-system collection), names any
-// database (db == ""), or grants anyResource with anyAction. Cluster-level
-// privileges never grant collection read access.
+// can reports whether the user can open a change stream on db.coll: the
+// effective actions across every matching privilege must include both find and
+// changeStream. MongoDB requires both actions to open a change-stream cursor.
+// A privilege matches when it names db.coll exactly, names the whole database
+// (collection == "" matches any non-system collection), names any database
+// (db == ""), or grants anyResource with anyAction. Cluster-level privileges
+// never grant collection read access.
 func (ai authInfo) can(db, coll string) bool {
+	find, changeStream := ai.effectiveActions(db, coll)
+	return find && changeStream
+}
+
+// effectiveActions returns whether the union of every privilege matching
+// db.coll grants find and changeStream. anyAction grants both, and the two
+// actions may come from different privileges that match the same resource (for
+// example find on the whole database and changeStream on one collection).
+func (ai authInfo) effectiveActions(db, coll string) (find, changeStream bool) {
 	for _, p := range ai.privileges {
 		if p.cluster {
 			continue
 		}
 		if p.anyResource {
 			if hasAction(p.actions, "anyAction") {
-				return true
+				return true, true
 			}
 			continue
 		}
@@ -168,11 +181,18 @@ func (ai authInfo) can(db, coll string) bool {
 			// collection == "" covers every non-system collection in the db.
 			continue
 		}
-		if hasAction(p.actions, "find", "changeStream", "anyAction") {
-			return true
+		for _, a := range p.actions {
+			switch a {
+			case "anyAction":
+				return true, true
+			case "find":
+				find = true
+			case "changeStream":
+				changeStream = true
+			}
 		}
 	}
-	return false
+	return find, changeStream
 }
 
 func hasAction(actions []string, want ...string) bool {
