@@ -215,7 +215,7 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 // that exists only for the preview.
 func (a *updateConnectorConfig) dryRun(ctx context.Context, cfg, changes map[string]string) *DryRunResult {
 	for k := range cfg {
-		if looksSecret(k) {
+		if LooksSecret(k) {
 			return &DryRunResult{Source: sourceValidate, Skipped: "the connector config holds secret keys; not sent to validate"}
 		}
 	}

@@ -9,6 +9,11 @@ Piperoom, never reuse a human or application credential, so you can audit and re
 The names below match the code: tools in `internal/tools/{dbtools,kafkatools}`, actions in
 `internal/actions`, clients in `internal/clients/*`. Replace placeholders (`<...>`).
 
+**Write mode** adds more write calls — the three `pg_*` source-Postgres writes, the Connect
+pause and N-key config patch, the Kafka offset reset and the produce calls (signal and DLQ
+replay). Their write roles and ACLs are in [write-roles.md](write-roles.md); this page covers
+the read access and the original Connect and Registry writes.
+
 ## Summary
 
 | System | Used by | Read access needed | Write access needed |
@@ -493,7 +498,7 @@ Pick one provider. The default is `anthropic` (the section above).
 - [ ] Every credential is dedicated to Piperoom and stored in a secret manager, not in the repo or in `owners.yaml`.
 - [ ] Postgres and warehouse roles cannot write (`INSERT` as that role fails), and see only pipeline tables.
 - [ ] Kafka principal has no write/group-read/alter ACLs, only pipeline-prefixed topics.
-- [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode. In write mode the proxy allows only the four Connect calls and two Registry calls listed above.
+- [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode. In write mode the proxy allows only the four Connect calls and two Registry calls listed above, plus the P3 calls in [write-roles.md](write-roles.md).
 - [ ] Network: Piperoom can reach only the five systems above, the Snowflake account host (only if `WAREHOUSE_KIND=snowflake`), the Google BigQuery endpoint and `oauth2.googleapis.com` (where a service-account key file exchanges its ADC token) (only if `WAREHOUSE_KIND=bigquery`), the Databricks workspace host (only if `WAREHOUSE_KIND=databricks`), the `AIRFLOW_URL` and `DBT_CLOUD_URL` hosts (only for a batch pipeline), the model provider's endpoint (the Anthropic API host or the pinned `ANTHROPIC_BASE_URL` host for `anthropic`; the Bedrock runtime in `AWS_REGION` for `bedrock`; the Vertex AI endpoint in `VERTEX_REGION` for `vertex`), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go`).
 - [ ] If `WAREHOUSE_KIND=snowflake`: the DSN password is URL-encoded, the role in the DSN has only `USAGE` and `SELECT` as listed above, and the resource monitor is set.
 - [ ] Airflow: the login (basic auth or a bearer token) is dedicated to Piperoom, over `https`, and has the `Viewer` role only.

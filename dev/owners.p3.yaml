@@ -29,6 +29,21 @@ pipelines:
       # dlq-backlog` creates the topic and `fix` deletes it.
       dlq_topics:
         - {topic: devctl.order-sync.dlq, written_by: order-sync}
+  - id: daily-revenue
+    title: Daily revenue (Airflow + dbt)
+    kind: batch
+    dags: [revenue_daily]
+    dbt_project: dev/batch/dbt/analytics
+    models: [stg_orders, fct_revenue]
+    sink_tables: [analytics.fct_revenue]
+    sink_ts_column: loaded_at
+    # The batch layers are not in the top-level `layers:` map (that map stays the
+    # six CDC layers, which TestExistingFilesStayValid pins), so they are owned
+    # here per-pipeline.
+    owners:
+      orchestrator: {approvers: priya}
+      transform: {approvers: priya}
+      warehouse: {approvers: meera}
 layers:
   postgres: priya
   kafka-connect: arjun

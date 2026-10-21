@@ -9,6 +9,8 @@ const PREFIXES: [string, string][] = [
   ['consumer_', 'consumer'],
   ['warehouse_', 'warehouse'],
   ['wh_', 'warehouse'],
+  ['dag_', 'orchestrator'],
+  ['dbt_', 'transform'],
 ]
 
 export function toolLayer(tool: string): string {

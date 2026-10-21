@@ -29,8 +29,9 @@ function ChangeItem({
   return (
     <li className="flex flex-col gap-1 border-l-2 border-border pl-3">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        {onSelectLayer ? (
+        {onSelectLayer && layer ? (
           // Row click filters the step stream to this change's layer (F7); click again to clear.
+          // A change kind without a layer (changeLayer -> '') is a plain badge, never a dead filter.
           <button
             type="button"
             aria-pressed={selectedLayer === layer}
