@@ -555,7 +555,7 @@ func TestResume(t *testing.T) {
 	var scheduled, cancelled int
 	for _, r := range fs.reqs {
 		text := joinTexts(r)
-		if strings.Contains(text, "may run from") {
+		if strings.Contains(text, "unless cancelled") {
 			scheduled++
 		}
 		if strings.Contains(text, "cancelled the policy countdown") {
@@ -821,11 +821,11 @@ func TestProposalScheduledLine(t *testing.T) {
 	}
 	text := joinTexts(fs.reqs[1])
 	const runAt = "2026-11-01T12:00:00Z"
-	if !strings.Contains(text, runAt) {
-		t.Errorf("run time missing: %q", text)
+	if !strings.Contains(text, "runs at "+runAt+" unless cancelled") {
+		t.Errorf("run time must read 'runs at <time> unless cancelled': %q", text)
 	}
-	if !strings.Contains(text, "may run from "+runAt) {
-		t.Errorf("cancel_until must read 'may run from <time>': %q", text)
+	if strings.Contains(text, "may run from") {
+		t.Errorf("cancel_until equal to run_at must not print the time twice: %q", text)
 	}
 	for _, bad := range []string{"deadline", "cancel by", "until", "expires", "cutoff"} {
 		if strings.Contains(strings.ToLower(text), bad) {
@@ -834,6 +834,26 @@ func TestProposalScheduledLine(t *testing.T) {
 	}
 	if !strings.Contains(text, "<https://pr.example/rooms/r1|Cancel>") {
 		t.Errorf("cancel deep link missing or wrong: %q", text)
+	}
+}
+
+func TestProposalScheduledLineDifferingCancel(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "orders lag", Severity: "sev2", PipelineID: "orders"})
+	runAt := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	cancelUntil := runAt.Add(15 * time.Minute)
+	scheduled := ev(2, events.ProposalScheduled, "ana", events.ProposalScheduledPayload{ProposalID: "p1", RunAt: runAt, Policy: "auto_approve", CancelUntil: cancelUntil})
+	closed := ev(3, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "done"})
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, scheduled, closed}}, fs, nil)
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	text := joinTexts(fs.reqs[1])
+	if strings.Count(text, runAt.Format(time.RFC3339)) != 1 {
+		t.Errorf("run_at must be printed exactly once: %q", text)
+	}
+	if !strings.Contains(text, "may run from "+cancelUntil.UTC().Format(time.RFC3339)) {
+		t.Errorf("differing cancel_until must add the 'may run from' sentence: %q", text)
 	}
 }
 

@@ -277,10 +277,15 @@ func (r *renderer) reply(e events.Event) (m message, ok bool, err error) {
 			return m, false, err
 		}
 		// cancel_until is advertised, never a deadline: "may run from", never
-		// "cancel by" (a cancel after it still wins if it lands first).
-		t := fmt.Sprintf(":clock1: *Scheduled (%s):* %s will run at %s.\nThe policy may run from %s.",
+		// "cancel by" (a cancel after it still wins if it lands first). RunAt
+		// is the single printed time; cancel_until only appears when it differs
+		// (in this wave it is always equal to RunAt, so it is never repeated).
+		t := fmt.Sprintf(":clock1: *Scheduled (%s):* %s runs at %s unless cancelled.",
 			policyName(p.Policy), r.proposalName(p.ProposalID),
-			p.RunAt.UTC().Format(time.RFC3339), p.CancelUntil.UTC().Format(time.RFC3339))
+			p.RunAt.UTC().Format(time.RFC3339))
+		if !p.CancelUntil.Equal(p.RunAt) {
+			t += fmt.Sprintf("\nThe policy may run from %s.", p.CancelUntil.UTC().Format(time.RFC3339))
+		}
 		blocks := []block{section(t)}
 		if link := r.cancelLink(e.RoomID); link != "" {
 			blocks = append(blocks, block{Type: "context", Elements: []textObj{{Type: "mrkdwn", Text: link, Verbatim: false}}})
