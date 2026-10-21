@@ -15,19 +15,33 @@ WAREHOUSE_KIND=databricks
 WAREHOUSE_DB_URL='token:<personal-access-token>@dbc-1234abcd-5678.cloud.databricks.com:443/sql/1.0/warehouses/1234567890abcdef?catalog=main'
 ```
 
+or, for a service principal with OAuth M2M (no personal access token needed):
+
+```
+WAREHOUSE_DB_URL='dbc-1234abcd-5678.cloud.databricks.com:443/sql/1.0/warehouses/1234567890abcdef?catalog=main&clientId=<service-principal-id>&clientSecret=<service-principal-secret>&authType=OAuthM2M'
+```
+
 **Requires Databricks Runtime 14.1 or later** on the SQL warehouse: every value is sent as a
 named parameter (`:key`, `:since`, ...), which older runtimes reject. Current SQL warehouses
 (Serverless, Pro, Classic on the current channel) meet it.
 
-`WAREHOUSE_DB_URL` is the driver's DSN form, restricted to what a read-only reader needs:
+`WAREHOUSE_DB_URL` is the driver's DSN form, restricted to what a read-only reader needs.
+Personal access token (PAT):
 
 ```
 token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]
 ```
 
+OAuth M2M (service principal):
+
+```
+<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]&clientId=<id>&clientSecret=<secret>[&authType=OAuthM2M]
+```
+
 | Part | Meaning |
 |---|---|
 | `token:<pat>@` | Personal access token of a user or service principal (`accessToken=<pat>` works too). URL-escape it if it holds `/`, `@` or `%`. |
+| `clientId` / `clientSecret` | The service principal's OAuth client id and secret. `clientID` (capital ID) works too; the two alone imply M2M, `authType=OAuthM2M` is explicit. |
 | `<host>` | Workspace host, e.g. `dbc-....cloud.databricks.com` or `adb-....azuredatabricks.net`. An `https://` prefix is allowed; `http://` is refused. |
 | `<port>` | Default 443. |
 | `<http-path>` | The SQL warehouse's HTTP path (Connection details tab), e.g. `/sql/1.0/warehouses/<id>`. |
@@ -35,16 +49,20 @@ token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&sch
 | `schema` | Optional initial schema; tables are always schema-qualified, so it changes nothing. |
 
 Anything else is refused at startup: other parameters (the driver would pass them on as
-session parameters), a user name other than `token`, OAuth U2M (it opens a browser), a
-repeated parameter, a `#fragment`. Error messages never quote the DSN or any part of it;
-`databricks.Redact(err, dsn)` scrubs the token (and any client secret) from any error text.
+session parameters), a user name other than `token`, OAuth U2M (it opens a browser),
+mixing a token with client credentials, a repeated parameter, a `#fragment`. Error
+messages never quote the DSN or any part of it; `databricks.Redact(err, dsn)` scrubs the
+token (and any client secret) from any error text.
 
-**OAuth M2M is not supported yet.** A DSN with `authType=OAuthM2M`, `clientId` or
-`clientSecret` is refused at startup. In `databricks-sql-go` v1.16.0 the M2M authenticator
-fetches its token, and runs OIDC discovery, with `context.Background()` and the default
-HTTP client while it holds a lock: no deadline, no 4 MB cap, outside the guarded transport.
-One hung token endpoint would stall every query past the 10 s deadline. For a service
-principal, create a personal access token for it and use `token:<pat>@`.
+**OAuth M2M.** The driver's built-in M2M authenticator fetches its token with
+`context.Background()` and the default HTTP client while it holds a lock: no deadline, no
+4 MB cap, so one hung token endpoint would stall every query. This client does not use it.
+Instead it registers its own authenticator (`dbsql.WithAuthenticator`) that resolves the
+workspace's OAuth token endpoint through the driver's cloud-aware endpoint resolution and
+fetches the client-credentials token over one bounded `*http.Client` (10 s timeout, 4 MB
+body cap), caching it until just before expiry. A hung token endpoint therefore fails a
+query within the 10 s cap and the query never reaches the warehouse; a bad token status
+and an oversized token body are errors, and the client secret never appears in them.
 
 The DSN holds the credential. Keep it in a secret store, not in a file in the repository.
 
