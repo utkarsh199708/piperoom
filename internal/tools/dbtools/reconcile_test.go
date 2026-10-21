@@ -101,7 +101,7 @@ func TestReconcileWindowAndBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := res.Data.([]ReconcileRow)
+	rows := res.Data.(ReconcileData).Buckets
 	if len(rows) != 10 || src.got.width != 3*time.Minute || src.got.col != "updated_at" || wh.table != "analytics.orders" {
 		t.Errorf("rows=%d width=%s col=%s sink=%s", len(rows), src.got.width, src.got.col, wh.table)
 	}
@@ -187,7 +187,7 @@ func TestReconcileTopicColumnValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range res.Data.([]ReconcileRow) {
+	for _, r := range res.Data.(ReconcileData).Buckets {
 		if r.Topic != 5 {
 			t.Fatalf("topic = %d in %+v", r.Topic, r)
 		}

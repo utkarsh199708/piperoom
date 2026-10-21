@@ -30,6 +30,15 @@ const (
 	// optional "settle" input.
 	defaultSettle = 2 * time.Minute
 	maxSettle     = time.Hour
+	// reconcileKeyCap bounds the distinct keys one side may hold in the
+	// window before the key comparison is refused. Keys are the exact row
+	// count (one key is one row, updates included), so the diff is only
+	// reported when neither side can have more keys than were read; past the
+	// cap the agent narrows the window instead of reading a truncated diff
+	// as "no more missing rows" (the confident-wrong-number failure, #409).
+	reconcileKeyCap = 2000
+	// reconcileKeySample is the most keys a summary or Data lists per side.
+	reconcileKeySample = 10
 )
 
 // ReconcileRow is one bucket of the comparison. Topic is -1 when topic rates
@@ -41,19 +50,44 @@ type ReconcileRow struct {
 	Sink   int64     `json:"sink"`
 }
 
+// ReconcileData is the detail behind a reconcile result: the bucket table and,
+// when both clients can list keys, the exact key diff.
+type ReconcileData struct {
+	Buckets []ReconcileRow `json:"buckets"`
+	Keys    *ReconcileKeys `json:"keys,omitempty"`
+}
+
+// ReconcileKeys is the key-level comparison of source and sink rows over the
+// same window. One key is one row, however often the row was updated, so
+// Source and Sink are row counts, not change-event counts. Missing and Extra
+// are exact (the read is refused, not truncated, past reconcileKeyCap);
+// MissingKeys and ExtraKeys list at most reconcileKeySample of them.
+type ReconcileKeys struct {
+	Column      string   `json:"column"`      // source key column
+	SinkColumn  string   `json:"sink_column"` // sink key column
+	Source      int64    `json:"source"`
+	Sink        int64    `json:"sink"`
+	Missing     int64    `json:"missing"` // in the source, not in the sink
+	Extra       int64    `json:"extra"`   // in the sink, not in the source
+	MissingKeys []string `json:"missing_keys,omitempty"`
+	ExtraKeys   []string `json:"extra_keys,omitempty"`
+}
+
 func reconcileTool(d Deps) tools.Tool {
 	return &tool{
 		name: "reconcile",
 		desc: "Compare row counts per time bucket (at most 12) between the source table, the Kafka topic and the warehouse sink table, " +
 			"and say on which side the rows are lost: the connector side (topic is missing them) or the consumer side (topic has them, sink does not). " +
-			"Counts only, never a value or a key. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events. " +
-			"Rows newer than the settle margin (default 2m) are treated as still in flight and not judged: the window is cut that long before now. If the consumer lags more than that, pass a larger settle or an earlier until.",
+			"Counts only, plus the compared key column's values; never another column value. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events. " +
+			"Rows newer than the settle margin (default 2m) are treated as still in flight and not judged: the window is cut that long before now. If the consumer lags more than that, pass a larger settle or an earlier until. " +
+			"When both tables have a single-column primary key, it also compares the key sets over the same window and lists the rows the sink is missing and the sink rows the source does not have (at most 2000 keys per side; a larger window is refused, so narrow it).",
 		schema: objSchema(map[string]any{
 			"table":      strProp("Source table, \"schema.table\", one of the room's source tables."),
 			"since":      strProp("Start of the window, RFC 3339. The window is at most 6 hours."),
 			"until":      strProp("End of the window, RFC 3339. Default: now minus settle. Never later than now minus settle."),
 			"settle":     strProp("Optional margin for rows still in flight, a Go duration such as \"5m\" (0 to 1h). Default 2m."),
 			"sink_table": strProp("Sink table, only needed when the pipeline has several sink tables and none has the source table's name."),
+			"key_column": strProp("Primary key column to compare, when the tables' primary keys are not discovered or differ from the source's. Default: each table's own primary key."),
 		}, "table", "since"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
 			var input struct {
@@ -62,12 +96,16 @@ func reconcileTool(d Deps) tools.Tool {
 				Until     string `json:"until"`
 				Settle    string `json:"settle"`
 				SinkTable string `json:"sink_table"`
+				KeyColumn string `json:"key_column"`
 			}
 			if err := decode(in, &input); err != nil {
 				return tools.Result{}, err
 			}
 			if !validTable(input.Table) {
 				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\"", tools.ErrBadInput)
+			}
+			if input.KeyColumn != "" && !validColumn(input.KeyColumn) {
+				return tools.Result{}, fmt.Errorf("%w: invalid key_column", tools.ErrBadInput)
 			}
 			since, err := parseRFC3339(input.Since)
 			if err != nil {
@@ -140,13 +178,38 @@ func reconcileTool(d Deps) tools.Tool {
 			defer cancel()
 
 			width, n := reconcileGrid(since, until)
-			rows, err := d.reconcileCounts(ctx, src, snk, input.Table, sink, topic, p.SinkTSColumn, since, until, width, n)
-			if err != nil {
-				return tools.Result{}, err
+			// The bucket counts and the key diff read the same window from the
+			// same two systems; run them together so one slow side does not
+			// spend the other's deadline.
+			var (
+				wg        sync.WaitGroup
+				rows      []ReconcileRow
+				countsErr error
+				keys      reconcileKeyDiff
+			)
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				rows, countsErr = d.reconcileCounts(ctx, src, snk, input.Table, sink, topic, p.SinkTSColumn, since, until, width, n)
+			}()
+			go func() {
+				defer wg.Done()
+				keys = d.reconcileKeyDiff(ctx, input.Table, sink, p.SinkTSColumn, input.KeyColumn, since, until)
+			}()
+			wg.Wait()
+			if countsErr != nil {
+				return tools.Result{}, countsErr
 			}
-			summary := reconcileSummary(input.Table, sink, topic, p.SinkTSColumn, width, rows) + note
+			if keys.err != nil {
+				return tools.Result{}, keys.err
+			}
+			data := ReconcileData{Buckets: rows}
+			if keys.have {
+				data.Keys = &keys.keys
+			}
+			summary := reconcileSummary(input.Table, sink, topic, p.SinkTSColumn, width, rows) + keys.summary() + note
 			summary, truncated := tools.Truncate(summary)
-			return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
+			return tools.Result{Summary: summary, Data: data, Truncated: truncated}, nil
 		},
 	}
 }
