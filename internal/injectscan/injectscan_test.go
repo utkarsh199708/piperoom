@@ -299,6 +299,16 @@ func FuzzScanNames(f *testing.F) {
 			if x.Offset < 0 || x.Offset > x.End || x.End > len(s) {
 				t.Fatalf("%s finding: span %d-%d outside 0-%d", x.Kind, x.Offset, x.End, len(s))
 			}
+			if !(0 <= x.Block.Start && x.Block.Start <= x.Offset && x.Offset <= x.End &&
+				x.End <= x.Block.End && x.Block.End <= len(s)) {
+				t.Fatalf("%s finding: block %+v does not enclose span [%d,%d) in %d bytes", x.Kind, x.Block, x.Offset, x.End, len(s))
+			}
+			if x.Block.Start < len(s) && !utf8.RuneStart(s[x.Block.Start]) {
+				t.Fatalf("%s finding: block start %d is not a rune boundary", x.Kind, x.Block.Start)
+			}
+			if x.Block.End < len(s) && !utf8.RuneStart(s[x.Block.End]) {
+				t.Fatalf("%s finding: block end %d is not a rune boundary", x.Kind, x.Block.End)
+			}
 			if len(x.Excerpt) > MaxExcerptBytes || !utf8.ValidString(x.Excerpt) {
 				t.Fatalf("%s finding: excerpt %d bytes %q", x.Kind, len(x.Excerpt), x.Excerpt)
 			}
