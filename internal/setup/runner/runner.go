@@ -10,6 +10,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -106,6 +107,20 @@ type Runner struct {
 	tokenExpiry time.Time // the token is idle-expired past this instant
 	roomID      string
 	negotiated  protocol.Version
+
+	// stdinMu serializes terminal confirmation prompts and their reads (ask)
+	// and guards stdinReader, the single shared reader, so two concurrent T3
+	// confirms cannot read each other's answer or buffer each other's input.
+	stdinMu     sync.Mutex
+	stdinReader *bufio.Reader
+
+	// handshakeMu guards handshakeDone. handshakeDone is non-nil while a
+	// reconnect handshake is in progress (the window between setConn and the
+	// Pair+Resume frames) and is closed when it completes. FrameResult writes
+	// wait on it, so a result from an old op cannot jump ahead of the
+	// handshake and be the first frame on the new socket.
+	handshakeMu   sync.Mutex
+	handshakeDone chan struct{}
 
 	// opMu guards everything an op goroutine touches below: the duplicate
 	// ledger, the cached frozen proposals, the class floors, the in-flight set
@@ -461,6 +476,9 @@ func (r *Runner) pair(ctx context.Context) error {
 // first (updated targets); the runner re-applies its class floors (never
 // lowered) and keeps waiting for the token.
 func (r *Runner) resume(ctx context.Context) error {
+	r.beginHandshake()
+	defer r.endHandshake()
+
 	cur := protocol.Current()
 	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FramePair, Pair: &protocol.Pair{
 		Token:           r.token,
@@ -487,12 +505,35 @@ func (r *Runner) resume(ctx context.Context) error {
 		return err
 	}
 
-	res := r.buildResume()
+	res, done := r.buildResume()
 	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameResume, Resume: &res}); err != nil {
 		return err
 	}
+	r.dropDone(done)
 	r.log.Info("reconnected", "room_id", r.roomID, "in_flight", len(res.InFlight))
 	return nil
+}
+
+// beginHandshake marks the start of a reconnect handshake: FrameResult writes
+// wait until endHandshake, so a result from an op that finished in the window
+// cannot be the first frame on the new socket. It is always paired with
+// endHandshake (deferred), even when the handshake fails.
+func (r *Runner) beginHandshake() {
+	r.handshakeMu.Lock()
+	r.handshakeDone = make(chan struct{})
+	r.handshakeMu.Unlock()
+}
+
+// endHandshake clears the handshake marker and releases any FrameResult writes
+// waiting for it.
+func (r *Runner) endHandshake() {
+	r.handshakeMu.Lock()
+	ch := r.handshakeDone
+	r.handshakeDone = nil
+	r.handshakeMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
 }
 
 // tokenPhaseErr classifies an error while waiting for a fresh token on a
@@ -608,6 +649,29 @@ func (r *Runner) readFrame(ctx context.Context) (protocol.Frame, error) {
 }
 
 func (r *Runner) writeFrame(ctx context.Context, f protocol.Frame) error {
+	// A result must not jump ahead of a reconnect handshake: the server expects
+	// Pair then Resume as the first frames on a new socket. The result is
+	// already in the in-flight set (markDone ran before the write), so waiting
+	// here cannot lose it; it is delivered after the handshake, or carried by
+	// the Resume the handshake itself sends. The loop re-checks after each wait
+	// so a result released at the end of one handshake cannot slip ahead of the
+	// next.
+	if f.Type == protocol.FrameResult {
+		for {
+			r.handshakeMu.Lock()
+			ch := r.handshakeDone
+			r.handshakeMu.Unlock()
+			if ch == nil {
+				break
+			}
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+
 	raw, err := json.Marshal(f)
 	if err != nil {
 		return fmt.Errorf("setup: encoding frame: %w", err)

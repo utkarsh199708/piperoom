@@ -149,20 +149,39 @@ func (r *Runner) markDone(id string, result *protocol.OpResult) {
 }
 
 // buildResume collects the ops the server may not have learned about: running
-// ops stay (they may need reporting again), done ops are reported once and
-// dropped. The list is sorted by ID for determinism.
-func (r *Runner) buildResume() protocol.Resume {
+// ops stay (they may need reporting again), done ops are reported once. It also
+// returns the ids of the done ops it included; the caller deletes them only
+// after the Resume is delivered, so a failed write keeps the results in place
+// for the next Resume. The list is sorted by ID for determinism.
+func (r *Runner) buildResume() (protocol.Resume, []string) {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	res := protocol.Resume{InFlight: []protocol.OpStatus{}}
+	var done []string
 	for id, op := range r.inflight {
 		res.InFlight = append(res.InFlight, op.status)
 		if op.status.State == protocol.StateDone {
-			delete(r.inflight, id)
+			done = append(done, id)
 		}
 	}
 	sort.Slice(res.InFlight, func(i, j int) bool { return res.InFlight[i].ID < res.InFlight[j].ID })
-	return res
+	return res, done
+}
+
+// dropDone removes the done ops that a delivered Resume carried, and only
+// those: a result that finished after the snapshot was taken stays in the
+// in-flight set for the next Resume.
+func (r *Runner) dropDone(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	for _, id := range ids {
+		if op, ok := r.inflight[id]; ok && op.status.State == protocol.StateDone {
+			delete(r.inflight, id)
+		}
+	}
 }
 
 // runOp handles one FrameOp in its own goroutine: it applies the runner's
@@ -281,27 +300,72 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 }
 
 // frozenProposal returns the frozen proposal the runner cached for req,
-// caching it from req.Proposal on the first request of a proposal.
+// caching it from req.Proposal on the first request of a proposal. A later
+// request may still carry a Proposal, but it is only accepted when its
+// canonical hash matches the cached proposal; otherwise it is refused (the
+// caller reports RefuseParamsHash) and the cache is left untouched, so a
+// request cannot swap the frozen proposal — and with it the hash checkStep
+// binds to — for a different one.
 func (r *Runner) frozenProposal(req *protocol.OpRequest) (events.ProposalCreatedPayload, error) {
 	r.opMu.Lock()
-	if len(req.Proposal) > 0 {
-		var p events.ProposalCreatedPayload
-		if err := json.Unmarshal(req.Proposal, &p); err != nil {
-			r.opMu.Unlock()
-			return events.ProposalCreatedPayload{}, fmt.Errorf("setup: decoding frozen proposal: %w", err)
+	defer r.opMu.Unlock()
+
+	cached, ok := r.proposals[req.ProposalID]
+	if !ok {
+		if len(req.Proposal) == 0 {
+			return events.ProposalCreatedPayload{}, errors.New("setup: no frozen proposal to recompute params_hash")
 		}
-		if p.ProposalID != req.ProposalID {
-			r.opMu.Unlock()
-			return events.ProposalCreatedPayload{}, errors.New("setup: frozen proposal id does not match the request")
+		p, err := decodeProposal(req)
+		if err != nil {
+			return events.ProposalCreatedPayload{}, err
 		}
 		r.proposals[req.ProposalID] = p
+		return p, nil
 	}
-	p, ok := r.proposals[req.ProposalID]
-	r.opMu.Unlock()
-	if !ok {
-		return events.ProposalCreatedPayload{}, errors.New("setup: no frozen proposal to recompute params_hash")
+
+	if len(req.Proposal) > 0 {
+		p, err := decodeProposal(req)
+		if err != nil {
+			return events.ProposalCreatedPayload{}, err
+		}
+		same, err := r.sameProposal(cached, p)
+		if err != nil {
+			return events.ProposalCreatedPayload{}, err
+		}
+		if !same {
+			return events.ProposalCreatedPayload{}, errors.New("setup: proposal differs from the frozen one")
+		}
+	}
+	return cached, nil
+}
+
+// decodeProposal parses the frozen proposal a request carries and checks its
+// id against the request's.
+func decodeProposal(req *protocol.OpRequest) (events.ProposalCreatedPayload, error) {
+	var p events.ProposalCreatedPayload
+	if err := json.Unmarshal(req.Proposal, &p); err != nil {
+		return events.ProposalCreatedPayload{}, fmt.Errorf("setup: decoding frozen proposal: %w", err)
+	}
+	if p.ProposalID != req.ProposalID {
+		return events.ProposalCreatedPayload{}, errors.New("setup: frozen proposal id does not match the request")
 	}
 	return p, nil
+}
+
+// sameProposal reports whether two payloads have the same canonical hash — the
+// params_hash the approver saw. Only the fields that hash covers matter; the
+// rest (Origin, FallbackLayers, ParamsHash) do not change what a step
+// executes, so they are ignored, exactly as params_hash ignores them.
+func (r *Runner) sameProposal(a, b events.ProposalCreatedPayload) (bool, error) {
+	ha, err := ComputeParamsHash(r.roomID, a.ProposalID, a.Title, a.Risk, a.Rollback, a.RequiredLayers, a.Steps)
+	if err != nil {
+		return false, err
+	}
+	hb, err := ComputeParamsHash(r.roomID, b.ProposalID, b.Title, b.Risk, b.Rollback, b.RequiredLayers, b.Steps)
+	if err != nil {
+		return false, err
+	}
+	return ha == hb, nil
 }
 
 // proposalHash returns the params_hash the runner recomputes for req: over the

@@ -67,8 +67,25 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 // ask prints prompt and reads one line from the runner's terminal, returning
 // true on y/yes and false on anything else. The read happens on a goroutine
 // and returns as soon as a line arrives or ctx ends, so a Ctrl-C stops the
-// prompt (the caller returns ctx.Err()).
+// prompt (the caller returns ctx.Err()). The whole prompt+read is serialized
+// under stdinMu and uses the one shared stdinReader, so two concurrent T3
+// confirms cannot read each other's answer or have a reader that loses the
+// race buffer (and drop) the other's input.
 func (r *Runner) ask(ctx context.Context, prompt string) (bool, error) {
+	r.stdinMu.Lock()
+	defer r.stdinMu.Unlock()
+
+	// An op whose ctx already ended has nothing to confirm; return before
+	// printing a prompt or spawning a read goroutine.
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	default:
+	}
+
+	if r.stdinReader == nil {
+		r.stdinReader = bufio.NewReader(r.stdin)
+	}
 	fmt.Fprint(r.stdout, prompt)
 
 	type result struct {
@@ -80,7 +97,7 @@ func (r *Runner) ask(ctx context.Context, prompt string) (bool, error) {
 	// select on ctx. If the person cancels, the read is abandoned; the process
 	// is exiting, so the goroutine is reclaimed with it.
 	go func() {
-		line, err := bufio.NewReader(r.stdin).ReadString('\n')
+		line, err := r.stdinReader.ReadString('\n')
 		ch <- result{line, err}
 	}()
 

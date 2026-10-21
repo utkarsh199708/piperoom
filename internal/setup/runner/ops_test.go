@@ -507,6 +507,131 @@ func TestOpRefusedWhenStartRecordNotPersisted(t *testing.T) {
 	}
 }
 
+// TestFrozenProposalNotSwapped: the first request of a proposal freezes it. A
+// later request that carries a different Proposal (same id, different content)
+// is refused with RefuseParamsHash and does not replace the cache, so a request
+// cannot swap the frozen proposal — and the hash checkStep binds to — together.
+func TestFrozenProposalNotSwapped(t *testing.T) {
+	cat := &fakeCatalogue{floor: map[string]string{"compose_up": protocol.TierT1}}
+	p1 := events.ProposalCreatedPayload{
+		ProposalID:     "p1",
+		Title:          "fix the stack",
+		Risk:           "low",
+		Rollback:       "revert",
+		RequiredLayers: []string{"environment"},
+		Steps: []events.ProposalStep{
+			{Action: "compose_up", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`)},
+			{Action: "compose_up", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`)},
+		},
+	}
+	// p2 has the same id but different content, so a different params_hash.
+	p2 := p1
+	p2.Title = "drop the database"
+
+	h1 := proposalHash(t, p1)
+	raw1 := proposalRaw(t, p1)
+	h2 := proposalHash(t, p2)
+	raw2 := proposalRaw(t, p2)
+
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+
+		// 1. The first request freezes p1 and runs.
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("a", "compose_up", protocol.TierT1, "p1", 0, h1, raw1)})
+		if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FrameResult {
+			t.Fatalf("expected result for the frozen proposal, got %+v", f)
+		}
+
+		// 2. A later request for the same proposal carries a different Proposal
+		// whose own hash matches; it must be refused, not swap the cache.
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("b", "compose_up", protocol.TierT1, "p1", 1, h2, raw2)})
+		assertRefused(t, conn, ctx, protocol.RefuseParamsHash)
+
+		// 3. A request that names the still-frozen proposal (no Proposal this
+		// time) with its hash runs, proving the cache still holds p1.
+		req := opReq("c", "compose_up", protocol.TierT1, "p1", 1, h1, nil)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: &req})
+		if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FrameResult {
+			t.Fatalf("expected result from the still-frozen proposal, got %+v", f)
+		}
+	})
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 2 {
+		t.Fatalf("executor called %d times, want 2 (the frozen step and the still-frozen step, never the swapped one)", n)
+	}
+}
+
+// TestConcurrentT3OnlyConfirmedRuns: two T3 ops arriving at once share one
+// terminal; a single typed "y" confirms exactly one of them and the other is
+// refused — a concurrent confirm cannot read (or steal) the other's answer.
+func TestConcurrentT3OnlyConfirmedRuns(t *testing.T) {
+	cat := &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT3}}
+	p1 := events.ProposalCreatedPayload{
+		ProposalID:     "p1",
+		Title:          "restart the stack",
+		Risk:           "low",
+		Rollback:       "revert",
+		RequiredLayers: []string{"environment"},
+		Steps: []events.ProposalStep{
+			{Action: "source_restart", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`)},
+			{Action: "source_restart", Layer: "environment", Params: json.RawMessage(`{"service":"connect"}`)},
+		},
+	}
+	h := proposalHash(t, p1)
+	raw := proposalRaw(t, p1)
+
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("a", "source_restart", protocol.TierT3, "p1", 0, h, raw)})
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("b", "source_restart", protocol.TierT3, "p1", 1, h, raw)})
+
+		results, refused := 0, 0
+		for i := 0; i < 2; i++ {
+			f := readFrameJSON(t, conn, ctx)
+			switch f.Type {
+			case protocol.FrameResult:
+				results++
+			case protocol.FrameRefused:
+				if f.Refused.Reason != protocol.RefuseNotConfirmed {
+					t.Fatalf("refusal reason = %q, want %q", f.Refused.Reason, protocol.RefuseNotConfirmed)
+				}
+				refused++
+			default:
+				t.Fatalf("unexpected frame %+v", f)
+			}
+		}
+		if results != 1 || refused != 1 {
+			t.Fatalf("got %d results and %d refusals, want exactly 1 and 1", results, refused)
+		}
+	})
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdin: strings.NewReader("y\n"), Stdout: io.Discard, Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 1 {
+		t.Fatalf("executor called %d times, want 1 (only the confirmed T3 op runs)", n)
+	}
+}
+
 // --- small helpers ---
 
 // opReqPtr returns a pointer to a T1+ OpRequest built by opReq.

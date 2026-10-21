@@ -121,6 +121,77 @@ func TestReconnectSendsResume(t *testing.T) {
 	}
 }
 
+// TestResultDoesNotPrecedeResume: an op that finishes while the reconnect
+// handshake is still running must not write its FrameResult before the runner
+// has sent Pair and Resume; the result is held and delivered after Resume.
+func TestResultDoesNotPrecedeResume(t *testing.T) {
+	clock := newTestClock()
+	slowStarted := make(chan struct{})
+	release := make(chan struct{})
+
+	cat := &fakeCatalogue{
+		floor: map[string]string{"slow": protocol.TierT1},
+		onExecute: func(ctx context.Context, req protocol.OpRequest) (protocol.OpResult, error) {
+			close(slowStarted)
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return protocol.OpResult{}, ctx.Err()
+			}
+			return protocol.OpResult{ID: req.ID, OK: true, Summary: "ok"}, nil
+		},
+	}
+
+	handler1 := func(conn *websocket.Conn) {
+		ctx := context.Background()
+		doHandshake(t, conn, ctx, "tok1", clock.Now, nil)
+		p1 := testProposalWithAction("p1", "slow")
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("slow-op", "slow", protocol.TierT1, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))})
+		<-slowStarted
+		_ = conn.Close(websocket.StatusPolicyViolation, "drop")
+	}
+
+	handler2 := func(conn *websocket.Conn) {
+		ctx := context.Background()
+		f := readFrameJSON(t, conn, ctx)
+		if f.Type != protocol.FramePair || f.Pair == nil {
+			t.Fatalf("expected pair, got %+v", f)
+		}
+		if f.Pair.Token != "tok1" {
+			t.Fatalf("reconnect pair token = %q, want tok1", f.Pair.Token)
+		}
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameToken, Token: &protocol.Token{Token: "tok2", ExpiresAt: clock.Now().Add(30 * time.Minute)}})
+
+		// Let the op finish now, while the handshake (Pair+Resume) is still in
+		// flight on the runner's side.
+		close(release)
+
+		// The first frame must be Resume, never a stray FrameResult.
+		f = readFrameJSON(t, conn, ctx)
+		if f.Type != protocol.FrameResume {
+			t.Fatalf("first frame after reconnect = %q, want resume", f.Type.Short())
+		}
+
+		// The held result follows.
+		f = readFrameJSON(t, conn, ctx)
+		if f.Type != protocol.FrameResult || f.Result == nil || f.Result.ID != "slow-op" {
+			t.Fatalf("expected the op's result after resume, got %+v", f)
+		}
+	}
+
+	srv := runMultiServer(handler1, handler2)
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdout: io.Discard, Log: quiet(), Now: clock.Now, Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
 // TestDoneOpNeverRerunAfterReconnect: a done op is reported in Resume when the
 // socket drops, and a re-sent (ProposalID, StepIndex) after the reconnect is
 // refused as a duplicate — a done op never re-runs, even across a reconnect.
