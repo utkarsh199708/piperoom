@@ -32,6 +32,18 @@ func TestValidWarehouseTable(t *testing.T) {
 		{"snowflake", "a..b", false},
 		{"snowflake", "$a.b", false},
 		{"snowflake", "", false},
+		// Databricks and BigQuery address a table by catalog/project + schema
+		// + table, so a three-part name is valid on them too (KAN-460).
+		{"databricks", "analytics.orders", true},
+		{"databricks", "main.analytics.orders", true},
+		{"databricks", "main.analytics.orders.extra", false},
+		{"bigquery", "analytics.orders", true},
+		{"bigquery", "my-project.analytics.orders", true},
+		{"bigquery", "a..b", false},
+		// The two kinds that keep two parts.
+		{"clickhouse", "analytics.orders", true},
+		{"clickhouse", "dwh.analytics.orders", false},
+		{"postgres", "dwh.analytics.orders", false},
 	}
 	for _, tc := range cases {
 		d := Deps{WarehouseKind: tc.kind}

@@ -204,18 +204,45 @@ func (d Deps) whIdentRe() *regexp.Regexp {
 	return identRe
 }
 
+// isBigQuery reports whether the warehouse is BigQuery. Empty means the
+// default, Postgres.
+func (d Deps) isBigQuery() bool {
+	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "bigquery")
+}
+
+// threePartTables reports whether the kind addresses a table as
+// "database.schema.table" rather than "schema.table": Snowflake, Databricks
+// (catalog.schema.table) and BigQuery (project.dataset.table) all do.
+func (d Deps) threePartTables() bool {
+	return d.isSnowflake() || d.isDatabricks() || d.isBigQuery()
+}
+
+// bigqueryProjectRe is the first segment of a BigQuery table: a project id,
+// which may contain hyphens (my-project). The schema and table parts still use
+// identRe, and the client quotes every part.
+var bigqueryProjectRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]*$`)
+
 // validWarehouseTable reports whether name is a valid warehouse table. Postgres
-// takes "schema.table". A Snowflake sink table can live in another database
-// than the DSN's default one, so Snowflake also takes "db.schema.table". Each
-// part has to match the kind's identifier regex (AGENTS.md section 4, rule 6);
-// the client quotes it again.
+// and ClickHouse take "schema.table"; Snowflake, Databricks and BigQuery take
+// "db.schema.table" too, because their sinks can live in another database,
+// catalog or project than the connection's default (KAN-460: a batch pipeline
+// whose sink is analytics.fct_revenue was addressed as
+// warehouse.analytics.fct_revenue and refused). Each part has to match the
+// kind's identifier regex (AGENTS.md section 4, rule 6); the client quotes it
+// again.
 func (d Deps) validWarehouseTable(name string) bool {
 	parts := strings.Split(name, ".")
-	if len(parts) != 2 && !(len(parts) == 3 && d.isSnowflake()) {
+	if len(parts) != 2 && !(len(parts) == 3 && d.threePartTables()) {
 		return false
 	}
 	re := d.whIdentRe()
-	for _, p := range parts {
+	for i, p := range parts {
+		if i == 0 && len(parts) == 3 && d.isBigQuery() {
+			if !bigqueryProjectRe.MatchString(p) {
+				return false
+			}
+			continue
+		}
 		if !re.MatchString(p) {
 			return false
 		}
