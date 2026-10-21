@@ -277,6 +277,38 @@ func TestBatchNameRules(t *testing.T) {
 	}
 }
 
+func TestBatchModelsAcceptUniqueID(t *testing.T) {
+	cases := []struct {
+		name    string
+		models  string
+		wantErr string // substring; "" = must load
+	}{
+		{name: "unique_id", models: `[model.pkg_a.orders]`},
+		{name: "unique_id with version", models: `[model.pkg_a.orders.v2]`},
+		{name: "unique_id next to a bare name", models: `[fct_revenue, model.pkg_a.orders]`},
+		{name: "empty package", models: `[model..orders]`, wantErr: "model unique_id"},
+		{name: "empty name", models: `[model.pkg_a.]`, wantErr: "model unique_id"},
+		{name: "seed is not a model", models: `[seed.pkg_a.orders]`, wantErr: "model unique_id"},
+		{name: "space in package", models: `["model.pkg a.orders"]`, wantErr: "model unique_id"},
+		{name: "semicolon in package", models: `["model.pkg;a.orders"]`, wantErr: "model unique_id"},
+		{name: "quote in package", models: `["model.pkg\"a.orders"]`, wantErr: "model unique_id"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := loadBatch(t, "    dags: [d1]\n    models: "+c.models+"\n")
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) || !strings.Contains(err.Error(), `pipeline "daily-revenue"`) {
+				t.Fatalf("err = %v, want the pipeline named and %q", err, c.wantErr)
+			}
+		})
+	}
+}
+
 func TestBatchFieldsAreTrimmed(t *testing.T) {
 	o, err := loadBatch(t, "    dags: [\" d1\", \"d2 \"]\n    models: [\"\\tm1 \"]\n    dbt_project: \"  /srv/dbt/analytics \"\n")
 	if err != nil {
