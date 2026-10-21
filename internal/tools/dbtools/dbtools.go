@@ -24,8 +24,15 @@ import (
 type Deps struct {
 	Src clients.SourceDB
 	Wh  clients.Warehouse
-	// WarehouseKind is "postgres" (or empty) or "snowflake". It only decides
-	// which table and column names the warehouse tools accept as input.
+	// WarehouseKind is the configured warehouse kind: "postgres" (or empty, the
+	// default), "snowflake", "clickhouse", "bigquery", or "databricks" (the
+	// constants in internal/wiring/warehouse.go). It decides only how the
+	// warehouse tools validate input: the identifier rules in whIdentRe
+	// (Snowflake adds '$'), the table forms validWarehouseTable accepts
+	// ("schema.table" everywhere; "db.schema.table" on Snowflake), and the
+	// case-insensitive column checks for the Snowflake ts_column and pk_column
+	// (Snowflake folds unquoted names to upper case). The other kinds share the
+	// Postgres rules.
 	WarehouseKind string
 	Builder       topology.Builder
 	// Connect reads live Kafka Connect connector configs. Only
