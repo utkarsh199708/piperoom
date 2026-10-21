@@ -19,25 +19,8 @@ import (
 //	topic -> kafka_engine -> materialized_view -> sink_table
 //
 // where the sink table is the pipeline's regular KindSinkTable ("wh:")
-// node and the two intermediate objects are the new node kinds below.
-//
-// CONTRACT CHANGE REQUEST: graph.go does not define these two kinds yet. Until
-// it does, the constants below are a local adapter in this package: Node.Kind
-// is a string type, so the builder may add NodeKind values of its own without
-// touching the contract file. See the PR body for the exact graph.go addition.
-
-const (
-	// KindKafkaEngine is a ClickHouse Kafka engine table: it consumes one Kafka
-	// topic and holds the raw rows for a materialized view to read. Its layer
-	// and owner are the warehouse's. ID prefix "kafka_engine", e.g.
-	// "kafka_engine:analytics.orders_kafka".
-	KindKafkaEngine NodeKind = "kafka_engine"
-	// KindMaterializedView is a ClickHouse materialized view that selects from
-	// a Kafka engine table and fills a warehouse sink table. Its layer and
-	// owner are the warehouse's. ID prefix "materialized_view", e.g.
-	// "materialized_view:analytics.orders_mv".
-	KindMaterializedView NodeKind = "materialized_view"
-)
+// node and the two intermediate objects are the contract's KindKafkaEngine
+// and KindMaterializedView nodes (graph.go).
 
 // clickhouseHop returns the two intermediate nodes of one ClickHouse
 // Kafka-ingestion hop and the three data edges that join them into the graph:
@@ -95,8 +78,8 @@ func viewNodeID(view string) string     { return "materialized_view:" + view }
 // clickhouseNames returns the ClickHouse object names of one Kafka-ingestion
 // hop by the dev naming convention (dev/clickhouse): the Kafka engine table is
 // "<sink>_kafka" and the materialized view "<sink>_mv". There is no owners.yaml
-// declaration for these names yet; the contract change request in the PR body
-// asks the leads for one, so a team with another convention can name them.
+// declaration for these names yet, so a team with another convention would
+// need one.
 func clickhouseNames(sink string) (engine, view string) {
 	return sink + "_kafka", sink + "_mv"
 }
