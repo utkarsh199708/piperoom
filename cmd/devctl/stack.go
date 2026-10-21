@@ -40,6 +40,8 @@ type stack struct {
 	composeFn        func(ctx context.Context, env map[string]string, args ...string) error
 	clickhouseExecFn func(ctx context.Context, query string) error
 	groupFn          func(ctx context.Context, group string) (groupView, error)
+	// airflowCLIFn replaces `docker exec … airflow …` in unit tests.
+	airflowCLIFn func(ctx context.Context, args ...string) (string, error)
 	// belowLogStartFn replaces the committed-below-log-start read (retention-loss)
 	// in unit tests, since the fake broker does not delete retained segments.
 	belowLogStartFn func(ctx context.Context, group, topic string) (bool, []int32, error)

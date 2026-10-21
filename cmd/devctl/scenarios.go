@@ -57,6 +57,13 @@ var scenarios = map[string]scenario{
 	"consumer-bad-deploy": {breakIt: breakConsumerBadDeploy, fix: fixConsumerBadDeploy, alert: badDeployAlert, owners: p3OwnersFile},
 	"dlq-backlog": {breakIt: breakDLQBacklog, fix: fixDLQBacklog, owners: p3OwnersFile,
 		signals: []string{owners.SignalDLQGrowth}},
+
+	// Batch pipeline daily-revenue (dev/batch.md). A batch pipeline has no
+	// watcher signals, so each break raises its alert instead; the pipeline is
+	// in dev/owners.yaml.
+	"dag-failed":       {breakIt: breakDagFailed, fix: fixDagFailed, alert: dagFailedAlert},
+	"dbt-model-broken": {breakIt: breakDbtModelBroken, fix: fixDbtModelBroken, alert: dbtModelBrokenAlert},
+	"late-batch":       {breakIt: breakLateBatch, fix: fixLateBatch, alert: lateBatchAlert},
 }
 
 // schema-change: a migration changes orders.amount from integer to

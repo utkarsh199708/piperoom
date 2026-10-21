@@ -165,7 +165,7 @@ services:
       PIPEROOM_SHADOW_TOKEN_BUDGET: ${PIPEROOM_SHADOW_TOKEN_BUDGET:-500000}
       PIPEROOM_SHADOW_MAX_TURNS: ${PIPEROOM_SHADOW_MAX_TURNS:-20}
 
-  # Batch pipeline "daily-revenue" (dev/batch.md, dev/owners.batch.yaml):
+  # Batch pipeline "daily-revenue" (dev/batch.md, dev/owners.yaml):
   # Airflow standalone runs DAG revenue_daily, whose dbt run builds
   # analytics.stg_orders -> analytics.fct_revenue in the warehouse database.
   # Profile "batch": `docker compose --profile batch up -d --wait` starts it

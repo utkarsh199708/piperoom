@@ -496,3 +496,31 @@ rows deleted during the break are gone — in production the real fix is a backf
 puts the stack back so the demo can run again. Idempotent: deleting already-deleted overrides and starting
 an already-running consumer are both safe.
 
+## 13. Batch scenarios — `dag-failed`, `dbt-model-broken`, `late-batch`
+
+These break the `daily-revenue` batch pipeline (dev/batch.md): Airflow DAG `revenue_daily` runs dbt, which
+builds `analytics.stg_orders` → `analytics.fct_revenue` in the warehouse. A batch pipeline has no watcher
+signals (owners.batchWatch), so each break raises its alert through `devctl alert <scenario>`; the pipeline
+is in `dev/owners.yaml`. They need the batch profile up and `AIRFLOW_URL` set (`dev/batch.md`).
+
+| Scenario | Break | Symptom (tool receipt) | Fix |
+|---|---|---|---|
+| `dag-failed` | point `check_source` at a missing table (Airflow Variable `revenue_source_table` = `orders_missing`), trigger `revenue_daily` | the run is `failed` at `check_source` (`dag_runs`, then `task_instances` + `task_log_tail`); layer orchestrator | restore the variable to `orders`, trigger a run, wait for `success` |
+| `dbt-model-broken` | write a broken model `fct_revenue_v2.sql` into `dev/batch/dbt/analytics/models/`, trigger | `check_source` passes but `dbt_run` fails; `dbt_run_results` shows `fct_revenue_v2` error and `task_log_tail` shows dbt's error; layer transform, model named | remove the broken model, trigger a run, wait for `success` |
+| `late-batch` | `airflow dags pause revenue_daily` | `dag_schedule_gap` verdict `paused`; `analytics.fct_revenue` goes stale; layer orchestrator | `airflow dags unpause revenue_daily`, trigger a run, wait for `success` |
+
+**Expected symptoms (not yet observed — no Docker in the session that wrote this):**
+```
+dag-failed:       dag_runs revenue_daily: 1 failed; task_instances: check_source failed (UndefinedTable), dbt_run upstream_failed
+dbt-model-broken: dag_runs revenue_daily: 1 failed; dbt_run_results: fct_revenue_v2 error | message: column "revenue_amt" does not exist
+late-batch:       dag_schedule_gap revenue_daily: verdict paused; the DAG is PAUSED, so no runs are scheduled
+```
+
+**Notes:**
+- `dag-failed` does not touch the CDC sink: it repoints `check_source` at a missing table through the
+  Airflow Variable `revenue_source_table` (default `orders`), so `analytics.orders` keeps loading while the
+  DAG fails and devconsumer never notices the break.
+- Each fix triggers a run and waits for `success`, so the break's failed state is overwritten and the fix is
+  idempotent (restoring the variable and removing the broken model are both safe on an already-restored stack).
+- The alerts are reconciliation/freshness checks, the kind a team's own monitoring would send; none of them
+  can come from the watcher (a batch pipeline has no Kafka/Connect/slot to watch).

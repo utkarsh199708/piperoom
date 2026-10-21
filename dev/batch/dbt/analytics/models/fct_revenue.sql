@@ -1,5 +1,5 @@
 -- analytics.fct_revenue: the sink table of the daily-revenue pipeline
--- (dev/owners.batch.yaml); loaded_at is its freshness column.
+-- (dev/owners.yaml); loaded_at is its freshness column.
 {{ config(materialized='table') }}
 
 select
