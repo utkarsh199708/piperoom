@@ -42,7 +42,8 @@ func TestSystemPromptIsStable(t *testing.T) {
 	// did P3-W3g's ambiguous-steer rule keyed on the action gap (the rule-1
 	// link kinds, the confidence enum and the propose_fix allow-list bullet
 	// went: the map and the tool schemas say them; rule 8 now names
-	// propose_fix).
+	// propose_fix). KAN-408's unreachable-read rule (rule 6) also fit by
+	// trimming, so 1335 stays the ceiling.
 	if wc := len(strings.Fields(a)); wc > 1335 {
 		t.Fatalf("system prompt is %d words, over the 1335 limit", wc)
 	}
@@ -65,6 +66,34 @@ func TestSystemPromptIsStable(t *testing.T) {
 	}
 	if strings.Contains(a, "summary plus structured detail") {
 		t.Fatal("system prompt still claims tool outputs carry structured detail")
+	}
+}
+
+// KAN-408: a read that cannot reach its component is evidence about that
+// component. The rule sits in method rule 6, names the stable fact the runner
+// stamps on the read ("unreachable: <component>"), refuses a healthy verdict
+// while the gap is open, rejects the "data still flows" walk-back, and keeps
+// auth and not-found failures apart from an outage.
+func TestSystemPromptUnreachableReadRule(t *testing.T) {
+	prompt := systemPrompt()
+	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
+	for _, want := range []string{
+		`"unreachable: <component>" means the component is down`,
+		"name it in the hypothesis and never call the pipeline healthy while unresolved",
+		"flowing data does not excuse it",
+		"Auth and not-found are not outages",
+		"A tool error or timeout is a finding, not proof",
+		"cite it as evidence for what is unknown or blocked",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("CDC prompt lacks %q", want)
+		}
+	}
+	if !strings.Contains(method, `"unreachable: <component>"`) {
+		t.Error("the unreachable-read rule left the CDC method section")
+	}
+	if strings.Contains(systemPromptFor(events.PipelineKindBatch), `"unreachable: <component>"`) {
+		t.Error("the CDC unreachable-read rule leaked into the batch prompt, which has no registry")
 	}
 }
 

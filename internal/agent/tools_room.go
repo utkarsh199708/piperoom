@@ -39,10 +39,17 @@ func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 // update_hypothesis checks the cited steps against. A nil ledger turns those
 // checks off, for harnesses that build room tools without a runner.
 func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools.Tool {
+	return newRoomToolsWithGaps(d, track, steps, nil)
+}
+
+// newRoomToolsWithGaps is newRoomToolsWith with the run's read failures, so a
+// healthy verdict is refused while a component is unreachable (KAN-408). A nil
+// gaps turns the guard off, for the same harnesses as a nil ledger.
+func newRoomToolsWithGaps(d Deps, track *proposalTracker, steps *stepLedger, gaps *readFailures) []tools.Tool {
 	return []tools.Tool{
-		&updateHypothesisTool{sink: d.Sink, steps: steps},
+		&updateHypothesisTool{sink: d.Sink, steps: steps, gaps: gaps},
 		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, steps: steps, log: d.Logger},
-		&postMessageTool{sink: d.Sink},
+		&postMessageTool{sink: d.Sink, gaps: gaps},
 	}
 }
 
@@ -99,6 +106,9 @@ type updateHypothesisTool struct {
 	sink Sink
 	// steps is the run's step ledger; nil means the cited steps are not checked.
 	steps *stepLedger
+	// gaps is the run's failed reads; an unresolved unreachable component
+	// refuses a healthy verdict (KAN-408). Nil turns the guard off.
+	gaps *readFailures
 }
 
 // stepIDRe is the shape of a step id (newStepID): "s_" and 26 Crockford digits.
@@ -237,6 +247,13 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	if err := t.checkSteps(in); err != nil {
 		return tools.Result{}, err
 	}
+	// A healthy verdict is refused while a read left a component unreachable
+	// (KAN-408): the eval's scenario 13 read a registry connection error as
+	// benign because the pipeline still moved data. The refusal names the gap
+	// and lets "no data loss yet, risk rising" through.
+	if err := checkHealthyVerdict(t.gaps, in.Text); err != nil {
+		return tools.Result{}, err
+	}
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
 	}
@@ -258,6 +275,10 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 
 type postMessageTool struct {
 	sink Sink
+	// gaps is the run's failed reads; a message that claims a healthy verdict
+	// is refused while a component is unreachable (KAN-408). Nil turns the
+	// guard off.
+	gaps *readFailures
 }
 
 func (t *postMessageTool) Name() string { return "post_message" }
@@ -286,6 +307,9 @@ func (t *postMessageTool) Run(ctx context.Context, input json.RawMessage) (tools
 	}
 	if in.Text == "" {
 		return tools.Result{}, fmt.Errorf("%w: text is required", tools.ErrBadInput)
+	}
+	if err := checkHealthyVerdict(t.gaps, in.Text); err != nil {
+		return tools.Result{}, err
 	}
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for post_message")

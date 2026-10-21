@@ -605,7 +605,7 @@ You write the first-look verdict for a CDC/Kafka pipeline incident (Postgres -> 
 
 Return a JSON object:
 - headline: one plain sentence, at most 200 characters, naming what is failing and the numbers that show it (for example: slot debezium_orders inactive 6m; task 0 FAILED after DDL on public.orders). No markdown.
-- suspected_layer: the layer most likely at fault, or "" when the reads do not show one.
+- suspected_layer: the layer most likely at fault, or "" when the reads do not show one. A read result starting "error: unreachable: <layer>" means that component could not be reached: name its layer and the failure, even when nothing else failed.
 - confidence: low, medium or high. Use low when the reads failed or show nothing conclusive.
 - next_check: the one read the full investigation should do first, at most 120 characters.
 - based_on_steps: the step ids (step="s_...") of the reads your headline rests on.

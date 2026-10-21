@@ -38,16 +38,21 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // mode on (the default, and every eval) gains the scheduling note, and the
 // "often a schema change", "when your belief changes" and "Never claim a fix
 // worked without re-checking" words were trimmed to stay under the word cap.
+// KAN-408 moved it a fifth time, on purpose: rule 6 now makes an unreachable
+// read ("unreachable: <component>") evidence that the component is down, which
+// refuses a healthy verdict until a read succeeds, and keeps auth and
+// not-found errors apart from an outage; the wording was paid for by trims
+// elsewhere in the method, intro and fixes sections.
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "7c05a799ba162e02fa5225d38b3f6b54ae2ecb332661ed613a2bb20afc673e93"
+const cdcPromptSHA256 = "0ee74ed9674cf9d5d5cd6001850961f0628f4c96302b336a12b536fb775e59d8"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it.
-const cdcPromptWriteOffSHA256 = "0ba6d3626ace1548300da7e698edee34567caeac5bb9daa728a229f118627d42"
+const cdcPromptWriteOffSHA256 = "3bd09c0d38fc2f8325b31f98b853a0894efbe68f144321ab344503c686fddeba"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
