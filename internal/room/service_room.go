@@ -444,7 +444,11 @@ func (s *Service) GetRoom(ctx context.Context, roomID string) (RoomSnapshot, err
 	return p.Clone(), nil
 }
 
-// ListRooms returns every room, open rooms first, as each was last published.
+// ListRooms returns every room in the list order defined by roomListLess, as
+// each was last published. The order is total, so every call and every list
+// path (GET /api/rooms, the first frame of GET /api/rooms/ws, and ListRoomsFor
+// after its tenant filter) answers the same rows in the same order for the
+// same state (KAN-382).
 func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 	// The store is read outside every lock; a room lock is taken only for a
 	// room that has to be loaded or folded (refreshAll).
@@ -456,20 +460,29 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 	for _, p := range rooms {
 		out = append(out, p.Clone())
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if (out[i].Status == "open") != (out[j].Status == "open") {
-			return out[i].Status == "open"
-		}
-		if !out[i].OpenedAt.Equal(out[j].OpenedAt) {
-			return out[i].OpenedAt.After(out[j].OpenedAt)
-		}
-		// Two rooms can share an opened_at: Postgres and the mem store both keep
-		// only microsecond precision. The id is the deterministic tiebreaker, so
-		// the HTTP list and the WS list socket always answer in the same order
-		// instead of the map iteration order of publishedRooms (KAN-382).
-		return out[i].ID < out[j].ID
-	})
+	sort.SliceStable(out, func(i, j int) bool { return roomListLess(&out[i], &out[j]) })
 	return out, nil
+}
+
+// roomListLess is the one definition of the room-list order:
+//
+//  1. open rooms before closed ones;
+//  2. newest opened_at first;
+//  3. id ascending as the final tiebreaker.
+//
+// The third key is what makes the order total. Two rooms can share an
+// opened_at (Postgres and the mem store both keep only microsecond precision),
+// and publishedRooms hands them over in map iteration order; without the id
+// comparison that random order would leak into the list, so the HTTP list and
+// the room list socket could disagree (KAN-382).
+func roomListLess(a, b *RoomSnapshot) bool {
+	if (a.Status == "open") != (b.Status == "open") {
+		return a.Status == "open"
+	}
+	if !a.OpenedAt.Equal(b.OpenedAt) {
+		return a.OpenedAt.After(b.OpenedAt)
+	}
+	return a.ID < b.ID
 }
 
 // Events returns events after afterSeq and the room's current last_seq.
