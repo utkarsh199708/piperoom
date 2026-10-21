@@ -100,6 +100,7 @@ func Register(reg *tools.Registry, d Deps) error {
 		pgLongTransactionsTool(d),
 		pgRowTool(d),
 		pgPublicationTablesTool(d),
+		connectorScopeGapTool(d),
 		warehouseFreshnessTool(d),
 		warehouseRowTool(d),
 		warehouseLoadErrorsTool(d),
