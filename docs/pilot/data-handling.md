@@ -121,8 +121,9 @@ auto-approved (`internal/room/autoapprove.go`).
 
 - **What the params contain.** A step's `params` are the action's own typed fields only — connector,
   topic, group and table names, a timestamp, a boolean, a count — the same values the agent would
-  propose. They never contain secrets: every action validates them before anything is stored, and
-  `connect_update_connector_config` refuses a credential-looking key **or** value
+  propose (`schema_register` also takes a free-form Avro schema string). Do not put credentials in
+  them: the action validation checks each field's shape and scope, not whether a value is a secret.
+  Only `connect_update_connector_config` rejects a credential-looking key **or** value
   (`looksSecret`/`valueLooksSecret`, `internal/actions/connector_config.go`). Read the params, not just
   the description, before you approve (F2).
 - **Where stored.** The params are stored in the proposal row (`proposals.steps`,
