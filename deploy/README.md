@@ -641,7 +641,7 @@ It needs no API key and no data stack. Do not use demo mode for a real incident.
 
 | | |
 |---|---|
-| Build | `Dockerfile` at the repo root: Node 24 builds `web/dist`, Go 1.27.2 builds `cmd/server` (`CGO_ENABLED=0`, `-trimpath`), then both go into `gcr.io/distroless/static-debian13:nonroot` |
+| Build | `Dockerfile` at the repo root: Node 24 builds `web/dist`, Go 1.27.3 builds `cmd/server` (`CGO_ENABLED=0`, `-trimpath`), then both go into `gcr.io/distroless/static-debian13:nonroot` |
 | Size | about 100 MB on disk (the server binary is about 73 MB, with the Anthropic, AWS and Google SDKs in it); about 22 MB compressed to pull |
 | Runs as | uid 65532 (`nonroot`), read-only root filesystem in compose, all capabilities dropped |
 | Listens on | `0.0.0.0:8090` (`PIPEROOM_HTTP_ADDR`); the UI is served from `/web` (`PIPEROOM_WEB_DIR`) at `/`, the API at `/api` |
@@ -740,7 +740,7 @@ Moving to the version with OIDC login (auth PR 3):
 
 ## Not covered here
 
-- Images are pinned by tag, not digest (`node:24-alpine`, `golang:1.27.2-alpine`,
+- Images are pinned by tag, not digest (`node:24-alpine`, `golang:1.27.3-alpine`,
   `distroless/static-debian13:nonroot`, `postgres:17`). Pin digests for a regulated site.
 - The UI loads two fonts from Google Fonts. On a network with no internet the page still works
   with fallback fonts; the CSP allows only those two hosts for this.

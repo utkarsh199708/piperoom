@@ -148,7 +148,7 @@ func TestDisplayValue(t *testing.T) {
 
 func TestIsSecretKey(t *testing.T) {
 	want := map[string]bool{
-		"source_db_url": true, "warehouse_db_url": true,
+		"source_db_url": true, "source_db_write_url": true, "warehouse_db_url": true,
 		"kafka_sasl_username": true, "kafka_sasl_password": true,
 		"connect_username": true, "connect_password": true,
 		"schema_registry_username": true, "schema_registry_password": true,
