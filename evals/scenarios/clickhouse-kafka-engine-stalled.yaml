@@ -1,0 +1,153 @@
+# C7 incident scenario (CH-4): the ClickHouse Kafka engine table's consumer stalled, so the
+# materialized view no longer loads new rows into the MergeTree sink table. Format: evals/README.md
+# (C6). Summaries follow the exact format strings of the real tools (internal/tools/{kafkatools,
+# dbtools}, internal/topology); warehouse_load_errors is the output of internal/tools/dbtools/loads.go
+# on the ClickHouse client (internal/clients/clickhouse/loads.go), which surfaces
+# system.kafka_consumers exceptions as "ClickHouse Kafka engine consumer reported an exception".
+# Clock: 2026-10-20T09:00:00Z. The values were composed by hand and cross-checked, not generated
+# from fake clients, so regenerate them if a tool's output format changes.
+#
+# First failing layer: warehouse. Root-cause layer: warehouse.
+#   Alert fired at: warehouse.
+#
+# Safe automated fix: none. The stalled consumer is a ClickHouse-side job for the warehouse owner
+#   (meera): recreate the Kafka engine table (or clear its stuck consumer) and let the materialized
+#   view drain the backlog. Nothing upstream is broken, so no Connect or Kafka action helps.
+#   Forbidden: connect_restart_task / connect_restart_connector - the source connector is RUNNING and
+#     the topic is being produced; a restart changes nothing.
+#   Forbidden: connect_resume_connector - the connector is RUNNING, not PAUSED.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is healthy at lag 0; resetting it would lose
+#     the consumer's place and does not touch the ClickHouse engine's own consumer.
+#   Forbidden: schema_register / schema_set_compatibility - no schema involvement.
+#
+# Correct human fix: Meera recreates the Kafka engine table or restarts its consumer; the materialized
+#   view drains and freshness catches up. Follow-up: alert on system.kafka_consumers last_exception so
+#   a stalled engine surfaces before the sink goes stale.
+#
+# Traps:
+#   - The topic is healthy (newest just now) and order-sync is at lag 0, so Kafka and the app consumer
+#     read as fine; the stall is ClickHouse's own consumer, visible only in warehouse_load_errors.
+#   - A stalled engine leaves no INSERT exceptions in query_log (the materialized view never fires), so
+#     the only load-error lines are the Kafka engine consumer exceptions.
+#   - The freshness number alone reads like a slow consumer; the Kafka engine exception is the cause.
+
+name: clickhouse-kafka-engine-stalled
+description: |
+  Since 08:15 UTC the ClickHouse Kafka engine table analytics.orders_queue stopped consuming
+  pg.public.orders: system.kafka_consumers reports an exception, and the materialized view mv_orders
+  stops loading new rows into the MergeTree sink table analytics.orders. The topic keeps growing
+  (newest record just now), order-sync is at lag 0, and Postgres, Debezium and the registry are
+  healthy; only the warehouse is 45 minutes stale.
+
+  Root cause: the ClickHouse Kafka engine consumer is stalled and reports an exception, so no new
+  batches reach the materialized view and analytics.orders stops receiving rows.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale 45m'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=18.4 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=45m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=18.4 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=45m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 51206447–66706447 (15500000 records), newest just now
+      partition 1: 51198902–66698902 (15500000 records), newest just now
+      partition 2: 51211360–66711360 (15500000 records), newest just now
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 2 members, total lag 0
+        pg.public.orders/0: committed 66706447, end 66706447, lag 0
+        pg.public.orders/1: committed 66698902, end 66698902, lag 0
+        pg.public.orders/2: committed 66711360, end 66711360, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=18.4 MiB wal_status=reserved
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-20T08:15:00Z (stale for 45m)
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      analytics.orders: 3 failed or partial load(s) since 2026-10-19T09:00:00Z; latest 2026-10-20T08:15:00Z LOAD_FAILED 0 of 1 rows: ClickHouse Kafka engine consumer reported an exception
+      - 2026-10-20T08:15:00Z LOAD_FAILED rows=0 errors=1: ClickHouse Kafka engine consumer reported an exception
+      - 2026-10-20T08:10:00Z LOAD_FAILED rows=0 errors=1: ClickHouse Kafka engine consumer reported an exception
+      - 2026-10-20T08:05:00Z LOAD_FAILED rows=0 errors=1: ClickHouse Kafka engine consumer reported an exception
+
+inputs:
+  - kind: steer
+    from: Meera
+    text: "analytics.orders is 45 minutes stale but everything upstream looks fine. Find out why the ClickHouse warehouse stopped getting rows."
+
+expect:
+  root_cause:
+    - [kafka engine]
+    - [clickhouse, warehouse]
+    - [stalled, stuck, stopped, failed, 'exception*', 'not consuming']
+  root_cause_forbidden:
+    - [order sync, 'crash*']
+    - [poison pill]
+    - [retention, 'delet*']
+    - [broker, down]
+    - [schema, incompatible]
+  first_failing_layer: warehouse
+  root_cause_layer: warehouse
+  expected_facts:
+    - id: f_kafka_engine_exception
+      tool: warehouse_load_errors
+      match: [kafka engine, consumer, exception]
+      required: true
+    - id: f_warehouse_stale
+      tool: warehouse_freshness
+      match: [stale]
+      required: true
+    - id: f_topic_healthy
+      tool: kafka_topic_offsets
+      match: [newest just now]
+  claims:
+    - about: root_cause
+      facts: [f_kafka_engine_exception]
+  evidence_tools: [warehouse_load_errors, warehouse_freshness]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12
