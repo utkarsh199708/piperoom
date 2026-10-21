@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { personLabel, usePeople } from '../hooks/usePeople'
 import { PersonName } from './VerifiedBadge'
 import { neutralizeBadgeText } from '@/lib/verification'
+import { Skeleton } from '@/components/ui/skeleton'
 
 // Picker for "who gets control" and "who gets the hand-off". The list comes from
 // GET /api/people in every mode. A viewer gets 403 viewer from it: no picker then.
@@ -35,21 +36,29 @@ export function PersonSelect({
     onChange(effective)
   }, [list, options, effective, value, onChange])
 
-  if (people.status === 'loading') return <p className="muted">Loading people…</p>
+  if (people.status === 'loading') {
+    return (
+      <div role="status" aria-label="Loading people" className="flex flex-col gap-1.5">
+        <span className="sr-only">Loading people…</span>
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-9 w-full rounded-md" />
+      </div>
+    )
+  }
   if (people.status === 'forbidden') {
-    return <p className="muted">View only: you cannot give control or hand off.</p>
+    return <p className="m-0 text-sm text-muted-foreground">View only: you cannot give control or hand off.</p>
   }
   if (people.status === 'error') {
     return (
-      <p className="error-text">
+      <p role="alert" className="m-0 text-sm text-destructive-fg">
         Could not load people: {people.message}{' '}
-        <button type="button" className="btn btn--link" onClick={people.reload}>
+        <button type="button" className="font-medium text-foreground underline underline-offset-2" onClick={people.reload}>
           Try again
         </button>
       </p>
     )
   }
-  if (options.length === 0) return <p className="muted">No one else is available right now.</p>
+  if (options.length === 0) return <p className="m-0 text-sm text-muted-foreground">No one else is available right now.</p>
   const selected = options.find((p) => p.id === effective)
   return (
     <>
@@ -57,6 +66,7 @@ export function PersonSelect({
           the drawn badge for the chosen person sits under the list. */}
       <select
         id={id}
+        className="h-9 w-full rounded-md border border-input-border bg-background px-2 text-sm text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
         value={effective}
         onChange={(e) => {
           picked.current = e.target.value

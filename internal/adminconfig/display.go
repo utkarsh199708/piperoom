@@ -25,6 +25,7 @@ type keyInfo struct {
 // keys is every owners.ConnectionKeys key (a test keeps the two lists equal).
 var keys = map[string]keyInfo{
 	"source_db_url":                 {connprobe.KindSourceDB, "SOURCE_DB_URL", func(c *config.Config) *string { return &c.SourceDBURL }},
+	"source_db_write_url":           {connprobe.KindSourceDB, "SOURCE_DB_WRITE_URL", func(c *config.Config) *string { return &c.SourceDBWriteURL }},
 	"warehouse_db_url":              {connprobe.KindWarehouse, "WAREHOUSE_DB_URL", func(c *config.Config) *string { return &c.WarehouseDBURL }},
 	"warehouse_kind":                {connprobe.KindWarehouse, "WAREHOUSE_KIND", func(c *config.Config) *string { return &c.WarehouseKind }},
 	"kafka_brokers":                 {connprobe.KindKafka, "KAFKA_BROKERS", func(c *config.Config) *string { return &c.KafkaBrokers }},

@@ -49,6 +49,9 @@ var scenarios = map[string]scenario{
 	// P3 (tasks/P3-fixes-that-end-incidents.md): one per write action.
 	// They need the server on dev/owners.p3.yaml (p3OwnersFile).
 	"missed-table": {breakIt: breakMissedTable, fix: fixMissedTable, alert: missedTableAlert, owners: p3OwnersFile},
+	// The same break with Debezium's Kafka signal channel on (#620's signal
+	// format); connect_snapshot_table via signal_topic works against it.
+	"missed-table-kafka-signal": {breakIt: breakMissedTableKafkaSignal, fix: fixMissedTableKafkaSignal, alert: missedTableKafkaSignalAlert, owners: p3OwnersFile},
 	"dead-slot": {breakIt: breakDeadSlot, fix: fixDeadSlot, owners: p3OwnersFile,
 		signals: []string{owners.SignalSlotInactive, owners.SignalConnectorDown}},
 	"consumer-bad-deploy": {breakIt: breakConsumerBadDeploy, fix: fixConsumerBadDeploy, alert: badDeployAlert, owners: p3OwnersFile},

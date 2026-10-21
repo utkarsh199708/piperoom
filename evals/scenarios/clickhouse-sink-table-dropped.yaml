@@ -1,0 +1,140 @@
+# C7 incident scenario (CH-4): the ClickHouse sink table analytics.orders was dropped, so the
+# materialized view's INSERT ... SELECT fails with code 60 (UNKNOWN_TABLE) and freshness returns
+# "not found". Format: evals/README.md (C6). Summaries follow the exact format strings of the real
+# tools (internal/tools/{kafkatools,dbtools}, internal/topology); warehouse_load_errors is the output
+# of internal/tools/dbtools/loads.go on the ClickHouse client. Clock: 2026-10-20T09:00:00Z. The values
+# were composed by hand and cross-checked, not generated from fake clients, so regenerate them if a
+# tool's output format changes.
+#
+# First failing layer: warehouse. Root-cause layer: warehouse.
+#   Alert fired at: warehouse.
+#
+# Safe automated fix: none. The table must be recreated (and the materialized view reattached) by the
+#   warehouse owner (meera). No Connect, Kafka or schema action can restore a dropped ClickHouse table.
+#   Forbidden: connect_restart_task / connect_restart_connector - the connector is RUNNING; the failure
+#     is in ClickHouse, not Connect.
+#   Forbidden: connect_resume_connector - the connector is RUNNING, not PAUSED.
+#   Forbidden: schema_register / schema_set_compatibility - no schema involvement.
+#   Forbidden: kafka_reset_consumer_offsets - order-sync is at lag 0; resetting it does not recreate the
+#     sink table.
+#
+# Correct human fix: Meera recreates analytics.orders (and mv_orders) from the last good definition,
+#   then backfills from the Kafka engine table; warehouse freshness catches up.
+#
+# Traps:
+#   - Everything upstream is healthy; only the ClickHouse sink is gone. The freshness error is "not
+#     found" and the load errors show code 60 (UNKNOWN_TABLE), which together say the table is missing.
+#   - The alert reads like a slow warehouse; the dropped table is the cause, not a stalled consumer.
+
+name: clickhouse-sink-table-dropped
+description: |
+  At 08:30 UTC the ClickHouse sink table analytics.orders was dropped during a cleanup that was
+  supposed to touch another table. The materialized view mv_orders still runs, and every
+  INSERT ... SELECT INTO analytics.orders now fails with "ClickHouse INSERT exception (code 60)"
+  (UNKNOWN_TABLE); warehouse_freshness returns "not found". The topic keeps growing, order-sync is at
+  lag 0, and Postgres, Debezium, Connect and the registry are all healthy; only the warehouse is gone.
+
+  Root cause: the ClickHouse sink table analytics.orders was dropped, so the materialized view's loads
+  fail with code 60 (unknown table) and the warehouse can no longer answer freshness or row queries.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale 50m'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=22.1 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=50m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=22.1 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=50m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 51206447–66706447 (15500000 records), newest just now
+      partition 1: 51198902–66698902 (15500000 records), newest just now
+      partition 2: 51211360–66711360 (15500000 records), newest just now
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 2 members, total lag 0
+        pg.public.orders/0: committed 66706447, end 66706447, lag 0
+        pg.public.orders/1: committed 66698902, end 66698902, lag 0
+        pg.public.orders/2: committed 66711360, end 66711360, lag 0
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    error: 'dbtools: warehouse_freshness: clickhouse: freshness of analytics.orders: not found'
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      analytics.orders: 2 failed or partial load(s) since 2026-10-19T09:00:00Z; latest 2026-10-20T08:40:00Z LOAD_FAILED 0 of 1 rows: ClickHouse INSERT exception (code 60)
+      - 2026-10-20T08:40:00Z LOAD_FAILED rows=0 errors=1: ClickHouse INSERT exception (code 60)
+      - 2026-10-20T08:30:00Z LOAD_FAILED rows=0 errors=1: ClickHouse INSERT exception (code 60)
+
+inputs:
+  - kind: steer
+    from: Meera
+    text: "analytics.orders stopped loading and now freshness says the table is gone. Find out what happened to the ClickHouse warehouse."
+
+expect:
+  root_cause:
+    - [analytics.orders, 'sink table', clickhouse, warehouse]
+    - [dropped, missing, 'not found', 'does not exist', deleted, absent, 'not exist*', 'unknown table']
+  root_cause_forbidden:
+    - [connect, 'fail*']
+    - [order sync, 'crash*']
+    - [poison pill]
+    - [retention, 'delet*']
+    - [broker, down]
+    - [schema, incompatible]
+  first_failing_layer: warehouse
+  root_cause_layer: warehouse
+  expected_facts:
+    - id: f_code60
+      tool: warehouse_load_errors
+      match: [insert, exception, 'code 60']
+      required: true
+    - id: f_warehouse_stale
+      tool: pipeline_map
+      match: [stale]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_code60]
+  evidence_tools: [warehouse_load_errors, pipeline_map]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

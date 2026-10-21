@@ -364,6 +364,36 @@ topic pg.public.devctl_refunds: does not exist
 on. The 25 rows written before need `connect_snapshot_table` with `via: signal_table` (the connector's
 `signal.data.collection`), which writes the same `execute-snapshot` row `devctl fix` writes.
 
+## 8a. `missed-table-kafka-signal` — the missed-table break with the Kafka signal channel on
+
+The same incident as §8, but the dev connector takes its snapshot signal over Kafka (`#620`'s signal
+format), for the first live check of `connect_snapshot_table` with `via: signal_topic`.
+
+**Break (`devctl break missed-table-kafka-signal`):** identical to `missed-table` (§8), except the connector
+config also turns Kafka signalling on and the break first creates the one-partition signal topic
+`devctl.signal`:
+
+```
+publication.autocreate.mode = disabled
+table.include.list          = public.orders,public.devctl_refunds,public.devctl_signal
+signal.data.collection      = public.devctl_signal
+signal.enabled.channels     = source,kafka
+signal.kafka.topic          = devctl.signal
+signal.kafka.bootstrap.servers = kafka:9092
+```
+
+`connect_config` shows `signal.enabled.channels: source,kafka`; `pg_publication_tables` shows
+`devctl_refunds` missing from `dbz_publication`. The 25 refunds never reach Kafka (topic
+`pg.public.devctl_refunds` has no records), and nothing fails — the connector, task 0, the slot and
+order-sync are all healthy.
+
+**Fix (`devctl fix missed-table-kafka-signal`):** what `fix missed-table` does (add the table to the
+publication if missing, send one incremental snapshot if the topic is short, then restore the connector
+config from `dev/connectors` — Kafka signalling off again — the publication on `orders` only, and drop the
+`devctl_*` tables, topics and subjects), plus deleting the `devctl.signal` topic. Idempotent.
+
+
+
 ## 9. `dead-slot` — a retired connector's slot keeps all WAL
 
 **Break (`devctl break dead-slot`):** the orders connector is retired: Connect REST `stop` (the config stays
