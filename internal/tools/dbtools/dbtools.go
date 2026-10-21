@@ -39,6 +39,10 @@ type Deps struct {
 	// to the pipeline named by pipeline_id (security finding F4). It must be
 	// non-nil; the row tools refuse to run without it.
 	Owners *owners.Owners
+	// Wait blocks for the given duration or until ctx ends; nil uses a timer.
+	// pg_streaming_liveness samples the slot twice, and tests replace the wait
+	// so they do not sleep.
+	Wait func(ctx context.Context, d time.Duration) error
 }
 
 // pipeline resolves the owners.Pipeline for id. A nil Owners is a wiring fault
@@ -96,6 +100,7 @@ func Register(reg *tools.Registry, d Deps) error {
 	}
 	list := []tools.Tool{
 		pgReplicationSlotsTool(d),
+		pgStreamingLivenessTool(d),
 		pgRecentDDLTool(d),
 		pgLongTransactionsTool(d),
 		pgRowTool(d),

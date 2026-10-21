@@ -24,15 +24,37 @@ type fakeSource struct {
 	rowCalls  int
 	pubTables []postgres.PublicationTable
 	pubErr    error
+	// slotReads scripts successive ReplicationSlots calls (the liveness tool
+	// reads twice); the last entry repeats. Empty falls back to slots.
+	slotReads [][]clients.ReplicationSlot
+	slotCalls int
+	slotErr   error
+	// txns, when non-nil, is what LongTransactions reports.
+	txns   []clients.Transaction
+	txnErr error
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
+	f.slotCalls++
+	if f.slotErr != nil {
+		return nil, f.slotErr
+	}
+	if len(f.slotReads) > 0 {
+		i := min(f.slotCalls-1, len(f.slotReads)-1)
+		return f.slotReads[i], nil
+	}
 	return f.slots, nil
 }
 func (f *fakeSource) RecentDDL(context.Context, time.Time, int) ([]clients.DDLChange, error) {
 	return []clients.DDLChange{{At: time.Now(), CommandTag: "ALTER TABLE", ObjectIdentity: "public.orders", Query: "ALTER TABLE orders", Username: "priya"}}, nil
 }
 func (f *fakeSource) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
+	if f.txnErr != nil {
+		return nil, f.txnErr
+	}
+	if f.txns != nil {
+		return f.txns, nil
+	}
 	return []clients.Transaction{{PID: 1, Username: "u", State: "active", Age: time.Minute, Query: "SELECT 1"}}, nil
 }
 
@@ -58,11 +80,13 @@ func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []strin
 type fakeConnect struct {
 	configs   map[string]map[string]string
 	configErr error
+	status    clients.ConnectorStatus
+	statusErr error
 }
 
 func (f *fakeConnect) ListConnectors(context.Context) ([]string, error) { return nil, nil }
 func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
-	return clients.ConnectorStatus{}, nil
+	return f.status, f.statusErr
 }
 func (f *fakeConnect) Config(_ context.Context, name string) (map[string]string, error) {
 	if f.configErr != nil {
@@ -157,10 +181,10 @@ func TestRegister(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	all := reg.All()
-	if len(all) != 11 {
-		t.Fatalf("registered %d tools, want 11", len(all))
+	if len(all) != 12 {
+		t.Fatalf("registered %d tools, want 12", len(all))
 	}
-	want := []string{"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
+	want := []string{"pg_replication_slots", "pg_streaming_liveness", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
 	for i, name := range want {
 		if all[i].Name() != name {
 			t.Fatalf("tool %d = %s, want %s", i, all[i].Name(), name)
