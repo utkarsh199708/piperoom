@@ -199,14 +199,34 @@ func TestCreateReadRoleReturnsOnlySecretName(t *testing.T) {
 	if got == st.value {
 		t.Fatal("the returned name must not be the password")
 	}
-	for _, q := range f.sqls {
-		if strings.Contains(q, st.value) {
-			t.Fatalf("password leaked into SQL text: %q", q)
+
+	// The password reaches the server only as the quoted literal of the CREATE
+	// LOGIN statement; no other statement may carry it.
+	var createLogin string
+	for i, q := range f.sqls {
+		if strings.Contains(strings.ToUpper(q), "CREATE LOGIN") {
+			createLogin = q
+			if len(f.args[i]) != 0 {
+				t.Fatalf("CREATE LOGIN must not bind the password as an arg: %v", f.args[i])
+			}
+			if !strings.Contains(q, "'"+st.value+"'") {
+				t.Fatalf("CREATE LOGIN does not embed the password literal: %q", q)
+			}
+			if strings.Contains(strings.ToUpper(q), "PASSWORD = @P1") {
+				t.Fatalf("CREATE LOGIN still binds the password as @p1: %q", q)
+			}
+			continue
 		}
+		if strings.Contains(q, st.value) {
+			t.Fatalf("password leaked into another SQL statement: %q", q)
+		}
+	}
+	if createLogin == "" {
+		t.Fatal("no CREATE LOGIN ran")
 	}
 	joined := strings.Join(f.sqls, "\n")
 	for _, want := range []string{
-		"CREATE LOGIN [piperoom_capture] WITH PASSWORD = @p1, CHECK_POLICY = OFF",
+		"CREATE LOGIN [piperoom_capture] WITH PASSWORD = '",
 		"CREATE USER [piperoom_capture] FOR LOGIN [piperoom_capture]",
 		"GRANT SELECT ON [dbo].[orders] TO [piperoom_capture]",
 		"GRANT SELECT ON SCHEMA::cdc TO [piperoom_capture]",
@@ -216,18 +236,28 @@ func TestCreateReadRoleReturnsOnlySecretName(t *testing.T) {
 			t.Fatalf("missing %q in:\n%s", want, joined)
 		}
 	}
-	// The password reaches the server only as the CREATE LOGIN argument.
-	var sawBound bool
-	for i, q := range f.sqls {
-		if strings.Contains(strings.ToUpper(q), "CREATE LOGIN") {
-			sawBound = true
-			if len(f.args[i]) != 1 || f.args[i][0] != st.value {
-				t.Fatalf("password arg = %v, want the stored password", f.args[i])
-			}
-		}
+}
+
+func TestCreateReadRoleLoginErrorKeepsPasswordOut(t *testing.T) {
+	// The driver echoes the statement text, which now embeds the password
+	// literal; the returned error must be generic and carry none of it.
+	f := &fakeDB{
+		qrows: []*fakeRow{{vals: []any{int64(0)}}}, // login does not exist
+		execs: []error{errors.New("mssql: Incorrect syntax near 'CREATE LOGIN [x] WITH PASSWORD = 'abc123def''")},
 	}
-	if !sawBound {
-		t.Fatal("no CREATE LOGIN ran")
+	st := &memStore{}
+	w := &SetupWriter{db: f, timeout: callTimeout, secret: st}
+	_, err := w.CreateReadRole(unscopedCtx(), "piperoom_capture", []string{"dbo.orders"})
+	if err == nil {
+		t.Fatal("want an error when CREATE LOGIN fails")
+	}
+	if !errors.Is(err, errCreateLogin) {
+		t.Fatalf("err = %v, want errCreateLogin", err)
+	}
+	for _, bad := range []string{"abc123def", "PASSWORD = '"} {
+		if strings.Contains(err.Error(), bad) {
+			t.Fatalf("error leaks the statement text %q: %q", bad, err)
+		}
 	}
 }
 
@@ -320,6 +350,46 @@ func TestSetupWriterScopeFailsClosed(t *testing.T) {
 		}
 		if len(f.sqls) != 0 {
 			t.Fatalf("ran %d statements for an out-of-scope table", len(f.sqls))
+		}
+	})
+}
+
+func TestCanaryWritesRespectTableScope(t *testing.T) {
+	ctx := tools.WithPipeline(context.Background(), owners.Pipeline{ID: "p1", SourceTables: []string{"dbo.orders"}})
+
+	t.Run("create outside the pipeline is refused", func(t *testing.T) {
+		f := &fakeDB{}
+		w := testWriter(f)
+		if err := w.CreateCanaryTable(ctx, "dbo.payroll"); !errors.Is(err, tools.ErrOutOfScope) {
+			t.Fatalf("err = %v, want tools.ErrOutOfScope", err)
+		}
+		if len(f.sqls) != 0 {
+			t.Fatalf("ran %d statements for an out-of-scope canary table", len(f.sqls))
+		}
+	})
+
+	t.Run("insert outside the pipeline is refused", func(t *testing.T) {
+		f := &fakeDB{}
+		w := testWriter(f)
+		if err := w.InsertCanary(ctx, "dbo.payroll", "deadbeefdeadbeefdeadbeefdeadbeef"); !errors.Is(err, tools.ErrOutOfScope) {
+			t.Fatalf("err = %v, want tools.ErrOutOfScope", err)
+		}
+		if len(f.sqls) != 0 {
+			t.Fatalf("ran %d statements for an out-of-scope canary table", len(f.sqls))
+		}
+	})
+
+	t.Run("in-scope target proceeds", func(t *testing.T) {
+		f := &fakeDB{qrows: []*fakeRow{{vals: []any{true}}}} // already tracked by CDC
+		w := testWriter(f)
+		if err := w.CreateCanaryTable(ctx, "dbo.orders"); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.sqls) == 0 {
+			t.Fatal("no statement ran for an in-scope canary table")
+		}
+		if err := w.InsertCanary(ctx, "dbo.orders", "deadbeefdeadbeefdeadbeefdeadbeef"); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

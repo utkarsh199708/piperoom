@@ -24,7 +24,9 @@ import (
 // Every method validates identifiers against ^[a-zA-Z_][a-zA-Z0-9_]*$ and
 // []-quotes the ones it must interpolate (CREATE TABLE, CREATE LOGIN, CREATE
 // USER, GRANT); values (schema/table names to the stored procedures, the
-// generated password, the canary nonce) are always passed as @pN parameters.
+// canary nonce) are passed as @pN parameters. The generated read-role password
+// is interpolated as a quoted string literal, not bound, because CREATE LOGIN's
+// DDL grammar has no parameter position for PASSWORD (see CreateReadRole).
 // Each call is bounded by the write timeout (10 s by default) whatever ctx
 // says.
 //
@@ -53,6 +55,12 @@ var errCaptureExists = errors.New("sqlserver: capture instance already exists")
 // errRoleExists is returned by CreateReadRole when the login already exists;
 // the login is never re-passworded.
 var errRoleExists = errors.New("sqlserver: login already exists")
+
+// errCreateLogin is returned by CreateReadRole when CREATE LOGIN fails. It is
+// deliberately generic: go-mssqldb echoes the statement text on failure, and
+// that text now embeds the generated password literal, so the driver error is
+// not wrapped.
+var errCreateLogin = errors.New("CREATE LOGIN failed")
 
 // writeDB is the part of *sql.DB the setup writer uses; tests substitute a
 // fake. It extends the read interface with Exec for the writes.
@@ -220,7 +228,7 @@ func (w *SetupWriter) CreateCanaryTable(ctx context.Context, table string) error
 	if err != nil {
 		return err
 	}
-	if err := checkSetupScope(ctx, nil); err != nil {
+	if err := checkSetupScope(ctx, [][2]string{{schema, tbl}}); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, w.timeout)
@@ -265,7 +273,7 @@ func (w *SetupWriter) InsertCanary(ctx context.Context, table, nonce string) err
 	if err != nil {
 		return err
 	}
-	if err := checkSetupScope(ctx, nil); err != nil {
+	if err := checkSetupScope(ctx, [][2]string{{schema, tbl}}); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, w.timeout)
@@ -334,8 +342,15 @@ func (w *SetupWriter) CreateReadRole(ctx context.Context, role string, tables []
 		return "", err
 	}
 
-	if err := w.db.Exec(ctx, fmt.Sprintf("CREATE LOGIN %s WITH PASSWORD = @p1, CHECK_POLICY = OFF", qlogin), password); err != nil {
-		return "", fmt.Errorf("sqlserver: create login %q: %w", login, err)
+	// CREATE LOGIN ... WITH PASSWORD takes a string literal (or a hashed
+	// password), not a TDS parameter: the DDL grammar has no parameter position
+	// in this clause, so the password cannot be bound as @p1. The generated
+	// password is hex (randomPassword) and quotePassword doubles any single
+	// quote, so interpolating it as a quoted literal is safe; on failure the
+	// driver error is not wrapped below because it can echo the statement.
+	createLogin := fmt.Sprintf("CREATE LOGIN %s WITH PASSWORD = %s, CHECK_POLICY = OFF", qlogin, quotePassword(password))
+	if err := w.db.Exec(ctx, createLogin); err != nil {
+		return "", fmt.Errorf("sqlserver: create login %q: %w", login, errCreateLogin)
 	}
 	if err := w.db.Exec(ctx, fmt.Sprintf("CREATE USER %s FOR LOGIN %s", qlogin, qlogin)); err != nil {
 		return "", fmt.Errorf("sqlserver: create user for login %q: %w", login, err)
@@ -383,12 +398,20 @@ func randomPassword() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// quotePassword quotes password as a SQL Server string literal. The generated
+// password is hex, so it holds only [0-9a-f] and never a quote; the doubling of
+// any single quote is defensive, in case the literal form is ever reused for a
+// caller-supplied value.
+func quotePassword(password string) string {
+	return "'" + strings.ReplaceAll(password, "'", "''") + "'"
+}
+
 // checkSetupScope is the writer's scope gate, in the order of tools.ScopeFor:
 // with the room's whole pipeline in ctx a table outside it is
 // tools.ErrOutOfScope; tools.WithUnscoped passes; anything else (a context that
-// names the pipeline only by id included) is tools.ErrNoScope before any I/O. A
-// nil tables list checks only that a scope is present (canary table, read
-// role).
+// names the pipeline only by id included) is tools.ErrNoScope before any I/O.
+// Every table a call will touch must be passed, so no write can ever reach a
+// table the pipeline does not authorize (the canary target included).
 func checkSetupScope(ctx context.Context, tables [][2]string) error {
 	sc, err := tools.ScopeFor(ctx, nil)
 	if err != nil {
