@@ -21,7 +21,7 @@ COPY web/ ./
 RUN npm run build
 
 # ---- stage 2: server binary -> /out/piperoom --------------------------------
-FROM golang:1.27.2-alpine AS server
+FROM golang:1.27.3-alpine AS server
 WORKDIR /src
 COPY go.mod go.sum ./
 # No separate "go mod download": it fetches every module in go.sum, including

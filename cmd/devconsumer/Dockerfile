@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.28.0@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # Build from the repo root: docker build -f cmd/devconsumer/Dockerfile .
-FROM golang:1.27.2-alpine AS build
+FROM golang:1.27.3-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 # No "go mod download" (it fetches every module in go.sum, ~133 MB of them never
