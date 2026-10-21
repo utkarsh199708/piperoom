@@ -1,15 +1,18 @@
-// Package sqlserver implements the read-only SQL Server client: whether CDC is
-// enabled per database and per table, the SQL Server Agent state, the capture
-// login's grants, and the server version and edition.
+// Package sqlserver implements the SQL Server client: a read-only half (whether
+// CDC is enabled per database and per table, the SQL Server Agent state, the
+// capture login's grants, and the server version and edition) and, on a
+// separate write pool, the setup write half (clients.SetupSourceWriter in
+// writer.go: CreatePublication via sp_cdc_enable_db / sp_cdc_enable_table, the
+// canary table, the read role, and AlterSystem as clients.ErrNotSupported).
 //
-// Every method is a SELECT (there is no write method) and applies a 10 s
-// deadline to the context. Names the caller supplies are checked against
-// ^[a-zA-Z_][a-zA-Z0-9_]*$ (AGENTS.md rule 6) before use; values are always
-// passed as query parameters, never interpolated into the statement text, which
-// is stronger than quoting. quoteIdent holds the bracket-quoting form the write
-// half (U4a-2) will need when it interpolates identifiers.
+// Every method applies a 10 s deadline to the context. Names the caller
+// supplies are checked against ^[a-zA-Z_][a-zA-Z0-9_]*$ (AGENTS.md rule 6)
+// before use; values are always passed as query parameters (@pN), never
+// interpolated into the statement text, which is stronger than quoting.
+// quoteIdent holds the bracket-quoting form the writer interpolates for the
+// identifiers it cannot pass as parameters (CREATE TABLE, CREATE LOGIN, GRANT).
 //
-// The client is the SQL Server subset of the planned clients.SourceSettingsReader
+// The read client is the SQL Server subset of the planned clients.SourceSettingsReader
 // (tasks/Q-board.md Q2a). That interface is not yet in internal/clients/clients.go,
 // so this package declares its own SettingsReader adapter; the PR requests the
 // contract change.
