@@ -40,6 +40,9 @@ type stack struct {
 	composeFn        func(ctx context.Context, env map[string]string, args ...string) error
 	clickhouseExecFn func(ctx context.Context, query string) error
 	groupFn          func(ctx context.Context, group string) (groupView, error)
+	// belowLogStartFn replaces the committed-below-log-start read (retention-loss)
+	// in unit tests, since the fake broker does not delete retained segments.
+	belowLogStartFn func(ctx context.Context, group, topic string) (bool, []int32, error)
 	// poll is how often waitFor checks its condition (default 2 s).
 	poll time.Duration
 	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init
