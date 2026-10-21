@@ -705,8 +705,21 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[
 	defer pr.record(rctx) // runs after the poll's receipt below
 	pollStart := time.Now()
 	defer func() { c.record(rctx, pollStart, "kgo.PollFetches(topic, offsets)", "topic="+topic) }()
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+	// Bound this read by the caller's deadline, not a fixed one. TopicOffsets
+	// is invoked with the tool's 10 s deadline (and the kfake tests use
+	// within's), so the record read already has a budget. A fixed 5 s inner
+	// deadline was too tight: for a partition stuck behind an aborted record
+	// below an open transaction (#300), the prober needs its stallAfter plus
+	// several round trips before newestReadable can answer, and on a loaded
+	// machine those CPU-starved round trips pushed the read past 5 s and cut
+	// a healthy one off with "context deadline exceeded". Callers that pass no
+	// deadline (a couple of integration tests) still get a 10 s bound so a
+	// stuck read cannot wait forever.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+	}
 	got := map[int32]time.Time{}
 	wait := map[int32]readWindow{}
 	for p, off := range at {
