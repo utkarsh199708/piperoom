@@ -1,6 +1,8 @@
 // Mirror of internal/events/events.go (contract) + docs/api.md objects.
 // Field names and JSON match the Go structs exactly.
 
+import type { NodeKind } from './nodeKinds'
+
 // ---- actors ----
 
 export type ActorKind = 'human' | 'agent' | 'system'
@@ -675,8 +677,8 @@ export interface AgentStats {
 
 export interface TopologyNode {
   id: string
-  /** 'dag', 'task' and 'model' are a batch pipeline's nodes (P4), drawn dag → task → model → sink_table. */
-  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table' | 'dag' | 'task' | 'model'
+  /** The exhaustive node-kind union (nodeKinds.ts); docs/api.md "Topology". */
+  kind: NodeKind
   name: string
   layer: string
   owner: string
