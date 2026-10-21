@@ -137,6 +137,15 @@ describe('ChangesLane', () => {
     expect(screen.getByText('oracle_patch')).toBeInTheDocument()
   })
 
+  it('an unknown kind is a plain badge, never a dead "Show only" filter button', () => {
+    const onSelectLayer = vi.fn()
+    const data = { changes: [change({ kind: 'oracle_patch', object: 'web-orders' })] }
+    render(<ChangesLane steps={stepWith(data)} alertAt="2026-10-14T03:10:00Z" now={NOW} onSelectLayer={onSelectLayer} />)
+    expect(screen.getByText('oracle_patch')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Show only/ })).not.toBeInTheDocument()
+    expect(onSelectLayer).not.toHaveBeenCalled()
+  })
+
   it('renders a hostile object name as text, never as HTML', () => {
     const hostile = '<img src=x onerror="alert(1)"><b>orders</b>'
     const { container } = render(
