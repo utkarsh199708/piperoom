@@ -31,7 +31,7 @@ Three actions write through it (layer `postgres`):
 | Action | SQL | Minimal grant | Code |
 |---|---|---|---|
 | `pg_add_publication_table` | `ALTER PUBLICATION <publication.name> ADD TABLE <schema.table>` | Own the publication **and** own the table (PostgreSQL requires both for `ADD TABLE`; only a superuser can skip it). There is no `GRANT` for publications. | `internal/actions/pgactions/add_publication_table.go`; `internal/clients/postgres/writer.go` (`AddPublicationTables`) |
-| `pg_drop_replication_slot` | `SELECT pg_drop_replication_slot($1)` | Superuser, or the `REPLICATION` attribute, or own the slot (be a member of its owning role). The action drops only the connector's inactive logical slot. | `internal/actions/pgactions/drop_replication_slot.go`; `internal/clients/postgres/writer_dropslot.go`, `writer.go` |
+| `pg_drop_replication_slot` | `SELECT pg_drop_replication_slot($1)` | Superuser, or the `REPLICATION` attribute. Slot ownership alone is not enough: PostgreSQL 17 restricts the replication-slot functions to superusers and roles with `REPLICATION`, so no slot-owner-only grant works. The action drops only the connector's inactive logical slot. | `internal/actions/pgactions/drop_replication_slot.go`; `internal/clients/postgres/writer_dropslot.go`, `writer.go` |
 | `pg_snapshot_signal` | `INSERT INTO <signal.data.collection> (id, type, data) VALUES ($1, 'execute-snapshot', $2)` | `INSERT` on the signal table only (plus `USAGE` on its schema and `CONNECT` on the database). | `internal/actions/pgactions/snapshot_signal.go`; `internal/clients/postgres/writer.go` (`InsertSnapshotSignal`) |
 
 Role template:
@@ -46,10 +46,11 @@ GRANT CONNECT ON DATABASE <db> TO piperoom_writer;
 ALTER PUBLICATION <publication.name> OWNER TO piperoom_writer;
 ALTER TABLE <schema>.<table> OWNER TO piperoom_writer;   -- repeat per source table
 
--- pg_drop_replication_slot: REPLICATION (broad) or slot ownership (narrow) — choose one.
+-- pg_drop_replication_slot: superuser or the REPLICATION attribute. There is no
+-- slot-owner-only grant: PostgreSQL 17 restricts pg_drop_replication_slot to superusers
+-- and roles with REPLICATION, so owning the slot (or being a member of its owner) is
+-- not enough on its own.
 ALTER ROLE piperoom_writer REPLICATION;
---  narrower: make piperoom_writer a member of the role that owns the slot, or
---  have piperoom_writer own the slot in the first place, and skip the REPLICATION attribute.
 
 -- pg_snapshot_signal: INSERT on the signal table only.
 GRANT USAGE ON SCHEMA <signal_schema> TO piperoom_writer;
@@ -65,9 +66,10 @@ Notes:
   owning the table too (the `ALTER PUBLICATION` documentation). The action never uses `FOR ALL TABLES` or
   `ADD TABLES IN SCHEMA` (the latter is superuser-only); it refuses a `FOR ALL TABLES` publication.
 - **`REPLICATION` is broad.** It also lets the role create slots and stream through the replication
-  protocol. Slot ownership is narrower, but the slot is usually owned by Debezium's own replication user;
-  to use ownership, the DBA must arrange for the writer role to own the slot (or be a member of its owner),
-  and re-do that if the slot is recreated.
+  protocol. There is no narrower slot-ownership grant: PostgreSQL 17 restricts `pg_drop_replication_slot`
+  (and the other replication-slot functions) to superusers and roles with the `REPLICATION` attribute, so
+  owning the slot, or being a member of its owner, does not by itself permit the call. The slot is usually
+  owned by Debezium's own replication user.
 - **Do not grant table or schema `SELECT` to the writer.** It does not need it, and it must not read data
   the read-only role cannot. The writer's re-reads (`pg_publication`, `pg_publication_tables`,
   `pg_replication_slots`) are readable by any role.
@@ -139,6 +141,6 @@ Notes:
 
 - [ ] Write mode stays off until your approvers have used read-only rooms; then `PIPEROOM_WRITE_MODE=on`.
 - [ ] `SOURCE_DB_WRITE_URL` is a separate write role, never the read-only `SOURCE_DB_URL` role, and never has `default_transaction_read_only = on`.
-- [ ] The source write role owns only the publication and the source tables `pg_add_publication_table` may add; it has `INSERT` on the signal table only; it has `REPLICATION` (or owns the slots) and nothing else.
+- [ ] The source write role owns only the publication and the source tables `pg_add_publication_table` may add; it has `INSERT` on the signal table only; it has `REPLICATION` and nothing else.
 - [ ] The Connect proxy allow-list adds only `PUT /connectors/{name}/pause` and `PATCH /connectors/{name}/config`, on the pipeline's connectors.
 - [ ] The Kafka principal gains only `Read` on the pipeline's groups, `Write` on its CDC topics and the signal topic, and `IdempotentWrite` on the cluster.
