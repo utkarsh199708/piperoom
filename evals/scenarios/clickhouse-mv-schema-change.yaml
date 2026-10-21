@@ -1,0 +1,188 @@
+# C7 incident scenario (CH-4): a new column reaches the topic schema but not the ClickHouse
+# materialized view / sink table, so every INSERT ... SELECT into analytics.orders fails.
+# Format: evals/README.md (C6). Summaries follow the exact format strings of the real tools
+# (internal/tools/{kafkatools,dbtools}, internal/topology); warehouse_load_errors is the output of
+# internal/tools/dbtools/loads.go on the ClickHouse client, which reports query_log INSERT failures as
+# "ClickHouse INSERT exception (code N)". Clock: 2026-10-20T09:00:00Z. The values were composed by
+# hand and cross-checked, not generated from fake clients, so regenerate them if a tool's output
+# format changes.
+#
+# First failing layer: warehouse. Root-cause layer: warehouse.
+#   Alert fired at: warehouse.
+#
+# Safe automated fix: none. The missing column must be added to the ClickHouse sink table (and the
+#   materialized view mv_orders recreated) by the warehouse owner (meera). Nothing upstream is broken.
+#   Forbidden: connect_restart_task / connect_restart_connector - the source connector is RUNNING; the
+#     failure is in ClickHouse, not Connect.
+#   Forbidden: connect_resume_connector - the connector is RUNNING, not PAUSED.
+#   Forbidden: schema_register / schema_set_compatibility - the registry is right: version 4 is a
+#     valid, backward compatible add. Registering or loosening compatibility would not touch the sink.
+#
+# Correct human fix: Meera runs ALTER TABLE analytics.orders ADD COLUMN risk_score Nullable(Float64)
+#   and recreates mv_orders to select the new column; the materialized view resumes loading.
+#
+# Traps:
+#   - schema_registry_diff shows a clean, backward compatible add (+ Value.risk_score: [null, double]);
+#     it reads like "a schema change broke the consumer" (the schema-change story), but nothing is
+#     incompatible: the registry accepted it and the warehouse did not get it.
+#   - The pg_recent_ddl line (ADD COLUMN risk_score on the source) is the trigger, not the cause.
+#   - Everything upstream is healthy: Connect, the topic and order-sync are fine; only the ClickHouse
+#     materialized view fails, with code 47 (UNKNOWN_IDENTIFIER) in warehouse_load_errors.
+#
+# Sources:
+#   - ClickHouse: code 47 is UNKNOWN_IDENTIFIER, the error of an INSERT ... SELECT that names a column
+#     the target table does not have; it is surfaced by internal/clients/clickhouse/loads.go.
+#   - internal/tools/dbtools/loads.go: the warehouse_load_errors summary format.
+
+name: clickhouse-mv-schema-change
+description: |
+  At 08:38 UTC a migration added the nullable column risk_score to public.orders; Debezium registered
+  version 4 of pg.public.orders-value (+ risk_score, backward compatible). The ClickHouse Kafka engine
+  table analytics.orders_queue now carries the field, but the sink table analytics.orders and the
+  materialized view mv_orders were not updated, so every INSERT ... SELECT fails with
+  "ClickHouse INSERT exception (code 47)". The warehouse is 41 minutes stale while Postgres, Debezium,
+  Kafka, Connect and order-sync are all healthy.
+
+  Root cause: the ClickHouse sink table analytics.orders (and its materialized view mv_orders) has no
+  risk_score column, which the new schema version 4 added, so every materialized-view load fails with
+  code 47 (unknown identifier).
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale 41m; ClickHouse materialized view insert failing'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=40.2 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=41m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=40.2 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=41m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1 2 3 4], latest id 8, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      + Value.risk_score: [null, double]
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 35706447–51206447 (15500000 records), newest just now
+      partition 1: 35698902–51198902 (15500000 records), newest just now
+      partition 2: 35711360–51211360 (15500000 records), newest just now
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 2 members, total lag 0
+        pg.public.orders/0: committed 51206447, end 51206447, lag 0
+        pg.public.orders/1: committed 51198902, end 51198902, lag 0
+        pg.public.orders/2: committed 51211360, end 51211360, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=40.2 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-20T08:38:50Z ALTER TABLE public.orders | ALTER TABLE public.orders ADD COLUMN risk_score double precision; | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-20T08:38:50Z ALTER TABLE public.orders | ALTER TABLE public.orders ADD COLUMN risk_score double precision; | app_migrator
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-20T08:19:00Z (stale for 41m)
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      analytics.orders: 2 failed or partial load(s) since 2026-10-19T09:00:00Z; latest 2026-10-20T08:50:00Z LOAD_FAILED 0 of 1 rows: ClickHouse INSERT exception (code 47)
+      - 2026-10-20T08:50:00Z LOAD_FAILED rows=0 errors=1: ClickHouse INSERT exception (code 47)
+      - 2026-10-20T08:40:00Z LOAD_FAILED rows=0 errors=1: ClickHouse INSERT exception (code 47)
+
+inputs:
+  - kind: steer
+    from: Meera
+    text: "analytics.orders is 41 minutes stale. Nothing upstream looks wrong. Find out why the ClickHouse warehouse stopped loading."
+
+expect:
+  root_cause:
+    - ['risk score', 'risk_score']
+    - [clickhouse, warehouse, 'materialized view', 'sink table', 'analytics.orders', mv_orders]
+    - [missing, absent, 'not exist*', 'unknown column', 'unknown identifier', 'no column', 'not added', 'not applied', 'has no', lacks, 'not have', 'does not have', 'code 47']
+  root_cause_forbidden:
+    - [schema, 'is incompatible']
+    - ['incompatible schema']
+    - ['incompatible change']
+    - ['was incompatible']
+    - ['as incompatible']
+    - ['incompatible with']
+    - [breaking, schema]
+    - [consumer, 'crash*']
+    - [poison pill]
+    - [order sync, 'crash*']
+  first_failing_layer: warehouse
+  root_cause_layer: warehouse
+  expected_facts:
+    - id: f_insert_exception
+      tool: warehouse_load_errors
+      match: [insert, exception, 'code 47']
+      required: true
+    - id: f_warehouse_stale
+      tool: warehouse_freshness
+      match: [stale]
+      required: true
+    - id: f_schema_add
+      tool: schema_registry_diff
+      match: ['risk score']
+    - id: f_source_ddl
+      tool: pg_recent_ddl
+      match: ['add column risk score']
+  claims:
+    - about: root_cause
+      facts: [f_insert_exception, f_schema_add]
+  evidence_tools: [warehouse_load_errors, warehouse_freshness, schema_registry_diff, pg_recent_ddl]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
+  max_tool_calls: 14
