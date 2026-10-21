@@ -555,6 +555,29 @@ func TestEchoGuardScanUnchanged(t *testing.T) {
 	}
 }
 
+// TestSpansNameNormalized: the action-name match normalises both sides too,
+// so a span name or an action carrying a zero-width or lookalike character
+// still names the clean form. In the room the names ScanNames fills and the
+// action (registry-checked) are clean, so this is the guard not relying on
+// either staying that way.
+func TestSpansNameNormalized(t *testing.T) {
+	clean := "connect_update_connector_config"
+	// Cyrillic а (U+0430) and a zero-width space (U+200B), both what
+	// injectscan.Normalize maps away.
+	lookalike := "connect_upd\u0430te_connector_config"
+	zw := "connect_upd\u200Bate_connector_config"
+	for _, n := range []string{clean, lookalike, zw} {
+		if !spansName([]flaggedSpan{{names: []string{n}}}, clean) {
+			t.Errorf("span name %q does not name %q", n, clean)
+		}
+	}
+	for _, a := range []string{lookalike, zw} {
+		if !spansName([]flaggedSpan{{names: []string{clean}}}, a) {
+			t.Errorf("action %q is not named by the clean span", a)
+		}
+	}
+}
+
 func TestParamEchoValues(t *testing.T) {
 	cases := []struct {
 		params string

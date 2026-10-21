@@ -178,11 +178,15 @@ func (l *stepLedger) echoedInjection(stepNum int, action string, params json.Raw
 	return nil, nil
 }
 
-// spansName reports whether one of the spans names action.
+// spansName reports whether one of the spans names action. Both sides are
+// normalised as injectscan normalises them before the fold — the same
+// transform the value echo (containsFold) applies — so a name or an action
+// carrying a zero-width or lookalike character still matches its clean form.
 func spansName(spans []flaggedSpan, action string) bool {
+	act := injectscan.Normalize(action)
 	for _, sp := range spans {
 		for _, n := range sp.names {
-			if strings.EqualFold(n, action) {
+			if strings.EqualFold(injectscan.Normalize(n), act) {
 				return true
 			}
 		}
