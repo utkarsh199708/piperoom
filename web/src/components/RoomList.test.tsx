@@ -204,7 +204,7 @@ describe('first-insight span', () => {
     usage: { calls: 0, unpriced_calls: 0, tokens: 0, cost_usd: null, latency_ms_total: 0 },
   })
 
-  it('shows "insight 48 s" for an open room with a hypothesis, nothing for -1, closed or shadow rooms', () => {
+  it('shows "first hypothesis in 48s" for an open room with a hypothesis, nothing for -1, closed or shadow rooms', () => {
     mockList([
       room({ id: 'with', insight: insight(48) }),
       room({ id: 'without', insight: insight(-1) }),
@@ -213,8 +213,8 @@ describe('first-insight span', () => {
       room({ id: 'shadowed', shadow: true, insight: insight(30) }),
     ])
     renderList('/?tab=all')
-    expect(screen.getAllByText(/insight \d+ s/)).toHaveLength(1)
-    expect(screen.getByText(/insight 48 s/)).toBeInTheDocument()
+    expect(screen.getAllByText(/first hypothesis in \d+s/)).toHaveLength(1)
+    expect(screen.getByText(/first hypothesis in 48s/)).toBeInTheDocument()
   })
 })
 

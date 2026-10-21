@@ -10,6 +10,7 @@ import { useTheme } from '@/context/theme'
 import { useCurrentUser } from '@/context/user'
 import { roomsNeedingYou, useListAttention } from '@/hooks/useListAttention'
 import { useRoomList } from '@/hooks/useRoomList'
+import { pageTitle } from '@/lib/title'
 import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, RoomListContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
 import { isEditableTarget } from './keys'
@@ -130,7 +131,7 @@ export function AppShell() {
   const needsYouCount = useMemo(() => roomsNeedingYou(rooms, user).length, [rooms, user])
   const roomId = location.pathname.startsWith('/rooms/') ? safeDecode(location.pathname.split('/')[2] ?? '') : ''
   const currentPipelineId = rooms.find((r) => r.id === roomId)?.pipeline_id
-  useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`))
+  useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`), pageTitle(location.pathname))
 
   return (
     <InShellContext.Provider value>
@@ -158,6 +159,7 @@ export function AppShell() {
                   <SidebarContent
                     openRooms={openRooms}
                     needsYou={needsYouCount}
+                    admin={user.admin === true}
                     pipelines={pipelines}
                     currentPipelineId={currentPipelineId}
                     navKey={navKey}
@@ -177,6 +179,7 @@ export function AppShell() {
                     <SidebarContent
                       openRooms={openRooms}
                     needsYou={needsYouCount}
+                    admin={user.admin === true}
                       pipelines={pipelines}
                       currentPipelineId={currentPipelineId}
                       navKey={navKey}
@@ -242,9 +245,14 @@ function safeDecode(v: string): string {
 function Breadcrumb({ pipelineId }: { pipelineId?: string }) {
   const { pathname } = useLocation()
   const inRoom = pathname.startsWith('/rooms/')
+  if (pathname === '/settings') {
+    return <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Settings</h1>
+  }
   if (!inRoom) {
     return (
-      <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Rooms</h1>
+      <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">
+        {pathname === '/shadow' ? 'Shadow results' : 'Rooms'}
+      </h1>
     )
   }
   return (

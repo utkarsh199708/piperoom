@@ -1,4 +1,4 @@
-import { EyeOff, Inbox, Search } from 'lucide-react'
+import { EyeOff, Inbox, Search, Settings } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -79,6 +79,7 @@ function PipelineItem({
 export function SidebarContent({
   openRooms,
   needsYou = 0,
+  admin = false,
   pipelines,
   currentPipelineId,
   navKey,
@@ -88,6 +89,8 @@ export function SidebarContent({
   openRooms: number
   /** Open rooms with a layer waiting on this person. */
   needsYou?: number
+  /** `/api/me.admin`: shows the Settings link. The server enforces it either way. */
+  admin?: boolean
   pipelines: PipelineSummary[]
   /** The pipeline of the room on screen, if any. */
   currentPipelineId?: string
@@ -162,6 +165,19 @@ export function SidebarContent({
               Shadow results
             </Link>
           </li>
+          {admin && (
+            <li>
+              <Link
+                to="/settings"
+                className={cn(itemClass, pathname === '/settings' && activeClass)}
+                aria-current={pathname === '/settings' ? 'page' : undefined}
+                onClick={onNavigate}
+              >
+                <Settings aria-hidden="true" />
+                Settings
+              </Link>
+            </li>
+          )}
         </ul>
       </nav>
 

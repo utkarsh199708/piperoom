@@ -73,8 +73,8 @@ describe('ShadowMetricsPage', () => {
     renderPage()
     expect(await screen.findByTestId('shadow-headline')).toHaveTextContent('1 of 2 matched, median 4 min vs 52 min, 20k tokens')
     expect(screen.getByRole('link', { name: 'r1' })).toHaveAttribute('href', '/rooms/r1')
-    expect(screen.getByText('layer ok, cause yes')).toBeInTheDocument()
-    expect(screen.getByText('not labelled')).toBeInTheDocument()
+    expect(screen.getByText('Right layer, cause found')).toBeInTheDocument()
+    expect(screen.getByText('Not labelled')).toBeInTheDocument()
   })
 
   it('refetches with the pipeline and since filters', async () => {

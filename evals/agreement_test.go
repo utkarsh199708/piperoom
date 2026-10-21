@@ -346,6 +346,11 @@ var syntheticLabels = map[string]Label{
 	"snowflake-sink-column-missing": {"kafka-connect", []string{"risk_score", "invalid identifier", "column"}},
 	// R8a's watcher-started scenario.
 	"watcher-start": {"kafka-connect", []string{"administrator command", "57p01", "restarted"}},
+	// The CH-4 ClickHouse scenarios (#715).
+	"clickhouse-kafka-engine-stalled": {"warehouse", []string{"kafka engine", "kafka_consumers", "engine table"}},
+	"clickhouse-mv-schema-change":     {"warehouse", []string{"risk_score", "unknown identifier", "code 47"}},
+	"clickhouse-readonly-profile":     {"warehouse", []string{"readonly", "code 164"}},
+	"clickhouse-sink-table-dropped":   {"warehouse", []string{"dropped", "code 60", "unknown table"}},
 	// The P3g-1 scenarios.
 	"missed-table":             {"postgres", []string{"publication", "autocreate"}},
 	"dead-slot-wal":            {"postgres", []string{"orphaned", "nobody reads", "drop the slot"}},
@@ -394,6 +399,14 @@ var syntheticTruth = map[string]map[string]truth{
 	// watcher-start lazy is the watcher's title, which names the failed
 	// connector task; wrong blames the Schema Registry.
 	"watcher-start": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// CH-4: lazy texts are the alert titles. Each names only the stale or
+	// unreadable table analytics.orders (warehouse), not the cause. The
+	// kafka-engine wrong text blames order-sync, readonly's the Connect task,
+	// sink-table-dropped's Kafka retention, mv-schema-change's the registry.
+	"clickhouse-kafka-engine-stalled": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"clickhouse-mv-schema-change":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"clickhouse-readonly-profile":     {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"clickhouse-sink-table-dropped":   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// P3g-1: lazy texts are the alert titles. consumer-bad-deploy and
 	// dlq-backlog titles name order-sync (and its DLQ), the consumer. Both
 	// dead-slot titles blame the slot (postgres) to a reader; the matcher reads
