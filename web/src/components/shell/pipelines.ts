@@ -45,3 +45,8 @@ export const HEALTH_LABEL: Record<Health, string> = {
   fail: 'failing',
   unknown: 'health unknown',
 }
+
+/** The pipeline kind the UI shows: the server's `kind`, or `cdc` when an older server omits it. */
+export function pipelineKind(kind: 'cdc' | 'batch' | undefined): 'cdc' | 'batch' {
+  return kind === 'batch' ? 'batch' : 'cdc'
+}

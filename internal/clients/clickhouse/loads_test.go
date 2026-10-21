@@ -101,13 +101,27 @@ func TestLoadErrorsOptionalKafkaTableAndUnsupportedQueryLog(t *testing.T) {
 
 func TestLoadErrorsBadInputAndTargetDown(t *testing.T) {
 	t.Run("bad table", func(t *testing.T) {
-		q := &fakeQuerier{}
-		_, err := newTestClient(q).LoadErrors(context.Background(), "analytics.orders; DROP TABLE x", time.Now(), 10)
-		if err == nil {
-			t.Fatal("LoadErrors accepted an unsafe table")
+		bad := []struct {
+			name  string
+			table string
+		}{
+			{"injection", "analytics.orders; DROP TABLE x"},
+			{"backtick", "analytics.`orders`"},
+			{"regex metachar", "analytics.or|ders"},
+			{"leading digit", "analytics.1orders"},
+			{"empty", ""},
 		}
-		if len(q.calls) != 0 {
-			t.Fatalf("unsafe input ran %d queries", len(q.calls))
+		for _, tt := range bad {
+			t.Run(tt.name, func(t *testing.T) {
+				q := &fakeQuerier{}
+				_, err := newTestClient(q).LoadErrors(context.Background(), tt.table, time.Now(), 10)
+				if err == nil {
+					t.Fatalf("LoadErrors accepted an unsafe table %q", tt.table)
+				}
+				if len(q.calls) != 0 {
+					t.Fatalf("unsafe input %q ran %d queries", tt.table, len(q.calls))
+				}
+			})
 		}
 	})
 

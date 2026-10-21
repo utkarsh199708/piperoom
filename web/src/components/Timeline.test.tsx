@@ -292,4 +292,18 @@ describe('Timeline layer filter', () => {
     render(<Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="postgres" />)
     expect(screen.getByRole('status')).toHaveTextContent('No steps on postgres yet')
   })
+
+  it('keeps a dag_runs step on the orchestrator filter', () => {
+    const dagSteps: StepState[] = [
+      {
+        id: 'd1',
+        title: 'List DAG runs',
+        tool_calls: [{ tool_use_id: 'd1', tool: 'dag_runs', input: { dag_id: 'revenue_daily' } }],
+        messages: [],
+      },
+    ]
+    render(<Timeline steps={dagSteps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="orchestrator" />)
+    expect(screen.getByRole('status')).toHaveTextContent('Showing 1 step on orchestrator')
+    expect(screen.getByRole('button', { name: /List DAG runs/ })).toBeInTheDocument()
+  })
 })

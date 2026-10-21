@@ -1,7 +1,7 @@
 # Batch profile: Airflow + dbt (P4g)
 
 The `batch` compose profile adds one service, `airflow`, to the dev stack. It runs the batch pipeline
-`daily-revenue` (`dev/owners.batch.yaml`):
+`daily-revenue` (`dev/owners.yaml`):
 
 ```
 DAG revenue_daily:  check_source  ->  dbt_run
@@ -44,17 +44,17 @@ can move to its own CI job with a build cache (C1's `.github/**`).
 
 ## Point Piperoom at it
 
-Run the server on the host as for the default stack, plus:
+Run the server on the host as for the default stack, plus the batch reader env vars (the `daily-revenue`
+pipeline and its per-pipeline `orchestrator`, `transform` and `warehouse` owners are already in
+`dev/owners.yaml`):
 
 ```powershell
-$env:OWNERS_FILE = "dev/owners.batch.yaml"
-$env:USERS_FILE = "dev/users.batch.yaml"   # the users who own orchestrator, transform, warehouse
 $env:AIRFLOW_URL = "http://127.0.0.1:8080"
 $env:DBT_ARTIFACTS_DIR = (Resolve-Path dev/batch/artifacts).Path   # must be absolute
 ```
 
-The server refuses to start when the users and owners files disagree in either direction, so the two batch
-files go together (`TestUsersBatchMatchesOwners` in `cmd/devctl` runs that check on them). Leave
-`AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` and `AIRFLOW_TOKEN` unset (config refuses a login over `http://`).
-`devctl break dag-failed`, `dbt-model-broken`, `late-batch` and `daily-revenue` in `dev/owners.yaml` come with
-P4g-2.
+The server refuses to start when the users and owners files disagree in either direction, so
+`dev/users.yaml` and `dev/owners.yaml` go together (`TestUsersBatchMatchesOwners` in `cmd/devctl` runs
+that check on them). Leave `AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` and `AIRFLOW_TOKEN` unset (config refuses
+a login over `http://`). `devctl break dag-failed`, `dbt-model-broken` and `late-batch` exercise the three
+batch failure modes (dev/scenarios.md §12).

@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -155,6 +157,30 @@ func allEvents() []events.Event {
 
 func str(m map[string]any, k string) string { s, _ := m[k].(string); return s }
 
+// loadEvent reads a recorded event fixture from testdata/.
+func loadEvent(t *testing.T, name string) events.Event {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e events.Event
+	if err := json.Unmarshal(raw, &e); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// joinTexts concatenates every text object of a Slack request into one string.
+func joinTexts(r map[string]any) string {
+	var b strings.Builder
+	for _, tx := range allTexts(r) {
+		b.WriteString(tx["text"].(string))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // ---- tests ----
 
 func TestParentThenThread(t *testing.T) {
@@ -213,6 +239,9 @@ func TestImportantTable(t *testing.T) {
 	if !Important(events.ControlLeaseExpired) || !Important(events.ApprovalNudged) {
 		t.Error("control.lease_expired and approval.nudged must be mirrored")
 	}
+	if !Important(events.ProposalScheduled) || !Important(events.ProposalCancelled) {
+		t.Error("proposal.scheduled and proposal.cancelled must be mirrored")
+	}
 	for _, ty := range allTypes {
 		if Important(ty) != want[ty] {
 			t.Errorf("%s: got %v", ty, Important(ty))
@@ -238,10 +267,13 @@ func allTexts(r map[string]any) []map[string]any {
 
 func TestEscaping(t *testing.T) {
 	title := "<!channel> & <https://evil.example|click> \x00bad\xff"
+	runAt := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	evs := []events.Event{
 		ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: title, Severity: "sev1", PipelineID: "p`x"}),
 		ev(2, events.ActionExecuted, "ana", events.ActionExecutedPayload{ProposalID: "p", OK: false, Output: "a```b <!here>"}),
-		ev(3, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "x"}),
+		ev(3, events.ProposalCreated, "ana", events.ProposalCreatedPayload{ProposalID: "p", Title: "<@U123> title", RequiredLayers: []string{"kafka"}}),
+		ev(4, events.ProposalScheduled, "ana", events.ProposalScheduledPayload{ProposalID: "p", RunAt: runAt, Policy: "<@U456|policy>", CancelUntil: runAt}),
+		ev(5, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "x"}),
 	}
 	fs := &fakeSlack{}
 	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, nil)
@@ -255,7 +287,7 @@ func TestEscaping(t *testing.T) {
 	for _, r := range fs.reqs {
 		for _, tx := range allTexts(r) {
 			text := tx["text"].(string)
-			if !strings.Contains(text, "|Open room>") && tx["verbatim"] != true {
+			if !strings.Contains(text, "|Open room>") && !strings.Contains(text, "|Cancel>") && tx["verbatim"] != true {
 				t.Errorf("untrusted text without verbatim: %q", text)
 			}
 			if !utf8.ValidString(text) || len(text) == 0 || len(text) > 3000 {
@@ -270,6 +302,16 @@ func TestEscaping(t *testing.T) {
 	link := allTexts(fs.reqs[0])
 	if l := link[len(link)-1]["text"].(string); l != "<https://pr.example/rooms/r1|Open room>" {
 		t.Errorf("link = %q", l)
+	}
+	var all string
+	for _, r := range fs.reqs {
+		all += joinTexts(r)
+	}
+	if !strings.Contains(all, "&lt;@U123&gt;") || strings.Contains(all, "<@U123") {
+		t.Errorf("proposal title not escaped: %q", all)
+	}
+	if !strings.Contains(all, "&lt;@U456|policy&gt;") || strings.Contains(all, "<@U456") {
+		t.Errorf("policy name not escaped: %q", all)
 	}
 }
 
@@ -486,24 +528,42 @@ func TestNonFatalErrorAdvances(t *testing.T) {
 func TestResume(t *testing.T) {
 	th := NewMemThreads()
 	_ = th.Put(context.Background(), "r1", Thread{Channel: "COLD", TS: "9.9", LastSeq: 5})
+	runAt := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
 	st := &fakeStore{evs: []events.Event{
 		ev(1, events.RoomCreated, "ana", payloadFor(events.RoomCreated)),
+		// Already handled (seq <= LastSeq): the replay must not post them again.
+		ev(2, events.ProposalScheduled, "ana", events.ProposalScheduledPayload{ProposalID: "p1", RunAt: runAt, Policy: "auto_approve", CancelUntil: runAt}),
 		ev(6, events.RoomCreated, "ana", payloadFor(events.RoomCreated)),
 		ev(7, events.ApprovalGiven, "ana", payloadFor(events.ApprovalGiven)),
-		ev(8, events.RoomClosed, "ana", payloadFor(events.RoomClosed)),
+		ev(8, events.ProposalScheduled, "ana", events.ProposalScheduledPayload{ProposalID: "p1", RunAt: runAt, Policy: "auto_approve", CancelUntil: runAt}),
+		ev(9, events.ProposalCancelled, "ana", events.ProposalCancelledPayload{ProposalID: "p1", By: events.Actor{Kind: events.ActorHuman, ID: "ana", Name: "ana"}}),
+		ev(10, events.RoomClosed, "ana", payloadFor(events.RoomClosed)),
 	}}
 	fs := &fakeSlack{}
 	b, _, _ := newBridge(t, st, fs, func(o *Options) { o.Threads = th })
 	if err := b.Run(context.Background(), "r1"); err != nil {
 		t.Fatal(err)
 	}
-	if st.subAfter != 5 || fs.count() != 2 {
+	if st.subAfter != 5 || fs.count() != 4 {
 		t.Fatalf("after=%d reqs=%d", st.subAfter, fs.count())
 	}
 	for _, r := range fs.reqs {
 		if str(r, "thread_ts") != "9.9" || str(r, "channel") != "COLD" {
 			t.Errorf("req = %v", r)
 		}
+	}
+	var scheduled, cancelled int
+	for _, r := range fs.reqs {
+		text := joinTexts(r)
+		if strings.Contains(text, "unless cancelled") {
+			scheduled++
+		}
+		if strings.Contains(text, "cancelled the policy countdown") {
+			cancelled++
+		}
+	}
+	if scheduled != 1 || cancelled != 1 {
+		t.Errorf("scheduled=%d cancelled=%d, want 1 each", scheduled, cancelled)
 	}
 }
 
@@ -744,5 +804,101 @@ func TestErrCode(t *testing.T) {
 		if got := errCode(err); got != want {
 			t.Errorf("errCode(%v) = %q, want %q", err, got, want)
 		}
+	}
+}
+
+func TestProposalScheduledLine(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "orders lag", Severity: "sev2", PipelineID: "orders"})
+	scheduled := loadEvent(t, "proposal_scheduled.json")
+	closed := ev(3, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "done"})
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, scheduled, closed}}, fs, nil)
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.count() != 3 {
+		t.Fatalf("requests = %d, want parent + one scheduled message + close", fs.count())
+	}
+	text := joinTexts(fs.reqs[1])
+	const runAt = "2026-11-01T12:00:00Z"
+	if !strings.Contains(text, "runs at "+runAt+" unless cancelled") {
+		t.Errorf("run time must read 'runs at <time> unless cancelled': %q", text)
+	}
+	if strings.Contains(text, "may run from") {
+		t.Errorf("cancel_until equal to run_at must not print the time twice: %q", text)
+	}
+	for _, bad := range []string{"deadline", "cancel by", "until", "expires", "cutoff"} {
+		if strings.Contains(strings.ToLower(text), bad) {
+			t.Errorf("deadline wording %q in %q", bad, text)
+		}
+	}
+	if !strings.Contains(text, "<https://pr.example/rooms/r1|Cancel>") {
+		t.Errorf("cancel deep link missing or wrong: %q", text)
+	}
+}
+
+func TestProposalScheduledLineDifferingCancel(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "orders lag", Severity: "sev2", PipelineID: "orders"})
+	runAt := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	cancelUntil := runAt.Add(15 * time.Minute)
+	scheduled := ev(2, events.ProposalScheduled, "ana", events.ProposalScheduledPayload{ProposalID: "p1", RunAt: runAt, Policy: "auto_approve", CancelUntil: cancelUntil})
+	closed := ev(3, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "done"})
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, scheduled, closed}}, fs, nil)
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	text := joinTexts(fs.reqs[1])
+	if strings.Count(text, runAt.Format(time.RFC3339)) != 1 {
+		t.Errorf("run_at must be printed exactly once: %q", text)
+	}
+	if !strings.Contains(text, "may run from "+cancelUntil.UTC().Format(time.RFC3339)) {
+		t.Errorf("differing cancel_until must add the 'may run from' sentence: %q", text)
+	}
+}
+
+func TestProposalCancelledLine(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "orders lag", Severity: "sev2", PipelineID: "orders"})
+	cancelled := loadEvent(t, "proposal_cancelled.json")
+	closed := ev(4, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "done"})
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, cancelled, closed}}, fs, nil)
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.count() != 3 {
+		t.Fatalf("requests = %d, want parent + one cancelled message + close", fs.count())
+	}
+	text := joinTexts(fs.reqs[1])
+	for _, want := range []string{"Priya", "cancelled the policy countdown", "waits for approval", "backfill running"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in %q", want, text)
+		}
+	}
+}
+
+func TestPolicyApprovalLine(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "orders lag", Severity: "sev2", PipelineID: "orders"})
+	policy := loadEvent(t, "approval_policy.json")
+	human := loadEvent(t, "approval_human.json")
+	closed := ev(6, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "done"})
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, policy, human, closed}}, fs, nil)
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.count() != 4 {
+		t.Fatalf("requests = %d, want parent + two approvals + close", fs.count())
+	}
+	policyText := joinTexts(fs.reqs[1])
+	humanText := joinTexts(fs.reqs[2])
+	if !strings.Contains(policyText, "auto_approve") {
+		t.Errorf("policy line must name the list: %q", policyText)
+	}
+	if strings.Contains(policyText, "System") {
+		t.Errorf("policy line must not name the system actor: %q", policyText)
+	}
+	if !strings.Contains(humanText, "Priya") || strings.Contains(humanText, "auto_approve") {
+		t.Errorf("human approval must render as before: %q", humanText)
 	}
 }

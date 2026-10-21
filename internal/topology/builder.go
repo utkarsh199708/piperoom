@@ -33,6 +33,10 @@ type Thresholds struct {
 	SinkStaleWarn time.Duration
 	// SinkStaleFail is the sink freshness age that raises a failure.
 	SinkStaleFail time.Duration
+	// EngineErrorWindow is how far back the builder reads a ClickHouse Kafka
+	// engine table's load history to decide its health: a Kafka consumer
+	// exception in this window fails the engine node (first-failing).
+	EngineErrorWindow time.Duration
 	// HealthBudget caps the parallel health-gathering phase.
 	HealthBudget time.Duration
 	// DLQRecentWarn is how young a dead-letter topic's newest record must be
@@ -57,6 +61,7 @@ func DefaultThresholds() Thresholds {
 		GroupLagWarn:          1000,
 		SinkStaleWarn:         10 * time.Minute,
 		SinkStaleFail:         30 * time.Minute,
+		EngineErrorWindow:     30 * time.Minute,
 		HealthBudget:          5 * time.Second,
 		DLQRecentWarn:         time.Hour,
 		SchemaRecentWarn:      time.Hour,
@@ -101,6 +106,11 @@ type builder struct {
 	srMu     sync.Mutex
 	subjects map[string]subjectSeen
 
+	// whKind is the warehouse kind wiring resolved for the process or the
+	// pipeline, set by WithWarehouseKind. It is the fallback warehouseKind
+	// uses when a pipeline has no own connections.warehouse_kind literal.
+	whKind string
+
 	// orch and transform are the optional batch readers (batch.go); nil
 	// leaves their nodes out of a batch graph and marks it Partial.
 	orch      clients.OrchestratorReader
@@ -114,6 +124,16 @@ type Option func(*builder)
 // pipeline's connectors and consumers depend on, with depends_on edges.
 func WithSchemaRegistry(sr clients.SchemaRegistryClient) Option {
 	return func(b *builder) { b.sr = sr }
+}
+
+// WithWarehouseKind tells the builder the warehouse kind wiring resolved
+// ("postgres", "snowflake", "bigquery", "databricks" or "clickhouse"). It is
+// the fallback warehouseKind uses for a pipeline with no own
+// connections.warehouse_kind literal (one that uses the process-wide settings,
+// or whose kind comes from an env:/file: reference, which only wiring
+// resolves). Only "clickhouse" changes the graph (the Kafka-ingestion hop).
+func WithWarehouseKind(kind string) Option {
+	return func(b *builder) { b.whKind = strings.ToLower(strings.TrimSpace(kind)) }
 }
 
 // NewBuilder constructs a Builder with default thresholds.
@@ -145,6 +165,21 @@ func newBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.K
 	}
 }
 
+// warehouseKind returns the pipeline's warehouse kind, lower-cased and trimmed:
+// the pipeline's own connections.warehouse_kind literal first, else the kind
+// wiring passed with WithWarehouseKind, else "postgres" (the default, which
+// draws no ClickHouse hop). An env:/file: reference is resolved by wiring, not
+// here, so such a pipeline needs WithWarehouseKind.
+func (b *builder) warehouseKind(p owners.Pipeline) string {
+	if r, ok := p.Connections["warehouse_kind"]; ok && r.Value != "" {
+		return strings.ToLower(strings.TrimSpace(r.Value))
+	}
+	if b.whKind != "" {
+		return b.whKind
+	}
+	return "postgres"
+}
+
 // Build returns the current graph for a pipeline with live health. Unreachable
 // systems give HealthUnknown on their nodes, never an error for the build.
 func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
@@ -154,18 +189,26 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	}
 	if p.KindOrDefault() == events.PipelineKindBatch {
 		// No CDC client is called for a batch pipeline: it has none.
-		return b.buildBatch(ctx, p), nil
+		return b.buildBatch(ctx, p)
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, b.t.HealthBudget)
 	defer cancel()
 
-	info := b.collect(cctx, p)
+	whKind := b.warehouseKind(p)
+	info := b.collect(cctx, p, whKind)
 	info.matchers = b.sourceMatchers(p, info)
 
 	// Topics and data edges come from config and metadata collect already
 	// read (edges.go); the schema subjects follow from the topics' users.
 	fp := b.planFlow(p, info)
+	// A ClickHouse warehouse ingests topics through a Kafka engine table and a
+	// materialized view, so the topic/group -> wh:sink edges become that hop.
+	var hops []clickhouseHopSpec
+	if whKind == "clickhouse" {
+		hops = clickhouseHopSpecs(p, fp.topics)
+		b.wireClickhouseHops(&fp, hops)
+	}
 	dlqs := discoverDLQs(p, info)
 	subjects, deps := b.planSubjects(info, fp)
 
@@ -213,6 +256,18 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 		} else {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
 		}
+	}
+	// ClickHouse hop nodes sit between the topic and the sink in data-flow
+	// order, so they are appended before the group and sink nodes (which keeps
+	// the engine listed before the sink it feeds).
+	for _, h := range hops {
+		if h.topic == "" {
+			continue
+		}
+		g.Nodes = append(g.Nodes,
+			b.kafkaEngineNode(h.engine, info),
+			b.materializedViewNode(h.view),
+		)
 	}
 	th := ThresholdsFor(b.t, p)
 	for _, d := range dlqs {

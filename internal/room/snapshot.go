@@ -123,12 +123,22 @@ type Proposal struct {
 	// set while the policy has neither run nor been stopped; nil otherwise.
 	Scheduled *Scheduled `json:"scheduled,omitempty"`
 
-	// origin is proposal.created.origin ("" reads as agent). Unexported until
-	// P3c exposes it; the auto-approve policy never schedules a driver's
-	// proposal (autoapprove.go).
-	origin string
+	// Origin is proposal.created.origin: "agent" or "driver"
+	// (POST /api/rooms/{id}/proposals); "" reads as "agent" and is normalised
+	// to it when the snapshot is folded. The auto-approve policy never
+	// schedules a driver's proposal (autoapprove.go). (P3c)
+	Origin string `json:"origin"`
 	// sched is the fold of the proposal's policy countdown (autoapprove.go).
 	sched schedState
+}
+
+// proposalOrigin normalises proposal.created.origin for the room view: "" (an
+// agent proposal written before P3c) reads as "agent" (docs/api.md).
+func proposalOrigin(o string) string {
+	if o == "" {
+		return events.ProposalOriginAgent
+	}
+	return o
 }
 
 // Scheduled mirrors the pending proposal.scheduled of a proposal
@@ -677,7 +687,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			Approvals:      approvals,
 			ParamsHash:     eventParamsHash(e.RoomID, p),
 			FallbackLayers: append([]string{}, p.FallbackLayers...),
-			origin:         p.Origin,
+			Origin:         proposalOrigin(p.Origin),
 		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv

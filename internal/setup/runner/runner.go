@@ -10,6 +10,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,10 +23,12 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"piperoom/internal/events"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -38,6 +41,13 @@ const (
 	defaultLabel = "piperoom-runner"
 	// catalogueVersion is "0" until the ops catalogue lands (a later wave).
 	catalogueVersion = "0"
+
+	// connectBackoffBase, connectBackoffMax and maxConnectRetries bound the
+	// retries of a transient connect or handshake failure: the runner waits
+	// exponentially longer (capped) and gives up after maxConnectRetries.
+	connectBackoffBase = time.Second
+	connectBackoffMax  = 30 * time.Second
+	maxConnectRetries  = 5
 )
 
 // Errors the caller branches on.
@@ -45,6 +55,10 @@ var (
 	ErrPairingRefused = errors.New("setup: pairing refused")
 	ErrYesOffLoopback = errors.New("setup: --yes is refused unless the server is loopback")
 	ErrFrameTooBig    = errors.New("setup: frame exceeds the 1 MiB cap")
+	// ErrTokenExpired reports that the runner's token is past its idle expiry
+	// (or was rejected by the server); the person must pair again with a new
+	// code.
+	ErrTokenExpired = errors.New("setup: runner token expired; pair again with a new code")
 )
 
 // errRedirectRefused fails a handshake that answers with a redirect, so a
@@ -53,15 +67,21 @@ var errRedirectRefused = errors.New("setup: refusing a redirect during the hands
 
 // Options configures a Runner. ServerURL and Code are required.
 type Options struct {
-	ServerURL  string       // http(s)://host[:port]
-	Code       string       // the pairing code
-	Yes        bool         // skip the y/N confirmation; loopback only
-	ProjectDir string       // "" = "."
-	Label      string       // "" = defaultLabel
-	Stdin      io.Reader    // nil = os.Stdin
-	Stdout     io.Writer    // nil = os.Stdout; the person-facing prompt
-	Log        *slog.Logger // nil = slog.Default()
-	LookupIP   LookupIPFunc // nil = the system resolver
+	ServerURL  string           // http(s)://host[:port]
+	Code       string           // the pairing code
+	Yes        bool             // skip the y/N confirmation; loopback only
+	ProjectDir string           // "" = "."
+	Label      string           // "" = defaultLabel
+	Stdin      io.Reader        // nil = os.Stdin
+	Stdout     io.Writer        // nil = os.Stdout; the person-facing prompt
+	Log        *slog.Logger     // nil = slog.Default()
+	LookupIP   LookupIPFunc     // nil = the system resolver
+	Now        func() time.Time // nil = time.Now; the runner's clock (tests inject one)
+	Catalogue  Catalogue        // nil = nopCatalogue (no op runs until ops lands)
+	// Backoff returns how long to wait before the attempt-th retry (1-based)
+	// of a transient connect or handshake failure; nil = exponential backoff
+	// from connectBackoffBase, capped at connectBackoffMax.
+	Backoff func(attempt int) time.Duration
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -75,12 +95,43 @@ type Runner struct {
 	stdout     io.Writer
 	log        *slog.Logger
 	lookupIP   LookupIPFunc
+	now        func() time.Time
+	catalogue  Catalogue
+	backoff    func(attempt int) time.Duration
 	url        *url.URL
 
-	conn       *websocket.Conn
-	token      string // never logged, never printed
-	roomID     string
-	negotiated protocol.Version
+	connMu sync.Mutex
+	conn   *websocket.Conn
+
+	token       string    // never logged, never printed
+	tokenExpiry time.Time // the token is idle-expired past this instant
+	roomID      string
+	negotiated  protocol.Version
+
+	// stdinMu serializes terminal confirmation prompts and their reads (ask)
+	// and guards stdinReader, the single shared reader, so two concurrent T3
+	// confirms cannot read each other's answer or buffer each other's input.
+	stdinMu     sync.Mutex
+	stdinReader *bufio.Reader
+
+	// handshakeMu guards handshakeDone. handshakeDone is non-nil while a
+	// reconnect handshake is in progress (the window between setConn and the
+	// Pair+Resume frames) and is closed when it completes. FrameResult writes
+	// wait on it, so a result from an old op cannot jump ahead of the
+	// handshake and be the first frame on the new socket.
+	handshakeMu   sync.Mutex
+	handshakeDone chan struct{}
+
+	// opMu guards everything an op goroutine touches below: the duplicate
+	// ledger, the cached frozen proposals, the class floors, the in-flight set
+	// and the open op log.
+	opMu      sync.Mutex
+	started   map[stepKey]struct{}
+	proposals map[string]events.ProposalCreatedPayload
+	floors    map[string]string
+	inflight  map[string]*inflightOp
+	opLog     *opLog
+	opLogDone bool // op log closed; late appends are no-ops
 }
 
 // New validates the options and builds a Runner.
@@ -95,6 +146,13 @@ func New(o Options) (*Runner, error) {
 		stdout:     o.Stdout,
 		log:        o.Log,
 		lookupIP:   o.LookupIP,
+		now:        o.Now,
+		catalogue:  o.Catalogue,
+		backoff:    o.Backoff,
+		started:    make(map[stepKey]struct{}),
+		proposals:  make(map[string]events.ProposalCreatedPayload),
+		floors:     make(map[string]string),
+		inflight:   make(map[string]*inflightOp),
 	}
 	if r.stdin == nil {
 		r.stdin = os.Stdin
@@ -107,6 +165,12 @@ func New(o Options) (*Runner, error) {
 	}
 	if r.lookupIP == nil {
 		r.lookupIP = defaultLookupIP
+	}
+	if r.now == nil {
+		r.now = time.Now
+	}
+	if r.catalogue == nil {
+		r.catalogue = nopCatalogue{}
 	}
 	if r.serverURL == "" {
 		return nil, errors.New("setup: --server (or PIPEROOM_SETUP_SERVER_URL) is required")
@@ -126,9 +190,13 @@ func New(o Options) (*Runner, error) {
 }
 
 // Run pairs the runner and then serves the socket until ctx ends or the
-// server closes it. It returns nil on a normal close, ErrDeclined when the
-// person answered N.
+// server closes it, reconnecting with the token (and a Resume) while it is
+// still idle-valid. It returns nil on a normal close, ErrDeclined when the
+// person answered N, and ErrTokenExpired when the token expired and a new
+// pairing code is required.
 func (r *Runner) Run(ctx context.Context) error {
+	defer r.closeOpLog()
+
 	loopback := r.isLoopback(ctx)
 	if r.yes && !loopback {
 		return ErrYesOffLoopback
@@ -138,21 +206,145 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
+	for {
+		if err := r.connectLoop(ctx, loopback, wsURL); err != nil {
+			return err
+		}
+		err := r.serve(ctx)
+		if err == nil {
+			// A clean close (or the ctx ending) is the server saying goodbye;
+			// the runner does not reconnect after it.
+			return nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		if !reconnectable(err) {
+			return err
+		}
+		if r.tokenExpired() {
+			r.log.Info("runner token expired; a new pairing code is required", "room_id", r.roomID)
+			return ErrTokenExpired
+		}
+		r.log.Info("connection lost; reconnecting", "room_id", r.roomID, "err", err)
+	}
+}
+
+// connectLoop dials and authenticates, retrying transient dial and handshake
+// failures with bounded backoff. A refused pairing, a declined confirmation,
+// an expired or rejected token, a protocol refusal, a dial that resolved off
+// loopback, and a ctx that ended all return immediately.
+func (r *Runner) connectLoop(ctx context.Context, loopback bool, wsURL string) error {
+	for attempt := 0; ; attempt++ {
+		err := r.connect(ctx, loopback, wsURL)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		if !connectTransient(err) {
+			return err
+		}
+		if r.token != "" && r.tokenExpired() {
+			r.log.Info("runner token expired; a new pairing code is required", "room_id", r.roomID)
+			return ErrTokenExpired
+		}
+		if attempt >= maxConnectRetries {
+			return err
+		}
+		d := r.backoffDelay(attempt + 1)
+		r.log.Info("connect failed; retrying", "room_id", r.roomID, "attempt", attempt+1, "backoff", d, "err", err)
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(d):
+		}
+	}
+}
+
+// connectTransient reports whether a connect error is a transient dial or
+// handshake failure the runner should retry. Terminal errors — a refused
+// pairing, a declined confirmation, an expired or rejected token, a protocol
+// version or frame refusal, a dial that resolved off loopback — return false.
+func connectTransient(err error) bool {
+	if websocket.CloseStatus(err) == protocol.CloseProtocolVersion {
+		return false
+	}
+	switch {
+	case errors.Is(err, ErrPairingRefused),
+		errors.Is(err, ErrDeclined),
+		errors.Is(err, ErrTokenExpired),
+		errors.Is(err, ErrDialNotLoopback),
+		errors.Is(err, ErrFrameTooBig),
+		errors.Is(err, errRedirectRefused),
+		errors.Is(err, protocol.ErrProtocolVersion),
+		errors.Is(err, protocol.ErrMalformedFrame):
+		return false
+	}
+	return true
+}
+
+// backoffDelay returns the wait before the attempt-th retry (1-based): the
+// injected Options.Backoff when set, else exponential backoff from
+// connectBackoffBase, capped at connectBackoffMax.
+func (r *Runner) backoffDelay(attempt int) time.Duration {
+	if r.backoff != nil {
+		return r.backoff(attempt)
+	}
+	d := connectBackoffBase
+	for i := 1; i < attempt; i++ {
+		if d >= connectBackoffMax {
+			return connectBackoffMax
+		}
+		d *= 2
+		if d > connectBackoffMax {
+			d = connectBackoffMax
+		}
+	}
+	return d
+}
+
+// reconnectable reports whether a serve error means the connection dropped
+// (reconnect with the token) rather than a fatal protocol problem (an
+// oversized or malformed frame).
+func reconnectable(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, ErrFrameTooBig) || errors.Is(err, protocol.ErrMalformedFrame) {
+		return false
+	}
+	return true
+}
+
+// connect dials the socket and authenticates: a first pairing with the code
+// (pair), or a reconnect with the token followed by a Resume.
+func (r *Runner) connect(ctx context.Context, loopback bool, wsURL string) error {
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	conn, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{HTTPClient: r.httpClient(loopback)})
 	cancel()
 	if err != nil {
 		return fmt.Errorf("setup: dialing %s: %w", r.serverURL, err)
 	}
-	r.conn = conn
-	defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
 	conn.SetReadLimit(protocol.MaxFrameBytes)
+	r.setConn(conn)
 	r.log.Debug("connected", "server", r.serverURL, "loopback", loopback)
 
-	if err := r.pair(ctx); err != nil {
+	if r.token == "" {
+		if err := r.pair(ctx); err != nil {
+			_ = conn.Close(websocket.StatusNormalClosure, "")
+			r.setConn(nil)
+			return err
+		}
+		return nil
+	}
+	if err := r.resume(ctx); err != nil {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		r.setConn(nil)
 		return err
 	}
-	return r.serve(ctx)
+	return nil
 }
 
 // httpClient builds the *http.Client for the WebSocket dial. It always refuses
@@ -189,6 +381,22 @@ func (r *Runner) dial(ctx context.Context, network, addr string, loopback bool) 
 	return d.DialContext(ctx, network, addr)
 }
 
+// setConn and currentConn guard the conn pointer: an op goroutine from a
+// previous connection can still be writing while the runner reconnects, so
+// every access goes through the mutex (coder/websocket itself is safe for
+// concurrent use).
+func (r *Runner) setConn(c *websocket.Conn) {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	r.conn = c
+}
+
+func (r *Runner) currentConn() *websocket.Conn {
+	r.connMu.Lock()
+	defer r.connMu.Unlock()
+	return r.conn
+}
+
 // pair sends Pair, confirms the Welcome on the person's terminal, sends
 // Hello, and stores the Token the server hands back.
 func (r *Runner) pair(ctx context.Context) error {
@@ -222,6 +430,7 @@ func (r *Runner) pair(ctx context.Context) error {
 	}
 	r.negotiated = protocol.Negotiate(cur, welcome.Version())
 	r.roomID = welcome.RoomID
+	r.applyTargets(welcome.Targets)
 
 	ok, err := r.confirm(ctx, welcome)
 	if err != nil {
@@ -253,24 +462,120 @@ func (r *Runner) pair(ctx context.Context) error {
 	if err != nil {
 		return phaseErr("token", tokenTimeout, false, err)
 	}
-	r.token = f.Token.Token
-	if r.token == "" {
-		return errors.New("setup: empty token")
+	if err := r.storeToken(f.Token); err != nil {
+		return err
 	}
 	fmt.Fprintf(r.stdout, "paired with %s as %q\n", r.serverURL, r.label)
 	r.log.Info("paired", "room_id", r.roomID, "label", r.label, "negotiated", r.negotiated.String())
 	return nil
 }
 
-// serve answers ping with pong and drops unknown frame types; op and
-// credential frames are handled in later waves.
+// resume authenticates a reconnect with the token: it sends Pair{Token}, takes
+// the fresh token the server rotates to, and then sends Resume as the first
+// frame after the reconnect. The server may answer a token-Pair with a Welcome
+// first (updated targets); the runner re-applies its class floors (never
+// lowered) and keeps waiting for the token.
+func (r *Runner) resume(ctx context.Context) error {
+	r.beginHandshake()
+	defer r.endHandshake()
+
+	cur := protocol.Current()
+	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FramePair, Pair: &protocol.Pair{
+		Token:           r.token,
+		ProtocolVersion: cur.Major,
+		ProtocolMinor:   cur.Minor,
+	}}); err != nil {
+		return err
+	}
+
+	f, err := r.readUntil(ctx, tokenTimeout, func(f protocol.Frame) (bool, error) {
+		switch f.Type {
+		case protocol.FrameWelcome:
+			r.applyTargets(f.Welcome.Targets)
+			return false, nil
+		case protocol.FrameToken:
+			return true, nil
+		}
+		return false, fmt.Errorf("setup: expected token, got %q", f.Type.Short())
+	})
+	if err != nil {
+		return tokenPhaseErr(err)
+	}
+	if err := r.storeToken(f.Token); err != nil {
+		return err
+	}
+
+	res, done := r.buildResume()
+	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameResume, Resume: &res}); err != nil {
+		return err
+	}
+	r.dropDone(done)
+	r.log.Info("reconnected", "room_id", r.roomID, "in_flight", len(res.InFlight))
+	return nil
+}
+
+// beginHandshake marks the start of a reconnect handshake: FrameResult writes
+// wait until endHandshake, so a result from an op that finished in the window
+// cannot be the first frame on the new socket. It is always paired with
+// endHandshake (deferred), even when the handshake fails.
+func (r *Runner) beginHandshake() {
+	r.handshakeMu.Lock()
+	r.handshakeDone = make(chan struct{})
+	r.handshakeMu.Unlock()
+}
+
+// endHandshake clears the handshake marker and releases any FrameResult writes
+// waiting for it.
+func (r *Runner) endHandshake() {
+	r.handshakeMu.Lock()
+	ch := r.handshakeDone
+	r.handshakeDone = nil
+	r.handshakeMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+// tokenPhaseErr classifies an error while waiting for a fresh token on a
+// reconnect. A close with CloseProtocolVersion is a version refusal (the
+// server moved incompatibly); any other close most likely rejected the token,
+// which means a new pairing code.
+func tokenPhaseErr(err error) error {
+	if errors.Is(err, ErrFrameTooBig) {
+		return err
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("setup: no token within %s", tokenTimeout)
+	}
+	if sc := websocket.CloseStatus(err); sc == protocol.CloseProtocolVersion {
+		return pairingRefused(err)
+	}
+	if sc := websocket.CloseStatus(err); sc >= 0 {
+		return fmt.Errorf("%w (server closed with status %d)", ErrTokenExpired, sc)
+	}
+	return fmt.Errorf("setup: reading token: %w", err)
+}
+
+// serve answers ping with pong, dispatches op and cancel frames, and drops
+// unknown frame types. It returns when the socket closes; the conn is closed
+// and cleared on the way out (op goroutines hold the Run ctx, not this one, so
+// a running op survives a dropped connection and is reported in Resume).
 func (r *Runner) serve(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
+	conn := r.currentConn()
+	if conn == nil {
+		return errors.New("setup: not connected")
+	}
+	defer func() {
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+		r.setConn(nil)
+	}()
+
+	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go r.pingLoop(ctx)
+	go r.pingLoop(connCtx)
 
 	for {
-		f, err := r.readFrame(ctx)
+		f, err := r.readFrame(connCtx)
 		if err != nil {
 			if errors.Is(err, ErrFrameTooBig) {
 				return err
@@ -292,10 +597,14 @@ func (r *Runner) serve(ctx context.Context) error {
 		}
 		switch f.Type {
 		case protocol.FramePing:
-			if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FramePong}); err != nil {
+			if err := r.writeFrame(connCtx, protocol.Frame{Type: protocol.FramePong}); err != nil {
 				return err
 			}
 		case protocol.FramePong:
+		case protocol.FrameOp:
+			go r.runOp(ctx, f.Op)
+		case protocol.FrameCancel:
+			r.cancelOp(f.Cancel.ID)
 		default:
 			r.log.Debug("frame not handled yet", "type", f.Type.Short())
 		}
@@ -321,7 +630,11 @@ func (r *Runner) pingLoop(ctx context.Context) {
 }
 
 func (r *Runner) readFrame(ctx context.Context) (protocol.Frame, error) {
-	_, data, err := r.conn.Read(ctx)
+	conn := r.currentConn()
+	if conn == nil {
+		return protocol.Frame{}, errors.New("setup: not connected")
+	}
+	_, data, err := conn.Read(ctx)
 	if err != nil {
 		if errors.Is(err, websocket.ErrMessageTooBig) || websocket.CloseStatus(err) == websocket.StatusMessageTooBig {
 			return protocol.Frame{}, fmt.Errorf("%w: server frame exceeds %d bytes", ErrFrameTooBig, protocol.MaxFrameBytes)
@@ -336,6 +649,29 @@ func (r *Runner) readFrame(ctx context.Context) (protocol.Frame, error) {
 }
 
 func (r *Runner) writeFrame(ctx context.Context, f protocol.Frame) error {
+	// A result must not jump ahead of a reconnect handshake: the server expects
+	// Pair then Resume as the first frames on a new socket. The result is
+	// already in the in-flight set (markDone ran before the write), so waiting
+	// here cannot lose it; it is delivered after the handshake, or carried by
+	// the Resume the handshake itself sends. The loop re-checks after each wait
+	// so a result released at the end of one handshake cannot slip ahead of the
+	// next.
+	if f.Type == protocol.FrameResult {
+		for {
+			r.handshakeMu.Lock()
+			ch := r.handshakeDone
+			r.handshakeMu.Unlock()
+			if ch == nil {
+				break
+			}
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+
 	raw, err := json.Marshal(f)
 	if err != nil {
 		return fmt.Errorf("setup: encoding frame: %w", err)
@@ -343,7 +679,11 @@ func (r *Runner) writeFrame(ctx context.Context, f protocol.Frame) error {
 	if len(raw) > protocol.MaxFrameBytes {
 		return fmt.Errorf("%w: %s is %d bytes", ErrFrameTooBig, f.Type.Short(), len(raw))
 	}
-	if err := r.conn.Write(ctx, websocket.MessageText, raw); err != nil {
+	conn := r.currentConn()
+	if conn == nil {
+		return errors.New("setup: not connected")
+	}
+	if err := conn.Write(ctx, websocket.MessageText, raw); err != nil {
 		return fmt.Errorf("setup: writing %s: %w", f.Type.Short(), err)
 	}
 	return nil

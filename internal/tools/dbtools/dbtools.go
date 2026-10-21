@@ -190,6 +190,12 @@ func (d Deps) isSnowflake() bool {
 	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "snowflake")
 }
 
+// isDatabricks reports whether the warehouse is Databricks. Empty means the
+// default, Postgres.
+func (d Deps) isDatabricks() bool {
+	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "databricks")
+}
+
 // whIdentRe is the identifier regex for the configured warehouse kind.
 func (d Deps) whIdentRe() *regexp.Regexp {
 	if d.isSnowflake() {

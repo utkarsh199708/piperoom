@@ -309,10 +309,12 @@ func (s Scope) CheckDAG(dagID string) error {
 }
 
 // CheckModel refuses a model that is not one of the pipeline's models. name
-// is a model name as owners.yaml writes it; a tool that takes a unique_id
-// converts it with owners.ModelName first and passes the name on.
+// is a model name as owners.yaml writes it, or a model unique_id
+// (model.<package>.<name>[.<version>]); owners.ModelsContain applies the same
+// rule as the topology builder: a bare entry admits any package, a unique_id
+// entry only its own package (and version, when it names one).
 func (s Scope) CheckModel(name string) error {
-	if s.unscoped || contains(s.p.Models, name) {
+	if s.unscoped || owners.ModelsContain(s.p.Models, name) {
 		return nil
 	}
 	return refuse("model", name, s, allowed("models", s.p.Models))
@@ -332,7 +334,7 @@ type LineageReader interface {
 // (clients.ErrNotFound) only has no neighbours. A nil reader is an error that
 // wraps clients.ErrNotSupported.
 func (s Scope) CheckModelOrAdjacent(ctx context.Context, name string, lr LineageReader) error {
-	if s.unscoped || contains(s.p.Models, name) {
+	if s.unscoped || owners.ModelsContain(s.p.Models, name) {
 		return nil
 	}
 	why := allowed("models", s.p.Models) + " and their direct parents and children"

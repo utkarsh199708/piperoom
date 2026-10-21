@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RoomSnapshot, Topology, TopologyNode } from '@/api/types'
-import { pipelineHealth, pipelineSummaries } from './pipelines'
+import { pipelineHealth, pipelineKind, pipelineSummaries } from './pipelines'
 
 const room = (id: string, pipeline_id: string, status = 'open') => ({ id, pipeline_id, status }) as RoomSnapshot
 const node = (health: TopologyNode['health']) => ({ id: health, health }) as TopologyNode
@@ -34,5 +34,13 @@ describe('pipelineHealth', () => {
     expect(pipelineHealth(null)).toBe('unknown')
     expect(pipelineHealth(topo())).toBe('unknown')
     expect(pipelineHealth(topo('ok', 'unknown'))).toBe('unknown')
+  })
+})
+
+describe('pipelineKind', () => {
+  it('reads batch only for an explicit batch kind; anything else is cdc', () => {
+    expect(pipelineKind('batch')).toBe('batch')
+    expect(pipelineKind('cdc')).toBe('cdc')
+    expect(pipelineKind(undefined)).toBe('cdc')
   })
 })

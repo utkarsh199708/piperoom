@@ -75,6 +75,8 @@ const config: Config = {
           kafka: token('--layer-kafka'),
           consumer: token('--layer-consumer'),
           warehouse: token('--layer-warehouse'),
+          orchestrator: token('--layer-orchestrator'),
+          transform: token('--layer-transform'),
         },
       },
       fontFamily: {

@@ -13,10 +13,11 @@ import (
 	"piperoom/internal/room"
 )
 
-// TestOwnersBatchLoads keeps dev/owners.batch.yaml loadable and in step with
-// the batch profile: the DAG, the models and the sink table it builds.
+// TestOwnersBatchLoads keeps the daily-revenue pipeline in dev/owners.yaml
+// loadable and in step with the batch profile: the DAG, the models and the
+// sink table it builds.
 func TestOwnersBatchLoads(t *testing.T) {
-	o, err := owners.Load("../../dev/owners.batch.yaml")
+	o, err := owners.Load("../../dev/owners.yaml")
 	if err != nil {
 		t.Fatalf("owners.Load: %v", err)
 	}
@@ -43,14 +44,15 @@ func TestOwnersBatchLoads(t *testing.T) {
 	}
 }
 
-// TestUsersBatchMatchesOwners runs the server's start-up check on the pair
-// dev/batch.md tells you to start the server with.
+// TestUsersBatchMatchesOwners runs the server's start-up check on the dev
+// pair (dev/users.yaml + dev/owners.yaml, which now holds the daily-revenue
+// batch pipeline and its orchestrator/transform layers).
 func TestUsersBatchMatchesOwners(t *testing.T) {
-	o, err := owners.Load("../../dev/owners.batch.yaml")
+	o, err := owners.Load("../../dev/owners.yaml")
 	if err != nil {
 		t.Fatalf("owners.Load: %v", err)
 	}
-	u, err := room.LoadUsers("../../dev/users.batch.yaml")
+	u, err := room.LoadUsers("../../dev/users.yaml")
 	if err != nil {
 		t.Fatalf("room.LoadUsers: %v", err)
 	}
