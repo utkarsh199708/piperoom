@@ -56,6 +56,7 @@
   "allowScripts": {
     "esbuild@0.28.2": true
   },
+  "//": "postcss-selector-parser override clears 2 moderate PostCSS advisories; remove once Tailwind v4 lands",
   "overrides": {
     "postcss-selector-parser": "^7.1.6"
   }
