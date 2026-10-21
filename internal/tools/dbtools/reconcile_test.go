@@ -152,8 +152,21 @@ func TestReconcileVerdictSide(t *testing.T) {
 		want    string
 		notWant string
 	}{
-		{"consumer side", topicWith(false), "sink is missing 60 rows in 03:09–03:15; topic has them (consumer side)", "connector side"},
-		{"connector side", topicWith(true), "topic is missing them (connector side)", "consumer side"},
+		// Enough events in the topic, but events are not rows: the side stays
+		// open and the next check is named (#482).
+		{"events cover the rows", topicWith(false), "the side is unproven, confirm one missing key with warehouse_row", "connector side"},
+		// Each source row updated twice: 3 events per row. That must not read
+		// as proof that the consumer dropped the rows (#482).
+		{"updates inflate events", &rateKafka{perBoundary: func(at time.Time) int64 {
+			var total int64
+			for i := range srcC {
+				if !rcSince.Add(time.Duration(i) * width).Before(at) {
+					total += 3 * srcC[i]
+				}
+			}
+			return total
+		}}, "the side is unproven", "consumer side"},
+		{"connector side", topicWith(true), "connector side", "consumer side"},
 		{"no rate reader", nil, "topic counts are not available, so the side is unknown", "consumer side"},
 		{"rates fail", &rateKafka{err: errors.New("broker down")}, "topic counts are not available", "consumer side"},
 	}
