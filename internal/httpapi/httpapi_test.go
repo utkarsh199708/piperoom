@@ -246,6 +246,7 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 	}{
 		{http.MethodGet, "/api/me", ""},
 		{http.MethodGet, "/api/rooms", ""},
+		{http.MethodGet, "/api/actions", ""},
 		{http.MethodPost, "/api/rooms", `{"title":"t","severity":"sev2","pipeline_id":"orders"}`},
 		{http.MethodPost, "/api/alerts/webhook", `{}`},
 		{http.MethodGet, "/api/rooms/r1", ""},
@@ -260,6 +261,7 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 		{http.MethodPost, "/api/rooms/r1/control/grant", `{"to":"arjun"}`},
 		{http.MethodPost, "/api/rooms/r1/close", `{"resolution":"x"}`},
 		{http.MethodPost, "/api/rooms/r1/handoffs", `{"to":"priya"}`},
+		{http.MethodPost, "/api/rooms/r1/proposals", `{"title":"t","risk":"low","rollback":"r","steps":[]}`},
 		{http.MethodPost, "/api/rooms/r1/trace", `{"table":"t","key":"k"}`},
 		{http.MethodPost, "/api/proposals/p1/approve", `{"layer":"postgres"}`},
 		{http.MethodPost, "/api/proposals/p1/reject", `{"layer":"postgres"}`},

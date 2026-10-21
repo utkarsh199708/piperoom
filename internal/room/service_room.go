@@ -460,7 +460,14 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 		if (out[i].Status == "open") != (out[j].Status == "open") {
 			return out[i].Status == "open"
 		}
-		return out[i].OpenedAt.After(out[j].OpenedAt)
+		if !out[i].OpenedAt.Equal(out[j].OpenedAt) {
+			return out[i].OpenedAt.After(out[j].OpenedAt)
+		}
+		// Two rooms can share an opened_at: Postgres and the mem store both keep
+		// only microsecond precision. The id is the deterministic tiebreaker, so
+		// the HTTP list and the WS list socket always answer in the same order
+		// instead of the map iteration order of publishedRooms (KAN-382).
+		return out[i].ID < out[j].ID
 	})
 	return out, nil
 }

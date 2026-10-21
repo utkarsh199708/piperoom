@@ -8,11 +8,13 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    # A cost trade-off: only the files that define the image build it on a PR.
-    # A change under internal/** or web/src/** is built at the next tag (and by
-    # any PR that also touches one of these paths).
+    # A cost trade-off: only PRs that touch the image inputs run these builds.
+    # Both images build on every trigger (the devconsumer image is validated but
+    # never published). A change under internal/** or web/src/** is built at the
+    # next tag (and by any PR that also touches one of these paths).
     paths:
       - "Dockerfile"
+      - "cmd/devconsumer/Dockerfile"
       - "go.mod"
       - "go.sum"
       - "cmd/server/**"
@@ -108,3 +110,33 @@ jobs:
           name: image-digest
           path: image-digest.txt
           retention-days: 90
+
+  # Builds (but never publishes) the devconsumer image from its own Dockerfile,
+  # so a PR that breaks cmd/devconsumer/Dockerfile fails here rather than at the
+  # next tag. Read-only: no login, no push, contents read only.
+  devconsumer:
+    name: Build devconsumer image
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build devconsumer image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: cmd/devconsumer/Dockerfile
+          push: false
+          load: true
+          tags: piperoom-devconsumer:ci
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,96 @@
+name: Fuzz
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # Manual runs (e.g. re-running a single target after a crasher is fixed).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Discover every fuzz target without hard-coding names, so a new Fuzz*
+  # function anywhere in the repo is fuzzed on the next run.
+  discover:
+    name: Discover fuzz targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Discover fuzz targets
+        id: discover
+        run: |
+          set -euo pipefail
+
+          # List every package, then ask `go test -list '^Fuzz'` in each one.
+          # The output is a JSON matrix of {pkg, fuzz} pairs consumed by the
+          # fuzz job's strategy.matrix.include below.
+          items=""
+          while IFS= read -r pkg; do
+            while IFS= read -r fuzz; do
+              [ -n "$fuzz" ] || continue
+              items="${items:+${items},}$(jq -nc --arg pkg "$pkg" --arg fuzz "$fuzz" '{pkg: $pkg, fuzz: $fuzz}')"
+            done < <(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep -E '^Fuzz' || true)
+          done < <(go list ./...)
+
+          matrix="[${items}]"
+          echo "Discovered fuzz targets:"
+          echo "$matrix" | jq -r '.[] | "  \(.pkg) -> \(.fuzz)"'
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  # One shard per target, in parallel (fail-fast: false so a crasher in one
+  # target does not cancel the others). Five targets x 30 s of fuzzing stays
+  # well under the budget even with a cold build cache.
+  fuzz:
+    name: Fuzz ${{ matrix.fuzz }}
+    needs: discover
+    if: needs.discover.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Fuzz ${{ matrix.fuzz }} for 30 s
+        run: go test -run='^$' -fuzz="^${{ matrix.fuzz }}$" -fuzztime=30s "${{ matrix.pkg }}"
+      - name: Upload fuzz crashers
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-crashers-${{ matrix.fuzz }}
+          path: |
+            **/testdata/fuzz/**
+          if-no-files-found: ignore
+          retention-days: 7

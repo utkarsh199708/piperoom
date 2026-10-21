@@ -65,22 +65,115 @@ func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPay
 // scope, derives the required approval layers from the step layers, and stores
 // the proposal (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
-	return s.createProposal(ctx, roomID, p, actor, nil)
+	id, _, err := s.createProposal(ctx, roomID, p, actor, nil)
+	return id, err
+}
+
+// maxOpenDriverProposals caps the open driver-authored proposals of one room
+// (docs/api.md: a sixth answers 429 too_many_proposals).
+const maxOpenDriverProposals = 5
+
+// CreateDriverProposal is POST /api/rooms/{id}/proposals (P3c): the driver
+// authors a fix proposal. Driver only (403 not_driver), open rooms only
+// (409 room_closed), never in a shadow room (400 validation), at most
+// maxOpenDriverProposals open driver-authored proposals per room
+// (429 too_many_proposals). It is validated exactly like an agent proposal
+// (createProposal: registered action, layer match, Validate under the room's
+// pipeline ctx, param keys, scope, params_hash, preview); only the typed text
+// is refused rather than sanitized, and Origin is forced to
+// ProposalOriginDriver, which also keeps the auto-approve policy off it
+// (scheduleCheckLocked).
+func (s *Service) CreateDriverProposal(ctx context.Context, user User, roomID string, p events.ProposalCreatedPayload) (events.Event, error) {
+	// The title, risk, rollback and step descriptions are typed by the driver,
+	// so they follow the typed-text rule (refused, not sanitized).
+	if err := rejectUnstorable(p.Title, p.Risk, p.Rollback); err != nil {
+		return events.Event{}, err
+	}
+	for _, st := range p.Steps {
+		if err := rejectUnstorable(st.Description, st.Verify); err != nil {
+			return events.Event{}, err
+		}
+	}
+	p.Origin = events.ProposalOriginDriver
+	// The fence below re-checks under the room's lock and is authoritative, but
+	// createProposal runs the structural and Validate checks first: Validate
+	// reads the pipeline's own systems, so a non-driver (or a call to a closed,
+	// shadow or capped room) must be refused before that. precheckDriverProposal
+	// does those checks under a short lock; the fence repeats them where the
+	// write lands.
+	if err := s.precheckDriverProposal(ctx, user, roomID); err != nil {
+		return events.Event{}, err
+	}
+	_, ev, err := s.createProposal(ctx, roomID, p, s.humanActor(user), func(st *roomState) error {
+		if !s.isDriver(st, user.ID) {
+			return ErrNotDriver()
+		}
+		if st.snap.Shadow {
+			return validation("a shadow room has no proposals")
+		}
+		if openDriverProposals(st.snap) >= maxOpenDriverProposals {
+			return tooManyProposals()
+		}
+		return nil
+	})
+	return ev, err
+}
+
+// precheckDriverProposal refuses, before any action Validate runs, the calls
+// createProposal's fence would refuse under the lock: a non-driver, a closed
+// room, a shadow room, or a room at its driver-proposal cap. The fence still
+// re-checks under the lock (the room may change between the checks); this
+// pass only keeps a refused caller from reading the pipeline's systems through
+// Validate and seeing their error text.
+func (s *Service) precheckDriverProposal(ctx context.Context, user User, roomID string) error {
+	s.syncRoom(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	defer s.unlockRoom(st)
+	if !s.isDriver(st, user.ID) {
+		return ErrNotDriver()
+	}
+	if !s.roomOpen(st) {
+		return roomClosed("room is closed")
+	}
+	if st.snap.Shadow {
+		return validation("a shadow room has no proposals")
+	}
+	if openDriverProposals(st.snap) >= maxOpenDriverProposals {
+		return tooManyProposals()
+	}
+	return nil
+}
+
+// openDriverProposals counts the open driver-authored proposals of a snapshot
+// (Origin "driver"; see scheduleCheckLocked, which never schedules them).
+func openDriverProposals(snap RoomSnapshot) int {
+	n := 0
+	for _, p := range snap.OpenProposals {
+		if p.Origin == events.ProposalOriginDriver {
+			n++
+		}
+	}
+	return n
 }
 
 // createProposal is CreateProposal with an optional fence, checked under the
 // room's lock before anything is written: the agent's proposals refuse a run
-// that lost its lease (fenceLocked).
-func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, error) {
+// that lost its lease (fenceLocked), the driver's refuse a non-driver, a
+// shadow room or too many open driver proposals. It returns the proposal id
+// and the proposal.created event.
+func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, events.Event, error) {
 	p = sanitizeProposal(p)
 	if len(p.Steps) == 0 {
-		return "", validation("proposal requires at least one step")
+		return "", events.Event{}, validation("proposal requires at least one step")
 	}
 	if err := checkPlanText("risk", p.Risk); err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
 	if err := checkPlanText("rollback", p.Rollback); err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
 	// The actions of the room's own pipeline (docs/design/tenancy.md): their
 	// Validate reads that pipeline's systems only.
@@ -93,21 +186,21 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	for i, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
 		if !ok {
-			return "", validation(fmt.Sprintf("unknown action %q", step.Action))
+			return "", events.Event{}, validation(fmt.Sprintf("unknown action %q", step.Action))
 		}
 		if step.Layer != a.Layer() {
-			return "", validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, a.Layer()))
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, a.Layer()))
 		}
 		if !isKnownLayer(step.Layer) {
-			return "", validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
 		}
 		if err := a.Validate(vctx, step.Params); err != nil {
-			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 		// Exact, case-sensitive keys only: the decoder would fold case and the
 		// approver would not see which value ran (see param_keys.go).
 		if err := checkParamKeys(a.ParamsSchema(), step.Params); err != nil {
-			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 	}
 
@@ -115,22 +208,22 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	s.syncRoom(ctx, roomID)
 	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
 	defer s.unlockRoom(st)
 	if fence != nil {
 		if err := fence(st); err != nil {
-			return "", err
+			return "", events.Event{}, err
 		}
 	}
 	if !s.roomOpen(st) {
-		return "", roomClosed("room is closed")
+		return "", events.Event{}, roomClosed("room is closed")
 	}
 	// A room opened from a webhook with an unknown pipeline has proposals
 	// disabled (docs/api.md:103): the agent must not propose a fix against a
 	// pipeline nothing can be scoped to.
 	if s.proposalsDisabled(st) {
-		return "", errProposalsDisabled(st.snap.PipelineID)
+		return "", events.Event{}, errProposalsDisabled(st.snap.PipelineID)
 	}
 
 	// Scope check against the room's pipeline (docs/api.md): a step must
@@ -139,7 +232,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	for i, step := range p.Steps {
 		a, _ := acts.Get(step.Action)
 		if err := s.scopeCheck(st.snap.PipelineID, a, step.Params); err != nil {
-			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 	}
 
@@ -160,7 +253,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	p.ProposalID = NewID("p_")
 	stepsJSON, err := json.Marshal(p.Steps)
 	if err != nil {
-		return "", fmt.Errorf("room: marshal proposal steps: %w", err)
+		return "", events.Event{}, fmt.Errorf("room: marshal proposal steps: %w", err)
 	}
 	// The hash is always computed here, over the parsed and sanitized proposal
 	// that is about to be stored. A value the caller put in ParamsHash is
@@ -170,9 +263,9 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	hash, err := ComputeParamsHash(roomID, p.ProposalID, p.Title, p.Risk, p.Rollback, p.RequiredLayers, p.Steps)
 	if err != nil {
 		if errors.Is(err, errParamsNumber) {
-			return "", validation(err.Error())
+			return "", events.Event{}, validation(err.Error())
 		}
-		return "", validation("proposal cannot be hashed: " + err.Error())
+		return "", events.Event{}, validation("proposal cannot be hashed: " + err.Error())
 	}
 	p.ParamsHash = hash
 	// Row first so a crash cannot leave an event with no backing row; if the
@@ -188,15 +281,16 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		Rollback:       p.Rollback,
 		ParamsHash:     p.ParamsHash,
 	}); err != nil {
-		return "", err
+		return "", events.Event{}, err
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p); err != nil {
+	ev, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p)
+	if err != nil {
 		dctx, cancel := compensateCtx(ctx)
 		defer cancel()
 		if delErr := s.store.DeleteProposal(dctx, p.ProposalID); delErr != nil {
 			s.log.Warn("room: compensate failed proposal row", "proposal", p.ProposalID, "err", delErr)
 		}
-		return "", err
+		return "", events.Event{}, err
 	}
 	// Preview runs outside the room's lock, on the service lifetime context;
 	// it waits for this call to release the lock before it appends anything.
@@ -207,7 +301,7 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 			s.previewProposal(s.ctx, roomID, pipelineID, p.ProposalID, steps)
 		}(st.snap.PipelineID, p.Steps)
 	}
-	return p.ProposalID, nil
+	return p.ProposalID, ev, nil
 }
 
 // ApproveProposal records a layer owner's approval. When every required layer

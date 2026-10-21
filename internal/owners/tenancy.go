@@ -25,6 +25,10 @@ const DefaultTenant = "default"
 // error texts next to pipeline ids.
 var tenantNameRE = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
+// repoIDRE is the repo-id charset (a slug, like the pipeline ids it sits next
+// to in errors and the PR tool's repo: field).
+var repoIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
 // envNameRE is a portable environment variable name.
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -46,12 +50,23 @@ type Tenant struct {
 	// Members see every room of the tenant's pipelines. The owners of those
 	// pipelines' layers are members too, without being listed (InTenant).
 	Members Principals `yaml:"members"`
+	// Admins approve the T2/T3 steps of a setup room whose provisional
+	// pipeline nobody owns yet, and a pipeline_register proposal on a team
+	// server, with grant "admin" (events.GrantAdmin; docs/design/setup-agent.md
+	// §3.6). Principals, exactly like members:. May be empty: a tenant with no
+	// admins relies on an overlapping pipeline's owners, or solo mode.
+	Admins Principals `yaml:"admins"`
+	// Repos are the repo ids of the tenant's default repos: the setup form's
+	// repo list falls back to them when the person names none (§3.10). A repo
+	// id is a plain slug; the repo's url and globs live in the pipeline's
+	// repos: block (Q7a).
+	Repos []string `yaml:"repos"`
 }
 
 // UnmarshalYAML rejects unknown keys, like the other blocks: a typo such as
 // `member:` would otherwise leave the tenant with owners only.
 func (t *Tenant) UnmarshalYAML(node *yaml.Node) error {
-	if err := checkKeys(node, "tenants", "members"); err != nil {
+	if err := checkKeys(node, "tenants", "members", "admins", "repos"); err != nil {
 		return err
 	}
 	type plain Tenant // no methods, so Decode does not recurse
@@ -202,8 +217,12 @@ func IsCAKey(key string) bool { return connKeys[key].ca }
 func IsLiteralKey(key string) bool { return connKeys[key].literal }
 
 // FileRef is the canonical connection reference of a file path (see
-// ConnRefs): cleaned and lower case, because Windows paths ignore case.
-func FileRef(path string) string { return "file:" + strings.ToLower(filepath.Clean(path)) }
+// ConnRefs): cleaned, lower case, and with forward slashes, so the same file
+// gives the same reference on every OS (Windows paths ignore case, and an
+// owners.yaml written on one OS must compare equal on another).
+func FileRef(path string) string {
+	return "file:" + strings.ToLower(filepath.ToSlash(filepath.Clean(path)))
+}
 
 // TenantName returns the pipeline's tenant: its tenant: value, or DefaultTenant.
 func (p Pipeline) TenantName() string {
@@ -291,6 +310,21 @@ func (o *Owners) InTenant(tenant, userID string, groups []string) bool {
 		}
 	}
 	return false
+}
+
+// IsTenantAdmin reports whether the session is named in tenants.<t>.admins:.
+// A tenant admin may approve a setup room's T2/T3 steps and its
+// pipeline_register with grant "admin" (docs/design/setup-agent.md §3.6).
+func (o *Owners) IsTenantAdmin(tenant, userID string, groups []string) bool {
+	if o == nil {
+		return false
+	}
+	t, ok := o.Tenants[tenant]
+	if !ok {
+		return false
+	}
+	_, ok = t.Admins.Matches(userID, groups)
+	return ok
 }
 
 // CanSeePipeline reports whether the session may see the rooms of the
@@ -469,6 +503,13 @@ func (o *Owners) validateTenancy() error {
 		if !tenantNameRE.MatchString(name) {
 			return fmt.Errorf("tenants: tenant name %s must match %s", quoteName(name), tenantNameRE)
 		}
+		repos, err := cleanRepos(o.Tenants[name].Repos)
+		if err != nil {
+			return fmt.Errorf("tenants.%s: %w", name, err)
+		}
+		t := o.Tenants[name]
+		t.Repos = repos
+		o.Tenants[name] = t
 	}
 	for i := range o.Pipelines {
 		p := &o.Pipelines[i]
@@ -585,6 +626,29 @@ func canonRef(r ConnRef) string {
 // so a file written on Linux checks the same way on a Windows dev machine.
 func isAbsPath(p string) bool {
 	return filepath.IsAbs(p) || strings.HasPrefix(p, "/")
+}
+
+// cleanRepos trims and checks a tenant's repos: list, like cleanNames for the
+// pipeline name lists. It returns the trimmed list and leaves its input alone.
+func cleanRepos(repos []string) ([]string, error) {
+	if repos == nil {
+		return nil, nil
+	}
+	out := make([]string, 0, len(repos))
+	for i, raw := range repos {
+		name := strings.TrimSpace(raw)
+		switch {
+		case name == "":
+			return nil, fmt.Errorf("repos[%d]: empty entry", i)
+		case !repoIDRE.MatchString(name):
+			return nil, fmt.Errorf("repos: %s is not a repo id (want %s)", quoteName(name), repoIDRE)
+		}
+		out = append(out, name)
+	}
+	if d := firstDuplicate(out); d != "" {
+		return nil, fmt.Errorf("repos lists %q twice", d)
+	}
+	return out, nil
 }
 
 // checkNullBlocks refuses a tenants:, connections: or tenant: key whose value

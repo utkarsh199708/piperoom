@@ -43,7 +43,6 @@ import (
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
-	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/version"
 	"piperoom/internal/watch"
@@ -75,6 +74,7 @@ func run() error {
 func runWith(d startDeps) error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	quickstart := flag.Bool("quickstart", false, "read-only quickstart: the real agent and tools, in-memory room store, dev login on loopback only, write mode off, a one-user users file for this run; prints the URL to open")
+	solo := flag.Bool("solo", false, "with --demo: give the demo presenter the solo ceremony (sole driver, approve-all); with --quickstart: give the sole owner from the owners file the solo ceremony (sole driver, approve-all)")
 	ownersPath := flag.String("owners", "", "with --quickstart: the owners file (default ./"+quickstartDefaultOwners+"); without --quickstart, set OWNERS_FILE instead")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
@@ -94,7 +94,7 @@ func runWith(d startDeps) error {
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
 	}
-	if err := checkStartFlags(*demoMode, *quickstart, *allowRemote, *ownersPath); err != nil {
+	if err := checkStartFlags(*demoMode, *quickstart, *solo, *allowRemote, *ownersPath); err != nil {
 		return err
 	}
 	if down.n != 0 || down.apply || down.confirm != "" || down.dropEvents {
@@ -187,11 +187,27 @@ func runWith(d startDeps) error {
 	if err != nil {
 		return err
 	}
+	// The scripted agent on a real stack (PIPEROOM_FAKE_AGENT=scripted) is
+	// read only outside --demo and --quickstart. A bad value, or a scripted
+	// request that would reach real users or run fixes, refuses the start
+	// before anything connects (config.ParseFakeAgent).
+	fakeAgent, err := fakeAgentSetup(cfg, *demoMode, *quickstart, log)
+	if err != nil {
+		return err
+	}
 	// Auto-approve delay (P0 item 2): a bad value stops the server here; the
 	// owners.yaml lists are checked once the action registries exist.
 	autoDelay, err := autoApproveDelay(cfg)
 	if err != nil {
 		return err
+	}
+
+	// Setup mode (docs/design/setup-agent.md): PIPEROOM_SETUP_ENABLED=on mounts
+	// the runner endpoint (GET /api/runners/ws); ParseSetup refuses it while
+	// write mode is off, since setup executes writes through the runner.
+	setupCfg, err := config.ParseSetup(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
 	}
 
 	// Spend limits and the price table (docs/design/cost.md): a bad value
@@ -246,6 +262,13 @@ func runWith(d startDeps) error {
 	if err != nil {
 		return fmt.Errorf("server: load owners file %s: %w", cfg.OwnersFile, err)
 	}
+	// --solo resolves the solo user from the flags before the users file is
+	// written, so a --quickstart owners file that names several owners is
+	// refused with the --solo message (not a users-file message), and the users
+	// file quickstartUsers writes is for exactly that user.
+	if err := applySoloFlag(&cfg, own, *demoMode, *quickstart, *solo, log); err != nil {
+		return err
+	}
 	if *quickstart {
 		var removeUsers func()
 		users, removeUsers, err = quickstartUsers(cfg, own, "", log)
@@ -275,10 +298,16 @@ func runWith(d startDeps) error {
 			"token_budget", shadowCfg.TokenBudget, "max_turns", shadowCfg.MaxTurns)
 	}
 	// Solo mode: refuse to start when the solo user is unknown or owners.yaml
-	// names anyone else (design section 5.3).
-	soloUser, err := soloSetup(cfg, users, own, log)
+	// names anyone else (design section 5.3). The solo user was resolved from
+	// the flags above (--demo -> the presenter, --quickstart -> the sole owner,
+	// otherwise PIPEROOM_SOLO_USER); only --demo relaxes the single-owner rule,
+	// so --quickstart runs the real check against the owners file.
+	soloUser, err := soloSetup(cfg, users, own, *demoMode, log)
 	if err != nil {
 		return err
+	}
+	if *demoMode && *solo && soloUser != "" && authSettings.DevNonLoopback {
+		log.Warn("server: --demo --solo on a non-loopback address: anyone who can reach this port can drive as the solo user", "addr", cfg.HTTPAddr)
 	}
 	// The OIDC relying party (nil in dev mode). Discovery runs in the
 	// background and is retried, so an IdP that is down now does not stop the
@@ -399,51 +428,32 @@ func runWith(d startDeps) error {
 			writePM = demo.WritePostmortem
 		}
 	} else {
-		// The model endpoint first: a wrong provider, region, project or token
-		// budget should stop the server before it opens any connection.
-		// One AWS config for the process, shared by Bedrock and MSK IAM.
-		awsCfg, err := wiring.LoadAWS(ctx, cfg)
-		if err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log, awsCfg)
-		if err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		// Spend limits are checked against the room database, so a restart
-		// does not reset them.
-		if err := ep.SetSpend(spend.options(spendStore, usage)); err != nil {
-			return fmt.Errorf("server: %w", err)
-		}
-		run = ep.Run
-		write = ep.WriteHandoff
-		// With PIPEROOM_TRIAGE_PASS=off the pass still writes agent.triage
-		// "failed"/"off" (no model call), so the UI never waits for one.
-		triage = ep.Triage
-		_, _, triageTimeout = ep.FirstLook()
-		closedHook.setForget(ep)
-
-		// One client set per pipeline with connections: in owners.yaml, plus
-		// the process-wide set when a pipeline uses it (docs/design/tenancy.md
-		// section 5). Each room, the topology and the watcher reach only the
-		// set of their own pipeline.
-		sets, err := d.openStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
-			// Defence in depth, no change in behaviour: with write mode off
-			// the executor already runs nothing; this also keeps the write
-			// clients from being built.
-			ReadOnly: !writeOn,
-			// similar_incidents reads past closed rooms from the room store;
-			// each set's Owners holds only its own pipelines.
-			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
+		w, err := wireAgent(ctx, d.openStacks, wiring.NewAgentEndpoint, wireAgentInput{
+			cfg:        cfg,
+			log:        log,
+			own:        own,
+			st:         st,
+			spendStore: spendStore,
+			spend:      spend,
+			usage:      usage,
+			hook:       closedHook,
+			fakeAgent:  fakeAgent,
+			pmMode:     pmMode,
+			writeOn:    writeOn,
 		})
 		if err != nil {
-			return fmt.Errorf("server: open the data stack: %w", err)
+			return err
 		}
-		defer sets.Close()
-		logStacks(log, sets)
-		stacks = sets
-		stackFor = roomStacks(sets)
-		topo = sets
+		defer w.stacks.Close()
+		logStacks(log, w.stacks)
+		run = w.run
+		write = w.write
+		writePM = w.writePM
+		triage = w.triage
+		triageTimeout = w.triageTimeout
+		stacks = w.stacks
+		stackFor = w.stackFor
+		topo = w.topo
 	}
 
 	// The auto-approve lists name actions of the proposal registry: acts in
@@ -459,11 +469,25 @@ func runWith(d startDeps) error {
 		return err
 	}
 
+	// GET /api/actions lists every action once, across every client set, in
+	// stack order (process-wide first); room.AllActions deduplicates by name.
+	var actionCatalogue func() []actions.Action
+	if stacks != nil {
+		actionCatalogue = func() []actions.Action {
+			var out []actions.Action
+			for _, s := range stacks.All() {
+				out = append(out, s.Actions.All()...)
+			}
+			return out
+		}
+	}
+
 	svc := newRoomService(room.Deps{
 		Store:             st,
 		Actions:           acts,
 		Tools:             toolsReg,
 		StackFor:          stackFor,
+		ActionCatalogue:   actionCatalogue,
 		Topology:          topo,
 		Users:             users,
 		Owners:            own,
@@ -553,6 +577,9 @@ func runWith(d startDeps) error {
 		})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
+	}
+	if setupCfg.Enabled {
+		httpOpts = append(httpOpts, httpapi.WithSetup(true))
 	}
 	// Admin settings and connection tests (docs/api.md): real mode only.
 	// --demo has no real connections to show or test, and its users may be

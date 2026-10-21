@@ -61,6 +61,7 @@ import { PersonName } from './VerifiedBadge'
 import { neutralizeBadgeText } from '../lib/verification'
 import { RoomListContext, useInShell } from './shell/context'
 import { isEditableTarget } from './shell/keys'
+import { pipelineKind } from './shell/pipelines'
 
 const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
 
@@ -908,6 +909,8 @@ function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaul
   const [createError, setCreateError] = useState<string | null>(null)
   // The choice must be one the server lists; until the person picks, the first (or the filter on screen).
   const chosen = pipelines.some((p) => p.id === pipelineId) ? pipelineId : (pipelines[0]?.id ?? '')
+  const chosenPipeline = pipelines.find((p) => p.id === chosen)
+  const kind = pipelineKind(chosenPipeline?.kind)
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -979,9 +982,16 @@ function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaul
               </select>
             </div>
             <div className="grid gap-1.5">
-              <label htmlFor="new-pipeline" className={FIELD_LABEL}>
-                Pipeline
-              </label>
+              <div className="flex items-center gap-1.5">
+                <label htmlFor="new-pipeline" className={FIELD_LABEL}>
+                  Pipeline
+                </label>
+                {chosenPipeline && (
+                  <Badge variant={kind === 'batch' ? 'info' : 'neutral'} mono>
+                    {kind}
+                  </Badge>
+                )}
+              </div>
               <select
                 id="new-pipeline"
                 value={chosen}

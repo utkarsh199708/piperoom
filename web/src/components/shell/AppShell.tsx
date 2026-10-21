@@ -22,6 +22,13 @@ import { ThemeToggle } from './ThemeToggle'
 // cmdk and the menu are only needed once it is opened: a separate chunk.
 const CommandMenu = lazy(() => import('./CommandMenu').then((m) => ({ default: m.CommandMenu })))
 
+// The "Break something" menu is dev-only: import.meta.env.DEV is statically false in a
+// production build, so the import() (and the chunk's "/devctl" strings) are tree-shaken
+// out of dist, and nothing renders. In dev it loads as its own chunk on first paint.
+const BreakSomethingMenu = import.meta.env.DEV
+  ? lazy(() => import('./BreakSomethingMenu').then((m) => ({ default: m.BreakSomethingMenu })))
+  : null
+
 // True from 768px (Tailwind md). Without matchMedia (tests) it is true.
 function useIsDesktop(): boolean {
   const query = '(min-width: 768px)'
@@ -206,6 +213,11 @@ export function AppShell() {
                   <div className="ml-auto flex min-w-0 items-center gap-2">
                     <div ref={setSlotEl} className="flex min-w-0 items-center gap-2" data-testid="topbar-slot" />
                     <ThemeToggle />
+                    {BreakSomethingMenu && (
+                      <Suspense fallback={null}>
+                        <BreakSomethingMenu />
+                      </Suspense>
+                    )}
                   </div>
                 </header>
                 <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scroll-padding-bottom:calc(var(--composer-h,0px)+var(--sheet-h,0px))] [scroll-padding-top:3rem] focus:outline-none">
