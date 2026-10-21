@@ -16,7 +16,15 @@ variables existed.
 | `SCHEMA_REGISTRY_IMAGE` | `confluentinc/cp-schema-registry:8.0.0` | the `schema-registry` service image |
 | `DEBEZIUM_VERSION` | `3.2.0.Final` | the Debezium Connect base image the `connect` service builds from (`dev/connect/Dockerfile`) |
 
-Example: `POSTGRES_IMAGE=postgres:16 KAFKA_IMAGE=apache/kafka:4.0.0 docker compose -f dev/docker-compose.yml up -d`.
+Example (PowerShell):
+
+```
+$env:POSTGRES_IMAGE = 'postgres:16'
+$env:KAFKA_IMAGE = 'apache/kafka:4.0.0'
+docker compose -f dev/docker-compose.yml up -d
+```
+
+POSIX shells: `POSTGRES_IMAGE=postgres:16 KAFKA_IMAGE=apache/kafka:4.0.0 docker compose -f dev/docker-compose.yml up -d`.
 
 ## Try this first: the read-only quickstart
 
