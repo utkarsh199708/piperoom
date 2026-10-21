@@ -46,6 +46,21 @@ const (
 	// KindModel is a transform model (id "model:<name>", layer transform),
 	// from TransformReader.ModelLineage, parents before children.
 	KindModel NodeKind = "model"
+
+	// ClickHouse Kafka ingestion (CH-3): topic -> kafka_engine ->
+	// materialized_view -> sink_table, data edges. Both nodes take the
+	// warehouse's layer and owner.
+	// KindKafkaEngine is a ClickHouse Kafka engine table that consumes one
+	// topic (id "kafka_engine:<db>.<table>"). Its health comes from what the
+	// warehouse reports about it; with no confirmation that it exists it is
+	// unknown, never ok.
+	KindKafkaEngine NodeKind = "kafka_engine"
+	// KindMaterializedView is a ClickHouse materialized view that reads a Kafka
+	// engine table and fills a sink table (id "materialized_view:<db>.<view>").
+	// When the builder finds the engine, view or topic by a naming convention
+	// rather than by reading the view's definition, the edges it draws are
+	// MappingInferred.
+	KindMaterializedView NodeKind = "materialized_view"
 )
 
 // Health is a node's state.
@@ -59,9 +74,10 @@ const (
 )
 
 // Node is one part of a pipeline. ID is "<prefix>:<name>" with prefixes
-// pg, connect, topic, dlq, group, wh, sr and, for batch pipelines, dag, task,
-// model (e.g. "connect:pg-orders-connector", "dlq:orders-dlq",
-// "sr:pg.public.orders-value", "dag:revenue_daily").
+// pg, connect, topic, dlq, group, wh, sr, for batch pipelines dag, task,
+// model, and for a ClickHouse warehouse kafka_engine, materialized_view (e.g.
+// "connect:pg-orders-connector", "dlq:orders-dlq", "sr:pg.public.orders-value",
+// "dag:revenue_daily", "kafka_engine:analytics.orders_kafka").
 type Node struct {
 	ID     string            `json:"id"`
 	Kind   NodeKind          `json:"kind"`
