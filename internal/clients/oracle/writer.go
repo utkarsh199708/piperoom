@@ -556,10 +556,11 @@ var alterSystemAllow = map[string]bool{
 }
 
 // AlterSystem sets one server setting. For Oracle the only allow-listed name
-// is archive_log, which issues ALTER DATABASE ARCHIVELOG (value is accepted
-// but unused: enabling archive log mode has no value to set, and the only form
-// offered turns it on, never off) and reports pendingRestart true, because the
-// mode takes effect only after a restart. It is a T3 op: the room service
+// is archive_log. Enabling it needs ALTER DATABASE ARCHIVELOG, which Oracle
+// accepts only when the instance is MOUNTed, not OPEN (it fails with ORA-01126
+// on an open database), so the writer's normal session cannot run it. The
+// method refuses before any I/O with clients.ErrNotSupported and names the DBA
+// steps instead of failing at execution time. It is a T3 op: the room service
 // creates and executes it only inside a maintenance window.
 func (w *Writer) AlterSystem(ctx context.Context, name, value string) (bool, error) {
 	if w == nil || w.dbx == nil {
@@ -571,10 +572,8 @@ func (w *Writer) AlterSystem(ctx context.Context, name, value string) (bool, err
 	if err := w.checkScope(ctx); err != nil {
 		return false, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
-	defer cancel()
-	if err := w.exec(ctx, "ALTER DATABASE ARCHIVELOG"); err != nil {
-		return false, fmt.Errorf("oracle: alter system archive_log: %w", err)
-	}
-	return true, nil
+	// ALTER DATABASE ARCHIVELOG runs only when the instance is MOUNTed, not
+	// OPEN, so a setup agent's normal session cannot issue it. Refuse rather
+	// than fail at execution time with ORA-01126 and name the DBA steps.
+	return false, fmt.Errorf("oracle: alter system: archive_log: %w: ALTER DATABASE ARCHIVELOG can run only when the instance is MOUNTed, not OPEN, so the setup writer cannot do it; a DBA must run: SHUTDOWN IMMEDIATE; STARTUP MOUNT; ALTER DATABASE ARCHIVELOG; ALTER DATABASE OPEN", clients.ErrNotSupported)
 }

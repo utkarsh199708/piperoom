@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -336,17 +337,25 @@ func TestAlterSystemAllowList(t *testing.T) {
 		}
 	}
 
+	// archive_log is refused with clients.ErrNotSupported before any I/O: the
+	// ALTER DATABASE ARCHIVELOG it needs is accepted only when the instance is
+	// MOUNTed, not OPEN, so a normal session would just fail with ORA-01126.
 	f := &fakeWriteDB{}
 	w := testWriter(f)
 	pending, err := w.AlterSystem(unscopedCtx(), "archive_log", "")
-	if err != nil {
-		t.Fatalf("AlterSystem(archive_log): %v", err)
+	if !errors.Is(err, clients.ErrNotSupported) {
+		t.Fatalf("AlterSystem(archive_log): err = %v, want clients.ErrNotSupported", err)
 	}
-	if !pending {
-		t.Fatal("archive_log: pendingRestart = false, want true")
+	if pending {
+		t.Fatal("archive_log: pendingRestart = true, want false")
 	}
-	if len(f.execs) != 1 || f.execs[0].stmt != "ALTER DATABASE ARCHIVELOG" {
-		t.Fatalf("execs = %+v, want one ALTER DATABASE ARCHIVELOG", f.execs)
+	if !strings.Contains(err.Error(), "SHUTDOWN IMMEDIATE") ||
+		!strings.Contains(err.Error(), "ALTER DATABASE ARCHIVELOG") ||
+		!strings.Contains(err.Error(), "ALTER DATABASE OPEN") {
+		t.Fatalf("AlterSystem(archive_log) error does not name the DBA steps: %v", err)
+	}
+	if len(f.execs) != 0 || len(f.queries) != 0 {
+		t.Fatalf("archive_log reached the database: execs %d, queries %d (want none)", len(f.execs), len(f.queries))
 	}
 }
 
