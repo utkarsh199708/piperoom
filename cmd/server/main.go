@@ -202,6 +202,14 @@ func runWith(d startDeps) error {
 		return err
 	}
 
+	// Setup mode (docs/design/setup-agent.md): PIPEROOM_SETUP_ENABLED=on mounts
+	// the runner endpoint (GET /api/runners/ws); ParseSetup refuses it while
+	// write mode is off, since setup executes writes through the runner.
+	setupCfg, err := config.ParseSetup(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+
 	// Spend limits and the price table (docs/design/cost.md): a bad value
 	// stops the server before it connects to anything.
 	spend, err := spendSetup(cfg)
@@ -569,6 +577,9 @@ func runWith(d startDeps) error {
 		})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
+	}
+	if setupCfg.Enabled {
+		httpOpts = append(httpOpts, httpapi.WithSetup(true))
 	}
 	// Admin settings and connection tests (docs/api.md): real mode only.
 	// --demo has no real connections to show or test, and its users may be

@@ -387,6 +387,9 @@ type Service struct {
 	// soleMembers counts the sole-member grants for /metrics
 	// (service_solemember.go).
 	soleMembers soleMemberCounter
+	// runners is the setup runner registry: pairing codes and the attached
+	// runners (runners.go; U wave).
+	runners *RunnerRegistry
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -482,6 +485,7 @@ func New(d Deps) *Service {
 			s.global = coordSlots{s: s, max: d.MaxAgentsGlobal}
 		}
 	}
+	s.runners = NewRunnerRegistry(now, s.EmitSetup, log)
 	return s
 }
 
