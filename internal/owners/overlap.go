@@ -188,6 +188,20 @@ func defaultPort(key string) string {
 	return ""
 }
 
+// schemeDefaultPort is the standard port for a URL scheme, used when a URL
+// endpoint names a host without a port; "" for a scheme with no known default.
+func schemeDefaultPort(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	case "postgres", "postgresql":
+		return "5432"
+	}
+	return ""
+}
+
 // kafkaHostPorts reduces a kafka_brokers value to its host:port values. The
 // value is a comma-separated list (e.g. "b1:9092,b2:9092"); each entry may
 // carry a Kafka protocol prefix ("SASL_SSL://b1:9092"), which is stripped before
@@ -214,8 +228,10 @@ func kafkaHostPorts(s string) []string {
 // path, query and fragment are removed and the host is lower-cased, so a full
 // DSN (postgres://user:pass@DB.Acme:5432/db?x=y) and a bare host:port
 // (DB.Acme:5432) both reduce to "db.acme:5432". When the endpoint names a host
-// without a port, defaultPort (the connection key's standard port) is filled in
-// so a DSN without a port matches a typed host:port; an empty defaultPort keeps
+// without a port, the missing port is filled in: a URL endpoint uses its
+// scheme's standard port (https -> 443, http -> 80, postgres -> 5432, …), and a
+// bare host uses defaultPort (the connection key's standard port). A scheme
+// without a known default falls back to defaultPort; an empty defaultPort keeps
 // the host as written.
 func hostPort(s, defaultPort string) string {
 	s = strings.TrimSpace(s)
@@ -231,7 +247,11 @@ func hostPort(s, defaultPort string) string {
 			if port := u.Port(); port != "" {
 				return host + ":" + port
 			}
-			return withDefaultPort(host, defaultPort)
+			def := schemeDefaultPort(u.Scheme)
+			if def == "" {
+				def = defaultPort
+			}
+			return withDefaultPort(host, def)
 		}
 	}
 	// A bare host[:port], possibly with userinfo and a path/query/fragment.

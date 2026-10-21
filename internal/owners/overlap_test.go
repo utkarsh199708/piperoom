@@ -182,8 +182,11 @@ func TestHostPort(t *testing.T) {
 		{"DB.ACME:5432", "", "db.acme:5432"},
 		{"  db.acme:5432  ", "", "db.acme:5432"},
 		{"postgres://user:pass@DB.Acme:5432/orders?sslmode=require", "", "db.acme:5432"},
-		{"postgres://db.acme/orders", "", "db.acme"},
+		{"postgres://db.acme/orders", "", "db.acme:5432"},
 		{"postgres://db.acme/orders", "5432", "db.acme:5432"},
+		{"https://registry.acme", "8081", "registry.acme:443"},
+		{"https://registry.acme:443", "8081", "registry.acme:443"},
+		{"http://connect.acme", "8083", "connect.acme:80"},
 		{"user:pass@db.acme:5432", "", "db.acme:5432"},
 		{"db.acme:5432/orders", "", "db.acme:5432"},
 		{"db.acme", "5432", "db.acme:5432"},
@@ -248,5 +251,29 @@ func TestOverlapDefaultPort(t *testing.T) {
 	out := loadedOwners(tenants, loaded).Overlap(p, nil)
 	if !hasOverlap(out, OverlapHost, "db.acme:5432", "qa") {
 		t.Fatalf("overlaps = %+v, want a host overlap on db.acme:5432 via default port", out)
+	}
+}
+
+// TestOverlapSchemeDefaultPort pins the URL scheme default port fix: a URL
+// endpoint without a port uses its scheme's standard port, not the connection
+// key's default, so https://registry.acme and https://registry.acme:443 name the
+// same host and the host overlap fires.
+func TestOverlapSchemeDefaultPort(t *testing.T) {
+	tenants := map[string]Tenant{
+		"a": {Admins: Principals{{Kind: KindUser, Name: "ann"}}},
+	}
+	loaded := Pipeline{ID: "qa", Tenant: "a", TopicPrefix: "other", SourceTables: []string{"public.x"}, Connectors: []string{"x"},
+		Connections: Connections{"schema_registry_url": {Value: "https://registry.acme"}}}
+	p, err := Provisional(events.SetupRequest{
+		PipelineID: "new", Tenant: "a", TopicPrefix: "pg",
+		Tables: []string{"public.z"}, Connectors: []string{"z"},
+		Targets: []events.SetupTarget{{Kind: "registry", Address: "https://registry.acme:443"}},
+	})
+	if err != nil {
+		t.Fatalf("Provisional: %v", err)
+	}
+	out := loadedOwners(tenants, loaded).Overlap(p, nil)
+	if !hasOverlap(out, OverlapHost, "registry.acme:443", "qa") {
+		t.Fatalf("overlaps = %+v, want a host overlap on registry.acme:443 via the scheme default port", out)
 	}
 }
