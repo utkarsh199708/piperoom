@@ -75,6 +75,7 @@ func run() error {
 func runWith(d startDeps) error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	quickstart := flag.Bool("quickstart", false, "read-only quickstart: the real agent and tools, in-memory room store, dev login on loopback only, write mode off, a one-user users file for this run; prints the URL to open")
+	solo := flag.Bool("solo", false, "with --demo: give the demo presenter the solo ceremony (sole driver, approve-all); with --quickstart: give the sole owner from the owners file the solo ceremony (sole driver, approve-all)")
 	ownersPath := flag.String("owners", "", "with --quickstart: the owners file (default ./"+quickstartDefaultOwners+"); without --quickstart, set OWNERS_FILE instead")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
@@ -94,7 +95,7 @@ func runWith(d startDeps) error {
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
 	}
-	if err := checkStartFlags(*demoMode, *quickstart, *allowRemote, *ownersPath); err != nil {
+	if err := checkStartFlags(*demoMode, *quickstart, *solo, *allowRemote, *ownersPath); err != nil {
 		return err
 	}
 	if down.n != 0 || down.apply || down.confirm != "" || down.dropEvents {
@@ -246,6 +247,13 @@ func runWith(d startDeps) error {
 	if err != nil {
 		return fmt.Errorf("server: load owners file %s: %w", cfg.OwnersFile, err)
 	}
+	// --solo resolves the solo user from the flags before the users file is
+	// written, so a --quickstart owners file that names several owners is
+	// refused with the --solo message (not a users-file message), and the users
+	// file quickstartUsers writes is for exactly that user.
+	if err := applySoloFlag(&cfg, own, *demoMode, *quickstart, *solo, log); err != nil {
+		return err
+	}
 	if *quickstart {
 		var removeUsers func()
 		users, removeUsers, err = quickstartUsers(cfg, own, "", log)
@@ -275,10 +283,16 @@ func runWith(d startDeps) error {
 			"token_budget", shadowCfg.TokenBudget, "max_turns", shadowCfg.MaxTurns)
 	}
 	// Solo mode: refuse to start when the solo user is unknown or owners.yaml
-	// names anyone else (design section 5.3).
-	soloUser, err := soloSetup(cfg, users, own, log)
+	// names anyone else (design section 5.3). The solo user was resolved from
+	// the flags above (--demo -> the presenter, --quickstart -> the sole owner,
+	// otherwise PIPEROOM_SOLO_USER); only --demo relaxes the single-owner rule,
+	// so --quickstart runs the real check against the owners file.
+	soloUser, err := soloSetup(cfg, users, own, *demoMode, log)
 	if err != nil {
 		return err
+	}
+	if *demoMode && *solo && soloUser != "" && authSettings.DevNonLoopback {
+		log.Warn("server: --demo --solo on a non-loopback address: anyone who can reach this port can drive as the solo user", "addr", cfg.HTTPAddr)
 	}
 	// The OIDC relying party (nil in dev mode). Discovery runs in the
 	// background and is retried, so an IdP that is down now does not stop the

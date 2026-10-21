@@ -62,10 +62,10 @@ layers:
 
 func TestCheckStartFlags(t *testing.T) {
 	for _, tc := range []struct {
-		name                          string
-		demo, quickstart, allowRemote bool
-		owners                        string
-		wantErr                       string // "" = allowed
+		name                                string
+		demo, quickstart, solo, allowRemote bool
+		owners                              string
+		wantErr                             string // "" = allowed
 	}{
 		{name: "no flags"},
 		{name: "demo", demo: true},
@@ -76,9 +76,12 @@ func TestCheckStartFlags(t *testing.T) {
 		{name: "quickstart and allow-remote", quickstart: true, allowRemote: true, wantErr: "loopback only"},
 		{name: "owners without quickstart", owners: "x.yaml", wantErr: "--owners needs --quickstart"},
 		{name: "owners with demo", demo: true, owners: "x.yaml", wantErr: "--owners needs --quickstart"},
+		{name: "solo alone", solo: true, wantErr: "--solo needs --demo or --quickstart"},
+		{name: "demo with solo", demo: true, solo: true},
+		{name: "quickstart with solo", quickstart: true, solo: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkStartFlags(tc.demo, tc.quickstart, tc.allowRemote, tc.owners)
+			err := checkStartFlags(tc.demo, tc.quickstart, tc.solo, tc.allowRemote, tc.owners)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("want no error, got %v", err)
@@ -454,10 +457,11 @@ func TestQuickstartHelper(t *testing.T) {
 }
 
 // quickstartCmd builds the helper process: USERS_FILE, the write mode and the
-// auth mode unset, the temp directory inside the test's own.
-func quickstartCmd(ctx context.Context, t *testing.T, ownersPath, tmp string, env ...string) *exec.Cmd {
+// auth mode unset, the temp directory inside the test's own. helper names the
+// helper test to re-run in the subprocess.
+func quickstartCmd(ctx context.Context, t *testing.T, helper, ownersPath, tmp string, env ...string) *exec.Cmd {
 	t.Helper()
-	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestQuickstartHelper$")
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run="+helper)
 	cmd.Env = append(os.Environ(),
 		"PIPEROOM_TEST_QUICKSTART=1",
 		"PIPEROOM_TEST_OWNERS="+ownersPath,
@@ -485,7 +489,7 @@ func TestQuickstartServesRoomListWithin10s(t *testing.T) {
 	tmp := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := quickstartCmd(ctx, t, ownersPath, tmp)
+	cmd := quickstartCmd(ctx, t, "^TestQuickstartHelper$", ownersPath, tmp)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -626,7 +630,7 @@ func TestQuickstartStartRefusesNonLoopback(t *testing.T) {
 	tmp := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := quickstartCmd(ctx, t, ownersPath, tmp,
+	cmd := quickstartCmd(ctx, t, "^TestQuickstartHelper$", ownersPath, tmp,
 		"PIPEROOM_HTTP_ADDR=0.0.0.0:0",
 		"PIPEROOM_DEV_ALLOW_NONLOOPBACK=1",
 		"PIPEROOM_DEV_ACK="+config.DevAckValue,
@@ -648,7 +652,7 @@ func TestQuickstartStartRefusesWriteModeOn(t *testing.T) {
 	ownersPath := writeOwnersFile(t, "user:"+quickstartOwner)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := quickstartCmd(ctx, t, ownersPath, t.TempDir(), "PIPEROOM_WRITE_MODE=on")
+	cmd := quickstartCmd(ctx, t, "^TestQuickstartHelper$", ownersPath, t.TempDir(), "PIPEROOM_WRITE_MODE=on")
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "RUN ERROR") || !strings.Contains(string(out), "PIPEROOM_WRITE_MODE=on") {
 		t.Fatalf("PIPEROOM_WRITE_MODE=on: err %v, want a start-up refusal naming it\n%s", err, out)
@@ -670,7 +674,7 @@ func TestQuickstartListenErrorRemovesTempDir(t *testing.T) {
 	tmp := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	cmd := quickstartCmd(ctx, t, ownersPath, tmp, "PIPEROOM_HTTP_ADDR="+busy.Addr().String())
+	cmd := quickstartCmd(ctx, t, "^TestQuickstartHelper$", ownersPath, tmp, "PIPEROOM_HTTP_ADDR="+busy.Addr().String())
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "RUN ERROR") {
 		t.Fatalf("listen on the occupied %s: err %v, want a start-up error\n%s", busy.Addr(), err, out)
