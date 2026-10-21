@@ -1,6 +1,6 @@
 module piperoom
 
-go 1.27.2
+go 1.27.3
 
 require (
 	cloud.google.com/go v0.123.0
@@ -16,7 +16,9 @@ require (
 	github.com/gowebpki/jcs v1.0.2
 	github.com/hamba/avro/v2 v2.31.0
 	github.com/jackc/pgx/v5 v5.11.0
+	github.com/microsoft/go-mssqldb v1.11.2
 	github.com/pressly/goose/v3 v3.28.0
+	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/snowflakedb/gosnowflake/v2 v2.3.0
 	github.com/twmb/franz-go v1.22.1
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
@@ -91,6 +93,8 @@ require (
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/godbus/dbus v0.0.0-20190726142602-4481cbc300e2 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
+	github.com/golang-sql/sqlexp v0.1.0 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
 	github.com/google/s2a-go v0.1.9 // indirect

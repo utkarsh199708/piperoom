@@ -3,3 +3,9 @@
 # Any other skipped test fails the job (fail-on-skips.sh), and so does an entry
 # past its review-by date. Remove an entry when its test stops skipping.
 piperoom/cmd/server TestRunHelper | subprocess helper, not a test: cmd/server re-runs the test binary with PIPEROOM_TEST_RUN=1 so run() executes in its own process; it skips in every other run (cmd/server/publicurl_test.go); not a stack skip | A5 | 2026-11-13
+piperoom/internal/clients/sqlserver TestServerInfoIntegration | needs PIPEROOM_MSSQL_DSN; the mssql dev profile (U4c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/sqlserver TestAgentStateIntegration | needs PIPEROOM_MSSQL_DSN; the mssql dev profile (U4c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/oracle TestDatabaseIntegration | needs ORACLE_DSN; the oracle dev profile (U9c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/sqlserver TestAlterSystemNotSupportedIntegration | needs PIPEROOM_MSSQL_DSN; the mssql dev profile (U4c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/sqlserver TestSetupWriterCanaryIntegration | needs PIPEROOM_MSSQL_DSN; the mssql dev profile (U4c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17
+piperoom/internal/clients/oracle TestWriterRefusesIntegration | needs ORACLE_DSN; the oracle dev profile (U9c) is not in the full-stack job yet; not a stack skip | A10 | 2026-11-17

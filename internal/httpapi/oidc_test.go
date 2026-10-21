@@ -121,6 +121,7 @@ type oidcOpts struct {
 	trusted []netip.Prefix
 	issuer  string // override: an unreachable IdP
 	noInit  bool   // skip discovery
+	extra   []httpapi.Option
 }
 
 func newOIDCEnv(t *testing.T, o oidcOpts) *oidcEnv {
@@ -188,10 +189,12 @@ func newOIDCEnv(t *testing.T, o oidcOpts) *oidcEnv {
 		Sessions: sessions, SessionLive: settings.Liveness(), ViewerGroups: []string{"viewers"},
 	})
 	states, idents := auth.NewMemLoginStates(), auth.NewMemIdentities().WithSessions(sessions)
-	api := httpapi.New(svc, st, log,
+	opts := append([]httpapi.Option{
 		httpapi.WithAuth(settings), httpapi.WithSessions(sessions), httpapi.WithLoginStates(states),
 		httpapi.WithIdentities(idents), httpapi.WithOIDC(rp),
-		httpapi.WithPublicOrigin(httpapi.PublicOrigin{Scheme: "https", Host: "piperoom.test"}))
+		httpapi.WithPublicOrigin(httpapi.PublicOrigin{Scheme: "https", Host: "piperoom.test"}),
+	}, o.extra...)
+	api := httpapi.New(svc, st, log, opts...)
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() {
 		srv.Close()
