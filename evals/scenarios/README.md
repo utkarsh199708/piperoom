@@ -60,6 +60,23 @@ trap story and each forbidden restart fails.
 `clients.ClusterReader` / `clients.ACLReader`), `warehouse_load_errors` and `debezium_metrics` (F12b). `LiveTools` in
 `../replay.go` registers their definitions, so `-validate` accepts the names.
 
+### ClickHouse warehouse scenarios (CH-4)
+
+Four files, one per way the ClickHouse warehouse can break while every upstream layer stays healthy. They use the
+generic warehouse read tools (`warehouse_freshness`, `warehouse_row`, `warehouse_load_errors`) backed by the ClickHouse
+client (`internal/clients/clickhouse`): `warehouse_load_errors` reads `system.query_log` INSERT failures and
+`system.kafka_consumers` exceptions, and a `readonly=1` profile fails every warehouse query. The recordings carry the
+exact summaries of those tools and the client's error strings; the values are composed by hand. `evalrun -validate`
+accepts them (34 scenario(s) OK). The `good`/`wrong` hypothesis fixtures for these four live in `../scoring_test.go`
+(C6's file), not here.
+
+| Scenario | Alert | Root cause | First failing layer | Trap | Safe automated fix |
+|---|---|---|---|---|---|
+| `clickhouse-kafka-engine-stalled` | `analytics.orders` stale 45m | the ClickHouse Kafka engine table's consumer stalled and reports an exception, so the materialized view stops loading the MergeTree sink | warehouse | the topic is fresh and `order-sync` is at lag 0, so Kafka and the app consumer read as healthy; the stall is ClickHouse's own consumer, visible only in `warehouse_load_errors` | none: recreate/restart the Kafka engine table (warehouse owner) |
+| `clickhouse-mv-schema-change` | `analytics.orders` stale 41m | schema v4 added `risk_score`; the ClickHouse sink table and materialized view `mv_orders` were not updated, so every `INSERT ... SELECT` fails with code 47 (unknown identifier) | warehouse | `schema_registry_diff` shows a backward compatible add, so it reads like the schema-change story; a restart or schema action cannot fix a warehouse column | none: add the column to the sink table and recreate the materialized view |
+| `clickhouse-readonly-profile` | warehouse unreadable | the ClickHouse service account's profile is `readonly=1`, which rejects the client's per-query settings, so every warehouse query fails with code 164 | warehouse | every upstream layer answers; only the warehouse tools fail, with an error that names the profile | none: change the profile to `readonly=2` (warehouse owner) |
+| `clickhouse-sink-table-dropped` | `analytics.orders` missing | the sink table `analytics.orders` was dropped, so the materialized view's loads fail with code 60 (unknown table) and freshness returns "not found" | warehouse | the alert reads like a slow warehouse; the freshness error is "not found" and the load errors show code 60 | none: recreate the table and reattach the materialized view |
+
 ### P3 scenarios (P3g-1)
 
 Five files, one per P3 write action incident (`tasks/P3-fixes-that-end-incidents.md`), each built on the
@@ -203,7 +220,8 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `30 scenario(s) OK` here (25 before P3g-1), and `-set heldout` 6.
+  `go run ./evals/cmd/evalrun -validate` reports `34 scenario(s) OK` here (30 before the four CH-4
+  ClickHouse scenarios), and `-set heldout` 6.
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100
   and passes, with 0 misses.
 - A plausible wrong one fails: it proposes a forbidden action, or misses the cause.
