@@ -14,7 +14,7 @@ The names below match the code: tools in `internal/tools/{dbtools,kafkatools}`, 
 | System | Used by | Read access needed | Write access needed |
 |---|---|---|---|
 | Source Postgres | `pg_replication_slots`, `pg_recent_ddl`, `pg_long_transactions`, `pg_row`, `pg_publication_tables`, `trace_record` | pipeline tables (`SELECT`), `piperoom_audit.ddl_log`, stat views, catalog views | **none** |
-| Warehouse (Postgres, or Snowflake with `WAREHOUSE_KIND=snowflake`) | `warehouse_freshness`, `warehouse_row`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables | **none** |
+| Warehouse (Postgres, or Snowflake / ClickHouse with `WAREHOUSE_KIND`) | `warehouse_freshness`, `warehouse_row`, `warehouse_load_errors`, `reconcile`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables (ClickHouse: a `readonly=2` profile, see [clickhouse.md](clickhouse.md)) | **none** |
 | Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record` | describe topics/groups, describe topic configs, read pipeline topics | **none** |
 | Other tools | `pipeline_map` reads the clients above and no new grant; `runbook_lookup` reads only the runbook text embedded in the binary (`internal/tools/runbooks/runbooks.go`) | none | none |
 | Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
@@ -86,12 +86,13 @@ secrets (for example `CREATE ROLE ... PASSWORD`) before enabling it in productio
 
 ## Warehouse
 
-**The warehouse is Postgres by default, or Snowflake with `WAREHOUSE_KIND=snowflake`.**
-`WAREHOUSE_KIND` accepts `postgres` (the default) or `snowflake`. Any other value stops the start
-(`internal/wiring/warehouse.go`). The choice is made in `internal/wiring/warehouse.go`,
-called from `internal/wiring/wiring.go`. With Postgres, `WAREHOUSE_DB_URL` is a Postgres URL and
-the client is `internal/clients/warehouse/warehouse.go`. With Snowflake, it is a gosnowflake DSN
-(see the Snowflake section below).
+**The warehouse is Postgres by default; set `WAREHOUSE_KIND` for Snowflake or ClickHouse.**
+`WAREHOUSE_KIND` accepts `postgres` (the default), `snowflake` or `clickhouse`; a value the wiring
+does not accept stops the start (`internal/wiring/warehouse.go`). The choice is made in
+`internal/wiring/warehouse.go`, called from `internal/wiring/wiring.go`. With Postgres,
+`WAREHOUSE_DB_URL` is a Postgres URL and the client is `internal/clients/warehouse/warehouse.go`.
+With Snowflake, it is a gosnowflake DSN (see the Snowflake section below). With ClickHouse, it is
+a clickhouse-go/v2 DSN; see [clickhouse.md](clickhouse.md).
 
 Same principle for either engine: a dedicated `SELECT`-only identity on the sink tables from
 `sink_tables` in `owners.yaml`.
@@ -136,6 +137,26 @@ GRANT ROLE PIPEROOM_RO TO USER PIPEROOM_SVC;
 
 Do not grant `INSERT/UPDATE/DELETE/CREATE/OWNERSHIP`, and do not give the user other roles.
 Set a resource monitor / `STATEMENT_TIMEOUT_IN_SECONDS` on the dedicated warehouse to cap cost.
+
+### ClickHouse (`WAREHOUSE_KIND=clickhouse`)
+
+Set `WAREHOUSE_KIND=clickhouse`; `WAREHOUSE_DB_URL` is then a clickhouse-go/v2 DSN
+(`internal/config/config.go`; `internal/wiring/warehouse.go`). The client enforces a read-only
+session itself (`readonly = 2`) and issues only `SELECT` queries
+(`internal/clients/clickhouse/client.go`), but the grant is the real boundary: give the DSN's user
+only the grants below. Full setup, what the agent can read and the limits are in
+[clickhouse.md](clickhouse.md).
+
+- Create a settings profile with `readonly = 2` — **never `readonly = 1`**, which rejects the
+  per-query `readonly` and `max_execution_time` settings the client sends and fails every query
+  with code 164 (`internal/clients/clickhouse/errors.go`; `internal/clients/clickhouse/README.md`).
+  Reference SQL: `dev/clickhouse/init/01-reader.sql`.
+- `SELECT` on the sink tables from `sink_tables` in `owners.yaml`
+  (`dev/clickhouse/init/01-reader.sql` grants `analytics.*`).
+- For the optional load-error tool: `SELECT` on `system.query_log`, and on
+  `system.kafka_consumers` if you want the Kafka-engine error history
+  (`internal/clients/clickhouse/loads.go`). A missing `system.kafka_consumers` grant (or a build
+  without Kafka support) skips that history; query-log results are still returned (`loads.go`).
 
 ## Kafka
 
@@ -323,7 +344,8 @@ Pick one provider. The default is `anthropic` (the section above).
 - [ ] Postgres and warehouse roles cannot write (`INSERT` as that role fails), and see only pipeline tables.
 - [ ] Kafka principal has no write/group-read/alter ACLs, only pipeline-prefixed topics.
 - [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode. In write mode the proxy allows only the four Connect calls and two Registry calls listed above.
-- [ ] Network: Piperoom can reach only the five systems above, the Snowflake account host (only if `WAREHOUSE_KIND=snowflake`), the model provider's endpoint (the Anthropic API host or the pinned `ANTHROPIC_BASE_URL` host for `anthropic`; the Bedrock runtime in `AWS_REGION` for `bedrock`; the Vertex AI endpoint in `VERTEX_REGION` for `vertex`), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go`).
+- [ ] Network: Piperoom can reach only the five systems above, the Snowflake account host (only if `WAREHOUSE_KIND=snowflake`), the ClickHouse host (only if `WAREHOUSE_KIND=clickhouse`), the model provider's endpoint (the Anthropic API host or the pinned `ANTHROPIC_BASE_URL` host for `anthropic`; the Bedrock runtime in `AWS_REGION` for `bedrock`; the Vertex AI endpoint in `VERTEX_REGION` for `vertex`), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go`).
 - [ ] If `WAREHOUSE_KIND=snowflake`: the DSN password is URL-encoded, the role in the DSN has only `USAGE` and `SELECT` as listed above, and the resource monitor is set.
+- [ ] If `WAREHOUSE_KIND=clickhouse`: the DSN's user has a `readonly=2` profile (never `readonly=1`) and only the `SELECT` grants listed above (`dev/clickhouse/init/01-reader.sql`).
 - [ ] `ANTHROPIC_BASE_URL` is unset or pinned, and `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` are unset on the host (`anthropic-sdk-go@v1.80.0/client.go:52-82`).
 - [ ] The room service's HTTP port (`PIPEROOM_HTTP_ADDR`) is not reachable from outside the pilot team's network.
