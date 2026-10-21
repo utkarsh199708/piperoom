@@ -55,7 +55,8 @@ func TestBatchScope(t *testing.T) {
 		{"other dag", batch.CheckDAG("kpi_weekly"), false, "allowed DAGs: revenue_daily"},
 		{"dag case differs", batch.CheckDAG("Revenue_Daily"), false, "DAG"},
 		{"other model", batch.CheckModel("stg_orders"), false, "allowed models: fct_revenue, dim_customer"},
-		{"model unique_id is not a name", batch.CheckModel("model.analytics.fct_revenue"), false, "model"},
+		{"unique_id of a listed name", batch.CheckModel("model.analytics.fct_revenue"), true, ""},
+		{"unique_id of another model", batch.CheckModel("model.analytics.stg_orders"), false, "allowed models: fct_revenue, dim_customer"},
 		{"cdc sink table", batch.CheckSinkTable("analytics.orders"), false, "allowed sink tables: analytics.fct_revenue"},
 		{"cdc pipeline id", batch.CheckPipelineID("orders"), false, "not this room's pipeline"},
 		// Every cdc check refuses on a batch pipeline.
@@ -200,5 +201,85 @@ func TestCheckModelOrAdjacent(t *testing.T) {
 	err = batchScopeFor(t, "daily-revenue").CheckModelOrAdjacent(context.Background(), long, &fakeLineage{l: lineage})
 	if !errors.Is(err, ErrOutOfScope) || strings.Contains(err.Error(), long) {
 		t.Errorf("long name: %v", err)
+	}
+}
+
+// modelScope returns a Scope whose pipeline lists the given models (as
+// owners.yaml writes them: a bare name or a unique_id).
+func modelScope(models ...string) Scope {
+	return Scope{p: owners.Pipeline{ID: "pinned", Kind: "batch", Models: models}}
+}
+
+// A unique_id entry admits only its own package; a bare entry keeps today's
+// name match; a versioned unique_id is pinned to that version.
+func TestCheckModelUniqueID(t *testing.T) {
+	cases := []struct {
+		name   string
+		models []string
+		model  string
+		want   bool
+	}{
+		{"unique_id admits itself", []string{"model.pkg_a.orders"}, "model.pkg_a.orders", true},
+		{"unique_id refuses the same name in another package", []string{"model.pkg_a.orders"}, "model.pkg_b.orders", false},
+		{"unique_id refuses an unversioned ref when versioned", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders", false},
+		{"bare admits the bare name", []string{"orders"}, "orders", true},
+		{"bare admits a unique_id of that name", []string{"orders"}, "model.pkg_a.orders", true},
+		{"bare admits any package", []string{"orders"}, "model.pkg_b.orders", true},
+		{"versioned admits itself", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders.v2", true},
+		{"versioned refuses another version", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders.v3", false},
+		{"not a model", []string{"model.pkg_a.orders"}, "stg_orders", false},
+		{"not a model at all", []string{"model.pkg_a.orders"}, "source.pkg_a.raw.orders", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := modelScope(c.models...).CheckModel(c.model)
+			if c.want {
+				if err != nil {
+					t.Errorf("CheckModel(%q) = %v, want allowed", c.model, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrOutOfScope) {
+				t.Errorf("CheckModel(%q) = %v, want ErrOutOfScope", c.model, err)
+			}
+		})
+	}
+}
+
+// The lineage-aware check applies the same pinning: a listed unique_id needs
+// no lineage read, and a same-named model in another package is refused
+// before any read rather than widened through lineage.
+func TestCheckModelOrAdjacentUniqueID(t *testing.T) {
+	lineage := map[string]clients.Lineage{
+		"model.pkg_a.orders": {Model: "model.pkg_a.orders", Parents: []string{"model.pkg_a.stg_orders"}, Children: []string{}},
+	}
+	cases := []struct {
+		name      string
+		models    []string
+		model     string
+		wantOK    bool
+		wantCalls int
+	}{
+		{"listed unique_id needs no lineage", []string{"model.pkg_a.orders"}, "model.pkg_a.orders", true, 0},
+		{"same name in another package is refused before a read", []string{"model.pkg_a.orders"}, "model.pkg_b.orders", false, 0},
+		{"bare entry keeps the name match", []string{"orders"}, "model.pkg_a.orders", true, 0},
+		{"versioned unique_id is pinned", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders.v2", true, 0},
+		{"versioned refuses the unversioned ref", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders", false, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := &fakeLineage{l: lineage}
+			err := modelScope(c.models...).CheckModelOrAdjacent(context.Background(), c.model, f)
+			if c.wantOK {
+				if err != nil {
+					t.Fatalf("err = %v, want allowed", err)
+				}
+			} else if !errors.Is(err, ErrOutOfScope) {
+				t.Fatalf("err = %v, want ErrOutOfScope", err)
+			}
+			if f.calls != c.wantCalls {
+				t.Errorf("lineage reads = %d, want %d", f.calls, c.wantCalls)
+			}
+		})
 	}
 }

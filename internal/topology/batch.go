@@ -117,18 +117,25 @@ func (b *builder) collectBatch(ctx context.Context, p owners.Pipeline) *batchCol
 		// every call, so a pipeline with many models reads a few at a time.
 		sem := make(chan struct{}, lineageReads)
 		for _, m := range p.Models {
+			name, ok := owners.ModelName(m)
+			if !ok {
+				continue // a pipeline built in code with an invalid entry
+			}
 			run(func() {
 				var l clients.Lineage
 				var err error
 				select {
 				case sem <- struct{}{}:
+					// Read by the entry as written: a unique_id pins the read
+					// to its package, so a same-named model in another package
+					// does not widen the lineage.
 					l, err = b.transform.ModelLineage(ctx, m)
 					<-sem
 				case <-ctx.Done():
 					err = ctx.Err()
 				}
 				mu.Lock()
-				c.lineage[m] = lineageSnapshot{l: l, err: err}
+				c.lineage[name] = lineageSnapshot{l: l, err: err}
 				mu.Unlock()
 			})
 		}
@@ -465,12 +472,16 @@ func (b *builder) taskNodes(dagID string, tis []clients.TaskInstance) (out []Nod
 func (b *builder) modelNodes(p owners.Pipeline, info *batchCollected) (nodes []Node, edges []Edge, partial bool) {
 	var names []string
 	for _, m := range p.Models {
-		s, ok := info.lineage[m]
+		name, ok := owners.ModelName(m)
+		if !ok {
+			continue // an invalid entry (only a pipeline built in code can carry one)
+		}
+		s, ok := info.lineage[name]
 		if !ok || errors.Is(s.err, clients.ErrNotSupported) {
 			partial = partial || ok // !ok: no reader, counted by buildBatch
 			continue
 		}
-		names = append(names, m)
+		names = append(names, name)
 	}
 	pos := map[string]int{}
 	for i, m := range names {
