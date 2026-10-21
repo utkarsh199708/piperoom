@@ -196,7 +196,7 @@ jobs:
               echo "build failures: $nbuild"
               echo "shard errors: $nerr"
               echo
-              jq -r '.test_failures[] | "\(.package).\(.test)\t\(.seed)\tgo test -race -run \"^\(.test)$\" -shuffle=\(.seed) \(.package)"' combined.json
+              jq -r '.test_failures[] | "\(.package).\(.test)\t\(.seed)\tgo test -race -count=10 -run \"^\(.test)$\" -shuffle=\(.seed) \(.package)"' combined.json
               jq -r '.build_failures[] | "\(.)\t(build failure)"' combined.json
               jq -r '.errors[] | "shard \(.index)\t\(.error)"' combined.json
             fi
@@ -216,7 +216,7 @@ jobs:
               if [ "$nfail" != "0" ]; then
                 echo "| package.Test | seed | reproduce |"
                 echo "|---|---|---|"
-                jq -r '.test_failures[] | "| `\(.package).\(.test)` | `\(.seed)` | `go test -race -run \"^\(.test)$\" -shuffle=\(.seed) \(.package)` |"' combined.json
+                jq -r '.test_failures[] | "| `\(.package).\(.test)` | `\(.seed)` | `go test -race -count=10 -run \"^\(.test)$\" -shuffle=\(.seed) \(.package)` |"' combined.json
                 echo
               fi
               if [ "$nbuild" != "0" ]; then
