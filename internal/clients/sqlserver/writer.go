@@ -190,7 +190,11 @@ func (w *SetupWriter) CreatePublication(ctx context.Context, name string, tables
 	if err := w.db.Exec(ctx, enableDatabaseSQL); err != nil {
 		return fmt.Errorf("sqlserver: enable CDC on the database: %w", err)
 	}
-	for _, p := range pairs {
+	// Check every capture instance first, then enable in a second loop: if any
+	// instance already exists the call must alter nothing, so no table may be
+	// enabled before all the checks have passed.
+	instances := make([]string, len(pairs))
+	for i, p := range pairs {
 		inst := captureInstance(name, len(pairs), p[0], p[1])
 		var n int64
 		if err := w.db.QueryRow(ctx, `SELECT COUNT(*) FROM cdc.change_tables WHERE capture_instance = @p1`, inst).Scan(&n); err != nil {
@@ -199,7 +203,10 @@ func (w *SetupWriter) CreatePublication(ctx context.Context, name string, tables
 		if n > 0 {
 			return fmt.Errorf("sqlserver: %w: capture instance %q already exists", errCaptureExists, inst)
 		}
-		if err := w.db.Exec(ctx, enableTableSQL, p[0], p[1], inst); err != nil {
+		instances[i] = inst
+	}
+	for i, p := range pairs {
+		if err := w.db.Exec(ctx, enableTableSQL, p[0], p[1], instances[i]); err != nil {
 			return fmt.Errorf("sqlserver: enable CDC on table %s.%s: %w", p[0], p[1], err)
 		}
 	}
@@ -377,7 +384,20 @@ func (w *SetupWriter) CreateReadRole(ctx context.Context, role string, tables []
 
 	name := "mssql_" + login
 	if err := w.secret.Put(ctx, name, password); err != nil {
-		return "", fmt.Errorf("sqlserver: store read-role password: %w", err)
+		putErr := fmt.Errorf("sqlserver: store read-role password: %w", err)
+		// The password is lost, so a retry would hit errRoleExists on the login
+		// this call just created. Roll it back: drop the database user first (it
+		// depends on the login), then the login, best effort, and report the Put
+		// error joined with any drop errors. login is a validated identifier and
+		// qlogin is []-quoted, so interpolating it into the DROP statements is safe.
+		dropErrs := make([]error, 0, 2)
+		if derr := w.db.Exec(ctx, "DROP USER "+qlogin); derr != nil {
+			dropErrs = append(dropErrs, fmt.Errorf("sqlserver: drop user %q after secret-store failure: %w", login, derr))
+		}
+		if derr := w.db.Exec(ctx, "DROP LOGIN "+qlogin); derr != nil {
+			dropErrs = append(dropErrs, fmt.Errorf("sqlserver: drop login %q after secret-store failure: %w", login, derr))
+		}
+		return "", errors.Join(append([]error{putErr}, dropErrs...)...)
 	}
 	return name, nil
 }

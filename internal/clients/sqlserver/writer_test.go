@@ -26,6 +26,14 @@ func (m *memStore) Put(_ context.Context, name, value string) error {
 	return nil
 }
 
+// failStore always fails Put, so a test can assert CreateReadRole rolls the
+// freshly created login and user back.
+type failStore struct {
+	err error
+}
+
+func (s *failStore) Put(_ context.Context, _, _ string) error { return s.err }
+
 // blockingDB answers Exec only after ctx is done, so the 10 s (or shorter,
 // under WithSetupTimeout) deadline is the thing that ends a call.
 type blockingDB struct{}
@@ -100,22 +108,26 @@ func TestCreatePublicationSQL(t *testing.T) {
 		t.Fatalf("sp_cdc_enable_table ran %d times, want 2", got)
 	}
 
-	// Order: enable db, check capture 1, enable table 1, check capture 2,
-	// enable table 2. Names are bound (@pN), never interpolated.
+	// Order: enable db, check capture 1, check capture 2, enable table 1,
+	// enable table 2. Every capture check runs before any table enable. Names
+	// are bound (@pN), never interpolated.
 	if len(f.sqls) != 5 {
 		t.Fatalf("ran %d statements, want 5: %q", len(f.sqls), f.sqls)
 	}
 	if !strings.Contains(f.sqls[1], "capture_instance = @p1") {
 		t.Fatalf("capture check not bound: %q", f.sqls[1])
 	}
-	enable := f.sqls[2]
+	if !strings.Contains(f.sqls[2], "capture_instance = @p1") {
+		t.Fatalf("second capture check not bound: %q", f.sqls[2])
+	}
+	enable := f.sqls[3]
 	for _, want := range []string{"@source_schema = @p1", "@source_name = @p2", "@role_name = NULL", "@capture_instance = @p3"} {
 		if !strings.Contains(enable, want) {
 			t.Fatalf("enable table SQL missing %q: %q", want, enable)
 		}
 	}
 	// A two-table publication derives name_schema_table per table.
-	if got := f.args[2]; len(got) != 3 || got[0] != "dbo" || got[1] != "orders" || got[2] != "piperoom_dbo_orders" {
+	if got := f.args[3]; len(got) != 3 || got[0] != "dbo" || got[1] != "orders" || got[2] != "piperoom_dbo_orders" {
 		t.Fatalf("table 1 args = %v", got)
 	}
 	if got := f.args[4]; len(got) != 3 || got[0] != "dbo" || got[1] != "customers" || got[2] != "piperoom_dbo_customers" {
@@ -134,6 +146,25 @@ func TestCreatePublicationExistingCaptureIsError(t *testing.T) {
 	}
 	if got := f.count("sp_cdc_enable_table"); got != 0 {
 		t.Fatalf("sp_cdc_enable_table ran %d times; nothing may be altered", got)
+	}
+}
+
+func TestCreatePublicationSecondTableExistingCaptureAltersNothing(t *testing.T) {
+	f := &fakeDB{qrows: []*fakeRow{
+		{vals: []any{int64(0)}}, // capture 1 does not exist
+		{vals: []any{int64(1)}}, // capture 2 already exists
+	}}
+	w := testWriter(f)
+	err := w.CreatePublication(unscopedCtx(), "piperoom", []string{"dbo.orders", "dbo.customers"})
+	if !errors.Is(err, errCaptureExists) {
+		t.Fatalf("err = %v, want errCaptureExists", err)
+	}
+	if got := f.count("sp_cdc_enable_table"); got != 0 {
+		t.Fatalf("sp_cdc_enable_table ran %d times; nothing may be altered", got)
+	}
+	// Both capture checks ran before any enable could.
+	if got := f.count("capture_instance = @p1"); got != 2 {
+		t.Fatalf("capture checks = %d, want 2", got)
 	}
 }
 
@@ -273,6 +304,32 @@ func TestCreateReadRoleExistingIsError(t *testing.T) {
 	}
 	if st.value != "" {
 		t.Fatalf("generated a password for an existing role: %q", st.value)
+	}
+}
+
+func TestCreateReadRoleSecretPutFailureDropsLoginAndUser(t *testing.T) {
+	putErr := errors.New("secret store down")
+	f := &fakeDB{qrows: []*fakeRow{{vals: []any{int64(0)}}}} // login does not exist
+	w := &SetupWriter{db: f, timeout: callTimeout, secret: &failStore{err: putErr}}
+	_, err := w.CreateReadRole(unscopedCtx(), "piperoom_capture", []string{"dbo.orders"})
+	if err == nil {
+		t.Fatal("want an error when the secret store fails")
+	}
+	if !errors.Is(err, putErr) {
+		t.Fatalf("err = %v, want it to wrap the Put error %v", err, putErr)
+	}
+	if got := f.count("DROP USER [piperoom_capture]"); got != 1 {
+		t.Fatalf("DROP USER ran %d times, want 1", got)
+	}
+	if got := f.count("DROP LOGIN [piperoom_capture]"); got != 1 {
+		t.Fatalf("DROP LOGIN ran %d times, want 1", got)
+	}
+	// The password must not leak into any statement other than the CREATE LOGIN
+	// literal, so the two rollback statements interpolate only the login name.
+	for _, q := range f.sqls {
+		if strings.Contains(strings.ToUpper(q), "DROP") && strings.Contains(q, "PASSWORD") {
+			t.Fatalf("rollback statement embeds a password clause: %q", q)
+		}
 	}
 }
 
