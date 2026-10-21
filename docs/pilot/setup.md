@@ -48,7 +48,8 @@ To serve the web UI, set `PIPEROOM_WEB_DIR` to the built `web/dist` ([section 4]
   Its URL is `PIPEROOM_DB_URL`. Use a role that owns only this database. The service creates its own
   tables at start-up (`cmd/server/main.go`), so the role needs rights to create tables in it.
 - **Network access** from the Piperoom host to: the source Postgres, the warehouse (Postgres, or
-  the Snowflake account if `WAREHOUSE_KIND=snowflake`, the Google BigQuery endpoint if
+  the Snowflake account if `WAREHOUSE_KIND=snowflake`, the Google BigQuery API endpoint and
+  `oauth2.googleapis.com` (where a service-account key file exchanges its ADC token) if
   `WAREHOUSE_KIND=bigquery`, or the Databricks workspace host if `WAREHOUSE_KIND=databricks`),
   Kafka brokers, Kafka Connect REST, Schema Registry, the room database, and the model provider you
   choose (section 1): `api.anthropic.com` (unless you pin `ANTHROPIC_BASE_URL`), the AWS Bedrock
