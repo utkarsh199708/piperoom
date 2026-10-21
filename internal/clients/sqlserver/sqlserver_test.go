@@ -100,6 +100,7 @@ func (r *fakeRow) Scan(dest ...any) error {
 type fakeDB struct {
 	rows  []*fakeRows
 	qrows []*fakeRow
+	execs []error
 	err   error
 
 	sqls []string
@@ -133,6 +134,20 @@ func (f *fakeDB) QueryRow(ctx context.Context, q string, args ...any) scanner {
 		return r
 	}
 	return &fakeRow{err: sql.ErrNoRows}
+}
+
+func (f *fakeDB) Exec(ctx context.Context, q string, args ...any) error {
+	f.sqls, f.args = append(f.sqls, q), append(f.args, args)
+	f.ctxs = append(f.ctxs, ctx)
+	if f.err != nil {
+		return f.err
+	}
+	if len(f.execs) > 0 {
+		e := f.execs[0]
+		f.execs = f.execs[1:]
+		return e
+	}
+	return nil
 }
 
 func (f *fakeDB) Ping(context.Context) error { return f.err }
