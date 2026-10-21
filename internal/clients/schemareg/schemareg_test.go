@@ -308,3 +308,93 @@ func TestRefusedPathRecordsNothing(t *testing.T) {
 		t.Fatalf("hits = %d, calls = %+v; want no request and no receipt", hits, calls)
 	}
 }
+
+// A soft-deleted subject or version is only visible with ?deleted=true; the
+// plain listings must keep their old meaning. (#KAN-407)
+func TestDeletedInclusiveListings(t *testing.T) {
+	tests := []struct {
+		name   string
+		call   func(*Client) (any, error)
+		path   string
+		body   string
+		verify func(*testing.T, any)
+	}{
+		{
+			name: "subjects including deleted",
+			call: func(c *Client) (any, error) {
+				subjects, err := c.SubjectsIncludingDeleted(context.Background())
+				return subjects, err
+			},
+			path: "/subjects",
+			body: `["pg.public.orders-value","gone-value"]`,
+			verify: func(t *testing.T, got any) {
+				subjects := got.([]string)
+				if len(subjects) != 2 || subjects[1] != "gone-value" {
+					t.Fatalf("subjects = %v", subjects)
+				}
+			},
+		},
+		{
+			name: "versions including deleted",
+			call: func(c *Client) (any, error) {
+				versions, err := c.VersionsIncludingDeleted(context.Background(), "pg.public.orders-value")
+				return versions, err
+			},
+			path: "/subjects/pg.public.orders-value/versions",
+			body: `[1,2,3]`,
+			verify: func(t *testing.T, got any) {
+				versions := got.([]int)
+				if len(versions) != 3 || versions[2] != 3 {
+					t.Fatalf("versions = %v", versions)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != tc.path {
+					t.Errorf("path = %q, want %q", r.URL.Path, tc.path)
+				}
+				if r.URL.Query().Get("deleted") != "true" {
+					t.Errorf("query = %q, want deleted=true", r.URL.RawQuery)
+				}
+				w.Write([]byte(tc.body))
+			})
+			got, err := tc.call(c)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			tc.verify(t, got)
+		})
+	}
+}
+
+// A hard-deleted (permanent) subject is absent even with deleted=true; both
+// deleted-inclusive reads must still map 404 to clients.ErrNotFound. (#KAN-407)
+func TestDeletedInclusiveListingNotFound(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error_code":40401,"message":"Subject not found"}`))
+	})
+	if _, err := c.SubjectsIncludingDeleted(context.Background()); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("SubjectsIncludingDeleted: want ErrNotFound, got %v", err)
+	}
+	if _, err := c.VersionsIncludingDeleted(context.Background(), "gone-value"); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("VersionsIncludingDeleted: want ErrNotFound, got %v", err)
+	}
+}
+
+// Registry down must surface as an error from the deleted-inclusive reads,
+// never as an empty list a caller could read as "permanently deleted".
+func TestDeletedInclusiveListingTargetDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	c := New(srv.URL, srv.Client())
+	srv.Close()
+	if _, err := c.SubjectsIncludingDeleted(context.Background()); err == nil || errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("SubjectsIncludingDeleted: got %v, want a transport error", err)
+	}
+	if _, err := c.VersionsIncludingDeleted(context.Background(), "pg.public.orders-value"); err == nil || errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("VersionsIncludingDeleted: got %v, want a transport error", err)
+	}
+}
