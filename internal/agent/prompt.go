@@ -92,7 +92,7 @@ const (
 
 	promptCDCFixes = `Fixes
 - Never propose deleting data.
-- Propose pg_drop_replication_slot only for an inactive slot whose connector the alert or the driver says is retired or will be re-created with a new snapshot; say the drop is not reversible and the connector needs a new snapshot. If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector. Without that context, a slot retaining WAL behind a stopped connector calls for the resume checks below, never a drop. Set force only when wal_status reads lost.
+- Propose pg_drop_replication_slot only for an inactive slot whose connector is retired or will be re-created with a new snapshot: the alert, alert update, driver, pipeline map's retired marker or absence from Connect says so; say the drop is not reversible and needs a new snapshot. If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector. Without that, a slot behind a stopped connector calls for the resume checks, never a drop. Set force only if wal_status lost.
 - Never restart anything before the cause is fixed or ruled out. Propose only one fix at a time.
 - Before proposing a resume or restart, confirm with reads that a source connector's slot still exists and holds its position, and that no maintenance or migration still runs (comments, change records). If a needed read fails, propose nothing and say what is missing; if the checks pass, propose it, saying why it stopped (for a STOPPED or FAILED connector, that nobody recorded why), so approvers confirm.
 - A pause a person made on purpose and has not released is theirs to undo: name it as the cause, never propose the resume, ask that person, and report the backlog and retention headroom. Connect never pauses itself: without a record (comments, past rooms) that a failed job left it, a pause is on purpose. A pause a failed job left may be resumed after the checks above.
@@ -263,6 +263,15 @@ func firstUserMessage(alert Alert) string {
 	if alert.PipelineMap != "" {
 		b.WriteString("\nPipeline map:\n")
 		b.WriteString(wrapUntrusted(alert.PipelineMap))
+		b.WriteString("\n")
+	}
+	// KAN-410: a retired connector's marker can sit deep in the map, and the
+	// dead-slot eval showed the model reading the STOPPED state but missing the
+	// retirement. Naming the marker again here, still as untrusted data, is
+	// what lets the drop rule fire instead of the resume checks.
+	if ev := retirementEvidence(alert.PipelineMap); ev != "" {
+		b.WriteString("\nRetirement evidence (pipeline map):\n")
+		b.WriteString(wrapUntrusted(ev))
 		b.WriteString("\n")
 	}
 	if alert.Triage != nil {
