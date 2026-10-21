@@ -94,6 +94,8 @@ These are the sources of text the model reads. Everything here goes to the model
 | Approvals and rejections | the layer and proposal id; on rejection, the reason | `internal/room/service.go` |
 | Action results | the output of each step, in full, with the ok flag | `internal/room/service.go` (no cap on this path) |
 | Tool results | each tool's `Summary` text (never `Data`) | the tool's `Summary`, capped by `tools.MaxSummaryBytes` |
+| `task_log_tail` summary | a window of the end of one Airflow task try's log, with secrets masked and fenced as untrusted data (the full masked tail is in `Data`) | `internal/tools/batchtools/logtail.go` |
+| `dbt_model_sql` summary | a window of one dbt model's compiled SQL (raw Jinja when dbt never compiled it), secrets masked and fenced as untrusted data (the full masked SQL, at most 64 KiB, is in `Data`) | `internal/tools/dbttools/model_sql.go` |
 | Hand-off | a digest of the room log (see below) | `internal/agent/handoff.go`; `prompt.go` |
 
 **Hand-off digest.** The hand-off request sends the room log, rendered as text. It keeps every
@@ -106,6 +108,10 @@ summaries and display names (`prompt.go`).
 Two more things follow from this list:
 
 - A tool's `Summary` can contain the key values and timestamps that the tool returns (section 2).
+- A `task_log_tail` or `dbt_model_sql` `Summary` carries a window of free text (a task log, a
+  model's SQL), so the model reads a masked, capped slice of text that dbt or a pipeline task
+  wrote. The same applies to `dbt_run_results` messages and `dag_runs` run notes, which appear one
+  line each in their summaries.
 - Anything an engineer types is sent to the model in some form. A comment reaches the agent live
   only when it mentions `@agent`. Comments also reach the model through the hand-off digest, which
   keeps the newest 30 non-critical events, so an older comment can be folded out of it
@@ -122,7 +128,7 @@ Two more things follow from this list:
 | `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go`) | other column values |
 | `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables; the publication's other tables only as a count | other tables of a `FOR ALL TABLES` publication |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
-| `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go`; `dbtools.go`). The same on Snowflake, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go`) | key value, all other columns |
+| `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go`; `dbtools.go`). The same on Snowflake, BigQuery and Databricks, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go`; `internal/clients/bigquery/bigquery.go`; `internal/clients/databricks/databricks.go`) | key value, all other columns |
 | `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go`) | row data |
 | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag, only for the room pipeline's own topics and consumer groups (`kafka_consumer_lag` shows only partitions of the pipeline's topics) | record payloads |
 | `kafka_topic_config` | for a pipeline's own topic: retention, cleanup policy, min in-sync replicas, partition count and replication factor (`kafka_tools.go`) | record payloads |
@@ -131,6 +137,13 @@ Two more things follow from this list:
 | `connect_*` | connector state and task errors (**stack traces can contain data**). Config: a fixed list of key names (`connect_tools.go`), the `transforms` name list and each transform's `type`, `field`, `fields` and `field.name` (every other `transforms*` value is `***`), and secret-looking keys (`password`, `secret`, `token`, `.key`) as `***`. A secret key's presence is shown, not its value (`connect_tools.go`) | secret values |
 | `schema_registry_*` | subjects, versions, schema definitions and diffs | data |
 | `runbook_lookup` | sections of the runbook library embedded in the binary (`internal/tools/runbooks/runbooks.go`) | pipeline data, network |
+| `dag_runs` | the last runs of one pipeline DAG (default 10, at most 100): run id, state, run type, logical date, start, duration and the run's `note` (free text, sanitized, redacted and scanned; the full note is in `Data`) (`internal/tools/batchtools/runs.go`) | row data |
+| `task_instances` | the task instances of one run: task id, state, try, operator, start and duration; every name is cleaned and cut (`runs.go`) | row data |
+| `task_log_tail` | the end of one task try's log, at most 32 KiB (default 16 KiB tail): invalid UTF-8 replaced, ANSI sequences dropped, secrets masked (`redact.Text`), and scanned for instruction-like text. The summary shows a fenced window of the end; `Data` holds the whole masked tail (`internal/tools/batchtools/logtail.go`) | the log before the tail window |
+| `dag_schedule_gap` | the DAG's schedule text (DAG-author text, shown as one line), paused flag, last run and last success, next run, lateness and a verdict (`internal/tools/batchtools/schedule.go`) | row data |
+| `dbt_run_results` | each node's status, rows and run time, and dbt's `message` (masked and scanned; one line in the summary, at most 2000 bytes in `Data`); failures first, scoped to the pipeline's models and their direct neighbours (`internal/tools/dbttools/run_results.go`) | results of models outside scope (counted) |
+| `dbt_model_lineage` | one model's direct parents and children, as unique_ids, at most 100 each (`internal/tools/dbttools/lineage.go`) | other nodes |
+| `dbt_model_sql` | one dbt model's compiled SQL (raw Jinja when dbt never compiled it), secrets masked, at most 64 KiB in `Data`, shown in windows in the summary; **never executed** (`internal/tools/dbttools/model_sql.go`) | nothing else |
 
 Things to know:
 
@@ -144,6 +157,14 @@ Things to know:
   is shown as `***`. Still put secrets in config providers, not in transform settings.
 - **`application_name` is free text.** The client sets it (any session can put anything in it),
   and `pg_long_transactions` shows it as-is.
+- **Task logs, run notes, dbt messages and dbt SQL are free text.** `task_log_tail` returns the end
+  of a task's log and `dbt_model_sql` a model's compiled SQL; both are masked of secrets and scanned
+  for instruction-like text, but their content (an error message, a `SELECT`, a literal value in the
+  log) is still shown as data. Review what your tasks and models print before the pilot.
+- **The warehouse client's SQL is recorded as provenance, not sent to the model.** Every
+  BigQuery/Databricks query is recorded as a provenance call (the fixed `SELECT` text and the
+  rendered `@`/`:` parameters) on the room's tool result, masked of secrets
+  (`internal/agent/provenance.go`); it goes to the room log only, never to the model.
 
 ## 3. Prompt injection and untrusted text
 

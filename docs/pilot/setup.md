@@ -48,11 +48,14 @@ To serve the web UI, set `PIPEROOM_WEB_DIR` to the built `web/dist` ([section 4]
   Its URL is `PIPEROOM_DB_URL`. Use a role that owns only this database. The service creates its own
   tables at start-up (`cmd/server/main.go`), so the role needs rights to create tables in it.
 - **Network access** from the Piperoom host to: the source Postgres, the warehouse (Postgres, or
-  the Snowflake account if `WAREHOUSE_KIND=snowflake`), Kafka brokers, Kafka Connect REST, Schema
-  Registry, the room database, and the model provider you choose (section 1): `api.anthropic.com`
-  (unless you pin `ANTHROPIC_BASE_URL`), the AWS Bedrock runtime in `AWS_REGION`, or the Vertex AI
-  endpoint in `VERTEX_REGION`. Add `slack.com` only if you enable Slack. For Snowflake, add the
-  account host in the DSN, for example `<account>.snowflakecomputing.com`.
+  the Snowflake account if `WAREHOUSE_KIND=snowflake`, the Google BigQuery endpoint if
+  `WAREHOUSE_KIND=bigquery`, or the Databricks workspace host if `WAREHOUSE_KIND=databricks`),
+  Kafka brokers, Kafka Connect REST, Schema Registry, the room database, and the model provider you
+  choose (section 1): `api.anthropic.com` (unless you pin `ANTHROPIC_BASE_URL`), the AWS Bedrock
+  runtime in `AWS_REGION`, or the Vertex AI endpoint in `VERTEX_REGION`. Add `slack.com` only if you
+  enable Slack. For Snowflake, add the account host in the DSN, for example
+  `<account>.snowflakecomputing.com`. For a batch pipeline, also allow the `AIRFLOW_URL` host and,
+  if set, the `DBT_CLOUD_URL` host.
 - **Settings for real mode:** `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`, `WAREHOUSE_KIND` (default
   `postgres`), `PIPEROOM_DB_URL`, `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL`,
   `OWNERS_FILE`, `USERS_FILE`, and the model provider's settings (section 1). Unset, each of the URL
@@ -91,8 +94,8 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused in dev auth mode unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` **and** `PIPEROOM_DEV_ACK=dev-login-has-no-password` are both set (`cmd/server/listen.go`, `cmd/server/authsetup.go`; the deprecated `--allow-remote` flag is an alias of the first). The Docker image listens on `0.0.0.0` in `oidc` mode and sets neither dev variable (`Dockerfile`); `oidc` mode ignores both |
 | `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
 | `SOURCE_DB_URL` | source Postgres, the **read-only** role |
-| `WAREHOUSE_KIND` | `postgres` (default) or `snowflake`. Any other value stops the start (`internal/wiring/warehouse.go`). Read from `config.go` |
-| `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go`). Read-only access comes only from the DSN's role (`internal/clients/snowflake/snowflake.go`). See [permissions.md](permissions.md#warehouse) |
+| `WAREHOUSE_KIND` | `postgres` (default), `snowflake`, `bigquery`, `databricks` or `clickhouse`. Any other value stops the start (`internal/wiring/warehouse.go`). Read from `config.go` |
+| `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). With `bigquery`: `bigquery://<project>/<location>[?...]`, no credential in the DSN (Application Default Credentials, `internal/clients/bigquery/README.md`). With `databricks`: `token:<pat>@<host>/<http-path>?catalog=<catalog>`, the token in the DSN (`internal/clients/databricks/README.md`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go`). Read-only access comes only from the DSN's role (`internal/clients/snowflake/snowflake.go`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
 | `CONNECT_URL` | Kafka Connect REST base URL |
 | `SCHEMA_REGISTRY_URL` | Schema Registry base URL, or `off` when the pipelines use no Schema Registry (the pipeline map then has no schema-subject nodes and the schema tools answer "Schema Registry not configured"). **Docker Compose: required** (`deploy/docker-compose.pilot.yml` refuses to start without it; a blank value is an error, so a forgotten registry is never read as none). **Helm:** the chart skips empty values, so an empty value is unset and the server falls back to the dev default `http://localhost:8081`, which a pod cannot reach: the registry then shows as unknown in the map. Set the URL or `off`. In the server itself (`internal/config/config.go`) an explicitly empty value also means none |
@@ -102,6 +105,27 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | Login: `PIPEROOM_AUTH_MODE`, `PIPEROOM_OIDC_*`, `PIPEROOM_AUTH_VIEWER_GROUPS`, `PIPEROOM_SESSION_IDLE`, `PIPEROOM_SESSION_MAX`, `PIPEROOM_TRUSTED_PROXIES`, `PIPEROOM_ALLOWED_HOSTS`, `PIPEROOM_SOLO_USER` | `PIPEROOM_AUTH_MODE` is `dev` (default) or `oidc`. Every one of these is described in [deploy/README.md](../../deploy/README.md#2-settings-in-deployenv), with the identity provider setup. They are read in `internal/config/config.go` and checked in `internal/auth/settings.go` and `cmd/server/authsetup.go` |
 | `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`checkWebDir` in `cmd/server/main.go`; `internal/httpapi/static.go`). The Docker image sets it to `/web` (`Dockerfile`). Unset, the server serves the API and the probes only |
 | `PIPEROOM_RETENTION_DAYS` | **Live.** Deletes whole closed rooms (events, proposals, approvals, hand-offs) closed more than this many days ago, checked every 6 hours (`cmd/server/retention.go`; `internal/store/retention.go`). Open rooms are never deleted. Empty or `0` keeps everything; a value must be a whole number from 0 to 36500, or the start stops. Deletion cannot be undone: export a room first with `GET /api/rooms/{id}/export` (SHA-256 over the JCS form, `internal/room/service_export.go`) |
+
+**Batch pipeline readers (Airflow and dbt)**
+
+Set these only for a `kind: batch` pipeline. An empty `AIRFLOW_URL` turns the Airflow reader off;
+an empty `DBT_ARTIFACTS_DIR` and `DBT_CLOUD_URL` turns the dbt reader off. In both cases the batch
+tools stay registered and answer "not configured" (`internal/wiring/kinds.go`).
+
+| Variable | Meaning |
+|---|---|
+| `AIRFLOW_URL` | base URL of the Airflow webserver REST API v1 (its root, without `/api/v1`), `http` or `https` with no user info. Empty = the Airflow tools answer "not configured" (`internal/config/config.go`) |
+| `AIRFLOW_USERNAME`, `AIRFLOW_PASSWORD` | basic auth for Airflow's `basic_auth` API backend. The two go together and need an `https` `AIRFLOW_URL` (`config.go` `ParseAirflow`) |
+| `AIRFLOW_TOKEN` | bearer token instead of basic auth, as managed Airflow services expect. Needs an `https` `AIRFLOW_URL` and excludes basic auth (`config.go` `ParseAirflow`) |
+| `DBT_ARTIFACTS_DIR` | absolute path to the directory holding `run_results.json` and `manifest.json` (dbt's `target/`); or dbt Cloud below, not both (`config.go` `ParseDBT`) |
+| `DBT_CLOUD_URL` | dbt Cloud base URL, e.g. `https://cloud.getdbt.com` (`config.go`) |
+| `DBT_CLOUD_TOKEN` | read-only dbt Cloud service token (**secret**) (`config.go`) |
+| `DBT_CLOUD_ACCOUNT_ID` | the `{a}` of `/api/v2/accounts/{a}/runs/` (`config.go`) |
+| `DBT_CLOUD_JOB_ID` | the job whose newest finished run's artifacts are read (`config.go`) |
+
+A batch pipeline has three layers — `orchestrator`, `transform` and `warehouse` — instead of the six
+CDC layers (`internal/events/events.go` `LayersOf`), and its `layers:` / `users.yaml` owners name
+those three. The least-privilege identity for each is in [permissions.md](permissions.md).
 
 **Model provider, triage and token budget**
 
@@ -266,6 +290,33 @@ users:
     name: <display name>
     layers: [kafka-connect, kafka, schema-registry]   # layers this person may approve
 ```
+
+A `kind: batch` pipeline (Airflow → dbt → warehouse) uses different fields and three layers instead
+of the CDC fields above:
+
+```yaml
+# owners.yaml — a batch pipeline
+pipelines:
+  - id: daily-revenue
+    title: Daily revenue (Airflow + dbt)
+    kind: batch                       # required to use the batch fields
+    dags: [revenue_daily]             # Airflow dag_ids the batch tools may read
+    dbt_project: dev/batch/dbt/analytics   # the dbt project path (dbt Cloud uses DBT_CLOUD_*)
+    models: [stg_orders, fct_revenue]      # dbt model names the dbt tools may read
+    sink_tables: [analytics.fct_revenue]   # the ONLY tables warehouse_row may read
+    sink_ts_column: loaded_at         # required when sink_tables is set
+layers:                               # the three batch layers (not the six CDC layers)
+  orchestrator: <user id>
+  transform: <user id>
+  warehouse: <user id>
+```
+
+A batch pipeline needs at least one of `dags` or `models`; it refuses the CDC fields
+(`topic_prefix`, `source_tables`, `connectors`, `consumer_groups`) and a `watch:` block
+(`internal/owners/kind.go` `validateBatch`). The Airflow and dbt connection settings
+(`airflow_url`, `dbt_artifacts_dir`, `dbt_cloud_url`, `dbt_cloud_token`, `dbt_cloud_account_id`,
+`dbt_cloud_job_id`) and the warehouse (`warehouse_db_url`, `warehouse_kind`) may also be set per
+pipeline under `connections:` (section 2a; `internal/wiring/connections.go`).
 
 Rules of thumb:
 
