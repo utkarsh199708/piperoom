@@ -22,9 +22,35 @@ var (
 	_ clients.SchemaRegistryClient = (*FakeRegistry)(nil)
 )
 
-// FakeActionDeps returns the fake clients the demo actions run over.
+// FakeActionDeps returns fresh fake clients the demo actions run over.
 func FakeActionDeps() actions.Deps {
-	return actions.Deps{Connect: NewFakeConnect(), Registry: NewFakeRegistry()}
+	return NewFakes().Actions()
+}
+
+// Fakes is the demo's in-memory client pair. The --demo server registers the
+// real actions over this pair and hands the same pair to Controls, so a reset
+// returns the whole demo stack to the state the story starts from. (KAN-392
+// moves this to per-room state; until it lands, one pair serves the process.)
+type Fakes struct {
+	Connect  *FakeConnect
+	Registry *FakeRegistry
+}
+
+// NewFakes returns the demo's fake clients in their starting state.
+func NewFakes() *Fakes {
+	return &Fakes{Connect: NewFakeConnect(), Registry: NewFakeRegistry()}
+}
+
+// Actions returns the actions.Deps that run over these clients.
+func (f *Fakes) Actions() actions.Deps {
+	return actions.Deps{Connect: f.Connect, Registry: f.Registry}
+}
+
+// Reset puts both clients back to the state the story starts from: the
+// connector's task 0 is FAILED and the subject compatibility is BACKWARD.
+func (f *Fakes) Reset() {
+	f.Connect.Reset()
+	f.Registry.Reset()
 }
 
 const (
@@ -96,6 +122,15 @@ func (f *FakeConnect) Resume(_ context.Context, name string) error {
 	return nil
 }
 
+// Reset returns the connector to the story's starting state: running, with
+// task 0 FAILED.
+func (f *FakeConnect) Reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connState = "RUNNING"
+	f.task0 = "FAILED"
+}
+
 func (f *FakeConnect) RestartConnector(_ context.Context, name string) error {
 	if name != connectorName {
 		return fmt.Errorf("demo: connector %q: %w", name, clients.ErrNotFound)
@@ -162,6 +197,13 @@ func (f *FakeRegistry) Register(_ context.Context, subject, _ string) (int, erro
 		return 0, fmt.Errorf("demo: subject %q: %w", subject, clients.ErrNotFound)
 	}
 	return 2, nil
+}
+
+// Reset returns the subject to the story's starting compatibility, BACKWARD.
+func (f *FakeRegistry) Reset() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.levels = map[string]string{subjectName: "BACKWARD"}
 }
 
 func (f *FakeRegistry) level(subject string) (string, bool) {

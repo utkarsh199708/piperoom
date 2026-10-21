@@ -398,6 +398,9 @@ func runWith(d startDeps) error {
 		// stackFor is room.Deps.StackFor: nil in demo mode, where every
 		// room uses acts and toolsReg.
 		stackFor func(string) room.PipelineStack
+		// demoCtl is the scripted demo's presenter controls (KAN-398); nil
+		// outside --demo, where the control routes do not exist.
+		demoCtl *demo.Controls
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
@@ -418,11 +421,15 @@ func runWith(d startDeps) error {
 		// 4, item 3): the proposal path -- scope check, approval, executor --
 		// is identical to production.
 		acts = actions.NewRegistry()
-		if err := actions.Register(acts, demo.FakeActionDeps()); err != nil {
+		fakes := demo.NewFakes()
+		if err := actions.Register(acts, fakes.Actions()); err != nil {
 			return fmt.Errorf("server: register demo actions: %w", err)
 		}
 		topo = demo.Builder{}
-		run = demo.Run
+		// The presenter controls: skip, pause, resume and reset, over the
+		// same fake clients the actions write through (KAN-398).
+		demoCtl = demo.NewControls(fakes)
+		run = demoCtl.Run
 		write = demo.WriteHandoff
 		if pmMode == config.PostmortemModelAuto {
 			writePM = demo.WritePostmortem
@@ -580,6 +587,11 @@ func runWith(d startDeps) error {
 	}
 	if setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
+	}
+	if demoCtl != nil {
+		// --demo only: mounts POST /api/rooms/{id}/demo/{skip|pause|resume|reset}
+		// and marks /healthz with "demo": true for the web control strip.
+		httpOpts = append(httpOpts, httpapi.WithDemoControls(demoCtl))
 	}
 	// Admin settings and connection tests (docs/api.md): real mode only.
 	// --demo has no real connections to show or test, and its users may be
