@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { fileURLToPath, URL } from 'node:url'
+import { isLoopbackHost } from './src/lib/loopback'
 
 // The Vite dev server proxies /devctl to `devctl serve` (cmd/devctl/serve.go), an
 // unauthenticated, loopback-only break/fix API, so the dev-only "Break something"
@@ -13,15 +14,6 @@ import { fileURLToPath, URL } from 'node:url'
 // host is not loopback, unless the developer explicitly opts in with
 // PIPEROOM_DEVCTL_ALLOW_REMOTE=1.
 const DEVCTL_PROXY_KEY = '^/devctl(/|$)'
-
-function isLoopbackHost(host: string | boolean | undefined): boolean {
-  // Vite's default host is localhost; `false` resolves the same way.
-  if (host === undefined || host === false) return true
-  // A bare `vite --host` binds 0.0.0.0.
-  if (host === true) return false
-  const h = host.trim().toLowerCase()
-  return h === 'localhost' || h === '::1' || h.startsWith('127.')
-}
 
 const devctlLoopbackGuard = (): Plugin => ({
   name: 'piperoom:devctl-loopback-guard',
