@@ -108,6 +108,70 @@ func TestReconnectSendsResume(t *testing.T) {
 	}
 }
 
+// TestDoneOpNeverRerunAfterReconnect: a done op is reported in Resume when the
+// socket drops, and a re-sent (ProposalID, StepIndex) after the reconnect is
+// refused as a duplicate — a done op never re-runs, even across a reconnect.
+func TestDoneOpNeverRerunAfterReconnect(t *testing.T) {
+	clock := newTestClock()
+	cat := &fakeCatalogue{floor: map[string]string{"compose_up": protocol.TierT1}}
+
+	var (
+		mu     sync.Mutex
+		resume protocol.Resume
+	)
+
+	handler1 := func(conn *websocket.Conn) {
+		ctx := context.Background()
+		doHandshake(t, conn, ctx, "tok1", clock.Now, nil)
+		p1 := testProposal("p1")
+		h := proposalHash(t, p1)
+		raw := proposalRaw(t, p1)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("done-op", "compose_up", protocol.TierT1, "p1", 0, h, raw)})
+		if f := readFrameJSON(t, conn, ctx); f.Type != protocol.FrameResult {
+			t.Fatalf("expected result, got %+v", f)
+		}
+		_ = conn.Close(websocket.StatusPolicyViolation, "drop")
+	}
+
+	handler2 := func(conn *websocket.Conn) {
+		ctx := context.Background()
+		mu.Lock()
+		resume = doReconnect(t, conn, ctx, "tok1", "tok2", clock.Now)
+		mu.Unlock()
+		// The server re-sends the step it is unsure about; the runner refuses
+		// it rather than running the done op again.
+		p1 := testProposal("p1")
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp,
+			Op: opReqPtr("again-op", "compose_up", protocol.TierT1, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))})
+		assertRefused(t, conn, ctx, protocol.RefuseDuplicateStep)
+	}
+
+	srv := runMultiServer(handler1, handler2)
+	defer srv.Close()
+
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Stdout: io.Discard, Log: quiet(), Now: clock.Now, Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(resume.InFlight) != 1 {
+		t.Fatalf("resume in_flight = %+v, want 1 done entry", resume.InFlight)
+	}
+	got := resume.InFlight[0]
+	if got.State != protocol.StateDone || got.Result == nil || got.Result.ID != "done-op" {
+		t.Errorf("resume entry = %+v, want done with its result", got)
+	}
+	if n := cat.callCount(); n != 1 {
+		t.Fatalf("executor called %d times, want 1 (the done op never re-runs)", n)
+	}
+}
+
 // TestTokenIdleExpiry: the token is valid 29 minutes in and expired at 30, at
 // which point the runner stops and requires a new pairing code.
 func TestTokenIdleExpiry(t *testing.T) {
