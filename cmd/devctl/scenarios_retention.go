@@ -30,6 +30,16 @@ const retentionOrders = 50
 // the old one (holding the committed offset) is deleted by the short retention.
 var sqlInsertRetentionLoss = fmt.Sprintf("INSERT INTO orders (customer_id, amount) SELECT g, 200 + g FROM generate_series(1, %d) g", retentionOrders)
 
+// retentionBreakCut is the topic config the break sets: a one-second retention
+// and segment roll. With the broker's 1 s retention check and 1 s segment
+// delete delay (dev/docker-compose.yml KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS,
+// KAFKA_LOG_SEGMENT_DELETE_DELAY_MS) a rolled segment is deleted a couple of
+// seconds after it ages past retention.ms.
+var retentionBreakCut = map[string]string{
+	"retention.ms": "1000",
+	"segment.ms":   "1000",
+}
+
 func breakRetentionLoss(ctx context.Context, s *stack) error {
 	if err := s.compose(ctx, nil, "stop", "devconsumer"); err != nil {
 		return err
@@ -37,22 +47,37 @@ func breakRetentionLoss(ctx context.Context, s *stack) error {
 	if err := s.waitGroupState(ctx, ordersGroup, "Empty", 0, 60*time.Second); err != nil {
 		return fmt.Errorf("devctl: devconsumer did not leave the group: %w", err)
 	}
-	// Short retention and segment roll: with the broker's 1 s retention check
-	// (dev/docker-compose.yml KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS) a rolled
-	// segment is deleted about a second after it ages past retention.ms.
-	if err := s.setTopicConfig(ctx, ordersTopic, map[string]string{
-		"retention.ms": "1000",
-		"segment.ms":   "1000",
-	}); err != nil {
+	// The devconsumer is stopped, so its committed offsets stay put while the
+	// inserted orders roll the segment past the short retention.
+	parts, err := s.breakRetention(ctx, ordersGroup, ordersTopic, func(ctx context.Context) error {
+		_, err := s.psql(ctx, "orders", sqlInsertRetentionLoss)
+		return err
+	})
+	if err != nil {
 		return err
 	}
-	if _, err := s.psql(ctx, "orders", sqlInsertRetentionLoss); err != nil {
-		return err
+	s.log.Info("broken: "+ordersTopic+" retention cut so its log start moved past "+ordersGroup+"'s committed offsets — the watcher fires offset_below_log_start",
+		"partitions_below", fmt.Sprint(parts))
+	return nil
+}
+
+// breakRetention cuts retention.ms and segment.ms on topic, calls roll to
+// produce records that roll the active segment past retention, and waits until
+// group's committed offset on topic falls below the log start (the records at
+// the committed position were deleted). It returns the affected partitions,
+// sorted. This is the shared core of the retention-loss scenario; the
+// integration test calls it against a real broker with belowLogStartFn unset.
+func (s *stack) breakRetention(ctx context.Context, group, topic string, roll func(context.Context) error) ([]int32, error) {
+	if err := s.setTopicConfig(ctx, topic, retentionBreakCut); err != nil {
+		return nil, err
+	}
+	if err := roll(ctx); err != nil {
+		return nil, err
 	}
 	var parts []int32
 	var lastErr error
 	if err := s.waitFor(ctx, 90*time.Second, func() (bool, error) {
-		below, ps, err := s.committedBelowLogStart(ctx, ordersGroup, ordersTopic)
+		below, ps, err := s.committedBelowLogStart(ctx, group, topic)
 		if err != nil {
 			lastErr = err
 			return false, nil
@@ -61,18 +86,15 @@ func breakRetentionLoss(ctx context.Context, s *stack) error {
 		return below, nil
 	}); err != nil {
 		if lastErr != nil {
-			return fmt.Errorf("devctl: %s's committed offsets did not fall below the log start of %s: %w (last error: %v)", ordersGroup, ordersTopic, err, lastErr)
+			return nil, fmt.Errorf("devctl: %s's committed offsets did not fall below the log start of %s: %w (last error: %v)", group, topic, err, lastErr)
 		}
-		return fmt.Errorf("devctl: %s's committed offsets did not fall below the log start of %s: %w", ordersGroup, ordersTopic, err)
+		return nil, fmt.Errorf("devctl: %s's committed offsets did not fall below the log start of %s: %w", group, topic, err)
 	}
-	s.log.Info("broken: "+ordersTopic+" retention cut so its log start moved past "+ordersGroup+"'s committed offsets — the watcher fires offset_below_log_start",
-		"partitions_below", fmt.Sprint(parts))
-	return nil
+	return parts, nil
 }
 
 func fixRetentionLoss(ctx context.Context, s *stack) error {
-	// Restore the broker defaults by deleting the overrides; safe to repeat.
-	if err := s.deleteTopicConfig(ctx, ordersTopic, "retention.ms", "segment.ms"); err != nil {
+	if err := s.fixRetention(ctx, ordersTopic); err != nil {
 		return err
 	}
 	if err := s.compose(ctx, nil, "start", "devconsumer"); err != nil {
@@ -83,6 +105,12 @@ func fixRetentionLoss(ctx context.Context, s *stack) error {
 	}
 	s.log.Info("fixed: " + ordersTopic + " retention and segment roll restored, devconsumer running again")
 	return nil
+}
+
+// fixRetention restores the broker defaults on topic by deleting the
+// retention.ms and segment.ms overrides; safe to repeat.
+func (s *stack) fixRetention(ctx context.Context, topic string) error {
+	return s.deleteTopicConfig(ctx, topic, "retention.ms", "segment.ms")
 }
 
 // setTopicConfig sets topic config keys to the given values.
