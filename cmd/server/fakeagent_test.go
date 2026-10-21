@@ -190,7 +190,7 @@ func funcPtr(f any) uintptr {
 // or database is needed.
 func TestFakeAgentHelper(t *testing.T) {
 	if os.Getenv("PIPEROOM_TEST_FAKE_AGENT") != "1" {
-		t.Skip("helper for subprocess tests")
+		return
 	}
 	os.Args = []string{"server"}
 	if err := run(); err != nil {
