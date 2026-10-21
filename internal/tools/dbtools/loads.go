@@ -10,6 +10,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/warehouse"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
@@ -74,7 +75,12 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 			if !ok {
 				return d.loadFallback(ctx, input.Table)
 			}
-			errs, err := lr.LoadErrors(ctx, input.Table, since, loadErrorLimit)
+			// A ClickHouse Kafka-engine sink's load history belongs to the
+			// engine table, not to the MergeTree table the view fills. With
+			// sinks: the engine is declared, so read the right one; a sibling
+			// sink's writer is never queried (#KAN-481).
+			readTable := loadErrorTable(sc.Pipeline(), input.Table)
+			errs, err := lr.LoadErrors(ctx, readTable, since, loadErrorLimit)
 			if errors.Is(err, clients.ErrNotSupported) {
 				return d.loadFallback(ctx, input.Table)
 			}
@@ -86,6 +92,21 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 			return tools.Result{Summary: summary, Data: errs, Truncated: truncated}, nil
 		},
 	}
+}
+
+// loadErrorTable returns the table whose load history to read for sink: the
+// declared ClickHouse Kafka engine writer when the pipeline declares one for
+// that sink (the engine owns the consumer exceptions and the failed loads),
+// else the sink table itself. A pipeline without a sinks: block keeps the old
+// behavior; its engine name, if any, comes from the topology's naming
+// convention, not from owners.yaml.
+func loadErrorTable(p owners.Pipeline, sink string) string {
+	if s, ok := p.SinkForTable(sink); ok {
+		if engine, ok := s.KafkaEngineWriter(); ok {
+			return engine
+		}
+	}
+	return sink
 }
 
 // loadErrorsSummary renders the newest failures first, one line each.

@@ -70,7 +70,7 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if key == "" {
 		return nil, fmt.Errorf("%w: trace: empty key", ErrBadInput)
 	}
-	if len(p.ConsumerGroups) == 0 || len(p.SinkTables) == 0 {
+	if len(p.ConsumerGroupNames()) == 0 || len(p.SinkTableNames()) == 0 {
 		return nil, fmt.Errorf("topology: pipeline %q has no consumer group or sink table", pipelineID)
 	}
 	// owners.yaml decides which tables a room may trace, whether Connect is up
@@ -85,7 +85,7 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 		table:          table,
 		groupCommitted: -1,
 	}
-	f.sink, f.sinkErr = sinkFor(table, p.SourceTables, p.SinkTables)
+	f.sink, f.sinkErr = sinkFor(table, p.SourceTables, p.SinkTableNames())
 
 	// Resolve the connector and topic. A Connect outage must not fail the
 	// trace: fall back to placeholder names and mark the connector unknown.
@@ -160,10 +160,10 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 
 	// 4. Consumer group: the one that reads the topic, and its committed
 	// offset for the record's partition.
-	f.group = strings.Join(p.ConsumerGroups, ",")
+	f.group = strings.Join(p.ConsumerGroupNames(), ",")
 	if f.topicFound {
 		var lag clients.GroupLag
-		f.group, lag, f.groupErr = b.groupFor(ctx, p.ConsumerGroups, topic)
+		f.group, lag, f.groupErr = b.groupFor(ctx, p.ConsumerGroupNames(), topic)
 		f.groupCommitted, f.groupUnknown = committedFor(lag, topic, f.topicPartition)
 	}
 

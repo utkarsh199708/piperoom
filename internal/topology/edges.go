@@ -187,7 +187,10 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 	}
 
 	// Pass 2: readers of the CDC topics (sink connectors, consumer groups) and
-	// what they write to the warehouse.
+	// what they write to the warehouse. With sinks: the block is the only
+	// declaration of what fills each table, so no connector or group is linked
+	// to a sink except the writer the block names.
+	explicitSinks := p.UsesSinkBlocks()
 	var toReaders, toWarehouse []Edge
 	for _, cn := range p.Connectors {
 		if !sinks[cn] {
@@ -203,11 +206,14 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 				toReaders = append(toReaders, Edge{From: "topic:" + t, To: cid})
 			}
 		}
-		for _, s := range p.SinkTables {
+		if explicitSinks {
+			continue
+		}
+		for _, s := range p.SinkTableNames() {
 			toWarehouse = append(toWarehouse, inferred(Edge{From: cid, To: "wh:" + s}))
 		}
 	}
-	for _, gr := range p.ConsumerGroups {
+	for _, gr := range p.ConsumerGroupNames() {
 		gid := "group:" + gr
 		read := groupTopics(info.groups[gr], fp.topics)
 		for _, t := range fp.topics {
@@ -220,10 +226,22 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 				toReaders = append(toReaders, Edge{From: "topic:" + t, To: gid})
 			}
 		}
-		// owners.yaml has no group -> sink table declaration yet, so this
-		// link is never proven.
-		for _, s := range p.SinkTables {
+		if explicitSinks {
+			continue
+		}
+		// The legacy form has no group -> sink table declaration, so this link
+		// is never proven. The sinks: form declares the writer per table below.
+		for _, s := range p.SinkTableNames() {
 			toWarehouse = append(toWarehouse, inferred(Edge{From: gid, To: "wh:" + s}))
+		}
+	}
+	if explicitSinks {
+		for _, s := range p.Sinks {
+			if name, ok := s.ConsumerGroupWriter(); ok {
+				// Declared in owners.yaml, so the pairing is proven (graph.go
+				// MappingMapped), unlike the legacy cross product.
+				toWarehouse = append(toWarehouse, Edge{From: "group:" + name, To: "wh:" + s.Table})
+			}
 		}
 	}
 

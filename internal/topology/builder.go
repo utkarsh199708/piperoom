@@ -196,19 +196,24 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	defer cancel()
 
 	whKind := b.warehouseKind(p)
-	info := b.collect(cctx, p, whKind)
+	info := b.collect(cctx, p, b.engineNames(p, whKind))
 	info.matchers = b.sourceMatchers(p, info)
 
 	// Topics and data edges come from config and metadata collect already
 	// read (edges.go); the schema subjects follow from the topics' users.
 	fp := b.planFlow(p, info)
-	// A ClickHouse warehouse ingests topics through a Kafka engine table and a
-	// materialized view, so the topic/group -> wh:sink edges become that hop.
+	// A ClickHouse Kafka engine ingests a topic directly, so its chain is
+	// topic -> engine -> view -> sink instead of topic -> group -> sink. A
+	// pipeline that declares sinks: gets a hop only for a sink whose writer is
+	// a kafka_engine; the legacy form keeps the pipeline-wide ClickHouse rule.
 	var hops []clickhouseHopSpec
-	if whKind == "clickhouse" {
+	switch {
+	case p.UsesSinkBlocks():
+		hops = explicitClickhouseHopSpecs(p, fp.topics)
+	case whKind == "clickhouse":
 		hops = clickhouseHopSpecs(p, fp.topics)
-		b.wireClickhouseHops(&fp, hops)
 	}
+	b.wireClickhouseHops(&fp, hops, p.UsesSinkBlocks())
 	dlqs := discoverDLQs(p, info)
 	subjects, deps := b.planSubjects(info, fp)
 
@@ -261,11 +266,11 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	// order, so they are appended before the group and sink nodes (which keeps
 	// the engine listed before the sink it feeds).
 	for _, h := range hops {
-		if h.topic == "" {
+		if h.topic == "" && !p.UsesSinkBlocks() {
 			continue
 		}
 		g.Nodes = append(g.Nodes,
-			b.kafkaEngineNode(h.engine, info),
+			b.kafkaEngineNode(h.engine, info, p.UsesSinkBlocks()),
 			b.materializedViewNode(h.view),
 		)
 	}
@@ -285,11 +290,21 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			ownTopics[p.TopicPrefix+"."+t] = true
 		}
 	}
-	for _, gr := range p.ConsumerGroups {
+	for _, gr := range p.ConsumerGroupNames() {
 		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))
 	}
-	for _, s := range p.SinkTables {
-		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info.freshness[s], info.now, b.t))
+	for _, s := range p.SinkTableNames() {
+		n := b.sinkNode(p, s, info.freshness[s], info.now, b.t)
+		// A declared sink carries its own warehouse and writer, so the agent
+		// can name the component that is failing instead of a sibling sink's
+		// consumer (#KAN-481).
+		if decl, ok := p.SinkForTable(s); ok {
+			n.Facts["writer"] = decl.Writer.Name
+			if decl.Warehouse != "" {
+				n.Facts["warehouse"] = decl.Warehouse
+			}
+		}
+		g.Nodes = append(g.Nodes, n)
 	}
 	// Subjects are side nodes, after the data flow.
 	for _, s := range subjects {

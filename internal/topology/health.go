@@ -59,7 +59,9 @@ type collected struct {
 }
 
 // collect gathers health for every system in parallel under ctx's budget.
-func (b *builder) collect(ctx context.Context, p owners.Pipeline, whKind string) *collected {
+// engines are the ClickHouse Kafka engine tables to read load errors for (the
+// sinks: writers, or every sink table of a legacy ClickHouse pipeline).
+func (b *builder) collect(ctx context.Context, p owners.Pipeline, engines []string) *collected {
 	c := &collected{
 		connect:      map[string]connectSnapshot{},
 		groups:       map[string]groupSnapshot{},
@@ -116,7 +118,7 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, whKind string)
 			mu.Unlock()
 		})
 	}
-	for _, gr := range p.ConsumerGroups {
+	for _, gr := range p.ConsumerGroupNames() {
 		gr := gr
 		run(func() {
 			lag, err := b.kafka.GroupLag(ctx, gr)
@@ -125,7 +127,7 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, whKind string)
 			mu.Unlock()
 		})
 	}
-	for _, s := range p.SinkTables {
+	for _, s := range p.SinkTableNames() {
 		s := s
 		run(func() {
 			ts, err := b.wh.Freshness(ctx, s, p.SinkTSColumn)
@@ -134,18 +136,16 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, whKind string)
 			mu.Unlock()
 		})
 	}
-	if whKind == "clickhouse" {
-		if lr, ok := b.wh.(clients.LoadErrorReader); ok {
-			for _, s := range p.SinkTables {
-				engine, _ := clickhouseNames(s)
-				run(func() {
-					since := c.now.Add(-b.t.EngineErrorWindow)
-					loads, err := lr.LoadErrors(ctx, engine, since, clickhouseLoadLimit)
-					mu.Lock()
-					c.engineLoads[engine] = engineLoadSnapshot{loads: loads, err: err}
-					mu.Unlock()
-				})
-			}
+	if lr, ok := b.wh.(clients.LoadErrorReader); ok {
+		for _, engine := range engines {
+			engine := engine
+			run(func() {
+				since := c.now.Add(-b.t.EngineErrorWindow)
+				loads, err := lr.LoadErrors(ctx, engine, since, clickhouseLoadLimit)
+				mu.Lock()
+				c.engineLoads[engine] = engineLoadSnapshot{loads: loads, err: err}
+				mu.Unlock()
+			})
 		}
 	}
 	wg.Wait()

@@ -2,6 +2,7 @@ package topology
 
 import (
 	"errors"
+	"slices"
 	"strings"
 
 	"piperoom/internal/clients"
@@ -23,17 +24,19 @@ import (
 // and KindMaterializedView nodes (graph.go).
 
 // clickhouseHop returns the two intermediate nodes of one ClickHouse
-// Kafka-ingestion hop and the three data edges that join them into the graph:
+// Kafka-ingestion hop and the data edges that join them into the graph:
 //
 //	topic -> kafka_engine:engine -> materialized_view:view -> sink
 //
 // The sink node itself is the pipeline's regular KindSinkTable node and is not
 // returned; sink is its id ("wh:analytics.orders"), topic the topic id
 // ("topic:pg.public.orders"), and engine/view the ClickHouse object names
-// ("analytics.orders_kafka", "analytics.orders_mv"). All three edges are
-// inferred: the engine, the view and their topic all come from the dev naming
-// convention (clickhouseNames, clickhouseEngineTopic), not from live
-// ClickHouse config, so the agent must verify them.
+// ("analytics.orders_kafka", "analytics.orders_mv"). An empty topic leaves the
+// topic -> engine edge out (the topic could not be identified); the rest of the
+// chain is still drawn. All edges are inferred: the engine, the view and their
+// topic all come from the dev naming convention (clickhouseNames,
+// clickhouseEngineTopic), not from live ClickHouse config, so the agent must
+// verify them.
 //
 // owner is the warehouse layer owner. Both nodes are HealthUnknown here: Build
 // replaces the engine node's health from the ClickHouse load-error reader
@@ -58,11 +61,13 @@ func clickhouseHop(owner, topic, sink, engine, view string) (nodes []Node, edges
 			Health: HealthUnknown,
 		},
 	}
-	edges = []Edge{
-		{From: topic, To: nodes[0].ID, Mapping: MappingInferred},
-		{From: nodes[0].ID, To: nodes[1].ID, Mapping: MappingInferred},
-		{From: nodes[1].ID, To: sink, Mapping: MappingInferred},
+	if topic != "" {
+		edges = append(edges, Edge{From: topic, To: nodes[0].ID, Mapping: MappingInferred})
 	}
+	edges = append(edges,
+		Edge{From: nodes[0].ID, To: nodes[1].ID, Mapping: MappingInferred},
+		Edge{From: nodes[1].ID, To: sink, Mapping: MappingInferred},
+	)
 	return nodes, edges
 }
 
@@ -122,8 +127,9 @@ type clickhouseHopSpec struct {
 // pipeline. A sink whose topic cannot be matched has topic "" and its hop is
 // left out (no engine/view nodes, no replacement edges).
 func clickhouseHopSpecs(p owners.Pipeline, topics []string) []clickhouseHopSpec {
-	specs := make([]clickhouseHopSpec, 0, len(p.SinkTables))
-	for _, s := range p.SinkTables {
+	sinks := p.SinkTableNames()
+	specs := make([]clickhouseHopSpec, 0, len(sinks))
+	for _, s := range sinks {
 		engine, view := clickhouseNames(s)
 		topic, _ := clickhouseEngineTopic(topics, s)
 		specs = append(specs, clickhouseHopSpec{sink: s, engine: engine, view: view, topic: topic})
@@ -131,15 +137,65 @@ func clickhouseHopSpecs(p owners.Pipeline, topics []string) []clickhouseHopSpec 
 	return specs
 }
 
+// explicitClickhouseHopSpecs plans the hop of every sink whose declared writer
+// is a ClickHouse Kafka engine table. The engine name comes from owners.yaml,
+// not from the naming convention; the materialized view's name still follows
+// the convention because the block does not name it.
+func explicitClickhouseHopSpecs(p owners.Pipeline, topics []string) []clickhouseHopSpec {
+	specs := make([]clickhouseHopSpec, 0, len(p.Sinks))
+	for _, s := range p.Sinks {
+		engine, ok := s.KafkaEngineWriter()
+		if !ok {
+			continue
+		}
+		_, view := clickhouseNames(s.Table)
+		topic, _ := clickhouseEngineTopic(topics, s.Table)
+		specs = append(specs, clickhouseHopSpec{sink: s.Table, engine: engine, view: view, topic: topic})
+	}
+	return specs
+}
+
+// engineNames returns the ClickHouse Kafka engine tables whose load errors the
+// builder must read: the declared kafka_engine writers of a sinks: pipeline,
+// or every sink table's conventional engine for the legacy form of a
+// ClickHouse pipeline. A non-ClickHouse pipeline with no engine writer has
+// none.
+func (b *builder) engineNames(p owners.Pipeline, whKind string) []string {
+	var names []string
+	add := func(name string) {
+		if name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	if p.UsesSinkBlocks() {
+		for _, s := range p.Sinks {
+			if engine, ok := s.KafkaEngineWriter(); ok {
+				add(engine)
+			}
+		}
+		return names
+	}
+	if whKind == "clickhouse" {
+		for _, s := range p.SinkTableNames() {
+			engine, _ := clickhouseNames(s)
+			add(engine)
+		}
+	}
+	return names
+}
+
 // wireClickhouseHops replaces the edges that carried data into each sink
 // ("topic/group -> wh:sink") with the Kafka-ingestion hop
 // "topic -> kafka_engine:<engine> -> materialized_view:<view> -> wh:sink".
 // The engine table consumes the topic directly, so the sink's old readers no
 // longer feed it. The hop edges are inferred: engine, view and topic all come
-// from the dev naming convention, not from live ClickHouse config.
-func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
+// from the dev naming convention, not from live ClickHouse config. A spec with
+// no topic is skipped in the legacy form (old shape kept); includeUntopiced
+// draws its engine -> view -> sink chain anyway, which the sinks: form uses
+// when the topic cannot be identified.
+func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec, includeUntopiced bool) {
 	for _, h := range specs {
-		if h.topic == "" {
+		if h.topic == "" && !includeUntopiced {
 			continue
 		}
 		sinkID := "wh:" + h.sink
@@ -150,7 +206,11 @@ func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
 			}
 			kept = append(kept, e)
 		}
-		_, edges := clickhouseHop(b.layerOwner("warehouse"), "topic:"+h.topic, sinkID, h.engine, h.view)
+		topic := ""
+		if h.topic != "" {
+			topic = "topic:" + h.topic
+		}
+		_, edges := clickhouseHop(b.layerOwner("warehouse"), topic, sinkID, h.engine, h.view)
 		fp.edges = append(kept, edges...)
 	}
 }
@@ -160,11 +220,12 @@ func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
 // consumer exception in the engine's recent history means the engine stopped
 // consuming, which fails this node before the sink it no longer fills goes
 // stale (first-failing semantics). The reader reports only exceptions, never
-// that the engine exists, and the engine's name is a naming-convention guess,
-// so a reading without exceptions leaves the node unknown (inferred), not OK:
-// the table may not exist. No reader, an unreachable reader, or a warehouse
-// that cannot report load history leaves the node unknown too.
-func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
+// that the engine exists, so a reading without exceptions leaves the node
+// unknown (inferred), not OK: the table may not exist. No reader, an
+// unreachable reader, or a warehouse that cannot report load history leaves the
+// node unknown too. declared is true when owners.yaml names the engine (a
+// sinks: writer), so its name no longer comes from the naming convention.
+func (b *builder) kafkaEngineNode(engine string, info *collected, declared bool) Node {
 	n := Node{
 		ID:     engineNodeID(engine),
 		Kind:   KindKafkaEngine,
@@ -172,7 +233,9 @@ func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
 		Layer:  "warehouse",
 		Owner:  b.layerOwner("warehouse"),
 		Health: HealthUnknown,
-		Facts:  map[string]string{"inferred": "naming convention"},
+	}
+	if !declared {
+		n.Facts = map[string]string{"inferred": "naming convention"}
 	}
 	snap, ok := info.engineLoads[engine]
 	if !ok {
