@@ -39,7 +39,7 @@ To serve the web UI, set `PIPEROOM_WEB_DIR` to the built `web/dist` ([section 4]
 
 ### 0. Prerequisites
 
-- **Go 1.27** to build `cmd/server` (`go.mod:3`: `go 1.27.3`), or **Docker with Compose v2** for the
+- **Go 1.27** to build `cmd/server` (`go.mod:3`: `go 1.27.2`), or **Docker with Compose v2** for the
   image in [deploy/README.md](../../deploy/README.md).
 - **Node.js** to build and serve the web UI in `web/` (`npm ci`), if you run the UI from the
   source tree. `web/package.json` pins no version. The dev machine used Node 24 (`AGENTS.md` §3).

@@ -55,7 +55,7 @@ Resolved since the 2026-10-14 draft (each checked against `main`, 2026-10-15; F7
   every secret it serves, so one deployment per customer stays the only hard boundary (`docs/pilot/README.md` F7).
 - **No server switch for writes.** `PIPEROOM_WRITE_MODE` now exists and defaults to `off` (see section 4).
 
-- **Go toolchain.** `go 1.27.3` at `go.mod:3`; `FROM golang:1.27.3-alpine` at `Dockerfile:23` and
+- **Go toolchain.** `go 1.27.2` at `go.mod:3`; `FROM golang:1.27.2-alpine` at `Dockerfile:23` and
   `cmd/devconsumer/Dockerfile:2`. This is gate G1.
 - **gosnowflake GO-2026-6665.** `go.mod:16` has `github.com/snowflakedb/gosnowflake/v2 v2.3.0` (the fix is in v2.2.0;
   migration in `9a4fa1e`, #436). `55850be` (#475) removed the allowlist entry: `.github/govulncheck-allow.txt` now lists
