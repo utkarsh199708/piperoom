@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"piperoom/internal/clients"
@@ -60,5 +61,49 @@ func TestBatchModelUniqueIDAgreesWithScope(t *testing.T) {
 	}
 	if err := sc.CheckModel("dim_customer"); err != nil {
 		t.Errorf("scope refuses the bare-listed model: %v", err)
+	}
+}
+
+// Two models that normalize to one bare name would store one model's lineage
+// over the other's and draw two nodes with one id; Build refuses the list
+// instead of drawing a broken map.
+func TestBatchModelUniqueIDCollision(t *testing.T) {
+	cases := []struct {
+		name   string
+		models []string
+	}{
+		{"two packages", []string{"model.pkg_a.orders", "model.pkg_b.orders"}},
+		{"bare plus unique_id", []string{"orders", "model.pkg_a.orders"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			o := &owners.Owners{
+				Pipelines: []owners.Pipeline{{
+					ID: "collide", Kind: "batch",
+					Models:       c.models,
+					SinkTables:   []string{"analytics.orders"},
+					SinkTSColumn: "loaded_at",
+				}},
+				Layers: owners.UserLayers(map[string]string{"transform": "tara", "warehouse": "meera"}),
+			}
+			tr := &fakeTransform{lineage: map[string]clients.Lineage{
+				"model.pkg_a.orders": {Model: "model.pkg_a.orders"},
+				"model.pkg_b.orders": {Model: "model.pkg_b.orders"},
+				"orders":             {Model: "model.pkg_a.orders"},
+			}}
+			g, err := newBatchBuilder(o, nil, WithTransform(tr)).Build(context.Background(), "collide")
+			if err == nil {
+				t.Fatalf("Build(%v) = %v, want a validation error", c.models, nodeIDs(g))
+			}
+			for _, m := range c.models {
+				if !strings.Contains(err.Error(), m) {
+					t.Errorf("error %q does not name %q", err, m)
+				}
+			}
+			// No graph is returned for a refused list, so no duplicate node ids.
+			if len(g.Nodes) != 0 {
+				t.Errorf("Build returned %d nodes with the error, want none: %v", len(g.Nodes), nodeIDs(g))
+			}
+		})
 	}
 }

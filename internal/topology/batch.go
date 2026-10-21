@@ -3,6 +3,7 @@ package topology
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
@@ -174,9 +175,14 @@ func (b *builder) readDAG(ctx context.Context, dagID string, sched clients.DAGSc
 	return s
 }
 
-// buildBatch returns the graph of a batch pipeline. Like Build it never
-// fails: what a reader cannot answer is unknown health or a Partial graph.
-func (b *builder) buildBatch(ctx context.Context, p owners.Pipeline) Graph {
+// buildBatch returns the graph of a batch pipeline. Like Build it fails only
+// for a models list whose entries collide under their bare name
+// (modelNameCollision); what a reader cannot answer is unknown health or a
+// Partial graph, never an error.
+func (b *builder) buildBatch(ctx context.Context, p owners.Pipeline) (Graph, error) {
+	if err := modelNameCollision(p.Models); err != nil {
+		return Graph{}, err
+	}
 	cctx, cancel := context.WithTimeout(ctx, b.t.HealthBudget)
 	defer cancel()
 	info := b.collectBatch(cctx, p)
@@ -260,7 +266,28 @@ func (b *builder) buildBatch(ctx context.Context, p owners.Pipeline) Graph {
 			g.Edges = append(g.Edges, inferred(Edge{From: from, To: n.ID}))
 		}
 	}
-	return g
+	return g, nil
+}
+
+// modelNameCollision returns an error when two models in the list normalize
+// (owners.ModelName) to the same bare name: two unique_ids of one name in
+// different packages, or a bare name plus a unique_id of that name. The batch
+// graph draws a model under its bare name (the task and sink names use it), so
+// such a list would store one model's lineage over the other's and draw two
+// nodes with one id. Build refuses it instead of drawing a broken map.
+func modelNameCollision(models []string) error {
+	seen := make(map[string]string, len(models))
+	for _, m := range models {
+		name, ok := owners.ModelName(m)
+		if !ok {
+			continue // an invalid entry (only a pipeline built in code can carry one)
+		}
+		if first, dup := seen[name]; dup {
+			return fmt.Errorf("models %q and %q are the same model %q: a batch graph draws a model under its bare name, so list only one entry per model name", first, m, name)
+		}
+		seen[name] = m
+	}
+	return nil
 }
 
 // batchSinkInputs names what loads sink table s: the model named like its table,
