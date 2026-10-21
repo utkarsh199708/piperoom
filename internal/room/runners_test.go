@@ -1,8 +1,10 @@
 package room_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"piperoom/internal/events"
 	"piperoom/internal/room"
+	"piperoom/internal/store/memstore"
 )
 
 // auditRecord is one emitted setup.* audit event.
@@ -243,10 +246,11 @@ func TestRunnerLostEmitsEvent(t *testing.T) {
 	}
 	if err := reg.Attach(ctx, code, room.Runner{
 		Tenant: "", RoomID: "r1", Creator: testCreator, Label: "laptop",
+		Token: "tok-a",
 	}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	reg.Lost(ctx, "", "r1", "arjun")
+	reg.Lost(ctx, "", "r1", "arjun", "tok-a")
 
 	last, ok := rec.last()
 	if !ok || last.typ != events.SetupRunnerLost {
@@ -258,5 +262,115 @@ func TestRunnerLostEmitsEvent(t *testing.T) {
 	}
 	if _, ok := reg.Runner("", "r1", "arjun"); ok {
 		t.Fatal("runner still attached after Lost")
+	}
+}
+
+// TestRunnerLostDoesNotDetachReplacement: when a second pairing replaces the
+// first, the old socket's Lost (with the old token) must not detach the new
+// runner or emit setup.runner_lost for it.
+func TestRunnerLostDoesNotDetachReplacement(t *testing.T) {
+	reg, rec, _ := newRegistry(t)
+	ctx := context.Background()
+
+	code1, err := reg.IssuePairingCode("", "r1", testCreator)
+	if err != nil {
+		t.Fatalf("issue 1: %v", err)
+	}
+	if _, err := reg.PairCode(ctx, code1, "10.0.0.1"); err != nil {
+		t.Fatalf("pair 1: %v", err)
+	}
+	if err := reg.Attach(ctx, code1, room.Runner{
+		Tenant: "", RoomID: "r1", Creator: testCreator, Label: "old", Token: "tok-old",
+	}); err != nil {
+		t.Fatalf("attach 1: %v", err)
+	}
+
+	code2, err := reg.IssuePairingCode("", "r1", testCreator)
+	if err != nil {
+		t.Fatalf("issue 2: %v", err)
+	}
+	if _, err := reg.PairCode(ctx, code2, "10.0.0.2"); err != nil {
+		t.Fatalf("pair 2: %v", err)
+	}
+	if err := reg.Attach(ctx, code2, room.Runner{
+		Tenant: "", RoomID: "r1", Creator: testCreator, Label: "new", Token: "tok-new",
+	}); err != nil {
+		t.Fatalf("attach 2: %v", err)
+	}
+
+	// The old socket closes and reports its loss with the old token.
+	reg.Lost(ctx, "", "r1", "arjun", "tok-old")
+
+	rn, ok := reg.Runner("", "r1", "arjun")
+	if !ok {
+		t.Fatal("replacement detached by the old socket's loss")
+	}
+	if rn.Label != "new" {
+		t.Fatalf("runner = %q, want new", rn.Label)
+	}
+	last, ok := rec.last()
+	if ok && last.typ == events.SetupRunnerLost {
+		t.Fatal("setup.runner_lost emitted for a still-attached replacement")
+	}
+}
+
+// TestEmitSetupUncachedRoom: a pairing audit for a room that is not cached is
+// still appended (the room is loaded from the store), not silently dropped.
+func TestEmitSetupUncachedRoom(t *testing.T) {
+	ctx := context.Background()
+	st := memstore.New()
+	// svcA creates and caches the room; svcB shares the store but has never
+	// seen the room, so its EmitSetup must load it first.
+	a := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	arjun, ok := a.LookupUser("arjun")
+	if !ok {
+		t.Fatal("arjun missing")
+	}
+	snap, err := a.CreateRoom(ctx, arjun, "Incident", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	b := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	if err := b.EmitSetup(ctx, snap.ID, events.SetupPairing, events.SetupPairingPayload{
+		Outcome: events.PairingOK, Source: "10.0.0.1",
+	}); err != nil {
+		t.Fatalf("emit setup: %v", err)
+	}
+
+	evs, _, err := a.Events(ctx, snap.ID, 0, 100)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	found := false
+	for _, e := range evs {
+		if e.Type != events.SetupPairing {
+			continue
+		}
+		p, err := events.Decode[events.SetupPairingPayload](e)
+		if err == nil && p.Outcome == events.PairingOK && p.Source == "10.0.0.1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("pairing audit for an uncached room was not appended")
+	}
+}
+
+// TestEmitSetupNoRoomLogsOutcomeSource: an attempt that names no room (a bad
+// code, a global rate limit, a protocol refusal) is logged with its safe
+// outcome and source, never silently dropped.
+func TestEmitSetupNoRoomLogsOutcomeSource(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	svc := room.New(room.Deps{Store: memstore.New(), Users: room.DefaultUsers(), Run: fakeRun, Logger: log})
+	if err := svc.EmitSetup(context.Background(), "", events.SetupPairing, events.SetupPairingPayload{
+		Outcome: events.PairingRateLimited, Source: "10.9.9.9",
+	}); err != nil {
+		t.Fatalf("emit setup: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "rate_limited") || !strings.Contains(out, "10.9.9.9") {
+		t.Fatalf("empty-room audit lost outcome/source: %q", out)
 	}
 }

@@ -43,7 +43,7 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	conn.SetReadLimit(protocol.MaxFrameBytes)
 
-	connCtx, cancel := context.WithCancel(context.Background())
+	connCtx, cancel := context.WithCancel(s.runnerCtx)
 	defer cancel()
 
 	source := s.clientIP(r)
@@ -166,12 +166,14 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 	// protocol.LostAfter is setup.runner_lost. pong replies to ping; refused
 	// records setup.runner_refused; other frame types are dropped by the
 	// caller's own check.
-	s.runnerLoop(connCtx, conn, res.Tenant, res.RoomID, res.Creator.ID)
+	s.runnerLoop(connCtx, conn, res.Tenant, res.RoomID, res.Creator.ID, token)
 }
 
 // runnerLoop reads frames for an attached runner until it is silent for
-// protocol.LostAfter or the connection ends.
-func (s *Server) runnerLoop(ctx context.Context, conn *websocket.Conn, tenant, roomID, creatorID string) {
+// protocol.LostAfter or the connection ends. token is the attachment identity
+// handed to the registry so a superseded socket never detaches or touches the
+// replacement.
+func (s *Server) runnerLoop(ctx context.Context, conn *websocket.Conn, tenant, roomID, creatorID, token string) {
 	for {
 		rctx, rcancel := context.WithTimeout(ctx, protocol.LostAfter)
 		f, err := readRunnerFrame(rctx, conn)
@@ -187,15 +189,15 @@ func (s *Server) runnerLoop(ctx context.Context, conn *websocket.Conn, tenant, r
 			} else if errors.Is(err, context.DeadlineExceeded) {
 				closeRunner(conn, websocket.StatusPolicyViolation, "runner lost")
 			}
-			s.svc.RunnerLost(ctx, tenant, roomID, creatorID)
+			s.svc.RunnerLost(ctx, tenant, roomID, creatorID, token)
 			return
 		}
-		s.svc.RunnerTouch(tenant, roomID, creatorID)
+		s.svc.RunnerTouch(tenant, roomID, creatorID, token)
 		switch f.Type {
 		case protocol.FramePing:
 			_ = writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FramePong})
 		case protocol.FrameRefused:
-			s.svc.RunnerRefused(ctx, tenant, roomID, creatorID, events.SetupRunnerRefusedPayload{
+			s.svc.RunnerRefused(ctx, tenant, roomID, creatorID, token, events.SetupRunnerRefusedPayload{
 				Op:         f.Refused.Op,
 				Reason:     f.Refused.Reason,
 				ProposalID: f.Refused.ProposalID,

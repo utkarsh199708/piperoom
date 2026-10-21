@@ -75,6 +75,10 @@ type Server struct {
 
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
+	// runnerCtx is the lifecycle of the runner WebSocket connections: Close
+	// cancels it, so a runner that keeps pinging cannot outlive the server.
+	runnerCtx    context.Context
+	runnerCancel context.CancelFunc
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -85,6 +89,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	if log == nil {
 		log = slog.Default()
 	}
+	runnerCtx, runnerCancel := context.WithCancel(context.Background())
 	s := &Server{
 		svc:          svc,
 		gw:           ws.NewGateway(svc, st, log),
@@ -92,6 +97,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		probeTimeout: DefaultProbeTimeout,
 		readyWarn:    readyWarner{every: readyWarnEvery, now: time.Now},
 		refuseWarn:   refuseWarner{every: refuseWarnEvery, now: time.Now},
+		runnerCtx:    runnerCtx,
+		runnerCancel: runnerCancel,
 	}
 	for _, o := range opts {
 		o(s)
@@ -270,11 +277,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Close shuts the WebSocket gateway down (closing every live connection) and
-// stops the room service.
+// stops the room service. It also cancels every runner WebSocket connection
+// context, so a runner that keeps pinging cannot leave its handler or socket
+// alive through shutdown.
 func (s *Server) Close() {
 	if s.webRoot != nil {
 		_ = s.webRoot.Close()
 	}
+	s.runnerCancel()
 	s.gw.Close()
 	s.svc.Close()
 }

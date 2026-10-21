@@ -9,22 +9,34 @@ import (
 // EmitSetup is the runner registry's audit sink and the escape hatch for a
 // protocol refusal that happens before a code resolves (a version mismatch at
 // Pair or Hello): it appends setup.* events to the room's log when the event
-// names a room, and logs (never loses) an attempt whose room is unknown, such
-// as a bad pairing code or a global rate limit. The code and the token never
-// reach this method.
+// names a room (loading the room into the cache first when it is not), and
+// logs (never loses) an attempt whose room is unknown, such as a bad pairing
+// code or a global rate limit, with its safe outcome and source. The code and
+// the token never reach this method.
 func (s *Service) EmitSetup(ctx context.Context, roomID string, typ events.Type, payload any) error {
 	if roomID == "" {
-		s.log.Info("room: setup pairing audit (no room)", "type", typ)
+		outcome, source := pairingAuditFields(payload)
+		s.log.Info("room: setup pairing audit (no room)", "type", typ, "outcome", outcome, "source", source)
 		return nil
 	}
-	st := s.lockCachedRoom(roomID)
-	if st == nil {
-		s.log.Info("room: setup audit for an uncached room", "type", typ, "room", roomID)
-		return nil
+	st, err := s.lockRoom(ctx, roomID)
+	if err != nil {
+		outcome, source := pairingAuditFields(payload)
+		s.log.Warn("room: setup audit dropped: room unavailable", "type", typ, "room", roomID, "outcome", outcome, "source", source, "err", err)
+		return err
 	}
 	defer s.unlockRoom(st)
-	_, err := s.emitLocked(ctx, st, roomID, typ, systemActor, payload)
+	_, err = s.emitLocked(ctx, st, roomID, typ, systemActor, payload)
 	return err
+}
+
+// pairingAuditFields extracts the safe outcome and source from a setup audit
+// payload that is a pairing attempt; both are "" for the other setup events.
+func pairingAuditFields(payload any) (outcome, source string) {
+	if p, ok := payload.(events.SetupPairingPayload); ok {
+		return p.Outcome, p.Source
+	}
+	return "", ""
 }
 
 // IssuePairingCode issues a single-use pairing code bound to (tenant, roomID,
@@ -52,18 +64,19 @@ func (s *Service) RunnerLookup(tenant, roomID, creatorID string) (*Runner, bool)
 }
 
 // RunnerLost detaches the runner bound to (tenant, roomID, creatorID) and emits
-// setup.runner_lost.
-func (s *Service) RunnerLost(ctx context.Context, tenant, roomID, creatorID string) {
-	s.runners.Lost(ctx, tenant, roomID, creatorID)
+// setup.runner_lost. token is the attachment identity; a loss reported by a
+// superseded socket is a no-op.
+func (s *Service) RunnerLost(ctx context.Context, tenant, roomID, creatorID, token string) {
+	s.runners.Lost(ctx, tenant, roomID, creatorID, token)
 }
 
 // RunnerTouch updates the runner's last-seen time after a frame arrives.
-func (s *Service) RunnerTouch(tenant, roomID, creatorID string) {
-	s.runners.Touch(tenant, roomID, creatorID)
+func (s *Service) RunnerTouch(tenant, roomID, creatorID, token string) {
+	s.runners.Touch(tenant, roomID, creatorID, token)
 }
 
 // RunnerRefused records that the runner refused an op, emitting
 // setup.runner_refused.
-func (s *Service) RunnerRefused(ctx context.Context, tenant, roomID, creatorID string, payload events.SetupRunnerRefusedPayload) {
-	s.runners.Refuse(ctx, tenant, roomID, creatorID, payload)
+func (s *Service) RunnerRefused(ctx context.Context, tenant, roomID, creatorID, token string, payload events.SetupRunnerRefusedPayload) {
+	s.runners.Refuse(ctx, tenant, roomID, creatorID, token, payload)
 }

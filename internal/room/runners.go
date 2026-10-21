@@ -318,13 +318,15 @@ func (r *RunnerRegistry) Runner(tenant, roomID, creatorID string) (*Runner, bool
 }
 
 // Lost detaches the runner bound to (tenant, roomID, creatorID) and emits
-// setup.runner_lost with its label and last-seen time.
-func (r *RunnerRegistry) Lost(ctx context.Context, tenant, roomID, creatorID string) {
+// setup.runner_lost with its label and last-seen time. token is the
+// attachment identity: when a replacement has attached since this socket
+// paired, its loss is a no-op and the new runner stays.
+func (r *RunnerRegistry) Lost(ctx context.Context, tenant, roomID, creatorID, token string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	key := runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}
 	rn, ok := r.runners[key]
-	if !ok {
+	if !ok || rn.Token != token {
 		return
 	}
 	delete(r.runners, key)
@@ -336,25 +338,26 @@ func (r *RunnerRegistry) Lost(ctx context.Context, tenant, roomID, creatorID str
 
 // Touch updates the runner's last-seen time after a frame arrives, so
 // setup.runner_lost carries when the runner was last heard from, not when it
-// attached. A frame that no longer names an attached runner is a no-op.
-func (r *RunnerRegistry) Touch(tenant, roomID, creatorID string) {
+// attached. A frame from a superseded attachment (token mismatch) is a no-op.
+func (r *RunnerRegistry) Touch(tenant, roomID, creatorID, token string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rn, ok := r.runners[runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}]
-	if !ok {
+	if !ok || rn.Token != token {
 		return
 	}
 	rn.LastSeen = r.now()
 }
 
 // Refuse records that the runner refused an op (setup.runner_refused). It does
-// not detach the runner.
-func (r *RunnerRegistry) Refuse(ctx context.Context, tenant, roomID, creatorID string, payload events.SetupRunnerRefusedPayload) {
+// not detach the runner. A refusal from a superseded attachment (token
+// mismatch) is a no-op.
+func (r *RunnerRegistry) Refuse(ctx context.Context, tenant, roomID, creatorID, token string, payload events.SetupRunnerRefusedPayload) {
 	key := runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}
 	r.mu.Lock()
-	_, ok := r.runners[key]
+	rn, ok := r.runners[key]
 	r.mu.Unlock()
-	if !ok {
+	if !ok || rn.Token != token {
 		return
 	}
 	r.emitSetup(ctx, roomID, events.SetupRunnerRefused, payload)

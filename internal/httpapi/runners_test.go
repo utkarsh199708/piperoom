@@ -189,3 +189,78 @@ func TestRunnerWSBadCodeCloses(t *testing.T) {
 	}
 	_ = svc
 }
+
+// TestRunnerWSCloseCancelsConnection: Server.Close cancels an attached
+// runner's connection context, so a runner that keeps pinging cannot leave its
+// handler or socket alive through shutdown.
+func TestRunnerWSCloseCancelsConnection(t *testing.T) {
+	st := memstore.New()
+	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	srv := httpapi.New(svc, st, nil, httpapi.WithSetup(true))
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	ctx := context.Background()
+	arjun, ok := svc.LookupUser("arjun")
+	if !ok {
+		t.Fatal("arjun missing")
+	}
+	snap, err := svc.CreateRoom(ctx, arjun, "Incident", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	creator := events.Actor{Kind: events.ActorHuman, ID: "arjun", Name: "Arjun"}
+	code, err := svc.IssuePairingCode("", snap.ID, creator)
+	if err != nil {
+		t.Fatalf("issue code: %v", err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/api/runners/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	if err := writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FramePair, Pair: &protocol.Pair{
+		Code: code, ProtocolVersion: protocol.CurrentMajor, ProtocolMinor: protocol.CurrentMinor,
+	}}); err != nil {
+		t.Fatalf("write pair: %v", err)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := readRunnerFrame(wctx, conn); err != nil { // Welcome
+		t.Fatalf("read welcome: %v", err)
+	}
+	hello := protocol.Frame{Type: protocol.FrameHello, Hello: &protocol.Hello{
+		OS: "linux", Arch: "amd64", Label: "laptop",
+		Tools:           map[string]string{"docker": "1.0"},
+		ProtocolVersion: protocol.CurrentMajor,
+		ProtocolMinor:   protocol.CurrentMinor,
+	}}
+	if err := writeRunnerFrame(ctx, conn, hello); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if _, err := readRunnerFrame(wctx, conn); err != nil { // Token
+		t.Fatalf("read token: %v", err)
+	}
+
+	// The handler is now in runnerLoop, blocked reading. Closing the server
+	// must cancel its context and drop the socket.
+	srv.Close()
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		for {
+			if _, _, err := conn.Read(ctx); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runner connection still alive after Server.Close")
+	}
+}
