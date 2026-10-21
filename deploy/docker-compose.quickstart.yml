@@ -53,7 +53,7 @@ services:
   # builds with. Its output goes to the quickstart-config volume, which step 2
   # mounts. An existing owners.yaml is kept unless FORCE=1.
   discover:
-    image: golang:1.27.2-alpine
+    image: golang:1.27.3-alpine
     network_mode: host
     working_dir: /src
     environment:
