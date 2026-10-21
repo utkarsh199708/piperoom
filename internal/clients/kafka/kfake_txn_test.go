@@ -87,17 +87,18 @@ const (
 	// withinBound is how long a read under within may take. A read that gets
 	// past an aborted tail or an open transaction returns after about one
 	// stallAfter (0.5 to 0.6 s measured on an idle machine); one stuck there
-	// waits out a timer instead: TopicOffsets its own 5 s (and fails),
-	// PeekDLQ the caller's withinDeadline, FindByKey withinDeadline (at most
-	// its own 15 s). A timer only runs longer under load, never shorter, so a
-	// bound under 5 s still tells the two apart while giving a loaded CI
-	// machine about 7 times the idle time (the old 2 s bound inside a 3 s
-	// deadline gave about 3 times, and a busy CI run hit the deadline).
-	withinBound = 4 * time.Second
+	// waits out a timer instead: TopicOffsets the caller's withinDeadline
+	// (and fails with the deadline), PeekDLQ withinDeadline, FindByKey
+	// withinDeadline (at most its own 15 s). Every stuck read therefore runs
+	// the full withinDeadline, so the bound only needs to sit below it: 8 s
+	// gives a loaded CI machine about 15 times the idle time (the old 4 s
+	// bound gave about 7 times, and a busy CI run still pushed a healthy
+	// read past the record read's old 5 s deadline).
+	withinBound = 8 * time.Second
 	// withinDeadline is the ctx deadline under within. It is well past
 	// withinBound, so a stuck PeekDLQ or FindByKey, which still returns no
 	// error, overruns the bound instead of being cut short just under it.
-	// It is short enough that three stuck reads in one test (5 + 10 + 10 s)
+	// It is short enough that three stuck reads in one test (10 + 10 + 10 s)
 	// end before kgo's default 40 s transaction timeout aborts the open
 	// transaction, which would unstick the reads after them.
 	withinDeadline = 10 * time.Second
