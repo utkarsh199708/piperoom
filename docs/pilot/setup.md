@@ -27,7 +27,7 @@ All are read by `config.Load()` in `internal/config/config.go`, except `ANTHROPI
 | `KAFKA_BROKERS` | `localhost:29092` | Kafka bootstrap brokers, comma separated. | Yes |
 | `SCHEMA_REGISTRY_URL` | `http://localhost:8081` | Schema Registry. `""` or `off` means you have none. | Yes, or `off` |
 | `SOURCE_DB_URL` | the dev stack's `orders` database | The CDC source Postgres, read-only role. Pinged at start-up (`internal/clients/postgres/postgres.go`). | Yes |
-| `WAREHOUSE_DB_URL` | the dev stack's `warehouse` database | The warehouse (Postgres; Snowflake or ClickHouse with `WAREHOUSE_KIND`), read-only role. Pinged at start-up. | Yes |
+| `WAREHOUSE_DB_URL` | the dev stack's `warehouse` database | The warehouse (Postgres by default; `WAREHOUSE_KIND` also accepts `snowflake`, `bigquery`, `databricks` and `clickhouse`), read-only role. Pinged at start-up. | Yes |
 | `PIPEROOM_WRITE_MODE` | `off` | `off`: approved fixes are recorded but never run. `on`: they run. Any other value stops the start (`config.ParseWriteMode`). One switch per process ([section 7](#7-run-the-pilot)). | No |
 | `ANTHROPIC_API_KEY` | none | The model key for the default `anthropic` provider. Other providers: [section 1](#1-configure-the-environment). | Yes (`anthropic` provider) |
 
@@ -48,8 +48,9 @@ To serve the web UI, set `PIPEROOM_WEB_DIR` to the built `web/dist` ([section 4]
   Its URL is `PIPEROOM_DB_URL`. Use a role that owns only this database. The service creates its own
   tables at start-up (`cmd/server/main.go`), so the role needs rights to create tables in it.
 - **Network access** from the Piperoom host to: the source Postgres, the warehouse (Postgres, or
-  the Snowflake account / ClickHouse host set by `WAREHOUSE_KIND`), Kafka brokers, Kafka Connect REST, Schema
-  Registry, the room database, and the model provider you choose (section 1): `api.anthropic.com`
+  the Snowflake account, BigQuery API endpoint, Databricks workspace or ClickHouse host set by
+  `WAREHOUSE_KIND`), Kafka brokers, Kafka Connect REST, Schema Registry, the room database, and the
+  model provider you choose (section 1): `api.anthropic.com`
   (unless you pin `ANTHROPIC_BASE_URL`), the AWS Bedrock runtime in `AWS_REGION`, or the Vertex AI
   endpoint in `VERTEX_REGION`. Add `slack.com` only if you enable Slack. For Snowflake, add the
   account host in the DSN, for example `<account>.snowflakecomputing.com`. For ClickHouse, add
@@ -92,7 +93,7 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused in dev auth mode unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` **and** `PIPEROOM_DEV_ACK=dev-login-has-no-password` are both set (`cmd/server/listen.go`, `cmd/server/authsetup.go`; the deprecated `--allow-remote` flag is an alias of the first). The Docker image listens on `0.0.0.0` in `oidc` mode and sets neither dev variable (`Dockerfile`); `oidc` mode ignores both |
 | `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
 | `SOURCE_DB_URL` | source Postgres, the **read-only** role |
-| `WAREHOUSE_KIND` | `postgres` (default), `snowflake` or `clickhouse`. A value the wiring does not accept stops the start (`internal/wiring/warehouse.go`). Read from `config.go` |
+| `WAREHOUSE_KIND` | `postgres` (default), `snowflake`, `bigquery`, `databricks` or `clickhouse`. A value the wiring does not accept stops the start (`internal/wiring/warehouse.go`). Read from `config.go` |
 | `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). With `clickhouse`: a clickhouse-go/v2 DSN, `clickhouse://<user>:<password>@<host>:<port>/<db>?secure=true` (see [clickhouse.md](clickhouse.md)). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go`). Read-only access comes only from the DSN's role (for Snowflake, `internal/clients/snowflake/snowflake.go`; for ClickHouse, a `readonly=2` profile, `internal/clients/clickhouse/client.go`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
 | `CONNECT_URL` | Kafka Connect REST base URL |
@@ -729,7 +730,7 @@ an identical body (`service_room.go`; index key);
 | Server exits at start with "users/owners config" | `users.yaml` and `owners.yaml` disagree about a layer owner (step 4). The message names the user and layer |
 | Server exits at start with "topic_prefix is required", "no source tables", "no connectors" or "sink_ts_column is required" | fix the named pipeline in `owners.yaml` (`internal/owners/owners.go`) |
 | Server exits at start with "ping for migrations" | `PIPEROOM_DB_URL` cannot be reached, or the role lacks rights to create tables |
-| Server exits at start with "unknown WAREHOUSE_KIND" | `WAREHOUSE_KIND` is not `postgres`, `snowflake` or `clickhouse` (`internal/wiring/warehouse.go`) |
+| Server exits at start with "unknown WAREHOUSE_KIND" | `WAREHOUSE_KIND` is not `postgres`, `snowflake`, `bigquery`, `databricks` or `clickhouse` (`internal/wiring/warehouse.go`) |
 | Server exits at start with "warehouse (snowflake)" | the DSN is wrong, the password is not URL-encoded, or the account host is unreachable. The error is redacted, so check the DSN by hand (`internal/wiring/warehouse.go`) |
 | Snowflake sink table reports not found | a missing table, or one the role cannot see, maps to `clients.ErrNotFound`. Names are upper-cased and double-quoted, so a table created with quotes and a mixed case cannot be reached (`internal/clients/snowflake/README.md`, `identifier.go`) |
 | Server exits at start with "PIPEROOM_MODEL_PROVIDER" | an unknown provider, or `bedrock` without `AWS_REGION`, or `vertex` without `VERTEX_PROJECT_ID` or `VERTEX_REGION` (`internal/agent/endpoint.go`) |

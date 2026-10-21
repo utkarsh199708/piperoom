@@ -14,7 +14,7 @@ The names below match the code: tools in `internal/tools/{dbtools,kafkatools}`, 
 | System | Used by | Read access needed | Write access needed |
 |---|---|---|---|
 | Source Postgres | `pg_replication_slots`, `pg_recent_ddl`, `pg_long_transactions`, `pg_row`, `pg_publication_tables`, `trace_record` | pipeline tables (`SELECT`), `piperoom_audit.ddl_log`, stat views, catalog views | **none** |
-| Warehouse (Postgres, or Snowflake / ClickHouse with `WAREHOUSE_KIND`) | `warehouse_freshness`, `warehouse_row`, `warehouse_load_errors`, `reconcile`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables (ClickHouse: a `readonly=2` profile, see [clickhouse.md](clickhouse.md)) | **none** |
+| Warehouse (Postgres by default; `WAREHOUSE_KIND` also accepts `snowflake`, `bigquery`, `databricks` and `clickhouse`) | `warehouse_freshness`, `warehouse_row`, `warehouse_load_errors`, `reconcile`, `trace_record`, `pipeline_map` (sink health) | `SELECT` on the pipeline's sink tables (ClickHouse: a `readonly=2` profile, see [clickhouse.md](clickhouse.md)) | **none** |
 | Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record` | describe topics/groups, describe topic configs, read pipeline topics | **none** |
 | Other tools | `pipeline_map` reads the clients above and no new grant; `runbook_lookup` reads only the runbook text embedded in the binary (`internal/tools/runbooks/runbooks.go`) | none | none |
 | Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
@@ -86,9 +86,9 @@ secrets (for example `CREATE ROLE ... PASSWORD`) before enabling it in productio
 
 ## Warehouse
 
-**The warehouse is Postgres by default; set `WAREHOUSE_KIND` for Snowflake or ClickHouse.**
-`WAREHOUSE_KIND` accepts `postgres` (the default), `snowflake` or `clickhouse`; a value the wiring
-does not accept stops the start (`internal/wiring/warehouse.go`). The choice is made in
+**The warehouse is Postgres by default; set `WAREHOUSE_KIND` for Snowflake, BigQuery, Databricks or ClickHouse.**
+`WAREHOUSE_KIND` accepts `postgres` (the default), `snowflake`, `bigquery`, `databricks` or
+`clickhouse`; a value the wiring does not accept stops the start (`internal/wiring/warehouse.go`). The choice is made in
 `internal/wiring/warehouse.go`, called from `internal/wiring/wiring.go`. With Postgres,
 `WAREHOUSE_DB_URL` is a Postgres URL and the client is `internal/clients/warehouse/warehouse.go`.
 With Snowflake, it is a gosnowflake DSN (see the Snowflake section below). With ClickHouse, it is

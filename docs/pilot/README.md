@@ -66,9 +66,10 @@ below is from the code.
   [setup.md](setup.md#6-wire-up-alerts).
 - **Write actions: six.** Four of them write to Kafka Connect and two to the Schema Registry. Each
   one is listed with its exact HTTP call in [permissions.md](permissions.md#kafka-connect).
-- **Warehouse is Postgres by default, or Snowflake / ClickHouse with `WAREHOUSE_KIND`.** The
-  Snowflake client is selectable on `main` (`internal/wiring/warehouse.go`). `WAREHOUSE_DB_URL` is
-  then a gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go`).
+- **Warehouse is Postgres by default; `WAREHOUSE_KIND` selects another.** The wiring accepts
+  `postgres` (the default), `snowflake`, `bigquery`, `databricks` or `clickhouse`
+  (`internal/wiring/warehouse.go`). The Snowflake client is selectable on `main`. `WAREHOUSE_DB_URL`
+  is then a gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go`).
   Read-only access comes only from the DSN role (`internal/clients/snowflake/snowflake.go`). The
   ClickHouse client is also selectable (`WAREHOUSE_KIND=clickhouse`); see
   [clickhouse.md](clickhouse.md). See [permissions.md](permissions.md#warehouse).
