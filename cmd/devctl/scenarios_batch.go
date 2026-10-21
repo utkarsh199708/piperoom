@@ -98,6 +98,10 @@ const (
 // real source table: analytics.orders is the CDC sink shared by the rest of
 // the stack. Layer: orchestrator.
 func breakDagFailed(ctx context.Context, s *stack) error {
+	cl, err := s.batchAirflowClient()
+	if err != nil {
+		return err
+	}
 	if _, err := s.airflowCLI(ctx, "variables", "set", batchSourceVar, batchSourceMissing); err != nil {
 		return err
 	}
@@ -105,7 +109,7 @@ func breakDagFailed(ctx context.Context, s *stack) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.waitBatchRun(ctx, "failed", after, batchRunTimeout); err != nil {
+	if _, err := s.waitBatchRun(ctx, cl, "failed", after, batchRunTimeout); err != nil {
 		return err
 	}
 	s.log.Info("broken: " + batchSourceVar + "=" + batchSourceMissing + " so check_source fails — the latest " + batchDAG + " run is failed")
@@ -115,6 +119,10 @@ func breakDagFailed(ctx context.Context, s *stack) error {
 // The fix: restore the variable to the real source table, then prove the
 // pipeline runs again.
 func fixDagFailed(ctx context.Context, s *stack) error {
+	cl, err := s.batchAirflowClient()
+	if err != nil {
+		return err
+	}
 	if _, err := s.airflowCLI(ctx, "variables", "set", batchSourceVar, batchSourceDefault); err != nil {
 		return err
 	}
@@ -122,7 +130,7 @@ func fixDagFailed(ctx context.Context, s *stack) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.waitBatchRun(ctx, "success", after, batchRunTimeout); err != nil {
+	if _, err := s.waitBatchRun(ctx, cl, "success", after, batchRunTimeout); err != nil {
 		return err
 	}
 	s.log.Info("fixed: " + batchSourceVar + " restored to " + batchSourceDefault + ", " + batchDAG + " run succeeded")
@@ -135,6 +143,10 @@ func fixDagFailed(ctx context.Context, s *stack) error {
 // check_source passes but dbt_run fails to build the model. Layer: transform,
 // the broken model.
 func breakDbtModelBroken(ctx context.Context, s *stack) error {
+	cl, err := s.batchAirflowClient()
+	if err != nil {
+		return err
+	}
 	path := filepath.Join(s.root, batchModelsRel, batchBrokenModel)
 	if err := os.WriteFile(path, []byte(brokenModelSQL), 0o644); err != nil {
 		return fmt.Errorf("devctl: write broken model: %w", err)
@@ -143,7 +155,7 @@ func breakDbtModelBroken(ctx context.Context, s *stack) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.waitBatchRun(ctx, "failed", after, batchRunTimeout); err != nil {
+	if _, err := s.waitBatchRun(ctx, cl, "failed", after, batchRunTimeout); err != nil {
 		return err
 	}
 	s.log.Info("broken: a broken dbt model was deployed — the latest "+batchDAG+" run is failed", "model", batchBrokenModel)
@@ -152,6 +164,10 @@ func breakDbtModelBroken(ctx context.Context, s *stack) error {
 
 // The fix: remove the broken model (the cause), then prove the pipeline runs.
 func fixDbtModelBroken(ctx context.Context, s *stack) error {
+	cl, err := s.batchAirflowClient()
+	if err != nil {
+		return err
+	}
 	path := filepath.Join(s.root, batchModelsRel, batchBrokenModel)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("devctl: remove broken model: %w", err)
@@ -160,7 +176,7 @@ func fixDbtModelBroken(ctx context.Context, s *stack) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.waitBatchRun(ctx, "success", after, batchRunTimeout); err != nil {
+	if _, err := s.waitBatchRun(ctx, cl, "success", after, batchRunTimeout); err != nil {
 		return err
 	}
 	s.log.Info("fixed: broken dbt model removed, " + batchDAG + " run succeeded")
@@ -173,11 +189,11 @@ func fixDbtModelBroken(ctx context.Context, s *stack) error {
 // analytics.fct_revenue goes stale. dag_schedule_gap reports it paused (layer
 // orchestrator); a real freshness check raises the alert.
 func breakLateBatch(ctx context.Context, s *stack) error {
-	if _, err := s.airflowCLI(ctx, "dags", "pause", batchDAG); err != nil {
-		return err
-	}
 	cl, err := s.batchAirflowClient()
 	if err != nil {
+		return err
+	}
+	if _, err := s.airflowCLI(ctx, "dags", "pause", batchDAG); err != nil {
 		return err
 	}
 	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
@@ -195,6 +211,10 @@ func breakLateBatch(ctx context.Context, s *stack) error {
 
 // The fix: unpause and prove a run succeeds (the sink refreshes).
 func fixLateBatch(ctx context.Context, s *stack) error {
+	cl, err := s.batchAirflowClient()
+	if err != nil {
+		return err
+	}
 	if _, err := s.airflowCLI(ctx, "dags", "unpause", batchDAG); err != nil {
 		return err
 	}
@@ -202,7 +222,7 @@ func fixLateBatch(ctx context.Context, s *stack) error {
 	if err != nil {
 		return err
 	}
-	if _, err := s.waitBatchRun(ctx, "success", after, batchRunTimeout); err != nil {
+	if _, err := s.waitBatchRun(ctx, cl, "success", after, batchRunTimeout); err != nil {
 		return err
 	}
 	s.log.Info("fixed: " + batchDAG + " unpaused and a run succeeded")
@@ -245,12 +265,10 @@ func (s *stack) triggerBatchRun(ctx context.Context) (time.Time, error) {
 	return after, nil
 }
 
-// waitBatchRun waits until a run newer than after reaches state want.
-func (s *stack) waitBatchRun(ctx context.Context, want string, after time.Time, timeout time.Duration) (airflow.DAGRun, error) {
-	cl, err := s.batchAirflowClient()
-	if err != nil {
-		return airflow.DAGRun{}, err
-	}
+// waitBatchRun waits until a run newer than after reaches state want. The
+// caller passes the client so each break/fix can fail on a missing AIRFLOW_URL
+// before it mutates anything.
+func (s *stack) waitBatchRun(ctx context.Context, cl *airflow.Client, want string, after time.Time, timeout time.Duration) (airflow.DAGRun, error) {
 	var got airflow.DAGRun
 	if err := s.waitFor(ctx, timeout, func() (bool, error) {
 		runs, err := cl.DAGRuns(ctx, batchDAG, 3)

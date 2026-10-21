@@ -207,14 +207,34 @@ func TestLateBatchBreakAndFix(t *testing.T) {
 }
 
 // The break fails with a clear error when AIRFLOW_URL is not set (the batch
-// profile is not started), instead of a confusing connection error.
+// profile is not started), instead of a confusing connection error. The check
+// must run before any mutation, so with AIRFLOW_URL empty no CLI call or model
+// write may happen.
 func TestBatchBreakNeedsAirflowURL(t *testing.T) {
-	w := newBatchWorld(t, "failed")
-	w.stack.cfg.AirflowURL = ""
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	if err := breakDagFailed(ctx, w.stack); err == nil || !strings.Contains(err.Error(), "AIRFLOW_URL is not set") {
-		t.Fatalf("break = %v, want AIRFLOW_URL error", err)
+	for _, tc := range []struct {
+		name    string
+		breakIt func(context.Context, *stack) error
+	}{
+		{"dag-failed", breakDagFailed},
+		{"dbt-model-broken", breakDbtModelBroken},
+		{"late-batch", breakLateBatch},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newBatchWorld(t, "failed")
+			w.stack.cfg.AirflowURL = ""
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			err := tc.breakIt(ctx, w.stack)
+			if err == nil || !strings.Contains(err.Error(), "AIRFLOW_URL is not set") {
+				t.Fatalf("break = %v, want AIRFLOW_URL error", err)
+			}
+			if len(w.cli) != 0 {
+				t.Errorf("break ran airflow CLI (%v), want none before the AIRFLOW_URL check", w.cli)
+			}
+			if _, statErr := os.Stat(w.modelPath()); !os.IsNotExist(statErr) {
+				t.Errorf("break wrote the broken model (stat err %v), want no write before the AIRFLOW_URL check", statErr)
+			}
+		})
 	}
 }
 
