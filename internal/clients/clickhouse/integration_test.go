@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	driver "github.com/ClickHouse/clickhouse-go/v2"
+
+	"piperoom/internal/clients"
 )
 
 func TestClickHouseIntegration(t *testing.T) {
@@ -99,6 +102,52 @@ func TestClickHouseIntegration(t *testing.T) {
 		t.Fatalf("open read-only client: %v", err)
 	}
 	t.Cleanup(func() { _ = readClient.Close() })
+
+	// A Kafka engine table carries its consumer group in kafka_group_name in
+	// its CREATE statement; the group is what the topology draws as the sink's
+	// own consumer (KAN-459). The broker is unreachable on purpose: the table is
+	// created (the consumer starts lazily and retries) and never consumed from.
+	engineTableName := tableName + "_kafka"
+	engineTable := readOpts.Auth.Database + "." + engineTableName
+	engineQualified, err := quoteTable(engineTable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+		defer cancel()
+		_, _ = admin.ExecContext(ctx, "DROP TABLE IF EXISTS "+engineQualified)
+	})
+	engineGroup := "it_" + hex.EncodeToString(random) + "_group"
+	createEngine := fmt.Sprintf(
+		"CREATE TABLE %s (id UInt64) ENGINE = Kafka SETTINGS kafka_broker_list = '127.0.0.1:1', "+
+			"kafka_topic_list = 'it_unused_topic', kafka_group_name = '%s', kafka_format = 'JSONEachRow'",
+		engineQualified, engineGroup,
+	)
+	execCtx, execCancel = context.WithTimeout(context.Background(), defaultTimeout)
+	_, err = admin.ExecContext(execCtx, createEngine)
+	execCancel()
+	if err != nil {
+		t.Fatalf("create Kafka engine table: %v", Redact(err, adminDSN))
+	}
+	engineCtx, engineCancel := context.WithTimeout(context.Background(), defaultTimeout)
+	gotGroup, err := readClient.EngineConsumerGroup(engineCtx, engineTable)
+	engineCancel()
+	if err != nil || gotGroup != engineGroup {
+		t.Fatalf("EngineConsumerGroup = %q, %v; want %q read with SELECT-only grants", gotGroup, err, engineGroup)
+	}
+	engineCtx, engineCancel = context.WithTimeout(context.Background(), defaultTimeout)
+	_, err = readClient.EngineConsumerGroup(engineCtx, table)
+	engineCancel()
+	if !errors.Is(err, clients.ErrNotSupported) {
+		t.Fatalf("EngineConsumerGroup on a MergeTree table = %v, want ErrNotSupported", err)
+	}
+	engineCtx, engineCancel = context.WithTimeout(context.Background(), defaultTimeout)
+	_, err = readClient.EngineConsumerGroup(engineCtx, engineTable+"_missing")
+	engineCancel()
+	if !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("EngineConsumerGroup on a missing table = %v, want ErrNotFound", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	emptyFresh, err := readClient.Freshness(ctx, table, "loaded_at")

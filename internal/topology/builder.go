@@ -206,8 +206,20 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	// materialized view, so the topic/group -> wh:sink edges become that hop.
 	var hops []clickhouseHopSpec
 	if whKind == "clickhouse" {
-		hops = clickhouseHopSpecs(p, fp.topics)
+		hops = clickhouseHopSpecs(p, fp.topics, info)
 		b.wireClickhouseHops(&fp, hops)
+	}
+	// The pipeline's topics, for the group lag: the ones derived from the
+	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
+	// the filter still knows them while Connect is down.
+	ownTopics := map[string]bool{}
+	for _, t := range fp.topics {
+		ownTopics[t] = true
+	}
+	if p.TopicPrefix != "" {
+		for _, t := range p.SourceTables {
+			ownTopics[p.TopicPrefix+"."+t] = true
+		}
 	}
 	dlqs := discoverDLQs(p, info)
 	subjects, deps := b.planSubjects(info, fp)
@@ -259,10 +271,15 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	}
 	// ClickHouse hop nodes sit between the topic and the sink in data-flow
 	// order, so they are appended before the group and sink nodes (which keeps
-	// the engine listed before the sink it feeds).
+	// the engine listed before the sink it feeds). The engine's own consumer
+	// group, when the warehouse reported one, comes first: topic -> group ->
+	// engine. A group owners.yaml already declares is not repeated.
 	for _, h := range hops {
 		if h.topic == "" {
 			continue
+		}
+		if h.group != "" && !h.declared {
+			g.Nodes = append(g.Nodes, b.kafkaEngineGroupNode(h.engine, info.engineGroups[h.engine], ownTopics))
 		}
 		g.Nodes = append(g.Nodes,
 			b.kafkaEngineNode(h.engine, info),
@@ -272,18 +289,6 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	th := ThresholdsFor(b.t, p)
 	for _, d := range dlqs {
 		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
-	}
-	// The pipeline's topics, for the group lag: the ones derived from the
-	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
-	// the filter still knows them while Connect is down.
-	ownTopics := map[string]bool{}
-	for _, t := range fp.topics {
-		ownTopics[t] = true
-	}
-	if p.TopicPrefix != "" {
-		for _, t := range p.SourceTables {
-			ownTopics[p.TopicPrefix+"."+t] = true
-		}
 	}
 	for _, gr := range p.ConsumerGroups {
 		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))

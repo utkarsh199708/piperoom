@@ -10,18 +10,21 @@ import (
 )
 
 // ClickHouse error codes are stable protocol values. UNKNOWN_TABLE and
-// UNKNOWN_DATABASE indicate that the requested warehouse object is absent.
+// UNKNOWN_DATABASE indicate that the requested warehouse object is absent;
+// SHOW CREATE TABLE reports CANNOT_GET_CREATE_TABLE_QUERY instead of
+// UNKNOWN_TABLE for the same case.
 const (
-	errUnknownTable    = 60
-	errUnknownDatabase = 81
-	errReadonly        = 164
-	errIllegalFinal    = 181
-	errAccessDenied    = 497
+	errUnknownTable         = 60
+	errUnknownDatabase      = 81
+	errReadonly             = 164
+	errIllegalFinal         = 181
+	errCannotGetCreateTable = 390
+	errAccessDenied         = 497
 )
 
 func missingObject(err error) bool {
 	var chErr *driver.Exception
-	return errors.As(err, &chErr) && (chErr.Code == errUnknownTable || chErr.Code == errUnknownDatabase)
+	return errors.As(err, &chErr) && (chErr.Code == errUnknownTable || chErr.Code == errUnknownDatabase || chErr.Code == errCannotGetCreateTable)
 }
 
 func illegalFinal(err error) bool {

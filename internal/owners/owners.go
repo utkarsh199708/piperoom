@@ -136,6 +136,11 @@ type Owners struct {
 	path  string
 	dir   string
 	skips []DirSkip
+
+	// derived holds consumer groups the topology read from the pipeline's own
+	// sink engines (derived.go). Load and LoadDir start it empty; a copied
+	// Owners (Only) shares it.
+	derived *derivedGroups
 }
 
 // Load reads and validates the owners file at path. An `auto_approve:` entry
@@ -181,6 +186,9 @@ func parse(path string) (*Owners, error) {
 	if err := checkNullBlocks(&root); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}
+	// Created here, not lazily at the first Build: two concurrent builds would
+	// otherwise race to create it and one pipeline's set would be lost.
+	o.derived = &derivedGroups{}
 	return &o, nil
 }
 

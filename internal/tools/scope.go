@@ -93,6 +93,13 @@ func PipelineFrom(ctx context.Context) (owners.Pipeline, bool) {
 type Scope struct {
 	p        owners.Pipeline
 	unscoped bool
+	// derived reads the consumer groups the topology derived from the
+	// pipeline's own sink engines (owners.Owners.DerivedConsumerGroups): a
+	// ClickHouse Kafka engine table's kafka_group_name is not in owners.yaml,
+	// but the group is part of the pipeline, so CheckGroup accepts it. It is
+	// nil when the call was resolved without an Owners instance (an unscoped
+	// call, or a context carrying the full pipeline and no config).
+	derived func(pipelineID string) []string
 }
 
 // ScopeFor resolves the scope of a tool call from ctx. o is the tool's owners
@@ -103,9 +110,13 @@ type Scope struct {
 //   - ErrNoScope otherwise.
 func ScopeFor(ctx context.Context, o *owners.Owners) (Scope, error) {
 	v := scopeOf(ctx)
+	var derived func(string) []string
+	if o != nil {
+		derived = o.DerivedConsumerGroups
+	}
 	switch {
 	case v.hasPipeline:
-		return Scope{p: v.pipeline}, nil
+		return Scope{p: v.pipeline, derived: derived}, nil
 	case v.pipelineID != "":
 		if o == nil {
 			return Scope{}, fmt.Errorf("tools: owners not configured, cannot resolve the room's pipeline %q (wiring must pass Owners)", v.pipelineID)
@@ -114,9 +125,9 @@ func ScopeFor(ctx context.Context, o *owners.Owners) (Scope, error) {
 		if !ok {
 			return Scope{}, fmt.Errorf("%w: the room's pipeline %q is not in the owners config", ErrOutOfScope, v.pipelineID)
 		}
-		return Scope{p: p}, nil
+		return Scope{p: p, derived: derived}, nil
 	case v.unscoped:
-		return Scope{unscoped: true}, nil
+		return Scope{unscoped: true, derived: derived}, nil
 	}
 	return Scope{}, fmt.Errorf("%w: this tool call has no room pipeline, so read tools are refused (CLI/dev callers must opt out explicitly)", ErrNoScope)
 }
@@ -176,12 +187,38 @@ func (s Scope) CheckConnector(name string) error {
 	return refuse("connector", name, s, "allowed connectors: "+strings.Join(s.p.Connectors, ", "))
 }
 
-// CheckGroup refuses a consumer group that is not one of the pipeline's groups.
-func (s Scope) CheckGroup(name string) error {
-	if s.unscoped || contains(s.p.ConsumerGroups, name) {
+// derivedGroups returns the consumer groups the topology derived from the
+// pipeline's own sink engines, or nil. They are part of the pipeline like the
+// declared ones, so CheckGroup and FilterGroups accept them; the scope stays
+// strict because the set is read from the pipeline's own objects and replaced
+// on every topology build (owners.SetDerivedConsumerGroups).
+func (s Scope) derivedGroups() []string {
+	if s.derived == nil || s.p.ID == "" {
 		return nil
 	}
-	return refuse("consumer group", name, s, "allowed consumer groups: "+strings.Join(s.p.ConsumerGroups, ", "))
+	return s.derived(s.p.ID)
+}
+
+// groupAllowed reports whether name is one of the pipeline's consumer groups:
+// declared in owners.yaml or derived from a sink engine it owns.
+func (s Scope) groupAllowed(name string) bool {
+	return contains(s.p.ConsumerGroups, name) || contains(s.derivedGroups(), name)
+}
+
+// allowedGroups lists the consumer groups the scope accepts for an error:
+// the declared ones and the ones derived from the pipeline's own engines.
+func (s Scope) allowedGroups() []string {
+	return slices.Concat(s.p.ConsumerGroups, s.derivedGroups())
+}
+
+// CheckGroup refuses a consumer group that is not one of the pipeline's groups
+// or a group its own sink engines consume with (a ClickHouse Kafka engine
+// table's kafka_group_name, read by the topology).
+func (s Scope) CheckGroup(name string) error {
+	if s.unscoped || s.groupAllowed(name) {
+		return nil
+	}
+	return refuse("consumer group", name, s, "allowed consumer groups: "+strings.Join(s.allowedGroups(), ", "))
 }
 
 // Topics returns the pipeline's topics: "<topic_prefix>.<source_table>" for
@@ -394,9 +431,14 @@ func (s Scope) FilterConnectors(names []string) []string {
 	return s.filter(names, func(n string) bool { return contains(s.p.Connectors, n) })
 }
 
-// FilterGroups keeps only the pipeline's consumer groups.
+// FilterGroups keeps only the pipeline's consumer groups: declared in
+// owners.yaml or derived from a sink engine the pipeline owns.
 func (s Scope) FilterGroups(names []string) []string {
-	return s.filter(names, func(n string) bool { return contains(s.p.ConsumerGroups, n) })
+	if s.unscoped {
+		return names
+	}
+	allowed := s.allowedGroups()
+	return s.filter(names, func(n string) bool { return contains(allowed, n) })
 }
 
 // FilterSubjects keeps only subjects derived from the pipeline's topics.
