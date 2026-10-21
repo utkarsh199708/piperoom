@@ -58,7 +58,10 @@ type runner struct {
 	alert Alert
 	// kind is the room's pipeline kind, normalised (RoomKind): it picks the
 	// system prompt section and the verification of a fix.
-	kind  string
+	kind string
+	// mode is the room's mode for wording (P2d). It defaults to write mode on;
+	// the room service fills it once the contract change lands (see mode.go).
+	mode  RoomMode
 	deps  Deps
 	opts  Options
 	log   *slog.Logger
@@ -186,6 +189,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	return &runner{
 		alert:     alert,
 		kind:      kind,
+		mode:      RoomMode{Write: true},
 		deps:      deps,
 		opts:      opts,
 		log:       deps.Logger,
@@ -201,7 +205,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 
 func (r *runner) run(ctx context.Context) error {
 	r.toolList = buildToolList(r.deps.Tools, roomToolsForKind(newRoomToolsWith(r.deps, r.proposals, r.steps), r.kind, r.deps.Actions))
-	r.system = systemPromptFor(r.kind)
+	r.system = systemPromptForMode(r.kind, r.mode)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 

@@ -20,9 +20,12 @@ const KIND_LABEL: Record<TopologyNode['kind'], string> = {
   dlq_topic: 'DLQ topic',
   consumer_group: 'Consumer',
   sink_table: 'Sink',
+  schema_subject: 'Schema subject',
   dag: 'DAG',
   task: 'Task',
   model: 'Model',
+  kafka_engine: 'Kafka engine',
+  materialized_view: 'Materialized view',
 }
 
 // A batch node's run state is one of its facts (internal/topology/batch.go); the lane shows it first, under a

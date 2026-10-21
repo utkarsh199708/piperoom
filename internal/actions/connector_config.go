@@ -50,30 +50,6 @@ func sortedKeys(allow map[string]map[string]bool) []string {
 	return keys
 }
 
-// secretSubstrings are fragments that mark a config key as a credential.
-var secretSubstrings = []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private"}
-
-// looksSecret reports whether a config key probably holds a credential. It is
-// a second line of defence behind the allow-list: if someone later adds a key
-// to the list by mistake, a secret-looking one is still refused. A bare "key"
-// segment counts too (key.converter credentials, api.key, ssl.key.password).
-func looksSecret(key string) bool {
-	k := strings.ToLower(key)
-	for _, s := range secretSubstrings {
-		if strings.Contains(k, s) {
-			return true
-		}
-	}
-	for _, seg := range strings.FieldsFunc(k, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
-	}) {
-		if seg == "key" {
-			return true
-		}
-	}
-	return false
-}
-
 // ---- connect_update_connector_config ----
 
 type updateConnectorConfig struct {
@@ -216,7 +192,7 @@ func checkConfigChange(allow map[string]map[string]bool, key, value string) erro
 	if len(key) > maxConfigKeyLen || !configKeyRe.MatchString(key) {
 		return fmt.Errorf("actions: key %q is not a config key name (letters, digits, '.', '_', '-'; at most %d bytes)", shortText(key), maxConfigKeyLen)
 	}
-	if looksSecret(key) {
+	if LooksSecret(key) {
 		return fmt.Errorf("actions: key %q looks like a credential and cannot be changed", key)
 	}
 	values, ok := allow[key]
@@ -242,7 +218,7 @@ func checkConfigChange(allow map[string]map[string]bool, key, value string) erro
 // valueLooksSecret reports whether a proposed value looks like a credential:
 // a secret-looking word, or text the redactor would mask.
 func valueLooksSecret(v string) bool {
-	if looksSecret(v) {
+	if LooksSecret(v) {
 		return true
 	}
 	_, st := redact.Text(v)

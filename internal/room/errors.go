@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 )
 
@@ -134,4 +135,10 @@ func noHypothesis() *Error {
 // alreadyNudged is 409 already_nudged; msg says how long ago (F9).
 func alreadyNudged(msg string) *Error {
 	return &Error{Status: 409, Code: "already_nudged", Msg: msg}
+}
+
+// tooManyProposals is 429 too_many_proposals: a sixth open driver-authored
+// proposal in one room (docs/api.md; P3c).
+func tooManyProposals() *Error {
+	return &Error{Status: http.StatusTooManyRequests, Code: "too_many_proposals", Msg: "at most 5 open driver-authored proposals per room"}
 }

@@ -34,10 +34,20 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // when a change there is the cause; to stay under the word cap the rule-1 link kinds, the confidence
 // enum and the propose_fix allow-list bullet went (the map and the tool
 // schemas state them; rule 8 names propose_fix instead), with three one-word
-// trims. It is pinned here, beside the snapshot
+// trims. P2d moved it a fourth time, on purpose, for mode-aware wording: write
+// mode on (the default, and every eval) gains the scheduling note, and the
+// "often a schema change", "when your belief changes" and "Never claim a fix
+// worked without re-checking" words were trimmed to stay under the word cap.
+// It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "150f33b924a55a23c5cfc3763f19f81457f2e5190afa68c6a4ec5042a1c323de"
+const cdcPromptSHA256 = "7c05a799ba162e02fa5225d38b3f6b54ae2ecb332661ed613a2bb20afc673e93"
+
+// cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
+// off (P2d): the same CDC prompt, except the scheduling note becomes the
+// "will not run here" note. Pinned beside its snapshot so a regenerated
+// snapshot cannot silently move it.
+const cdcPromptWriteOffSHA256 = "0ba6d3626ace1548300da7e698edee34567caeac5bb9daa728a229f118627d42"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
@@ -47,6 +57,25 @@ func TestSystemPromptSnapshotCDC(t *testing.T) {
 	sum := sha256.Sum256([]byte(got))
 	if h := hex.EncodeToString(sum[:]); h != cdcPromptSHA256 {
 		t.Fatalf("CDC system prompt sha256 = %s, want %s: the CDC prompt must stay byte-identical (CDC evals, prompt cache)", h, cdcPromptSHA256)
+	}
+}
+
+// TestSystemPromptSnapshotCDCWriteOff pins the CDC prompt with write mode off:
+// the only change from the write-on prompt is the mode note (P2d).
+func TestSystemPromptSnapshotCDCWriteOff(t *testing.T) {
+	got := systemPromptForMode(events.PipelineKindCDC, RoomMode{Write: false})
+	checkPromptSnapshot(t, "system_prompt_cdc_write_off.txt", got)
+	sum := sha256.Sum256([]byte(got))
+	if h := hex.EncodeToString(sum[:]); h != cdcPromptWriteOffSHA256 {
+		t.Fatalf("CDC write-off system prompt sha256 = %s, want %s", h, cdcPromptWriteOffSHA256)
+	}
+	// Both modes stay under the 1335-word cap (P2d).
+	if wc := len(strings.Fields(got)); wc > 1335 {
+		t.Fatalf("CDC write-off system prompt is %d words, over the 1335 limit", wc)
+	}
+	// The write-off note must be the only mode wording: no scheduling note.
+	if strings.Contains(got, "name the countdown") {
+		t.Fatal("write-off prompt carries the write-on scheduling note")
 	}
 }
 

@@ -409,12 +409,12 @@ func TestDefaultAllowListIsFreshEachCall(t *testing.T) {
 
 func TestLooksSecret(t *testing.T) {
 	for _, k := range []string{"database.password", "sasl.jaas.config", "api.key", "key.converter", "ssl.key.password", "auth_token", "client.secret", "aws.secret.access.key"} {
-		if !looksSecret(k) {
-			t.Errorf("looksSecret(%q) = false", k)
+		if !LooksSecret(k) {
+			t.Errorf("LooksSecret(%q) = false", k)
 		}
 	}
 	for _, k := range sortedKeys(defaultConnectorConfigAllowList()) {
-		if looksSecret(k) {
+		if LooksSecret(k) {
 			t.Errorf("allow-listed key %q looks secret", k)
 		}
 	}

@@ -3,6 +3,29 @@
 Postgres → Debezium (Kafka Connect) → Kafka → `devconsumer` → warehouse, plus the Schema Registry, all in
 `dev/docker-compose.yml`. Addresses and test credentials are in `AGENTS.md` §3.
 
+## Image versions
+
+The stack's images can be swapped by setting environment variables (compose reads them at `docker compose`
+time). With no variables set, the defaults below are used, so the stack is unchanged from before the
+variables existed.
+
+| Variable | Default | Used for |
+|---|---|---|
+| `POSTGRES_IMAGE` | `postgres:17` | the `postgres` service image |
+| `KAFKA_IMAGE` | `apache/kafka:4.1.0` | the `kafka` service image |
+| `SCHEMA_REGISTRY_IMAGE` | `confluentinc/cp-schema-registry:8.0.0` | the `schema-registry` service image |
+| `DEBEZIUM_VERSION` | `3.2.0.Final` | the Debezium Connect base image the `connect` service builds from (`dev/connect/Dockerfile`) |
+
+Example (PowerShell):
+
+```
+$env:POSTGRES_IMAGE = 'postgres:16'
+$env:KAFKA_IMAGE = 'apache/kafka:4.0.0'
+docker compose -f dev/docker-compose.yml up -d
+```
+
+POSIX shells: `POSTGRES_IMAGE=postgres:16 KAFKA_IMAGE=apache/kafka:4.0.0 docker compose -f dev/docker-compose.yml up -d`.
+
 ## Try this first: the read-only quickstart
 
 A handful of commands from a clean clone to a room the real agent investigates. Nothing it proposes can run: the

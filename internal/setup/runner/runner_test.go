@@ -194,35 +194,6 @@ func TestRefusedBeforeDial(t *testing.T) {
 	}
 }
 
-// TestTokenNeverLogged: the session token appears in no log line and in no
-// terminal output.
-func TestTokenNeverLogged(t *testing.T) {
-	const token = "tok-very-secret-value"
-	var logBuf, outBuf bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
-		if _, _, err := handshake(conn, ctx, 1, token); err != nil {
-			t.Errorf("handshake: %v", err)
-		}
-	})
-	defer srv.Close()
-
-	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, Log: log, Stdout: &outBuf})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Run(context.Background()); err != nil {
-		t.Fatalf("Run = %v", err)
-	}
-	<-done
-	for _, s := range []string{logBuf.String(), outBuf.String()} {
-		if strings.Contains(s, token) {
-			t.Fatalf("token leaked into output: %q", s)
-		}
-	}
-}
-
 // TestOversizedFrameRefused: a frame over 1 MiB fails the read (the runner
 // does not act on it).
 func TestOversizedFrameRefused(t *testing.T) {

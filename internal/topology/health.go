@@ -37,6 +37,10 @@ type collected struct {
 	groups    map[string]groupSnapshot
 	freshness map[string]freshSnapshot
 
+	// engineLoads holds one load-error reading per ClickHouse Kafka engine
+	// table (clickhouse.go). It stays empty for a non-clickhouse warehouse.
+	engineLoads map[string]engineLoadSnapshot
+
 	topicNewest  map[string]time.Time
 	topicRecords map[string]int64 // sum of end-start over partitions
 	topicErr     map[string]error
@@ -55,11 +59,12 @@ type collected struct {
 }
 
 // collect gathers health for every system in parallel under ctx's budget.
-func (b *builder) collect(ctx context.Context, p owners.Pipeline) *collected {
+func (b *builder) collect(ctx context.Context, p owners.Pipeline, whKind string) *collected {
 	c := &collected{
 		connect:      map[string]connectSnapshot{},
 		groups:       map[string]groupSnapshot{},
 		freshness:    map[string]freshSnapshot{},
+		engineLoads:  map[string]engineLoadSnapshot{},
 		topicNewest:  map[string]time.Time{},
 		topicRecords: map[string]int64{},
 		topicErr:     map[string]error{},
@@ -128,6 +133,20 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline) *collected {
 			c.freshness[s] = freshSnapshot{ts: ts, err: err}
 			mu.Unlock()
 		})
+	}
+	if whKind == "clickhouse" {
+		if lr, ok := b.wh.(clients.LoadErrorReader); ok {
+			for _, s := range p.SinkTables {
+				engine, _ := clickhouseNames(s)
+				run(func() {
+					since := c.now.Add(-b.t.EngineErrorWindow)
+					loads, err := lr.LoadErrors(ctx, engine, since, clickhouseLoadLimit)
+					mu.Lock()
+					c.engineLoads[engine] = engineLoadSnapshot{loads: loads, err: err}
+					mu.Unlock()
+				})
+			}
+		}
 	}
 	wg.Wait()
 	return c

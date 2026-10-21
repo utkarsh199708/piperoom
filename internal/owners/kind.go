@@ -33,6 +33,10 @@ var (
 	dagIDRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 	// modelNameRE is a dbt model name: letters, digits and '_' only.
 	modelNameRE = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+	// modelUniqueIDRE is a dbt model unique_id: model.<package>.<name>, with an
+	// optional version segment, each segment in the model alphabet (letters,
+	// digits and '_'). The same shape owners.ModelName reads.
+	modelUniqueIDRE = regexp.MustCompile(`^model\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$`)
 )
 
 // KindOrDefault returns the pipeline kind: events.PipelineKindCDC when the file
@@ -83,6 +87,35 @@ func ModelName(ref string) (string, bool) {
 		return "", false
 	}
 	return name, true
+}
+
+// ModelsContain reports whether the pipeline's models list admits ref. models
+// holds names as owners.yaml writes them: a bare name, or a unique_id
+// "model.<package>.<name>[.<version>]". ref is a name in the same two forms
+// (a tool input, or a unique_id from the manifest). A bare entry admits any
+// package with that name (the match before unique_ids could be listed); a
+// unique_id entry is pinned to its package, and its version when it names one,
+// so the same-named model in another package is refused. The topology builder
+// and tools.Scope both read a pipeline's models through ModelName, so the
+// graph and the scope agree on which unique_id model belongs.
+func ModelsContain(models []string, ref string) bool {
+	rn, ok := ModelName(ref)
+	if !ok {
+		return false
+	}
+	for _, m := range models {
+		mn, ok := ModelName(m)
+		if !ok || mn != rn {
+			continue
+		}
+		if m == mn { // a bare name admits any package with this name
+			return true
+		}
+		if m == ref { // a unique_id admits only the exact id
+			return true
+		}
+	}
+	return false
 }
 
 // isBatch reports whether the pipeline is of kind batch.
@@ -163,7 +196,7 @@ func (p *Pipeline) validateBatch() error {
 			return fmt.Errorf("dags: %q is not a DAG id (an id of only dots is a path segment, not a name)", d)
 		}
 	}
-	models, err := cleanNames("models", p.Models, modelNameRE, "a model name (letters, digits and '_')")
+	models, err := cleanModels(p.Models)
 	if err != nil {
 		return err
 	}
@@ -228,6 +261,33 @@ func cleanNames(field string, in []string, re *regexp.Regexp, what string) ([]st
 	}
 	if d := firstDuplicate(out); d != "" {
 		return nil, fmt.Errorf("%s lists %q twice", field, d)
+	}
+	return out, nil
+}
+
+// cleanModels trims every entry of the models list and checks it: not empty, a
+// model name (letters, digits and '_') or a model unique_id
+// (model.<package>.<name>[.<version>]), not repeated. It returns the trimmed
+// list (nil for an absent list) and leaves its input alone, so a failed check
+// changes nothing. A unique_id is pinned: the same name in another package is
+// a different model and must be listed on its own.
+func cleanModels(in []string) ([]string, error) {
+	if in == nil {
+		return nil, nil
+	}
+	out := make([]string, 0, len(in))
+	for i, raw := range in {
+		name := strings.TrimSpace(raw)
+		switch {
+		case name == "":
+			return nil, fmt.Errorf("models[%d]: empty entry", i)
+		case !modelNameRE.MatchString(name) && !modelUniqueIDRE.MatchString(name):
+			return nil, fmt.Errorf("models: %q is not a model name (letters, digits and '_') or a model unique_id (model.<package>.<name>)", name)
+		}
+		out = append(out, name)
+	}
+	if d := firstDuplicate(out); d != "" {
+		return nil, fmt.Errorf("models lists %q twice", d)
 	}
 	return out, nil
 }
