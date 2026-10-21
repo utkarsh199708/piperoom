@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -128,7 +127,10 @@ func parseModel(s string) (modelRef, error) {
 // checkModel resolves the call's scope and checks ref against it before the
 // tool reads its own artifact. A pipeline model needs no I/O; anything else
 // is allowed only when the manifest's lineage makes it a direct parent or
-// child of a pipeline model, and a lineage read that fails refuses it.
+// child of a pipeline model, and a lineage read that fails refuses it. The
+// model check takes the full ref (a unique_id entry is pinned to its
+// package); the adjacency check takes the bare name (a unique_id names a
+// model, and the lineage is read by name as before).
 func checkModel(ctx context.Context, d Deps, tool string, ref modelRef) (tools.Scope, error) {
 	sc, err := tools.ScopeFor(ctx, d.Owners)
 	if err != nil {
@@ -137,7 +139,7 @@ func checkModel(ctx context.Context, d Deps, tool string, ref modelRef) (tools.S
 	if sc.Unscoped() {
 		return sc, nil
 	}
-	if err := sc.CheckModel(ref.Name); err == nil {
+	if err := sc.CheckModel(ref.Ref); err == nil {
 		return sc, nil
 	} else if d.Transform == nil {
 		// No reader to prove adjacency: the plain refusal, which names the
@@ -248,13 +250,14 @@ func nonNil(s []string) []string {
 	return s
 }
 
-// isPipelineModel reports whether a node id names one of the scope's models.
+// isPipelineModel reports whether a node id names one of the scope's models,
+// with the same rule as tools.Scope.CheckModel (a unique_id entry is pinned to
+// its package).
 func isPipelineModel(sc tools.Scope, id string) bool {
 	if sc.Unscoped() {
 		return false
 	}
-	n, ok := owners.ModelName(id)
-	return ok && slices.Contains(sc.Pipeline().Models, n)
+	return owners.ModelsContain(sc.Pipeline().Models, id)
 }
 
 func objectSchema(props map[string]any, required ...string) map[string]any {

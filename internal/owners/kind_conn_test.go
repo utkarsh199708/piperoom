@@ -130,3 +130,33 @@ func TestModelName(t *testing.T) {
 		}
 	}
 }
+
+// ModelsContain is the one rule the topology builder and tools.Scope share for
+// reading a pipeline's models: a bare entry admits any package with that name,
+// a unique_id entry only its own package (and version, when it names one).
+func TestModelsContain(t *testing.T) {
+	cases := []struct {
+		name   string
+		models []string
+		ref    string
+		want   bool
+	}{
+		{"bare admits itself", []string{"orders"}, "orders", true},
+		{"bare admits a unique_id", []string{"orders"}, "model.pkg_a.orders", true},
+		{"bare admits any package", []string{"orders"}, "model.pkg_b.orders", true},
+		{"bare is not another name", []string{"orders"}, "model.pkg_a.other", false},
+		{"unique_id admits itself", []string{"model.pkg_a.orders"}, "model.pkg_a.orders", true},
+		{"unique_id refuses another package", []string{"model.pkg_a.orders"}, "model.pkg_b.orders", false},
+		{"unique_id refuses a bare name", []string{"model.pkg_a.orders"}, "orders", false},
+		{"versioned admits itself", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders.v2", true},
+		{"versioned refuses the unversioned id", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders", false},
+		{"versioned refuses another version", []string{"model.pkg_a.orders.v2"}, "model.pkg_a.orders.v3", false},
+		{"not a model", []string{"model.pkg_a.orders"}, "source.pkg_a.raw.orders", false},
+		{"no models", nil, "orders", false},
+	}
+	for _, c := range cases {
+		if got := ModelsContain(c.models, c.ref); got != c.want {
+			t.Errorf("ModelsContain(%v, %q) = %v, want %v", c.models, c.ref, got, c.want)
+		}
+	}
+}

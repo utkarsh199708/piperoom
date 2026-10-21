@@ -189,7 +189,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	}
 	if p.KindOrDefault() == events.PipelineKindBatch {
 		// No CDC client is called for a batch pipeline: it has none.
-		return b.buildBatch(ctx, p), nil
+		return b.buildBatch(ctx, p)
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, b.t.HealthBudget)
