@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react'
 import { HandoffChecks } from './room/HandoffChecks'
 
 describe('HandoffChecks', () => {
-  it('lists each violation with its rule and detail as text', () => {
+  it('lists each violation with its rule in words, where it is, and the detail as text', () => {
     render(
       <HandoffChecks
         summary={{
@@ -16,7 +16,9 @@ describe('HandoffChecks', () => {
     )
     expect(screen.getByRole('heading', { name: 'Checks' })).toBeInTheDocument()
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
-    expect(screen.getByText('unknown_identifier')).toHaveAttribute('title', 'open[0]')
+    expect(screen.getByText('Name not found in the room log')).toHaveAttribute('title', 'unknown_identifier · open[0]')
+    expect(screen.getByText('· Still open, item 1')).toBeInTheDocument()
+    expect(screen.queryByText('unknown_identifier')).toBeNull()
     expect(screen.getByText('"decimal.handling.mode" does not appear in the log')).toBeInTheDocument()
     expect(document.querySelector('b')).toBeNull()
   })
