@@ -26,7 +26,7 @@ func TestClickhouseHopFixture(t *testing.T) {
 			{ID: sink, Kind: KindSinkTable, Name: "analytics.orders", Layer: "warehouse", Owner: "meera", Health: HealthOK},
 		},
 	}
-	nodes, edges := clickhouseHop("meera", topic, sink, engine, view)
+	nodes, edges := clickhouseHop("meera", topic, sink, engine, view, "", false)
 	g.Nodes = append(g.Nodes, nodes...)
 	g.Edges = append(g.Edges, edges...)
 
@@ -73,11 +73,12 @@ func TestClickhouseHopFixture(t *testing.T) {
 	}
 }
 
-// TestClickhouseHopEdgesAreInferred: every hop edge is a naming-convention
-// guess, never proven data flow and never a dependency, so the agent treats it
-// as a hypothesis to verify.
+// TestClickhouseHopEdgesAreInferred: with no engine group read, every hop edge
+// is a naming-convention guess, never proven data flow and never a dependency,
+// so the agent treats it as a hypothesis to verify. (With a group, its ->
+// engine edge is mapped; clickhouse_group_test.go covers that.)
 func TestClickhouseHopEdgesAreInferred(t *testing.T) {
-	_, edges := clickhouseHop("meera", "topic:t", "wh:s", "s_kafka", "s_mv")
+	_, edges := clickhouseHop("meera", "topic:t", "wh:s", "s_kafka", "s_mv", "", false)
 	if len(edges) != 3 {
 		t.Fatalf("edges = %d, want 3", len(edges))
 	}
@@ -112,7 +113,7 @@ func TestClickhouseHopJSON(t *testing.T) {
 			{ID: "wh:analytics.orders", Kind: KindSinkTable, Name: "analytics.orders", Layer: "warehouse", Owner: "meera", Health: HealthOK},
 		},
 	}
-	nodes, edges := clickhouseHop("meera", "topic:pg.public.orders", "wh:analytics.orders", "analytics.orders_kafka", "analytics.orders_mv")
+	nodes, edges := clickhouseHop("meera", "topic:pg.public.orders", "wh:analytics.orders", "analytics.orders_kafka", "analytics.orders_mv", "", false)
 	g.Nodes = append(g.Nodes, nodes...)
 	g.Edges = append(g.Edges, edges...)
 

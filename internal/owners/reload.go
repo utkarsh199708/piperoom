@@ -152,6 +152,7 @@ func loadDir(path, dir string) (*Owners, error) {
 		Auditors:  o.Auditors,
 		Tenants:   o.Tenants,
 		Pipelines: append(append([]Pipeline{}, o.Pipelines...), dirPipes...),
+		derived:   &derivedGroups{},
 	}
 	if err := merged.validate(); err != nil {
 		return nil, err

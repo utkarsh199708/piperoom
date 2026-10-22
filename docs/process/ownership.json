@@ -26,7 +26,11 @@
       "folders": ["internal/clients/postgres/**", "internal/clients/warehouse/**", "internal/tools/dbtools/**", "internal/tools/scope.go",
         "internal/topology/**", "internal/owners/**", "internal/clients/pgconv/**",
         "internal/tools/changes/**", "internal/clients/prom/**", "internal/tools/debeziumtools/**",
-        "internal/actions/pgactions/**", "internal/actions/sourceactions/**", "internal/setup/sources/postgres/**"],
+        "internal/actions/pgactions/**", "internal/actions/sourceactions/**", "internal/setup/sources/postgres/**",
+        "internal/clients/clickhouse/engine.go", "internal/clients/clickhouse/engine_test.go", "internal/clients/clickhouse/errors.go",
+        "internal/clients/clickhouse/README.md", "internal/clients/clickhouse/integration_test.go",
+        "internal/tools/kafkatools/kafka_tools.go", "internal/tools/kafkatools/scope_derived_group_test.go",
+        "internal/tools/scope_derived_test.go"],
       "excluded": ["internal/topology/graph.go"]
     },
     "A4": { "folders": ["internal/agent/**", "cmd/investigate/**", "internal/wiring/**"], "excluded": ["internal/agent/contract.go", "internal/agent/llm/llm.go"] },

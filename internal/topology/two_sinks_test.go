@@ -227,7 +227,7 @@ func TestExplicitAmbiguousTopicKeepsWriterChain(t *testing.T) {
 		Warehouse: "clickhouse",
 		Writer:    owners.SinkWriter{Kind: owners.SinkWriterKafkaEngine, Name: "analytics.orders_kafka"},
 	}}}
-	specs := explicitClickhouseHopSpecs(p, []string{"pg.public.orders", "pg.sales.orders"})
+	specs := explicitClickhouseHopSpecs(p, []string{"pg.public.orders", "pg.sales.orders"}, &collected{})
 	if len(specs) != 1 || specs[0].topic != "" {
 		t.Fatalf("specs = %+v, want one spec with no topic", specs)
 	}

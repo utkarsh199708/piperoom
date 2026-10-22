@@ -93,6 +93,14 @@ func PipelineFrom(ctx context.Context) (owners.Pipeline, bool) {
 type Scope struct {
 	p        owners.Pipeline
 	unscoped bool
+	// derived reads the consumer groups the topology derived from the
+	// pipeline's own sink engines (owners.Owners.DerivedConsumerGroups): a
+	// ClickHouse Kafka engine table's kafka_group_name is not in owners.yaml,
+	// but the read tools accept it (CheckReadGroup, FilterReadGroups). The
+	// write guard (CheckGroup) never does. It is nil when the call was resolved
+	// without an Owners instance (an unscoped call, or a context carrying the
+	// full pipeline and no config).
+	derived func(pipelineID string) []string
 }
 
 // ScopeFor resolves the scope of a tool call from ctx. o is the tool's owners
@@ -103,9 +111,13 @@ type Scope struct {
 //   - ErrNoScope otherwise.
 func ScopeFor(ctx context.Context, o *owners.Owners) (Scope, error) {
 	v := scopeOf(ctx)
+	var derived func(string) []string
+	if o != nil {
+		derived = o.DerivedConsumerGroups
+	}
 	switch {
 	case v.hasPipeline:
-		return Scope{p: v.pipeline}, nil
+		return Scope{p: v.pipeline, derived: derived}, nil
 	case v.pipelineID != "":
 		if o == nil {
 			return Scope{}, fmt.Errorf("tools: owners not configured, cannot resolve the room's pipeline %q (wiring must pass Owners)", v.pipelineID)
@@ -114,9 +126,9 @@ func ScopeFor(ctx context.Context, o *owners.Owners) (Scope, error) {
 		if !ok {
 			return Scope{}, fmt.Errorf("%w: the room's pipeline %q is not in the owners config", ErrOutOfScope, v.pipelineID)
 		}
-		return Scope{p: p}, nil
+		return Scope{p: p, derived: derived}, nil
 	case v.unscoped:
-		return Scope{unscoped: true}, nil
+		return Scope{unscoped: true, derived: derived}, nil
 	}
 	return Scope{}, fmt.Errorf("%w: this tool call has no room pipeline, so read tools are refused (CLI/dev callers must opt out explicitly)", ErrNoScope)
 }
@@ -176,12 +188,54 @@ func (s Scope) CheckConnector(name string) error {
 	return refuse("connector", name, s, "allowed connectors: "+strings.Join(s.p.Connectors, ", "))
 }
 
-// CheckGroup refuses a consumer group that is not one of the pipeline's groups.
+// derivedGroups returns the consumer groups the topology derived from the
+// pipeline's own sink engines, or nil. They are part of the pipeline for the
+// read tools (CheckReadGroup, FilterReadGroups); CheckGroup, the write guard,
+// does not accept them. The set is read from the pipeline's own objects and
+// replaced on every topology build (owners.SetDerivedConsumerGroups), and the
+// owners config drops any group a pipeline declares, so a DDL author cannot
+// widen scope with kafka_group_name.
+func (s Scope) derivedGroups() []string {
+	if s.derived == nil || s.p.ID == "" {
+		return nil
+	}
+	return s.derived(s.p.ID)
+}
+
+// groupAllowed reports whether name is one of the read tools' consumer groups:
+// declared in owners.yaml or derived from a sink engine the pipeline owns.
+func (s Scope) groupAllowed(name string) bool {
+	return contains(s.p.ConsumerGroups, name) || contains(s.derivedGroups(), name)
+}
+
+// allowedGroups lists the consumer groups the read tools accept for an error:
+// the declared ones and the ones derived from the pipeline's own engines.
+func (s Scope) allowedGroups() []string {
+	return slices.Concat(s.p.ConsumerGroups, s.derivedGroups())
+}
+
+// CheckGroup refuses a consumer group that owners.yaml does not declare for the
+// pipeline. It is the write guard: actions (kafka_reset_offsets) and
+// clients/kafka.Writer.ResetGroupOffsets both call it, so a group derived from
+// warehouse DDL is never enough to reset offsets, whatever the engine's
+// kafka_group_name says. The read tools use CheckReadGroup.
 func (s Scope) CheckGroup(name string) error {
 	if s.unscoped || contains(s.p.ConsumerGroups, name) {
 		return nil
 	}
-	return refuse("consumer group", name, s, "allowed consumer groups: "+strings.Join(s.p.ConsumerGroups, ", "))
+	return refuse("consumer group", name, s, allowed("consumer groups", s.p.ConsumerGroups))
+}
+
+// CheckReadGroup refuses a consumer group that is neither declared in
+// owners.yaml nor derived from one of the pipeline's own sink engines (a
+// ClickHouse Kafka engine table's kafka_group_name, read by the topology). The
+// read tools (kafka_consumer_lag) use it; CheckGroup stays declared-only for
+// the write paths.
+func (s Scope) CheckReadGroup(name string) error {
+	if s.unscoped || s.groupAllowed(name) {
+		return nil
+	}
+	return refuse("consumer group", name, s, allowed("consumer groups", s.allowedGroups()))
 }
 
 // Topics returns the pipeline's topics: "<topic_prefix>.<source_table>" for
@@ -394,9 +448,17 @@ func (s Scope) FilterConnectors(names []string) []string {
 	return s.filter(names, func(n string) bool { return contains(s.p.Connectors, n) })
 }
 
-// FilterGroups keeps only the pipeline's consumer groups.
+// FilterGroups keeps only the pipeline's declared consumer groups. It is the
+// listing rule of the write guard (CheckGroup); read tools use FilterReadGroups.
 func (s Scope) FilterGroups(names []string) []string {
 	return s.filter(names, func(n string) bool { return contains(s.p.ConsumerGroups, n) })
+}
+
+// FilterReadGroups keeps only the consumer groups the read tools may list:
+// declared in owners.yaml or derived from a sink engine the pipeline owns.
+func (s Scope) FilterReadGroups(names []string) []string {
+	allowed := s.allowedGroups()
+	return s.filter(names, func(n string) bool { return contains(allowed, n) })
 }
 
 // FilterSubjects keeps only subjects derived from the pipeline's topics.

@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -44,6 +45,13 @@ type collected struct {
 	// engineLoads holds one load-error reading per ClickHouse Kafka engine
 	// table (clickhouse.go). It stays empty for a non-clickhouse warehouse.
 	engineLoads map[string]engineLoadSnapshot
+	// engineGroups holds one reading per ClickHouse Kafka engine table: the
+	// Kafka consumer group its CREATE statement names, and that group's lag.
+	// engineGroupRead is true when the warehouse client can read the group at
+	// all; without it, or when a read fails, the engine node says the group is
+	// not monitored instead of the graph silently leaving it out.
+	engineGroups    map[string]engineGroupSnapshot
+	engineGroupRead bool
 
 	topicNewest  map[string]time.Time
 	topicRecords map[string]int64 // sum of end-start over partitions
@@ -71,6 +79,7 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, engines []stri
 		groups:       map[string]groupSnapshot{},
 		freshness:    map[string]freshSnapshot{},
 		engineLoads:  map[string]engineLoadSnapshot{},
+		engineGroups: map[string]engineGroupSnapshot{},
 		topicNewest:  map[string]time.Time{},
 		topicRecords: map[string]int64{},
 		topicErr:     map[string]error{},
@@ -166,7 +175,47 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, engines []stri
 			})
 		}
 	}
+	// The engine's own consumer group is a ClickHouse reading too, so it is
+	// gated like load history and asked for the same engines (the sinks:
+	// writers, or the legacy convention's names).
+	if gr, ok := b.wh.(engineGroupReader); ok && b.loadErrorsAllowed() {
+		c.engineGroupRead = true
+		for _, engine := range engines {
+			engine := engine
+			run(func() {
+				// Read from the warehouse first: the group name is the
+				// engine's own (kafka_group_name), never owners.yaml. The
+				// lag is Kafka's answer for that group, so a stopped sink
+				// consumer shows its own lag next to the CDC consumer's.
+				snap := engineGroupSnapshot{}
+				snap.group, snap.groupErr = gr.EngineConsumerGroup(ctx, engine)
+				if snap.groupErr == nil && snap.group != "" {
+					if b.kafka == nil {
+						snap.lagErr = errors.New("topology: no Kafka client to read a derived consumer group's lag")
+					} else {
+						snap.lag, snap.lagErr = b.kafka.GroupLag(ctx, snap.group)
+					}
+				}
+				mu.Lock()
+				c.engineGroups[engine] = snap
+				mu.Unlock()
+			})
+		}
+	}
 	wg.Wait()
+	if c.engineGroupRead {
+		// The derived groups are what the read tools accept besides the declared
+		// ones (tools.Scope.CheckReadGroup); CheckGroup, the write guard, stays
+		// declared-only. Recording them here, from the pipeline's own engines
+		// only, keeps that scope strict; a failed read records none.
+		groups := make([]string, 0, len(c.engineGroups))
+		for _, snap := range c.engineGroups {
+			if snap.group != "" {
+				groups = append(groups, snap.group)
+			}
+		}
+		b.o.SetDerivedConsumerGroups(p.ID, groups)
+	}
 	return c
 }
 
