@@ -473,12 +473,23 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 }
 
 // Events returns events after afterSeq and the room's current last_seq.
+// An explicit limit 0 is an empty page: the caller asks for the log head
+// (last_seq) and no events. A negative limit is invalid. The HTTP layer
+// defaults an absent limit to 500 (docs/api.md, GET /api/rooms/{id}/events).
 func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, int64, error) {
-	if _, err := s.readRoom(ctx, roomID); err != nil {
+	snap, err := s.readRoom(ctx, roomID)
+	if err != nil {
 		return nil, 0, err
 	}
-	if limit <= 0 {
-		limit = 500
+	if limit < 0 {
+		return nil, 0, validation("limit must be a non-negative integer")
+	}
+	if limit == 0 {
+		// "Give me no events" used to fall into a limit <= 0 default of 500,
+		// so limit=0 returned the whole page (KAN-395). last_seq can trail an
+		// append that is still in flight; the next poll sees it, exactly as a
+		// client paging the log already allows.
+		return []events.Event{}, snap.LastSeq, nil
 	}
 	if limit > 1000 {
 		limit = 1000
