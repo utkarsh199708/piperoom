@@ -104,7 +104,7 @@ func TestBuildClickhouseEngineConsumerGroup(t *testing.T) {
 		}
 	}
 	if got, want := o.DerivedConsumerGroups("orders"), []string{"piperoom-clickhouse-orders"}; !slices.Equal(got, want) {
-		t.Fatalf("derived consumer groups = %v, want %v (tools.Scope.CheckGroup reads this)", got, want)
+		t.Fatalf("derived consumer groups = %v, want %v (tools.Scope.CheckReadGroup reads this)", got, want)
 	}
 
 	// Data-flow order: topic, engine group, engine, view, sink.

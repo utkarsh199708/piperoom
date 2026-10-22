@@ -108,3 +108,35 @@ func TestDerivedConsumerGroupsHandBuiltOwners(t *testing.T) {
 		t.Fatalf("nil owners derived groups = %v, want none", got)
 	}
 }
+
+// TestDerivedConsumerGroupsRefuseDeclaredGroups: a warehouse DDL author
+// controls kafka_group_name, so a derived group that any pipeline declares is
+// dropped — another pipeline's group must never enter this pipeline's read
+// scope, and a declared group needs no second entry. The rule must also hold
+// through an Only view, whose Pipelines no longer list the other pipeline: the
+// declared-group index is shared with the copy.
+func TestDerivedConsumerGroupsRefuseDeclaredGroups(t *testing.T) {
+	o := loadDerivedOwners(t)
+	o.SetDerivedConsumerGroups("orders", []string{"piperoom-clickhouse-orders", "bill-sync", "order-sync"})
+	if got, want := o.DerivedConsumerGroups("orders"), []string{"piperoom-clickhouse-orders"}; !slices.Equal(got, want) {
+		t.Fatalf("derived groups = %v, want %v (only the group no pipeline declares)", got, want)
+	}
+
+	// wiring gives each pipeline stack an Only view; its builder still refuses
+	// another pipeline's declared group.
+	view := o.Only("orders")
+	view.SetDerivedConsumerGroups("orders", []string{"piperoom-clickhouse-orders-2", "bill-sync"})
+	if got, want := o.DerivedConsumerGroups("orders"), []string{"piperoom-clickhouse-orders-2"}; !slices.Equal(got, want) {
+		t.Fatalf("derived groups through an Only view = %v, want %v", got, want)
+	}
+
+	// A hand-built Owners has no index; the pipelines it holds are scanned.
+	h := &Owners{Pipelines: []Pipeline{
+		{ID: "orders"},
+		{ID: "billing", ConsumerGroups: []string{"bill-sync"}},
+	}}
+	h.SetDerivedConsumerGroups("orders", []string{"ch", "bill-sync"})
+	if got, want := h.DerivedConsumerGroups("orders"), []string{"ch"}; !slices.Equal(got, want) {
+		t.Fatalf("hand-built owners derived groups = %v, want %v", got, want)
+	}
+}

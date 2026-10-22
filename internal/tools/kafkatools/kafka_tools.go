@@ -114,9 +114,11 @@ func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 		return tools.Result{}, err
 	}
 	// Only this room's groups; the others get no GroupLag call either and are
-	// only counted.
+	// only counted. A group the topology derived from the pipeline's own sink
+	// engine (a ClickHouse kafka_group_name) counts as the room's here; the
+	// write guard stays on declared groups only.
 	all := len(groups)
-	groups = sc.FilterGroups(groups)
+	groups = sc.FilterReadGroups(groups)
 	other := all - len(groups)
 	type row struct {
 		Group string `json:"group"`
@@ -182,7 +184,9 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	if err != nil {
 		return tools.Result{}, err
 	}
-	if err := sc.CheckGroup(p.Group); err != nil {
+	// Read scope: a declared group or one derived from the pipeline's own sink
+	// engine. CheckGroup (the write guard) stays declared-only.
+	if err := sc.CheckReadGroup(p.Group); err != nil {
 		return tools.Result{}, err
 	}
 	cctx, cancel := withTimeout(ctx)

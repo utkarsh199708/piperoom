@@ -141,6 +141,12 @@ type Owners struct {
 	// sink engines (derived.go). Load and LoadDir start it empty; a copied
 	// Owners (Only) shares it.
 	derived *derivedGroups
+
+	// declaredGroups indexes every consumer_groups entry of the config by group
+	// name. validate builds it and an Only copy shares it, so a builder that
+	// sees one pipeline can still refuse a derived group that another pipeline
+	// declares (derived.go). nil on a hand-built Owners.
+	declaredGroups map[string]bool
 }
 
 // Load reads and validates the owners file at path. An `auto_approve:` entry
@@ -289,5 +295,23 @@ func (o *Owners) validate() error {
 	if err := o.validateDLQ(); err != nil {
 		return err
 	}
-	return o.validateTenancy()
+	if err := o.validateTenancy(); err != nil {
+		return err
+	}
+	o.indexConsumerGroups()
+	return nil
+}
+
+// indexConsumerGroups records every declared consumer group across all
+// pipelines. A derived group is checked against this set (derived.go); the
+// whole config is kept, not the subset an Only view holds, because a
+// per-pipeline stack's builder must still see another pipeline's declaration.
+func (o *Owners) indexConsumerGroups() {
+	idx := make(map[string]bool)
+	for i := range o.Pipelines {
+		for _, g := range o.Pipelines[i].ConsumerGroups {
+			idx[g] = true
+		}
+	}
+	o.declaredGroups = idx
 }

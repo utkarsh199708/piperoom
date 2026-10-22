@@ -183,9 +183,10 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, whKind string)
 	}
 	wg.Wait()
 	if whKind == "clickhouse" {
-		// The derived groups are what tools.Scope.CheckGroup accepts besides
-		// the declared ones. Recording them here, from the pipeline's own
-		// engines only, keeps that scope strict; a failed read records none.
+		// The derived groups are what the read tools accept besides the declared
+		// ones (tools.Scope.CheckReadGroup); CheckGroup, the write guard, stays
+		// declared-only. Recording them here, from the pipeline's own engines
+		// only, keeps that scope strict; a failed read records none.
 		groups := make([]string, 0, len(c.engineGroups))
 		for _, snap := range c.engineGroups {
 			if snap.group != "" {

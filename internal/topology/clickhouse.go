@@ -34,8 +34,9 @@ import (
 // group's own lag. That is what keeps a stalled warehouse sink from being
 // blamed on the pipeline's declared consumer: the CDC group can read healthy
 // while the engine's group is the one that is behind. The builder records the
-// group on the owners config so tools.Scope.CheckGroup accepts it for
-// kafka_consumer_lag (health.go).
+// group on the owners config so tools.Scope.CheckReadGroup accepts it for
+// kafka_consumer_lag (health.go); the write guard (CheckGroup) stays on
+// declared groups.
 
 // clickhouseHop returns the intermediate nodes of one ClickHouse
 // Kafka-ingestion hop and the data edges that join them into the graph:
