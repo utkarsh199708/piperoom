@@ -25,7 +25,8 @@ type windowKeysReader interface {
 }
 
 // reconcileKeyDiff is the outcome of the key-level comparison: the data, the
-// reason it was not compared, or the error that fails the call.
+// reason it was not compared, or the input error that fails the call. A key
+// read that fails is a note, not an error: the bucket table still answers.
 type reconcileKeyDiff struct {
 	keys ReconcileKeys
 	have bool
@@ -36,8 +37,9 @@ type reconcileKeyDiff struct {
 // reconcileKeyDiff compares the sets of primary keys in the source and in the
 // sink over the same window. One key is one row, however often the row was
 // updated, so this is a row comparison while the topic column is an event
-// count. The diff is refused rather than truncated past reconcileKeyCap, so
-// "no more missing keys" is never read from a cut read (#409).
+// count. The diff is left out with a note rather than truncated past
+// reconcileKeyCap, so "no more missing keys" is never read from a cut read
+// (#409) and the bucket table is still returned.
 func (d Deps) reconcileKeyDiff(ctx context.Context, srcTable, sinkTable, tsCol, keyCol string, since, until time.Time) reconcileKeyDiff {
 	src, ok := d.Src.(windowKeysReader)
 	if !ok {
@@ -47,13 +49,19 @@ func (d Deps) reconcileKeyDiff(ctx context.Context, srcTable, sinkTable, tsCol, 
 	if !ok {
 		return reconcileKeyDiff{note: "keys not compared: the warehouse client cannot list keys"}
 	}
-	srcKey, note, err := keyColumnOf(ctx, d.Src, srcTable, keyCol, "source")
-	if err != nil || note != "" {
-		return reconcileKeyDiff{note: note, err: err}
+	srcKey, note, err := d.keyColumnOf(ctx, d.Src, srcTable, keyCol, "source")
+	if err != nil {
+		return reconcileKeyDiff{err: err}
 	}
-	sinkKey, note, err := keyColumnOf(ctx, d.Wh, sinkTable, keyCol, "sink")
-	if err != nil || note != "" {
-		return reconcileKeyDiff{note: note, err: err}
+	if note != "" {
+		return reconcileKeyDiff{note: note}
+	}
+	sinkKey, note, err := d.keyColumnOf(ctx, d.Wh, sinkTable, keyCol, "sink")
+	if err != nil {
+		return reconcileKeyDiff{err: err}
+	}
+	if note != "" {
+		return reconcileKeyDiff{note: note}
 	}
 
 	var (
@@ -73,13 +81,13 @@ func (d Deps) reconcileKeyDiff(ctx context.Context, srcTable, sinkTable, tsCol, 
 	}()
 	wg.Wait()
 	if srcErr != nil {
-		return reconcileKeyDiff{err: fmt.Errorf("dbtools: reconcile: source keys of %s: %w", srcTable, srcErr)}
+		return reconcileKeyDiff{note: fmt.Sprintf("keys not compared: reading the source keys of %s failed (%v)", srcTable, srcErr)}
 	}
 	if snkErr != nil {
-		return reconcileKeyDiff{err: fmt.Errorf("dbtools: reconcile: sink keys of %s: %w", sinkTable, snkErr)}
+		return reconcileKeyDiff{note: fmt.Sprintf("keys not compared: reading the sink keys of %s failed (%v)", sinkTable, snkErr)}
 	}
 	if srcTotal > reconcileKeyCap || snkTotal > reconcileKeyCap {
-		return reconcileKeyDiff{err: fmt.Errorf("%w: the window holds %d source keys and %d sink keys, more than the %d-key cap: narrow since/until", tools.ErrBadInput, srcTotal, snkTotal, reconcileKeyCap)}
+		return reconcileKeyDiff{note: fmt.Sprintf("keys not compared: %d source / %d sink keys exceed the %d-key cap; narrow since/until for a key diff", srcTotal, snkTotal, reconcileKeyCap)}
 	}
 	missing, extra := diffKeys(srcKeys, snkKeys)
 	return reconcileKeyDiff{have: true, keys: ReconcileKeys{
@@ -94,32 +102,56 @@ func (d Deps) reconcileKeyDiff(ctx context.Context, srcTable, sinkTable, tsCol, 
 	}}
 }
 
-// keyColumnOf returns the key column to compare for table: the caller's
-// choice, or the table's single-column primary key. A note and no error means
-// the table cannot be compared by key (no primary key, a composite one, or a
-// client that does not report it), which is not a failure of the call.
-func keyColumnOf(ctx context.Context, c any, table, chosen, side string) (string, string, error) {
-	if chosen != "" {
-		return chosen, "", nil
-	}
+// keyColumnOf returns the key column to compare for table: the table's
+// single-column primary key when the client reports one, otherwise the
+// caller's choice. key_column may not stand in for a primary key: any other
+// column (an email, a tax id) would be read for the whole window and sampled
+// into the room log, exactly what pg_row refuses. A note and no error means
+// the table cannot be compared by key (no primary key, a composite one, a
+// client that does not report it, or a read failure), which is not a failure
+// of the call; only a key_column that is not the primary key is ErrBadInput.
+func (d Deps) keyColumnOf(ctx context.Context, c any, table, chosen, side string) (string, string, error) {
 	pk, ok := c.(pkColumner)
 	if !ok {
+		// No primary key is reported: the caller's column is the only key
+		// there is to compare.
+		if chosen != "" {
+			return chosen, "", nil
+		}
 		return "", fmt.Sprintf("keys not compared: the %s client does not report the primary key of %s; pass key_column", side, table), nil
 	}
 	col, err := pk.PrimaryKeyColumn(ctx, table)
 	switch {
 	case errors.Is(err, clients.ErrNotFound):
+		// No primary key exists, so there is no key a chosen column could
+		// bypass; the caller names the only row identity there is.
+		if chosen != "" {
+			return chosen, "", nil
+		}
 		return "", fmt.Sprintf("keys not compared: %s has no primary key; pass key_column", table), nil
 	case errors.Is(err, clients.ErrNotSupported):
+		// A composite key has no single column to compare, and no key_column
+		// may stand in for it: that would make any column readable.
+		if chosen != "" {
+			return "", "", fmt.Errorf("%w: key_column is not allowed for %s: it has a composite primary key, so there is no single-column key to compare", tools.ErrBadInput, table)
+		}
 		return "", fmt.Sprintf("keys not compared: %s has a composite primary key; reconcile compares one key column", table), nil
 	case err != nil:
-		return "", "", fmt.Errorf("dbtools: reconcile: primary key of %s: %w", table, err)
+		return "", fmt.Sprintf("keys not compared: the primary key of %s could not be read (%v)", table, err), nil
 	}
 	// The client reads the name from the catalog, but a name is still checked
 	// before it reaches another client's SQL.
 	if !validColumn(col) {
-		return "", "", fmt.Errorf("dbtools: reconcile: primary key of %s is not a plain identifier", table)
+		return "", fmt.Sprintf("keys not compared: the primary key of %s is not a plain identifier", table), nil
 	}
+	// Snowflake folds unquoted names to upper case and Databricks to lower
+	// case; both report the key in their own case, so "ID" and "id" are the
+	// same column there. Postgres is case-sensitive (warehouse_row's rule).
+	fold := side == "sink" && (d.isSnowflake() || d.isDatabricks())
+	if chosen != "" && chosen != col && !(fold && strings.EqualFold(chosen, col)) {
+		return "", "", fmt.Errorf("%w: key_column must be the primary key column of %s (%q)", tools.ErrBadInput, table, col)
+	}
+	// The canonical name, so the client reads the exact catalog column.
 	return col, "", nil
 }
 
@@ -187,7 +219,9 @@ func (k reconcileKeyDiff) summary() string {
 	sb.WriteString("\n")
 	switch {
 	case k.keys.Missing > 0:
-		fmt.Fprintf(&sb, "keys: %d source %s not in the sink for this window; confirm one with warehouse_row (source row present, sink row absent) before naming a writer", k.keys.Missing, rowsAre(k.keys.Missing))
+		// A key absent from the sink window can also be a stale row the lagging
+		// sink has not updated yet, so the line says both.
+		fmt.Fprintf(&sb, "keys: %d source %s not in the sink's window (missing, or not yet updated there); confirm one with warehouse_row (source row present, sink row absent) before naming a writer", k.keys.Missing, rowsAre(k.keys.Missing))
 	case k.keys.Extra > 0:
 		fmt.Fprintf(&sb, "keys: %d sink %s not among the source rows in this window (a later source update moves a row out of the window); confirm one with warehouse_row", k.keys.Extra, rowsAre(k.keys.Extra))
 	case k.keys.Source > 0:

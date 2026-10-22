@@ -60,8 +60,9 @@ type ReconcileData struct {
 // ReconcileKeys is the key-level comparison of source and sink rows over the
 // same window. One key is one row, however often the row was updated, so
 // Source and Sink are row counts, not change-event counts. Missing and Extra
-// are exact (the read is refused, not truncated, past reconcileKeyCap);
-// MissingKeys and ExtraKeys list at most reconcileKeySample of them.
+// are exact (a window past reconcileKeyCap leaves the key section out with a
+// note instead of reporting a truncated diff); MissingKeys and ExtraKeys list
+// at most reconcileKeySample of them, and they are always primary-key values.
 type ReconcileKeys struct {
 	Column      string   `json:"column"`      // source key column
 	SinkColumn  string   `json:"sink_column"` // sink key column
@@ -80,14 +81,15 @@ func reconcileTool(d Deps) tools.Tool {
 			"and say on which side the rows are lost: the connector side (topic is missing them) or the consumer side (topic has them, sink does not). " +
 			"Counts only, plus the compared key column's values; never another column value. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events. " +
 			"Rows newer than the settle margin (default 2m) are treated as still in flight and not judged: the window is cut that long before now. If the consumer lags more than that, pass a larger settle or an earlier until. " +
-			"When both tables have a single-column primary key, it also compares the key sets over the same window and lists the rows the sink is missing and the sink rows the source does not have (at most 2000 keys per side; a larger window is refused, so narrow it).",
+			"When both tables report a single-column primary key, it also compares the key sets over the same window and lists the rows in the source but not in the sink's window and the sink rows the source does not have (at most 2000 keys per side; a larger window leaves the key section out with a note, so narrow it). " +
+			"key_column, when given, must name the table's primary key; it can never read another column. The key sets are compared as text (id::text), so a sink that stores the key in another type or letter case can show the same row as missing and extra.",
 		schema: objSchema(map[string]any{
 			"table":      strProp("Source table, \"schema.table\", one of the room's source tables."),
 			"since":      strProp("Start of the window, RFC 3339. The window is at most 6 hours."),
 			"until":      strProp("End of the window, RFC 3339. Default: now minus settle. Never later than now minus settle."),
 			"settle":     strProp("Optional margin for rows still in flight, a Go duration such as \"5m\" (0 to 1h). Default 2m."),
 			"sink_table": strProp("Sink table, only needed when the pipeline has several sink tables and none has the source table's name."),
-			"key_column": strProp("Primary key column to compare, when the tables' primary keys are not discovered or differ from the source's. Default: each table's own primary key."),
+			"key_column": strProp("Primary key column to compare. Optional, and only accepted when it is the table's primary key; default: each table's own primary key."),
 		}, "table", "since"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
 			var input struct {
@@ -201,6 +203,8 @@ func reconcileTool(d Deps) tools.Tool {
 				return tools.Result{}, countsErr
 			}
 			if keys.err != nil {
+				// The only key-diff error is a refused key_column (ErrBadInput);
+				// every other key problem is a note beside the bucket table.
 				return tools.Result{}, keys.err
 			}
 			data := ReconcileData{Buckets: rows}
