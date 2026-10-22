@@ -287,6 +287,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(reason ? { reason } : {}),
     }),
+  // X8: the driver tries the proposal on the staging stack. Answers 202 with proposal.stage_started at once; the
+  // result is a proposal.staged over the socket. 409 no_staging / not_stageable / stage_in_progress / staging_required,
+  // 429 rate_limited (a sixth stage of one proposal).
+  stageProposal: (proposalId: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/stage`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
   // paramsHash: the hash shown with the proposal, same rule as approve.
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {

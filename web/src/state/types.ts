@@ -12,6 +12,7 @@ import type {
   Identity,
   PostmortemSource,
   ProposalPreviewedPayload,
+  ProposalStagedPayload,
   ProposalStep,
   RoomLabelledPayload,
   RoomMode,
@@ -180,6 +181,23 @@ export interface ProposalState {
   preview?: ProposalPreviewedPayload
   /** The agent's verdict after the last step ran. */
   verification?: AgentVerificationPayload
+  /**
+   * X8: step indexes whose action can be staged. From the snapshot (open_proposals[].stageable, the
+   * server's registry knows it, the log does not) or, for a stage that starts, from its `steps`.
+   * Absent until one of them says so.
+   */
+  stageable?: number[]
+  /** X8: a proposal.stage_started with no proposal.staged yet. The card also checks expires_at against its clock. */
+  stage_running?: { by: Actor; started_at: string; expires_at: string; steps: number[]; params_hash: string }
+  /** X8: the newest proposal.staged payload; the card calls it stale when its params_hash is not the proposal's. */
+  staged?: ProposalStagedPayload
+  /**
+   * X8: a step's action is in require_staging: and no healthy stage of this params_hash exists. From
+   * the snapshot, lifted by a healthy proposal.staged, and set by a 409 staging_required on approve.
+   */
+  staging_required?: boolean
+  /** X8: the server's own words from a 409 staging_required (names the step and action); untrusted text. */
+  staging_message?: string
   /**
    * P1a: every required layer approved while write mode is off, so no step runs. From the snapshot
    * (`open_proposals[].blocked`) or, for an approval that arrives over the socket, from `mode.write`
@@ -388,6 +406,12 @@ export interface RoomState {
    */
   snapshot_blocked?: Record<string, 'write_mode_off'>
   /**
+   * X8: proposal_id -> the snapshot's `stageable` and `staging_required` for the open proposals that
+   * carry either. The reducer copies it onto the proposal when proposal.created replays (same
+   * reason as snapshot_hashes), and applyModeRefresh redoes it.
+   */
+  snapshot_staging?: Record<string, { stageable: number[]; staging_required: boolean }>
+  /**
    * The room GET's `mode` (P1a, P2b). Write mode changes only when the server restarts, which drops
    * the socket, so it is read again on every reconnect (`mode_refreshed`, applyModeRefresh). The
    * socket never carries it. Absent on a server from before P1a, which has write mode on.
@@ -495,6 +519,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
         .map((p) => [p.proposal_id, p.params_hash as string]),
     ),
     ...snapshotWriteMode(snapshot),
+    ...snapshotStaging(snapshot),
     driver: snapshot.driver
       ? {
           id: snapshot.driver.id,
@@ -543,6 +568,16 @@ export function snapshotWriteMode(snapshot: RoomSnapshot): Pick<RoomState, 'mode
     ...(snapshot.mode ? { mode: snapshot.mode } : {}),
     ...(Object.keys(blocked).length > 0 ? { snapshot_blocked: blocked } : {}),
   }
+}
+
+// The X8 fields, left off entirely when no open proposal carries one (a server from before X8c).
+export function snapshotStaging(snapshot: RoomSnapshot): Pick<RoomState, 'snapshot_staging'> {
+  const staging = Object.fromEntries(
+    (snapshot.open_proposals ?? [])
+      .filter((p) => p.stageable !== undefined || p.staging_required !== undefined)
+      .map((p) => [p.proposal_id, { stageable: p.stageable ?? [], staging_required: p.staging_required === true }]),
+  )
+  return Object.keys(staging).length > 0 ? { snapshot_staging: staging } : {}
 }
 
 // The snapshot carries status and source only; the replay of postmortem.drafted fills in the rest.

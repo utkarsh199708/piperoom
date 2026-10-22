@@ -55,6 +55,8 @@ export type EventType =
   | 'room.labelled'
   | 'checklist.step_done'
   | 'proposal.previewed'
+  | 'proposal.stage_started'
+  | 'proposal.staged'
   | 'agent.verification'
   | 'postmortem.drafted'
   | 'postmortem.failed'
@@ -357,6 +359,47 @@ export interface ProposalPreviewedPayload {
   at: string
 }
 
+/** The three states a staged step shows (events.StageResult.Outcome). */
+export type StageOutcome = 'healthy' | 'failed' | 'not_applied'
+
+/**
+ * What one step did on the staging stack (X8, docs/api.md "X8 staging"). `detail`, `leftover` and
+ * `target` are staging's own words, untrusted: render them as text.
+ */
+export interface StageResult {
+  target?: string
+  applied: boolean
+  healthy: boolean
+  detail?: string
+  dry_run?: DryRunResult
+  /** What the stage could not put back on staging; absent when staging is as it was. */
+  leftover?: string
+  duration_ms: number
+}
+
+/** One staged step: exactly one of `result` (staging gave a verdict) and `error` (it did not). */
+export interface StageStepResult {
+  step_index: number
+  result?: StageResult
+  error?: string
+}
+
+/** proposal.stage_started (actor: the driver): `steps` are the indexes of the stageable steps. */
+export interface ProposalStageStartedPayload {
+  proposal_id: string
+  params_hash: string
+  steps: number[]
+  expires_at: string
+}
+
+/** proposal.staged (system actor): one entry per index of the matching stage_started. */
+export interface ProposalStagedPayload {
+  proposal_id: string
+  params_hash: string
+  steps: StageStepResult[]
+  at: string
+}
+
 export interface VerificationCheck {
   layer: string
   name: string
@@ -573,6 +616,14 @@ export interface ProposalSummary {
    * 45 s in the past (#652); the web folds proposal.scheduled itself and never reads this field.
    */
   scheduled?: { run_at: string; cancel_until: string }
+  /** X8: step indexes whose action implements actions.Stager; [] or absent when none (and before X8c). */
+  stageable?: number[]
+  /** X8: a proposal.stage_started with no proposal.staged yet, before its expires_at. */
+  stage_running?: { by: Actor; started_at: string; expires_at: string; steps: number[] }
+  /** X8: the newest proposal.staged payload, kept while its params_hash differs from the proposal's. */
+  staged?: ProposalStagedPayload
+  /** X8: a step's action is in require_staging: and no healthy stage for the current params_hash exists. */
+  staging_required?: boolean
 }
 
 /**
@@ -586,6 +637,8 @@ export interface RoomMode {
   solo: boolean
   /** The pipeline's auto_approve: list from owners.yaml. */
   auto_approve: string[]
+  /** X8: the pipeline declares staging: and write mode is on, so "Try in staging" may exist. Absent before X8c. */
+  staging?: boolean
 }
 
 export interface SuggestionSummary {

@@ -46,6 +46,11 @@ export interface ApproveResult {
    * stale banner and reloads the room; the caller must not retry.
    */
   mismatch?: boolean
+  /**
+   * 409 staging_required (X8): the fix needs a healthy stage first. The server's text is on the
+   * proposal (`staging_message`) and the card says it; the room error banner does not.
+   */
+  stagingRequired?: boolean
 }
 
 /** What an approve-all (POST /api/proposals/{pid}/approve-all) came to. */
@@ -57,6 +62,19 @@ export interface ApproveAllResult extends ApproveResult {
   refused?: boolean
   /** Any other failure, for the confirm dialog, which covers the room error banner. */
   error?: string
+}
+
+/** What a "Try in staging" (POST /api/proposals/{pid}/stage) came to; `code` is the server error code on a failure. */
+export interface StageAttempt {
+  ok: boolean
+  code?: string
+  /** The text for the person (the card shows it; the room error banner does not). */
+  error?: string
+}
+
+/** True for the 409 the server sends when approve needs a healthy stage first (X8). */
+export function isStagingRequired(e: unknown): boolean {
+  return e instanceof ApiClientError && e.status === 409 && e.code === 'staging_required'
 }
 
 /** True for the 409 the server sends when the params_hash sent is not the proposal's. */
@@ -177,6 +195,12 @@ export interface RoomActions {
    * it; optional only for hosts and test doubles from before it, which show no Cancel.
    */
   cancelSchedule?: (proposalId: string, reason?: string) => Promise<CancelResult>
+  /**
+   * Try the proposal on the staging stack (X8, the driver's). Resolves when the server took it (the
+   * running state and the result arrive as events) or said no; the answer is for the card and stays
+   * out of the room error banner. Optional for hosts and test doubles from before X8, which show no button.
+   */
+  stage?: (proposalId: string) => Promise<StageAttempt>
   /** `paramsHash` is the hash the UI rendered with the proposal, sent as is. */
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) => void
   handoff: (to: string, stayAsWatcher: boolean) => void
@@ -199,6 +223,8 @@ type RoomAction =
   | { type: 'mode_refreshed'; snapshot: RoomSnapshot }
   // The server refused this person's approve-all (403 not_layer_owner): kept until the room reloads.
   | { type: 'approve_all_refused'; proposalId: string; text: string }
+  // The server answered 409 staging_required: the proposal is held for a healthy stage (X8).
+  | { type: 'staging_required'; proposalId: string; text: string }
   | { type: 'reset' }
 
 function roomReducer(state: RoomState | null, action: RoomAction): RoomState | null {
@@ -211,6 +237,15 @@ function roomReducer(state: RoomState | null, action: RoomAction): RoomState | n
       return state ? applyEvent(state, action.event) : state
     case 'mode_refreshed':
       return state ? applyModeRefresh(state, action.snapshot) : state
+    case 'staging_required':
+      return state
+        ? {
+            ...state,
+            proposals: state.proposals.map((p) =>
+              p.proposal_id === action.proposalId ? { ...p, staging_required: true, staging_message: action.text } : p,
+            ),
+          }
+        : state
     case 'approve_all_refused':
       return state
         ? { ...state, approve_all_refused: { ...state.approve_all_refused, [action.proposalId]: action.text } }
@@ -373,6 +408,10 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     let probed = false
     let firstConnect = true
     let queue: Promise<void> = Promise.resolve()
+    // What the room GET said last, kept here (not read from state, which lags a render) for the
+    // X8 refresh below: the log position the replay runs to, and whether the pipeline has staging.
+    let replayTarget = 0
+    let stagingOn = false
 
     // A hidden tab is away: the heartbeat and a reconnect must not flip it back to viewing.
     const currentPresence = (): PresenceMember['state'] => (document.hidden ? 'away' : 'viewing')
@@ -385,10 +424,16 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     const applyEventSeq = (ev: Event) => {
       if (ev.seq <= lastSeqRef.current) return
       staleRoomRef.current = null
+      const replaying = ev.seq <= replayTarget
       dispatch({ type: 'event', event: ev })
       lastSeqRef.current = ev.seq
       // The stream settles a send by its client_id (an answer may have been lost).
       ledger.onEvent(ev, user.id)
+      // X8: what can be staged and whether a stage is still owed are not in the log. A proposal or a
+      // stage that arrives live asks the server again; the room GET at load already covers the replay.
+      if (!replaying && stagingOn && (ev.type === 'proposal.created' || ev.type === 'proposal.staged')) {
+        void refreshMode()
+      }
     }
 
     // Page /events until the gap before `ev` closes. On failure (fetch throws or
@@ -449,6 +494,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       try {
         const snapshot = await api.room(roomId)
         if (cancelled || !snapshot) return
+        stagingOn = snapshot.mode?.staging === true
         dispatch({ type: 'mode_refreshed', snapshot })
       } catch {
         // see above
@@ -572,6 +618,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         const snapshot = await api.room(roomId)
         if (cancelled) return
         dispatch({ type: 'init', snapshot })
+        replayTarget = snapshot.last_seq ?? 0
+        stagingOn = snapshot.mode?.staging === true
         // lastSeqRef stays 0: open with after=0 so the full log replays and the
         // reducer rebuilds timeline/comments/proposals/trace/handoffs (item D).
         setConn('connecting')
@@ -806,6 +854,11 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setError(null)
           return { ok: false, needsConfirm: true }
         }
+        if (isStagingRequired(e)) {
+          setError(null)
+          dispatch({ type: 'staging_required', proposalId, text: errorText(e) })
+          return { ok: false, stagingRequired: true }
+        }
         setError(errorText(e))
         return { ok: false }
       }
@@ -840,6 +893,11 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           return { ok: false, needsConfirm: true }
         }
         const text = errorText(e)
+        if (isStagingRequired(e)) {
+          setError(null)
+          dispatch({ type: 'staging_required', proposalId, text })
+          return { ok: false, stagingRequired: true, error: text }
+        }
         if (e instanceof ApiClientError && e.status === 403 && e.code === 'not_layer_owner') {
           // The card says it, next to the rows that are back; the banner would say it twice.
           setError(null)
@@ -871,6 +929,38 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         const text = errorText(e)
         setError(text)
         return { ok: false, error: text }
+      }
+    },
+    stage: async (proposalId) => {
+      if (isFixtures()) {
+        const p = stateRef.current?.proposals.find((x) => x.proposal_id === proposalId)
+        const steps = p?.stageable ?? []
+        const hash = p?.params_hash ?? ''
+        synthesize('proposal.stage_started', {
+          proposal_id: proposalId,
+          params_hash: hash,
+          steps,
+          expires_at: new Date(Date.now() + 150_000).toISOString(),
+        })
+        synthesize('proposal.staged', {
+          proposal_id: proposalId,
+          params_hash: hash,
+          steps: steps.map((i) => ({
+            step_index: i,
+            result: { target: 'connector orders-src', applied: true, healthy: true, detail: 'RUNNING, 1 of 1 tasks RUNNING for 60 s', duration_ms: 61_000 },
+          })),
+          at: new Date().toISOString(),
+        })
+        return { ok: true }
+      }
+      try {
+        await api.stageProposal(proposalId)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        // The card shows the reason next to the button; the banner would say it twice.
+        const code = e instanceof ApiClientError ? e.code : undefined
+        return { ok: false, code, error: errorText(e) }
       }
     },
     reject: (proposalId, layer, reason, paramsHash) => {

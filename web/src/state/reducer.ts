@@ -5,6 +5,8 @@ import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
   ProposalPreviewedPayload,
+  ProposalStageStartedPayload,
+  ProposalStagedPayload,
   RoomSnapshot,
   Actor,
   AgentHypothesisPayload,
@@ -48,7 +50,8 @@ import { alertSource } from '../lib/alerts'
 import { driftFacts } from '../lib/drift'
 import { runbookHits } from '../lib/f8'
 import { stripBidi } from '../lib/title'
-import { checklistKey, snapshotWriteMode } from './types'
+import { checklistKey, snapshotStaging, snapshotWriteMode } from './types'
+import { stageLiftsRequirement } from '../lib/staging'
 import type { AlertInfo, HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
@@ -65,6 +68,7 @@ function as<T>(e: Event): T {
  */
 export function applyModeRefresh(state: RoomState, snapshot: RoomSnapshot): RoomState {
   const fresh = snapshotWriteMode(snapshot)
+  const freshStaging = snapshotStaging(snapshot)
   const next: RoomState = {
     ...state,
     ...fresh,
@@ -74,12 +78,24 @@ export function applyModeRefresh(state: RoomState, snapshot: RoomSnapshot): Room
       const proposal = { ...p }
       delete proposal.blocked
       if (blocked) proposal.blocked = blocked
+      // X8: the snapshot is the authority on what can be staged and whether a stage is still owed.
+      const staging = freshStaging.snapshot_staging?.[p.proposal_id]
+      if (staging) {
+        proposal.stageable = staging.stageable
+        if (staging.staging_required) proposal.staging_required = true
+        else {
+          delete proposal.staging_required
+          delete proposal.staging_message
+        }
+      }
       return proposal
     }),
+    ...freshStaging,
   }
   // A snapshot without them (a server from before P1a, or one with nothing blocked) clears the old ones.
   if (!fresh.mode) delete next.mode
   if (!fresh.snapshot_blocked) delete next.snapshot_blocked
+  if (!freshStaging.snapshot_staging) delete next.snapshot_staging
   return next
 }
 
@@ -610,6 +626,13 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ...(state.snapshot_blocked?.[p.proposal_id] ? { blocked: state.snapshot_blocked[p.proposal_id] } : {}),
             // Left off when every layer has an owner, so such a proposal folds as before P2b.
             ...(p.fallback_layers && p.fallback_layers.length > 0 ? { fallback_layers: [...p.fallback_layers] } : {}),
+            // X8: only the snapshot knows what can be staged and whether a stage is owed.
+            ...(state.snapshot_staging?.[p.proposal_id]
+              ? {
+                  stageable: state.snapshot_staging[p.proposal_id].stageable,
+                  ...(state.snapshot_staging[p.proposal_id].staging_required ? { staging_required: true } : {}),
+                }
+              : {}),
           },
         ],
       }
@@ -622,6 +645,53 @@ function applyCore(state: RoomState, event: Event): RoomState {
       next = {
         ...state,
         proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? { ...prop, preview: p } : prop)),
+      }
+      break
+    }
+
+    // X8: a stage the driver started. It runs until a proposal.staged (or its expires_at, which the card
+    // checks against its clock). A second one replaces the first, as the server only lets one run.
+    case 'proposal.stage_started': {
+      const p = as<ProposalStageStartedPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) =>
+          prop.proposal_id === p.proposal_id
+            ? {
+                ...prop,
+                stage_running: {
+                  by: event.actor,
+                  started_at: event.at,
+                  expires_at: p.expires_at,
+                  steps: p.steps ?? [],
+                  params_hash: p.params_hash,
+                },
+                // The steps of a stage are the stageable ones, so a snapshot that did not say still gets an answer.
+                ...(prop.stageable === undefined ? { stageable: p.steps ?? [] } : {}),
+              }
+            : prop,
+        ),
+      }
+      break
+    }
+
+    // X8: the newest stage wins and ends the running one. A healthy stage of this very fix lifts
+    // "staging required" at once; any other leaves it to the snapshot the hook asks for.
+    case 'proposal.staged': {
+      const p = as<ProposalStagedPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          const rest = { ...prop }
+          delete rest.stage_running
+          const lifted = prop.staging_required === true && stageLiftsRequirement(prop, p)
+          if (lifted) {
+            delete rest.staging_required
+            delete rest.staging_message
+          }
+          return { ...rest, staged: p }
+        }),
       }
       break
     }
