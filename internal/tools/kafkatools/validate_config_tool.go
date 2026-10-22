@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strings"
 
-	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/redact"
@@ -173,13 +172,36 @@ const (
 
 var validateConfigKeyRe = regexp.MustCompile(`^[A-Za-z0-9_$][A-Za-z0-9._$-]*$`)
 
+// looksSecretKey is the rule of actions.LooksSecret, mirrored here because
+// internal/actions imports kafkatools (config versions), so importing it here
+// would be a cycle. The two must stay in step until a leaf package owns the
+// rule (Q0/U1-23); a test in this file pins the fragments.
+func looksSecretKey(key string) bool {
+	k := strings.ToLower(key)
+	for _, s := range secretKeySubstrings {
+		if strings.Contains(k, s) {
+			return true
+		}
+	}
+	for _, seg := range strings.FieldsFunc(k, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	}) {
+		if seg == "key" {
+			return true
+		}
+	}
+	return false
+}
+
+var secretKeySubstrings = []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private"}
+
 // plaintextSecretKey reports whether a config key names a credential under the
-// shared actions.LooksSecret rule. looksSecret also flags the converter class
+// shared looksSecret rule. looksSecret also flags the converter class
 // keys, because they contain a bare "key" segment; a converter class is not a
-// credential, so those stay usable (LooksSecret's doc expects each caller's
+// credential, so those stay usable (the rule's doc expects each caller's
 // allow-list to do exactly this).
 func plaintextSecretKey(k string) bool {
-	if !actions.LooksSecret(k) {
+	if !looksSecretKey(k) {
 		return false
 	}
 	lk := strings.ToLower(k)
