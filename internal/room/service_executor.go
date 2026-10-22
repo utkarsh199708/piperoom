@@ -416,12 +416,23 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		// Mask at the source: every later use (store, event, log) sees
 		// only the masked text.
 		output = maskExecOutput(output)
-		if err := s.finishStep(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output); err != nil {
+		// A step whose runner socket dropped is unknown, not failed: it may
+		// have run (docs/design/setup-agent.md §2.1).
+		unknown := errors.Is(err, ErrRunnerLost)
+		if err := s.finishStepOutcome(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output, unknown); err != nil {
 			if errors.Is(err, store.ErrClaimLost) {
 				// The sweep declared this run dead while the step ran and
 				// has recorded the outcome; a second event would contradict
 				// it.
 				s.log.Warn("room: step finished after its claim was declared dead; result not recorded", "proposal", p.ProposalID, "step", i)
+				return nil
+			}
+			if errors.Is(err, ErrStepOrder) {
+				// The step was already finished: the runner's reconciled
+				// result (a FrameResult or Resume that raced this request's
+				// end) recorded it. A second outcome event would contradict
+				// that one (U1-5a: completed exactly once).
+				s.log.Warn("room: step already recorded by a reconciled runner result; outcome not recorded again", "proposal", p.ProposalID, "step", i)
 				return nil
 			}
 			// The local or store transition failed: finish the store row
@@ -515,6 +526,14 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 // and emits the action.executed event. The store write and the event use
 // resultCtx so they complete even while the service shuts down (review item 3).
 func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string) error {
+	return s.finishStepOutcome(roomID, proposalID, paramsHash, t, i, ok, output, false)
+}
+
+// finishStepOutcome is finishStep with the outcome-unknown mark: a setup step
+// whose runner socket dropped may have run, so its action.executed says
+// outcome_unknown (OK false) exactly as an interrupted executor step does
+// (events.ActionExecutedPayload.OutcomeUnknown).
+func (s *Service) finishStepOutcome(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string, unknown bool) error {
 	output = maskExecOutput(output) // action output is tool text and may hold secrets
 	status := "done"
 	if !ok {
@@ -531,6 +550,7 @@ func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTrack
 	// The DB state is authoritative; a failed event append must not undo it.
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output, ParamsHash: paramsHash,
+		OutcomeUnknown: unknown,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", maskExecErr(err))
 	}
