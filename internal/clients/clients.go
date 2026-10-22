@@ -792,3 +792,69 @@ type ChangeReader interface {
 type ChangeWriter interface {
 	RecordChange(ctx context.Context, c PipelineChange) (inserted bool, err error)
 }
+
+// ---- X3: watch sample history (Piperoom's own table, fed by the watcher) ----
+//
+// Not a customer system: the room store implements both interfaces over the
+// table watch_samples(pipeline_id, metric, at, value); its migration number
+// 00018 (migrations/00018_watch_samples.sql) is reserved for A5 (X3a). Rows
+// older than config.WatchSampleRetention are deleted by the store's
+// retention job. A sample is one number per pipeline and metric: never a row
+// value, a record, a config value or free text.
+
+// Metric names of a watch sample (watch_samples.metric, ?metric= of
+// GET /api/pipelines/{pid}/trends, events.ForecastSignal.Metric). (X3)
+const (
+	WatchMetricSlotWALBytes         = "slot_wal_bytes"          // WAL the replication slot retains; limit: watch.wal_headroom_bytes
+	WatchMetricDLQRecords           = "dlq_records"             // records in the pipeline's dead-letter topics; no limit (trend only)
+	WatchMetricGroupLag             = "group_lag"               // total consumer lag of the pipeline's groups; no limit (trend only)
+	WatchMetricDBSizeBytes          = "db_size_bytes"           // pg_database_size of the source; limit: watch.db_size_limit
+	WatchMetricTopicOldestUnreadAge = "topic_oldest_unread_age" // seconds, the oldest unconsumed record of any pipeline topic; limit: that topic's retention.ms
+)
+
+// WatchMetrics lists every metric name, in a stable order. A name outside it
+// is refused by the store and by the trends route (400 validation). (X3)
+var WatchMetrics = []string{WatchMetricSlotWALBytes, WatchMetricDLQRecords, WatchMetricGroupLag,
+	WatchMetricDBSizeBytes, WatchMetricTopicOldestUnreadAge}
+
+// WatchMetricUnit returns the unit of a metric ("bytes", "records" or
+// "seconds"), or "" for a name outside WatchMetrics. (X3)
+func WatchMetricUnit(metric string) string {
+	switch metric {
+	case WatchMetricSlotWALBytes, WatchMetricDBSizeBytes:
+		return "bytes"
+	case WatchMetricDLQRecords, WatchMetricGroupLag:
+		return "records"
+	case WatchMetricTopicOldestUnreadAge:
+		return "seconds"
+	}
+	return ""
+}
+
+// MaxSamplesPerSeries caps what Samples returns for one pipeline and metric:
+// one sample per 15 minutes for 7 days. (X3)
+const MaxSamplesPerSeries = 7 * 24 * 4
+
+// SamplePoint is one watch sample; a list of them, oldest first, is the body
+// of GET /api/pipelines/{pid}/trends. (X3)
+type SamplePoint struct {
+	At    time.Time `json:"at"`
+	Value float64   `json:"value"`
+}
+
+// SampleWriter appends one sample. A second sample with the same (pipeline,
+// metric, at) is not written again and is not an error. An unknown metric,
+// an empty pipeline id, or a NaN or infinite value is refused (an error, no
+// row). It writes Piperoom's own table, never a customer system, so the
+// watcher (X3a) may hold one, as it holds a ChangeWriter. (X3)
+type SampleWriter interface {
+	AppendSample(ctx context.Context, pipelineID, metric string, at time.Time, value float64) error
+}
+
+// SampleReader lists the samples of one pipeline and metric with At >= since,
+// oldest first, at most MaxSamplesPerSeries (the newest ones when more
+// match). None is an empty list, not an error; an unknown metric is an
+// error. Callers check the pipeline's tenant before they call it. (X3)
+type SampleReader interface {
+	Samples(ctx context.Context, pipelineID, metric string, since time.Time) ([]SamplePoint, error)
+}

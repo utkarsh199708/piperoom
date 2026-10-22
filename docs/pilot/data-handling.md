@@ -58,6 +58,16 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
   are redacted of it (`internal/wiring/warehouse.go`; `internal/clients/snowflake/redact.go`).
   Warehouse queries run with the role in that DSN, so the account's network path is part of
   your egress review (section 5).
+- **Watch sample history (`watch_samples`, X3; contract in `internal/clients/clients.go`, table and
+  writer land with X3a).** The watcher stores one number per pipeline and metric at most every
+  15 minutes: retained slot WAL bytes, DLQ record count, total consumer lag, source database size
+  (`pg_database_size`) and the age of the oldest unread record. No row value, record, config value or
+  free text. Kept 7 days, then deleted. Shown to anyone who can see the pipeline
+  (`GET /api/pipelines/{pid}/trends`); reading it makes no call to your systems.
+- **Connector config drift (`config_drift`, X3b).** The watcher keeps, in memory only, a SHA-256 of each
+  connector's approved config and of each key with its value (`actions.DigestConfig`); it never keeps or
+  logs a config value. A drift room shows the changed key **names** only, and every changed key that looks
+  like a credential (`actions.LooksSecret`) only as `<secret key changed>`.
 - **Slack (optional, outbound only).** Off unless **both** `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`
   are set. A half setting stops the server at start (`cmd/server/main.go`;
   `internal/slackbridge/bridge.go`). It posts into one thread per room in one channel
