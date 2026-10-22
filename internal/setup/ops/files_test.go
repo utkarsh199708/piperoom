@@ -370,3 +370,28 @@ func TestExecuteDeadlineAndUnknown(t *testing.T) {
 		t.Fatalf("expired deadline = %+v, %v; want a cut op", res, err)
 	}
 }
+
+// TestFileReadRedactsSecrets: the content of a read file goes through
+// redact.Text, like http_get's body, so a credential in a plain config file
+// (not caught by the secret-path deny-list) never reaches the server verbatim.
+func TestFileReadRedactsSecrets(t *testing.T) {
+	r := testRegistry(t)
+	writeFile(t, r.env.ProjectDir, "connect/worker.properties",
+		"bootstrap.servers=localhost:29092\ndatabase.password=hunter2secret\n")
+	res := runOp(t, r, "file_read", map[string]string{"path": "connect/worker.properties"})
+	if !res.OK {
+		t.Fatalf("file_read failed: %s", res.Summary)
+	}
+	var data struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(data.Content, "hunter2secret") {
+		t.Fatalf("secret survived redaction: %q", data.Content)
+	}
+	if !strings.Contains(data.Content, "bootstrap.servers") {
+		t.Fatalf("non-secret content lost: %q", data.Content)
+	}
+}

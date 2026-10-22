@@ -16,6 +16,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
+	"piperoom/internal/redact"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -111,6 +112,11 @@ func (fileReadOp) Execute(ctx context.Context, params json.RawMessage, env Env) 
 		content = content[:maxReadContent]
 		truncated = true
 	}
+	// A config file can carry credentials (database.password=..., tokens), and
+	// §2.4 of this package's contract says no op reads a secret back; the path
+	// deny-list alone only catches secret-named files. Redact the content like
+	// http_get redacts its body, before it reaches the server or the model.
+	content, _ = redact.Text(content)
 	summary := fmt.Sprintf("read %s (%d bytes)", p.Path, len(data))
 	if truncated {
 		summary += ", truncated"
