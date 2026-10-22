@@ -75,6 +75,51 @@ The same path is tested end to end by `go test -tags integration -run TestQuicks
 `devctl break schema-change` and `devctl fix schema-change`, so hold the stack lock as `PIPEROOM_STACK_OWNER`
 and start from a fresh stack (`devctl reset`): `break` needs `orders.amount` still `integer`.
 
+## Staging profile: a second Connect and Schema Registry (X8)
+
+The `staging` compose profile adds the stack that X8 tries a fix on before production: `connect-staging` and
+`schema-registry-staging`, on the **same Kafka**. A plain `devctl up` does not start them; nothing in the default
+stack depends on them.
+
+```
+go run ./cmd/devctl up --staging --owner me        # the default stack, then staging, connector RUNNING on both
+go run ./cmd/devctl down --staging --owner me      # only staging, plus what it left in Postgres and Kafka
+go run ./cmd/devctl reset --staging --owner me     # wipes everything, staging included, and starts both again
+                                                   # (without --staging, reset tears staging down and leaves it down)
+```
+
+(`docker compose -f dev/docker-compose.yml --profile staging up -d --build --wait` starts the two services
+alone; `devctl up --staging` also registers the connector.) `devctl down` stops staging too. Reset never touches a
+room database: it only runs `docker compose down -v` on this project and counts warehouse rows; the demo's room
+database is another project (`demo-room-db.yml`).
+
+| What | Production | Staging |
+|---|---|---|
+| Connect REST (host) | `http://localhost:8083` | `http://localhost:18083` (service `connect-staging`; inside the network `http://connect-staging:8083`) |
+| Schema Registry (host) | `http://localhost:8081` | `http://localhost:18081` (service `schema-registry-staging`; inside the network `http://schema-registry-staging:8081`) |
+| Connect `group.id` | `piperoom-connect` | `piperoom-connect-staging` |
+| Connect config, offset, status topics | `_connect_configs`, `_connect_offsets`, `_connect_status` | `_connect_configs_staging`, `_connect_offsets_staging`, `_connect_status_staging` |
+| Registry store topic and group | `_schemas`, `schema-registry` | `_schemas_staging`, `schema-registry-staging` |
+| Connector | `pg-orders-connector` | `pg-orders-connector` (same name and config, except the three rows below) |
+| Debezium `topic.prefix` (data topic) | `pg` (`pg.public.orders`) | `pgstg` (`pgstg.public.orders`) |
+| Replication slot / publication | `debezium_orders` / `dbz_publication` | `debezium_orders_staging` / `dbz_publication_staging` |
+
+The staging ports bind to `127.0.0.1` (like the Connect and registry APIs, they take no login). The two stacks
+share Kafka and Postgres, and nothing else: with the same `group.id` the two workers would be one Connect cluster,
+and under the same prefix the staging connector would write into the topics `devconsumer` reads, so the table
+above is what keeps staging from touching production. `down --staging` deletes the staging connector, the two
+containers, the staging slot and publication (an inactive slot would keep retaining WAL on the source) and the
+staging topics; run twice, the second run changes nothing.
+
+`devctl` reads `STAGING_CONNECT_URL` and `STAGING_SCHEMA_REGISTRY_URL` if you moved the ports; it refuses a value
+equal to the production `CONNECT_URL` or `SCHEMA_REGISTRY_URL` (the owners file has the same rule).
+
+**Owners file.** `owners.staging.yaml` is `owners.yaml` plus a `staging: {connections: {connect_url, schema_registry_url}}`
+block on the `orders` pipeline (`docs/api.md`, "X8 staging"); start the server with
+`OWNERS_FILE=dev/owners.staging.yaml` and write mode on. It needs the owners loader of X8a. The Go integration tests
+of X8b use `testenv.RequireStaging(t)`, which skips when the profile is not up;
+`go test -tags integration -run TestStagingProfile ./internal/testenv/` checks the profile itself against a running stack.
+
 ## The dev-only break/fix API (`devctl serve`)
 
 For the web "Break something" menu (A6) there is a tiny local HTTP API:
@@ -100,6 +145,7 @@ cross-site request always needs a preflight that fails. Stop it with Ctrl-C.
 |---|---|
 | `scenarios.md` | the failure scenarios `devctl break` / `fix` create, as observed on this stack; the stack lock |
 | `shadow.md`, `owners.shadow.yaml` | shadow mode: the agent investigates silently and you grade it |
+| `owners.staging.yaml` | `owners.yaml` plus the `staging:` block of the staging profile (above) |
 | `owners.yaml`, `users.yaml` | the four-person dev directory (arjun, priya, kabir, meera) the full server uses by default |
 | `demo.env`, `demo-room-db.yml` | the live demo profile and its separate room database (`docs/demo/schema-change.md`) |
 | `docker-compose.yml`, `connect/`, `connectors/`, `postgres-init/` | the stack itself |

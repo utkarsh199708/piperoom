@@ -1,7 +1,7 @@
 // Command devctl starts, breaks and fixes the local CDC pipeline used to
 // develop and test Piperoom. Run it from anywhere inside the repo.
 //
-//	devctl up | down | reset | status
+//	devctl up [--staging] | down [--staging] | reset [--staging] | status
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
@@ -36,9 +36,10 @@ import (
 
 const usage = `devctl — local pipeline control
 
-  devctl up                 start the stack, register the connector, start devconsumer
-  devctl down               stop the stack
-  devctl reset              remove all data and start clean
+  devctl up [--staging]     start the stack, register the connector, start devconsumer
+                            (--staging: also a second Connect + Schema Registry, dev/README.md)
+  devctl down [--staging]   stop the stack (--staging: only the staging services, their slot and topics)
+  devctl reset [--staging]  remove all data (staging included) and start clean
   devctl status             one-screen pipeline health (for humans)
   devctl health             read-only check per layer; exit 1 unhealthy, 2 setup error
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
@@ -107,37 +108,43 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		if err != nil {
 			return err
 		}
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl up")
+		staging, err := stagingFlag("up", rest)
+		if err != nil {
+			return err
 		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
-		return st.up(ctx)
+		return st.upWith(ctx, staging)
 	case "down":
 		owner, rest, err := splitOwner(args)
 		if err != nil {
 			return err
 		}
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl down")
+		stagingOnly, err := stagingFlag("down", rest)
+		if err != nil {
+			return err
 		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
-		return st.compose(ctx, nil, "down")
+		if stagingOnly {
+			return st.stagingDown(ctx)
+		}
+		return st.down(ctx)
 	case "reset":
 		owner, rest, err := splitOwner(args)
 		if err != nil {
 			return err
 		}
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl reset")
+		staging, err := stagingFlag("reset", rest)
+		if err != nil {
+			return err
 		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
-		return st.reset(ctx)
+		return st.resetWith(ctx, staging)
 	case "status":
 		return st.status(ctx, os.Stdout)
 	case "health":

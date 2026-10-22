@@ -249,9 +249,10 @@ func TestComposeShadowService(t *testing.T) {
 	// The batch profile's services are opt-in too (dev/batch.md, TestComposeBatchProfile).
 	for name, s := range doc.Services {
 		allowedProfile := reflect.DeepEqual(s.Profiles, []string{"batch"}) ||
-			reflect.DeepEqual(s.Profiles, []string{"clickhouse"})
+			reflect.DeepEqual(s.Profiles, []string{"clickhouse"}) ||
+			reflect.DeepEqual(s.Profiles, []string{stagingProfile})
 		if name != shadowService && len(s.Profiles) != 0 && !allowedProfile {
-			t.Errorf("service %q has profiles %v: only the shadow server, batch, and clickhouse profiles may be opt-in", name, s.Profiles)
+			t.Errorf("service %q has profiles %v: only the shadow server, batch, clickhouse and staging profiles may be opt-in", name, s.Profiles)
 		}
 	}
 	if len(svc.Ports) != 1 || !strings.HasPrefix(svc.Ports[0], "127.0.0.1:") {
