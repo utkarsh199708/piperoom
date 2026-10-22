@@ -214,6 +214,7 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 	fixW := reflect.TypeOf((*clients.ConnectFixWriter)(nil)).Elem()
 	allowed := map[reflect.Type]bool{
 		reflect.TypeOf(readOnlyConnect{}):         true,
+		reflect.TypeOf(readOnlyConnectTasks{}):    true,
 		reflect.TypeOf(readOnlyRegistry{}):        true,
 		reflect.TypeOf(readOnlyRegistryDeleted{}): true,
 	}
@@ -284,4 +285,33 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 	}
 	// The builder RegisterTools stored on w is what the db tools reach.
 	walk("builder", reflect.ValueOf(w.Builder), 0)
+}
+
+// taskSpy is the writing spy plus the worker-task read (X6b).
+type taskSpy struct{ *writeSpy }
+
+func (taskSpy) WorkerTasks(context.Context) (map[string][]clients.TaskAssignment, error) {
+	return map[string][]clients.TaskAssignment{"w1:8083": {{Connector: "c", Task: 0, State: "RUNNING"}}}, nil
+}
+
+// TestReadConnectKeepsWorkerTasks: connect_task_balance finds the worker-task
+// read by a type assertion, so the read-only wrapper keeps it exactly when
+// the client has it, and its writes still refuse.
+func TestReadConnectKeepsWorkerTasks(t *testing.T) {
+	ctx := context.Background()
+	sp := &writeSpy{}
+	c := readConnect(&Wired{Connect: taskSpy{sp}})
+	wt, ok := c.(clients.WorkerTaskReader)
+	if !ok {
+		t.Fatalf("readConnect(taskSpy) = %T, which hides WorkerTasks", c)
+	}
+	if got, err := wt.WorkerTasks(ctx); err != nil || len(got["w1:8083"]) != 1 {
+		t.Fatalf("WorkerTasks = %v, %v", got, err)
+	}
+	if err := c.RestartTask(ctx, "c", 0); !errors.Is(err, ErrReadOnly) || len(sp.writes) != 0 {
+		t.Fatalf("RestartTask = %v, writes %v", err, sp.writes)
+	}
+	if _, ok := readConnect(&Wired{Connect: sp}).(clients.WorkerTaskReader); ok {
+		t.Fatal("readConnect grew WorkerTasks on a client without it")
+	}
 }

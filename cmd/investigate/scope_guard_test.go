@@ -45,6 +45,9 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"debezium_metrics":         `{"connector":"pg-orders-connector"}`,
 		"dlq_peek":                 `{"connector":"pg-orders-sink"}`,
 		"what_changed":             `{}`,
+
+		// X6b
+		"debezium_snapshot_progress": `{"connector":"pg-orders-connector"}`,
 	}
 	ran := 0
 	for _, tl := range reg.All() {
