@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"piperoom/internal/actions/pgactions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/pgconv"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/wiring"
 )
@@ -77,16 +79,45 @@ func writeNotes(ws []ReplayWrite) []WriteNote {
 	return out
 }
 
-// writeLog records the writes of one set of replay clients.
+// writeLog records the writes of one set of replay clients, and the proposal
+// steps the run's scripted executor ran with success (stepRan), which the
+// recovery actions' Verify counts against (X2e).
 type writeLog struct {
 	mu     sync.Mutex
 	writes []ReplayWrite
+	ran    []ranStep
+}
+
+// ranStep is one proposal step that the run executed with success.
+type ranStep struct {
+	action string
+	params json.RawMessage
 }
 
 func (l *writeLog) record(method string, args map[string]any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.writes = append(l.writes, ReplayWrite{Method: method, Args: args})
+}
+
+// stepRan notes a step the scripted executor ran with success.
+func (l *writeLog) stepRan(action string, params json.RawMessage) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.ran = append(l.ran, ranStep{action: action, params: append(json.RawMessage(nil), params...)})
+}
+
+// stepsRan returns the params of every step of action that ran with success.
+func (l *writeLog) stepsRan(action string) []json.RawMessage {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []json.RawMessage
+	for _, s := range l.ran {
+		if s.action == action {
+			out = append(out, s.params)
+		}
+	}
+	return out
 }
 
 func (l *writeLog) snapshot() []ReplayWrite {
@@ -99,7 +130,7 @@ func (l *writeLog) snapshot() []ReplayWrite {
 // one registration production uses, over replay clients that read res and
 // recs and record every write in wl. The replay writer is never a typed nil.
 func registerP3(reg *actions.Registry, res Resources, recs []Recording, wl *writeLog) error {
-	kr := replayKafkaReads{recs: recs}
+	kr := replayKafkaReads{recs: recs, res: res, log: wl}
 	w := replayWriter{log: wl}
 	if err := wiring.RegisterP3Actions(reg, wiring.P3ActionDeps{
 		Connect:      replayConfig{res: res, recs: recs},
@@ -108,6 +139,7 @@ func registerP3(reg *actions.Registry, res Resources, recs []Recording, wl *writ
 		Records:      kr,
 		SourceWriter: w,
 		KafkaWriter:  w,
+		Sink:         replaySink{res: res, log: wl},
 	}); err != nil {
 		return fmt.Errorf("evals: P3 action definitions: %w", err)
 	}
@@ -321,9 +353,12 @@ func orStr(s, def string) string {
 
 // replayKafkaReads is the read-only Kafka of the P3 Kafka actions: the
 // group-reset planner reads the kafka_consumer_lag recording, the DLQ reader
-// the kafka_topic_offsets and dlq_peek recordings.
+// the kafka_topic_offsets and dlq_peek recordings. kafka_replay_range (X2e)
+// also reads resources.topics and, in Verify, the steps the run executed.
 type replayKafkaReads struct {
 	recs []Recording
+	res  Resources
+	log  *writeLog
 }
 
 var (
@@ -454,6 +489,8 @@ func (k replayKafkaReads) DLQOffsets(_ context.Context, topics ...string) (map[s
 			out[t] = offs
 		} else if offs, ok := k.dlqOffsets(t); ok {
 			out[t] = offs
+		} else if offs, ok := k.declaredTopic(t); ok {
+			out[t] = offs
 		}
 	}
 	return out, nil
@@ -504,4 +541,267 @@ func (w replayWriter) Produce(_ context.Context, topic string, recs []clients.Re
 func (w replayWriter) SendSnapshotSignal(_ context.Context, signalTopic, connector, logicalName string, tables []string) (kafka.SnapshotSignal, error) {
 	w.log.record("SendSnapshotSignal", map[string]any{"topic": signalTopic, "connector": connector, "logical_name": logicalName, "tables": append([]string(nil), tables...)})
 	return kafka.SnapshotSignal{ID: "replay-signal", Topic: signalTopic}, nil
+}
+
+// ---- the recovery actions (X2e) ----
+//
+// pg_resnapshot_rows and kafka_replay_range (actions.ClassRecovery) count
+// what their step repaired in Verify, which the agent calls after the step
+// ran (X2c). Replay answers those counts as follows:
+//
+//   - Source key counts (RangeColumn, CountRange) come from
+//     resources.tables: key_column and the key_ranges that hold rows. No read
+//     tool counts a key range.
+//   - The sink (read by Verify only) holds the source rows of every
+//     pg_resnapshot_rows step the run executed with success, and nothing
+//     else of the step's range: a recovery is counted against what the run
+//     actually ran.
+//   - A reprocess topic holds, since the step, the offsets of every
+//     kafka_replay_range step the run executed into it (all on its first
+//     partition: Verify sums the partitions). Offsets by time are not
+//     replayed, so a time-window replay is refused at Validate.
+//   - The reprocess topic itself is declared in resources.topics (empty),
+//     since kafka_topic_offsets refuses any topic but the CDC topics.
+
+var (
+	_ pgactions.RowRangeCounter = replaySource{}
+	_ pgactions.SinkCounter     = replaySink{}
+	_ clients.Warehouse         = replaySink{}
+	_ clients.RateReader        = replayKafkaReads{}
+)
+
+// rangeKind is the column every replayed key is: a 64-bit integer key.
+func rangeKind(primary bool) postgres.RangeColumn {
+	return postgres.RangeColumn{Type: "int8", Kind: pgconv.RangeKindInteger, PrimaryKey: primary}
+}
+
+func (s replaySource) RangeColumn(_ context.Context, table, column string) (postgres.RangeColumn, error) {
+	t, ok := s.res.Tables[table]
+	if !ok {
+		return postgres.RangeColumn{}, fmt.Errorf("evals: table %s: %w", table, clients.ErrNotFound)
+	}
+	if t.KeyColumn == "" || column != t.KeyColumn {
+		return postgres.RangeColumn{}, fmt.Errorf("evals: column %s of %s: %w (replay counts only the key_column of resources.tables)", column, table, errNotReplayed)
+	}
+	return rangeKind(t.PrimaryKey), nil
+}
+
+func (s replaySource) CountRange(_ context.Context, table, column, from, to string) (int64, error) {
+	t, ok := s.res.Tables[table]
+	if !ok {
+		return 0, fmt.Errorf("evals: table %s: %w", table, clients.ErrNotFound)
+	}
+	if t.KeyColumn == "" || column != t.KeyColumn {
+		return 0, fmt.Errorf("evals: column %s of %s: %w", column, table, errNotReplayed)
+	}
+	lo, hi, err := keyBounds(from, to)
+	if err != nil {
+		return 0, err
+	}
+	return rowsIn(t.KeyRanges, lo, hi), nil
+}
+
+// keyBounds parses a range's canonical integer bounds; to "" is no upper
+// bound.
+func keyBounds(from, to string) (lo, hi int64, err error) {
+	if lo, err = strconv.ParseInt(from, 10, 64); err != nil {
+		return 0, 0, fmt.Errorf("evals: key bound %q: %w", from, errNotReplayed)
+	}
+	hi = math.MaxInt64
+	if to != "" {
+		if hi, err = strconv.ParseInt(to, 10, 64); err != nil {
+			return 0, 0, fmt.Errorf("evals: key bound %q: %w", to, errNotReplayed)
+		}
+	}
+	return lo, hi, nil
+}
+
+// rowsIn counts the keys of ranges (each [from, to], disjoint) in [lo, hi].
+func rowsIn(ranges [][]int64, lo, hi int64) int64 {
+	var n int64
+	for _, r := range ranges {
+		if len(r) != 2 {
+			continue
+		}
+		a, b := max(r[0], lo), min(r[1], hi)
+		if a <= b {
+			n += b - a + 1
+		}
+	}
+	return n
+}
+
+// replaySink is the sink pg_resnapshot_rows' Verify counts (wiring hands
+// the action only its range-count view). It holds what the run's executed
+// steps re-emitted; it has no rows to read and no time windows.
+type replaySink struct {
+	res Resources
+	log *writeLog
+}
+
+func (replaySink) Freshness(context.Context, string, string) (time.Time, error) {
+	return time.Time{}, errNotReplayed
+}
+
+func (replaySink) Row(context.Context, string, string, string) (map[string]any, bool, error) {
+	return nil, false, errNotReplayed
+}
+
+// RangeColumn answers a key column some source table declares; any other
+// column is missing at the sink, which Verify reads as unverifiable.
+func (k replaySink) RangeColumn(_ context.Context, table, column string) (postgres.RangeColumn, error) {
+	for _, t := range k.res.Tables {
+		if t.KeyColumn != "" && t.KeyColumn == column {
+			return rangeKind(true), nil
+		}
+	}
+	return postgres.RangeColumn{}, fmt.Errorf("evals: sink column %s of %s: %w", column, table, clients.ErrNotFound)
+}
+
+// resnapStep is the part of a pg_resnapshot_rows step the sink reads.
+type resnapStep struct {
+	Table    string `json:"table"`
+	KeyRange *struct {
+		Column string `json:"column"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+	} `json:"key_range"`
+	Since *struct {
+		Column string `json:"column"`
+		At     string `json:"at"`
+	} `json:"since"`
+}
+
+// CountRange counts the source rows in [from, to] that an executed
+// pg_resnapshot_rows step on column re-emitted; overlapping steps count a
+// row once.
+func (k replaySink) CountRange(_ context.Context, _, column, from, to string) (int64, error) {
+	lo, hi, err := keyBounds(from, to)
+	if err != nil {
+		return 0, err
+	}
+	if k.log == nil {
+		return 0, nil
+	}
+	byTable := map[string][][]int64{}
+	for _, raw := range k.log.stepsRan(pgactions.ResnapshotRowsName) {
+		var p resnapStep
+		if json.Unmarshal(raw, &p) != nil {
+			continue
+		}
+		var c, f, t string
+		switch {
+		case p.KeyRange != nil:
+			c, f, t = p.KeyRange.Column, p.KeyRange.From, p.KeyRange.To
+		case p.Since != nil:
+			c, f = p.Since.Column, p.Since.At
+		}
+		a, b, err := keyBounds(f, t)
+		if c != column || err != nil {
+			continue
+		}
+		byTable[p.Table] = append(byTable[p.Table], []int64{max(a, lo), min(b, hi)})
+	}
+	var n int64
+	for table, steps := range byTable {
+		for _, s := range mergeRanges(steps) {
+			n += rowsIn(k.res.Tables[table].KeyRanges, s[0], s[1])
+		}
+	}
+	return n, nil
+}
+
+func (replaySink) CountBetween(context.Context, string, string, time.Time, time.Time) (int64, error) {
+	return 0, fmt.Errorf("evals: time windows: %w", clients.ErrNotSupported)
+}
+
+// mergeRanges returns rs (each [from, to]) sorted and merged, empty ones
+// dropped, so overlapping steps count a key once.
+func mergeRanges(rs [][]int64) [][]int64 {
+	var in [][]int64
+	for _, r := range rs {
+		if r[0] <= r[1] {
+			in = append(in, r)
+		}
+	}
+	sort.Slice(in, func(i, j int) bool { return in[i][0] < in[j][0] })
+	var out [][]int64
+	for _, r := range in {
+		if n := len(out); n > 0 && r[0] <= out[n-1][1] {
+			out[n-1][1] = max(out[n-1][1], r[1])
+			continue
+		}
+		out = append(out, []int64{r[0], r[1]})
+	}
+	return out
+}
+
+// replayRangeStep is the part of a kafka_replay_range step the reprocess
+// topic's count reads.
+type replayRangeStep struct {
+	ToTopic string `json:"to_topic"`
+	Ranges  []struct {
+		FromOffset int64 `json:"from_offset"`
+		ToOffset   int64 `json:"to_offset"`
+	} `json:"ranges"`
+}
+
+// PartitionRates answers only a resources.topics topic or one that executed
+// kafka_replay_range steps copied into: the offsets of those steps, as
+// written since the step (Verify's count). Offsets by time of any other topic
+// (a CDC topic's time window) are not replayed.
+func (k replayKafkaReads) PartitionRates(_ context.Context, _ time.Time, topics ...string) ([]clients.PartitionRate, error) {
+	var out []clients.PartitionRate
+	for _, topic := range topics {
+		var copied int64
+		_, found := k.res.Topics[topic]
+		if k.log != nil {
+			for _, raw := range k.log.stepsRan("kafka_replay_range") {
+				var p replayRangeStep
+				if json.Unmarshal(raw, &p) != nil || p.ToTopic != topic {
+					continue
+				}
+				found = true
+				for _, r := range p.Ranges {
+					copied += max(r.ToOffset-r.FromOffset+1, 0)
+				}
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("evals: offsets by time of %s: %w", topic, clients.ErrNotSupported)
+		}
+		for i, p := range k.partitionsOf(topic) {
+			r := clients.PartitionRate{Topic: topic, Partition: p.Partition, End: p.End, OffsetAtStart: p.End}
+			if i == 0 {
+				r.End, r.Records = p.End+copied, copied
+			}
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// partitionsOf is a topic's recorded offsets, else its resources.topics
+// entry, else one empty partition.
+func (k replayKafkaReads) partitionsOf(topic string) []clients.PartitionOffsets {
+	if offs, ok := k.topicOffsets(topic); ok {
+		return offs
+	}
+	if offs, ok := k.declaredTopic(topic); ok {
+		return offs
+	}
+	return []clients.PartitionOffsets{{Partition: 0}}
+}
+
+// declaredTopic is a resources.topics entry: every partition empty.
+func (k replayKafkaReads) declaredTopic(topic string) ([]clients.PartitionOffsets, bool) {
+	t, ok := k.res.Topics[topic]
+	if !ok || t.Partitions < 1 {
+		return nil, false
+	}
+	out := make([]clients.PartitionOffsets, t.Partitions)
+	for i := range out {
+		out[i].Partition = int32(i)
+	}
+	return out, true
 }

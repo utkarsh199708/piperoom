@@ -210,6 +210,17 @@ var errGroupActive = errors.New("devctl: consumer group has active members")
 // group, so the group re-reads the whole topic when it next starts. The group
 // must have no members.
 func (s *stack) resetGroupToStart(ctx context.Context, group, topic string) error {
+	return s.resetGroup(ctx, group, topic, "start", (*kadm.Client).ListStartOffsets)
+}
+
+// resetGroupToEnd commits the end offset of every partition of topic for
+// group (kafka-consumer-groups --reset-offsets --to-latest): the group skips
+// every record already on the topic. The group must have no members.
+func (s *stack) resetGroupToEnd(ctx context.Context, group, topic string) error {
+	return s.resetGroup(ctx, group, topic, "end", (*kadm.Client).ListEndOffsets)
+}
+
+func (s *stack) resetGroup(ctx context.Context, group, topic, which string, list func(*kadm.Client, context.Context, ...string) (kadm.ListedOffsets, error)) error {
 	cl, err := s.kafkaClient()
 	if err != nil {
 		return err
@@ -223,15 +234,15 @@ func (s *stack) resetGroupToStart(ctx context.Context, group, topic string) erro
 	if g, ok := described[group]; ok && len(g.Members) > 0 {
 		return fmt.Errorf("%w: %s has %d (stop the consumer first)", errGroupActive, group, len(g.Members))
 	}
-	starts, err := adm.ListStartOffsets(ctx, topic)
+	offs, err := list(adm, ctx, topic)
 	if err != nil {
-		return fmt.Errorf("devctl: start offsets of %s: %w", topic, err)
+		return fmt.Errorf("devctl: %s offsets of %s: %w", which, topic, err)
 	}
-	if err := starts.Error(); err != nil {
-		return fmt.Errorf("devctl: start offsets of %s: %w", topic, err)
+	if err := offs.Error(); err != nil {
+		return fmt.Errorf("devctl: %s offsets of %s: %w", which, topic, err)
 	}
-	if err := adm.CommitAllOffsets(ctx, group, starts.Offsets()); err != nil {
-		return fmt.Errorf("devctl: commit start offsets of %s for %s: %w", topic, group, err)
+	if err := adm.CommitAllOffsets(ctx, group, offs.Offsets()); err != nil {
+		return fmt.Errorf("devctl: commit %s offsets of %s for %s: %w", which, topic, group, err)
 	}
 	return nil
 }
