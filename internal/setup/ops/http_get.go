@@ -103,6 +103,13 @@ func (httpGetOp) Execute(ctx context.Context, params json.RawMessage, env Env) (
 	start := env.Now()
 	resp, err := env.HTTP.Do(req)
 	if err != nil {
+		// A *url.Error's text embeds the full URL, query included, and a
+		// query can carry a token; wrap only the inner error next to the
+		// query-free targetOf.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
 		return Result{}, fmt.Errorf("ops: http_get %s: %w", targetOf(u), err)
 	}
 	defer resp.Body.Close()

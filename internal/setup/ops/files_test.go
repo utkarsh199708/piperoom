@@ -227,6 +227,9 @@ func TestFileWriteRefusals(t *testing.T) {
 		{"k8s manifest", "k8s/connect.yaml", "a: b", ErrExecutedName},
 		{"manifests dir", "manifests/connect.yml", "a: b", ErrExecutedName},
 		{"mounted dir", mount + "/postgres/x.txt", "x", ErrExecutedName},
+		{"mounted dir behind ./", "./" + mount + "/postgres/x.txt", "x", ErrExecutedName},
+		{"mounted dir behind .\\", ".\\connect\\plugins\\postgres\\x.txt", "x", ErrExecutedName},
+		{"mounted dir with /./ inside", "connect/./plugins/postgres/x.txt", "x", ErrExecutedName},
 		{"secret key", "notes.txt", "db.password = hunter2", ErrExecutedName},
 		{"secret json", "notes.json", `{"api_key": "hunter2"}`, ErrExecutedName},
 		{"too big", "big.txt", big, ErrTooLarge},
@@ -393,5 +396,22 @@ func TestFileReadRedactsSecrets(t *testing.T) {
 	}
 	if !strings.Contains(data.Content, "bootstrap.servers") {
 		t.Fatalf("non-secret content lost: %q", data.Content)
+	}
+}
+
+// A mount dir registered with a no-op "." component protects the directory it
+// resolves to, instead of silently matching nothing.
+func TestMountDirWithDotSegmentStillProtects(t *testing.T) {
+	r, err := New(Config{ProjectDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if err := r.RegisterMountDir("connect/./plugins"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = runOpErr(t, r, "file_write", map[string]string{"path": "connect/plugins/x.txt", "content": "x"})
+	if !errors.Is(err, ErrExecutedName) {
+		t.Fatalf("err = %v, want ErrExecutedName", err)
 	}
 }

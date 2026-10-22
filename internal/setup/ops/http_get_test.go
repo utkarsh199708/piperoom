@@ -171,3 +171,20 @@ func bytesOf(b byte, n int) []byte {
 	}
 	return out
 }
+
+// An http_get failure must not leak the query string through the wrapped
+// *url.Error, whose text embeds the full URL (a query can carry a token).
+func TestHTTPGetErrorOmitsQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+	r := testRegistry(t, targetFor(srv.URL))
+	_, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL + "/?custom_param=sekret123TOKEN"})
+	if !errors.Is(err, errRedirectRefused) {
+		t.Fatalf("err = %v, want errRedirectRefused", err)
+	}
+	if strings.Contains(err.Error(), "sekret123TOKEN") {
+		t.Fatalf("error leaks the query string: %v", err)
+	}
+}

@@ -266,11 +266,25 @@ func (c *Confiner) verifyHandle(f *os.File, denied []fs.FileInfo) error {
 	return nil
 }
 
+// normalParts is pathParts with the no-op "." components dropped, so a
+// leading "./" (or an embedded "/./") cannot shift the positional comparison
+// below off the components the open will actually resolve.
+func normalParts(name string) []string {
+	parts := pathParts(name)
+	out := parts[:0]
+	for _, p := range parts {
+		if p != "." {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // underAny reports whether the slash-separated path is under one of dirs.
 func underAny(path string, dirs []string) bool {
-	parts := pathParts(path)
+	parts := normalParts(path)
 	for _, dir := range dirs {
-		dp := pathParts(strings.TrimPrefix(dir, "./"))
+		dp := normalParts(dir)
 		if len(dp) == 0 {
 			return true // the project root itself is mounted: no write is safe
 		}
