@@ -2,11 +2,13 @@
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
 import { neutralizeBadgeText } from '../lib/verification'
 import { verdictKind, verdictWords } from '../lib/execution'
+import { checkingLabel, gapLine, outcomeView, recoveryOutcome } from '../lib/recovery'
 import { stripBidi } from '../lib/title'
 import { policyLabel } from '../lib/countdown'
 import { clockTimeSeconds } from '../lib/time'
 import type {
   ActionExecutedPayload,
+  AgentRecoveryCheckPayload,
   AgentVerificationPayload,
   AgentHypothesisPayload,
   AgentMessagePayload,
@@ -240,7 +242,14 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const p = as<AgentVerificationPayload>(e)
       // A repeat re-states the first verdict (no check ran again): one line already announced it.
       if (p.repeat) return { text: 'Verification already recorded', kind: 'system' }
+      const outcome = recoveryOutcome(p)
+      if (outcome) return { text: `Verification: ${outcomeView(outcome).word.toLowerCase()}`, kind: 'decision' }
       return { text: `Verification: ${verdictWords(verdictKind(p))}`, kind: 'decision' }
+    }
+    case 'agent.recovery_check': {
+      const p = as<AgentRecoveryCheckPayload>(e)
+      const gap = gapLine(p.before, p.after, p.unit)
+      return { text: `Recovery ${checkingLabel(p)}${gap ? ` · ${gap}` : ''}`, kind: 'system' }
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)

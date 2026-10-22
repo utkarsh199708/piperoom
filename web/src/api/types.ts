@@ -56,6 +56,7 @@ export type EventType =
   | 'checklist.step_done'
   | 'proposal.previewed'
   | 'agent.verification'
+  | 'agent.recovery_check'
   | 'postmortem.drafted'
   | 'postmortem.failed'
   | 'proposal.scheduled'
@@ -343,6 +344,10 @@ export interface PreviewResult {
   reversible: boolean
   rollback?: string
   dry_run?: DryRunResult
+  /** X2: how much a recovery step would re-emit, read from the target by the action's Preview. Absent for a fix. */
+  count?: number
+  /** X2: what `count` counts. Anything else is shown without a unit word. */
+  unit?: RecoveryUnit
 }
 
 export interface StepPreview {
@@ -379,6 +384,31 @@ export interface DataFlowCheck {
   detail?: string
 }
 
+/** X2: what a recovery count counts (docs/api.md, X2 recovery actions). */
+export type RecoveryUnit = 'rows' | 'records'
+
+/** X2: how a recovery proposal ended (events.RecoveryOutcomeFor). */
+export type RecoveryOutcome = 'recovered' | 'partial' | 'not_recovered' | 'unverifiable'
+
+/** X2: proposal.created.class. Absent reads as "fix". */
+export type ProposalClass = 'fix' | 'recovery' | 'performance'
+
+/**
+ * agent.recovery_check (agent actor): one poll of a recovery step's Verify after it ran. Progress only,
+ * never a verdict. `poll` counts from 1 and never exceeds `max_polls`.
+ */
+export interface AgentRecoveryCheckPayload {
+  proposal_id: string
+  step_index: number
+  poll: number
+  max_polls: number
+  /** The gap the action set out to repair. */
+  before: number
+  /** What is still missing at this poll. */
+  after: number
+  unit: RecoveryUnit
+}
+
 /** The agent's verdict on a fix (agent.verification). `repeat` means "already verified", no checks. */
 export interface AgentVerificationPayload {
   proposal_id: string
@@ -387,6 +417,15 @@ export interface AgentVerificationPayload {
   recovered: boolean
   verdict: string
   repeat?: boolean
+  /**
+   * X2, recovery proposals only: the counted verdict. `before`/`after` are nullable pointers on the
+   * wire (absent for `unverifiable`); `after: 0` is a real count, never "missing". `recovered` is true
+   * only with outcome "recovered".
+   */
+  outcome?: RecoveryOutcome
+  before?: number | null
+  after?: number | null
+  unit?: RecoveryUnit
 }
 
 export interface ProposalCreatedPayload {
@@ -403,6 +442,8 @@ export interface ProposalCreatedPayload {
    * Absent when every layer has an owner.
    */
   fallback_layers?: string[]
+  /** X2/X6: set by the room service from the action registry. Absent reads as "fix". */
+  class?: ProposalClass
 }
 
 /**
@@ -573,6 +614,8 @@ export interface ProposalSummary {
    * 45 s in the past (#652); the web folds proposal.scheduled itself and never reads this field.
    */
   scheduled?: { run_at: string; cancel_until: string }
+  /** X2: copied from proposal.created.class; absent reads as "fix". */
+  class?: ProposalClass
 }
 
 /**

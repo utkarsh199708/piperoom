@@ -23,6 +23,7 @@ import { Clock } from './room/Clock'
 import { BlastRadius } from './room/BlastRadius'
 import { ExecutionCard } from './room/ExecutionCard'
 import { VerificationCard } from './room/VerificationCard'
+import { RecoveryProgress } from './room/RecoveryCard'
 import type { CloseNudge } from './room/VerificationCard'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
@@ -1398,7 +1399,10 @@ function Proposal({
             : { asDriver: nudge.isDriver, onSteer: actions.steer, sends: actions.sends }
         }
       />
-      {proposal.verification && <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} />}
+      <RecoveryProgress proposal={proposal} />
+      {proposal.verification && (
+        <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} recovery={proposal.recovery} />
+      )}
     </article>
   )
 }

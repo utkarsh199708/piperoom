@@ -108,4 +108,24 @@ describe('describeEvent agent.verification', () => {
   ])('recovered=%s %j reads %j', (recovered, verdict, text) => {
     expect(v({ recovered, verdict })).toEqual({ text, kind: 'decision' })
   })
+
+  // X2: a recovery proposal's verdict reads by its counted outcome (partial is not "not recovered").
+  it.each([
+    [{ recovered: false, outcome: 'partial', before: 4, after: 1, unit: 'rows' }, 'Verification: partially recovered'],
+    [{ recovered: true, outcome: 'recovered', before: 4, after: 0, unit: 'rows' }, 'Verification: recovered'],
+    [{ recovered: false, outcome: 'unverifiable' }, 'Verification: could not verify'],
+  ])('%j reads %j', (p, text) => {
+    expect(v({ verdict: 'v', ...p })).toEqual({ text, kind: 'decision' })
+  })
+})
+
+describe('describeEvent agent.recovery_check (X2)', () => {
+  it('names the poll and the gap; no ids reach the text', () => {
+    const d = describeEvent(
+      ev('agent.recovery_check', { proposal_id: 'p_01M4ABCDEFGHJKMNPQRSTVWXYZ', step_index: 0, poll: 2, max_polls: 8, before: 412, after: 120, unit: 'rows' }, agent),
+      ctx,
+    )
+    expect(d).toEqual({ text: 'Recovery checking (2 of 8) · 412 missing → 120 rows', kind: 'system' })
+    expect(d.text).not.toMatch(ID)
+  })
 })
