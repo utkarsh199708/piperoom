@@ -1553,19 +1553,20 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentCancel = cancel
 	st.agentRun++
 	run := st.agentRun
+	openedAt := st.snap.OpenedAt
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	var firstLook <-chan agent.TriageResult
 	if st.firstLook && s.triage != nil {
 		// Before the slot: a room queued behind the cap still gets its
 		// diagnosis. It runs once per room, never on a restart.
-		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, raw))
+		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, openedAt, raw))
 	}
 	st.firstLook = false
 	go func() {
 		defer s.wg.Done()
 		// However the supervisor ends, its slot or queue entry goes back.
 		defer gate.release()
-		alert := s.newAlert(roomID, title, pipelineID, raw)
+		alert := s.newAlert(roomID, title, pipelineID, openedAt, raw)
 		deps := agent.Deps{
 			Tools:     s.toolsFor(pipelineID),
 			Actions:   s.actionsFor(pipelineID),

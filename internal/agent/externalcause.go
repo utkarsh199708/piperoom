@@ -65,8 +65,9 @@ type seenChange struct {
 type externalCauses struct {
 	mu       sync.Mutex
 	pipeline string
-	// alertAt is when the investigation started, which stands for the alert's
-	// time: a room's run starts when its alert opens it (Alert has no time).
+	// alertAt is the alert's time (Alert.At, when the room opened), else
+	// the run's start, which stands for it where no room gives one
+	// (cmd/investigate, evals).
 	alertAt time.Time
 	teams   []Team
 	seen    map[int64]*seenChange
@@ -75,7 +76,13 @@ type externalCauses struct {
 	team  string
 }
 
-func newExternalCauses(a Alert, alertAt time.Time) *externalCauses {
+// newExternalCauses ranks against a.At, or against start when the alert
+// carries no time.
+func newExternalCauses(a Alert, start time.Time) *externalCauses {
+	alertAt := a.At
+	if alertAt.IsZero() {
+		alertAt = start
+	}
 	return &externalCauses{pipeline: a.PipelineID, alertAt: alertAt, teams: a.Teams, seen: map[int64]*seenChange{}}
 }
 

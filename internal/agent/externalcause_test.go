@@ -101,6 +101,24 @@ func TestAlertDistance(t *testing.T) {
 	}
 }
 
+// Alert.At (the room's open time) is the alert's time: a run started hours
+// later (a quiet forecast room's first steer) still measures a change's
+// distance from the alert, not from its own start. Without it the run's start
+// stands for the alert.
+func TestExternalCausesUseAlertTime(t *testing.T) {
+	late := x4Alert.Add(5 * time.Hour)
+	c := newExternalCauses(Alert{PipelineID: "orders", Teams: x4Teams, At: x4Alert}, late)
+	note := c.observe("s_1", whatChangedData{Changes: []clients.PipelineChange{migrationChange(t)}})
+	if !strings.Contains(note, "3m before the alert") {
+		t.Fatalf("note does not measure from Alert.At:\n%s", note)
+	}
+	c = newExternalCauses(Alert{PipelineID: "orders", Teams: x4Teams}, late)
+	note = c.observe("s_1", whatChangedData{Changes: []clients.PipelineChange{migrationChange(t)}})
+	if !strings.Contains(note, "5h03m before the alert") {
+		t.Fatalf("note without Alert.At does not measure from the run's start:\n%s", note)
+	}
+}
+
 // TC4: a read with no external change gets no note, so the tool output reaches
 // the model exactly as before X4.
 func TestObserveNoExternalChangeAddsNothing(t *testing.T) {

@@ -3,6 +3,7 @@ package room
 import (
 	"slices"
 	"testing"
+	"time"
 )
 
 // X4c: the agent's Alert carries the teams of the room pipeline's tenant
@@ -23,14 +24,14 @@ pipelines:
     connectors: [c1]
 `)
 	svc := kindService(t, own, "", nil)
-	got := svc.newAlert("r", "t", "orders", nil).Teams
+	got := svc.newAlert("r", "t", "orders", time.Time{}, nil).Teams
 	if len(got) != 1 || got[0].ID != "checkout" || !slices.Equal(got[0].Owns, []string{"checkout-api"}) {
 		t.Fatalf("Teams = %+v, want only tenant a's checkout team", got)
 	}
-	if got := svc.newAlert("r", "t", "ghost", nil).Teams; got != nil {
+	if got := svc.newAlert("r", "t", "ghost", time.Time{}, nil).Teams; got != nil {
 		t.Fatalf("unknown pipeline: Teams = %+v, want nil", got)
 	}
-	if got := kindService(t, nil, "", nil).newAlert("r", "t", "orders", nil).Teams; got != nil {
+	if got := kindService(t, nil, "", nil).newAlert("r", "t", "orders", time.Time{}, nil).Teams; got != nil {
 		t.Fatalf("no owners: Teams = %+v, want nil", got)
 	}
 }
