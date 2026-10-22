@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"time"
+
+	"piperoom/internal/actions"
+)
 
 // defaultModel is the Claude model the agent uses unless Options says otherwise.
 const defaultModel = "claude-opus-5-5"
@@ -83,6 +87,12 @@ type timing struct {
 	// stepResultWait is how long a turn waits for the step results of a
 	// proposal approved in full before it starts without them.
 	stepResultWait time.Duration
+	// recoveryFirstPoll, recoveryMaxPoll and recoveryTimeout are the poll
+	// schedule of a recovery proposal's counted verification (X2c,
+	// verify_recovery.go): the actions.RecoveryVerify* defaults.
+	recoveryFirstPoll time.Duration
+	recoveryMaxPoll   time.Duration
+	recoveryTimeout   time.Duration
 }
 
 // defaultTiming returns the production waits and deadlines.
@@ -96,5 +106,9 @@ func defaultTiming() timing {
 		settleWait:      defaultSettleWait,
 		baselineTimeout: defaultBaselineTimeout,
 		stepResultWait:  defaultStepResultWait,
+
+		recoveryFirstPoll: actions.RecoveryVerifyFirstPoll,
+		recoveryMaxPoll:   actions.RecoveryVerifyMaxPoll,
+		recoveryTimeout:   actions.RecoveryVerifyTimeout,
 	}
 }

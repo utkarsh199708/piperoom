@@ -376,12 +376,17 @@ func validIdent(s string) bool {
 // context with no pipeline, or with only its id, is tools.ErrNoScope (a
 // client has no owners config to resolve an id and must not guess).
 func (r Reconcile) scope(ctx context.Context, table string) error {
+	return r.scopeFor(ctx, table, "reconcile")
+}
+
+// scopeFor is scope with the operation named in its errors.
+func (r Reconcile) scopeFor(ctx context.Context, table, op string) error {
 	sc, err := tools.ScopeFor(ctx, nil)
 	if err != nil {
 		if !errors.Is(err, tools.ErrNoScope) {
 			err = fmt.Errorf("%w: %w", tools.ErrNoScope, err)
 		}
-		return fmt.Errorf("%s: reconcile refused: it needs the pipeline in ctx (tools.WithPipeline) or the explicit tools.WithUnscoped opt-out: %w", r.Name, err)
+		return fmt.Errorf("%s: %s refused: it needs the pipeline in ctx (tools.WithPipeline) or the explicit tools.WithUnscoped opt-out: %w", r.Name, op, err)
 	}
 	if r.Sink {
 		err = sc.CheckSinkTable(table)
@@ -389,7 +394,7 @@ func (r Reconcile) scope(ctx context.Context, table string) error {
 		err = sc.CheckSourceTable(table)
 	}
 	if err != nil {
-		return fmt.Errorf("%s: reconcile: %w", r.Name, err)
+		return fmt.Errorf("%s: %s: %w", r.Name, op, err)
 	}
 	return nil
 }

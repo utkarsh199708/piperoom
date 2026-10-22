@@ -62,13 +62,31 @@ func (readOnlyRegistry) Register(context.Context, string, string) (int, error) {
 	return 0, ErrReadOnly
 }
 
+// readOnlyConnectTasks is readOnlyConnect plus the cluster-wide task read
+// (clients.WorkerTaskReader, X6b), which connect_task_balance finds by a type
+// assertion. Like readOnlyRegistryDeleted, it exists so the read-only value
+// has the read exactly when the real client has it.
+type readOnlyConnectTasks struct {
+	readOnlyConnect
+	wt clients.WorkerTaskReader
+}
+
+func (c readOnlyConnectTasks) WorkerTasks(ctx context.Context) (map[string][]clients.TaskAssignment, error) {
+	return c.wt.WorkerTasks(ctx)
+}
+
 // readConnect returns w's Connect client for read tools: nil when none is
-// configured (the tools then say so), else read-only.
+// configured (the tools then say so), else read-only, with the worker-task
+// read when the client has it.
 func readConnect(w *Wired) clients.ConnectClient {
 	if w.Connect == nil {
 		return nil
 	}
-	return readOnlyConnect{r: w.Connect}
+	ro := readOnlyConnect{r: w.Connect}
+	if wt, ok := w.Connect.(clients.WorkerTaskReader); ok {
+		return readOnlyConnectTasks{readOnlyConnect: ro, wt: wt}
+	}
+	return ro
 }
 
 // deletedSubjectLister is the registry's deleted-state read pair (KAN-407).

@@ -160,6 +160,12 @@ describe('formatMetricValue and sparklineLabel', () => {
     expect(formatMetricValue('topic_oldest_unread_age', 5 * 3600)).toBe('5 h')
   })
 
+  it('has no badge horizon: a retention limit of 30 days reads 30 d, and seconds stay seconds', () => {
+    expect(formatMetricValue('topic_oldest_unread_age', 30 * 24 * 3600)).toBe('30 d')
+    expect(formatMetricValue('topic_oldest_unread_age', 42)).toBe('42 s')
+    expect(formatMetricValue('topic_oldest_unread_age', 90)).toBe('1 min')
+  })
+
   it('names the metric and its newest value', () => {
     expect(sparklineLabel('dlq_records', series(3))).toBe('Dead-letter records, last 24 h, now 1,002 records')
     expect(sparklineLabel('dlq_records', [])).toBe('Dead-letter records, last 24 h')

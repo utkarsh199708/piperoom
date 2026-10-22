@@ -100,6 +100,12 @@ func Register(reg *tools.Registry, d Deps) error {
 			return err
 		}
 	}
+	// X6b: the cluster-wide task read is optional on a ConnectReader.
+	if _, ok := d.Connect.(clients.WorkerTaskReader); ok {
+		if err := reg.Register(&taskBalance{d: d}); err != nil {
+			return err
+		}
+	}
 	if _, ok := d.Kafka.(clients.ACLReader); ok {
 		if err := reg.Register(&kafkaACLs{d: d}); err != nil {
 			return err

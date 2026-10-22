@@ -178,8 +178,12 @@ func TestFleetHealthAndRows(t *testing.T) {
 		sig("dlq_growth", clients.WatchFiring, "sev3", "dlq:w.dlq", now.Add(-time.Hour)), fc(&eta1), fc(&eta2),
 	}})
 	e.put(t, clients.WatchStatus{PipelineID: "healthy", CheckedAt: now})
+	ackedFc := fc(&eta1)
+	ackedFc.State = clients.WatchAcked
 	e.put(t, clients.WatchStatus{PipelineID: "acked", CheckedAt: now, Signals: []clients.WatchSignal{
-		sig("slot_wal", clients.WatchAcked, "sev1", "", now.Add(-time.Hour)),
+		sig("slot_wal", clients.WatchAcked, "sev1", "connect:c4", now.Add(-time.Hour)),
+		sig("dlq_growth", clients.WatchFiring, "sev3", "dlq:a.dlq", now.Add(-time.Hour)),
+		ackedFc,
 	}})
 	e.put(t, clients.WatchStatus{PipelineID: "stale", CheckedAt: now.Add(-4 * time.Minute), Signals: []clients.WatchSignal{
 		sig("connector_down", clients.WatchFiring, "sev1", "connect:c5", now.Add(-time.Hour)),
@@ -225,7 +229,9 @@ func TestFleetHealthAndRows(t *testing.T) {
 		w.Forecasts[0].Metric != clients.WatchMetricSlotWALBytes || !slices.Equal(w.SignalsFiring, []string{"dlq_growth", "forecast"}) {
 		t.Fatalf("warning = %+v", w)
 	}
-	if a := by["acked"]; a.WorstNode != "" || !slices.Equal(a.SignalsFiring, []string{"slot_wal"}) {
+	// worst_node names the worst FIRING signal: the acked sev1's node never
+	// shadows the firing sev3's, and an acked forecast is not listed.
+	if a := by["acked"]; a.WorstNode != "dlq:a.dlq" || !slices.Equal(a.SignalsFiring, []string{"slot_wal", "dlq_growth", "forecast"}) || len(a.Forecasts) != 0 {
 		t.Fatalf("acked = %+v", a)
 	}
 	// Stale: unknown, nothing listed as firing, but checked_at says when.

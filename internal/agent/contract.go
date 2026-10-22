@@ -18,7 +18,13 @@ import (
 
 // HumanInput is something a person said that the agent must read.
 type HumanInput struct {
-	Seq       int64        `json:"seq"` // room event seq it came from
+	Seq int64 `json:"seq"` // room event seq it came from
+	// At is the time of the room event the input came from (events.Event.At).
+	// The room service sets it for "action_result": the action.executed time
+	// a recovery step's Verify counts from (actions.Verifier, X2c). Zero when
+	// the sender does not know it (the CLI, a demo inbox): the runner then
+	// uses the time it first read the input, which is never earlier.
+	At        time.Time    `json:"at,omitzero"`
 	Actor     events.Actor `json:"actor"`
 	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged"
 	StepID    string       `json:"step_id,omitempty"`
