@@ -12,6 +12,7 @@ in the same PR.
 |---|---|
 | [quickstart.md](quickstart.md) | get a read-only room on your own pipelines in two commands, before reading anything else |
 | [permissions.md](permissions.md) | create **least-privilege** credentials for each system Piperoom touches |
+| [clickhouse.md](clickhouse.md) | point the warehouse at ClickHouse: DSN, least-privilege `readonly=2` reader, what works, limits |
 | [write-roles.md](write-roles.md) | create the **write** credentials for the P3 fix actions, only if you turn write mode on |
 | [setup.md](setup.md) | the ten variables a first install sets, then the reference: prerequisites, configure Piperoom against your pipeline, start the room service and verify it |
 | [data-handling.md](data-handling.md) | know exactly what data Piperoom reads, what reaches the model, where it goes (including Slack), and who sees it |
@@ -66,11 +67,13 @@ below is from the code.
   [setup.md](setup.md#6-wire-up-alerts).
 - **Write actions: six.** Four of them write to Kafka Connect and two to the Schema Registry. Each
   one is listed with its exact HTTP call in [permissions.md](permissions.md#kafka-connect).
-- **Warehouse is Postgres by default, or Snowflake with `WAREHOUSE_KIND=snowflake`.** The Snowflake
-  client is selectable on `main` (`internal/wiring/warehouse.go`). `WAREHOUSE_DB_URL` is then a
-  gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go`).
-  Read-only access comes only from the DSN role (`internal/clients/snowflake/snowflake.go`).
-  See [permissions.md](permissions.md#warehouse).
+- **Warehouse is Postgres by default; `WAREHOUSE_KIND` selects another.** The wiring accepts
+  `postgres` (the default), `snowflake`, `bigquery`, `databricks` or `clickhouse`
+  (`internal/wiring/warehouse.go`). The Snowflake client is selectable on `main`. `WAREHOUSE_DB_URL`
+  is then a gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go`).
+  Read-only access comes only from the DSN role (`internal/clients/snowflake/snowflake.go`). The
+  ClickHouse client is also selectable (`WAREHOUSE_KIND=clickhouse`); see
+  [clickhouse.md](clickhouse.md). See [permissions.md](permissions.md#warehouse).
 - **Retention is live.** `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N days, checked
   every 6 hours; an empty value or `0` keeps everything. Export a room first with
   `GET /api/rooms/{id}/export`. Also on `main`: the Docker image and the served web UI, the signed alert routes,
