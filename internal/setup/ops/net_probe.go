@@ -282,17 +282,45 @@ func tlsCheck(ctx context.Context, req ProbeRequest, env Env) connprobe.Check {
 		return connprobe.Check{Status: connprobe.StatusSkip, Detail: "TCP failed first"}
 	}
 	defer conn.Close()
-	cfg := &tls.Config{InsecureSkipVerify: true, ServerName: req.Host, MinVersion: tls.VersionTLS12} //nolint:gosec // reading the certificate, not trusting it
+	// The probe reports the certificate and the verification verdict instead
+	// of refusing the handshake, so verification runs explicitly in the
+	// callback below and its outcome goes into the check's detail. Nothing is
+	// sent or trusted over this connection; it closes after the handshake.
+	verr := errors.New("the endpoint presented no certificate")
+	var leaf *x509.Certificate
+	cfg := &tls.Config{
+		ServerName:         req.Host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // VerifyPeerCertificate below verifies and reports
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			certs := make([]*x509.Certificate, 0, len(rawCerts))
+			for _, raw := range rawCerts {
+				c, perr := x509.ParseCertificate(raw)
+				if perr != nil {
+					verr = perr
+					return nil
+				}
+				certs = append(certs, c)
+			}
+			if len(certs) == 0 {
+				return nil
+			}
+			leaf = certs[0]
+			pool := x509.NewCertPool()
+			for _, c := range certs[1:] {
+				pool.AddCert(c)
+			}
+			_, verr = leaf.Verify(x509.VerifyOptions{DNSName: req.Host, Intermediates: pool})
+			return nil
+		},
+	}
 	tc := tls.Client(conn, cfg)
 	if err := tc.HandshakeContext(cctx); err != nil {
 		return connprobe.Check{Status: connprobe.StatusFail, Problem: "TLS handshake failed", Fix: "check the endpoint's TLS settings"}
 	}
-	state := tc.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
+	if leaf == nil {
 		return connprobe.Check{Status: connprobe.StatusFail, Problem: "the endpoint presented no certificate", Fix: "check the endpoint's TLS settings"}
 	}
-	leaf := state.PeerCertificates[0]
-	_, verr := leaf.Verify(x509.VerifyOptions{DNSName: req.Host})
 	verified := "chain verified against the system roots"
 	if verr != nil {
 		verified = "chain not verified against the system roots"
