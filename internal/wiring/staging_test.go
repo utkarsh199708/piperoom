@@ -288,6 +288,18 @@ func TestRequireStagingNeedsStager(t *testing.T) {
 			t.Fatalf("write=%q: opened %d/%d, closed %v/%v", mode, len(f.cfgs), len(fs.cfgs), f.closed, fs.closed)
 		}
 	}
+	// X8b's three Stagers are accepted in both write modes (the registry
+	// holds every action), as dev/owners.staging.yaml uses the first.
+	staged := loadOwners(t, stagingYAML(`
+    require_staging: [connect_update_connector_config, schema_register, schema_set_compatibility]`))
+	for _, mode := range []string{"", "on"} {
+		f, fs := newFakeOpener(), &fakeStaging{}
+		st, err := openStacks(context.Background(), processCfg(mode), nil, staged, StackOptions{}, stagingDeps(f, fs, env(stagingEnv())))
+		if err != nil {
+			t.Fatalf("write=%q: openStacks with X8b's stagers = %v", mode, err)
+		}
+		st.Close()
+	}
 }
 
 // stagerAction is an action that implements actions.Stager.
