@@ -73,6 +73,14 @@ const (
 	// dead-slot
 	sqlSlotRow  = "SELECT active::text || '|' || coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0) FROM pg_replication_slots WHERE slot_name = '" + slotName + "'"
 	sqlDropSlot = "SELECT pg_drop_replication_slot('" + slotName + "')"
+	// The slot Debezium expects, recreated at the current WAL position. The
+	// connector's stored offset points into the slot that was dropped, so the
+	// fix also clears the offset (see fixDeadSlot).
+	sqlCreateSlot = "SELECT slot_name FROM pg_create_logical_replication_slot('" + slotName + "', 'pgoutput')"
+	// A new slot's confirmed_flush_lsn (pgoutput) is its consistent point: the
+	// WAL position it starts reading from. Any connector offset below it can
+	// never be replayed on this slot.
+	sqlSlotStart = "SELECT coalesce(confirmed_flush_lsn::text, '') FROM pg_replication_slots WHERE slot_name = '" + slotName + "'"
 	// Re-emits the rows changed while no slot existed, with their own
 	// updated_at, so the warehouse gets them through CDC (followed by
 	// pendingWhere's formatted timestamp, nothing else).
@@ -345,12 +353,16 @@ func (s *stack) slotRow(ctx context.Context) (slotState, bool, error) {
 }
 
 // The fix drops the dead slot (what pg_drop_replication_slot does, and what
-// frees the WAL), then brings the dev pipeline back: resume the connector,
-// which creates a new slot at the current WAL position, and re-emit the rows
-// changed while no slot existed so the warehouse is complete again. In
-// production that last step is connect_snapshot_table. Idempotent: a slot the
-// agent already dropped is not dropped again, a running connector is left
-// alone.
+// frees the WAL), recreates it at the current WAL position, and clears the
+// connector's stored offsets. The offset Debezium saved points into the slot
+// that was just dropped: a new slot starts after it, so the task would fail
+// with "trying to read change stream starting at … is no longer available"
+// (KAN-411). With no offset and snapshot.mode=when_needed, Debezium takes a
+// fresh snapshot on the new slot instead — in production that step is
+// connect_snapshot_table — and the rows changed while no slot existed are
+// re-emitted. Idempotent: a running connector on an active slot is left alone,
+// a slot the agent already dropped is not dropped again, and the fix ends on a
+// RUNNING connector streaming a marker row into the warehouse.
 func fixDeadSlot(ctx context.Context, s *stack) error {
 	st, err := s.connectorStatus(ctx)
 	if err != nil {
@@ -365,33 +377,48 @@ func fixDeadSlot(ctx context.Context, s *stack) error {
 		s.log.Info("skipped: connector RUNNING and slot " + slotName + " active, nothing is dead")
 		return nil
 	}
+	if running && exists {
+		return fmt.Errorf("devctl: slot %s is inactive but the connector is %s; not dropping a slot the connector may still use", slotName, st.Connector.State)
+	}
 	// Read before the resume: rows newer than this were written while the slot
 	// was dead (or gone) and must be re-emitted.
 	newest, err := s.warehouseNewest(ctx)
 	if err != nil {
 		return err
 	}
-	switch {
-	case exists && !slot.active && !running:
+	// Stop first: a stopped connector holds no WAL sender, so the slot can be
+	// dropped, and Connect only deletes a connector's offsets while it is
+	// STOPPED (it rejects the delete on a running connector).
+	if err := s.stopConnectorUntilSlotInactive(ctx); err != nil {
+		return err
+	}
+	if exists {
 		if _, err := s.psql(ctx, "orders", sqlDropSlot); err != nil {
 			return err
 		}
 		s.log.Info("dropped slot "+slotName, "retained_bytes_freed", slot.retained)
-	case exists && !slot.active:
-		return fmt.Errorf("devctl: slot %s is inactive but the connector is %s; not dropping a slot the connector may still use", slotName, st.Connector.State)
-	case !exists:
+	} else {
 		s.log.Info("skipped: slot " + slotName + " already dropped")
-		if running {
-			// Debezium creates a missing slot only when its task starts.
-			if err := s.restartTask(ctx, 0); err != nil {
-				return err
-			}
-		}
 	}
-	if !running {
-		if _, err := s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/resume", nil, http.StatusAccepted, http.StatusOK, http.StatusNoContent); err != nil {
-			return err
-		}
+	if _, err := s.psql(ctx, "orders", sqlCreateSlot); err != nil {
+		return err
+	}
+	start, err := s.slotStart(ctx)
+	if err != nil {
+		return err
+	}
+	// The saved offset cannot be replayed on the new slot, so it is not
+	// restored: clearing it lets Debezium start from the slot with a snapshot.
+	if err := s.clearConnectorOffsets(ctx); err != nil {
+		return err
+	}
+	s.log.Info("cleared connector offsets: the saved position predates the recreated slot, so Debezium snapshots instead of failing",
+		"slot", slotName, "slot_start_lsn", start)
+	if err := s.setSnapshotMode(ctx, "when_needed"); err != nil {
+		return err
+	}
+	if _, err := s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/resume", nil, http.StatusAccepted, http.StatusOK, http.StatusNoContent); err != nil {
+		return err
 	}
 	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
 		return err
@@ -403,16 +430,51 @@ func fixDeadSlot(ctx context.Context, s *stack) error {
 		}
 		return ok && row.active, nil
 	}); err != nil {
-		return fmt.Errorf("devctl: connector did not create an active slot %s: %w", slotName, err)
+		return fmt.Errorf("devctl: connector did not use the recreated slot %s: %w", slotName, err)
 	}
 	if _, err := s.psql(ctx, "orders", sqlTouchPending+pendingWhere(warehousePendingFrom(newest))); err != nil {
 		return err
 	}
+	// A task can report RUNNING and still fail on its stored offset; only a new
+	// row reaching the warehouse proves the connector is streaming again.
+	if err := s.waitMarkerOrder(ctx); err != nil {
+		return fmt.Errorf("devctl: connector is not streaming on the recreated slot: %w", err)
+	}
 	if err := s.waitLagZero(ctx, ordersGroup, 90*time.Second); err != nil {
 		return err
 	}
-	s.log.Info("fixed: dead slot dropped, connector RUNNING on a new slot " + slotName + ", rows changed meanwhile re-emitted, order-sync lag 0")
+	s.log.Info("fixed: dead slot dropped and recreated, connector offsets cleared, connector RUNNING on a fresh snapshot, rows changed meanwhile re-emitted, order-sync lag 0")
 	return nil
+}
+
+// slotStart returns the slot's start LSN (its consistent point), "" when the
+// slot is gone.
+func (s *stack) slotStart(ctx context.Context) (string, error) {
+	out, err := s.psql(ctx, "orders", sqlSlotStart)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// clearConnectorOffsets deletes the connector's stored offsets (Kafka Connect
+// 3.6+, DELETE /connectors/{name}/offsets). Connect accepts the delete only
+// while the connector is STOPPED; a connector that has no offsets answers 204,
+// so the call is safe to repeat.
+func (s *stack) clearConnectorOffsets(ctx context.Context) error {
+	_, err := s.do(ctx, http.MethodDelete, s.cfg.ConnectURL+"/connectors/"+connectorName+"/offsets", nil, http.StatusNoContent, http.StatusOK)
+	if err != nil {
+		return fmt.Errorf("devctl: clear connector offsets: %w", err)
+	}
+	return nil
+}
+
+// setSnapshotMode re-registers the connector from dev/connectors with
+// snapshot.mode set. when_needed snapshots exactly when there is no offset —
+// the state the fix leaves behind — and is a no-op on a later start that has
+// one, so the fix stays idempotent.
+func (s *stack) setSnapshotMode(ctx context.Context, mode string) error {
+	return s.registerConnectorWith(ctx, map[string]string{"snapshot.mode": mode})
 }
 
 // stopConnectorUntilSlotInactive stops the connector (Connect REST stop: a
