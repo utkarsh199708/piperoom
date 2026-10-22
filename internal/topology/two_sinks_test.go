@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -45,8 +46,13 @@ layers:
 // real schema path (validation, normalized values and the merged lists).
 func twoSinksOwners(t *testing.T) *owners.Owners {
 	t.Helper()
+	return ownersFromYAML(t, twoSinksYAML)
+}
+
+func ownersFromYAML(t *testing.T, yaml string) *owners.Owners {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "owners.yaml")
-	if err := os.WriteFile(path, []byte(twoSinksYAML), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	o, err := owners.Load(path)
@@ -56,7 +62,7 @@ func twoSinksOwners(t *testing.T) *owners.Owners {
 	return o
 }
 
-func twoSinksBuilder(t *testing.T, fresh map[string]time.Time, loads map[string][]clients.LoadError) *builder {
+func twoSinksBuilder(t *testing.T, kind string, fresh map[string]time.Time, loads map[string][]clients.LoadError) *builder {
 	t.Helper()
 	k := &fakeKafka{
 		lags:    map[string]clients.GroupLag{"order-sync": lagOn("pg.public.orders")},
@@ -66,15 +72,17 @@ func twoSinksBuilder(t *testing.T, fresh map[string]time.Time, loads map[string]
 	b := newBuilder(twoSinksOwners(t), clickhouseConnect(), k,
 		&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg_orders_slot", Active: true, RetainedWALBytes: 10}}}, wh, nil)
 	b.now = func() time.Time { return srNow }
+	b.whKind = kind
 	return b
 }
 
 // TestBuildTwoSinksOneTopic is TC2: the graph has two writer chains and two
-// sink nodes; a stalled ClickHouse engine fails only the ClickHouse chain while
-// the Postgres chain stays ok, and no edge claims order-sync feeds the
-// ClickHouse table.
+// sink nodes; a stalled ClickHouse engine fails only the ClickHouse chain. The
+// one warehouse client here is ClickHouse, so the declared Postgres sink is
+// unknown (its warehouse has no connected client) instead of being read from
+// ClickHouse, and no edge claims order-sync feeds the ClickHouse table.
 func TestBuildTwoSinksOneTopic(t *testing.T) {
-	b := twoSinksBuilder(t,
+	b := twoSinksBuilder(t, "clickhouse",
 		map[string]time.Time{
 			"analytics.orders":    srNow.Add(-time.Minute),
 			"analytics_ch.orders": srNow.Add(-45 * time.Minute),
@@ -103,10 +111,15 @@ func TestBuildTwoSinksOneTopic(t *testing.T) {
 		t.Fatalf("edges:\n got %v\nwant %v", got, wantEdges)
 	}
 
-	// Each sink owns its health; the ClickHouse writer fails on its own node.
+	// The Postgres sink is not read through the ClickHouse client: unknown,
+	// not fail, with its own writer and warehouse facts.
 	pgSink := g.mustNode(t, "wh:analytics.orders")
-	if pgSink.Health != HealthOK || pgSink.Facts["writer"] != "order-sync" || pgSink.Facts["warehouse"] != "postgres" {
+	if pgSink.Health != HealthUnknown || pgSink.Facts["error"] != "warehouse not connected" ||
+		pgSink.Facts["writer"] != "order-sync" || pgSink.Facts["warehouse"] != "postgres" {
 		t.Fatalf("postgres sink = %+v", pgSink)
+	}
+	if _, read := pgSink.Facts["stale_for"]; read {
+		t.Fatalf("postgres sink carries a freshness read from ClickHouse: %+v", pgSink.Facts)
 	}
 	chSink := g.mustNode(t, "wh:analytics_ch.orders")
 	if chSink.Health != HealthFail || chSink.Facts["writer"] != "analytics.orders_kafka" || chSink.Facts["warehouse"] != "clickhouse" {
@@ -131,7 +144,7 @@ func TestBuildTwoSinksOneTopic(t *testing.T) {
 // TestTwoSinksRenderListsBothWriters is TC3: the map text names each sink with
 // its own writer, so the failing ClickHouse sink cannot be read as order-sync.
 func TestTwoSinksRenderListsBothWriters(t *testing.T) {
-	b := twoSinksBuilder(t,
+	b := twoSinksBuilder(t, "clickhouse",
 		map[string]time.Time{
 			"analytics.orders":    srNow.Add(-time.Minute),
 			"analytics_ch.orders": srNow.Add(-45 * time.Minute),
@@ -228,6 +241,157 @@ func TestExplicitAmbiguousTopicKeepsWriterChain(t *testing.T) {
 	if got := edgeStrings(fp.edges); !slices.Equal(got, want) {
 		t.Fatalf("edges:\n got %v\nwant %v", got, want)
 	}
+}
+
+// sameTableTwoSinksYAML is the real dev shape (dev/clickhouse): the topic
+// fills Postgres analytics.orders through order-sync and ClickHouse
+// analytics.orders through the Kafka engine table analytics.orders_kafka.
+// The two sinks share a table name, so their map keys carry the warehouse.
+const sameTableTwoSinksYAML = `
+pipelines:
+  - id: orders
+    title: Orders CDC
+    topic_prefix: pg
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    sinks:
+      - table: analytics.orders
+        warehouse: postgres
+        writer: {kind: consumer_group, name: order-sync}
+      - table: analytics.orders
+        warehouse: clickhouse
+        writer: {kind: kafka_engine, name: analytics.orders_kafka}
+    sink_ts_column: updated_at
+layers:
+  postgres: priya
+  kafka-connect: arjun
+  schema-registry: priya
+  kafka: arjun
+  consumer: kabir
+  warehouse: meera
+`
+
+// countingWarehouse records Freshness calls, so a test can prove a
+// mismatched sink was never read.
+type countingWarehouse struct {
+	*fakeWarehouseLoad
+	freshCalls map[string]int
+}
+
+func (w *countingWarehouse) Freshness(ctx context.Context, table, ts string) (time.Time, error) {
+	w.freshCalls[table]++
+	return w.fakeWarehouseLoad.Freshness(ctx, table, ts)
+}
+
+// TestBuildTwoSinksSameTableDifferentWarehouses is the KAN-481 dev case: one
+// Postgres and one ClickHouse sink both named analytics.orders, with a single
+// ClickHouse client. The Postgres sink node is keyed by warehouse, is left
+// unknown (not failed) with a "warehouse not connected" fact, and is never
+// read; the ClickHouse sink is read normally.
+func TestBuildTwoSinksSameTableDifferentWarehouses(t *testing.T) {
+	o := ownersFromYAML(t, sameTableTwoSinksYAML)
+	k := &fakeKafka{
+		lags:    map[string]clients.GroupLag{"order-sync": lagOn("pg.public.orders")},
+		offsets: map[string][]clients.PartitionOffsets{"pg.public.orders": {{Partition: 0, LastTimestamp: srNow.Add(-time.Minute)}}},
+	}
+	wh := &countingWarehouse{
+		fakeWarehouseLoad: &fakeWarehouseLoad{fakeWarehouse: fakeWarehouse{
+			fresh: map[string]time.Time{"analytics.orders": srNow.Add(-45 * time.Minute)},
+		}},
+		freshCalls: map[string]int{},
+	}
+	b := newBuilder(o, clickhouseConnect(), k,
+		&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg_orders_slot", Active: true, RetainedWALBytes: 10}}}, wh, nil)
+	b.now = func() time.Time { return srNow }
+	b.whKind = "clickhouse"
+
+	g, err := b.Build(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	pgSink := g.mustNode(t, "wh:postgres:analytics.orders")
+	if pgSink.Health != HealthUnknown || pgSink.Facts["error"] != "warehouse not connected" ||
+		pgSink.Facts["writer"] != "order-sync" || pgSink.Facts["warehouse"] != "postgres" ||
+		pgSink.Name != "analytics.orders" {
+		t.Fatalf("postgres sink = %+v", pgSink)
+	}
+	chSink := g.mustNode(t, "wh:clickhouse:analytics.orders")
+	if chSink.Health != HealthFail || chSink.Facts["stale_for"] != "45m" ||
+		chSink.Facts["writer"] != "analytics.orders_kafka" || chSink.Facts["warehouse"] != "clickhouse" {
+		t.Fatalf("clickhouse sink = %+v", chSink)
+	}
+	if _, ok := g.node("wh:analytics.orders"); ok {
+		t.Fatal("a shared table name got a table-only sink node")
+	}
+	// Only the ClickHouse sink's freshness was read: the mismatched Postgres
+	// sink never reached the ClickHouse client.
+	if got := wh.freshCalls["analytics.orders"]; got != 1 {
+		t.Fatalf("freshness reads for analytics.orders = %d, want 1 (ClickHouse sink only)", got)
+	}
+
+	got := edgeStrings(g.Edges)
+	for _, want := range []string{
+		"group:order-sync>wh:postgres:analytics.orders",
+		"topic:pg.public.orders>kafka_engine:analytics.orders_kafka ~",
+		"materialized_view:analytics.orders_mv>wh:clickhouse:analytics.orders ~",
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("edge %q missing:\n%v", want, got)
+		}
+	}
+	for _, e := range g.Edges {
+		if e.To == "wh:postgres:analytics.orders" && e.From != "group:order-sync" {
+			t.Fatalf("postgres sink fed by %q", e.From)
+		}
+	}
+}
+
+// TestTraceSinkForSharedTableNameIsUnknown: a trace cannot tell the Postgres
+// analytics.orders from the ClickHouse one by name, so it says so instead of
+// reading one warehouse's table as the other's.
+func TestTraceSinkForSharedTableNameIsUnknown(t *testing.T) {
+	o := ownersFromYAML(t, sameTableTwoSinksYAML)
+	p, _ := o.Pipeline("orders")
+	if _, err := sinkFor("public.orders", p.SourceTables, p.SinkRefs()); !errors.Is(err, errNoSink) {
+		t.Fatalf("sinkFor err = %v, want errNoSink", err)
+	}
+}
+
+// TestTraceSinkWarehouseNotConnected: a declared Postgres sink with only a
+// ClickHouse client is unknown in the trace, and its row is never read through
+// the ClickHouse client.
+func TestTraceSinkWarehouseNotConnected(t *testing.T) {
+	o := testOwners()
+	p := &o.Pipelines[0]
+	p.SinkTables = nil
+	p.Sinks = []owners.Sink{{
+		Table: "analytics.orders", Warehouse: "postgres",
+		Writer: owners.SinkWriter{Kind: owners.SinkWriterConsumerGroup, Name: "order-sync"},
+	}}
+	wh := &keyedWarehouse{fakeWarehouse: &fakeWarehouse{}, col: "id"}
+	b := newBuilder(o,
+		&fakeConnect{config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}}},
+		&fakeKafka{}, &fakeSource{rows: map[string]map[string]any{"public.orders|7": {"id": 7}}}, wh, nil)
+	b.whKind = "clickhouse"
+
+	stages, err := b.Trace(context.Background(), "orders", "public.orders", "7")
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	for _, s := range stages {
+		if s.Layer != "warehouse" {
+			continue
+		}
+		if s.Status != "unknown" || s.Facts["error"] != "warehouse not connected" {
+			t.Fatalf("warehouse stage = %s %v", s.Status, s.Facts)
+		}
+		if wh.rowCalls != 0 {
+			t.Fatalf("read %d sink row(s) through the wrong warehouse", wh.rowCalls)
+		}
+		return
+	}
+	t.Fatalf("no warehouse stage in %+v", stages)
 }
 
 // TestLegacySingleSinkUnchanged: the old consumer_groups + sink_tables form

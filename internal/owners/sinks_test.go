@@ -67,6 +67,54 @@ func TestLoadTwoSinks(t *testing.T) {
 	}
 }
 
+// TestLoadTwoSinksSameTableDifferentWarehouses is the real dev shape
+// (dev/clickhouse): Postgres analytics.orders and ClickHouse analytics.orders
+// are two sinks, so they must load and get distinct map keys.
+func TestLoadTwoSinksSameTableDifferentWarehouses(t *testing.T) {
+	yaml := `
+pipelines:
+  - id: orders
+    topic_prefix: pg
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    sinks:
+      - table: analytics.orders
+        warehouse: postgres
+        writer: {kind: consumer_group, name: order-sync}
+      - table: analytics.orders
+        warehouse: clickhouse
+        writer: {kind: kafka_engine, name: analytics.orders_kafka}
+    sink_ts_column: updated_at
+layers: {}
+`
+	o, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, _ := o.Pipeline("orders")
+	// The table-name list stays unique for scope and the watcher.
+	if want := []string{"analytics.orders"}; !reflect.DeepEqual(p.SinkTables, want) {
+		t.Fatalf("sink tables = %v, want %v", p.SinkTables, want)
+	}
+	if got := len(p.SinksForTable("analytics.orders")); got != 2 {
+		t.Fatalf("SinksForTable = %d entries, want 2", got)
+	}
+	refs := p.SinkRefs()
+	if len(refs) != 2 {
+		t.Fatalf("SinkRefs = %+v, want two", refs)
+	}
+	pg, ch := refs[0], refs[1]
+	if pg.Key != "postgres:analytics.orders" || pg.Table != "analytics.orders" || pg.Warehouse != "postgres" || !pg.Declared {
+		t.Fatalf("postgres ref = %+v", pg)
+	}
+	if ch.Key != "clickhouse:analytics.orders" || ch.Table != "analytics.orders" || ch.Warehouse != "clickhouse" || !ch.Declared {
+		t.Fatalf("clickhouse ref = %+v", ch)
+	}
+	if pg.Key == ch.Key {
+		t.Fatalf("two sinks share the key %q", pg.Key)
+	}
+}
+
 func TestLoadSinkWriterDefaultsAndExtraGroups(t *testing.T) {
 	yaml := `
 pipelines:
@@ -160,6 +208,21 @@ func TestLoadSinkErrors(t *testing.T) {
 			name:    "kafka engine in postgres",
 			extra:   "    sinks:\n      - {table: analytics.orders, warehouse: postgres, writer: {kind: kafka_engine, name: analytics.orders_kafka}}\n",
 			wantErr: "needs warehouse clickhouse",
+		},
+		{
+			name:    "kafka engine name is not db.table",
+			extra:   "    sinks:\n      - {table: analytics.orders, warehouse: clickhouse, writer: {kind: kafka_engine, name: orders_kafka}}\n",
+			wantErr: "want db.table",
+		},
+		{
+			name:    "unknown warehouse",
+			extra:   "    sinks:\n      - {table: analytics.orders, warehouse: oracle, writer: {kind: consumer_group, name: order-sync}}\n",
+			wantErr: `unknown warehouse "oracle"`,
+		},
+		{
+			name:    "same table in one warehouse twice",
+			extra:   "    sinks:\n      - {table: analytics.orders, warehouse: postgres, writer: {kind: consumer_group, name: order-sync}}\n      - {table: analytics.orders, warehouse: postgres, writer: {kind: consumer_group, name: other}}\n",
+			wantErr: `sinks lists table "analytics.orders" twice in warehouse "postgres"`,
 		},
 		{
 			name:    "sinks need a ts column",

@@ -25,6 +25,10 @@ type groupSnapshot struct {
 type freshSnapshot struct {
 	ts  time.Time
 	err error
+	// warehouseNotConnected is set when the sink's declared warehouse has no
+	// connected client of that kind: no read was issued, and the sink is
+	// unknown rather than another warehouse's answer (#KAN-481).
+	warehouseNotConnected bool
 }
 
 // collected holds everything the health phase gathers. One goroutine writes
@@ -127,16 +131,30 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, engines []stri
 			mu.Unlock()
 		})
 	}
-	for _, s := range p.SinkTableNames() {
-		s := s
-		run(func() {
-			ts, err := b.wh.Freshness(ctx, s, p.SinkTSColumn)
+	for _, ref := range p.SinkRefs() {
+		ref := ref
+		wh, connected := b.sinkClient(p, ref)
+		if !connected {
+			// Never read a sink through a client of another kind: a declared
+			// Postgres sink must not show ClickHouse health (#KAN-481). Other
+			// sink reads are already running, so the map write takes mu.
 			mu.Lock()
-			c.freshness[s] = freshSnapshot{ts: ts, err: err}
+			c.freshness[ref.Key] = freshSnapshot{warehouseNotConnected: true}
+			mu.Unlock()
+			continue
+		}
+		run(func() {
+			ts, err := wh.Freshness(ctx, ref.Table, p.SinkTSColumn)
+			mu.Lock()
+			c.freshness[ref.Key] = freshSnapshot{ts: ts, err: err}
 			mu.Unlock()
 		})
 	}
-	if lr, ok := b.wh.(clients.LoadErrorReader); ok {
+	// Load history belongs to a ClickHouse Kafka engine. A client of another
+	// kind would be answering about a different warehouse, so read only when
+	// the connected kind is ClickHouse (an empty kind is the legacy wiring
+	// that passed no kind).
+	if lr, ok := b.wh.(clients.LoadErrorReader); ok && b.loadErrorsAllowed() {
 		for _, engine := range engines {
 			engine := engine
 			run(func() {
@@ -150,6 +168,33 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline, engines []stri
 	}
 	wg.Wait()
 	return c
+}
+
+// sinkClient returns the warehouse client to read ref through, and false when
+// the sink declares a warehouse the builder has no client of that kind for. An
+// empty connected kind is the legacy single-warehouse wiring: every sink is
+// read through the one client, as before. A nil second client means a
+// mismatched sink is unknown; it is never read through the wrong warehouse.
+func (b *builder) sinkClient(p owners.Pipeline, ref owners.SinkRef) (clients.Warehouse, bool) {
+	if b.whKind == "" || !ref.Declared {
+		return b.wh, true
+	}
+	kind := ref.Warehouse
+	if kind == "" {
+		// The block says an empty warehouse means the pipeline's kind.
+		kind = b.warehouseKind(p)
+	}
+	if kind != b.whKind {
+		return nil, false
+	}
+	return b.wh, true
+}
+
+// loadErrorsAllowed reports whether the connected warehouse client may be
+// asked for ClickHouse Kafka-engine load history. An empty kind is the legacy
+// wiring and keeps the old behavior.
+func (b *builder) loadErrorsAllowed() bool {
+	return b.whKind == "" || b.whKind == "clickhouse"
 }
 
 // collectTopics fetches the newest record timestamp per topic in parallel.

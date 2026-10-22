@@ -85,7 +85,14 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 		table:          table,
 		groupCommitted: -1,
 	}
-	f.sink, f.sinkErr = sinkFor(table, p.SourceTables, p.SinkTableNames())
+	ref, err := sinkFor(table, p.SourceTables, p.SinkRefs())
+	f.sink = ref.Table
+	f.sinkErr = err
+	// A sink whose declared warehouse has no connected client must not be read
+	// through another warehouse's client (#KAN-481).
+	if _, ok := b.sinkClient(p, ref); f.sinkErr == nil && !ok {
+		f.sinkErr = errWarehouseNotConnected
+	}
 
 	// Resolve the connector and topic. A Connect outage must not fail the
 	// trace: fall back to placeholder names and mark the connector unknown.
@@ -267,36 +274,53 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 // never another table's row.
 var errNoSink = errors.New("no sink table of the pipeline matches the source table")
 
+// errWarehouseNotConnected means the sink's declared warehouse has no
+// connected client of that kind, so its row cannot be read here without
+// asking another warehouse (#KAN-481).
+var errWarehouseNotConnected = errors.New("warehouse not connected")
+
 // errNoGroup means none of the pipeline's consumer groups has partitions of
 // the record's topic, so no committed offset tells whether it was consumed.
 var errNoGroup = errors.New("no consumer group of the pipeline reads the topic")
 
-// sinkFor picks the sink table of a source table: the only sink of a
-// pipeline with one source table, else the one sink with the same table name
-// (#401). Unlike reconcile_counts, a trace has no sink_table override, so a
-// lone sink of a pipeline with several source tables is not assumed to hold
-// every table's rows, and a name two source tables share (public.orders,
-// archive.orders) tells nothing.
-func sinkFor(source string, sources, sinks []string) (string, error) {
+// sinkFor picks the sink of a source table: the only sink of a pipeline with
+// one source table, else the one sink with the same table name (#401). Unlike
+// reconcile_counts, a trace has no sink_table override, so a lone sink of a
+// pipeline with several source tables is not assumed to hold every table's
+// rows, and a name two source tables share (public.orders, archive.orders)
+// tells nothing. Two sinks that share a table name in different warehouses
+// (the dev Postgres and ClickHouse analytics.orders) cannot be told apart by
+// name either: the trace returns errNoSink rather than reading one of them.
+func sinkFor(source string, sources []string, sinks []owners.SinkRef) (owners.SinkRef, error) {
 	if len(sources) == 1 && len(sinks) == 1 {
 		return sinks[0], nil
 	}
-	name := source[strings.LastIndex(source, ".")+1:]
+	name := lastSegment(source)
 	for _, s := range sources {
-		if s != source && s[strings.LastIndex(s, ".")+1:] == name {
-			return strings.Join(sinks, ","), errNoSink
+		if s != source && lastSegment(s) == name {
+			return owners.SinkRef{Table: strings.Join(sinkTables(sinks), ",")}, errNoSink
 		}
 	}
-	var match []string
+	var match []owners.SinkRef
 	for _, s := range sinks {
-		if s[strings.LastIndex(s, ".")+1:] == name {
+		if lastSegment(s.Table) == name {
 			match = append(match, s)
 		}
 	}
 	if len(match) == 1 {
 		return match[0], nil
 	}
-	return strings.Join(sinks, ","), errNoSink
+	return owners.SinkRef{Table: strings.Join(sinkTables(sinks), ",")}, errNoSink
+}
+
+// sinkTables returns the display names of refs, in order, for the trace stage
+// of a sink that could not be chosen.
+func sinkTables(refs []owners.SinkRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		out = append(out, r.Table)
+	}
+	return out
 }
 
 // groupFor returns the consumer group whose partitions include topic, with
@@ -586,6 +610,8 @@ func unknownReason(err error) string {
 		return "no matching sink table"
 	case errors.Is(err, errNoGroup):
 		return "no group reads the topic"
+	case errors.Is(err, errWarehouseNotConnected):
+		return "warehouse not connected"
 	case errors.Is(err, errSinkKey):
 		return "sink primary key is composite or differs from the source key: the trace cannot look up its row"
 	}

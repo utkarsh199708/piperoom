@@ -118,7 +118,8 @@ func clickhouseEngineTopic(topics []string, sink string) (string, bool) {
 	return match, match != ""
 }
 
-// clickhouseHopSpec is one Kafka-ingestion hop to wire into a graph.
+// clickhouseHopSpec is one Kafka-ingestion hop to wire into a graph. sink is
+// the sink ref key (the node id with "wh:" added), not always the table name.
 type clickhouseHopSpec struct {
 	sink, engine, view, topic string
 }
@@ -140,17 +141,19 @@ func clickhouseHopSpecs(p owners.Pipeline, topics []string) []clickhouseHopSpec 
 // explicitClickhouseHopSpecs plans the hop of every sink whose declared writer
 // is a ClickHouse Kafka engine table. The engine name comes from owners.yaml,
 // not from the naming convention; the materialized view's name still follows
-// the convention because the block does not name it.
+// the convention because the block does not name it. sink is the ref key (the
+// table, or warehouse:table when two sinks share a name), while the engine
+// and view names use the table.
 func explicitClickhouseHopSpecs(p owners.Pipeline, topics []string) []clickhouseHopSpec {
 	specs := make([]clickhouseHopSpec, 0, len(p.Sinks))
-	for _, s := range p.Sinks {
-		engine, ok := s.KafkaEngineWriter()
+	for _, ref := range p.SinkRefs() {
+		engine, ok := ref.Sink.KafkaEngineWriter()
 		if !ok {
 			continue
 		}
-		_, view := clickhouseNames(s.Table)
-		topic, _ := clickhouseEngineTopic(topics, s.Table)
-		specs = append(specs, clickhouseHopSpec{sink: s.Table, engine: engine, view: view, topic: topic})
+		_, view := clickhouseNames(ref.Table)
+		topic, _ := clickhouseEngineTopic(topics, ref.Table)
+		specs = append(specs, clickhouseHopSpec{sink: ref.Key, engine: engine, view: view, topic: topic})
 	}
 	return specs
 }

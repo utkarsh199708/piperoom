@@ -236,11 +236,12 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 		}
 	}
 	if explicitSinks {
-		for _, s := range p.Sinks {
-			if name, ok := s.ConsumerGroupWriter(); ok {
+		for _, ref := range p.SinkRefs() {
+			if name, ok := ref.Sink.ConsumerGroupWriter(); ok {
 				// Declared in owners.yaml, so the pairing is proven (graph.go
-				// MappingMapped), unlike the legacy cross product.
-				toWarehouse = append(toWarehouse, Edge{From: "group:" + name, To: "wh:" + s.Table})
+				// MappingMapped), unlike the legacy cross product. The ref key
+				// keeps same-named sinks in different warehouses distinct.
+				toWarehouse = append(toWarehouse, Edge{From: "group:" + name, To: "wh:" + ref.Key})
 			}
 		}
 	}

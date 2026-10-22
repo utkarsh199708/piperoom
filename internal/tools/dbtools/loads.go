@@ -97,14 +97,25 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 // loadErrorTable returns the table whose load history to read for sink: the
 // declared ClickHouse Kafka engine writer when the pipeline declares one for
 // that sink (the engine owns the consumer exceptions and the failed loads),
-// else the sink table itself. A pipeline without a sinks: block keeps the old
+// else the sink table itself. A table name two warehouses share can have two
+// entries; only one engine writer makes the answer unambiguous, otherwise the
+// sink table itself is read. A pipeline without a sinks: block keeps the old
 // behavior; its engine name, if any, comes from the topology's naming
 // convention, not from owners.yaml.
 func loadErrorTable(p owners.Pipeline, sink string) string {
-	if s, ok := p.SinkForTable(sink); ok {
-		if engine, ok := s.KafkaEngineWriter(); ok {
-			return engine
+	engine := ""
+	for _, s := range p.SinksForTable(sink) {
+		name, ok := s.KafkaEngineWriter()
+		if !ok {
+			continue
 		}
+		if engine != "" && engine != name {
+			return sink // two engines: the table name alone cannot pick one
+		}
+		engine = name
+	}
+	if engine != "" {
+		return engine
 	}
 	return sink
 }
