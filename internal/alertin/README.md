@@ -208,4 +208,6 @@ From your own incident tooling, post `kind:"vendor_incident"` with the vendor co
 `alertin.StatusPoller` reads a statuspage.io RSS or Atom feed (Confluent Cloud, Aiven) every 5 minutes (10 s
 deadline, 4 MB cap). Each incident whose newest update is `investigating`, `identified` or `monitoring` becomes one
 `vendor_incident` row with `source: statuspage`, one per incident and status. Resolved incidents, maintenances and
-items older than 7 days are skipped. An unreachable feed writes nothing and logs one warning an hour.
+items older than 7 days are skipped. An unreachable feed writes nothing and logs one warning an hour. The poller
+connects only to public addresses (a feed host or redirect target that resolves to a loopback, private, link-local or
+cloud-metadata address is refused), follows at most 5 redirects and only to `https`, and uses no HTTP proxy.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/connprobe"
 	"piperoom/internal/store/memstore"
 )
 
@@ -296,5 +298,26 @@ func TestStatusPollerRunStops(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+}
+
+// The default client dials public addresses only: a feed on a loopback,
+// private or metadata address is refused before any connection, so neither
+// the owners.yaml URL nor a redirect reaches an internal endpoint (SSRF).
+func TestStatusFeedDefaultClientRefusesInternalAddresses(t *testing.T) {
+	srv := newFeedServer(t, nil) // on 127.0.0.1
+	p, err := NewStatusPoller(StatusPollerConfig{Feeds: []VendorFeed{confluentFeed(srv.URL)}, Writer: memstore.New()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range []string{srv.URL + "/history.rss", "https://169.254.169.254/latest/meta-data/",
+		"https://10.0.0.1/feed", "https://[::1]:8443/feed", "https://metadata.google.internal/feed"} {
+		if _, err := p.fetch(context.Background(), u); !errors.Is(err, connprobe.ErrBlockedAddress) {
+			t.Errorf("%s: err = %v, want connprobe.ErrBlockedAddress", u, err)
+		}
+	}
+	tr, ok := p.cfg.Client.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil || p.cfg.Client.CheckRedirect == nil || p.cfg.Client.Timeout != StatusFeedTimeout {
+		t.Fatalf("default client: %+v", p.cfg.Client)
 	}
 }

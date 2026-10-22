@@ -18,6 +18,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/config"
+	"piperoom/internal/connprobe"
 )
 
 // Limits of the status-page poller (docs/api.md, External changes).
@@ -45,8 +46,8 @@ type VendorFeed struct {
 type StatusPollerConfig struct {
 	Feeds  []VendorFeed
 	Writer clients.ChangeWriter
-	// Client fetches the feeds; default one with StatusFeedTimeout that
-	// follows redirects to https only.
+	// Client fetches the feeds; default newStatusFeedClient (public
+	// addresses only, redirects to https only, StatusFeedTimeout).
 	Client   *http.Client
 	Interval time.Duration // default config.VendorStatusPollInterval
 	Log      *slog.Logger
@@ -74,7 +75,7 @@ func NewStatusPoller(cfg StatusPollerConfig) (*StatusPoller, error) {
 		return nil, errors.New("alertin: status poller needs a change writer")
 	}
 	if cfg.Client == nil {
-		cfg.Client = &http.Client{Timeout: StatusFeedTimeout, CheckRedirect: httpsRedirectsOnly}
+		cfg.Client = newStatusFeedClient()
 	}
 	if cfg.Interval <= 0 {
 		cfg.Interval = config.VendorStatusPollInterval
@@ -108,6 +109,29 @@ func NewStatusPoller(cfg StatusPollerConfig) (*StatusPoller, error) {
 		warn:  &throttledWarn{every: StatusFeedWarnEvery, last: map[string]time.Time{}},
 		seen:  map[string]map[string]bool{},
 	}, nil
+}
+
+// newStatusFeedClient is the default feed client. Its dialer
+// (connprobe.Guard with neither loopback nor private ranges allowed) refuses
+// loopback, private, link-local and cloud-metadata addresses, checked on the
+// resolved address it then dials, so neither the owners.yaml URL nor a
+// feed's redirect can make the server reach an internal endpoint (SSRF). It
+// uses no HTTP proxy: the guard would then check the proxy's address, not
+// the feed's.
+func newStatusFeedClient() *http.Client {
+	guard := &connprobe.Guard{}
+	return &http.Client{
+		Timeout: StatusFeedTimeout,
+		Transport: &http.Transport{
+			DialContext:           guard.DialContext,
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   StatusFeedTimeout,
+			ResponseHeaderTimeout: StatusFeedTimeout,
+			MaxIdleConns:          4,
+			IdleConnTimeout:       90 * time.Second,
+		},
+		CheckRedirect: httpsRedirectsOnly,
+	}
 }
 
 func httpsRedirectsOnly(req *http.Request, via []*http.Request) error {
