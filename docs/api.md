@@ -952,7 +952,9 @@ deadline (the store's default when the request has none).
   graded: `room.labelled` carries no grade, see AgentStats); `at` is the time of that event.
 - `checked_at`: when the watcher last checked the pipeline; omitted when it never did.
 
-**`FleetChangesPage`**: `{ "changes": [PipelineChange], "next": "<cursor>" }`. `next` is `""` on the last page. A
+**`FleetChangesPage`**: `{ "changes": [PipelineChange], "next": "<cursor>" }`. `next` is `""` on the last page —
+except at `limit=200` (the reader's cap), where a final exactly-full page may still carry a non-empty `next`; the
+page it names is then empty with `next` `""`, and that empty page ends the pagination. A
 `PipelineChange` here is exactly the F8 row (`id, pipeline_id, kind, object, at, actor?, source, fingerprint,
 before?, after?, summary`): config values masked `***`, a DDL statement only in `summary` (≤ 300 runes), and for
 X4's external kinds `after` is a `clients.ExternalChange` (untrusted sender text; see External changes); clients
