@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -166,6 +167,13 @@ type Config struct {
 	// exporter next to Kafka Connect. ParseDebeziumMetrics.
 	DebeziumMetricsURL    string // DEBEZIUM_METRICS_URL: http(s)://host:port/metrics; empty = debezium_metrics says "not configured"
 	DebeziumMetricsPrefix string // DEBEZIUM_METRICS_PREFIX: metric name prefix, default "debezium_metrics_"
+
+	// X7: the optional OpenLineage emitter (X7b; mapping in
+	// docs/design/lineage.md). Empty URL = off: no goroutine, no request.
+	// ParseOpenLineage. The API key is a secret; never log it.
+	OpenLineageURL       string // OPENLINEAGE_URL: the full endpoint events are POSTed to, e.g. http://marquez:5000/api/v1/lineage
+	OpenLineageNamespace string // OPENLINEAGE_NAMESPACE: the job namespace, default "piperoom"
+	OpenLineageAPIKey    string // OPENLINEAGE_API_KEY: sent as "Authorization: Bearer <key>"; empty = no header (secret)
 
 	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
 	WebDir string // PIPEROOM_WEB_DIR
@@ -375,6 +383,11 @@ func Load() Config {
 
 		DebeziumMetricsURL:    get("DEBEZIUM_METRICS_URL", ""),
 		DebeziumMetricsPrefix: get("DEBEZIUM_METRICS_PREFIX", DefaultDebeziumMetricsPrefix),
+
+		// X7
+		OpenLineageURL:       get("OPENLINEAGE_URL", ""),
+		OpenLineageNamespace: get("OPENLINEAGE_NAMESPACE", DefaultOpenLineageNamespace),
+		OpenLineageAPIKey:    get("OPENLINEAGE_API_KEY", ""),
 
 		WebDir: get("PIPEROOM_WEB_DIR", ""),
 
@@ -1225,6 +1238,97 @@ func ParseDebeziumMetrics(c Config) (DebeziumMetrics, error) {
 		}
 	}
 	return d, nil
+}
+
+// ---- X7: OpenLineage emitter (X7b; docs/design/lineage.md) ----
+
+// OpenLineage emitter limits. Fixed, not configurable: docs/design/lineage.md
+// and the emitter's tests state them. (X7)
+const (
+	DefaultOpenLineageNamespace = "piperoom"
+	// OpenLineageEmitInterval is the least time between two topology
+	// events of one pipeline; builds in between send nothing.
+	OpenLineageEmitInterval = 15 * time.Minute
+	// OpenLineageTimeout is the deadline of one POST, retries apart.
+	OpenLineageTimeout = 10 * time.Second
+	// OpenLineageMaxRetries is how many times a failed POST (network error,
+	// 429 or 5xx) is retried with backoff before one warning is logged and
+	// the event is dropped. A 4xx other than 429 is not retried.
+	OpenLineageMaxRetries = 3
+	// OpenLineageMaxEventBytes caps one event body. An event over it is sent
+	// without its columnLineage and schema facets, then dropped if still over.
+	OpenLineageMaxEventBytes = 1 << 20
+	// OpenLineageMaxResponseBytes caps what is read of a response (rule 7).
+	OpenLineageMaxResponseBytes = 4 << 20
+)
+
+// OpenLineage holds the typed emitter settings. URL "" = off.
+type OpenLineage struct {
+	URL       string
+	Namespace string
+	APIKey    string // secret: LogValue hides it
+}
+
+// LogValue keeps the API key out of the log.
+func (o OpenLineage) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("url", o.URL), slog.String("namespace", o.Namespace),
+		slog.Bool("api_key_set", o.APIKey != ""))
+}
+
+// ParseOpenLineage validates OPENLINEAGE_URL (empty = off; else an absolute
+// http(s) URL with a host and no user info), OPENLINEAGE_NAMESPACE (1 to 128
+// characters of letters, digits and . _ - : /, starting with a letter or
+// digit; empty = "piperoom") and OPENLINEAGE_API_KEY: a key is only sent over
+// https, or http to a loopback host, so http to any other host with a key is
+// an error. The error names the env var and never quotes the key.
+func ParseOpenLineage(c Config) (OpenLineage, error) {
+	o := OpenLineage{
+		URL:       strings.TrimSpace(c.OpenLineageURL),
+		Namespace: strings.TrimSpace(c.OpenLineageNamespace),
+		APIKey:    strings.TrimSpace(c.OpenLineageAPIKey),
+	}
+	if o.Namespace == "" {
+		o.Namespace = DefaultOpenLineageNamespace
+	}
+	if !validOpenLineageNamespace(o.Namespace) {
+		return OpenLineage{}, fmt.Errorf("config: OPENLINEAGE_NAMESPACE=%q: want 1 to 128 of letters, digits and . _ - : /, starting with a letter or digit", c.OpenLineageNamespace)
+	}
+	if o.URL == "" {
+		return o, nil
+	}
+	scheme, err := checkHTTPURL("OPENLINEAGE_URL", o.URL)
+	if err != nil {
+		return OpenLineage{}, err
+	}
+	if scheme == "http" && o.APIKey != "" {
+		u, _ := url.Parse(o.URL) // checkHTTPURL parsed it
+		if !loopbackHost(u.Hostname()) {
+			return OpenLineage{}, fmt.Errorf("config: OPENLINEAGE_URL: an API key is sent only over https (or http to a loopback host)")
+		}
+	}
+	return o, nil
+}
+
+func validOpenLineageNamespace(ns string) bool {
+	if ns == "" || len(ns) > 128 {
+		return false
+	}
+	for i, r := range ns {
+		alnum := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if !alnum && (i == 0 || !strings.ContainsRune("._-:/", r)) {
+			return false
+		}
+	}
+	return true
+}
+
+// loopbackHost reports whether host is localhost or a loopback IP.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ---- P wave (P2, P3, P4; PIPEROOM_WRITE_MODE of P1 is next to ParseDevAck) ----

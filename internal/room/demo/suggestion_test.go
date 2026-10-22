@@ -227,6 +227,7 @@ func TestDemoHandlesEveryHumanInputKind(t *testing.T) {
 		"alert_update":      true,
 		"proposal_created":  true,
 		"proposal_executed": true,
+		"proposal_staged":   true, // X8: the demo stack declares no staging, so the scripted story never stages
 	}
 
 	kinds := contractKinds(t)

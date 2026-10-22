@@ -136,7 +136,7 @@ func TestBuildRefusesForgingTopicNames(t *testing.T) {
 			b.sr = &fakeSR{subjectsErr: errDownSR}
 			g := mustBuild(t, b)
 			// The bad name becomes the placeholder (the table name), unconfirmed.
-			if !slices.Contains(g.Edges, inferred(Edge{From: "connect:pg-orders-connector", To: "topic:public.orders"})) {
+			if !containsEdge(g.Edges, inferred(Edge{From: "connect:pg-orders-connector", To: "topic:public.orders"})) {
 				t.Fatalf("no placeholder topic: %v", edgeStrings(g.Edges))
 			}
 			if n := g.mustNode(t, "topic:public.orders"); n.Health != HealthUnknown || !mapsEqual(n.Facts, map[string]string{"topic_name": "invalid"}) {

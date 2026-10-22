@@ -358,7 +358,7 @@ func TestBuildRoutedTopics(t *testing.T) {
 			if tc.inferred {
 				want = inferred(want)
 			}
-			if !slices.Contains(g.Edges, want) {
+			if !containsEdge(g.Edges, want) {
 				t.Fatalf("edge %+v missing: %v", want, edgeStrings(g.Edges))
 			}
 			g.mustNode(t, "topic:"+tc.topic)

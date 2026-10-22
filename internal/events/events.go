@@ -93,6 +93,16 @@ const (
 	// cancelled (POST /api/proposals/{pid}/cancel). Counted like
 	// proposal.scheduled. (P2)
 	ProposalCancelled Type = "proposal.cancelled"
+	// X8: ProposalStageStarted says the driver started trying a proposal's
+	// steps on the pipeline's staging stack (POST /api/proposals/{pid}/stage).
+	// Actor: the driver. It ends with proposal.staged for the same proposal,
+	// or at its expires_at; while one is pending a second stage answers 409.
+	// ProposalStaged carries what staging said (actions.Stager), written by the
+	// system actor. Both are informational like proposal.previewed: not part
+	// of params_hash, never run by the executor, and the agent's Sink refuses
+	// them. (X8)
+	ProposalStageStarted Type = "proposal.stage_started"
+	ProposalStaged       Type = "proposal.staged"
 
 	// HypothesisVerdict is a person's confirm or dispute of the agent's
 	// current hypothesis (POST /api/rooms/{id}/hypothesis). HypothesisSeq is
@@ -435,6 +445,59 @@ const SecretKeyChanged = "<secret key changed>"
 // MaxChangedKeys caps ConfigDriftSignal.ChangedKeys. A connector config has a
 // few dozen keys, so more than this means the config was replaced. (X3)
 const MaxChangedKeys = 50
+
+// ---- X7: retention evidence in config_risk (watcher X7d) ----
+//
+// Retention findings are entries of the existing config_risk signal's
+// "risks" list (internal/watch), next to the connector risks
+// ({connector, code, sev, text, table?}); they are not a new signal. Each
+// compares a pipeline topic's (or, when a clients.TableRetentionReader
+// answers, a sink table's) configured retention with its owners.yaml
+// declared_retention, in both directions: keeping data shorter than declared
+// loses it, keeping it longer than declared breaks the retention promise.
+// A topic with no declaration is never judged; an unreadable topic config
+// (no DescribeConfigs ACL) gives one INFO log and no finding.
+
+// Retention risk codes (RetentionRisk.Code).
+const (
+	// RiskRetentionShorter: the configured retention is shorter than
+	// declared ("pg.public.orders retains 1d; declared 7d").
+	RiskRetentionShorter = "retention_shorter_than_declared"
+	// RiskRetentionLonger: the configured retention is longer than declared,
+	// infinite (retention.ms=-1) included.
+	RiskRetentionLonger = "retention_longer_than_declared"
+	// RiskCompactCDCTopic: a CDC topic of the pipeline has cleanup.policy
+	// compact without delete, so delete events are compacted away after
+	// delete.retention.ms and a re-read cannot replay them.
+	RiskCompactCDCTopic = "compact_cdc_topic"
+)
+
+// RetentionRiskSeverity is the severity of every retention finding: it fires
+// config_risk (it is listed in /api/fleet signals_firing and logged) but opens
+// no room on its own, whatever config_risk's action; when another signal of
+// the pipeline opens or joins a room, the finding rides along in the
+// evidence.
+const RetentionRiskSeverity = "sev4"
+
+// RetentionRisk is one retention entry of config_risk's "risks" list (X7d).
+// Configured and Declared are topology.FormatRetention text ("1d", "36h",
+// "infinite"); Configured is "" for RiskCompactCDCTopic. Text is a fixed
+// sentence per code with names and these durations filled in, at most 200
+// bytes, rendered as text. Names, durations and the policy word only: never
+// a record, a row or any other config value.
+type RetentionRisk struct {
+	Code       string `json:"code"`            // RiskRetentionShorter, RiskRetentionLonger or RiskCompactCDCTopic
+	Sev        string `json:"sev"`             // RetentionRiskSeverity; "sev" like the connector risks
+	Topic      string `json:"topic,omitempty"` // the pipeline topic judged
+	Table      string `json:"table,omitempty"` // or the sink table ("schema.table")
+	Configured string `json:"configured,omitempty"`
+	Declared   string `json:"declared,omitempty"`
+	// RetentionBytes is the topic's retention.bytes when set (> 0): a size
+	// cap can cut retention short of retention.ms, so the finding names it.
+	RetentionBytes int64  `json:"retention_bytes,omitempty"`
+	CleanupPolicy  string `json:"cleanup_policy,omitempty"` // the topic's cleanup.policy word(s)
+	Text           string `json:"text"`
+}
 
 // RoomClosedPayload ends a room. A room closed by the open-room limit
 // (PIPEROOM_MAX_OPEN_DAYS) is closed by the system actor with the resolution
@@ -865,6 +928,23 @@ type PreviewResult struct {
 	// RecoveryUnitRecords whenever Count is set.
 	Count *int64 `json:"count,omitempty"`
 	Unit  string `json:"unit,omitempty"`
+	// X6: a performance action (connect_tune_throughput) lists every key it
+	// would change, with the value now and the value it sets, read from the
+	// connector's config by Preview; Current is the rollback value the card
+	// offers when the verdict is PerformanceWorse. Nil for every other
+	// action (and omitted, so other previews marshal as before).
+	Tuning []TuningChange `json:"tuning,omitempty"`
+}
+
+// TuningChange is one allow-listed key of a performance step
+// (actions.TunableKeys): the key, its value now and the value the step sets.
+// Values are base-10 integers as Connect stores them, never another key's
+// value; Current is "" when the key is unset (Connect's default applies; the
+// card says "unset"). (X6)
+type TuningChange struct {
+	Key      string `json:"key"`
+	Current  string `json:"current"`
+	Proposed string `json:"proposed"`
 }
 
 // DryRunResult is the target system's own answer to "would this be accepted"
@@ -889,6 +969,147 @@ type ProposalPreviewedPayload struct {
 	ProposalID string        `json:"proposal_id"`
 	Steps      []StepPreview `json:"steps"`
 	At         time.Time     `json:"at"`
+}
+
+// ---- X8: staging (try a proposal's steps on a staging stack first) ----
+//
+// A pipeline may declare a staging stack in owners.yaml (staging:
+// {connections: ...}, docs/api.md "X8 staging"). The driver can then try a
+// proposal's steps there before anyone approves them: the room service calls
+// each step's actions.Stager, which applies the same change to the
+// same-named object on staging, watches it, and puts staging back. The
+// result is evidence for the approvers, like the preview; it never changes
+// what the executor does in production. Everything here is names, states,
+// counts, times and redacted traces: never a record value, a config value, a
+// staging URL or a credential.
+
+// StageResult is what staging said about one step (actions.Stager). Applied
+// is true when the change was written to staging; Healthy is true only when
+// it was applied and staging stayed healthy for the whole observation window
+// (actions.StageObserveWindow), so Healthy implies Applied. Both are always
+// present on the wire: false is evidence too. Detail is one redacted text of
+// at most MaxStageDetailBytes: why it was not applied (StageNoStaging,
+// "connector not present in staging"), the failed task's trace, or what
+// healthy means here ("RUNNING, 3 of 3 tasks RUNNING for 60 s"). DryRun is
+// staging's own pre-check where the action makes one (the Registry
+// compatibility check of a schema step); a refusal there means nothing was
+// written. Leftover says what the stage could not put back on staging (a
+// registered schema version, a failed restore), at most MaxStageLeftoverBytes;
+// empty when staging is as it was. DurationMS is the stage's wall time,
+// apply to verdict, restore excluded. (X8)
+type StageResult struct {
+	Target     string        `json:"target,omitempty"` // the staging object, e.g. "connector orders-src"; a name, never a URL
+	Applied    bool          `json:"applied"`
+	Healthy    bool          `json:"healthy"`
+	Detail     string        `json:"detail,omitempty"`
+	DryRun     *DryRunResult `json:"dry_run,omitempty"`
+	Leftover   string        `json:"leftover,omitempty"`
+	DurationMS int64         `json:"duration_ms"`
+}
+
+// Caps of a StageResult's text, enforced by actions.CleanStageResult before
+// the room service writes proposal.staged. (X8)
+const (
+	MaxStageTargetBytes   = 200
+	MaxStageDetailBytes   = 2048
+	MaxStageLeftoverBytes = 500
+	MaxStageErrorBytes    = 500 // StepStage.Error, like StepPreview.Error
+)
+
+// StageNoStaging is StageResult.Detail when the action has no staging client
+// to write through (the pipeline declares no staging:, the staging block has
+// no client the action needs, or write mode is off): Applied false, nil
+// error. (X8)
+const StageNoStaging = "no staging declared"
+
+// Stage outcomes, StageResult.Outcome: the three states a client shows. (X8)
+const (
+	// StageHealthy: applied and healthy for the whole window.
+	StageHealthy = "healthy"
+	// StageFailed: applied and unhealthy, or refused by staging's own
+	// pre-check (DryRun ran and said no), so the change would fail.
+	StageFailed = "failed"
+	// StageNotApplied: nothing was tried (no staging, the object is not on
+	// staging, a pre-check that was skipped); Detail says why.
+	StageNotApplied = "not_applied"
+)
+
+// Outcome is the one rule that turns a StageResult into StageHealthy,
+// StageFailed or StageNotApplied, shared by the room service, the agent, the
+// Slack mirror and the web.
+func (r StageResult) Outcome() string {
+	switch {
+	case r.Applied && r.Healthy:
+		return StageHealthy
+	case r.Applied:
+		return StageFailed
+	case r.DryRun != nil && !r.DryRun.OK && r.DryRun.Skipped == "":
+		return StageFailed
+	default:
+		return StageNotApplied
+	}
+}
+
+// ProposalStageStartedPayload is proposal.stage_started (actor: the driver).
+// ParamsHash is the proposal's params_hash when the stage started; Steps are
+// the indexes of the steps being staged, in order: every step whose action
+// implements actions.Stager (never empty: a proposal with none answers 409
+// and writes nothing). ExpiresAt is actions.StageExpiry of the start and
+// len(Steps): after it, a stage with no proposal.staged is lost (the server
+// stopped) and a new one may start. Times are UTC. (X8)
+type ProposalStageStartedPayload struct {
+	ProposalID string    `json:"proposal_id"`
+	ParamsHash string    `json:"params_hash"`
+	Steps      []int     `json:"steps"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+// StepStage is one staged step: its result, or the error that stopped Stage
+// (staging unreachable, ctx ended before a verdict), redacted, at most
+// MaxStageErrorBytes. Exactly one of Result and Error is set. (X8)
+type StepStage struct {
+	StepIndex int          `json:"step_index"`
+	Result    *StageResult `json:"result,omitempty"`
+	Error     string       `json:"error,omitempty"`
+}
+
+// ProposalStagedPayload is proposal.staged (system actor): one entry per
+// index of the matching proposal.stage_started, in the same order. Each step
+// is staged on its own against staging as it was (each Stage restores before
+// the next starts), and a failed step does not stop the next. ParamsHash is
+// copied from proposal.stage_started: a stage counts for a proposal only while
+// it equals the proposal's current params_hash. (X8)
+type ProposalStagedPayload struct {
+	ProposalID string      `json:"proposal_id"`
+	ParamsHash string      `json:"params_hash"`
+	Steps      []StepStage `json:"steps"`
+	At         time.Time   `json:"at"`
+}
+
+// StepHealthy reports whether step index i was staged with outcome
+// StageHealthy. A step that is not in Steps, or has an Error, is not.
+// owners.yaml require_staging: needs it for each step whose action it names.
+func (p ProposalStagedPayload) StepHealthy(i int) bool {
+	for _, s := range p.Steps {
+		if s.StepIndex == i {
+			return s.Error == "" && s.Result != nil && s.Result.Outcome() == StageHealthy
+		}
+	}
+	return false
+}
+
+// Healthy reports whether at least one step was staged and every step in
+// Steps is StepHealthy: the stage's one-word verdict.
+func (p ProposalStagedPayload) Healthy() bool {
+	if len(p.Steps) == 0 {
+		return false
+	}
+	for _, s := range p.Steps {
+		if !p.StepHealthy(s.StepIndex) {
+			return false
+		}
+	}
+	return true
 }
 
 // VerificationCheck is one read-tool check of a layer after a fix. (F4)
@@ -938,6 +1159,18 @@ type AgentVerificationPayload struct {
 	Before  *int64 `json:"before,omitempty"`
 	After   *int64 `json:"after,omitempty"`
 	Unit    string `json:"unit,omitempty"` // RecoveryUnitRows | RecoveryUnitRecords, with Before/After
+	// X6: a proposal of class performance sets Outcome to one of the
+	// Performance* outcomes, Before and After to the step's throughput in
+	// the window before and after it ran, and Unit to
+	// PerformanceUnitRecordsPerMinute (actions.Verifier). LagSlopeBefore and
+	// LagSlopeAfter are the consumer lag's change over the same windows, in
+	// records per minute (positive: lag grows), absent when not measured (a
+	// source connector, no lag history). Recovered keeps its F4 meaning on a
+	// performance proposal (every layer check passed: a tuning restarts
+	// tasks, which can fail them); the throughput verdict is Outcome. Absent
+	// on every other verification, which marshals as before.
+	LagSlopeBefore *int64 `json:"lag_slope_before,omitempty"`
+	LagSlopeAfter  *int64 `json:"lag_slope_after,omitempty"`
 }
 
 // ---- X2: recovery actions (class, outcomes, verify progress) ----
@@ -950,6 +1183,12 @@ type AgentVerificationPayload struct {
 const (
 	ActionClassFix      = "fix"
 	ActionClassRecovery = "recovery"
+	// ActionClassPerformance is the class of an action that tunes
+	// throughput (connect_tune_throughput, X6c): it changes only
+	// allow-listed keys (actions.TunableKeys) and, like a recovery, must be
+	// verifiable (actions.Verifier, measuring throughput before and after it
+	// ran). (X6)
+	ActionClassPerformance = "performance"
 )
 
 // Recovery outcomes, AgentVerificationPayload.Outcome. The agent polls the
@@ -1002,6 +1241,72 @@ type AgentRecoveryCheckPayload struct {
 	Unit       string `json:"unit"` // RecoveryUnitRows | RecoveryUnitRecords
 }
 
+// ---- X6: performance actions (ActionClassPerformance above; throughput verdict) ----
+
+// Performance outcomes, AgentVerificationPayload.Outcome of a performance
+// proposal; PerformanceOutcomeFor is the rule. Unverifiable is the recovery
+// value: Verify could not measure a window (the reader answered
+// clients.ErrNotSupported, or no history covers it), and Before/After are
+// then absent. (X6)
+const (
+	PerformanceImproved     = "improved"
+	PerformanceNoChange     = "no_change"
+	PerformanceWorse        = "worse"
+	PerformanceUnverifiable = RecoveryUnverifiable
+)
+
+// PerformanceUnitRecordsPerMinute is the unit of a performance Verify's
+// Before/After and of the lag slopes: records per minute averaged over the
+// window, so a consumer under 1 record/s still compares in whole numbers.
+// Clients may show it per second. (X6)
+const PerformanceUnitRecordsPerMinute = "records_per_min"
+
+// PerformanceChangePercent is the least relative change that counts: a
+// throughput or lag slope that moves less is no_change. (X6)
+const PerformanceChangePercent = 10
+
+// PerformanceOutcomeFor is the verdict on a performance step from its
+// throughput before and after (records per minute, >= 0) and, when both are
+// measured, the lag slopes (records per minute; positive: lag grows). It is
+// the one rule the agent, the post-mortem and the web share; a verification
+// that could not measure reports PerformanceUnverifiable instead of calling
+// it.
+//
+//   - throughput decides first: improved when after >= before + 10 % (any
+//     after > 0 when before is 0), worse when after <= before - 10 %;
+//   - only when it moved less, the lag decides: improved when a growing lag
+//     (slope before > 0) has a slope at least 10 % lower (also when it now
+//     shrinks), worse when a lag that was not growing (slope before <= 0)
+//     now grows or a growing lag's slope rose by at least 10 %;
+//   - else no_change.
+//
+// Throughput comes first in both directions: a sink with a backlog consumes
+// at its capacity, so its rate is the tuning's effect, while the lag slope
+// also moves with the producer. A consume rate up 20 % while the producer
+// sped up more is improved; one down 30 % while the producer slowed even
+// more (the lag now shrinks) is worse. (X6)
+func PerformanceOutcomeFor(before, after int64, lagSlopeBefore, lagSlopeAfter *int64) string {
+	const p = PerformanceChangePercent
+	lag := lagSlopeBefore != nil && lagSlopeAfter != nil
+	var lb, la int64
+	if lag {
+		lb, la = *lagSlopeBefore, *lagSlopeAfter
+	}
+	switch {
+	case after > before && after*100 >= before*(100+p):
+		return PerformanceImproved
+	case after < before && after*100 <= before*(100-p):
+		return PerformanceWorse
+	case lag && lb > 0 && la*100 <= lb*(100-p):
+		return PerformanceImproved
+	case lag && lb <= 0 && la > 0:
+		return PerformanceWorse
+	case lag && lb > 0 && la*100 >= lb*(100+p):
+		return PerformanceWorse
+	}
+	return PerformanceNoChange
+}
+
 // ProposalCreatedPayload is a fix waiting for approvals.
 type ProposalCreatedPayload struct {
 	ProposalID     string         `json:"proposal_id"`
@@ -1029,6 +1334,10 @@ type ProposalCreatedPayload struct {
 	// registry, never from the proposer's text. Empty reads as
 	// ActionClassFix, so a fix proposal marshals as before. Not part of
 	// params_hash: it follows from the steps' action names, which are. (X2)
+	// X6: ActionClassPerformance when any step's action is a performance
+	// action. A proposal has one verdict, so the room service refuses one
+	// that mixes recovery and performance steps (400 validation); fix steps
+	// may join either.
 	Class string `json:"class,omitempty"`
 }
 

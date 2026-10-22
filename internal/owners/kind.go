@@ -304,6 +304,7 @@ func batchWatch() WatchConfig {
 	for _, s := range []*WatchSignal{
 		&w.ConnectorDown, &w.SlotInactive, &w.SlotWAL.WatchSignal, &w.DLQGrowth.WatchSignal,
 		&w.ConfigRisk, &w.ConsumerLag.WatchSignal, &w.GroupUnstable.WatchSignal, &w.OffsetBelowLogStart,
+		&w.CountDrift, &w.RowDrift, &w.DupKeys, &w.OrderSkew,
 	} {
 		s.Enabled = false
 	}
