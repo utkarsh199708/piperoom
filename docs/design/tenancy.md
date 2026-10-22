@@ -269,6 +269,9 @@ object did not exist when it is outside the caller's tenants. **404, never 403**
 | `POST /api/handoffs/{hid}/accept` | `404 not_found`, the answer for a missing hand-off, before `409`/`403` |
 | `GET /api/pipelines/{pid}/topology` | `404 not_found` "pipeline not found" |
 | `GET /api/shadow/metrics` | only rooms of your tenants are counted; `?pipeline=` outside them counts nothing, as an unknown pipeline does |
+| `GET /api/fleet` (X5-0) | the pipeline has no row and is in no count; `?tenant=` naming a tenant you are not in, or none, answers `[]` (not `403`/`404`) |
+| `GET /api/fleet/changes` (X5-0) | the pipeline's changes are not listed; `?pipeline=` outside them answers an empty page, as an unknown pipeline does |
+| `GET /api/pipelines/{pid}/connectors/{name}/config-versions` (X5-0, also `?diff=`) | `404 not_found` "pipeline not found", before the connector, hash and role checks |
 | `POST /api/rooms` | `400 validation` "unknown pipeline", the answer for an unknown pipeline |
 | `POST /api/alerts/webhook` (dev) | `404 not_found` for a pipeline outside your tenants, unknown pipelines included |
 | `control/grant`, `handoffs` (create) | a target who cannot see the room is refused like an unknown person (`400 validation`) |

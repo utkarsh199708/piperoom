@@ -785,6 +785,132 @@ type ChangeReader interface {
 	ListChanges(ctx context.Context, pipelineID string, since, until time.Time, kinds []string, limit int) ([]PipelineChange, error)
 }
 
+// ---- Fleet view: cross-pipeline changes, watcher status, connector config versions (X5-0) ----
+//
+// Piperoom's own tables again, not customer systems: the room store (store.PG,
+// memstore) implements every interface in this block. The watcher writes
+// WatchStatus and ConnectorConfigVersion (the Reader / Writer rule above does
+// not apply, as for ChangeWriter); the fleet routes of docs/api.md ("Fleet
+// view") only read. Nothing here carries a row value; a connector config value
+// is stored only after actions.RedactConfig. Every method takes a context and
+// the store bounds it at 10 s when the caller set no deadline.
+
+// Caps of the fleet shapes, enforced by the store on write and by the routes
+// on read.
+const (
+	MaxFleetChangesPage  = 200  // FleetChangeReader limit; the route's default page is 100
+	MaxWatchSignals      = 32   // WatchStatus.Signals per pipeline
+	MaxConfigKeys        = 1000 // keys of one ConnectorConfigVersion.Config, and of its ChangedKeys
+	MaxConfigVersionList = 200  // ConfigVersionReader.ConfigVersions limit
+)
+
+// ChangeCursor is a position in the fleet change order (At, then ID, both
+// descending). The zero value is the newest end.
+type ChangeCursor struct {
+	At time.Time `json:"at"`
+	ID int64     `json:"id"`
+}
+
+// FleetChangeReader lists the changes of several pipelines in one page, newest
+// first by (At, ID), at most limit (1..MaxFleetChangesPage), only rows strictly
+// after before in that order, with At >= since (zero = no bound). kinds nil =
+// every kind; pipelineIDs empty = no rows (the caller passes the pipelines the
+// user can see, never "all"). Optional next to ChangeReader, asserted at use
+// time: without it the route merges ChangeReader pages per pipeline.
+type FleetChangeReader interface {
+	ListFleetChanges(ctx context.Context, pipelineIDs []string, since time.Time, kinds []string, before ChangeCursor, limit int) ([]PipelineChange, error)
+}
+
+// Watch status states of WatchSignal.State.
+const (
+	WatchFiring = "firing" // the signal fires now
+	WatchAcked  = "acked"  // still fires, but the driver closed its room (docs/design/watcher.md)
+)
+
+// WatchSignal is one signal of a pipeline that is firing or acked; a signal in
+// state ok is not listed. Node is the topology node id the signal is about
+// ("connect:<connector>", "group:<group>", "dlq:<topic>"; "" when the watcher
+// cannot name one). Metric and ETA are set only for Signal "forecast" (X3a):
+// the sample metric and the time the forecast reaches its limit.
+type WatchSignal struct {
+	Signal   string     `json:"signal"`   // an owners.Signal* name, "forecast", "config_drift", later X-wave kinds
+	State    string     `json:"state"`    // WatchFiring | WatchAcked
+	Severity string     `json:"severity"` // "sev1".."sev4"
+	Node     string     `json:"node,omitempty"`
+	Since    time.Time  `json:"since"` // when it started firing
+	Metric   string     `json:"metric,omitempty"`
+	ETA      *time.Time `json:"eta,omitempty"`
+}
+
+// WatchStatus is the watcher's latest view of one pipeline: the row the fleet
+// view reads instead of asking the watcher, which runs on one replica only
+// (docs/design/replicas.md). Signals holds at most MaxWatchSignals entries and
+// no evidence values.
+type WatchStatus struct {
+	PipelineID string        `json:"pipeline_id"`
+	CheckedAt  time.Time     `json:"checked_at"` // the tick that produced it
+	Signals    []WatchSignal `json:"signals"`
+}
+
+// WatchStatusWriter replaces the status row of s.PipelineID. The watcher calls
+// it at most once per pipeline per tick; a failed write is logged by the
+// watcher and never stops a tick. More than MaxWatchSignals signals is refused
+// with an error, nothing written.
+type WatchStatusWriter interface {
+	PutWatchStatus(ctx context.Context, s WatchStatus) error
+}
+
+// WatchStatusReader returns the status rows of the given pipelines; a pipeline
+// the watcher never checked has no row (not an error).
+type WatchStatusReader interface {
+	WatchStatuses(ctx context.Context, pipelineIDs []string) ([]WatchStatus, error)
+}
+
+// SecretKeyChanged stands for the name of a changed credential key
+// (actions.LooksSecret) in ConnectorConfigVersion.ChangedKeys and in the
+// config_drift signal's changed keys (X3-0): not even the key name is shown.
+const SecretKeyChanged = "<secret key changed>"
+
+// ConnectorConfigVersion is one config of a connector as the watcher saw it
+// (X3b records, X5c stores). Config holds the values after
+// actions.RedactConfig, applied once by the caller (a raw config never
+// crosses this interface), and Hash is actions.ConfigHash of that map, so no
+// secret value is stored or hashed. The store computes Hash itself (a
+// caller's Hash is ignored) and refuses a Config in which an
+// actions.LooksSecret key holds anything but actions.RedactedValue. ChangedKeys are
+// the key names that differ from the connector's previous version, sorted,
+// with SecretKeyChanged for a credential key; empty on the first version. By
+// is "proposal:<id>" when an executed Piperoom proposal produced the config,
+// "" otherwise. Config is empty in list answers.
+type ConnectorConfigVersion struct {
+	PipelineID  string            `json:"pipeline_id"`
+	Connector   string            `json:"connector"`
+	Hash        string            `json:"hash"`
+	At          time.Time         `json:"at"`
+	By          string            `json:"by"`
+	ChangedKeys []string          `json:"changed_keys"`
+	Config      map[string]string `json:"config,omitempty"`
+}
+
+// ConfigVersionWriter appends v unless it would repeat the connector's latest
+// version (same Hash and no ChangedKeys); inserted reports whether it did. A
+// Config or ChangedKeys over MaxConfigKeys entries is refused with an error,
+// nothing written.
+type ConfigVersionWriter interface {
+	RecordConfigVersion(ctx context.Context, v ConnectorConfigVersion) (inserted bool, err error)
+}
+
+// ConfigVersionReader reads stored versions. ConfigVersions lists one
+// connector's versions newest first, at most limit (1..MaxConfigVersionList),
+// Config empty. ConfigVersion returns the newest version with that Hash,
+// Config filled; none is ErrNotFound.
+type ConfigVersionReader interface {
+	ConfigVersions(ctx context.Context, pipelineID, connector string, limit int) ([]ConnectorConfigVersion, error)
+	ConfigVersion(ctx context.Context, pipelineID, connector, hash string) (ConnectorConfigVersion, error)
+}
+
+// ---- end Fleet view (X5-0) ----
+
 // ChangeWriter records a change. A row with the same (pipeline, kind, object,
 // fingerprint) is not written again; inserted reports whether it was.
 // It writes Piperoom's own table, never a customer system, so the Reader /

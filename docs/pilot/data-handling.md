@@ -261,6 +261,16 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
   room's content**: such a purge or delete removes the room from Piperoom but not from that directory.
   Protect, back up and expire the directory under your own policy.
 - Without an archive, export a room first with `GET /api/rooms/{id}/export` if you must keep it.
+- **Fleet view: watcher status and connector config versions (X5-0; stored by X5a, X5c).** No new read of
+  your systems: the watcher keeps, in the Piperoom database, one status row per pipeline (signal names,
+  severities, topology node ids, times, forecast ETAs; no evidence values), replaced every tick, and one row per
+  connector config it sees change. A config version stores the connector's config **redacted**: the value of
+  every credential-looking key (`actions.LooksSecret`) reads `<redacted>`, every other value has passed the
+  secret masker (`redact.Text`, so a password inside a JDBC URL is masked) and is cut at 4 KB. Its hash is
+  taken over that redacted form, so it cannot be used to guess a secret. Versions older than
+  `PIPEROOM_CHANGES_RETENTION_DAYS` are deleted, except the newest of each connector. Version lists (key
+  names only) are visible to anyone who can see the pipeline; diffs (redacted values) only to its layer
+  approvers and backups, the solo user and auditors.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
   else in it. Data sent to the model provider (Anthropic, Bedrock or Vertex), and messages already posted to Slack, are governed by
   your agreements with those providers, not by Piperoom.

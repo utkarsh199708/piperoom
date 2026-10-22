@@ -7,14 +7,18 @@ package actions
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
+	"piperoom/internal/redact"
 )
 
 // Action is one write operation.
@@ -123,6 +127,68 @@ func LooksSecret(key string) bool {
 	}
 	return false
 }
+
+// ---- Connector config redaction and hash (X5-0; fleet config versions) ----
+
+// RedactedValue replaces the value of a LooksSecret key in a stored config.
+const RedactedValue = "<redacted>"
+
+// MaxConfigValueBytes cuts one redacted config value; a longer one ends in
+// "…" within the limit.
+const MaxConfigValueBytes = 4096
+
+// RedactConfig returns the form of a connector config that may be stored and
+// shown (X5c config versions): a LooksSecret key's value becomes
+// RedactedValue, every other value passes redact.Text (so a password inside a
+// JDBC URL is masked) and is cut at MaxConfigValueBytes on a rune boundary.
+// It never modifies cfg and returns a non-nil map. Apply it once, to the raw
+// config: redact.Text is not idempotent (a masked "[redacted 16]" may be
+// masked again), so the watcher (X3b) redacts and hands the result on, and
+// the store (X5c) keeps it as given.
+func RedactConfig(cfg map[string]string) map[string]string {
+	out := make(map[string]string, len(cfg))
+	for k, v := range cfg {
+		if LooksSecret(k) {
+			out[k] = RedactedValue
+			continue
+		}
+		v, _ = redact.Text(v)
+		out[k] = cutValue(v)
+	}
+	return out
+}
+
+// cutValue cuts v to at most MaxConfigValueBytes bytes, ending in "…",
+// without splitting a rune.
+func cutValue(v string) string {
+	if len(v) <= MaxConfigValueBytes {
+		return v
+	}
+	const ell = "…"
+	n := MaxConfigValueBytes - len(ell)
+	for n > 0 && !utf8.RuneStart(v[n]) {
+		n--
+	}
+	return v[:n] + ell
+}
+
+// ConfigHash is the version id of a redacted config: the lowercase hex
+// SHA-256 of its JSON encoding (encoding/json writes map keys sorted, so key
+// order never matters). Pass RedactConfig's result: hashing a raw config would
+// make the hash a guessing oracle for a secret value. Two configs that differ
+// only in a secret value have the same hash.
+func ConfigHash(redacted map[string]string) string {
+	if redacted == nil {
+		redacted = map[string]string{}
+	}
+	// json.Marshal of a map[string]string cannot fail: strings always encode
+	// (invalid UTF-8 becomes U+FFFD), so there is no error to report.
+	b, _ := json.Marshal(redacted)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// ---- end connector config redaction and hash (X5-0) ----
 
 // Registry holds actions in registration order.
 type Registry struct {
