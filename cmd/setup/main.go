@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"piperoom/internal/config"
+	"piperoom/internal/setup/ops"
 	"piperoom/internal/setup/runner"
 )
 
@@ -54,13 +55,23 @@ func run(args []string) error {
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	// The real catalogue (U1-2). Targets arrive with the Welcome, and the
+	// runner's target registry is a later row: until it hands them over,
+	// http_get and net_probe refuse every host and the file and env ops work.
+	catalogue, err := ops.New(ops.Config{ProjectDir: *project})
+	if err != nil {
+		return err
+	}
+	defer catalogue.Close()
 	r, err := runner.New(runner.Options{
-		ServerURL:  serverURL,
-		Code:       codeStr,
-		Yes:        *yes,
-		ProjectDir: *project,
-		Label:      *label,
-		Log:        log,
+		ServerURL:        serverURL,
+		Code:             codeStr,
+		Yes:              *yes,
+		ProjectDir:       *project,
+		Label:            *label,
+		Log:              log,
+		Catalogue:        catalogue,
+		CatalogueVersion: ops.CatalogueVersion,
 	})
 	if err != nil {
 		return err

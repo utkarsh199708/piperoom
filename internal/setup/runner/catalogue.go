@@ -37,6 +37,15 @@ type Catalogue interface {
 	StepAction(op string) (action string, ok bool)
 }
 
+// TargetChecker is an optional Catalogue capability: CheckTarget checks the
+// request's params without I/O and returns a protocol.Refuse* code ("", or
+// RefuseTarget, RefuseSchema) the runner refuses with, before the guard and
+// before anything executes. A catalogue that does not implement it is
+// checked only by Execute.
+type TargetChecker interface {
+	CheckTarget(req protocol.OpRequest) (reason string)
+}
+
 // nopCatalogue is the default catalogue until internal/setup/ops lands: it
 // knows no op, so every OpRequest is refused with RefuseUnknownOp.
 type nopCatalogue struct{}
