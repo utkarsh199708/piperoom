@@ -24,15 +24,45 @@ type fakeSource struct {
 	rowCalls  int
 	pubTables []postgres.PublicationTable
 	pubErr    error
+	// slotReads scripts successive ReplicationSlots calls (the liveness tool
+	// reads twice); the last entry repeats. Empty falls back to slots.
+	slotReads [][]clients.ReplicationSlot
+	slotCalls int
+	slotErr   error
+	// txns, when non-nil, is what LongTransactions reports.
+	txns   []clients.Transaction
+	txnErr error
+
+	// fresh is the newest source timestamp warehouse_freshness compares
+	// against; freshErr models an unreadable source.
+	fresh       time.Time
+	freshErr    error
+	freshCalls  int
+	freshTable  string
+	freshColumn string
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
+	f.slotCalls++
+	if f.slotErr != nil {
+		return nil, f.slotErr
+	}
+	if len(f.slotReads) > 0 {
+		i := min(f.slotCalls-1, len(f.slotReads)-1)
+		return f.slotReads[i], nil
+	}
 	return f.slots, nil
 }
 func (f *fakeSource) RecentDDL(context.Context, time.Time, int) ([]clients.DDLChange, error) {
 	return []clients.DDLChange{{At: time.Now(), CommandTag: "ALTER TABLE", ObjectIdentity: "public.orders", Query: "ALTER TABLE orders", Username: "priya"}}, nil
 }
 func (f *fakeSource) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
+	if f.txnErr != nil {
+		return nil, f.txnErr
+	}
+	if f.txns != nil {
+		return f.txns, nil
+	}
 	return []clients.Transaction{{PID: 1, Username: "u", State: "active", Age: time.Minute, Query: "SELECT 1"}}, nil
 }
 
@@ -50,6 +80,11 @@ func (f *fakeSource) Row(_ context.Context, table, _, key string) (map[string]an
 func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []string) ([]postgres.PublicationTable, error) {
 	return f.pubTables, f.pubErr
 }
+func (f *fakeSource) Freshness(_ context.Context, table, tsColumn string) (time.Time, error) {
+	f.freshCalls++
+	f.freshTable, f.freshColumn = table, tsColumn
+	return f.fresh, f.freshErr
+}
 
 // fakeConnect implements clients.ConnectClient. Config looks up the connector
 // in configs and reports clients.ErrNotFound (wrapped) for unknown names, so
@@ -58,11 +93,13 @@ func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []strin
 type fakeConnect struct {
 	configs   map[string]map[string]string
 	configErr error
+	status    clients.ConnectorStatus
+	statusErr error
 }
 
 func (f *fakeConnect) ListConnectors(context.Context) ([]string, error) { return nil, nil }
 func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
-	return clients.ConnectorStatus{}, nil
+	return f.status, f.statusErr
 }
 func (f *fakeConnect) Config(_ context.Context, name string) (map[string]string, error) {
 	if f.configErr != nil {
@@ -129,6 +166,9 @@ func testDeps() Deps {
 			rows: map[string]map[string]any{
 				"public.orders|7": {"id": "7", "customer_id": "100", "amount": "50", "status": "placed", "updated_at": "2026-10-11T10:00:00Z"},
 			},
+			// The source is as old as the fake sink's newest row: the default
+			// pipeline is in sync, not idle.
+			fresh: time.Now().Add(-2 * time.Minute),
 		},
 		Wh: &fakeWarehouse{
 			rows:  map[string]map[string]any{"analytics.orders|7": {"id": "7", "updated_at": "2026-10-11T10:00:00Z", "loaded_at": "2026-10-11T10:00:01Z"}},
@@ -157,10 +197,10 @@ func TestRegister(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	all := reg.All()
-	if len(all) != 11 {
-		t.Fatalf("registered %d tools, want 11", len(all))
+	if len(all) != 12 {
+		t.Fatalf("registered %d tools, want 12", len(all))
 	}
-	want := []string{"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
+	want := []string{"pg_replication_slots", "pg_streaming_liveness", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record"}
 	for i, name := range want {
 		if all[i].Name() != name {
 			t.Fatalf("tool %d = %s, want %s", i, all[i].Name(), name)

@@ -302,6 +302,10 @@ func componentForTool(tool string) string {
 		return "schema-registry"
 	case strings.HasPrefix(tool, "connect_"), strings.HasPrefix(tool, "debezium_"):
 		return "kafka-connect"
+	case tool == "kafka_consumer_lag", tool == "kafka_list_groups":
+		// Consumer-side reads speak to the consumer layer, matching the triage
+		// pass's layer table (triage_pass.go), not the broker.
+		return "consumer"
 	case strings.HasPrefix(tool, "kafka_"), strings.HasPrefix(tool, "dlq_"):
 		return "kafka"
 	case strings.HasPrefix(tool, "pg_"):

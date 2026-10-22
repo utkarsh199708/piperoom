@@ -38,7 +38,7 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 			"Use when the warehouse is stale and the sink connector task is FAILED or shows no error. Snowpipe Streaming loads are not listed. " +
 			"On the dev Postgres warehouse, which keeps no load history, it reports table write counters and lock waits instead.",
 		schema: objSchema(map[string]any{
-			"table": strProp("Sink table, \"schema.table\" (or \"db.schema.table\" on Snowflake). Must be one of the room's sink tables."),
+			"table": strProp("Sink table, \"schema.table\" (or \"db.schema.table\" on Snowflake, Databricks or BigQuery). Must be one of the room's sink tables."),
 			"since": strProp("Only loads at or after this RFC 3339 timestamp. Default: the last 24 hours. Snowflake keeps 14 days."),
 		}, "table"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
@@ -50,7 +50,7 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 				return tools.Result{}, err
 			}
 			if !d.validWarehouseTable(input.Table) {
-				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\" (or \"db.schema.table\" on Snowflake)", tools.ErrBadInput)
+				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\" (or \"db.schema.table\" on Snowflake, Databricks or BigQuery)", tools.ErrBadInput)
 			}
 			since := time.Now().Add(-defaultLoadWindow)
 			if input.Since != "" {

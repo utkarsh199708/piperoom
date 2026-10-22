@@ -407,6 +407,7 @@ func TestConnectRecoveredRequiresEveryTaskRunning(t *testing.T) {
 		{"one task failed", connectBrokenResult(), false},
 		{"one task paused", tools.Result{Data: map[string]any{"state": "RUNNING", "tasks": []map[string]any{{"state": "RUNNING"}, {"state": "PAUSED"}}}}, false},
 		{"connector paused", tools.Result{Data: map[string]any{"state": "PAUSED", "tasks": []map[string]any{{"state": "RUNNING"}}}}, false},
+		{"connector stopped", tools.Result{Data: map[string]any{"state": "STOPPED", "tasks": []map[string]any{{"state": "RUNNING"}}}}, false},
 		{"undecodable payload is never recovered", tools.Result{Summary: "pg-orders-connector: RUNNING"}, false},
 	}
 	for _, c := range cases {

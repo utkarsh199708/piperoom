@@ -38,21 +38,27 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // mode on (the default, and every eval) gains the scheduling note, and the
 // "often a schema change", "when your belief changes" and "Never claim a fix
 // worked without re-checking" words were trimmed to stay under the word cap.
-// KAN-408 moved it a fifth time, on purpose: rule 6 now makes an unreachable
-// read ("unreachable: <component>") evidence that the component is down, which
-// refuses a healthy verdict until a read succeeds, and keeps auth and
-// not-found errors apart from an outage; the wording was paid for by trims
-// elsewhere in the method, intro and fixes sections.
+// KAN-410 moved it a fifth time, on purpose: the drop rule now names the
+// pipeline map's retired marker and a connector Connect no longer lists as
+// the retirement evidence, so a dead slot behind a retired connector gets the
+// drop while a stopped connector without that evidence still gets the resume
+// checks. KAN-406 moved it a sixth time: a PAUSED or STOPPED connector is the
+// incident unless a record shows a person paused it, replacing the C7 rule
+// that an unexplained pause was deliberate. KAN-408 moved it a seventh time:
+// rule 6 makes an unreachable read ("unreachable: <component>") evidence that
+// the component is down, refusing a healthy verdict until a read succeeds,
+// while auth and not-found errors stay apart from an outage; the wording
+// stays inside the 1335-word ceiling.
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "0ee74ed9674cf9d5d5cd6001850961f0628f4c96302b336a12b536fb775e59d8"
+const cdcPromptSHA256 = "16f2993f405a1c0889586c6aa1d7a03f26d4d42cdfbc1bcbe778b201225e6859"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it.
-const cdcPromptWriteOffSHA256 = "3bd09c0d38fc2f8325b31f98b853a0894efbe68f144321ab344503c686fddeba"
+const cdcPromptWriteOffSHA256 = "22b68491d63d6773688a9d0b1e424bbca8a48826aa6ea16c972c65833435af44"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

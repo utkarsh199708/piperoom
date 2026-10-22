@@ -3,6 +3,7 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -12,6 +13,18 @@ import (
 	"piperoom/internal/tools"
 )
 
+// deletedSubjectReader is the local adapter for the registry's deleted-state
+// reads until they land on clients.SchemaRegistryReader (contract change
+// request in the PR). The real client (internal/clients/schemareg) implements
+// it; the tools assert it at use time, so fakes and the eval replay need not.
+// It is the only way to tell a soft-deleted subject or version (still in the
+// registry, restorable) from a hard-deleted or never-registered one (gone),
+// because both are absent from the plain listings. (#KAN-407)
+type deletedSubjectReader interface {
+	SubjectsIncludingDeleted(ctx context.Context) ([]string, error)
+	VersionsIncludingDeleted(ctx context.Context, subject string) ([]int, error)
+}
+
 // ---- schema_registry_subjects ----
 
 type registrySubjects struct{ d Deps }
@@ -19,15 +32,19 @@ type registrySubjects struct{ d Deps }
 func (t *registrySubjects) Name() string     { return "schema_registry_subjects" }
 func (t *registrySubjects) Kind() tools.Kind { return tools.KindRead }
 func (t *registrySubjects) InputSchema() map[string]any {
-	return objectSchema(map[string]any{"prefix": strProp("optional subject prefix filter")})
+	return objectSchema(map[string]any{
+		"prefix":          strProp("optional subject prefix filter"),
+		"include_deleted": map[string]any{"type": "boolean", "description": "list soft-deleted subjects too, marked \"(soft-deleted)\" (default false); a soft-deleted subject still exists and can be restored"},
+	})
 }
 func (t *registrySubjects) Description() string {
-	return "Lists the pipeline's schema registry subjects, optionally filtered by a prefix."
+	return "Lists the pipeline's schema registry subjects, optionally filtered by a prefix. With include_deleted, soft-deleted subjects are listed too and marked."
 }
 
 func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
-		Prefix string `json:"prefix"`
+		Prefix         string `json:"prefix"`
+		IncludeDeleted bool   `json:"include_deleted"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
@@ -49,17 +66,55 @@ func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tool
 	// only counted, before the prefix filter, so a prefix cannot probe for
 	// other subjects' names through the count.
 	all := len(subjects)
-	subjects = sc.FilterSubjects(subjects)
-	other := all - len(subjects)
-	var out []string
-	for _, s := range subjects {
+	live := sc.FilterSubjects(subjects)
+	other := all - len(live)
+
+	// Soft-deleted subjects are absent from Subjects(); ask for them only when
+	// the caller did, so the common listing costs one request as before.
+	var deleted []string
+	if p.IncludeDeleted {
+		dr, ok := t.d.Registry.(deletedSubjectReader)
+		if !ok {
+			return tools.Result{}, fmt.Errorf("kafkatools: schema_registry_subjects: registry client does not support listing soft-deleted subjects")
+		}
+		withDeleted, err := dr.SubjectsIncludingDeleted(cctx)
+		if err != nil {
+			return tools.Result{}, fmt.Errorf("kafkatools: schema_registry_subjects: list subjects including deleted: %w", err)
+		}
+		isLive := make(map[string]bool, len(subjects))
+		for _, s := range subjects {
+			isLive[s] = true
+		}
+		var deletedAll []string
+		for _, s := range withDeleted {
+			if !isLive[s] {
+				deletedAll = append(deletedAll, s)
+			}
+		}
+		deleted = sc.FilterSubjects(deletedAll)
+		other += len(deletedAll) - len(deleted)
+	}
+
+	var out, deletedOut []string
+	for _, s := range live {
 		if p.Prefix == "" || strings.HasPrefix(s, p.Prefix) {
 			out = append(out, s)
 		}
 	}
+	for _, s := range deleted {
+		if p.Prefix == "" || strings.HasPrefix(s, p.Prefix) {
+			deletedOut = append(deletedOut, s)
+		}
+	}
 	var sb strings.Builder
 	sb.WriteString(strings.Join(out, "\n"))
+	for _, s := range deletedOut {
+		appendLine(&sb, s+" (soft-deleted)")
+	}
 	appendLine(&sb, tools.NotShown(other, "subject", "subjects"))
+	if p.IncludeDeleted {
+		return res(sb.String(), map[string]any{"subjects": out, "deleted_subjects": deletedOut}), nil
+	}
 	return res(sb.String(), out), nil
 }
 
@@ -73,7 +128,7 @@ func (t *registryVersions) InputSchema() map[string]any {
 	return objectSchema(map[string]any{"subject": strProp("subject name")}, "subject")
 }
 func (t *registryVersions) Description() string {
-	return "Lists a subject's versions, its latest schema id, and its compatibility level (subject or global)."
+	return "Lists a subject's versions, its latest schema id, and its compatibility level (subject or global). A subject that is missing or soft-deleted is reported as such, with its deleted state."
 }
 
 func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -97,10 +152,22 @@ func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tool
 	defer cancel()
 	versions, err := t.d.Registry.Versions(cctx, p.Subject)
 	if err != nil {
+		// A 404 is a finding, not a tool error: a subject the connector or a
+		// consumer still needs and the registry no longer lists is exactly the
+		// incident this read must surface. Every other error (unreachable,
+		// 5xx) stays an error so it is never read as "missing". (#KAN-407)
+		if errors.Is(err, clients.ErrNotFound) {
+			return t.missingSubject(cctx, p.Subject), nil
+		}
 		return tools.Result{}, err
 	}
 	latest, err := t.d.Registry.Schema(cctx, p.Subject, -1)
 	if err != nil {
+		// A subject deleted between the two reads lands here; report the same
+		// missing-subject finding rather than an opaque 404 error.
+		if errors.Is(err, clients.ErrNotFound) {
+			return t.missingSubject(cctx, p.Subject), nil
+		}
 		return tools.Result{}, err
 	}
 	level, subjectLevel, err := t.d.Registry.Compatibility(cctx, p.Subject)
@@ -113,10 +180,75 @@ func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tool
 	}
 	summary := fmt.Sprintf("%s: versions %v, latest id %d, compatibility %s (%s)",
 		p.Subject, versions, latest.ID, level, scope)
-	return res(summary, map[string]any{
+	data := map[string]any{
 		"subject": p.Subject, "versions": versions, "latest_id": latest.ID,
 		"compatibility": level, "compatibility_scope": scope,
-	}), nil
+	}
+	// Versions() hides soft-deleted versions. When the client can list them,
+	// say so: a version deleted while a consumer still stamps its id is the
+	// same incident one level down, and the caller cannot see it otherwise.
+	if dr, ok := t.d.Registry.(deletedSubjectReader); ok {
+		withDeleted, err := dr.VersionsIncludingDeleted(cctx, p.Subject)
+		switch {
+		case err != nil && !errors.Is(err, clients.ErrNotFound):
+			// Enrichment only: the live listing above is valid, so report it
+			// and say the deleted-version check failed instead of failing the call.
+			data["deleted_versions_error"] = err.Error()
+		case err == nil:
+			if extra := missingInts(versions, withDeleted); len(extra) > 0 {
+				data["deleted_versions"] = extra
+				summary += fmt.Sprintf("; soft-deleted versions %v still exist and can be restored (list with deleted=true)", extra)
+			}
+		}
+	}
+	return res(summary, data), nil
+}
+
+// missingSubject builds the finding for a subject the live listing does not
+// have. The Summary always carries the restorable/soft-delete caveat; with a
+// client that lists deleted versions it also names the state: soft-deleted
+// (versions still exist, restorable) or hard-deleted/never registered. A
+// failed probe leaves the state unknown; it never turns the missing subject
+// into a healthy one. (#KAN-407)
+func (t *registryVersions) missingSubject(ctx context.Context, subject string) tools.Result {
+	summary := fmt.Sprintf("%s: subject not found (soft-deleted subjects can be listed with deleted=true)", subject)
+	data := map[string]any{"subject": subject, "found": false, "deleted_state": "unknown"}
+	dr, ok := t.d.Registry.(deletedSubjectReader)
+	if !ok {
+		return res(summary, data)
+	}
+	versions, err := dr.VersionsIncludingDeleted(ctx, subject)
+	switch {
+	case err != nil && !errors.Is(err, clients.ErrNotFound):
+		data["deleted_probe_error"] = err.Error()
+		summary += "; deleted-state check failed, so soft- or hard-deleted is unknown"
+	case len(versions) > 0:
+		data["deleted_state"] = "soft"
+		data["versions"] = versions
+		summary += fmt.Sprintf("; soft-deleted: versions %v still exist and can be restored", versions)
+	default:
+		data["deleted_state"] = "hard"
+		summary += "; no soft-deleted versions exist (hard-deleted or never registered)"
+	}
+	return res(summary, data)
+}
+
+// missingInts returns the elements of all that want does not have, sorted.
+// It is used for the versions a deleted-inclusive listing shows but the live
+// listing hides.
+func missingInts(want, all []int) []int {
+	have := make(map[int]bool, len(want))
+	for _, v := range want {
+		have[v] = true
+	}
+	var out []int
+	for _, v := range all {
+		if !have[v] {
+			out = append(out, v)
+		}
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ---- schema_registry_diff ----

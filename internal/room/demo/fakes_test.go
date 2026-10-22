@@ -85,7 +85,9 @@ func TestRealActionsOverFakesPreventDemoDrift(t *testing.T) {
 // fake reports after the resume.
 func TestRealResumeConnectorOverFakes(t *testing.T) {
 	connect := NewFakeConnect()
-	connect.connState = "PAUSED"
+	connect.mu.Lock()
+	connect.stateLocked("").connState = "PAUSED"
+	connect.mu.Unlock()
 	reg := actions.NewRegistry()
 	if err := actions.Register(reg, actions.Deps{Connect: connect, Registry: NewFakeRegistry()}); err != nil {
 		t.Fatalf("register real actions: %v", err)

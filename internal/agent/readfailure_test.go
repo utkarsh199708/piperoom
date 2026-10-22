@@ -329,3 +329,18 @@ func TestRunUnreachableBlocksHealthyThenBlip(t *testing.T) {
 		t.Fatal("the model never saw the blip fact")
 	}
 }
+
+// componentForTool must agree with the triage pass's layer table: the
+// consumer-side reads speak to the consumer layer, not the broker (#781).
+func TestComponentForToolConsumerReads(t *testing.T) {
+	for tool, want := range map[string]string{
+		"kafka_consumer_lag": "consumer",
+		"kafka_list_groups":  "consumer",
+		"kafka_topic_config": "kafka",
+		"dlq_peek":           "kafka",
+	} {
+		if got := componentForTool(tool); got != want {
+			t.Errorf("componentForTool(%q) = %q, want %q", tool, got, want)
+		}
+	}
+}

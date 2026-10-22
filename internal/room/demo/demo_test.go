@@ -349,7 +349,7 @@ func TestFakeRegistryCompatibilityWrites(t *testing.T) {
 	if err := f.SetCompatibility(ctx, "unknown-value", "NONE"); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("SetCompatibility(unknown): err = %v, want ErrNotFound", err)
 	}
-	if _, ok := f.level("unknown-value"); ok {
+	if _, ok := f.level(ctx, "unknown-value"); ok {
 		t.Fatal("SetCompatibility created a subject it should have refused")
 	}
 

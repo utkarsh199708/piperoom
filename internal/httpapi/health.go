@@ -80,6 +80,10 @@ type healthBody struct {
 	// are recorded and never run (PIPEROOM_WRITE_MODE, P0 item 1), so a
 	// probe or an operator can tell a read-only install from outside.
 	WriteMode string `json:"write_mode"`
+	// Demo is true only on a --demo server with the scripted agent's
+	// presenter controls (KAN-398). The web UI shows its dev-only control
+	// strip on it; left out everywhere else.
+	Demo bool `json:"demo,omitempty"`
 }
 
 type readyBody struct {
@@ -94,7 +98,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	if s.svc.WriteOn() {
 		mode = "on"
 	}
-	writeJSON(w, http.StatusOK, healthBody{Status: "ok", Version: version.String(), WriteMode: mode})
+	writeJSON(w, http.StatusOK, healthBody{Status: "ok", Version: version.String(), WriteMode: mode, Demo: s.demo != nil})
 }
 
 // handleReadyz reports whether the store answers within the probe timeout.

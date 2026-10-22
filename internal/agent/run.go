@@ -869,13 +869,17 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	data, dataCut := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
-		failure := classifyReadFailure(u.name, err)
+		// Classify from the scrubbed error: its text can reach the model and
+		// the room log through the fact, and scrubbing keeps the typed chain
+		// (scrubbedError.Unwrap), so errors.Is/As classification still works.
+		scrubbed := r.scrubToolError(u.name, err)
+		failure := classifyReadFailure(u.name, scrubbed)
 		failure.stepID = stepID
 		// An unreachable component is an evidence gap this run keeps until a
 		// read of it succeeds; the summary carries the stable fact so the model
 		// and the room log name the failure mechanically (KAN-408).
 		r.gaps.record(failure)
-		msg := failedReadSummary(failure, r.scrubToolError(u.name, err).Error())
+		msg := failedReadSummary(failure, scrubbed.Error())
 		summary, truncated := tools.Truncate(msg)
 		r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:     stepID,
@@ -918,7 +922,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	r.steps.addWithInput(stepID, u.name, string(cleaned), summary, false)
 	return toolResult{
 		toolUseID: u.id,
-		content:   r.wrapReadToolOutput(u.name, stepID, summary),
+		content:   r.readToolContent(u.name, stepID, summary, res.Data),
 		isError:   false,
 	}
 }
