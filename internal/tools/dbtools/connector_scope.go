@@ -51,7 +51,7 @@ func connectorScopeGapTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			conn, err := resolveConnector(ctx, p, d.Connect)
+			conn, err := resolveConnector(ctx, "pg_connector_scope_gap", p, d.Connect)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_connector_scope_gap: %w", err)
 			}
