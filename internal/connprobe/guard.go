@@ -70,10 +70,46 @@ var privateRanges = []netip.Prefix{
 	netip.MustParsePrefix("fc00::/7"),
 }
 
+// IPv6 transition-mechanism prefixes that embed an IPv4 address a router may
+// deliver the packet to: NAT64 (well-known and local-use), 6to4 and Teredo.
+var (
+	nat64WellKnown = netip.MustParsePrefix("64:ff9b::/96")
+	nat64LocalUse  = netip.MustParsePrefix("64:ff9b:1::/48")
+	sixToFour      = netip.MustParsePrefix("2002::/16")
+	teredo         = netip.MustParsePrefix("2001::/32")
+)
+
+// embeddedV4 returns the IPv4 address an IPv6 transition-mechanism address
+// carries, if any. On a network that routes these, the packet reaches that
+// IPv4 host, so the guard judges the embedded address too.
+func embeddedV4(a netip.Addr) (netip.Addr, bool) {
+	if !a.Is6() || a.Is4In6() {
+		return netip.Addr{}, false
+	}
+	b := a.As16()
+	switch {
+	case nat64WellKnown.Contains(a) || nat64LocalUse.Contains(a):
+		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
+	case sixToFour.Contains(a):
+		return netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]}), true
+	case teredo.Contains(a):
+		// Teredo stores the client IPv4 inverted in the last four bytes.
+		return netip.AddrFrom4([4]byte{^b[12], ^b[13], ^b[14], ^b[15]}), true
+	}
+	return netip.Addr{}, false
+}
+
 // CheckAddr reports whether the guard allows a. IPv4-mapped IPv6 addresses
-// are checked as IPv4, so ::ffff:169.254.169.254 is refused like the plain one.
+// are checked as IPv4, so ::ffff:169.254.169.254 is refused like the plain
+// one, and an address that embeds an IPv4 address (NAT64, 6to4, Teredo) is
+// refused whenever the embedded address would be.
 func (g *Guard) CheckAddr(a netip.Addr) error {
 	a = a.Unmap()
+	if v4, ok := embeddedV4(a); ok {
+		if err := g.CheckAddr(v4); err != nil {
+			return fmt.Errorf("%w (embedded in %s)", err, a)
+		}
+	}
 	for _, p := range alwaysBlocked {
 		if p.Contains(a) {
 			return fmt.Errorf("%w: %s is a link-local, metadata or reserved address", ErrBlockedAddress, a)
