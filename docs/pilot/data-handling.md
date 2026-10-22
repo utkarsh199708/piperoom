@@ -58,6 +58,36 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
   are redacted of it (`internal/wiring/warehouse.go`; `internal/clients/snowflake/redact.go`).
   Warehouse queries run with the role in that DSN, so the account's network path is part of
   your egress review (section 5).
+- **Watch sample history (`watch_samples`, X3; contract in `internal/clients/clients.go`, table and
+  writer land with X3a).** The watcher stores one number per pipeline and metric at most every
+  15 minutes: retained slot WAL bytes, DLQ record count, total consumer lag, source database size
+  (`pg_database_size`) and the age of the oldest unread record. No row value, record, config value or
+  free text. Kept 7 days, then deleted. Shown to anyone who can see the pipeline
+  (`GET /api/pipelines/{pid}/trends`); reading it makes no call to your systems.
+- **Connector config drift (`config_drift`, X3b).** The watcher keeps, in memory only, each connector's
+  approved config in its redacted form (`actions.RedactConfig`, the form section 4's config versions store),
+  its hash (`actions.ConfigHash`, taken over the redacted form, so it cannot be used to guess a secret) and a
+  fingerprint of each key's value keyed with a random per-process key (HMAC-SHA256, `actions.DigestConfig`),
+  which never leaves the process; it never keeps or logs a raw config value. A drift room shows the two hashes and
+  the changed key **names** only, and every changed key that looks like a credential (`actions.LooksSecret`) only
+  as `<secret key changed>`.
+- **External changes (X4: deploys, migrations, vendor incidents).** Rows of the same change log as the watcher's
+  (`pipeline_changes`, section 4: `PIPEROOM_CHANGES_RETENTION_DAYS`, 5000 rows per pipeline). What they hold:
+  - **The change webhook** (`POST /api/changes/webhook`, signed with `CHANGES_WEBHOOK_SECRET`) stores what your
+    CI or deploy tool sends: title, service, actor, URL and a vendor status (the sender's own `id` only inside the
+    dedup fingerprint, a hash). It is free text from the sender, capped (title 300 runes, the rest 128 bytes, URL
+    1024 bytes and `http`/`https` only), shown as text, given to the model only inside the untrusted-data wrapper,
+    and never logged.
+  - **Migration history readers** (X4b) read, from the pipeline's own source database, the metadata columns of
+    `flyway_schema_history` or `databasechangelog` (version, description, applied time, applied by), or dbt run
+    results when configured; never a script's contents or checksum, never a row of another table. Read-only, 10 s.
+  - **The vendor status poller** (X4a) fetches a pipeline's `owners.yaml` `vendor_status_url` (a vendor's
+    public status feed) every 5 minutes from the server: an **outbound** HTTPS request to a host you name, part
+    of your egress review (section 5). It sends nothing but the request.
+  - **Paging a team** (`POST /api/rooms/{id}/page-team`, X4d, a driver's click, never automatic) posts one
+    message to the team's own `slack_channel` from `owners.yaml` `teams:`: the hypothesis text, the cited
+    change's title and URL, the cited step numbers and the room link. That channel is outside the room's
+    Slack thread (see Slack, below); nothing is read back from it.
 - **Slack (optional, outbound only).** Off unless **both** `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`
   are set. A half setting stops the server at start (`cmd/server/main.go`;
   `internal/slackbridge/bridge.go`). It posts into one thread per room in one channel
@@ -74,6 +104,8 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
   - **Limits are bytes**, counted after escaping (`internal/slackbridge/escape.go`).
   - **Not posted:** the raw alert body (`internal/slackbridge/render.go`), tool results and their `Data`, comments and
     steers.
+  - **Team pages (X4d).** A driver's "Page <team>" posts one message to that team's `slack_channel`
+    (`owners.yaml` `teams:`), not to the room's channel: see External changes, above.
   - Slack keeps its copies under its own retention, not Piperoom's. Thread state is saved in the
     room database table `slack_threads` (`migrations/00003_slack_threads.sql`). A crash between a
     Slack post and the save can repeat one message after a restart (`bridge.go`).
@@ -155,6 +187,7 @@ auto-approved (`internal/room/autoapprove.go`).
 | `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables; the publication's other tables only as a count | other tables of a `FOR ALL TABLES` publication |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
 | `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go`; `dbtools.go`). The same on Snowflake, BigQuery and Databricks, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go`; `internal/clients/bigquery/bigquery.go`; `internal/clients/databricks/databricks.go`) | key value, all other columns |
+| `clients.Reconciler` reader (the watcher's `count_drift` and `row_drift`, X1, and a recovery action's `Verify`, X2; not a tool) | row counts of a source or sink table over a time window, the primary-key values of at most 200 of the newest source rows, and the named timestamp columns of at most 1000 keys (`internal/clients/clients.go`). Only for the pipeline's own `source_tables`/`sink_tables`. The keys stay in the caller's memory: the room gets a `DriftSignal` (`internal/events/events.go`) or an `agent.recovery_check`/`agent.verification` with counts and a window only | every non-timestamp column value; key values in events, logs or the model |
 | `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go`) | row data |
 | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag, only for the room pipeline's own topics and consumer groups (`kafka_consumer_lag` shows only partitions of the pipeline's topics) | record payloads |
 | `kafka_topic_config` | for a pipeline's own topic: retention, cleanup policy, min in-sync replicas, partition count and replication factor (`kafka_tools.go`) | record payloads |
@@ -261,6 +294,16 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
   room's content**: such a purge or delete removes the room from Piperoom but not from that directory.
   Protect, back up and expire the directory under your own policy.
 - Without an archive, export a room first with `GET /api/rooms/{id}/export` if you must keep it.
+- **Fleet view: watcher status and connector config versions (X5-0; stored by X5a, X5c).** No new read of
+  your systems: the watcher keeps, in the Piperoom database, one status row per pipeline (signal names,
+  severities, topology node ids, times, forecast ETAs; no evidence values), replaced every tick, and one row per
+  connector config it sees change. A config version stores the connector's config **redacted**: the value of
+  every credential-looking key (`actions.LooksSecret`) reads `<redacted>`, every other value has passed the
+  secret masker (`redact.Text`, so a password inside a JDBC URL is masked) and is cut at 4 KB. Its hash is
+  taken over that redacted form, so it cannot be used to guess a secret. Versions older than
+  `PIPEROOM_CHANGES_RETENTION_DAYS` are deleted, except the newest of each connector. Version lists (key
+  names only) are visible to anyone who can see the pipeline; diffs (redacted values) only to its layer
+  approvers and backups, the solo user and auditors.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
   else in it. Data sent to the model provider (Anthropic, Bedrock or Vertex), and messages already posted to Slack, are governed by
   your agreements with those providers, not by Piperoom.
@@ -276,7 +319,9 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
   `internal/owners/tenancy.go`), but one process still holds the credentials for all of them.
 - Pilot with a small, named group in `users.yaml`: everyone in a room sees everything in it.
 - Turn Slack on only with a **private** channel whose members may see every room mirrored into it.
-  Leave `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` unset if they may not.
+  Leave `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` unset if they may not. A `teams:` entry's `slack_channel`
+  (X4) receives the pages its team gets; give it the same care.
+- Set a `vendor_status_url` (X4) only to a status feed host your egress policy allows (section 1).
 - Pin or unset `ANTHROPIC_BASE_URL`; unset `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` on the host
   (section 1).
 - Keep the HTTP port on loopback or behind your VPN ([setup.md](setup.md#network-exposure)).

@@ -25,7 +25,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrNotFound is returned (wrapped) when the named object does not exist.
@@ -361,6 +366,25 @@ type SnapshotSignal struct {
 	Offset    int64  `json:"offset"`
 }
 
+// ---- X2: targeted re-snapshot over a Kafka signal topic (recovery) ----
+
+// SnapshotConditionSignaler is SnapshotSignaler with a row condition: the same
+// execute-snapshot record, plus Debezium's additional-conditions entry
+// {"data-collection": t, "filter": additionalCondition} for every t in tables,
+// so the connector re-emits only the rows that match (pg_resnapshot_rows,
+// X2a, on a connector with signal.kafka.topic). additionalCondition follows
+// the rule of SnapshotConditionWriter: built and checked by the action from
+// typed params, never text from the model; the implementation runs
+// ValidateSnapshotCondition before any I/O and refuses an empty condition
+// (an unconditional snapshot is SendSnapshotSignal). Scope, key and partition
+// rules are SnapshotSignaler's. Optional and separate from SnapshotSignaler,
+// so the Kafka client, fakes and the eval replay compile without it; an
+// action asserts it at use time and refuses before any I/O when it is
+// absent. (X2)
+type SnapshotConditionSignaler interface {
+	SendSnapshotSignalWhere(ctx context.Context, signalTopic, connector, logicalName string, tables []string, additionalCondition string) (SnapshotSignal, error)
+}
+
 // RecordReader reads whole records for dlq_replay (P3a): at most limit
 // records of one partition of topic from offset from, in offset order (fewer
 // when the partition ends first or 32 MiB were read). It changes nothing, so
@@ -507,6 +531,97 @@ type SourceWriter interface {
 	InsertSnapshotSignal(ctx context.Context, signalTable, connectorID string, tables []string) (signalID string, err error)
 }
 
+// ---- X2: targeted re-snapshot over a signal table (recovery) ----
+
+// SnapshotConditionWriter is implemented by the source Postgres client next to
+// SourceWriter, on the same write pool and under the same rules (write mode
+// on, the room's pipeline scope in ctx, identifiers checked and quoted,
+// tools.ErrOutOfScope / tools.ErrNoScope before any I/O). It is a separate
+// interface so that SourceWriter, its fakes and the eval replay compile
+// unchanged; the recovery action pg_resnapshot_rows (X2a) asserts it at use
+// time and refuses before any I/O when the writer lacks it. (X2)
+type SnapshotConditionWriter interface {
+	// InsertSnapshotSignalWhere inserts one execute-snapshot row like
+	// SourceWriter.InsertSnapshotSignal, whose data also carries
+	// "additional-conditions": [{"data-collection": t, "filter":
+	// additionalCondition}] for every t in tables, so Debezium re-reads only
+	// the matching rows, and returns the row id.
+	//
+	// additionalCondition is a SQL boolean expression that Debezium appends
+	// to its snapshot SELECT, so it is executable text on the source
+	// database. It is validated by the action (allow-listed grammar), never
+	// passed raw from the model: the action builds it from typed params (an
+	// identifier checked against ^[a-zA-Z_][a-zA-Z0-9_]*$ and quoted, the
+	// table's primary key or a timestamp column, a comparison operator from a
+	// fixed set, values bound as quoted literals with ' doubled), and the
+	// model only ever supplies those params. The writer checks it again with
+	// ValidateSnapshotCondition and refuses before any I/O when it fails
+	// (ErrBadSnapshotCondition). The condition and its values are never
+	// logged; errors name the table only.
+	InsertSnapshotSignalWhere(ctx context.Context, signalTable, connectorID string, tables []string, additionalCondition string) (signalID string, err error)
+}
+
+// MaxSnapshotConditionBytes caps a re-snapshot's additionalCondition. One
+// key range or time bound is far shorter; the cap also keeps the signal row
+// under the 2 KiB data column Debezium's signal table documents. (X2)
+const MaxSnapshotConditionBytes = 1024
+
+// ErrBadSnapshotCondition is returned (wrapped) by ValidateSnapshotCondition
+// and by every SnapshotConditionWriter / SnapshotConditionSignaler for a
+// condition that fails it. Nothing was written. (X2)
+var ErrBadSnapshotCondition = errors.New("clients: refused snapshot condition")
+
+// ValidateSnapshotCondition is the writers' second line of defence behind the
+// action's grammar. It is lexical and stricter than any SQL dialect a source
+// speaks: it tracks '…' literals and "…" identifiers (a doubled quote stays
+// inside), and refuses an empty condition, one over
+// MaxSnapshotConditionBytes, a control character (NUL, newline and tab
+// included) or a backslash anywhere, an unterminated quote, and ; -- /* # $
+// or ` outside a quote. So a value such as '1; drop' bound as a literal
+// passes, while a second statement, a comment, a dollar-quoted or
+// backslash-escaped string does not. It does no I/O and returns
+// ErrBadSnapshotCondition wrapped; the message never echoes the condition. (X2)
+func ValidateSnapshotCondition(cond string) error {
+	if cond == "" {
+		return fmt.Errorf("%w: empty", ErrBadSnapshotCondition)
+	}
+	if len(cond) > MaxSnapshotConditionBytes {
+		return fmt.Errorf("%w: %d bytes, at most %d", ErrBadSnapshotCondition, len(cond), MaxSnapshotConditionBytes)
+	}
+	var quote byte // 0 outside a quote, else ' or "
+	for i := 0; i < len(cond); i++ {
+		c := cond[i]
+		if c < 0x20 || c == 0x7f || c == '\\' {
+			return fmt.Errorf("%w: control character or backslash at byte %d", ErrBadSnapshotCondition, i)
+		}
+		if quote != 0 {
+			if c == quote {
+				if i+1 < len(cond) && cond[i+1] == quote {
+					i++ // a doubled quote is an escaped one, not the end
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		next := byte(0)
+		if i+1 < len(cond) {
+			next = cond[i+1]
+		}
+		switch {
+		case c == '\'' || c == '"':
+			quote = c
+		case c == ';', c == '#', c == '$', c == '`',
+			c == '-' && next == '-', c == '/' && next == '*':
+			return fmt.Errorf("%w: %q outside a quote at byte %d", ErrBadSnapshotCondition, c, i)
+		}
+	}
+	if quote != 0 {
+		return fmt.Errorf("%w: unterminated quote", ErrBadSnapshotCondition)
+	}
+	return nil
+}
+
 // SetupSourceWriter holds the writes only a setup makes on the source
 // database (docs/design/setup-agent.md §4 item 4): built only with write
 // mode on, on the write pool (SOURCE_DB_WRITE_URL for Postgres), never the
@@ -642,6 +757,82 @@ type CountReader interface {
 	CountByBucket(ctx context.Context, table, tsColumn string, since, until time.Time, width time.Duration) ([]MinuteCount, error)
 }
 
+// ---- X1: silent corruption, source vs sink reconcile (optional) ----
+//
+// Asserted at use time like CountReader (rec, ok := src.(clients.Reconciler)),
+// never embedded in SourceDB or Warehouse, so no existing client or fake has
+// to grow. The source Postgres and the dev Postgres warehouse implement it
+// (X1a, A3); other warehouses return ErrNotSupported from every method until
+// their owners add it. The drift watcher signals (count_drift, row_drift;
+// events.DriftSignal) are its first caller; a recovery action's Verify (X2,
+// actions.Verifier) is the second.
+
+// Caps and deadline of every Reconciler implementation. Callers and tests use
+// these constants instead of their own numbers.
+const (
+	// ReconcileMaxSample caps SampleKeys' n: a larger n is cut to it.
+	ReconcileMaxSample = 200
+	// ReconcileMaxKeys caps RowTimes' keys: more is refused, nothing is read.
+	ReconcileMaxKeys = 1000
+	// ReconcileTimeout is the per-call deadline an implementation sets when
+	// ctx has none (or a later one); the source's statement_timeout still
+	// applies on top.
+	ReconcileTimeout = 10 * time.Second
+)
+
+// ReconcileSampleSize is the number of keys SampleKeys reads for a requested
+// n: n cut to ReconcileMaxSample, and 0 when n <= 0 (the implementation then
+// refuses the call with an error wrapping tools.ErrBadInput). Implementations
+// call it so the cap is the same everywhere.
+func ReconcileSampleSize(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return min(n, ReconcileMaxSample)
+}
+
+// Reconciler reads the row evidence a drift check needs from one side of a
+// pipeline (source or sink): counts, primary-key values and timestamps only.
+// It never returns any other column value, and no method writes.
+//
+// Rules for every method:
+//   - table is "schema.table"; table, pkColumn, tsColumn and every entry of
+//     tsColumns must match ^[a-zA-Z_][a-zA-Z0-9_]*$ per part and are quoted
+//     with pgx.Identifier{...}.Sanitize() (or the warehouse's equivalent).
+//     A bad identifier is an error wrapping tools.ErrBadInput, before any I/O.
+//   - Scope fails closed like SourceWriter: the pipeline in ctx
+//     (tools.WithPipeline; the watcher sets it per pipeline, the agent per
+//     room) must list table in source_tables (source) or sink_tables (sink),
+//     else an error wrapping tools.ErrOutOfScope (tools.ErrNoScope with no
+//     pipeline), before any I/O.
+//   - Each call has a deadline of ReconcileTimeout (10 s) at most; a call cut
+//     by it returns an error wrapping context.DeadlineExceeded.
+//   - Times are compared and returned in UTC; tsColumn values that are NULL
+//     are never counted, sampled or returned.
+type Reconciler interface {
+	// CountBetween counts the rows of table whose tsColumn is in the
+	// half-open window [from, to). to before from is tools.ErrBadInput.
+	// It returns a count only, never a value. Deadline 10 s.
+	CountBetween(ctx context.Context, table, tsColumn string, from, to time.Time) (int64, error)
+	// SampleKeys returns the primary-key values (as text) of the newest
+	// rows of table with tsColumn >= since, newest first: at most
+	// ReconcileSampleSize(n) keys, so n > ReconcileMaxSample (200) is cut
+	// to 200 and n <= 0 is tools.ErrBadInput. Keys only, never another
+	// column's value; a caller keeps them in memory and never logs them or
+	// puts them in an event. Deadline 10 s.
+	SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since time.Time, n int) ([]string, error)
+	// RowTimes reads, for each key of keys (primary-key values as text), the
+	// timestamp columns tsColumns of that row: key -> column -> time. It
+	// selects only pkColumn and tsColumns, never another column, so no
+	// non-timestamp value can be returned. A key with no row is absent from
+	// the result; a NULL column is absent from its row's map; no keys is an
+	// empty map and no I/O. More than ReconcileMaxKeys (1000) keys or an
+	// empty tsColumns is tools.ErrBadInput before any I/O; a named column
+	// that is not a date/time type is tools.ErrBadInput too, and no value of
+	// it is returned. Deadline 10 s.
+	RowTimes(ctx context.Context, table, pkColumn string, keys []string, tsColumns []string) (map[string]map[string]time.Time, error)
+}
+
 // ---- Batch pipelines: orchestrator and transform (P4) ----
 //
 // Optional readers, like ClusterReader: wiring holds nil when the system is
@@ -762,11 +953,130 @@ const (
 	ChangeSchemaVersion   = "schema_version"   // a subject's latest version went up (registered) or down (deleted)
 )
 
+// ---- X4: external changes (deploy, migration, vendor incident) ----
+//
+// Many incidents start outside the pipeline: an application deploy, a schema
+// migration run by Flyway, Liquibase or dbt, or a vendor's own incident. They
+// are rows of the same change log (PipelineChange, ChangeReader/ChangeWriter),
+// not a parallel concept, so the "what changed" tool, the retention loop and
+// the room store treat them like every other kind. Their Before is empty and
+// their After is an ExternalChange. Summary is the title (one line, untrusted
+// text, cut like every Summary); Actor is who deployed or ran the migration.
+//
+// Object per kind: deploy → the service deployed (ExternalChange.Service);
+// migration → the history table read ("public.flyway_schema_history",
+// "public.databasechangelog"), the dbt project for dbt, or the service for a
+// webhook; vendor_incident → the vendor component ("confluent-cloud",
+// "msk", "aiven-kafka"). Readers and writers of these rows see timestamps and
+// metadata only: never a migration script's contents, never a row value.
+
+// External change kinds of PipelineChange.Kind. (X4)
+const (
+	ChangeDeploy         = "deploy"          // an application or service deploy (webhook)
+	ChangeMigration      = "migration"       // an applied schema migration (Flyway, Liquibase, dbt, or webhook)
+	ChangeVendorIncident = "vendor_incident" // a vendor status-page incident (webhook or status-page poller)
+)
+
+// Change sources of PipelineChange.Source. The first two predate X4. (X4)
+const (
+	ChangeSourceWatcher    = "watcher"    // internal/watch (F8c)
+	ChangeSourceDDLAudit   = "ddl_audit"  // the source DDL audit table (F8)
+	ChangeSourceWebhook    = "webhook"    // POST /api/changes/webhook (X4a): deploy, migration or vendor_incident
+	ChangeSourceFlyway     = "flyway"     // flyway_schema_history in the source database (X4b)
+	ChangeSourceLiquibase  = "liquibase"  // databasechangelog in the source database (X4b)
+	ChangeSourceDBT        = "dbt"        // dbt run results (X4b)
+	ChangeSourceStatuspage = "statuspage" // a pipeline's owners.yaml vendor_status_url poller (X4a)
+)
+
+// ChangeKinds returns every PipelineChange.Kind, the F8 kinds first then the
+// external ones, as a fresh slice. The room store and the "what changed" tool
+// validate kinds against it, so a new kind is added here once. (X4)
+func ChangeKinds() []string {
+	return []string{ChangeDDL, ChangeConnectorConfig, ChangeConnectorState, ChangeSchemaVersion,
+		ChangeDeploy, ChangeMigration, ChangeVendorIncident}
+}
+
+// IsExternalChange reports whether kind is a change made outside the
+// pipeline (deploy, migration, vendor_incident). The agent ranks these first
+// inside the alert window (X4c). (X4)
+func IsExternalChange(kind string) bool {
+	switch kind {
+	case ChangeDeploy, ChangeMigration, ChangeVendorIncident:
+		return true
+	}
+	return false
+}
+
+// Vendor incident states of ExternalChange.Status (the statuspage.io set). (X4)
+const (
+	VendorInvestigating = "investigating"
+	VendorIdentified    = "identified"
+	VendorMonitoring    = "monitoring"
+	VendorResolved      = "resolved"
+)
+
+// Caps of ExternalChange fields, checked by ExternalChange.Validate. (X4)
+const (
+	MaxExternalChangeURLBytes     = 1024
+	MaxExternalChangeServiceBytes = 128
+	MaxExternalChangeVersionBytes = 128
+)
+
+// ExternalChange is PipelineChange.After of the external kinds. Every field
+// is untrusted text from the sender or the customer's database: clients show
+// it as text, the agent sees it only inside its untrusted-data wrapper. (X4)
+type ExternalChange struct {
+	// URL links to the deploy run, pull request, migration run or incident
+	// page; http or https, no user info, ≤ MaxExternalChangeURLBytes. "" when
+	// the source has none (Flyway, Liquibase).
+	URL string `json:"url,omitempty"`
+	// Service is the application service as owners.yaml teams[].owns names it,
+	// so the agent can name the owning team; "" when unknown.
+	Service string `json:"service,omitempty"`
+	// Version is the migration version (Flyway version, Liquibase id, dbt
+	// invocation id); migration only.
+	Version string `json:"version,omitempty"`
+	// Status is one of the Vendor* states; vendor_incident only. "" = unknown.
+	Status string `json:"status,omitempty"`
+}
+
+// Validate checks the caps and the URL rule. A writer (the webhook, the
+// migration reader, the poller) calls it before RecordChange and refuses or
+// drops the row on error; it never fixes a value up. (X4)
+func (e ExternalChange) Validate() error {
+	if e.URL != "" && len(e.URL) <= MaxExternalChangeURLBytes {
+		u, err := url.Parse(e.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("clients: external change url must be an absolute http or https URL")
+		}
+		if u.User != nil {
+			return errors.New("clients: external change url must not carry user info")
+		}
+	}
+	for _, f := range []struct {
+		name, v string
+		max     int
+	}{{"service", e.Service, MaxExternalChangeServiceBytes}, {"version", e.Version, MaxExternalChangeVersionBytes}, {"url", e.URL, MaxExternalChangeURLBytes}} {
+		if len(f.v) > f.max {
+			return fmt.Errorf("clients: external change %s is over %d bytes", f.name, f.max)
+		}
+		if !utf8.ValidString(f.v) || strings.ContainsFunc(f.v, unicode.IsControl) {
+			return fmt.Errorf("clients: external change %s holds control characters or invalid UTF-8", f.name)
+		}
+	}
+	switch e.Status {
+	case "", VendorInvestigating, VendorIdentified, VendorMonitoring, VendorResolved:
+	default:
+		return fmt.Errorf("clients: external change status %q is not a known vendor incident state", e.Status)
+	}
+	return nil
+}
+
 // PipelineChange is one recorded change on a pipeline. Before and After hold
 // only the changed keys (config), the two states (state), the version pair
 // (schema) or nothing (DDL: the statement is in Summary, cut at 300 runes).
 // A credential value is never stored: masked keys read "***". Actor is the
-// DDL username or ""; Source is "watcher" or "ddl_audit".
+// DDL username or ""; Source is one of the ChangeSource* constants.
 type PipelineChange struct {
 	ID          int64           `json:"id"`
 	PipelineID  string          `json:"pipeline_id"`
@@ -793,4 +1103,208 @@ type ChangeReader interface {
 // Writer rule above does not apply: the watcher (F8c) may hold one.
 type ChangeWriter interface {
 	RecordChange(ctx context.Context, c PipelineChange) (inserted bool, err error)
+}
+
+// ---- X3: watch sample history (Piperoom's own table, fed by the watcher) ----
+//
+// Not a customer system: the room store implements both interfaces over the
+// table watch_samples(pipeline_id, metric, at, value); its migration number
+// 00018 (migrations/00018_watch_samples.sql) is reserved for A5 (X3a). Rows
+// older than config.WatchSampleRetention are deleted by the store's
+// retention job. A sample is one number per pipeline and metric: never a row
+// value, a record, a config value or free text.
+//
+// Migration numbers: 00017 is reserved by docs/design/onboarding.md
+// (proposed), 00018 here, 00019 and 00020 by the fleet block below. goose
+// (migrations/migrate.go) refuses to apply a number below one a database
+// already ran, so migrations merge in number order: a reserved number whose
+// row is not ready is given up at merge time (the leads renumber in this
+// comment in the same PR), never filled in later.
+
+// Metric names of a watch sample (watch_samples.metric, ?metric= of
+// GET /api/pipelines/{pid}/trends, events.ForecastSignal.Metric,
+// clients.WatchSignal.Metric). (X3)
+const (
+	WatchMetricSlotWALBytes         = "slot_wal_bytes"          // WAL the replication slot retains; limit: watch.wal_headroom_bytes
+	WatchMetricDLQRecords           = "dlq_records"             // records in the pipeline's dead-letter topics; no limit (trend only)
+	WatchMetricGroupLag             = "group_lag"               // total consumer lag of the pipeline's groups; no limit (trend only)
+	WatchMetricDBSizeBytes          = "db_size_bytes"           // pg_database_size of the source; limit: watch.db_size_limit
+	WatchMetricTopicOldestUnreadAge = "topic_oldest_unread_age" // seconds, the oldest unconsumed record of any pipeline topic; limit: that topic's retention.ms
+)
+
+// WatchMetrics returns every metric name, in a stable order, as a fresh slice
+// (like ChangeKinds). A name outside it is refused by the store and by the
+// trends route (400 validation). (X3)
+func WatchMetrics() []string {
+	return []string{WatchMetricSlotWALBytes, WatchMetricDLQRecords, WatchMetricGroupLag,
+		WatchMetricDBSizeBytes, WatchMetricTopicOldestUnreadAge}
+}
+
+// WatchMetricUnit returns the unit of a metric ("bytes", "records" or
+// "seconds"), or "" for a name outside WatchMetrics(). (X3)
+func WatchMetricUnit(metric string) string {
+	switch metric {
+	case WatchMetricSlotWALBytes, WatchMetricDBSizeBytes:
+		return "bytes"
+	case WatchMetricDLQRecords, WatchMetricGroupLag:
+		return "records"
+	case WatchMetricTopicOldestUnreadAge:
+		return "seconds"
+	}
+	return ""
+}
+
+// MaxSamplesPerSeries caps what Samples returns for one pipeline and metric:
+// one sample per 15 minutes for 7 days. (X3)
+const MaxSamplesPerSeries = 7 * 24 * 4
+
+// SamplePoint is one watch sample; a list of them, oldest first, is the body
+// of GET /api/pipelines/{pid}/trends. (X3)
+type SamplePoint struct {
+	At    time.Time `json:"at"`
+	Value float64   `json:"value"`
+}
+
+// SampleWriter appends one sample. A second sample with the same (pipeline,
+// metric, at) is not written again and is not an error. An unknown metric,
+// an empty pipeline id, or a NaN or infinite value is refused (an error, no
+// row). It writes Piperoom's own table, never a customer system, so the
+// watcher (X3a) may hold one, as it holds a ChangeWriter. (X3)
+type SampleWriter interface {
+	AppendSample(ctx context.Context, pipelineID, metric string, at time.Time, value float64) error
+}
+
+// SampleReader lists the samples of one pipeline and metric with At >= since,
+// oldest first, at most MaxSamplesPerSeries (the newest ones when more
+// match). None is an empty list, not an error; an unknown metric is an
+// error. Callers check the pipeline's tenant before they call it. (X3)
+type SampleReader interface {
+	Samples(ctx context.Context, pipelineID, metric string, since time.Time) ([]SamplePoint, error)
+}
+
+// ---- Fleet view: cross-pipeline changes, watcher status, connector config versions (X5-0) ----
+//
+// Piperoom's own tables again, not customer systems: the room store (store.PG,
+// memstore) implements every interface in this block. The watcher writes
+// WatchStatus and ConnectorConfigVersion (the Reader / Writer rule above does
+// not apply, as for ChangeWriter); the fleet routes of docs/api.md ("Fleet
+// view") only read. Nothing here carries a row value; a connector config value
+// is stored only after actions.RedactConfig. Every method takes a context and
+// the store bounds it at 10 s when the caller set no deadline. Tables, for A5:
+// watch_status (migration 00019, X5a) and connector_config_versions (00020,
+// X5c; not docs/design/onboarding.md's config_versions); the numbering rule is
+// in the X3 block above.
+
+// Caps of the fleet shapes, enforced by the store on write and by the routes
+// on read.
+const (
+	MaxFleetChangesPage  = 200  // FleetChangeReader limit; the route's default page is 100
+	MaxWatchSignals      = 32   // WatchStatus.Signals per pipeline
+	MaxConfigKeys        = 1000 // keys of one ConnectorConfigVersion.Config, and of its ChangedKeys
+	MaxConfigVersionList = 200  // ConfigVersionReader.ConfigVersions limit
+)
+
+// ChangeCursor is a position in the fleet change order (At, then ID, both
+// descending). The zero value is the newest end.
+type ChangeCursor struct {
+	At time.Time `json:"at"`
+	ID int64     `json:"id"`
+}
+
+// FleetChangeReader lists the changes of several pipelines in one page, newest
+// first by (At, ID), at most limit (1..MaxFleetChangesPage), only rows strictly
+// after before in that order, with At >= since (zero = no bound). kinds nil =
+// every kind; pipelineIDs empty = no rows (the caller passes the pipelines the
+// user can see, never "all"). Optional next to ChangeReader, asserted at use
+// time: without it the route merges ChangeReader pages per pipeline.
+type FleetChangeReader interface {
+	ListFleetChanges(ctx context.Context, pipelineIDs []string, since time.Time, kinds []string, before ChangeCursor, limit int) ([]PipelineChange, error)
+}
+
+// Watch status states of WatchSignal.State.
+const (
+	WatchFiring = "firing" // the signal fires now
+	WatchAcked  = "acked"  // still fires, but the driver closed its room (docs/design/watcher.md)
+)
+
+// WatchSignal is one signal of a pipeline that is firing or acked; a signal in
+// state ok is not listed. Node is the topology node id the signal is about
+// ("connect:<connector>", "group:<group>", "dlq:<topic>"; "" when the watcher
+// cannot name one). Metric and ETA are set only for Signal "forecast" (X3a):
+// the sample metric and the time the forecast reaches its limit.
+type WatchSignal struct {
+	Signal   string     `json:"signal"`   // an owners.Signal* name or an X-wave events.Signal* name (count_drift … config_drift)
+	State    string     `json:"state"`    // WatchFiring | WatchAcked
+	Severity string     `json:"severity"` // "sev1".."sev4"
+	Node     string     `json:"node,omitempty"`
+	Since    time.Time  `json:"since"` // when it started firing
+	Metric   string     `json:"metric,omitempty"`
+	ETA      *time.Time `json:"eta,omitempty"`
+}
+
+// WatchStatus is the watcher's latest view of one pipeline: the row the fleet
+// view reads instead of asking the watcher, which runs on one replica only
+// (docs/design/replicas.md). Signals holds at most MaxWatchSignals entries and
+// no evidence values.
+type WatchStatus struct {
+	PipelineID string        `json:"pipeline_id"`
+	CheckedAt  time.Time     `json:"checked_at"` // the tick that produced it
+	Signals    []WatchSignal `json:"signals"`
+}
+
+// WatchStatusWriter replaces the status row of s.PipelineID. The watcher calls
+// it at most once per pipeline per tick; a failed write is logged by the
+// watcher and never stops a tick. More than MaxWatchSignals signals is refused
+// with an error, nothing written.
+type WatchStatusWriter interface {
+	PutWatchStatus(ctx context.Context, s WatchStatus) error
+}
+
+// WatchStatusReader returns the status rows of the given pipelines; a pipeline
+// the watcher never checked has no row (not an error).
+type WatchStatusReader interface {
+	WatchStatuses(ctx context.Context, pipelineIDs []string) ([]WatchStatus, error)
+}
+
+// ConnectorConfigVersion is one config of a connector as the watcher saw it
+// (X3b records, X5c stores). Config holds the values after
+// actions.RedactConfig, applied once by the caller (actions.DigestConfig's
+// Redacted; a raw config never crosses this interface), and Hash is
+// actions.ConfigHash of that map, the same id as config_drift's hashes, so no
+// secret value is stored or hashed. The store computes Hash itself (a
+// caller's Hash is ignored) and refuses a Config in which an
+// actions.LooksSecret key holds anything but actions.RedactedValue.
+// ChangedKeys is actions.ChangedConfigKeys from the watcher's previous digest
+// of the connector: names only, sorted, events.SecretKeyChanged for a
+// credential key, so a change only to a secret value is a new version with
+// the same Hash. It is empty when the watcher has no earlier digest in
+// memory (its first poll after it starts); the diff route compares the
+// stored forms either way. By is "proposal:<id>" when an executed Piperoom
+// proposal produced the config, "" otherwise. Config is empty in list
+// answers.
+type ConnectorConfigVersion struct {
+	PipelineID  string            `json:"pipeline_id"`
+	Connector   string            `json:"connector"`
+	Hash        string            `json:"hash"`
+	At          time.Time         `json:"at"`
+	By          string            `json:"by"`
+	ChangedKeys []string          `json:"changed_keys"`
+	Config      map[string]string `json:"config,omitempty"`
+}
+
+// ConfigVersionWriter appends v unless it would repeat the connector's latest
+// version (same Hash and no ChangedKeys); inserted reports whether it did. A
+// Config or ChangedKeys over MaxConfigKeys entries is refused with an error,
+// nothing written.
+type ConfigVersionWriter interface {
+	RecordConfigVersion(ctx context.Context, v ConnectorConfigVersion) (inserted bool, err error)
+}
+
+// ConfigVersionReader reads stored versions. ConfigVersions lists one
+// connector's versions newest first, at most limit (1..MaxConfigVersionList),
+// Config empty. ConfigVersion returns the newest version with that Hash,
+// Config filled; none is ErrNotFound.
+type ConfigVersionReader interface {
+	ConfigVersions(ctx context.Context, pipelineID, connector string, limit int) ([]ConnectorConfigVersion, error)
+	ConfigVersion(ctx context.Context, pipelineID, connector, hash string) (ConnectorConfigVersion, error)
 }

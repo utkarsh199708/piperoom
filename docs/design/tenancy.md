@@ -269,6 +269,13 @@ object did not exist when it is outside the caller's tenants. **404, never 403**
 | `POST /api/handoffs/{hid}/accept` | `404 not_found`, the answer for a missing hand-off, before `409`/`403` |
 | `GET /api/pipelines/{pid}/topology` | `404 not_found` "pipeline not found" |
 | `GET /api/shadow/metrics` | only rooms of your tenants are counted; `?pipeline=` outside them counts nothing, as an unknown pipeline does |
+| `GET /api/fleet` (X5-0) | the pipeline has no row and is in no count; `?tenant=` naming a tenant you are not in, or none, answers `[]` (not `403`/`404`) |
+| `GET /api/fleet/changes` (X5-0) | the pipeline's changes are not listed; `?pipeline=` outside them answers an empty page, as an unknown pipeline does |
+| `GET /api/pipelines/{pid}/connectors/{name}/config-versions` (X5-0, also `?diff=`) | `404 not_found` "pipeline not found", before the connector, hash and role checks |
+| `GET /api/pipelines/{pid}/trends` (X3-0) | `404 not_found` "pipeline not found", before the metric check (X3a's ticket said `403`; this rule wins) |
+| `POST /api/pipelines/{pid}/connectors/{name}/accept-config` (X3-0) | `404 not_found` "pipeline not found", before the connector, role and watcher checks |
+| `POST /api/rooms/{id}/page-team` (X4-0) | the room-id rule above; a `team` of another tenant is refused like an unknown team (`400 validation`) |
+| `POST /api/changes/webhook` (X4-0, signed) | no caller tenant: the secret is shared by every tenant, so the reply carries `stored` only; an unknown pipeline is `404 not_found` |
 | `POST /api/rooms` | `400 validation` "unknown pipeline", the answer for an unknown pipeline |
 | `POST /api/alerts/webhook` (dev) | `404 not_found` for a pipeline outside your tenants, unknown pipelines included |
 | `control/grant`, `handoffs` (create) | a target who cannot see the room is refused like an unknown person (`400 validation`) |

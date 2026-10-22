@@ -28,6 +28,11 @@ const (
 	RoomLogCapWarning    Type = "room.log_cap_warning"
 	RoomDeleted          Type = "room.deleted"
 
+	// RoomEscalated raises the severity of an open room: a forecast room whose
+	// metric reached its limit, so the watcher's normal signal joined it.
+	// System actor; the snapshot's severity is the newest one. (X3)
+	RoomEscalated Type = "room.escalated"
+
 	AgentStatus     Type = "agent.status"
 	AgentStepStart  Type = "agent.step.started"
 	AgentToolCall   Type = "agent.tool_call"
@@ -41,6 +46,11 @@ const (
 	// proposal ran: the layer checks and the data-flow check it made. It
 	// replaces the plain-text "[verification]" agent.message. (F4)
 	AgentVerification Type = "agent.verification"
+	// AgentRecoveryCheck is one poll of a recovery action's Verify while the
+	// agent waits for the repair to land: the counts so far, so a client can
+	// show "checking (2 of N)". Progress only: the verdict is the one
+	// agent.verification that follows the last poll. (X2)
+	AgentRecoveryCheck Type = "agent.recovery_check"
 	// AgentTriage is the bounded first look written by the triage pass before
 	// the full investigation (docs/design: tasks/F6-proactive-triage.md). One
 	// per run of the pass; a room may hold several (a re-fire re-runs it). (F6)
@@ -91,6 +101,13 @@ const (
 	// keeps the latest per person. AgentHypothesisPayload.Confirmed is never
 	// set by the agent: clients and the snapshot derive it from these events. (F9)
 	HypothesisVerdict Type = "hypothesis.verdict"
+
+	// X4: RoomTeamPaged records that the driver paged the team that owns an
+	// upstream cause (POST /api/rooms/{id}/page-team): one Slack post to the
+	// team's owners.yaml slack_channel, never automatic, at most one per team
+	// per room per hour. Actor: the driver. The team's reply is not ingested.
+	// The room's agent Sink refuses it. (X4)
+	RoomTeamPaged Type = "room.team_paged"
 
 	// HandoffRequested is written when the driver asks for a hand-off, before
 	// the agent writes the summary (which can take minutes). It ends with
@@ -243,10 +260,181 @@ type RoomCreatedPayload struct {
 	// Empty (omitted) for every incident room, so events from before the U
 	// wave serialise exactly as before. Never set together with Shadow. (U)
 	Mode string `json:"mode,omitempty"`
+	// Origin is RoomOriginForecast for a room a forecast signal opened: it
+	// opens quietly, sev4, with the trend summary as its first system message
+	// and no agent run (zero tokens) until the first steer, the first @agent
+	// comment or a room.escalated. Empty (omitted) for every other room, so
+	// events from before the X wave serialise exactly as before. (X3)
+	Origin string `json:"origin,omitempty"`
 }
 
 // RoomModeSetup is RoomCreatedPayload.Mode of a setup room. (U)
 const RoomModeSetup = "setup"
+
+// RoomOriginForecast is RoomCreatedPayload.Origin of a room a forecast
+// signal opened. (X3)
+const RoomOriginForecast = "forecast"
+
+// RoomEscalatedPayload raises an open room's severity. Severity is the new
+// level, always more severe than From; Signal is the watcher signal that
+// caused it (e.g. "slot_wal"). Escalating a forecast room also starts its
+// agent when none has run yet. (X3)
+type RoomEscalatedPayload struct {
+	Severity string `json:"severity"` // "sev1".."sev3"
+	From     string `json:"from"`
+	Signal   string `json:"signal"`
+}
+
+// ---- X wave: watcher signals (X1 drift, X3 forecast and config_drift) ----
+//
+// The watcher (internal/watch) puts one flat object per firing signal in the
+// "signals" list of its evidence JSON (room.created.alert and its joins),
+// like every older signal: "signal" and "severity" first, then the signal's
+// own keys. DriftSignal, ForecastSignal and ConfigDriftSignal are those
+// objects for the X-wave signals, so the watcher, the room service, the
+// snapshot, the web and the agent's evidence renderer
+// (agent.AlertEvidenceText) agree on one set of keys. They are not event
+// types. Like all watcher evidence they carry names, counts, hashes and times
+// only: never a key value, a row value, record content or a connector config
+// value. The names are also the owners.yaml watch.signals names and
+// clients.WatchSignal.Signal values.
+
+// X-wave watcher signal names (the evidence's signals[].signal).
+const (
+	// SignalCountDrift (X1): source and sink row counts over the same closed
+	// window (shifted by the sink's lag) differ by more than the tolerance.
+	SignalCountDrift = "count_drift"
+	// SignalRowDrift (X1): sampled source keys are missing on the sink after
+	// the lag, or a timestamp column differs.
+	SignalRowDrift = "row_drift"
+	// SignalDupKeys (X1): the CDC topic holds the same (key, source
+	// position) more than once in the window.
+	SignalDupKeys = "dup_keys"
+	// SignalOrderSkew (X1): the source position goes backwards for one key
+	// on the CDC topic.
+	SignalOrderSkew = "order_skew"
+	// SignalForecast (X3): a pipeline metric will reach its limit within the
+	// forecast horizon.
+	SignalForecast = "forecast"
+	// SignalConfigDrift (X3): a connector's config changed outside an
+	// approved fix.
+	SignalConfigDrift = "config_drift"
+)
+
+// SignalSeverity is the default severity of an X-wave watcher signal: "sev2"
+// for count_drift and row_drift, "sev3" for dup_keys, order_skew and
+// config_drift, "sev4" for forecast; "" for any other name (the older
+// signals' severities are the watcher's and owners.yaml's). It is the one
+// table docs/api.md (Watcher alerts) shows.
+func SignalSeverity(signal string) string {
+	switch signal {
+	case SignalCountDrift, SignalRowDrift:
+		return "sev2"
+	case SignalDupKeys, SignalOrderSkew, SignalConfigDrift:
+		return "sev3"
+	case SignalForecast:
+		return "sev4"
+	}
+	return ""
+}
+
+// DriftWindow is the half-open time window [From, To) a drift check read.
+type DriftWindow struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+// DriftSignal is the evidence entry of one drift signal (X1). It carries
+// names, counts and a window only: never a key value, a row value or record
+// content. The numbers are always present (0 is evidence too); Table, Topic
+// and Detail are omitted when empty. Window is an object here, while an
+// older signal's "window" (dlq_growth) is a word like "15m": a reader goes by
+// "signal" first.
+type DriftSignal struct {
+	Kind     string      `json:"signal"`          // SignalCountDrift, SignalRowDrift, SignalDupKeys or SignalOrderSkew
+	Severity string      `json:"severity"`        // SignalSeverity(Kind) unless owners.yaml sets another
+	Table    string      `json:"table,omitempty"` // "schema.table" of the source table (count_drift, row_drift)
+	Topic    string      `json:"topic,omitempty"` // the CDC topic (dup_keys, order_skew; the table's topic otherwise when known)
+	Window   DriftWindow `json:"window"`
+	// Source and Sink are the row counts on each side over Window
+	// (count_drift); for dup_keys and order_skew Source is the records
+	// scanned and Sink is 0.
+	Source int64 `json:"source"`
+	Sink   int64 `json:"sink"`
+	// Missing is rows (count_drift: Source - Sink when positive) or sampled
+	// keys (row_drift) not on the sink; for dup_keys the duplicate events.
+	Missing int `json:"missing"`
+	// Mismatched is sampled keys whose timestamp columns differ (row_drift);
+	// for order_skew the per-key position regressions.
+	Mismatched int `json:"mismatched"`
+	// Sample is the keys compared (row_drift, at most
+	// clients.ReconcileMaxSample) or the distinct keys affected (dup_keys,
+	// order_skew).
+	Sample int `json:"sample"`
+	// Detail is one line of watcher-written text (fixed wording plus names
+	// and numbers, at most 200 bytes), shown as text and never as HTML.
+	Detail string `json:"detail,omitempty"`
+}
+
+// ForecastSignal is the evidence entry of a forecast signal (X3): a pipeline
+// metric will reach its limit within the forecast horizon, by a
+// least-squares line over the last config.WatchForecastFitWindow of watch
+// samples (clients.SampleReader), fired when the ETA is inside
+// config.WatchForecast.Horizon and the fit's R² is at least
+// config.WatchForecastMinR2. Metric is one of clients.WatchMetrics();
+// Current, Limit and Slope are in that metric's unit
+// (clients.WatchMetricUnit; Slope per hour). Object names the slot, topic,
+// group or database the series follows when it is one object, "" for a
+// pipeline total. Numbers and names only.
+type ForecastSignal struct {
+	Signal   string    `json:"signal"`   // SignalForecast
+	Severity string    `json:"severity"` // SignalSeverity(SignalForecast), "sev4"
+	Metric   string    `json:"metric"`
+	Object   string    `json:"object,omitempty"`
+	Current  float64   `json:"current"`
+	Limit    float64   `json:"limit"`
+	ETA      time.Time `json:"eta"`            // when the line reaches Limit, UTC
+	Slope    float64   `json:"slope_per_hour"` // > 0: a flat or shrinking series never fires
+	R2       float64   `json:"r2"`             // goodness of fit, 0..1
+	Samples  int       `json:"samples"`        // points in the fit
+}
+
+// ConfigDriftSignal is the evidence entry of a config_drift signal (X3): a
+// connector's config changed outside an approved fix, that is
+// actions.ChangedConfigKeys between the last approved digest and the current
+// one is not empty. The approved digest moves at server start, on every
+// action.executed that touches the connector, and on POST
+// /api/pipelines/{pid}/connectors/{name}/accept-config. OldHash and NewHash
+// are actions.ConfigHash of the two redacted configs (ConfigDigest.Hash, the
+// same id as a config version's hash, X5): no secret value enters them, so
+// they are equal when only a secret value changed.
+type ConfigDriftSignal struct {
+	Signal    string `json:"signal"`   // SignalConfigDrift
+	Severity  string `json:"severity"` // SignalSeverity(SignalConfigDrift), "sev3"
+	Connector string `json:"connector"`
+	OldHash   string `json:"old_hash"`
+	NewHash   string `json:"new_hash"`
+	// ChangedKeys are the NAMES of the keys added, removed or changed, sorted,
+	// the first MaxChangedKeys of actions.ChangedConfigKeys. Values, old or
+	// new, are never stored, logged or sent: not here, not in the room log,
+	// and not in the watcher's memory beyond a keyed per-key fingerprint. A
+	// secret-looking key (actions.LooksSecret) is reported as
+	// SecretKeyChanged instead of its name, once however many such keys
+	// changed.
+	ChangedKeys []string `json:"changed_keys"`
+	// KeysOmitted counts the changed names past MaxChangedKeys.
+	KeysOmitted int `json:"keys_omitted,omitempty"`
+}
+
+// SecretKeyChanged stands for the name of a changed credential key
+// (actions.LooksSecret): in ConfigDriftSignal.ChangedKeys and in
+// clients.ConnectorConfigVersion.ChangedKeys (X5). It is the only placeholder
+// for it; not even the key's name is shown. (X3)
+const SecretKeyChanged = "<secret key changed>"
+
+// MaxChangedKeys caps ConfigDriftSignal.ChangedKeys. A connector config has a
+// few dozen keys, so more than this means the config was replaced. (X3)
+const MaxChangedKeys = 50
 
 // RoomClosedPayload ends a room. A room closed by the open-room limit
 // (PIPEROOM_MAX_OPEN_DAYS) is closed by the system actor with the resolution
@@ -418,6 +606,94 @@ type AgentHypothesisPayload struct {
 	// the cited steps' summaries contain (agent grounding, F3). The UI marks
 	// them; they never block the hypothesis. At most 20, each ≤ 80 bytes.
 	UnbackedTerms []string `json:"unbacked_terms,omitempty"`
+	// X4: Scope says where the cause is (HypothesisScope); omitted on the
+	// wire when unknown, and an event written before X4 decodes as
+	// ScopeUnknown. Team is an owners.yaml teams[].id, set only with
+	// ScopeUpstreamApp or ScopeVendor, else "". ChangeID is the
+	// clients.PipelineChange.ID the scope rests on (the deploy, migration or
+	// vendor incident the agent cites), 0 when none. (X4)
+	Scope    HypothesisScope `json:"scope,omitzero"`
+	Team     string          `json:"team,omitempty"`
+	ChangeID int64           `json:"change_id,omitempty"`
+}
+
+// UnmarshalJSON defaults Scope to ScopeUnknown, so a hypothesis written
+// before X4 (no "scope" key) replays as unknown, not as "". (X4)
+func (p *AgentHypothesisPayload) UnmarshalJSON(b []byte) error {
+	type plain AgentHypothesisPayload
+	v := plain{Scope: ScopeUnknown}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*p = AgentHypothesisPayload(v)
+	return nil
+}
+
+// ---- X4: hypothesis scope and team pages ----
+
+// HypothesisScope is where the agent places the cause of the incident. Only
+// the four constants below are ever held after decoding: an absent, null,
+// empty or unrecognised value reads as ScopeUnknown, so an old or a newer
+// writer never breaks replay. (X4)
+type HypothesisScope string
+
+const (
+	// ScopePipeline: the cause is in the pipeline (source DB settings,
+	// connector, registry, Kafka, consumer, sink); a pipeline fix is the root
+	// fix.
+	ScopePipeline HypothesisScope = "pipeline"
+	// ScopeUpstreamApp: an application change outside the pipeline (a deploy
+	// or a migration) caused it. The agent may propose only a mitigation,
+	// labelled as such, never a pipeline fix as the root fix.
+	ScopeUpstreamApp HypothesisScope = "upstream_app"
+	// ScopeVendor: a vendor's incident (managed Kafka, Connect, registry).
+	ScopeVendor HypothesisScope = "vendor"
+	// ScopeUnknown: not established, or written before X4.
+	ScopeUnknown HypothesisScope = "unknown"
+)
+
+// Normalize returns s when it is one of the three known scopes, else
+// ScopeUnknown.
+func (s HypothesisScope) Normalize() HypothesisScope {
+	switch s {
+	case ScopePipeline, ScopeUpstreamApp, ScopeVendor:
+		return s
+	}
+	return ScopeUnknown
+}
+
+// IsZero makes omitzero drop an unknown scope, so a hypothesis without a
+// scope marshals byte for byte as before X4 (export hashes).
+func (s HypothesisScope) IsZero() bool { return s.Normalize() == ScopeUnknown }
+
+// MarshalJSON writes the normalised value.
+func (s HypothesisScope) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(s.Normalize()))
+}
+
+// UnmarshalJSON accepts any JSON string or null; a value that is not one of
+// the scopes becomes ScopeUnknown. A non-string is an error.
+func (s *HypothesisScope) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*s = ScopeUnknown
+		return nil
+	}
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("events: hypothesis scope: %w", err)
+	}
+	*s = HypothesisScope(v).Normalize()
+	return nil
+}
+
+// TeamPagedPayload is room.team_paged. Team is the owners.yaml teams[].id;
+// HypothesisSeq the seq of the agent.hypothesis the page carried; ChangeID
+// that hypothesis's change_id (0 when none). Ids only: the Slack message is
+// rendered from the room log when sent and never stored. (X4)
+type TeamPagedPayload struct {
+	Team          string `json:"team"`
+	HypothesisSeq int64  `json:"hypothesis_seq"`
+	ChangeID      int64  `json:"change_id,omitempty"`
 }
 
 // HypothesisVerdictPayload: Verdict is "confirmed" or "disputed"; Note is the
@@ -582,6 +858,13 @@ type PreviewResult struct {
 	Reversible bool          `json:"reversible"`
 	Rollback   string        `json:"rollback,omitempty"` // how to undo, as an action and params, when Reversible
 	DryRun     *DryRunResult `json:"dry_run,omitempty"`  // nil when the target system has no dry-run
+	// X2: a recovery action says how much Execute would re-emit ("will
+	// re-emit 412 rows"), read from the target, never estimated by the
+	// model. Count is nil for every other action (and omitted, so a fix
+	// preview marshals as before); Unit is RecoveryUnitRows or
+	// RecoveryUnitRecords whenever Count is set.
+	Count *int64 `json:"count,omitempty"`
+	Unit  string `json:"unit,omitempty"`
 }
 
 // DryRunResult is the target system's own answer to "would this be accepted"
@@ -644,6 +927,79 @@ type AgentVerificationPayload struct {
 	Recovered  bool                `json:"recovered"`
 	Verdict    string              `json:"verdict"` // one line, e.g. "recovered: every layer check passed and data is flowing again"
 	Repeat     bool                `json:"repeat,omitempty"`
+	// X2: set only for a proposal of class recovery (ProposalCreatedPayload.Class),
+	// from the action's Verify polls; absent on every other verification, which
+	// marshals as before. Outcome is one of the Recovery* outcomes below.
+	// Before is the gap the action set out to repair and After what is still
+	// missing at the last poll (counts only, never row values); pointers so a
+	// recovered After of 0 is kept and "not measured" (unverifiable) is
+	// absent. Recovered is true only when Outcome is RecoveryRecovered.
+	Outcome string `json:"outcome,omitempty"`
+	Before  *int64 `json:"before,omitempty"`
+	After   *int64 `json:"after,omitempty"`
+	Unit    string `json:"unit,omitempty"` // RecoveryUnitRows | RecoveryUnitRecords, with Before/After
+}
+
+// ---- X2: recovery actions (class, outcomes, verify progress) ----
+
+// Action classes, ProposalCreatedPayload.Class and actions.Class. A fix
+// changes a system's state (restart, config, offsets); a recovery re-emits
+// data a fault lost or corrupted and must be verifiable by counts
+// (actions.Verifier). The constants live here because package actions
+// imports events, so one definition serves the action, the log and the API.
+const (
+	ActionClassFix      = "fix"
+	ActionClassRecovery = "recovery"
+)
+
+// Recovery outcomes, AgentVerificationPayload.Outcome. The agent polls the
+// action's Verify until After is 0 or its verify timeout: recovered (After
+// is 0), partial (0 < After < Before at the timeout), not_recovered (After ≥
+// Before at the timeout), unverifiable (Verify could not count, e.g. the
+// reader answered clients.ErrNotSupported; Before/After absent, and the
+// proposal is never shown as recovered).
+const (
+	RecoveryRecovered    = "recovered"
+	RecoveryPartial      = "partial"
+	RecoveryNotRecovered = "not_recovered"
+	RecoveryUnverifiable = "unverifiable"
+)
+
+// Units of a recovery count: source rows (pg_resnapshot_rows) or Kafka
+// records (kafka_replay_range).
+const (
+	RecoveryUnitRows    = "rows"
+	RecoveryUnitRecords = "records"
+)
+
+// RecoveryOutcomeFor is the outcome of a finished poll loop from its last
+// counts: RecoveryRecovered when after ≤ 0, RecoveryPartial when after <
+// before, RecoveryNotRecovered otherwise. It is the one rule the agent, the
+// post-mortem and the web share; a loop that could not count reports
+// RecoveryUnverifiable instead of calling it.
+func RecoveryOutcomeFor(before, after int64) string {
+	switch {
+	case after <= 0:
+		return RecoveryRecovered
+	case after < before:
+		return RecoveryPartial
+	default:
+		return RecoveryNotRecovered
+	}
+}
+
+// AgentRecoveryCheckPayload is one Verify poll (agent.recovery_check, agent
+// actor). Poll counts from 1; MaxPolls is the most the agent will make in
+// this verification (its timeout and backoff), so Poll ≤ MaxPolls. Counts
+// only, never row values or keys; StepIndex is the recovery step polled. (X2)
+type AgentRecoveryCheckPayload struct {
+	ProposalID string `json:"proposal_id"`
+	StepIndex  int    `json:"step_index"`
+	Poll       int    `json:"poll"`
+	MaxPolls   int    `json:"max_polls"`
+	Before     int64  `json:"before"`
+	After      int64  `json:"after"`
+	Unit       string `json:"unit"` // RecoveryUnitRows | RecoveryUnitRecords
 }
 
 // ProposalCreatedPayload is a fix waiting for approvals.
@@ -668,6 +1024,12 @@ type ProposalCreatedPayload struct {
 	// like RequiredLayers; empty when every layer has an owner. Not part of
 	// params_hash. (P2)
 	FallbackLayers []string `json:"fallback_layers,omitempty"`
+	// Class is ActionClassRecovery when any step's action is a recovery
+	// action (actions.ClassOf), set by the room service from the action
+	// registry, never from the proposer's text. Empty reads as
+	// ActionClassFix, so a fix proposal marshals as before. Not part of
+	// params_hash: it follows from the steps' action names, which are. (X2)
+	Class string `json:"class,omitempty"`
 }
 
 // Proposal origins in ProposalCreatedPayload.Origin. (P3)
