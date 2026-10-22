@@ -242,9 +242,18 @@ func TestStageHappyPath(t *testing.T) {
 	if want := actions.StageExpiry(aaT0, 2); !sp.ExpiresAt.Equal(want) {
 		t.Fatalf("expires_at = %v, want %v", sp.ExpiresAt, want)
 	}
+	// The fake stage can finish before this read (it does under -race), so
+	// the snapshot shows either the running stage or its result.
 	p0 := openProposalMust(t, r, roomID, pid)
-	if sp.ParamsHash != p0.ParamsHash || p0.StageRunning == nil || !slices.Equal(p0.StageRunning.Steps, []int{1, 2}) {
-		t.Fatalf("running = %+v, hash %q vs %q", p0.StageRunning, sp.ParamsHash, p0.ParamsHash)
+	if sp.ParamsHash != p0.ParamsHash {
+		t.Fatalf("hash %q vs %q", sp.ParamsHash, p0.ParamsHash)
+	}
+	if p0.StageRunning == nil {
+		if len(logOf(t, r.st, roomID, events.ProposalStaged)) == 0 {
+			t.Fatalf("snapshot shows no running stage and no result")
+		}
+	} else if !slices.Equal(p0.StageRunning.Steps, []int{1, 2}) {
+		t.Fatalf("running = %+v", p0.StageRunning)
 	}
 
 	waitForCond(t, 5*time.Second, func() bool { return len(logOf(t, r.st, roomID, events.ProposalStaged)) == 1 }, "no proposal.staged")
