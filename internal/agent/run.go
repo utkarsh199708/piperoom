@@ -445,6 +445,9 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 
 func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
 	blocks := openingBlocks(r.alert, r.past)
+	if note := stagingNote(r.alert, r.deps.Actions); note != "" {
+		blocks = append(blocks, anthropic.NewBetaTextBlock(note))
+	}
 	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
 	return anthropic.NewBetaUserMessage(blocks...)
 }

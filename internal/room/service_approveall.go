@@ -69,6 +69,10 @@ func (s *Service) ApproveAllProposal(ctx context.Context, user User, proposalID,
 	if err := s.checkParamsHash(ctx, &p, paramsHash, false); err != nil {
 		return nil, err
 	}
+	// X8: as approve, before any layer is recorded.
+	if err := s.stagingGateLocked(st, proposalID); err != nil {
+		return nil, err
+	}
 	if slices.Contains(details, events.GrantSolo) {
 		if err := checkSoloConfirm(st.snap.PipelineID, "*", confirm); err != nil {
 			return nil, err

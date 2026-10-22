@@ -447,6 +447,8 @@ func formatHumanInput(in HumanInput) string {
 		return fmt.Sprintf("[action result ok=%s] %s", okLabel(in.OK), wrapUntrusted(in.Text))
 	case "alert_update":
 		return "[alert update] " + wrapUntrusted(in.Text)
+	case "proposal_staged":
+		return formatStageResult(in)
 	default:
 		return fmt.Sprintf("[%s] %s", name, wrapUntrusted(in.Text))
 	}

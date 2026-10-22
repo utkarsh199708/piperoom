@@ -16,6 +16,10 @@ import (
 type PipelineStack struct {
 	Tools   *tools.Registry
 	Actions *actions.Registry
+	// Staging is true when Actions hold the pipeline's staging client set
+	// (wiring.Stack.HasStaging: owners.yaml staging: and write mode on), so
+	// its Stagers can try a step on staging (X8).
+	Staging bool
 }
 
 // toolsFor returns the read tools of the pipeline's own client set. Without
