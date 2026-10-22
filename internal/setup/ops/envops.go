@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"piperoom/internal/events"
+	"piperoom/internal/redact"
 	"piperoom/internal/setup/protocol"
 )
 
@@ -138,7 +139,10 @@ func (javaVersionOp) Execute(ctx context.Context, params json.RawMessage, env En
 	if err != nil {
 		return Result{Summary: "java not found on PATH"}, fmt.Errorf("%w: java: %v", ErrExec, err)
 	}
-	text := strings.TrimSpace(string(out))
+	// java's stderr can echo JAVA_TOOL_OPTIONS and _JAVA_OPTIONS, which carry
+	// whatever the operator put there (keystore passwords included). Redact
+	// before clipping, so a mask is never cut in half.
+	text, _ := redact.Text(strings.TrimSpace(string(out)))
 	if code != 0 {
 		return Result{Summary: fmt.Sprintf("java -version exited %d", code), Data: map[string]any{"output": clip(text)}},
 			fmt.Errorf("%w: java -version exited %d", ErrExec, code)
@@ -256,9 +260,16 @@ func (jarListOp) Execute(ctx context.Context, params json.RawMessage, env Env) (
 	coreVersions := map[string]bool{}
 	for _, d := range dirs {
 		sort.Strings(d.jars)
+		// listJars returns bare file names; prefix each with its directory
+		// relative to the scanned root, so two same-named jars in different
+		// connector directories stay apart in the listing.
+		rel := ""
+		if d.dir != clean {
+			rel = strings.TrimPrefix(d.dir, clean+"/") + "/"
+		}
 		for _, j := range d.jars {
 			if len(listing.Jars) < maxListedJars {
-				listing.Jars = append(listing.Jars, strings.TrimPrefix(j, clean+"/"))
+				listing.Jars = append(listing.Jars, rel+j)
 			} else {
 				listing.Truncated = true
 			}

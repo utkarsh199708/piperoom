@@ -316,10 +316,24 @@ func (fileWriteOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 		return Result{}, fmt.Errorf("ops: stat %s: %w", clip(p.Path), lerr)
 	}
 
+	// Remember which directories this write creates, deepest last, so a
+	// refusal below can take them back out instead of leaving a model-chosen
+	// directory tree behind.
+	var createdDirs []string
 	dir := path.Dir(clean)
 	if dir != "." {
+		for d := dir; d != "." && d != "/"; d = path.Dir(d) {
+			if _, lerr := env.Confine.root.Lstat(d); errors.Is(lerr, fs.ErrNotExist) {
+				createdDirs = append([]string{d}, createdDirs...)
+			}
+		}
 		if err := env.Confine.root.MkdirAll(dir, 0o755); err != nil {
 			return Result{}, fmt.Errorf("ops: creating %s: %w", clip(p.Path), err)
+		}
+	}
+	removeCreated := func() {
+		for i := len(createdDirs) - 1; i >= 0; i-- {
+			_ = env.Confine.root.Remove(createdDirs[i])
 		}
 	}
 	tmp, err := tempName(clean)
@@ -346,6 +360,7 @@ func (fileWriteOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 	}
 	if werr != nil {
 		_ = env.Confine.root.Remove(tmp)
+		removeCreated()
 		return Result{}, fmt.Errorf("ops: writing %s: %w", clip(p.Path), werr)
 	}
 	// Re-run the walk after the rename: a component swapped to a symlink
@@ -356,6 +371,7 @@ func (fileWriteOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 	// which the standard library does not expose portably.
 	if why := walkRefusal(clean, env.Confine.root.Lstat, denied, os.SameFile); why != "" {
 		_ = env.Confine.root.Remove(clean)
+		removeCreated()
 		return Result{}, fmt.Errorf("%w: %s: %s (path changed during the write; the file was removed)", ErrPath, why, clip(p.Path))
 	}
 	return Result{
@@ -397,7 +413,7 @@ func (fileDeleteOp) Validate(params json.RawMessage, env Env) error {
 	if why := lexicalRefusal(p.Path); why != "" {
 		return fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
-	return nil
+	return deletablePath(p.Path, env.MountDirs)
 }
 
 func (fileDeleteOp) Execute(ctx context.Context, params json.RawMessage, env Env) (Result, error) {
@@ -407,6 +423,9 @@ func (fileDeleteOp) Execute(ctx context.Context, params json.RawMessage, env Env
 	}
 	if why := lexicalRefusal(p.Path); why != "" {
 		return Result{}, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
+	}
+	if err := deletablePath(p.Path, env.MountDirs); err != nil {
+		return Result{}, err
 	}
 	clean, _, err := env.Confine.prepare(p.Path)
 	if err != nil {
@@ -429,16 +448,41 @@ func (fileDeleteOp) Execute(ctx context.Context, params json.RawMessage, env Env
 	}, nil
 }
 
-// secretReadPath refuses a read of the secret store's default file and of the
-// materialised .env files (design §2.4: no op can read a secret back). A
-// materialised properties file registered by a template driver is refused by
-// the Confiner's path list in the row that adds it.
+// secretReadPath refuses a read of the secret store's default file, the
+// materialised .env files (design §2.4: no op can read a secret back), and the
+// well-known credential files a project directory can hold whose formats the
+// redact pass does not parse (.netrc's "password <token>", .pgpass's
+// colon-separated lines, private key material). A materialised properties file
+// registered by a template driver is refused by the Confiner's path list in
+// the row that adds it.
 func secretReadPath(p string) error {
 	base := strings.ToLower(path.Base(strings.ReplaceAll(p, "\\", "/")))
-	if strings.HasPrefix(base, ".env") || base == "secrets.env" || base == "secrets.json" {
+	switch {
+	case strings.HasPrefix(base, ".env"),
+		base == "secrets.env", base == "secrets.json",
+		base == ".netrc", base == "_netrc", base == ".pgpass", base == "pgpass.conf",
+		base == ".my.cnf", base == ".htpasswd", base == "credentials",
+		strings.HasPrefix(base, "id_rsa"), strings.HasPrefix(base, "id_ed25519"),
+		strings.HasPrefix(base, "id_ecdsa"), strings.HasPrefix(base, "id_dsa"),
+		strings.HasSuffix(base, ".ppk"), strings.HasSuffix(base, ".pem"),
+		strings.HasSuffix(base, ".key"), strings.HasSuffix(base, ".p12"),
+		strings.HasSuffix(base, ".pfx"), strings.HasSuffix(base, ".jks"),
+		strings.HasSuffix(base, ".keystore"), strings.HasSuffix(base, ".truststore"),
+		strings.HasSuffix(base, ".kdbx"):
 		return fmt.Errorf("%w: %s names a secret file", ErrSecretPath, clip(p))
 	}
 	return nil
+}
+
+// deletablePath refuses the paths file_delete must not remove: everything
+// file_write may not touch (deleting a compose file or a mounted plugin jar
+// breaks the stack the same way overwriting it does) and the secret files
+// (deleting the secret store destroys the room's credentials).
+func deletablePath(p string, mounts []string) error {
+	if err := writablePath(p, mounts); err != nil {
+		return err
+	}
+	return secretReadPath(p)
 }
 
 // decodeWrite decodes and bounds file_write params.
@@ -501,18 +545,38 @@ func writablePath(p string, mounts []string) error {
 	switch {
 	case strings.HasPrefix(base, ".env"):
 		return refuse("an environment file")
-	case strings.HasPrefix(base, "dockerfile"):
+	case strings.HasPrefix(base, "dockerfile"), strings.HasPrefix(base, "containerfile"):
 		return refuse("a Dockerfile")
+	case base == "makefile", base == "gnumakefile", base == "justfile",
+		strings.HasSuffix(base, ".mk"):
+		return refuse("a build file")
+	case base == ".pre-commit-config.yaml", base == ".pre-commit-config.yml",
+		base == "lefthook.yml", base == "lefthook.yaml":
+		return refuse("a hook configuration file")
 	case strings.HasSuffix(base, ".jar"), strings.HasSuffix(base, ".sh"),
-		strings.HasSuffix(base, ".ps1"), strings.HasSuffix(base, ".bat"),
-		strings.HasSuffix(base, ".service"), strings.HasSuffix(base, ".cmd"):
-		return refuse("an executable, archive or service file")
+		strings.HasSuffix(base, ".bash"), strings.HasSuffix(base, ".zsh"),
+		strings.HasSuffix(base, ".ps1"), strings.HasSuffix(base, ".psm1"),
+		strings.HasSuffix(base, ".psd1"), strings.HasSuffix(base, ".bat"),
+		strings.HasSuffix(base, ".cmd"), strings.HasSuffix(base, ".py"),
+		strings.HasSuffix(base, ".rb"), strings.HasSuffix(base, ".pl"),
+		strings.HasSuffix(base, ".js"), strings.HasSuffix(base, ".mjs"),
+		strings.HasSuffix(base, ".cjs"),
+		strings.HasSuffix(base, ".service"), strings.HasSuffix(base, ".timer"),
+		strings.HasSuffix(base, ".socket"), strings.HasSuffix(base, ".path"),
+		strings.HasSuffix(base, ".mount"):
+		return refuse("an executable, script, archive or unit file")
 	case base == "compose.yaml", base == "compose.yml",
 		base == "compose.override.yaml", base == "compose.override.yml":
 		return refuse("a compose file")
 	case strings.HasPrefix(base, "docker-compose") &&
 		(strings.HasSuffix(base, ".yml") || strings.HasSuffix(base, ".yaml")):
 		return refuse("a compose file")
+	}
+	for _, part := range pathParts(p) {
+		// .husky and .githooks hold scripts git runs whatever their names.
+		if strings.EqualFold(part, ".husky") || strings.EqualFold(part, ".githooks") {
+			return refuse("a git hook")
+		}
 	}
 	if strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml") {
 		for _, part := range pathParts(p) {

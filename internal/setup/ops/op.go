@@ -418,8 +418,10 @@ func (r *Registry) Execute(ctx context.Context, req protocol.OpRequest) (protoco
 	return r.finish(req.ID, res, err), err
 }
 
-// finish converts a Result into the wire shape: Summary redacted and capped,
-// Data capped, Receipt kept whole. A nil err means OK.
+// finish converts a Result into the wire shape: Summary and Data redacted and
+// capped, Receipt kept whole. A nil err means OK. Ops that emit external text
+// (http_get, file_read) redact it at the source too; the pass here is the
+// backstop that makes protocol.go's "Data after redaction" true for every op.
 func (r *Registry) finish(id string, res Result, err error) protocol.OpResult {
 	out := protocol.OpResult{ID: id, OK: err == nil, Receipt: res.Receipt, Truncated: res.Truncated}
 	summary, _ := redact.Text(res.Summary)
@@ -427,7 +429,11 @@ func (r *Registry) finish(id string, res Result, err error) protocol.OpResult {
 	out.Summary = summary
 	out.Truncated = out.Truncated || cut
 	if res.Data != nil {
-		raw, merr := json.Marshal(res.Data)
+		data, st := redact.JSONStats(res.Data)
+		// A string past redact.MaxScan is masked whole, never passed through
+		// unscanned; report that as a cut.
+		out.Truncated = out.Truncated || st.ByKind[redact.KindOverflow] > 0
+		raw, merr := json.Marshal(data)
 		if merr != nil {
 			out.Truncated = true
 		} else if len(raw) > protocol.MaxDataBytes {
