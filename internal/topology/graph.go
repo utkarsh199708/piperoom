@@ -139,10 +139,18 @@ func ValidTag(key, value string) error {
 	if len(value) > MaxTagValueBytes {
 		return fmt.Errorf("topology: tag %s: value is %d bytes, max %d", key, len(value), MaxTagValueBytes)
 	}
-	if !utf8.ValidString(value) || strings.IndexFunc(value, unicode.IsControl) >= 0 {
-		return fmt.Errorf("topology: tag %s: value must be printable text on one line", key)
+	if !utf8.ValidString(value) || strings.IndexFunc(value, unsafeTagRune) >= 0 {
+		return fmt.Errorf("topology: tag %s: value must be printable text on one line, without bidirectional controls", key)
 	}
 	return nil
+}
+
+// unsafeTagRune is a control character or a bidirectional control
+// (U+202A-U+202E, U+2066-U+2069): a tag is shown as text next to names, and
+// the room refuses the same runes in typed text (#358), so a column name
+// cannot reorder what the lane shows.
+func unsafeTagRune(r rune) bool {
+	return unicode.IsControl(r) || r >= 0x202A && r <= 0x202E || r >= 0x2066 && r <= 0x2069
 }
 
 func tagKeyRE(k string) bool {
@@ -182,7 +190,8 @@ func PIIClasses() []PIIClass {
 // FormatPIITag renders a column -> class map as the TagPII value: pairs
 // "column:class" sorted by column, joined by ",", at most MaxTagValueBytes.
 // omitted counts the pairs left out: past the cap, a column name holding ','
-// ':' or a control character, or a class that is not one of PIIClasses. The
+// ':', a control character or a bidirectional control, or a class that is
+// not one of PIIClasses. The
 // caller sets TagPIIOmitted when omitted > 0; an empty map is "", 0.
 func FormatPIITag(cols map[string]PIIClass) (value string, omitted int) {
 	names := make([]string, 0, len(cols))
@@ -194,7 +203,7 @@ func FormatPIITag(cols map[string]PIIClass) (value string, omitted int) {
 	full := false
 	for _, c := range names {
 		cl := cols[c]
-		if full || c == "" || strings.ContainsAny(c, ",:") || strings.IndexFunc(c, unicode.IsControl) >= 0 ||
+		if full || c == "" || strings.ContainsAny(c, ",:") || strings.IndexFunc(c, unsafeTagRune) >= 0 ||
 			!utf8.ValidString(c) || !slices.Contains(PIIClasses(), cl) {
 			omitted++
 			continue

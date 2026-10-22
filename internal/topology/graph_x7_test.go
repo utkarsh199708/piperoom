@@ -196,6 +196,9 @@ func TestX7ValidTag(t *testing.T) {
 		{"pii", "a\nb", false},
 		{"pii", "a\x00b", false},
 		{"pii", "\xff", false},
+		{"pii", "a\u202eb", false}, // bidi override (#358 rule)
+		{"pii", "a\u2066b", false}, // bidi isolate
+		{"pii", "e\u0301mail", true},
 	} {
 		if err := ValidTag(tt.key, tt.value); (err == nil) != tt.ok {
 			t.Errorf("ValidTag(%q, %.20q) = %v, want ok=%v", tt.key, tt.value, err, tt.ok)
@@ -209,8 +212,9 @@ func TestX7PIITag(t *testing.T) {
 	v, omitted := FormatPIITag(map[string]PIIClass{
 		"phone_number": PIIPhone, "customer_email": PIIEmail, "dob": PIIDOB,
 		"a,b": PIIName, "x:y": PIIName, "bad\nname": PIIName, "": PIIName, "weird": PIIClass("hobby"),
+		"liame_\u202etsuc": PIIEmail,
 	})
-	if v != "customer_email:email,dob:dob,phone_number:phone" || omitted != 5 {
+	if v != "customer_email:email,dob:dob,phone_number:phone" || omitted != 6 {
 		t.Fatalf("FormatPIITag = %q, %d", v, omitted)
 	}
 	back, err := ParsePIITag(v)

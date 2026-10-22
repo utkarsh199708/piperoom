@@ -29,7 +29,8 @@ type HumanInput struct {
 	Text string `json:"text"`
 	// OK is set only for Kind "action_result": true when the step succeeded,
 	// false when it failed. Nil means the outcome is unknown, and the agent must
-	// then never claim the pipeline recovered.
+	// then never claim the pipeline recovered. (X8: also for
+	// "proposal_staged", below.)
 	OK *bool `json:"ok,omitempty"`
 	// ProposalID, Layer and StepIndex identify what an "approval_result" or
 	// "action_result" is about, so the runner never parses Text for them.

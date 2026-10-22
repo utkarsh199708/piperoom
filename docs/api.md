@@ -126,9 +126,9 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB; X4: `POST /api/changes/webhook` body over 4 KB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); X3: `watch_off` (`accept-config` while the watcher is off); X4: `slack_off` (`page-team` while the Slack bridge is off), `not_upstream` (`page-team` when the current hypothesis's `scope` is not `upstream_app` or `vendor`) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); X3: `watch_off` (`accept-config` while the watcher is off); X4: `slack_off` (`page-team` while the Slack bridge is off), `not_upstream` (`page-team` when the current hypothesis's `scope` is not `upstream_app` or `vendor`); X8 (see **X8 staging** under Objects): `no_staging` (`POST /api/proposals/{pid}/stage` when the room's pipeline declares no `staging:` or write mode is off), `not_stageable` (no step's action implements `actions.Stager`), `stage_in_progress` (a stage of the proposal is still running), `staging_required` (`approve` or `approve-all` while a `require_staging:` step has no healthy stage for the current `params_hash`; the message names the step and action) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
-| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; X4: the 61st verified `POST /api/changes/webhook` of one pipeline within a minute, and a second `page-team` of the same team in one room within an hour); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket); P3: `too_many_proposals` (a sixth open driver-authored proposal in one room) |
+| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; X4: the 61st verified `POST /api/changes/webhook` of one pipeline within a minute, and a second `page-team` of the same team in one room within an hour); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket); P3: `too_many_proposals` (a sixth open driver-authored proposal in one room); X8: `rate_limited` (a sixth `POST /api/proposals/{pid}/stage` of one proposal) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working); X3: `connect_unavailable` (`accept-config` could not read Kafka Connect) |
 
@@ -150,12 +150,6 @@ pairing while the first runner is still attached), `409 overlap` (`pipeline_regi
 the message names the overlap kind and the caller's own tenant's pipelines only), `409 not_verified`
 (`pipeline_register` without a green `setup.verified` for the current plan); `429 pairing_closed` (the pairing rate
 limit of design §2.1: pairing is closed for 10 minutes and audited).
-
-X8 staging (X8-0; see **X8 staging** under Objects) adds: `409 no_staging` (`POST /api/proposals/{pid}/stage` when the
-room's pipeline declares no `staging:` or write mode is off), `409 not_stageable` (no step's action implements
-`actions.Stager`), `409 stage_in_progress` (a stage of the proposal is still running), `409 staging_required`
-(`approve` or `approve-all` while a `require_staging:` step has no healthy stage for the current `params_hash`; the
-message names the step and action), `429 rate_limited` (a sixth stage of one proposal).
 
 ## Objects
 
@@ -424,19 +418,26 @@ proposals, previews and verifications marshal as before.
 - **Preview.** `proposal.previewed.steps[].preview` gains `tuning?: [{key, current, proposed}]`: every key the step
   changes, its value now (`""` when unset, shown as "unset") and the value it sets, read from the connector's config
   by `Preview` (10 s, read-only), plus Connect's `validate` in `dry_run`. `current` is the rollback the card offers.
+- **Staging.** `connect_tune_throughput` implements `actions.Stager`, so the driver can try it on the pipeline's
+  staging stack first (`POST /api/proposals/{pid}/stage`, **X8 staging** below). `Preview` never stages: it never
+  writes, staging included.
 - **Verdict (agent actor).** One `agent.verification` per performance proposal with `outcome` ∈ `improved |
   no_change | worse | unverifiable`, `before`/`after` (the connector's throughput, `unit: "records_per_min"`) and
   `lag_slope_before?`/`lag_slope_after?` (the sink's consumer lag change, records per minute, positive = growing;
-  absent for a source connector or without lag history). `events.PerformanceOutcomeFor` is the one rule: `improved`
-  at +10 % throughput or a growing lag's slope down 10 %; else `worse` at −10 % throughput or a lag that starts or
-  grows 10 % faster; else `no_change`. Windows (`actions.PerformanceVerify*`): before = the 15 min up to the step's
+  absent for a source connector or without lag history). `events.PerformanceOutcomeFor` is the one rule: throughput
+  decides first (`improved` at +10 %, `worse` at −10 %); only when it moved less does the lag decide (`improved` when a
+  growing lag's slope is 10 % lower or the lag now shrinks, `worse` when a lag starts growing or grows 10 % faster);
+  else `no_change`. Windows (`actions.PerformanceVerify*`): before = the 15 min up to the step's
   `action.executed`, after = the 15 min from 2 min after it; the agent calls `Verify` once the after window closed,
   retries a failed call every 60 s, and reports `unverifiable` (no counts) when a window cannot be measured or 30 min
   after the step. On `worse` the card offers the preview's `current` values as a rollback proposal; nothing is
   rolled back automatically. `recovered` keeps its F4 meaning (every layer check passed after the restart).
 - **Data.** Throughput, lag and config key names and integers only; no record, row value or other config value.
   `Verify` reads only (`RateReader`, the pipeline's `group_lag` watch samples), with the room's pipeline scope in ctx
-  and a 10 s deadline per call. Every member and viewer of the room reads these events like any other agent event.
+  and a 10 s deadline per call. A source connector's throughput comes from Kafka offsets alone; a sink connector's
+  consumed records are the records written to its topics less the change of the pipeline's `group_lag` samples (X3a:
+  the pipeline's total lag, one sample per 15 min), so with the watcher off, or no sample near a window's ends, a sink
+  tuning is `unverifiable`. Every member and viewer of the room reads these events like any other agent event.
 - **Worker tasks** (`clients.WorkerTaskReader`, optional on a `ConnectReader`; `connect_task_balance` X6b): worker id →
   `[{connector, type, task, state}]` for the whole Connect cluster, one `GET /connectors?expand=status`, 4 MB and
   10 s caps. Cluster metadata, so the tool names only the room pipeline's connectors and shows every other connector
@@ -778,11 +779,11 @@ before X7 has the same JSON and a client that ignores them reads the map as befo
                { "input": "pg:public.orders", "from": "discount", "transform": "dropped" } ] }
 ```
 - Node `tags` (`topology.Node.Tags`): governance labels, at most 16, keys `^[a-z][a-z0-9_]{0,31}$`, values one line of
-  at most 2048 bytes. `pii`: the table's columns classed as personal data from column **names and types only**,
-  `column:class` pairs sorted by column (`topology.FormatPIITag`); classes `email | phone | name | address |
-  national_id | card | ip | dob | other`; `pii_omitted`: how many pairs the cap left out. `retention`: the
-  `owners.yaml` `declared_retention` of the node's topic or table (`7d`, `36h`, `infinite`). Other keys may appear
-  later; show an unknown key as a neutral label.
+  at most 2048 bytes, without control or bidirectional control characters (`topology.ValidTag`). `pii`: the table's
+  columns classed as personal data from column **names and types only**, `column:class` pairs sorted by column
+  (`topology.FormatPIITag`); classes `email | phone | name | address | national_id | card | ip | dob | other`;
+  `pii_omitted`: how many pairs the cap left out. `retention`: the `owners.yaml` `declared_retention` of the node's
+  topic or table (`7d`, `36h`, `infinite`). Other keys may appear later; show an unknown key as a neutral label.
 - Edge `columns` (`topology.ColumnMap`): the column lineage of a data edge **into a dataset node** (`source_table`,
   `topic`, `dlq_topic`, `sink_table`, `model`, `kafka_engine`, `materialized_view`). `to` is a column of the edge's
   `to` node (a topic field by its dotted path, `after.amount`); `input` the upstream dataset node `from` belongs to.
@@ -1050,6 +1051,15 @@ closes; `--demo` forces it off.
   timestamp columns, never another column. A client without the reader, or answering `ErrNotSupported`, turns
   the check off for that pipeline with one INFO log. Settings live in `owners.yaml` `watch:`
   (`reconcile_interval` default 15 min, `count_tolerance`, `reconcile: off` per table), not in the environment.
+
+  `dup_keys` and `order_skew` come from the optional Kafka reader `clients.DupScanner` (X1c; also behind the
+  agent's `kafka_dup_keys` tool): one `DupScan` of the pipeline's CDC topic, at most 50 000 records and 10 s, which
+  decodes only `source.lsn` and returns a `clients.DupReport` of counts, offsets and key fingerprints. The watcher
+  copies counts only: `topic` = `DupReport.topic`, `source` = `scanned`, then `missing` = `duplicates` and `sample` =
+  `keys` (`dup_keys`) or `mismatched` = `order_regressions` and `sample` = `regression_keys` (`order_skew`); `window`
+  is `[since, the scan's start)`, and a `capped` or `partial` scan says so in `detail`. Fingerprints and offsets
+  never enter the signal. Records with no usable key or `source.lsn` (not Debezium Postgres, a registry outage) are
+  counted as `undecodable` and never fire anything.
 
   **Sample history and forecasts (X3).** Every pipeline gets one sample per metric at most every 15 minutes in
   `watch_samples` (kept 7 days; read with **Trends** under REST endpoints). A `forecast` signal opens a quiet

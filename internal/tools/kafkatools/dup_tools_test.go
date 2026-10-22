@@ -21,23 +21,23 @@ import (
 type fakeDupKafka struct {
 	*fakeKafka
 	calls int
-	dupFn func(ctx context.Context, topic string, since time.Time, maxScan int) (kafka.DupReport, error)
+	dupFn func(ctx context.Context, topic string, since time.Time, maxScan int) (clients.DupReport, error)
 }
 
-func (f *fakeDupKafka) DupScan(ctx context.Context, topic string, since time.Time, maxScan int) (kafka.DupReport, error) {
+func (f *fakeDupKafka) DupScan(ctx context.Context, topic string, since time.Time, maxScan int) (clients.DupReport, error) {
 	f.calls++
 	return f.dupFn(ctx, topic, since, maxScan)
 }
 
-var _ dupScanner = (*fakeDupKafka)(nil)
+var _ clients.DupScanner = (*fakeDupKafka)(nil)
 
 func dupTool(t *testing.T, k clients.KafkaAdmin) tools.Tool {
 	t.Helper()
 	return scopeTool(t, Deps{Kafka: k, Owners: scopeOwners()}, "kafka_dup_keys")
 }
 
-func reportOf(rep kafka.DupReport) *fakeDupKafka {
-	return &fakeDupKafka{fakeKafka: &fakeKafka{}, dupFn: func(_ context.Context, topic string, since time.Time, maxScan int) (kafka.DupReport, error) {
+func reportOf(rep clients.DupReport) *fakeDupKafka {
+	return &fakeDupKafka{fakeKafka: &fakeKafka{}, dupFn: func(_ context.Context, topic string, since time.Time, maxScan int) (clients.DupReport, error) {
 		rep.Topic, rep.Since, rep.MaxScan = topic, since, maxScan
 		return rep, nil
 	}}
@@ -46,8 +46,8 @@ func reportOf(rep kafka.DupReport) *fakeDupKafka {
 func TestDupKeysSummary(t *testing.T) {
 	in := `{"topic":"pg.public.orders","since":"` + since + `"}`
 	// TC1's line, with the ticket's numbers.
-	r, err := dupTool(t, reportOf(kafka.DupReport{Scanned: 41_200, Duplicates: 3, Keys: 2,
-		Partitions: []kafka.DupPartition{{Partition: 0, Done: true}}})).Run(roomCtx(), json.RawMessage(in))
+	r, err := dupTool(t, reportOf(clients.DupReport{Scanned: 41_200, Duplicates: 3, Keys: 2,
+		Partitions: []clients.DupPartition{{Partition: 0, Done: true}}})).Run(roomCtx(), json.RawMessage(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +55,10 @@ func TestDupKeysSummary(t *testing.T) {
 		t.Fatalf("summary = %q, want %q", r.Summary, want)
 	}
 	// TC4: capped; TC7: partial; plus findings and undecodable reasons.
-	rep := kafka.DupReport{Scanned: 50_000, Capped: true, OrderRegressions: 1, RegressionKeys: 1, Undecodable: 4,
-		UndecodableReasons: map[string]int{kafka.UndecodableNoLSN: 3, kafka.UndecodableRegistry: 1},
-		Partitions:         []kafka.DupPartition{{Partition: 0, Done: true}, {Partition: 1}},
-		Findings:           []kafka.DupFinding{{Kind: "regression", Key: "sha256:00aa", Partition: 1, Offset: 9, LSN: 5, PrevLSN: 7, FirstOffset: 3}},
+	rep := clients.DupReport{Scanned: 50_000, Capped: true, OrderRegressions: 1, RegressionKeys: 1, Undecodable: 4,
+		UndecodableReasons: map[string]int{clients.DupUndecodableNoLSN: 3, clients.DupUndecodableRegistry: 1},
+		Partitions:         []clients.DupPartition{{Partition: 0, Done: true}, {Partition: 1}},
+		Findings:           []clients.DupFinding{{Kind: clients.DupKindRegression, Key: "sha256:00aa", Partition: 1, Offset: 9, LSN: 5, PrevLSN: 7, FirstOffset: 3}},
 		FindingsOmitted:    25,
 	}
 	r, err = dupTool(t, reportOf(rep)).Run(roomCtx(), json.RawMessage(`{"topic":"pg.public.orders","since":"`+since+`","max_scan":1000000}`))
@@ -72,10 +72,10 @@ func TestDupKeysSummary(t *testing.T) {
 			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
 		}
 	}
-	if got := r.Data.(kafka.DupReport).MaxScan; got != kafka.DupScanMaxScan {
-		t.Errorf("max_scan passed = %d, want the cap %d", got, kafka.DupScanMaxScan)
+	if got := r.Data.(clients.DupReport).MaxScan; got != clients.DupScanMaxScan {
+		t.Errorf("max_scan passed = %d, want the cap %d", got, clients.DupScanMaxScan)
 	}
-	rep = kafka.DupReport{Scanned: 7, Partial: true, Partitions: []kafka.DupPartition{{Partition: 0}}}
+	rep = clients.DupReport{Scanned: 7, Partial: true, Partitions: []clients.DupPartition{{Partition: 0}}}
 	r, err = dupTool(t, reportOf(rep)).Run(roomCtx(), json.RawMessage(in))
 	if err != nil || !strings.Contains(r.Summary, "partial: the time limit cut the scan before the end of partition(s) [0]") {
 		t.Fatalf("partial summary = %q, err %v", r.Summary, err)
@@ -89,7 +89,7 @@ func TestDupKeysSummary(t *testing.T) {
 // input before any I/O (E2), a client error wrapped (E5), and no tool for a
 // client without DupScan.
 func TestDupKeysRefusals(t *testing.T) {
-	f := reportOf(kafka.DupReport{})
+	f := reportOf(clients.DupReport{})
 	tool := dupTool(t, f)
 	_, err := tool.Run(roomCtx(), json.RawMessage(`{"topic":"bill.public.invoices","since":"`+since+`"}`))
 	if !errors.Is(err, tools.ErrOutOfScope) || f.calls != 0 {
@@ -104,8 +104,8 @@ func TestDupKeysRefusals(t *testing.T) {
 	if f.calls != 0 {
 		t.Fatalf("bad input reached the client %d times", f.calls)
 	}
-	f.dupFn = func(context.Context, string, time.Time, int) (kafka.DupReport, error) {
-		return kafka.DupReport{}, fmt.Errorf("kafka: dup scan: %w", clients.ErrNotFound)
+	f.dupFn = func(context.Context, string, time.Time, int) (clients.DupReport, error) {
+		return clients.DupReport{}, fmt.Errorf("kafka: dup scan: %w", clients.ErrNotFound)
 	}
 	if _, err := tool.Run(roomCtx(), json.RawMessage(`{"topic":"pg.public.orders","since":"`+since+`"}`)); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("client error: %v, want it wrapped", err)

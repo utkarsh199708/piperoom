@@ -101,6 +101,15 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
     `OPENLINEAGE_API_KEY` goes only in the `Authorization` header, only over https (or to a loopback host), and is
     never logged. Every pipeline of the server lands in one namespace (`OPENLINEAGE_NAMESPACE`): with several tenants,
     use one lineage server per tenant or leave it off.
+- **Staging (X8; optional, only with a pipeline's `owners.yaml` `staging:` block and write mode on; contract in
+  `internal/actions/action.go`, `docs/api.md` "X8 staging").** When the driver clicks "Try in staging", the server
+  writes the proposal's change to **your staging** Kafka Connect or Schema Registry with the staging credentials you
+  reference in `staging.connections` (resolved like `connections:`, never logged), watches the connector for 60
+  seconds, then puts the staging connector's previous whole config back (a registered staging schema version cannot
+  be removed and is reported as left over). It never calls a production endpoint: a staging URL equal to a
+  production one is a load error. The room gets `proposal.staged`: outcomes, object names and staging's own error
+  text, redacted and capped (see What reaches the model, below); never a config value, schema body, staging URL or
+  credential. The staging connector's config passes through the server's memory for the restore only.
 - **Slack (optional, outbound only).** Off unless **both** `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`
   are set. A half setting stops the server at start (`cmd/server/main.go`;
   `internal/slackbridge/bridge.go`). It posts into one thread per room in one channel
@@ -211,7 +220,7 @@ auto-approved (`internal/room/autoapprove.go`).
 | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag, only for the room pipeline's own topics and consumer groups (`kafka_consumer_lag` shows only partitions of the pipeline's topics) | record payloads |
 | `kafka_topic_config` | for a pipeline's own topic: retention, cleanup policy, min in-sync replicas, partition count and replication factor (`kafka_tools.go`) | record payloads |
 | `kafka_find_by_key` | topic, partition, offset, timestamp and **key** of matching records | record **values** |
-| `kafka_dup_keys` (X1c; `DupScan` on the Kafka client, also the watcher's `dup_keys`/`order_skew` reader) | for one of the room pipeline's CDC topics since a time: records scanned, duplicate `(key, source.lsn)` events and per-key `source.lsn` regressions as counts, per-partition offsets, and for at most 20 findings the partition, offsets, `source.lsn` positions and a key **fingerprint** (`sha256:` and 16 hex digits of the raw key bytes; a short key such as an integer id can be guessed back from it) (`internal/clients/kafka/dupscan.go`). The Kafka client reads whole records (at most 50 000, 10 s) to find `source.lsn` with its own bounded Avro/JSON walker, not the Avro library's decoder, and drops them | key values, record values, every field other than `source.lsn` |
+| `kafka_dup_keys` (X1c; the optional reader `clients.DupScanner`, `DupScan` on the Kafka client, also the watcher's `dup_keys`/`order_skew` reader, which copies counts only into its signal) | for one of the room pipeline's CDC topics since a time: records scanned, duplicate `(key, source.lsn)` events and per-key `source.lsn` regressions as counts, per-partition offsets, and for at most 20 findings the partition, offsets, `source.lsn` positions and a key **fingerprint** (`sha256:` and 16 hex digits of the raw key bytes; a short key such as an integer id can be guessed back from it) (`internal/clients/kafka/dupscan.go`). The Kafka client reads whole records (at most 50 000, 10 s) to find `source.lsn` with its own bounded Avro/JSON walker, not the Avro library's decoder, and drops them | key values, record values, every field other than `source.lsn` |
 | `trace_record` | per-stage status and facts for one `(table, key)` (`map.go`) | row values |
 | `connect_*` | connector state and task errors (**stack traces can contain data**). Config: a fixed list of key names (`connect_tools.go`), the `transforms` name list and each transform's `type`, `field`, `fields` and `field.name` (every other `transforms*` value is `***`), and secret-looking keys (`password`, `secret`, `token`, `.key`) as `***`. A secret key's presence is shown, not its value (`connect_tools.go`) | secret values |
 | `schema_registry_*` | subjects, versions, schema definitions and diffs | data |

@@ -33,7 +33,8 @@ func TestPerformanceOutcomeFor(t *testing.T) {
 		{"lag slope +10 % worse", 1000, 1000, i64(300), i64(330), events.PerformanceWorse},
 		{"lag shrinking faster no change", 1000, 1000, i64(-100), i64(-300), events.PerformanceNoChange},
 		{"rate up wins over lag up", 1000, 1200, i64(100), i64(500), events.PerformanceImproved},
-		{"lag down wins over rate down", 1000, 700, i64(100), i64(-10), events.PerformanceImproved},
+		{"rate down wins over lag down", 1000, 700, i64(100), i64(-10), events.PerformanceWorse},
+		{"rate flat, lag down improved", 1000, 950, i64(100), i64(-10), events.PerformanceImproved},
 		{"one slope missing ignores lag", 1000, 1000, i64(300), nil, events.PerformanceNoChange},
 	}
 	for _, tt := range tests {

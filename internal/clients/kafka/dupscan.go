@@ -14,89 +14,36 @@ import (
 	"piperoom/internal/clients"
 )
 
-// DupScan's caps and deadline (X1c). Callers and tests use these constants.
+// DupScan's report, caps and reasons are the contract's (clients.DupScanner,
+// X1-0 after the X1c contract change request); the names below keep this
+// package's callers and tests unchanged.
 const (
-	// DupScanMaxScan caps DupScan's maxScan (records over all partitions); a
-	// larger one is cut to it and maxScan <= 0 means it.
-	DupScanMaxScan = 50_000
-	// DupScanTimeout is DupScan's deadline when ctx has none or a later one.
-	DupScanTimeout = 10 * time.Second
-	// MaxDupFindings caps DupReport.Findings; the rest are counted.
-	MaxDupFindings = 20
+	DupScanMaxScan = clients.DupScanMaxScan
+	DupScanTimeout = clients.DupScanTimeout
+	MaxDupFindings = clients.MaxDupFindings
+
+	UndecodableNoKey     = clients.DupUndecodableNoKey
+	UndecodableNoLSN     = clients.DupUndecodableNoLSN
+	UndecodableFormat    = clients.DupUndecodableFormat
+	UndecodableMalformed = clients.DupUndecodableMalformed
+	UndecodableRegistry  = clients.DupUndecodableRegistry
+	UndecodableSchema    = clients.DupUndecodableSchema
 )
 
-// Why a record has no usable (key, source.lsn): the keys of
-// DupReport.UndecodableReasons. Fixed words, never record text.
-const (
-	UndecodableNoKey     = "no_key"         // empty record key
-	UndecodableNoLSN     = "no_lsn"         // an envelope without source.lsn (not Postgres, or null)
-	UndecodableFormat    = "not_envelope"   // neither a JSON object nor Confluent Avro
-	UndecodableMalformed = "malformed"      // JSON or Avro that does not parse
-	UndecodableRegistry  = "registry"       // no schema registry, or it was unreachable
-	UndecodableSchema    = "schema_refused" // schema missing, too large or unparseable
+type (
+	// DupReport is clients.DupReport.
+	DupReport = clients.DupReport
+	// DupPartition is clients.DupPartition.
+	DupPartition = clients.DupPartition
+	// DupFinding is clients.DupFinding.
+	DupFinding = clients.DupFinding
 )
 
-// DupReport is what DupScan found on one topic: counts, offsets, source
-// positions and key fingerprints only. A record key or value never enters
-// it; Findings name a key by KeyFingerprint.
-type DupReport struct {
-	Topic   string    `json:"topic"`
-	Since   time.Time `json:"since"`
-	MaxScan int       `json:"max_scan"`
-	// Scanned is the data records read (transaction markers excluded).
-	Scanned int `json:"scanned"`
-	// Capped: the scan stopped at MaxScan with records left to read.
-	Capped bool `json:"capped"`
-	// Partial: the deadline cut the scan; the counts cover what was read.
-	Partial bool `json:"partial"`
-	// Duplicates is the records whose (key, source.lsn) was already seen;
-	// Keys is the distinct keys among them.
-	Duplicates int `json:"duplicates"`
-	Keys       int `json:"keys"`
-	// OrderRegressions is the records whose source.lsn is below one the
-	// same key already had earlier in the same partition (a duplicate is
-	// not also a regression); RegressionKeys is the distinct keys.
-	OrderRegressions int `json:"order_regressions"`
-	RegressionKeys   int `json:"regression_keys"`
-	// Undecodable is the records with no usable key or source.lsn, by reason
-	// (the Undecodable* constants). Tombstones (empty values) are counted
-	// apart: they carry no position.
-	Undecodable        int            `json:"undecodable"`
-	UndecodableReasons map[string]int `json:"undecodable_reasons,omitempty"`
-	Tombstones         int            `json:"tombstones"`
-	Partitions         []DupPartition `json:"partitions"`
-	// Findings are the first MaxDupFindings duplicates and regressions in
-	// read order; FindingsOmitted counts the rest.
-	Findings        []DupFinding `json:"findings,omitempty"`
-	FindingsOmitted int          `json:"findings_omitted,omitempty"`
-}
-
-// DupPartition is one partition's part of a DupScan.
-type DupPartition struct {
-	Partition int32 `json:"partition"`
-	From      int64 `json:"from"` // first offset at or after since
-	Next      int64 `json:"next"` // first offset not read
-	End       int64 `json:"end"`  // readable end when the scan started
-	Scanned   int   `json:"scanned"`
-	Done      bool  `json:"done"`
-}
-
-// DupFinding is one duplicate or order regression. First* point at the
-// earlier record: the first with the same (key, lsn) for a duplicate, the
-// one with the higher PrevLSN for a regression.
-type DupFinding struct {
-	Kind           string `json:"kind"` // "duplicate" or "regression"
-	Key            string `json:"key"`  // KeyFingerprint of the record key
-	Partition      int32  `json:"partition"`
-	Offset         int64  `json:"offset"`
-	FirstPartition int32  `json:"first_partition"`
-	FirstOffset    int64  `json:"first_offset"`
-	LSN            int64  `json:"lsn"`
-	PrevLSN        int64  `json:"prev_lsn,omitempty"`
-}
+var _ clients.DupScanner = (*Client)(nil)
 
 // KeyFingerprint names a record key without showing it: "sha256:" and the
-// first 8 bytes of the SHA-256 of the raw key bytes, in hex.
+// first 8 bytes of the SHA-256 of the raw key bytes, in hex
+// (clients.DupFinding.Key).
 func KeyFingerprint(key []byte) string {
 	sum := sha256.Sum256(key)
 	return "sha256:" + hex.EncodeToString(sum[:8])
@@ -293,7 +240,7 @@ func (st *dupState) add(rep *DupReport, r clients.Record, lsnOf func([]byte) (in
 			st.dupKeys[k] = true
 			rep.Keys++
 		}
-		rep.finding(DupFinding{Kind: "duplicate", Key: KeyFingerprint(r.Key), Partition: r.Partition, Offset: r.Offset,
+		addFinding(rep, DupFinding{Kind: clients.DupKindDuplicate, Key: KeyFingerprint(r.Key), Partition: r.Partition, Offset: r.Offset,
 			FirstPartition: first.partition, FirstOffset: first.offset, LSN: lsn})
 		return
 	}
@@ -311,14 +258,15 @@ func (st *dupState) add(rep *DupReport, r clients.Record, lsnOf func([]byte) (in
 			st.regKeys[k] = true
 			rep.RegressionKeys++
 		}
-		rep.finding(DupFinding{Kind: "regression", Key: KeyFingerprint(r.Key), Partition: r.Partition, Offset: r.Offset,
+		addFinding(rep, DupFinding{Kind: clients.DupKindRegression, Key: KeyFingerprint(r.Key), Partition: r.Partition, Offset: r.Offset,
 			FirstPartition: prev.partition, FirstOffset: prev.offset, LSN: lsn, PrevLSN: prev.lsn})
 	case !ok || lsn > prev.lsn:
 		newest[k] = at
 	}
 }
 
-func (rep *DupReport) finding(f DupFinding) {
+// addFinding keeps f when there is room, else counts it as omitted.
+func addFinding(rep *DupReport, f DupFinding) {
 	if len(rep.Findings) >= MaxDupFindings {
 		rep.FindingsOmitted++
 		return

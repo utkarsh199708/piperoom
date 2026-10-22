@@ -1183,6 +1183,12 @@ type AgentVerificationPayload struct {
 const (
 	ActionClassFix      = "fix"
 	ActionClassRecovery = "recovery"
+	// ActionClassPerformance is the class of an action that tunes
+	// throughput (connect_tune_throughput, X6c): it changes only
+	// allow-listed keys (actions.TunableKeys) and, like a recovery, must be
+	// verifiable (actions.Verifier, measuring throughput before and after it
+	// ran). (X6)
+	ActionClassPerformance = "performance"
 )
 
 // Recovery outcomes, AgentVerificationPayload.Outcome. The agent polls the
@@ -1235,13 +1241,7 @@ type AgentRecoveryCheckPayload struct {
 	Unit       string `json:"unit"` // RecoveryUnitRows | RecoveryUnitRecords
 }
 
-// ---- X6: performance actions (class, throughput verdict) ----
-
-// ActionClassPerformance is the class of an action that tunes throughput
-// (connect_tune_throughput, X6c): it changes only allow-listed keys
-// (actions.TunableKeys) and, like a recovery, must be verifiable
-// (actions.Verifier, measuring throughput before and after it ran). (X6)
-const ActionClassPerformance = "performance"
+// ---- X6: performance actions (ActionClassPerformance above; throughput verdict) ----
 
 // Performance outcomes, AgentVerificationPayload.Outcome of a performance
 // proposal; PerformanceOutcomeFor is the rule. Unverifiable is the recovery
@@ -1272,16 +1272,19 @@ const PerformanceChangePercent = 10
 // that could not measure reports PerformanceUnverifiable instead of calling
 // it.
 //
-//   - improved: after >= before + 10 % (any after > 0 when before is 0), or
-//     a growing lag (slope before > 0) whose slope fell by at least 10 %
-//     (also when the lag now shrinks);
-//   - else worse: after <= before - 10 %, or a lag that was not growing
-//     (slope before <= 0) now grows, or a growing lag whose slope rose by at
-//     least 10 %;
+//   - throughput decides first: improved when after >= before + 10 % (any
+//     after > 0 when before is 0), worse when after <= before - 10 %;
+//   - only when it moved less, the lag decides: improved when a growing lag
+//     (slope before > 0) has a slope at least 10 % lower (also when it now
+//     shrinks), worse when a lag that was not growing (slope before <= 0)
+//     now grows or a growing lag's slope rose by at least 10 %;
 //   - else no_change.
 //
-// Improved is checked first: a step that raised the consume rate while the
-// producer sped up even more did what it was for. (X6)
+// Throughput comes first in both directions: a sink with a backlog consumes
+// at its capacity, so its rate is the tuning's effect, while the lag slope
+// also moves with the producer. A consume rate up 20 % while the producer
+// sped up more is improved; one down 30 % while the producer slowed even
+// more (the lag now shrinks) is worse. (X6)
 func PerformanceOutcomeFor(before, after int64, lagSlopeBefore, lagSlopeAfter *int64) string {
 	const p = PerformanceChangePercent
 	lag := lagSlopeBefore != nil && lagSlopeAfter != nil
@@ -1292,10 +1295,10 @@ func PerformanceOutcomeFor(before, after int64, lagSlopeBefore, lagSlopeAfter *i
 	switch {
 	case after > before && after*100 >= before*(100+p):
 		return PerformanceImproved
-	case lag && lb > 0 && la*100 <= lb*(100-p):
-		return PerformanceImproved
 	case after < before && after*100 <= before*(100-p):
 		return PerformanceWorse
+	case lag && lb > 0 && la*100 <= lb*(100-p):
+		return PerformanceImproved
 	case lag && lb <= 0 && la > 0:
 		return PerformanceWorse
 	case lag && lb > 0 && la*100 >= lb*(100+p):

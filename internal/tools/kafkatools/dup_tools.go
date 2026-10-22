@@ -9,22 +9,19 @@ import (
 	"strings"
 	"time"
 
-	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 )
 
 // ---- kafka_dup_keys (X1c) ----
 
-// dupScanner is the local adapter for the Kafka client's DupScan until a
-// reader for it lands in internal/clients/clients.go (contract change
-// request in the X1c PR). The tool is registered only for a client that has
-// it, so fakes and the eval replay get no tool the model could call in vain.
-type dupScanner interface {
-	DupScan(ctx context.Context, topic string, since time.Time, maxScan int) (kafka.DupReport, error)
-}
+// The tool reads through the optional clients.DupScanner (X1, applied from
+// the X1c contract change request). It is registered only for a client that
+// has it, so fakes and the eval replay get no tool the model could call in
+// vain.
 
 // dupMaxListed caps the findings kafka_dup_keys lists in Summary; Data has
-// up to kafka.MaxDupFindings.
+// up to clients.MaxDupFindings.
 const dupMaxListed = 10
 
 type dupKeys struct{ d Deps }
@@ -37,7 +34,7 @@ func (t *dupKeys) InputSchema() map[string]any {
 		"since": strProp("RFC 3339 timestamp; scan from here"),
 		"max_scan": map[string]any{
 			"type":        "integer",
-			"description": "max records over all partitions, 1 to " + strconv.Itoa(kafka.DupScanMaxScan) + "; default " + strconv.Itoa(kafka.DupScanMaxScan),
+			"description": "max records over all partitions, 1 to " + strconv.Itoa(clients.DupScanMaxScan) + "; default " + strconv.Itoa(clients.DupScanMaxScan),
 		},
 	}, "topic", "since")
 }
@@ -63,12 +60,12 @@ func (t *dupKeys) Run(ctx context.Context, input json.RawMessage) (tools.Result,
 	if since.Before(time.Unix(0, 0)) {
 		since = time.Unix(0, 0).UTC() // Kafka reads negative times as "latest"/"earliest"
 	}
-	maxScan := kafka.DupScanMaxScan
+	maxScan := clients.DupScanMaxScan
 	if p.MaxScan != nil {
 		if *p.MaxScan < 1 {
-			return tools.Result{}, fmt.Errorf("%w: max_scan must be between 1 and %d", tools.ErrBadInput, kafka.DupScanMaxScan)
+			return tools.Result{}, fmt.Errorf("%w: max_scan must be between 1 and %d", tools.ErrBadInput, clients.DupScanMaxScan)
 		}
-		maxScan = min(*p.MaxScan, kafka.DupScanMaxScan)
+		maxScan = min(*p.MaxScan, clients.DupScanMaxScan)
 	}
 	sc, err := t.d.scope(ctx)
 	if err != nil {
@@ -77,7 +74,7 @@ func (t *dupKeys) Run(ctx context.Context, input json.RawMessage) (tools.Result,
 	if err := sc.CheckTopic(p.Topic); err != nil {
 		return tools.Result{}, err
 	}
-	ds, ok := t.d.Kafka.(dupScanner)
+	ds, ok := t.d.Kafka.(clients.DupScanner)
 	if !ok {
 		return tools.Result{}, fmt.Errorf("kafka_dup_keys: this Kafka client cannot scan for duplicates")
 	}
@@ -92,7 +89,7 @@ func (t *dupKeys) Run(ctx context.Context, input json.RawMessage) (tools.Result,
 
 // dupSummary is built from numbers, fixed words, the scoped topic name and
 // key fingerprints: no record text can reach it.
-func dupSummary(rep kafka.DupReport) string {
+func dupSummary(rep clients.DupReport) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s: %s across %s, %s in %s", rep.Topic,
 		plural(rep.Duplicates, "duplicate event"), plural(rep.Keys, "key"),
@@ -131,14 +128,14 @@ func dupSummary(rep kafka.DupReport) string {
 		if i == dupMaxListed {
 			break
 		}
-		if f.Kind == "regression" {
+		if f.Kind == clients.DupKindRegression {
 			appendLine(&sb, fmt.Sprintf("  regression: key %s, partition %d offset %d has lsn %d after lsn %d at offset %d", f.Key, f.Partition, f.Offset, f.LSN, f.PrevLSN, f.FirstOffset))
 			continue
 		}
 		appendLine(&sb, fmt.Sprintf("  duplicate: key %s, partition %d offset %d repeats lsn %d of partition %d offset %d", f.Key, f.Partition, f.Offset, f.LSN, f.FirstPartition, f.FirstOffset))
 	}
 	if n := len(rep.Findings) + rep.FindingsOmitted - min(len(rep.Findings), dupMaxListed); n > 0 {
-		appendLine(&sb, fmt.Sprintf("%d more finding(s) not listed; Data.findings has the first %d", n, kafka.MaxDupFindings))
+		appendLine(&sb, fmt.Sprintf("%d more finding(s) not listed; Data.findings has the first %d", n, clients.MaxDupFindings))
 	}
 	return sb.String()
 }

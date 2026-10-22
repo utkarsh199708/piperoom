@@ -233,15 +233,24 @@ type Tiered interface {
 // ---- X2: the recovery action class ----
 
 // Action classes. Every action is a fix unless it implements Classed and says
-// otherwise; the values are the event constants (events.ActionClass*). (X2)
+// otherwise; the values are the event constants (events.ActionClass*). (X2,
+// X6)
 const (
 	ClassFix      = events.ActionClassFix
 	ClassRecovery = events.ActionClassRecovery
+	// ClassPerformance is the class of an action that tunes throughput
+	// (connect_tune_throughput, X6c). Registry.Register refuses one that
+	// does not implement Verifier (throughput before and after) and Preview
+	// (the TuningChange list whose Current values are the rollback the card
+	// offers). It changes only keys of TunableKeys, checked with
+	// CheckTunable in Validate and again in Execute. (X6)
+	ClassPerformance = events.ActionClassPerformance
 )
 
 // Classed is implemented by an action that is not a plain fix. A recovery
 // action re-emits data a fault lost (pg_resnapshot_rows, kafka_replay_range)
-// and must also implement Verifier: Registry.Register refuses it otherwise.
+// and must also implement Verifier; a performance action (X6) must implement
+// Verifier and Preview: Registry.Register refuses either otherwise.
 // Class must not do I/O and returns the same value on every call. It is the
 // action's kind, unrelated to the endpoint class Tiered.Tier takes (local |
 // shared | production). (X2)
@@ -315,15 +324,7 @@ type VerifyResult struct {
 	LagSlopeAfter  *int64 `json:"lag_slope_after,omitempty"`
 }
 
-// ---- X6: the performance action class ----
-
-// ClassPerformance is the class of an action that tunes throughput
-// (connect_tune_throughput, X6c). Registry.Register refuses one that does
-// not implement Verifier (throughput before and after) and Preview (the
-// TuningChange list whose Current values are the rollback the card offers).
-// It changes only keys of TunableKeys, checked with CheckTunable in Validate
-// and again in Execute. (X6)
-const ClassPerformance = events.ActionClassPerformance
+// ---- X6: the performance action class (ClassPerformance, above) ----
 
 // Verify schedule of a performance action. Verify derives both windows from
 // executedAt, never from the clock: Before is the throughput over
@@ -357,8 +358,12 @@ const (
 // Verify keeps no state between calls: it reads only history the call can
 // reach at that moment (record counts by offset timestamp,
 // clients.RateReader; the pipeline's group_lag watch samples,
-// clients.SampleReader). When a window cannot be measured from it, the error
-// wraps clients.ErrNotSupported and the outcome is unverifiable. The agent
+// clients.SampleReader). A sink's consumed records over a window are the
+// records written to its topics less the change of group_lag (the
+// pipeline's total lag, one sample per 15 min) between the window's ends.
+// When a window cannot be measured from it (no sample near an end: the
+// watcher is off or young), the error wraps clients.ErrNotSupported and the
+// outcome is unverifiable. The agent
 // applies events.PerformanceOutcomeFor to the result. (X6)
 
 // TunableKey is one connector config key a performance action may change,

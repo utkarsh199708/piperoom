@@ -81,7 +81,7 @@ func Register(reg *tools.Registry, d Deps) error {
 			return err
 		}
 	}
-	if _, ok := d.Kafka.(dupScanner); ok {
+	if _, ok := d.Kafka.(clients.DupScanner); ok {
 		if err := reg.Register(&dupKeys{d: d}); err != nil {
 			return err
 		}

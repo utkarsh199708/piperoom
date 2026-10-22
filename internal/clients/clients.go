@@ -989,6 +989,139 @@ type Reconciler interface {
 	RowTimes(ctx context.Context, table, pkColumn string, keys []string, tsColumns []string) (map[string]map[string]time.Time, error)
 }
 
+// ---- X1: duplicate and order scan of a CDC topic (optional on a KafkaAdmin) ----
+//
+// Asserted at use time like RateReader (ds, ok := k.(clients.DupScanner)),
+// never embedded in KafkaAdmin, so no existing client or fake has to grow.
+// internal/clients/kafka implements it (X1c, A2; its DupReport and the
+// constants below are aliases there); the kafka_dup_keys tool (X1c) and the
+// watcher's dup_keys and order_skew checks (X1b, events.DriftSignal) are its
+// callers. The watcher fills a DriftSignal from a report, counts only:
+//   - dup_keys: Topic = Topic, Source = Scanned, Missing = Duplicates,
+//     Sample = Keys;
+//   - order_skew: Topic = Topic, Source = Scanned, Mismatched =
+//     OrderRegressions, Sample = RegressionKeys;
+//   - both: Window = [Since, the time the watcher started the scan); a
+//     Capped or Partial report says so in Detail. Findings, offsets and key
+//     fingerprints stay out of the signal.
+
+// Caps and deadline of every DupScanner. Callers and tests use these
+// constants instead of their own numbers. (X1)
+const (
+	// DupScanMaxScan caps DupScan's maxScan (records over all partitions); a
+	// larger one is cut to it and maxScan <= 0 means it.
+	DupScanMaxScan = 50_000
+	// DupScanTimeout is DupScan's deadline when ctx has none or a later one.
+	DupScanTimeout = 10 * time.Second
+	// MaxDupFindings caps DupReport.Findings; the rest are counted in
+	// FindingsOmitted.
+	MaxDupFindings = 20
+)
+
+// Why a record has no usable (key, source.lsn): the keys of
+// DupReport.UndecodableReasons. Fixed words, never record text. (X1)
+const (
+	DupUndecodableNoKey     = "no_key"         // empty record key
+	DupUndecodableNoLSN     = "no_lsn"         // an envelope without source.lsn (not Postgres, or null)
+	DupUndecodableFormat    = "not_envelope"   // neither a JSON object nor Confluent Avro
+	DupUndecodableMalformed = "malformed"      // JSON or Avro that does not parse
+	DupUndecodableRegistry  = "registry"       // no schema registry, or it was unreachable
+	DupUndecodableSchema    = "schema_refused" // schema missing, too large or unparseable
+)
+
+// DupFinding kinds. (X1)
+const (
+	DupKindDuplicate  = "duplicate"
+	DupKindRegression = "regression"
+)
+
+// DupReport is what DupScan found on one topic: counts, offsets, source
+// positions and key fingerprints only. A record key or value never enters
+// it; Findings name a key by its fingerprint (DupFinding.Key). (X1)
+type DupReport struct {
+	Topic   string    `json:"topic"`
+	Since   time.Time `json:"since"`
+	MaxScan int       `json:"max_scan"`
+	// Scanned is the data records read (transaction markers excluded).
+	Scanned int `json:"scanned"`
+	// Capped: the scan stopped at MaxScan with records left to read.
+	Capped bool `json:"capped"`
+	// Partial: the deadline cut the scan; the counts cover what was read.
+	Partial bool `json:"partial"`
+	// Duplicates is the records whose (key, source.lsn) was already seen;
+	// Keys is the distinct keys among them.
+	Duplicates int `json:"duplicates"`
+	Keys       int `json:"keys"`
+	// OrderRegressions is the records whose source.lsn is below one the
+	// same key already had earlier in the same partition (a duplicate is
+	// not also a regression); RegressionKeys is the distinct keys.
+	OrderRegressions int `json:"order_regressions"`
+	RegressionKeys   int `json:"regression_keys"`
+	// Undecodable is the records with no usable key or source.lsn, by reason
+	// (the DupUndecodable* constants). Tombstones (empty values) are counted
+	// apart: they carry no position.
+	Undecodable        int            `json:"undecodable"`
+	UndecodableReasons map[string]int `json:"undecodable_reasons,omitempty"`
+	Tombstones         int            `json:"tombstones"`
+	Partitions         []DupPartition `json:"partitions"`
+	// Findings are the first MaxDupFindings duplicates and regressions in
+	// read order; FindingsOmitted counts the rest.
+	Findings        []DupFinding `json:"findings,omitempty"`
+	FindingsOmitted int          `json:"findings_omitted,omitempty"`
+}
+
+// DupPartition is one partition's part of a DupScan. (X1)
+type DupPartition struct {
+	Partition int32 `json:"partition"`
+	From      int64 `json:"from"` // first offset at or after since
+	Next      int64 `json:"next"` // first offset not read
+	End       int64 `json:"end"`  // readable end when the scan started
+	Scanned   int   `json:"scanned"`
+	Done      bool  `json:"done"`
+}
+
+// DupFinding is one duplicate or order regression. First* point at the
+// earlier record: the first with the same (key, lsn) for a duplicate, the
+// one with the higher PrevLSN for a regression. Key is "sha256:" and the
+// first 8 bytes of the SHA-256 of the raw key bytes in hex (16 digits): it
+// tells keys apart without showing them, but a short key (an integer id)
+// can be guessed back from it, so it stays in tool Data and is never put in
+// an event. (X1)
+type DupFinding struct {
+	Kind           string `json:"kind"` // DupKindDuplicate or DupKindRegression
+	Key            string `json:"key"`
+	Partition      int32  `json:"partition"`
+	Offset         int64  `json:"offset"`
+	FirstPartition int32  `json:"first_partition"`
+	FirstOffset    int64  `json:"first_offset"`
+	LSN            int64  `json:"lsn"`
+	PrevLSN        int64  `json:"prev_lsn,omitempty"`
+}
+
+// DupScanner scans a Debezium Postgres CDC topic for duplicate change events
+// (the same key and source.lsn more than once, on any partition) and per-key
+// source.lsn regressions (within one partition). (X1)
+//
+// DupScan reads topic from the first offset at or after since up to each
+// partition's readable end as it was when the scan started, round-robin over
+// the partitions, at most maxScan records (maxScan <= 0 or above
+// DupScanMaxScan means DupScanMaxScan; Capped when records were left). It
+// decodes a value only to find source.lsn (JSON, or Confluent Avro with the
+// registry's writer schema through a walker bounded by the value's bytes,
+// never a generic decoder) and compares keys as bytes; no key, value or
+// decoded field leaves the method: the report has counts, offsets, positions
+// and fingerprints only, and so do its errors. It only reads.
+//
+// Deadline DupScanTimeout: a scan cut by a deadline (its own or the
+// caller's) returns the report so far with Partial set and a nil error; a
+// caller's cancel is an error. An unknown topic wraps ErrNotFound; a value it
+// cannot decode is counted in Undecodable, never an error. Like the other
+// Kafka reads it does not read the pipeline in ctx: the caller scopes topic
+// to its pipeline (tools.Scope.CheckTopic) before the call.
+type DupScanner interface {
+	DupScan(ctx context.Context, topic string, since time.Time, maxScan int) (DupReport, error)
+}
+
 // ---- Batch pipelines: orchestrator and transform (P4) ----
 //
 // Optional readers, like ClusterReader: wiring holds nil when the system is
