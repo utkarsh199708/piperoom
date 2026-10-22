@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { CircleCheck, CircleX } from 'lucide-react'
 import type { AgentVerificationPayload, SinkCheck } from '../../api/types'
+import type { RecoveryProgress } from '../../state/types'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
@@ -8,6 +9,8 @@ import { cn } from '@/lib/utils'
 import { PersonName } from '@/components/VerifiedBadge'
 import { clockTime } from '../../lib/time'
 import { verdictKind, verdictWords } from '../../lib/execution'
+import { recoveryOutcome } from '../../lib/recovery'
+import { RecoveryResult } from './RecoveryCard'
 
 export interface CloseNudge {
   /** The room is open, so closing it is still possible. */
@@ -60,11 +63,20 @@ export function VerificationCard({
   verification,
   title,
   nudge,
+  isRecovery = false,
+  recovery,
 }: {
   verification: AgentVerificationPayload
   /** The proposal's title, for the pre-filled resolution. */
   title: string
   nudge: CloseNudge
+  /**
+   * X2: the proposal's class is recovery. Only then is `outcome` a recovery outcome: a performance proposal (X6)
+   * carries its own outcomes, "unverifiable" among them, which the recovery wording would misname.
+   */
+  isRecovery?: boolean
+  /** X2: the recovery proposal's timing, for "recovered in 3 min". */
+  recovery?: RecoveryProgress
 }) {
   if (verification.repeat) {
     return (
@@ -74,19 +86,25 @@ export function VerificationCard({
     )
   }
   const kind = verdictKind(verification)
-  const ok = kind === 'recovered'
+  // X2: a recovery proposal carries a counted outcome, which says more than the boolean (partial is not "not recovered").
+  const outcome = isRecovery ? recoveryOutcome(verification) : undefined
+  const ok = outcome ? outcome === 'recovered' && verification.recovered : kind === 'recovered'
   const flow = verification.data_flow
   return (
     <div role="status" className="flex flex-col gap-2 px-3.5 py-2.5 text-sm" data-testid="verification-card">
       <div className="flex flex-col gap-0.5">
-        <p
-          className={cn(
-            'm-0 font-medium',
-            ok ? 'text-success-foreground' : kind === 'not-recovered' ? 'text-destructive-fg' : 'text-warning-foreground',
-          )}
-        >
-          {ok || kind === 'not-recovered' ? `Verified · ${verdictWords(kind)}` : kind === 'inconclusive' ? 'Inconclusive' : 'Not verified'}
-        </p>
+        {outcome ? (
+          <RecoveryResult verification={verification} outcome={outcome} recovery={recovery} />
+        ) : (
+          <p
+            className={cn(
+              'm-0 font-medium',
+              ok ? 'text-success-foreground' : kind === 'not-recovered' ? 'text-destructive-fg' : 'text-warning-foreground',
+            )}
+          >
+            {ok || kind === 'not-recovered' ? `Verified · ${verdictWords(kind)}` : kind === 'inconclusive' ? 'Inconclusive' : 'Not verified'}
+          </p>
+        )}
         <p className="m-0 max-w-[72ch] text-sm leading-5 text-muted-foreground">{verification.verdict}</p>
       </div>
       {verification.checks.length > 0 && (

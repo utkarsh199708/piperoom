@@ -77,6 +77,8 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 		return configDriftSignal
 	}
 	switch id {
+	case retentionID:
+		return retentionSignal(cfg)
 	case owners.SignalConnectorDown:
 		return cfg.ConnectorDown
 	case owners.SignalSlotInactive:

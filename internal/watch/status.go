@@ -69,7 +69,11 @@ func statusSignal(now time.Time, id string, ss *sigState) clients.WatchSignal {
 	if since.IsZero() {
 		since = now
 	}
-	g := clients.WatchSignal{Signal: name, State: state, Severity: sev, Since: since, Node: signalNode(id, ss.last.ev)}
+	node := ss.last.node
+	if node == "" {
+		node = signalNode(id, ss.last.ev)
+	}
+	g := clients.WatchSignal{Signal: name, State: state, Severity: sev, Since: since, Node: node}
 	if m := forecastMetric(id); m != "" {
 		g.Metric = m
 		if s, ok := ss.last.ev["eta"].(string); ok {
@@ -91,6 +95,8 @@ func signalName(id string) string {
 		return driftKind(id)
 	case configDriftConnector(id) != "":
 		return events.SignalConfigDrift
+	case id == retentionID:
+		return owners.SignalConfigRisk
 	}
 	return id
 }

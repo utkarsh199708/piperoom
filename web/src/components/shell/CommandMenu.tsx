@@ -2,7 +2,7 @@ import { useRef } from 'react'
 import { flushSync } from 'react-dom'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CircleCheck, Copy, Download, FileText, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Settings, Sun, UserCheck } from 'lucide-react'
+import { CircleCheck, Copy, Download, FileText, GitCompareArrows, Hand, Inbox, LayoutGrid, LogOut, Moon, Route, Settings, Sun, UserCheck } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import {
   CommandDialog,
@@ -226,6 +226,10 @@ export function CommandMenu({
         )}
 
         <CommandGroup heading="Navigate">
+          <CommandItem value="go to fleet" keywords={['pipelines', 'health']} onSelect={() => run(() => navigate('/fleet'))}>
+            <LayoutGrid aria-hidden="true" />
+            Go to Fleet
+          </CommandItem>
           <CommandItem value="go to rooms" onSelect={() => run(() => navigate('/'))}>
             <Inbox aria-hidden="true" />
             Go to Rooms

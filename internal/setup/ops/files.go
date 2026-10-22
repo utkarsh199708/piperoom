@@ -293,10 +293,12 @@ func (fileWriteOp) Validate(params json.RawMessage, env Env) error {
 	if why := lexicalRefusal(p.Path); why != "" {
 		return fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
-	if err := writablePath(p.Path, env.MountDirs); err != nil {
+	// The secret refusal comes first: a materialised secret that is also an
+	// executed name (a .properties file) reports ErrSecretPath.
+	if err := materialisedRefusal(p.Path, env); err != nil {
 		return err
 	}
-	if err := materialisedRefusal(p.Path, env); err != nil {
+	if err := writablePath(p.Path, env.MountDirs); err != nil {
 		return err
 	}
 	if err := checkWriteContent(p.Content); err != nil {
@@ -313,10 +315,10 @@ func (fileWriteOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 	if why := lexicalRefusal(p.Path); why != "" {
 		return Result{}, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
-	if err := writablePath(p.Path, env.MountDirs); err != nil {
+	if err := materialisedRefusal(p.Path, env); err != nil {
 		return Result{}, err
 	}
-	if err := materialisedRefusal(p.Path, env); err != nil {
+	if err := writablePath(p.Path, env.MountDirs); err != nil {
 		return Result{}, err
 	}
 	if err := checkWriteContent(p.Content); err != nil {
@@ -434,10 +436,10 @@ func (fileDeleteOp) Validate(params json.RawMessage, env Env) error {
 	if why := lexicalRefusal(p.Path); why != "" {
 		return fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
-	if err := deletablePath(p.Path, env.MountDirs); err != nil {
+	if err := materialisedRefusal(p.Path, env); err != nil {
 		return err
 	}
-	return materialisedRefusal(p.Path, env)
+	return deletablePath(p.Path, env.MountDirs)
 }
 
 func (fileDeleteOp) Execute(ctx context.Context, params json.RawMessage, env Env) (Result, error) {
@@ -448,10 +450,10 @@ func (fileDeleteOp) Execute(ctx context.Context, params json.RawMessage, env Env
 	if why := lexicalRefusal(p.Path); why != "" {
 		return Result{}, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
-	if err := deletablePath(p.Path, env.MountDirs); err != nil {
+	if err := materialisedRefusal(p.Path, env); err != nil {
 		return Result{}, err
 	}
-	if err := materialisedRefusal(p.Path, env); err != nil {
+	if err := deletablePath(p.Path, env.MountDirs); err != nil {
 		return Result{}, err
 	}
 	clean, _, err := env.Confine.prepare(p.Path)

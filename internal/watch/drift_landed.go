@@ -307,7 +307,7 @@ func (w *Watcher) placeholderPart(ctx context.Context, t target, mem *driftMem, 
 			continue
 		}
 		for _, c := range tt.Columns {
-			if c.Name != ts && validColumn(c.Name) && !piiColumn(c.Name) && (onSnk == nil || onSnk[c.Name]) {
+			if c.Name != ts && validColumn(c.Name) && !piiColumn(t.p, c.Name, pr.source, pr.sink) && (onSnk == nil || onSnk[c.Name]) {
 				cols = append(cols, c.Name)
 			}
 		}

@@ -114,9 +114,18 @@ type Pipeline struct {
 	// names whose steps need a healthy stage before approval. It needs a
 	// staging: block; wiring checks every name is a registered actions.Stager.
 	RequireStaging []string `yaml:"require_staging"`
+	// PII is the optional `pii:` block (X7c, pii.go): include and exclude
+	// overrides of the column-name PII classifier. Read it with
+	// PIIOverrideFor.
+	PII *PIISpec `yaml:"pii"`
+	// DeclaredRetention is the optional `declared_retention:` block (X7,
+	// declared_retention.go). Nil = nothing declared.
+	DeclaredRetention *DeclaredRetention `yaml:"declared_retention"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
+	// pii is PII after validation. Set by Load.
+	pii *piiRules
 }
 
 // MaxRetentionDays bounds a pipeline's retention_days (100 years), the same
@@ -324,6 +333,12 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.validateRecovery(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.validatePII(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.validateDeclaredRetention(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if p.isBatch() {

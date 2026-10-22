@@ -28,6 +28,7 @@ type colCatalog struct {
 	mu      sync.Mutex
 	sink    bool
 	cols    map[string][]string
+	types   map[string]string // column -> catalog type; "text" when absent (X7c)
 	err     error
 	block   bool // wait for ctx to end
 	asked   []string
@@ -65,7 +66,11 @@ func (c *colCatalog) Columns(ctx context.Context, table string) ([]clients.Colum
 	}
 	out := make([]clients.ColumnInfo, len(names))
 	for i, n := range names {
-		out[i] = clients.ColumnInfo{Name: n, Type: "text", Position: i + 1, Nullable: true}
+		typ := "text"
+		if t, ok := c.types[n]; ok {
+			typ = t
+		}
+		out[i] = clients.ColumnInfo{Name: n, Type: typ, Position: i + 1, Nullable: true}
 	}
 	return out, nil
 }

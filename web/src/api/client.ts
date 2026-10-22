@@ -19,6 +19,8 @@ import type {
   ProbeResult,
   AdminConfig,
   AgentStats,
+  FleetChangesPage,
+  FleetPipeline,
   PipelineInfo,
   RoomSnapshot,
   ShadowBlindBody,
@@ -226,6 +228,17 @@ export const api = {
     request<TrendPoint[]>(
       `/api/pipelines/${encodeURIComponent(pipelineId)}/trends?metric=${encodeURIComponent(metric)}&days=${days}`,
     ),
+  // X5: one row per pipeline the caller can see, [] when there are none; filtered and sorted in the browser.
+  fleet: () => request<FleetPipeline[]>('/api/fleet'),
+  // X5: what changed across the caller's pipelines (default the last 7 days), newest first, one page per call.
+  // `cursor` is the previous page's `next`, opaque.
+  fleetChanges: (page: { cursor?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams()
+    if (page.limit) q.set('limit', String(page.limit))
+    if (page.cursor) q.set('cursor', page.cursor)
+    const qs = q.toString()
+    return request<FleetChangesPage>(`/api/fleet/changes${qs ? `?${qs}` : ''}`)
+  },
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string; client_id?: string }) =>

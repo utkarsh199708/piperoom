@@ -19,6 +19,9 @@ type Mode struct {
 	Solo bool `json:"solo"`
 	// AutoApprove lists the pipeline's policy actions; never null.
 	AutoApprove []string `json:"auto_approve"`
+	// Staging is true when the driver can try a proposal on the pipeline's
+	// staging stack (X8; stagingOn): the same for every caller.
+	Staging bool `json:"staging,omitempty"`
 }
 
 // WriteOn reports whether fully approved proposals run (PIPEROOM_WRITE_MODE=on
@@ -35,7 +38,20 @@ func (s *Service) RoomFor(ctx context.Context, u User, roomID string) (RoomSnaps
 	if err != nil {
 		return RoomSnapshot{}, err
 	}
-	snap.Mode = &Mode{Write: !s.writeOff, Solo: s.soloFor(u, snap.PipelineID), AutoApprove: s.autoApproveFor(snap.PipelineID)}
+	snap.Mode = &Mode{Write: !s.writeOff, Solo: s.soloFor(u, snap.PipelineID), AutoApprove: s.autoApproveFor(snap.PipelineID), Staging: s.stagingOn(snap.PipelineID)}
+	// X8: which steps can be staged and whether approval waits for a stage
+	// depend on the server's actions and owners.yaml; a stage past its
+	// expires_at is lost and no longer shown as running.
+	acts := s.actionsFor(snap.PipelineID)
+	now := s.now()
+	for i := range snap.OpenProposals {
+		p := &snap.OpenProposals[i]
+		p.Stageable = stageableSteps(acts, p.Steps)
+		p.StagingRequired = s.stagingGate(snap.PipelineID, *p) != nil
+		if p.StageRunning != nil && !stageRunningAt(*p, now) {
+			p.StageRunning = nil
+		}
+	}
 	// The setup member's server-side fields: the configured token budget and
 	// whether the maintenance window has ended (docs/api.md).
 	s.fillSetupRuntime(&snap)

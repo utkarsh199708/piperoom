@@ -389,6 +389,11 @@ type Service struct {
 	leaseOnce     sync.Once
 	leaseTickDone func()
 
+	// stageStepTimeout, when set (tests only), replaces
+	// actions.StageStepTimeout as the bound of one step's Stage
+	// (service_stage.go).
+	stageStepTimeout time.Duration
+
 	// retryAfter, when set (tests only), replaces time.After for the wait
 	// between failed agent and shadow attempts, so tests need not sit out the
 	// production backoff. globalRetry is globalSlotRetry; tests shorten it.
@@ -1511,6 +1516,19 @@ func inputFor(e events.Event) *agent.HumanInput {
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
 			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
+		}
+	case events.ProposalStaged:
+		p, ok := decode[events.ProposalStagedPayload](e)
+		if !ok {
+			return nil
+		}
+		// Staging's verdict is evidence, never approval: OK says whether
+		// every staged step was healthy, and the text (staging's own words)
+		// reaches the model only inside the untrusted-data wrapper. (X8)
+		healthy := p.Healthy()
+		return &agent.HumanInput{
+			Seq: e.Seq, Actor: e.Actor, Kind: "proposal_staged",
+			Text: stagedInputText(p), OK: &healthy, ProposalID: p.ProposalID,
 		}
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)

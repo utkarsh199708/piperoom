@@ -333,6 +333,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	}
 	g.Edges = append(g.Edges, deps...)
 	b.addColumns(&g, p, info, fp, lineage)
+	addPIITags(&g, lineage)
 
 	return g, nil
 }

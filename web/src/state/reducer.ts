@@ -3,6 +3,7 @@
 // filling (seq > last_seq + 1) is the transport's job (see hooks/useRoom.ts).
 import type {
   ActionExecutedPayload,
+  AgentRecoveryCheckPayload,
   AgentVerificationPayload,
   ProposalPreviewedPayload,
   RoomSnapshot,
@@ -610,6 +611,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ...(state.snapshot_blocked?.[p.proposal_id] ? { blocked: state.snapshot_blocked[p.proposal_id] } : {}),
             // Left off when every layer has an owner, so such a proposal folds as before P2b.
             ...(p.fallback_layers && p.fallback_layers.length > 0 ? { fallback_layers: [...p.fallback_layers] } : {}),
+            // X2/X6: only a non-fix class is kept, so a fix folds exactly as before.
+            ...(p.class === 'recovery' || p.class === 'performance' ? { class: p.class } : {}),
           },
         ],
       }
@@ -665,7 +668,29 @@ function applyCore(state: RoomState, event: Event): RoomState {
         proposals: state.proposals.map((prop) => {
           if (prop.proposal_id !== p.proposal_id) return prop
           if (p.repeat && prop.verification && !prop.verification.repeat) return prop
-          return { ...prop, verification: p }
+          // X2: the counted verdict ends the polling; when it arrived is the end of "recovered in 3 min".
+          const counted = prop.class === 'recovery' && !p.repeat && p.outcome !== undefined
+          return {
+            ...prop,
+            verification: p,
+            ...(counted ? { recovery: { ...prop.recovery, verified_at: event.at } } : {}),
+          }
+        }),
+      }
+      break
+    }
+
+    // X2: progress of a recovery step's Verify. Only the newest poll is kept; a late or replayed
+    // older poll of the same step never moves the count back.
+    case 'agent.recovery_check': {
+      const p = as<AgentRecoveryCheckPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          const cur = prop.recovery?.check
+          if (cur && cur.step_index === p.step_index && cur.poll > p.poll) return prop
+          return { ...prop, recovery: { ...prop.recovery, check: p } }
         }),
       }
       break
@@ -739,7 +764,12 @@ function applyCore(state: RoomState, event: Event): RoomState {
         ...state,
         proposals: state.proposals.map((prop) =>
           prop.proposal_id === p.proposal_id
-            ? { ...prop, executed: [...prop.executed, p] }
+            ? {
+                ...prop,
+                executed: [...prop.executed, p],
+                // X2: the clock of "recovered in 3 min" starts when the last step finished ok.
+                ...(prop.class === 'recovery' && p.ok ? { recovery: { ...prop.recovery, ran_at: event.at } } : {}),
+              }
             : prop,
         ),
       }

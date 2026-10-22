@@ -1145,12 +1145,19 @@ closes; `--demo` forces it off.
   `compact_cdc_topic` (a CDC topic with `cleanup.policy` `compact` and no `delete`: deletes are compacted away, with or
   without a declaration). `configured`/`declared` are durations (`1d`, `36h`, `infinite`); `topic` or `table`;
   `retention_bytes?` when a size cap is set; `cleanup_policy?`; `text` one watcher-written line, at most 200 bytes,
-  shown as text. No declaration, or equal values, is no finding. A retention finding is `sev4`: it makes
-  `config_risk` fire (so it is in `/api/fleet` `signals_firing`) but opens no room on its own, whatever
+  shown as text. No declaration, or equal values, is no finding. **Lead rulings (batch 8):** a topic whose
+  `cleanup.policy` is `compact` without `delete` keeps the latest record of every key forever, so its configured
+  retention is `infinite` whatever `retention.ms` says (`retention.ms` deletes nothing without `delete`); a sink table
+  whose warehouse reports no retention setting keeps its rows forever, so it is `infinite` too. Both are judged
+  against the declaration in both directions like any other value (a compacted CDC topic declared `7d` is
+  `compact_cdc_topic` and `retention_longer_than_declared`). Under `delete`, a `retention.ms` of `0` or one that does not
+  parse is not judged. A retention finding is `sev4`: it makes `config_risk` fire (so it is in `/api/fleet` `signals_firing`) but opens no room on its own, whatever
   `config_risk`'s action; it rides along when another signal of the pipeline opens or joins a room. A topic config
   the watcher cannot read (no `DescribeConfigs` ACL) gives one INFO log and no finding. Names, durations and the
-  policy word only, never another config value. The agent sees these keys once `agent.AlertEvidenceText` (A4)
-  allow-lists them.
+  policy word only, never another config value. The agent sees each finding through `agent.AlertEvidenceText`
+  as `retention_risk=<topic or table>:<code>` with `configured`, `declared`, `retention_bytes` and `cleanup_policy`
+  when they have their documented shape (never `text`), both inside a `config_risk` signal and from the body's
+  top-level `config_risks` list (another signal opened or joined the room).
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`. F6 plans `rooms` as

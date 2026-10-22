@@ -134,3 +134,43 @@ func TestColumnsErrors(t *testing.T) {
 		t.Fatalf("rows err = %v", err)
 	}
 }
+
+// X7c TC3: the catalog read behind the PII tags names only catalog relations
+// after FROM and JOIN, and selects names, type names, positions and
+// nullability: never a table of the pipeline, so no row value can be read.
+func TestColumnsSQLCatalogOnly(t *testing.T) {
+	words := strings.Fields(columnsSQL)
+	var rels []string
+	for i, w := range words[:len(words)-1] {
+		if u := strings.ToUpper(w); u == "FROM" || u == "JOIN" {
+			rels = append(rels, words[i+1])
+		}
+	}
+	want := []string{"pg_catalog.pg_class", "pg_catalog.pg_namespace", "pg_catalog.pg_attribute"}
+	if !slices.Equal(rels, want) {
+		t.Fatalf("columnsSQL reads %v, want %v", rels, want)
+	}
+	sel, _, _ := strings.Cut(columnsSQL, "FROM")
+	for _, col := range []string{"attname", "format_type", "attnum", "attnotnull"} {
+		if !strings.Contains(sel, col) {
+			t.Fatalf("select list lost %s: %s", col, sel)
+		}
+	}
+	// Four output columns: three commas outside parentheses.
+	depth, top := 0, 0
+	for _, r := range sel {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				top++
+			}
+		}
+	}
+	if top != 3 {
+		t.Fatalf("select list has %d columns, want 4: %s", top+1, sel)
+	}
+}

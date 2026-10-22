@@ -274,6 +274,8 @@ type pipeState struct {
 	driftClosed map[string]time.Time
 	// cfgBase is each connector's approved config (config_drift.go).
 	cfgBase map[string]*driftBase
+	// ret is the retention memory (retention.go); nil while config_risk is off.
+	ret *retentionMem
 	// warned* keep "skipped" lines to one per episode.
 	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }
@@ -335,6 +337,8 @@ type Watcher struct {
 	chgFailing bool
 	// lagNoReaderLogged keeps the "no lag reader" line to one.
 	lagNoReaderLogged bool
+	// retNoReaderLogged keeps the "cannot read topic configs" line to one.
+	retNoReaderLogged bool
 
 	// Sample history and forecasts (forecast.go); nil samples = off.
 	samples SampleStore
@@ -489,6 +493,11 @@ func (w *Watcher) tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Before evaluate, which judges config_risk with these reads.
+	w.readRetention(ctx, now, ts, obs)
+	if ctx.Err() != nil {
+		return
+	}
 	w.mu.Lock()
 	fired := w.evaluate(now, ts, obs)
 	jobs := w.planSamples(now, ts, obs)
@@ -557,7 +566,8 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
 		if m == "" && ss.phase != phaseOK && ss.notified {
 			real = true
 		}
-		if ss.phase == phaseFiring {
+		if ss.phase == phaseFiring && id != retentionID {
+			// A retention finding never had a room of its own to close.
 			ss.ack()
 			if driftKind(id) != "" {
 				if ps.driftClosed == nil {

@@ -137,11 +137,29 @@ type Proposal struct {
 	// set while the policy has neither run nor been stopped; nil otherwise.
 	Scheduled *Scheduled `json:"scheduled,omitempty"`
 
+	// X8 staging (docs/api.md "X8 snapshot fields"). Stageable and
+	// StagingRequired depend on the server's actions and owners.yaml, so the
+	// room view sets them (RoomFor); Apply leaves Stageable empty and
+	// StagingRequired false. StageRunning is the newest proposal.stage_started
+	// with no proposal.staged after it (RoomFor hides it past expires_at);
+	// Staged is the newest proposal.staged, kept while its params_hash differs
+	// from the proposal's (only a matching one counts).
+	Stageable       []int                         `json:"stageable"`
+	StageRunning    *StageRunning                 `json:"stage_running,omitempty"`
+	Staged          *events.ProposalStagedPayload `json:"staged,omitempty"`
+	StagingRequired bool                          `json:"staging_required,omitempty"`
+	// stages counts the proposal's proposal.stage_started events: at most
+	// maxStagesPerProposal (service_stage.go).
+	stages int
+
 	// Origin is proposal.created.origin: "agent" or "driver"
 	// (POST /api/rooms/{id}/proposals); "" reads as "agent" and is normalised
 	// to it when the snapshot is folded. The auto-approve policy never
 	// schedules a driver's proposal (autoapprove.go). (P3c)
 	Origin string `json:"origin"`
+	// Class is proposal.created.class (X2/X6): "recovery" or "performance";
+	// "" (omitted) reads as "fix", so a fix proposal marshals as before.
+	Class string `json:"class,omitempty"`
 	// sched is the fold of the proposal's policy countdown (autoapprove.go).
 	sched schedState
 }
@@ -153,6 +171,17 @@ func proposalOrigin(o string) string {
 		return events.ProposalOriginAgent
 	}
 	return o
+}
+
+// StageRunning is a proposal.stage_started of the proposal with no
+// proposal.staged after it (open_proposals[].stage_running, X8). ParamsHash
+// is the stage's, for the room service; it is not part of the JSON.
+type StageRunning struct {
+	By         Person    `json:"by"`
+	StartedAt  time.Time `json:"started_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Steps      []int     `json:"steps"`
+	paramsHash string
 }
 
 // Scheduled mirrors the pending proposal.scheduled of a proposal
@@ -457,6 +486,28 @@ func clonePreview(in *events.ProposalPreviewedPayload) *events.ProposalPreviewed
 	return &c
 }
 
+// cloneStaged deep-copies a proposal.staged payload: its steps and their
+// results.
+func cloneStaged(in *events.ProposalStagedPayload) *events.ProposalStagedPayload {
+	if in == nil {
+		return nil
+	}
+	c := *in
+	c.Steps = make([]events.StepStage, len(in.Steps))
+	for i, st := range in.Steps {
+		c.Steps[i] = st
+		if st.Result != nil {
+			r := *st.Result
+			if st.Result.DryRun != nil {
+				dr := *st.Result.DryRun
+				r.DryRun = &dr
+			}
+			c.Steps[i].Result = &r
+		}
+	}
+	return &c
+}
+
 func cloneProposals(in []Proposal) []Proposal {
 	out := make([]Proposal, len(in))
 	for i, p := range in {
@@ -469,6 +520,13 @@ func cloneProposals(in []Proposal) []Proposal {
 			sc := *p.Scheduled
 			out[i].Scheduled = &sc
 		}
+		out[i].Stageable = append([]int{}, p.Stageable...)
+		if p.StageRunning != nil {
+			sr := *p.StageRunning
+			sr.Steps = append([]int{}, p.StageRunning.Steps...)
+			out[i].StageRunning = &sr
+		}
+		out[i].Staged = cloneStaged(p.Staged)
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
 			for k, v := range p.Approvals {
@@ -751,6 +809,9 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			FallbackLayers: append([]string{}, p.FallbackLayers...),
 			Origin:         proposalOrigin(p.Origin),
 		}
+		if p.Class != events.ActionClassFix {
+			np.Class = p.Class
+		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv
 			rest := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews))
@@ -785,6 +846,16 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			}
 			m[p.ProposalID] = p
 			snap.pendingPreviews = m
+		}
+
+	case events.ProposalStageStarted:
+		if p, ok := decode[events.ProposalStageStartedPayload](e); ok {
+			foldStageStarted(snap.OpenProposals, e, p)
+		}
+
+	case events.ProposalStaged:
+		if p, ok := decode[events.ProposalStagedPayload](e); ok {
+			foldStaged(snap.OpenProposals, p)
 		}
 
 	case events.ApprovalGiven:
@@ -876,6 +947,9 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 		}
 		if snap.OpenProposals[i].Approvals == nil {
 			snap.OpenProposals[i].Approvals = map[string]string{}
+		}
+		if snap.OpenProposals[i].Stageable == nil {
+			snap.OpenProposals[i].Stageable = []int{}
 		}
 	}
 	if snap.PendingSuggestions == nil {
@@ -975,6 +1049,40 @@ func isLastStep(proposals []Proposal, proposalID string, stepIndex int) bool {
 		}
 	}
 	return false
+}
+
+// foldStageStarted folds a proposal.stage_started into its open proposal:
+// the stage runs until a proposal.staged (or its expires_at, which the room
+// view and the stage route read), and it counts toward the per-proposal cap.
+// A stage of a proposal that is no longer open is dropped.
+func foldStageStarted(proposals []Proposal, e events.Event, p events.ProposalStageStartedPayload) {
+	for i := range proposals {
+		if proposals[i].ProposalID != p.ProposalID {
+			continue
+		}
+		proposals[i].stages++
+		proposals[i].StageRunning = &StageRunning{
+			By:         Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified},
+			StartedAt:  e.At.UTC(),
+			ExpiresAt:  p.ExpiresAt.UTC(),
+			Steps:      append([]int{}, p.Steps...),
+			paramsHash: p.ParamsHash,
+		}
+		return
+	}
+}
+
+// foldStaged folds a proposal.staged into its open proposal: it ends the
+// running stage and replaces the previous result (newest stage wins).
+func foldStaged(proposals []Proposal, p events.ProposalStagedPayload) {
+	for i := range proposals {
+		if proposals[i].ProposalID != p.ProposalID {
+			continue
+		}
+		proposals[i].StageRunning = nil
+		proposals[i].Staged = cloneStaged(&p)
+		return
+	}
 }
 
 // setApproval records a decision on a proposal's approvals map without
