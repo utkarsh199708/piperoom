@@ -427,8 +427,8 @@ func runEach(t *testing.T, reg *tools.Registry, id, table string, own, other *sp
 }
 
 // clientFree are the read tools that need no client of the set: runbook text is
-// embedded, and debezium_metrics answers "not configured" without a metrics URL.
-var clientFree = []string{"runbook_lookup", "debezium_metrics"}
+// embedded, and the debezium tools answer "not configured" without a metrics URL.
+var clientFree = []string{"runbook_lookup", "debezium_metrics", "debezium_snapshot_progress"}
 
 // TestTwoTenantsToolsHitOnlyTheirOwnClients is the core isolation test: each
 // pipeline's tools, actions and topology reach only the spy built from that

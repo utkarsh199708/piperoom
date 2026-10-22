@@ -120,7 +120,9 @@ func toolPackages() []toolPackage {
 			return kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners, Samples: samples})
 		}},
 		{name: "debezium tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
-			return debeziumtools.Register(reg, debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners})
+			// The source's row estimates give debezium_snapshot_progress its ETA (X6b).
+			rows, _ := w.Source.(debeziumtools.RowEstimator)
+			return debeziumtools.Register(reg, debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners, Rows: rows})
 		}},
 		// Schedule is left nil: batchtools.Register falls back to the
 		// orchestrator's clients.DAGScheduleReader (*airflow.Client), the one
