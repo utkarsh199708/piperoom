@@ -59,6 +59,9 @@ type reading struct {
 	withDur bool
 	// value and threshold are for the log line.
 	value, threshold string
+	// node, when set, is the topology node the status row names (retention
+	// findings name their topic or table; signalNode derives the others).
+	node string
 	// ev is this signal's evidence. Built fresh each tick and never changed
 	// afterwards, so it can be read without the lock.
 	ev map[string]any

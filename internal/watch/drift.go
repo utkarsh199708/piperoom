@@ -131,10 +131,10 @@ func (ps *pipeState) driftIDs() []string {
 }
 
 // ids are every signal id of the pipeline in title order: the fixed ones,
-// then its drift ids, then its config_drift ids (config_drift.go). Caller
-// holds w.mu.
+// then its drift ids, then its config_drift ids (config_drift.go), then its
+// retention state (retention.go). Caller holds w.mu.
 func (ps *pipeState) ids() []string {
-	return slices.Concat(signalIDs, ps.driftIDs(), configDriftIDs(ps))
+	return slices.Concat(signalIDs, ps.driftIDs(), configDriftIDs(ps), retentionIDs(ps))
 }
 
 // primaryKeyer is implemented by the source and the warehouse clients that
