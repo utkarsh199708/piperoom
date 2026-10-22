@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -395,5 +396,46 @@ func TestForecastRoomPostmortemSpendsNothing(t *testing.T) {
 	}
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("postmortem model calls = %d, want 0", n)
+	}
+}
+
+// A quiet forecast room spends nothing on the first look either: no triage
+// pass at open, none on a later watcher post (even past the 15 min re-fire
+// age), and exactly one when the first steer starts the agent.
+func TestForecastRoomRunsNoFirstLookUntilAsked(t *testing.T) {
+	var mu sync.Mutex
+	cur := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	now := func() time.Time { mu.Lock(); defer mu.Unlock(); return cur }
+	tr := &fakeTriager{}
+	svc, runs := newTriageService(t, 2, tr, now)
+	ctx := context.Background()
+	snap, created, err := svc.OpenAlertRoom(ctx, forecastAlert("orders"))
+	if err != nil || !created || snap.Origin != events.RoomOriginForecast {
+		t.Fatalf("open forecast room: created=%v origin=%q err=%v", created, snap.Origin, err)
+	}
+	mu.Lock()
+	cur = cur.Add(20 * time.Minute)
+	mu.Unlock()
+	if err := postWatcher(ctx, svc, snap.ID, forecastEvidence("orders")); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := tr.n(); n != 0 {
+		t.Fatalf("triage passes in a quiet room = %d, want 0", n)
+	}
+	if _, _, ok := runs.get(snap.ID); ok {
+		t.Fatal("a quiet room started its agent")
+	}
+
+	arjun := mustUser(t, svc, "arjun")
+	if _, err := svc.GrantControl(ctx, arjun, snap.ID, "arjun"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Steer(ctx, arjun, snap.ID, "is the slot really growing?"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 2*time.Second, func() bool { _, _, ok := runs.get(snap.ID); return ok && tr.n() == 1 })
+	if a, _, _ := runs.get(snap.ID); !a.At.Equal(snap.OpenedAt) {
+		t.Fatalf("run's Alert.At = %v, want the room's opened_at %v (the steer came 20 min later)", a.At, snap.OpenedAt)
 	}
 }
