@@ -282,40 +282,8 @@ func tlsCheck(ctx context.Context, req ProbeRequest, env Env) connprobe.Check {
 		return connprobe.Check{Status: connprobe.StatusSkip, Detail: "TCP failed first"}
 	}
 	defer conn.Close()
-	// The probe reports the certificate and the verification verdict instead
-	// of refusing the handshake, so verification runs explicitly in the
-	// callback below and its outcome goes into the check's detail. Nothing is
-	// sent or trusted over this connection; it closes after the handshake.
-	verr := errors.New("the endpoint presented no certificate")
-	var leaf *x509.Certificate
-	cfg := &tls.Config{
-		ServerName:         req.Host,
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true, //nolint:gosec // VerifyPeerCertificate below verifies and reports
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			certs := make([]*x509.Certificate, 0, len(rawCerts))
-			for _, raw := range rawCerts {
-				c, perr := x509.ParseCertificate(raw)
-				if perr != nil {
-					verr = perr
-					return nil
-				}
-				certs = append(certs, c)
-			}
-			if len(certs) == 0 {
-				return nil
-			}
-			leaf = certs[0]
-			pool := x509.NewCertPool()
-			for _, c := range certs[1:] {
-				pool.AddCert(c)
-			}
-			_, verr = leaf.Verify(x509.VerifyOptions{DNSName: req.Host, Intermediates: pool})
-			return nil
-		},
-	}
-	tc := tls.Client(conn, cfg)
-	if err := tc.HandshakeContext(cctx); err != nil {
+	leaf, verr, err := handshakeManualVerify(cctx, conn, req.Host)
+	if err != nil {
 		return connprobe.Check{Status: connprobe.StatusFail, Problem: "TLS handshake failed", Fix: "check the endpoint's TLS settings"}
 	}
 	if leaf == nil {
@@ -331,4 +299,46 @@ func tlsCheck(ctx context.Context, req ProbeRequest, env Env) connprobe.Check {
 		Detail: fmt.Sprintf("subject %q, issuer %q, expires %s (%d days), %s",
 			clip(leaf.Subject.CommonName), clip(leaf.Issuer.CommonName), leaf.NotAfter.UTC().Format("2006-01-02"), days, verified),
 	}
+}
+
+// handshakeManualVerify runs the probe's TLS handshake with the standard
+// chain verification moved into VerifyPeerCertificate, where it runs against
+// the system roots and its verdict comes back as verifyErr. The probe's job
+// is to report an invalid certificate's subject and expiry (the expired
+// certificate IS the diagnostic), which the default in-handshake check would
+// hide behind a bare handshake error; InsecureSkipVerify moves the check, it
+// does not remove it. Nothing is sent or trusted over the connection, and the
+// caller closes it right after the handshake.
+func handshakeManualVerify(ctx context.Context, conn net.Conn, host string) (leaf *x509.Certificate, verifyErr, err error) {
+	verifyErr = errors.New("the endpoint presented no certificate")
+	manualVerifyCfg := &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // the check runs in VerifyPeerCertificate below
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			certs := make([]*x509.Certificate, 0, len(rawCerts))
+			for _, raw := range rawCerts {
+				c, perr := x509.ParseCertificate(raw)
+				if perr != nil {
+					verifyErr = perr
+					return nil
+				}
+				certs = append(certs, c)
+			}
+			if len(certs) == 0 {
+				return nil
+			}
+			leaf = certs[0]
+			pool := x509.NewCertPool()
+			for _, c := range certs[1:] {
+				pool.AddCert(c)
+			}
+			_, verifyErr = leaf.Verify(x509.VerifyOptions{DNSName: host, Intermediates: pool})
+			return nil
+		},
+	}
+	if herr := tls.Client(conn, manualVerifyCfg).HandshakeContext(ctx); herr != nil {
+		return nil, nil, herr
+	}
+	return leaf, verifyErr, nil
 }
