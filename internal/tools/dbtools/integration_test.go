@@ -39,12 +39,7 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-// TestPgPublicationTablesIntegration runs the pg_publication_tables tool end
-// to end against the dev stack: it resolves the orders pipeline from
-// dev/owners.yaml, reads the connector user and publication name from the
-// dev stack's Connect (the tool has no default role) and reads the real
-// dbz_publication from the source Postgres.
-// TestConnectorScopeGapIntegration runs connector_scope_gap end to end against
+// TestConnectorScopeGapIntegration runs pg_connector_scope_gap end to end against
 // the dev stack's clean baseline: the connector and owners.yaml both name
 // public.orders, so there is no outside-scope table and no gap.
 func TestConnectorScopeGapIntegration(t *testing.T) {
@@ -66,14 +61,14 @@ func TestConnectorScopeGapIntegration(t *testing.T) {
 	if err := Register(reg, Deps{Src: db, Owners: o, Connect: cc}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	tt, ok := reg.Get("connector_scope_gap")
+	tt, ok := reg.Get("pg_connector_scope_gap")
 	if !ok {
-		t.Fatal("connector_scope_gap not registered")
+		t.Fatal("pg_connector_scope_gap not registered")
 	}
 
 	res, err := tt.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"pipeline_id":"orders"}`))
 	if err != nil {
-		t.Fatalf("connector_scope_gap: %v", err)
+		t.Fatalf("pg_connector_scope_gap: %v", err)
 	}
 	if !strings.Contains(res.Summary, "public.orders: declared=yes, in_connector=yes, in_publication=yes") {
 		t.Fatalf("summary missing the healthy orders line: %q", res.Summary)
@@ -87,6 +82,11 @@ func TestConnectorScopeGapIntegration(t *testing.T) {
 	}
 }
 
+// TestPgPublicationTablesIntegration runs the pg_publication_tables tool end
+// to end against the dev stack: it resolves the orders pipeline from
+// dev/owners.yaml, reads the connector user and publication name from the
+// dev stack's Connect (the tool has no default role) and reads the real
+// dbz_publication from the source Postgres.
 func TestPgPublicationTablesIntegration(t *testing.T) {
 	cfg := testenv.Require(t)
 

@@ -77,7 +77,7 @@ type connectorConfig struct {
 	publication       string
 	publicationSource string
 	// cfg is the connector's live configuration, kept for tools that compare
-	// more than the publication (connector_scope_gap reads the table filters).
+	// more than the publication (pg_connector_scope_gap reads the table filters).
 	cfg map[string]string
 }
 

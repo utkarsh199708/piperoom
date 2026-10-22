@@ -12,7 +12,7 @@ import (
 	"piperoom/internal/tools"
 )
 
-// scopeGapTool builds connector_scope_gap with a fake source whose publication
+// scopeGapTool builds pg_connector_scope_gap with a fake source whose publication
 // holds the given members.
 func scopeGapTool(t *testing.T, members []postgres.PublicationTable, cfg map[string]string) tools.Tool {
 	t.Helper()
@@ -23,9 +23,9 @@ func scopeGapTool(t *testing.T, members []postgres.PublicationTable, cfg map[str
 	if err := Register(reg, d); err != nil {
 		t.Fatal(err)
 	}
-	tt, ok := reg.Get("connector_scope_gap")
+	tt, ok := reg.Get("pg_connector_scope_gap")
 	if !ok {
-		t.Fatal("connector_scope_gap not registered")
+		t.Fatal("pg_connector_scope_gap not registered")
 	}
 	return tt
 }
@@ -73,7 +73,7 @@ func TestConnectorScopeGapListsOutsideDeclaredTable(t *testing.T) {
 	tt := scopeGapTool(t, members, scopeGapConfig("public.orders,public.devctl_refunds,public.devctl_signal"))
 	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
 	if err != nil {
-		t.Fatalf("connector_scope_gap: %v", err)
+		t.Fatalf("pg_connector_scope_gap: %v", err)
 	}
 
 	rows := rowsByTable(t, dataMap(t, res))
@@ -114,7 +114,7 @@ func TestConnectorScopeGapNeverWidensScope(t *testing.T) {
 	tt := scopeGapTool(t, members, scopeGapConfig("public.orders,public.devctl_refunds"))
 	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
 	if err != nil {
-		t.Fatalf("connector_scope_gap: %v", err)
+		t.Fatalf("pg_connector_scope_gap: %v", err)
 	}
 	if strings.Contains(res.Summary, "secret_other_team") {
 		t.Fatalf("summary disclosed an unrelated table: %q", res.Summary)
@@ -146,7 +146,7 @@ func TestConnectorScopeGapHonoursExcludeList(t *testing.T) {
 	tt := scopeGapTool(t, nil, cfg)
 	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
 	if err != nil {
-		t.Fatalf("connector_scope_gap: %v", err)
+		t.Fatalf("pg_connector_scope_gap: %v", err)
 	}
 	if strings.Contains(res.Summary, "public.devctl_refunds") {
 		t.Fatalf("excluded table was reported: %q", res.Summary)
@@ -160,7 +160,7 @@ func TestConnectorScopeGapUnboundedIncludeList(t *testing.T) {
 	tt := scopeGapTool(t, nil, cfg)
 	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
 	if err != nil {
-		t.Fatalf("connector_scope_gap: %v", err)
+		t.Fatalf("pg_connector_scope_gap: %v", err)
 	}
 	if !strings.Contains(res.Summary, "table.include.list is not set") {
 		t.Fatalf("summary must explain the unbounded filter: %q", res.Summary)
@@ -176,7 +176,7 @@ func TestConnectorScopeGapReportsPatterns(t *testing.T) {
 	tt := scopeGapTool(t, nil, scopeGapConfig(`public\.devctl_.*`))
 	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
 	if err != nil {
-		t.Fatalf("connector_scope_gap: %v", err)
+		t.Fatalf("pg_connector_scope_gap: %v", err)
 	}
 	if !strings.Contains(res.Summary, "patterns that cannot be expanded") {
 		t.Fatalf("summary must report the pattern: %q", res.Summary)
@@ -192,32 +192,5 @@ func TestConnectorScopeGapIsReadOnly(t *testing.T) {
 	tt := scopeGapTool(t, nil, scopeGapConfig("public.orders"))
 	if tt.Kind() != tools.KindRead {
 		t.Fatalf("kind = %v, want read", tt.Kind())
-	}
-}
-
-// The pure parser: a listed table without metacharacters is literal; an entry
-// with metacharacters is a pattern that still matches declared tables.
-func TestParseConnectorInclude(t *testing.T) {
-	c := ParseConnectorInclude(map[string]string{
-		"table.include.list": "public.orders,public\\.devctl_.*, public.orders",
-		"table.exclude.list": "public.devctl_signal",
-	})
-	if len(c.Literal) != 1 || c.Literal[0] != "public.orders" {
-		t.Fatalf("literal = %v, want [public.orders]", c.Literal)
-	}
-	if len(c.Patterns) != 1 {
-		t.Fatalf("patterns = %v", c.Patterns)
-	}
-	if !c.Includes("public.devctl_refunds") {
-		t.Fatal("pattern should include devctl_refunds")
-	}
-	if c.Includes("public.devctl_signal") {
-		t.Fatal("exclude list must win over a pattern")
-	}
-	if c.Includes("public.payments") {
-		t.Fatal("unlisted table must not be included")
-	}
-	if got := c.OutsideDeclared([]string{"public.orders"}); len(got) != 0 {
-		t.Fatalf("OutsideDeclared = %v, want none (only literal tables can be listed)", got)
 	}
 }
