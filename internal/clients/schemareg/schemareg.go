@@ -58,7 +58,8 @@ func NewSecure(baseURL string, sec netsec.HTTP) (*Client, error) {
 	return New(baseURL, hc), nil
 }
 
-// Subjects lists all registered subjects.
+// Subjects lists all registered subjects. A soft-deleted subject is absent;
+// SubjectsIncludingDeleted lists it too.
 func (c *Client) Subjects(ctx context.Context) ([]string, error) {
 	var out []string
 	if err := c.do(ctx, http.MethodGet, "/subjects", nil, &out); err != nil {
@@ -67,10 +68,38 @@ func (c *Client) Subjects(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// Versions lists the version numbers of a subject.
+// SubjectsIncludingDeleted lists live and soft-deleted subjects
+// (GET /subjects?deleted=true). A subject that was permanently deleted, or
+// never registered, is in neither list. Confluent's ?deleted=true is the only
+// way to see a soft-deleted subject: it still exists and can be restored.
+func (c *Client) SubjectsIncludingDeleted(ctx context.Context) ([]string, error) {
+	var out []string
+	if err := c.do(ctx, http.MethodGet, "/subjects?deleted=true", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// Versions lists the version numbers of a subject. A soft-deleted version is
+// absent; VersionsIncludingDeleted lists it too. A missing subject wraps
+// clients.ErrNotFound.
 func (c *Client) Versions(ctx context.Context, subject string) ([]int, error) {
 	var out []int
 	path := "/subjects/" + url.PathEscape(subject) + "/versions"
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// VersionsIncludingDeleted lists a subject's live and soft-deleted versions
+// (.../versions?deleted=true). A soft-deleted subject or version still exists
+// and can be restored; one that was permanently deleted, or a subject never
+// registered, wraps clients.ErrNotFound in both lists. It is not on
+// clients.SchemaRegistryReader; kafkatools asserts it at use time.
+func (c *Client) VersionsIncludingDeleted(ctx context.Context, subject string) ([]int, error) {
+	var out []int
+	path := "/subjects/" + url.PathEscape(subject) + "/versions?deleted=true"
 	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}

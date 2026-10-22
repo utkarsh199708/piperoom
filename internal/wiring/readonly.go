@@ -71,13 +71,48 @@ func readConnect(w *Wired) clients.ConnectClient {
 	return readOnlyConnect{r: w.Connect}
 }
 
+// deletedSubjectLister is the registry's deleted-state read pair (KAN-407).
+// It mirrors kafkatools' deletedSubjectReader, which the registry tools find
+// by a type assertion on their client; TestReadOnlyClients fails if the
+// read-only wrapper stops forwarding it.
+type deletedSubjectLister interface {
+	SubjectsIncludingDeleted(ctx context.Context) ([]string, error)
+	VersionsIncludingDeleted(ctx context.Context, subject string) ([]int, error)
+}
+
+// The real client has the deleted-state reads, so the read tools keep them
+// through the wrapper.
+var _ deletedSubjectLister = (*schemareg.Client)(nil)
+
+// readOnlyRegistryDeleted is readOnlyRegistry plus the deleted-state reads.
+// Like readOnlyRegistryDryRun, it exists so the read-only value keeps the
+// extra reads exactly when the real client has them: a registry without them
+// stays a plain readOnlyRegistry, and the tools' assertion fails as it would
+// on the client itself.
+type readOnlyRegistryDeleted struct {
+	readOnlyRegistry
+	d deletedSubjectLister
+}
+
+func (s readOnlyRegistryDeleted) SubjectsIncludingDeleted(ctx context.Context) ([]string, error) {
+	return s.d.SubjectsIncludingDeleted(ctx)
+}
+func (s readOnlyRegistryDeleted) VersionsIncludingDeleted(ctx context.Context, subject string) ([]int, error) {
+	return s.d.VersionsIncludingDeleted(ctx, subject)
+}
+
 // readRegistry returns w's Schema Registry client for read tools: nil when
-// none is configured, else read-only.
+// none is configured, else read-only, with the deleted-state reads when the
+// client has them.
 func readRegistry(w *Wired) clients.SchemaRegistryClient {
 	if w.Registry == nil {
 		return nil
 	}
-	return readOnlyRegistry{r: w.Registry}
+	ro := readOnlyRegistry{r: w.Registry}
+	if d, ok := w.Registry.(deletedSubjectLister); ok {
+		return readOnlyRegistryDeleted{readOnlyRegistry: ro, d: d}
+	}
+	return ro
 }
 
 // With write mode off the actions get read-only clients too (writemode.go).
@@ -145,8 +180,13 @@ func readOnlyActionConnect(w *Wired) clients.ConnectClient {
 // write mode on), else read-only, with the compatibility check when the
 // client has it.
 func readOnlyActionRegistry(w *Wired) clients.SchemaRegistryClient {
-	ro, ok := readRegistry(w).(readOnlyRegistry)
-	if !ok {
+	var ro readOnlyRegistry
+	switch v := readRegistry(w).(type) {
+	case readOnlyRegistry:
+		ro = v
+	case readOnlyRegistryDeleted:
+		ro = v.readOnlyRegistry
+	default:
 		return noRegistry{}
 	}
 	if c, ok := ro.r.(registryChecker); ok {
