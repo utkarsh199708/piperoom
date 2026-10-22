@@ -19,6 +19,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
+	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
 
@@ -145,8 +146,9 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 	return waitForInput(ctx, deps, emit)
 }
 
-// waitForInput answers steers, comments and approval results until the room
-// closes. An inbox that is closed (a shadow room) ends it at once with nil.
+// waitForInput answers steers, comments, forwarded suggestions and approval
+// results until the room closes. An inbox that is closed (a shadow room) ends
+// it at once with nil.
 func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, any) error) error {
 	for ctx.Err() == nil {
 		if err := deps.Inbox.Wait(ctx); err != nil {
@@ -157,19 +159,38 @@ func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, a
 			return nil
 		}
 		for _, in := range inputs {
-			switch in.Kind {
-			case "steer":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it: " + in.Text})
-			case "comment":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Noted from " + in.Actor.Name + ": " + in.Text, ReplyTo: in.CommentID})
-			case "approval_result":
-				_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: in.Text})
-			case "action_result":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: in.Text})
-			}
+			handleInput(ctx, deps, in, emit)
 		}
 	}
 	return nil
+}
+
+// handleInput answers one human input. The switch mirrors the input kinds of
+// internal/agent/contract.go; a kind the demo does not act on is logged at
+// debug level rather than dropped silently, so the next kind added to the
+// contract shows up in a demo run (KAN-391).
+func handleInput(ctx context.Context, deps agent.Deps, in agent.HumanInput, emit func(events.Type, any) error) {
+	switch in.Kind {
+	case "steer":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it: " + in.Text})
+	case "suggestion":
+		// A forwarded suggestion is the suggester's words, not the driver's
+		// (the real agent wraps it as untrusted data), so the demo only
+		// acknowledges it and never acts on its content. The cap keeps one
+		// large paste from crowding the room.
+		text, _ := tools.Truncate(in.Text)
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it (forwarded suggestion): " + text})
+	case "comment":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Noted from " + in.Actor.Name + ": " + in.Text, ReplyTo: in.CommentID})
+	case "approval_result":
+		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: in.Text})
+	case "action_result":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: in.Text})
+	default:
+		if deps.Logger != nil {
+			deps.Logger.DebugContext(ctx, "demo: no scripted handler for human input kind", "kind", in.Kind, "seq", in.Seq)
+		}
+	}
 }
 
 // WriteHandoff is a fake hand-off writer returning the fixture summary.
