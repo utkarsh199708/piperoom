@@ -81,7 +81,15 @@ type p3World struct {
 	sinkEmpty                 bool // analytics.orders has no updated_at yet
 	riFull                    bool // public.orders REPLICA IDENTITY FULL
 	placeholders              int  // analytics.orders rows holding the TOAST placeholder
-	sql                       []string
+	// X2e recovery scenarios: the marked orders of each break, the ones
+	// written while order-sync was down (not read yet), whether retention
+	// deleted all but the last lost batch, and the re-snapshot signals sent.
+	lostLo, lostHi, lastBatchLo int64
+	skippedLo, skippedHi        int64
+	unreadLost, unreadSkipped   []int64
+	retentionCut                bool
+	resnapshots                 int
+	sql                         []string
 }
 
 func newP3World(t *testing.T) *p3World {
@@ -345,6 +353,53 @@ func (w *p3World) exec(db, q string) (string, error) {
 		return strings.Join(ids, ","), nil
 	case strings.HasPrefix(q, "UPDATE orders SET status = status || '', updated_at = now() WHERE id IN ("):
 		w.placeholders = 0
+	// X2e: rows-lost-after-retention and consumer-skipped-range
+	case strings.HasPrefix(q, sqlLostBatchPrefix):
+		lo := w.nextID + 1
+		ids := w.insertStreamed(lostBatchSize)
+		if w.lostLo == 0 {
+			w.lostLo = lo
+		}
+		w.lostHi, w.lastBatchLo = w.nextID, lo
+		if !w.consumerUp {
+			w.unreadLost = append(w.unreadLost, ids...)
+		}
+		return fmt.Sprintf("%d %d", lo, w.nextID), nil
+	case q == sqlLostSpan:
+		return idSpan(w.lostLo, w.lostHi), nil
+	case q == sqlInsertSkipped:
+		lo := w.nextID + 1
+		ids := w.insertStreamed(skippedOrders)
+		w.skippedLo, w.skippedHi = lo, w.nextID
+		if !w.consumerUp {
+			w.unreadSkipped = append(w.unreadSkipped, ids...)
+		}
+		return fmt.Sprintf("%d %d", lo, w.nextID), nil
+	case q == sqlSkippedSpan:
+		return idSpan(w.skippedLo, w.skippedHi), nil
+	case strings.HasPrefix(q, sqlSourceIDs):
+		var lo, hi int64
+		if _, err := fmt.Sscanf(strings.TrimPrefix(q, sqlSourceIDs), "%d AND %d", &lo, &hi); err != nil {
+			return "", fmt.Errorf("fake: %q: %w", q, err)
+		}
+		return strconv.FormatInt(max(min(hi, w.nextID)-max(lo, 1001)+1, 0), 10), nil
+	case q == sqlSignalExists:
+		if w.signalExists {
+			return "t", nil
+		}
+		return "f", nil
+	case q == sqlDropSignal:
+		w.signalExists = false
+	case strings.HasPrefix(q, sqlResnapshotPrefix):
+		if q != sqlResnapshotSignal(w.lostLo, w.lostHi) {
+			return "", fmt.Errorf("fake postgres: re-snapshot signal for the wrong range: %s", q)
+		}
+		w.resnapshots++
+		if w.signalExists && w.streaming() && w.consumerUp {
+			for id := w.lostLo; id <= w.lostHi; id++ {
+				w.loaded[id] = true
+			}
+		}
 	// dlq-backlog
 	case q == sqlInsertGift:
 		w.sourceGift += giftOrders
@@ -370,6 +425,54 @@ func (w *p3World) exec(db, q string) (string, error) {
 		return "", fmt.Errorf("fake postgres: unexpected SQL on %s: %s", db, q)
 	}
 	return "", nil
+}
+
+// insertStreamed writes n orders that Debezium streams to the orders topic,
+// loaded at once when order-sync runs. Caller holds w.mu.
+func (w *p3World) insertStreamed(n int) []int64 {
+	ids := make([]int64, n)
+	recs := make([]*kgo.Record, n)
+	for i := range ids {
+		w.nextID++
+		ids[i] = w.nextID
+		recs[i] = &kgo.Record{Key: []byte(strconv.FormatInt(w.nextID, 10)), Value: []byte("order")}
+		if w.consumerUp {
+			w.loaded[w.nextID] = true
+		}
+	}
+	w.produce(ordersTopic, recs...)
+	return ids
+}
+
+func idSpan(lo, hi int64) string {
+	if lo == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d %d", lo, hi)
+}
+
+// committedAtEnd reports whether order-sync's committed offsets on the orders
+// topic are its end offsets (a reset to latest). Caller holds w.mu.
+func (w *p3World) committedAtEnd() bool {
+	adm := kadm.NewClient(w.raw)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	fetched, err := adm.FetchOffsets(ctx, ordersGroup)
+	if err != nil || fetched.Error() != nil {
+		return false
+	}
+	ends, err := adm.ListEndOffsets(ctx, ordersTopic)
+	if err != nil {
+		return false
+	}
+	n := 0
+	ok := true
+	ends.Each(func(e kadm.ListedOffset) {
+		c, has := fetched.Lookup(ordersTopic, e.Partition)
+		n++
+		ok = ok && has && c.At == e.Offset
+	})
+	return ok && n > 0
 }
 
 func (w *p3World) produceRefunds(n int) {
@@ -431,6 +534,20 @@ func (w *p3World) compose(_ context.Context, env map[string]string, args ...stri
 				w.nullTS = 0
 			}
 		}
+		// X2e: what order-sync reads of the orders written while it was
+		// down. After a retention cut only the last lost batch is still on
+		// the topic; after a reset to latest none of the skipped ones is.
+		for _, id := range w.unreadLost {
+			if !w.retentionCut || id >= w.lastBatchLo {
+				w.loaded[id] = true
+			}
+		}
+		if len(w.unreadSkipped) > 0 && !w.committedAtEnd() {
+			for _, id := range w.unreadSkipped {
+				w.loaded[id] = true
+			}
+		}
+		w.unreadLost, w.unreadSkipped = nil, nil
 		if w.skipOps == "" && w.atStart() {
 			// The good build re-reads the topic from the reset offsets and
 			// loads every order the bad build skipped.

@@ -362,6 +362,9 @@ var syntheticLabels = map[string]Label{
 	"consumer-duplicates": {"kafka", []string{"same lsn", "redeliver*", "same key"}},
 	"sink-dropped-column": {"consumer", []string{"upsert", "2.16.1"}},
 	"toast-placeholder":   {"kafka-connect", []string{"replica identity", "toast*"}},
+	// The X2e recovery scenarios (KAN-427).
+	"rows-lost-after-retention": {"kafka", []string{"retention", "log start", "deleted"}},
+	"consumer-skipped-range":    {"consumer", []string{"reset", "latest", "skipp*"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -431,6 +434,13 @@ var syntheticTruth = map[string]map[string]truth{
 	"consumer-duplicates": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"sink-dropped-column": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"toast-placeholder":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	// X2e: the lazy texts are the reconciliation titles, which name the
+	// source and the warehouse and no cause. The wrong texts blame the
+	// connector (kafka-connect, not kafka) and a consumer filter (the right
+	// layer, the wrong cause). The matcher misses the layer of the
+	// rows-lost good text: the clause that says what failed names order-sync.
+	"rows-lost-after-retention": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"consumer-skipped-range":    {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.

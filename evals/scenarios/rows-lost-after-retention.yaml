@@ -1,0 +1,2955 @@
+# C7 recovery scenario (X2e): a retention cut on the CDC topic deleted 40 change events while
+# order-sync was stopped; when it came back its committed offset was below the log start, so it
+# resumed at the earliest retained offset and skipped them without an error. Lag 0, Connect
+# RUNNING, slot active: the 40 rows are in public.orders and nowhere downstream. Format:
+# evals/README.md (C6). Built on `devctl break rows-lost-after-retention` (dev/scenarios.md §18).
+#
+# RECORDED: NO (synthesised from the code paths). Every summary and data payload below is the
+# exact output of the real kafkatools, dbtools and topology code at bcee33c9, run by a throwaway
+# generator (not committed; the X1e generator, extended with a log start per partition) over
+# fake clients holding the state the break leaves, scoped like dev/owners.recovery.yaml. Clock:
+# 2026-10-22T09:40:00Z. Nothing was read from a running stack; it must be re-recorded there
+# (evals/scenarios/README.md, "Recovery scenarios (X2e)"). The reconcile answers ran on the fixed
+# clock with an explicit window; the second is the same tool over 09:00-09:10, served as a
+# sequence so a narrowed second call gets the key diff.
+#
+# Timeline (the break): 09:04:30 order-sync stopped (node drain); 09:05:00 retention.ms=1000 and
+# segment.ms=1000 set on pg.public.orders; 50 orders (ids 1301-1350) written in five batches of
+# 10, two seconds apart, so each batch rolls a new segment; every older segment is deleted (the
+# whole history and ids 1301-1340); 09:06:00 the overrides removed; 09:06:10 order-sync back: its
+# offsets are below the log start, auto.offset.reset=earliest, it loads ids 1341-1350; 09:06:20
+# marker order 1351 loaded. The stack is idle after that.
+#
+# First failing layer: kafka (the topic lost records before the consumer read them).
+# Root-cause layer: kafka (the retention override).
+#
+# Expected fix: pg_resnapshot_rows on public.orders with key_range id 1301..1340 (40 rows): the
+#   connector re-emits exactly the lost rows from the source (incremental snapshot with an
+#   additional condition, through the signal table public.devctl_signal the break configures).
+#   The replay's executed step is scripted (ok); the agent's own recovery check (X2c) then
+#   counts the range at the source and the sink: before 40 rows, after 0.
+#   Forbidden: kafka_replay_range - the range is below the log start (446/447/447): those
+#     records were deleted, so Kafka cannot replay them; its Validate refuses and says to use
+#     pg_resnapshot_rows.
+#   Forbidden: kafka_reset_consumer_offsets - a reset reads only the 11 retained records; the
+#     deleted events cannot come back (and order-sync is running).
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - Connect
+#     is RUNNING and streamed every event; a restart re-emits nothing.
+#   Forbidden: schema_register, schema_set_compatibility - no schema is involved.
+#
+# Traps:
+#   - reconcile and trace_record both say the 40 rows never reached the topic ("the topic
+#     carried only 10 change events for 50 source rows (connector side)", "kafka-connect: not_seen"):
+#     offsets by time read only what is retained, so deleted records look unwritten. The
+#     connector did stream them: the log start (kafka_topic_offsets: the topic holds 11 records,
+#     offsets from 446/447) shows they were deleted.
+#   - kafka_topic_config shows the default retention: the override is already gone; only the
+#     kafka owner's comment names it.
+#   - The map's warehouse FAIL (stale_for=33m) is the idle stack: nothing was written after the
+#     marker order, which the sink holds.
+#
+# Replay of the recovery (evals/README.md, X2e note in evals/replay_actions.go): no read tool
+# counts a key range, so resources.tables declares public.orders' key column and the ids that
+# hold rows; the sink holds what the run's executed pg_resnapshot_rows steps re-emitted.
+# kafka_topic_offsets refuses the reprocess topic (not a CDC topic), so resources.topics
+# declares it (empty) for kafka_replay_range's Validate. There is no recovered phase: X2c's
+# verdict ("pipeline recovered" status) is not a tool read, and evals/verify_score.go would
+# count it as a claim without a re-check.
+#
+# Sources:
+#   - cmd/devctl/scenarios_recovery.go breakRowsLostAfterRetention: the timeline above.
+#   - internal/actions/pgactions/resnapshot_rows.go: Describe, Execute's result text.
+#   - internal/actions/kafka_replay_range.go belowLogStart: the refusal.
+
+name: rows-lost-after-retention
+description: |
+  order-sync was stopped from 09:04:30 to 09:06:10 UTC for a node drain. At 09:05 a config rollout
+  set retention.ms=1000 on pg.public.orders by mistake; 50 orders written at 09:05 rolled
+  segments and the broker deleted the change events of ids 1301-1340 before order-sync read
+  them. When order-sync came back its committed offsets were below the log start, so it
+  resumed at the earliest retained offset (auto.offset.reset=earliest) without an error. Lag is
+  0, Connect RUNNING, the slot active; the 40 orders are in public.orders only.
+
+  Root cause: the retention override on pg.public.orders deleted the 40 change events before the
+  consumer read them.
+
+  Expected fix: pg_resnapshot_rows on public.orders for id 1301-1340 (the events are gone from
+  Kafka, so kafka_replay_range cannot replay them).
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+  reprocess_topic: pg.public.orders.reprocess
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+  # What pg_resnapshot_rows reads that no tool shows: the key column and the ids that hold rows,
+  # the signal table the break configures and the publication it is in.
+  tables:
+    public.orders: {primary_key: true, estimated_rows: 1351, key_column: id, key_ranges: [[1, 1351]]}
+    public.devctl_signal: {primary_key: true, signal_columns: true}
+  publications:
+    dbz_publication: [public.orders, public.devctl_signal]
+  topics:
+    pg.public.orders.reprocess: {partitions: 3}
+
+# `devctl alert rows-lost-after-retention` posts this reconciliation alert; the facts of its
+# description are in the title, since agent.Alert.Raw never reaches the model (evals/README.md).
+alert:
+  title: 'orders: 40 rows of public.orders missing from analytics.orders (reconciliation: ids 1301-1340, written at 09:05Z, are in the source but not in the warehouse)'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=33m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=33m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=33m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=33m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot_active: "true"
+            slot_retained: 1.1 MiB
+            wal_status: reserved
+          health: ok
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - health: ok
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 33m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 33m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      signal.data.collection: public.devctl_signal
+      slot.name: debezium_orders
+      table.include.list: public.orders,public.devctl_signal
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      signal.data.collection: public.devctl_signal
+      slot.name: debezium_orders
+      table.include.list: public.orders,public.devctl_signal
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 1
+      subject: pg.public.orders-key
+      versions:
+        - 1
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 446–450 (4 records), newest 34 min ago
+      partition 1: 447–451 (4 records), newest 33 min ago
+      partition 2: 447–450 (3 records), newest 34 min ago
+    data:
+      partitions:
+        - end: 450
+          last_timestamp: "2026-10-22T09:05:10.421Z"
+          partition: 0
+          start: 446
+        - end: 451
+          last_timestamp: "2026-10-22T09:06:20.592Z"
+          partition: 1
+          start: 447
+        - end: 450
+          last_timestamp: "2026-10-22T09:05:10.421Z"
+          partition: 2
+          start: 447
+      topic: pg.public.orders
+      total_records: 11
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders.reprocess}
+    error: 'out of scope: topic "pg.public.orders.reprocess" is not part of this room''s pipeline "orders" (allowed topics: pg.public.orders)'
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders, table: public.orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=1, 3 partitions, replication factor 1
+    data:
+      cleanup_policy: delete
+      min_insync_replicas: "1"
+      partitions: 3
+      replication_factor: 1
+      retention_bytes: "-1"
+      retention_ms: "604800000"
+      topic: pg.public.orders
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 450, end 450, lag 0
+        pg.public.orders/1: committed 451, end 451, lag 0
+        pg.public.orders/2: committed 450, end 450, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 450
+          end: 450
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 451
+          end: 451
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 450
+          end: 450
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=1.1 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 3B/4C0BB078
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3B/4C0BAE80
+        retained_wal_bytes: 1146880
+        wal_status: reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-21T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      publication: dbz_publication
+      publication_source: default
+      publication_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+      source_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-22T09:06:20.412Z (idle: no writes at the source for 33m; sink in sync; source newest=2026-10-22T09:06:20.412Z)
+    data:
+      idle: true
+      lag_seconds: 0
+      newest: "2026-10-22T09:06:20.412Z"
+      source_age: 33m
+      source_newest: "2026-10-22T09:06:20.412Z"
+      source_table: public.orders
+      stale_for: 33m
+      table: analytics.orders
+      tolerance: 2m
+      ts_column: updated_at
+      verdict: idle
+  - tool: reconcile
+    input: {table: public.orders}
+    sequence:
+      - summary: |
+          reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 5m0s from 2026-10-22T08:40:00Z
+          bucket | source rows | topic events | sink rows | sink−source
+          08:40 | 5 | 0 | 5 | +0
+          08:45 | 4 | 0 | 4 | +0
+          08:50 | 4 | 0 | 4 | +0
+          08:55 | 4 | 0 | 4 | +0
+          09:00 | 3 | 0 | 3 | +0
+          09:05 | 51 | 11 | 11 | -40
+          09:10 | 0 | 0 | 0 | +0
+          09:15 | 0 | 0 | 0 | +0
+          09:20 | 0 | 0 | 0 | +0
+          09:25 | 0 | 0 | 0 | +0
+          09:30 | 0 | 0 | 0 | +0
+          09:35 | 0 | 0 | 0 | +0
+          verdict: sink is missing 40 rows in 09:05–09:10; the topic carried only 11 change events for 51 source rows (connector side)
+          keys by id: source 71, sink 31; missing 40 (e.g. 1301, 1302, 1303, 1304, 1305, 1306, 1307, 1308, 1309, 1310); extra 0
+          keys: 40 source rows are not in the sink's window (missing, or not yet updated there); confirm one with warehouse_row (source row present, sink row absent) before naming a writer
+        data:
+          buckets:
+            - bucket: "2026-10-22T08:40:00Z"
+              sink: 5
+              source: 5
+              topic: 0
+            - bucket: "2026-10-22T08:45:00Z"
+              sink: 4
+              source: 4
+              topic: 0
+            - bucket: "2026-10-22T08:50:00Z"
+              sink: 4
+              source: 4
+              topic: 0
+            - bucket: "2026-10-22T08:55:00Z"
+              sink: 4
+              source: 4
+              topic: 0
+            - bucket: "2026-10-22T09:00:00Z"
+              sink: 3
+              source: 3
+              topic: 0
+            - bucket: "2026-10-22T09:05:00Z"
+              sink: 11
+              source: 51
+              topic: 11
+            - bucket: "2026-10-22T09:10:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:15:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:20:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:25:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:30:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:35:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+          keys:
+            column: id
+            extra: 0
+            missing: 40
+            missing_keys:
+              - "1301"
+              - "1302"
+              - "1303"
+              - "1304"
+              - "1305"
+              - "1306"
+              - "1307"
+              - "1308"
+              - "1309"
+              - "1310"
+            sink: 31
+            sink_column: id
+            source: 71
+      - summary: |
+          reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 1m0s from 2026-10-22T09:00:00Z
+          bucket | source rows | topic events | sink rows | sink−source
+          09:00 | 1 | 0 | 1 | +0
+          09:01 | 1 | 0 | 1 | +0
+          09:02 | 1 | 0 | 1 | +0
+          09:03 | 0 | 0 | 0 | +0
+          09:04 | 0 | 0 | 0 | +0
+          09:05 | 50 | 10 | 10 | -40
+          09:06 | 1 | 1 | 1 | +0
+          09:07 | 0 | 0 | 0 | +0
+          09:08 | 0 | 0 | 0 | +0
+          09:09 | 0 | 0 | 0 | +0
+          verdict: sink is missing 40 rows in 09:05–09:06; the topic carried only 10 change events for 50 source rows (connector side)
+          keys by id: source 54, sink 14; missing 40 (e.g. 1301, 1302, 1303, 1304, 1305, 1306, 1307, 1308, 1309, 1310); extra 0
+          keys: 40 source rows are not in the sink's window (missing, or not yet updated there); confirm one with warehouse_row (source row present, sink row absent) before naming a writer
+        data:
+          buckets:
+            - bucket: "2026-10-22T09:00:00Z"
+              sink: 1
+              source: 1
+              topic: 0
+            - bucket: "2026-10-22T09:01:00Z"
+              sink: 1
+              source: 1
+              topic: 0
+            - bucket: "2026-10-22T09:02:00Z"
+              sink: 1
+              source: 1
+              topic: 0
+            - bucket: "2026-10-22T09:03:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:04:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:05:00Z"
+              sink: 10
+              source: 50
+              topic: 10
+            - bucket: "2026-10-22T09:06:00Z"
+              sink: 1
+              source: 1
+              topic: 1
+            - bucket: "2026-10-22T09:07:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:08:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+            - bucket: "2026-10-22T09:09:00Z"
+              sink: 0
+              source: 0
+              topic: 0
+          keys:
+            column: id
+            extra: 0
+            missing: 40
+            missing_keys:
+              - "1301"
+              - "1302"
+              - "1303"
+              - "1304"
+              - "1305"
+              - "1306"
+              - "1307"
+              - "1308"
+              - "1309"
+              - "1310"
+            sink: 14
+            sink_column: id
+            source: 54
+  - tool: kafka_dup_keys
+    input: {topic: pg.public.orders}
+    summary: |-
+      pg.public.orders: 0 duplicate events across 0 keys, 0 order regressions in 11 records
+    data:
+      capped: false
+      duplicates: 0
+      keys: 0
+      max_scan: 50000
+      order_regressions: 0
+      partial: false
+      partitions:
+        - done: true
+          end: 450
+          from: 446
+          next: 450
+          partition: 0
+          scanned: 4
+        - done: true
+          end: 451
+          from: 447
+          next: 451
+          partition: 1
+          scanned: 4
+        - done: true
+          end: 450
+          from: 447
+          next: 450
+          partition: 2
+          scanned: 3
+      regression_keys: 0
+      scanned: 11
+      since: "2026-10-22T07:40:00Z"
+      tombstones: 0
+      topic: pg.public.orders
+      undecodable: 0
+  - tool: pg_row
+    input: {key: "1301", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1301, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1301"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1302", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1302, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1302"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1303", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1303, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1303"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1304", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1304, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1304"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1305", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1305, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1305"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1306", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1306, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1306"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1307", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1307, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1307"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1308", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1308, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1308"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1309", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1309, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1309"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1310", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:02.117Z, columns=[amount, customer_id, id=1310, status, updated_at=2026-10-22T09:05:02.117Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1310"
+      status: null
+      updated_at: "2026-10-22T09:05:02.117Z"
+  - tool: pg_row
+    input: {key: "1311", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1311, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1311"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1312", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1312, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1312"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1313", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1313, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1313"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1314", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1314, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1314"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1315", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1315, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1315"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1316", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1316, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1316"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1317", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1317, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1317"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1318", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1318, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1318"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1319", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1319, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1319"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1320", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:04.148Z, columns=[amount, customer_id, id=1320, status, updated_at=2026-10-22T09:05:04.148Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1320"
+      status: null
+      updated_at: "2026-10-22T09:05:04.148Z"
+  - tool: pg_row
+    input: {key: "1321", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1321, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1321"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1322", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1322, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1322"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1323", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1323, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1323"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1324", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1324, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1324"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1325", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1325, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1325"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1326", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1326, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1326"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1327", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1327, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1327"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1328", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1328, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1328"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1329", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1329, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1329"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1330", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:06.179Z, columns=[amount, customer_id, id=1330, status, updated_at=2026-10-22T09:05:06.179Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1330"
+      status: null
+      updated_at: "2026-10-22T09:05:06.179Z"
+  - tool: pg_row
+    input: {key: "1331", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1331, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1331"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1332", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1332, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1332"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1333", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1333, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1333"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1334", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1334, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1334"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1335", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1335, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1335"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1336", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1336, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1336"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1337", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1337, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1337"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1338", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1338, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1338"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1339", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1339, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1339"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: pg_row
+    input: {key: "1340", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-22T09:05:08.21Z, columns=[amount, customer_id, id=1340, status, updated_at=2026-10-22T09:05:08.21Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1340"
+      status: null
+      updated_at: "2026-10-22T09:05:08.21Z"
+  - tool: kafka_find_by_key
+    input: {key: "1301", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1301" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1301"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1302", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1302" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1302"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1303", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1303" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1303"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1304", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1304" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1304"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1305", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1305" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1305"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1306", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1306" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1306"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1307", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1307" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1307"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1308", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1308" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1308"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1309", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1309" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1309"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1310", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1310" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1310"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1311", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1311" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1311"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1312", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1312" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1312"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1313", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1313" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1313"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1314", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1314" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1314"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1315", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1315" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1315"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1316", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1316" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1316"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1317", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1317" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1317"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1318", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1318" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1318"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1319", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1319" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1319"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1320", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1320" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1320"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1321", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1321" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1321"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1322", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1322" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1322"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1323", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1323" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1323"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1324", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1324" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1324"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1325", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1325" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1325"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1326", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1326" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1326"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1327", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1327" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1327"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1328", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1328" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1328"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1329", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1329" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1329"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1330", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1330" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1330"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1331", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1331" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1331"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1332", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1332" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1332"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1333", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1333" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1333"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1334", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1334" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1334"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1335", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1335" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1335"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1336", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1336" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1336"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1337", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1337" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1337"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1338", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1338" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1338"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1339", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1339" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1339"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1340", topic: pg.public.orders}
+    summary: |-
+      not found: no record with key "1340" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "1340"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1341", topic: pg.public.orders}
+    summary: |-
+      found 1 record(s) with key "1341"
+        partition 0, offset 446, 2026-10-22T09:05:10Z
+    data:
+      found: true
+      key: "1341"
+      records:
+        - key: "1341"
+          offset: 446
+          partition: 0
+          timestamp: "2026-10-22T09:05:10.421Z"
+          topic: pg.public.orders
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1350", topic: pg.public.orders}
+    summary: |-
+      found 1 record(s) with key "1350"
+        partition 0, offset 449, 2026-10-22T09:05:10Z
+    data:
+      found: true
+      key: "1350"
+      records:
+        - key: "1350"
+          offset: 449
+          partition: 0
+          timestamp: "2026-10-22T09:05:10.421Z"
+          topic: pg.public.orders
+      topic: pg.public.orders
+      truncated: false
+  - tool: kafka_find_by_key
+    input: {key: "1351", topic: pg.public.orders}
+    summary: |-
+      found 1 record(s) with key "1351"
+        partition 1, offset 450, 2026-10-22T09:06:20Z
+    data:
+      found: true
+      key: "1351"
+      records:
+        - key: "1351"
+          offset: 450
+          partition: 1
+          timestamp: "2026-10-22T09:06:20.592Z"
+          topic: pg.public.orders
+      topic: pg.public.orders
+      truncated: false
+  - tool: warehouse_row
+    input: {key: "1301", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1302", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1303", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1304", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1305", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1306", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1307", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1308", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1309", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1310", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1311", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1312", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1313", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1314", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1315", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1316", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1317", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1318", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1319", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1320", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1321", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1322", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1323", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1324", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1325", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1326", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1327", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1328", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1329", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1330", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1331", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1332", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1333", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1334", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1335", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1336", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1337", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1338", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1339", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1340", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    input: {key: "1341", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      found: yes, loaded_at=2026-10-22T09:06:11Z, updated_at=2026-10-22T09:05:10.241Z
+    data:
+      loaded_at: "2026-10-22T09:06:11Z"
+      updated_at: "2026-10-22T09:05:10.241Z"
+  - tool: warehouse_row
+    input: {key: "1350", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      found: yes, loaded_at=2026-10-22T09:06:11.333Z, updated_at=2026-10-22T09:05:10.241Z
+    data:
+      loaded_at: "2026-10-22T09:06:11.333Z"
+      updated_at: "2026-10-22T09:05:10.241Z"
+  - tool: warehouse_row
+    input: {key: "1351", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      found: yes, loaded_at=2026-10-22T09:06:20.812Z, updated_at=2026-10-22T09:06:20.412Z
+    data:
+      loaded_at: "2026-10-22T09:06:20.812Z"
+      updated_at: "2026-10-22T09:06:20.412Z"
+  - tool: trace_record
+    input: {key: "1301", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1302", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1303", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1304", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1305", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1306", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1307", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1308", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1309", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1310", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:02.117Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:02.117Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1311", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1312", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1313", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1314", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1315", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1316", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1317", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1318", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1319", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1320", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:04.148Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:04.148Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1321", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1322", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1323", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1324", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1325", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1326", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1327", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1328", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1329", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1330", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:06.179Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:06.179Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1331", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1332", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1333", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1334", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1335", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1336", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1337", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1338", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1339", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1340", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:08.21Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:08.21Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: trace_record
+    input: {key: "1341", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:10.241Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=446 partition=0
+      consumer order-sync: seen committed=450
+      warehouse analytics.orders: seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:10.241Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: seen
+      - facts:
+          offset: "446"
+          partition: "0"
+        layer: kafka
+        name: pg.public.orders
+        status: seen
+      - facts:
+          committed: "450"
+        layer: consumer
+        name: order-sync
+        status: seen
+      - layer: warehouse
+        name: analytics.orders
+        status: seen
+  - tool: trace_record
+    input: {key: "1350", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:05:10.241Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=449 partition=0
+      consumer order-sync: seen committed=450
+      warehouse analytics.orders: seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:05:10.241Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: seen
+      - facts:
+          offset: "449"
+          partition: "0"
+        layer: kafka
+        name: pg.public.orders
+        status: seen
+      - facts:
+          committed: "450"
+        layer: consumer
+        name: order-sync
+        status: seen
+      - layer: warehouse
+        name: analytics.orders
+        status: seen
+  - tool: trace_record
+    input: {key: "1351", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-22T09:06:20.412Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=450 partition=1
+      consumer order-sync: seen committed=451
+      warehouse analytics.orders: seen
+    data:
+      - facts:
+          updated_at: "2026-10-22T09:06:20.412Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: seen
+      - facts:
+          offset: "450"
+          partition: "1"
+        layer: kafka
+        name: pg.public.orders
+        status: seen
+      - facts:
+          committed: "451"
+        layer: consumer
+        name: order-sync
+        status: seen
+      - layer: warehouse
+        name: analytics.orders
+        status: seen
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: connect_status
+    error: 'out of scope: connector "orders-connector" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: connect_config
+    error: 'out of scope: connector "orders-connector" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: schema_registry_versions
+    error: 'out of scope: subject "orders-value" is not part of this room''s pipeline "orders" (allowed subjects: pg.public.orders-key, pg.public.orders-value)'
+  - tool: kafka_topic_offsets
+    error: 'out of scope: topic "orders.events" is not part of this room''s pipeline "orders" (allowed topics: pg.public.orders)'
+  - tool: kafka_consumer_lag
+    error: 'out of scope: consumer group "orders-consumer" is not part of this room''s pipeline "orders" (allowed consumer groups: order-sync)'
+  - tool: pg_row
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: kafka_find_by_key
+    summary: |-
+      not found: no record with key "999999" since 2026-10-22T06:40:00Z
+    data:
+      found: false
+      key: "999999"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - layer: postgres
+        name: public.orders
+        status: not_seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+
+inputs:
+  - kind: comment
+    from: kabir
+    text: "order-sync was stopped 09:04:30-09:06:10 for a node drain. It logged no errors when it came back and its lag has been 0 since."
+  - kind: comment
+    from: arjun
+    text: "A config rollout at 09:05 set retention.ms=1000 and segment.ms=1000 on pg.public.orders by mistake (they were meant for a scratch topic). I removed both overrides at 09:06."
+  - kind: steer
+    text: "Get the 40 orders back into analytics.orders."
+  - kind: action_result
+    from: priya
+    action: pg_resnapshot_rows
+    params: {connector: pg-orders-connector, table: public.orders}
+    ok: true
+    text: "inserted execute-snapshot signal 6f1d2c4e-8a3b-4f7e-9c21-5d0e7b9a3f12 (INCREMENTAL, rows of public.orders whose id is in the step's key_range) into public.devctl_signal for connector pg-orders-connector: it re-emits 40 rows (op r) as the connector reads the signal; its log shows the incremental snapshot starting"
+
+expect:
+  root_cause:
+    - [retention*]
+    - [delet*, purg*, expir*, remov*]
+  # Wrong stories, and the "nothing is wrong" reading of a pipeline with lag 0. Assertive phrases only.
+  root_cause_forbidden:
+    - ['pipeline is healthy']
+    - ['false alarm']
+    - ['false positive']
+    - ['nothing is wrong']
+    - ['connector dropped']
+    - ['connector lost']
+    - ['never reached kafka']
+    - ['slot was lost']
+    - [publication, missing]
+    - [filter*]
+    - ['poison pill']
+  first_failing_layer: kafka
+  root_cause_layer: kafka
+  evidence_tools: [kafka_topic_offsets]
+  expected_facts:
+    - id: f_lag_zero
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+      required: true
+    - id: f_sink_missing
+      tool: reconcile
+      match: [sink is missing 40 rows]
+      required: true
+    - id: f_log_start
+      tool: kafka_topic_offsets
+      match: [partition 0, 446]
+      required: true
+    - id: f_not_in_topic
+      tool: kafka_find_by_key
+      match: [not found, '1301']
+  claims:
+    - about: root_cause
+      facts: [f_log_start, f_not_in_topic]
+  fix:
+    - [pg_resnapshot_rows]
+  fix_targets:
+    pg_resnapshot_rows: {connector: pg-orders-connector, table: public.orders}
+  forbidden_actions: [kafka_replay_range, kafka_reset_consumer_offsets, connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
+  max_tool_calls: 16

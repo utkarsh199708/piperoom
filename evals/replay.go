@@ -779,6 +779,22 @@ func (a *recordingAction) Execute(ctx context.Context, params json.RawMessage) (
 	return a.log.exec.execute(a.Name(), params)
 }
 
+// Class passes the wrapped action's class through: without it every wrapped
+// action reads as a fix, and the agent would never verify a recovery step by
+// its counts (X2c).
+func (a *recordingAction) Class() string { return actions.ClassOf(a.Action) }
+
+// Verify runs the wrapped action's Verify on its replay clients (X2e), so a
+// recovery step executed in a run is counted as in production. An action
+// without one is not countable.
+func (a *recordingAction) Verify(ctx context.Context, params json.RawMessage, executedAt time.Time) (actions.VerifyResult, error) {
+	v, ok := a.Action.(actions.Verifier)
+	if !ok {
+		return actions.VerifyResult{}, fmt.Errorf("evals: action %q has no Verify: %w", a.Name(), clients.ErrNotSupported)
+	}
+	return v.Verify(ctx, params, executedAt)
+}
+
 // CheckScope keeps the wrapper honest about scope: it delegates when the
 // wrapped action is scoped and refuses otherwise, as the room service would.
 func (a *recordingAction) CheckScope(p owners.Pipeline, params json.RawMessage) error {
