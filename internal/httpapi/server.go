@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -347,13 +348,65 @@ func requestLog(log *slog.Logger, client func(*http.Request) string) func(http.H
 
 // ---- helpers ----
 
+// decodeBody decodes the JSON request body into dst, refusing bodies over
+// maxBody (docs/api.md: 1 MB).
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(dst); err != nil {
+	return decodeBodyLimit(w, r, dst, maxBody)
+}
+
+// decodeBodyLimit is decodeBody with an explicit cap, for routes that accept
+// less than maxBody. A body over the cap is 413 too_large, not invalid JSON:
+// the JSON may be well formed, and "invalid JSON" would send the caller
+// debugging its payload instead of its size (KAN-388, docs/api.md 413).
+func decodeBodyLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return bodyTooLarge(limit)
+		}
 		return validation("invalid JSON body")
 	}
 	return nil
+}
+
+// readBody reads the whole request body up to limit, for handlers that need
+// the raw bytes (the alert webhook). Over the cap is the same 413 as
+// decodeBodyLimit; any other read error is a 400. Neither message echoes the
+// body.
+func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	raw, err := io.ReadAll(r.Body)
+	if err == nil {
+		return raw, nil
+	}
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		return nil, bodyTooLarge(limit)
+	}
+	return nil, validation("unreadable request body")
+}
+
+// bodyTooLarge is docs/api.md's 413 too_large for a body over its route's cap.
+// The message gives the limit, never any part of the body.
+func bodyTooLarge(limit int64) *room.Error {
+	return &room.Error{
+		Status: http.StatusRequestEntityTooLarge,
+		Code:   "too_large",
+		Msg:    "request body too large (limit " + byteLimit(limit) + ")",
+	}
+}
+
+// byteLimit renders a body cap the way the 413 message reads it ("1 MiB").
+func byteLimit(n int64) string {
+	switch {
+	case n >= 1<<20 && n%(1<<20) == 0:
+		return strconv.FormatInt(n>>20, 10) + " MiB"
+	case n >= 1<<10 && n%(1<<10) == 0:
+		return strconv.FormatInt(n>>10, 10) + " KiB"
+	default:
+		return strconv.FormatInt(n, 10) + " bytes"
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

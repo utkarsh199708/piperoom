@@ -32,6 +32,14 @@ type fakeSource struct {
 	// txns, when non-nil, is what LongTransactions reports.
 	txns   []clients.Transaction
 	txnErr error
+
+	// fresh is the newest source timestamp warehouse_freshness compares
+	// against; freshErr models an unreadable source.
+	fresh       time.Time
+	freshErr    error
+	freshCalls  int
+	freshTable  string
+	freshColumn string
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
@@ -71,6 +79,11 @@ func (f *fakeSource) Row(_ context.Context, table, _, key string) (map[string]an
 }
 func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []string) ([]postgres.PublicationTable, error) {
 	return f.pubTables, f.pubErr
+}
+func (f *fakeSource) Freshness(_ context.Context, table, tsColumn string) (time.Time, error) {
+	f.freshCalls++
+	f.freshTable, f.freshColumn = table, tsColumn
+	return f.fresh, f.freshErr
 }
 
 // fakeConnect implements clients.ConnectClient. Config looks up the connector
@@ -153,6 +166,9 @@ func testDeps() Deps {
 			rows: map[string]map[string]any{
 				"public.orders|7": {"id": "7", "customer_id": "100", "amount": "50", "status": "placed", "updated_at": "2026-10-11T10:00:00Z"},
 			},
+			// The source is as old as the fake sink's newest row: the default
+			// pipeline is in sync, not idle.
+			fresh: time.Now().Add(-2 * time.Minute),
 		},
 		Wh: &fakeWarehouse{
 			rows:  map[string]map[string]any{"analytics.orders|7": {"id": "7", "updated_at": "2026-10-11T10:00:00Z", "loaded_at": "2026-10-11T10:00:01Z"}},

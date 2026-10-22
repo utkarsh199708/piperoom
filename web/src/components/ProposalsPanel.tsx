@@ -28,7 +28,7 @@ import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
 import { DecisionHandleContext } from './shell/context'
-import { completesSet } from '../lib/decision'
+import { completesSet, cancelledLayers } from '../lib/decision'
 import { writeModeOff } from '../lib/writeMode'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
@@ -989,6 +989,9 @@ function LayerRow({
   const reasonText = decision?.outcome === 'rejected' ? decision.reason : undefined
   const decidedAt = decision?.at ? clockTime(decision.at) : ''
   const decidedName = decision ? neutralizeBadgeText(decision.by.name || decision.by.id) : ''
+  // A pending layer on a rejected proposal is dead, not waiting: no owner to name, no Nudge, no
+  // Approve (the server already answers 409 for it). The other layer's rejection cancelled it.
+  const cancelled = cancelledLayers(proposal).includes(layer)
 
   return (
     <div
@@ -1046,6 +1049,18 @@ function LayerRow({
             </span>
           )}
         </>
+      ) : cancelled ? (
+        // The proposal is rejected: this layer's turn never came, so it says that instead of
+        // naming an owner and offering a Nudge (KAN-393).
+        <Badge
+          className="ml-auto max-w-full"
+          variant="neutral"
+          data-testid={`cancelled-${layer}`}
+          title="The proposal was rejected, so this layer was not decided."
+        >
+          <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground" aria-hidden="true" />
+          <span className="truncate">Cancelled</span>
+        </Badge>
       ) : canDecide || inBundle ? (
         <>
           <PersonAvatar actor={{ id: user.id, name: user.name }} size={20} />

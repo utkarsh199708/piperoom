@@ -639,37 +639,53 @@ recordings:
     input: {table: analytics.ledger_entries, ts_column: posted_at}
     phase: broken
     summary: |-
-      newest=2026-10-11T08:52:36Z (stale for 47m)
+      newest=2026-10-11T08:52:36Z (stale for 47m); source unknown, age only: the source client cannot read a newest timestamp
     data:
       newest: "2026-10-11T08:52:36Z"
+      source_error: the source client cannot read a newest timestamp
+      source_table: public.ledger_entries
       stale_for: 47m
       table: analytics.ledger_entries
+      tolerance: 2m
       ts_column: posted_at
+      verdict: unknown
   - tool: warehouse_freshness
     input: {table: analytics.ledger_entries, ts_column: posted_at}
     phase: recovered
     sequence:
       - summary: |-
-          newest=2026-10-11T08:58:52Z (stale for 41m)
+          newest=2026-10-11T08:58:52Z (stale for 41m); source unknown, age only: the source client cannot read a newest timestamp
         data:
           newest: "2026-10-11T08:58:52Z"
+          source_error: the source client cannot read a newest timestamp
+          source_table: public.ledger_entries
           stale_for: 41m
           table: analytics.ledger_entries
+          tolerance: 2m
           ts_column: posted_at
+          verdict: unknown
       - summary: |-
-          newest=2026-10-11T09:17:09Z (stale for 22m)
+          newest=2026-10-11T09:17:09Z (stale for 22m); source unknown, age only: the source client cannot read a newest timestamp
         data:
           newest: "2026-10-11T09:17:09Z"
+          source_error: the source client cannot read a newest timestamp
+          source_table: public.ledger_entries
           stale_for: 22m
           table: analytics.ledger_entries
+          tolerance: 2m
           ts_column: posted_at
+          verdict: unknown
       - summary: |-
-          newest=2026-10-11T09:38:46Z (stale for 1m)
+          newest=2026-10-11T09:38:46Z (stale for 1m); source unknown, age only: the source client cannot read a newest timestamp
         data:
           newest: "2026-10-11T09:38:46Z"
+          source_error: the source client cannot read a newest timestamp
+          source_table: public.ledger_entries
           stale_for: 1m
           table: analytics.ledger_entries
+          tolerance: 2m
           ts_column: posted_at
+          verdict: unknown
   - tool: pipeline_map
     error: 'out of scope: pipeline_id "default" is not this room''s pipeline "ledger"; read tools only work on the room''s own pipeline'
   - tool: connect_status

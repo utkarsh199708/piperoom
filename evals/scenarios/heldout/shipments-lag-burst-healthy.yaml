@@ -424,12 +424,16 @@ recordings:
   - tool: warehouse_freshness
     input: {table: analytics.shipments, ts_column: updated_at}
     summary: |-
-      newest=2026-10-11T09:33:20Z (stale for 6m)
+      newest=2026-10-11T09:33:20Z (stale for 6m); source unknown, age only: the source client cannot read a newest timestamp
     data:
       newest: "2026-10-11T09:33:20Z"
+      source_error: the source client cannot read a newest timestamp
+      source_table: public.shipments
       stale_for: 6m
       table: analytics.shipments
+      tolerance: 2m
       ts_column: updated_at
+      verdict: unknown
   - tool: pipeline_map
     error: 'out of scope: pipeline_id "default" is not this room''s pipeline "shipments"; read tools only work on the room''s own pipeline'
   - tool: connect_status

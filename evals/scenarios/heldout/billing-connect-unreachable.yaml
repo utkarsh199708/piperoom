@@ -272,12 +272,16 @@ recordings:
   - tool: warehouse_freshness
     input: {table: analytics.invoices, ts_column: updated_at}
     summary: |-
-      newest=2026-10-11T09:13:28Z (stale for 26m)
+      newest=2026-10-11T09:13:28Z (stale for 26m); source unknown, age only: the source client cannot read a newest timestamp
     data:
       newest: "2026-10-11T09:13:28Z"
+      source_error: the source client cannot read a newest timestamp
+      source_table: public.invoices
       stale_for: 26m
       table: analytics.invoices
+      tolerance: 2m
       ts_column: updated_at
+      verdict: unknown
   - tool: pipeline_map
     error: 'out of scope: pipeline_id "default" is not this room''s pipeline "billing"; read tools only work on the room''s own pipeline'
   - tool: connect_status

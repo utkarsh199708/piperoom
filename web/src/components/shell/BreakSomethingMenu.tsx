@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Bug } from 'lucide-react'
+import { Bug, Check, Copy } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
   DropdownMenu,
@@ -60,8 +60,24 @@ async function runDevctl(op: Op, name: string): Promise<void> {
 
 type Load =
   | { status: 'loading' }
+  | { status: 'down' }
   | { status: 'error'; message: string }
   | { status: 'ready'; scenarios: string[] }
+
+// The command that starts the API the menu talks to. Shown verbatim (and
+// copyable) when the request fails because devctl serve is not up.
+const START_COMMAND = 'go run ./cmd/devctl serve'
+
+// A failed scenario GET has two very different meanings, and only one of them is
+// actionable:
+//   - no response at all (fetch rejected: the proxy target is absent) or a 5xx
+//     (Vite answers 500 for a refused proxy connection, our plugin answers 503)
+//     means devctl serve is not running;
+//   - any other non-2xx is a real answer from devctl and keeps its message.
+function devctlIsDown(err: unknown): boolean {
+  if (err instanceof DevctlError) return err.status >= 500
+  return err instanceof TypeError
+}
 
 type Notice = { kind: 'busy' | 'error'; text: string }
 
@@ -98,7 +114,11 @@ function ScenarioList() {
     try {
       setLoad({ status: 'ready', scenarios: await listScenarios() })
     } catch (err) {
-      setLoad({ status: 'error', message: err instanceof Error ? err.message : String(err) })
+      if (devctlIsDown(err)) {
+        setLoad({ status: 'down' })
+      } else {
+        setLoad({ status: 'error', message: err instanceof Error ? err.message : String(err) })
+      }
     }
   }, [])
 
@@ -124,6 +144,9 @@ function ScenarioList() {
 
   if (load.status === 'loading') {
     return <DropdownMenuLabel className="font-normal">Loading scenarios…</DropdownMenuLabel>
+  }
+  if (load.status === 'down') {
+    return <DevctlNotRunning onRetry={reload} />
   }
   if (load.status === 'error') {
     return (
@@ -166,6 +189,49 @@ function ScenarioList() {
           </Button>
         </div>
       ))}
+    </div>
+  )
+}
+
+// The degraded state: the GET produced no scenario list because nothing answered
+// at the proxy target. That is the normal state of a fresh checkout (devctl serve
+// is a separate process), so name the cause and hand over the exact command
+// instead of leaving a Retry that can only fail the same way.
+function DevctlNotRunning({ onRetry }: { onRetry: () => Promise<void> }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    if (!navigator.clipboard) return
+    void navigator.clipboard.writeText(START_COMMAND).then(
+      () => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      },
+      () => undefined,
+    )
+  }
+  return (
+    <div className="flex flex-col gap-2 px-2 py-1.5">
+      <p role="status" className="text-xs text-destructive-fg">
+        devctl serve is not running.
+      </p>
+      <p className="text-xs text-muted-foreground">Start it in another terminal, then retry:</p>
+      <div className="flex min-w-0 items-center gap-2">
+        <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-muted px-2 py-1 font-mono text-xs">
+          {START_COMMAND}
+        </code>
+        <Button
+          variant="outline"
+          size="icon"
+          className="shrink-0"
+          aria-label={copied ? 'Copied start command' : 'Copy start command'}
+          onClick={copy}
+        >
+          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+        </Button>
+      </div>
+      <Button variant="outline" size="sm" className="self-start" onClick={() => void onRetry()}>
+        Retry
+      </Button>
     </div>
   )
 }
