@@ -347,6 +347,7 @@ export function RoomScreen() {
       onTrace={viewer ? undefined : () => setTraceOpen(true)}
       selectedLayer={layerFilter ?? undefined}
       onSelectLayer={setLayerFilter}
+      drift={state.alert?.drift}
     />
   )
   const pinned = <PinnedHandoffs key={state.id} roomId={state.id} handoffs={state.handoffs} />

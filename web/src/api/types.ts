@@ -60,6 +60,7 @@ export type EventType =
   | 'postmortem.failed'
   | 'proposal.scheduled'
   | 'proposal.cancelled'
+  | 'room.escalated'
 
 export interface Event {
   room_id: string
@@ -110,6 +111,75 @@ export interface RoomCreatedPayload {
   dedup_key?: string
   /** The pipeline had shadow mode on when the room opened (docs/design/shadow.md); the agent runs silently and its numbers are revealed after close. */
   shadow?: boolean
+  /** X3: "forecast" for a room a forecast signal opened (sev4, no agent until someone asks); absent otherwise. */
+  origin?: string
+}
+
+/** room.escalated (X3, system actor): a watcher signal raised an open room's severity; a room is never lowered. */
+export interface RoomEscalatedPayload {
+  severity: string // the new level, "sev1".."sev3"
+  from: string
+  signal: string
+}
+
+// ---- watcher evidence (room.created.alert when alert_source is "watcher"; docs/api.md "Watcher alerts") ----
+
+/** The four X1 drift signal names (events.SignalCountDrift etc.). */
+export type DriftKind = 'count_drift' | 'row_drift' | 'dup_keys' | 'order_skew'
+
+/** events.DriftWindow: half-open [from, to), RFC 3339 UTC. */
+export interface DriftWindow {
+  from: string
+  to: string
+}
+
+/**
+ * events.DriftSignal: one flat entry of the watcher evidence's `signals` list. Names, counts and a window only;
+ * `detail` and `table` are untrusted text, rendered as text. `window` is an object here, while dlq_growth's is a
+ * word, so a reader goes by `signal` first.
+ */
+export interface DriftSignal {
+  signal: DriftKind
+  severity: string
+  table?: string
+  topic?: string
+  window: DriftWindow
+  /** count_drift: source rows; dup_keys/order_skew: records scanned. */
+  source: number
+  /** count_drift: sink rows; 0 otherwise. */
+  sink: number
+  /** count_drift: source - sink when positive; row_drift: sampled keys not on the sink; dup_keys: duplicate events. */
+  missing: number
+  /** row_drift: sampled keys whose timestamp differs; order_skew: position regressions. */
+  mismatched: number
+  /** row_drift: keys compared; dup_keys/order_skew: distinct keys affected. */
+  sample: number
+  detail?: string
+}
+
+/** events.ForecastSignal (X3): a metric's trend reaches its limit within the forecast horizon. */
+export interface ForecastSignal {
+  signal: 'forecast'
+  severity: string
+  metric: string
+  object?: string
+  current: number
+  limit: number
+  eta: string
+  slope_per_hour: number
+  r2: number
+  samples: number
+}
+
+/** events.ConfigDriftSignal (X3): a connector's config changed outside an approved fix. Key names only. */
+export interface ConfigDriftSignal {
+  signal: 'config_drift'
+  severity: string
+  connector: string
+  old_hash: string
+  new_hash: string
+  changed_keys: string[]
+  keys_omitted?: number
 }
 
 export interface RoomClosedPayload {
