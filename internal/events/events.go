@@ -93,6 +93,16 @@ const (
 	// cancelled (POST /api/proposals/{pid}/cancel). Counted like
 	// proposal.scheduled. (P2)
 	ProposalCancelled Type = "proposal.cancelled"
+	// X8: ProposalStageStarted says the driver started trying a proposal's
+	// steps on the pipeline's staging stack (POST /api/proposals/{pid}/stage).
+	// Actor: the driver. It ends with proposal.staged for the same proposal,
+	// or at its expires_at; while one is pending a second stage answers 409.
+	// ProposalStaged carries what staging said (actions.Stager), written by the
+	// system actor. Both are informational like proposal.previewed: not part
+	// of params_hash, never run by the executor, and the agent's Sink refuses
+	// them. (X8)
+	ProposalStageStarted Type = "proposal.stage_started"
+	ProposalStaged       Type = "proposal.staged"
 
 	// HypothesisVerdict is a person's confirm or dispute of the agent's
 	// current hypothesis (POST /api/rooms/{id}/hypothesis). HypothesisSeq is
@@ -889,6 +899,147 @@ type ProposalPreviewedPayload struct {
 	ProposalID string        `json:"proposal_id"`
 	Steps      []StepPreview `json:"steps"`
 	At         time.Time     `json:"at"`
+}
+
+// ---- X8: staging (try a proposal's steps on a staging stack first) ----
+//
+// A pipeline may declare a staging stack in owners.yaml (staging:
+// {connections: ...}, docs/api.md "X8 staging"). The driver can then try a
+// proposal's steps there before anyone approves them: the room service calls
+// each step's actions.Stager, which applies the same change to the
+// same-named object on staging, watches it, and puts staging back. The
+// result is evidence for the approvers, like the preview; it never changes
+// what the executor does in production. Everything here is names, states,
+// counts, times and redacted traces: never a record value, a config value, a
+// staging URL or a credential.
+
+// StageResult is what staging said about one step (actions.Stager). Applied
+// is true when the change was written to staging; Healthy is true only when
+// it was applied and staging stayed healthy for the whole observation window
+// (actions.StageObserveWindow), so Healthy implies Applied. Both are always
+// present on the wire: false is evidence too. Detail is one redacted text of
+// at most MaxStageDetailBytes: why it was not applied (StageNoStaging,
+// "connector not present in staging"), the failed task's trace, or what
+// healthy means here ("RUNNING, 3 of 3 tasks RUNNING for 60 s"). DryRun is
+// staging's own pre-check where the action makes one (the Registry
+// compatibility check of a schema step); a refusal there means nothing was
+// written. Leftover says what the stage could not put back on staging (a
+// registered schema version, a failed restore), at most MaxStageLeftoverBytes;
+// empty when staging is as it was. DurationMS is the stage's wall time,
+// apply to verdict, restore excluded. (X8)
+type StageResult struct {
+	Target     string        `json:"target,omitempty"` // the staging object, e.g. "connector orders-src"; a name, never a URL
+	Applied    bool          `json:"applied"`
+	Healthy    bool          `json:"healthy"`
+	Detail     string        `json:"detail,omitempty"`
+	DryRun     *DryRunResult `json:"dry_run,omitempty"`
+	Leftover   string        `json:"leftover,omitempty"`
+	DurationMS int64         `json:"duration_ms"`
+}
+
+// Caps of a StageResult's text, enforced by actions.CleanStageResult before
+// the room service writes proposal.staged. (X8)
+const (
+	MaxStageTargetBytes   = 200
+	MaxStageDetailBytes   = 2048
+	MaxStageLeftoverBytes = 500
+	MaxStageErrorBytes    = 500 // StepStage.Error, like StepPreview.Error
+)
+
+// StageNoStaging is StageResult.Detail when the action has no staging client
+// to write through (the pipeline declares no staging:, the staging block has
+// no client the action needs, or write mode is off): Applied false, nil
+// error. (X8)
+const StageNoStaging = "no staging declared"
+
+// Stage outcomes, StageResult.Outcome: the three states a client shows. (X8)
+const (
+	// StageHealthy: applied and healthy for the whole window.
+	StageHealthy = "healthy"
+	// StageFailed: applied and unhealthy, or refused by staging's own
+	// pre-check (DryRun ran and said no), so the change would fail.
+	StageFailed = "failed"
+	// StageNotApplied: nothing was tried (no staging, the object is not on
+	// staging, a pre-check that was skipped); Detail says why.
+	StageNotApplied = "not_applied"
+)
+
+// Outcome is the one rule that turns a StageResult into StageHealthy,
+// StageFailed or StageNotApplied, shared by the room service, the agent, the
+// Slack mirror and the web.
+func (r StageResult) Outcome() string {
+	switch {
+	case r.Applied && r.Healthy:
+		return StageHealthy
+	case r.Applied:
+		return StageFailed
+	case r.DryRun != nil && !r.DryRun.OK && r.DryRun.Skipped == "":
+		return StageFailed
+	default:
+		return StageNotApplied
+	}
+}
+
+// ProposalStageStartedPayload is proposal.stage_started (actor: the driver).
+// ParamsHash is the proposal's params_hash when the stage started; Steps are
+// the indexes of the steps being staged, in order: every step whose action
+// implements actions.Stager (never empty: a proposal with none answers 409
+// and writes nothing). ExpiresAt is actions.StageExpiry of the start and
+// len(Steps): after it, a stage with no proposal.staged is lost (the server
+// stopped) and a new one may start. Times are UTC. (X8)
+type ProposalStageStartedPayload struct {
+	ProposalID string    `json:"proposal_id"`
+	ParamsHash string    `json:"params_hash"`
+	Steps      []int     `json:"steps"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+// StepStage is one staged step: its result, or the error that stopped Stage
+// (staging unreachable, ctx ended before a verdict), redacted, at most
+// MaxStageErrorBytes. Exactly one of Result and Error is set. (X8)
+type StepStage struct {
+	StepIndex int          `json:"step_index"`
+	Result    *StageResult `json:"result,omitempty"`
+	Error     string       `json:"error,omitempty"`
+}
+
+// ProposalStagedPayload is proposal.staged (system actor): one entry per
+// index of the matching proposal.stage_started, in the same order. Each step
+// is staged on its own against staging as it was (each Stage restores before
+// the next starts), and a failed step does not stop the next. ParamsHash is
+// copied from proposal.stage_started: a stage counts for a proposal only while
+// it equals the proposal's current params_hash. (X8)
+type ProposalStagedPayload struct {
+	ProposalID string      `json:"proposal_id"`
+	ParamsHash string      `json:"params_hash"`
+	Steps      []StepStage `json:"steps"`
+	At         time.Time   `json:"at"`
+}
+
+// StepHealthy reports whether step index i was staged with outcome
+// StageHealthy. A step that is not in Steps, or has an Error, is not.
+// owners.yaml require_staging: needs it for each step whose action it names.
+func (p ProposalStagedPayload) StepHealthy(i int) bool {
+	for _, s := range p.Steps {
+		if s.StepIndex == i {
+			return s.Error == "" && s.Result != nil && s.Result.Outcome() == StageHealthy
+		}
+	}
+	return false
+}
+
+// Healthy reports whether at least one step was staged and every step in
+// Steps is StepHealthy: the stage's one-word verdict.
+func (p ProposalStagedPayload) Healthy() bool {
+	if len(p.Steps) == 0 {
+		return false
+	}
+	for _, s := range p.Steps {
+		if !p.StepHealthy(s.StepIndex) {
+			return false
+		}
+	}
+	return true
 }
 
 // VerificationCheck is one read-tool check of a layer after a fix. (F4)

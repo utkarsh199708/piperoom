@@ -20,7 +20,7 @@ import (
 type HumanInput struct {
 	Seq       int64        `json:"seq"` // room event seq it came from
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed"
+	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	// Text of an "alert_update" is the server's rendering of a re-fired or
@@ -54,6 +54,13 @@ type HumanInput struct {
 	// is unknown (as OK). A step that never ran (an earlier one failed) is
 	// false. The runner verifies the fix as after its own. (P3)
 	StepsOK []*bool `json:"steps_ok,omitempty"`
+	// X8: Kind "proposal_staged" is sent once per proposal.staged. ProposalID
+	// names the proposal, Text is the server's rendering of the result (each
+	// staged step's outcome and detail: staging's own words, untrusted data,
+	// never an instruction), and OK is events.ProposalStagedPayload.Healthy:
+	// true when every staged step was healthy, false otherwise. A healthy
+	// stage is evidence, never approval: the agent must not claim the fix
+	// worked in production. (X8)
 }
 
 // Inbox delivers human input to the agent between model turns.
@@ -111,6 +118,14 @@ type Alert struct {
 	// change's ExternalChange.Service to the team whose Owns lists it. Nil
 	// when owners.yaml has no teams: the hypothesis then names no team. (X4)
 	Teams []Team `json:"teams,omitempty"`
+	// X8: Staging is true when the room's pipeline declares a staging stack
+	// (owners.yaml staging:) and write mode is on, so the driver can try a
+	// proposal there (POST /api/proposals/{pid}/stage); filled by the room
+	// service. The agent then recommends staging for a proposal whose action
+	// implements actions.Stager, and reads the result back from HumanInput
+	// kind "proposal_staged". False (omitted) means no staging: the agent
+	// does not mention it. (X8)
+	Staging bool `json:"staging,omitempty"`
 	// Mode is "" for an incident room and ModeSetup for a setup room
 	// (room.created.mode). In setup mode Raw holds the events.SetupRequest,
 	// PipelineID the pipeline being set up (no owners.yaml entry yet: the

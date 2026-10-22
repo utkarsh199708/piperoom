@@ -32,6 +32,9 @@ func strProp(desc string) map[string]any {
 type Deps struct {
 	Connect  clients.ConnectClient
 	Registry clients.SchemaRegistryClient
+	// Staging is the pipeline's staging client set (X8-0, action.go); nil
+	// when none. Only an action's Stage may use it.
+	Staging *Staging
 
 	// validateTimeout overrides timeout for the I/O in Validate; tests only.
 	// Zero means the default.
