@@ -549,3 +549,39 @@ func TestRecoveryScopeIsTheAlertsPipeline(t *testing.T) {
 		t.Fatalf("Verify saw pipeline %q, want none (another pipeline's scope)", act.pipelines)
 	}
 }
+
+// Verify counts from the action.executed time the room sends (HumanInput.At),
+// not from when the agent read the result; polls already due run at once. A
+// time past the agent's clock is the agent's now; no At falls back to now.
+func TestRecoveryCountsFromTheEventTime(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		offset time.Duration // At - now; 0 = At unset
+		want   time.Duration // executedAt - now
+		sleeps []time.Duration
+	}{
+		{"event time", -40 * time.Second, -40 * time.Second, nil},
+		{"event time ahead of this clock", 30 * time.Second, 0, waits(1)},
+		{"no event time", 0, 0, waits(1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			act := newRecoveryAction("fake_resnapshot", rows(412, 0))
+			r, clk := newRecoveryRunner(t, &scriptedModel{}, &fakeInbox{}, &fakeSink{}, nil, []events.ProposalStep{resnapStep("fake_resnapshot")}, act)
+			start := clk.Now()
+			in := actionInput("proposal p_1 step 0: signal sent", okPtr(true))
+			if tc.offset != 0 {
+				in.At = start.Add(tc.offset)
+			}
+			out := r.verifyActionResult(tools.WithPipeline(context.Background(), owners.Pipeline{ID: "orders"}), in)
+			if !out.recovered || act.callCount() != 1 {
+				t.Fatalf("outcome %+v after %d calls, want recovered after 1", out, act.callCount())
+			}
+			if got := act.execAt[0].Sub(start); got != tc.want {
+				t.Fatalf("executedAt = now%+v, want now%+v", got, tc.want)
+			}
+			if !sameDurations(clk.sleeps(), tc.sleeps) {
+				t.Fatalf("sleeps = %v, want %v", clk.sleeps(), tc.sleeps)
+			}
+		})
+	}
+}

@@ -1496,8 +1496,10 @@ func inputFor(e events.Event) *agent.HumanInput {
 			okp = &stepOK
 		}
 		stepIndex := p.StepIndex
+		// At is the step's execution time, which a recovery's Verify
+		// counts from (X2c).
 		return &agent.HumanInput{
-			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
+			Seq: e.Seq, At: e.At, Actor: e.Actor, Kind: "action_result",
 			Text: fmt.Sprintf("step %d: %s", p.StepIndex+1, p.Output),
 			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}

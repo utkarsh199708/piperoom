@@ -49,7 +49,7 @@ type execFlow struct {
 	arrived map[int]bool
 	// seenAt is when the agent first drained each step's result: the
 	// stand-in for the action.executed time a recovery's Verify needs
-	// (verify_recovery.go), since HumanInput carries no event time.
+	// (verify_recovery.go) when the input carries none (HumanInput.At zero).
 	seenAt map[int]time.Time
 }
 

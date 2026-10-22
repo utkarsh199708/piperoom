@@ -79,6 +79,29 @@ func (r *runner) nowTime() time.Time {
 	return time.Now()
 }
 
+// executedAt is the time the last step ran, which Verify counts from: the
+// action.executed event's time (HumanInput.At), else the time the agent first
+// read the result (never earlier), else now. A time past the agent's clock
+// (another replica's clock ahead of this one) is now, so the first poll is
+// never pushed later than the schedule says.
+func (r *runner) executedAt(in HumanInput, id string, step int) time.Time {
+	now := r.nowTime()
+	if !in.At.IsZero() {
+		return minTime(in.At, now)
+	}
+	if at, ok := r.proposals.seenAt(id, step); ok {
+		return minTime(at, now)
+	}
+	return now
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
 // recoveryPlan returns the times of the polls of one recovery verification:
 // first after first, then the wait doubling up to maxWait, every one at most
 // timeout after executedAt. Polls already due at now (the agent saw the
@@ -323,10 +346,10 @@ func (st *recoveryStep) check() events.VerificationCheck {
 // verifyRecoveryProposal verifies a proposal with recovery steps after its
 // last step succeeded: the fix steps' layer checks, then the counts. It emits
 // the agent.verification and the message, records the verdict, and returns
-// the note for the model. executedAt is when the agent first saw the last
-// step's result (HumanInput carries no event time); it is never earlier
-// than the action.executed time, so a count bounded by it errs towards "not
-// recovered". A ctx that ends mid-way emits no verdict.
+// the note for the model. executedAt is the last step's action.executed time
+// (runner.executedAt; when the input does not carry it, the time the agent
+// first saw the result, which is never earlier, so a count bounded by it errs
+// towards "not recovered"). A ctx that ends mid-way emits no verdict.
 func (r *runner) verifyRecoveryProposal(ctx context.Context, rec proposalRecord, steps []*recoveryStep, executedAt time.Time) actionOutcome {
 	var fixSteps []events.ProposalStep
 	for i, s := range rec.steps {
