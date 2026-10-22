@@ -6,18 +6,25 @@ package watch
 // scans the CDC topics:
 //
 //   - count_drift: CountBetween on both sides over the last closed hour,
-//     shifted back by the sink's lag (now - its newest sink_ts_column); fires
-//     when |source - sink| / source > count_tolerance on two checks in a row.
+//     shifted back by the sink's lag (now - its newest sink_ts_column), or,
+//     on an idle sink, over the hour ending at the sink's newest row
+//     (drift_landed.go); fires when |source - sink| / source >
+//     count_tolerance on two checks in a row.
 //   - row_drift: SampleKeys (50) on the source over the hour before
 //     now - lag - settle (rows that had time to reach the sink), RowTimes on
 //     both sides for the same keys; fires when a settled key is missing on
-//     the sink, or one of its timestamp columns differs.
+//     the sink, or one of its timestamp columns differs. It also fires on
+//     the breaks the timestamps cannot show (drift_landed.go): recently
+//     landed rows with sink_ts_column NULL, Debezium's unavailable-value
+//     placeholder in a toastable column, a column gone from the sink.
 //   - dup_keys and order_skew: one DupScan per CDC topic over the time since
 //     the last scan; counts copied into the signal as docs/api.md maps them.
 //
-// Every reader is optional (clients.Reconciler, clients.DupScanner, found by
-// type assertion); one that is missing or answers ErrNotSupported turns its
-// checks off for the pipeline with one INFO line. Primary-key values stay in
+// Every reader is optional (clients.Reconciler, clients.DupScanner,
+// clients.ColumnReader, clients.ToastColumnReader, clients.PlaceholderCounter
+// and the source's Freshness, found by type assertion); one that is missing
+// or answers ErrNotSupported turns its checks off for the pipeline with one
+// INFO line. Primary-key values stay in
 // this file's local variables: no log line, error or evidence carries one.
 // Each signal id holds the table or topic ("count_drift:public.orders"), so
 // state and cooldown are per (pipeline, table, kind).
@@ -155,10 +162,13 @@ type driftMem struct {
 	scanned   map[string]time.Time
 	pk        map[string]string // "src|table" / "sink|table" -> key column
 	off       map[string]bool
+	cols      map[string]map[string]bool // source table -> columns both sides had (structurePart)
+	nextPh    map[string]int             // source table -> placeholder column rotation
 }
 
 func newDriftMem() *driftMem {
-	return &driftMem{fails: map[string]int{}, scanned: map[string]time.Time{}, pk: map[string]string{}, off: map[string]bool{}}
+	return &driftMem{fails: map[string]int{}, scanned: map[string]time.Time{}, pk: map[string]string{}, off: map[string]bool{},
+		cols: map[string]map[string]bool{}, nextPh: map[string]int{}}
 }
 
 // driftResult is one reading of one drift id.
@@ -175,6 +185,9 @@ type driftReaders struct {
 	colSrc       clients.ColumnReader
 	colSnk       clients.ColumnReader
 	dup          clients.DupScanner
+	srcFresh     freshnessReader            // the source's newest row (idle sink)
+	toast        clients.ToastColumnReader  // the source's toastable columns
+	ph           clients.PlaceholderCounter // placeholder rows on the sink
 }
 
 func readersOf(t target) driftReaders {
@@ -182,7 +195,10 @@ func readersOf(t target) driftReaders {
 	rd.src, _ = t.src.(clients.Reconciler)
 	rd.pkSrc, _ = t.src.(primaryKeyer)
 	rd.colSrc, _ = t.src.(clients.ColumnReader)
+	rd.srcFresh, _ = t.src.(freshnessReader)
+	rd.toast, _ = t.src.(clients.ToastColumnReader)
 	if t.wh != nil {
+		rd.ph, _ = t.wh.(clients.PlaceholderCounter)
 		rd.wh = t.wh
 		rd.snk, _ = t.wh.(clients.Reconciler)
 		rd.pkSnk, _ = t.wh.(primaryKeyer)
@@ -366,17 +382,31 @@ func notSupported(err error) bool { return errors.Is(err, clients.ErrNotSupporte
 
 // checkPair runs count_drift and row_drift on one pair. stop is true when the
 // Reconciler answered ErrNotSupported: the table checks are then off.
+// row_drift is the merge of up to four parts (drift_landed.go): the sink's
+// column set, the sampled key compare, a probe of recently landed rows and a
+// count of Debezium's unavailable-value placeholder.
 func (w *Watcher) checkPair(ctx context.Context, now time.Time, t target, mem *driftMem, rd driftReaders, pr tablePair) ([]driftResult, bool) {
 	countID, rowID := driftID(events.SignalCountDrift, pr.source), driftID(events.SignalRowDrift, pr.source)
-	wantCount := t.cfg.CountDrift.Enabled
-	wantRow := t.cfg.RowDrift.Enabled && !mem.off[offRowTable+pr.source]
+	wantCount, wantRow := t.cfg.CountDrift.Enabled, t.cfg.RowDrift.Enabled
 	if !wantCount && !wantRow {
 		return nil, false
 	}
-	fresh, err := call(ctx, w.cfg.CheckTimeout, "sink freshness", func(c context.Context) (time.Time, error) {
-		return rd.wh.Freshness(c, pr.sink, t.p.SinkTSColumn)
-	})
-	if err != nil {
+	var parts []rowPart
+	var cat *catalogs
+	if wantRow {
+		var err error
+		if cat, err = w.readCatalogs(ctx, rd, pr); err != nil {
+			parts = append(parts, rowPart{v: vUnknown, err: err})
+		} else if cat != nil {
+			sp, tsGone := structurePart(now, mem, pr, t.p.SinkTSColumn, cat)
+			if tsGone {
+				// Every other read keys on the column the sink no longer has.
+				return []driftResult{{rowID, mergeRow(t, pr, []rowPart{sp})}}, false
+			}
+			parts = append(parts, sp)
+		}
+	}
+	unknownAll := func(err error) []driftResult {
 		var out []driftResult
 		if wantCount {
 			out = append(out, driftResult{countID, reading{v: vUnknown, err: err}})
@@ -384,12 +414,22 @@ func (w *Watcher) checkPair(ctx context.Context, now time.Time, t target, mem *d
 		if wantRow {
 			out = append(out, driftResult{rowID, reading{v: vUnknown, err: err}})
 		}
-		return out, false
+		return out
 	}
-	lag := sinkLag(now, fresh)
+	fresh, err := call(ctx, w.cfg.CheckTimeout, "sink freshness", func(c context.Context) (time.Time, error) {
+		return rd.wh.Freshness(c, pr.sink, t.p.SinkTSColumn)
+	})
+	if err != nil {
+		return unknownAll(err), false
+	}
+	srcNewest, err := w.sourceNewest(ctx, now, t, mem, rd, pr, fresh)
+	if err != nil {
+		return unknownAll(err), false
+	}
+	win := driftWindows(now, fresh, srcNewest)
 	var out []driftResult
 	if wantCount {
-		r, err := w.countReading(ctx, now, t, mem, rd, pr, lag)
+		r, err := w.countReading(ctx, t, mem, rd, pr, win)
 		if notSupported(err) {
 			w.driftOff(mem, t.p.ID, offReconcile, "count_drift,row_drift", "the reconcile reader is not supported by this client")
 			return out, true
@@ -397,13 +437,15 @@ func (w *Watcher) checkPair(ctx context.Context, now time.Time, t target, mem *d
 		out = append(out, driftResult{countID, r})
 	}
 	if wantRow {
-		r, err := w.rowReading(ctx, now, t, mem, rd, pr, lag)
+		rp, err := w.rowParts(ctx, t, mem, rd, pr, win, cat)
 		if notSupported(err) {
 			w.driftOff(mem, t.p.ID, offReconcile, "count_drift,row_drift", "the reconcile reader is not supported by this client")
 			return out, true
 		}
-		if r != nil {
-			out = append(out, driftResult{rowID, *r})
+		parts = append(parts, rp...)
+		parts = append(parts, w.placeholderPart(ctx, t, mem, rd, pr, win, cat)...)
+		if len(parts) > 0 {
+			out = append(out, driftResult{rowID, mergeRow(t, pr, parts)})
 		}
 	}
 	return out, false
@@ -418,8 +460,8 @@ func sinkLag(now, fresh time.Time) time.Duration {
 	return min(now.Sub(fresh), maxDriftLag).Truncate(time.Second)
 }
 
-// countWindow is count_drift's window: the last closed hour, ending lag
-// earlier.
+// countWindow is count_drift's window on a busy sink: the last closed hour,
+// ending lag earlier.
 func countWindow(now time.Time, lag time.Duration) (from, to time.Time) {
 	to = now.UTC().Truncate(time.Hour).Add(-lag)
 	return to.Add(-driftWindow), to
@@ -427,10 +469,10 @@ func countWindow(now time.Time, lag time.Duration) (from, to time.Time) {
 
 // countReading compares the counts of one pair. A non-nil error is only
 // ErrNotSupported; any other failure is an unknown reading.
-func (w *Watcher) countReading(ctx context.Context, now time.Time, t target, mem *driftMem, rd driftReaders, pr tablePair, lag time.Duration) (reading, error) {
+func (w *Watcher) countReading(ctx context.Context, t target, mem *driftMem, rd driftReaders, pr tablePair, win pairWindows) (reading, error) {
 	id := driftID(events.SignalCountDrift, pr.source)
 	ts := t.p.SinkTSColumn
-	from, to := countWindow(now, lag)
+	from, to := win.countFrom, win.countTo
 	srcN, err := call(ctx, w.cfg.CheckTimeout, "count source rows", func(c context.Context) (int64, error) {
 		return rd.src.CountBetween(c, pr.source, ts, from, to)
 	})
@@ -440,7 +482,7 @@ func (w *Watcher) countReading(ctx context.Context, now time.Time, t target, mem
 			return rd.snk.CountBetween(c, pr.sink, ts, from, to)
 		})
 		if err == nil {
-			return countVerdict(t, mem, id, pr, from, to, lag, srcN, snkN), nil
+			return countVerdict(t, mem, id, pr, win, srcN, snkN), nil
 		}
 	}
 	if notSupported(err) {
@@ -452,7 +494,7 @@ func (w *Watcher) countReading(ctx context.Context, now time.Time, t target, mem
 // countVerdict judges two counts: over the tolerance on countDriftChecks
 // checks in a row is a breach; the first is a hold. At the tolerance itself
 // is not drift.
-func countVerdict(t target, mem *driftMem, id string, pr tablePair, from, to time.Time, lag time.Duration, srcN, snkN int64) reading {
+func countVerdict(t target, mem *driftMem, id string, pr tablePair, win pairWindows, srcN, snkN int64) reading {
 	tol := t.cfg.CountTolerance
 	diff := srcN - snkN
 	if diff < 0 {
@@ -484,27 +526,35 @@ func countVerdict(t target, mem *driftMem, id string, pr tablePair, from, to tim
 	r.sev = events.SignalSeverity(events.SignalCountDrift)
 	r.label = fmt.Sprintf("count drift %s: source %d rows, sink %d (%.1f%%)", pr.source, srcN, snkN, ratio*100)
 	detail := "sink " + pr.sink
-	if lag > 0 {
-		detail += "; window shifted by the sink lag of " + fmtDur(lag)
+	switch {
+	case win.idle:
+		detail += "; sink idle: window ends at its newest row"
+	case win.lag > 0:
+		detail += "; window shifted by the sink lag of " + fmtDur(win.lag)
 	}
 	r.ev = driftEvidence(events.DriftSignal{
 		Kind: events.SignalCountDrift, Severity: r.sev, Table: pr.source, Topic: topicOf(t, pr.source),
-		Window: events.DriftWindow{From: from, To: to}, Source: srcN, Sink: snkN,
+		Window: events.DriftWindow{From: win.countFrom, To: win.countTo}, Source: srcN, Sink: snkN,
 		Missing: int(max(srcN-snkN, 0)), Detail: detail,
 	})
 	return r
 }
 
-// rowReading compares sampled rows of one pair. A nil reading means the
-// table's row check was turned off (no usable key); a non-nil error is only
-// ErrNotSupported from the Reconciler.
-func (w *Watcher) rowReading(ctx context.Context, now time.Time, t target, mem *driftMem, rd driftReaders, pr tablePair, lag time.Duration) (*reading, error) {
+// rowParts runs row_drift's key sample on one pair: the settled compare and,
+// when the sink looks behind, the probe of recently landed rows. nil when the
+// table's sample is off (no usable key, or a key or sink_ts_column that looks
+// like personal data); a non-nil error is only ErrNotSupported from the
+// Reconciler.
+func (w *Watcher) rowParts(ctx context.Context, t target, mem *driftMem, rd driftReaders, pr tablePair, win pairWindows, cat *catalogs) ([]rowPart, error) {
+	if mem.off[offRowTable+pr.source] {
+		return nil, nil
+	}
 	ts := t.p.SinkTSColumn
-	unknown := func(err error) (*reading, error) {
+	unknown := func(err error) ([]rowPart, error) {
 		if notSupported(err) {
 			return nil, err
 		}
-		return &reading{v: vUnknown, err: err}, nil
+		return []rowPart{{v: vUnknown, err: err}}, nil
 	}
 	if rd.pkSrc == nil || rd.pkSnk == nil {
 		w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "a client cannot name the table's primary key")
@@ -515,25 +565,41 @@ func (w *Watcher) rowReading(ctx context.Context, now time.Time, t target, mem *
 		return nil, nil
 	}
 	pkSrc, err := w.primaryKey(ctx, mem, rd.pkSrc, "src", pr.source)
+	var pkSnk string
 	if err == nil {
-		var pkSnk string
-		if pkSnk, err = w.primaryKey(ctx, mem, rd.pkSnk, "sink", pr.sink); err == nil {
-			if piiColumn(pkSrc) || piiColumn(pkSnk) {
-				// A table keyed by personal data (an email, a phone) is never
-				// sampled: the keys would be the personal data itself
-				// (docs/design/lineage.md section 3).
-				w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "the primary key column looks like personal data")
-				return nil, nil
-			}
-			return w.compareRows(ctx, now, t, rd, pr, lag, pkSrc, pkSnk)
-		}
+		pkSnk, err = w.primaryKey(ctx, mem, rd.pkSnk, "sink", pr.sink)
 	}
 	if errors.Is(err, clients.ErrNotFound) || notSupported(err) {
 		// No primary key, or a composite one: no single-key lookup is one row.
 		w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "no single-column primary key on "+pr.source+" or "+pr.sink)
 		return nil, nil
 	}
-	return unknown(err)
+	if err != nil {
+		return unknown(err)
+	}
+	if piiColumn(pkSrc) || piiColumn(pkSnk) {
+		// A table keyed by personal data (an email, a phone) is never
+		// sampled: the keys would be the personal data itself
+		// (docs/design/lineage.md section 3).
+		w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "the primary key column looks like personal data")
+		return nil, nil
+	}
+	main, err := w.compareRows(ctx, t, rd, pr, win, pkSrc, pkSnk, timeColumns(cat, ts))
+	if err != nil {
+		return unknown(err)
+	}
+	parts := []rowPart{main}
+	if win.probe {
+		p, err := w.landedProbe(ctx, t, rd, pr, win, pkSrc, pkSnk)
+		if notSupported(err) {
+			return nil, err
+		}
+		if err != nil {
+			p = rowPart{v: vUnknown, err: err}
+		}
+		parts = append(parts, p)
+	}
+	return parts, nil
 }
 
 func (w *Watcher) primaryKey(ctx context.Context, mem *driftMem, pk primaryKeyer, side, table string) (string, error) {
@@ -550,43 +616,32 @@ func (w *Watcher) primaryKey(ctx context.Context, mem *driftMem, pk primaryKeyer
 	return col, nil
 }
 
-// compareRows samples settled source keys (sink_ts_column in [cutoff - 1 h,
-// cutoff), the window SampleKeys bounds) and compares their timestamp
-// columns with the sink's. Keys live only in this function.
-func (w *Watcher) compareRows(ctx context.Context, now time.Time, t target, rd driftReaders, pr tablePair, lag time.Duration, pkSrc, pkSnk string) (*reading, error) {
+// compareRows samples settled source keys (sink_ts_column in the row window,
+// the half-open [since, cutoff) SampleKeys bounds) and compares their
+// timestamp columns cols with the sink's. Keys live only in this function.
+func (w *Watcher) compareRows(ctx context.Context, t target, rd driftReaders, pr tablePair, win pairWindows, pkSrc, pkSnk string, cols []string) (rowPart, error) {
 	ts := t.p.SinkTSColumn
-	cutoff := now.UTC().Add(-lag - rowSettle).Truncate(time.Second)
-	since := cutoff.Add(-driftWindow)
-	unknown := func(err error) (*reading, error) {
-		if notSupported(err) {
-			return nil, err
-		}
-		return &reading{v: vUnknown, err: err}, nil
-	}
-	cols, err := w.timeColumns(ctx, rd, pr, ts)
-	if err != nil {
-		return unknown(err)
-	}
+	since, cutoff := win.rowSince, win.rowCutoff
 	keys, err := call(ctx, w.cfg.CheckTimeout, "sample source keys", func(c context.Context) ([]string, error) {
 		return rd.src.SampleKeys(c, pr.source, pkSrc, ts, since, cutoff, driftSampleKeys)
 	})
 	if err != nil {
-		return unknown(err)
+		return rowPart{}, err
 	}
 	if len(keys) == 0 {
-		return &reading{v: vHold, value: "no source rows to sample", threshold: "0 missing"}, nil
+		return rowPart{v: vHold, value: "no source rows to sample"}, nil
 	}
 	srcT, err := call(ctx, w.cfg.CheckTimeout, "source row times", func(c context.Context) (map[string]map[string]time.Time, error) {
 		return rd.src.RowTimes(c, pr.source, pkSrc, keys, cols)
 	})
 	if err != nil {
-		return unknown(err)
+		return rowPart{}, err
 	}
 	snkT, err := call(ctx, w.cfg.CheckTimeout, "sink row times", func(c context.Context) (map[string]map[string]time.Time, error) {
 		return rd.snk.RowTimes(c, pr.sink, pkSnk, keys, cols)
 	})
 	if err != nil {
-		return unknown(err)
+		return rowPart{}, err
 	}
 	sample, missing, mismatched := 0, 0, 0
 	for _, k := range keys {
@@ -610,27 +665,21 @@ func (w *Watcher) compareRows(ctx context.Context, now time.Time, t target, rd d
 			}
 		}
 	}
-	r := &reading{
-		value:     fmt.Sprintf("%d of %d sampled keys missing, %d with differing timestamps", missing, sample, mismatched),
-		threshold: "0 missing, 0 differing",
+	p := rowPart{
+		sample: sample, missing: missing, mismatched: mismatched, from: since, to: cutoff,
+		value: fmt.Sprintf("%d of %d sampled keys missing, %d with differing timestamps", missing, sample, mismatched),
 	}
 	switch {
 	case sample == 0:
-		r.v = vHold
-		return r, nil
+		p.v = vHold
 	case missing == 0 && mismatched == 0:
-		r.v = vClear
-		return r, nil
+		p.v = vClear
+	default:
+		p.v = vBreach
+		p.label = fmt.Sprintf("%d of %d sampled keys missing on the sink, %d with differing timestamps", missing, sample, mismatched)
+		p.detail = fmt.Sprintf("%d timestamp columns compared", len(cols))
 	}
-	r.v = vBreach
-	r.sev = events.SignalSeverity(events.SignalRowDrift)
-	r.label = fmt.Sprintf("row drift %s: %d of %d sampled keys missing on the sink, %d with differing timestamps", pr.source, missing, sample, mismatched)
-	r.ev = driftEvidence(events.DriftSignal{
-		Kind: events.SignalRowDrift, Severity: r.sev, Table: pr.source, Topic: topicOf(t, pr.source),
-		Window: events.DriftWindow{From: since, To: cutoff}, Missing: missing, Mismatched: mismatched, Sample: sample,
-		Detail: fmt.Sprintf("sink %s; %d timestamp columns compared", pr.sink, len(cols)),
-	})
-	return r, nil
+	return p, nil
 }
 
 // sameTime: column c is absent on both rows, or present on both within
@@ -649,47 +698,29 @@ func sameTime(a, b map[string]time.Time, c string) bool {
 }
 
 // timeColumns are the timestamp columns row_drift compares: ts first, then
-// the date/time columns both tables have (when both clients can read the
-// catalog), never one whose name looks like personal data, at most
-// maxDriftColumns. Without a catalog reader it is ts alone.
-func (w *Watcher) timeColumns(ctx context.Context, rd driftReaders, pr tablePair, ts string) ([]string, error) {
+// the date/time columns both tables have (when both catalogs were read),
+// never one whose name looks like personal data, at most maxDriftColumns.
+// Without the catalogs it is ts alone.
+func timeColumns(cat *catalogs, ts string) []string {
 	cols := []string{ts}
-	if rd.colSrc == nil || rd.colSnk == nil {
-		return cols, nil
-	}
-	srcCols, err := call(ctx, w.cfg.CheckTimeout, "source columns", func(c context.Context) ([]clients.ColumnInfo, error) {
-		return rd.colSrc.Columns(c, pr.source)
-	})
-	if err != nil {
-		if notSupported(err) {
-			return cols, nil
-		}
-		return nil, err
-	}
-	snkCols, err := call(ctx, w.cfg.CheckTimeout, "sink columns", func(c context.Context) ([]clients.ColumnInfo, error) {
-		return rd.colSnk.Columns(c, pr.sink)
-	})
-	if err != nil {
-		if notSupported(err) {
-			return cols, nil
-		}
-		return nil, err
+	if cat == nil {
+		return cols
 	}
 	onSink := map[string]bool{}
-	for _, c := range snkCols {
+	for _, c := range cat.snk {
 		if timeType(c.Type) {
 			onSink[c.Name] = true
 		}
 	}
 	var more []string
-	for _, c := range srcCols {
+	for _, c := range cat.src {
 		if c.Name != ts && timeType(c.Type) && onSink[c.Name] && !piiColumn(c.Name) && validColumn(c.Name) {
 			more = append(more, c.Name)
 		}
 	}
 	slices.Sort(more)
 	more = slices.Compact(more)
-	return append(cols, more[:min(len(more), maxDriftColumns-1)]...), nil
+	return append(cols, more[:min(len(more), maxDriftColumns-1)]...)
 }
 
 // timeType: a catalog type that is a point in time (what RowTimes reads).

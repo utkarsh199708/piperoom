@@ -519,8 +519,13 @@ func TestRowDriftSamplesSettledWindow(t *testing.T) {
 	h.step(0)
 	wins := h.src.sampleWindows()
 	cutoff := t0.Add(-10*time.Minute - rowSettle)
-	if len(wins) != 1 || !wins[0][1].Equal(cutoff) || !wins[0][0].Equal(cutoff.Add(-driftWindow)) {
-		t.Fatalf("sample windows %v, want [%v, %v)", wins, cutoff.Add(-driftWindow), cutoff)
+	if len(wins) != 2 || !wins[0][1].Equal(cutoff) || !wins[0][0].Equal(cutoff.Add(-driftWindow)) {
+		t.Fatalf("sample windows %v, want [%v, %v) first", wins, cutoff.Add(-driftWindow), cutoff)
+	}
+	// The sink is behind by more than the settle: the landed-row probe
+	// samples the last hour by the wall clock too (X1b-fix).
+	if landed := t0.Add(-rowSettle); !wins[1][1].Equal(landed) || !wins[1][0].Equal(landed.Add(-driftWindow)) {
+		t.Fatalf("probe window %v, want [%v, %v)", wins[1], landed.Add(-driftWindow), landed)
 	}
 	if len(h.snk.sampleWindows()) != 0 {
 		t.Fatal("the sink was sampled; only the source picks the keys")
