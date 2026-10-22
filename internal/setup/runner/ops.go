@@ -223,6 +223,15 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		return
 	}
 
+	// A catalogue that can allow-list a request's target refuses a host
+	// outside the room's targets (and malformed params) before the guard.
+	if tc, ok := r.catalogue.(TargetChecker); ok {
+		if reason := tc.CheckTarget(*req); reason != "" {
+			r.refuse(ctx, req, reason)
+			return
+		}
+	}
+
 	// The guard runs on the raised class before anything else, for every op.
 	if r.catalogue.GuardForbidden(req.Op, eff) {
 		r.refuse(ctx, req, protocol.RefuseGuard)
