@@ -6,6 +6,12 @@ package demo
 // (LEAD-ARCH round 4, item 3). The fixtures tell the schema-change story from
 // dev/owners.yaml: pg-orders-connector has task 0 FAILED after an
 // incompatible Avro schema was rejected for pg.public.orders-value.
+//
+// One registry of actions is built once at startup (cmd/server), so the fakes
+// are shared by every room of the process. Their mutable state is therefore
+// keyed by the room id the room service puts in the action context
+// (room.RoomID): each demo room starts the story from the same values and a
+// fix executed in one room never changes another's preview (KAN-392).
 
 import (
 	"context"
@@ -14,6 +20,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
+	"piperoom/internal/room"
 )
 
 // Compile-time checks: the fakes must satisfy the exact contract interfaces.
@@ -28,9 +35,8 @@ func FakeActionDeps() actions.Deps {
 }
 
 // Fakes is the demo's in-memory client pair. The --demo server registers the
-// real actions over this pair and hands the same pair to Controls, so a reset
-// returns the whole demo stack to the state the story starts from. (KAN-392
-// moves this to per-room state; until it lands, one pair serves the process.)
+// real actions over this pair and hands the same pair to Controls; a reset
+// returns one room's state to the state the story starts from.
 type Fakes struct {
 	Connect  *FakeConnect
 	Registry *FakeRegistry
@@ -46,44 +52,82 @@ func (f *Fakes) Actions() actions.Deps {
 	return actions.Deps{Connect: f.Connect, Registry: f.Registry}
 }
 
-// Reset puts both clients back to the state the story starts from: the
+// Reset puts one room's clients back to the state the story starts from: the
 // connector's task 0 is FAILED and the subject compatibility is BACKWARD.
-func (f *Fakes) Reset() {
-	f.Connect.Reset()
-	f.Registry.Reset()
+// Other rooms keep their own state.
+func (f *Fakes) Reset(roomID string) {
+	f.Connect.Reset(roomID)
+	f.Registry.Reset(roomID)
 }
 
 const (
 	connectorName = "pg-orders-connector"
 	subjectName   = "pg.public.orders-value"
+
+	// storyTaskState and storyCompatibility are the story's starting values.
+	// The scripted tool summaries in demo.go state the same values, so a fresh
+	// demo room's preview and its summaries agree (KAN-392).
+	storyTaskState     = "FAILED"
+	storyCompatibility = "BACKWARD"
 )
 
 // FakeConnect is an in-memory Kafka Connect: one source connector whose task 0
 // starts FAILED (the demo story) and turns RUNNING when restarted or resumed.
+// Each room id gets its own connector state; calls without a room id share
+// the "" state, which keeps single-room users and direct tests working.
 type FakeConnect struct {
-	mu        sync.Mutex
+	mu     sync.Mutex
+	states map[string]*connectState
+}
+
+type connectState struct {
 	connState string
 	task0     string
 }
 
+func newConnectState() *connectState {
+	return &connectState{connState: "RUNNING", task0: storyTaskState}
+}
+
 // NewFakeConnect returns the Connect state the demo story starts from.
 func NewFakeConnect() *FakeConnect {
-	return &FakeConnect{connState: "RUNNING", task0: "FAILED"}
+	return &FakeConnect{states: make(map[string]*connectState)}
+}
+
+// stateLocked returns the state of roomID, creating it from the story on first
+// use. The caller holds f.mu.
+func (f *FakeConnect) stateLocked(roomID string) *connectState {
+	st, ok := f.states[roomID]
+	if !ok {
+		st = newConnectState()
+		f.states[roomID] = st
+	}
+	return st
+}
+
+// Reset forgets roomID's state so its next call starts the story again. The
+// demo reset endpoint (KAN-398) calls it; until then a presenter restarts the
+// process. An empty roomID resets the "" bucket.
+func (f *FakeConnect) Reset(roomID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.states, roomID)
 }
 
 func (f *FakeConnect) ListConnectors(context.Context) ([]string, error) {
 	return []string{connectorName}, nil
 }
 
-func (f *FakeConnect) Status(_ context.Context, name string) (clients.ConnectorStatus, error) {
+func (f *FakeConnect) Status(ctx context.Context, name string) (clients.ConnectorStatus, error) {
 	if name != connectorName {
 		return clients.ConnectorStatus{}, fmt.Errorf("demo: connector %q: %w", name, clients.ErrNotFound)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	st := f.stateLocked(room.RoomID(ctx))
 	return clients.ConnectorStatus{
-		Name: name, Type: "source", State: f.connState, WorkerID: "172.19.0.5:8083",
-		Tasks: []clients.TaskStatus{{ID: 0, State: f.task0, WorkerID: "172.19.0.5:8083"}},
+		Name: name, Type: "source", State: st.connState, WorkerID: "172.19.0.5:8083",
+		Tasks: []clients.TaskStatus{{ID: 0, State: st.task0, WorkerID: "172.19.0.5:8083"}},
 	}, nil
 }
 
@@ -97,7 +141,7 @@ func (f *FakeConnect) Config(_ context.Context, name string) (map[string]string,
 	}, nil
 }
 
-func (f *FakeConnect) RestartTask(_ context.Context, name string, task int) error {
+func (f *FakeConnect) RestartTask(ctx context.Context, name string, task int) error {
 	if name != connectorName {
 		return fmt.Errorf("demo: connector %q: %w", name, clients.ErrNotFound)
 	}
@@ -106,66 +150,86 @@ func (f *FakeConnect) RestartTask(_ context.Context, name string, task int) erro
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.task0 = "RUNNING"
+	f.stateLocked(room.RoomID(ctx)).task0 = "RUNNING"
 	return nil
 }
 
 // Resume sets the connector and its tasks to RUNNING, as RestartTask sets task 0.
-func (f *FakeConnect) Resume(_ context.Context, name string) error {
+func (f *FakeConnect) Resume(ctx context.Context, name string) error {
 	if name != connectorName {
 		return fmt.Errorf("demo: connector %q: %w", name, clients.ErrNotFound)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.connState = "RUNNING"
-	f.task0 = "RUNNING"
+	st := f.stateLocked(room.RoomID(ctx))
+	st.connState = "RUNNING"
+	st.task0 = "RUNNING"
 	return nil
 }
 
-// Reset returns the connector to the story's starting state: running, with
-// task 0 FAILED.
-func (f *FakeConnect) Reset() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.connState = "RUNNING"
-	f.task0 = "FAILED"
-}
-
-func (f *FakeConnect) RestartConnector(_ context.Context, name string) error {
+func (f *FakeConnect) RestartConnector(ctx context.Context, name string) error {
 	if name != connectorName {
 		return fmt.Errorf("demo: connector %q: %w", name, clients.ErrNotFound)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.task0 = "RUNNING"
+	f.stateLocked(room.RoomID(ctx)).task0 = "RUNNING"
 	return nil
 }
 
 // FakeRegistry is an in-memory Schema Registry with one subject at
-// compatibility BACKWARD, the demo story's starting point.
+// compatibility BACKWARD, the demo story's starting point. Like FakeConnect,
+// it keeps one state per room id.
 type FakeRegistry struct {
 	mu     sync.Mutex
-	levels map[string]string
+	levels map[string]map[string]string
 }
 
 // NewFakeRegistry returns the Registry state the demo story starts from.
 func NewFakeRegistry() *FakeRegistry {
-	return &FakeRegistry{levels: map[string]string{subjectName: "BACKWARD"}}
+	return &FakeRegistry{levels: make(map[string]map[string]string)}
+}
+
+// roomLevelsLocked returns roomID's subject levels, creating them from the
+// story on first use. The caller holds f.mu.
+func (f *FakeRegistry) roomLevelsLocked(roomID string) map[string]string {
+	levels, ok := f.levels[roomID]
+	if !ok {
+		levels = map[string]string{subjectName: storyCompatibility}
+		f.levels[roomID] = levels
+	}
+	return levels
+}
+
+// level returns a subject's compatibility level in ctx's room.
+func (f *FakeRegistry) level(ctx context.Context, subject string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	level, ok := f.roomLevelsLocked(room.RoomID(ctx))[subject]
+	return level, ok
+}
+
+// Reset forgets roomID's state so its next call starts the story again (see
+// FakeConnect.Reset).
+func (f *FakeRegistry) Reset(roomID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.levels, roomID)
 }
 
 func (f *FakeRegistry) Subjects(context.Context) ([]string, error) {
 	return []string{subjectName}, nil
 }
 
-func (f *FakeRegistry) Versions(_ context.Context, subject string) ([]int, error) {
-	if _, ok := f.level(subject); !ok {
+func (f *FakeRegistry) Versions(ctx context.Context, subject string) ([]int, error) {
+	if _, ok := f.level(ctx, subject); !ok {
 		return nil, fmt.Errorf("demo: subject %q: %w", subject, clients.ErrNotFound)
 	}
 	return []int{1}, nil
 }
 
-func (f *FakeRegistry) Schema(_ context.Context, subject string, version int) (clients.SchemaVersion, error) {
-	if _, ok := f.level(subject); !ok || (version != -1 && version != 1) {
+func (f *FakeRegistry) Schema(ctx context.Context, subject string, version int) (clients.SchemaVersion, error) {
+	if _, ok := f.level(ctx, subject); !ok || (version != -1 && version != 1) {
 		return clients.SchemaVersion{}, fmt.Errorf("demo: subject %q version %d: %w", subject, version, clients.ErrNotFound)
 	}
 	return clients.SchemaVersion{
@@ -174,41 +238,28 @@ func (f *FakeRegistry) Schema(_ context.Context, subject string, version int) (c
 	}, nil
 }
 
-func (f *FakeRegistry) Compatibility(_ context.Context, subject string) (string, bool, error) {
-	level, ok := f.level(subject)
+func (f *FakeRegistry) Compatibility(ctx context.Context, subject string) (string, bool, error) {
+	level, ok := f.level(ctx, subject)
 	if !ok {
 		return "", false, fmt.Errorf("demo: subject %q: %w", subject, clients.ErrNotFound)
 	}
 	return level, true, nil
 }
 
-func (f *FakeRegistry) SetCompatibility(_ context.Context, subject, level string) error {
+func (f *FakeRegistry) SetCompatibility(ctx context.Context, subject, level string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.levels[subject]; !ok {
+	levels := f.roomLevelsLocked(room.RoomID(ctx))
+	if _, ok := levels[subject]; !ok {
 		return fmt.Errorf("demo: subject %q: %w", subject, clients.ErrNotFound)
 	}
-	f.levels[subject] = level
+	levels[subject] = level
 	return nil
 }
 
-func (f *FakeRegistry) Register(_ context.Context, subject, _ string) (int, error) {
-	if _, ok := f.level(subject); !ok {
+func (f *FakeRegistry) Register(ctx context.Context, subject, _ string) (int, error) {
+	if _, ok := f.level(ctx, subject); !ok {
 		return 0, fmt.Errorf("demo: subject %q: %w", subject, clients.ErrNotFound)
 	}
 	return 2, nil
-}
-
-// Reset returns the subject to the story's starting compatibility, BACKWARD.
-func (f *FakeRegistry) Reset() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.levels = map[string]string{subjectName: "BACKWARD"}
-}
-
-func (f *FakeRegistry) level(subject string) (string, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	level, ok := f.levels[subject]
-	return level, ok
 }

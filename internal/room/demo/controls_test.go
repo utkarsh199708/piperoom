@@ -263,7 +263,7 @@ func TestResetRestoresFakesAndReplays(t *testing.T) {
 	defer stopRun(t, cancel, done)
 
 	waitFor(t, 10*time.Second, "the first proposal", func() bool { return props.count() >= 1 })
-	ctx := context.Background()
+	ctx := room.WithRoomID(context.Background(), "r_reset")
 	// The fix ran: compatibility NONE, task RUNNING.
 	if err := fakes.Registry.SetCompatibility(ctx, subjectName, "NONE"); err != nil {
 		t.Fatalf("set compatibility: %v", err)
@@ -306,6 +306,60 @@ func TestResetRestoresFakesAndReplays(t *testing.T) {
 	}
 }
 
+// A reset in one room only restores that room's fake state. Another room that
+// already ran its fix keeps NONE/RUNNING (KAN-392 + #785 review).
+func TestResetIsPerRoom(t *testing.T) {
+	fakes := NewFakes()
+	c := NewControls(fakes)
+	c.delay = 5 * time.Millisecond
+	sinkA, sinkB := &recordingSink{}, &recordingSink{}
+	cancelA, doneA := startRun(t, c, "r_a", sinkA, &countProposals{})
+	defer stopRun(t, cancelA, doneA)
+	cancelB, doneB := startRun(t, c, "r_b", sinkB, &countProposals{})
+	defer stopRun(t, cancelB, doneB)
+
+	waitFor(t, 10*time.Second, "both rooms at the proposal", func() bool {
+		return hasMessage(sinkA, "The fix proposal") && hasMessage(sinkB, "The fix proposal")
+	})
+	ctxA := room.WithRoomID(context.Background(), "r_a")
+	ctxB := room.WithRoomID(context.Background(), "r_b")
+	for _, ctx := range []context.Context{ctxA, ctxB} {
+		if err := fakes.Registry.SetCompatibility(ctx, subjectName, "NONE"); err != nil {
+			t.Fatalf("set compatibility: %v", err)
+		}
+		if err := fakes.Connect.RestartTask(ctx, connectorName, 0); err != nil {
+			t.Fatalf("restart task: %v", err)
+		}
+	}
+
+	if err := c.Reset("r_a"); err != nil {
+		t.Fatalf("Reset A: %v", err)
+	}
+	waitFor(t, 10*time.Second, "room A back to the starting state", func() bool {
+		st, err := fakes.Connect.Status(ctxA, connectorName)
+		if err != nil || len(st.Tasks) != 1 || st.Tasks[0].State != "FAILED" {
+			return false
+		}
+		level, ok, err := fakes.Registry.Compatibility(ctxA, subjectName)
+		return err == nil && ok && level == "BACKWARD"
+	})
+
+	stB, err := fakes.Connect.Status(ctxB, connectorName)
+	if err != nil {
+		t.Fatalf("connector B status: %v", err)
+	}
+	if len(stB.Tasks) != 1 || stB.Tasks[0].State != "RUNNING" {
+		t.Fatalf("room B connector after A's reset = %+v, want RUNNING", stB.Tasks)
+	}
+	levelB, ok, err := fakes.Registry.Compatibility(ctxB, subjectName)
+	if err != nil {
+		t.Fatalf("compatibility B: %v", err)
+	}
+	if !ok || levelB != "NONE" {
+		t.Fatalf("room B compatibility after A's reset = %q (subject %v), want NONE", levelB, ok)
+	}
+}
+
 // TC4 (preview half): the action preview over the demo's clients shows the
 // starting state again after a reset, which is what a replayed proposal's
 // preview card shows.
@@ -324,7 +378,7 @@ func TestFakesResetRestoresActionPreview(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s has no Preview", ActionSchemaSetCompatibility)
 	}
-	ctx := context.Background()
+	ctx := room.WithRoomID(context.Background(), "r_preview")
 	if _, err := act.Execute(ctx, params); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -335,7 +389,7 @@ func TestFakesResetRestoresActionPreview(t *testing.T) {
 	if !strings.Contains(after.Current, "NONE") {
 		t.Fatalf("preview after the fix = %q, want the written level", after.Current)
 	}
-	fakes.Reset()
+	fakes.Reset("r_preview")
 	again, err := preview.Preview(ctx, params)
 	if err != nil {
 		t.Fatalf("Preview after reset: %v", err)

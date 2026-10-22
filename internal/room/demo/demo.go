@@ -92,7 +92,7 @@ func runStory(ctx context.Context, rc *runState, fakes *Fakes, deps agent.Deps, 
 		case waitReset:
 			rc.takeReset()
 			if fakes != nil {
-				fakes.Reset()
+				fakes.Reset(rc.roomID)
 			}
 			rc.restartStory()
 		}

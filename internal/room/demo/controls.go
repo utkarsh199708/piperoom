@@ -56,6 +56,7 @@ func NewControls(fakes *Fakes) *Controls {
 // the story, and restarts it whenever the driver resets.
 func (c *Controls) Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options) error {
 	rc := newRunState()
+	rc.roomID = alert.RoomID
 	if deps.Sink != nil {
 		rc.setEmitter(func(typ events.Type, payload any) error {
 			return deps.Sink.Emit(ctx, typ, payload)
@@ -142,6 +143,10 @@ const (
 // runState is one room's scripted run: its pause, skip and reset signals. The
 // zero value is not usable; use newRunState.
 type runState struct {
+	// roomID keys the per-room demo fake state. A package-level Run has none
+	// and shares the "" bucket.
+	roomID string
+
 	// wake is signalled on every control change; capacity one, so signals
 	// coalesce.
 	wake chan struct{}
