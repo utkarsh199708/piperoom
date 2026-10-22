@@ -599,6 +599,7 @@ func runWith(d startDeps) error {
 			PipelineDailyTokens:  spend.cost.PipelineDailyTokens,
 			PipelineDailyCostUSD: spend.cost.PipelineDailyCostUSD,
 		})}
+	httpOpts = append(httpOpts, httpapi.WithChangesWebhook(changeWebhook(cfg, own, st, log)))
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
 	}

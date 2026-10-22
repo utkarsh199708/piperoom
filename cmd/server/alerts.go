@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
+	"net/http"
 	"strings"
 
 	"piperoom/internal/alertin"
+	"piperoom/internal/clients"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 )
@@ -104,4 +107,14 @@ func enabledAlertSources(c alertin.Config) string {
 		return "none"
 	}
 	return strings.Join(on, ",")
+}
+
+// changeWebhook builds POST /api/changes/webhook (X4) over the room store's
+// change log. It is mounted even without CHANGES_WEBHOOK_SECRET, so a sender
+// gets 401 rather than 404; only whether it is enabled is logged.
+func changeWebhook(cfg config.Config, own *owners.Owners, st any, log *slog.Logger) http.Handler {
+	cw, _ := st.(clients.ChangeWriter)
+	h := alertin.NewChangeWebhook(alertin.ChangeWebhookConfig{Secret: cfg.ChangesWebhookSecret, Owners: own, Writer: cw, Log: log})
+	log.Info("server: change webhook", "enabled", h.Enabled())
+	return h
 }

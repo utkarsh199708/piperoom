@@ -104,7 +104,7 @@ func isHealthProbe(r *http.Request) bool {
 }
 
 // isSignedAlertRoute reports whether r is POST /api/alerts/{source} for a
-// signed source. Those routes skip the Host check (lead decision on PR #61):
+// signed source, or the signed change webhook. Those routes skip the Host check (lead decision on PR #61):
 // the sender's HMAC or token is their auth and DNS rebinding cannot forge it,
 // while in-cluster senders call by internal DNS names that no operator would
 // think to list. The unsigned dev webhook (/api/alerts/webhook) is not one of
@@ -112,6 +112,9 @@ func isHealthProbe(r *http.Request) bool {
 func isSignedAlertRoute(r *http.Request) bool {
 	if r.Method != http.MethodPost {
 		return false
+	}
+	if r.URL.Path == "/api/changes/webhook" {
+		return true // X4: signed with CHANGES_WEBHOOK_SECRET like the generic source
 	}
 	src, ok := strings.CutPrefix(r.URL.Path, "/api/alerts/")
 	return ok && src != "" && src != "webhook" && !strings.Contains(src, "/")
