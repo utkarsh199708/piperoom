@@ -1,0 +1,158 @@
+name: Version matrix
+
+# KAN-195: weekly run of the dev-stack integration tests against other versions
+# of the stack's components, so a Postgres, Kafka, Schema Registry or Debezium
+# release that breaks the tools shows up here and not at a pilot site.
+#
+# One axis moves per row; every other component stays at the dev stack's
+# default (dev/docker-compose.yml). The baseline row is the default stack, so a
+# red variant row next to a green baseline names the component that broke.
+# Image tags are the ones dev/docker-compose.yml reads from POSTGRES_IMAGE,
+# KAFKA_IMAGE, SCHEMA_REGISTRY_IMAGE and DEBEZIUM_VERSION.
+#
+# Never on pull_request or push: the matrix is slow and starts a full stack
+# per row. Run it by hand from the Actions tab after editing a row.
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"   # weekly, Mondays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: version-matrix-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # A broken version must not hide the others.
+      fail-fast: false
+      matrix:
+        include:
+          - name: baseline (postgres 17, kafka 4.1.0, registry 8.0.0, debezium 3.2.0)
+            postgres_image: postgres:17
+            kafka_image: apache/kafka:4.1.0
+            schema_registry_image: confluentinc/cp-schema-registry:8.0.0
+            debezium_version: 3.2.0.Final
+          - name: postgres 16
+            postgres_image: postgres:16
+            kafka_image: apache/kafka:4.1.0
+            schema_registry_image: confluentinc/cp-schema-registry:8.0.0
+            debezium_version: 3.2.0.Final
+          - name: postgres 15
+            postgres_image: postgres:15
+            kafka_image: apache/kafka:4.1.0
+            schema_registry_image: confluentinc/cp-schema-registry:8.0.0
+            debezium_version: 3.2.0.Final
+          - name: kafka 3.9.0
+            postgres_image: postgres:17
+            kafka_image: apache/kafka:3.9.0
+            schema_registry_image: confluentinc/cp-schema-registry:8.0.0
+            debezium_version: 3.2.0.Final
+          - name: schema registry 7.9.0
+            postgres_image: postgres:17
+            kafka_image: apache/kafka:4.1.0
+            schema_registry_image: confluentinc/cp-schema-registry:7.9.0
+            debezium_version: 3.2.0.Final
+          - name: debezium 3.1.0
+            postgres_image: postgres:17
+            kafka_image: apache/kafka:4.1.0
+            schema_registry_image: confluentinc/cp-schema-registry:8.0.0
+            debezium_version: 3.1.0.Final
+    # The room-database tests get a separate Postgres on host port 5433, as in
+    # ci.yml's fullstack job (their WAL would otherwise sit behind the slot).
+    services:
+      roomdb:
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: piperoom
+          # CI-only throwaway database on the job's own network; not a secret.
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: piperoom
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U piperoom -d piperoom"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PIPEROOM_STACK_OWNER: ci
+      PIPEROOM_STACK_LOCK: /tmp/piperoom-ci/stack.lock
+      # Read by dev/docker-compose.yml.
+      POSTGRES_IMAGE: ${{ matrix.postgres_image }}
+      KAFKA_IMAGE: ${{ matrix.kafka_image }}
+      SCHEMA_REGISTRY_IMAGE: ${{ matrix.schema_registry_image }}
+      DEBEZIUM_VERSION: ${{ matrix.debezium_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Start the dev stack with this row's versions
+        run: docker compose -f dev/docker-compose.yml up -d --build
+      - name: Wait until Connect and the Schema Registry answer
+        run: .github/scripts/wait-for-stack.sh 300
+      - name: Register the connector
+        run: |
+          mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
+          go run ./cmd/devctl lock --owner ci
+          go run ./cmd/devctl up --owner ci
+      - name: Start the optional ClickHouse profile
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse up -d --wait clickhouse
+      - name: Create the ClickHouse sink
+        run: go run ./cmd/devctl clickhouse init --owner ci
+      - name: go test -tags integration ./internal/... ./cmd/...
+        env:
+          PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
+          CLICKHOUSE_INTEGRATION_DSN: clickhouse://piperoom_reader:piperoom-clickhouse-reader@127.0.0.1:9001/analytics
+          CLICKHOUSE_INTEGRATION_ADMIN_DSN: clickhouse://piperoom_admin:piperoom-clickhouse-admin@127.0.0.1:9001/analytics
+        run: |
+          set +e
+          go test -count=1 -timeout 25m -json -tags integration ./internal/... ./cmd/... > test.json
+          rc=$?
+          set -e
+          jq -rs '
+            ([.[] | select(.Action == "fail" and (.Test // "") != "") | "\(.Package) \(.Test)"]) as $failed
+            | .[] | select(.Action == "output" and (.Test // "") != ""
+                           and (("\(.Package) \(.Test)") as $k | $failed | index($k)))
+            | .Output' test.json | grep -v '^$' || true
+          exit "$rc"
+      - name: Skipped integration tests are failures
+        if: success() || failure()
+        run: .github/scripts/fail-on-skips.sh test.json
+      - name: Break and fix the schema-change scenario
+        if: success()
+        run: |
+          .github/scripts/wait-healthy.sh 180
+          go run ./cmd/devctl break --owner ci schema-change
+          go run ./cmd/devctl fix --owner ci schema-change
+          .github/scripts/wait-healthy.sh 180
+      - name: Dump stack logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse logs --no-color --tail=300
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: version-matrix-test-json-${{ strategy.job-index }}
+          path: test.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Tear down
+        if: always()
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse down -v --remove-orphans
