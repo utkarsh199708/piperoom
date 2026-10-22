@@ -45,7 +45,7 @@ func reconcileTool(d Deps) tools.Tool {
 	return &tool{
 		name: "reconcile",
 		desc: "Compare row counts per time bucket (at most 12) between the source table, the Kafka topic and the warehouse sink table, " +
-			"and say on which side the rows are lost: the connector side (topic is missing them) or the consumer side (topic has them, sink does not). " +
+			"and say whether the topic is short of rows (connector side) or the side is unproven (confirm with warehouse_row before naming a writer). " +
 			"Counts only, never a value or a key. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events, " +
 			"which is not the same as rows: an update or a delete adds an event without adding a row, so a topic that carried at least as many events as the source had rows does not prove where the loss happened " +
 			"(the verdict then says the side is unproven: confirm one missing key with warehouse_row before naming a writer). " +

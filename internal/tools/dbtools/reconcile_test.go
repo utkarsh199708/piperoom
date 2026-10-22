@@ -309,3 +309,23 @@ func TestReconcileSettleCutsOnlyTheNewestSlice(t *testing.T) {
 		t.Errorf("description lacks the margin: %s", tl.Description())
 	}
 }
+
+// The description is read on every call: it must not tell the model that a
+// topic with enough events proves the consumer dropped rows (#482 review).
+func TestReconcileDescriptionDoesNotNameAConsumerSide(t *testing.T) {
+	reg := tools.NewRegistry()
+	if err := Register(reg, testDeps()); err != nil {
+		t.Fatal(err)
+	}
+	tt, ok := reg.Get("reconcile")
+	if !ok {
+		t.Fatal("reconcile not registered")
+	}
+	desc := tt.Description()
+	if strings.Contains(desc, "consumer side") {
+		t.Fatalf("description still names a consumer side: %q", desc)
+	}
+	if !strings.Contains(desc, "connector side") || !strings.Contains(desc, "unproven") {
+		t.Fatalf("description must keep the connector-side/unproven distinction: %q", desc)
+	}
+}
