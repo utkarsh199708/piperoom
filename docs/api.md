@@ -650,6 +650,8 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | GET | `/api/pipelines/{pid}/agent-stats?days=90` | – | `AgentStats` | F11 (server F11a, implemented by A5; web F11b, A6). The agent's track record on one pipeline over the last `days` (1–365, default 90, else `400 validation`) of **closed** rooms: counts, graded hit rate, reliability by confidence (`by_confidence[]` with the field names of `evals.ReliabilityBucket`), medians of time to first hypothesis, human MTTR and cost, plus the shadow subset. Visibility first (`404 not_found` for an unknown pipeline or one outside the caller's tenants), then any logged-in user, viewers included. `enough_data` is false under 10 graded rooms: clients show counts, never a rate. Cached 2 minutes per pipeline. Sources: `shadow.labelled/graded` and F8's `room.labelled`; before F8 only shadow rooms are graded |
 | GET | `/api/pipelines/{pid}/trends?metric=slot_wal_bytes&days=1` | – | `[{at, value}]` | X3 (contract X3-0; server X3a, A5; web X3d, A6). **Trends**: the watcher's samples of one metric of one pipeline (`clients.SamplePoint`), oldest first, at most one per 15 min and 672 in all (`clients.MaxSamplesPerSeries`); `at` RFC 3339 UTC, `value` a number in the metric's unit. `metric` is required, one of `slot_wal_bytes` (bytes), `dlq_records` (records), `group_lag` (records), `db_size_bytes` (bytes), `topic_oldest_unread_age` (seconds) (`clients.WatchMetrics`); anything else → `400 validation`. `days` 1–7 (default 1; samples are kept 7 days), else `400 validation`. `[]` when there are no samples yet (watcher off, new pipeline). Visibility first: `404 not_found` for an unknown pipeline **and** for one outside the caller's tenants (the Tenants rule: never `403`, so the route does not confirm another tenant's pipeline id), then any logged-in user, viewers included. Served from Piperoom's own `watch_samples` table: a request makes no call to a customer system and returns numbers only, never a row value, a record, a config value or free text. Store read deadline 10 s |
 | POST | `/api/pipelines/{pid}/connectors/{name}/accept-config` | – | `{connector, hash}` | X3 (contract X3-0; server X3b, A5 with the watcher, A7). Makes the connector's **current** config the approved baseline of `config_drift`, so the next poll is quiet until it changes again; `hash` is the new baseline's id: `actions.ConfigHash` of the redacted config (`actions.DigestConfig`), the same id as `config_drift`'s hashes and the fleet view's config versions. Visibility first (`404 not_found` for an unknown pipeline, one outside the caller's tenants, or a connector that is not one of the pipeline's), then only an approver or backup of the pipeline's `kafka-connect` layer, or `PIPEROOM_SOLO_USER`: anyone else `403 not_layer_owner` (a viewer `403 viewer`). `409 watch_off` when `PIPEROOM_WATCH_MODE=off` (there is no baseline to move); `503 connect_unavailable` when Kafka Connect cannot be read within 10 s, and the baseline is unchanged. Writes no room event and changes no customer system; the server logs the caller, pipeline, connector and both hashes, never a config value |
+| GET | `/api/pipelines/{pid}/autonomy` | – | `[{action, state, streak, needed, window, last_verdicts: [{proposal_id, verdict, at}], granted_at?, revoked_reason?}]` | AU1 (AU1-0 contract; server AU1b, A5; web AU1c, A6). The trust ledger of one pipeline, one row per `owners.yaml` `autonomy:` entry in file order; see Earned autonomy below. `state` ∈ `earning \| granted \| revoked`; `streak` is the current run of verified recoveries inside `window`, `needed` the entry's `after_verified`; `window` as written (`"30d"`); `last_verdicts` are the newest 10, newest first, `verdict` ∈ `recovered \| partial \| not_recovered \| unverifiable \| disputed`; `granted_at` while granted, `revoked_reason` (an `autonomy.revoked` reason) while revoked. `[]` without an `autonomy:` block. With autonomy off (`PIPEROOM_AUTONOMY=off` or write mode off) rows still show their streaks, never `granted`, and the response carries `X-Piperoom-Autonomy: off`. Visibility first (`404 not_found` for an unknown pipeline or one outside the caller's tenants), then any logged-in user, viewers included |
+| POST | `/api/pipelines/{pid}/autonomy/{action}/revoke` | `{reason?}` | `Event` (`autonomy.revoked`, `reason: "human"`) | AU1 (AU1-0 contract; server AU1b, A5). Ends earned autonomy of `action` on the pipeline at once; a countdown pending under `earned_autonomy` is cancelled (`proposal.cancelled`, `by` the caller). Visibility first (`404 not_found`), then **an owner of the action's layer on this pipeline or a tenant admin** (`tenants.<t>.admins`; without a `tenants:` block a users.yaml admin); anyone else `403 not_allowed`, viewers `403 viewer`; never the agent. `action` not in the pipeline's `autonomy:` block `404 not_found`; not granted `409 not_granted`. `reason` ≤ 500 characters, typed-text rule; kept in the server log, not in the event. The event goes to the pipeline's newest open room, else to the room of the action's last `autonomy.granted` |
 | POST | `/api/rooms/{id}/trace` | `{table, key}` | `Event` | runs a record trace; emits `trace.pinned`; table not in the pipeline or empty key → `400 validation` |
 | POST | `/api/rooms/{id}/shadow/blind` | `{actual_layer, root_cause_terms}` | `Event` (`shadow.labelled`) | closed shadow rooms only; once per room (`409 already_decided`); caller must be a member of the room's pipeline: the solo user, or an approver or backup for any layer of that pipeline in `owners.yaml` (in dev mode also a `users.yaml` user whose `layers:` grant a layer the pipeline's `owners:` block does not replace), the same rule as the export minus auditors; else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the incident layers (`events.IncidentLayers()`), `root_cause_terms` 1–20 strings of 1–200 chars → else `400 validation`; the event carries `identity` with the qualifying `grant` |
 | GET | `/api/rooms/{id}/shadow?include=data,room` | – | `{run: ShadowRun, events: [Event + "shadow": true]}` | closed shadow rooms only; `409 not_labelled` until the blind label; any logged-in user, viewers included (`include=data` too, as with `tool_result.data` on `GET /events`); `events` have their own `seq` and are never fed to the room reducer; `tool_result.data` is omitted unless `include=data`; `include=room` adds `room: {created, labelled, graded}` for the eval builder. `ShadowRun` = `{room_id, status, model, pipeline_map, started_at, first_hypothesis_at, final_hypothesis_at, finished_at, finished_after_close, final_hypothesis, tool_calls, tokens, revealed_at}` (null times when unset; `status` ∈ `queued\|running\|hypothesised\|no_hypothesis\|error\|budget\|interrupted`) |
@@ -976,6 +978,52 @@ A room sees the teams of its pipeline's tenant (all teams without a `tenants:` b
 `agent.hypothesis.team` only to one of them; the page route refuses any other id as unknown. The page posts to the
 team's `slack_channel` with the bridge's bot token: that channel sees the hypothesis text, the cited change's title
 and URL, the cited step numbers and the room link (`docs/pilot/data-handling.md`, Slack).
+
+### Earned autonomy (AU1-0; owners A3 (AU1a), ledger and scheduling A5 (AU1b), web A6 (AU1c), wording A4 + C12 (AU1d))
+
+An action can earn the auto-approve policy on one pipeline after a streak of verified recoveries and lose it on the
+first failure. Additive: a pipeline without an `autonomy:` block, and every log written before AU1, behave and replay
+exactly as before. Hard rules (KAN-461), never relaxed by a row:
+- The agent never approves its own proposal and never edits `owners.yaml`.
+- Only registered actions; every autonomous run still goes Preview → policy approval → Execute → Verify, fully logged.
+- Autonomy is per (pipeline, action), capped at the entry's `max_tier`.
+- Write mode off means no autonomy of any kind. A person can revoke at once, and `PIPEROOM_AUTONOMY=off` disables the wave.
+
+**`owners.yaml` `autonomy:`** per pipeline (validated by A3 in `internal/owners`):
+```yaml
+pipelines:
+  - id: orders
+    autonomy:
+      connect_resume_connector: {after_verified: 10, window: 30d, max_tier: T1}
+```
+- `after_verified` is 3–100: how many verified recoveries in a row are needed.
+- `window` is `1d`–`90d`, in whole days written `<n>d`.
+- `max_tier` is `T0`–`T2`, default `T1`; `T3` is refused at load.
+- Each key must be a registered action, like `auto_approve:`; an action in both `auto_approve:` and `autonomy:` is a
+  load error.
+- A load error names the pipeline, the action and the field.
+- Changing or removing an entry revokes its grant (`config_changed`).
+
+**Ledger events.**
+- `autonomy.granted {action, streak, window, evidence: [proposal_id]}`: system actor, written when the streak reaches
+  `after_verified` inside `window`.
+- `autonomy.revoked {action, reason, by?}`: `reason` ∈ `verify_failed | human | config_changed | expired`. For
+  `human`, `by` and the event actor are the person; otherwise the actor is the system.
+- A verified recovery is an `agent.verification` with `recovered: true` (for a recovery proposal, `outcome:
+  "recovered"`) on an agent proposal of the action that no member disputed. Driver-authored proposals never count.
+- Any other verification of a granted action revokes it (`verify_failed`). `partial`, `not_recovered` and
+  `unverifiable` fail closed.
+
+**Earned policy.** While granted, a proposal whose every step is a granted action at or below its `max_tier` is
+scheduled like `auto_approve`: `proposal.scheduled {policy: "earned_autonomy"}`, the same countdown
+`PIPEROOM_AUTO_APPROVE_DELAY` and the same cancel rules. The system actor then approves it with `approval.given
+{grant: "policy", policy: "earned_autonomy"}` (`events.PolicyEarned`). It never applies:
+- with write mode off, `PIPEROOM_AUTONOMY=off` or `PIPEROOM_AUTO_APPROVE_DELAY=0`;
+- in a shadow or setup room;
+- to a driver-authored proposal, or after a failed preview.
+
+**`PIPEROOM_AUTONOMY`** is `on` (the default) or `off`, any case; any other value stops the server with an error naming
+the variable. It takes effect only with `PIPEROOM_WRITE_MODE=on` (`config.ParseAutonomy`).
 
 ### Spend limits (design `docs/design/cost.md`)
 
