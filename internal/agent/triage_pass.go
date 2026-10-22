@@ -672,7 +672,7 @@ You write the first-look verdict for a CDC/Kafka pipeline incident (Postgres -> 
 
 Return a JSON object:
 - headline: one plain sentence, at most 200 characters, naming what is failing and the numbers that show it (for example: slot debezium_orders inactive 6m; task 0 FAILED after DDL on public.orders). No markdown.
-- suspected_layer: a hypothesis, not a conclusion: the layer the reads point at, or "" when none of them shows one. Never name a layer from the alert alone. Reads by layer: pg_* are postgres; connect_* and debezium_metrics are kafka-connect; schema_registry_* are schema-registry; kafka_consumer_lag and kafka_list_groups are consumer; other kafka_* and dlq_* are kafka; warehouse_* are warehouse; dag_* and task_* are orchestrator; dbt_* are transform. Any other tool is no layer's read.
+- suspected_layer: a hypothesis, not a conclusion: the layer the reads point at, or "" when none of them shows one. Never name a layer from the alert alone. Reads by layer: pg_* are postgres; connect_* and debezium_metrics are kafka-connect; schema_registry_* are schema-registry; kafka_consumer_lag and kafka_list_groups are consumer; other kafka_* and dlq_* are kafka; warehouse_* are warehouse; dag_* and task_* are orchestrator; dbt_* are transform. Any other tool is no layer's read. A read result starting "error: unreachable: <layer>" means that component could not be reached: name its layer and the failure, even when nothing else failed.
 - confidence: low, medium or high. Use low when the reads failed or show nothing conclusive. A suspected_layer is kept only at medium or high.
 - next_check: the one read the full investigation should do first, at most 120 characters.
 - based_on_steps: the step ids (step="s_...") of the reads your headline rests on.

@@ -81,6 +81,10 @@ type runner struct {
 	// the steps a hypothesis cites.
 	steps *stepLedger
 
+	// gaps remembers this run's failed reads, so an unreachable component
+	// blocks a healthy verdict until a later read of it succeeds (KAN-408).
+	gaps *readFailures
+
 	// recoveredIdle is true while the pipeline is verified recovered and nothing
 	// since has broken that (a failed or unknown step, or a NOT recovered
 	// verdict). An episode that ends while it is set stays "done" and waits for
@@ -186,6 +190,11 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	steps.setScanNames(scanNamesFor(deps, alert.PipelineMap))
 	steps.seedTriage(alert.Triage)
 	steps.setBackground(alertBackground(alert))
+	gaps := newReadFailures()
+	// A first-look read that could not reach its component is evidence this
+	// run must keep: it blocks a healthy verdict until a read succeeds
+	// (KAN-408).
+	gaps.seedTriage(alert.Triage)
 	return &runner{
 		alert:     alert,
 		kind:      kind,
@@ -198,13 +207,14 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		timing:    defaultTiming(),
 		proposals: newProposalTracker(),
 		steps:     steps,
+		gaps:      gaps,
 
 		noneSubjects: map[string]bool{},
 	}, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, roomToolsForKind(newRoomToolsWith(r.deps, r.proposals, r.steps), r.kind, r.deps.Actions))
+	r.toolList = buildToolList(r.deps.Tools, roomToolsForKind(newRoomToolsWithGaps(r.deps, r.proposals, r.steps, r.gaps), r.kind, r.deps.Actions))
 	r.system = systemPromptForMode(r.kind, r.mode)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
@@ -859,7 +869,17 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	data, dataCut := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
-		msg := "error: " + r.scrubToolError(u.name, err).Error()
+		// Classify from the scrubbed error: its text can reach the model and
+		// the room log through the fact, and scrubbing keeps the typed chain
+		// (scrubbedError.Unwrap), so errors.Is/As classification still works.
+		scrubbed := r.scrubToolError(u.name, err)
+		failure := classifyReadFailure(u.name, scrubbed)
+		failure.stepID = stepID
+		// An unreachable component is an evidence gap this run keeps until a
+		// read of it succeeds; the summary carries the stable fact so the model
+		// and the room log name the failure mechanically (KAN-408).
+		r.gaps.record(failure)
+		msg := failedReadSummary(failure, scrubbed.Error())
 		summary, truncated := tools.Truncate(msg)
 		r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:     stepID,
@@ -882,6 +902,12 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	// Defensively re-cap the summary before it reaches the model; a tool that
 	// ignores MaxSummaryBytes must not be able to bloat the request.
 	summary, reTruncated := tools.Truncate(res.Summary)
+	// A later successful read of a tool that failed earlier resolves the gap
+	// (a transient blip, not a fault) and says so in the room log, so the
+	// model reports it as a blip instead of keeping a stale fault (KAN-408).
+	if f, blip := r.gaps.succeeded(u.name); blip {
+		summary, reTruncated = tools.Truncate(blipSummary(f, summary))
+	}
 	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID:     stepID,
 		ToolUseID:  u.id,
