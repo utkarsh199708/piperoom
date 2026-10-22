@@ -35,8 +35,8 @@ import (
 //     must be one of its consumer_groups (tools.Scope.CheckGroup, the rule of
 //     the kafka_consumer_lag tool) and the topic one of its topics
 //     (tools.Scope.CheckTopic: exactly "<topic_prefix>.<source_table>", the
-//     rule of the kafka_topic_offsets and kafka_find_by_key tools); a miss
-//     wraps tools.ErrOutOfScope;
+//     rule of the kafka_topic_offsets and kafka_find_by_key tools) or its
+//     declared reprocess_topic (X2b); a miss wraps tools.ErrOutOfScope;
 //   - ctx carries the explicit opt-out (tools.WithUnscoped; the CLI and the
 //     integration tests): nothing is checked;
 //   - anything else, no scope at all or only a pipeline id
@@ -530,18 +530,11 @@ func commitErr(err error) error {
 // error says its outcome is unknown: it is not counted, and it may still
 // appear in the topic. Before any I/O, a topic outside the room's pipeline
 // is refused (tools.ErrOutOfScope), and so is a ctx with no scope
-// (tools.ErrNoScope); see Writer.
+// (tools.ErrNoScope); see Writer. The pipeline's topics here are its CDC
+// topics plus its declared reprocess_topic (owners.yaml, X2b).
 func (w *Writer) Produce(ctx context.Context, topic string, recs []clients.Record) (int, error) {
-	if strings.TrimSpace(topic) == "" {
-		return 0, errors.New("kafka: produce: empty topic")
-	}
-	if err := checkWriteScope(ctx, func(sc tools.Scope) error { return sc.CheckTopic(topic) }); err != nil {
+	if err := checkProduce(ctx, topic, recs); err != nil {
 		return 0, err
-	}
-	for i := range recs {
-		if n := recordBytes(recs[i]); n > maxProduceRecordBytes {
-			return 0, fmt.Errorf("kafka: produce %s: record %d is %d bytes (key, value and headers), over the %d byte cap; nothing was produced", topic, i, n, maxProduceRecordBytes)
-		}
 	}
 	if len(recs) == 0 {
 		return 0, nil
@@ -562,6 +555,103 @@ func (w *Writer) Produce(ctx context.Context, topic string, recs []clients.Recor
 			return acked, fmt.Errorf("kafka: produce %s: record %d of %d not acked, %d acked: %w", topic, i, len(recs), acked, err)
 		}
 		acked++
+	}
+	slog.InfoContext(ctx, "kafka: records produced", "topic", topic, "acked", acked)
+	return acked, nil
+}
+
+// checkProduce is the part of Produce and ProduceAll that needs no I/O: a
+// topic in the room's pipeline (a CDC topic or the declared reprocess_topic)
+// and no record over the size cap.
+func checkProduce(ctx context.Context, topic string, recs []clients.Record) error {
+	if strings.TrimSpace(topic) == "" {
+		return errors.New("kafka: produce: empty topic")
+	}
+	if err := checkWriteScope(ctx, func(sc tools.Scope) error {
+		err := sc.CheckTopic(topic)
+		if err != nil && topic == sc.Pipeline().ReprocessTopic {
+			return nil
+		}
+		return err
+	}); err != nil {
+		return err
+	}
+	for i := range recs {
+		if n := recordBytes(recs[i]); n > maxProduceRecordBytes {
+			return fmt.Errorf("kafka: produce %s: record %d is %d bytes (key, value and headers), over the %d byte cap; nothing was produced", topic, i, n, maxProduceRecordBytes)
+		}
+	}
+	return nil
+}
+
+// ProduceAll writes recs to topic with every record in flight at once and
+// returns how many the broker acked. It is Produce for a bulk copy
+// (kafka_replay_range, up to 100 000 records in one 30 s step, where a round
+// trip per record is too slow), with the same checks, scope and record
+// handling. Order holds per target partition: the producer is idempotent,
+// writes a partition's records in the order given, and fails every record
+// buffered behind a failed one on that partition. Across partitions it does
+// not, so after an error acked is an exact count but not a prefix of recs:
+// the copy is not resumable from acked, and a re-run copies again. When ctx
+// ends with records in flight and kgo cannot tell within a second what
+// became of them, they are not counted and the error says how many may
+// still be written.
+func (w *Writer) ProduceAll(ctx context.Context, topic string, recs []clients.Record) (int, error) {
+	if err := checkProduce(ctx, topic, recs); err != nil {
+		return 0, err
+	}
+	if len(recs) == 0 {
+		return 0, nil
+	}
+	ctx, cancel := withDefaultTimeout(ctx, writeCallTimeout)
+	defer cancel()
+	if err := w.topicExists(ctx, topic); err != nil {
+		return 0, fmt.Errorf("kafka: produce %s: %w", topic, err)
+	}
+	acked := 0
+	start := time.Now()
+	defer func() {
+		w.c.record(ctx, start, "kgo.Produce(topic, records) pipelined", "topic="+topic,
+			"records="+strconv.Itoa(len(recs)), "acked="+strconv.Itoa(acked))
+	}()
+	// Buffered for every record: kgo calls each promise once, also after
+	// this returned, and a promise must never block.
+	done := make(chan error, len(recs))
+	sent := 0
+	for i := range recs {
+		if ctx.Err() != nil {
+			break
+		}
+		w.producer()(ctx, toKgoRecord(topic, recs[i]), func(_ *kgo.Record, err error) { done <- err })
+		sent++
+	}
+	var firstErr error
+	var grace <-chan time.Time // set once ctx ended
+	ctxDone := ctx.Done()
+	for got := 0; got < sent; {
+		select {
+		case err := <-done:
+			got++
+			if err == nil {
+				acked++
+			} else if firstErr == nil {
+				firstErr = err
+			}
+		case <-ctxDone:
+			ctxDone = nil
+			t := time.NewTimer(produceGrace)
+			defer t.Stop()
+			grace = t.C
+		case <-grace:
+			return acked, fmt.Errorf("kafka: produce %s: %d of %d records acked, %d not sent, %d with an unknown outcome that may still be written: %w",
+				topic, acked, len(recs), len(recs)-sent, sent-got, ctx.Err())
+		}
+	}
+	if firstErr == nil && sent < len(recs) {
+		firstErr = ctx.Err()
+	}
+	if firstErr != nil {
+		return acked, fmt.Errorf("kafka: produce %s: %d of %d records acked, %d not sent: %w", topic, acked, len(recs), len(recs)-sent, firstErr)
 	}
 	slog.InfoContext(ctx, "kafka: records produced", "topic", topic, "acked", acked)
 	return acked, nil
