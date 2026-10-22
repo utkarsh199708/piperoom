@@ -124,20 +124,33 @@ func (s *stack) deleteTopics(ctx context.Context, topics ...string) error {
 // listed when it is called, in offset order per partition (partitions in
 // ascending order). A missing or empty topic yields no records.
 func (s *stack) readTopic(ctx context.Context, topic string) ([]*kgo.Record, error) {
+	return s.readTopicTail(ctx, topic, 0)
+}
+
+// readTopicTail is readTopic limited to the last tail records of each
+// partition (tail <= 0 reads everything). The size guard applies to what is
+// read, so a long-lived topic can still be read through its tail.
+func (s *stack) readTopicTail(ctx context.Context, topic string, tail int64) ([]*kgo.Record, error) {
 	span, ok, err := s.topicSpan(ctx, topic)
 	if err != nil || !ok || span.records() == 0 {
 		return nil, err
 	}
-	if n := span.records(); n > maxReplayRecords {
-		return nil, fmt.Errorf("devctl: %s holds %d records, more than the %d devctl reads", topic, n, maxReplayRecords)
-	}
 	from := map[int32]kgo.Offset{}
 	last := map[int32]int64{}
+	var n int64
 	for p, se := range span {
 		if se[1] > se[0] {
-			from[p] = kgo.NewOffset().At(se[0])
+			start := se[0]
+			if tail > 0 {
+				start = max(start, se[1]-tail)
+			}
+			from[p] = kgo.NewOffset().At(start)
 			last[p] = se[1] - 1
+			n += se[1] - start
 		}
+	}
+	if n > maxReplayRecords {
+		return nil, fmt.Errorf("devctl: %s holds %d records, more than the %d devctl reads", topic, n, maxReplayRecords)
 	}
 	cl, err := s.kafkaClient(kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{topic: from}))
 	if err != nil {

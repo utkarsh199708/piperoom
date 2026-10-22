@@ -111,6 +111,10 @@ services:
       # (dev/scenarios.md §8, §9). Empty = the good build.
       SKIP_OPS: ${DEVCONSUMER_SKIP_OPS:-}
       REJECT_STATUS: ${DEVCONSUMER_REJECT_STATUS:-}
+      # Silent bad builds for `devctl break sink-filtered-rows` /
+      # `sink-dropped-column` (dev/scenarios.md §14, §15). Empty = the good build.
+      SKIP_WHERE: ${DEVCONSUMER_SKIP_WHERE:-}
+      DROP_COLUMNS: ${DEVCONSUMER_DROP_COLUMNS:-}
       # The pipeline's DLQ (dev/owners.yaml watch.dlq_topics). It exists only
       # while dlq-backlog is broken; nothing is written to it otherwise.
       DLQ_TOPIC: devctl.order-sync.dlq
