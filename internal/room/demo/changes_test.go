@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +93,39 @@ func TestStoryChangesAreNewestFirstAndCoverTheStory(t *testing.T) {
 
 // The sixth step is emitted as a normal tool result whose Data the web lane
 // parses; pin the tool name, input window and payload so it cannot regress.
+// s_5 (pg_recent_ddl) and s_6 (what_changed) describe the same ALTER. Their
+// timestamps must agree, and both must be relative to the room opening.
+func TestDDLLogStepMatchesWhatChanged(t *testing.T) {
+	steps := storySteps(storyNow, "orders")
+	var ddl *step
+	for i := range steps {
+		if steps[i].id == "s_5" {
+			ddl = &steps[i]
+		}
+	}
+	if ddl == nil {
+		t.Fatal("no s_5 step")
+	}
+	want := storyChanges(storyNow, "orders").Changes[0]
+	wantAt := want.At.Format(time.RFC3339)
+	data, ok := ddl.data.(map[string]any)
+	if !ok {
+		t.Fatalf("s_5 data type %T", ddl.data)
+	}
+	if data["at"] != wantAt {
+		t.Fatalf("s_5 at = %v, want %s (what_changed's newest row)", data["at"], wantAt)
+	}
+	if !strings.HasPrefix(ddl.summary, wantAt+" ALTER TABLE public.orders: ") {
+		t.Fatalf("s_5 summary = %q, want it to start with %q", ddl.summary, wantAt)
+	}
+	if sql, _ := data["sql"].(string); !strings.Contains(want.Summary, sql) {
+		t.Fatalf("s_5 sql %q does not match what_changed summary %q", sql, want.Summary)
+	}
+	if want.At.After(storyNow) || storyNow.Sub(want.At) != ddlAgo {
+		t.Fatalf("DDL at %s is not %s before the room opened (%s)", want.At, ddlAgo, storyNow)
+	}
+}
+
 func TestRunEmitsWhatChangedStep(t *testing.T) {
 	sink := &recordingSink{}
 	err := runStory(context.Background(), agent.Alert{RoomID: "r", PipelineID: "orders"},

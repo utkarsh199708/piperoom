@@ -162,6 +162,11 @@ func runStory(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agen
 // "What changed" lane renders; without it the lane stays empty in --demo.
 func storySteps(now time.Time, pipelineID string) []step {
 	recorded := storyChanges(now, pipelineID)
+	// s_5 and s_6 describe the same ALTER, so they use the same recorded time:
+	// what_changed's newest row. A fixed timestamp here would date the DDL log
+	// line days before a room opened today.
+	ddlAt := now.UTC().Truncate(time.Second).Add(-ddlAgo)
+	ddlStamp := ddlAt.Format(time.RFC3339)
 	return []step{
 		{"s_1", "Check the Debezium connector", "connect_status",
 			"pg-orders-connector (source): RUNNING. Tasks: 0=FAILED on 172.19.0.5:8083.\nTask 0 error: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\n  Caused by: ... Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path /fields/0/type/1 in the old schema'}, {oldSchemaVersion: 1}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409\nRejected schema vs pg.public.orders-value v1: amount: int → bytes(decimal 12,2)",
@@ -176,8 +181,8 @@ func storySteps(now time.Time, pipelineID string) []step {
 			"group order-sync: state Stable, members 1, total lag 0",
 			nil, map[string]any{"group": "order-sync", "state": "Stable", "members": 1, "total_lag": 0}},
 		{"s_5", "Check the DDL log", "pg_recent_ddl",
-			"2026-10-11T09:47:00Z ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) by etl",
-			nil, map[string]any{"command": "ALTER TABLE", "object": "public.orders", "sql": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", "username": "etl", "at": "2026-10-11T09:47:00Z"}},
+			ddlStamp + " ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) by etl",
+			nil, map[string]any{"command": "ALTER TABLE", "object": "public.orders", "sql": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", "username": "etl", "at": ddlStamp}},
 		{"s_6", "Check what changed before the alert", changes.ToolName,
 			whatChangedSummary(recorded),
 			map[string]any{"window": whatChangedWindow}, recorded},

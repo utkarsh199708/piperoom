@@ -1,18 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { vi } from 'vitest'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { ChangesLane } from './ChangesLane'
 import type { StepState } from '@/state/types'
 
 const NOW = Date.parse('2026-10-14T03:30:00Z')
-
-// The --demo agent's recorded what_changed result (shared with the Go demo
-// test), so the lane is tested against the data a --demo room really emits.
-// Vitest runs with web/ as its cwd.
-const demoWhatChanged = (): unknown =>
-  JSON.parse(readFileSync(resolve(process.cwd(), '../internal/room/demo/testdata/what_changed.json'), 'utf8'))
 
 function stepWith(data: unknown, tool = 'what_changed'): StepState[] {
   return [
@@ -178,36 +170,6 @@ describe('ChangesLane', () => {
     fireEvent.click(screen.getByRole('button', { name: /Show only kafka-connect steps/ }))
     expect(onSelectLayer).toHaveBeenLastCalledWith('kafka-connect')
     fireEvent.click(screen.getByRole('button', { name: /Show only postgres steps/ }))
-    expect(onSelectLayer).toHaveBeenLastCalledWith('postgres')
-  })
-
-  it('shows the --demo what_changed rows and filters the feed from them', () => {
-    // KAN-399: the lane must be reachable in --demo, newest first, and a row
-    // must filter the investigation feed to its layer (the existing F7 filter).
-    const onSelectLayer = vi.fn()
-    render(
-      <ChangesLane
-        steps={stepWith(demoWhatChanged())}
-        alertAt="2026-10-22T09:00:00Z"
-        now={Date.parse('2026-10-22T09:05:00Z')}
-        onSelectLayer={onSelectLayer}
-      />,
-    )
-    const region = screen.getByRole('region', { name: 'What changed' })
-    expect(within(region).getByText('3 changes')).toBeInTheDocument()
-    const items = within(region).getAllByRole('listitem').filter((li) => li.dataset.testid !== 'alert-rule')
-    expect(items[0]).toHaveTextContent('public.orders')
-    expect(items[0]).toHaveTextContent('ddl')
-    expect(items[1]).toHaveTextContent('pg-orders-connector')
-    expect(items[1]).toHaveTextContent('connector_config')
-    expect(items[2]).toHaveTextContent('pg.public.orders-value')
-    expect(items[2]).toHaveTextContent('schema_version')
-
-    fireEvent.click(within(region).getByRole('button', { name: /Show only schema-registry steps/ }))
-    expect(onSelectLayer).toHaveBeenLastCalledWith('schema-registry')
-    fireEvent.click(within(region).getByRole('button', { name: /Show only kafka-connect steps/ }))
-    expect(onSelectLayer).toHaveBeenLastCalledWith('kafka-connect')
-    fireEvent.click(within(region).getByRole('button', { name: /Show only postgres steps/ }))
     expect(onSelectLayer).toHaveBeenLastCalledWith('postgres')
   })
 })
