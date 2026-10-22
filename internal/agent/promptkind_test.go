@@ -46,13 +46,13 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "a478390a93bdf01db19b162a42832075410bb5e6f84c1ca8cada86a973ba498b"
+const cdcPromptSHA256 = "5d900b46db55b216a9fd79fc644f613357d702af31a18c3c69e0ba2428931b46"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it.
-const cdcPromptWriteOffSHA256 = "00eb1f8da033f2ee265e21332233534489c7d00d34d4502d1703537254932022"
+const cdcPromptWriteOffSHA256 = "dd628686b24ce253424ad60ba23620dbb893c90e7b606c3056c8c00097ca1761"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

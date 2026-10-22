@@ -24,6 +24,7 @@ require (
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
 	github.com/twmb/franz-go/pkg/kfake v0.0.0-20261013022759-7b6cac30a57a
 	github.com/twmb/franz-go/pkg/kmsg v1.15.0
+	go.mongodb.org/mongo-driver/v2 v2.9.2
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/text v0.43.0
@@ -136,6 +137,10 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
+	github.com/xdg-go/scram v1.2.0 // indirect
+	github.com/xdg-go/stringprep v1.0.4 // indirect
+	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect

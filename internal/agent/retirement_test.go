@@ -168,7 +168,7 @@ func TestRetiredSlotContextPinsTheDropRule(t *testing.T) {
 		"the alert, alert update, driver, pipeline map's retired marker or absence from Connect says so",
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
 		"Without that, a slot behind a stopped connector calls for the resume checks, never a drop.",
-		"say the drop is not reversible and needs a new snapshot",
+		"say the drop is irreversible and needs a new snapshot",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("CDC system prompt missing %q", want)

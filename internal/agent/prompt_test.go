@@ -909,7 +909,7 @@ func TestSystemPromptKeepsSafetyRails(t *testing.T) {
 		"never cite them as evidence",
 		"Never propose deleting data.",
 		"calls for the resume checks, never a drop",
-		"say the drop is not reversible",
+		"say the drop is irreversible",
 		"never copy raw record values",
 		"schema_set_compatibility set to NONE and schema_register are high-risk",
 		"Never restart anything before the cause is fixed or ruled out",
@@ -967,6 +967,87 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	}
 	if n := strings.Count(prompt, "one short question with post_message"); n != 1 {
 		t.Errorf("CDC prompt has %d ambiguous-steer rules, want 1", n)
+	}
+}
+
+// TestSystemPromptCarriesPoisonPillFlappingRule pins KAN-405: a consumer group
+// that changes state more than twice in 10 minutes, or that recovers and then
+// fails again, is flapping, never a periodic loader, and is not healthy until
+// the partition-level lag and the oldest unread offset are read. A periodic
+// explanation needs evidence of a schedule: the same interval across 3 cycles.
+// The rule sits before the healthy-verdict sentence of method 7, so it gates
+// that verdict instead of following it.
+func TestSystemPromptCarriesPoisonPillFlappingRule(t *testing.T) {
+	prompt := systemPrompt()
+	want := []string{
+		"More than two group state changes in 10 minutes",
+		"recovering then failing",
+		"is flapping, not health, never a periodic loader",
+		"check partition-level lag and oldest unread offset",
+		"only a regular interval across 3 cycles is periodic",
+	}
+	for _, w := range want {
+		if !strings.Contains(prompt, w) {
+			t.Errorf("system prompt missing the flapping rule %q", w)
+		}
+	}
+	// The rule is one line inside the method's "before calling the pipeline
+	// healthy" rule, before both the open-items and healthy-verdict sentences.
+	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
+	rule := strings.Index(method, "More than two group state changes")
+	if rule < 0 {
+		t.Fatal("the flapping rule is not in the method section")
+	}
+	for _, after := range []string{
+		"If no evidence names a cause, say in your closing message",
+		"If every stage reads healthy, your closing message must say the pipeline is healthy now",
+	} {
+		if i := strings.Index(method, after); i < 0 || i < rule {
+			t.Errorf("the flapping rule must precede %q", after)
+		}
+	}
+	// "periodic loader" appears only in its prohibition: an unconditional
+	// mention would license the explanation this rule removes.
+	if n := strings.Count(prompt, "periodic loader"); n != 1 {
+		t.Errorf("prompt mentions \"periodic loader\" %d times, want only the prohibition", n)
+	}
+	if !strings.Contains(prompt, "never a periodic loader") {
+		t.Error("the periodic-loader explanation is not forbidden without evidence")
+	}
+	// The batch prompt has no consumer group, so it must not carry the rule.
+	if strings.Contains(systemPromptFor(events.PipelineKindBatch), "periodic loader") {
+		t.Error("the batch prompt carries the CDC consumer-group rule")
+	}
+}
+
+// TestFlappingRuleSeparatesLoopFromPeriodic walks the two series of the KAN-405
+// ticket through the rule's own wording: a group that recovers and fails again
+// is governed by the prohibition, while a regular 10-minute cycle across 3
+// cycles is the only shape the rule lets through as periodic. This guards
+// against over-correcting into "any rebalance is an incident".
+func TestFlappingRuleSeparatesLoopFromPeriodic(t *testing.T) {
+	prompt := systemPrompt()
+	for _, tc := range []struct {
+		name   string
+		series string
+		want   string
+	}{
+		{
+			name:   "poison-pill loop",
+			series: "order-sync: Empty -> PreparingRebalance -> Empty -> PreparingRebalance -> Empty",
+			want:   "is flapping, not health, never a periodic loader",
+		},
+		{
+			name:   "genuinely periodic loader",
+			series: "order-sync: Stable -> Empty -> Stable, same interval every 10 minutes across 3 cycles",
+			want:   "only a regular interval across 3 cycles is periodic",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !strings.Contains(prompt, tc.want) {
+				t.Fatalf("series %q: prompt lacks the clause that decides it: %q", tc.series, tc.want)
+			}
+		})
 	}
 }
 
