@@ -210,10 +210,23 @@ func (a *updateConnectorConfig) Stage(ctx context.Context, raw json.RawMessage) 
 		return finish(res, start), nil
 	}
 	todo, same := set.plan(before)
+	return a.d.stageConnectorKeys(ctx, c, fw, put, set.connector, before, todo, same, res, start)
+}
+
+// stageConnectorKeys is the part of a connector config stage after the
+// action's own checks passed on staging's config (before): todo are the keys
+// to write, same the keys staging already has at their value. It runs
+// Connect's validate on staging, applies todo (PATCH), watches the connector
+// for the observe window and gives it its whole previous config back (PUT),
+// even when ctx ends first. With nothing to write it only reports the
+// connector's health. connect_update_connector_config and
+// connect_tune_throughput share it.
+func (d Deps) stageConnectorKeys(ctx context.Context, c clients.ConnectReader, fw clients.ConnectFixWriter, put clients.ConnectConfigPutter,
+	connector string, before, todo map[string]string, same []string, res StageResult, start time.Time) (StageResult, error) {
 	if len(todo) == 0 {
 		// Staging already runs with the change: nothing to write or restore;
 		// its health is still the verdict.
-		healthy, detail, err := a.d.observeConnector(ctx, c, set.connector)
+		healthy, detail, err := d.observeConnector(ctx, c, connector)
 		if err != nil {
 			return StageResult{}, err
 		}
@@ -230,20 +243,20 @@ func (a *updateConnectorConfig) Stage(ctx context.Context, raw json.RawMessage) 
 		return finish(res, start), nil // staging's validate refused it: nothing written
 	}
 
-	applyErr := fw.UpdateConnectorConfigKeys(ctx, set.connector, todo)
+	applyErr := fw.UpdateConnectorConfigKeys(ctx, connector, todo)
 	var healthy bool
 	var detail string
 	var obsErr error
 	if applyErr == nil {
-		healthy, detail, obsErr = a.d.observeConnector(ctx, c, set.connector)
+		healthy, detail, obsErr = d.observeConnector(ctx, c, connector)
 	}
 	elapsed := time.Since(start)
 	// Restore on every path after the write was tried: a PATCH that timed out
 	// may still have landed.
-	leftover := a.d.restoreConnector(ctx, c, put, set.connector, before)
+	leftover := d.restoreConnector(ctx, c, put, connector, before)
 	switch {
 	case applyErr != nil:
-		return StageResult{}, withLeftover(stagingErr("apply the change to "+set.connector, applyErr), leftover)
+		return StageResult{}, withLeftover(stagingErr("apply the change to "+connector, applyErr), leftover)
 	case obsErr != nil:
 		return StageResult{}, withLeftover(obsErr, leftover)
 	}

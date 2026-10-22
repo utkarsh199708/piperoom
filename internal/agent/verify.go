@@ -12,6 +12,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -244,6 +245,11 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	if steps := r.recoverySteps(rec.steps); len(steps) > 0 {
 		// A recovery is verified by counts (X2c, verify_recovery.go).
 		return r.verifyRecoveryProposal(ctx, rec, steps, r.executedAt(in, id, step))
+	}
+	if steps := r.classSteps(rec.steps, actions.ClassPerformance); len(steps) > 0 {
+		// A tuning is verified by throughput before and after (X6c,
+		// verify_performance.go).
+		return r.verifyPerformanceProposal(ctx, rec, steps, r.executedAt(in, id, step))
 	}
 
 	vr := r.verifyProposal(ctx, rec)

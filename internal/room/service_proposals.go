@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
@@ -184,10 +185,20 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// config and that room's per-room client state.
 	vctx := s.actionCtx(ctx, roomID, pipelineID)
 	// Structural checks first: they do not need the room state.
+	// The class comes from the registry, never from the proposer (X2, X6).
+	p.Class = ""
 	for i, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
 		if !ok {
 			return "", events.Event{}, validation(fmt.Sprintf("unknown action %q", step.Action))
+		}
+		switch c := actions.ClassOf(a); {
+		case c == actions.ClassFix:
+		case p.Class != "" && p.Class != c:
+			// One verdict per proposal: counts or throughput, not both.
+			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): a proposal cannot mix recovery and performance steps; propose them separately", i, step.Action))
+		default:
+			p.Class = c
 		}
 		if step.Layer != a.Layer() {
 			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, a.Layer()))

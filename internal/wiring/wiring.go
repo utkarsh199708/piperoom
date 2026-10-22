@@ -472,7 +472,49 @@ func registerActions(areg *actions.Registry, w *Wired, staging *actions.Staging)
 	} else if err := actions.Register(areg, actions.Deps{Connect: readOnlyActionConnect(w), Registry: readOnlyActionRegistry(w)}); err != nil {
 		return err
 	}
+	if err := registerTuning(areg, w, staging); err != nil {
+		return err
+	}
 	return registerP3Actions(areg, w)
+}
+
+// registerTuning registers the performance action connect_tune_throughput
+// (X6c): the whole Connect client and the staging set with write mode on,
+// the read-only Connect adapter and no staging off. Its Verify reads the
+// Kafka reader's offsets by time and the room store's group_lag watch
+// samples (nil without a room store: a sink tuning is then unverifiable).
+func registerTuning(areg *actions.Registry, w *Wired, staging *actions.Staging) error {
+	d := actions.TuningDeps{Connect: readOnlyActionConnect(w)}
+	if w.write {
+		d.Connect, d.Staging = w.Connect, staging
+	}
+	if isNilIface(d.Connect) {
+		d.Connect = nil
+	}
+	if !isNilIface(w.Kafka) {
+		d.Kafka = tuningKafka{r: w.Kafka}
+	}
+	if s, ok := w.Rooms.(clients.SampleReader); ok && !isNilIface(s) {
+		d.Samples = s
+	}
+	return actions.RegisterTuning(areg, d)
+}
+
+// tuningKafka is the Kafka reader as connect_tune_throughput holds it: the
+// two reads it makes and nothing else of the client. A reader without
+// offsets by time answers clients.ErrNotSupported (unverifiable).
+type tuningKafka struct{ r clients.KafkaReader }
+
+func (k tuningKafka) TopicOffsets(ctx context.Context, topic string) ([]clients.PartitionOffsets, error) {
+	return k.r.TopicOffsets(ctx, topic)
+}
+
+func (k tuningKafka) PartitionRates(ctx context.Context, since time.Time, topics ...string) ([]clients.PartitionRate, error) {
+	rr, ok := k.r.(clients.RateReader)
+	if !ok {
+		return nil, fmt.Errorf("wiring: the Kafka client has no offsets by time: %w", clients.ErrNotSupported)
+	}
+	return rr.PartitionRates(ctx, since, topics...)
 }
 
 // splitBrokers splits a comma-separated broker list, trimming blanks.
