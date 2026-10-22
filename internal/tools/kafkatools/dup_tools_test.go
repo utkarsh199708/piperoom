@@ -66,7 +66,7 @@ func TestDupKeysSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{"scanned 50 000 (capped)", "partition(s) [1]", "1 order regression in 50 000 records (regressions on 1 key)",
-		"4 records had no usable key or source.lsn (no_lsn 3, registry 1)", "regression: key sha256:00aa, partition 1 offset 9 has lsn 5 after lsn 7 at offset 3",
+		"4 records had no usable key or source.lsn (no_lsn 3, registry 1)", "regression: partition 1 offset 9 has lsn 5 after lsn 7 at offset 3",
 		"25 more finding(s)"} {
 		if !strings.Contains(r.Summary, want) {
 			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
@@ -167,6 +167,11 @@ func TestDupKeysKFake(t *testing.T) {
 	}
 	if !strings.Contains(string(data), kafka.KeyFingerprint([]byte("customer-1"))) {
 		t.Errorf("data has no fingerprint of the duplicated key: %s", data)
+	}
+	// The fingerprint belongs in Data only: the summary is recorded into
+	// agent.tool_result events, which the DupFinding contract keeps it out of.
+	if strings.Contains(r.Summary, "sha256:") {
+		t.Errorf("summary carries a key fingerprint: %s", r.Summary)
 	}
 }
 

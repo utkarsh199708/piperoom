@@ -10,6 +10,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
+	"piperoom/internal/quickstart"
 	"piperoom/internal/room"
 )
 
@@ -59,15 +60,15 @@ const demoPresenterID = "arjun"
 // the demo presenter; with --quickstart it is the owners file's sole user,
 // refused when there is not exactly one. Without --solo the solo user comes
 // from PIPEROOM_SOLO_USER (config.SoloUser).
-func soloFlagsUser(cfg config.Config, own *owners.Owners, demoMode, quickstart, soloFlag bool) (string, error) {
+func soloFlagsUser(cfg config.Config, own *owners.Owners, demoMode, quickstartMode, soloFlag bool) (string, error) {
 	if !soloFlag {
 		return strings.TrimSpace(cfg.SoloUser), nil
 	}
 	switch {
 	case demoMode:
 		return demoPresenterID, nil
-	case quickstart:
-		id, ok := soleUser(own)
+	case quickstartMode:
+		id, ok := quickstart.SoleUser(own)
 		if !ok {
 			return "", errors.New("server: --solo needs an owners file that names one user")
 		}
@@ -83,14 +84,14 @@ func soloFlagsUser(cfg config.Config, own *owners.Owners, demoMode, quickstart, 
 // that names several owners is refused with the --solo message, not a
 // users-file message, and the users file quickstartUsers writes is for exactly
 // that user.
-func applySoloFlag(cfg *config.Config, own *owners.Owners, demoMode, quickstart, solo bool, log *slog.Logger) error {
+func applySoloFlag(cfg *config.Config, own *owners.Owners, demoMode, quickstartMode, solo bool, log *slog.Logger) error {
 	if !solo {
 		return nil
 	}
 	if got := strings.TrimSpace(cfg.SoloUser); got != "" {
 		log.Warn("server: --solo and PIPEROOM_SOLO_USER are both set; --solo wins", "solo_user", got)
 	}
-	user, err := soloFlagsUser(*cfg, own, demoMode, quickstart, true)
+	user, err := soloFlagsUser(*cfg, own, demoMode, quickstartMode, true)
 	if err != nil {
 		return err
 	}

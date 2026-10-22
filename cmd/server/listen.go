@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 
 	"piperoom/internal/config"
+	"piperoom/internal/quickstart"
 )
 
 // errNonLoopback reports a listen address that another host can reach. In dev
@@ -34,11 +34,9 @@ func checkListenAddr(addr string, allowRemote bool) (remote bool, err error) {
 }
 
 // isLoopbackHost reports whether host names the loopback interface. An empty
-// host (":8090") listens on every interface, so it is not loopback.
+// host (":8090") listens on every interface, so it is not loopback. The rule
+// itself lives with the quickstart, which refuses a non-loopback address
+// whatever the dev switches say.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return quickstart.IsLoopbackHost(host)
 }

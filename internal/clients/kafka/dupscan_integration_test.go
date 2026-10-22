@@ -4,8 +4,11 @@ package kafka
 
 import (
 	"testing"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"piperoom/internal/clients"
 )
 
 // TestDupScanAgainstDevStack: the dev stack's real Debezium Avro events
@@ -28,12 +31,23 @@ func TestDupScanAgainstDevStack(t *testing.T) {
 		}
 	}
 
-	recs, err := NewReplayReader(c).ReadRecords(ctx, "pg.public.orders", 0, 0, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(recs) < 2 {
-		t.Skip("pg.public.orders has fewer than 2 records; run the dev stack's load first")
+	// The dev stack's initial load lands shortly after the connector
+	// registers; poll for it rather than skipping, because the full-stack job
+	// fails on any skipped test (fail-on-skips.sh).
+	var recs []clients.Record
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		recs, err = NewReplayReader(c).ReadRecords(ctx, "pg.public.orders", 0, 0, 5)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recs) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pg.public.orders still has %d record(s) after 90s; the dev stack's load did not run", len(recs))
+		}
+		time.Sleep(2 * time.Second)
 	}
 	raw, w := rawClient(t, brokers), writerOn(t, brokers)
 	topic := itTopic(t, raw, w, "it-dupscan", 1)
