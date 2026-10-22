@@ -198,8 +198,9 @@ func TestNetProbeMetadataFromResolver(t *testing.T) {
 }
 
 func TestNetProbeTLS(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // the TCP check closes before a TLS handshake
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0) // the TCP check closes before a TLS handshake; set before serving starts
+	srv.StartTLS()
 	defer srv.Close()
 	r := testRegistry(t, targetFor(srv.URL))
 	res, err := runOpErr(t, r, "net_probe", map[string]any{"target": "connect", "tls": true})
