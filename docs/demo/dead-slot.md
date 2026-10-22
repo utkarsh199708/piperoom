@@ -51,27 +51,19 @@ unchanged. These steps differ:
    `OWNERS_FILE=...`"). On the baseline `dev/owners.yaml` the room is not set up for this scenario. That file sets
    `slot_inactive` and `connector_down` to `for: 30s` (`dev/owners.p3.yaml`), which is what makes the room open
    within a minute.
-2. **A write role for the source database. Needs rehearsal.** The drop runs through `SOURCE_DB_WRITE_URL`, a role
-   that is **not** the read-only `SOURCE_DB_URL` role (`internal/wiring/writemode.go`, `checkSourceWriteURL`).
-   `dev/demo.env` sets `PIPEROOM_WRITE_MODE=on` but **sets no `SOURCE_DB_WRITE_URL`**, and no file in `dev/` creates
-   such a role. Without it the approval goes through and `Execute` fails with "no write credentials"
-   (`drop_replication_slot.go`, `errNoWriteCredentials`; `docs/pilot/write-roles.md`). The drop needs `REPLICATION`
-   (or superuser) on the role (`docs/pilot/write-roles.md`, "Source Postgres"). A role must exist **after the last
-   `devctl reset`**, because reset wipes the database. Suggested, not yet run:
-   ```
-   docker compose -f dev/docker-compose.yml exec -T postgres psql -U piperoom -d orders -c \
-     "CREATE ROLE piperoom_writer LOGIN REPLICATION PASSWORD 'piperoom-dev'"
-   export SOURCE_DB_WRITE_URL='postgres://piperoom_writer:piperoom-dev@localhost:5432/orders?sslmode=disable'
-   ```
-   (Dev-stack-only credentials, as in `AGENTS.md` §3. The `debezium` role of `connector-auth` is not an option:
-   it exists only after that scenario's break.) Whether the dev Postgres accepts this login from the host, and
-   whether the writer's start-up checks pass, is **unverified**.
-3. **Start the server** with the demo profile plus the owners file and the writer URL:
+2. **The source write role. Needs rehearsal.** The drop runs through `SOURCE_DB_WRITE_URL`, a role that is **not**
+   the read-only `SOURCE_DB_URL` role (`internal/wiring/writemode.go`, `checkSourceWriteURL`); without it the
+   approval goes through and `Execute` fails with "no write credentials" (`drop_replication_slot.go`,
+   `errNoWriteCredentials`). `dev/postgres-init/04-writer.sql` now creates `piperoom_writer` (`REPLICATION`, as the
+   drop needs, `docs/pilot/write-roles.md`) on every fresh database, so it survives `devctl reset`, and
+   `dev/demo.env` sets `SOURCE_DB_WRITE_URL` to it. An existing stack that predates the file needs one `devctl reset`
+   to get the role. That the server accepts the URL and the drop runs is **unverified** (no Docker in the session
+   that wrote it). The role owns nothing, so `pg_add_publication_table` and `pg_snapshot_signal` still refuse here.
+3. **Start the server** with the demo profile (which carries the writer URL) plus the owners file:
    ```
    export ANTHROPIC_API_KEY=...        # from your shell, never from a file
    set -a; . dev/demo.env; set +a
    export OWNERS_FILE=dev/owners.p3.yaml
-   export SOURCE_DB_WRITE_URL=...      # step 2
    go run ./cmd/server
    ```
    The log shows `server: watcher starting` with mode `rooms` (`schema-change.md`). If wiring refuses
@@ -79,8 +71,8 @@ unchanged. These steps differ:
 4. **Rehearse once:** `go run ./cmd/devctl demo --rehearse dead-slot --owner demo`. It accepts any scenario
    (`cmd/devctl/rehearse.go`, `parseDemoFlags`), resets, loads a short burst, runs `breakDeadSlot`, waits for a
    room on pipeline `orders`, resets again, and prints `PASS: break -> room in <time>`. Note that time. The
-   rehearsal ends with a reset, which **wipes the writer role from step 2**: create it again afterwards, and
-   restart the server so it picks up nothing stale (the server's rooms are in the 5433 database and survive).
+   rehearsal ends with a reset; the writer role comes back with the fresh database (step 2). The server and its
+   rooms (5433 database) are untouched.
    Open the rehearsal room and run the whole beat table below against it if you can; **close the room** when done
    (the next run refuses to start while one is open).
 5. After the rehearsal's final reset: `go run ./cmd/devctl health` (exit 0). Do **not** run a second `break`
@@ -193,13 +185,12 @@ stays stale. If the audience asks "so is it fixed?": the disk risk is; restoring
   the stack is unhealthy, `go run ./cmd/devctl reset --owner demo` is the known-good way, and the next `break`
   needs the reset anyway when the agent already dropped the slot (`breakDeadSlot` refuses without a slot). Confirm
   with `go run ./cmd/devctl health` (exit 0).
-- A reset removes the writer role: re-create it before the next run (*Before the audience arrives*, step 2).
 - Release the lock, stop the server and the web app, and tear down as in `schema-change.md`
   (`devctl unlock`, `devctl down`, `docker compose -f dev/demo-room-db.yml down -v`).
 
 ## Needs rehearsal (checklist)
 
-- [ ] A source write role: create it, confirm the server starts with `SOURCE_DB_WRITE_URL`, confirm the drop runs.
+- [ ] The source write role (`04-writer.sql`): confirm the server starts with `SOURCE_DB_WRITE_URL` and the drop runs.
 - [ ] `devctl demo --rehearse dead-slot`: record the break-to-room time and fix beat 1:15.
 - [ ] Both watcher signals (`connector_down` sev3, `slot_inactive` sev2) land in one room; what the title says.
 - [ ] Whether the first agent turn (or the triage first look) proposes a resume before the steer is delivered, and
