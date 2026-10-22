@@ -418,6 +418,71 @@ type AgentHypothesisPayload struct {
 	// the cited steps' summaries contain (agent grounding, F3). The UI marks
 	// them; they never block the hypothesis. At most 20, each ≤ 80 bytes.
 	UnbackedTerms []string `json:"unbacked_terms,omitempty"`
+	// Scope says where the cause lies (X4): in the pipeline, in an upstream
+	// application, at a vendor, or unknown. A decoded payload always has one
+	// of the four: a value this build does not know, and an event written
+	// before X4 with no scope, read as ScopeUnknown. ScopeUnknown is written
+	// as no key, so an event without scope marshals exactly as before.
+	Scope HypothesisScope `json:"scope,omitempty"`
+	// Team is the owners.yaml teams: id the cause points at; set only with
+	// ScopeUpstreamApp, and only to a team the server knows. (X4)
+	Team string `json:"team,omitempty"`
+}
+
+// HypothesisScope is AgentHypothesisPayload.Scope. (X4)
+type HypothesisScope string
+
+// Hypothesis scopes. (X4)
+const (
+	ScopePipeline    HypothesisScope = "pipeline"     // a pipeline layer (the default before X4)
+	ScopeUpstreamApp HypothesisScope = "upstream_app" // an application that writes the source (a deploy, a migration)
+	ScopeVendor      HypothesisScope = "vendor"       // a managed service's own incident
+	ScopeUnknown     HypothesisScope = "unknown"
+)
+
+// ParseHypothesisScope maps s to a known scope, and anything else (empty
+// included) to ScopeUnknown. (X4)
+func ParseHypothesisScope(s string) HypothesisScope {
+	switch v := HypothesisScope(s); v {
+	case ScopePipeline, ScopeUpstreamApp, ScopeVendor:
+		return v
+	}
+	return ScopeUnknown
+}
+
+// UnmarshalJSON reads any string, mapping one it does not know to
+// ScopeUnknown, so a newer writer never breaks an older reader.
+func (s *HypothesisScope) UnmarshalJSON(b []byte) error {
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("events: hypothesis scope: %w", err)
+	}
+	*s = ParseHypothesisScope(v)
+	return nil
+}
+
+// MarshalJSON omits Scope when it is ScopeUnknown (see the field).
+func (p AgentHypothesisPayload) MarshalJSON() ([]byte, error) {
+	type plain AgentHypothesisPayload
+	if p.Scope == ScopeUnknown {
+		p.Scope = ""
+	}
+	return json.Marshal(plain(p))
+}
+
+// UnmarshalJSON reads a missing scope as ScopeUnknown (replay of events
+// written before X4).
+func (p *AgentHypothesisPayload) UnmarshalJSON(b []byte) error {
+	type plain AgentHypothesisPayload
+	var v plain
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	if v.Scope == "" {
+		v.Scope = ScopeUnknown
+	}
+	*p = AgentHypothesisPayload(v)
+	return nil
 }
 
 // HypothesisVerdictPayload: Verdict is "confirmed" or "disputed"; Note is the

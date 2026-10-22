@@ -792,13 +792,34 @@ const (
 	ChangeConnectorConfig = "connector_config" // connector config keys changed (values masked)
 	ChangeConnectorState  = "connector_state"  // connector or task state transition
 	ChangeSchemaVersion   = "schema_version"   // a subject's latest version went up (registered) or down (deleted)
+
+	// Changes outside the pipeline (X4): what an upstream team or a vendor
+	// did that the pipeline then saw. Before and After are empty; Summary
+	// carries the one line, Object the service, migration or vendor name.
+	ChangeDeploy         = "deploy"          // an application deploy (POST /api/changes/webhook)
+	ChangeMigration      = "migration"       // a schema migration a tool applied (Flyway, Liquibase, dbt) or a webhook reported
+	ChangeVendorIncident = "vendor_incident" // a vendor status page incident (webhook)
+)
+
+// Sources of PipelineChange.Source: where the row came from.
+const (
+	ChangeSourceWatcher    = "watcher"    // the built-in watcher (F8c)
+	ChangeSourceDDLAudit   = "ddl_audit"  // the source DDL audit table (F8c)
+	ChangeSourceWebhook    = "webhook"    // POST /api/changes/webhook, signed (X4a)
+	ChangeSourceFlyway     = "flyway"     // flyway_schema_history on the source (X4b)
+	ChangeSourceLiquibase  = "liquibase"  // databasechangelog on the source (X4b)
+	ChangeSourceDBT        = "dbt"        // dbt run results (X4b)
+	ChangeSourceStatuspage = "statuspage" // a vendor status page, through the webhook (X4a)
 )
 
 // PipelineChange is one recorded change on a pipeline. Before and After hold
 // only the changed keys (config), the two states (state), the version pair
-// (schema) or nothing (DDL: the statement is in Summary, cut at 300 runes).
-// A credential value is never stored: masked keys read "***". Actor is the
-// DDL username or ""; Source is "watcher" or "ddl_audit".
+// (schema) or nothing (DDL: the statement is in Summary, cut at 300 runes;
+// deploy, migration and vendor_incident: Summary only). A credential value
+// is never stored: masked keys read "***". Actor is the DDL username, the
+// deployer or migration author as the sender named them, or ""; Source is
+// one of ChangeSource*. Text from a webhook or a migration table is
+// untrusted: a tool wraps it like every other read.
 type PipelineChange struct {
 	ID          int64           `json:"id"`
 	PipelineID  string          `json:"pipeline_id"`

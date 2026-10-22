@@ -76,3 +76,73 @@ func TestDefaultSignalSeverity(t *testing.T) {
 		}
 	}
 }
+
+func TestHypothesisScopeRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		v    events.AgentHypothesisPayload
+	}{
+		{"pipeline", events.AgentHypothesisPayload{Text: "slot inactive", BasedOnSteps: []string{"s_1"}, Confidence: "high", Scope: events.ScopePipeline}},
+		{"upstream app with team", events.AgentHypothesisPayload{Text: "orders-api deploy dropped a column", BasedOnSteps: []string{"s_2"}, Confidence: "medium", Scope: events.ScopeUpstreamApp, Team: "checkout"}},
+		{"vendor", events.AgentHypothesisPayload{Text: "MSK incident", BasedOnSteps: []string{}, Confidence: "low", Scope: events.ScopeVendor}},
+		{"unknown", events.AgentHypothesisPayload{Text: "unclear", BasedOnSteps: []string{}, Confidence: "low", Scope: events.ScopeUnknown}},
+	}
+	for _, tt := range tests {
+		roundTrip(t, tt.name, tt.v)
+	}
+}
+
+func TestHypothesisScopeDecoding(t *testing.T) {
+	tests := []struct {
+		name, raw string
+		want      events.HypothesisScope
+	}{
+		{"known", `{"text":"x","based_on_steps":[],"confidence":"low","confirmed":false,"scope":"vendor"}`, events.ScopeVendor},
+		{"value from a newer writer", `{"text":"x","based_on_steps":[],"confidence":"low","confirmed":false,"scope":"cosmic_ray"}`, events.ScopeUnknown},
+		{"wrong case", `{"text":"x","based_on_steps":[],"confidence":"low","confirmed":false,"scope":"Pipeline"}`, events.ScopeUnknown},
+		{"null", `{"text":"x","based_on_steps":[],"confidence":"low","confirmed":false,"scope":null}`, events.ScopeUnknown},
+		{"before X4: no scope", `{"text":"x","based_on_steps":["s_1"],"confidence":"high","confirmed":false}`, events.ScopeUnknown},
+	}
+	for _, tt := range tests {
+		e := events.Event{Type: events.AgentHypothesis, Payload: json.RawMessage(tt.raw)}
+		p, err := events.Decode[events.AgentHypothesisPayload](e)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if p.Scope != tt.want {
+			t.Errorf("%s: scope = %q, want %q", tt.name, p.Scope, tt.want)
+		}
+	}
+	if _, err := events.Decode[events.AgentHypothesisPayload](events.Event{Type: events.AgentHypothesis, Payload: json.RawMessage(`{"scope":7}`)}); err == nil {
+		t.Error("a non-string scope decoded without error")
+	}
+}
+
+// Replay compatibility: an agent.hypothesis written before X4 decodes and
+// marshals back to the same bytes, so snapshots and export hashes of old
+// rooms do not move.
+func TestHypothesisBeforeX4MarshalsUnchanged(t *testing.T) {
+	old := `{"text":"connector task failed on a schema change","based_on_steps":["s_1","s_3"],"confidence":"high","confirmed":false,"unbacked_terms":["orders_v2"]}`
+	p, err := events.Decode[events.AgentHypothesisPayload](events.Event{Type: events.AgentHypothesis, Payload: json.RawMessage(old)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != old {
+		t.Errorf("re-marshalled\n got %s\nwant %s", got, old)
+	}
+}
+
+func TestParseHypothesisScope(t *testing.T) {
+	for in, want := range map[string]events.HypothesisScope{
+		"pipeline": events.ScopePipeline, "upstream_app": events.ScopeUpstreamApp, "vendor": events.ScopeVendor,
+		"unknown": events.ScopeUnknown, "": events.ScopeUnknown, "team": events.ScopeUnknown,
+	} {
+		if got := events.ParseHypothesisScope(in); got != want {
+			t.Errorf("ParseHypothesisScope(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
