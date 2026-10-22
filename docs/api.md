@@ -123,10 +123,10 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 |---|---|
 | 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
 | 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline), `not_provisioned` (login gate) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline; AU1: autonomy revoke by someone who is neither an owner of the action's layer nor a tenant admin), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB; X4: `POST /api/changes/webhook` body over 4 KB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); X3: `watch_off` (`accept-config` when this server keeps no baseline for the connector: the watcher is off, runs on another server replica, or does not watch the pipeline or connector); X4: `slack_off` (`page-team` while the Slack bridge is off), `not_upstream` (`page-team` when the current hypothesis's `scope` is not `upstream_app` or `vendor`); X8 (see **X8 staging** under Objects): `no_staging` (`POST /api/proposals/{pid}/stage` when the room's pipeline declares no `staging:` or write mode is off), `not_stageable` (no step's action implements `actions.Stager`), `stage_in_progress` (a stage of the proposal is still running), `staging_required` (`approve` or `approve-all` while a `require_staging:` step has no healthy stage for the current `params_hash`; the message names the step and action) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); AU1: `not_granted` (`POST …/autonomy/{action}/revoke` while the action is not granted); X3: `watch_off` (`accept-config` when this server keeps no baseline for the connector: the watcher is off, runs on another server replica, or does not watch the pipeline or connector); X4: `slack_off` (`page-team` while the Slack bridge is off), `not_upstream` (`page-team` when the current hypothesis's `scope` is not `upstream_app` or `vendor`); X8 (see **X8 staging** under Objects): `no_staging` (`POST /api/proposals/{pid}/stage` when the room's pipeline declares no `staging:` or write mode is off), `not_stageable` (no step's action implements `actions.Stager`), `stage_in_progress` (a stage of the proposal is still running), `staging_required` (`approve` or `approve-all` while a `require_staging:` step has no healthy stage for the current `params_hash`; the message names the step and action) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; X4: the 61st verified `POST /api/changes/webhook` of one pipeline within a minute, and a second `page-team` of the same team in one room within an hour); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket); P3: `too_many_proposals` (a sixth open driver-authored proposal in one room); X8: `rate_limited` (a sixth `POST /api/proposals/{pid}/stage` of one proposal) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
@@ -1247,7 +1247,10 @@ pipelines:
 ```
 - `after_verified` is 3–100: how many verified recoveries in a row are needed.
 - `window` is `1d`–`90d`, in whole days written `<n>d`.
-- `max_tier` is `T0`–`T2`, default `T1`; `T3` is refused at load.
+- `max_tier` is `T0`–`T2`, default `T1`; `T3` is refused at load. A step's tier is the per-action tier AU1b assigns
+  in the actions catalogue, on the setup scale (`internal/setup/protocol`); incident-room proposal steps carry no tier
+  of their own today, and an action without an assigned tier is above every `max_tier`, so it never auto-approves
+  (fail closed).
 - Each key must be a registered action, like `auto_approve:`; an action in both `auto_approve:` and `autonomy:` is a
   load error.
 - A load error names the pipeline, the action and the field.
@@ -1259,7 +1262,10 @@ pipelines:
 - `autonomy.revoked {action, reason, by?}`: `reason` ∈ `verify_failed | human | config_changed | expired`. For
   `human`, `by` and the event actor are the person; otherwise the actor is the system.
 - A verified recovery is an `agent.verification` with `recovered: true` (for a recovery proposal, `outcome:
-  "recovered"`) on an agent proposal of the action that no member disputed. Driver-authored proposals never count.
+  "recovered"`) on an agent proposal of the action that no member disputed. A member disputes with the F9 verdict route: a
+  `hypothesis.verdict` of `disputed` standing in the proposal's room when the verification is written marks that
+  recovery `disputed` (it zeroes the streak and shows in `last_verdicts`); a later `agent.hypothesis` clears verdicts
+  as always. Driver-authored proposals never count.
 - Any other verification of a granted action revokes it (`verify_failed`). `partial`, `not_recovered` and
   `unverifiable` fail closed.
 
@@ -1271,8 +1277,9 @@ scheduled like `auto_approve`: `proposal.scheduled {policy: "earned_autonomy"}`,
 - in a shadow or setup room;
 - to a driver-authored proposal, or after a failed preview.
 
-**`PIPEROOM_AUTONOMY`** is `on` (the default) or `off`, any case; any other value stops the server with an error naming
-the variable. It takes effect only with `PIPEROOM_WRITE_MODE=on` (`config.ParseAutonomy`).
+**`PIPEROOM_AUTONOMY`** is `on` (the default) or `off`, any case; `config.ParseAutonomy` refuses any other value with
+an error naming the variable, and the server refuses to start on it once AU1b wires `ParseAutonomy` into `cmd/server`
+(the `ParseSetup` pattern; until then a bad value is ignored). It takes effect only with `PIPEROOM_WRITE_MODE=on`.
 
 ### Spend limits (design `docs/design/cost.md`)
 
