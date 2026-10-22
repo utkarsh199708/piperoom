@@ -70,6 +70,9 @@ type Pipeline struct {
 	// SetupSpec is the optional `setup:` block (see setup.go), written by
 	// pipeline_register. Read it with Setup(). Allowed on both kinds.
 	SetupSpec *SetupSpec `yaml:"setup"`
+	// RecoverySpec is the optional cdc `recovery:` block (recovery.go, X2).
+	// Read it with RecoveryMaxRows.
+	RecoverySpec *RecoverySpec `yaml:"recovery"`
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
 	// replaces the top-level `layers:` entry for this pipeline. Load refuses a
 	// layer that is not one of the pipeline's Layers().
@@ -310,6 +313,9 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.validateReprocessTopic(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.validateRecovery(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if p.isBatch() {

@@ -24,10 +24,23 @@ import (
 )
 
 // p3ActionNames are the P3 write actions RegisterP3Actions adds (P3a, P3b),
-// in its registration order.
+// and the X2a recovery action after them, in its registration order.
 var p3ActionNames = []string{
 	"kafka_reset_consumer_offsets", "dlq_replay", "kafka_replay_range", "connect_snapshot_table",
 	"pg_drop_replication_slot", "pg_add_publication_table", "pg_snapshot_signal",
+	"pg_resnapshot_rows",
+}
+
+// p3Writers says which writers action n holds: the source writer for the
+// pg_* actions, the Kafka writer for the others, and both for
+// pg_resnapshot_rows, whose signal goes to the signal table or the Kafka
+// signal topic as the connector config says (X2a).
+func p3Writers(n string) (source, kafka bool) {
+	if n == "pg_resnapshot_rows" {
+		return true, true
+	}
+	pg := strings.HasPrefix(n, "pg_")
+	return pg, !pg
 }
 
 // p3Params are params each P3 action accepts for pipeline id of
@@ -42,6 +55,7 @@ func p3Params(id string) map[string]json.RawMessage {
 		"pg_drop_replication_slot":     json.RawMessage(`{"connector":"` + id + `-connector","slot":"` + id + `_slot"}`),
 		"pg_add_publication_table":     json.RawMessage(`{"connector":"` + id + `-connector","publication":"` + id + `_pub","table":"public.a"}`),
 		"pg_snapshot_signal":           json.RawMessage(`{"connector":"` + id + `-connector","tables":["public.a"],"signal_table":"public.debezium_signal"}`),
+		"pg_resnapshot_rows":           json.RawMessage(`{"connector":"` + id + `-connector","table":"public.a","key_range":{"column":"id","from":"1","to":"20"}}`),
 	}
 }
 
@@ -253,7 +267,7 @@ func TestP3ActionsWriteModeOn(t *testing.T) {
 	swT, kwT := reflect.TypeOf(sw), reflect.TypeOf(kw)
 	for _, n := range p3ActionNames {
 		reach := reachableTypes(only(t, areg, n))
-		wantSource, wantKafka := strings.HasPrefix(n, "pg_"), !strings.HasPrefix(n, "pg_")
+		wantSource, wantKafka := p3Writers(n)
 		if reach[swT] != wantSource || reach[kwT] != wantKafka {
 			t.Errorf("%s reaches source writer=%v kafka writer=%v, want %v %v", n, reach[swT], reach[kwT], wantSource, wantKafka)
 		}
@@ -379,9 +393,9 @@ func TestRegisterP3Actions(t *testing.T) {
 	swT, kwT := reflect.TypeOf(sw), reflect.TypeOf(kw)
 	for _, n := range p3ActionNames {
 		reach := reachableTypes(only(t, areg, n))
-		wantSource := strings.HasPrefix(n, "pg_")
-		if reach[swT] != wantSource || reach[kwT] != !wantSource {
-			t.Errorf("%s reaches source writer=%v kafka writer=%v, want %v %v", n, reach[swT], reach[kwT], wantSource, !wantSource)
+		wantSource, wantKafka := p3Writers(n)
+		if reach[swT] != wantSource || reach[kwT] != wantKafka {
+			t.Errorf("%s reaches source writer=%v kafka writer=%v, want %v %v", n, reach[swT], reach[kwT], wantSource, wantKafka)
 		}
 	}
 	// The harness's Planner and Records reach the Kafka action that reads
