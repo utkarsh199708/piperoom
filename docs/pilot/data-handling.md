@@ -66,6 +66,15 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
   (`GET /api/pipelines/{pid}/trends`); reading it makes no call to your systems. The first three come
   from reads the watcher already makes; database size and oldest unread age need optional client
   readers that no client implements yet, so they are not sampled today (section 2, watcher samples).
+- **Watcher status (`watch_status`, X5; migration 00019, written by the watcher, X5a).** One row per
+  watched pipeline, replaced on every tick (no history): when the watcher last checked it and, for each
+  signal now firing or acked, its name, state, severity, start time, the topology node id it is about
+  (`connect:<connector>`, `group:<group>`, `dlq:<topic>`, `pg:<table>`, `topic:<topic>`) and, for a
+  forecast, its metric and ETA. No evidence value, row value, record, config value or free text. The
+  fleet view (`GET /api/fleet`, any signed-in user, filtered by tenant) reads it with
+  `pipeline_changes` counts, open rooms and the last closed room's verdict; `GET /api/fleet/changes`
+  pages the same masked `pipeline_changes` rows the room shows. Neither route makes a call to your
+  systems.
 - **Connector config drift (`config_drift`, X3b).** The watcher keeps, in memory only, each connector's
   approved config in its redacted form (`actions.RedactConfig`, the form section 4's config versions store),
   its hash (`actions.ConfigHash`, taken over the redacted form, so it cannot be used to guess a secret) and a

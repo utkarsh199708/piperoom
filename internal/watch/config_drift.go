@@ -90,6 +90,14 @@ type driftBase struct {
 	// setAt is when AcceptConfig set approved. A tick read that started
 	// before it is not judged (it may show the config before the accept).
 	setAt time.Time
+	// The stored config versions (X5c, config_versions.go), apart from the
+	// approved config: seen is the last config written as a version (seenOK
+	// says it is set), rebaseBy the "proposal:<id>" of the action that set
+	// rebaseAt, and versionBy the By of the version still to be written.
+	seen      actions.ConfigDigest
+	seenOK    bool
+	rebaseBy  string
+	versionBy string
 }
 
 // driftBase returns the baseline of a connector, creating an empty one.
@@ -112,6 +120,8 @@ func (ps *pipeState) driftBase(connector string) *driftBase {
 func (w *Watcher) evaluateConfigDrift(now time.Time, t target, ps *pipeState, obs *observation, fired map[string][]string) {
 	for _, c := range t.connectors {
 		id := configDriftID(c)
+		// Before the reading: it consumes rebaseAt, which names the version's By.
+		w.planVersion(now, t.p.ID, c, ps, obs)
 		r := configDriftReading(c, ps, obs)
 		if ss := ps.sigs[id]; r.v == vHold && ss != nil && ss.phase != phaseOK {
 			// A hold keeps what the room shows: the last breach's label and
@@ -207,6 +217,14 @@ func configDriftLabel(c string, changed []string) string {
 // config, so the fix itself never fires config_drift. Wire it to the room
 // service's action hook. It does no I/O.
 func (w *Watcher) ApproveConnectorChange(pipelineID, connector string) {
+	w.ApproveConnectorChangeBy(pipelineID, connector, "")
+}
+
+// ApproveConnectorChangeBy is ApproveConnectorChange for the action of
+// proposal proposalID: the stored config version (X5c) that read shows, if
+// the config changed, gets By "proposal:<proposalID>". An empty proposalID
+// leaves By empty.
+func (w *Watcher) ApproveConnectorChangeBy(pipelineID, connector, proposalID string) {
 	if pipelineID == "" || connector == "" {
 		return
 	}
@@ -217,6 +235,10 @@ func (w *Watcher) ApproveConnectorChange(pipelineID, connector string) {
 		return // no baseline yet: the next read sets one anyway
 	}
 	ps.cfgBase[connector].rebaseAt = w.clock.Now()
+	ps.cfgBase[connector].rebaseBy = ""
+	if proposalID != "" {
+		ps.cfgBase[connector].rebaseBy = "proposal:" + proposalID
+	}
 	w.log.Info("watch: connector changed by an approved action; its config becomes the baseline at the next read",
 		"pipeline", pipelineID, "connector", connector)
 }

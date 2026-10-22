@@ -658,6 +658,17 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	if sampleStore != nil {
 		httpOpts = append(httpOpts, httpapi.WithSamples(sampleStore))
 	}
+	// The fleet view (X5a) reads the watcher's status rows, which the leader's
+	// watcher writes, so every replica answers alike.
+	fleetStore, _ := st.(store.FleetStore)
+	httpOpts = append(httpOpts, httpapi.WithFleet(fleetOptions(own, st, fleetStore, s.watchCfg, changesDays)))
+	// Connector config versions (X5c): the watcher writes them, the
+	// config-versions routes read them; the change-log retention above
+	// purges them (configVersionsPurger).
+	versionStore, _ := st.(store.ConfigVersionStore)
+	if versionStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithConfigVersions(versionStore))
+	}
 	if s.setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
 	}
@@ -707,9 +718,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		MaxOpenRooms: s.watchMaxOpenRooms,
 		Forecast:     s.watchForecast,
 	}
-	if sampleStore != nil {
-		watchDeps.Samples = sampleStore
-	}
+	watchStores(&watchDeps, st)
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
 	}

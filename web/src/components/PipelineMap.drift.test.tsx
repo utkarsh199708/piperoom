@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
-import type { Topology } from '../api/types'
+import type { ForecastSummary, Topology, TrendPoint } from '../api/types'
 import cdc from '../fixtures/topology.json'
 import evidence from '../fixtures/watcher-drift.json'
 import { driftFacts } from '../lib/drift'
@@ -87,5 +87,47 @@ describe('PipelineMap drift facts (X1)', () => {
     const elsewhere = driftFacts({ signals: [{ signal: 'dup_keys', topic: 'other.topic', window: W }] }, 'watcher')
     rerender(<PipelineMap topology={topology} drift={elsewhere} />)
     expect(container.querySelector('[data-drift]')).toBeNull()
+  })
+
+  it('draws drift next to the X3 sparkline and ETA badge on the same node, compact and expanded', () => {
+    const now = Date.parse('2026-10-22T10:00:00Z')
+    const points: TrendPoint[] = Array.from({ length: 8 }, (_, i) => ({
+      at: new Date(now - (7 - i) * 15 * 60_000).toISOString(),
+      value: 100 + i,
+    }))
+    const forecast: ForecastSummary = {
+      metric: 'topic_oldest_unread_age',
+      object: 'pg.public.orders',
+      current: 500_000,
+      limit: 604_800,
+      eta: new Date(now + 18 * 3_600_000 + 60_000).toISOString(),
+      slope_per_hour: 3600,
+      r2: 0.9,
+    }
+    vi.useFakeTimers()
+    vi.setSystemTime(now)
+    try {
+      render(
+        <PipelineMap
+          topology={topology}
+          drift={driftFacts(evidence, 'watcher')}
+          trends={{ topic_oldest_unread_age: points, group_lag: points }}
+          forecast={forecast}
+        />,
+      )
+      const check = () => {
+        const topic = node('pg.public.orders')
+        expect(topic.querySelector('[data-drift]')).not.toBeNull()
+        expect(topic.querySelector('[data-sparkline]')).not.toBeNull()
+        expect(topic.querySelector('[data-eta]')).toHaveTextContent('data loss in 18 h')
+        expect(node('order-sync').querySelector('[data-sparkline]')).not.toBeNull()
+        expect(node('analytics.orders').querySelector('[data-drift]')).not.toBeNull()
+      }
+      check()
+      expand()
+      check()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

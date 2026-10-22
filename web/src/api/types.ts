@@ -683,6 +683,45 @@ export interface RoomSnapshot {
   postmortem?: PostmortemSummary
   /** P1a/P2b: on the room GET only (list rows have none); absent on an older server, which means write mode on. */
   mode?: RoomMode
+  /** X3: room.created.origin ("forecast" for a forecast room); absent for every other room. */
+  origin?: string
+  /** X3: the newest forecast signal of the room's evidence; absent when none. */
+  forecast?: ForecastSummary
+}
+
+/**
+ * The trend metrics the watcher samples (clients.WatchMetrics, docs/api.md "Trends"). Units: bytes for
+ * slot_wal_bytes and db_size_bytes, records for dlq_records and group_lag, seconds for topic_oldest_unread_age.
+ */
+export const WATCH_METRICS = [
+  'slot_wal_bytes',
+  'dlq_records',
+  'group_lag',
+  'db_size_bytes',
+  'topic_oldest_unread_age',
+] as const
+export type WatchMetric = (typeof WATCH_METRICS)[number]
+
+/** One sample of GET /api/pipelines/{pid}/trends (clients.SamplePoint): oldest first, `value` in the metric's unit. */
+export interface TrendPoint {
+  at: string
+  value: number
+}
+
+/**
+ * RoomSnapshot.forecast (X3, events.ForecastSignal minus signal/severity, plus `at`): `current`, `limit` and
+ * `slope_per_hour` in the metric's unit; `eta` is when the fitted line reaches `limit`; `object` names the slot,
+ * topic, group or database the series follows (absent for a pipeline total).
+ */
+export interface ForecastSummary {
+  metric: string
+  object?: string
+  current: number
+  limit: number
+  eta: string
+  slope_per_hour: number
+  r2: number
+  at?: string
 }
 
 /** RoomSnapshot.postmortem (docs/api.md, F2). */

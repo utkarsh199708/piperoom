@@ -233,6 +233,8 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"GET", "/api/pipelines/{pid}/agent-stats", "/api/pipelines/pb/agent-stats", ""},
 		{"GET", "/api/pipelines/{pid}/trends", "/api/pipelines/pb/trends?metric=slot_wal_bytes", ""},
 		{"POST", "/api/pipelines/{pid}/connectors/{name}/accept-config", "/api/pipelines/pb/connectors/pb-c/accept-config", ""},
+		{"GET", "/api/pipelines/{pid}/connectors/{name}/config-versions", "/api/pipelines/pb/connectors/pb-c/config-versions", ""},
+		{"GET", "/api/pipelines/{pid}/connectors/{name}/config-versions", "/api/pipelines/pb/connectors/pb-c/config-versions?diff=" + strings.Repeat("a", 64) + ".." + strings.Repeat("b", 64), ""},
 		{"GET", "/api/rooms/{id}/usage", "/api/rooms/" + f.rb + "/usage", ""},
 		{"GET", "/api/usage", "/api/usage?pipeline=pb", ""},
 	}
@@ -247,6 +249,8 @@ var aggregateRoutes = []string{
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
 	"GET /api/pipelines",
+	"GET /api/fleet",         // TestFleetTenancy
+	"GET /api/fleet/changes", // TestFleetTenancy
 	"POST /api/alerts/webhook",
 	"POST /api/alerts/{source}",
 }

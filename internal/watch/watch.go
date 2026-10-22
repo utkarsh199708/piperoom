@@ -178,6 +178,14 @@ type Deps struct {
 	// config.ParseWatchForecast; a zero Horizon means the default 48 h.
 	Samples  SampleStore
 	Forecast config.WatchForecast
+	// Status, when set, gets one clients.WatchStatus per watched pipeline at
+	// the end of every tick (X5a, status.go): the room store's watch_status,
+	// which the fleet view reads on any replica.
+	Status clients.WatchStatusWriter
+	// ConfigVersions, when set, keeps every connector config the watcher
+	// reads whose hash or keyed fingerprints changed (X5c,
+	// config_versions.go): the room store's connector_config_versions.
+	ConfigVersions clients.ConfigVersionWriter
 	// Clock defaults to the wall clock.
 	Clock Clock
 	// Log defaults to slog.Default().
@@ -331,6 +339,13 @@ type Watcher struct {
 	// Sample history and forecasts (forecast.go); nil samples = off.
 	samples SampleStore
 	horizon time.Duration
+
+	// status receives the tick's status rows (status.go); nil = off.
+	status clients.WatchStatusWriter
+	// Connector config versions (config_versions.go); nil versions = off.
+	// versionJobs are planned under mu by evaluate and written by the tick.
+	versions    clients.ConfigVersionWriter
+	versionJobs []versionJob
 }
 
 const maxClosedRemembered = 256
@@ -376,7 +391,8 @@ func New(d Deps) (*Watcher, error) {
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 		changes: d.Changes, registry: d.Registry, ddl: d.DDL,
 		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
-		samples: d.Samples, horizon: d.Forecast.Horizon,
+		samples: d.Samples, horizon: d.Forecast.Horizon, status: d.Status,
+		versions: d.ConfigVersions,
 	}
 	if w.horizon <= 0 {
 		w.horizon = 48 * time.Hour // config.DefaultWatchForecastHorizon
@@ -476,7 +492,13 @@ func (w *Watcher) tick(ctx context.Context) {
 	w.mu.Lock()
 	fired := w.evaluate(now, ts, obs)
 	jobs := w.planSamples(now, ts, obs)
+	vjobs := w.versionJobs
+	w.versionJobs = nil
 	w.mu.Unlock()
+	w.writeVersions(ctx, vjobs)
+	if ctx.Err() != nil {
+		return
+	}
 	w.writeSamples(ctx, now, jobs)
 	if ctx.Err() != nil {
 		return
@@ -487,6 +509,12 @@ func (w *Watcher) tick(ctx context.Context) {
 	}
 	if w.cfg.Mode == config.WatchRooms {
 		w.emit(ctx, now, ts, fired)
+	}
+	if w.status != nil && ctx.Err() == nil {
+		w.mu.Lock()
+		rows := w.buildStatusesLocked(now, ts)
+		w.mu.Unlock()
+		w.writeStatuses(ctx, rows)
 	}
 	w.log.Debug("watch: tick done", "mode", string(w.cfg.Mode), "pipelines", len(ts),
 		"took", w.clock.Now().Sub(now).String())

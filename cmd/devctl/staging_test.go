@@ -180,8 +180,9 @@ func TestStagingURLsMatchCompose(t *testing.T) {
 	}
 }
 
-// dev/owners.staging.yaml is dev/owners.yaml plus a staging block on orders. It
-// is parsed generically: the strict owners loader only knows `staging:` once X8a lands.
+// dev/owners.staging.yaml is dev/owners.yaml plus a staging block and
+// require_staging on orders. It is parsed generically: the strict owners
+// loader only knows `staging:` once X8a lands.
 func TestOwnersStagingMatchesOwners(t *testing.T) {
 	st := repoStack(t)
 	read := func(name string) map[string]any {
@@ -221,6 +222,11 @@ func TestOwnersStagingMatchesOwners(t *testing.T) {
 			}
 		}
 		delete(m, "staging")
+		// require_staging: needs a staging: block, so it lives only here (X8b).
+		if rs, _ := m["require_staging"].([]any); !reflect.DeepEqual(rs, []any{"connect_update_connector_config"}) {
+			t.Errorf("orders require_staging = %v, want [connect_update_connector_config]", m["require_staging"])
+		}
+		delete(m, "require_staging")
 	}
 	if declared != 1 {
 		t.Fatalf("staging blocks = %d, want 1", declared)

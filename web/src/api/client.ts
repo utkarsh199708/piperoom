@@ -26,6 +26,8 @@ import type {
   ShadowMetrics,
   ShadowResponse,
   Topology,
+  TrendPoint,
+  WatchMetric,
 } from './types'
 import { classifyAuthProblem, getAuthEpoch, reportAuthProblem } from '../lib/auth'
 import type { AuthMode } from '../lib/auth'
@@ -218,6 +220,12 @@ export const api = {
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
   topology: (pipelineId: string) =>
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  // X3: the watcher's samples of one metric, oldest first; [] before the first sample. 404 for an unknown
+  // pipeline and for one outside the caller's tenants.
+  trends: (pipelineId: string, metric: WatchMetric, days = 1) =>
+    request<TrendPoint[]>(
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/trends?metric=${encodeURIComponent(metric)}&days=${days}`,
+    ),
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string; client_id?: string }) =>

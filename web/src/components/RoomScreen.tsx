@@ -7,6 +7,8 @@ import { exportRoom, isFixtures } from '../api/client'
 import { downloadText, exportErrorText } from '../lib/postmortem'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
+import { useTrends } from '../hooks/useTrends'
+import { ForecastChart } from './room/TrendChart'
 import { useMediaQuery } from '../hooks/useMediaQuery'
 import { rememberRoomTitle } from '../lib/signinNotice'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
@@ -165,6 +167,8 @@ export function RoomScreen() {
     refreshKey: executedCount,
     active: state?.status === 'open',
   })
+  // X3 sparklines: asked for once the pipeline's topology answered, so an unknown pipeline costs no more requests.
+  const trends = useTrends(state?.pipeline_id ?? '', topology !== null && !notFound)
   // The sign-in screen names this room if the session ends while it is open.
   useEffect(() => {
     rememberRoomTitle(state?.title)
@@ -348,8 +352,13 @@ export function RoomScreen() {
       selectedLayer={layerFilter ?? undefined}
       onSelectLayer={setLayerFilter}
       drift={state.alert?.drift}
+      trends={trends.series}
+      forecast={state.forecast}
     />
   )
+  // A forecast room opens on the trend that opened it (X3): nothing has failed yet, so the chart leads.
+  const forecastChart =
+    state.origin === 'forecast' && state.forecast ? <ForecastChart forecast={state.forecast} trends={trends} now={now} /> : null
   const pinned = <PinnedHandoffs key={state.id} roomId={state.id} handoffs={state.handoffs} />
   const hypothesis = state.hypothesis ? (
     <HypothesisCard
@@ -501,6 +510,7 @@ export function RoomScreen() {
 
           {wide ? (
             <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+              {forecastChart}
               {lane}
               {pinned}
               {hypothesis}
@@ -527,6 +537,7 @@ export function RoomScreen() {
               </TabsList>
               {/* Every panel stays mounted (hidden) so half-written comments survive a tab change. */}
               <TabsContent value="investigation" forceMount hidden={tab !== 'investigation'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+                {forecastChart}
                 {lane}
                 {pinned}
                 {hypothesis}

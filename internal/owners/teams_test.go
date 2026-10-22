@@ -177,3 +177,44 @@ pipelines:
 		t.Fatalf("DirSkips = %+v", skips)
 	}
 }
+
+// A pipeline's team: (X5-0) is a free label without a teams: list, and one of
+// its ids serving the pipeline's tenant with one.
+func TestPipelineTeam(t *testing.T) {
+	withTeam := func(team string) string {
+		return strings.Replace(teamsPipeline, "    connectors: [pg-orders]\n", "    connectors: [pg-orders]\n    team: "+team+"\n", 1)
+	}
+	o, err := Load(writeTemp(t, withTeam("orders-core")))
+	if err != nil {
+		t.Fatalf("Load without teams: list: %v", err)
+	}
+	if p, _ := o.Pipeline("orders"); p.Team != "orders-core" {
+		t.Fatalf("Team = %q", p.Team)
+	}
+	listed := "teams:\n  - {id: checkout, slack_channel: C0123ABCD, owns: [checkout-api]}\n"
+	if _, err := Load(writeTemp(t, listed+withTeam("checkout"))); err != nil {
+		t.Fatalf("Load with a listed team: %v", err)
+	}
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"bad label", withTeam(`"Orders Core"`), "must match"},
+		{"not in teams:", listed + withTeam("billing"), `team "billing" is not declared in teams:`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Load(writeTemp(t, tc.yaml)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Load error = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+	// With tenants, a pipeline may name only a team of its own tenant.
+	tenantTeams := "teams:\n" +
+		"  - {id: team-a, slack_channel: C0123ABCD, owns: [a-api], tenant: a}\n" +
+		"  - {id: team-b, slack_channel: C0456EFGH, owns: [b-api], tenant: b}\n"
+	ok := strings.Replace(twoTenants(), "    tenant: a\n", "    tenant: a\n    team: team-a\n", 1)
+	if _, err := Load(writeTemp(t, ok+tenantTeams)); err != nil {
+		t.Fatalf("Load with the tenant's own team: %v", err)
+	}
+	cross := strings.Replace(twoTenants(), "    tenant: a\n", "    tenant: a\n    team: team-b\n", 1)
+	if _, err := Load(writeTemp(t, cross+tenantTeams)); err == nil || !strings.Contains(err.Error(), `serves tenant "b"`) {
+		t.Fatalf("Load error = %v, want another tenant's team refused", err)
+	}
+}

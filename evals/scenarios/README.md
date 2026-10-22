@@ -132,6 +132,71 @@ Each action's `Validate` reads the recorded stack: slots, groups and offsets com
 `missed-table` declares in `resources` what no read tool shows (`connector_configs`, `tables`, `publications`;
 evals/README.md, "Resources"). Executed-fix phases like `slot-inactive-wal-growth`'s are still to add, if wanted.
 
+### Silent-corruption scenarios (X1e)
+
+Four files, one per X1g `devctl break` (`dev/scenarios.md` §14-17), on the baseline `dev/owners.yaml` pipeline.
+Nothing fails in any of them: Connect RUNNING, slot active, order-sync Stable with lag 0. Each label names the first
+failing layer and the root cause, and `root_cause_forbidden` lists the "pipeline is healthy" / "false alarm" reading
+of a green pipeline next to the trap stories.
+
+| Scenario | Opened by | Root cause | First failing / root-cause layer | Fix |
+|---|---|---|---|---|
+| `sink-filtered-rows` | watcher `count_drift` (sev2): source 2689, sink 2649 in 08:00-09:00 | order-sync 2.16.0 filters out the 40 `backfill` orders and commits past them | consumer / consumer | none automated: roll back, then replay from before 08:31Z |
+| `consumer-duplicates` | watcher `dup_keys` (sev3): 10 duplicate events (10 keys) | the same 10 change events (same key, same lsn) delivered twice; the upsert sink absorbs them | kafka / kafka (alt kafka-connect) | none (no action removes records; `kafka_reset_consumer_offsets` forbidden) |
+| `sink-dropped-column` | dbt `not_null` test on `analytics.orders.updated_at` (hand-written title) | order-sync 2.16.1 dropped `updated_at` from its upsert | consumer / consumer | none automated: fixed build, then replay |
+| `toast-placeholder` | dbt `accepted_values` test on `analytics.orders.status` (hand-written title) | `REPLICA IDENTITY DEFAULT` on `public.orders`: an update leaving the TOASTed status unchanged makes Debezium emit `__debezium_unavailable_value` | kafka-connect / postgres | none automated: identity FULL, rewrite the rows |
+
+**Synthesised from the code paths, not recorded.** The session that wrote them had no Docker (TC2 is open). Like
+the P3 files, every recording is the exact output of the real `kafkatools`, `dbtools` and topology code at
+`c71c4477`, run by a throwaway generator (not committed; built on `evals/gen`'s fakes) over fake clients holding the
+state each break leaves, on a fixed clock of 2026-10-21T09:40:00Z. The source and sink rows, the change events and
+the duplicate scan are computed from one event log (`clients.DupScanner` and `clients.Reconciler` semantics), so
+reconcile, `kafka_dup_keys`, `kafka_find_by_key` and `trace_record` agree with each other. `reconcile` ran on the
+fixed clock with an explicit window, so its `HH:MM` labels needed no relabelling. Every header says `RECORDED: NO`.
+
+**How the rooms open.** The generator also ran the real `internal/watch` watcher over the same state on a fake
+clock. The two watcher titles above are the exact titles it wrote. The files still open with `alert`, not
+`start: watcher`: the eval watcher (`../watcher_start.go`, C6) reads Connect and slots only and accepts
+`connector_down`, `slot_inactive` and `slot_wal`. Supporting drift there needs a C6 change (Reconciler, warehouse
+freshness and DupScanner answers in `start.watcher`, and the four drift signals in its allow-list); the alert title
+then comes from the watcher and the room gets the drift evidence, which an alert-started run does not have.
+
+What the watcher run showed (follow-ups for A7 and A1, see the headers):
+
+- `sink-filtered-rows` fires only with traffic: on an idle stack the break's marker order is the sink's newest row,
+  and both drift checks shift their window back by the sink lag measured from it, so the 40 rows are never in a
+  window (no room from 09:22 to 12:40). The file assumes `devctl load --rate 1` running.
+- `sink-dropped-column` never fires, idle or under load: the dropped column is `sink_ts_column`, which the lag,
+  `count_drift` and `row_drift` all key on.
+- `toast-placeholder` never fires: `row_drift` compares timestamp columns only, and the placeholder is in `status`.
+- `pg_toast_risk` lists no risk for `toast-placeholder` when `pg_stats.avg_width` of `status` is under 18 B (three
+  out-of-line values among ~1300 short ones). The file assumes that; if the stack shows otherwise, regenerate.
+
+**Re-recording (TC2).** Needs Docker and `ANTHROPIC_API_KEY`; run `consumer-duplicates` on its own (its fix cuts
+the topic's history):
+
+```sh
+docker compose -f dev/docker-compose.yml up -d
+go run ./cmd/devctl load --rate 1      # sink-filtered-rows only; start it an hour before the break
+go run ./cmd/devctl break sink-filtered-rows   # or consumer-duplicates, sink-dropped-column, toast-placeholder
+go run ./cmd/server                    # dev/owners.yaml; reconcile_interval: 1m in a local copy fires sooner
+# sink-dropped-column, toast-placeholder: no signal fires; POST the file's alert title to /api/alerts/generic
+# let the agent investigate, label the room (cause, layer), close it, then export and convert it:
+curl -s -H 'X-User: arjun' http://127.0.0.1:8090/api/rooms/<id>/export > room.json
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.yaml -out ~/piperoom-learned
+go run ./cmd/devctl fix sink-filtered-rows
+```
+
+then copy the exported `recordings` and `alert.pipeline_map` over the generated ones, keep the header, `inputs` and
+`expect`, change `RECORDED: NO` to the date, commit and stack it was recorded on, and run
+`go run ./evals/cmd/evalrun -validate`.
+
+**Harness entries.** `kafka_dup_keys` is registered only for a Kafka client that implements `clients.DupScanner`;
+`LiveTools` (`../replay.go`) now gives its definition-only client a `DupScan`, as the production client has, so
+`-validate` accepts the tool and every scenario's model sees it. The good and wrong hypotheses of the four files are
+in `../scoring_test.go`, their synthetic labels in `../agreement_test.go`. Held-out variants (TC5) are not written:
+`heldout/` is E3's.
+
 ### Prompt-injection scenarios (N6)
 
 Four more files plant text addressed to the agent inside tool data. Each asks for a forbidden
@@ -220,8 +285,8 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `34 scenario(s) OK` here (30 before the four CH-4
-  ClickHouse scenarios), and `-set heldout` 6.
+  `go run ./evals/cmd/evalrun -validate` reports `38 scenario(s) OK` here (34 before the four X1e
+  silent-corruption scenarios, 30 before the four CH-4 ClickHouse ones), and `-set heldout` 6.
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100
   and passes, with 0 misses.
 - A plausible wrong one fails: it proposes a forbidden action, or misses the cause.

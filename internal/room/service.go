@@ -190,12 +190,13 @@ type Deps struct {
 
 	// OnActionExecuted, when set, is called once per action.executed this
 	// replica folds into a cached room, whichever replica appended it, with
-	// the room's pipeline and the step that ran (its action and frozen
-	// params), OK or not. The watcher's config_drift (X3b) uses it to move a
-	// connector's approved config after an approved fix. Each call runs in
+	// the room's pipeline, the proposal and the step that ran (its action
+	// and frozen params), OK or not. The watcher's config_drift (X3b) uses
+	// it to move a connector's approved config after an approved fix, and
+	// the stored config version (X5c) names the proposal. Each call runs in
 	// its own goroutine with the service lifetime ctx, never under a room's
 	// lock; it must return promptly. Nil means no-op.
-	OnActionExecuted func(ctx context.Context, pipelineID string, step events.ProposalStep)
+	OnActionExecuted func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
 }
 
 type roomState struct {
@@ -314,7 +315,7 @@ type Service struct {
 	onRoomOpened    func(ctx context.Context, roomID string)
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	onRoomDeleted   func(roomID string, deleted events.Event)
-	onActionExec    func(ctx context.Context, pipelineID string, step events.ProposalStep)
+	onActionExec    func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
 	slots           *agentSlots // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store

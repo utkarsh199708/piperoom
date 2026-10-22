@@ -83,8 +83,14 @@ type Server struct {
 	// Watch sample history (WithSamples): trends.go.
 	samples clients.SampleReader
 
+	// Fleet view (WithFleet): fleet.go.
+	fleet fleetView
+
 	// config_drift's accept-config (WithConfigAccept): acceptconfig.go.
 	configAccept ConfigAccepter
+
+	// Connector config versions (WithConfigVersions): configversions.go.
+	configVersions clients.ConfigVersionReader
 
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
@@ -274,7 +280,10 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 				short.Get("/pipelines/{pid}/trends", s.handleTrends)
+				short.Get("/fleet", s.handleFleet)
+				short.Get("/fleet/changes", s.handleFleetChanges)
 				short.Post("/pipelines/{pid}/connectors/{name}/accept-config", s.handleAcceptConfig)
+				short.Get("/pipelines/{pid}/connectors/{name}/config-versions", s.handleConfigVersions)
 				// The scripted demo's presenter controls; no-op outside --demo.
 				s.mountDemo(short)
 			})

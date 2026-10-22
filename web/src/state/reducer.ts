@@ -259,6 +259,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
         severity: p.severity as RoomState['severity'],
         pipeline_id: p.pipeline_id,
         shadow: p.shadow ?? state.shadow,
+        ...(p.origin ? { origin: p.origin } : {}),
         status: 'open',
         opened_at: event.at,
         driver,

@@ -19,3 +19,13 @@ func TestClientIDUniqueConformance(t *testing.T) { storetest.RunClientIDUnique(t
 
 // The watch sample history (X3a TC1); Postgres runs it under the integration tag.
 func TestSamplesConformance(t *testing.T) { storetest.RunSamples(t, New(), "orders") }
+
+// The fleet view's store surface (X5a); Postgres runs it under the
+// integration tag.
+func TestFleetConformance(t *testing.T) { storetest.RunFleet(t, New(), "fleet") }
+
+// The connector config history (X5c TC1, TC3); Postgres runs it under the
+// integration tag.
+func TestConfigVersionsConformance(t *testing.T) {
+	storetest.RunConfigVersions(t, New(), "orders")
+}
