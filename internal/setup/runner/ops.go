@@ -22,6 +22,15 @@ var errDuplicateStep = errors.New("setup: step already started")
 // in the PR for adding it there.
 const refuseStartPersist = "start_persist"
 
+// refuseStoreUnavailable is the reason the runner refuses an op when the
+// secret store cannot be opened: without the store there is no redaction set
+// and no receipt key, so no OpResult could pass SanitizeResult or carry an
+// OutMAC. Refusing keeps the invariant that every OpResult leaves the runner
+// redacted and MAC'd; nothing is marked started, so the server may send the
+// step again once the store is writable. Like refuseStartPersist, this reason
+// is not yet one of protocol.Refuse*.
+const refuseStoreUnavailable = "store_unavailable"
+
 // tierRank orders tiers T0..T3; an unknown tier string ranks as T0.
 func tierRank(t string) int {
 	switch t {
@@ -186,7 +195,9 @@ func (r *Runner) dropDone(ids []string) {
 
 // runOp handles one FrameOp in its own goroutine: it applies the runner's
 // safety checks (floor, proposal fields, guard, params_hash, duplicate, T3
-// confirmation), executes through the catalogue, and reports Result or Refused.
+// confirmation), executes through the catalogue (or the runner's built-in
+// secret_set), redacts the result literally under the secret store and mints
+// its OutMAC, and reports Result or Refused.
 func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 	opCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -202,8 +213,9 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 	}
 
 	// Unknown op and the tier floor come first: nothing below the op's floor
-	// runs, and an op the catalogue does not know is refused outright.
-	floor, ok := r.catalogue.Floor(req.Op)
+	// runs, and an op neither the catalogue nor the runner knows is refused
+	// outright.
+	floor, ok := r.floorOf(req.Op)
 	if !ok {
 		r.refuse(ctx, req, protocol.RefuseUnknownOp)
 		return
@@ -224,8 +236,9 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 	}
 
 	// A catalogue that can allow-list a request's target refuses a host
-	// outside the room's targets (and malformed params) before the guard.
-	if tc, ok := r.catalogue.(TargetChecker); ok {
+	// outside the room's targets (and malformed params) before the guard. A
+	// built-in op is not in the catalogue, so it has no target to check.
+	if tc, ok := r.catalogue.(TargetChecker); ok && !isBuiltinOp(req.Op) {
 		if reason := tc.CheckTarget(*req); reason != "" {
 			r.refuse(ctx, req, reason)
 			return
@@ -235,6 +248,17 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 	// The guard runs on the raised class before anything else, for every op.
 	if r.catalogue.GuardForbidden(req.Op, eff) {
 		r.refuse(ctx, req, protocol.RefuseGuard)
+		return
+	}
+
+	// The secret store must be open before anything runs: every result is
+	// redacted literally and carries an OutMAC under the store's key, and an
+	// op whose output could not be redacted must not run at all. The check is
+	// before markStarted, so a step is not burned on a store failure.
+	store, err := r.secretStore()
+	if err != nil {
+		r.log.Error("secret store unavailable", "op", req.Op, "err", err)
+		r.refuse(ctx, req, refuseStoreUnavailable)
 		return
 	}
 
@@ -281,7 +305,8 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		r.setInflight(&protocol.OpStatus{ID: req.ID, State: protocol.StateRunning}, cancel)
 	}
 
-	result, err := r.catalogue.Execute(opCtx, *req)
+	// The secret store was opened above, before the step was marked started.
+	result, err := r.executeOp(opCtx, *req)
 	result.ID = req.ID
 	if err != nil {
 		result.OK = false
@@ -290,6 +315,10 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		}
 		r.log.Debug("op failed", "op", req.Op, "id", req.ID)
 	}
+	// Literal redaction before anything leaves the runner, then the receipt
+	// MAC over exactly the bytes the server receives.
+	result = store.SanitizeResult(result)
+	result.Receipt.OutMAC = store.ResultMAC(result.OK, result.Summary, result.Data)
 	r.markDone(req.ID, &result)
 
 	if t1 {
@@ -306,6 +335,15 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		// The result stays in the in-flight set; the next Resume carries it.
 		r.log.Debug("writing result failed", "op", req.Op, "id", req.ID, "err", werr)
 	}
+}
+
+// executeOp runs one op: a built-in (secret_set) in the runner, everything
+// else through the catalogue.
+func (r *Runner) executeOp(ctx context.Context, req protocol.OpRequest) (protocol.OpResult, error) {
+	if isBuiltinOp(req.Op) {
+		return r.executeBuiltin(ctx, req)
+	}
+	return r.catalogue.Execute(ctx, req)
 }
 
 // frozenProposal returns the frozen proposal the runner cached for req,
@@ -403,6 +441,11 @@ func (r *Runner) checkStep(req *protocol.OpRequest) error {
 	}
 	frozen := p.Steps[step]
 	action, ok := r.catalogue.StepAction(req.Op)
+	if !ok && isBuiltinOp(req.Op) {
+		// secret_set is executed by the runner itself; its catalogue action
+		// name is its op name.
+		action, ok = req.Op, true
+	}
 	if !ok {
 		return errors.New("setup: op is not in the catalogue")
 	}

@@ -64,42 +64,62 @@ func (r *Runner) confirm(ctx context.Context, welcome *protocol.Welcome) (bool, 
 	return r.ask(ctx, "continue? [y/N] ")
 }
 
+// stdinLine is one line (or the reader's terminal error) from the runner's
+// terminal, as the single stdin-reader goroutine hands it to a prompt.
+type stdinLine struct {
+	line string
+	err  error
+}
+
+// stdinCh returns the channel the runner's one stdin-reader goroutine feeds,
+// starting that goroutine on first use. stdinMu must be held. Exactly one
+// goroutine ever reads r.stdin: a prompt whose ctx ends abandons only its
+// channel receive, never a ReadString, so a later prompt cannot race a live
+// orphaned read on the same reader (a data race) and a line typed for an
+// abandoned prompt is not swallowed by a dead channel — it answers the next
+// prompt instead. After a read error (EOF included) the goroutine hands the
+// same terminal result to every later prompt, exactly as a fresh ReadString
+// on an exhausted reader would.
+func (r *Runner) stdinCh() <-chan stdinLine {
+	if r.stdinLines == nil {
+		ch := make(chan stdinLine)
+		r.stdinLines = ch
+		reader := bufio.NewReader(r.stdin)
+		go func() {
+			for {
+				line, err := reader.ReadString('\n')
+				ch <- stdinLine{line: line, err: err}
+				if err != nil {
+					for {
+						ch <- stdinLine{err: err}
+					}
+				}
+			}
+		}()
+	}
+	return r.stdinLines
+}
+
 // ask prints prompt and reads one line from the runner's terminal, returning
-// true on y/yes and false on anything else. The read happens on a goroutine
-// and returns as soon as a line arrives or ctx ends, so a Ctrl-C stops the
-// prompt (the caller returns ctx.Err()). The whole prompt+read is serialized
-// under stdinMu and uses the one shared stdinReader, so two concurrent T3
-// confirms cannot read each other's answer or have a reader that loses the
-// race buffer (and drop) the other's input.
+// true on y/yes and false on anything else. The line comes from the single
+// stdin-reader goroutine (stdinCh) and arrives as soon as the person answers
+// or ctx ends, so a Ctrl-C stops the prompt (the caller returns ctx.Err()).
+// The whole prompt+read is serialized under stdinMu, so two concurrent T3
+// confirms cannot read each other's answer.
 func (r *Runner) ask(ctx context.Context, prompt string) (bool, error) {
 	r.stdinMu.Lock()
 	defer r.stdinMu.Unlock()
 
 	// An op whose ctx already ended has nothing to confirm; return before
-	// printing a prompt or spawning a read goroutine.
+	// printing a prompt.
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()
 	default:
 	}
 
-	if r.stdinReader == nil {
-		r.stdinReader = bufio.NewReader(r.stdin)
-	}
+	ch := r.stdinCh()
 	fmt.Fprint(r.stdout, prompt)
-
-	type result struct {
-		line string
-		err  error
-	}
-	ch := make(chan result, 1)
-	// A blocked stdin read cannot be interrupted, so read on a goroutine and
-	// select on ctx. If the person cancels, the read is abandoned; the process
-	// is exiting, so the goroutine is reclaimed with it.
-	go func() {
-		line, err := r.stdinReader.ReadString('\n')
-		ch <- result{line, err}
-	}()
 
 	select {
 	case <-ctx.Done():
