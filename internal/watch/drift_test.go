@@ -14,6 +14,7 @@ import (
 	"piperoom/internal/alertin"
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -582,6 +583,44 @@ func TestRowDriftNeverRequestsPIIColumns(t *testing.T) {
 	}
 }
 
+// X7c TC5: a timestamp column owners.yaml pii.include tags (per table or for
+// every table) is never requested in RowTimes; pii.exclude does not open a
+// name hit to sampling; an included sink_ts_column turns row_drift off.
+func TestRowDriftNeverRequestsIncludedPIIColumns(t *testing.T) {
+	pipes := []pipeSpec{{id: "orders", watch: sinkYAML("[public.t]",
+		"    pii:\n      include: [\"public.t.shipped_at:dob\", delivered_at]\n      exclude: [email_verified_at]\n")}}
+	h := newDriftHarness(t, driftOpts{columns: true, opts: opts{pipes: pipes}})
+	cols := []clients.ColumnInfo{
+		{Name: "id", Type: "bigint"},
+		{Name: "updated_at", Type: "timestamp with time zone"},
+		{Name: "shipped_at", Type: "timestamp without time zone"},
+		{Name: "delivered_at", Type: "timestamp without time zone"},
+		{Name: "picked_at", Type: "timestamp without time zone"},
+		{Name: "email_verified_at", Type: "timestamp with time zone"},
+		{Name: "birth_date", Type: "date"},
+	}
+	h.src.cols, h.snk.cols = cols, cols
+	h.step(0)
+	want := []string{"updated_at", "picked_at"}
+	for _, f := range []*fakeRec{h.src, h.snk} {
+		rc := f.rowCalls()
+		if len(rc) != 1 || !slices.Equal(rc[0].cols, want) {
+			t.Fatalf("RowTimes columns %+v, want %v", rc, want)
+		}
+	}
+
+	pipes = []pipeSpec{{id: "orders", watch: sinkYAML("[public.t]", "    pii:\n      include: [updated_at]\n")}}
+	h = newDriftHarness(t, driftOpts{columns: true, opts: opts{pipes: pipes}})
+	h.src.cols, h.snk.cols = cols, cols
+	h.step(0)
+	if len(h.src.sampleWindows()) != 0 || len(h.src.rowCalls())+len(h.snk.rowCalls()) != 0 {
+		t.Fatal("an included sink_ts_column was sampled")
+	}
+	if !strings.Contains(h.logs.String(), "sink_ts_column looks like personal data") {
+		t.Fatalf("no INFO line:\n%s", h.logs.String())
+	}
+}
+
 func TestPIIColumnNames(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -592,7 +631,7 @@ func TestPIIColumnNames(t *testing.T) {
 		{"phone_confirmed_at", true}, {"last_login_ip", true}, {"card_expires_at", true}, {"name", true},
 		{"PassportIssuedAt", true}, {"tax_filed_at", true}, {"timestamp", false}, {"pipeline_at", false},
 	} {
-		if got := piiColumn(tc.name); got != tc.pii {
+		if got := piiColumn(owners.Pipeline{}, tc.name, "public.t"); got != tc.pii {
 			t.Errorf("piiColumn(%q) = %v, want %v", tc.name, got, tc.pii)
 		}
 	}
