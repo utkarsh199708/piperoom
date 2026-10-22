@@ -455,12 +455,16 @@ recordings:
   - tool: warehouse_freshness
     input: {table: analytics.user_profiles, ts_column: updated_at}
     summary: |-
-      newest=2026-10-11T08:28:59Z (stale for 1.2h)
+      newest=2026-10-11T08:28:59Z (stale for 1.2h); source unknown, age only: the source client cannot read a newest timestamp
     data:
       newest: "2026-10-11T08:28:59Z"
+      source_error: the source client cannot read a newest timestamp
+      source_table: public.users
       stale_for: 1.2h
       table: analytics.user_profiles
+      tolerance: 2m
       ts_column: updated_at
+      verdict: unknown
   - tool: schema_registry_diff
     input: {from_version: 3, subject: usr.public.users-value}
     summary: |-

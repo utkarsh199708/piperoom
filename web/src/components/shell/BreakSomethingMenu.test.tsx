@@ -91,6 +91,58 @@ describe('BreakSomethingMenu scenarios', () => {
   })
 })
 
+describe('BreakSomethingMenu when devctl serve is down', () => {
+  // What the Vite proxy now answers for a refused connection, and what it used
+  // to answer before the fix (an empty 500). Both must be actionable.
+  it.each([
+    ['the 503 the proxy plugin writes', jsonResponse(503, { error: 'devctl_not_running' })],
+    ['an empty 500 from the proxy', new Response(null, { status: 500 })],
+  ])('explains how to start devctl on %s', async (_label, response) => {
+    fetchMock.mockResolvedValue(response)
+    openMenu()
+    expect(await screen.findByText('devctl serve is not running.')).toBeInTheDocument()
+    expect(screen.getByText('go run ./cmd/devctl serve')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    expect(screen.queryByText(/Could not load scenarios/)).not.toBeInTheDocument()
+  })
+
+  it('shows the same hint when the request itself fails (dev server proxy gone)', async () => {
+    fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+    openMenu()
+    expect(await screen.findByText('devctl serve is not running.')).toBeInTheDocument()
+    expect(screen.getByText('go run ./cmd/devctl serve')).toBeInTheDocument()
+  })
+
+  it('copies the start command', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    fetchMock.mockResolvedValue(jsonResponse(503, { error: 'devctl_not_running' }))
+    openMenu()
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy start command' }))
+    expect(writeText).toHaveBeenCalledWith('go run ./cmd/devctl serve')
+    expect(await screen.findByRole('button', { name: 'Copied start command' })).toBeInTheDocument()
+  })
+
+  it('Retry reloads and shows the scenarios once devctl is up', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(503, { error: 'devctl_not_running' }))
+    openMenu()
+    await screen.findByText('devctl serve is not running.')
+    fetchMock.mockResolvedValueOnce(scenariosResponse('schema-change'))
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByRole('button', { name: 'Break schema-change' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Fix schema-change' })).toBeInTheDocument()
+    expect(screen.queryByText('devctl serve is not running.')).not.toBeInTheDocument()
+  })
+
+  it('keeps the plain error (with its message) for a real non-5xx answer', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { error: 'no such route' }))
+    openMenu()
+    expect(await screen.findByText(/Could not load scenarios: no such route/)).toBeInTheDocument()
+    expect(screen.queryByText('devctl serve is not running.')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+})
+
 describe('BreakSomethingMenu actions', () => {
   it('clicking Break posts one POST to /devctl/break/{name}', async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {

@@ -557,21 +557,29 @@ recordings:
   - tool: warehouse_freshness
     input: {table: analytics.stock_levels, ts_column: updated_at}
     summary: |-
-      newest=2026-10-11T06:27:51Z (stale for 3.2h)
+      newest=2026-10-11T06:27:51Z (stale for 3.2h); source unknown, age only: the source client cannot read a newest timestamp
     data:
       newest: "2026-10-11T06:27:51Z"
+      source_error: the source client cannot read a newest timestamp
+      source_table: public.stock_levels
       stale_for: 3.2h
       table: analytics.stock_levels
+      tolerance: 2m
       ts_column: updated_at
+      verdict: unknown
   - tool: warehouse_freshness
     input: {table: analytics.sites, ts_column: updated_at}
     summary: |-
-      newest=2026-10-11T09:39:29Z (stale for 31s)
+      newest=2026-10-11T09:39:29Z (stale for 31s); source unknown, age only: the source client cannot read a newest timestamp
     data:
       newest: "2026-10-11T09:39:29Z"
+      source_error: the source client cannot read a newest timestamp
+      source_table: public.sites
       stale_for: 31s
       table: analytics.sites
+      tolerance: 2m
       ts_column: updated_at
+      verdict: unknown
   - tool: kafka_topic_config
     input: {pipeline_id: inventory}
     error: 'bad tool input: table is required: pipeline "inventory" has 2 source tables'
