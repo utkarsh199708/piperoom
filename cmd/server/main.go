@@ -718,15 +718,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		MaxOpenRooms: s.watchMaxOpenRooms,
 		Forecast:     s.watchForecast,
 	}
-	if sampleStore != nil {
-		watchDeps.Samples = sampleStore
-	}
-	if fleetStore != nil {
-		watchDeps.Status = fleetStore
-	}
-	if versionStore != nil {
-		watchDeps.ConfigVersions = versionStore
-	}
+	watchStores(&watchDeps, st)
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
 	}

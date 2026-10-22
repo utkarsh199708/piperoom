@@ -7,6 +7,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
+	"piperoom/internal/watch"
 )
 
 // The fleet routes read the room store only: status, changes and counts from
@@ -26,3 +27,25 @@ func TestFleetOptions(t *testing.T) {
 		t.Fatalf("watch off / no fleet store = %+v", off)
 	}
 }
+
+// The watcher writes every room-store table it has: samples, status rows,
+// config versions and the change feed, so changes_24h counts the connector
+// changes it sees. A store without them leaves each off.
+func TestWatchStores(t *testing.T) {
+	var d watch.Deps
+	watchStores(&d, memstore.New())
+	if d.Samples == nil || d.Status == nil || d.ConfigVersions == nil || d.Changes == nil {
+		t.Fatalf("watch stores not wired: %+v", d)
+	}
+	if d.Registry != nil || d.DDL != nil {
+		t.Fatal("the change feed must not add registry or DDL reads")
+	}
+	var bare watch.Deps
+	watchStores(&bare, roomOnlyStore{})
+	if bare.Samples != nil || bare.Status != nil || bare.ConfigVersions != nil || bare.Changes != nil {
+		t.Fatalf("a store without the tables wired %+v", bare)
+	}
+}
+
+// roomOnlyStore is a store.Store with none of the watcher's tables.
+type roomOnlyStore struct{ store.Store }
