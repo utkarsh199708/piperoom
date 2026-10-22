@@ -172,11 +172,22 @@ export function DecisionBar({
     case 'rejected': {
       const id = decision.proposal.proposal_id
       if (readDismissed(id, memory.current)) return null
+      const who = decision.byActor ? <PersonName person={decision.byActor} /> : decision.by
+      // One rejection rejects the whole proposal, so name the layer that stopped it and the layers
+      // it cancelled: otherwise the bar reads as if the other layer still waits on its owner (KAN-393).
       text = (
         <span aria-live="polite" className="inline-flex flex-wrap items-center gap-x-1.5">
-          Proposal rejected by{' '}
-          {decision.byActor ? <PersonName person={decision.byActor} /> : decision.by}
-          {decision.layer ? ` · ${decision.layer}` : ''}
+          {decision.cancelled.length > 0 ? (
+            <>
+              Rejected by {who}
+              {decision.layer ? ` (${decision.layer})` : ''}; {decision.cancelled.join(', ')} cancelled
+            </>
+          ) : (
+            <>
+              Proposal rejected by {who}
+              {decision.layer ? ` · ${decision.layer}` : ''}
+            </>
+          )}
         </span>
       )
       actions = (
