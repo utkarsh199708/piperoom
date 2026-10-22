@@ -433,7 +433,7 @@ func (a *replayRange) Preview(ctx context.Context, raw json.RawMessage) (Preview
 		Expected: fmt.Sprintf("will re-emit %d records%s to %s, in offset order per source partition (each key keeps its order): %s. First keys (redacted): %s. "+
 			"Key, value and other headers are kept; the %s* headers are dropped. %s is not changed. "+
 			"The count is offsets: one that holds no record (compaction, transaction markers) is skipped. "+
-				"Not idempotent: running it again, or approving another proposal for the same range, copies the records again.",
+			"Not idempotent: running it again, or approving another proposal for the same range, copies the records again.",
 			total, window, p.ToTopic, strings.Join(exp, "; "), keys, connectErrorsPrefix, p.Topic),
 		Reversible: false, // a produced record cannot be taken back
 		Count:      &count,
