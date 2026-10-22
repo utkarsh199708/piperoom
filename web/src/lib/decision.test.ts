@@ -82,8 +82,22 @@ describe('decisionFor', () => {
         'kafka-connect': { outcome: 'rejected', reason: 'no', by: { kind: 'human', id: 'k', name: 'Kabir' }, params_hash: 'h' },
       },
     })
-    expect(decisionFor(room([rejected]), arjun)).toMatchObject({ kind: 'rejected', by: 'Kabir', layer: 'kafka-connect' })
+    expect(decisionFor(room([rejected]), arjun)).toMatchObject({ kind: 'rejected', by: 'Kabir', layer: 'kafka-connect', cancelled: [] })
     expect(decisionFor(room([rejected, { ...rejected, proposal_id: 'p2', status: 'approved', executed: [ex(0), ex(1)] }]), arjun)?.kind).toBe('done')
+  })
+  it('a rejection lists the layers it left pending as cancelled (KAN-393)', () => {
+    const rejected = prop({
+      status: 'rejected',
+      approvals: { 'schema-registry': 'rejected', 'kafka-connect': 'pending' },
+      decisions: {
+        'schema-registry': { outcome: 'rejected', reason: 'no', by: { kind: 'human', id: 'k', name: 'Kabir' }, params_hash: 'h' },
+      },
+    })
+    expect(decisionFor(room([rejected]), arjun)).toMatchObject({
+      kind: 'rejected',
+      layer: 'schema-registry',
+      cancelled: ['kafka-connect'],
+    })
   })
   it('a closed room has none', () => {
     expect(decisionFor(room([prop()], { status: 'closed' }), arjun)).toBeNull()

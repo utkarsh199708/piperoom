@@ -425,26 +425,38 @@ recordings:
     phase: recovered
     sequence:
       - summary: |-
-          newest=2026-10-10T14:20:00Z (stale for 19.3h)
+          newest=2026-10-10T14:20:00Z (stale for 19.3h); source unknown, age only: the source client cannot read a newest timestamp
         data:
           newest: "2026-10-10T14:20:00Z"
+          source_error: the source client cannot read a newest timestamp
+          source_table: public.orders
           stale_for: 19.3h
           table: analytics.orders
+          tolerance: 2m
           ts_column: updated_at
+          verdict: unknown
       - summary: |-
-          newest=2026-10-10T14:57:00Z (stale for 18.7h)
+          newest=2026-10-10T14:57:00Z (stale for 18.7h); source unknown, age only: the source client cannot read a newest timestamp
         data:
           newest: "2026-10-10T14:57:00Z"
+          source_error: the source client cannot read a newest timestamp
+          source_table: public.orders
           stale_for: 18.7h
           table: analytics.orders
+          tolerance: 2m
           ts_column: updated_at
+          verdict: unknown
       - summary: |-
-          newest=2026-10-10T16:38:00Z (stale for 17.0h)
+          newest=2026-10-10T16:38:00Z (stale for 17.0h); source unknown, age only: the source client cannot read a newest timestamp
         data:
           newest: "2026-10-10T16:38:00Z"
+          source_error: the source client cannot read a newest timestamp
+          source_table: public.orders
           stale_for: 17.0h
           table: analytics.orders
+          tolerance: 2m
           ts_column: updated_at
+          verdict: unknown
   - tool: trace_record
     input: {key: "5634120", pipeline_id: orders, table: public.orders}
     phase: recovered

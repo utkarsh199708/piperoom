@@ -101,7 +101,7 @@ func TestReconcileWindowAndBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := res.Data.([]ReconcileRow)
+	rows := res.Data.(ReconcileData).Buckets
 	if len(rows) != 10 || src.got.width != 3*time.Minute || src.got.col != "updated_at" || wh.table != "analytics.orders" {
 		t.Errorf("rows=%d width=%s col=%s sink=%s", len(rows), src.got.width, src.got.col, wh.table)
 	}
@@ -152,8 +152,21 @@ func TestReconcileVerdictSide(t *testing.T) {
 		want    string
 		notWant string
 	}{
-		{"consumer side", topicWith(false), "sink is missing 60 rows in 03:09–03:15; topic has them (consumer side)", "connector side"},
-		{"connector side", topicWith(true), "topic is missing them (connector side)", "consumer side"},
+		// Enough events in the topic, but events are not rows: the side stays
+		// open and the next check is named (#482).
+		{"events cover the rows", topicWith(false), "the side is unproven, confirm one missing key with warehouse_row", "connector side"},
+		// Each source row updated twice: 3 events per row. That must not read
+		// as proof that the consumer dropped the rows (#482).
+		{"updates inflate events", &rateKafka{perBoundary: func(at time.Time) int64 {
+			var total int64
+			for i := range srcC {
+				if !rcSince.Add(time.Duration(i) * width).Before(at) {
+					total += 3 * srcC[i]
+				}
+			}
+			return total
+		}}, "the side is unproven", "consumer side"},
+		{"connector side", topicWith(true), "connector side", "consumer side"},
 		{"no rate reader", nil, "topic counts are not available, so the side is unknown", "consumer side"},
 		{"rates fail", &rateKafka{err: errors.New("broker down")}, "topic counts are not available", "consumer side"},
 	}
@@ -187,7 +200,7 @@ func TestReconcileTopicColumnValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range res.Data.([]ReconcileRow) {
+	for _, r := range res.Data.(ReconcileData).Buckets {
 		if r.Topic != 5 {
 			t.Fatalf("topic = %d in %+v", r.Topic, r)
 		}
@@ -294,5 +307,25 @@ func TestReconcileSettleCutsOnlyTheNewestSlice(t *testing.T) {
 	tl, _ := reg.Get("reconcile")
 	if !strings.Contains(tl.Description(), "settle margin (default 2m)") {
 		t.Errorf("description lacks the margin: %s", tl.Description())
+	}
+}
+
+// The description is read on every call: it must not tell the model that a
+// topic with enough events proves the consumer dropped rows (#482 review).
+func TestReconcileDescriptionDoesNotNameAConsumerSide(t *testing.T) {
+	reg := tools.NewRegistry()
+	if err := Register(reg, testDeps()); err != nil {
+		t.Fatal(err)
+	}
+	tt, ok := reg.Get("reconcile")
+	if !ok {
+		t.Fatal("reconcile not registered")
+	}
+	desc := tt.Description()
+	if strings.Contains(desc, "consumer side") {
+		t.Fatalf("description still names a consumer side: %q", desc)
+	}
+	if !strings.Contains(desc, "connector side") || !strings.Contains(desc, "unproven") {
+		t.Fatalf("description must keep the connector-side/unproven distinction: %q", desc)
 	}
 }

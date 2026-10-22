@@ -179,9 +179,10 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// Validate reads that pipeline's systems only.
 	pipelineID := s.roomPipeline(ctx, roomID)
 	acts := s.actionsFor(pipelineID)
-	// Validate runs under the room's pipeline scope, as the executor and the
-	// preview do, so an action reads that pipeline's whole config.
-	vctx := s.pipelineCtx(ctx, pipelineID)
+	// Validate runs under the room's pipeline scope and room id, as the
+	// executor and the preview do, so an action reads that pipeline's whole
+	// config and that room's per-room client state.
+	vctx := s.actionCtx(ctx, roomID, pipelineID)
 	// Structural checks first: they do not need the room state.
 	for i, step := range p.Steps {
 		a, ok := acts.Get(step.Action)
