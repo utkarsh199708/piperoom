@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"time"
 
 	"piperoom/internal/clients"
 )
@@ -24,7 +25,10 @@ type ReplayReader struct {
 	w *Writer
 }
 
-var _ clients.RecordReader = (*ReplayReader)(nil)
+var (
+	_ clients.RecordReader = (*ReplayReader)(nil)
+	_ clients.RateReader   = (*ReplayReader)(nil)
+)
 
 // NewReplayReader returns a ReplayReader reading through c. The caller keeps
 // owning c (and closes it); a nil c gives a ReplayReader whose calls fail.
@@ -52,4 +56,14 @@ func (r *ReplayReader) DLQOffsets(ctx context.Context, topics ...string) (map[st
 		return nil, errNoReplayClient
 	}
 	return r.w.c.DLQOffsets(ctx, topics...)
+}
+
+// PartitionRates is Client.PartitionRates (offsets by time, no record read):
+// kafka_replay_range resolves a time range to offsets with it and its Verify
+// counts the records written to the reprocess topic since the step (X2b).
+func (r *ReplayReader) PartitionRates(ctx context.Context, since time.Time, topics ...string) ([]clients.PartitionRate, error) {
+	if r == nil || r.w == nil {
+		return nil, errNoReplayClient
+	}
+	return r.w.c.PartitionRates(ctx, since, topics...)
 }

@@ -32,6 +32,13 @@ type Pipeline struct {
 	SourceTables   []string `yaml:"source_tables"`
 	Connectors     []string `yaml:"connectors"`
 	ConsumerGroups []string `yaml:"consumer_groups"`
+	// ReprocessTopic is the optional cdc `reprocess_topic:` (X2b): the Kafka
+	// topic the recovery action kafka_replay_range copies a retained offset
+	// range of one of the pipeline's CDC topics into, so a consumer re-reads
+	// it there and the CDC topic itself never gets copies. Empty = none, and
+	// the action refuses. Load refuses an invalid topic name, a CDC or DLQ
+	// topic, and a topic two pipelines on one cluster declare (reprocess.go).
+	ReprocessTopic string `yaml:"reprocess_topic"`
 	// SinkTables and SinkTSColumn belong to both kinds.
 	SinkTables   []string `yaml:"sink_tables"`
 	SinkTSColumn string   `yaml:"sink_ts_column"`
@@ -302,6 +309,9 @@ func (o *Owners) validate() error {
 		if err := checkAutoApproveSyntax(p.AutoApprove); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if err := p.validateReprocessTopic(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
 		if p.isBatch() {
 			// No watch: block (validateKind) and nothing to watch.
 			w := batchWatch()
@@ -321,6 +331,9 @@ func (o *Owners) validate() error {
 		p.watch = &w
 	}
 	if err := o.validateDLQ(); err != nil {
+		return err
+	}
+	if err := o.validateReprocessTopics(); err != nil {
 		return err
 	}
 	if err := o.validateTenancy(); err != nil {
