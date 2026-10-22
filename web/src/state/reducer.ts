@@ -35,6 +35,7 @@ import type {
   ProposalScheduledPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  RoomEscalatedPayload,
   RoomLabelledPayload,
   SteerDeclinedPayload,
   SteerSentPayload,
@@ -44,10 +45,11 @@ import type {
 import { describeEvent } from './describe'
 import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
+import { driftFacts } from '../lib/drift'
 import { runbookHits } from '../lib/f8'
 import { stripBidi } from '../lib/title'
 import { checklistKey, snapshotWriteMode } from './types'
-import type { HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
+import type { AlertInfo, HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -245,10 +247,12 @@ function applyCore(state: RoomState, event: Event): RoomState {
       // POST /api/rooms has no alert at all. alert_source is server-set and is
       // what the alert badge reads; the body-inferred source is only a label.
       const alertSourceField = typeof p.alert_source === 'string' && p.alert_source !== '' ? p.alert_source : undefined
-      const alert =
+      // Drift facts are read only when the server says the watcher opened the room (X1).
+      const drift = driftFacts(p.alert, alertSourceField)
+      const alert: AlertInfo | null =
         (p.alert === undefined || p.alert === null) && alertSourceField === undefined
           ? null
-          : { source: alertSource(p.alert), alert_source: alertSourceField }
+          : { source: alertSource(p.alert), alert_source: alertSourceField, ...(drift.length > 0 ? { drift } : {}) }
       next = {
         ...state,
         title: stripBidi(p.title),
@@ -264,6 +268,14 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ? [{ id: event.actor.id, name: event.actor.name, verified: event.actor.verified === true, role: 'driver' }]
             : state.members,
       }
+      break
+    }
+
+    case 'room.escalated': {
+      // The replay folds room.created's first severity; without this the header would drop back to it (X3).
+      const p = as<RoomEscalatedPayload>(event)
+      const rank = (s: string) => (/^sev[1-4]$/.test(s) ? Number(s.slice(3)) : 99)
+      if (rank(p.severity) < rank(state.severity)) next = { ...state, severity: p.severity as RoomState['severity'] }
       break
     }
 

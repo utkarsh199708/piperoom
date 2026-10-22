@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils'
 import { PersonName, VerifiedBadge } from '@/components/VerifiedBadge'
 import { alertSourceLabel, alertVerification, neutralizeBadgeText, personVerification } from '@/lib/verification'
 import { TriageCard } from './TriageCard'
+import { DriftSummary } from './DriftSummary'
 import { durationLabel } from '@/lib/time'
 
 export interface HeaderMember {
@@ -281,6 +282,9 @@ export function RoomHeader({
           )}
         </div>
       </div>
+
+      {/* A watcher-opened room leads with the drift it saw (X1), before the first look. */}
+      <DriftSummary facts={state.alert?.drift} />
 
       <TriageCard state={state} onCite={onCite} />
 

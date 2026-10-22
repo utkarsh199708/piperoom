@@ -276,6 +276,8 @@ export interface AlertInfo {
   source: string | null
   /** Server-set room.created.alert_source: the only input to the alert's verified badge. */
   alert_source?: string
+  /** X1: the drift entries of a watcher-opened room's evidence (cleaned, untrusted text); absent when none. */
+  drift?: DriftFact[]
 }
 
 /** What the agent has cost in this room, folded from agent.usage (F11; same rules as the server's insight). */
@@ -314,6 +316,7 @@ export function emptyInsight(): InsightState {
 
 export type { ActivityKind } from './describe'
 import type { ActivityKind } from './describe'
+import type { DriftFact } from '../lib/drift'
 import { stripBidi } from '../lib/title'
 
 /** Who ticked one runbook item and when (checklist.step_done). */
