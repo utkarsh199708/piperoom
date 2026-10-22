@@ -146,3 +146,46 @@ func TestParseHypothesisScope(t *testing.T) {
 		}
 	}
 }
+
+func TestPreventiveSignalsRoundTrip(t *testing.T) {
+	eta := time.Date(2026, 10, 23, 4, 30, 0, 0, time.UTC)
+	forecasts := []struct {
+		name string
+		v    events.ForecastSignal
+	}{
+		{"slot WAL", events.ForecastSignal{Kind: events.SignalForecast, Metric: "slot_wal_bytes", Current: 7.5e9, Limit: 1e10, ETA: eta, Slope: 1.2e8}},
+		{"falling slope, zero current", events.ForecastSignal{Kind: events.SignalForecast, Metric: "consumer_lag", Current: 0, Limit: 50000, ETA: eta, Slope: -3.5}},
+		{"empty", events.ForecastSignal{}},
+	}
+	for _, tt := range forecasts {
+		roundTrip(t, tt.name, tt.v)
+	}
+	drifts := []struct {
+		name string
+		v    events.ConfigDriftSignal
+	}{
+		{"plain keys", events.ConfigDriftSignal{Kind: events.SignalConfigDrift, Connector: "pg-orders", OldHash: "ab12", NewHash: "cd34", ChangedKeys: []string{"snapshot.mode", "table.include.list"}}},
+		{"a secret key", events.ConfigDriftSignal{Kind: events.SignalConfigDrift, Connector: "pg-orders", OldHash: "ab12", NewHash: "ef56", ChangedKeys: []string{events.SecretKeyChanged, "tasks.max"}}},
+		{"no keys", events.ConfigDriftSignal{Kind: events.SignalConfigDrift, Connector: "pg-orders", OldHash: "ab12", NewHash: "ab13", ChangedKeys: []string{}}},
+	}
+	for _, tt := range drifts {
+		roundTrip(t, tt.name, tt.v)
+	}
+}
+
+// The placeholder is part of the contract: the watcher writes it, the web app
+// and the agent recognise it.
+func TestSecretKeyChangedPlaceholder(t *testing.T) {
+	if events.SecretKeyChanged != "<secret key changed>" {
+		t.Fatalf("SecretKeyChanged = %q", events.SecretKeyChanged)
+	}
+}
+
+// X3 adds kinds; it changes no severity of the X1 kinds.
+func TestPreventiveSignalsKeepSeverities(t *testing.T) {
+	for _, k := range []string{events.SignalForecast, events.SignalConfigDrift} {
+		if s := events.DefaultSignalSeverity(k); s != "" {
+			t.Errorf("DefaultSignalSeverity(%q) = %q; X3-0 sets no default (owners.yaml or the watcher decide)", k, s)
+		}
+	}
+}

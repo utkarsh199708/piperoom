@@ -228,7 +228,8 @@ type RoomCreatedPayload struct {
 	// AlertSource is the route that opened the room: "webhook" (dev X-User
 	// route), a signed source ("alertmanager", "grafana", "pagerduty",
 	// "datadog", "generic") or the built-in watcher ("watcher"; dedup key
-	// "watcher:<pipeline>", no HTTP route). Empty for rooms not opened by an alert.
+	// "watcher:<pipeline>", no HTTP route), or the watcher's quiet forecast
+	// room (AlertSourceForecast, X3). Empty for rooms not opened by an alert.
 	AlertSource string `json:"alert_source,omitempty"`
 	// DedupKey is the exact index key the room was opened under, so a restart
 	// rebuilds the same alert index instead of re-deriving it from Alert.
@@ -1368,6 +1369,54 @@ type DriftSignal struct {
 	Mismatched int         `json:"mismatched"`
 	Sample     int         `json:"sample"`
 	Detail     string      `json:"detail,omitempty"`
+}
+
+// Preventive signal kinds (X3).
+const (
+	// SignalForecast: a trend of a pipeline metric reaches a limit soon. It
+	// opens a room with AlertSourceForecast, which does not start the agent.
+	SignalForecast = "forecast"
+	// SignalConfigDrift: a connector's config changed outside an approved
+	// fix (no action.executed of this pipeline explains it).
+	SignalConfigDrift = "config_drift"
+)
+
+// AlertSourceForecast is RoomCreatedPayload.AlertSource of a room the
+// watcher opened for a SignalForecast: a quiet room that does not start the
+// agent (nothing is broken yet); a person starts it with a steer or an
+// @agent comment. Dedup key "forecast:<pipeline>:<metric>". (X3)
+const AlertSourceForecast = "forecast"
+
+// ForecastSignal is the evidence of a forecast (X3). Metric is the watcher
+// metric the trend is fitted on (a name of GET /api/pipelines/{pid}/trends,
+// e.g. "slot_wal_bytes"); Current and Limit are in that metric's unit, Slope
+// in unit per hour; ETA is when the fitted line reaches Limit, UTC.
+type ForecastSignal struct {
+	Kind    string    `json:"kind"` // SignalForecast
+	Metric  string    `json:"metric"`
+	Current float64   `json:"current"`
+	Limit   float64   `json:"limit"`
+	ETA     time.Time `json:"eta"`
+	Slope   float64   `json:"slope"`
+}
+
+// SecretKeyChanged stands for a changed key that looks secret
+// (actions.LooksSecret) in ConfigDriftSignal.ChangedKeys. (X3)
+const SecretKeyChanged = "<secret key changed>"
+
+// ConfigDriftSignal is the evidence of a config_drift (X3). OldHash and
+// NewHash are hex SHA-256 of the connector config before and after, so two
+// rooms can tell the same change apart without holding it. ChangedKeys are
+// the names of the keys added, removed or changed, sorted; config values are
+// never stored, in this signal or anywhere it is copied. A key that looks
+// secret (actions.LooksSecret) is listed as SecretKeyChanged, not by name,
+// once however many such keys changed.
+type ConfigDriftSignal struct {
+	Kind        string   `json:"kind"` // SignalConfigDrift
+	Connector   string   `json:"connector"`
+	OldHash     string   `json:"old_hash"`
+	NewHash     string   `json:"new_hash"`
+	ChangedKeys []string `json:"changed_keys"`
 }
 
 // Layers are the pipeline layers that own nodes and approve fixes, of every
