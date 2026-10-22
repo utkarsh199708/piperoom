@@ -27,10 +27,13 @@ type fakeStmt struct {
 }
 
 // fakeTx answers QueryRow with scan (no scan: no rows) and Exec with execErr,
-// and remembers every statement.
+// and remembers every statement. scanSQL, when set, answers per statement
+// instead of scan: the admin writer re-reads and then terminates in one
+// transaction, and the two rows have different shapes.
 type fakeTx struct {
 	stmts     []fakeStmt
 	scan      func(dest ...any) error
+	scanSQL   func(sql string, dest ...any) error
 	execErr   func(sql string) error
 	commitErr error
 	commits   int
@@ -54,6 +57,9 @@ func (f *fakeTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comm
 
 func (f *fakeTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	f.note(ctx, sql, args)
+	if f.scanSQL != nil {
+		return scanSQLRow{fn: f.scanSQL, sql: sql}
+	}
 	if f.scan == nil {
 		return fakeRow{err: pgx.ErrNoRows}
 	}
@@ -77,6 +83,14 @@ func (f *fakeTx) sqls() []string {
 type scanRow func(dest ...any) error
 
 func (r scanRow) Scan(dest ...any) error { return r(dest...) }
+
+// scanSQLRow answers one statement with the scan chosen by its text.
+type scanSQLRow struct {
+	fn  func(sql string, dest ...any) error
+	sql string
+}
+
+func (r scanSQLRow) Scan(dest ...any) error { return r.fn(r.sql, dest...) }
 
 type fakeBeginner struct {
 	tx     *fakeTx

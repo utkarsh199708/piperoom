@@ -26,11 +26,23 @@ type DB struct {
 	target string  // receipt target: database@host:port, never credentials
 }
 
+// readerAppName marks the read pool's sessions in pg_stat_activity: a DBA can
+// tell them apart, and the admin writer (source_admin.go) refuses to end a
+// session whose application_name starts with "piperoom". A DSN that sets
+// application_name keeps its own.
+const readerAppName = "piperoom-reader"
+
 // New opens a read-only connection pool and verifies it with a ping.
 func New(ctx context.Context, url string) (*DB, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse config: %w", err)
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["application_name"]; !ok {
+		if cfg.ConnConfig.RuntimeParams == nil {
+			cfg.ConnConfig.RuntimeParams = map[string]string{}
+		}
+		cfg.ConnConfig.RuntimeParams["application_name"] = readerAppName
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, "SET default_transaction_read_only = on")
