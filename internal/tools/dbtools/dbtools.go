@@ -212,14 +212,29 @@ func (d Deps) whIdentRe() *regexp.Regexp {
 	return identRe
 }
 
-// validWarehouseTable reports whether name is a valid warehouse table. Postgres
-// takes "schema.table". A Snowflake sink table can live in another database
-// than the DSN's default one, so Snowflake also takes "db.schema.table". Each
-// part has to match the kind's identifier regex (AGENTS.md section 4, rule 6);
-// the client quotes it again.
+// isBigQuery reports whether the warehouse is BigQuery. Empty means the
+// default, Postgres.
+func (d Deps) isBigQuery() bool {
+	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "bigquery")
+}
+
+// threePartTables reports whether the kind addresses a table as
+// "database.schema.table" rather than "schema.table". Only Snowflake does: the
+// Databricks and BigQuery clients deliberately refuse a catalog/project prefix
+// (every table is read in the DSN's catalog/project), so accepting one here
+// would only turn a bad tool input into a client error.
+func (d Deps) threePartTables() bool {
+	return d.isSnowflake()
+}
+
+// validWarehouseTable reports whether name is a valid warehouse table. Postgres,
+// ClickHouse, Databricks and BigQuery take "schema.table"; Snowflake also takes
+// "db.schema.table", because its sinks can live in another database than the
+// connection's default. Each part has to match the kind's identifier regex
+// (AGENTS.md section 4, rule 6); the client quotes it again.
 func (d Deps) validWarehouseTable(name string) bool {
 	parts := strings.Split(name, ".")
-	if len(parts) != 2 && !(len(parts) == 3 && d.isSnowflake()) {
+	if len(parts) != 2 && !(len(parts) == 3 && d.threePartTables()) {
 		return false
 	}
 	re := d.whIdentRe()
