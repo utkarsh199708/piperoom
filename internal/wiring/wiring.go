@@ -359,7 +359,11 @@ func assemble(o *owners.Owners, whKind string, a2 *a2Clients, src clients.Source
 // Schema Registry included, for Open and RegisterTools alike. The builder only
 // reads, and the db tools reach clients through it, so it gets read-only ones.
 func newTopologyBuilder(w *Wired) topology.Builder {
-	return topology.NewBuilder(w.Owners, readConnect(w), w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(readRegistry(w)))
+	return topology.NewBuilder(w.Owners, readConnect(w), w.Kafka, w.Source, w.Warehouse,
+		topology.WithSchemaRegistry(readRegistry(w)),
+		// The sink health guard needs to know which warehouse this client is,
+		// so a declared sink of another kind is left unknown (#KAN-481).
+		topology.WithWarehouseKind(w.WarehouseKind))
 }
 
 // errNoRegistry is what the write actions get from the registry when none is

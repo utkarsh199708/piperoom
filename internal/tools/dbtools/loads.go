@@ -10,6 +10,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/warehouse"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
@@ -38,7 +39,7 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 			"Use when the warehouse is stale and the sink connector task is FAILED or shows no error. Snowpipe Streaming loads are not listed. " +
 			"On the dev Postgres warehouse, which keeps no load history, it reports table write counters and lock waits instead.",
 		schema: objSchema(map[string]any{
-			"table": strProp("Sink table, \"schema.table\" (or \"db.schema.table\" on Snowflake). Must be one of the room's sink tables."),
+			"table": strProp("Sink table, \"schema.table\" (or \"db.schema.table\" on Snowflake, Databricks or BigQuery). Must be one of the room's sink tables."),
 			"since": strProp("Only loads at or after this RFC 3339 timestamp. Default: the last 24 hours. Snowflake keeps 14 days."),
 		}, "table"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
@@ -50,7 +51,7 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 				return tools.Result{}, err
 			}
 			if !d.validWarehouseTable(input.Table) {
-				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\" (or \"db.schema.table\" on Snowflake)", tools.ErrBadInput)
+				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\" (or \"db.schema.table\" on Snowflake, Databricks or BigQuery)", tools.ErrBadInput)
 			}
 			since := time.Now().Add(-defaultLoadWindow)
 			if input.Since != "" {
@@ -74,7 +75,12 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 			if !ok {
 				return d.loadFallback(ctx, input.Table)
 			}
-			errs, err := lr.LoadErrors(ctx, input.Table, since, loadErrorLimit)
+			// A ClickHouse Kafka-engine sink's load history belongs to the
+			// engine table, not to the MergeTree table the view fills. With
+			// sinks: the engine is declared, so read the right one; a sibling
+			// sink's writer is never queried (#KAN-481).
+			readTable := loadErrorTable(sc.Pipeline(), input.Table)
+			errs, err := lr.LoadErrors(ctx, readTable, since, loadErrorLimit)
 			if errors.Is(err, clients.ErrNotSupported) {
 				return d.loadFallback(ctx, input.Table)
 			}
@@ -86,6 +92,32 @@ func warehouseLoadErrorsTool(d Deps) tools.Tool {
 			return tools.Result{Summary: summary, Data: errs, Truncated: truncated}, nil
 		},
 	}
+}
+
+// loadErrorTable returns the table whose load history to read for sink: the
+// declared ClickHouse Kafka engine writer when the pipeline declares one for
+// that sink (the engine owns the consumer exceptions and the failed loads),
+// else the sink table itself. A table name two warehouses share can have two
+// entries; only one engine writer makes the answer unambiguous, otherwise the
+// sink table itself is read. A pipeline without a sinks: block keeps the old
+// behavior; its engine name, if any, comes from the topology's naming
+// convention, not from owners.yaml.
+func loadErrorTable(p owners.Pipeline, sink string) string {
+	engine := ""
+	for _, s := range p.SinksForTable(sink) {
+		name, ok := s.KafkaEngineWriter()
+		if !ok {
+			continue
+		}
+		if engine != "" && engine != name {
+			return sink // two engines: the table name alone cannot pick one
+		}
+		engine = name
+	}
+	if engine != "" {
+		return engine
+	}
+	return sink
 }
 
 // loadErrorsSummary renders the newest failures first, one line each.

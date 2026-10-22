@@ -76,6 +76,9 @@ type connectorConfig struct {
 	role              string
 	publication       string
 	publicationSource string
+	// cfg is the connector's live configuration, kept for tools that compare
+	// more than the publication (pg_connector_scope_gap reads the table filters).
+	cfg map[string]string
 }
 
 // pgPublicationTablesTool shows, for a pipeline, the Debezium publication and
@@ -162,6 +165,7 @@ func resolveConnector(ctx context.Context, p owners.Pipeline, connect clients.Co
 		name:        name,
 		role:        role,
 		publication: cfg["publication.name"],
+		cfg:         cfg,
 	}
 	if c.publication == "" {
 		c.publication = defaultPublication

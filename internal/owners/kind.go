@@ -176,6 +176,8 @@ func (p *Pipeline) validateBatch() error {
 		field = "connectors"
 	case len(p.ConsumerGroups) > 0:
 		field = "consumer_groups"
+	case len(p.Sinks) > 0:
+		field = "sinks"
 	}
 	if field != "" {
 		return fmt.Errorf("%s is a %s field, but the pipeline kind is %s",

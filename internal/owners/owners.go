@@ -35,6 +35,17 @@ type Pipeline struct {
 	// SinkTables and SinkTSColumn belong to both kinds.
 	SinkTables   []string `yaml:"sink_tables"`
 	SinkTSColumn string   `yaml:"sink_ts_column"`
+	// Sinks is the optional cdc `sinks:` block (sinks.go): each sink table with
+	// the warehouse it lives in and the writer that fills it, so two sinks on
+	// one topic stay distinct. It replaces sink_tables:; the legacy
+	// consumer_groups + sink_tables lists keep working and mean one sink per
+	// table. Load merges the block into SinkTables and ConsumerGroups.
+	Sinks []Sink `yaml:"sinks"`
+	// sinksMerged records that validateSinks already merged Sinks into
+	// SinkTables and ConsumerGroups, so a re-validation of the same pipeline
+	// (LoadDir validates the merged set again) does not mistake the merged
+	// SinkTables for a user-declared sink_tables: beside sinks:.
+	sinksMerged bool
 	// DAGs, DBTProject and Models are the batch fields (a cdc pipeline sets
 	// none). DAGs are Airflow dag_ids, Models are dbt model names, DBTProject
 	// is the dbt project's path or URL. A batch pipeline needs at least one
@@ -136,6 +147,17 @@ type Owners struct {
 	path  string
 	dir   string
 	skips []DirSkip
+
+	// derived holds consumer groups the topology read from the pipeline's own
+	// sink engines (derived.go). Load and LoadDir start it empty; a copied
+	// Owners (Only) shares it.
+	derived *derivedGroups
+
+	// declaredGroups indexes every consumer_groups entry of the config by group
+	// name. validate builds it and an Only copy shares it, so a builder that
+	// sees one pipeline can still refuse a derived group that another pipeline
+	// declares (derived.go). nil on a hand-built Owners.
+	declaredGroups map[string]bool
 }
 
 // Load reads and validates the owners file at path. An `auto_approve:` entry
@@ -181,6 +203,9 @@ func parse(path string) (*Owners, error) {
 	if err := checkNullBlocks(&root); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}
+	// Created here, not lazily at the first Build: two concurrent builds would
+	// otherwise race to create it and one pipeline's set would be lost.
+	o.derived = &derivedGroups{}
 	return &o, nil
 }
 
@@ -222,6 +247,11 @@ func (o *Owners) validate() error {
 		}
 		seen[p.ID] = true
 		if err := p.validateKind(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		// validateSinks merges a sinks: block into SinkTables and
+		// ConsumerGroups, so the checks below see the effective lists.
+		if err := p.validateSinks(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.checkOwnerLayers(); err != nil {
@@ -281,5 +311,23 @@ func (o *Owners) validate() error {
 	if err := o.validateDLQ(); err != nil {
 		return err
 	}
-	return o.validateTenancy()
+	if err := o.validateTenancy(); err != nil {
+		return err
+	}
+	o.indexConsumerGroups()
+	return nil
+}
+
+// indexConsumerGroups records every declared consumer group across all
+// pipelines. A derived group is checked against this set (derived.go); the
+// whole config is kept, not the subset an Only view holds, because a
+// per-pipeline stack's builder must still see another pipeline's declaration.
+func (o *Owners) indexConsumerGroups() {
+	idx := make(map[string]bool)
+	for i := range o.Pipelines {
+		for _, g := range o.Pipelines[i].ConsumerGroups {
+			idx[g] = true
+		}
+	}
+	o.declaredGroups = idx
 }

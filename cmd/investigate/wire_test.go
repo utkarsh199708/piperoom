@@ -151,8 +151,9 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 	reg, areg, _ := wireFakes(t)
 
 	want := []string{
-		"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row",
+		"pg_replication_slots", "pg_streaming_liveness", "pg_recent_ddl", "pg_long_transactions", "pg_row",
 		"pg_publication_tables",
+		"pg_connector_scope_gap",
 		"warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record",
 		"connect_list_connectors", "connect_status", "connect_config",
 		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",

@@ -245,6 +245,9 @@ func continuation(line string, open openValue, st *Stats) (string, openValue) {
 	for k < e && !bareStops[line[k]] {
 		k++
 	}
+	if headIsCredentialKey(line[:k]) {
+		return line, openValue{}
+	}
 	if !open.explicit && (!credentialTail(line[:k]) || blankAt(line, k)) {
 		return line, openValue{}
 	}
@@ -253,6 +256,24 @@ func continuation(line string, open openValue, st *Stats) (string, openValue) {
 		next = openValue{ok: true, explicit: true}
 	}
 	return maskHead(line, k, st), next
+}
+
+// headIsCredentialKey reports whether the first token of a continued line is
+// itself the key of a credential pair ("Authorization: Bearer x",
+// "password=x"): masking such a head hides the key from the line rules while
+// the value after it stays in the clear, so the line is treated as new text,
+// not the tail of the open value. A real secret fragment is never a known key
+// name followed by its separator.
+func headIsCredentialKey(tok string) bool {
+	i := strings.IndexAny(tok, ":=")
+	if i <= 0 {
+		return false
+	}
+	name := strings.ToLower(strings.Trim(tok[:i], `"'\`))
+	if name == "authorization" || name == "proxy-authorization" {
+		return true
+	}
+	return secretKey(name) != keyNone
 }
 
 // maskHead masks line[:k] as one secret fragment. Fragments keep no

@@ -5,7 +5,7 @@ legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to 
   from: pg:public.orders
 3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=40m ago
   from: connect:pg-orders-connector
-4 kafka_engine:analytics.orders_kafka [warehouse, owner meera] UNKNOWN inferred=naming convention
+4 kafka_engine:analytics.orders_kafka [warehouse, owner meera] UNKNOWN consumer_group=not monitored inferred=naming convention
   from: topic:pg.public.orders (unconfirmed)
 5 materialized_view:analytics.orders_mv [warehouse, owner meera] UNKNOWN
   from: kafka_engine:analytics.orders_kafka (unconfirmed)

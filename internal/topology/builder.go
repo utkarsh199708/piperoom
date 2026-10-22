@@ -106,9 +106,12 @@ type builder struct {
 	srMu     sync.Mutex
 	subjects map[string]subjectSeen
 
-	// whKind is the warehouse kind wiring resolved for the process or the
-	// pipeline, set by WithWarehouseKind. It is the fallback warehouseKind
-	// uses when a pipeline has no own connections.warehouse_kind literal.
+	// whKind is the warehouse kind of the connected client, set by
+	// WithWarehouseKind. It is both the fallback warehouseKind uses when a
+	// pipeline has no own connections.warehouse_kind literal and the kind a
+	// declared sink's warehouse must match before the builder reads it. Empty
+	// means the legacy single-warehouse wiring: every sink is read through the
+	// one client, as before (#KAN-481).
 	whKind string
 
 	// orch and transform are the optional batch readers (batch.go); nil
@@ -126,12 +129,15 @@ func WithSchemaRegistry(sr clients.SchemaRegistryClient) Option {
 	return func(b *builder) { b.sr = sr }
 }
 
-// WithWarehouseKind tells the builder the warehouse kind wiring resolved
-// ("postgres", "snowflake", "bigquery", "databricks" or "clickhouse"). It is
-// the fallback warehouseKind uses for a pipeline with no own
+// WithWarehouseKind tells the builder the warehouse kind of the client it was
+// given ("postgres", "snowflake", "bigquery", "databricks" or "clickhouse").
+// It is the fallback warehouseKind uses for a pipeline with no own
 // connections.warehouse_kind literal (one that uses the process-wide settings,
 // or whose kind comes from an env:/file: reference, which only wiring
-// resolves). Only "clickhouse" changes the graph (the Kafka-ingestion hop).
+// resolves), and it decides whether a declared sink's warehouse has a
+// connected client at all: a sink of another kind is left unknown instead of
+// being read through this client (#KAN-481). Empty keeps the legacy
+// single-warehouse behavior.
 func WithWarehouseKind(kind string) Option {
 	return func(b *builder) { b.whKind = strings.ToLower(strings.TrimSpace(kind)) }
 }
@@ -196,19 +202,24 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	defer cancel()
 
 	whKind := b.warehouseKind(p)
-	info := b.collect(cctx, p, whKind)
+	info := b.collect(cctx, p, b.engineNames(p, whKind))
 	info.matchers = b.sourceMatchers(p, info)
 
 	// Topics and data edges come from config and metadata collect already
 	// read (edges.go); the schema subjects follow from the topics' users.
 	fp := b.planFlow(p, info)
-	// A ClickHouse warehouse ingests topics through a Kafka engine table and a
-	// materialized view, so the topic/group -> wh:sink edges become that hop.
+	// A ClickHouse Kafka engine ingests a topic directly, so its chain is
+	// topic -> engine -> view -> sink instead of topic -> group -> sink. A
+	// pipeline that declares sinks: gets a hop only for a sink whose writer is
+	// a kafka_engine; the legacy form keeps the pipeline-wide ClickHouse rule.
 	var hops []clickhouseHopSpec
-	if whKind == "clickhouse" {
-		hops = clickhouseHopSpecs(p, fp.topics)
-		b.wireClickhouseHops(&fp, hops)
+	switch {
+	case p.UsesSinkBlocks():
+		hops = explicitClickhouseHopSpecs(p, fp.topics, info)
+	case whKind == "clickhouse":
+		hops = clickhouseHopSpecs(p, fp.topics, info)
 	}
+	b.wireClickhouseHops(&fp, hops, p.UsesSinkBlocks())
 	dlqs := discoverDLQs(p, info)
 	subjects, deps := b.planSubjects(info, fp)
 
@@ -257,22 +268,6 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
 		}
 	}
-	// ClickHouse hop nodes sit between the topic and the sink in data-flow
-	// order, so they are appended before the group and sink nodes (which keeps
-	// the engine listed before the sink it feeds).
-	for _, h := range hops {
-		if h.topic == "" {
-			continue
-		}
-		g.Nodes = append(g.Nodes,
-			b.kafkaEngineNode(h.engine, info),
-			b.materializedViewNode(h.view),
-		)
-	}
-	th := ThresholdsFor(b.t, p)
-	for _, d := range dlqs {
-		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
-	}
 	// The pipeline's topics, for the group lag: the ones derived from the
 	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
 	// the filter still knows them while Connect is down.
@@ -285,11 +280,36 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			ownTopics[p.TopicPrefix+"."+t] = true
 		}
 	}
-	for _, gr := range p.ConsumerGroups {
+	// ClickHouse hop nodes sit between the topic and the sink in data-flow
+	// order, so they are appended before the group and sink nodes (which keeps
+	// the engine listed before the sink it feeds). The engine's own consumer
+	// group, when the warehouse reported one, comes first: topic -> group ->
+	// engine. A group owners.yaml already declares is not repeated.
+	for _, h := range hops {
+		if h.topic == "" && !p.UsesSinkBlocks() {
+			continue
+		}
+		if h.group != "" && !h.declared {
+			g.Nodes = append(g.Nodes, b.kafkaEngineGroupNode(h.engine, info.engineGroups[h.engine], ownTopics))
+		}
+		g.Nodes = append(g.Nodes,
+			b.kafkaEngineNode(h.engine, info, p.UsesSinkBlocks()),
+			b.materializedViewNode(h.view),
+		)
+	}
+	th := ThresholdsFor(b.t, p)
+	for _, d := range dlqs {
+		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
+	}
+	for _, gr := range p.ConsumerGroupNames() {
 		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))
 	}
-	for _, s := range p.SinkTables {
-		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info.freshness[s], info.now, b.t))
+	for _, ref := range p.SinkRefs() {
+		// A declared sink carries its own warehouse and writer, so the agent
+		// can name the component that is failing instead of a sibling sink's
+		// consumer (#KAN-481). The ref key keeps two sinks that share a table
+		// name in different warehouses distinct.
+		g.Nodes = append(g.Nodes, b.sinkNode(p, ref, info.freshness[ref.Key], info.now, b.t))
 	}
 	// Subjects are side nodes, after the data flow.
 	for _, s := range subjects {
@@ -501,33 +521,47 @@ func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) (clients.GroupLa
 	return l, len(kept) > 0 || len(unknown) > 0
 }
 
-// sinkNode draws sink table s from its freshness reading snap, judged by t
-// (b.t for a CDC pipeline; a batch pipeline's cadence, batch.go).
-func (b *builder) sinkNode(p owners.Pipeline, s string, snap freshSnapshot, now time.Time, t Thresholds) Node {
+// sinkNode draws sink ref from its freshness reading snap, judged by t (b.t
+// for a CDC pipeline; a batch pipeline's cadence, batch.go). The node id
+// carries the ref key, so two sinks that share a table name in different
+// warehouses stay distinct.
+func (b *builder) sinkNode(p owners.Pipeline, ref owners.SinkRef, snap freshSnapshot, now time.Time, t Thresholds) Node {
 	n := Node{
-		ID:     "wh:" + s,
+		ID:     "wh:" + ref.Key,
 		Kind:   KindSinkTable,
-		Name:   s,
+		Name:   ref.Table,
 		Layer:  "warehouse",
 		Owner:  b.layerOwner("warehouse"),
 		Health: HealthUnknown,
+		// The timestamp column is set on every sink node, including unreachable
+		// ones, so the agent knows which column its recovery check must read.
+		Facts: map[string]string{"ts_column": p.SinkTSColumn},
+	}
+	if ref.Declared {
+		n.Facts["writer"] = ref.Sink.Writer.Name
+		if ref.Warehouse != "" {
+			n.Facts["warehouse"] = ref.Warehouse
+		}
 	}
 	switch {
+	case snap.warehouseNotConnected:
+		// The sink lives in a warehouse this process has no client for; a read
+		// through the connected client would be another warehouse's answer, so
+		// the sink stays unknown, never fail (#KAN-481).
+		n.Facts["error"] = "warehouse not connected"
 	case errors.Is(snap.err, clients.ErrNotFound):
 		// The table or its timestamp column is gone: nothing can load.
 		n.Health = HealthFail
-		n.Facts = map[string]string{"missing": "true"}
+		n.Facts["missing"] = "true"
 	case snap.err != nil:
-		n.Facts = map[string]string{"error": "unreachable"}
+		n.Facts["error"] = "unreachable"
 	default:
-		n.Health, n.Facts = sinkHealth(snap.ts, now, t)
+		health, facts := sinkHealth(snap.ts, now, t)
+		n.Health = health
+		for k, v := range facts {
+			n.Facts[k] = v
+		}
 	}
-	// The timestamp column is set on every sink node, including unreachable
-	// ones, so the agent knows which column its recovery check must read.
-	if n.Facts == nil {
-		n.Facts = map[string]string{}
-	}
-	n.Facts["ts_column"] = p.SinkTSColumn
 	return n
 }
 
