@@ -718,6 +718,104 @@ the first of: `handoff.created` with the same `request_id` (the normal end), `ha
 `expires_at` (request time + 3 min, the summary deadline; covers a server that stopped mid-request). The server and
 clients use this same rule. `handoff.created` gains `request_id` (absent on events from before R0).
 
+<!-- ===== X5-0 fleet view (KAN-438): routes and shapes. Keep this block together; other X-wave contract
+     tickets add their own sections elsewhere. Server X5a (`/api/fleet`, `/api/fleet/changes`) and X5c
+     (`config-versions`), both A5; web X5b (A6); Go shapes in `internal/clients/clients.go` ("Fleet view")
+     and `internal/actions/action.go` (`RedactConfig`, `ConfigHash`). ===== -->
+### Fleet view (X5-0; server X5a and X5c by A5, web X5b by A6)
+
+One row per pipeline, what changed across pipelines, and the config history of one connector. Every answer is
+built from data Piperoom already holds (the watcher's status rows `clients.WatchStatus`, X3a samples, F8's
+`pipeline_changes`, rooms and their events, X5c's config versions): **no route here reads a customer system**, so
+it stays cheap with 50+ pipelines. Timestamps, counts, key names and node ids only: never a row value, and a
+connector config value only redacted (`actions.RedactConfig`). Every store read of these routes runs under a 10 s
+deadline (the store's default when the request has none).
+
+| Method | Path | Body | Result | Notes |
+|---|---|---|---|---|
+| GET | `/api/fleet?tenant=&team=&kind=` | – | `[FleetPipeline]` | Every pipeline of `owners.yaml` the caller can see (`room.Service.CanSeePipeline`; with a `tenants:` block only those of the caller's tenants, the solo user sees all), sorted by `health` (`fail`, `warn`, `unknown`, `ok`), then `pipeline_id`. Filters, each optional and exact (case-sensitive): `tenant` (a pipeline's `tenant:`), `team` (its `team:`), `kind` (`cdc` \| `batch`, else `400 validation` "unknown kind"). A `tenant` the caller is not a member of, or one that does not exist, answers `[]`, never `403`/`404`, so tenant names do not leak. Any logged-in user, viewers included. No paging: the list is bounded by `owners.yaml`. Cached 10 s per caller and query string; `[]` when there are no pipelines (the web shows its first-run panel) |
+| GET | `/api/fleet/changes?since=&kind=&pipeline=&limit=&cursor=` | – | `FleetChangesPage` | `PipelineChange` rows (the F8 shape, already masked) of every pipeline the caller can see, newest first by (`at`, `id`), paged. `since` RFC 3339, default now − 7 days, not before now − `PIPEROOM_CHANGES_RETENTION_DAYS` (an earlier value is raised to it); `kind` one or more `clients.Change*` kinds, comma-separated (an unknown one → `400 validation` "unknown kind"); `pipeline` narrows to one pipeline (outside the caller's tenants or unknown → an empty page, as for an aggregate); `limit` 1–200, default 100 (else `400 validation`); `cursor` is the `next` of the previous page, opaque (a bad one → `400 validation` "bad cursor"). Pages are stable: a row recorded after the first page never shifts a later page (the cursor is a position, not an offset). Any logged-in user, viewers included |
+| GET | `/api/pipelines/{pid}/connectors/{name}/config-versions?limit=` | – | `[ConfigVersion]` | X5c. The config versions of one connector of the pipeline the watcher recorded (X3b), newest first, at most `limit` (1–200, default 50, else `400 validation`); key **names** only. Visibility first: an unknown pipeline or one outside the caller's tenants → `404 not_found` "pipeline not found"; a `{name}` that is not one of the pipeline's connectors (`owners.yaml` `connectors:`, or one the watcher recorded for it) → `404 not_found` "connector not found"; a known connector with no version yet → `[]`. Then any logged-in user, viewers included |
+| GET | `/api/pipelines/{pid}/connectors/{name}/config-versions?diff=a..b` | – | `ConfigDiff` | X5c. The key-by-key difference from version `a` to version `b` (full 64-hex `hash` values, `a` older or newer: the answer is always `from` = `a`, `to` = `b`). Same `404`s as above, first; then only an approver or backup of any layer of that pipeline (in dev mode also a `users.yaml` user whose `layers:` grant one), the solo user, or an `auditors:` principal (the `/api/usage` rule): values are shown, redacted, so viewers and other members get `403 not_allowed`. A malformed `diff` (not two 64-hex hashes joined by `..`) → `400 validation`; a hash that is no version of this connector → `404 not_found` "version not found". `a == b` → `keys: []`. A hash held by several versions (a revert) names the newest of them; their redacted content is the same. With `diff` set, `limit` is ignored |
+
+**`FleetPipeline`** (one row of `GET /api/fleet`):
+```json
+{ "pipeline_id": "orders", "title": "Orders CDC", "kind": "cdc", "tenant": "payments", "team": "orders-core",
+  "health": "fail", "worst_node": "connect:pg-orders-connector", "open_rooms": 1,
+  "signals_firing": ["connector_down", "slot_wal"], "changes_24h": 3,
+  "forecasts": [ {"metric": "slot_wal_bytes", "eta": "2026-10-23T04:10:00Z"} ],
+  "last_verdict": { "room_id": "r_01J…", "verdict": "confirmed", "layer_correct": true, "at": "2026-10-21T09:12:00Z" },
+  "checked_at": "2026-10-22T10:01:00Z" }
+```
+- `title`, `kind`, `tenant` as `GET /api/pipelines` (`""` when unset; `kind` `cdc` when the file names none).
+  `team` is the pipeline's optional `team:` key in `owners.yaml` (X5-0; an id from X4's `teams:` list when that list
+  exists, which A3's loader checks), `""` when unset.
+- `health` ∈ `ok | warn | fail | unknown`, the topology node words: `fail` when a signal at `sev1` or `sev2` is
+  firing; `warn` when any other signal is firing or acked, a forecast is firing, or a room of the pipeline is open;
+  `ok` when the watcher checked the pipeline recently and nothing fires; `unknown` when it did not (watcher `off`,
+  `checked_at` zero or older than 3 × `PIPEROOM_WATCH_INTERVAL`). Open rooms raise `ok`/`unknown` to `warn` only.
+- `worst_node`: the topology node id (as `GET /api/pipelines/{pid}/topology` names it, e.g. `connect:<connector>`,
+  `group:<group>`, `dlq:<topic>`) of the worst firing signal (highest severity, then oldest `since`), `""` when
+  nothing fires or the watcher could not name a node. The web links it to the pipeline lane; it is never resolved by
+  reading the topology on request.
+- `signals_firing`: the distinct names of the watcher signals now `firing` or `acked` (the `owners.Signal*` names,
+  `forecast`, `config_drift`, and later X-wave kinds), worst first, at most 32. `[]` when none.
+- `open_rooms`: rooms of the pipeline not closed (shadow rooms included, setup rooms not).
+- `changes_24h`: `pipeline_changes` rows of the pipeline with `at` in the last 24 hours, every kind.
+- `forecasts`: the pipeline's firing `forecast` signals (X3a), soonest `eta` first, at most 8; `metric` is the X3a
+  sample metric name. `[]` when none.
+- `last_verdict`: the human judgement of the pipeline's most recently closed room that has one, `null` when none in
+  the retention window. `verdict` is the last `hypothesis.verdict` of that room (`confirmed` \| `disputed`, `""` when
+  it has only a grade); `layer_correct` is the last `shadow.graded.layer_correct` (`null` when the room was not
+  graded: `room.labelled` carries no grade, see AgentStats); `at` is the time of that event.
+- `checked_at`: when the watcher last checked the pipeline; omitted when it never did.
+
+**`FleetChangesPage`**: `{ "changes": [PipelineChange], "next": "<cursor>" }`. `next` is `""` on the last page. A
+`PipelineChange` here is exactly the F8 row (`id, pipeline_id, kind, object, at, actor?, source, fingerprint,
+before?, after?, summary`): config values masked `***`, a DDL statement only in `summary` (≤ 300 runes); clients
+render every string as text.
+
+**`ConfigVersion`** (one row of `config-versions`):
+```json
+{ "hash": "9f2c…64 hex…", "at": "2026-10-20T14:03:00Z", "by": "",
+  "changed_keys": ["decimal.handling.mode", "<secret key changed>"] }
+```
+- `hash` is `actions.ConfigHash` of the redacted config: the same value for the same redacted content, so a config
+  reverted to an earlier state repeats an earlier hash, and a change only to a secret value repeats the previous
+  hash (its `changed_keys` still says so). A secret value never enters the hash.
+- `at`: when the watcher first saw this config. `by`: `"proposal:<id>"` when an executed Piperoom proposal produced it,
+  `""` when it changed outside Piperoom or the watcher cannot tell (the watcher sees results, not people).
+- `changed_keys`: key names that differ from the previous version (added, removed or changed), sorted; a key for
+  which `actions.LooksSecret` is true reads `<secret key changed>` (its name is not shown), at most 1000. `[]` on the
+  first version the watcher recorded.
+
+**`ConfigDiff`** (`?diff=a..b`):
+```json
+{ "connector": "pg-orders-connector",
+  "from": {"hash": "…", "at": "…"}, "to": {"hash": "…", "at": "…"},
+  "keys": [ {"key": "decimal.handling.mode", "change": "changed", "old": "precise", "new": "double"},
+            {"key": "database.sslpassword", "change": "added", "new": "<redacted>"},
+            {"key": "transforms", "change": "added", "new": "unwrap"} ] }
+```
+`keys[]` sorted by `key`, at most 1000; `change` ∈ `added | removed | changed`; `old` is omitted for `added`, `new`
+for `removed`. Values are the stored, redacted ones (`actions.RedactConfig`: a `LooksSecret` key reads `<redacted>`,
+every other value has passed `redact.Text`, so a password inside a JDBC URL is masked, and is cut at 4096 bytes). A
+secret key appears by name here (the caller passed the role check) but never with a value. The diff compares stored
+values, so a key whose redacted values are equal (a change only to a secret value) is not listed; the newer
+version's `changed_keys` records it.
+
+**Tenancy and wiring.** In the tenancy route test (`docs/design/tenancy.md` §6) `/api/fleet` and
+`/api/fleet/changes` are aggregates that filter by tenant (a pipeline outside the caller's tenants is left out and
+its rows never counted), and both `config-versions` forms are pipeline routes that answer `404 not_found` first. No
+route here returns another tenant's pipeline id, title, team, room id or change, in a row, a count or an error. The
+Go shapes the server codes against are in `internal/clients/clients.go` ("Fleet view": `FleetChangeReader`,
+`WatchStatus` with its writer and reader, `ConnectorConfigVersion` with its writer and reader, the caps) and
+`internal/actions/action.go` (`RedactConfig`, `ConfigHash`, `RedactedValue`). The watcher writes one
+`clients.WatchStatus` per pipeline per tick and one `clients.ConnectorConfigVersion` per config change it sees;
+both are Piperoom's own rows. Config versions older than `PIPEROOM_CHANGES_RETENTION_DAYS` are removed, except the
+newest version of each connector (the current config stays diffable); status rows are replaced, not kept.
+<!-- ===== end X5-0 fleet view ===== -->
+
 ### Watcher alerts (`alert_source: "watcher"`)
 
 The built-in watcher (`internal/watch`, wired in `cmd/server/watch.go`, design in `docs/design/watcher.md`)
