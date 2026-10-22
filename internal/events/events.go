@@ -1246,6 +1246,65 @@ type ShadowGradedPayload struct {
 	Identity     *Identity `json:"identity,omitempty"`
 }
 
+// ---- Watcher signals (X wave) ----
+//
+// A watcher signal is a kind of evidence the built-in watcher (internal/watch)
+// puts in room.created.alert of a watcher room, or posts as a join into an
+// open one. The kinds of before the X wave are named in internal/owners
+// (owners.Signal*); the X-wave kinds are named here so the watcher, the agent
+// and the web app share one spelling. owners.yaml watch: settings (A3) must
+// accept these names before the watcher emits them.
+
+// Drift signal kinds (X1): "green but wrong" faults that raise no symptom.
+const (
+	SignalCountDrift = "count_drift" // source and sink row counts differ for a closed window
+	SignalRowDrift   = "row_drift"   // sampled keys are missing in the sink or carry other timestamps
+	SignalDupKeys    = "dup_keys"    // one key landed more than once where it must be unique
+	SignalOrderSkew  = "order_skew"  // events of one key arrived out of source order
+)
+
+// DefaultSignalSeverity is the room severity a signal opens with when
+// owners.yaml sets none: sev2 for a count or row drift (data is missing or
+// wrong), sev3 for duplicates and order skew (data is there, but needs a
+// look). "" for a kind it does not know: the caller keeps its own default.
+func DefaultSignalSeverity(kind string) string {
+	switch kind {
+	case SignalCountDrift, SignalRowDrift:
+		return "sev2"
+	case SignalDupKeys, SignalOrderSkew:
+		return "sev3"
+	}
+	return ""
+}
+
+// DriftWindow is the closed time window a drift signal compared, UTC.
+type DriftWindow struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+// DriftSignal is the evidence of one drift signal (X1). It holds counts and
+// names only, never a key or a record value. Table is the source table
+// ("schema.table"); Topic is the CDC topic between them, "" when the kind did
+// not read one. Source and Sink are row counts in Window (count_drift; 0 for
+// the other kinds). Missing counts the sampled keys absent in the sink
+// (row_drift). Mismatched counts the sampled keys whose timestamps differ
+// (row_drift), the keys found more than once (dup_keys) or the keys found out
+// of order (order_skew). Sample is how many keys were checked (0 for
+// count_drift). Detail is one line written by the watcher, ≤ 300 runes.
+type DriftSignal struct {
+	Kind       string      `json:"kind"` // Signal* above
+	Table      string      `json:"table"`
+	Topic      string      `json:"topic,omitempty"`
+	Window     DriftWindow `json:"window"`
+	Source     int64       `json:"source"`
+	Sink       int64       `json:"sink"`
+	Missing    int         `json:"missing"`
+	Mismatched int         `json:"mismatched"`
+	Sample     int         `json:"sample"`
+	Detail     string      `json:"detail,omitempty"`
+}
+
 // Layers are the pipeline layers that own nodes and approve fixes, of every
 // pipeline kind: the six CDC layers first, then the batch-only ones (P4),
 // then the setup layer (U). A check of "is this a known layer" uses Layers;

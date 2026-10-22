@@ -640,6 +640,40 @@ type CountReader interface {
 	CountByBucket(ctx context.Context, table, tsColumn string, since, until time.Time, width time.Duration) ([]MinuteCount, error)
 }
 
+// ---- Reconcile: source against sink (optional, X1) ----
+
+// Caps of Reconciler. A call over a cap is refused with an error before any
+// read: the watcher samples, it never scans a table.
+const (
+	MaxReconcileSample = 200  // SampleKeys n
+	MaxReconcileKeys   = 1000 // RowTimes len(keys)
+)
+
+// Reconciler compares a table on the source with its copy in the sink, for
+// the watcher's drift signals (events.SignalCountDrift, SignalRowDrift). It
+// is optional on a SourceDB and a Warehouse, asserted at use time like
+// CountReader; a client without it leaves the signals "unknown". table is
+// "schema.table"; table and column names pass the identifier rule of
+// AGENTS.md §4.6. Each method bounds itself with a 10 s deadline (shorter
+// when ctx says so). None of them returns a column value other than the
+// primary key and the named timestamps. (X1)
+type Reconciler interface {
+	// CountBetween counts rows with from <= tsColumn < to. A count only.
+	CountBetween(ctx context.Context, table, tsColumn string, from, to time.Time) (int64, error)
+	// SampleKeys returns at most n primary keys (n <= MaxReconcileSample,
+	// else an error) of rows with tsColumn >= since, as text. The keys are
+	// the only row data any Reconciler method returns: the caller compares
+	// them and keeps counts; it never puts a key in an event, a log or a
+	// prompt.
+	SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since time.Time, n int) ([]string, error)
+	// RowTimes returns, for each of keys (len(keys) <= MaxReconcileKeys, else
+	// an error) that exists, the value of each of tsColumns:
+	// key -> column -> time. A missing key is absent from the map; a NULL
+	// timestamp is absent from its row's map. Timestamps only: never another
+	// column's value.
+	RowTimes(ctx context.Context, table, pkColumn string, keys []string, tsColumns []string) (map[string]map[string]time.Time, error)
+}
+
 // ---- Batch pipelines: orchestrator and transform (P4) ----
 //
 // Optional readers, like ClusterReader: wiring holds nil when the system is

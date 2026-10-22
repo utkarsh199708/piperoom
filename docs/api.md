@@ -631,6 +631,23 @@ closes; `--demo` forces it off.
 - **Triage pass (F6, implemented by A4 and A5).** Before an agent slot is taken, a bounded first look
   (`PIPEROOM_TRIAGE_PASS`, model `PIPEROOM_TRIAGE_PASS_MODEL`, deadline `PIPEROOM_TRIAGE_PASS_TIMEOUT`) writes its
   own steps and one `agent.triage`; not in shadow rooms or rooms restored after a restart.
+- **Drift signals (X1-0; reader A3, signals A7, Kafka checks A2).** Silent faults ("green but wrong") get four
+  signal kinds, named in `internal/events` (`events.Signal*`). Each carries `events.DriftSignal` as evidence:
+  `{kind, table, topic?, window: {from, to}, source, sink, missing, mismatched, sample, detail?}`, counts and names
+  only, never a key or a record value; zero counts stay on the wire. Like every signal they share the pipeline's one
+  watcher room. Severity when `owners.yaml` sets none (`events.DefaultSignalSeverity`):
+
+  | Kind | Fires when | Default severity |
+  |---|---|---|
+  | `count_drift` | source and sink row counts differ for a closed window (`source`, `sink`) | `sev2` |
+  | `row_drift` | sampled source keys are missing in the sink (`missing`) or carry other timestamps (`mismatched`) | `sev2` |
+  | `dup_keys` | one key landed more than once where it must be unique (`mismatched` of `sample`) | `sev3` |
+  | `order_skew` | events of one key arrived out of source order (`mismatched` of `sample`) | `sev3` |
+
+  The counts come from the optional `clients.Reconciler` on the source and the warehouse client (`CountBetween`,
+  `SampleKeys` with `n ≤ 200`, `RowTimes` with `≤ 1000` keys; 10 s each; primary keys and timestamps only). A
+  client without it leaves `count_drift` and `row_drift` unknown for that pipeline (one log line), as `dlq_growth`
+  does without a `DLQReader`.
 
 ### Spend limits (design `docs/design/cost.md`)
 
