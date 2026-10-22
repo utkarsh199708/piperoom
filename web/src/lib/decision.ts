@@ -14,7 +14,11 @@ export type Decision =
   | { kind: 'waiting'; proposal: ProposalState; pending: string[]; approved: number; total: number }
   | { kind: 'executing'; proposal: ProposalState; step: number; total: number; action: string }
   | { kind: 'done'; proposal: ProposalState; ok: boolean; failedStep?: number }
-  | { kind: 'rejected'; proposal: ProposalState; by: string; byActor?: Actor; layer: string }
+  /**
+   * `layer` is the layer whose rejection stopped the proposal; `cancelled` are the layers it left
+   * undecided (see cancelledLayers), so the bar never says they still wait on someone.
+   */
+  | { kind: 'rejected'; proposal: ProposalState; by: string; byActor?: Actor; layer: string; cancelled: string[] }
 
 function newest(proposals: ProposalState[], status: ProposalState['status']): ProposalState | undefined {
   return [...proposals].reverse().find((p) => p.status === status)
@@ -23,6 +27,22 @@ function newest(proposals: ProposalState[], status: ProposalState['status']): Pr
 /** Every layer except `layer` has approved: this person's approval completes the set. */
 export function completesSet(p: ProposalState, layer: string): boolean {
   return p.required_layers.every((l) => l === layer || p.approvals[l] === 'approved')
+}
+
+/**
+ * The layers a rejection left undone. One rejection rejects the whole proposal (the server writes
+ * one `approval.rejected` for the deciding layer and sets the proposal `rejected`), so a layer that
+ * is still `pending` on a rejected proposal was cancelled, not left waiting for its owner. Keeping
+ * this rule in one place is what stops the card offering a Nudge for a proposal that is dead.
+ */
+export function cancelledLayers(p: ProposalState): string[] {
+  if (p.status !== 'rejected') return []
+  // Anything that is not a recorded decision counts as cancelled: `pending` today, and a server
+  // that later sends the leftover layers as `cancelled` reads the same way.
+  return p.required_layers.filter((l) => {
+    const value = p.approvals[l] ?? 'pending'
+    return value !== 'approved' && value !== 'rejected'
+  })
 }
 
 export function decisionFor(state: RoomState, user: CurrentUser): Decision | null {
@@ -75,7 +95,14 @@ export function decisionFor(state: RoomState, user: CurrentUser): Decision | nul
   if (rejected && proposals[proposals.length - 1] === rejected) {
     const layer = rejected.required_layers.find((l) => rejected.decisions?.[l]?.outcome === 'rejected') ?? ''
     const d = layer ? rejected.decisions[layer] : undefined
-    return { kind: 'rejected', proposal: rejected, by: d ? neutralizeBadgeText(d.by.name || d.by.id) : 'a reviewer', byActor: d?.by, layer }
+    return {
+      kind: 'rejected',
+      proposal: rejected,
+      by: d ? neutralizeBadgeText(d.by.name || d.by.id) : 'a reviewer',
+      byActor: d?.by,
+      layer,
+      cancelled: cancelledLayers(rejected),
+    }
   }
   return null
 }

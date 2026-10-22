@@ -314,7 +314,7 @@ Every object a break creates is named `devctl_*` / `devctl.*`; every fix removes
 | Scenario | How the room opens | Action that ends it (P3) | `devctl fix` does |
 |---|---|---|---|
 | `missed-table` | alert: `devctl alert missed-table` (no watcher signal sees a table that is missing from Kafka) | `pg_add_publication_table`, then `connect_snapshot_table` (`via: signal_table`) for the rows written before | adds the table to the publication if missing, sends one incremental-snapshot signal if the topic is short, waits until every row is in Kafka; then back to baseline: connector config from `dev/connectors`, publication on `orders` only, `devctl_*` tables, topics and subjects removed |
-| `dead-slot` | watcher: `slot_inactive`, `connector_down` (STOPPED, sev3) | `pg_drop_replication_slot` | drops the slot if it is inactive and the connector is not RUNNING (refuses otherwise), resumes the connector (new slot), re-emits the rows changed meanwhile, waits for order-sync lag 0 |
+| `dead-slot` | watcher: `slot_inactive`, `connector_down` (STOPPED, sev3) | `pg_drop_replication_slot` | stops the connector, drops the inactive slot (refuses one a running connector may still use), recreates it at the current WAL position, deletes the connector's stored offsets because they predate the new slot, sets `snapshot.mode=when_needed`, resumes, and waits for a marker row in the warehouse and order-sync lag 0 (re-snapshot: rows are re-emitted) |
 | `consumer-bad-deploy` | alert: `devctl alert consumer-bad-deploy` (lag is 0; only a reconciliation sees it) | `kafka_reset_consumer_offsets` (group inactive, to the deploy time) | stops devconsumer, resets order-sync to the start of `pg.public.orders` (the load is an upsert by id, so a full replay is safe), starts the good build, waits for lag 0 |
 | `dlq-backlog` | watcher: `dlq_growth` (`devctl.order-sync.dlq` is declared in `dev/owners.p3.yaml`) | `dlq_replay`, after the cause is fixed | deploys the good build, replays every DLQ record into `pg.public.orders` in order without the `__connect.errors.*` headers, deletes the DLQ topic, waits until every `gift` order is in the warehouse |
 
@@ -413,10 +413,23 @@ retained WAL growing with `devctl load`; the watcher fires `connector_down` (sev
 `slot_inactive` after 30 s.
 
 **Fix:** `pg_drop_replication_slot` (postgres owner approves) frees the WAL at once (the slot is gone).
-`devctl fix dead-slot` does the same, then puts the dev pipeline back: resume (Debezium creates a new slot at
-the current WAL position) and `UPDATE orders SET updated_at = updated_at` on the rows newer than the
-warehouse's newest row, so the changes made while no slot existed reach the warehouse. In production that last
-step is `connect_snapshot_table`. If the agent already dropped the slot, the fix skips the drop.
+`devctl fix dead-slot` does the same, then puts the dev pipeline back. Order matters: **stop the connector**
+(a stopped connector holds no WAL sender, and Connect only deletes offsets on a stopped connector) → drop the
+slot → **recreate it** (`pg_create_logical_replication_slot`, `pgoutput`) at the current WAL position →
+**delete the connector's stored offsets** (`DELETE /connectors/pg-orders-connector/offsets`) → set
+`snapshot.mode=when_needed` → resume → wait for task 0 RUNNING, an active slot, **a new row in the warehouse**
+and order-sync lag 0. The saved offset points into the dropped slot, so restoring it would fail the task with
+"trying to read change stream starting at … is no longer available" (KAN-411, observed on the live stack in the
+phase-3a eval). Clearing it makes Debezium **re-snapshot**: every row is re-emitted, not only the rows changed
+while no slot existed (in production that step is `connect_snapshot_table`; the P3 action
+`pg_drop_replication_slot` has the same consequence, see `prompt.go`). If the agent already dropped the slot, the
+fix skips the drop; on a healthy stack it is a no-op. Idempotent: a second run ends healthy.
+
+**Live status (KAN-411, 2026-10-22):** the first live run dropped the slot and then failed at
+`waitConnector(RUNNING)` exactly as described above; the sequence above is the fix. It is unit-tested against
+the fake stack (`cmd/devctl/scenarios_p3_test.go`), but **the reworked fix has not been re-run on a live stack
+yet** — the stack lock was held by `qa` during this change. The next live run should replace this paragraph
+with what was observed.
 
 ## 10. `consumer-bad-deploy` — offsets committed past orders never loaded
 

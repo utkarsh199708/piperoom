@@ -1,0 +1,41 @@
+{
+  "window": "6h",
+  "changes": [
+    {
+      "id": 3,
+      "pipeline_id": "orders",
+      "kind": "ddl",
+      "object": "public.orders",
+      "at": "2026-10-22T08:58:30Z",
+      "actor": "etl",
+      "source": "ddl_audit",
+      "fingerprint": "f1f661f28a979b849c102a19158c51c60d78605a05442fc7adac26099ceaa81c",
+      "summary": "ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)"
+    },
+    {
+      "id": 2,
+      "pipeline_id": "orders",
+      "kind": "connector_config",
+      "object": "pg-orders-connector",
+      "at": "2026-10-22T08:48:00Z",
+      "source": "watcher",
+      "fingerprint": "a1f48f9e7e3504a08c4c551ef41537f3f9a4a0f5941c851fc352dd2b0a8bea30",
+      "before": {"heartbeat.interval.ms":"10000"},
+      "after": {"heartbeat.interval.ms":"5000"},
+      "summary": "config of pg-orders-connector: 1 key changed (heartbeat.interval.ms)"
+    },
+    {
+      "id": 1,
+      "pipeline_id": "orders",
+      "kind": "schema_version",
+      "object": "pg.public.orders-value",
+      "at": "2026-10-22T08:19:00Z",
+      "source": "watcher",
+      "fingerprint": "0a00f130683b4337023853b379946fcde1f7f5644fcf5df6d43739a14cdf8792",
+      "before": {"version":0},
+      "after": {"version":1},
+      "summary": "schema pg.public.orders-value: version 1 registered (was 0)"
+    }
+  ],
+  "omitted": 0
+}

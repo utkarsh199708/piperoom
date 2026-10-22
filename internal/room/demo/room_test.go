@@ -56,7 +56,7 @@ func newDemoRoom(t *testing.T) (*room.Service, string) {
 		Users:    room.DefaultUsers(),
 		Owners:   own,
 		Run: func(ctx context.Context, a agent.Alert, d agent.Deps, o agent.Options) error {
-			return run(ctx, a, d, o, roomTestDelay)
+			return runStory(ctx, a, d, o, time.Now(), roomTestDelay)
 		},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
@@ -77,12 +77,22 @@ func mustUser(t *testing.T, svc *room.Service, id string) room.User {
 	return u
 }
 
-// roomLog returns every event the room has so far.
+// roomLogLimit is the explicit page size roomLog asks for; limit 0 is an
+// empty page since KAN-395, so relying on a default here would silently read
+// nothing. 500 matches the HTTP layer's default page (docs/api.md).
+const roomLogLimit = 500
+
+// roomLog returns every event the room has so far. The log is never empty:
+// CreateRoom writes room.created before it returns, so an empty page means
+// the read itself regressed (e.g. an accidental limit-0 call).
 func roomLog(t *testing.T, svc *room.Service, roomID string) []events.Event {
 	t.Helper()
-	evs, _, err := svc.Events(context.Background(), roomID, 0, 0)
+	evs, _, err := svc.Events(context.Background(), roomID, 0, roomLogLimit)
 	if err != nil {
 		t.Fatalf("read room log: %v", err)
+	}
+	if len(evs) == 0 {
+		t.Fatalf("room log of %s is empty; it must hold at least room.created", roomID)
 	}
 	return evs
 }
