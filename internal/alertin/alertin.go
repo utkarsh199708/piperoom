@@ -20,6 +20,10 @@
 // that stays the same when the sender sends the same incident again, so the
 // room service can return the room that is already open. That also makes a
 // replayed, validly signed request harmless.
+//
+// X4 adds two writers of the pipeline change log that open no room:
+// ChangeWebhook (POST /api/changes/webhook, signed like Generic) and
+// StatusPoller (vendor status feeds).
 package alertin
 
 import (
