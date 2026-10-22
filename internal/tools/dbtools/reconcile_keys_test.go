@@ -220,7 +220,7 @@ func TestReconcileKeysCapNote(t *testing.T) {
 	if res.Data.(ReconcileData).Keys != nil || len(res.Data.(ReconcileData).Buckets) == 0 {
 		t.Fatalf("data = %+v", res.Data)
 	}
-	if !strings.Contains(res.Summary, "bucket | source | topic | sink") {
+	if !strings.Contains(res.Summary, "bucket | source rows | topic events | sink rows") {
 		t.Errorf("bucket table lost:\n%s", res.Summary)
 	}
 	if want := "keys not compared: 2001 source / 0 sink keys exceed the 2000-key cap; narrow since/until for a key diff"; !strings.Contains(res.Summary, want) {
@@ -432,7 +432,7 @@ func TestReconcileKeysReadErrorsAreNotes(t *testing.T) {
 		if res.Data.(ReconcileData).Keys != nil {
 			t.Errorf("%s: partial key diff reported", c.name)
 		}
-		if !strings.Contains(res.Summary, c.want) || !strings.Contains(res.Summary, "bucket | source | topic | sink") {
+		if !strings.Contains(res.Summary, c.want) || !strings.Contains(res.Summary, "bucket | source rows | topic events | sink rows") {
 			t.Errorf("%s: summary:\n%s", c.name, res.Summary)
 		}
 	}

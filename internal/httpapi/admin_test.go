@@ -207,9 +207,12 @@ func TestAdminTestRoute(t *testing.T) {
 	if strings.Contains(logs.String(), "pipeline.nope.kafka") {
 		t.Error("an unknown id was logged as a test")
 	}
-	for _, body := range []string{`not json`, `{"id":`, `{"id":""}`, `{}`, `{"id":"` + strings.Repeat("x", 5000) + `"}`} {
+	for _, body := range []string{`not json`, `{"id":`, `{"id":""}`, `{}`} {
 		wantErrCode(t, adminReq(t, http.MethodPost, url, "ada", testJSON, body), http.StatusBadRequest, "validation")
 	}
+	// Over the 4 KiB cap is a size error, not invalid JSON (KAN-388).
+	wantErrCode(t, adminReq(t, http.MethodPost, url, "ada", testJSON, `{"id":"`+strings.Repeat("x", 5000)+`"}`),
+		http.StatusRequestEntityTooLarge, "too_large")
 	// The content type rule of every other POST.
 	wantErrCode(t, adminReq(t, http.MethodPost, url, "ada", "text/plain", `{"id":"process-wide.kafka"}`), http.StatusBadRequest, "bad_request")
 	wantErrCode(t, adminReq(t, http.MethodPost, url, "ada", "", `{"id":"process-wide.kafka"}`), http.StatusBadRequest, "bad_request")

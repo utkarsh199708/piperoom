@@ -2,7 +2,10 @@ package room_test
 
 import (
 	"context"
+	"slices"
+	"sort"
 	"testing"
+	"time"
 )
 
 // TestListRoomsDeterministicTiebreak pins the tiebreaker added for KAN-382:
@@ -48,6 +51,57 @@ func TestListRoomsDeterministicTiebreak(t *testing.T) {
 			if next[i].ID != first[i].ID {
 				t.Fatalf("list order changed between calls: call 1[%d]=%q, later[%d]=%q", i, first[i].ID, i, next[i].ID)
 			}
+		}
+	}
+}
+
+// TestListRoomsFullOrder pins every key of the list order, not only the id
+// tiebreaker: open rooms precede closed ones even when the closed room is
+// newer, rooms are newest opened_at first, and an equal opened_at is broken
+// by id ascending.
+func TestListRoomsFullOrder(t *testing.T) {
+	svc, _, c := newTestService(t)
+	ctx := context.Background()
+	u := mustUser(t, svc, "arjun")
+
+	old, err := svc.CreateRoom(ctx, u, "old", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Minute)
+	tied1, err := svc.CreateRoom(ctx, u, "tied one", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tied2, err := svc.CreateRoom(ctx, u, "tied two", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Minute)
+	newestClosed, err := svc.CreateRoom(ctx, u, "newest closed", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CloseRoom(ctx, u, newestClosed.ID, "done"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both tied rooms share an opened_at; the id is their only difference.
+	tied := []string{tied1.ID, tied2.ID}
+	sort.Strings(tied)
+	want := []string{tied[0], tied[1], old.ID, newestClosed.ID}
+
+	for range 5 {
+		got, err := svc.ListRooms(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := make([]string, 0, len(got))
+		for _, r := range got {
+			ids = append(ids, r.ID)
+		}
+		if !slices.Equal(ids, want) {
+			t.Fatalf("order = %v, want %v (open newest first, ties by id, closed last)", ids, want)
 		}
 	}
 }

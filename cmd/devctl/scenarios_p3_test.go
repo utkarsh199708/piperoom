@@ -500,6 +500,91 @@ func TestDeadSlotBreakAndFix(t *testing.T) {
 	}
 }
 
+// KAN-411: the connector's saved offset points into the slot that was just
+// dropped, so the fix clears it before resuming. The fake fails task 0 when it
+// resumes with an offset older than the slot's start (as Debezium did on the
+// live stack), so a fix that skipped the delete would time out at RUNNING.
+func TestDeadSlotFixClearsTheStaleOffset(t *testing.T) {
+	w := newP3World(t)
+	s, logs := w.stack()
+	ctx := w.ctx()
+	if err := breakDeadSlot(ctx, s); err != nil {
+		t.Fatalf("break: %v\n%s", err, logs)
+	}
+	if err := fixDeadSlot(ctx, s); err != nil {
+		t.Fatalf("fix: %v\n%s", err, logs)
+	}
+	w.with(func() {
+		if w.offsetLSN != 0 {
+			t.Errorf("stored offset %#x survived the fix", w.offsetLSN)
+		}
+		if w.taskFailed {
+			t.Error("task failed on the recreated slot")
+		}
+		if mode, _ := w.connCfg["snapshot.mode"].(string); mode != "when_needed" {
+			t.Errorf("snapshot.mode = %v, want when_needed so the connector snapshots without offsets", w.connCfg["snapshot.mode"])
+		}
+	})
+	// TC1/TC6: stop → drop → create → delete offsets, then resume, in that
+	// order. Connect refuses the offsets delete on a running connector, so the
+	// stop has to come first.
+	ops := w.snapshotOps()
+	last := -1
+	for _, op := range []string{"stop", "drop-slot", "create-slot", "delete-offsets"} {
+		i := slices.Index(ops, op)
+		if i < 0 {
+			t.Fatalf("ops %v: missing %q", ops, op)
+		}
+		if i < last {
+			t.Fatalf("ops %v: %q is out of order", ops, op)
+		}
+		last = i
+	}
+	if del, resume := slices.Index(ops, "delete-offsets"), slices.Index(ops, "resume"); del > resume {
+		t.Errorf("ops %v: resumed before clearing the offsets", ops)
+	}
+	if !strings.Contains(logs.String(), "cleared connector offsets") {
+		t.Errorf("fix did not log the cleared offsets:\n%s", logs)
+	}
+}
+
+// TC4: on a healthy stack the fix changes nothing.
+func TestDeadSlotFixOnHealthyStackIsNoOp(t *testing.T) {
+	w := newP3World(t)
+	s, logs := w.stack()
+	if err := fixDeadSlot(w.ctx(), s); err != nil {
+		t.Fatalf("fix: %v\n%s", err, logs)
+	}
+	w.with(func() {
+		if len(w.ops) != 0 || len(w.touched) != 0 || w.offsetLSN == 0 {
+			t.Errorf("healthy fix touched the stack: ops=%v touched=%v offset=%#x", w.ops, w.touched, w.offsetLSN)
+		}
+	})
+	if !strings.Contains(logs.String(), "nothing is dead") {
+		t.Errorf("no-op fix did not say why:\n%s", logs)
+	}
+}
+
+// Error path: when Connect refuses the offsets delete, the fix stops with that
+// error instead of resuming on an offset it knows cannot be replayed.
+func TestDeadSlotFixFailsWhenOffsetsCannotBeCleared(t *testing.T) {
+	w := newP3World(t)
+	w.offsetDeleteStatus = http.StatusInternalServerError
+	s, logs := w.stack()
+	if err := breakDeadSlot(w.ctx(), s); err != nil {
+		t.Fatalf("break: %v\n%s", err, logs)
+	}
+	err := fixDeadSlot(w.ctx(), s)
+	if err == nil || !strings.Contains(err.Error(), "clear connector offsets") {
+		t.Fatalf("fix = %v, want the offsets delete to fail", err)
+	}
+	w.with(func() {
+		if slices.Contains(w.ops, "resume") {
+			t.Errorf("fix resumed despite the failed delete: %v", w.ops)
+		}
+	})
+}
+
 // The agent dropped the slot (pg_drop_replication_slot) and nobody resumed:
 // the fix resumes and re-emits without dropping again.
 func TestDeadSlotFixAfterAgentDropped(t *testing.T) {
