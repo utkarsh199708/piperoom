@@ -30,9 +30,10 @@ type Deps struct {
 	// warehouse tools validate input: the identifier rules in whIdentRe
 	// (Snowflake adds '$'), the table forms validWarehouseTable accepts
 	// ("schema.table" everywhere; "db.schema.table" on Snowflake), and the
-	// case-insensitive column checks for the Snowflake ts_column and pk_column
-	// (Snowflake folds unquoted names to upper case). The other kinds share the
-	// Postgres rules.
+	// case-insensitive column checks: Snowflake folds both ts_column and
+	// pk_column, Databricks folds pk_column (unquoted names fold to upper case
+	// in Snowflake and lower case in Databricks). Other column and table rules
+	// are the Postgres ones.
 	WarehouseKind string
 	Builder       topology.Builder
 	// Connect reads live Kafka Connect connector configs. Only
