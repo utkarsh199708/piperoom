@@ -89,6 +89,9 @@ type Server struct {
 	// config_drift's accept-config (WithConfigAccept): acceptconfig.go.
 	configAccept ConfigAccepter
 
+	// Connector config versions (WithConfigVersions): configversions.go.
+	configVersions clients.ConfigVersionReader
+
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
 	// runnerCtx is the lifecycle of the runner WebSocket connections: Close
@@ -280,6 +283,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/fleet", s.handleFleet)
 				short.Get("/fleet/changes", s.handleFleetChanges)
 				short.Post("/pipelines/{pid}/connectors/{name}/accept-config", s.handleAcceptConfig)
+				short.Get("/pipelines/{pid}/connectors/{name}/config-versions", s.handleConfigVersions)
 				// The scripted demo's presenter controls; no-op outside --demo.
 				s.mountDemo(short)
 			})

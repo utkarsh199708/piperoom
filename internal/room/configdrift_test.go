@@ -17,8 +17,8 @@ import (
 )
 
 type execCall struct {
-	pipeline string
-	step     events.ProposalStep
+	pipeline, proposal string
+	step               events.ProposalStep
 }
 
 // driftSvc is newTestService with the OnActionExecuted hook recorded and a
@@ -40,9 +40,9 @@ func driftSvc(t *testing.T, act ...actions.Action) (*room.Service, *memstore.Sto
 		Owners: &owners.Owners{Pipelines: []owners.Pipeline{
 			{ID: "orders", SourceTables: []string{"public.orders"}, Connectors: []string{"pg-orders"}},
 		}},
-		OnActionExecuted: func(_ context.Context, pipelineID string, step events.ProposalStep) {
+		OnActionExecuted: func(_ context.Context, pipelineID, proposalID string, step events.ProposalStep) {
 			mu.Lock()
-			calls = append(calls, execCall{pipelineID, step})
+			calls = append(calls, execCall{pipelineID, proposalID, step})
 			mu.Unlock()
 		},
 	})
@@ -69,7 +69,7 @@ func TestOnActionExecutedGetsTheStep(t *testing.T) {
 	// Each call runs on its own goroutine: the order is not fixed.
 	slices.SortFunc(got, func(a, b execCall) int { return strings.Compare(string(a.step.Params), string(b.step.Params)) })
 	for i, want := range []events.ProposalStep{s1, s2} {
-		if got[i].pipeline != "orders" || got[i].step.Action != want.Action || string(got[i].step.Params) != string(want.Params) {
+		if got[i].pipeline != "orders" || got[i].proposal != pid || got[i].step.Action != want.Action || string(got[i].step.Params) != string(want.Params) {
 			t.Fatalf("call %d = %+v (%s), want orders and %s", i, got[i], got[i].step.Params, want.Params)
 		}
 	}

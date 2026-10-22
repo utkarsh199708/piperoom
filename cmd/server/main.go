@@ -662,6 +662,13 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	// watcher writes, so every replica answers alike.
 	fleetStore, _ := st.(store.FleetStore)
 	httpOpts = append(httpOpts, httpapi.WithFleet(fleetOptions(own, st, fleetStore, s.watchCfg, changesDays)))
+	// Connector config versions (X5c): the watcher writes them, the
+	// config-versions routes read them; the change-log retention above
+	// purges them (configVersionsPurger).
+	versionStore, _ := st.(store.ConfigVersionStore)
+	if versionStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithConfigVersions(versionStore))
+	}
 	if s.setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
 	}
@@ -716,6 +723,9 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	}
 	if fleetStore != nil {
 		watchDeps.Status = fleetStore
+	}
+	if versionStore != nil {
+		watchDeps.ConfigVersions = versionStore
 	}
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)

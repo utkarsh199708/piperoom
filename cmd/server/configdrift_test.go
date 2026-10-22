@@ -25,10 +25,10 @@ type driftWatcher struct {
 
 func (*driftWatcher) OnRoomClosed(string, string, string) {}
 
-func (d *driftWatcher) ApproveConnectorChange(pipelineID, connector string) {
+func (d *driftWatcher) ApproveConnectorChangeBy(pipelineID, connector, proposalID string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.approved = append(d.approved, pipelineID+"/"+connector)
+	d.approved = append(d.approved, pipelineID+"/"+connector+"/"+proposalID)
 }
 
 func (d *driftWatcher) AcceptConfig(context.Context, string, string) (string, string, error) {
@@ -56,16 +56,16 @@ func TestOnActionExecutedApprovesConnector(t *testing.T) {
 	step := func(p string) events.ProposalStep {
 		return events.ProposalStep{Action: "a", Params: json.RawMessage(p)}
 	}
-	hook.onActionExecuted(context.Background(), "orders", step(`{"connector":"pg-orders"}`)) // no watcher: no-op
+	hook.onActionExecuted(context.Background(), "orders", "p_01", step(`{"connector":"pg-orders"}`)) // no watcher: no-op
 	w := &driftWatcher{}
 	hook.setWatcher(w)
-	hook.onActionExecuted(context.Background(), "orders", step(`{"connector":"pg-orders"}`))
-	hook.onActionExecuted(context.Background(), "orders", step(`{"slot":"x"}`))
-	if len(w.approved) != 1 || w.approved[0] != "orders/pg-orders" {
+	hook.onActionExecuted(context.Background(), "orders", "p_01", step(`{"connector":"pg-orders"}`))
+	hook.onActionExecuted(context.Background(), "orders", "p_01", step(`{"slot":"x"}`))
+	if len(w.approved) != 1 || w.approved[0] != "orders/pg-orders/p_01" {
 		t.Fatalf("approved = %v", w.approved)
 	}
 	hook.clearWatcher(w)
-	hook.onActionExecuted(context.Background(), "orders", step(`{"connector":"pg-orders"}`))
+	hook.onActionExecuted(context.Background(), "orders", "p_01", step(`{"connector":"pg-orders"}`))
 	if len(w.approved) != 1 {
 		t.Fatalf("a cleared watcher was called: %v", w.approved)
 	}

@@ -32,13 +32,13 @@ func (s *Service) actionExecutedLocked(st *roomState, e events.Event) {
 	}
 	step := st.snap.OpenProposals[i].Steps[p.StepIndex]
 	step.Params = append([]byte(nil), step.Params...)
-	pipelineID := st.snap.PipelineID
+	pipelineID, proposalID := st.snap.PipelineID, p.ProposalID
 	if !s.addWorker() {
 		return
 	}
 	go func() {
 		defer s.wg.Done()
-		s.onActionExec(s.ctx, pipelineID, step)
+		s.onActionExec(s.ctx, pipelineID, proposalID, step)
 	}()
 }
 
