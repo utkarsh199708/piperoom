@@ -72,3 +72,24 @@ func TestDeclaredRetentionRefusals(t *testing.T) {
 		}
 	}
 }
+
+// A pipeline that declares its sinks in a sinks: block (no sink_tables:)
+// can declare its sink tables' retention too: validation runs after the
+// block filled SinkTables, and the watcher judges the same SinkRefs tables.
+func TestDeclaredRetentionSinksBlock(t *testing.T) {
+	doc := "pipelines:\n  - id: orders\n    topic_prefix: pg\n    source_tables: [public.orders]\n" +
+		"    connectors: [c1]\n    sinks:\n      - table: analytics.orders\n        warehouse: Postgres\n" +
+		"        writer: {kind: consumer_group, name: order-sync}\n    sink_ts_column: updated_at\n" +
+		"    declared_retention:\n      tables:\n        analytics.orders: 30d\n"
+	o, err := loadOwners(t, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := o.Pipeline("orders")
+	if v, ok := p.DeclaredTableRetention("analytics.orders"); !ok || v != "30d" {
+		t.Fatalf("table = %q %v", v, ok)
+	}
+	if _, err := loadOwners(t, strings.Replace(doc, "        analytics.orders: 30d", "        analytics.other: 30d", 1)); err == nil {
+		t.Fatal("a table outside the sinks: block loaded")
+	}
+}
