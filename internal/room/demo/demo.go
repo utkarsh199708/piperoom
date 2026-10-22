@@ -22,6 +22,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
+	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
 
@@ -138,7 +139,7 @@ func playStory(ctx context.Context, rc *runState, deps agent.Deps, watcher *inbo
 		rc.markIdle()
 		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value."})
 		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "no proposals in this room"})
-		return waitForInput(ctx, rc, watcher, deps.Inbox, emit)
+		return waitForInput(ctx, rc, watcher, deps, emit)
 	}
 
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal."})
@@ -171,21 +172,23 @@ func playStory(ctx context.Context, rc *runState, deps agent.Deps, watcher *inbo
 			rc.markIdle()
 			_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "I cannot propose a fix in this room: " + re.Msg})
 			_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "proposals disabled"})
-			return waitForInput(ctx, rc, watcher, deps.Inbox, emit)
+			return waitForInput(ctx, rc, watcher, deps, emit)
 		}
 		return waitDone, err
 	}
 	rc.markIdle()
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "The fix proposal is waiting for the schema-registry and kafka-connect owners."})
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "1 proposal open"})
-	return waitForInput(ctx, rc, watcher, deps.Inbox, emit)
+	return waitForInput(ctx, rc, watcher, deps, emit)
 }
 
-// waitForInput answers steers, comments and approval results until the room
-// closes. An inbox that is closed (a shadow room) ends it at once with nil.
-// The wait rides on the run's single inbox watcher, so a reset (which returns
-// waitReset) never leaves a second Wait racing for the same input.
-func waitForInput(ctx context.Context, rc *runState, watcher *inboxWatcher, in agent.Inbox, emit func(events.Type, any) error) (runWait, error) {
+// waitForInput answers steers, comments, forwarded suggestions and approval
+// results until the room closes. An inbox that is closed (a shadow room) ends
+// it at once with nil. The wait rides on the run's single inbox watcher, so a
+// reset (which returns waitReset) never leaves a second Wait racing for the
+// same input.
+func waitForInput(ctx context.Context, rc *runState, watcher *inboxWatcher, deps agent.Deps, emit func(events.Type, any) error) (runWait, error) {
+	in := deps.Inbox
 	if in == nil {
 		return waitDone, nil
 	}
@@ -202,16 +205,7 @@ func waitForInput(ctx context.Context, rc *runState, watcher *inboxWatcher, in a
 			return waitDone, nil
 		}
 		for _, in := range inputs {
-			switch in.Kind {
-			case "steer":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it: " + in.Text})
-			case "comment":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Noted from " + in.Actor.Name + ": " + in.Text, ReplyTo: in.CommentID})
-			case "approval_result":
-				_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: in.Text})
-			case "action_result":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: in.Text})
-			}
+			handleInput(ctx, deps, in, emit)
 		}
 	}
 	return waitDone, nil
@@ -248,6 +242,34 @@ func (w *inboxWatcher) wait(ctx context.Context, rc *runState) runWait {
 				return waitDone // room closed or ctx cancelled
 			}
 			return waitReady
+		}
+	}
+}
+
+// handleInput answers one human input. The switch mirrors the input kinds of
+// internal/agent/contract.go; a kind the demo does not act on is logged at
+// debug level rather than dropped silently, so the next kind added to the
+// contract shows up in a demo run (KAN-391).
+func handleInput(ctx context.Context, deps agent.Deps, in agent.HumanInput, emit func(events.Type, any) error) {
+	switch in.Kind {
+	case "steer":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it: " + in.Text})
+	case "suggestion":
+		// A forwarded suggestion is the suggester's words, not the driver's
+		// (the real agent wraps it as untrusted data), so the demo only
+		// acknowledges it and never acts on its content. The cap keeps one
+		// large paste from crowding the room.
+		text, _ := tools.Truncate(in.Text)
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it (forwarded suggestion): " + text})
+	case "comment":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Noted from " + in.Actor.Name + ": " + in.Text, ReplyTo: in.CommentID})
+	case "approval_result":
+		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: in.Text})
+	case "action_result":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: in.Text})
+	default:
+		if deps.Logger != nil {
+			deps.Logger.DebugContext(ctx, "demo: no scripted handler for human input kind", "kind", in.Kind, "seq", in.Seq)
 		}
 	}
 }

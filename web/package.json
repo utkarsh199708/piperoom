@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "test": "vitest run",
     "e2e": "npm run build && playwright test",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "audit:runtime": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
     "@fontsource-variable/geist": "5.3.0",
@@ -58,7 +59,7 @@
   "allowScripts": {
     "esbuild@0.28.2": true
   },
-  "//": "postcss-selector-parser override clears 2 moderate PostCSS advisories; remove once Tailwind v4 lands",
+  "//": "postcss-selector-parser is overridden to ^7 (Tailwind 3 wants ^6) to clear 2 moderate PostCSS advisories; remove it after the Tailwind v4 migration (KAN-387). The 5 high advisories left by npm audit are dev-only and all trace to tailwindcss 3 -> braces 3.0.3, which has no patched release (GHSA-vfj7-8cjw-p6xm); KAN-387 clears them. Runtime deps are clean: npm run audit:runtime.",
   "overrides": {
     "postcss-selector-parser": "^7.1.6"
   }
