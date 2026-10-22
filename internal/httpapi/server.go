@@ -19,6 +19,7 @@ import (
 
 	"piperoom/internal/alertin"
 	"piperoom/internal/auth"
+	"piperoom/internal/clients"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/ws"
@@ -43,6 +44,7 @@ type Server struct {
 	handler http.Handler
 
 	alerts       alertin.Config // signed alert sources; the zero value has every source disabled
+	changes      http.Handler   // POST /api/changes/webhook (WithChangesWebhook); nil = not mounted
 	ready        Pinger
 	probeTimeout time.Duration
 	readyWarn    readyWarner
@@ -77,6 +79,9 @@ type Server struct {
 	// Admin settings and connection tests (WithAdmin): admin.go.
 	admin      AdminSettings
 	adminLimit *rateLimiter
+
+	// Watch sample history (WithSamples): trends.go.
+	samples clients.SampleReader
 
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
@@ -179,6 +184,10 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		// no session. They take the sender's own content type (no requireJSON).
 		// A source without a secret answers 401.
 		api.With(middleware.Timeout(requestTimeout)).Post("/alerts/{source}", s.handleSignedAlert)
+		// The signed change webhook (X4): the same scheme, its own secret.
+		if s.changes != nil {
+			api.With(middleware.Timeout(requestTimeout)).Post("/changes/webhook", s.changes.ServeHTTP)
+		}
 
 		// The setup runner's WebSocket (PIPEROOM_SETUP_ENABLED=on): the
 		// credential is the pairing code in its first frame, not a session, so
@@ -261,6 +270,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
+				short.Get("/pipelines/{pid}/trends", s.handleTrends)
 				// The scripted demo's presenter controls; no-op outside --demo.
 				s.mountDemo(short)
 			})

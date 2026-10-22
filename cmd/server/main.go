@@ -211,6 +211,7 @@ type serverSettings struct {
 	resumeOnTakeover  bool
 	watchCfg          config.Watch
 	watchMaxOpenRooms int
+	watchForecast     config.WatchForecast
 	pmMode            string
 	shadowCfg         config.Shadow
 	writeOn           bool
@@ -254,6 +255,11 @@ func parseServer(cfg config.Config, m serveMode) (serverSettings, error) {
 	// room beyond PIPEROOM_MAX_AGENTS queues for an agent but still gets its
 	// first look.
 	if s.watchMaxOpenRooms, err = config.ParseWatchMaxOpenRooms(cfg); err != nil {
+		return serverSettings{}, fmt.Errorf("server: %w", err)
+	}
+	// X3: a bad PIPEROOM_WATCH_FORECAST_HORIZON stops the start like any
+	// other watcher value.
+	if s.watchForecast, err = config.ParseWatchForecast(cfg); err != nil {
 		return serverSettings{}, fmt.Errorf("server: %w", err)
 	}
 
@@ -623,6 +629,14 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	changesPurge, _ := st.(changesPurger)
 	stopChangesRetention := startElectedChangesRetention(ctx, elector, changesPurge, changesDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopChangesRetention()
+	// Watch samples (X3a) are kept 7 days, whatever else is configured.
+	sampleStore, _ := st.(store.SampleStore)
+	var samplesPurge samplesPurger
+	if sampleStore != nil {
+		samplesPurge = sampleStore
+	}
+	stopSamplesRetention := startElectedSamplesRetention(ctx, elector, samplesPurge, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopSamplesRetention()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(s.publicOrigin), httpapi.WithAuth(s.authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
@@ -632,8 +646,12 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 			PipelineDailyTokens:  s.spend.cost.PipelineDailyTokens,
 			PipelineDailyCostUSD: s.spend.cost.PipelineDailyCostUSD,
 		})}
+	httpOpts = append(httpOpts, httpapi.WithChangesWebhook(changeWebhook(cfg, own, st, log)))
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
+	}
+	if sampleStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithSamples(sampleStore))
 	}
 	if s.setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
@@ -682,6 +700,10 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		Rooms:        watchRooms{svc: svc},
 		Config:       s.watchCfg,
 		MaxOpenRooms: s.watchMaxOpenRooms,
+		Forecast:     s.watchForecast,
+	}
+	if sampleStore != nil {
+		watchDeps.Samples = sampleStore
 	}
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)

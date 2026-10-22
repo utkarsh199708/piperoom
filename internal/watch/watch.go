@@ -34,6 +34,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -158,6 +159,11 @@ type Deps struct {
 	// from PIPEROOM_MAX_AGENTS: a room beyond the agent pool still opens, gets
 	// the triage pass and queues for an agent. Zero means 6.
 	MaxOpenRooms int
+	// Samples, when set, turns on the sample history and forecasts (X3a,
+	// forecast.go): the room store's watch_samples. Forecast comes from
+	// config.ParseWatchForecast; a zero Horizon means the default 48 h.
+	Samples  SampleStore
+	Forecast config.WatchForecast
 	// Clock defaults to the wall clock.
 	Clock Clock
 	// Log defaults to slog.Default().
@@ -180,10 +186,11 @@ const (
 )
 
 // signalIDs lists the signals in a fixed order, so titles and logs are stable.
-// New signals go at the end so existing titles keep their order.
-var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
+// New signals go at the end so existing titles keep their order; the
+// forecasts (one id per metric, forecast.go) come last.
+var signalIDs = append([]string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
-	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}
+	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}, forecastIDs()...)
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -229,6 +236,14 @@ type pipeState struct {
 	// ackLocked, in memory). A storm follower never had a room under its own
 	// dedup key, so the room service cannot tell its cooldown; this can.
 	lastClosed time.Time
+	// roomKey is the dedup key the watcher opened roomID under (DedupKey or a
+	// ForecastDedupKey); "" for a room it only joined.
+	roomKey string
+	// lastSample is when each metric was last sampled (forecast.go).
+	lastSample map[string]time.Time
+	// fcClosed is, per forecast metric, when a room carrying its forecast
+	// closed: the per-metric cooldown the watcher saw itself.
+	fcClosed map[string]time.Time
 	// warned* keep "skipped" lines to one per episode.
 	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }
@@ -289,6 +304,10 @@ type Watcher struct {
 	chgFailing bool
 	// lagNoReaderLogged keeps the "no lag reader" line to one.
 	lagNoReaderLogged bool
+
+	// Sample history and forecasts (forecast.go); nil samples = off.
+	samples SampleStore
+	horizon time.Duration
 }
 
 const maxClosedRemembered = 256
@@ -334,6 +353,10 @@ func New(d Deps) (*Watcher, error) {
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 		changes: d.Changes, registry: d.Registry, ddl: d.DDL,
 		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
+		samples: d.Samples, horizon: d.Forecast.Horizon,
+	}
+	if w.horizon <= 0 {
+		w.horizon = 48 * time.Hour // config.DefaultWatchForecastHorizon
 	}
 	if w.maxRooms <= 0 {
 		w.maxRooms = defaultMaxOpenRooms
@@ -429,7 +452,12 @@ func (w *Watcher) tick(ctx context.Context) {
 	}
 	w.mu.Lock()
 	fired := w.evaluate(now, ts, obs)
+	jobs := w.planSamples(now, ts, obs)
 	w.mu.Unlock()
+	w.writeSamples(ctx, now, jobs)
+	if ctx.Err() != nil {
+		return
+	}
 	if w.cfg.Mode == config.WatchRooms {
 		w.emit(ctx, now, ts, fired)
 	}
@@ -462,16 +490,34 @@ func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 }
 
 // ackLocked turns firing signals into acked and forgets the room.
+//
+// A room the watcher opened for forecasts alone (ForecastDedupKey) starts the
+// cooldown of those forecasts only: a real signal later on the pipeline must
+// still open a room (X3).
 func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
+	now := w.clock.Now()
+	real := !strings.HasPrefix(ps.roomKey, ForecastDedupKey(pipelineID, ""))
 	for id, ss := range ps.sigs {
+		m := forecastMetric(id)
+		if m == "" && ss.phase != phaseOK && ss.notified {
+			real = true
+		}
 		if ss.phase == phaseFiring {
 			ss.ack()
+			if m != "" {
+				if ps.fcClosed == nil {
+					ps.fcClosed = map[string]time.Time{}
+				}
+				ps.fcClosed[m] = now
+			}
 			w.log.Info("watch: signal acked, room closed while it still fires",
 				"mode", string(w.cfg.Mode), "pipeline", pipelineID, "signal", id, "room", roomID)
 		}
 	}
-	ps.roomID, ps.owned, ps.follower = "", false, false
-	ps.lastClosed = w.clock.Now()
+	ps.roomID, ps.owned, ps.follower, ps.roomKey = "", false, false, ""
+	if real {
+		ps.lastClosed = now
+	}
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
 }
 

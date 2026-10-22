@@ -110,7 +110,11 @@ it as `{env: PIPEROOM_SECRET_<ID>}` and lists the variables to set.
 
 ## 6. Components
 
-### 6.1 Storage (A5, new migration `00017_config.sql`)
+### 6.1 Storage (A5, new migration: the next free number, `000NN_config.sql`)
+
+Number 00017, first reserved here, was given up when the X wave's 00018 (`watch_samples`) merged: goose refuses a
+number below one a database already ran (numbering rule in the X3 block of `internal/clients/clients.go`). This
+table takes the next free number after 00020 when it is built.
 
 ```sql
 CREATE TABLE config_versions (

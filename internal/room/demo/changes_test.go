@@ -129,7 +129,7 @@ func TestDDLLogStepMatchesWhatChanged(t *testing.T) {
 func TestRunEmitsWhatChangedStep(t *testing.T) {
 	sink := &recordingSink{}
 	err := runStory(context.Background(), agent.Alert{RoomID: "r", PipelineID: "orders"},
-		agent.Deps{Sink: sink, Inbox: &closedInbox{}}, agent.Options{}, storyNow, 0)
+		agent.Deps{Sink: sink, Inbox: &closedInbox{}}, agent.Options{}, storyNow, roomTestDelay)
 	if err != nil {
 		t.Fatalf("runStory: %v", err)
 	}

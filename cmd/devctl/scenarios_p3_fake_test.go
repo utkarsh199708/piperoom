@@ -74,7 +74,14 @@ type p3World struct {
 	rejectStatus string
 	lag          int64
 	resetSeen    bool // the group's committed offsets were at the topic start when a good build started
-	sql          []string
+	// X1g silent scenarios
+	skipWhere, dropColumns    string // the running build's knobs
+	backfillSrc, backfillSink int
+	nullTS                    int  // analytics.orders rows with updated_at NULL
+	sinkEmpty                 bool // analytics.orders has no updated_at yet
+	riFull                    bool // public.orders REPLICA IDENTITY FULL
+	placeholders              int  // analytics.orders rows holding the TOAST placeholder
+	sql                       []string
 }
 
 func newP3World(t *testing.T) *p3World {
@@ -94,7 +101,7 @@ func newP3World(t *testing.T) *p3World {
 		nextID: 1000, loaded: map[int64]bool{},
 		slotExists: true, slotActive: true, retained: 26000,
 		offsetLSN: 0x1000000, slotStartLSN: 0x1000000,
-		connState: "RUNNING", consumerUp: true,
+		connState: "RUNNING", consumerUp: true, riFull: true,
 	}
 }
 
@@ -247,6 +254,9 @@ func (w *p3World) exec(db, q string) (string, error) {
 	case q == sqlSlotStart:
 		return fmt.Sprintf("0/%X", w.slotStartLSN), nil
 	case strings.HasPrefix(q, "SELECT coalesce(round(extract(epoch FROM max(updated_at))") && db == "warehouse":
+		if w.sinkEmpty {
+			return "0", nil
+		}
 		return "1760000000000000", nil
 	case strings.HasPrefix(q, sqlTouchPending):
 		w.touched = append(w.touched, strings.TrimPrefix(q, sqlTouchPending))
@@ -276,6 +286,65 @@ func (w *p3World) exec(db, q string) (string, error) {
 		return strconv.FormatInt(w.nextID, 10), nil
 	case q == sqlCountWarehouse && db == "warehouse":
 		return strconv.Itoa(len(w.loaded)), nil
+	// X1g: sink-filtered-rows
+	case q == sqlInsertBackfill:
+		w.nextID += backfillOrders
+		w.backfillSrc += backfillOrders
+		if w.consumerUp && w.skipWhere != "status="+backfillStatus {
+			w.backfillSink += backfillOrders
+		}
+	case q == sqlSourceBackfill:
+		return strconv.Itoa(w.backfillSrc), nil
+	case q == sqlSinkBackfill && db == "warehouse":
+		return strconv.Itoa(w.backfillSink), nil
+	// X1g: sink-dropped-column
+	case strings.HasPrefix(q, sqlPinnedStart):
+		w.nextID += droppedOrders
+		if !strings.Contains(q, "1760000000000000 * interval") {
+			return "", fmt.Errorf("fake postgres: pinned insert is not at the sink's newest updated_at: %s", q)
+		}
+		if w.consumerUp && strings.Contains(w.dropColumns, droppedColumn) {
+			w.nullTS += droppedOrders
+		}
+	case q == sqlSinkNullTS && db == "warehouse":
+		return strconv.Itoa(w.nullTS), nil
+	// X1g: consumer-duplicates
+	case q == sqlInsertDupSource:
+		recs := make([]*kgo.Record, dupSourceOrders)
+		for i := range recs {
+			w.nextID++
+			recs[i] = &kgo.Record{Key: []byte(fmt.Sprintf("key-%d", w.nextID)), Value: []byte(fmt.Sprintf("event-%d", w.nextID))}
+		}
+		w.produce(ordersTopic, recs...)
+	// X1g: toast-placeholder
+	case q == sqlReplicaDefault:
+		w.riFull = false
+	case q == sqlReplicaFull:
+		w.riFull = true
+	case q == sqlInsertToast:
+		lo := w.nextID + 1
+		w.nextID += toastOrders
+		if w.consumerUp {
+			// The insert event carries the full value: the sink loads it.
+			for id := lo; id <= w.nextID; id++ {
+				w.loaded[id] = true
+			}
+		}
+		return fmt.Sprintf("%d %d", lo, w.nextID), nil
+	case strings.HasPrefix(q, "UPDATE orders SET amount = amount + 1, updated_at = now() WHERE id BETWEEN "):
+		if !w.riFull {
+			w.placeholders += toastOrders
+		}
+	case q == sqlSinkPlaceholders && db == "warehouse":
+		return strconv.Itoa(w.placeholders), nil
+	case q == sqlSinkPlaceholderIDs && db == "warehouse":
+		ids := make([]string, w.placeholders)
+		for i := range ids {
+			ids[i] = strconv.Itoa(2000 + i)
+		}
+		return strings.Join(ids, ","), nil
+	case strings.HasPrefix(q, "UPDATE orders SET status = status || '', updated_at = now() WHERE id IN ("):
+		w.placeholders = 0
 	// dlq-backlog
 	case q == sqlInsertGift:
 		w.sourceGift += giftOrders
@@ -350,6 +419,18 @@ func (w *p3World) compose(_ context.Context, env map[string]string, args ...stri
 		w.consumerUp = true
 		w.skipOps = env["DEVCONSUMER_SKIP_OPS"]
 		w.rejectStatus = env["DEVCONSUMER_REJECT_STATUS"]
+		w.skipWhere = env["DEVCONSUMER_SKIP_WHERE"]
+		w.dropColumns = env["DEVCONSUMER_DROP_COLUMNS"]
+		if w.atStart() {
+			// A good build re-reads the topic from the reset offsets: the
+			// upsert loads what the filter skipped and fills the NULLs.
+			if w.skipWhere == "" {
+				w.backfillSink = w.backfillSrc
+			}
+			if w.dropColumns == "" {
+				w.nullTS = 0
+			}
+		}
 		if w.skipOps == "" && w.atStart() {
 			// The good build re-reads the topic from the reset offsets and
 			// loads every order the bad build skipped.

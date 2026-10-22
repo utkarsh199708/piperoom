@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Confluent Cloud Status - Incident History</title>
+    <link>https://status.confluent.cloud</link>
+    <description>Statuspage</description>
+    <item>
+      <title>Elevated produce latency in AWS us-east-1</title>
+      <description>
+&lt;p&gt;&lt;small&gt;Oct &lt;var data-var='date'&gt;20&lt;/var&gt;, &lt;var data-var='time'&gt;13:58&lt;/var&gt; UTC&lt;/small&gt;&lt;br&gt;&lt;strong&gt;Monitoring&lt;/strong&gt; - A fix has been applied and we are monitoring the results.&lt;/p&gt;&lt;p&gt;&lt;small&gt;Oct &lt;var data-var='date'&gt;20&lt;/var&gt;, &lt;var data-var='time'&gt;13:20&lt;/var&gt; UTC&lt;/small&gt;&lt;br&gt;&lt;strong&gt;Investigating&lt;/strong&gt; - We are investigating elevated produce latency.&lt;/p&gt;      </description>
+      <pubDate>Tue, 20 Oct 2026 13:58:00 +0000</pubDate>
+      <link>https://status.confluent.cloud/incidents/abc123</link>
+      <guid>https://status.confluent.cloud/incidents/abc123</guid>
+    </item>
+    <item>
+      <title>Schema Registry errors in GCP europe-west1</title>
+      <description>&lt;p&gt;&lt;strong&gt;Resolved&lt;/strong&gt; - This incident has been resolved.&lt;/p&gt;&lt;p&gt;&lt;strong&gt;Identified&lt;/strong&gt; - The issue has been identified.&lt;/p&gt;</description>
+      <pubDate>Mon, 19 Oct 2026 09:00:00 +0000</pubDate>
+      <link>https://status.confluent.cloud/incidents/def456</link>
+      <guid>https://status.confluent.cloud/incidents/def456</guid>
+    </item>
+    <item>
+      <title>Scheduled maintenance of the control plane</title>
+      <description>&lt;p&gt;&lt;strong&gt;Scheduled&lt;/strong&gt; - We will be performing maintenance.&lt;/p&gt;</description>
+      <pubDate>Mon, 19 Oct 2026 08:00:00 +0000</pubDate>
+      <link>https://status.confluent.cloud/incidents/maint1</link>
+      <guid>https://status.confluent.cloud/incidents/maint1</guid>
+    </item>
+    <item>
+      <title>Old incident never marked resolved</title>
+      <description>&lt;p&gt;&lt;strong&gt;Investigating&lt;/strong&gt; - Looking.&lt;/p&gt;</description>
+      <pubDate>Thu, 1 Oct 2026 08:00:00 +0000</pubDate>
+      <link>https://status.confluent.cloud/incidents/old1</link>
+      <guid>https://status.confluent.cloud/incidents/old1</guid>
+    </item>
+  </channel>
+</rss>

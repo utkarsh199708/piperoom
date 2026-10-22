@@ -537,3 +537,102 @@ late-batch:       dag_schedule_gap revenue_daily: verdict paused; the DAG is PAU
   idempotent (restoring the variable and removing the broken model are both safe on an already-restored stack).
 - The alerts are reconciliation/freshness checks, the kind a team's own monitoring would send; none of them
   can come from the watcher (a batch pipeline has no Kafka/Connect/slot to watch).
+
+## Silent corruption: `sink-filtered-rows`, `sink-dropped-column`, `consumer-duplicates`, `toast-placeholder`
+
+Four breaks where **nothing fails**: the connector is RUNNING, the slot is active, order-sync is Stable with
+lag 0, and **`devctl health` stays green** after the break (the warehouse layer measures "pending" rows by
+`updated_at` against the sink's newest row, so each break leaves its rows older than that). The only way in is
+comparing source and sink, or reading the topic: the watcher's `count_drift`, `row_drift` and `dup_keys`
+signals (X1). They run on the baseline `dev/owners.yaml` (no owners file switch). The drift checks fire every
+`watch.reconcile_interval` (15 min by default; set `reconcile_interval: 1m` in a local owners file to see a
+signal sooner). All four are re-runnable: break twice and fix once ends healthy, and a second fix is a no-op or
+a harmless replay. The rows a break writes stay in `public.orders` (they are ordinary orders); `devctl reset`
+removes them.
+
+Not yet observed on a live stack (no Docker in the session that wrote them): the *Expected* blocks below
+come from the code and from Postgres/Debezium behaviour, and the integration tests
+(`go test -tags integration ./cmd/devctl -run 'TestIntegration(SinkFiltered|SinkDropped|ConsumerDup|Toast)'`)
+are the first live check. If you see something different, update this file.
+
+### 14. `sink-filtered-rows` — a filter in the consumer drops rows
+
+**Break:** devconsumer restarts with `SKIP_WHERE=status=backfill` (`DEVCONSUMER_SKIP_WHERE` in compose): a
+release whose filter drops every order in that status without loading it, and commits the offset. 40 `backfill`
+orders are inserted, then one normal marker order; the break waits for the marker in the warehouse and for lag 0.
+
+**Expected:**
+```
+consumer    order-sync: state Stable, members 1, total lag 0
+warehouse   fresh; SELECT count(*) FROM orders  -  SELECT count(*) FROM analytics.orders  >= 40
+devctl health: pipeline healthy
+devconsumer log: "devconsumer started … skip_where=status=backfill"
+watcher: count_drift (sev2) on public.orders / analytics.orders, source - sink = missing rows
+```
+**Fix:** devconsumer restarts without the filter, order-sync is reset to the start of `pg.public.orders` and
+replays (the load is an upsert by id), then the fix waits until no `backfill` order is missing.
+
+### 15. `sink-dropped-column` — the upsert stops writing `updated_at`
+
+**Break:** devconsumer restarts with `DROP_COLUMNS=updated_at`: a release that rewrote its upsert and lost the
+column (left out of both the INSERT and the update list). 20 orders are inserted whose source `updated_at` is
+exactly the sink's current newest (late-arriving rows), so health cannot see them as pending; they load with
+`updated_at` NULL.
+
+**Expected:**
+```
+consumer    order-sync: state Stable, members 1, total lag 0
+warehouse   SELECT count(*) FROM analytics.orders WHERE updated_at IS NULL  >= 20 (source has the timestamps)
+devctl health: pipeline healthy
+watcher: row_drift (sev2): mismatched rows on the updated_at column; counts match, so no count_drift
+```
+**Fix:** devconsumer restarts with the column written and order-sync replays from the start of the topic; the
+upsert fills every NULL; the fix waits until none is left.
+
+### 16. `consumer-duplicates` — the same change events twice on the topic
+
+**Break:** needs order-sync running and at lag 0. Writes 10 orders, waits for them in the warehouse, then
+publishes the newest event of each of 10 keys a second time on `pg.public.orders` (same key, same payload, so
+the same `source.lsn`), as an upstream redelivery would (an unclean Connect restart that replays from the last
+flushed offset, a relay re-publishing a window). devconsumer reprocesses them without harm (upsert) and lag
+returns to 0. A consumer cannot create duplicates by reading, so the break writes them; taking only the newest
+event per key makes them duplicates, not LSN regressions (`order_skew`).
+
+**Expected:**
+```
+consumer    order-sync: state Stable, members 1, total lag 0
+warehouse   correct (the upsert absorbs the copies)
+devctl health: pipeline healthy
+kafka_dup_keys pg.public.orders: >= 10 duplicate events, 0 order regressions
+watcher: dup_keys (sev3)
+```
+**Fix:** Kafka cannot delete single records, so the fix waits for lag 0 and moves each partition's log start up
+to order-sync's committed offset **minus the last record** (kept so the topic is never empty: health reads the
+newest record). The duplicates sit before the end of the log and are consumed, so the sink loses nothing; the
+topic's older history is gone, as with `kafka-delete-records`. A topic with no duplicate event is left alone
+(second run: "skipped"). The count (the check the break and the fix use) is the records in the last 5000 per
+partition that repeat an earlier record's key and value byte for byte. Because the cut drops history, run this
+scenario on its own: the fixes of `sink-filtered-rows` and `sink-dropped-column` replay order-sync from the start
+of the topic and only see what is left; `devctl reset` rebuilds the full history.
+
+### 17. `toast-placeholder` — Debezium emits the unavailable-value placeholder
+
+**Break:** needs order-sync running and at lag 0. `ALTER TABLE orders REPLICA IDENTITY DEFAULT` (the dev default
+is FULL), then 3 orders with a 12.8 kB `status` (random hex, stored out of line by TOAST) are inserted and, once
+in the warehouse, updated in a non-TOAST column (`amount`, `updated_at`). The update's WAL record has no value
+for the unchanged TOAST column, so Debezium writes `__debezium_unavailable_value` as `status`, and devconsumer
+loads that string.
+
+**Expected:**
+```
+consumer    order-sync: state Stable, members 1, total lag 0
+warehouse   SELECT count(*) FROM analytics.orders WHERE status = '__debezium_unavailable_value'  >= 3
+source      the same rows have the real status
+devctl health: pipeline healthy
+pg_toast_risk (X1d): orders.status TOASTed, replica identity DEFAULT, placeholder seen N times in the sink
+watcher: row_drift (sev2): mismatched rows (status)
+```
+**Fix:** `ALTER TABLE orders REPLICA IDENTITY FULL`, then rewrite `status` of every source row the sink holds as a
+placeholder (`status = status || ''` builds a new value, so the change event carries it in full) and wait until
+no placeholder is left. With no placeholder row only the `ALTER` runs. The change events already on the topic
+keep the placeholder (history is not rewritten).

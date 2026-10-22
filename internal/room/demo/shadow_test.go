@@ -43,7 +43,7 @@ func TestRunWithoutProposalsEndsOnClosedInbox(t *testing.T) {
 	in := &closedInbox{}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	err := Run(ctx, agent.Alert{RoomID: "r", PipelineID: "orders"}, agent.Deps{Sink: sink, Inbox: in}, agent.Options{})
+	err := runFast(ctx, agent.Alert{RoomID: "r", PipelineID: "orders"}, agent.Deps{Sink: sink, Inbox: in})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

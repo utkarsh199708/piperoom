@@ -53,7 +53,8 @@ func TestDirRunResults(t *testing.T) {
 			name: "v6",
 			file: v6,
 			want: RunResults{
-				GeneratedAt: time.Date(2026, 10, 17, 0, 12, 31, 402117000, time.UTC),
+				GeneratedAt:  time.Date(2026, 10, 17, 0, 12, 31, 402117000, time.UTC),
+				InvocationID: "5b0d3f52-6a1e-4c3a-9a43-3c1f0d7e9b21",
 				Results: []ModelResult{
 					{Model: "model.analytics.dim_customer", Status: "success", Message: "SELECT 1200", Rows: 1200, Seconds: 1.25},
 					{Model: "model.analytics.fct_revenue", Status: "error", Rows: -1, Seconds: 0.31,
@@ -66,8 +67,9 @@ func TestDirRunResults(t *testing.T) {
 			name: "v5",
 			file: fixture(t, "run_results_v5.json"),
 			want: RunResults{
-				GeneratedAt: time.Date(2026, 10, 16, 0, 10, 2, 0, time.UTC),
-				Results:     []ModelResult{{Model: "model.analytics.fct_revenue", Status: "success", Message: "INSERT 0 42", Rows: 42, Seconds: 2.5}},
+				GeneratedAt:  time.Date(2026, 10, 16, 0, 10, 2, 0, time.UTC),
+				InvocationID: "0c9e1d2a-1111-4c3a-9a43-3c1f0d7e9b21",
+				Results:      []ModelResult{{Model: "model.analytics.fct_revenue", Status: "success", Message: "INSERT 0 42", Rows: 42, Seconds: 2.5}},
 			},
 		},
 		{
@@ -114,6 +116,9 @@ func TestDirRunResults(t *testing.T) {
 			}
 			if !got.GeneratedAt.Equal(tt.want.GeneratedAt) {
 				t.Errorf("GeneratedAt = %v, want %v", got.GeneratedAt, tt.want.GeneratedAt)
+			}
+			if got.InvocationID != tt.want.InvocationID {
+				t.Errorf("InvocationID = %q, want %q", got.InvocationID, tt.want.InvocationID)
 			}
 			if !slices.Equal(got.Results, tt.want.Results) {
 				t.Errorf("Results =\n%+v\nwant\n%+v", got.Results, tt.want.Results)

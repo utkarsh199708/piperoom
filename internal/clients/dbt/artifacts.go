@@ -123,8 +123,9 @@ func checkVersion(file, kind, version string, supported []int) error {
 }
 
 type metadata struct {
-	Version     string    `json:"dbt_schema_version"`
-	GeneratedAt time.Time `json:"generated_at"`
+	Version      string    `json:"dbt_schema_version"`
+	GeneratedAt  time.Time `json:"generated_at"`
+	InvocationID string    `json:"invocation_id"`
 }
 
 // readCapped reads all of r, failing with ErrTooLarge past MaxArtifactBytes
@@ -178,7 +179,7 @@ func parseRunResults(b []byte) (RunResults, error) {
 	if err := json.Unmarshal(head.Results, &raw); err != nil {
 		return RunResults{}, malformed(RunResultsFile, err)
 	}
-	out := RunResults{GeneratedAt: head.Metadata.GeneratedAt, Results: make([]ModelResult, 0, len(raw))}
+	out := RunResults{GeneratedAt: head.Metadata.GeneratedAt, InvocationID: head.Metadata.InvocationID, Results: make([]ModelResult, 0, len(raw))}
 	for i, r := range raw {
 		if r.UniqueID == "" {
 			return RunResults{}, malformed(RunResultsFile, fmt.Errorf("results[%d] has no unique_id", i))

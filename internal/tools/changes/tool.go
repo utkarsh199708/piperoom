@@ -51,17 +51,18 @@ const (
 	maxLineRunes = 300 // one summary line, after the timestamp and object
 )
 
-// Kinds lists every change kind the log can hold, for the input schema and the
-// "recorded kinds" note.
-var Kinds = []string{clients.ChangeDDL, clients.ChangeConnectorConfig, clients.ChangeConnectorState, clients.ChangeSchemaVersion}
-
 // Deps are the tool's dependencies.
 type Deps struct {
 	// Changes is the change log. Nil or failing is allowed: the tool then
-	// answers from the live DDL read alone and says "change log unavailable".
+	// answers from the live reads alone and says "change log unavailable".
 	Changes clients.ChangeReader
-	// Src is the source Postgres reader for the live DDL read; nil skips it.
+	// Src is the source Postgres reader for the live DDL read and, when it
+	// implements MigrationReader, the Flyway and Liquibase history read; nil
+	// skips both.
 	Src clients.SourceReader
+	// Transform is the dbt reader; with it, the latest dbt run of a batch
+	// pipeline's models is a migration change. Nil skips it.
+	Transform clients.TransformReader
 	// Owners resolves the room's pipeline (tools.ScopeFor).
 	Owners *owners.Owners
 	// Logger defaults to slog.Default().
@@ -104,7 +105,8 @@ func (t *Tool) Kind() tools.Kind { return tools.KindRead }
 func (t *Tool) Description() string {
 	return "Lists what changed on this pipeline recently, newest first: DDL on the source tables (with the user), " +
 		"connector config key changes (credential values masked), connector and task state transitions, and " +
-		"Schema Registry versions registered or deleted. Use it as your second read: a change just before the " +
+		"Schema Registry versions registered or deleted, and changes made outside the pipeline: application " +
+		"deploys, schema migrations (Flyway, Liquibase, dbt runs) and vendor incidents. Use it as your second read: a change just before the " +
 		"alert is a suspect to verify with the other tools, not proof of the cause. Config changes are noticed " +
 		"when the watcher polls, so their time is the poll time, not the edit time."
 }
@@ -118,7 +120,7 @@ func (t *Tool) InputSchema() map[string]any {
 			"window": map[string]any{"type": "string", "description": "How far back, like \"6h\" or \"2d\". Default 6h, from 1s to 7d."},
 			"kinds": map[string]any{
 				"type":        "array",
-				"items":       map[string]any{"type": "string", "enum": Kinds},
+				"items":       map[string]any{"type": "string", "enum": clients.ChangeKinds()},
 				"description": "Only these kinds. Default: all.",
 			},
 			"object": map[string]any{"type": "string", "description": "Only this \"schema.table\", connector or schema subject of the pipeline."},
@@ -194,9 +196,10 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 	if err != nil {
 		return tools.Result{}, err
 	}
+	kinds := clients.ChangeKinds()
 	for _, k := range p.Kinds {
-		if !slices.Contains(Kinds, k) {
-			return tools.Result{}, fmt.Errorf("%w: unknown kind %q (kinds: %s)", tools.ErrBadInput, k, strings.Join(Kinds, ", "))
+		if !slices.Contains(kinds, k) {
+			return tools.Result{}, fmt.Errorf("%w: unknown kind %q (kinds: %s)", tools.ErrBadInput, k, strings.Join(kinds, ", "))
 		}
 	}
 	if len(p.Object) > 200 || strings.ContainsFunc(p.Object, unicode.IsControl) {
@@ -258,8 +261,18 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 			}
 		}
 	}
-	if !logOK && !liveOK {
-		return tools.Result{}, errors.New("changes: neither the change log nor the live DDL read is available")
+	migOK := false
+	if len(p.Kinds) == 0 || slices.Contains(p.Kinds, clients.ChangeMigration) {
+		rows, mnotes, ok, err := t.readMigrations(ctx, scope, since)
+		if err != nil {
+			return tools.Result{}, err
+		}
+		migOK = ok
+		all = append(all, rows...)
+		notes = append(notes, mnotes...)
+	}
+	if !logOK && !liveOK && !migOK {
+		return tools.Result{}, errors.New("changes: neither the change log nor a live read (DDL, migrations) is available")
 	}
 
 	all = mergeAndFilter(all, p.Object, p.Kinds, since, now)
@@ -268,7 +281,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 
 	var sb strings.Builder
 	if len(shown) == 0 {
-		fmt.Fprintf(&sb, "no recorded change on %s in the last %s (recorded kinds: %s)", pipeline, windowLabel(p.Window, window), strings.Join(Kinds, ", "))
+		fmt.Fprintf(&sb, "no recorded change on %s in the last %s (recorded kinds: %s)", pipeline, windowLabel(p.Window, window), strings.Join(kinds, ", "))
 	}
 	for i, c := range shown {
 		if i > 0 {
@@ -498,8 +511,14 @@ func line(c clients.PipelineChange) string {
 }
 
 // describe is the text after the colon: for a state change the transition from
-// before/after, otherwise the stored summary.
+// before/after, for a migration "[version] " before the summary, otherwise the
+// stored summary.
 func describe(c clients.PipelineChange) string {
+	if c.Kind == clients.ChangeMigration {
+		if v := migrationVersion(c); v != "" {
+			return "[" + v + "] " + c.Summary
+		}
+	}
 	if c.Kind == clients.ChangeConnectorState {
 		var b, a struct {
 			State string `json:"state"`
