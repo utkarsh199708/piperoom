@@ -108,40 +108,49 @@ func (netProbeOp) Execute(ctx context.Context, params json.RawMessage, env Env) 
 	if err != nil {
 		return Result{}, err
 	}
-	host, port := splitTargetAddress(target.Address)
-	if host == "" {
-		return Result{}, fmt.Errorf("%w: target %q has no host address", ErrTarget, clip(p.Target))
-	}
-	if port == "" {
-		// A target registered without a port offers only the standard port
-		// (http_get's rule): 443 when the probe reads TLS, else 80. A bare
-		// host must not hand the model every service on that machine.
-		port = "80"
-		if p.TLS {
-			port = "443"
-		}
-	}
-	// p.Port is a cross-check, never an override: the probe goes to the
-	// target's own port, and naming any other port is refused.
-	if p.Port != 0 && strconv.Itoa(p.Port) != port {
-		return Result{}, fmt.Errorf("%w: port %d is not target %q's port", ErrTarget, p.Port, clip(p.Target))
-	}
 	probe := env.Probe
 	if probe == nil {
 		probe = builtinProbe{}
 	}
-	res, err := probe.Probe(ctx, ProbeRequest{Target: target, Host: host, Port: port, TLS: p.TLS}, env)
-	if err != nil {
-		return Result{Summary: fmt.Sprintf("net_probe %s %s: %v", p.Target, net.JoinHostPort(host, port), err)}, err
+	// A kafka target may name a comma-separated broker list (targetAddresses):
+	// every broker is probed in order, each on its own port, and the checks
+	// are reported in that order.
+	var checks []connprobe.Check
+	probed := make([]string, 0, 1)
+	for _, a := range targetAddresses(target) {
+		host, port := splitTargetAddress(a)
+		if host == "" {
+			return Result{}, fmt.Errorf("%w: target %q has no host address", ErrTarget, clip(p.Target))
+		}
+		if port == "" {
+			// A target registered without a port offers only the standard port
+			// (http_get's rule): 443 when the probe reads TLS, else 80. A bare
+			// host must not hand the model every service on that machine.
+			port = "80"
+			if p.TLS {
+				port = "443"
+			}
+		}
+		// p.Port is a cross-check, never an override: the probe goes to each
+		// broker's own port, and naming any other port is refused.
+		if p.Port != 0 && strconv.Itoa(p.Port) != port {
+			return Result{}, fmt.Errorf("%w: port %d is not target %q's port", ErrTarget, p.Port, clip(p.Target))
+		}
+		res, err := probe.Probe(ctx, ProbeRequest{Target: target, Host: host, Port: port, TLS: p.TLS}, env)
+		if err != nil {
+			return Result{Summary: fmt.Sprintf("net_probe %s %s: %v", p.Target, net.JoinHostPort(host, port), err)}, err
+		}
+		checks = append(checks, res.Checks...)
+		probed = append(probed, net.JoinHostPort(host, port))
 	}
-	addr := net.JoinHostPort(host, port)
-	data := netProbeData{Target: p.Target, Address: addr, Checks: res.Checks}
+	addr := strings.Join(probed, ",")
+	data := netProbeData{Target: p.Target, Address: addr, Checks: checks}
 	out := Result{
-		Summary: summarizeProbe(p.Target, addr, res.Checks),
+		Summary: summarizeProbe(p.Target, addr, checks),
 		Data:    data,
 		Receipt: events.SetupReceipt{Kind: "", Target: addr, At: env.Now()},
 	}
-	for _, c := range res.Checks {
+	for _, c := range checks {
 		if c.Status == connprobe.StatusFail {
 			return out, fmt.Errorf("%w: %s", ErrProbeFailed, c.ID)
 		}

@@ -455,9 +455,12 @@ func (a *addPublicationTable) Execute(ctx context.Context, raw json.RawMessage) 
 		p.Table, p.Publication, addPubQuoteIdent(p.Publication), addPubQuoteTable(p.Table)), nil
 }
 
-// addPubQuoteIdent and addPubQuoteTable render already-checked identifiers for the
-// preview and result text only; no statement is built from them here.
-func addPubQuoteIdent(s string) string { return `"` + s + `"` }
+// addPubQuoteIdent and addPubQuoteTable render identifiers for the preview and
+// result text only; no statement is built from them here. The identifiers were
+// already checked against addPubIdentRe, which admits no double quote, but the
+// rendering still escapes one the Postgres way (doubling it), so the printed
+// ALTER stays a safe statement even if copied and run verbatim.
+func addPubQuoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 func addPubQuoteTable(t string) string {
 	s, n, _ := strings.Cut(t, ".")

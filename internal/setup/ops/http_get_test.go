@@ -227,6 +227,43 @@ func TestHTTPGetUsesTargetHostSpelling(t *testing.T) {
 	}
 }
 
+// A kafka target may name a comma-separated broker list, and each broker is
+// matchable on its own with the usual port rules: a port-less broker matches
+// only the scheme's default port. A comma in any other kind's address is one
+// opaque spelling and matches nothing.
+func TestMatchTargetKafkaBrokerList(t *testing.T) {
+	env := Env{Targets: []events.SetupTarget{
+		{Kind: "kafka", Address: "b1.example:8083, b2.example:8083,b3.example"},
+		{Kind: "postgres", Address: "p1.example:8083,p2.example:8083"},
+	}}
+	for _, raw := range []string{
+		"http://b1.example:8083/",
+		"http://b2.example:8083/",
+		"http://b3.example/", // port-less broker, scheme default port
+	} {
+		if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"`+raw+`"}`), env); err != nil {
+			t.Errorf("decode(%q) = %v, want nil", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"http://b3.example:9092/", // a port-less broker offers no other port
+		"http://p1.example:8083/", // a non-kafka comma address is never a list
+		"http://p2.example:8083/",
+	} {
+		if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"`+raw+`"}`), env); !errors.Is(err, ErrTarget) {
+			t.Errorf("decode(%q) = %v, want ErrTarget", raw, err)
+		}
+	}
+	// The rebuilt URL carries the matched broker's own spelling.
+	_, rebuilt, err := decodeHTTPGet(json.RawMessage(`{"url":"http://B2.EXAMPLE:8083/x"}`), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.Host != "b2.example:8083" {
+		t.Fatalf("rebuilt host = %q", rebuilt.Host)
+	}
+}
+
 // A URL-form target without an explicit port pins its scheme's own port: an
 // https target does not also offer port 80.
 func TestHTTPGetURLTargetPinsSchemePort(t *testing.T) {

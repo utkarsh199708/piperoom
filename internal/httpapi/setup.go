@@ -1,0 +1,190 @@
+package httpapi
+
+import (
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"piperoom/internal/events"
+	"piperoom/internal/room"
+)
+
+// Setup rooms (U wave; docs/api.md "Setup rooms"): POST /api/setup and the
+// driver's clicks on a setup room. Every rule lives in package room; these
+// handlers decode, call and write, nothing else. The routes are always
+// mounted: with PIPEROOM_SETUP_ENABLED off the service answers 404
+// setup_disabled, which is the documented answer (a route that is simply
+// absent would answer not_found).
+
+// maxSetupBody caps a setup route's request body. A SetupRequest names tables,
+// connectors and targets; 64 KiB holds every honest one, and the value lists
+// are capped in the service as well.
+const maxSetupBody = 64 << 10
+
+// setupRoomResponse is POST /api/setup's answer: the new room, its single-use
+// pairing code, when the code expires, and the runner command to paste.
+type setupRoomResponse struct {
+	Room      room.RoomSnapshot `json:"room"`
+	Code      string            `json:"code"`
+	ExpiresAt time.Time         `json:"expires_at"`
+	Command   string            `json:"command"`
+}
+
+// handleSetupCreate is POST /api/setup: open a setup room and return the code
+// the runner pairs with.
+func (s *Server) handleSetupCreate(w http.ResponseWriter, r *http.Request) {
+	var req events.SetupRequest
+	if err := decodeBodyLimit(w, r, &req, maxSetupBody); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	res, err := s.svc.CreateSetupRoom(r.Context(), userFrom(r.Context()), req)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, setupRoomResponse{
+		Room:      res.Room,
+		Code:      res.Code,
+		ExpiresAt: res.ExpiresAt.UTC(),
+		Command:   setupCommand(s.setupOrigin(r), res.Code),
+	})
+}
+
+// setupOrigin is the server origin the runner command names: the configured
+// public origin, else the one this request arrived on.
+func (s *Server) setupOrigin(r *http.Request) string {
+	if s.public.Scheme != "" && s.public.Host != "" {
+		return s.public.Scheme + "://" + s.public.Host
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
+}
+
+// setupCommand is the line a person pastes into a terminal to pair the runner.
+// The code is 8 characters of protocol.CodeAlphabet, and the origin is a host
+// the server validated, so the line needs no quoting.
+func setupCommand(origin, code string) string {
+	if origin == "" {
+		return "piperoom-setup --code " + code
+	}
+	return "piperoom-setup --server " + origin + " --code " + code
+}
+
+// handleSetupAddTarget is POST /api/rooms/{id}/setup/targets.
+func (s *Server) handleSetupAddTarget(w http.ResponseWriter, r *http.Request) {
+	var body events.SetupTarget
+	if err := decodeBodyLimit(w, r, &body, maxSetupBody); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.AddSetupTarget(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
+// handleSetupRaiseClass is POST /api/rooms/{id}/setup/targets/{t}/class, where
+// t is the target's address as registered (URL-encoded).
+func (s *Server) handleSetupRaiseClass(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Class string `json:"class"`
+	}
+	if err := decodeBodyLimit(w, r, &body, maxSetupBody); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.RaiseSetupTargetClass(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), targetParam(r), body.Class)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
+// targetParam is the class route's {t}: the target's address as registered,
+// URL-encoded by the client (an address may hold ':', '/', '[' and ']', and
+// chi hands the raw segment back).
+func targetParam(r *http.Request) string {
+	raw := chi.URLParam(r, "t")
+	if decoded, err := url.PathUnescape(raw); err == nil {
+		return decoded
+	}
+	return raw
+}
+
+// handleSetupExtendPipeline is POST /api/rooms/{id}/setup/pipeline.
+func (s *Server) handleSetupExtendPipeline(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		AddConnectors     []string `json:"add_connectors"`
+		AddTables         []string `json:"add_tables"`
+		AddConsumerGroups []string `json:"add_consumer_groups"`
+		AddSinkTables     []string `json:"add_sink_tables"`
+	}
+	if err := decodeBodyLimit(w, r, &body, maxSetupBody); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.ExtendSetupPipeline(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), room.SetupPipelineExtension{
+		AddConnectors:     body.AddConnectors,
+		AddTables:         body.AddTables,
+		AddConsumerGroups: body.AddConsumerGroups,
+		AddSinkTables:     body.AddSinkTables,
+	})
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
+// handleSetupMaintenanceWindow is POST /api/rooms/{id}/setup/maintenance-window.
+// The times are RFC 3339 strings decoded here, so a malformed one is 400
+// validation rather than a decode failure.
+func (s *Server) handleSetupMaintenanceWindow(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Start string `json:"start"`
+		End   string `json:"end"`
+	}
+	if err := decodeBodyLimit(w, r, &body, maxSetupBody); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	start, err := parseSetupTime("start", body.Start)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	end, err := parseSetupTime("end", body.End)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	ev, err := s.svc.RecordMaintenanceWindow(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), start, end)
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeEvent(w, http.StatusOK, ev)
+}
+
+// parseSetupTime parses one RFC 3339 time of a maintenance window.
+func parseSetupTime(field, raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, validation(field + " is required (RFC 3339)")
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, validation(field + " must be an RFC 3339 time")
+	}
+	return t, nil
+}
