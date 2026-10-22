@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 
 	"piperoom/internal/clients"
 )
@@ -15,11 +16,12 @@ import (
 // fakeRunner answers canned command replies and records what it was asked to
 // run, so the unit tests need no real mongod.
 type fakeRunner struct {
-	replies     map[string]bson.M // "db.command" -> reply
-	err         error             // when set, every command fails with it
-	fail        map[string]error  // "db.command" -> error for that command only
-	got         []bson.D
-	deadlineSet bool
+	replies       map[string]bson.M // "db.command" -> reply
+	err           error             // when set, every command fails with it
+	fail          map[string]error  // "db.command" -> error for that command only
+	got           []bson.D
+	deadlineSet   bool
+	disconnectErr error
 }
 
 func (f *fakeRunner) runCommand(ctx context.Context, db string, cmd bson.D) (bson.M, error) {
@@ -43,7 +45,7 @@ func (f *fakeRunner) runCommand(ctx context.Context, db string, cmd bson.D) (bso
 	return bson.M{"ok": 1}, nil
 }
 
-func (f *fakeRunner) disconnect(context.Context) error { return nil }
+func (f *fakeRunner) disconnect(context.Context) error { return f.disconnectErr }
 
 func newClient(f *fakeRunner) *Client { return &Client{run: f} }
 
@@ -442,6 +444,17 @@ func TestBlockersNotSupported(t *testing.T) {
 	_, err := newClient(&fakeRunner{}).Blockers(context.Background(), time.Minute)
 	if !errors.Is(err, clients.ErrNotSupported) {
 		t.Fatalf("err = %v, want clients.ErrNotSupported", err)
+	}
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	f := &fakeRunner{disconnectErr: mongo.ErrClientDisconnected}
+	if err := newClient(f).Close(context.Background()); err != nil {
+		t.Fatalf("Close after an earlier disconnect = %v, want nil", err)
+	}
+	f.disconnectErr = errors.New("boom")
+	if err := newClient(f).Close(context.Background()); err == nil {
+		t.Fatal("Close swallowed a real disconnect error")
 	}
 }
 
