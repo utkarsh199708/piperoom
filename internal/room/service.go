@@ -1608,7 +1608,10 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
 				firstLook = nil
 			}
-			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
+			// X2c: the run ctx carries the room's whole pipeline, so the
+			// agent's recovery Verify calls read in its scope (actions need
+			// tools.WithPipeline); the agent's read tools re-scope by id.
+			err := s.runGuarded(s.pipelineCtx(ctx, pipelineID), roomID, alert, deps, s.opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
 			// already written the idle status and the message, so no retry
