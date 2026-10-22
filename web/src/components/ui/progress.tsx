@@ -3,7 +3,7 @@ import * as ProgressPrimitive from '@radix-ui/react-progress'
 import { cn } from '@/lib/utils'
 
 // Radix has no indeterminate animation, so without a `value` the indicator is a
-// child div with a CSS keyframe (tailwind.config.ts: animate-indeterminate).
+// child div with a CSS keyframe (src/index.css: animate-indeterminate).
 // Under prefers-reduced-motion it stays a still bar.
 function Progress({
   className,
