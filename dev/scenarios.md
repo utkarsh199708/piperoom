@@ -567,8 +567,11 @@ consumer    order-sync: state Stable, members 1, total lag 0
 warehouse   fresh; SELECT count(*) FROM orders  -  SELECT count(*) FROM analytics.orders  >= 40
 devctl health: pipeline healthy
 devconsumer log: "devconsumer started … skip_where=status=backfill"
-watcher: count_drift (sev2) on public.orders / analytics.orders, source - sink = missing rows
+watcher: count_drift (sev2) on public.orders / analytics.orders, source - sink = missing rows (after 2 checks)
+         row_drift (sev2): the sampled backfill keys are missing on the sink
 ```
+On an idle stack the windows end at the sink's newest row (the marker), since the source has nothing newer;
+under load they are the last closed hour shifted by the sink's lag.
 **Fix:** devconsumer restarts without the filter, order-sync is reset to the start of `pg.public.orders` and
 replays (the load is an upsert by id), then the fix waits until no `backfill` order is missing.
 
@@ -584,8 +587,12 @@ exactly the sink's current newest (late-arriving rows), so health cannot see the
 consumer    order-sync: state Stable, members 1, total lag 0
 warehouse   SELECT count(*) FROM analytics.orders WHERE updated_at IS NULL  >= 20 (source has the timestamps)
 devctl health: pipeline healthy
-watcher: row_drift (sev2): mismatched rows on the updated_at column; counts match, so no count_drift
+watcher: row_drift (sev2): mismatched = sampled rows the sink holds with updated_at NULL
+         count_drift (sev2, idle stack, after 2 checks): rows with updated_at NULL are outside the sink's window
 ```
+Every drift read keys on `updated_at`, so the NULL rows look like lag: on an idle stack the windows end at the sink's
+newest row, under load the landed-row probe samples the last hour by the wall clock and counts the rows the sink
+holds with the column NULL. A sink table that loses the column itself is a row_drift "column missing on the sink".
 **Fix:** devconsumer restarts with the column written and order-sync replays from the start of the topic; the
 upsert fills every NULL; the fix waits until none is left.
 
@@ -630,8 +637,10 @@ warehouse   SELECT count(*) FROM analytics.orders WHERE status = '__debezium_una
 source      the same rows have the real status
 devctl health: pipeline healthy
 pg_toast_risk (X1d): orders.status TOASTed, replica identity DEFAULT, placeholder seen N times in the sink
-watcher: row_drift (sev2): mismatched rows (status)
+watcher: row_drift (sev2): mismatched = 3, detail "unavailable-value placeholder in status: 3 rows"; no count_drift
 ```
+The timestamps agree, so row_drift comes from its placeholder count: the source's toastable columns
+(`ToastColumnReader`) counted for Debezium's default placeholder in the sink (`PlaceholderCounter`).
 **Fix:** `ALTER TABLE orders REPLICA IDENTITY FULL`, then rewrite `status` of every source row the sink holds as a
 placeholder (`status = status || ''` builds a new value, so the change event carries it in full) and wait until
 no placeholder is left. With no placeholder row only the `ALTER` runs. The change events already on the topic
