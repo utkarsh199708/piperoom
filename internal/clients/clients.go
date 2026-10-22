@@ -97,6 +97,52 @@ type TaskStatus struct {
 	Trace    string `json:"trace,omitempty"` // stack trace when FAILED
 }
 
+// ---- X6: Connect worker task assignments (optional on a ConnectReader) ----
+//
+// Asserted at use time like RateReader (wr, ok := c.(clients.WorkerTaskReader)),
+// never embedded in ConnectReader, so no existing client or fake has to grow.
+// internal/clients/connect implements it (X6b, A2); the connect_task_balance
+// tool (X6b) is its caller.
+
+// WorkerTasksTimeout is the per-call deadline a WorkerTasks implementation
+// sets when ctx has none (or a later one). (X6)
+const WorkerTasksTimeout = 10 * time.Second
+
+// UnassignedWorker is the WorkerTasks key of a task Connect reports with no
+// worker id (UNASSIGNED during a rebalance). (X6)
+const UnassignedWorker = ""
+
+// TaskAssignment is one task of one connector as Connect's status reports
+// it: names and states only, never the task's trace or the connector's
+// config. (X6)
+type TaskAssignment struct {
+	Connector string `json:"connector"`
+	Type      string `json:"type"`  // "source" | "sink"; "" when Connect does not say
+	Task      int    `json:"task"`  // task id within the connector
+	State     string `json:"state"` // RUNNING | PAUSED | FAILED | UNASSIGNED | RESTARTING
+}
+
+// WorkerTaskReader reads which worker runs which task, for the whole Connect
+// cluster at once: one GET /connectors?expand=status (Connect 2.3+), the
+// response capped at 4 MB, within WorkerTasksTimeout. An older Connect
+// without expand=status answers ErrNotSupported. (X6)
+//
+// The result maps a worker id as Connect reports it (host:port) to that
+// worker's tasks, each slice sorted by connector and task id. A worker that
+// runs a connector instance but no task is present with an empty slice; a
+// worker that runs nothing does not show in Connect's status and is absent,
+// so callers say "workers seen", not "workers". A task with no worker id is
+// under UnassignedWorker.
+//
+// Tenancy: it is cluster metadata, not filtered by the pipeline in ctx (like
+// ListConnectors). The caller shows only the room's own connectors
+// (tools.Scope.CheckConnector) by name, type and state, and reduces every
+// other connector to a task count per worker: never its name, type or
+// state, in Summary, Data or a log.
+type WorkerTaskReader interface {
+	WorkerTasks(ctx context.Context) (map[string][]TaskAssignment, error)
+}
+
 // ---- Schema Registry (Confluent REST API) ----
 
 // SchemaRegistryReader is the read half of the Schema Registry client.
