@@ -22,8 +22,15 @@ test('room UI works against the demo server', async ({ page, context, baseURL })
   const login = await context.request.post(`${base}/auth/dev-login`, { data: { user: USER } })
   expect(login.status()).toBe(200)
 
-  // 2. The room list renders.
+  // 2. The bare URL lands on the fleet (X5b): one row per owners.yaml pipeline, `orders`
+  //    among them (a table row on desktop, a card on the phone project).
   await page.goto(`${base}/`)
+  await expect(page).toHaveURL(/#\/fleet$/)
+  await expect(page.getByRole('heading', { level: 1, name: 'Fleet' })).toBeVisible()
+  await expect(page.locator('[data-pipeline-id="orders"]')).toBeVisible()
+
+  // 2b. The room list stays at #/.
+  await page.goto(`${base}/#/`)
   await expect(page.getByRole('heading', { level: 1, name: 'Rooms' })).toBeVisible()
 
   // 3. Open a demo room: --demo runs no watcher, so rooms open by hand with the
