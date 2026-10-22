@@ -194,6 +194,12 @@ func (c *Confiner) prepare(name string) (string, []fs.FileInfo, error) {
 		return "", nil, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(name))
 	}
 	clean := strings.ReplaceAll(name, "\\", "/")
+	// The lexical rule above already refuses everything non-local; this
+	// standard-library check restates "inside the root, no escape" in a form
+	// both a reader and a taint analysis can see without the table.
+	if !filepath.IsLocal(filepath.FromSlash(clean)) {
+		return "", nil, fmt.Errorf("%w: not a local name: %s", ErrPath, clip(name))
+	}
 	denied := c.denied()
 	if why := walkRefusal(clean, c.root.Lstat, denied, os.SameFile); why != "" {
 		return "", denied, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(name))

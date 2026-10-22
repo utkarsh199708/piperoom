@@ -176,35 +176,67 @@ func decodeHTTPGet(params json.RawMessage, env Env) (httpGetParams, *url.URL, er
 	case u.Fragment != "":
 		return p, nil, fmt.Errorf("%w: url must not carry a fragment", ErrParams)
 	}
-	if _, ok := matchTarget(env, u); !ok {
+	t, ok := matchTarget(env, u)
+	if !ok {
 		return p, nil, fmt.Errorf("%w: %s is not one of the room's targets", ErrTarget, clip(u.Host))
 	}
-	return p, u, nil
+	// Rebuild the URL the request will actually use from the MATCHED TARGET's
+	// own host and port (room configuration, not request input) plus the
+	// request's path and query. The model's spelling of the host never
+	// reaches the dial, which also makes the allow-list visible to a taint
+	// analysis: nothing request-controlled flows into the URL's host.
+	scheme := "http"
+	if u.Scheme == "https" {
+		scheme = "https"
+	}
+	th, tp := splitTargetAddress(t.Address)
+	hostport := th
+	if strings.Contains(th, ":") {
+		hostport = "[" + th + "]" // a bare IPv6 literal
+	}
+	if u.Port() != "" || tp != "" {
+		if tp == "" {
+			tp = schemeDefaultPort(scheme)
+		}
+		hostport = net.JoinHostPort(th, tp)
+	}
+	safe := &url.URL{Scheme: scheme, Host: hostport, Path: u.Path, RawPath: u.RawPath, RawQuery: u.RawQuery}
+	return p, safe, nil
 }
 
 // matchTarget reports whether the URL's host and port match a registered
-// target's address. A target without a port matches the host on any port.
+// target's address. A target without a port matches only the scheme's
+// standard port (80 or 443), never an arbitrary port: a bare-host target must
+// not hand the model every service on that machine.
 func matchTarget(env Env, u *url.URL) (events.SetupTarget, bool) {
 	host := strings.ToLower(u.Hostname())
 	port := u.Port()
 	if port == "" {
-		if u.Scheme == "https" {
-			port = "443"
-		} else {
-			port = "80"
-		}
+		port = schemeDefaultPort(u.Scheme)
 	}
 	for _, t := range env.Targets {
 		th, tp := splitTargetAddress(t.Address)
 		if th == "" || !strings.EqualFold(th, host) {
 			continue
 		}
-		if tp != "" && tp != port {
+		if tp == "" {
+			tp = schemeDefaultPort(u.Scheme)
+		}
+		if tp != port {
 			continue
 		}
 		return t, true
 	}
 	return events.SetupTarget{}, false
+}
+
+// schemeDefaultPort is the standard port of the only two schemes http_get
+// accepts.
+func schemeDefaultPort(scheme string) string {
+	if scheme == "https" {
+		return "443"
+	}
+	return "80"
 }
 
 // splitTargetAddress reads a target address as host[:port], a URL, or a bare

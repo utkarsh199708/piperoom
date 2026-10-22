@@ -188,3 +188,41 @@ func TestHTTPGetErrorOmitsQuery(t *testing.T) {
 		t.Fatalf("error leaks the query string: %v", err)
 	}
 }
+
+// A target registered without a port offers only the scheme's standard port,
+// never every service on the machine.
+func TestHTTPGetPortlessTargetMatchesOnlyStandardPorts(t *testing.T) {
+	env := Env{Targets: []events.SetupTarget{{Kind: "connect", Address: "connect.example"}}}
+	for _, raw := range []string{
+		"http://connect.example:8083/connectors",
+		"https://connect.example:2375/",
+		"http://connect.example:443/", // the other scheme's default is still not this scheme's
+	} {
+		if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"`+raw+`"}`), env); !errors.Is(err, ErrTarget) {
+			t.Errorf("decode(%q) = %v, want ErrTarget", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"http://connect.example/connectors",
+		"http://connect.example:80/connectors",
+		"https://connect.example/subjects",
+		"https://connect.example:443/subjects",
+	} {
+		if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"`+raw+`"}`), env); err != nil {
+			t.Errorf("decode(%q) = %v, want nil", raw, err)
+		}
+	}
+}
+
+// The request's URL is rebuilt from the matched target's own address: the
+// model's spelling of the host never reaches the dial.
+func TestHTTPGetUsesTargetHostSpelling(t *testing.T) {
+	env := Env{Targets: []events.SetupTarget{{Kind: "connect", Address: "connect.example:8083"}}}
+	_, rebuilt, err := decodeHTTPGet(json.RawMessage(`{"url":"http://CONNECT.EXAMPLE:8083/x?a=b"}`), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.Host != "connect.example:8083" || rebuilt.Path != "/x" || rebuilt.RawQuery != "a=b" {
+		t.Fatalf("rebuilt = %q", rebuilt.String())
+	}
+}

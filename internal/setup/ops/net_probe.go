@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,11 +109,22 @@ func (netProbeOp) Execute(ctx context.Context, params json.RawMessage, env Env) 
 		return Result{}, err
 	}
 	host, port := splitTargetAddress(target.Address)
-	if p.Port != 0 {
-		port = fmt.Sprint(p.Port)
+	if host == "" {
+		return Result{}, fmt.Errorf("%w: target %q has no host address", ErrTarget, clip(p.Target))
 	}
-	if host == "" || port == "" {
-		return Result{}, fmt.Errorf("%w: target %q has no host:port address", ErrTarget, clip(p.Target))
+	if port == "" {
+		// A target registered without a port offers only the standard port
+		// (http_get's rule): 443 when the probe reads TLS, else 80. A bare
+		// host must not hand the model every service on that machine.
+		port = "80"
+		if p.TLS {
+			port = "443"
+		}
+	}
+	// p.Port is a cross-check, never an override: the probe goes to the
+	// target's own port, and naming any other port is refused.
+	if p.Port != 0 && strconv.Itoa(p.Port) != port {
+		return Result{}, fmt.Errorf("%w: port %d is not target %q's port", ErrTarget, p.Port, clip(p.Target))
 	}
 	probe := env.Probe
 	if probe == nil {
