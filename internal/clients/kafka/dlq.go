@@ -35,9 +35,9 @@ var knownDLQHeaders = map[string]bool{
 	connectErrorsPrefix + "stage":                true,
 	connectErrorsPrefix + "class.name":           true,
 	connectErrorsPrefix + "exception.class.name": true,
-	headerMessage:    true,
-	headerStacktrace: true,
-	headerRejectRule: true,
+	headerMessage:                                true,
+	headerStacktrace:                             true,
+	headerRejectRule:                             true,
 }
 
 const (
