@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -102,6 +103,8 @@ type fakeRoomSvc struct {
 	pipeline string
 	gotAlert alertin.Alert
 	gotPost  [2]string
+	// gotEvidence is what PostRoomEvidence was given.
+	gotEvidence json.RawMessage
 }
 
 func (f *fakeRoomSvc) OpenAlertRoom(_ context.Context, a alertin.Alert) (room.RoomSnapshot, bool, error) {
@@ -121,6 +124,12 @@ func (f *fakeRoomSvc) LastRoomForKey(p, k string) (string, *time.Time, bool) {
 
 func (f *fakeRoomSvc) PostRoomNote(_ context.Context, roomID, text string) error {
 	f.gotPost = [2]string{roomID, text}
+	return f.postErr
+}
+
+func (f *fakeRoomSvc) PostRoomEvidence(_ context.Context, roomID, text string, evidence json.RawMessage) error {
+	f.gotPost = [2]string{roomID, text}
+	f.gotEvidence = evidence
 	return f.postErr
 }
 
@@ -203,29 +212,42 @@ func TestAdapterPostEvidence(t *testing.T) {
 		{name: "other room error", err: invalid, is: []error{invalid}, isNot: []error{watch.ErrRoomClosed, watch.ErrNoRoom}},
 		{name: "plain error", err: boom, is: []error{boom}, isNot: []error{watch.ErrRoomClosed, watch.ErrNoRoom}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			svc := &fakeRoomSvc{postErr: tc.err}
-			err := watchRooms{svc}.PostEvidence(context.Background(), "r_1", "evidence")
-			if svc.gotPost != [2]string{"r_1", "evidence"} {
-				t.Fatalf("service got %v", svc.gotPost)
-			}
-			if tc.err == nil {
-				if err != nil {
-					t.Fatalf("err = %v", err)
+		// Both joins map errors the same way; the JSON one hands the
+		// evidence through (X3c escalation, F6 alert updates).
+		ev := json.RawMessage(`{"source":"watcher"}`)
+		for _, withJSON := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s json=%v", tc.name, withJSON), func(t *testing.T) {
+				svc := &fakeRoomSvc{postErr: tc.err}
+				var err error
+				if withJSON {
+					err = watchRooms{svc}.PostEvidenceJSON(context.Background(), "r_1", "evidence", ev)
+					if string(svc.gotEvidence) != string(ev) {
+						t.Fatalf("service got evidence %s", svc.gotEvidence)
+					}
+				} else {
+					err = watchRooms{svc}.PostEvidence(context.Background(), "r_1", "evidence")
 				}
-				return
-			}
-			for _, e := range tc.is {
-				if !errors.Is(err, e) {
-					t.Errorf("err %v: want errors.Is %v", err, e)
+				if svc.gotPost != [2]string{"r_1", "evidence"} {
+					t.Fatalf("service got %v", svc.gotPost)
 				}
-			}
-			for _, e := range tc.isNot {
-				if errors.Is(err, e) {
-					t.Errorf("err %v: must not be %v", err, e)
+				if tc.err == nil {
+					if err != nil {
+						t.Fatalf("err = %v", err)
+					}
+					return
 				}
-			}
-		})
+				for _, e := range tc.is {
+					if !errors.Is(err, e) {
+						t.Errorf("err %v: want errors.Is %v", err, e)
+					}
+				}
+				for _, e := range tc.isNot {
+					if errors.Is(err, e) {
+						t.Errorf("err %v: must not be %v", err, e)
+					}
+				}
+			})
+		}
 	}
 }
 

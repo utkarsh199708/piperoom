@@ -651,7 +651,9 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, w
 			// A shadow room never resumes its agent, so the "steer to
 			// resume" notice would be wrong there (the sweep in Load marks
 			// its run interrupted instead).
-			if restarted && !snap.Shadow && s.restartNoticeDue(r.ID, st, leases) {
+			// A quiet forecast room had no agent to pause: its trend note
+			// still says how to start one.
+			if restarted && !snap.Shadow && !quietRoom(snap) && s.restartNoticeDue(r.ID, st, leases) {
 				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
 					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
 				}
