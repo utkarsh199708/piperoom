@@ -67,9 +67,14 @@ func (d *resnapDB) CountBetween(ctx context.Context, table, column string, from,
 	return d.window[table], nil
 }
 
-func (d *resnapDB) SampleKeys(context.Context, string, string, string, time.Time, int) ([]string, error) {
+func (d *resnapDB) SampleKeys(context.Context, string, string, string, time.Time, time.Time, int) ([]string, error) {
 	panic("not used")
 }
+
+// resnapDB must stay a clients.Reconciler: Verify of a since window asserts
+// it on the source, so a contract change must break the build here, not
+// turn the window test into an unsupported-source one.
+var _ clients.Reconciler = (*resnapDB)(nil)
 
 func (d *resnapDB) RowTimes(context.Context, string, string, []string, []string) (map[string]map[string]time.Time, error) {
 	panic("not used")
