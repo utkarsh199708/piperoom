@@ -11,14 +11,20 @@ package demo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
+	"piperoom/internal/tools"
+	"piperoom/internal/tools/changes"
 	"piperoom/internal/topology"
 )
 
@@ -36,9 +42,34 @@ const (
 
 const stepDelay = 550 * time.Millisecond
 
+// whatChangedWindow is the window the scripted what_changed step asks for.
+const whatChangedWindow = "6h"
+
+// How long before the room opens each recorded change happened, newest first.
+// The DDL and the connector config change are the suspects just before the
+// alert; the schema version was registered earlier by the same rollout.
+const (
+	ddlAgo             = 90 * time.Second
+	connectorConfigAgo = 12 * time.Minute
+	schemaVersionAgo   = 41 * time.Minute
+)
+
+// step is one scripted investigation step. input nil means the demo's generic
+// {"probe": true} tool input; data is the tool result's Data.
+type step struct {
+	id, title, tool, summary string
+	input, data              any
+}
+
 // Run is a scripted fake agent.Run. It replays the schema-change story with
 // realistic delays, then waits for steers and approval results.
 func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options) error {
+	return runStory(ctx, alert, deps, opts, time.Now(), stepDelay)
+}
+
+// runStory is Run with the story clock and the pause injected, so tests can
+// pin the recorded change times and skip the demo's delays.
+func runStory(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options, now time.Time, delay time.Duration) error {
 	emit := func(typ events.Type, payload any) error {
 		return deps.Sink.Emit(ctx, typ, payload)
 	}
@@ -46,36 +77,14 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 		select {
 		case <-ctx.Done():
 			return false
-		case <-time.After(stepDelay):
+		case <-time.After(delay):
 			return true
 		}
 	}
 
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "working", Detail: "investigating"})
 
-	type step struct {
-		id, title, tool, summary string
-		data                     any
-	}
-	steps := []step{
-		{"s_1", "Check the Debezium connector", "connect_status",
-			"pg-orders-connector (source): RUNNING. Tasks: 0=FAILED on 172.19.0.5:8083.\nTask 0 error: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\n  Caused by: ... Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path /fields/0/type/1 in the old schema'}, {oldSchemaVersion: 1}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409\nRejected schema vs pg.public.orders-value v1: amount: int → bytes(decimal 12,2)",
-			map[string]any{"connector": "pg-orders-connector", "state": "RUNNING", "tasks": []any{map[string]any{"id": 0, "state": "FAILED", "worker": "172.19.0.5:8083"}}}},
-		{"s_2", "Inspect the Schema Registry subject", "schema_registry_versions",
-			"subject pg.public.orders-value: versions [1], latest id 1, compatibility BACKWARD (subject-level)",
-			map[string]any{"subject": "pg.public.orders-value", "versions": []int{1}, "latest_id": 1, "compatibility": "BACKWARD", "level": "subject"}},
-		{"s_3", "Diff the attempted schema against v1", "schema_registry_diff",
-			"amount: int → bytes(decimal 12,2)",
-			map[string]any{"subject": "pg.public.orders-value", "from_version": 1, "field_diffs": []any{map[string]any{"field": "amount", "from": "int", "to": "bytes(decimal 12,2)"}}}},
-		{"s_4", "Check consumer lag", "kafka_consumer_lag",
-			"group order-sync: state Stable, members 1, total lag 0",
-			map[string]any{"group": "order-sync", "state": "Stable", "members": 1, "total_lag": 0}},
-		{"s_5", "Check the DDL log", "pg_recent_ddl",
-			"2026-10-11T09:47:00Z ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) by etl",
-			map[string]any{"command": "ALTER TABLE", "object": "public.orders", "sql": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", "username": "etl", "at": "2026-10-11T09:47:00Z"}},
-	}
-
-	for _, st := range steps {
+	for _, st := range storySteps(now, alert.PipelineID) {
 		if !pause() {
 			return nil
 		}
@@ -83,7 +92,11 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 		if !pause() {
 			return nil
 		}
-		_ = emit(events.AgentToolCall, events.AgentToolCallPayload{StepID: st.id, ToolUseID: "tu_" + st.id, Tool: st.tool, Input: mustJSON(map[string]any{"probe": true})})
+		input := st.input
+		if input == nil {
+			input = map[string]any{"probe": true}
+		}
+		_ = emit(events.AgentToolCall, events.AgentToolCallPayload{StepID: st.id, ToolUseID: "tu_" + st.id, Tool: st.tool, Input: mustJSON(input)})
 		if !pause() {
 			return nil
 		}
@@ -95,7 +108,7 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 
 	_ = emit(events.AgentHypothesis, events.AgentHypothesisPayload{
 		Text:         "A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.",
-		BasedOnSteps: []string{"s_1", "s_3", "s_5"},
+		BasedOnSteps: []string{"s_1", "s_3", "s_5", "s_6"},
 		Confidence:   "high",
 		Confirmed:    false,
 	})
@@ -145,8 +158,110 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 	return waitForInput(ctx, deps, emit)
 }
 
-// waitForInput answers steers, comments and approval results until the room
-// closes. An inbox that is closed (a shadow room) ends it at once with nil.
+// storySteps returns the six scripted reads of the schema-change story. The
+// last one is what_changed, whose result carries the F8 change rows the web
+// "What changed" lane renders; without it the lane stays empty in --demo.
+func storySteps(now time.Time, pipelineID string) []step {
+	recorded := storyChanges(now, pipelineID)
+	// s_5 and s_6 describe the same ALTER, so they use the same recorded time:
+	// what_changed's newest row. A fixed timestamp here would date the DDL log
+	// line days before a room opened today.
+	ddlAt := now.UTC().Truncate(time.Second).Add(-ddlAgo)
+	ddlStamp := ddlAt.Format(time.RFC3339)
+	return []step{
+		{"s_1", "Check the Debezium connector", "connect_status",
+			"pg-orders-connector (source): RUNNING. Tasks: 0=FAILED on 172.19.0.5:8083.\nTask 0 error: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\n  Caused by: ... Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path /fields/0/type/1 in the old schema'}, {oldSchemaVersion: 1}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409\nRejected schema vs pg.public.orders-value v1: amount: int → bytes(decimal 12,2)",
+			nil, map[string]any{"connector": "pg-orders-connector", "state": "RUNNING", "tasks": []any{map[string]any{"id": 0, "state": "FAILED", "worker": "172.19.0.5:8083"}}}},
+		{"s_2", "Inspect the Schema Registry subject", "schema_registry_versions",
+			"subject pg.public.orders-value: versions [1], latest id 1, compatibility BACKWARD (subject-level)",
+			nil, map[string]any{"subject": "pg.public.orders-value", "versions": []int{1}, "latest_id": 1, "compatibility": "BACKWARD", "level": "subject"}},
+		{"s_3", "Diff the attempted schema against v1", "schema_registry_diff",
+			"amount: int → bytes(decimal 12,2)",
+			nil, map[string]any{"subject": "pg.public.orders-value", "from_version": 1, "field_diffs": []any{map[string]any{"field": "amount", "from": "int", "to": "bytes(decimal 12,2)"}}}},
+		{"s_4", "Check consumer lag", "kafka_consumer_lag",
+			"group order-sync: state Stable, members 1, total lag 0",
+			nil, map[string]any{"group": "order-sync", "state": "Stable", "members": 1, "total_lag": 0}},
+		{"s_5", "Check the DDL log", "pg_recent_ddl",
+			ddlStamp + " ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) by etl",
+			nil, map[string]any{"command": "ALTER TABLE", "object": "public.orders", "sql": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", "username": "etl", "at": ddlStamp}},
+		{"s_6", "Check what changed before the alert", changes.ToolName,
+			whatChangedSummary(recorded),
+			map[string]any{"window": whatChangedWindow}, recorded},
+	}
+}
+
+// storyChanges is the recorded what_changed result of the story, newest
+// first: the DDL and the connector config change are the suspects just before
+// the alert, and the schema version was registered earlier by the same
+// rollout. It is built from the real tool's changes.Data type, so the demo
+// lane parses exactly the shape production emits.
+func storyChanges(now time.Time, pipelineID string) changes.Data {
+	if pipelineID == "" {
+		pipelineID = "orders"
+	}
+	now = now.UTC().Truncate(time.Second)
+	at := func(d time.Duration) time.Time { return now.Add(-d) }
+	ddlAt, cfgAt, verAt := at(ddlAgo), at(connectorConfigAgo), at(schemaVersionAgo)
+	return changes.Data{
+		Window: whatChangedWindow,
+		Changes: []clients.PipelineChange{
+			{
+				ID: 3, PipelineID: pipelineID, Kind: clients.ChangeDDL, Object: "public.orders", At: ddlAt,
+				Actor: "etl", Source: "ddl_audit",
+				Fingerprint: changeFingerprint(clients.ChangeDDL, "public.orders", ddlAt.Format(time.RFC3339Nano)),
+				Summary:     "ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)",
+			},
+			{
+				ID: 2, PipelineID: pipelineID, Kind: clients.ChangeConnectorConfig, Object: "pg-orders-connector", At: cfgAt,
+				Source:      "watcher",
+				Fingerprint: changeFingerprint(clients.ChangeConnectorConfig, "pg-orders-connector", "heartbeat.interval.ms"),
+				Before:      mustJSON(map[string]string{"heartbeat.interval.ms": "10000"}),
+				After:       mustJSON(map[string]string{"heartbeat.interval.ms": "5000"}),
+				Summary:     "config of pg-orders-connector: 1 key changed (heartbeat.interval.ms)",
+			},
+			{
+				ID: 1, PipelineID: pipelineID, Kind: clients.ChangeSchemaVersion, Object: "pg.public.orders-value", At: verAt,
+				Source:      "watcher",
+				Fingerprint: changeFingerprint(clients.ChangeSchemaVersion, "pg.public.orders-value", "0", "1"),
+				Before:      mustJSON(map[string]int{"version": 0}),
+				After:       mustJSON(map[string]int{"version": 1}),
+				Summary:     "schema pg.public.orders-value: version 1 registered (was 0)",
+			},
+		},
+	}
+}
+
+// whatChangedSummary renders the recorded changes as the tool's one-line-per-
+// change summary, so the investigation feed and the lane tell one story.
+func whatChangedSummary(d changes.Data) string {
+	var sb strings.Builder
+	for i, c := range d.Changes {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(c.At.Format(time.RFC3339))
+		sb.WriteByte(' ')
+		sb.WriteString(c.Kind)
+		sb.WriteByte(' ')
+		sb.WriteString(c.Object)
+		if c.Actor != "" {
+			sb.WriteString(" by " + c.Actor)
+		}
+		sb.WriteString(": " + c.Summary)
+	}
+	return sb.String()
+}
+
+// changeFingerprint is the opaque dedup key the change log stores: sha256 of
+// the change's identity, hex encoded.
+func changeFingerprint(parts ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(h[:])
+}
+
+// waitForInput answers steers, comments, forwarded suggestions and approval
+// results until the room closes. An inbox that is closed (a shadow room) ends
+// it at once with nil.
 func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, any) error) error {
 	for ctx.Err() == nil {
 		if err := deps.Inbox.Wait(ctx); err != nil {
@@ -157,19 +272,38 @@ func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, a
 			return nil
 		}
 		for _, in := range inputs {
-			switch in.Kind {
-			case "steer":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it: " + in.Text})
-			case "comment":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Noted from " + in.Actor.Name + ": " + in.Text, ReplyTo: in.CommentID})
-			case "approval_result":
-				_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: in.Text})
-			case "action_result":
-				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: in.Text})
-			}
+			handleInput(ctx, deps, in, emit)
 		}
 	}
 	return nil
+}
+
+// handleInput answers one human input. The switch mirrors the input kinds of
+// internal/agent/contract.go; a kind the demo does not act on is logged at
+// debug level rather than dropped silently, so the next kind added to the
+// contract shows up in a demo run (KAN-391).
+func handleInput(ctx context.Context, deps agent.Deps, in agent.HumanInput, emit func(events.Type, any) error) {
+	switch in.Kind {
+	case "steer":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it: " + in.Text})
+	case "suggestion":
+		// A forwarded suggestion is the suggester's words, not the driver's
+		// (the real agent wraps it as untrusted data), so the demo only
+		// acknowledges it and never acts on its content. The cap keeps one
+		// large paste from crowding the room.
+		text, _ := tools.Truncate(in.Text)
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it (forwarded suggestion): " + text})
+	case "comment":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Noted from " + in.Actor.Name + ": " + in.Text, ReplyTo: in.CommentID})
+	case "approval_result":
+		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: in.Text})
+	case "action_result":
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: in.Text})
+	default:
+		if deps.Logger != nil {
+			deps.Logger.DebugContext(ctx, "demo: no scripted handler for human input kind", "kind", in.Kind, "seq", in.Seq)
+		}
+	}
 }
 
 // WriteHandoff is a fake hand-off writer returning the fixture summary.

@@ -641,7 +641,7 @@ function RoomRow({
       </td>
       <td className={TD}>
         <Badge variant={severityVariant(room.severity)} className="uppercase">
-          {room.severity}
+          {room.severity || 'unknown'}
         </Badge>
       </td>
       <td className={cn(TD, 'max-md:hidden')}>

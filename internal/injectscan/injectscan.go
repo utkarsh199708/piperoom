@@ -360,10 +360,28 @@ func scanWindow(s string, base int) []Finding {
 	found = append(found, scanHiddenTags(s)...)
 	found = append(found, scanStrayTags(s)...)
 	for i := range found {
+		found[i].Offset, found[i].End = runeSpan(s, found[i].Offset, found[i].End)
 		found[i].Offset += base
 		found[i].End += base
 	}
 	return found
+}
+
+// runeSpan widens [start, end) of s to rune starts. origin maps each invalid
+// byte to its own offset, so a span next to a stray continuation byte can
+// start or end on it; widening (never narrowing) keeps the matched text inside
+// the span. The window s starts and ends on rune starts of the whole input, so
+// the result is a rune boundary there too.
+func runeSpan(s string, start, end int) (int, int) {
+	start = min(max(start, 0), len(s))
+	end = min(max(end, start), len(s))
+	for start > 0 && !utf8.RuneStart(s[start]) {
+		start--
+	}
+	for end < len(s) && !utf8.RuneStart(s[end]) {
+		end++
+	}
+	return start, end
 }
 
 // scanBase64 decodes up to maxBlobs candidate blobs and scans the decoded text

@@ -391,8 +391,10 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 		}
 		// Validate and Execute run under the room's whole pipeline: the
 		// write clients refuse a write without it (fail closed), and
-		// Validate sees the same scope the write will run under.
-		actx := s.pipelineCtx(ctx, pipelineID)
+		// Validate sees the same scope the write will run under. The room id
+		// travels too, so a client keeping per-room state (--demo) uses this
+		// room's, not another's.
+		actx := s.actionCtx(ctx, p.RoomID, pipelineID)
 		if err := action.Validate(actx, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil

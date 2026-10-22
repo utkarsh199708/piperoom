@@ -38,20 +38,24 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // mode on (the default, and every eval) gains the scheduling note, and the
 // "often a schema change", "when your belief changes" and "Never claim a fix
 // worked without re-checking" words were trimmed to stay under the word cap.
-// KAN-406 moved it a fifth time, on purpose: a PAUSED or STOPPED connector is
-// the incident unless a record shows a person paused it, replacing the C7
-// rule that an unexplained pause was deliberate; the past-incidents line and
-// the resume checks' parenthetical gave back the words. It is pinned here,
-// beside the snapshot
+// KAN-410 moved it a fifth time, on purpose: the drop rule now names the
+// pipeline map's retired marker and a connector Connect no longer lists as
+// the retirement evidence, so a dead slot behind a retired connector gets the
+// drop while a stopped connector without that evidence still gets the resume
+// checks. KAN-406 moved it a sixth time: a PAUSED or STOPPED connector is the
+// incident unless a record shows a person paused it, replacing the C7 rule
+// that an unexplained pause was deliberate; the wording stays inside the
+// 1335-word ceiling.
+// It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "dbffa00a23c92ed8d94106b6345c0ca52ebc17bf062eece4880c0c3f82a2b705"
+const cdcPromptSHA256 = "5d900b46db55b216a9fd79fc644f613357d702af31a18c3c69e0ba2428931b46"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it.
-const cdcPromptWriteOffSHA256 = "acb439511688b456db78cad958ac74d5290fe1ce72b984e33717e45418d40a72"
+const cdcPromptWriteOffSHA256 = "dd628686b24ce253424ad60ba23620dbb893c90e7b606c3056c8c00097ca1761"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
