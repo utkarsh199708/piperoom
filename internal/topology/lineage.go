@@ -27,13 +27,18 @@ type columnReads struct {
 	srcCols     map[string][]string // source table -> column names, ordinal order
 	sinkCols    map[string][]string // sink ref key -> column names, ordinal order
 	topicFields map[string][]string // topic -> value field paths
+	// srcPII and sinkPII are the PII-classed columns of each table read
+	// (X7c, pii.go), keyed like srcCols and sinkCols.
+	srcPII  map[string]map[string]PIIClass
+	sinkPII map[string]map[string]PIIClass
 }
 
 // collectLineage reads the catalogs and value schemas the pipeline's hops
 // need, in parallel under ctx. The catalog readers check scope themselves and
 // fail closed, so ctx carries the pipeline (tools.WithPipeline).
 func (b *builder) collectLineage(ctx context.Context, p owners.Pipeline, fp flowPlan, info *collected) *columnReads {
-	lr := &columnReads{srcCols: map[string][]string{}, sinkCols: map[string][]string{}, topicFields: map[string][]string{}}
+	lr := &columnReads{srcCols: map[string][]string{}, sinkCols: map[string][]string{}, topicFields: map[string][]string{},
+		srcPII: map[string]map[string]PIIClass{}, sinkPII: map[string]map[string]PIIClass{}}
 	sctx := tools.WithPipeline(ctx, p)
 	var wg sync.WaitGroup
 	run := func(f func()) {
@@ -47,9 +52,9 @@ func (b *builder) collectLineage(ctx context.Context, p owners.Pipeline, fp flow
 	if srcOK {
 		for _, tbl := range p.SourceTables {
 			run(func() {
-				if cols, ok := b.readColumns(sctx, src, p.ID, "source", tbl); ok {
+				if cols, pii, ok := b.readColumns(sctx, src, p, "source", tbl); ok {
 					lr.mu.Lock()
-					lr.srcCols[tbl] = cols
+					lr.srcCols[tbl], lr.srcPII[tbl] = cols, pii
 					lr.mu.Unlock()
 				}
 			})
@@ -64,9 +69,9 @@ func (b *builder) collectLineage(ctx context.Context, p owners.Pipeline, fp flow
 		}
 		sinkOK = true
 		run(func() {
-			if cols, ok := b.readColumns(sctx, cr, p.ID, "sink", ref.Table); ok {
+			if cols, pii, ok := b.readColumns(sctx, cr, p, "sink", ref.Table); ok {
 				lr.mu.Lock()
-				lr.sinkCols[ref.Key] = cols
+				lr.sinkCols[ref.Key], lr.sinkPII[ref.Key] = cols, pii
 				lr.mu.Unlock()
 			}
 		})
@@ -99,10 +104,12 @@ func (b *builder) collectLineage(ctx context.Context, p owners.Pipeline, fp flow
 	return lr
 }
 
-// readColumns reads one table's column names. ErrNotSupported turns that side
-// off for the pipeline with one INFO log per builder; another error leaves the
-// table unknown (logged at debug: catalog errors carry names, never values).
-func (b *builder) readColumns(ctx context.Context, cr clients.ColumnReader, pipelineID, side, table string) ([]string, bool) {
+// readColumns reads one table's column names and classes its columns as PII
+// (classifyColumns). ErrNotSupported turns that side off for the pipeline
+// with one INFO log per builder; another error leaves the table unknown
+// (logged at debug: catalog errors carry names, never values).
+func (b *builder) readColumns(ctx context.Context, cr clients.ColumnReader, p owners.Pipeline, side, table string) ([]string, map[string]PIIClass, bool) {
+	pipelineID := p.ID
 	cols, err := cr.Columns(ctx, table)
 	if err != nil {
 		if errors.Is(err, clients.ErrNotSupported) {
@@ -111,7 +118,7 @@ func (b *builder) readColumns(ctx context.Context, cr clients.ColumnReader, pipe
 		} else {
 			b.log.Debug("topology: column catalog unreadable; its hops have no column lineage", "pipeline", pipelineID, "table", table, "err", err)
 		}
-		return nil, false
+		return nil, nil, false
 	}
 	cols = slices.Clone(cols[:min(len(cols), clients.MaxTableColumns)])
 	slices.SortStableFunc(cols, func(a, b clients.ColumnInfo) int { return a.Position - b.Position })
@@ -119,7 +126,7 @@ func (b *builder) readColumns(ctx context.Context, cr clients.ColumnReader, pipe
 	for i, c := range cols {
 		names[i] = c.Name
 	}
-	return names, true
+	return names, classifyColumns(p, table, cols), true
 }
 
 // infoOnce logs msg at INFO the first time key is seen by this builder.

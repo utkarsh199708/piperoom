@@ -43,6 +43,7 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
+	"piperoom/internal/redact"
 	"piperoom/internal/tools"
 )
 
@@ -560,7 +561,7 @@ func (w *Watcher) rowParts(ctx context.Context, t target, mem *driftMem, rd drif
 		w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "a client cannot name the table's primary key")
 		return nil, nil
 	}
-	if piiColumn(ts) {
+	if piiColumn(t.p, ts, pr.source, pr.sink) {
 		w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "sink_ts_column looks like personal data")
 		return nil, nil
 	}
@@ -577,14 +578,14 @@ func (w *Watcher) rowParts(ctx context.Context, t target, mem *driftMem, rd drif
 	if err != nil {
 		return unknown(err)
 	}
-	if piiColumn(pkSrc) || piiColumn(pkSnk) {
+	if piiColumn(t.p, pkSrc, pr.source) || piiColumn(t.p, pkSnk, pr.sink) {
 		// A table keyed by personal data (an email, a phone) is never
 		// sampled: the keys would be the personal data itself
 		// (docs/design/lineage.md section 3).
 		w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "the primary key column looks like personal data")
 		return nil, nil
 	}
-	main, err := w.compareRows(ctx, t, rd, pr, win, pkSrc, pkSnk, timeColumns(cat, ts))
+	main, err := w.compareRows(ctx, t, rd, pr, win, pkSrc, pkSnk, timeColumns(t.p, pr, cat, ts))
 	if err != nil {
 		return unknown(err)
 	}
@@ -701,7 +702,7 @@ func sameTime(a, b map[string]time.Time, c string) bool {
 // the date/time columns both tables have (when both catalogs were read),
 // never one whose name looks like personal data, at most maxDriftColumns.
 // Without the catalogs it is ts alone.
-func timeColumns(cat *catalogs, ts string) []string {
+func timeColumns(p owners.Pipeline, pr tablePair, cat *catalogs, ts string) []string {
 	cols := []string{ts}
 	if cat == nil {
 		return cols
@@ -714,7 +715,7 @@ func timeColumns(cat *catalogs, ts string) []string {
 	}
 	var more []string
 	for _, c := range cat.src {
-		if c.Name != ts && timeType(c.Type) && onSink[c.Name] && !piiColumn(c.Name) && validColumn(c.Name) {
+		if c.Name != ts && timeType(c.Type) && onSink[c.Name] && !piiColumn(p, c.Name, pr.source, pr.sink) && validColumn(c.Name) {
 			more = append(more, c.Name)
 		}
 	}
@@ -743,27 +744,19 @@ func validColumn(s string) bool {
 	return true
 }
 
-// piiWords are column-name words of X7c's personal-data classes (email,
-// phone, name, address, national id, card, ip, date of birth). row_drift
-// never reads a column whose name has one (a `birth_date` or
-// `email_verified_at` is a date, but of a person): the name alone decides,
-// so a long PII tag list that was cut cannot let one through.
-var piiWords = []string{"email", "mail", "phone", "mobile", "tel", "fax", "name", "address", "addr", "street",
-	"city", "zip", "postcode", "postal", "ssn", "sin", "nin", "national", "tax", "passport", "license", "licence",
-	"card", "pan", "iban", "cvv", "ip", "birth", "birthday", "birthdate", "dob", "born"}
-
-// piiSubstrings catch the same words run together ("dateofbirth", "emailat").
-var piiSubstrings = []string{"birth", "email", "phone", "passport", "address"}
-
-func piiColumn(name string) bool {
-	n := strings.ToLower(name)
-	for _, s := range piiSubstrings {
-		if strings.Contains(n, s) {
-			return true
-		}
+// piiColumn reports whether row_drift must never read column name of one of
+// tables: the shared classifier's name check (redact.PersonalColumn, X7c: a
+// `birth_date` or `email_verified_at` is a date, but of a person) or an
+// owners.yaml pii.include entry. The column list itself decides, never the
+// node's PII tag, so a long tag that was cut cannot let one through
+// (docs/design/lineage.md section 3). pii.exclude does not clear a name hit
+// here: it corrects the tag, and a false positive only skips a column.
+func piiColumn(p owners.Pipeline, name string, tables ...string) bool {
+	if redact.PersonalColumn(name) {
+		return true
 	}
-	for _, word := range strings.FieldsFunc(n, func(r rune) bool { return r == '_' || r == '-' || r == '.' || r == ' ' }) {
-		if slices.Contains(piiWords, word) {
+	for _, t := range tables {
+		if o, _ := p.PIIOverrideFor(t, name); o == owners.PIIIncluded {
 			return true
 		}
 	}
