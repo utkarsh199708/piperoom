@@ -36,21 +36,20 @@
   "devDependencies": {
     "@eslint/js": "^9.33.0",
     "@playwright/test": "^1.64.1",
+    "@tailwindcss/vite": "4.3.3",
     "@testing-library/jest-dom": "6.6.3",
     "@testing-library/react": "16.3.0",
     "@types/node": "22.15.0",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^5.0.0",
-    "autoprefixer": "10.4.21",
     "eslint": "^9.33.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
     "globals": "^16.3.0",
     "jsdom": "26.1.0",
-    "postcss": "8.5.30",
-    "tailwindcss": "3.4.17",
-    "tailwindcss-animate": "1.0.7",
+    "tailwindcss": "4.3.3",
+    "tw-animate-css": "1.4.0",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.39.1",
     "vite": "^7.1.2",
@@ -58,9 +57,5 @@
   },
   "allowScripts": {
     "esbuild@0.28.2": true
-  },
-  "//": "postcss-selector-parser is overridden to ^7 (Tailwind 3 wants ^6) to clear 2 moderate PostCSS advisories; remove it after the Tailwind v4 migration (KAN-387). The 5 high advisories left by npm audit are dev-only and all trace to tailwindcss 3 -> braces 3.0.3, which has no patched release (GHSA-vfj7-8cjw-p6xm); KAN-387 clears them. Runtime deps are clean: npm run audit:runtime.",
-  "overrides": {
-    "postcss-selector-parser": "^7.1.6"
   }
 }

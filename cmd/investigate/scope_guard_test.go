@@ -18,6 +18,7 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 	reg, _, f := wireFakes(t)
 	inputs := map[string]string{
 		"pg_replication_slots":     `{}`,
+		"pg_streaming_liveness":    `{"pipeline_id":"orders"}`,
 		"pg_recent_ddl":            `{"since":"2026-10-11T00:00:00Z"}`,
 		"pg_long_transactions":     `{}`,
 		"pg_row":                   `{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"1"}`,

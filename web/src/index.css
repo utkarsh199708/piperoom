@@ -1,7 +1,8 @@
 /*
  * Piperoom UI v2 foundation.
  *
- * 1. Tailwind layers.
+ * 1. Tailwind CSS 4 with a CSS-first config: the design tokens are bridged into
+ *    Tailwind's theme in `@theme inline` below (no tailwind.config.ts).
  * 2. Design tokens (docs/design/ui-v2/project/Handoff.dc.html), in shadcn's own
  *    variable names. Dark is the default. Light comes from
  *    :root[data-theme='light'] (or a .light class), or from the OS setting when
@@ -9,19 +10,175 @@
  * 3. Legacy aliases, so the screens that U2/U3 have not restyled yet follow the theme.
  * 4. The old stylesheet below stays until each screen is restyled.
  */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss' source(none);
+@import 'tw-animate-css';
 
-/* Preflight leaves borders at a default grey; every border uses the token unless a class says otherwise. */
+/*
+ * Utility scanning is explicit: the old tailwind.config.ts listed exactly these
+ * files. `source(none)` keeps Tailwind from also walking node_modules and dist.
+ */
+@source '../index.html';
+@source './**/*.{ts,tsx}';
+
+/* Same selector as the old `darkMode: ['selector', '[data-theme="dark"]']`. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* Touch screens: bigger hit targets (`coarse:h-11`) and no key caps; mouse screens keep both as they are. */
+@custom-variant coarse (@media (pointer: coarse));
+@custom-variant fine (@media (pointer: fine));
+
+/*
+ * Tailwind's view of the tokens below. `inline` makes a utility spell out the
+ * token (`background-color: var(--primary)`), so every colour mode keeps working
+ * from the one declaration in `:root` / `[data-theme='light']`, and an opacity
+ * modifier (`bg-primary/90`, `bg-layer-postgres/[.12]`) becomes a color-mix of
+ * that token, as the Tailwind 3 `token()` functions did (Tailwind also keeps the
+ * plain token as a fallback for browsers without color-mix).
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-input-border: var(--input-border);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-subtle: var(--primary-subtle);
+  --color-primary-fg: var(--primary-fg);
+  --color-success: var(--success);
+  --color-success-solid: var(--success-solid);
+  --color-success-subtle: var(--success-subtle);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-subtle: var(--danger-subtle);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive-fg: var(--danger-foreground);
+  --color-info: var(--info);
+  --color-info-subtle: var(--info-subtle);
+  --color-info-foreground: var(--info-foreground);
+  --color-agent: var(--agent);
+  --color-agent-subtle: var(--agent-subtle);
+  --color-agent-foreground: var(--agent-foreground);
+  --color-layer-postgres: var(--layer-postgres);
+  --color-layer-kafka-connect: var(--layer-kafka-connect);
+  --color-layer-schema-registry: var(--layer-schema-registry);
+  --color-layer-kafka: var(--layer-kafka);
+  --color-layer-consumer: var(--layer-consumer);
+  --color-layer-warehouse: var(--layer-warehouse);
+  --color-layer-orchestrator: var(--layer-orchestrator);
+  --color-layer-transform: var(--layer-transform);
+
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 18px;
+  --text-base: 14px;
+  --text-base--line-height: 20px;
+  --text-lg: 16px;
+  --text-lg--line-height: 22px;
+  --text-xl: 20px;
+  --text-xl--line-height: 26px;
+
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+
+  --animate-indeterminate: indeterminate 1.4s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
+  --animate-check: check 200ms cubic-bezier(.2,.8,.2,1) both;
+  --animate-heal: heal 600ms cubic-bezier(.2,.8,.2,1) both;
+  --animate-cite: cite 600ms cubic-bezier(.2,.8,.2,1) both;
+
+  @keyframes indeterminate {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(250%);
+    }
+  }
+  @keyframes check {
+    0% {
+      transform: scale(0.6);
+      opacity: 0;
+    }
+    100% {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+  @keyframes heal {
+    0% {
+      background-color: var(--success-subtle);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+  @keyframes cite {
+    0% {
+      background-color: var(--agent-subtle);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+  @keyframes shimmer {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+}
+
+/*
+ * Everything below is the app's own CSS and must lose to utilities, exactly as it
+ * did in Tailwind 3 (where the utilities came after this file). In Tailwind 4 the
+ * utilities live in the `utilities` layer, and unlayered CSS beats every layer, so
+ * it all sits in `base`; leaving it unlayered would, for example, let the `input`
+ * padding rule override `px-2.5` and the `h1..h4` line-height override `text-lg`.
+ */
 @layer base {
+  /* Preflight leaves borders at a default grey; every border uses the token unless a class says otherwise. */
   *,
   ::before,
   ::after {
     border-color: var(--border);
   }
-}
+  /* Tailwind 4's preflight no longer gives buttons a pointer cursor (v3 did). */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
 
+/* Tokens, then the legacy stylesheet. Kept unindented: one wrapper, no reindent diff. */
 :root {
   --radius: 0.5rem; /* lg 8 · md 6 · sm 4 */
   --background: #0a0a0b;
@@ -425,8 +582,10 @@ textarea:focus {
   align-items: center;
   text-decoration: none;
 }
+}
 
-/* No keyboard on a touch screen: key caps are noise there. The cheat-sheet opts back in. */
+/* No keyboard on a touch screen: key caps are noise there. The cheat-sheet opts back in.
+   Unlayered on purpose: inside @layer base the inline-flex utility would win. */
 @media (pointer: coarse) {
   kbd[data-slot='kbd'] {
     display: none;
@@ -435,3 +594,4 @@ textarea:focus {
     display: inline-flex;
   }
 }
+
