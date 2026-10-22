@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -230,11 +231,30 @@ func reconnectRunner(t *testing.T, ctx context.Context, srvURL, token string) (*
 	return conn, tok.Token.Token
 }
 
+// syncLogBuf is a mutex-guarded log sink: the server's request-log goroutines
+// may still write while the test reads it back.
+type syncLogBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncLogBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncLogBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
 // TestRunnerWSTokenReconnect: a runner reattaches with its token (no pairing
 // code), gets a new token, the old one is refused, and an op sent after the
 // reconnect is answered by the runner's FrameResult through the executor.
 func TestRunnerWSTokenReconnect(t *testing.T) {
-	var logbuf strings.Builder
+	var logbuf syncLogBuf
 	st := memstore.New()
 	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
 	srv := httptest.NewServer(httpapi.New(svc, st, slog.New(slog.NewTextHandler(&logbuf, nil)), httpapi.WithSetup(true)))
