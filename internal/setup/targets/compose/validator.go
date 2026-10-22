@@ -43,6 +43,7 @@ var deniedServiceKeys = map[string]struct{ rule, why string }{
 	"sysctls":             {RulePrivilege, "changes kernel settings from the container"},
 	"runtime":             {RulePrivilege, "selects a container runtime outside the templates"},
 	"volumes_from":        {RulePrivilege, "inherits another container's volumes"},
+	"entrypoint":          {RulePrivilege, "overrides the image's entrypoint; no template renders one"},
 	"extends":             {RuleExtends, "inherits another service or file"},
 	"build":               {RuleBuild, "builds an image; no template in this driver builds"},
 	"env_file":            {RuleMount, "adds an env file the pinned compose argv does not pass"},
@@ -50,10 +51,45 @@ var deniedServiceKeys = map[string]struct{ rule, why string }{
 	"configs":             {RuleMount, "mounts a config file outside the validated document"},
 }
 
-// interpolationRE is a compose variable substitution from the env file
-// (${VAR}, ${VAR:-def}, ${VAR-def}, ${VAR:?err}, ${VAR?err}). It is the only
-// form a credential-valued service environment entry may take.
-var interpolationRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-?][^}]*)?\}$`)
+// interpolationRE is a compose variable substitution from the env file: the
+// bare ${VAR} form only. The default and error operators (${VAR:-def},
+// ${VAR?err}) are refused everywhere, because a default is a plain-text value
+// smuggled past the secret rule (${_:-hunter2} ships hunter2), and
+// checkInterpolations restricts VAR to the .env allow-list, because any other
+// variable reads the compose process's own environment into the stack
+// (DEBUG=${AWS_SECRET_ACCESS_KEY}).
+var interpolationRE = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\}$`)
+
+// docInterpolationRE matches one allowed substitution at a position in the raw
+// document; checkInterpolations anchors it at every '$'.
+var docInterpolationRE = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// checkInterpolations walks the raw document and requires every '$' to start
+// an exact ${KEY} whose KEY is in the .env allow-list. Compose interpolates
+// ${...} and $VAR anywhere in the file — volume sources, commands, images —
+// from the compose process's environment, before any of the checks below see
+// the resolved value; `${HOME}:/host` reads to them as a named volume and
+// mounts the home directory. No rendered template uses any other form, so the
+// gate refuses nothing a template produces. $$ (compose's literal-$ escape) is
+// refused too: no template renders one, and a '$' that survives to a value is
+// a form this validator cannot judge.
+func checkInterpolations(doc []byte) error {
+	s := string(doc)
+	for i := 0; i < len(s); i++ {
+		if s[i] != '$' {
+			continue
+		}
+		m := docInterpolationRE.FindStringSubmatch(s[i:])
+		if m == nil {
+			return ruleError(RuleYAML, "", "the document uses a $ form other than ${KEY}; compose would interpolate it from the runner's environment")
+		}
+		if !envKeys[m[1]] {
+			return ruleError(RuleYAML, "", "the document interpolates %s, which is not in the .env allow-list", q(m[1]))
+		}
+		i += len(m[0]) - 1
+	}
+	return nil
+}
 
 // ValidateYAML parses doc and validates it against the S1 rules of design
 // §2.5. class is the class of the Compose target: a local target must bind
@@ -65,6 +101,9 @@ func ValidateYAML(doc []byte, class string) error {
 	}
 	if len(doc) > maxComposeBytes {
 		return ruleError(RuleYAML, "", "the document is %d bytes; the cap is %d", len(doc), maxComposeBytes)
+	}
+	if err := checkInterpolations(doc); err != nil {
+		return err
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(doc))
 	var root map[string]any
@@ -448,6 +487,16 @@ func checkVolumeString(service, entry string) error {
 		if !localProjectPath(src) {
 			return ruleError(RuleMount, service, "volume %s binds outside the project directory", q(entry))
 		}
+		if !pluginTarget(dst) {
+			mode := ""
+			if len(parts) == 3 {
+				mode = parts[2]
+			}
+			if !modeReadOnly(mode) {
+				return ruleError(RuleMount, service,
+					"volume %s binds a project directory writable; every bind except ./%s is read-only (:ro)", q(entry), PluginDir)
+			}
+		}
 		return nil
 	}
 	if strings.ContainsAny(src, "/\\") {
@@ -485,6 +534,10 @@ func checkVolumeMap(service string, m map[string]any) error {
 		if !localProjectPath(source) {
 			return ruleError(RuleMount, service, "a bind mount outside the project directory is not allowed")
 		}
+		if ro, _ := m["read_only"].(bool); !ro && !pluginTarget(target) {
+			return ruleError(RuleMount, service,
+				"a bind mount of %s is writable; every bind except ./%s is read-only", q(source), PluginDir)
+		}
 	case "volume":
 		if source != "" && (strings.ContainsAny(source, "/\\:") || strings.HasPrefix(source, ".")) {
 			return ruleError(RuleMount, service, "volume name %s is not a volume name", q(source))
@@ -521,6 +574,26 @@ func checkContainerPath(service, p string) error {
 		}
 	}
 	return nil
+}
+
+// pluginTarget reports whether a mount target is the Connect plugin directory,
+// the one bind that stays writable: plugin_install fills it from the host, and
+// a container writing its own plugin directory changes only what that same
+// container loads. Every other writable bind would let an allow-listed image's
+// shell plant files (git hooks, manifests, scripts) that the write ops exist
+// to refuse.
+func pluginTarget(target string) bool {
+	return target == PluginDirContainer || strings.HasPrefix(target, PluginDirContainer+"/")
+}
+
+// modeReadOnly reports whether a short-form mode list carries "ro".
+func modeReadOnly(mode string) bool {
+	for _, part := range strings.Split(mode, ",") {
+		if part == "ro" {
+			return true
+		}
+	}
+	return false
 }
 
 // volumeMode is compose's short-form mode list.

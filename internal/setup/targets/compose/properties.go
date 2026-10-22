@@ -89,19 +89,22 @@ func looksCredential(key string) bool {
 	return false
 }
 
-// kindOf classifies the file name. Only the three names this driver writes
-// are accepted; compose.yaml and every other name are refused, so
+// kindOf classifies the file name. Only the three exact names this driver
+// writes are accepted, at the project root and in the exact case the stack
+// reads them: "sub/.env" or "WORKER.PROPERTIES" would be written where the
+// pinned argv and the worker never look, so a stack would silently run against
+// a stale file. compose.yaml and every other name are refused, so
 // properties_write can never bypass compose_write's validator.
 func kindOf(file string) (propsKind, string, error) {
-	base := strings.ToLower(path.Base(strings.ReplaceAll(file, "\\", "/")))
-	switch base {
+	clean := strings.TrimPrefix(strings.ReplaceAll(file, "\\", "/"), "./")
+	switch clean {
 	case EnvFileName:
-		return kindEnv, base, nil
+		return kindEnv, clean, nil
 	case "worker.properties", "connect-distributed.properties":
-		return kindWorker, base, nil
+		return kindWorker, clean, nil
 	}
-	return "", base, ruleError(RuleProperties, "",
-		"file %s is not a properties kind this driver writes (.env, worker.properties, connect-distributed.properties)", q(base))
+	return "", path.Base(clean), ruleError(RuleProperties, "",
+		"file %s is not a properties file this driver writes at the project root (.env, worker.properties, connect-distributed.properties)", q(file))
 }
 
 // validateEntries checks the allow-list and every value of one properties

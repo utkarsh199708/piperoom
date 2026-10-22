@@ -88,16 +88,18 @@ func (o composeWriteOp) Execute(ctx context.Context, params json.RawMessage, env
 	if err := ValidateYAML(r.Doc, o.d.classOrDefault()); err != nil {
 		return ops.Result{}, err
 	}
-	clean, changed, err := writeText(env, r.File, r.Doc, 0o644)
-	if err != nil {
-		return ops.Result{}, err
-	}
 	// Every directory the file mounts is registered with the ops package, so
-	// file_write refuses it from now on (design §2.5).
+	// file_write refuses it from now on (design §2.5). Registration comes
+	// BEFORE the write: a registration failure must not leave the file on
+	// disk with its mounts unprotected.
 	for _, dir := range r.Mounts {
 		if err := o.d.reg.RegisterMountDir(dir); err != nil {
 			return ops.Result{}, fmt.Errorf("compose: registering mount %s: %w", q(dir), err)
 		}
+	}
+	clean, changed, err := writeText(env, r.File, r.Doc, 0o644)
+	if err != nil {
+		return ops.Result{}, err
 	}
 	summary := fmt.Sprintf("wrote %s (%d bytes), services: %s", clean, len(r.Doc), strings.Join(r.Services, ", "))
 	if !changed {
@@ -211,6 +213,11 @@ func writeText(env ops.Env, name string, data []byte, mode fs.FileMode) (string,
 	if err != nil {
 		return "", false, err
 	}
+	// The same refusal file_write enforces: a directory a rendered template
+	// mounts or builds from takes no writes, from this writer either.
+	if ops.MountedPath(clean, env.MountDirs) {
+		return "", false, fmt.Errorf("%w: %s is under a directory a template mounts or builds from", ops.ErrExecutedName, q(name))
+	}
 	root, err := os.OpenRoot(env.Confine.Dir())
 	if err != nil {
 		return "", false, fmt.Errorf("compose: opening the project root: %w", err)
@@ -221,6 +228,14 @@ func writeText(env ops.Env, name string, data []byte, mode fs.FileMode) (string,
 			return "", false, fmt.Errorf("%w: %s exists and is not a regular file", ops.ErrNotRegular, q(name))
 		}
 		if old, rerr := root.ReadFile(clean); rerr == nil && bytes.Equal(old, data) {
+			// Unchanged bytes are a no-op write, but the mode still applies:
+			// a pre-existing world-readable .env must not stay 0644 because
+			// its content already matched.
+			if fi.Mode().Perm() != mode.Perm() {
+				if cerr := root.Chmod(clean, mode); cerr != nil {
+					return "", false, fmt.Errorf("compose: fixing the mode of %s: %w", q(name), cerr)
+				}
+			}
 			return clean, false, nil
 		}
 	} else if !errors.Is(lerr, fs.ErrNotExist) {
@@ -291,11 +306,17 @@ func Argv(projectDir, file, envFile, sub string, services []string) ([]string, e
 	if !isComposeName(file) {
 		return nil, fmt.Errorf("%w: file %s is not a compose file name", ErrParams, q(file))
 	}
+	// The file is joined under the project directory below, so it must pass
+	// the same path rule every file op enforces: ".." or an absolute path
+	// would point compose at a file outside the project.
+	if err := ops.CheckName(file); err != nil {
+		return nil, fmt.Errorf("%w: file: %v", ErrParams, err)
+	}
 	if envFile == "" {
 		envFile = EnvFileName
 	}
-	if path.Base(strings.ReplaceAll(envFile, "\\", "/")) != EnvFileName {
-		return nil, fmt.Errorf("%w: the env file must be %s", ErrParams, EnvFileName)
+	if envFile != EnvFileName {
+		return nil, fmt.Errorf("%w: the env file must be %s at the project root", ErrParams, EnvFileName)
 	}
 	if !composeSubcommands[sub] {
 		return nil, fmt.Errorf("%w: subcommand %s is not allowed", ErrParams, q(sub))
