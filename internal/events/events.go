@@ -41,6 +41,11 @@ const (
 	// proposal ran: the layer checks and the data-flow check it made. It
 	// replaces the plain-text "[verification]" agent.message. (F4)
 	AgentVerification Type = "agent.verification"
+	// AgentRecoveryCheck is one poll of a recovery action's Verify while the
+	// agent waits for the repair to land: the counts so far, so a client can
+	// show "checking (2 of N)". Progress only: the verdict is the one
+	// agent.verification that follows the last poll. (X2)
+	AgentRecoveryCheck Type = "agent.recovery_check"
 	// AgentTriage is the bounded first look written by the triage pass before
 	// the full investigation (docs/design: tasks/F6-proactive-triage.md). One
 	// per run of the pass; a room may hold several (a re-fire re-runs it). (F6)
@@ -582,6 +587,13 @@ type PreviewResult struct {
 	Reversible bool          `json:"reversible"`
 	Rollback   string        `json:"rollback,omitempty"` // how to undo, as an action and params, when Reversible
 	DryRun     *DryRunResult `json:"dry_run,omitempty"`  // nil when the target system has no dry-run
+	// X2: a recovery action says how much Execute would re-emit ("will
+	// re-emit 412 rows"), read from the target, never estimated by the
+	// model. Count is nil for every other action (and omitted, so a fix
+	// preview marshals as before); Unit is RecoveryUnitRows or
+	// RecoveryUnitRecords whenever Count is set.
+	Count *int64 `json:"count,omitempty"`
+	Unit  string `json:"unit,omitempty"`
 }
 
 // DryRunResult is the target system's own answer to "would this be accepted"
@@ -644,6 +656,79 @@ type AgentVerificationPayload struct {
 	Recovered  bool                `json:"recovered"`
 	Verdict    string              `json:"verdict"` // one line, e.g. "recovered: every layer check passed and data is flowing again"
 	Repeat     bool                `json:"repeat,omitempty"`
+	// X2: set only for a proposal of class recovery (ProposalCreatedPayload.Class),
+	// from the action's Verify polls; absent on every other verification, which
+	// marshals as before. Outcome is one of the Recovery* outcomes below.
+	// Before is the gap the action set out to repair and After what is still
+	// missing at the last poll (counts only, never row values); pointers so a
+	// recovered After of 0 is kept and "not measured" (unverifiable) is
+	// absent. Recovered is true only when Outcome is RecoveryRecovered.
+	Outcome string `json:"outcome,omitempty"`
+	Before  *int64 `json:"before,omitempty"`
+	After   *int64 `json:"after,omitempty"`
+	Unit    string `json:"unit,omitempty"` // RecoveryUnitRows | RecoveryUnitRecords, with Before/After
+}
+
+// ---- X2: recovery actions (class, outcomes, verify progress) ----
+
+// Action classes, ProposalCreatedPayload.Class and actions.Class. A fix
+// changes a system's state (restart, config, offsets); a recovery re-emits
+// data a fault lost or corrupted and must be verifiable by counts
+// (actions.Verifier). The constants live here because package actions
+// imports events, so one definition serves the action, the log and the API.
+const (
+	ActionClassFix      = "fix"
+	ActionClassRecovery = "recovery"
+)
+
+// Recovery outcomes, AgentVerificationPayload.Outcome. The agent polls the
+// action's Verify until After is 0 or its verify timeout: recovered (After
+// is 0), partial (0 < After < Before at the timeout), not_recovered (After ≥
+// Before at the timeout), unverifiable (Verify could not count, e.g. the
+// reader answered clients.ErrNotSupported; Before/After absent, and the
+// proposal is never shown as recovered).
+const (
+	RecoveryRecovered    = "recovered"
+	RecoveryPartial      = "partial"
+	RecoveryNotRecovered = "not_recovered"
+	RecoveryUnverifiable = "unverifiable"
+)
+
+// Units of a recovery count: source rows (pg_resnapshot_rows) or Kafka
+// records (kafka_replay_range).
+const (
+	RecoveryUnitRows    = "rows"
+	RecoveryUnitRecords = "records"
+)
+
+// RecoveryOutcomeFor is the outcome of a finished poll loop from its last
+// counts: RecoveryRecovered when after ≤ 0, RecoveryPartial when after <
+// before, RecoveryNotRecovered otherwise. It is the one rule the agent, the
+// post-mortem and the web share; a loop that could not count reports
+// RecoveryUnverifiable instead of calling it.
+func RecoveryOutcomeFor(before, after int64) string {
+	switch {
+	case after <= 0:
+		return RecoveryRecovered
+	case after < before:
+		return RecoveryPartial
+	default:
+		return RecoveryNotRecovered
+	}
+}
+
+// AgentRecoveryCheckPayload is one Verify poll (agent.recovery_check, agent
+// actor). Poll counts from 1; MaxPolls is the most the agent will make in
+// this verification (its timeout and backoff), so Poll ≤ MaxPolls. Counts
+// only, never row values or keys; StepIndex is the recovery step polled. (X2)
+type AgentRecoveryCheckPayload struct {
+	ProposalID string `json:"proposal_id"`
+	StepIndex  int    `json:"step_index"`
+	Poll       int    `json:"poll"`
+	MaxPolls   int    `json:"max_polls"`
+	Before     int64  `json:"before"`
+	After      int64  `json:"after"`
+	Unit       string `json:"unit"` // RecoveryUnitRows | RecoveryUnitRecords
 }
 
 // ProposalCreatedPayload is a fix waiting for approvals.
@@ -668,6 +753,12 @@ type ProposalCreatedPayload struct {
 	// like RequiredLayers; empty when every layer has an owner. Not part of
 	// params_hash. (P2)
 	FallbackLayers []string `json:"fallback_layers,omitempty"`
+	// Class is ActionClassRecovery when any step's action is a recovery
+	// action (actions.ClassOf), set by the room service from the action
+	// registry, never from the proposer's text. Empty reads as
+	// ActionClassFix, so a fix proposal marshals as before. Not part of
+	// params_hash: it follows from the steps' action names, which are. (X2)
+	Class string `json:"class,omitempty"`
 }
 
 // Proposal origins in ProposalCreatedPayload.Origin. (P3)
