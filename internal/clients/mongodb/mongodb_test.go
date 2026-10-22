@@ -348,7 +348,12 @@ func TestCan(t *testing.T) {
 		want  bool
 	}{
 		{"find and changeStream match any collection", []privilege{{actions: []string{"find", "changeStream"}}}, "orders", "customers", true},
-		{"find and changeStream match the oplog", []privilege{{actions: []string{"find", "changeStream"}}}, "local", "oplog.rs", true},
+		{"readAnyDatabase does not match the oplog", []privilege{{actions: []string{"find", "changeStream"}}}, "local", "oplog.rs", false},
+		{"readAnyDatabase plus a local grant matches the oplog", []privilege{
+			{actions: []string{"find", "changeStream"}},
+			{db: "local", actions: []string{"find", "changeStream"}},
+		}, "local", "oplog.rs", true},
+		{"readAnyDatabase does not match config", []privilege{{actions: []string{"find", "changeStream"}}}, "config", "settings", false},
 		{"only find is not selectable", []privilege{{actions: []string{"find"}}}, "orders", "customers", false},
 		{"only changeStream is not selectable", []privilege{{actions: []string{"changeStream"}}}, "orders", "customers", false},
 		{"find and changeStream across two matching privileges", []privilege{
@@ -437,20 +442,6 @@ func TestBlockersNotSupported(t *testing.T) {
 	_, err := newClient(&fakeRunner{}).Blockers(context.Background(), time.Minute)
 	if !errors.Is(err, clients.ErrNotSupported) {
 		t.Fatalf("err = %v, want clients.ErrNotSupported", err)
-	}
-}
-
-func TestRedactURI(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"mongodb://u:p@h:27017/db", "mongodb://u:***@h:27017/db"},
-		{"mongodb+srv://u:p@cluster0.mongodb.net/db?retryWrites=true", "mongodb+srv://u:***@cluster0.mongodb.net/db?retryWrites=true"},
-		{"mongodb://h:27017/db", "mongodb://h:27017/db"},
-		{"mongodb://u@h:27017/db", "mongodb://u@h:27017/db"},
-	}
-	for _, tt := range tests {
-		if got := redactURI(tt.in); got != tt.want {
-			t.Fatalf("redactURI(%q) = %q, want %q", tt.in, got, tt.want)
-		}
 	}
 }
 

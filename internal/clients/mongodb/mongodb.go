@@ -13,7 +13,7 @@
 // asMap/asSlice helpers decoding documents into bson.M. Each call runs under
 // its own 10 s deadline (defaultTimeout). The connection string may carry
 // credentials, so it is never put into an error message or log line: errors
-// are wrapped through redactErr and any logging uses redactURI.
+// are wrapped through redactErr.
 //
 // The client implements SourceSettingsReader, a local mirror of the interface
 // proposed for clients.SourceSettingsReader in tasks/Q-board.md Q2a (it is not
@@ -27,6 +27,7 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -92,9 +93,13 @@ func New(ctx context.Context, uri string) (*Client, error) {
 	return &Client{run: &driverClient{cli: cli}}, nil
 }
 
-// Close disconnects the client. It is safe to call more than once.
+// Close disconnects the client. A second call is a no-op: the driver's
+// ErrClientDisconnected is treated as success.
 func (c *Client) Close(ctx context.Context) error {
-	return c.run.disconnect(ctx)
+	if err := c.run.disconnect(ctx); err != nil && !errors.Is(err, mongo.ErrClientDisconnected) {
+		return err
+	}
+	return nil
 }
 
 // cmd runs one read command against db under a fresh 10 s deadline.

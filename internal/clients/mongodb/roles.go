@@ -173,6 +173,12 @@ func (ai authInfo) effectiveActions(db, coll string) (find, changeStream bool) {
 		if p.db != "" && p.db != db {
 			continue
 		}
+		// A wildcard database resource (the shape readAnyDatabase grants)
+		// covers every database except local, config and admin: MongoDB
+		// excludes those from the built-in any-database roles.
+		if p.db == "" && (db == "local" || db == "config" || db == "admin") {
+			continue
+		}
 		if p.collection != "" {
 			if p.collection != coll {
 				continue

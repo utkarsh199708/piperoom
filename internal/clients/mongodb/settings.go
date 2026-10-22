@@ -169,6 +169,9 @@ func splitCollection(name string) (db, coll string) {
 
 // splitUser splits "authDb.user" into its two parts; a bare name is a user in
 // an unspecified auth database.
+// splitUser splits "authDb.user" at the first dot. A bare user name that
+// contains a dot is therefore read as authDb.user; pass a dotted user with its
+// auth database explicitly.
 func splitUser(name string) (user, authDB string) {
 	if i := strings.IndexByte(name, '.'); i >= 0 {
 		return name[i+1:], name[:i]

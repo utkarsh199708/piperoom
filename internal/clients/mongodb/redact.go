@@ -39,20 +39,6 @@ func passwordOf(uri string) string {
 	return userinfo[colon+1:]
 }
 
-// redactURI returns uri with the password (only) replaced, so it can be logged
-// without leaking credentials.
-func redactURI(uri string) string {
-	prefix, auth, suffix := splitURI(uri)
-	if at := strings.LastIndex(auth, "@"); at >= 0 {
-		userinfo := auth[:at]
-		if colon := strings.Index(userinfo, ":"); colon >= 0 {
-			userinfo = userinfo[:colon+1] + "***"
-		}
-		auth = userinfo + auth[at:]
-	}
-	return prefix + auth + suffix
-}
-
 // redactedError wraps err so that Error() hides any occurrence of the secrets
 // (the connection string's password), while Unwrap preserves the original
 // error for errors.Is / errors.As.
@@ -71,6 +57,8 @@ func (e *redactedError) Error() string {
 	return msg
 }
 
+// Unwrap returns the driver error unchanged so errors.Is/errors.As work. Its
+// message is not redacted: never log or return the unwrapped error.
 func (e *redactedError) Unwrap() error { return e.err }
 
 // redactErr wraps err so a driver error that echoes the connection string
