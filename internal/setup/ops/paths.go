@@ -310,3 +310,11 @@ func underAny(path string, dirs []string) bool {
 	}
 	return false
 }
+
+// MountedPath reports whether the slash-separated path lies under one of the
+// registered mount directories. It is the refusal file_write applies, exported
+// so another writer in the setup tree (compose_write, properties_write) can
+// refuse the same paths rather than bypass the invariant.
+func MountedPath(p string, mounts []string) bool {
+	return underAny(strings.ReplaceAll(p, "\\", "/"), mounts)
+}

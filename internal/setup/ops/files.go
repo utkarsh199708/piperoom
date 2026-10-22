@@ -565,6 +565,12 @@ func writablePath(p string, mounts []string) error {
 		strings.HasSuffix(base, ".socket"), strings.HasSuffix(base, ".path"),
 		strings.HasSuffix(base, ".mount"):
 		return refuse("an executable, script, archive or unit file")
+	case strings.HasSuffix(base, ".properties"):
+		// A Kafka Connect worker loads .properties config with code-loading
+		// keys (plugin.path, config.providers.*.class); properties_write
+		// allow-lists those keys, and file_write must not offer a way around
+		// that allow-list.
+		return refuse("a properties file; properties_write validates these")
 	case base == "compose.yaml", base == "compose.yml",
 		base == "compose.override.yaml", base == "compose.override.yml":
 		return refuse("a compose file")
