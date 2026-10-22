@@ -241,6 +241,15 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		}
 	}
 
+	if steps := r.recoverySteps(rec.steps); len(steps) > 0 {
+		// A recovery is verified by counts (X2c, verify_recovery.go).
+		executedAt, seen := r.proposals.seenAt(id, step)
+		if !seen {
+			executedAt = r.nowTime()
+		}
+		return r.verifyRecoveryProposal(ctx, rec, steps, executedAt)
+	}
+
 	vr := r.verifyProposal(ctx, rec)
 	recovered, evidence, head := vr.recovered, vr.evidence, vr.head
 	var followUp string
