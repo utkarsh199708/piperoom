@@ -35,6 +35,17 @@ type Pipeline struct {
 	// SinkTables and SinkTSColumn belong to both kinds.
 	SinkTables   []string `yaml:"sink_tables"`
 	SinkTSColumn string   `yaml:"sink_ts_column"`
+	// Sinks is the optional cdc `sinks:` block (sinks.go): each sink table with
+	// the warehouse it lives in and the writer that fills it, so two sinks on
+	// one topic stay distinct. It replaces sink_tables:; the legacy
+	// consumer_groups + sink_tables lists keep working and mean one sink per
+	// table. Load merges the block into SinkTables and ConsumerGroups.
+	Sinks []Sink `yaml:"sinks"`
+	// sinksMerged records that validateSinks already merged Sinks into
+	// SinkTables and ConsumerGroups, so a re-validation of the same pipeline
+	// (LoadDir validates the merged set again) does not mistake the merged
+	// SinkTables for a user-declared sink_tables: beside sinks:.
+	sinksMerged bool
 	// DAGs, DBTProject and Models are the batch fields (a cdc pipeline sets
 	// none). DAGs are Airflow dag_ids, Models are dbt model names, DBTProject
 	// is the dbt project's path or URL. A batch pipeline needs at least one
@@ -222,6 +233,11 @@ func (o *Owners) validate() error {
 		}
 		seen[p.ID] = true
 		if err := p.validateKind(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		// validateSinks merges a sinks: block into SinkTables and
+		// ConsumerGroups, so the checks below see the effective lists.
+		if err := p.validateSinks(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.checkOwnerLayers(); err != nil {
