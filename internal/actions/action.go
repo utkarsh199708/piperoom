@@ -22,6 +22,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/redact"
@@ -77,6 +78,133 @@ type (
 	PreviewResult = events.PreviewResult
 	DryRunResult  = events.DryRunResult
 )
+
+// ---- X8: staging (try a step on the pipeline's staging stack first) ----
+
+// StageResult is the event type, like PreviewResult. (X8)
+type StageResult = events.StageResult
+
+// Staging is the write-capable client set of one pipeline's staging stack,
+// built by wiring (X8a) from that pipeline's owners.yaml staging:
+// {connections: ...} block only, and only when write mode is on; never from
+// connections: or the process-wide settings, so no field ever reaches
+// production. Actions get it as Deps.Staging; nil means no staging (no
+// staging: block, or write mode off). A field is nil when the block does
+// not configure that system: Connect without connect_url, Registry without
+// schema_registry_url, Kafka without kafka_brokers (optional: staging Connect
+// may share the production Kafka cluster with its own internal topics, so it
+// is read-only here and no X8 action writes Kafka). Only Stage may use it. (X8)
+type Staging struct {
+	Connect  clients.ConnectClient
+	Registry clients.SchemaRegistryClient
+	Kafka    clients.KafkaReader
+}
+
+// Timing of a stage. The room service bounds each Stage call with
+// StageStepTimeout. Stage watches an applied change for StageObserveWindow
+// (a connector must be RUNNING with every task RUNNING at its end; a FAILED
+// task ends it early as unhealthy; never RUNNING within it is unhealthy),
+// then restores staging on a context of its own,
+// context.WithoutCancel(ctx) bounded by StageRestoreTimeout, so a cancelled
+// stage still restores. (X8)
+const (
+	StageObserveWindow  = 60 * time.Second
+	StageStepTimeout    = 2 * time.Minute
+	StageRestoreTimeout = 10 * time.Second
+)
+
+// StageExpiry is proposal.stage_started's expires_at for a stage of steps
+// steps begun at start: each step's StageStepTimeout and
+// StageRestoreTimeout, plus 30 s for the event writes. (X8)
+func StageExpiry(start time.Time, steps int) time.Time {
+	if steps < 1 {
+		steps = 1
+	}
+	return start.Add(time.Duration(steps)*(StageStepTimeout+StageRestoreTimeout) + 30*time.Second)
+}
+
+// Stager is implemented by an action whose change can be tried on the
+// pipeline's staging stack before production (X8b: connect config,
+// schema_register, schema_set_compatibility; X6c: connect_tune_throughput).
+// Stage applies the change raw describes to the same-named object on
+// staging, watches it for StageObserveWindow where the change has a running
+// state, puts staging back, and reports. It writes ONLY through Deps.Staging
+// and never calls a production client, reader or writer; it never creates
+// the object on staging (a connector or subject that is not there is
+// Applied false, Detail "connector not present in staging").
+//
+// The room service calls it from POST /api/proposals/{pid}/stage (driver
+// only) once per step whose action implements it, in step order, after the
+// step's Validate and CheckScope pass again, with the room's pipeline scope
+// in ctx and a StageStepTimeout deadline; Stage must stop when ctx ends. The
+// executor never calls it, and staging never changes what Execute does. An
+// action without Stager is unaffected: its steps are simply not staged.
+//
+// Results:
+//   - no staging client for this action (Deps.Staging nil, or the field it
+//     needs nil): Applied false, Detail events.StageNoStaging, nil error;
+//   - staging's own pre-check refuses (Registry compatibility, Connect
+//     validate): DryRun set with OK false, Applied false, and no write made;
+//   - applied and healthy for the window: Applied true, Healthy true;
+//   - applied and unhealthy: Applied true, Healthy false, Detail the failed
+//     task's or registry's error text (redacted by CleanStageResult).
+//
+// A non-nil error means no verdict (staging unreachable, ctx ended first);
+// the room service stores it as the step's error. Restoring is part of
+// Stage: a connector gets its previous whole config back
+// (clients.ConnectConfigPutter); what cannot be undone (a registered schema
+// version) or failed to restore is reported in Leftover. Detail, Leftover
+// and errors carry names, states and traces only, never a config value, a
+// record value, a staging URL or a credential. (X8)
+type Stager interface {
+	Stage(ctx context.Context, raw json.RawMessage) (StageResult, error)
+}
+
+// CleanStageResult is the form of a StageResult the room service writes to
+// proposal.staged: Target, Detail, Leftover and DryRun.Text pass redact.Text
+// and are cut on a rune boundary to events.MaxStageTargetBytes,
+// MaxStageDetailBytes, MaxStageLeftoverBytes and 2 KiB (DryRunResult's
+// cap); Healthy without Applied becomes false and a negative DurationMS
+// becomes 0, so a buggy action cannot show a healthy stage that never ran.
+// It never modifies r's DryRun in place. (X8)
+func CleanStageResult(r StageResult) StageResult {
+	clean := func(s string, n int) string {
+		s, _ = redact.Text(s)
+		return cutText(s, n)
+	}
+	r.Target = clean(r.Target, events.MaxStageTargetBytes)
+	r.Detail = clean(r.Detail, events.MaxStageDetailBytes)
+	r.Leftover = clean(r.Leftover, events.MaxStageLeftoverBytes)
+	if r.DryRun != nil {
+		d := *r.DryRun
+		d.Text = clean(d.Text, maxDryRunTextBytes)
+		r.DryRun = &d
+	}
+	if !r.Applied {
+		r.Healthy = false
+	}
+	if r.DurationMS < 0 {
+		r.DurationMS = 0
+	}
+	return r
+}
+
+// maxDryRunTextBytes is DryRunResult.Text's documented cap (2 KiB).
+const maxDryRunTextBytes = 2048
+
+// cutText cuts s to at most n bytes, ending in "…", without splitting a
+// rune.
+func cutText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	const ell = "…"
+	m := n - len(ell)
+	for m > 0 && !utf8.RuneStart(s[m]) {
+		m--
+	}
+	return s[:m] + ell
+}
 
 // Receipted is implemented by an action whose Execute can hand back a receipt
 // of what was done: the setup actions, which forward one typed op to the

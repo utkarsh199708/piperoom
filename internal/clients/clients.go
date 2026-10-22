@@ -71,6 +71,19 @@ type ConnectFixWriter interface {
 	UpdateConnectorConfigKeys(ctx context.Context, name string, changes map[string]string) error
 }
 
+// X8: ConnectConfigPutter replaces a connector's whole config (PUT
+// /connectors/{name}/config). Implemented by internal/clients/connect (X8b)
+// and asserted at use time like ConnectFixWriter, so the existing fakes need
+// not grow. In X8 only an action's Stage holds one, on the staging client
+// (actions.Staging), to give the staging connector back the config it had
+// before the stage. PUT also creates a connector that does not exist, so the
+// caller first checks that it exists (ConnectReader.ListConnectors) and never
+// creates one. cfg is the whole config as ConnectReader.Config returned it;
+// it is never logged or put in an error. (X8)
+type ConnectConfigPutter interface {
+	PutConnectorConfig(ctx context.Context, name string, cfg map[string]string) error
+}
+
 // ConnectClient is the whole Kafka Connect client.
 type ConnectClient interface {
 	ConnectReader
