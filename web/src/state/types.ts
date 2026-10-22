@@ -5,6 +5,7 @@ import type {
   Actor,
   AgentStatusPayload,
   AgentVerificationPayload,
+  ForecastSummary,
   HandoffSummary,
   HypothesisSummary,
   HypothesisVerdict,
@@ -315,6 +316,7 @@ export function emptyInsight(): InsightState {
 export type { ActivityKind } from './describe'
 import type { ActivityKind } from './describe'
 import { stripBidi } from '../lib/title'
+import { cleanForecast } from '../lib/trends'
 
 /** Who ticked one runbook item and when (checklist.step_done). */
 export interface ChecklistTick {
@@ -417,6 +419,10 @@ export interface RoomState {
   closed_by?: Actor
   /** F2: null on open rooms, shadow rooms and closed rooms from before F2. */
   postmortem: PostmortemState | null
+  /** X3: room.created.origin; "forecast" for a quiet forecast room. Absent for every other room. */
+  origin?: string
+  /** X3: the snapshot's newest forecast signal (lane ETA badge, forecast room chart); absent when none. */
+  forecast?: ForecastSummary
 }
 
 export function emptyRoomState(id: string): RoomState {
@@ -475,6 +481,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     resolution: snapshot.resolution,
     closed_by: snapshot.closed_by,
     postmortem: postmortemFromSnapshot(snapshot),
+    ...(snapshot.origin ? { origin: snapshot.origin } : {}),
+    ...forecastField(snapshot),
     last_seq: 0,
     shadow: snapshot.shadow === true,
     replay_target: snapshot.last_seq ?? 0,
@@ -512,6 +520,12 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
       ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
   }
+}
+
+// X3: left off when the snapshot has no usable forecast, so an older server's snapshot folds as before.
+function forecastField(snapshot: RoomSnapshot): Pick<RoomState, 'forecast'> {
+  const forecast = cleanForecast(snapshot.forecast)
+  return forecast ? { forecast } : {}
 }
 
 // The P1a fields, left off entirely when the server sent none so a snapshot from an older server
