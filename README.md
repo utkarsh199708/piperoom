@@ -66,6 +66,21 @@ docker compose -f deploy/docker-compose.quickstart.yml up --build   # or Docker 
 127.0.0.1 only, and prints the URL to open. The room says fixes are suggestions: approvals are
 recorded, nothing runs. Send a test alert with the `curl` in `docs/pilot/quickstart.md`.
 
+**Batch pipelines (Airflow + dbt → warehouse).** There is no `--kind` flag: the kind is a field of
+`owners.yaml`, and `cmd/discover` only finds CDC pipelines, so you write the batch pipeline by hand.
+Add a pipeline with `kind: batch`, its `dags` and/or `models`, and the three batch layers
+(`orchestrator`, `transform`, `warehouse`); the file shape is in `docs/pilot/setup.md` (§ batch).
+Then set the readers' variables (`AIRFLOW_URL` with `AIRFLOW_USERNAME` and `AIRFLOW_PASSWORD`, or
+`AIRFLOW_TOKEN`; `DBT_ARTIFACTS_DIR`, or `DBT_CLOUD_URL` with its token, account and job; and
+`WAREHOUSE_DB_URL` with `WAREHOUSE_KIND`, as in `docs/pilot/setup.md`) and start with that file:
+
+```sh
+make quickstart QUICKSTART_OWNERS=owners.yaml   # an existing file is reused, discover is skipped
+```
+
+The batch tools are read-only, like the rest of the quickstart. The Airflow, dbt and warehouse
+roles are in `docs/pilot/permissions.md`.
+
 Write mode is a separate, full-server setup: `PIPEROOM_WRITE_MODE=on` plus the Connect write
 role in `docs/pilot/permissions.md` (`--quickstart` refuses it); see `docs/pilot/setup.md`.
 
