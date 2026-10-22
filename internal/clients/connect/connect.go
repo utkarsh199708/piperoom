@@ -219,7 +219,11 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, in, out any
 	if len(b) > maxResponseBytes {
 		return fmt.Errorf("connect: %s %s: %w", method, path, ErrResponseTooLarge)
 	}
-	if err := json.Unmarshal(b, out); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	// UseNumber keeps a 64-bit source position (a Postgres LSN, a MySQL file
+	// position) exact in a map[string]any; a float64 loses digits past 2^53.
+	dec.UseNumber()
+	if err := dec.Decode(out); err != nil {
 		return fmt.Errorf("connect: %s %s: decode: %w", method, path, err)
 	}
 	return nil
