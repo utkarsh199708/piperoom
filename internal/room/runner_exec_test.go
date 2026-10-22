@@ -422,7 +422,7 @@ func TestResumeDuplicateStepRefusalKeepsWaiter(t *testing.T) {
 	}()
 	waitOp(t, f.w, 1)
 	f.ex.ReconcileResume(ctx, "r1", protocol.Resume{}) // marks op1 re-sent
-	f.ex.DeliverRefusal(protocol.Refusal{ID: "op1", Op: "compose_up", Reason: protocol.RefuseDuplicateStep, ProposalID: "p1"})
+	f.ex.DeliverRefusal("r1", protocol.Refusal{ID: "op1", Op: "compose_up", Reason: protocol.RefuseDuplicateStep, ProposalID: "p1"})
 	select {
 	case got := <-ch:
 		t.Fatalf("waiter ended on a duplicate_step refusal: %+v", got)
@@ -447,7 +447,7 @@ func TestExecuteRefusalDelivered(t *testing.T) {
 		ch <- err
 	}()
 	waitOp(t, f.w, 1)
-	f.ex.DeliverRefusal(protocol.Refusal{ID: "op1", Op: "compose_up", Reason: protocol.RefuseGuard})
+	f.ex.DeliverRefusal("r1", protocol.Refusal{ID: "op1", Op: "compose_up", Reason: protocol.RefuseGuard})
 	err := <-ch
 	if !errors.Is(err, room.ErrRunnerLost) && err == nil {
 		t.Fatalf("Execute = %v, want a refusal error", err)
@@ -580,5 +580,72 @@ func TestRunnerTokenExpiry(t *testing.T) {
 		if strings.Contains(got.Source, "tok") || strings.Contains(got.RunnerLabel, "tok-a") {
 			t.Fatalf("token leaked into an audit payload: %+v", got)
 		}
+	}
+}
+
+// TestCrossRoomOutcomeIgnored pins the room-isolation invariant: an outcome
+// (result, refusal, or resume state) naming a pending op id is accepted only
+// from the room the op was sent to. Room isolation never rests on op-id
+// secrecy, so another room's authenticated runner cannot forge or refuse
+// room r1's step.
+func TestCrossRoomOutcomeIgnored(t *testing.T) {
+	f := newExecFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := make(chan error, 1)
+	go func() {
+		_, err := f.ex.Execute(ctx, "r1", stepReq("op1", "p1", 0))
+		ch <- err
+	}()
+	waitOp(t, f.w, 1)
+
+	// A forged result, refusal, and done/running resume from room r2.
+	f.ex.DeliverResult(ctx, "r2", protocol.OpResult{ID: "op1", OK: true, Summary: "forged"})
+	f.ex.DeliverRefusal("r2", protocol.Refusal{ID: "op1", Op: "compose_up", Reason: protocol.RefuseGuard})
+	done := protocol.OpResult{ID: "op1", OK: true, Summary: "forged"}
+	f.ex.ReconcileResume(ctx, "r2", protocol.Resume{InFlight: []protocol.OpStatus{
+		{ID: "op1", State: protocol.StateDone, Result: &done},
+	}})
+	select {
+	case got := <-ch:
+		t.Fatalf("waiter ended on another room's outcome: %v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	// The real room's result still lands.
+	f.ex.DeliverResult(ctx, "r1", protocol.OpResult{ID: "op1", OK: true, Summary: "real"})
+	if err := <-ch; err != nil {
+		t.Fatalf("Execute = %v", err)
+	}
+}
+
+// TestCrossRoomLateOutcomeIgnored: the same invariant for an op whose Execute
+// already ended (the late-result memory): only the op's own room can settle
+// it, as a result or as resume-running.
+func TestCrossRoomLateOutcomeIgnored(t *testing.T) {
+	f := newExecFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	_, err := f.ex.Execute(ctx, "r1", stepReq("op1", "p1", 0))
+	if err == nil {
+		t.Fatal("Execute ended without an error despite cancellation")
+	}
+
+	f.ex.DeliverResult(context.Background(), "r2", protocol.OpResult{ID: "op1", OK: true, Summary: "forged"})
+	f.ex.ReconcileResume(context.Background(), "r2", protocol.Resume{InFlight: []protocol.OpStatus{
+		{ID: "op1", State: protocol.StateRunning},
+	}})
+	if res, unk := f.rec.counts(); res != 0 || unk != 0 {
+		t.Fatalf("another room settled the op: results=%d unknown=%d", res, unk)
+	}
+
+	// The op's own room still records the late result exactly once.
+	f.ex.DeliverResult(context.Background(), "r1", protocol.OpResult{ID: "op1", OK: true, Summary: "real"})
+	if res, unk := f.rec.counts(); res != 1 || unk != 0 {
+		t.Fatalf("own room's late result: results=%d unknown=%d, want 1, 0", res, unk)
 	}
 }

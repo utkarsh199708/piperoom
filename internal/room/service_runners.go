@@ -116,7 +116,7 @@ func (s *Service) RunnerRefused(ctx context.Context, tenant, roomID, creatorID, 
 	if !s.runners.Refuse(ctx, tenant, roomID, creatorID, token, payload) {
 		return
 	}
-	s.runnerExec.DeliverRefusal(ref)
+	s.runnerExec.DeliverRefusal(roomID, ref)
 }
 
 // RunnerResult hands one FrameResult to the op waiting for it or records it as

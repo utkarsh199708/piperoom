@@ -47,6 +47,14 @@ type pendingOp struct {
 	resent bool
 }
 
+// knownOp is one request whose Execute ended without an outcome, kept for a
+// late result, together with the room whose runner it was sent to: a late
+// outcome is accepted only from that room's runner.
+type knownOp struct {
+	roomID string
+	req    protocol.OpRequest
+}
+
 // runnerOutcome is what a waiting Execute receives: a result or the runner's
 // refusal.
 type runnerOutcome struct {
@@ -78,11 +86,11 @@ type RunnerExecutor struct {
 	log *slog.Logger
 
 	mu      sync.Mutex
-	pending map[string]*pendingOp         // op id -> waiting Execute
-	known   map[string]protocol.OpRequest // op id -> request whose Execute ended, for a late result
-	order   []string                      // FIFO of known ids for maxKnownOps
-	settled map[string]struct{}           // (proposal, step) already recorded
-	settle  []string                      // FIFO of settled keys for maxSettledSteps
+	pending map[string]*pendingOp // op id -> waiting Execute
+	known   map[string]knownOp    // op id -> request whose Execute ended, for a late result
+	order   []string              // FIFO of known ids for maxKnownOps
+	settled map[string]struct{}   // (proposal, step) already recorded
+	settle  []string              // FIFO of settled keys for maxSettledSteps
 }
 
 // NewRunnerExecutor builds an executor over the runner registry. out may be
@@ -96,7 +104,7 @@ func NewRunnerExecutor(reg *RunnerRegistry, out RunnerResults, log *slog.Logger)
 		out:     out,
 		log:     log,
 		pending: map[string]*pendingOp{},
-		known:   map[string]protocol.OpRequest{},
+		known:   map[string]knownOp{},
 		settled: map[string]struct{}{},
 	}
 }
@@ -153,7 +161,7 @@ func (e *RunnerExecutor) Execute(ctx context.Context, roomID string, req protoco
 		}
 		if cur := e.pending[req.ID]; cur != nil {
 			delete(e.pending, req.ID)
-			e.rememberLocked(req)
+			e.rememberLocked(roomID, req)
 		}
 		e.mu.Unlock()
 		if !e.reg.ConnectedForRoom(roomID) {
@@ -173,7 +181,7 @@ func (e *RunnerExecutor) forgetPending(id string, keep bool) {
 	p := e.pending[id]
 	delete(e.pending, id)
 	if keep && p != nil {
-		e.rememberLocked(p.req)
+		e.rememberLocked(p.roomID, p.req)
 	}
 	e.mu.Unlock()
 }
@@ -196,6 +204,14 @@ func (e *RunnerExecutor) DeliverResult(ctx context.Context, roomID string, res p
 	e.mu.Lock()
 	p := e.pending[res.ID]
 	if p != nil {
+		if p.roomID != roomID {
+			// Another room's authenticated runner named this op id. Op ids
+			// are not secrets, so room isolation never rests on them: the
+			// outcome is accepted only from the room the op was sent to.
+			e.mu.Unlock()
+			e.log.Warn("room: runner result for another room's op ignored", "room", roomID)
+			return
+		}
 		// The channel is buffered (capacity one) and this is its only
 		// sender, so the send never blocks and happens before any Execute
 		// can decide to give up.
@@ -204,7 +220,12 @@ func (e *RunnerExecutor) DeliverResult(ctx context.Context, roomID string, res p
 		e.mu.Unlock()
 		return
 	}
-	req, known := e.known[res.ID]
+	k, known := e.known[res.ID]
+	if known && k.roomID != roomID {
+		e.mu.Unlock()
+		e.log.Warn("room: late runner result for another room's op ignored", "room", roomID)
+		return
+	}
 	if known {
 		e.forgetKnownLocked(res.ID)
 	}
@@ -214,11 +235,11 @@ func (e *RunnerExecutor) DeliverResult(ctx context.Context, roomID string, res p
 		e.log.Info("room: runner result for an unknown op ignored", "room", roomID)
 		return
 	}
-	if !e.markSettled(req) {
+	if !e.markSettled(k.req) {
 		return
 	}
 	if e.out.Result != nil {
-		e.out.Result(ctx, roomID, req, res)
+		e.out.Result(ctx, roomID, k.req, res)
 	}
 }
 
@@ -228,9 +249,9 @@ func (e *RunnerExecutor) DeliverResult(ctx context.Context, roomID string, res p
 // its real result follows, so the waiter stays. A refusal for an op nobody
 // waits for changes nothing here: httpapi has already emitted
 // setup.runner_refused for it.
-func (e *RunnerExecutor) DeliverRefusal(ref protocol.Refusal) {
+func (e *RunnerExecutor) DeliverRefusal(roomID string, ref protocol.Refusal) {
 	e.mu.Lock()
-	if p := e.pending[ref.ID]; p != nil && !(ref.Reason == protocol.RefuseDuplicateStep && p.resent) {
+	if p := e.pending[ref.ID]; p != nil && p.roomID == roomID && !(ref.Reason == protocol.RefuseDuplicateStep && p.resent) {
 		// Same handshake as DeliverResult: send under e.mu so a waiter that
 		// is giving up either takes this outcome or is already gone.
 		delete(e.pending, ref.ID)
@@ -296,7 +317,13 @@ func (e *RunnerExecutor) ReconcileResume(ctx context.Context, roomID string, res
 func (e *RunnerExecutor) markRunning(ctx context.Context, roomID, id string) {
 	e.mu.Lock()
 	p := e.pending[id]
-	req, known := e.known[id]
+	k, known := e.known[id]
+	if known && k.roomID != roomID {
+		// Another room's op: not this runner's to settle.
+		e.mu.Unlock()
+		e.log.Warn("room: runner resume names another room's op; ignored", "room", roomID)
+		return
+	}
 	if known {
 		e.forgetKnownLocked(id)
 	}
@@ -304,11 +331,11 @@ func (e *RunnerExecutor) markRunning(ctx context.Context, roomID, id string) {
 	if p != nil || !known {
 		return
 	}
-	if !e.markSettled(req) {
+	if !e.markSettled(k.req) {
 		return
 	}
 	if e.out.Unknown != nil {
-		e.out.Unknown(ctx, roomID, req)
+		e.out.Unknown(ctx, roomID, k.req)
 	}
 }
 
@@ -329,11 +356,11 @@ func (e *RunnerExecutor) DropRoom(roomID string) {
 
 // rememberLocked records a request whose Execute ended without an outcome.
 // Caller holds e.mu.
-func (e *RunnerExecutor) rememberLocked(req protocol.OpRequest) {
+func (e *RunnerExecutor) rememberLocked(roomID string, req protocol.OpRequest) {
 	if _, ok := e.known[req.ID]; ok {
 		return
 	}
-	e.known[req.ID] = req
+	e.known[req.ID] = knownOp{roomID: roomID, req: req}
 	e.order = append(e.order, req.ID)
 	for len(e.order) > maxKnownOps {
 		old := e.order[0]
