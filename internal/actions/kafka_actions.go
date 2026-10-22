@@ -39,6 +39,10 @@ type Deps struct {
 	// validateTimeout overrides timeout for the I/O in Validate; tests only.
 	// Zero means the default.
 	validateTimeout time.Duration
+	// stageWindow, stagePoll, stageSettle and restoreTimeout override
+	// StageObserveWindow, stagePollInterval, stageSettle and
+	// StageRestoreTimeout in Stage; tests only. Zero means the default.
+	stageWindow, stagePoll, stageSettle, restoreTimeout time.Duration
 }
 
 // Register adds the Kafka Connect and Schema Registry write actions to reg.
