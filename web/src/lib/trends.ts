@@ -140,7 +140,7 @@ export interface EtaBadge {
 }
 
 /** The badge for a forecast at `now`, or null when there is none to show (unknown metric, bad time, > 7 d). */
-export function etaBadge(forecast: ForecastSummary, now: number): EtaBadge | null {
+export function etaBadge(forecast: Pick<ForecastSummary, 'metric' | 'eta' | 'object'>, now: number): EtaBadge | null {
   if (!isWatchMetric(forecast.metric)) return null
   const eta = Date.parse(forecast.eta)
   if (Number.isNaN(eta)) return null

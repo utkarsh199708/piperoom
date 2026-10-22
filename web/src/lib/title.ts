@@ -30,6 +30,7 @@ export const LIST_TITLE = 'Rooms · Piperoom'
 export function pageTitle(pathname: string): string {
   if (pathname.startsWith('/settings')) return 'Settings · Piperoom'
   if (pathname.startsWith('/shadow')) return 'Shadow results · Piperoom'
+  if (pathname.startsWith('/fleet') || pathname.startsWith('/pipelines/')) return 'Fleet · Piperoom'
   return LIST_TITLE
 }
 

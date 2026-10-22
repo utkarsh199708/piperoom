@@ -844,6 +844,66 @@ export interface PipelineInfo {
   kind?: 'cdc' | 'batch'
 }
 
+/** FleetPipeline.forecasts[] (X5): one firing forecast; `metric` is an X3 sample metric name. */
+export interface FleetForecast {
+  metric: string
+  eta: string
+}
+
+/** FleetPipeline.last_verdict (X5): the human judgement of the pipeline's last judged room. */
+export interface FleetVerdict {
+  room_id: string
+  /** `confirmed` | `disputed`, or '' when the room has only a grade. */
+  verdict: string
+  /** null when the room was not graded. */
+  layer_correct: boolean | null
+  at: string
+}
+
+export type FleetHealth = 'ok' | 'warn' | 'fail' | 'unknown'
+
+/** One row of GET /api/fleet (docs/api.md "Fleet view", X5-0). */
+export interface FleetPipeline {
+  pipeline_id: string
+  title: string
+  kind: string
+  tenant: string
+  team: string
+  health: FleetHealth
+  /** A topology node id as GET .../topology names it (`connect:<connector>`, `pg:<table>`); '' when nothing fires. */
+  worst_node: string
+  open_rooms: number
+  /** Watcher signal names now firing or acked, worst first. */
+  signals_firing: string[]
+  changes_24h: number
+  /** Soonest ETA first. */
+  forecasts: FleetForecast[]
+  last_verdict: FleetVerdict | null
+  /** Omitted when the watcher never checked the pipeline. */
+  checked_at?: string
+}
+
+/** One F8 `pipeline_changes` row as GET /api/fleet/changes returns it (already masked; untrusted text). */
+export interface PipelineChange {
+  id: number
+  pipeline_id: string
+  kind: string
+  object: string
+  at: string
+  actor?: string
+  source: string
+  fingerprint: string
+  before?: unknown
+  after?: unknown
+  summary: string
+}
+
+/** GET /api/fleet/changes: one page, newest first; `next` is '' on the last page. */
+export interface FleetChangesPage {
+  changes: PipelineChange[]
+  next: string
+}
+
 export interface Person {
   id: string
   name: string

@@ -1,4 +1,4 @@
-import { EyeOff, Inbox, Search, Settings } from 'lucide-react'
+import { EyeOff, Inbox, LayoutGrid, Search, Settings } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -105,6 +105,7 @@ export function SidebarContent({
   const { pathname, search } = useLocation()
   const filter = pathname === '/' ? new URLSearchParams(search).get('pipeline') : null
   const onList = pathname === '/' && !filter // the unfiltered list is the current page of the Rooms link
+  const onFleet = pathname === '/fleet' || pathname.startsWith('/pipelines/')
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-foreground">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-4">
@@ -135,6 +136,17 @@ export function SidebarContent({
 
       <nav aria-label="Main" className="px-2 pt-3">
         <ul className="flex flex-col gap-0.5">
+          <li>
+            <Link
+              to="/fleet"
+              className={cn(itemClass, onFleet && activeClass)}
+              aria-current={onFleet ? 'page' : undefined}
+              onClick={onNavigate}
+            >
+              <LayoutGrid aria-hidden="true" />
+              Fleet
+            </Link>
+          </li>
           <li>
             <Link
               to="/"
