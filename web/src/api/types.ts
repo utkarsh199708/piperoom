@@ -782,6 +782,21 @@ export interface AgentStats {
   cost_available: boolean
   enough_data: boolean
   shadow: { rooms: number; graded: number; layer_correct: number }
+  /** X6 infrastructure cost hints, last 7 days of watch samples; null without history, absent before X6d. */
+  infra?: AgentStatsInfra | null
+}
+
+/**
+ * X6 `infra` of agent-stats (docs/api.md): units only, never a currency. Each metric is null when the
+ * pipeline has no sample of it in the window; `from`/`to` are the first and newest sample used.
+ */
+export interface AgentStatsInfra {
+  from: string
+  to: string
+  samples: number
+  wal_retained_gb_days: number | null
+  dlq_records: number | null
+  oldest_unread_age_s: number | null
 }
 
 export interface TopologyNode {
