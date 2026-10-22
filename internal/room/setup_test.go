@@ -3,6 +3,7 @@ package room_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -374,28 +375,67 @@ func TestCreateSetupRoomTargetDenylist(t *testing.T) {
 	}
 	env := newSetupEnv(t, setupOptions{withTenants: true, ownAddrs: own, resolver: res})
 	refused := []string{
-		"169.254.169.254:5432",     // link-local (cloud metadata)
-		"fd00:ec2::254",            // the EC2 metadata IPv6 address
-		"[fe80::1]:5432",           // link-local IPv6
-		"224.0.0.1:9092",           // multicast
-		"0.0.0.0:5432",             // unspecified
-		"127.0.0.1:5432",           // another host's loopback on a team server
-		"metadata.google.internal", // refused by name
-		"internal.metadata:5432",   // resolves to a link-local address
-		"10.9.9.9:5432",            // this server's own address
+		"169.254.169.254:5432",                       // link-local (cloud metadata)
+		"fd00:ec2::254",                              // the EC2 metadata IPv6 address
+		"[fe80::1]:5432",                             // link-local IPv6
+		"224.0.0.1:9092",                             // multicast
+		"0.0.0.0:5432",                               // unspecified
+		"127.0.0.1:5432",                             // another host's loopback on a team server
+		"metadata.google.internal",                   // refused by name
+		"internal.metadata:5432",                     // resolves to a link-local address
+		"10.9.9.9:5432",                              // this server's own address
+		"postgres://reader@db.acme:5432/orders",      // user info is a stored credential
+		"postgres://user:secret@db.acme:5432/orders", // so is a password
 	}
 	for i, address := range refused {
 		req := setupRequest("orders-refused-" + string(rune('a'+i)))
 		req.Targets = []events.SetupTarget{{Kind: "postgres", Address: address}}
 		_, err := env.svc.CreateSetupRoom(context.Background(), alice(), req)
 		wantSetupError(t, err, 400, "address_refused")
+		if err != nil && strings.Contains(err.Error(), "secret") {
+			t.Fatalf("the refusal echoes the address: %v", err)
+		}
 	}
-	allowed := []string{"db.acme:5432", "unresolvable.acme:5432", "postgres://reader@db.acme:5432/orders"}
+	allowed := []string{"db.acme:5432", "unresolvable.acme:5432", "postgres://db.acme:5432/orders"}
 	for i, address := range allowed {
 		req := setupRequest("orders-allowed-" + string(rune('a'+i)))
 		req.Targets = []events.SetupTarget{{Kind: "postgres", Address: address}}
 		if _, err := env.svc.CreateSetupRoom(context.Background(), alice(), req); err != nil {
 			t.Fatalf("address %q was refused: %v", address, err)
+		}
+	}
+}
+
+// The denylist is not limited to the network kinds: a registered target of any
+// kind becomes allow-listed for http_get and net_probe, so an address that
+// parses to a host is checked whatever kind carries it. An opaque identifier
+// that is not host-shaped (a cloud account id with a path, a kubectl context
+// and namespace) stays accepted.
+func TestCreateSetupRoomNonNetworkKindDenylist(t *testing.T) {
+	env := newSetupEnv(t, setupOptions{withTenants: true})
+	refused := []events.SetupTarget{
+		{Kind: "aws", Address: "http://169.254.169.254"}, // the metadata service as a URL
+		{Kind: "aws", Address: "169.254.169.254"},        // and as a bare address
+		{Kind: "aws", Address: "127.0.0.1:6379"},         // another host's loopback on a team server
+		{Kind: "kubernetes", Address: "metadata.google.internal"},
+		{Kind: "confluent", Address: "https://admin:secret@confluent.cloud"}, // user info in any kind
+	}
+	for i, target := range refused {
+		req := setupRequest("orders-nn-refused-" + string(rune('a'+i)))
+		req.Targets = []events.SetupTarget{target}
+		_, err := env.svc.CreateSetupRoom(context.Background(), alice(), req)
+		wantSetupError(t, err, 400, "address_refused")
+	}
+	allowed := []events.SetupTarget{
+		{Kind: "aws", Address: "123456789012"},             // an account id does not resolve
+		{Kind: "kubernetes", Address: "prod-cluster/apps"}, // a context and namespace is not host-shaped
+		{Kind: "confluent", Address: "lkc-abc123"},
+	}
+	for i, target := range allowed {
+		req := setupRequest("orders-nn-allowed-" + string(rune('a'+i)))
+		req.Targets = []events.SetupTarget{target}
+		if _, err := env.svc.CreateSetupRoom(context.Background(), alice(), req); err != nil {
+			t.Fatalf("%s %q was refused: %v", target.Kind, target.Address, err)
 		}
 	}
 }
@@ -572,6 +612,110 @@ func mustUsers(t *testing.T) *room.Users {
 		t.Fatal(err)
 	}
 	return u
+}
+
+// The caller's right to touch the room is settled before any address verdict:
+// a non-driver, a hidden room and a server with setup off answer their own
+// errors even for an address the denylist would refuse, so the routes neither
+// run the resolver nor leak refusal classes for a caller the room refuses.
+func TestAddSetupTargetAuthorizationBeforeAddressVerdict(t *testing.T) {
+	// trackingResolver counts lookups: a refused caller must cause none.
+	lookups := 0
+	res := resolverFunc(func(ctx context.Context, network, host string) ([]netip.Addr, error) {
+		lookups++
+		return fakeResolver{"db.acme": {netip.MustParseAddr("10.1.2.3")}}.LookupNetIP(ctx, network, host)
+	})
+	env := newSetupEnv(t, setupOptions{withTenants: true, resolver: res})
+	ctx := context.Background()
+	roomID := createSetup(t, env, setupRequest("orders-setup")).Room.ID
+	lookups = 0
+
+	// The metadata address would be 400 address_refused for the driver; every
+	// refused caller gets its own answer instead, with no lookup made.
+	metadata := events.SetupTarget{Kind: "postgres", Address: "internal.metadata:5432"}
+	_, err := env.svc.AddSetupTarget(ctx, ann(), roomID, metadata)
+	wantSetupError(t, err, 403, "not_driver")
+	_, err = env.svc.AddSetupTarget(ctx, bob(), roomID, metadata)
+	wantSetupError(t, err, 404, "not_found")
+	if lookups != 0 {
+		t.Fatalf("a refused caller drove the resolver: %d lookups", lookups)
+	}
+
+	// With setup off the same request is 404 setup_disabled, still before any
+	// address verdict (the route exists but says nothing about the address).
+	disabled := room.New(room.Deps{Store: env.store, Users: mustUsers(t), Owners: env.own,
+		Now:   func() time.Time { return env.now },
+		Setup: config.Setup{Enabled: false}, SetupResolver: res})
+	t.Cleanup(disabled.Close)
+	_, err = disabled.AddSetupTarget(ctx, alice(), roomID, metadata)
+	wantSetupError(t, err, 404, "setup_disabled")
+	if lookups != 0 {
+		t.Fatalf("a disabled server drove the resolver: %d lookups", lookups)
+	}
+}
+
+// resolverFunc adapts a function to room.TargetResolver.
+type resolverFunc func(ctx context.Context, network, host string) ([]netip.Addr, error)
+
+func (f resolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error) {
+	return f(ctx, network, host)
+}
+
+// One request names at most maxSetupTargets targets, and one room registers at
+// most that many, so a request cannot drive the server's resolver without
+// bound.
+func TestSetupTargetCaps(t *testing.T) {
+	env := newSetupEnv(t, setupOptions{withTenants: true})
+	ctx := context.Background()
+
+	req := setupRequest("orders-too-many")
+	for i := 0; i < 32; i++ {
+		req.Targets = append(req.Targets, events.SetupTarget{Kind: "host", Address: fmt.Sprintf("h%d.acme:1", i)})
+	}
+	_, err := env.svc.CreateSetupRoom(ctx, alice(), req)
+	wantSetupError(t, err, 400, "validation")
+
+	roomID := createSetup(t, env, setupRequest("orders-setup")).Room.ID
+	for i := 1; i < 32; i++ {
+		if _, err := env.svc.AddSetupTarget(ctx, alice(), roomID, events.SetupTarget{Kind: "host", Address: fmt.Sprintf("h%d.acme:1", i)}); err != nil {
+			t.Fatalf("target %d: %v", i, err)
+		}
+	}
+	_, err = env.svc.AddSetupTarget(ctx, alice(), roomID, events.SetupTarget{Kind: "host", Address: "one-too-many.acme:1"})
+	wantSetupError(t, err, 400, "validation")
+}
+
+// Two concurrent creates of the same pipeline open one room: the key lock
+// makes the pipeline check and the create one step.
+func TestCreateSetupRoomConcurrentSamePipeline(t *testing.T) {
+	env := newSetupEnv(t, setupOptions{withTenants: true})
+	const n = 8
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := env.svc.CreateSetupRoom(context.Background(), alice(), setupRequest("orders-setup"))
+			errs <- err
+		}()
+	}
+	created := 0
+	for i := 0; i < n; i++ {
+		err := <-errs
+		if err == nil {
+			created++
+			continue
+		}
+		wantSetupError(t, err, 409, "pipeline_exists")
+	}
+	if created != 1 {
+		t.Fatalf("%d rooms were created, want 1", created)
+	}
+	rooms, err := env.svc.ListRooms(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rooms) != 1 {
+		t.Fatalf("rooms = %d, want 1", len(rooms))
+	}
 }
 
 func TestSetupCommandOnIncidentRoomAndClosedRoom(t *testing.T) {

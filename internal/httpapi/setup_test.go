@@ -202,7 +202,9 @@ func TestSetupRoutesDisabled(t *testing.T) {
 	if err := json.Unmarshal(body, &inc); err != nil {
 		t.Fatal(err)
 	}
-	status, code = env.errCode(t, "alice", http.MethodPost, "/api/rooms/"+inc.ID+"/setup/targets", `{"kind":"connect","address":"connect.acme:8083"}`)
+	// The address is one the denylist would refuse: the disabled answer comes
+	// first, so a disabled route says nothing about any address.
+	status, code = env.errCode(t, "alice", http.MethodPost, "/api/rooms/"+inc.ID+"/setup/targets", `{"kind":"connect","address":"169.254.169.254:8083"}`)
 	if status != http.StatusNotFound || code != "setup_disabled" {
 		t.Fatalf("targets route = %d %s, want 404 setup_disabled", status, code)
 	}

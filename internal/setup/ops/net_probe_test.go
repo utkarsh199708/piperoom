@@ -161,6 +161,45 @@ func TestNetProbeRefusedPort(t *testing.T) {
 	}
 }
 
+// A kafka target naming a comma-separated broker list probes every broker,
+// each on its own port.
+func TestNetProbeKafkaBrokerList(t *testing.T) {
+	listen := func() net.Listener {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_ = c.Close()
+			}
+		}()
+		return ln
+	}
+	a, b := listen(), listen()
+	r := testRegistry(t, events.SetupTarget{Kind: "kafka", Address: a.Addr().String() + "," + b.Addr().String()})
+	res, err := runOpErr(t, r, "net_probe", map[string]any{"target": "kafka"})
+	if err != nil {
+		t.Fatalf("net_probe: %v (summary %s)", err, res.Summary)
+	}
+	var data netProbeData
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Address != a.Addr().String()+","+b.Addr().String() {
+		t.Fatalf("address = %q", data.Address)
+	}
+	// Both brokers were probed: dns and tcp per broker.
+	if len(data.Checks) != 4 {
+		t.Fatalf("checks = %+v", data.Checks)
+	}
+}
+
 func TestNetProbeUnknownTarget(t *testing.T) {
 	r := testRegistry(t, events.SetupTarget{Kind: "connect", Address: "127.0.0.1:1"})
 	if _, err := runOpErr(t, r, "net_probe", map[string]any{"target": "postgres"}); !errors.Is(err, ErrTarget) {

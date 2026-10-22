@@ -120,6 +120,23 @@ func (s *Service) CreateSetupRoom(ctx context.Context, user User, req events.Set
 		return SetupRoom{}, err
 	}
 
+	// Two concurrent creates of the same pipeline must not both pass the
+	// pipeline checks: the key lock (the alert webhook's striped lock, and
+	// with a shared store the cluster-wide one) makes the re-check and the
+	// create one step, and it is held until the room is published, so the
+	// loser's re-check sees the winner's open room. The key starts with
+	// "setup ", and a space cannot occur in a pipeline id, so it never
+	// collides with an alert's pipeline|dedup index key. The unlocked checks
+	// above remain the fast fail before any target resolution.
+	unlock, err := s.lockAlertKey(ctx, "setup "+req.PipelineID)
+	if err != nil {
+		return SetupRoom{}, err
+	}
+	defer unlock()
+	if s.owners.HasPipeline(req.PipelineID) || s.openSetupRoomFor(req.PipelineID) {
+		return SetupRoom{}, pipelineExists(req.PipelineID)
+	}
+
 	roomID := NewID("r_")
 	now := s.now().UTC()
 	if err := s.store.CreateRoom(ctx, store.Room{
@@ -188,6 +205,11 @@ func (s *Service) CreateSetupRoom(ctx context.Context, user User, req events.Set
 // planSetupTargets validates every target of the request and combines its
 // floor with the derived class.
 func (s *Service) planSetupTargets(ctx context.Context, in []events.SetupTarget) ([]events.SetupTarget, []setupTargetPlan, error) {
+	// The cap comes before any plan: each target can cost a name lookup, so
+	// an oversized list must not drive the resolver at all.
+	if len(in) > maxSetupTargets {
+		return nil, nil, validation(fmt.Sprintf("targets: at most %d entries", maxSetupTargets))
+	}
 	out := make([]events.SetupTarget, 0, len(in))
 	plans := make([]setupTargetPlan, 0, len(in))
 	seen := map[string]bool{}
@@ -324,15 +346,31 @@ func (s *Service) lockSetupRoom(ctx context.Context, user User, roomID string) (
 // §2.6, the class is max(floor, derived) and never below shared, and the room
 // emits setup.target_registered plus setup.target_classed.
 func (s *Service) AddSetupTarget(ctx context.Context, user User, roomID string, in events.SetupTarget) (events.Event, error) {
-	plan, err := s.planSetupTarget(ctx, in)
-	if err != nil {
-		return events.Event{}, err
-	}
+	// The caller's right to touch the room is settled first: planSetupTarget
+	// resolves names (up to targetResolveTimeout per host) and answers address
+	// verdicts, and neither that resolver work nor a verdict may be observable
+	// by a caller the room would refuse (403 not_driver, 404). The lock is
+	// given back for the resolution, because no slow call runs under a room
+	// lock, and taken again below.
 	st, err := s.lockSetupRoom(ctx, user, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	s.unlockRoom(st)
+	plan, err := s.planSetupTarget(ctx, in)
+	if err != nil {
+		return events.Event{}, err
+	}
+	// Re-locked and re-verified: the room may have closed or changed drivers
+	// while the names resolved.
+	st, err = s.lockSetupRoom(ctx, user, roomID)
+	if err != nil {
+		return events.Event{}, err
+	}
 	defer s.unlockRoom(st)
+	if len(st.snap.Setup.Targets) >= maxSetupTargets {
+		return events.Event{}, validation(fmt.Sprintf("the room already has %d targets; at most %d", len(st.snap.Setup.Targets), maxSetupTargets))
+	}
 	for _, t := range st.snap.Setup.Targets {
 		if t.Address == plan.target.Address {
 			return events.Event{}, validation("that target address is already registered")

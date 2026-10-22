@@ -144,6 +144,13 @@ func setupTargetHosts(address string) []string {
 // service names and addresses, multicast, unspecified, loopback of another
 // host and this server's own addresses are refused. Private ranges are
 // allowed: a corporate database at 10.x or 192.168.x is the normal case.
+//
+// The denylist is not limited to the network kinds: a registered target of any
+// kind is what the ops layer allow-lists for http_get and net_probe, so an
+// address that parses to a host is checked whatever kind carries it. A
+// non-network kind may still name an opaque identifier that is not host-shaped
+// (a kubectl context with a namespace, a cloud account alias with a path), and
+// only a network kind must name a host.
 func (s *Service) checkSetupTarget(ctx context.Context, kind, address string) error {
 	if !setupTargetKinds[kind] {
 		return validation(fmt.Sprintf("target kind %q: want one of postgres, kafka, connect, registry, kubernetes, aws, confluent, aiven, host", kind))
@@ -158,22 +165,39 @@ func (s *Service) checkSetupTarget(ctx context.Context, kind, address string) er
 	if hasControlChars(raw) {
 		return validation("target address contains characters that cannot be stored")
 	}
-	if !networkTargetKinds[kind] {
-		return nil
-	}
 	for _, part := range strings.Split(raw, ",") {
-		host := setupTargetHost(part)
-		if host == "" {
-			return validation("target address must name a host, a host:port or a URL with a host")
+		if setupTargetURLHasUserinfo(part) {
+			// The address would be stored verbatim in events, snapshots and
+			// exports, so a credential in it is refused before anything is
+			// written or resolved.
+			return credentialRefused()
 		}
-		if !setupHostNameRE.MatchString(host) {
-			return validation("target address must name a host, a host:port or a URL with a host")
+		host := setupTargetHost(part)
+		if host == "" || !setupHostNameRE.MatchString(host) {
+			if networkTargetKinds[kind] {
+				return validation("target address must name a host, a host:port or a URL with a host")
+			}
+			// An opaque identifier of a non-network kind: nothing the server
+			// could resolve or deny.
+			continue
 		}
 		if err := s.checkSetupTargetHost(ctx, host); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// setupTargetURLHasUserinfo reports whether a URL-form address carries user
+// info. A non-URL address never does: user info pasted into a bare host fails
+// setupHostNameRE's shape instead.
+func setupTargetURLHasUserinfo(address string) bool {
+	raw := strings.TrimSpace(address)
+	if !strings.Contains(raw, "://") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	return err == nil && u.User != nil
 }
 
 // checkSetupTargetHost resolves one host and applies the denylist to every

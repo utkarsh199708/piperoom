@@ -176,6 +176,13 @@ func addressRefused() *Error {
 	return &Error{Status: http.StatusBadRequest, Code: "address_refused", Msg: "the target address is not allowed: cloud metadata endpoints, link-local, multicast, unspecified and loopback addresses of another host are refused, as are this server's own addresses"}
 }
 
+// credentialRefused is 400 address_refused for a URL-form target address that
+// carries user info. The address would be stored verbatim in events, snapshots
+// and exports, so the message never echoes it (the user info IS the secret).
+func credentialRefused() *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "address_refused", Msg: "the target address must not carry user info: register the host without credentials"}
+}
+
 // classLowered is 400 class_lowered: a class below the one the server derived
 // (a class is a floor that only rises).
 func classLowered(msg string) *Error {

@@ -161,6 +161,12 @@ const (
 	maxSetupPipelineList = 200
 )
 
+// maxSetupTargets caps how many targets one request may name and how many one
+// room may register. Each target can cost the server a name lookup at
+// registration (checkSetupTargetHost), so the cap bounds what one request can
+// make the server's resolver do; a real pipeline names a handful of hosts.
+const maxSetupTargets = 32
+
 // DefaultSetupTokenBudget is defaultSetupTokenBudget as a typed value, for a
 // caller that has no config.
 func DefaultSetupTokenBudget() int64 { return defaultSetupTokenBudget }
