@@ -16,16 +16,18 @@ import (
 
 // Verdicts of pg_streaming_liveness. "streaming", "quiet" and
 // "not_confirmed" are not faults: a quiet source has nothing to send, and a
-// flush that did not move inside a window shorter than the connector's
-// offset-flush interval cannot show a stall. Only "stuck" is a fault.
+// flat flush with a head−confirmed_flush lag that one worker offset flush
+// could still explain cannot show a stall. Only "stuck" is a fault.
 const (
 	verdictStreaming = "streaming"
 	verdictStuck     = "stuck"
 	verdictQuiet     = "quiet"
 	// verdictNotConfirmed means the source WAL head advanced while
-	// confirmed_flush_lsn stayed flat, but the observed window was shorter than
-	// the connector's offset.flush.interval.ms, so Debezium has simply not been
-	// due to confirm offsets yet. It is an explicit unknown, never a fault.
+	// confirmed_flush_lsn stayed flat, but the head−confirmed_flush lag is
+	// still small enough that one worker offset flush could explain it
+	// (Debezium confirms offsets only when Kafka Connect commits them), so
+	// the window is too short to call the slot stuck. It is an explicit
+	// unknown, never a fault.
 	verdictNotConfirmed = "not_confirmed"
 	// verdictUnknown means the reads did not carry enough to judge (a slot
 	// without a comparable LSN, a slot that appeared or disappeared between the
@@ -39,11 +41,23 @@ const (
 	// tool's 10 s deadline even when the source answers slowly.
 	livenessMaxWindowSeconds = 8
 
-	// defaultOffsetFlushInterval is Kafka Connect's default
-	// offset.flush.interval.ms. Debezium advances confirmed_flush_lsn only when
-	// Connect commits offsets, so a flat flush over a shorter window is not
-	// evidence of a stall.
-	defaultOffsetFlushInterval = 60 * time.Second
+	// workerOffsetFlushDefault is Kafka Connect's default WORKER
+	// offset.flush.interval.ms (60 s). It is a worker property, unreadable
+	// through the connector REST API, so the tool never reads it from a
+	// connector config (a value put there by mistake is ignored by Connect
+	// and must not be trusted here); it only scales the stuck-lag threshold.
+	workerOffsetFlushDefault = 60 * time.Second
+
+	// stuckLagFlushIntervals and stuckLagFloorBytes set the stuck threshold:
+	// a flat confirmed_flush_lsn while the head moves is "stuck" only when
+	// the head−confirmed_flush lag is growing and larger than
+	// max(stuckLagFloorBytes,
+	//     stuckLagFlushIntervals × observed write rate × workerOffsetFlushDefault).
+	// A lag that one worker offset flush could explain, with generous margin,
+	// never trips it, and the floor keeps quiet-ish sources from tripping on
+	// noise.
+	stuckLagFlushIntervals = 4
+	stuckLagFloorBytes     = int64(16 << 20) // 16 MiB
 )
 
 // pgStreamingLivenessTool answers whether the source Postgres is actually
@@ -61,7 +75,7 @@ func pgStreamingLivenessTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_streaming_liveness",
 		desc: "Check whether the source Postgres is actually streaming to Debezium: sample the pipeline's replication slot confirmed_flush_lsn twice, window_seconds apart, and compare it with the source WAL head. " +
-			"Returns verdict streaming (the slot advanced), stuck (confirmed_flush_lsn stayed flat while the source wrote, over a window at least as long as the connector's offset.flush.interval.ms), not_confirmed (flat flush over a shorter window: Debezium has not been due to commit offsets yet, not a fault) or quiet (no source writes; not a fault). " +
+			"Returns verdict streaming (the slot advanced), stuck (confirmed_flush_lsn stayed flat while the source wrote AND the head-confirmed_flush lag is growing and larger than one Kafka Connect worker offset flush could explain: above max(16 MiB, 4 x the observed write rate x the 60 s worker offset.flush.interval.ms default)), not_confirmed (flat flush with a lag below that threshold: Debezium may simply not have been due to commit offsets yet, not a fault) or quiet (no source writes; not a fault). " +
 			"A quiet reading with an inactive slot, or a stuck reading, is not healthy. Use it when a connector or its tasks are RUNNING but the sink is stale or no events arrive; debezium_metrics, when DEBEZIUM_METRICS_URL is set, is the connector-side view, and this check needs no JMX. " +
 			"stuck also names the oldest open writer transaction: a long transaction, or a write outside the publication, holds the slot back without the connector being broken.",
 		schema: objSchema(map[string]any{
@@ -106,6 +120,11 @@ func pgStreamingLivenessTool(d Deps) tools.Tool {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_streaming_liveness: verdict unknown: pipeline %q has no Debezium Postgres source connector, so it has no replication slot and streaming cannot be confirmed", p.ID)
 			}
 
+			// Read the connector configs before the wait, with the full tool
+			// deadline left; they only NAME the measured connector. No worker
+			// property (offset.flush.interval.ms) is read from them.
+			slotsByConnector := d.connectorSlots(ctx, p)
+
 			started := time.Now()
 			before, _, err := d.namedSlots(ctx, names)
 			if err != nil {
@@ -123,8 +142,6 @@ func pgStreamingLivenessTool(d Deps) tools.Tool {
 			beforeSlot, beforeOK := findSlot(names, before)
 			afterSlot, afterOK := findSlot(names, after)
 			s0, s1, ok := findSlotPair(names, before, after)
-			// The connector's offset-flush interval decides whether a flat
-			// confirmed_flush_lsn over this window can mean "stuck" at all.
 			measured := ""
 			switch {
 			case ok:
@@ -134,13 +151,13 @@ func pgStreamingLivenessTool(d Deps) tools.Tool {
 			case afterOK:
 				measured = afterSlot.Name
 			}
-			flushInterval, connector, flushNote := d.offsetFlushInterval(ctx, p, measured)
+			connector := measuredConnector(p, slotsByConnector, measured)
 
 			var sl slotLiveness
 			var verdict, note string
 			switch {
 			case ok:
-				sl, verdict, note = evaluateSlot(s0, s1, window, flushInterval)
+				sl, verdict, note = evaluateSlot(s0, s1, window)
 			case !beforeOK && !afterOK:
 				return tools.Result{}, noSlotError(p, names)
 			case beforeOK:
@@ -152,22 +169,14 @@ func pgStreamingLivenessTool(d Deps) tools.Tool {
 				verdict = verdictUnknown
 				note = fmt.Sprintf("slot %q appeared during the %s check, so it has no earlier position to compare", afterSlot.Name, topology.HumanAge(window))
 			}
-			// The flush interval only qualifies the two flat-flush verdicts;
-			// an unavailable config must not add noise to a streaming or quiet
-			// reading.
-			if verdict != verdictStuck && verdict != verdictNotConfirmed {
-				flushNote = ""
-			}
 			rep := livenessReport{
-				Pipeline:              p.ID,
-				Verdict:               verdict,
-				Note:                  note,
-				Source:                "replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)",
-				WindowSeconds:         int(window / time.Second),
-				ElapsedMS:             elapsed.Milliseconds(),
-				OffsetFlushIntervalMS: flushInterval.Milliseconds(),
-				OffsetFlushNote:       flushNote,
-				Slot:                  sl,
+				Pipeline:      p.ID,
+				Verdict:       verdict,
+				Note:          note,
+				Source:        "replication slot LSN (confirmed_flush_lsn vs restart_lsn + retained WAL)",
+				WindowSeconds: int(window / time.Second),
+				ElapsedMS:     elapsed.Milliseconds(),
+				Slot:          sl,
 			}
 			rep.Connector = connector
 			rep.ConnectorState, rep.ConnectorTasks, rep.ConnectorStatusError = d.connectorStatus(ctx, connector)
@@ -323,15 +332,21 @@ func slotLivenessOf(s clients.ReplicationSlot) slotLiveness {
 
 // evaluateSlot compares one slot at two reads. The verdict is:
 //   - streaming when confirmed_flush_lsn advanced;
-//   - stuck when it did not move while the source WAL head advanced, and the
-//     window is at least the connector's offset-flush interval (Debezium only
-//     confirms offsets when Connect commits them);
-//   - not_confirmed when it did not move while the head advanced, but the
-//     window is shorter than that interval: too early to call it a stall;
+//   - stuck when it did not move while the source WAL head advanced, AND the
+//     head−confirmed_flush lag is old and growing: larger at the second read
+//     than the first, and above a threshold that one worker offset flush
+//     cannot explain (Debezium only confirms offsets when Kafka Connect
+//     commits them, about every worker offset.flush.interval.ms — a worker
+//     property this tool cannot read, so the threshold is scaled from
+//     Connect's 60 s default; see stuckLagThreshold);
+//   - not_confirmed when it did not move while the head advanced, but the lag
+//     is below that bar: too early to call it a stall. A quiet capture set
+//     with no heartbeat (only other tables or databases moving the head)
+//     lands here, never at stuck;
 //   - quiet when neither moved (the source had nothing to send);
 //   - unknown, with a note, when the reads do not carry a comparable position.
 //     A slot that cannot be judged is never reported as healthy.
-func evaluateSlot(before, after clients.ReplicationSlot, window, flushInterval time.Duration) (slotLiveness, string, string) {
+func evaluateSlot(before, after clients.ReplicationSlot, window time.Duration) (slotLiveness, string, string) {
 	sl := slotLivenessOf(before)
 	sl.Active = after.Active
 	sl.WALStatus = after.WALStatus
@@ -371,20 +386,55 @@ func evaluateSlot(before, after clients.ReplicationSlot, window, flushInterval t
 	}
 	sl.SourceWALAdvanceBytes = int64(head1 - head0)
 	if head1 > head0 {
-		// A flat confirmed_flush_lsn only means the connector is stuck if the
-		// window covered at least one offset flush: Debezium confirms offsets
-		// roughly every offset.flush.interval.ms, not on every record.
-		if window < flushInterval {
-			sl.Verdict = verdictNotConfirmed
-			note := fmt.Sprintf("confirmed_flush_lsn did not move in %s while the source wrote %d bytes; Debezium confirms offsets about every %s (%d ms, offset.flush.interval.ms), so this window is too short to call the slot stuck",
-				topology.HumanAge(window), sl.SourceWALAdvanceBytes, topology.HumanAge(flushInterval), flushInterval.Milliseconds())
-			return sl, verdictNotConfirmed, note
+		lag0 := lagBytes(head0, flush0)
+		lag1 := lagBytes(head1, flush1)
+		threshold := stuckLagThreshold(sl.SourceWALAdvanceBytes, window)
+		sl.FlushLagBytes = lag0
+		sl.FlushLagBytesAfter = lag1
+		sl.StuckLagThresholdBytes = threshold
+		if lag1 > lag0 && lag1 > threshold {
+			sl.Verdict = verdictStuck
+			note := fmt.Sprintf("the head-confirmed_flush lag grew from %s to %s in %s and is above the stuck threshold of %s (max of %s and %d x the observed write rate x the 60 s Kafka Connect worker offset-flush default), which one worker offset flush cannot explain",
+				topology.HumanBytes(lag0), topology.HumanBytes(lag1), topology.HumanAge(window),
+				topology.HumanBytes(threshold), topology.HumanBytes(stuckLagFloorBytes), stuckLagFlushIntervals)
+			return sl, verdictStuck, note
 		}
-		sl.Verdict = verdictStuck
-		return sl, verdictStuck, ""
+		sl.Verdict = verdictNotConfirmed
+		note := fmt.Sprintf("confirmed_flush_lsn did not move in %s while the source wrote %d bytes, but the head-confirmed_flush lag (%s) is below the stuck threshold of %s (max of %s and %d x the observed write rate x the 60 s Kafka Connect worker offset-flush default, a worker property this tool cannot read), so one worker offset flush could still explain it: the window is too short to call the slot stuck",
+			topology.HumanAge(window), sl.SourceWALAdvanceBytes, topology.HumanBytes(lag1),
+			topology.HumanBytes(threshold), topology.HumanBytes(stuckLagFloorBytes), stuckLagFlushIntervals)
+		return sl, verdictNotConfirmed, note
 	}
 	sl.Verdict = verdictQuiet
 	return sl, verdictQuiet, ""
+}
+
+// lagBytes is the signed distance from confirmed_flush_lsn to the WAL head.
+func lagBytes(head, flush uint64) int64 {
+	if head >= flush {
+		return int64(head - flush)
+	}
+	return -int64(flush - head)
+}
+
+// stuckLagThreshold is the smallest head−confirmed_flush lag that one worker
+// offset flush cannot explain: stuckLagFlushIntervals flush intervals' worth
+// of WAL at the write rate observed over the window, with stuckLagFloorBytes
+// as a floor so quiet-ish sources do not trip on noise.
+// offset.flush.interval.ms is a Kafka Connect WORKER property, unreadable
+// through the connector REST API, so Connect's 60 s worker default is the
+// scale (workerOffsetFlushDefault); a worker flushing more often only makes
+// the threshold more conservative.
+func stuckLagThreshold(headAdvance int64, window time.Duration) int64 {
+	if window <= 0 {
+		window = time.Second
+	}
+	rate := float64(headAdvance) / window.Seconds()
+	t := int64(float64(stuckLagFlushIntervals) * rate * workerOffsetFlushDefault.Seconds())
+	if t < stuckLagFloorBytes {
+		return stuckLagFloorBytes
+	}
+	return t
 }
 
 // slotWALHead reconstructs the server's WAL position from a slot row:
@@ -421,56 +471,46 @@ func parseLSN(s string) (uint64, error) {
 	return hi<<32 | lo, nil
 }
 
-// offsetFlushInterval returns how often the connector that owns slot confirms
-// offsets, the name of that connector, and a note when the interval is only
-// assumed. Debezium advances confirmed_flush_lsn when Kafka Connect commits
-// offsets (worker config offset.flush.interval.ms), so this interval decides
-// whether a flat flush over the window can mean "stuck". The connector whose
-// config names slot wins; otherwise the pipeline's first connector. A connector
-// that does not set the property gets Connect's 60000 ms default.
-func (d Deps) offsetFlushInterval(ctx context.Context, p owners.Pipeline, slot string) (time.Duration, string, string) {
-	if len(p.Connectors) == 0 {
-		return defaultOffsetFlushInterval, "", ""
+// connectorSlots maps each of the pipeline's connectors to the slot its
+// config names. It is read before the two slot reads, with the full tool
+// deadline left, and only to NAME the measured connector in the report. No
+// worker property is read from the connector config: offset.flush.interval.ms
+// lives in the WORKER config, which the connector REST API does not expose,
+// and a copy mistakenly set on the connector is ignored by Connect. A
+// connector whose config cannot be read is simply absent from the map.
+func (d Deps) connectorSlots(ctx context.Context, p owners.Pipeline) map[string]string {
+	if d.Connect == nil || len(p.Connectors) == 0 {
+		return nil
 	}
-	name := p.Connectors[0]
-	if d.Connect == nil {
-		return defaultOffsetFlushInterval, name, "Connect is not configured, so offset.flush.interval.ms is unknown; assuming the 60000 ms default"
-	}
-	var note string
+	out := make(map[string]string, len(p.Connectors))
 	for _, c := range p.Connectors {
 		cfg, err := d.Connect.Config(ctx, c)
 		if err != nil {
-			if note == "" {
-				note = fmt.Sprintf("connector %q config unavailable, so offset.flush.interval.ms is unknown; assuming the 60000 ms default: %s", c, cutShort(oneLine(err.Error()), 200))
-			}
 			continue
 		}
-		cfgSlot, err := owners.ConnectorSlot(cfg)
+		slot, err := owners.ConnectorSlot(cfg)
 		if err != nil {
 			continue
 		}
-		if cfgSlot != "" && cfgSlot != slot {
-			continue
-		}
-		flush, parseNote := offsetFlushFromConfig(cfg)
-		return flush, c, parseNote
+		out[c] = slot
 	}
-	return defaultOffsetFlushInterval, name, note
+	return out
 }
 
-// offsetFlushFromConfig parses offset.flush.interval.ms. A missing value is
-// Connect's 60000 ms default (no note); an invalid value also falls back to
-// the default, with a note saying why.
-func offsetFlushFromConfig(cfg map[string]string) (time.Duration, string) {
-	raw := strings.TrimSpace(cfg["offset.flush.interval.ms"])
-	if raw == "" {
-		return defaultOffsetFlushInterval, ""
+// measuredConnector names the connector whose config names the measured slot;
+// otherwise the pipeline's first connector.
+func measuredConnector(p owners.Pipeline, slotsByConnector map[string]string, slot string) string {
+	if len(p.Connectors) == 0 {
+		return ""
 	}
-	ms, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || ms < 0 {
-		return defaultOffsetFlushInterval, fmt.Sprintf("offset.flush.interval.ms %q is not a non-negative integer; assuming the 60000 ms default", cutShort(raw, 40))
+	if slot != "" {
+		for _, c := range p.Connectors {
+			if slotsByConnector[c] == slot {
+				return c
+			}
+		}
 	}
-	return time.Duration(ms) * time.Millisecond, ""
+	return p.Connectors[0]
 }
 
 // connectorStatus reads connector's state. The liveness verdict comes from
@@ -566,19 +606,16 @@ func toLongTxn(t clients.Transaction) longTxn {
 type livenessReport struct {
 	Pipeline string `json:"pipeline"`
 	Verdict  string `json:"verdict"`
-	// Note says why a verdict is unknown.
+	// Note explains a stuck verdict (the lag and the threshold it crossed),
+	// a not_confirmed verdict (why the reading is too early to judge), or why
+	// a verdict is unknown.
 	Note string `json:"note,omitempty"`
 	// Source says which signal produced the verdict, so the model does not
 	// claim Debezium metrics were read.
-	Source        string `json:"source"`
-	WindowSeconds int    `json:"window_seconds"`
-	ElapsedMS     int64  `json:"elapsed_ms"`
-	// OffsetFlushIntervalMS is the measured connector's
-	// offset.flush.interval.ms (Kafka Connect's 60000 ms default when unset). A
-	// flat confirmed_flush_lsn over a shorter window is not evidence of a stall.
-	OffsetFlushIntervalMS int64        `json:"offset_flush_interval_ms"`
-	OffsetFlushNote       string       `json:"offset_flush_note,omitempty"`
-	Slot                  slotLiveness `json:"slot"`
+	Source        string       `json:"source"`
+	WindowSeconds int          `json:"window_seconds"`
+	ElapsedMS     int64        `json:"elapsed_ms"`
+	Slot          slotLiveness `json:"slot"`
 	// Connector is the connector whose slot was measured (the pipeline's first
 	// connector when no config names the slot); its state is what makes
 	// "RUNNING but stuck" visible.
@@ -606,8 +643,17 @@ type slotLiveness struct {
 	ConfirmedFlushAdvanceBytes int64  `json:"confirmed_flush_advance_bytes"`
 	// SourceWALAdvanceBytes is how far the server's WAL head moved between the
 	// reads (0 when nothing was written).
-	SourceWALAdvanceBytes int64  `json:"source_wal_advance_bytes"`
-	Verdict               string `json:"verdict"`
+	SourceWALAdvanceBytes int64 `json:"source_wal_advance_bytes"`
+	// FlushLagBytes / FlushLagBytesAfter are the head−confirmed_flush lag at
+	// each read, and StuckLagThresholdBytes the lag above which a flat flush
+	// with a moving head is "stuck":
+	// max(16 MiB, 4 x observed write rate x the 60 s Kafka Connect worker
+	// offset-flush default). Set only when the flush was flat while the head
+	// moved (the two verdicts the threshold decides between).
+	FlushLagBytes          int64  `json:"flush_lag_bytes,omitempty"`
+	FlushLagBytesAfter     int64  `json:"flush_lag_bytes_after,omitempty"`
+	StuckLagThresholdBytes int64  `json:"stuck_lag_threshold_bytes,omitempty"`
+	Verdict                string `json:"verdict"`
 }
 
 // livenessSummary renders the verdict, the slot measurement, the connector
@@ -648,10 +694,11 @@ func livenessSummary(rep livenessReport) string {
 	if rep.ConnectorStatusError != "" {
 		fmt.Fprintf(&sb, "%s\n", rep.ConnectorStatusError)
 	}
-	if rep.OffsetFlushNote != "" {
-		fmt.Fprintf(&sb, "%s\n", rep.OffsetFlushNote)
-	}
 	if rep.Verdict == verdictStuck {
+		// The note states the lag and the threshold that made this stuck.
+		if rep.Note != "" {
+			fmt.Fprintf(&sb, "%s\n", rep.Note)
+		}
 		switch {
 		case rep.OldestTransaction != nil:
 			t := rep.OldestTransaction
