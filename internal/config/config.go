@@ -103,6 +103,13 @@ type Config struct {
 	GenericAlertSecret   string // GENERIC_ALERT_SECRET (HMAC for /api/alerts/generic)
 	DefaultAlertPipeline string // DEFAULT_ALERT_PIPELINE: used when an alert names no pipeline
 
+	// X4: ChangesWebhookSecret signs POST /api/changes/webhook with the
+	// generic alert scheme (X-Piperoom-Signature: t=<unix ts>,v1=<hex
+	// HMAC-SHA256("<ts>.<body>")>, ±5 min). Comma-separated for rotation,
+	// like GENERIC_ALERT_SECRET. Empty = the route answers 401. Secret; never
+	// log it. Limits: ChangesWebhookMaxBodyBytes, ChangesWebhookPerMinute.
+	ChangesWebhookSecret string // CHANGES_WEBHOOK_SECRET
+
 	// Agent cost guard: at most this many agent runs working at once on THIS
 	// replica, across all its rooms; further rooms wait in a queue (round-robin
 	// across pipelines, FIFO within one). 0 or empty = default 3. With several
@@ -343,6 +350,7 @@ func Load() Config {
 		DatadogAlertToken:    get("DATADOG_ALERT_TOKEN", ""),
 		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
 		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
+		ChangesWebhookSecret: get("CHANGES_WEBHOOK_SECRET", ""), // X4
 
 		MaxAgents:        get("PIPEROOM_MAX_AGENTS", ""),
 		MaxAgentsGlobal:  get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
@@ -1152,6 +1160,19 @@ const (
 	// MaxChangesPerPipeline is the row cap per pipeline the store keeps
 	// whatever the retention.
 	MaxChangesPerPipeline = 5000
+)
+
+// X4: limits of POST /api/changes/webhook (docs/api.md, External changes).
+const (
+	// ChangesWebhookMaxBodyBytes caps the body; a larger one is 413
+	// too_large and nothing is stored.
+	ChangesWebhookMaxBodyBytes = 4096
+	// ChangesWebhookPerMinute is how many verified requests one pipeline may
+	// send per minute; the next is 429 rate_limited.
+	ChangesWebhookPerMinute = 60
+	// VendorStatusPollInterval is how often an owners.yaml vendor_status_url
+	// is fetched; an unreachable feed logs one warning per hour.
+	VendorStatusPollInterval = 5 * time.Minute
 )
 
 // ParseChangesRetentionDays validates PIPEROOM_CHANGES_RETENTION_DAYS: a whole

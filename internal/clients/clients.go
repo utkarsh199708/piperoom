@@ -26,7 +26,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrNotFound is returned (wrapped) when the named object does not exist.
@@ -945,11 +949,130 @@ const (
 	ChangeSchemaVersion   = "schema_version"   // a subject's latest version went up (registered) or down (deleted)
 )
 
+// ---- X4: external changes (deploy, migration, vendor incident) ----
+//
+// Many incidents start outside the pipeline: an application deploy, a schema
+// migration run by Flyway, Liquibase or dbt, or a vendor's own incident. They
+// are rows of the same change log (PipelineChange, ChangeReader/ChangeWriter),
+// not a parallel concept, so the "what changed" tool, the retention loop and
+// the room store treat them like every other kind. Their Before is empty and
+// their After is an ExternalChange. Summary is the title (one line, untrusted
+// text, cut like every Summary); Actor is who deployed or ran the migration.
+//
+// Object per kind: deploy → the service deployed (ExternalChange.Service);
+// migration → the history table read ("public.flyway_schema_history",
+// "public.databasechangelog"), the dbt project for dbt, or the service for a
+// webhook; vendor_incident → the vendor component ("confluent-cloud",
+// "msk", "aiven-kafka"). Readers and writers of these rows see timestamps and
+// metadata only: never a migration script's contents, never a row value.
+
+// External change kinds of PipelineChange.Kind. (X4)
+const (
+	ChangeDeploy         = "deploy"          // an application or service deploy (webhook)
+	ChangeMigration      = "migration"       // an applied schema migration (Flyway, Liquibase, dbt, or webhook)
+	ChangeVendorIncident = "vendor_incident" // a vendor status-page incident (webhook or status-page poller)
+)
+
+// Change sources of PipelineChange.Source. The first two predate X4. (X4)
+const (
+	ChangeSourceWatcher    = "watcher"    // internal/watch (F8c)
+	ChangeSourceDDLAudit   = "ddl_audit"  // the source DDL audit table (F8)
+	ChangeSourceWebhook    = "webhook"    // POST /api/changes/webhook (X4a): deploy, migration or vendor_incident
+	ChangeSourceFlyway     = "flyway"     // flyway_schema_history in the source database (X4b)
+	ChangeSourceLiquibase  = "liquibase"  // databasechangelog in the source database (X4b)
+	ChangeSourceDBT        = "dbt"        // dbt run results (X4b)
+	ChangeSourceStatuspage = "statuspage" // a pipeline's owners.yaml vendor_status_url poller (X4a)
+)
+
+// ChangeKinds returns every PipelineChange.Kind, the F8 kinds first then the
+// external ones, as a fresh slice. The room store and the "what changed" tool
+// validate kinds against it, so a new kind is added here once. (X4)
+func ChangeKinds() []string {
+	return []string{ChangeDDL, ChangeConnectorConfig, ChangeConnectorState, ChangeSchemaVersion,
+		ChangeDeploy, ChangeMigration, ChangeVendorIncident}
+}
+
+// IsExternalChange reports whether kind is a change made outside the
+// pipeline (deploy, migration, vendor_incident). The agent ranks these first
+// inside the alert window (X4c). (X4)
+func IsExternalChange(kind string) bool {
+	switch kind {
+	case ChangeDeploy, ChangeMigration, ChangeVendorIncident:
+		return true
+	}
+	return false
+}
+
+// Vendor incident states of ExternalChange.Status (the statuspage.io set). (X4)
+const (
+	VendorInvestigating = "investigating"
+	VendorIdentified    = "identified"
+	VendorMonitoring    = "monitoring"
+	VendorResolved      = "resolved"
+)
+
+// Caps of ExternalChange fields, checked by ExternalChange.Validate. (X4)
+const (
+	MaxExternalChangeURLBytes     = 1024
+	MaxExternalChangeServiceBytes = 128
+	MaxExternalChangeVersionBytes = 128
+)
+
+// ExternalChange is PipelineChange.After of the external kinds. Every field
+// is untrusted text from the sender or the customer's database: clients show
+// it as text, the agent sees it only inside its untrusted-data wrapper. (X4)
+type ExternalChange struct {
+	// URL links to the deploy run, pull request, migration run or incident
+	// page; http or https, no user info, ≤ MaxExternalChangeURLBytes. "" when
+	// the source has none (Flyway, Liquibase).
+	URL string `json:"url,omitempty"`
+	// Service is the application service as owners.yaml teams[].owns names it,
+	// so the agent can name the owning team; "" when unknown.
+	Service string `json:"service,omitempty"`
+	// Version is the migration version (Flyway version, Liquibase id, dbt
+	// invocation id); migration only.
+	Version string `json:"version,omitempty"`
+	// Status is one of the Vendor* states; vendor_incident only. "" = unknown.
+	Status string `json:"status,omitempty"`
+}
+
+// Validate checks the caps and the URL rule. A writer (the webhook, the
+// migration reader, the poller) calls it before RecordChange and refuses or
+// drops the row on error; it never fixes a value up. (X4)
+func (e ExternalChange) Validate() error {
+	if e.URL != "" && len(e.URL) <= MaxExternalChangeURLBytes {
+		u, err := url.Parse(e.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("clients: external change url must be an absolute http or https URL")
+		}
+		if u.User != nil {
+			return errors.New("clients: external change url must not carry user info")
+		}
+	}
+	for _, f := range []struct {
+		name, v string
+		max     int
+	}{{"service", e.Service, MaxExternalChangeServiceBytes}, {"version", e.Version, MaxExternalChangeVersionBytes}, {"url", e.URL, MaxExternalChangeURLBytes}} {
+		if len(f.v) > f.max {
+			return fmt.Errorf("clients: external change %s is over %d bytes", f.name, f.max)
+		}
+		if !utf8.ValidString(f.v) || strings.ContainsFunc(f.v, unicode.IsControl) {
+			return fmt.Errorf("clients: external change %s holds control characters or invalid UTF-8", f.name)
+		}
+	}
+	switch e.Status {
+	case "", VendorInvestigating, VendorIdentified, VendorMonitoring, VendorResolved:
+	default:
+		return fmt.Errorf("clients: external change status %q is not a known vendor incident state", e.Status)
+	}
+	return nil
+}
+
 // PipelineChange is one recorded change on a pipeline. Before and After hold
 // only the changed keys (config), the two states (state), the version pair
 // (schema) or nothing (DDL: the statement is in Summary, cut at 300 runes).
 // A credential value is never stored: masked keys read "***". Actor is the
-// DDL username or ""; Source is "watcher" or "ddl_audit".
+// DDL username or ""; Source is one of the ChangeSource* constants.
 type PipelineChange struct {
 	ID          int64           `json:"id"`
 	PipelineID  string          `json:"pipeline_id"`
