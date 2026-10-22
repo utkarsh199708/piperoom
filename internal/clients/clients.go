@@ -219,15 +219,17 @@ type DLQRecord struct {
 	Partition int32     `json:"partition"`
 	Offset    int64     `json:"offset"`
 	Timestamp time.Time `json:"timestamp"`
-	// Headers keeps only headers whose key starts with "__connect.errors."
-	// (Connect's DLQ context headers: topic, partition, offset, connector.name,
-	// task.id, stage, class.name, exception.class.name, exception.message,
-	// exception.stacktrace). Values are text with control characters removed
-	// and at most 300 runes; exception.stacktrace is its first line only;
-	// exception.message and that first line are redacted (dlq.RedactMessage:
-	// "[Source:", "Detail:" and "Where:" tails, braces, brackets and quoted
-	// strings removed) because converters and drivers quote record bytes in
-	// them. Empty when the sink does not set
+	// Headers keeps Connect's DLQ context headers (keys starting with
+	// "__connect.errors.": topic, partition, offset, connector.name, task.id,
+	// stage, class.name, exception.class.name, exception.message,
+	// exception.stacktrace) and Piperoom's own value-free reject-rule header
+	// "x-piperoom-reject-rule" (a rule name such as "status_enum", never the
+	// rejected value). Values are text with control characters removed and at
+	// most 300 runes; exception.stacktrace is its first line only;
+	// exception.message, that first line and the reject rule are redacted
+	// (dlq.RedactMessage: "[Source:", "Detail:" and "Where:" tails, braces,
+	// brackets and quoted strings removed) because converters and drivers
+	// quote record bytes in them. Empty when the sink does not set
 	// errors.deadletterqueue.context.headers.enable=true. Every other header
 	// is dropped: an application header is never returned.
 	Headers map[string]string `json:"headers,omitempty"`
