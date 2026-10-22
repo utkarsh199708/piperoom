@@ -21,6 +21,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
+	"piperoom/internal/clients"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -196,6 +197,11 @@ type Deps struct {
 	// its own goroutine with the service lifetime ctx, never under a room's
 	// lock; it must return promptly. Nil means no-op.
 	OnActionExecuted func(ctx context.Context, pipelineID string, step events.ProposalStep)
+
+	// TeamPager posts the driver's page of an application team (X4d,
+	// PageTeam). Nil means the Slack bridge is off: page-team answers 409
+	// slack_off and writes nothing.
+	TeamPager TeamPager
 }
 
 type roomState struct {
@@ -247,6 +253,9 @@ type roomState struct {
 	// firstLook is set on a room opened in this process until its agent
 	// starts: only such a room gets the triage pass (service_triage.go).
 	firstLook bool
+	// teamPaging holds the teams whose page is being posted to Slack outside
+	// the lock (PageTeam), so a double click on this replica posts once.
+	teamPaging map[string]bool
 
 	// Shadow run state (shadow.go). shadowActive is true from the start of
 	// the shadow supervisor until it has written the run's final status.
@@ -315,7 +324,9 @@ type Service struct {
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	onRoomDeleted   func(roomID string, deleted events.Event)
 	onActionExec    func(ctx context.Context, pipelineID string, step events.ProposalStep)
-	slots           *agentSlots // global cap on concurrent agent runs
+	teamPager       TeamPager            // nil = Slack bridge off (X4d)
+	changes         clients.ChangeReader // nil when the store keeps no change log
+	slots           *agentSlots          // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store
 	sessionLive     auth.Liveness
@@ -440,6 +451,7 @@ func New(d Deps) *Service {
 		topo = noopTopology{}
 	}
 	shadowStore, _ := d.Store.(store.ShadowStore)
+	changes, _ := d.Store.(clients.ChangeReader)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		store:           d.Store,
@@ -461,12 +473,14 @@ func New(d Deps) *Service {
 		shadowOpts:      d.ShadowOptions,
 		shadowGrace:     d.ShadowGrace,
 		shadow:          shadowStore,
+		changes:         changes,
 		log:             log,
 		now:             now,
 		onRoomOpened:    d.OnRoomOpened,
 		onRoomClosed:    d.OnRoomClosed,
 		onRoomDeleted:   d.OnRoomDeleted,
 		onActionExec:    d.OnActionExecuted,
+		teamPager:       d.TeamPager,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,

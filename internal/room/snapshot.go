@@ -56,6 +56,20 @@ type Hypothesis struct {
 	Seq int64 `json:"seq"`
 	// Verdicts is the latest verdict per person on Seq, in seq order.
 	Verdicts []Verdict `json:"verdicts"`
+	// Scope, Team and ChangeID are copied from the payload (X4): scope
+	// "unknown" when it has none, team "" and change_id 0 when unset.
+	Scope    events.HypothesisScope `json:"scope"`
+	Team     string                 `json:"team"`
+	ChangeID int64                  `json:"change_id"`
+}
+
+// TeamPaged is one room.team_paged of the room (X4d): which team the driver
+// paged, for which hypothesis, by whom and when.
+type TeamPaged struct {
+	Team          string    `json:"team"`
+	HypothesisSeq int64     `json:"hypothesis_seq"`
+	By            Person    `json:"by"`
+	At            time.Time `json:"at"`
 }
 
 // Verdict is one person's current confirm or dispute of the hypothesis.
@@ -206,12 +220,14 @@ type RoomSnapshot struct {
 	// Origin is room.created.origin: "forecast" for a room a forecast signal
 	// opened (X3), omitted otherwise. Forecast is the newest forecast signal
 	// of the room's watcher evidence (forecast.go), omitted when none.
-	Origin             string       `json:"origin,omitempty"`
-	Forecast           *Forecast    `json:"forecast,omitempty"`
-	LastSeq            int64        `json:"last_seq"`
-	Driver             *Driver      `json:"driver"`
-	AgentStatus        AgentStatus  `json:"agent_status"`
-	Hypothesis         *Hypothesis  `json:"hypothesis"`
+	Origin      string      `json:"origin,omitempty"`
+	Forecast    *Forecast   `json:"forecast,omitempty"`
+	LastSeq     int64       `json:"last_seq"`
+	Driver      *Driver     `json:"driver"`
+	AgentStatus AgentStatus `json:"agent_status"`
+	Hypothesis  *Hypothesis `json:"hypothesis"`
+	// TeamPages are the room.team_paged events in seq order (X4d); never null.
+	TeamPages          []TeamPaged  `json:"team_pages"`
 	Triage             *Triage      `json:"triage"`
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
@@ -339,6 +355,7 @@ func NewSnapshot() RoomSnapshot {
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
 		ChecklistDone:      map[string]ChecklistTick{},
+		TeamPages:          []TeamPaged{},
 	}
 }
 
@@ -394,6 +411,7 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
 	c.ChecklistDone = cloneTicks(s.ChecklistDone)
+	c.TeamPages = append([]TeamPaged{}, s.TeamPages...)
 	return c
 }
 
@@ -610,7 +628,22 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			Confidence:   p.Confidence,
 			Seq:          e.Seq,
 			Verdicts:     []Verdict{},
+			Scope:        p.Scope.Normalize(),
+			Team:         p.Team,
+			ChangeID:     p.ChangeID,
 		}
+
+	case events.RoomTeamPaged:
+		p, ok := decode[events.TeamPagedPayload](e)
+		if !ok {
+			break
+		}
+		// A full slice expression: the append never writes into the caller's
+		// backing array.
+		snap.TeamPages = append(snap.TeamPages[:len(snap.TeamPages):len(snap.TeamPages)], TeamPaged{
+			Team: p.Team, HypothesisSeq: p.HypothesisSeq,
+			By: Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified}, At: e.At,
+		})
 
 	case events.HypothesisVerdict:
 		p, ok := decode[events.HypothesisVerdictPayload](e)
@@ -837,6 +870,9 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 	}
 	if snap.PendingSuggestions == nil {
 		snap.PendingSuggestions = []Suggestion{}
+	}
+	if snap.TeamPages == nil {
+		snap.TeamPages = []TeamPaged{}
 	}
 	if snap.AgentStatus.State == "" {
 		snap.AgentStatus.State = "idle"

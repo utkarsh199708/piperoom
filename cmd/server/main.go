@@ -576,6 +576,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		OnRoomClosed:      closedHook.onClosed,
 		OnActionExecuted:  closedHook.onActionExecuted,
 		OnRoomDeleted:     deletedHook.onDeleted,
+		TeamPager:         slack.teamPager(),
 	}, s.authSettings, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
