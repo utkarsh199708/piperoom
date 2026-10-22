@@ -107,11 +107,13 @@ jobs:
         run: docker compose -f dev/docker-compose.yml up -d --build
       - name: Wait until Connect and the Schema Registry answer
         run: .github/scripts/wait-for-stack.sh 300
-      - name: Register the connector
+      # --staging: the staging profile too, so testenv.TestStagingProfile runs
+      # instead of skipping (ci.yml's fullstack job does the same).
+      - name: Register the connector, production and staging
         run: |
           mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
           go run ./cmd/devctl lock --owner ci
-          go run ./cmd/devctl up --owner ci
+          go run ./cmd/devctl up --staging --owner ci
       - name: Start the optional ClickHouse profile
         run: docker compose -f dev/docker-compose.yml --profile clickhouse up -d --wait clickhouse
       - name: Create the ClickHouse sink
@@ -144,7 +146,7 @@ jobs:
           .github/scripts/wait-healthy.sh 180
       - name: Dump stack logs
         if: failure()
-        run: docker compose -f dev/docker-compose.yml --profile clickhouse logs --no-color --tail=300
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging logs --no-color --tail=300
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -155,4 +157,4 @@ jobs:
           retention-days: 7
       - name: Tear down
         if: always()
-        run: docker compose -f dev/docker-compose.yml --profile clickhouse down -v --remove-orphans
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging down -v --remove-orphans

@@ -64,9 +64,10 @@ func TestStagingProfile(t *testing.T) {
 
 	// TC1: the connector is RUNNING on staging, and production is unaffected.
 	WaitFor(t, 90*time.Second, func() (bool, error) { return running(stg.ConnectURL), nil })
-	if !running(cfg.ConnectURL) {
-		t.Error("production connector is not RUNNING")
-	}
+	// Waited for, not sampled: the production connector is shared, and another
+	// package's test (actions.TestResumeConnectorIntegration) stops and resumes
+	// it while this one may be running in parallel.
+	WaitFor(t, 2*time.Minute, func() (bool, error) { return running(cfg.ConnectURL), nil })
 	var stgCfg, prodCfg map[string]string
 	if err := get(stg.ConnectURL, "/connectors/"+connector+"/config", &stgCfg); err != nil {
 		t.Fatal(err)
