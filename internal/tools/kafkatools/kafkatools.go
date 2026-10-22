@@ -81,6 +81,11 @@ func Register(reg *tools.Registry, d Deps) error {
 			return err
 		}
 	}
+	if _, ok := d.Kafka.(dupScanner); ok {
+		if err := reg.Register(&dupKeys{d: d}); err != nil {
+			return err
+		}
+	}
 	if len(d.CertTargets) > 0 {
 		if err := reg.Register(&certExpiry{d: d}); err != nil {
 			return err
