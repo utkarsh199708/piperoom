@@ -971,12 +971,17 @@ type Reconciler interface {
 	// It returns a count only, never a value. Deadline 10 s.
 	CountBetween(ctx context.Context, table, tsColumn string, from, to time.Time) (int64, error)
 	// SampleKeys returns the primary-key values (as text) of the newest
-	// rows of table with tsColumn >= since, newest first: at most
-	// ReconcileSampleSize(n) keys, so n > ReconcileMaxSample (200) is cut
-	// to 200 and n <= 0 is tools.ErrBadInput. Keys only, never another
+	// rows of table whose tsColumn is in the half-open window [since,
+	// until), newest first: at most ReconcileSampleSize(n) keys, so n >
+	// ReconcileMaxSample (200) is cut to 200 and n <= 0 is
+	// tools.ErrBadInput. until before since is tools.ErrBadInput; an empty
+	// window (until == since) is no keys and no I/O. The upper bound lets a
+	// caller sample rows old enough to have reached the sink (the drift
+	// watcher passes now - lag - settle), so a busy table's newest, still
+	// in-flight rows do not take the whole sample. Keys only, never another
 	// column's value; a caller keeps them in memory and never logs them or
 	// puts them in an event. Deadline 10 s.
-	SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since time.Time, n int) ([]string, error)
+	SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since, until time.Time, n int) ([]string, error)
 	// RowTimes reads, for each key of keys (primary-key values as text), the
 	// timestamp columns tsColumns of that row: key -> column -> time. It
 	// selects only pkColumn and tsColumns, never another column, so no

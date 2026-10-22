@@ -189,7 +189,7 @@ func TestReconcileBadIdentifiers(t *testing.T) {
 					t.Errorf("CountBetween err = %v, want ErrBadInput", err)
 				}
 			}
-			if _, err := r.SampleKeys(ctx, c.table, c.pk, c.ts, winFrom, 10); !errors.Is(err, tools.ErrBadInput) {
+			if _, err := r.SampleKeys(ctx, c.table, c.pk, c.ts, winFrom, winTo, 10); !errors.Is(err, tools.ErrBadInput) {
 				t.Errorf("SampleKeys err = %v, want ErrBadInput", err)
 			}
 			if _, err := r.RowTimes(ctx, c.table, c.pk, []string{"1"}, []string{c.ts}); !errors.Is(err, tools.ErrBadInput) {
@@ -199,30 +199,40 @@ func TestReconcileBadIdentifiers(t *testing.T) {
 	}
 }
 
-// TC3: SampleKeys cuts n to the cap; n <= 0 and too many keys are refused.
+// TC3: SampleKeys cuts n to the cap and reads only [since, until); n <= 0,
+// a window that ends before it starts and too many keys are refused.
 func TestReconcileCaps(t *testing.T) {
 	f := &recDB{t: t, results: []*recRows{{oids: []uint32{pgtype.TextOID}, rows: [][]any{{"3"}, {"2"}}}}}
-	keys, err := newRec(f, false).SampleKeys(scoped(), "public.orders", "id", "updated_at", winFrom, 500)
+	keys, err := newRec(f, false).SampleKeys(scoped(), "public.orders", "id", "updated_at", winFrom, winTo, 500)
 	if err != nil || strings.Join(keys, ",") != "3,2" {
 		t.Fatalf("SampleKeys = %v, %v", keys, err)
 	}
 	c := f.calls[0]
-	if c.args[1] != clients.ReconcileMaxSample {
-		t.Errorf("limit = %v, want %d", c.args[1], clients.ReconcileMaxSample)
+	if c.args[2] != clients.ReconcileMaxSample {
+		t.Errorf("limit = %v, want %d", c.args[2], clients.ReconcileMaxSample)
 	}
-	want := `SELECT "id"::text FROM "public"."orders" WHERE "updated_at" >= $1 AND "id" IS NOT NULL ORDER BY "updated_at" DESC, "id" DESC LIMIT $2`
+	want := `SELECT "id"::text FROM "public"."orders" WHERE "updated_at" >= $1 AND "updated_at" < $2 AND "id" IS NOT NULL ORDER BY "updated_at" DESC, "id" DESC LIMIT $3`
 	if c.sql != want {
 		t.Errorf("sql = %s\nwant  %s", c.sql, want)
 	}
 	if since := c.args[0].(time.Time); since.Location() != time.UTC || !since.Equal(winFrom) {
 		t.Errorf("since = %v, want UTC", since)
 	}
+	if until := c.args[1].(time.Time); until.Location() != time.UTC || !until.Equal(winTo) {
+		t.Errorf("until = %v, want %v in UTC", until, winTo)
+	}
 
 	r := newRec(&recDB{t: t, noIO: true}, false)
 	for _, n := range []int{0, -1} {
-		if _, err := r.SampleKeys(scoped(), "public.orders", "id", "updated_at", winFrom, n); !errors.Is(err, tools.ErrBadInput) {
+		if _, err := r.SampleKeys(scoped(), "public.orders", "id", "updated_at", winFrom, winTo, n); !errors.Is(err, tools.ErrBadInput) {
 			t.Errorf("SampleKeys(n=%d) err = %v, want ErrBadInput", n, err)
 		}
+	}
+	if _, err := r.SampleKeys(scoped(), "public.orders", "id", "updated_at", winTo, winFrom, 5); !errors.Is(err, tools.ErrBadInput) {
+		t.Errorf("SampleKeys(until before since) err = %v, want ErrBadInput", err)
+	}
+	if keys, err := r.SampleKeys(scoped(), "public.orders", "id", "updated_at", winFrom, winFrom, 5); err != nil || keys == nil || len(keys) != 0 {
+		t.Errorf("SampleKeys(empty window) = %v, %v; want no keys and no I/O", keys, err)
 	}
 	keys1001 := make([]string, clients.ReconcileMaxKeys+1)
 	if _, err := r.RowTimes(scoped(), "public.orders", "id", keys1001, []string{"updated_at"}); !errors.Is(err, tools.ErrBadInput) {
@@ -257,7 +267,7 @@ func TestReconcileScope(t *testing.T) {
 			if _, err := r.CountBetween(c.ctx, c.table, "updated_at", winFrom, winTo); !errors.Is(err, c.want) {
 				t.Errorf("CountBetween err = %v, want %v", err, c.want)
 			}
-			if _, err := r.SampleKeys(c.ctx, c.table, "id", "updated_at", winFrom, 10); !errors.Is(err, c.want) {
+			if _, err := r.SampleKeys(c.ctx, c.table, "id", "updated_at", winFrom, winTo, 10); !errors.Is(err, c.want) {
 				t.Errorf("SampleKeys err = %v, want %v", err, c.want)
 			}
 			if _, err := r.RowTimes(c.ctx, c.table, "id", []string{"1"}, []string{"updated_at"}); !errors.Is(err, c.want) {
@@ -389,7 +399,7 @@ func TestReconcileErrors(t *testing.T) {
 	}
 
 	f = &recDB{t: t, errs: []error{&pgconn.PgError{Code: "42P01", Message: `relation "public.orders" does not exist`}}}
-	if _, err := newRec(f, false).SampleKeys(scoped(), "public.orders", "id", "updated_at", winFrom, 5); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := newRec(f, false).SampleKeys(scoped(), "public.orders", "id", "updated_at", winFrom, winTo, 5); !errors.Is(err, clients.ErrNotFound) {
 		t.Errorf("missing table: err = %v, want ErrNotFound", err)
 	}
 

@@ -33,15 +33,20 @@ type rowCall struct {
 // fakeRec is one side's clients.Reconciler (and primary-key reader). Counts
 // and rows are per table; a table with no rows entry has every sampled key.
 type fakeRec struct {
-	mu        sync.Mutex
-	counts    map[string]int64
-	countErr  error
-	keys      []string
-	at        time.Time // every row's timestamp columns
+	mu       sync.Mutex
+	counts   map[string]int64
+	countErr error
+	keys     []string
+	at       time.Time // every row's timestamp columns
+	// sampledAt, when set, is the rows' time as SampleKeys sees it (a row
+	// updated between the sample and RowTimes); else at.
+	sampledAt time.Time
+	sampleWin [][2]time.Time // SampleKeys' [since, until) per call
 	missing   map[string]bool
 	shifted   map[string]bool // keys whose timestamps are an hour off
 	rowsErr   error
 	pkErr     error
+	pkCol     string // the key column PrimaryKeyColumn names ("id" when empty)
 	cols      []clients.ColumnInfo
 	countCs   []countCall
 	sampleCs  []string // tables
@@ -73,15 +78,29 @@ func (f *fakeRec) CountBetween(ctx context.Context, table, ts string, from, to t
 	return f.counts[table], nil
 }
 
-func (f *fakeRec) SampleKeys(ctx context.Context, table, pk, ts string, since time.Time, n int) ([]string, error) {
+func (f *fakeRec) SampleKeys(ctx context.Context, table, pk, ts string, since, until time.Time, n int) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.noteScope(ctx)
 	f.sampleCs = append(f.sampleCs, table)
+	f.sampleWin = append(f.sampleWin, [2]time.Time{since, until})
 	if n != driftSampleKeys {
 		return nil, fmt.Errorf("fake: n = %d", n)
 	}
+	at := f.at
+	if !f.sampledAt.IsZero() {
+		at = f.sampledAt
+	}
+	if at.Before(since) || !at.Before(until) {
+		return []string{}, f.countErr // every row is outside the window
+	}
 	return slices.Clone(f.keys), f.countErr
+}
+
+func (f *fakeRec) sampleWindows() [][2]time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.sampleWin)
 }
 
 func (f *fakeRec) RowTimes(ctx context.Context, table, pk string, keys, cols []string) (map[string]map[string]time.Time, error) {
@@ -114,6 +133,9 @@ func (f *fakeRec) PrimaryKeyColumn(ctx context.Context, table string) (string, e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pkCs++
+	if f.pkCol != "" {
+		return f.pkCol, f.pkErr
+	}
 	return "id", f.pkErr
 }
 
@@ -473,12 +495,66 @@ func TestRowDriftMismatchedTimestamp(t *testing.T) {
 
 func TestRowDriftSkipsRowsStillInFlight(t *testing.T) {
 	h := newDriftHarness(t, driftOpts{})
-	// Every sampled row is newer than now - lag - settle: nothing is judged.
+	// Every row is newer than now - lag - settle: the sample window ends
+	// there, so no key is sampled and nothing is judged.
 	h.src.at = t0.Add(-time.Minute)
 	h.snk.missing["secret-key-0000"] = true
 	h.step(0)
 	if len(h.rooms.created()) != 0 || h.phase("orders", driftID(events.SignalRowDrift, "public.t")) != phaseOK {
 		t.Fatal("a row still in flight was judged missing")
+	}
+	if rc := h.src.rowCalls(); len(rc) != 0 {
+		t.Fatalf("RowTimes ran on an empty sample: %+v", rc)
+	}
+}
+
+// The sample window is [cutoff - 1 h, cutoff) with cutoff = now - sink lag -
+// settle: the newest settled rows, not the newest rows (clients.Reconciler
+// SampleKeys' until). A row updated between the sample and RowTimes is on its
+// way again and is skipped, not judged missing.
+func TestRowDriftSamplesSettledWindow(t *testing.T) {
+	h := newDriftHarness(t, driftOpts{})
+	h.wh.fresh = t0.Add(-10 * time.Minute)
+	h.src.at, h.snk.at = t0.Add(-30*time.Minute), t0.Add(-30*time.Minute)
+	h.step(0)
+	wins := h.src.sampleWindows()
+	cutoff := t0.Add(-10*time.Minute - rowSettle)
+	if len(wins) != 1 || !wins[0][1].Equal(cutoff) || !wins[0][0].Equal(cutoff.Add(-driftWindow)) {
+		t.Fatalf("sample windows %v, want [%v, %v)", wins, cutoff.Add(-driftWindow), cutoff)
+	}
+	if len(h.snk.sampleWindows()) != 0 {
+		t.Fatal("the sink was sampled; only the source picks the keys")
+	}
+
+	// Sampled settled, updated since: RowTimes shows a time past the cutoff.
+	h2 := newDriftHarness(t, driftOpts{})
+	h2.src.sampledAt = t0.Add(-30 * time.Minute)
+	h2.src.at = t0.Add(-time.Minute)
+	h2.snk.missing["secret-key-0000"] = true
+	h2.step(0)
+	if rc := h2.src.rowCalls(); len(rc) != 1 || rc[0].keys != driftSampleKeys {
+		t.Fatalf("source RowTimes %+v, want one call with the sampled keys", rc)
+	}
+	if len(h2.rooms.created()) != 0 || h2.phase("orders", driftID(events.SignalRowDrift, "public.t")) != phaseOK {
+		t.Fatal("a row updated after the sample was judged missing")
+	}
+}
+
+// A table keyed by a personal-data column is never sampled (lineage.md
+// section 3): its keys would be the personal data.
+func TestRowDriftSkipsPIIKeyColumn(t *testing.T) {
+	h := newDriftHarness(t, driftOpts{})
+	h.src.pkCol, h.snk.pkCol = "customer_email", "customer_email"
+	h.step(0)
+	if len(h.src.sampleWindows()) != 0 || len(h.src.rowCalls()) != 0 {
+		t.Fatal("a table keyed by an email column was sampled")
+	}
+	if !strings.Contains(h.logs.String(), "the primary key column looks like personal data") {
+		t.Fatalf("no INFO line:\n%s", h.logs.String())
+	}
+	h.step(15 * time.Minute)
+	if n := strings.Count(h.logs.String(), "the primary key column looks like personal data"); n != 1 {
+		t.Fatalf("%d INFO lines, want one per pipeline", n)
 	}
 }
 

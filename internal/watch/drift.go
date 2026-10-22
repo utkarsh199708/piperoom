@@ -8,8 +8,9 @@ package watch
 //   - count_drift: CountBetween on both sides over the last closed hour,
 //     shifted back by the sink's lag (now - its newest sink_ts_column); fires
 //     when |source - sink| / source > count_tolerance on two checks in a row.
-//   - row_drift: SampleKeys (50) on the source, RowTimes on both sides for
-//     the same keys; fires when a key settled on the source is missing on
+//   - row_drift: SampleKeys (50) on the source over the hour before
+//     now - lag - settle (rows that had time to reach the sink), RowTimes on
+//     both sides for the same keys; fires when a settled key is missing on
 //     the sink, or one of its timestamp columns differs.
 //   - dup_keys and order_skew: one DupScan per CDC topic over the time since
 //     the last scan; counts copied into the signal as docs/api.md maps them.
@@ -517,6 +518,13 @@ func (w *Watcher) rowReading(ctx context.Context, now time.Time, t target, mem *
 	if err == nil {
 		var pkSnk string
 		if pkSnk, err = w.primaryKey(ctx, mem, rd.pkSnk, "sink", pr.sink); err == nil {
+			if piiColumn(pkSrc) || piiColumn(pkSnk) {
+				// A table keyed by personal data (an email, a phone) is never
+				// sampled: the keys would be the personal data itself
+				// (docs/design/lineage.md section 3).
+				w.driftOff(mem, t.p.ID, offRowTable+pr.source, "row_drift", "the primary key column looks like personal data")
+				return nil, nil
+			}
 			return w.compareRows(ctx, now, t, rd, pr, lag, pkSrc, pkSnk)
 		}
 	}
@@ -542,7 +550,8 @@ func (w *Watcher) primaryKey(ctx context.Context, mem *driftMem, pk primaryKeyer
 	return col, nil
 }
 
-// compareRows samples settled source keys and compares their timestamp
+// compareRows samples settled source keys (sink_ts_column in [cutoff - 1 h,
+// cutoff), the window SampleKeys bounds) and compares their timestamp
 // columns with the sink's. Keys live only in this function.
 func (w *Watcher) compareRows(ctx context.Context, now time.Time, t target, rd driftReaders, pr tablePair, lag time.Duration, pkSrc, pkSnk string) (*reading, error) {
 	ts := t.p.SinkTSColumn
@@ -559,7 +568,7 @@ func (w *Watcher) compareRows(ctx context.Context, now time.Time, t target, rd d
 		return unknown(err)
 	}
 	keys, err := call(ctx, w.cfg.CheckTimeout, "sample source keys", func(c context.Context) ([]string, error) {
-		return rd.src.SampleKeys(c, pr.source, pkSrc, ts, since, driftSampleKeys)
+		return rd.src.SampleKeys(c, pr.source, pkSrc, ts, since, cutoff, driftSampleKeys)
 	})
 	if err != nil {
 		return unknown(err)
@@ -584,7 +593,9 @@ func (w *Watcher) compareRows(ctx context.Context, now time.Time, t target, rd d
 		st, ok := srcT[k]
 		at, has := st[ts]
 		if !ok || !has || !at.Before(cutoff) {
-			continue // deleted since the sample, or still in flight
+			// Deleted since the sample, or updated since (its new time is
+			// still on its way to the sink).
+			continue
 		}
 		sample++
 		kt, ok := snkT[k]

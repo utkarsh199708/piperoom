@@ -49,14 +49,14 @@ func TestDBReconcilerSinkSide(t *testing.T) {
 		ID: "orders", SourceTables: []string{"public.orders"}, SinkTables: []string{"analytics.orders"},
 	})
 	q := &sampleQuerier{rows: &sampleRows{keys: []string{"9", "8"}}}
-	keys, err := testDB(q).SampleKeys(ctx, "analytics.orders", "id", "updated_at", time.Now().Add(-time.Hour), 2)
+	keys, err := testDB(q).SampleKeys(ctx, "analytics.orders", "id", "updated_at", time.Now().Add(-time.Hour), time.Now(), 2)
 	if err != nil || len(keys) != 2 || keys[0] != "9" {
 		t.Fatalf("SampleKeys = %v, %v", keys, err)
 	}
-	if want := `SELECT "id"::text FROM "analytics"."orders" WHERE "updated_at" >= $1 AND "id" IS NOT NULL ORDER BY "updated_at" DESC, "id" DESC LIMIT $2`; q.sqls[0] != want {
+	if want := `SELECT "id"::text FROM "analytics"."orders" WHERE "updated_at" >= $1 AND "updated_at" < $2 AND "id" IS NOT NULL ORDER BY "updated_at" DESC, "id" DESC LIMIT $3`; q.sqls[0] != want {
 		t.Errorf("sql = %s", q.sqls[0])
 	}
-	if _, err := testDB(q).SampleKeys(ctx, "public.orders", "id", "updated_at", time.Now(), 2); !errors.Is(err, tools.ErrOutOfScope) {
+	if _, err := testDB(q).SampleKeys(ctx, "public.orders", "id", "updated_at", time.Now(), time.Now().Add(time.Minute), 2); !errors.Is(err, tools.ErrOutOfScope) {
 		t.Fatalf("source table on the sink: err = %v", err)
 	}
 	if _, err := testDB(q).CountBetween(context.Background(), "analytics.orders", "updated_at", time.Now(), time.Now()); !errors.Is(err, tools.ErrNoScope) {

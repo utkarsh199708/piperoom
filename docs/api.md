@@ -1052,8 +1052,10 @@ closes; `--demo` forces it off.
   The drift entry carries names, counts and a window only: **never a key value, a row value or record content.**
   The counts come from the optional reader `clients.Reconciler` (source and sink, read-only, scoped to the
   pipeline's `source_tables`/`sink_tables`, deadline 10 s per call): `CountBetween` returns counts,
-  `SampleKeys` at most 200 primary-key values that stay inside the watcher, and `RowTimes` at most 1000 keys'
-  timestamp columns, never another column. A client without the reader, or answering `ErrNotSupported`, turns
+  `SampleKeys` at most 200 primary-key values of the newest rows in a window `[since, until)` (the watcher samples
+  the hour before `now - sink lag - 2 min`, rows that had time to reach the sink; never a table whose key column
+  looks like personal data) that stay inside the watcher, and `RowTimes` at most 1000 keys' timestamp columns,
+  never another column. A client without the reader, or answering `ErrNotSupported`, turns
   the check off for that pipeline with one INFO log. Settings live in `owners.yaml` `watch:`
   (`reconcile_interval` default 15 min, `count_tolerance`, `reconcile: off` per table), not in the environment.
 
