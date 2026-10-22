@@ -2,6 +2,7 @@ package pgactions
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -388,23 +389,13 @@ func resnapCompare(kind, a, b string) int {
 	case pgconv.RangeKindInteger:
 		x, _ := strconv.ParseInt(a, 10, 64)
 		y, _ := strconv.ParseInt(b, 10, 64)
-		return cmpInt(x, y)
+		return cmp.Compare(x, y)
 	case pgconv.RangeKindTime:
 		x, _ := time.Parse(time.RFC3339Nano, a)
 		y, _ := time.Parse(time.RFC3339Nano, b)
 		return x.Compare(y)
 	}
 	return strings.Compare(a, b)
-}
-
-func cmpInt(x, y int64) int {
-	switch {
-	case x < y:
-		return -1
-	case x > y:
-		return 1
-	}
-	return 0
 }
 
 // resnapFilter builds the Debezium filter from a checked column name and
@@ -470,7 +461,6 @@ type resnapRoute struct {
 	topic       string // signal.kafka.topic
 	prefix      string // topic.prefix, the Kafka signal's key
 	chunk       int    // incremental.snapshot.chunk.size
-	cfg         map[string]string
 }
 
 // route reads the connector config and picks the signal channel: the
@@ -490,7 +480,6 @@ func (a *resnapshotRows) route(ctx context.Context, p resnapParams) (resnapRoute
 		return resnapRoute{}, fmt.Errorf("pgactions: %s: connector %q is not a Debezium Postgres source connector (connector.class %q)", ResnapshotRowsName, addPubCut(p.Connector), addPubCut(cfg["connector.class"]))
 	}
 	r := resnapRoute{
-		cfg:         cfg,
 		signalTable: strings.TrimSpace(cfg["signal.data.collection"]),
 		publication: strings.TrimSpace(cfg["publication.name"]),
 		topic:       strings.TrimSpace(cfg["signal.kafka.topic"]),
