@@ -133,7 +133,7 @@
   }
   @keyframes heal {
     0% {
-      background-color: hsl(var(--success-subtle));
+      background-color: var(--success-subtle);
     }
     100% {
       background-color: transparent;
@@ -582,8 +582,10 @@ textarea:focus {
   align-items: center;
   text-decoration: none;
 }
+}
 
-/* No keyboard on a touch screen: key caps are noise there. The cheat-sheet opts back in. */
+/* No keyboard on a touch screen: key caps are noise there. The cheat-sheet opts back in.
+   Unlayered on purpose: inside @layer base the inline-flex utility would win. */
 @media (pointer: coarse) {
   kbd[data-slot='kbd'] {
     display: none;
@@ -591,6 +593,5 @@ textarea:focus {
   .kbd-visible kbd[data-slot='kbd'] {
     display: inline-flex;
   }
-}
 }
 
