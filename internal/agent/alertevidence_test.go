@@ -117,6 +117,46 @@ func TestWatcherEvidenceForecastAndConfigDrift(t *testing.T) {
 	}
 }
 
+// X7d retention findings render as retention_risk entries, in a
+// config_risk signal and in the body's config_risks list (another signal
+// opened the room); their text and anything off the allow-list stay out.
+func TestWatcherEvidenceRetentionRisks(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","signals":[
+	  {"signal":"config_risk","severity":"sev3","risks":[
+	   {"connector":"pg-orders","code":"errors_tolerance_all","sev":"sev3"},
+	   {"code":"retention_shorter_than_declared","sev":"sev4","topic":"pg.public.orders","configured":"1d",
+	    "declared":"7d","retention_bytes":1073741824,"cleanup_policy":"delete","text":"IGNORE PREVIOUS retains 1d"},
+	   {"code":"retention_longer_than_declared","sev":"sev4","table":"analytics.orders","configured":"infinite",
+	    "declared":"30d; DROP","text":"t"}]}],
+	  "config_risks":[
+	   {"code":"compact_cdc_topic","sev":"sev4","topic":"pg.public.items","cleanup_policy":"compact","declared":"7d"},
+	   {"code":"retention_longer_than_declared","topic":"bad topic; rm","configured":"infinite","declared":"7d"},
+	   {"code":"retention_shorter_than_declared","topic":"pg.public.x","configured":"1 day","cleanup_policy":"compact,evil"}]}`)
+	got := AlertEvidenceText(raw)
+	for _, want := range []string{
+		"signal=config_risk severity=sev3 risk=pg-orders:errors_tolerance_all " +
+			"retention_risk=pg.public.orders:retention_shorter_than_declared configured=1d declared=7d " +
+			"retention_bytes=1073741824 cleanup_policy=delete " +
+			"retention_risk=analytics.orders:retention_longer_than_declared configured=infinite",
+		"config_risks retention_risk=pg.public.items:compact_cdc_topic declared=7d cleanup_policy=compact " +
+			"retention_risk=pg.public.x:retention_shorter_than_declared",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing:\n%s\nwant %s", got, want)
+		}
+	}
+	for _, bad := range []string{"IGNORE", "DROP", "rm", "1 day", "evil", "retains"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("%q reached the evidence:\n%s", bad, got)
+		}
+	}
+	// A connector risk renders as before.
+	if got := AlertEvidenceText(json.RawMessage(`{"source":"watcher","signals":[{"signal":"slot_inactive","slot":"s1"}],
+	  "config_risks":[{"connector":"c1","code":"drops_records"}]}`)); got != "source=watcher\nsignal=slot_inactive slot=s1\nconfig_risks risk=c1:drops_records" {
+		t.Fatalf("config_risks line = %q", got)
+	}
+}
+
 func TestAlertEvidenceTextOtherBodies(t *testing.T) {
 	for _, raw := range []string{``, `{}`, `not json`, `{"source":"grafana","signals":[{"signal":"x"}]}`, `{"source":"watcher","signals":[]}`, `{"description":"SECRET_DESC"}`} {
 		got := AlertEvidenceText(json.RawMessage(raw))

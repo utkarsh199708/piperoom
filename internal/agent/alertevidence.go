@@ -108,6 +108,10 @@ type watcherBody struct {
 	Severity string           `json:"severity"`
 	At       string           `json:"at"`
 	Signals  []map[string]any `json:"signals"`
+	// ConfigRisks are the pipeline's config_risk findings when another
+	// signal opened or joined the room (watch.compose): connector risks and
+	// X7d retention findings, rendered like a config_risk signal's risks.
+	ConfigRisks any `json:"config_risks"`
 }
 
 // parseWatcherBody decodes raw when it is a watcher body with at least one
@@ -148,6 +152,9 @@ func watcherEvidence(raw json.RawMessage) string {
 		if line := signalLine(s); line != "" {
 			lines = append(lines, line)
 		}
+	}
+	if rs := riskFields(b.ConfigRisks); len(rs) > 0 {
+		lines = append(lines, truncatePromptField("config_risks "+strings.Join(rs, " "), maxEvidenceLine))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -352,7 +359,10 @@ func traceLine(v any) string {
 	return truncatePromptField(s, maxEvidenceTrace)
 }
 
-// riskFields renders config_risk findings as connector:code pairs.
+// riskFields renders config_risk findings: a connector risk as a
+// connector:code pair, a retention finding (X7d, events.RetentionRisk) as
+// retention_risk=<topic or table>:code with its durations, size cap and
+// cleanup policy. Its text is never rendered.
 func riskFields(v any) []string {
 	risks, _ := v.([]any)
 	var out []string
@@ -361,14 +371,60 @@ func riskFields(v any) []string {
 			break
 		}
 		m, _ := r.(map[string]any)
-		conn, _ := m["connector"].(string)
 		code, _ := m["code"].(string)
-		if !evidenceName.MatchString(conn) || !evidenceWord.MatchString(code) {
+		if !evidenceWord.MatchString(code) {
+			continue
+		}
+		if retentionCodes[code] {
+			if part := retentionRiskField(m, code); part != "" {
+				out = append(out, part)
+			}
+			continue
+		}
+		conn, _ := m["connector"].(string)
+		if !evidenceName.MatchString(conn) {
 			continue
 		}
 		out = append(out, "risk="+conn+":"+code)
 	}
 	return out
+}
+
+// retentionCodes are the RetentionRisk codes.
+var retentionCodes = map[string]bool{
+	events.RiskRetentionShorter: true, events.RiskRetentionLonger: true, events.RiskCompactCDCTopic: true,
+}
+
+// evidenceRetention is topology.FormatRetention's output ("7d", "36h",
+// "infinite"); evidencePolicy is a cleanup.policy of the two Kafka words.
+var (
+	evidenceRetention = regexp.MustCompile(`^(infinite|[0-9]{1,12}[dhms])$`)
+	evidencePolicy    = regexp.MustCompile(`^(compact|delete)(,(compact|delete))?$`)
+)
+
+// retentionRiskField renders one retention finding; "" when its topic or
+// table does not look like a name.
+func retentionRiskField(m map[string]any, code string) string {
+	obj, _ := m["topic"].(string)
+	if obj == "" {
+		obj, _ = m["table"].(string)
+	}
+	if !evidenceName.MatchString(obj) {
+		return ""
+	}
+	part := "retention_risk=" + obj + ":" + code
+	for _, k := range []string{"configured", "declared"} {
+		if d, _ := m[k].(string); evidenceRetention.MatchString(d) {
+			part += " " + k + "=" + d
+		}
+	}
+	if n, ok := evidenceNumber(m["retention_bytes"]); ok {
+		part += " retention_bytes=" + n
+	}
+	if p, _ := m["cleanup_policy"].(string); evidencePolicy.MatchString(p) {
+		part += " cleanup_policy=" + p
+	}
+	return part
 }
 
 // partitionFields renders a consumer lag signal's worst partitions as
