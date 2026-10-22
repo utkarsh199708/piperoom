@@ -55,6 +55,10 @@ type Stack struct {
 	Actions *actions.Registry
 	// Topology builds graphs and traces over Clients.
 	Topology topology.Builder
+
+	// staging is the pipeline's staging client set that Actions hold
+	// (staging.go); nil without staging: or with write mode off.
+	staging *actions.Staging
 }
 
 // Stacks holds every client set of the process. It is also a
@@ -66,7 +70,9 @@ type Stacks struct {
 	// a client by naming a pipeline nobody configured.
 	empty *Stack
 	all   []*Stack
-	once  sync.Once
+	// closers release what the sets do not own: the staging clients.
+	closers []func()
+	once    sync.Once
 }
 
 var _ topology.Builder = (*Stacks)(nil)
@@ -97,6 +103,9 @@ type stackDeps struct {
 	open    func(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners, write bool) (*Wired, error)
 	src     connSource
 	loadAWS func(ctx context.Context, cfg config.Config) (*aws.Config, error)
+	// staging builds a pipeline's staging clients (staging.go); only called
+	// with write mode on.
+	staging stagingOpener
 }
 
 // OpenStacks builds the client sets of own: one per pipeline with a
@@ -109,7 +118,11 @@ type stackDeps struct {
 // a bad value, or a SOURCE_DB_WRITE_URL equal to SOURCE_DB_URL, stops the
 // start before anything is opened. Any failure closes what was opened and
 // returns an error that names the pipeline and the reference, never a value.
-// The caller must Close the result.
+// A pipeline's staging: block (X8) is resolved and checked against every
+// production Connect and Schema Registry endpoint in both write modes, and
+// its clients are built only with write mode on (staging.go); every
+// require_staging: entry must name a registered actions.Stager of the
+// pipeline's set. The caller must Close the result.
 func OpenStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts StackOptions) (*Stacks, error) {
 	return openStacks(ctx, cfg, awsCfg, own, opts, stackDeps{
 		open: openClients,
@@ -117,6 +130,7 @@ func OpenStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		loadAWS: func(ctx context.Context, c config.Config) (*aws.Config, error) {
 			return loadAWS(ctx, c, os.Getenv, defaultAWSLoader)
 		},
+		staging: openStagingClients,
 	})
 }
 
@@ -146,12 +160,28 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 	// variable or file fails the start without a half-built process.
 	var procIDs, ownIDs []string
 	pcfg := map[string]config.Config{}
+	// scfg holds the resolved staging: blocks (X8), by pipeline id.
+	scfg := map[string]config.Config{}
 	// extra holds the references only resolution can see: the process AWS
 	// identity of MSK IAM, and the resolved paths of TLS keys and
 	// certificates, whichever variable or file named them.
 	extra := map[string][]string{}
 	needAWS := false
 	for _, p := range selected {
+		if p.HasStaging() {
+			sc, err := stagingConfig(p, d.src)
+			if err != nil {
+				return nil, err
+			}
+			// Staging's key files and AWS identity count for the shared
+			// reference rule like the pipeline's own.
+			extra[p.ID] = append(extra[p.ID], tlsPathRefs(sc)...)
+			if usesMSKIAM(sc) {
+				extra[p.ID] = append(extra[p.ID], awsProcessIdentityRef)
+				needAWS = needAWS || write
+			}
+			scfg[p.ID] = sc
+		}
 		if !p.HasConnections() {
 			procIDs = append(procIDs, p.ID)
 			extra[p.ID] = append(extra[p.ID], tlsPathRefs(cfg)...)
@@ -197,6 +227,15 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 	if err := own.CheckSharedRefs(extra); err != nil {
 		return nil, fmt.Errorf("wiring: %w", err)
 	}
+	if len(scfg) > 0 {
+		if err := own.CheckStagingOverlap(stagingEndpoints(cfg, own, pcfg, scfg, d.src)); err != nil {
+			return nil, fmt.Errorf("wiring: %w", err)
+		}
+	}
+	if !write {
+		// Off, no staging client is built and nothing keeps the secrets.
+		scfg = nil
+	}
 	if needAWS && awsCfg == nil {
 		c := cfg
 		c.KafkaSASLMechanism = netsec.MechAWSMSKIAM
@@ -238,6 +277,22 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		if err := add("pipeline "+id, []string{id}, pcfg[id]); err != nil {
 			s.Close()
 			return nil, fmt.Errorf("wiring: pipeline %q: %w", id, err)
+		}
+	}
+	for _, p := range selected {
+		if sc, ok := scfg[p.ID]; ok {
+			if err := s.addStaging(p.ID, sc, awsCfg, d.staging); err != nil {
+				s.Close()
+				return nil, err
+			}
+		}
+		// Checked against the pipeline's own registry, which holds every
+		// action in both write modes (only the clients change).
+		if len(p.RequireStaging) > 0 {
+			if err := own.Only(p.ID).ValidateRequireStaging(stagerNames(s.For(p.ID).Actions)); err != nil {
+				s.Close()
+				return nil, fmt.Errorf("wiring: %w", err)
+			}
 		}
 	}
 	return s, nil
@@ -305,6 +360,9 @@ func (s *Stacks) Close() {
 		return
 	}
 	s.once.Do(func() {
+		for i := len(s.closers) - 1; i >= 0; i-- {
+			s.closers[i]()
+		}
 		for i := len(s.all) - 1; i >= 0; i-- {
 			s.all[i].Clients.Close()
 		}
