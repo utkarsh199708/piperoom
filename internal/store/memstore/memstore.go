@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
@@ -39,6 +40,8 @@ type Store struct {
 	spend spendTables
 
 	changes changeTable // pipeline_changes (changes.go)
+
+	samples map[sampleKey][]clients.SamplePoint // watch_samples (samples.go)
 }
 
 type roomLog struct {

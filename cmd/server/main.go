@@ -182,6 +182,12 @@ func runWith(d startDeps) error {
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+	// X3: a bad PIPEROOM_WATCH_FORECAST_HORIZON stops the start like any
+	// other watcher value.
+	watchForecast, err := config.ParseWatchForecast(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
 
 	// A bad PIPEROOM_POSTMORTEM_MODEL stops the server.
 	pmMode, err := config.ParsePostmortemModel(cfg)
@@ -590,6 +596,14 @@ func runWith(d startDeps) error {
 	changesPurge, _ := st.(changesPurger)
 	stopChangesRetention := startElectedChangesRetention(ctx, elector, changesPurge, changesDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopChangesRetention()
+	// Watch samples (X3a) are kept 7 days, whatever else is configured.
+	sampleStore, _ := st.(store.SampleStore)
+	var samplesPurge samplesPurger
+	if sampleStore != nil {
+		samplesPurge = sampleStore
+	}
+	stopSamplesRetention := startElectedSamplesRetention(ctx, elector, samplesPurge, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopSamplesRetention()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
@@ -601,6 +615,9 @@ func runWith(d startDeps) error {
 		})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
+	}
+	if sampleStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithSamples(sampleStore))
 	}
 	if setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
@@ -651,6 +668,10 @@ func runWith(d startDeps) error {
 		Rooms:        watchRooms{svc: svc},
 		Config:       watchCfg,
 		MaxOpenRooms: watchMaxOpenRooms,
+		Forecast:     watchForecast,
+	}
+	if sampleStore != nil {
+		watchDeps.Samples = sampleStore
 	}
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)

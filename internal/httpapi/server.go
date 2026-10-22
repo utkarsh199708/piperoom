@@ -19,6 +19,7 @@ import (
 
 	"piperoom/internal/alertin"
 	"piperoom/internal/auth"
+	"piperoom/internal/clients"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/ws"
@@ -77,6 +78,9 @@ type Server struct {
 	// Admin settings and connection tests (WithAdmin): admin.go.
 	admin      AdminSettings
 	adminLimit *rateLimiter
+
+	// Watch sample history (WithSamples): trends.go.
+	samples clients.SampleReader
 
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
@@ -261,6 +265,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
+				short.Get("/pipelines/{pid}/trends", s.handleTrends)
 				// The scripted demo's presenter controls; no-op outside --demo.
 				s.mountDemo(short)
 			})
