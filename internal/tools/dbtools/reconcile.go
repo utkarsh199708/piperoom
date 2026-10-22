@@ -30,6 +30,15 @@ const (
 	// optional "settle" input.
 	defaultSettle = 2 * time.Minute
 	maxSettle     = time.Hour
+	// reconcileKeyCap bounds the distinct keys one side may hold in the
+	// window before the key comparison is refused. Keys are the exact row
+	// count (one key is one row, updates included), so the diff is only
+	// reported when neither side can have more keys than were read; past the
+	// cap the agent narrows the window instead of reading a truncated diff
+	// as "no more missing rows" (the confident-wrong-number failure, #409).
+	reconcileKeyCap = 2000
+	// reconcileKeySample is the most keys a summary or Data lists per side.
+	reconcileKeySample = 10
 )
 
 // ReconcileRow is one bucket of the comparison. Topic is -1 when topic rates
@@ -41,19 +50,48 @@ type ReconcileRow struct {
 	Sink   int64     `json:"sink"`
 }
 
+// ReconcileData is the detail behind a reconcile result: the bucket table and,
+// when both clients can list keys, the exact key diff.
+type ReconcileData struct {
+	Buckets []ReconcileRow `json:"buckets"`
+	Keys    *ReconcileKeys `json:"keys,omitempty"`
+}
+
+// ReconcileKeys is the key-level comparison of source and sink rows over the
+// same window. One key is one row, however often the row was updated, so
+// Source and Sink are row counts, not change-event counts. Missing and Extra
+// are exact (a window past reconcileKeyCap leaves the key section out with a
+// note instead of reporting a truncated diff); MissingKeys and ExtraKeys list
+// at most reconcileKeySample of them, and they are always primary-key values.
+type ReconcileKeys struct {
+	Column      string   `json:"column"`      // source key column
+	SinkColumn  string   `json:"sink_column"` // sink key column
+	Source      int64    `json:"source"`
+	Sink        int64    `json:"sink"`
+	Missing     int64    `json:"missing"` // in the source, not in the sink
+	Extra       int64    `json:"extra"`   // in the sink, not in the source
+	MissingKeys []string `json:"missing_keys,omitempty"`
+	ExtraKeys   []string `json:"extra_keys,omitempty"`
+}
+
 func reconcileTool(d Deps) tools.Tool {
 	return &tool{
 		name: "reconcile",
 		desc: "Compare row counts per time bucket (at most 12) between the source table, the Kafka topic and the warehouse sink table, " +
-			"and say on which side the rows are lost: the connector side (topic is missing them) or the consumer side (topic has them, sink does not). " +
-			"Counts only, never a value or a key. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events. " +
-			"Rows newer than the settle margin (default 2m) are treated as still in flight and not judged: the window is cut that long before now. If the consumer lags more than that, pass a larger settle or an earlier until.",
+			"and say whether the topic is short of rows (connector side) or the side is unproven (confirm with warehouse_row before naming a writer). " +
+			"Counts only, plus the compared key column's values; never another column value. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events, " +
+			"which is not the same as rows: an update or a delete adds an event without adding a row, so a topic that carried at least as many events as the source had rows does not prove where the loss happened " +
+			"(the verdict then says the side is unproven: confirm one missing key with warehouse_row before naming a writer). " +
+			"Rows newer than the settle margin (default 2m) are treated as still in flight and not judged: the window is cut that long before now. If the consumer lags more than that, pass a larger settle or an earlier until. " +
+			"When both tables report a single-column primary key, it also compares the key sets over the same window and lists the rows in the source but not in the sink's window and the sink rows the source does not have (at most 2000 keys per side; a larger window leaves the key section out with a note, so narrow it). " +
+			"key_column, when given, must name the table's primary key; it can never read another column. The key sets are compared as text (id::text), so a sink that stores the key in another type or letter case can show the same row as missing and extra.",
 		schema: objSchema(map[string]any{
 			"table":      strProp("Source table, \"schema.table\", one of the room's source tables."),
 			"since":      strProp("Start of the window, RFC 3339. The window is at most 6 hours."),
 			"until":      strProp("End of the window, RFC 3339. Default: now minus settle. Never later than now minus settle."),
 			"settle":     strProp("Optional margin for rows still in flight, a Go duration such as \"5m\" (0 to 1h). Default 2m."),
 			"sink_table": strProp("Sink table, only needed when the pipeline has several sink tables and none has the source table's name."),
+			"key_column": strProp("Primary key column to compare. Optional, and only accepted when it is the table's primary key; default: each table's own primary key."),
 		}, "table", "since"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
 			var input struct {
@@ -62,12 +100,16 @@ func reconcileTool(d Deps) tools.Tool {
 				Until     string `json:"until"`
 				Settle    string `json:"settle"`
 				SinkTable string `json:"sink_table"`
+				KeyColumn string `json:"key_column"`
 			}
 			if err := decode(in, &input); err != nil {
 				return tools.Result{}, err
 			}
 			if !validTable(input.Table) {
 				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\"", tools.ErrBadInput)
+			}
+			if input.KeyColumn != "" && !validColumn(input.KeyColumn) {
+				return tools.Result{}, fmt.Errorf("%w: invalid key_column", tools.ErrBadInput)
 			}
 			since, err := parseRFC3339(input.Since)
 			if err != nil {
@@ -140,13 +182,40 @@ func reconcileTool(d Deps) tools.Tool {
 			defer cancel()
 
 			width, n := reconcileGrid(since, until)
-			rows, err := d.reconcileCounts(ctx, src, snk, input.Table, sink, topic, p.SinkTSColumn, since, until, width, n)
-			if err != nil {
-				return tools.Result{}, err
+			// The bucket counts and the key diff read the same window from the
+			// same two systems; run them together so one slow side does not
+			// spend the other's deadline.
+			var (
+				wg        sync.WaitGroup
+				rows      []ReconcileRow
+				countsErr error
+				keys      reconcileKeyDiff
+			)
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				rows, countsErr = d.reconcileCounts(ctx, src, snk, input.Table, sink, topic, p.SinkTSColumn, since, until, width, n)
+			}()
+			go func() {
+				defer wg.Done()
+				keys = d.reconcileKeyDiff(ctx, input.Table, sink, p.SinkTSColumn, input.KeyColumn, since, until)
+			}()
+			wg.Wait()
+			if countsErr != nil {
+				return tools.Result{}, countsErr
 			}
-			summary := reconcileSummary(input.Table, sink, topic, p.SinkTSColumn, width, rows) + note
+			if keys.err != nil {
+				// The only key-diff error is a refused key_column (ErrBadInput);
+				// every other key problem is a note beside the bucket table.
+				return tools.Result{}, keys.err
+			}
+			data := ReconcileData{Buckets: rows}
+			if keys.have {
+				data.Keys = &keys.keys
+			}
+			summary := reconcileSummary(input.Table, sink, topic, p.SinkTSColumn, width, rows) + keys.summary() + note
 			summary, truncated := tools.Truncate(summary)
-			return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
+			return tools.Result{Summary: summary, Data: data, Truncated: truncated}, nil
 		},
 	}
 }
@@ -286,7 +355,7 @@ func reconcileSummary(source, sink, topic, tsCol string, width time.Duration, ro
 	var sb strings.Builder
 	haveTopic := rows[0].Topic >= 0
 	fmt.Fprintf(&sb, "reconcile %s → %s → %s by %s, buckets of %s from %s\n", source, topic, sink, tsCol, width, topology.FormatTS(rows[0].Bucket))
-	sb.WriteString("bucket | source | topic | sink | sink−source\n")
+	sb.WriteString("bucket | source rows | topic events | sink rows | sink−source\n")
 	for _, r := range rows {
 		t := "n/a"
 		if r.Topic >= 0 {
@@ -316,13 +385,20 @@ func reconcileSummary(source, sink, topic, tsCol string, width time.Duration, ro
 	}
 	end := rows[last].Bucket.Add(width)
 	span := fmt.Sprintf("%s–%s", rows[first].Bucket.Format("15:04"), end.Format("15:04"))
+	// The topic column counts change events, not rows: an update or a delete
+	// adds an event without adding a row, so events >= source rows is the
+	// normal state of a healthy pipeline that updates anything. Only a topic
+	// that carried FEWER events than the source had rows is evidence of the
+	// connector losing them; the other direction bounds the loss but does not
+	// prove where it happened, so the side is left open and the next check is
+	// named (#482, KAN-482).
 	switch {
 	case !haveTopic:
 		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; topic counts are not available, so the side is unknown", missing, span)
-	case float64(topicSum) >= (1-reconcileTolerance)*float64(srcSum):
-		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; topic has them (consumer side)", missing, span)
+	case float64(topicSum) < (1-reconcileTolerance)*float64(srcSum):
+		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; the topic carried only %d change events for %d source rows (connector side)", missing, span, topicSum, srcSum)
 	default:
-		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; topic is missing them (connector side)", missing, span)
+		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; the topic carried %d change events for %d source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer", missing, span, topicSum, srcSum)
 	}
 	return sb.String()
 }

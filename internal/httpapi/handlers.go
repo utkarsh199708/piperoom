@@ -3,7 +3,6 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -90,10 +89,9 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 // (docs/api.md). A resolved alert with no open room to join is 202 and opens
 // nothing.
 func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	raw, err := io.ReadAll(r.Body)
+	raw, err := readBody(w, r, maxBody)
 	if err != nil {
-		s.writeErr(w, validation("request body too large or unreadable"))
+		s.writeErr(w, err)
 		return
 	}
 	if !json.Valid(raw) {

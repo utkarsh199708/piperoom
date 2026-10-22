@@ -51,6 +51,13 @@ type p3World struct {
 	slotExists, slotActive bool
 	retained               int64
 	touched                []string
+	// Debezium's offset storage: the WAL position task 0 last committed, and
+	// the current slot's consistent point. Recreating the slot moves its start
+	// past the saved offset, and a resume with that offset fails the task the
+	// way the live stack did (KAN-411). offsetLSN 0 means no stored offsets.
+	offsetLSN, slotStartLSN uint64
+	taskFailed              bool
+	ops                     []string
 	// dlq-backlog
 	sourceGift int
 	// connect
@@ -58,6 +65,9 @@ type p3World struct {
 	connCfg     map[string]any
 	restarts    int
 	subjectsDel []string
+	// offsetDeleteStatus is the DELETE /offsets answer when non-zero; the
+	// error-path tests use it to make the Connect call fail.
+	offsetDeleteStatus int
 	// devconsumer
 	consumerUp   bool
 	skipOps      string
@@ -83,6 +93,7 @@ func newP3World(t *testing.T) *p3World {
 		t: t, addrs: c.ListenAddrs(), raw: raw,
 		nextID: 1000, loaded: map[int64]bool{},
 		slotExists: true, slotActive: true, retained: 26000,
+		offsetLSN: 0x1000000, slotStartLSN: 0x1000000,
 		connState: "RUNNING", consumerUp: true,
 	}
 }
@@ -130,7 +141,9 @@ func (w *p3World) produce(topic string, recs ...*kgo.Record) {
 	}
 }
 
-func (w *p3World) streaming() bool { return w.connState == "RUNNING" && w.slotExists }
+func (w *p3World) streaming() bool {
+	return w.connState == "RUNNING" && w.slotExists && !w.taskFailed
+}
 
 func (w *p3World) psql(_ context.Context, db string, stmts ...string) (string, error) {
 	w.mu.Lock()
@@ -219,7 +232,20 @@ func (w *p3World) exec(db, q string) (string, error) {
 		if w.slotActive {
 			return "", fmt.Errorf("psql: replication slot %q is active", slotName)
 		}
+		w.ops = append(w.ops, "drop-slot")
 		w.slotExists, w.retained = false, 0
+	case q == sqlCreateSlot:
+		if w.slotExists {
+			return "", fmt.Errorf("psql: replication slot %q already exists", slotName)
+		}
+		w.ops = append(w.ops, "create-slot")
+		w.slotExists, w.slotActive, w.retained = true, false, 0
+		// A new slot starts at the current WAL position, after the offset
+		// Debezium saved on the slot that was dropped.
+		w.slotStartLSN += 0x1000000
+		return slotName, nil
+	case q == sqlSlotStart:
+		return fmt.Sprintf("0/%X", w.slotStartLSN), nil
 	case strings.HasPrefix(q, "SELECT coalesce(round(extract(epoch FROM max(updated_at))") && db == "warehouse":
 		return "1760000000000000", nil
 	case strings.HasPrefix(q, sqlTouchPending):
@@ -382,7 +408,11 @@ func (w *p3World) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == base+"/status":
 		tasks := `[]`
 		if w.connState == "RUNNING" {
-			tasks = `[{"id":0,"state":"RUNNING"}]`
+			task := "RUNNING"
+			if w.taskFailed {
+				task = "FAILED"
+			}
+			tasks = fmt.Sprintf(`[{"id":0,"state":%q}]`, task)
 		}
 		writeJSON(rw, http.StatusOK, fmt.Sprintf(`{"connector":{"state":%q},"tasks":%s}`, w.connState, tasks))
 	case r.Method == http.MethodPut && r.URL.Path == base+"/config":
@@ -392,22 +422,55 @@ func (w *p3World) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			writeJSON(rw, http.StatusBadRequest, `{}`)
 			return
 		}
+		w.ops = append(w.ops, "config")
 		w.connCfg = cfg
 		writeJSON(rw, http.StatusOK, `{}`)
 	case r.Method == http.MethodPost && r.URL.Path == base+"/tasks/0/restart":
 		w.restarts++
 		if w.connState == "RUNNING" && !w.slotExists {
 			w.slotExists, w.slotActive = true, true
+			w.slotStartLSN += 0x1000000
 		}
+		w.taskFailed = w.offsetLSN != 0 && w.offsetLSN < w.slotStartLSN
+		w.slotActive = !w.taskFailed
 		rw.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut && r.URL.Path == base+"/stop":
+		w.ops = append(w.ops, "stop")
 		w.connState, w.slotActive = "STOPPED", false
 		rw.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut && r.URL.Path == base+"/resume":
+		w.ops = append(w.ops, "resume")
 		w.connState = "RUNNING"
-		// Debezium creates a missing slot when the task starts.
-		w.slotExists, w.slotActive = true, true
+		if !w.slotExists {
+			// Debezium creates a missing slot when the task starts, at the
+			// current WAL position — after any offset saved before.
+			w.slotExists, w.retained = true, 0
+			w.slotStartLSN += 0x1000000
+		}
+		// A stored offset older than the slot's start cannot be replayed on
+		// it: the task fails with "change stream … is no longer available".
+		w.taskFailed = w.offsetLSN != 0 && w.offsetLSN < w.slotStartLSN
+		w.slotActive = !w.taskFailed
+		if !w.taskFailed && w.consumerUp {
+			// No offset: Debezium snapshots everything the warehouse lacks.
+			for id := int64(1001); id <= w.nextID; id++ {
+				w.loaded[id] = true
+			}
+		}
 		rw.WriteHeader(http.StatusAccepted)
+	case r.Method == http.MethodDelete && r.URL.Path == base+"/offsets":
+		if w.offsetDeleteStatus != 0 {
+			writeJSON(rw, w.offsetDeleteStatus, `{"error_code":500}`)
+			return
+		}
+		// Connect only deletes offsets while the connector is STOPPED.
+		if w.connState != "STOPPED" {
+			writeJSON(rw, http.StatusConflict, `{"error_code":400}`)
+			return
+		}
+		w.ops = append(w.ops, "delete-offsets")
+		w.offsetLSN = 0
+		rw.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/subjects/"):
 		w.subjectsDel = append(w.subjectsDel, r.URL.Path+"?"+r.URL.RawQuery)
 		writeJSON(rw, http.StatusNotFound, `{"error_code":40401}`)
@@ -421,4 +484,11 @@ func (w *p3World) with(f func()) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	f()
+}
+
+// snapshotOps returns a copy of the connector operations seen so far.
+func (w *p3World) snapshotOps() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.ops...)
 }

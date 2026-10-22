@@ -124,7 +124,7 @@ export function SidebarContent({
           onClick={onSearch}
           aria-label="Search"
         >
-          <Search className="!size-3.5" aria-hidden="true" />
+          <Search className="size-3.5!" aria-hidden="true" />
           Search
           <span className="ml-auto inline-flex gap-0.5" aria-hidden="true">
             <Kbd>{modKeyLabel()}</Kbd>

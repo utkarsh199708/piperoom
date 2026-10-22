@@ -45,6 +45,19 @@ test('room UI works against the demo server', async ({ page, context, baseURL })
   //    (bounded wait: the scripted steps take ~8s).
   await expect(page.getByRole('region', { name: 'Decision' })).toBeVisible({ timeout: 30_000 })
 
+  // 5b. The scripted what_changed step fills the "What changed" lane, so the
+  //     demo shows the schema-change evidence above the investigation feed
+  //     (KAN-399). It streams before the proposal, but wait after it so the
+  //     step is certainly recorded in a replayed room too. The lane starts
+  //     collapsed under 768 px, so open it before looking for a row.
+  const lane = page.getByRole('region', { name: 'What changed' })
+  await expect(lane).toBeVisible({ timeout: 20_000 })
+  await expect(lane.getByText('3 changes')).toBeVisible()
+  const laneToggle = lane.getByRole('button', { name: /What changed/ })
+  if ((await laneToggle.getAttribute('aria-expanded')) === 'false') await laneToggle.click()
+  await expect(lane.getByText('schema_version')).toBeVisible()
+  await expect(lane.getByText('connector_config')).toBeVisible()
+
   // 6. The run must be clean.
   expect(pageErrors).toEqual([])
   expect(consoleErrors).toEqual([])

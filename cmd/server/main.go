@@ -9,6 +9,23 @@
 // only, write mode off and a one-user users file written for the run
 // (quickstart.go). Owners are loaded and cross-checked against the users file
 // in every mode.
+//
+// PIPEROOM_FAKE_AGENT=scripted replaces every model path (the agent run, the
+// hand-off and post-mortem writers, triage) with the scripted story of
+// internal/room/demo while keeping the real path around it: Postgres store and
+// migrations, tools, actions, topology, watcher, HTTP and WebSocket API. It
+// needs no model call and no ANTHROPIC_API_KEY. Because a scripted
+// investigation is not real, it is accepted only with dev login, write mode
+// off and no Slack token; the documented demo start is
+//
+//	PIPEROOM_FAKE_AGENT=scripted PIPEROOM_AUTH_MODE=dev \
+//	PIPEROOM_DEV_ACK=dev-login-has-no-password PIPEROOM_WRITE_MODE=off \
+//	PIPEROOM_WATCH_MODE=rooms go run ./cmd/server
+//
+// Any other value, or a scripted request that would reach real users or run
+// fixes, stops the start through config.ParseFakeAgent. --demo and
+// --quickstart ignore the variable (--demo already runs the scripted agent and
+// forces write mode on).
 package main
 
 import (
@@ -398,6 +415,9 @@ func runWith(d startDeps) error {
 		// stackFor is room.Deps.StackFor: nil in demo mode, where every
 		// room uses acts and toolsReg.
 		stackFor func(string) room.PipelineStack
+		// demoCtl is the scripted demo's presenter controls (KAN-398); nil
+		// outside --demo, where the control routes do not exist.
+		demoCtl *demo.Controls
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
@@ -418,11 +438,15 @@ func runWith(d startDeps) error {
 		// 4, item 3): the proposal path -- scope check, approval, executor --
 		// is identical to production.
 		acts = actions.NewRegistry()
-		if err := actions.Register(acts, demo.FakeActionDeps()); err != nil {
+		fakes := demo.NewFakes()
+		if err := actions.Register(acts, fakes.Actions()); err != nil {
 			return fmt.Errorf("server: register demo actions: %w", err)
 		}
 		topo = demo.Builder{}
-		run = demo.Run
+		// The presenter controls: skip, pause, resume and reset, over the
+		// same fake clients the actions write through (KAN-398).
+		demoCtl = demo.NewControls(fakes)
+		run = demoCtl.Run
 		write = demo.WriteHandoff
 		if pmMode == config.PostmortemModelAuto {
 			writePM = demo.WritePostmortem
@@ -580,6 +604,11 @@ func runWith(d startDeps) error {
 	}
 	if setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
+	}
+	if demoCtl != nil {
+		// --demo only: mounts POST /api/rooms/{id}/demo/{skip|pause|resume|reset}
+		// and marks /healthz with "demo": true for the web control strip.
+		httpOpts = append(httpOpts, httpapi.WithDemoControls(demoCtl))
 	}
 	// Admin settings and connection tests (docs/api.md): real mode only.
 	// --demo has no real connections to show or test, and its users may be

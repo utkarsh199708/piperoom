@@ -379,15 +379,15 @@ export function PipelineMap({
         <div className="ml-auto flex items-center gap-1">
           <Button variant="ghost" className="h-7 px-2.5" aria-pressed={expanded} onClick={toggle}>
             {expanded ? (
-              <ChevronsRightLeft aria-hidden="true" className="!size-3.5" />
+              <ChevronsRightLeft aria-hidden="true" className="size-3.5!" />
             ) : (
-              <ChevronsLeftRight aria-hidden="true" className="!size-3.5" />
+              <ChevronsLeftRight aria-hidden="true" className="size-3.5!" />
             )}
             {expanded ? 'Compact' : 'Expand'}
           </Button>
           {onTrace && (
             <Button variant="ghost" className="h-7 px-2.5" onClick={onTrace} aria-keyshortcuts="Shift+T">
-              <Route aria-hidden="true" className="!size-3.5" />
+              <Route aria-hidden="true" className="size-3.5!" />
               Trace a record
               <Kbd aria-hidden="true">⇧T</Kbd>
             </Button>
@@ -444,7 +444,7 @@ export function PipelineMap({
         </div>
         {overflow.left && (
           <>
-            <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-background to-transparent" />
+            <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-linear-to-r from-background to-transparent" />
             {overflow.moreLeft > 0 && (
               <button
                 type="button"
@@ -459,7 +459,7 @@ export function PipelineMap({
         )}
         {overflow.right && (
           <>
-            <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-background to-transparent" />
+            <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-linear-to-l from-background to-transparent" />
             {overflow.moreRight > 0 && (
               <button
                 type="button"

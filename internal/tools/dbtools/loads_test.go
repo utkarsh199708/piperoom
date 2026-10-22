@@ -10,6 +10,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/warehouse"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -106,6 +107,51 @@ func TestLoadErrorsToolPostgresFallback(t *testing.T) {
 	res, err = loadTool(t, &fakeWarehouse{}).Run(roomCtx(), json.RawMessage(`{"table":"analytics.orders"}`))
 	if err != nil || !strings.Contains(res.Summary, "no load history") {
 		t.Errorf("plain warehouse: %q %v", res.Summary, err)
+	}
+}
+
+// TestLoadErrorsToolUsesDeclaredEngine is the KAN-481 attribution rule: for a
+// sink whose declared writer is a ClickHouse Kafka engine, the load history of
+// that engine is read (the engine owns the consumer exceptions), while a
+// sibling consumer_group sink still reads its own table.
+func TestLoadErrorsToolUsesDeclaredEngine(t *testing.T) {
+	d := testDeps()
+	p := d.Owners.Pipelines[0]
+	p.ID = "two-sinks"
+	p.SinkTables = []string{"analytics.orders", "analytics_ch.orders"}
+	p.Sinks = []owners.Sink{
+		{
+			Table:     "analytics.orders",
+			Warehouse: "postgres",
+			Writer:    owners.SinkWriter{Kind: owners.SinkWriterConsumerGroup, Name: "order-sync"},
+		},
+		{
+			Table:     "analytics_ch.orders",
+			Warehouse: "clickhouse",
+			Writer:    owners.SinkWriter{Kind: owners.SinkWriterKafkaEngine, Name: "analytics.orders_kafka"},
+		},
+	}
+	d.Owners.Pipelines = append(d.Owners.Pipelines, p)
+	wh := &loadWarehouse{}
+	d.Wh = wh
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tl, _ := reg.Get("warehouse_load_errors")
+	ctx := tools.WithPipelineID(context.Background(), "two-sinks")
+
+	if _, err := tl.Run(ctx, json.RawMessage(`{"table":"analytics_ch.orders"}`)); err != nil {
+		t.Fatalf("clickhouse sink: %v", err)
+	}
+	if wh.gotTable != "analytics.orders_kafka" {
+		t.Fatalf("load history read for %q, want the declared engine analytics.orders_kafka", wh.gotTable)
+	}
+	if _, err := tl.Run(ctx, json.RawMessage(`{"table":"analytics.orders"}`)); err != nil {
+		t.Fatalf("postgres sink: %v", err)
+	}
+	if wh.gotTable != "analytics.orders" {
+		t.Fatalf("load history read for %q, want the sink table itself", wh.gotTable)
 	}
 }
 

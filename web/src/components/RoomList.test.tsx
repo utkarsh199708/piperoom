@@ -156,6 +156,14 @@ describe('RoomList table', () => {
     expect(within(older).getByRole('button', { name: /Take control/ })).toBeInTheDocument()
   })
 
+  it('renders a room with no severity as "unknown", not a blank badge', () => {
+    mockList([room({ id: 'o_blank', title: 'Legacy room', severity: '' })])
+    renderList()
+
+    const row = screen.getByRole('row', { name: /Legacy room/ })
+    expect(within(row).getByText('unknown')).toBeInTheDocument()
+  })
+
   it('has the Open / Mine / Resolved / All tabs with counts', () => {
     mockList(rooms)
     renderList()

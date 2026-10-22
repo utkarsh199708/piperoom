@@ -638,7 +638,7 @@ func (b *builder) batchSinkNode(p owners.Pipeline, s string, info *batchCollecte
 			Facts: map[string]string{"error": "not configured", "ts_column": p.SinkTSColumn},
 		}
 	}
-	return b.sinkNode(p, s, info.freshness[s], info.now, th)
+	return b.sinkNode(p, owners.SinkRef{Key: s, Table: s}, info.freshness[s], info.now, th)
 }
 
 // runHealth judges a DAG run state (Airflow: queued | running | success |

@@ -10,7 +10,7 @@ import (
 	"piperoom/internal/owners"
 )
 
-// ClickHouse Kafka-ingestion hop (CH-3, KAN-459).
+// ClickHouse Kafka-ingestion hop (CH-3).
 //
 // A ClickHouse warehouse ingests a CDC topic through three objects
 // (dev/clickhouse): a Kafka engine table that consumes the topic, a
@@ -25,8 +25,8 @@ import (
 // and KindMaterializedView nodes (graph.go).
 //
 // The engine consumes with a Kafka consumer group of its own
-// (kafka_group_name in its CREATE statement), which owners.yaml does not list.
-// When the warehouse client can report it, the hop also draws
+// (kafka_group_name in its CREATE statement), which owners.yaml does not list
+// (KAN-459). When the warehouse client can report it, the hop also draws
 //
 //	topic -> group:<kafka_group_name> -> kafka_engine
 //
@@ -46,14 +46,16 @@ import (
 // The sink node itself is the pipeline's regular KindSinkTable node and is not
 // returned; sink is its id ("wh:analytics.orders"), topic the topic id
 // ("topic:pg.public.orders"), and engine/view the ClickHouse object names
-// ("analytics.orders_kafka", "analytics.orders_mv"). group is the engine's
-// Kafka consumer group ("" when the warehouse could not report it); declared
-// says owners.yaml already lists it, so the hop adds no second node with the
-// same id and only the group -> engine edge. All hop edges are inferred: the
-// engine, the view and their topic all come from the dev naming convention
-// (clickhouseNames, clickhouseEngineTopic), not from live ClickHouse config,
-// so the agent must verify them. The group -> engine edge is the exception: it
-// is proven by the engine's own CREATE statement.
+// ("analytics.orders_kafka", "analytics.orders_mv"). An empty topic leaves the
+// edge into the chain's first node out (the topic could not be identified);
+// the rest of the chain is still drawn. group is the engine's Kafka consumer
+// group ("" when the warehouse could not report it); declared says owners.yaml
+// already lists it, so the hop adds no second node with the same id and only
+// the group -> engine edge. The hop edges are inferred: the engine, the view
+// and their topic all come from the dev naming convention (clickhouseNames,
+// clickhouseEngineTopic), not from live ClickHouse config, so the agent must
+// verify them. The group -> engine edge is the exception: it is proven by the
+// engine's own CREATE statement.
 //
 // owner is the warehouse layer owner. The nodes are HealthUnknown here: Build
 // replaces the engine node's health from the ClickHouse load-error reader
@@ -91,12 +93,12 @@ func clickhouseHop(owner, topic, sink, engine, view, group string, declared bool
 		},
 	)
 	if group != "" {
-		if !declared {
+		if !declared && topic != "" {
 			edges = append(edges, Edge{From: topic, To: groupNodeID(group), Mapping: MappingInferred})
 		}
 		// The engine's CREATE statement names the group, so this edge is mapped.
 		edges = append(edges, Edge{From: groupNodeID(group), To: engineNodeID(engine)})
-	} else {
+	} else if topic != "" {
 		edges = append(edges, Edge{From: topic, To: engineNodeID(engine), Mapping: MappingInferred})
 	}
 	edges = append(edges,
@@ -154,49 +156,110 @@ func clickhouseEngineTopic(topics []string, sink string) (string, bool) {
 	return match, match != ""
 }
 
-// clickhouseHopSpec is one Kafka-ingestion hop to wire into a graph.
+// clickhouseHopSpec is one Kafka-ingestion hop to wire into a graph. sink is
+// the sink ref key (the node id with "wh:" added), not always the table name.
 type clickhouseHopSpec struct {
 	sink, engine, view, topic string
 	// group is the Kafka consumer group the engine's CREATE statement names
 	// (kafka_group_name), read from the warehouse; "" when the warehouse
 	// cannot report it (no reader, not a Kafka engine table, read failed).
 	group string
-	// declared is true when owners.yaml already lists group in consumer_groups.
-	// The declared group node then stands for it and the hop adds no second
-	// node with the same id.
+	// declared is true when owners.yaml already lists group as a consumer
+	// group. The declared group node then stands for it and the hop adds no
+	// second node with the same id.
 	declared bool
+}
+
+// hopGroup fills a spec's group and declared from the engine-group reading in
+// collect, so the hop can draw the sink's own consumer.
+func hopGroup(p owners.Pipeline, engine string, info *collected) (group string, declared bool) {
+	group = info.engineGroups[engine].group
+	return group, group != "" && slices.Contains(p.ConsumerGroupNames(), group)
 }
 
 // clickhouseHopSpecs plans the hop for every sink table of a ClickHouse
 // pipeline. A sink whose topic cannot be matched has topic "" and its hop is
-// left out (no engine/view nodes, no replacement edges). The engine's group,
-// when info has one, comes from the warehouse read in collect, so the hop can
-// draw the sink's own consumer.
+// left out (no engine/view nodes, no replacement edges).
 func clickhouseHopSpecs(p owners.Pipeline, topics []string, info *collected) []clickhouseHopSpec {
-	specs := make([]clickhouseHopSpec, 0, len(p.SinkTables))
-	for _, s := range p.SinkTables {
+	sinks := p.SinkTableNames()
+	specs := make([]clickhouseHopSpec, 0, len(sinks))
+	for _, s := range sinks {
 		engine, view := clickhouseNames(s)
 		topic, _ := clickhouseEngineTopic(topics, s)
-		group := info.engineGroups[engine].group
+		group, declared := hopGroup(p, engine, info)
 		specs = append(specs, clickhouseHopSpec{
 			sink: s, engine: engine, view: view, topic: topic,
-			group:    group,
-			declared: group != "" && slices.Contains(p.ConsumerGroups, group),
+			group: group, declared: declared,
 		})
 	}
 	return specs
 }
 
+// explicitClickhouseHopSpecs plans the hop of every sink whose declared writer
+// is a ClickHouse Kafka engine table. The engine name comes from owners.yaml,
+// not from the naming convention; the materialized view's name still follows
+// the convention because the block does not name it. sink is the ref key (the
+// table, or warehouse:table when two sinks share a name), while the engine
+// and view names use the table.
+func explicitClickhouseHopSpecs(p owners.Pipeline, topics []string, info *collected) []clickhouseHopSpec {
+	specs := make([]clickhouseHopSpec, 0, len(p.Sinks))
+	for _, ref := range p.SinkRefs() {
+		engine, ok := ref.Sink.KafkaEngineWriter()
+		if !ok {
+			continue
+		}
+		_, view := clickhouseNames(ref.Table)
+		topic, _ := clickhouseEngineTopic(topics, ref.Table)
+		group, declared := hopGroup(p, engine, info)
+		specs = append(specs, clickhouseHopSpec{
+			sink: ref.Key, engine: engine, view: view, topic: topic,
+			group: group, declared: declared,
+		})
+	}
+	return specs
+}
+
+// engineNames returns the ClickHouse Kafka engine tables whose load errors the
+// builder must read: the declared kafka_engine writers of a sinks: pipeline,
+// or every sink table's conventional engine for the legacy form of a
+// ClickHouse pipeline. A non-ClickHouse pipeline with no engine writer has
+// none.
+func (b *builder) engineNames(p owners.Pipeline, whKind string) []string {
+	var names []string
+	add := func(name string) {
+		if name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	if p.UsesSinkBlocks() {
+		for _, s := range p.Sinks {
+			if engine, ok := s.KafkaEngineWriter(); ok {
+				add(engine)
+			}
+		}
+		return names
+	}
+	if whKind == "clickhouse" {
+		for _, s := range p.SinkTableNames() {
+			engine, _ := clickhouseNames(s)
+			add(engine)
+		}
+	}
+	return names
+}
+
 // wireClickhouseHops replaces the edges that carried data into each sink
 // ("topic/group -> wh:sink") with the Kafka-ingestion hop
-// "topic -> [group ->] kafka_engine:<engine> -> materialized_view:<view> -> wh:sink".
+// "topic -> kafka_engine:<engine> -> materialized_view:<view> -> wh:sink".
 // The engine table consumes the topic directly, so the sink's old readers no
-// longer feed it. The hop edges are inferred (engine, view and topic come from
-// the dev naming convention, not live ClickHouse config), except group ->
-// engine: the engine's own CREATE statement names that group.
-func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
+// longer feed it. The hop edges are inferred: engine, view and topic all come
+// from the dev naming convention, not from live ClickHouse config. A spec with
+// no topic is skipped in the legacy form (old shape kept); includeUntopiced
+// draws its engine -> view -> sink chain anyway, which the sinks: form uses
+// when the topic cannot be identified.
+func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec, includeUntopiced bool) {
 	for _, h := range specs {
-		if h.topic == "" {
+		if h.topic == "" && !includeUntopiced {
 			continue
 		}
 		sinkID := "wh:" + h.sink
@@ -207,7 +270,11 @@ func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
 			}
 			kept = append(kept, e)
 		}
-		_, edges := clickhouseHop(b.layerOwner("warehouse"), "topic:"+h.topic, sinkID, h.engine, h.view, h.group, h.declared)
+		topic := ""
+		if h.topic != "" {
+			topic = "topic:" + h.topic
+		}
+		_, edges := clickhouseHop(b.layerOwner("warehouse"), topic, sinkID, h.engine, h.view, h.group, h.declared)
 		fp.edges = append(kept, edges...)
 	}
 }
@@ -217,16 +284,16 @@ func (b *builder) wireClickhouseHops(fp *flowPlan, specs []clickhouseHopSpec) {
 // consumer exception in the engine's recent history means the engine stopped
 // consuming, which fails this node before the sink it no longer fills goes
 // stale (first-failing semantics). The reader reports only exceptions, never
-// that the engine exists, and the engine's name is a naming-convention guess,
-// so a reading without exceptions leaves the node unknown (inferred), not OK:
-// the table may not exist. No reader, an unreachable reader, or a warehouse
-// that cannot report load history leaves the node unknown too.
-//
-// The consumer_group fact names the engine's own Kafka consumer group, or says
-// why the map has no group node for it: "not monitored" when the warehouse
-// cannot report the group, "unreadable" when the read failed. That keeps the
-// sink's consumer visible as a fact even when its lag is not.
-func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
+// that the engine exists, so a reading without exceptions leaves the node
+// unknown (inferred), not OK: the table may not exist. No reader, an
+// unreachable reader, or a warehouse that cannot report load history leaves the
+// node unknown too. The consumer_group fact names the engine's own Kafka
+// consumer group, or says why the map has no group node for it: "not
+// monitored" when the warehouse cannot report the group, "unreadable" when the
+// read failed. That keeps the sink's consumer visible as a fact even when its
+// lag is not. declared is true when owners.yaml names the engine (a
+// sinks: writer), so its name no longer comes from the naming convention.
+func (b *builder) kafkaEngineNode(engine string, info *collected, declared bool) Node {
 	n := Node{
 		ID:     engineNodeID(engine),
 		Kind:   KindKafkaEngine,
@@ -234,10 +301,10 @@ func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
 		Layer:  "warehouse",
 		Owner:  b.layerOwner("warehouse"),
 		Health: HealthUnknown,
-		Facts: map[string]string{
-			"inferred":       "naming convention",
-			"consumer_group": engineGroupFact(engine, info),
-		},
+		Facts:  map[string]string{"consumer_group": engineGroupFact(engine, info)},
+	}
+	if !declared {
+		n.Facts["inferred"] = "naming convention"
 	}
 	snap, ok := info.engineLoads[engine]
 	if !ok {
@@ -258,6 +325,25 @@ func (b *builder) kafkaEngineNode(engine string, info *collected) Node {
 		break
 	}
 	return n
+}
+
+// materializedViewNode draws a materialized view's node. No reader reports a
+// view's freshness, so it stays unknown.
+func (b *builder) materializedViewNode(view string) Node {
+	return Node{
+		ID:     viewNodeID(view),
+		Kind:   KindMaterializedView,
+		Name:   view,
+		Layer:  "warehouse",
+		Owner:  b.layerOwner("warehouse"),
+		Health: HealthUnknown,
+	}
+}
+
+// engineLoadSnapshot is one engine table's load-error reading.
+type engineLoadSnapshot struct {
+	loads []clients.LoadError
+	err   error
 }
 
 // engineGroupFact is the engine node's consumer_group fact: the group id, or
@@ -315,25 +401,6 @@ func (b *builder) kafkaEngineGroupNode(engine string, snap engineGroupSnapshot, 
 		n.Facts[k] = v
 	}
 	return n
-}
-
-// materializedViewNode draws a materialized view's node. No reader reports a
-// view's freshness, so it stays unknown.
-func (b *builder) materializedViewNode(view string) Node {
-	return Node{
-		ID:     viewNodeID(view),
-		Kind:   KindMaterializedView,
-		Name:   view,
-		Layer:  "warehouse",
-		Owner:  b.layerOwner("warehouse"),
-		Health: HealthUnknown,
-	}
-}
-
-// engineLoadSnapshot is one engine table's load-error reading.
-type engineLoadSnapshot struct {
-	loads []clients.LoadError
-	err   error
 }
 
 // engineGroupSnapshot is one engine table's consumer-group reading: the group
