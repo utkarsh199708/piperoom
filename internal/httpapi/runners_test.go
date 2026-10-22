@@ -3,9 +3,11 @@ package httpapi_test
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -165,6 +167,239 @@ func TestRunnerWSPairingAndAttach(t *testing.T) {
 	if _, ok := svc.RunnerLookup("", snap.ID, "arjun"); !ok {
 		t.Fatal("runner not registered after Hello")
 	}
+}
+
+// dialRunner opens the runner socket and completes the code handshake:
+// Pair(code) → Welcome → Hello → Token. It returns the socket and the token.
+func dialRunner(t *testing.T, ctx context.Context, srvURL, code, label string) (*websocket.Conn, string) {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srvURL, "http") + "/api/runners/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := writeRunnerFrame(rctx, conn, protocol.Frame{Type: protocol.FramePair, Pair: &protocol.Pair{
+		Code: code, ProtocolVersion: protocol.CurrentMajor, ProtocolMinor: protocol.CurrentMinor,
+	}}); err != nil {
+		t.Fatalf("write pair: %v", err)
+	}
+	if f, err := readRunnerFrame(rctx, conn); err != nil || f.Type != protocol.FrameWelcome {
+		t.Fatalf("read welcome: %+v, %v", f, err)
+	}
+	if err := writeRunnerFrame(rctx, conn, protocol.Frame{Type: protocol.FrameHello, Hello: &protocol.Hello{
+		OS: "linux", Arch: "amd64", Label: label,
+		Tools:           map[string]string{"docker": "1.0"},
+		ProtocolVersion: protocol.CurrentMajor, ProtocolMinor: protocol.CurrentMinor,
+	}}); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	tok, err := readRunnerFrame(rctx, conn)
+	if err != nil || tok.Type != protocol.FrameToken || tok.Token == nil || tok.Token.Token == "" {
+		t.Fatalf("read token: %+v, %v", tok, err)
+	}
+	return conn, tok.Token.Token
+}
+
+// reconnectRunner reattaches with the token: Pair(token) → Welcome, Token.
+func reconnectRunner(t *testing.T, ctx context.Context, srvURL, token string) (*websocket.Conn, string) {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(srvURL, "http") + "/api/runners/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := writeRunnerFrame(rctx, conn, protocol.Frame{Type: protocol.FramePair, Pair: &protocol.Pair{
+		Token: token, ProtocolVersion: protocol.CurrentMajor, ProtocolMinor: protocol.CurrentMinor,
+	}}); err != nil {
+		t.Fatalf("write token pair: %v", err)
+	}
+	if f, err := readRunnerFrame(rctx, conn); err != nil || f.Type != protocol.FrameWelcome {
+		t.Fatalf("read reconnect welcome: %+v, %v", f, err)
+	}
+	tok, err := readRunnerFrame(rctx, conn)
+	if err != nil || tok.Type != protocol.FrameToken || tok.Token == nil || tok.Token.Token == "" {
+		t.Fatalf("read rotated token: %+v, %v", tok, err)
+	}
+	// The runner's first frame after the reconnect is Resume.
+	if err := writeRunnerFrame(rctx, conn, protocol.Frame{Type: protocol.FrameResume, Resume: &protocol.Resume{}}); err != nil {
+		t.Fatalf("write resume: %v", err)
+	}
+	return conn, tok.Token.Token
+}
+
+// syncLogBuf is a mutex-guarded log sink: the server's request-log goroutines
+// may still write while the test reads it back.
+type syncLogBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncLogBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncLogBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// TestRunnerWSTokenReconnect: a runner reattaches with its token (no pairing
+// code), gets a new token, the old one is refused, and an op sent after the
+// reconnect is answered by the runner's FrameResult through the executor.
+func TestRunnerWSTokenReconnect(t *testing.T) {
+	var logbuf syncLogBuf
+	st := memstore.New()
+	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	srv := httptest.NewServer(httpapi.New(svc, st, slog.New(slog.NewTextHandler(&logbuf, nil)), httpapi.WithSetup(true)))
+	defer srv.Close()
+
+	ctx := context.Background()
+	arjun, ok := svc.LookupUser("arjun")
+	if !ok {
+		t.Fatal("arjun missing")
+	}
+	snap, err := svc.CreateRoom(ctx, arjun, "Incident", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	creator := events.Actor{Kind: events.ActorHuman, ID: "arjun", Name: "Arjun"}
+	code, err := svc.IssuePairingCode("", snap.ID, creator)
+	if err != nil {
+		t.Fatalf("issue code: %v", err)
+	}
+
+	conn1, token1 := dialRunner(t, ctx, srv.URL, code, "laptop")
+	_ = conn1.Close(websocket.StatusNormalClosure, "drop")
+
+	conn2, token2 := reconnectRunner(t, ctx, srv.URL, token1)
+	defer conn2.Close(websocket.StatusNormalClosure, "")
+	if token2 == token1 {
+		t.Fatal("token was not rotated on reconnect")
+	}
+	if _, ok := svc.RunnerLookup("", snap.ID, "arjun"); !ok {
+		t.Fatal("runner not attached after token reconnect")
+	}
+
+	// The rotated token is on the wire; the old one is a bad code now.
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/runners/ws"
+	conn3, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn3.Close(websocket.StatusNormalClosure, "")
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := writeRunnerFrame(rctx, conn3, protocol.Frame{Type: protocol.FramePair, Pair: &protocol.Pair{Token: token1}}); err != nil {
+		t.Fatalf("write old token: %v", err)
+	}
+	if _, _, err := conn3.Read(rctx); err == nil {
+		t.Fatal("old token accepted after rotation")
+	} else if sc := websocket.CloseStatus(err); sc != websocket.StatusPolicyViolation {
+		t.Fatalf("old token close status = %d, want policy violation", sc)
+	}
+
+	// An op sent by the executor reaches this socket and its result completes
+	// the call.
+	idx := 0
+	req := protocol.OpRequest{
+		ID: "op-1", Op: "compose_up", Params: []byte(`{}`), Tier: protocol.TierT1,
+		Class: protocol.ClassLocal, Deadline: time.Now().Add(5 * time.Second),
+		ProposalID: "p-1", StepIndex: &idx, ParamsHash: "h",
+	}
+	type out struct {
+		res protocol.OpResult
+		err error
+	}
+	ch := make(chan out, 1)
+	go func() {
+		res, err := svc.RunnerExecutor().Execute(ctx, snap.ID, req)
+		ch <- out{res, err}
+	}()
+	op, err := readRunnerFrame(rctx, conn2)
+	if err != nil || op.Type != protocol.FrameOp || op.Op == nil || op.Op.ID != "op-1" {
+		t.Fatalf("read op: %+v, %v", op, err)
+	}
+	if err := writeRunnerFrame(rctx, conn2, protocol.Frame{Type: protocol.FrameResult, Result: &protocol.OpResult{
+		ID: "op-1", OK: true, Summary: "done",
+	}}); err != nil {
+		t.Fatalf("write result: %v", err)
+	}
+	got := <-ch
+	if got.err != nil || !got.res.OK || got.res.Summary != "done" {
+		t.Fatalf("Execute = %+v, %v", got.res, got.err)
+	}
+
+	// A result for an op this server never sent is ignored and the socket
+	// stays usable.
+	if err := writeRunnerFrame(rctx, conn2, protocol.Frame{Type: protocol.FrameResult, Result: &protocol.OpResult{
+		ID: "never-sent", OK: true, Summary: "x",
+	}}); err != nil {
+		t.Fatalf("write unknown result: %v", err)
+	}
+	if err := writeRunnerFrame(rctx, conn2, protocol.Frame{Type: protocol.FramePing}); err != nil {
+		t.Fatalf("write ping: %v", err)
+	}
+	if pong, err := readRunnerFrame(rctx, conn2); err != nil || pong.Type != protocol.FramePong {
+		t.Fatalf("read pong: %+v, %v", pong, err)
+	}
+
+	// The reconnect is a second setup.runner_attached (the runner sends no
+	// Hello again), and neither token appears in a log line or a room event.
+	evs, _, err := svc.Events(ctx, snap.ID, 0, 200)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	attached := 0
+	var all strings.Builder
+	for _, e := range evs {
+		if e.Type == events.SetupRunnerAttached {
+			attached++
+		}
+		b, _ := json.Marshal(e)
+		all.Write(b)
+	}
+	if attached != 2 {
+		t.Fatalf("setup.runner_attached events = %d, want 2 (pair and reconnect)", attached)
+	}
+	if strings.Contains(all.String(), token1) || strings.Contains(all.String(), token2) {
+		t.Fatal("a runner token reached the room log")
+	}
+	if strings.Contains(logbuf.String(), token1) || strings.Contains(logbuf.String(), token2) {
+		t.Fatal("a runner token reached a log line")
+	}
+}
+
+// TestRunnerWSUnknownTokenRefused: a token this server never issued is refused
+// with a policy violation and no registration.
+func TestRunnerWSUnknownTokenRefused(t *testing.T) {
+	srv, svc := newRunnerServer(t, true)
+	ctx := context.Background()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/runners/ws"
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := writeRunnerFrame(rctx, conn, protocol.Frame{Type: protocol.FramePair, Pair: &protocol.Pair{
+		Token: "never-issued-token", ProtocolVersion: protocol.CurrentMajor, ProtocolMinor: protocol.CurrentMinor,
+	}}); err != nil {
+		t.Fatalf("write pair: %v", err)
+	}
+	if _, _, err := conn.Read(rctx); err == nil {
+		t.Fatal("unknown token accepted")
+	} else if sc := websocket.CloseStatus(err); sc != websocket.StatusPolicyViolation {
+		t.Fatalf("unknown token close status = %d, want policy violation", sc)
+	}
+	_ = svc
 }
 
 // TestRunnerWSBadCodeCloses: a bad code closes the socket with a policy

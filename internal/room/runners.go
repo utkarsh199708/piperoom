@@ -29,8 +29,18 @@ const (
 	maxGlobalAttempts = 100
 )
 
+// RunnerWriter is the transport of one attached runner socket: it writes one
+// frame to the runner. Implementations must be safe for concurrent use and
+// bound the write by ctx. httpapi adapts *websocket.Conn to it; tests use a
+// fake.
+type RunnerWriter interface {
+	WriteRunnerFrame(ctx context.Context, f protocol.Frame) error
+}
+
 // Runner is a paired setup runner (docs/design/setup-agent.md §2.1). The
-// token is in memory only, never in an event or a log.
+// token is in memory only, never in an event or a log. A lost runner keeps its
+// record (and its token) until the token expires, so it may reattach with the
+// token; Connected says whether a socket is attached now.
 type Runner struct {
 	Tenant  string
 	RoomID  string
@@ -46,8 +56,13 @@ type Runner struct {
 	ProtocolMinor    int
 	AttachedAt       time.Time
 	LastSeen         time.Time
+	Connected        bool
 	Token            string
 	TokenExpiresAt   time.Time
+
+	// writer is the live socket. Guarded by the registry's mu; nil while the
+	// runner is lost or in the moment between token rotation and rebinding.
+	writer RunnerWriter
 }
 
 // runnerKey binds a runner to its room.
@@ -289,50 +304,65 @@ func (r *RunnerRegistry) lookupCode(code string) *pairingCode {
 // Attach registers a runner (after Hello) and consumes its pairing code: the
 // code is single use, so the next presentation is a bad code. A runner that
 // replaces another for the same (tenant, room, creator) is audited as a
-// replacement. It emits setup.runner_attached.
+// replacement. It emits setup.runner_attached. The socket is bound separately
+// with BindWriter once the token reached the runner.
 func (r *RunnerRegistry) Attach(ctx context.Context, code string, rn Runner) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	now := r.now()
+	r.pruneRunnersLocked(now)
 	key := runnerKey{tenant: rn.Tenant, roomID: rn.RoomID, creator: rn.Creator.ID}
 	if _, ok := r.runners[key]; ok {
 		// A second pairing for the same room replaces the first; audited.
 		r.audit(ctx, rn.RoomID, events.PairingReplaced, "", rn.Label)
 	}
 	delete(r.codes, code)
-	rn.AttachedAt = r.now()
-	rn.LastSeen = rn.AttachedAt
+	rn.AttachedAt = now
+	rn.LastSeen = now
+	rn.Connected = true
+	rn.writer = nil
 	r.runners[key] = &rn
 	r.emitRunnerAttached(ctx, rn)
 	return nil
 }
 
-// Runner returns the runner bound to (tenant, roomID, creatorID), if attached.
+// Runner returns the runner bound to (tenant, roomID, creatorID) while a
+// socket is attached. A lost runner keeps a reconnectable record that this
+// method does not return; a new pairing or the token path (Reconnect) finds
+// it.
 func (r *RunnerRegistry) Runner(tenant, roomID, creatorID string) (*Runner, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rn, ok := r.runners[runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}]
-	if !ok {
+	if !ok || !rn.Connected {
 		return nil, false
 	}
-	return rn, true
+	c := *rn
+	return &c, true
 }
 
 // Lost detaches the runner bound to (tenant, roomID, creatorID) and emits
-// setup.runner_lost with its label and last-seen time. token is the
-// attachment identity: when a replacement has attached since this socket
-// paired, its loss is a no-op and the new runner stays.
+// setup.runner_lost with its label and last-seen time. The record and its
+// token stay for protocol.TokenIdle, so the runner can reattach with the token
+// (Reconnect). token is the attachment identity: when a replacement has
+// attached since this socket paired, or the runner is already detached, its
+// loss is a no-op and the new attachment stays.
 func (r *RunnerRegistry) Lost(ctx context.Context, tenant, roomID, creatorID, token string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	key := runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}
 	rn, ok := r.runners[key]
-	if !ok || rn.Token != token {
+	if !ok || !rn.Connected || !tokenEqual(rn.Token, token) {
+		r.mu.Unlock()
 		return
 	}
-	delete(r.runners, key)
+	rn.Connected = false
+	rn.writer = nil
+	lastSeen := rn.LastSeen
+	label := rn.Label
+	r.mu.Unlock()
 	r.emitSetup(ctx, roomID, events.SetupRunnerLost, events.SetupRunnerLostPayload{
-		RunnerLabel: rn.Label,
-		LastSeen:    rn.LastSeen.UTC(),
+		RunnerLabel: label,
+		LastSeen:    lastSeen.UTC(),
 	})
 }
 
@@ -343,24 +373,160 @@ func (r *RunnerRegistry) Touch(tenant, roomID, creatorID, token string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	rn, ok := r.runners[runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}]
-	if !ok || rn.Token != token {
+	if !ok || !rn.Connected || !tokenEqual(rn.Token, token) {
 		return
 	}
 	rn.LastSeen = r.now()
 }
 
 // Refuse records that the runner refused an op (setup.runner_refused). It does
-// not detach the runner. A refusal from a superseded attachment (token
-// mismatch) is a no-op.
-func (r *RunnerRegistry) Refuse(ctx context.Context, tenant, roomID, creatorID, token string, payload events.SetupRunnerRefusedPayload) {
+// not detach the runner and reports whether the frame came from the current
+// attachment. A refusal from a superseded attachment (token mismatch) is a
+// no-op.
+func (r *RunnerRegistry) Refuse(ctx context.Context, tenant, roomID, creatorID, token string, payload events.SetupRunnerRefusedPayload) bool {
 	key := runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}
 	r.mu.Lock()
 	rn, ok := r.runners[key]
 	r.mu.Unlock()
-	if !ok || rn.Token != token {
-		return
+	if !ok || !rn.Connected || !tokenEqual(rn.Token, token) {
+		return false
 	}
 	r.emitSetup(ctx, roomID, events.SetupRunnerRefused, payload)
+	return true
+}
+
+// Reconnect reattaches a runner that presents its token (docs/design/
+// setup-agent.md §2.1): the token is compared in constant time, must belong to
+// a live record and must not be past its idle expiry; on success it is rotated
+// to newToken and setup.runner_attached is emitted again (the runner never
+// sends Hello a second time, so the stored Hello describes it). It returns the
+// outcome (events.PairingOK, PairingBadCode or PairingExpired) for the
+// caller's close reason; neither token is logged or put in an event. An
+// unknown or expired token changes nothing.
+func (r *RunnerRegistry) Reconnect(ctx context.Context, token, newToken string, expires time.Time, source string) (Runner, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.now()
+	key, rn := r.lookupTokenLocked(token)
+	if rn == nil || newToken == "" {
+		r.audit(ctx, "", events.PairingBadCode, source, "")
+		return Runner{}, events.PairingBadCode
+	}
+	if !now.Before(rn.TokenExpiresAt) {
+		// An expired token can never reattach. A detached record is dropped;
+		// an attached one stays until the socket ends, so the room still
+		// knows who is connected.
+		if !rn.Connected {
+			delete(r.runners, key)
+		}
+		r.audit(ctx, rn.RoomID, events.PairingExpired, source, rn.Label)
+		return Runner{}, events.PairingExpired
+	}
+	r.pruneRunnersLocked(now)
+	rn.Token = newToken
+	rn.TokenExpiresAt = expires
+	rn.LastSeen = now
+	rn.Connected = true
+	rn.writer = nil
+	c := *rn
+	r.emitRunnerAttached(ctx, c)
+	return c, events.PairingOK
+}
+
+// BindWriter attaches the live socket to the runner record the token names.
+// It reports false for a closed, replaced or expired attachment; the caller
+// then closes the socket without serving it.
+func (r *RunnerRegistry) BindWriter(tenant, roomID, creatorID, token string, w RunnerWriter) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rn, ok := r.runners[runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}]
+	if !ok || !rn.Connected || !tokenEqual(rn.Token, token) {
+		return false
+	}
+	rn.writer = w
+	return true
+}
+
+// Current reports whether token is the live attachment of (tenant, roomID,
+// creatorID). Frames that name a superseded attachment are ignored.
+func (r *RunnerRegistry) Current(tenant, roomID, creatorID, token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rn, ok := r.runners[runnerKey{tenant: tenant, roomID: roomID, creator: creatorID}]
+	return ok && rn.Connected && tokenEqual(rn.Token, token)
+}
+
+// WriteToRoom writes one frame to the runner currently attached to roomID.
+// It returns protocol.ErrNoRunner when no socket is attached (a lost runner
+// keeps no writer). The timestamp of the attachment is not changed: only the
+// read loop's Touch moves LastSeen.
+func (r *RunnerRegistry) WriteToRoom(ctx context.Context, roomID string, f protocol.Frame) error {
+	r.mu.Lock()
+	var best *Runner
+	for _, rn := range r.runners {
+		if rn.RoomID != roomID || !rn.Connected || rn.writer == nil {
+			continue
+		}
+		if best == nil || rn.AttachedAt.After(best.AttachedAt) {
+			best = rn
+		}
+	}
+	w := RunnerWriter(nil)
+	if best != nil {
+		w = best.writer
+	}
+	r.mu.Unlock()
+	if w == nil {
+		return fmt.Errorf("room: runner write %s: %w", f.Type.Short(), protocol.ErrNoRunner)
+	}
+	if err := w.WriteRunnerFrame(ctx, f); err != nil {
+		return fmt.Errorf("room: runner write %s: %w", f.Type.Short(), err)
+	}
+	return nil
+}
+
+// ConnectedForRoom reports whether a runner socket is attached to roomID.
+func (r *RunnerRegistry) ConnectedForRoom(roomID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rn := range r.runners {
+		if rn.RoomID == roomID && rn.Connected {
+			return true
+		}
+	}
+	return false
+}
+
+// lookupTokenLocked finds the record a token names, by constant-time
+// comparison against every record. The set is small (one per room and
+// creator), so the linear scan is the constant-time way to leak nothing about
+// which token was presented. Caller holds r.mu.
+func (r *RunnerRegistry) lookupTokenLocked(token string) (runnerKey, *Runner) {
+	if token == "" {
+		return runnerKey{}, nil
+	}
+	for key, rn := range r.runners {
+		if tokenEqual(rn.Token, token) {
+			return key, rn
+		}
+	}
+	return runnerKey{}, nil
+}
+
+// pruneRunnersLocked drops detached records whose token expired, so an expired
+// token can never come back and the registry does not grow. Attached records
+// stay. Caller holds r.mu.
+func (r *RunnerRegistry) pruneRunnersLocked(now time.Time) {
+	for key, rn := range r.runners {
+		if !rn.Connected && !now.Before(rn.TokenExpiresAt) {
+			delete(r.runners, key)
+		}
+	}
+}
+
+// tokenEqual compares two runner tokens in constant time.
+func tokenEqual(a, b string) bool {
+	return len(a) == len(b) && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 // audit emits setup.pairing for one attempt. roomID is "" for an attempt that

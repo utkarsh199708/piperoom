@@ -390,6 +390,9 @@ type Service struct {
 	// runners is the setup runner registry: pairing codes and the attached
 	// runners (runners.go; U wave).
 	runners *RunnerRegistry
+	// runnerExec dispatches OpRequests to the attached runner and reconciles
+	// its results and Resume frames (runner_exec.go; U1-5a).
+	runnerExec *RunnerExecutor
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -486,6 +489,10 @@ func New(d Deps) *Service {
 		}
 	}
 	s.runners = NewRunnerRegistry(now, s.EmitSetup, log)
+	s.runnerExec = NewRunnerExecutor(s.runners, RunnerResults{
+		Result:  s.applyRunnerResult,
+		Unknown: s.applyRunnerUnknown,
+	}, log)
 	return s
 }
 
