@@ -1,36 +1,43 @@
 package warehouse
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/pgconv"
 	"piperoom/internal/tools"
 )
 
 // The sink side of the TOAST truncation check (X1d, pg_toast_risk): how many
 // sink rows hold Debezium's unavailable-value placeholder instead of the
-// column's value. Not on clients.Warehouse (contract change request in the
-// X1d report); the tool finds it with a type assertion.
+// column's value. DB implements the optional clients.PlaceholderCounter; the
+// tool finds it with a type assertion.
 
+// Caps of CountPlaceholder (clients.MaxPlaceholderBytes,
+// clients.MaxPlaceholderWindow).
 const (
-	// MaxPlaceholderBytes caps the placeholder string: Debezium's default,
-	// __debezium_unavailable_value, is 28 bytes.
-	MaxPlaceholderBytes = 256
-	// MaxPlaceholderWindow caps until - since: the count scans the window.
-	MaxPlaceholderWindow = 7 * 24 * time.Hour
+	MaxPlaceholderBytes  = clients.MaxPlaceholderBytes
+	MaxPlaceholderWindow = clients.MaxPlaceholderWindow
 )
 
+var _ clients.PlaceholderCounter = (*DB)(nil)
+
 // CountPlaceholder counts the rows of table ("schema.table", one of the
-// sink_tables of the pipeline in ctx) whose column, read as text, equals
-// placeholder and whose tsColumn is in [since, until). It returns the count
-// only: no value of any column is selected, and no error quotes one.
+// sink_tables of the pipeline in ctx) whose column, read as text, is one of
+// the placeholder's forms (placeholderForms) and whose tsColumn is in
+// [since, until). It returns the count only: no value of any column is
+// selected, and no error quotes one.
 // Identifiers follow ^[a-zA-Z_][a-zA-Z0-9_]*$ and a bad one, an empty or
 // over-long placeholder or a bad window is tools.ErrBadInput before any I/O;
 // so is a table outside the pipeline's sink_tables (tools.ErrOutOfScope), or
@@ -47,6 +54,10 @@ func (d *DB) CountPlaceholder(ctx context.Context, table, column, placeholder, t
 	}
 	if placeholder == "" || len(placeholder) > MaxPlaceholderBytes {
 		return 0, fmt.Errorf("warehouse: placeholder must be 1 to %d bytes: %w", MaxPlaceholderBytes, tools.ErrBadInput)
+	}
+	forms, err := placeholderForms(placeholder)
+	if err != nil {
+		return 0, err
 	}
 	if !until.After(since) || until.Sub(since) > MaxPlaceholderWindow {
 		return 0, fmt.Errorf("warehouse: placeholder count window %s..%s: want until after since, at most %s: %w",
@@ -67,19 +78,42 @@ func (d *DB) CountPlaceholder(ctx context.Context, table, column, placeholder, t
 
 	var n int64
 	// The bounds are untyped: they take the timestamp column's type.
-	if err := d.queryRow(ctx, placeholderQuery(schema, tbl, col, tsColumn), placeholder, since.UTC(), until.UTC()).Scan(&n); err != nil {
+	if err := d.queryRow(ctx, placeholderQuery(schema, tbl, col, tsColumn), forms, since.UTC(), until.UTC()).Scan(&n); err != nil {
 		return 0, placeholderErr(table, err)
 	}
 	return n, nil
 }
 
 // placeholderQuery builds the count; every identifier is already validated
-// and is quoted again here. column::text lets a json or varchar column be
-// compared with the placeholder too.
+// and is quoted again here. column::text lets a json, varchar or bytea column
+// be compared with the placeholder's forms too.
 func placeholderQuery(schema, tbl, col, ts string) string {
 	t := pgx.Identifier{ts}.Sanitize()
-	return fmt.Sprintf(`SELECT count(*) FROM %s WHERE %s::text = $1 AND %s >= $2 AND %s < $3`,
+	return fmt.Sprintf(`SELECT count(*) FROM %s WHERE %s::text = ANY($1::text[]) AND %s >= $2 AND %s < $3`,
 		pgx.Identifier{schema, tbl}.Sanitize(), pgx.Identifier{col}.Sanitize(), t, t)
+}
+
+// placeholderForms is what a sink column holding the placeholder reads as
+// text. Debezium sends the placeholder's bytes for a binary column (and
+// decodes a "hex:" placeholder to bytes first), so besides the text itself a
+// bytea column reads as its hex text (bytea_output hex, Postgres's default)
+// and a JSON sink that kept Debezium's encoding holds base64. Without these a
+// bytea column would always count 0. The text form is left out when the
+// bytes are not valid UTF-8 or hold a NUL, which a text value cannot.
+func placeholderForms(placeholder string) ([]string, error) {
+	b := []byte(placeholder)
+	if h, ok := strings.CutPrefix(placeholder, "hex:"); ok {
+		d, err := hex.DecodeString(h)
+		if err != nil || len(d) == 0 {
+			return nil, fmt.Errorf("warehouse: placeholder has Debezium's hex: prefix but no hex octets after it: %w", tools.ErrBadInput)
+		}
+		b = d
+	}
+	forms := make([]string, 0, 3)
+	if utf8.Valid(b) && !bytes.ContainsRune(b, 0) {
+		forms = append(forms, string(b))
+	}
+	return append(forms, `\x`+hex.EncodeToString(b), base64.StdEncoding.EncodeToString(b)), nil
 }
 
 // placeholderErr keeps values out of the error: a data exception (class 22,

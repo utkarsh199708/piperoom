@@ -6,60 +6,30 @@ import (
 	"fmt"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/pgconv"
 	"piperoom/internal/tools"
 )
 
-// The catalog side of the TOAST truncation check (X1d, pg_toast_risk). This
-// method is not on clients.SourceDB (contract change request in the X1d
-// report); the dbtools tool finds it with a type assertion, the same pattern
-// as PublicationSourceTables.
+// The catalog side of the TOAST truncation check (X1d, pg_toast_risk). DB
+// implements the optional clients.ToastColumnReader; the dbtools tool finds
+// it with a type assertion, the same pattern as PublicationSourceTables.
 
+// Caps of ToastColumns (clients.MaxToastTables, clients.MaxToastColumns).
 const (
-	// MaxToastTables caps the tables one ToastColumns call reads; more is
-	// tools.ErrBadInput before any I/O.
-	MaxToastTables = 500
-	// MaxToastColumns caps the column rows one call returns. A wider result is
-	// cut (ToastColumns reports cut), never refused.
-	MaxToastColumns = 5000
+	MaxToastTables  = clients.MaxToastTables
+	MaxToastColumns = clients.MaxToastColumns
 )
 
-// ToastTable is one source table as the catalog describes it for TOAST:
-// its replica identity, the size of its TOAST relation and its toastable
-// columns. Catalog facts only: no row, no value, no statistic other than
-// the average stored width.
-type ToastTable struct {
-	Table string `json:"table"` // "schema.table", as asked
-	// Found is false when no ordinary or partitioned table of that name
-	// exists (or the role cannot see it); the other fields are then empty.
-	Found bool `json:"found"`
-	// ReplicaIdentity is pg_class.relreplident spelled out: DEFAULT, FULL,
-	// INDEX or NOTHING.
-	ReplicaIdentity string `json:"replica_identity"`
-	// ToastBytes is pg_relation_size of the table's TOAST relation: above
-	// zero, some values of the table are (or were, until a VACUUM truncates)
-	// stored out of line. 0 when the table has no TOAST relation (a
-	// partitioned root has none; its partitions do).
-	ToastBytes int64 `json:"toast_bytes"`
-	// Columns are the table's toastable columns (attstorage x or e), in
-	// column order.
-	Columns []ToastColumn `json:"columns,omitempty"`
-}
+// The TOAST shapes are clients'; these aliases keep the package's own names.
+type (
+	// ToastTable is clients.ToastTable.
+	ToastTable = clients.ToastTable
+	// ToastColumn is clients.ToastColumn.
+	ToastColumn = clients.ToastColumn
+)
 
-// ToastColumn is one toastable column.
-type ToastColumn struct {
-	Name string `json:"name"`
-	// Type is format_type(atttypid, atttypmod), e.g. "text", "jsonb".
-	Type string `json:"type"`
-	// Storage is attstorage: "x" (extended: compressed, then out of line) or
-	// "e" (external: out of line, uncompressed).
-	Storage string `json:"storage"`
-	// AvgWidth is pg_stats.avg_width, the average STORED width in bytes (a
-	// value moved out of line counts as its 18-byte TOAST pointer); -1 when
-	// the column has no statistics (never analysed, or not visible to the
-	// role).
-	AvgWidth int `json:"avg_width"`
-}
+var _ clients.ToastColumnReader = (*DB)(nil)
 
 // replicaIdentityWords spells pg_class.relreplident out.
 var replicaIdentityWords = map[string]string{"d": "DEFAULT", "f": "FULL", "i": "INDEX", "n": "NOTHING"}

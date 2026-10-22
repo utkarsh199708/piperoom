@@ -14,20 +14,8 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/postgres"
 	"piperoom/internal/tools"
 )
-
-// MigrationReader reads the Flyway and Liquibase history tables of the source
-// database (X4b). The source Postgres client (*postgres.DB) implements it; it
-// is asserted on Deps.Src at use time, so a source without it only has no
-// migrations. It is local until clients gains a source-neutral migration
-// reader (contract change request in the X4b PR).
-type MigrationReader interface {
-	RecentMigrations(ctx context.Context, schemas []string, since time.Time, limit int) (postgres.MigrationHistory, error)
-}
-
-var _ MigrationReader = (*postgres.DB)(nil)
 
 // readMigrations returns the migration changes of the room's pipeline at or
 // after since: Flyway and Liquibase history tables in the schemas of the
@@ -38,10 +26,10 @@ var _ MigrationReader = (*postgres.DB)(nil)
 // caller's context ending.
 func (t *Tool) readMigrations(ctx context.Context, sc tools.Scope, since time.Time) (out []clients.PipelineChange, notes []string, ok bool, err error) {
 	pipeline := sc.Pipeline().ID
-	if mr, isMR := t.d.Src.(MigrationReader); isMR {
+	if mr, isMR := t.d.Src.(clients.MigrationReader); isMR {
 		if schemas := sourceSchemas(sc); len(schemas) > 0 {
 			cctx, cancel := context.WithTimeout(ctx, callTimeout)
-			h, rerr := mr.RecentMigrations(cctx, schemas, since, min(listLimit, postgres.MaxMigrations))
+			h, rerr := mr.RecentMigrations(cctx, schemas, since, min(listLimit, clients.MaxMigrations))
 			cancel()
 			if rerr != nil {
 				if ctx.Err() != nil {
@@ -53,9 +41,9 @@ func (t *Tool) readMigrations(ctx context.Context, sc tools.Scope, since time.Ti
 				ok = true
 				for _, tb := range h.Tables {
 					switch tb.State {
-					case postgres.HistoryUnreadable:
+					case clients.HistoryUnreadable:
 						notes = append(notes, "migration history not readable (grant SELECT on "+grantName(tb)+")")
-					case postgres.HistoryUnknownShape:
+					case clients.HistoryUnknownShape:
 						notes = append(notes, cleanLine(tb.Qualified(), 120)+" is not a "+tb.Source+" history table (columns differ); skipped")
 					}
 				}
@@ -115,7 +103,7 @@ func sourceSchemas(sc tools.Scope) []string {
 
 // grantName is the table to name in the grant fact: bare in public, where
 // both tools put it by default, else schema-qualified.
-func grantName(h postgres.HistoryTable) string {
+func grantName(h clients.HistoryTable) string {
 	if h.Schema == "public" {
 		return h.Name
 	}
@@ -126,7 +114,7 @@ func grantName(h postgres.HistoryTable) string {
 // (External changes): Object the history table, Actor installed_by or author,
 // After {version}, Summary the description. A row whose version fails
 // ExternalChange.Validate is dropped, never fixed up.
-func migrationChange(pipeline string, m postgres.Migration) (clients.PipelineChange, bool) {
+func migrationChange(pipeline string, m clients.Migration) (clients.PipelineChange, bool) {
 	ext := clients.ExternalChange{Version: m.Version}
 	if ext.Validate() != nil {
 		return clients.PipelineChange{}, false
@@ -195,13 +183,22 @@ func dbtChange(pipeline string, sc tools.Scope, rr clients.RunResults) (clients.
 			parts = append(parts, fmt.Sprintf("%d %s", counts[st], st))
 		}
 	}
+	// The run's invocation id is the change's version (docs/api.md, External
+	// changes). It is the artifact's text: one that fails the contract's caps
+	// is left out, the run itself still counts.
+	after := json.RawMessage(`{}`)
+	if ext := (clients.ExternalChange{Version: rr.InvocationID}); rr.InvocationID != "" && ext.Validate() == nil {
+		if b, err := json.Marshal(ext); err == nil {
+			after = b
+		}
+	}
 	c := clients.PipelineChange{
 		PipelineID: pipeline,
 		Kind:       clients.ChangeMigration,
 		Object:     project,
 		At:         rr.GeneratedAt.UTC(),
 		Source:     clients.ChangeSourceDBT,
-		After:      json.RawMessage(`{}`),
+		After:      after,
 		Summary:    fmt.Sprintf("dbt run: %d %s of this pipeline (%s)", n, tools.Plural(n, "model", "models"), strings.Join(parts, ", ")),
 	}
 	c.Fingerprint = changeFingerprint(c)

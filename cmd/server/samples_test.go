@@ -25,7 +25,8 @@ func TestSamplesRetentionRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var buf bytes.Buffer
+	// The loop logs from its goroutine while the test reads: lockedBuffer.
+	var buf lockedBuffer
 	stop := startSamplesRetention(ctx, st, time.Hour, time.Second, func() time.Time { return now }, slog.New(slog.NewTextHandler(&buf, nil)))
 	waitUntil(t, func() bool { return strings.Contains(buf.String(), "rows=1") })
 	stop()

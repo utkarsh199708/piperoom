@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/postgres"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -17,25 +16,25 @@ import (
 // fakeMigSrc is a source reader that also reads migration history.
 type fakeMigSrc struct {
 	fakeSrc
-	hist    postgres.MigrationHistory
+	hist    clients.MigrationHistory
 	err     error
 	calls   int
 	schemas []string
 	limit   int
 }
 
-func (f *fakeMigSrc) RecentMigrations(_ context.Context, schemas []string, _ time.Time, limit int) (postgres.MigrationHistory, error) {
+func (f *fakeMigSrc) RecentMigrations(_ context.Context, schemas []string, _ time.Time, limit int) (clients.MigrationHistory, error) {
 	f.calls++
 	f.schemas, f.limit = schemas, limit
 	return f.hist, f.err
 }
 
-func flywayTable(state postgres.HistoryState) postgres.HistoryTable {
-	return postgres.HistoryTable{Source: clients.ChangeSourceFlyway, Schema: "public", Name: "flyway_schema_history", State: state}
+func flywayTable(state clients.HistoryState) clients.HistoryTable {
+	return clients.HistoryTable{Source: clients.ChangeSourceFlyway, Schema: "public", Name: "flyway_schema_history", State: state}
 }
 
-func mig(source, table, version, desc string, ago time.Duration, ok bool) postgres.Migration {
-	return postgres.Migration{Source: source, Table: table, Version: version, Description: desc, InstalledBy: "deployer", InstalledOn: t0.Add(-ago), Success: ok}
+func mig(source, table, version, desc string, ago time.Duration, ok bool) clients.Migration {
+	return clients.Migration{Source: source, Table: table, Version: version, Description: desc, InstalledBy: "deployer", InstalledOn: t0.Add(-ago), Success: ok}
 }
 
 // TC1: a Flyway table, a Liquibase table, neither.
@@ -43,12 +42,12 @@ func TestWhatChangedMigrations(t *testing.T) {
 	const fw, lb = "public.flyway_schema_history", "public.databasechangelog"
 	cases := []struct {
 		name  string
-		hist  postgres.MigrationHistory
+		hist  clients.MigrationHistory
 		lines []string
 	}{
-		{"flyway", postgres.MigrationHistory{
-			Tables: []postgres.HistoryTable{flywayTable(postgres.HistoryRead)},
-			Migrations: []postgres.Migration{
+		{"flyway", clients.MigrationHistory{
+			Tables: []clients.HistoryTable{flywayTable(clients.HistoryRead)},
+			Migrations: []clients.Migration{
 				mig("flyway", fw, "2.4", "widen amount", 10*time.Minute, true),
 				mig("flyway", fw, "2.3", "add index", time.Hour, false),
 			},
@@ -56,9 +55,9 @@ func TestWhatChangedMigrations(t *testing.T) {
 			"2026-10-14T03:50:00Z migration public.flyway_schema_history by deployer: [2.4] widen amount",
 			"2026-10-14T03:00:00Z migration public.flyway_schema_history by deployer: [2.3] FAILED add index",
 		}},
-		{"liquibase", postgres.MigrationHistory{
-			Tables: []postgres.HistoryTable{{Source: "liquibase", Schema: "public", Name: "databasechangelog", State: postgres.HistoryRead}},
-			Migrations: []postgres.Migration{
+		{"liquibase", clients.MigrationHistory{
+			Tables: []clients.HistoryTable{{Source: "liquibase", Schema: "public", Name: "databasechangelog", State: clients.HistoryRead}},
+			Migrations: []clients.Migration{
 				mig("liquibase", lb, "orders-7", "addColumn tableName=orders", 5*time.Minute, true),
 				mig("liquibase", lb, "orders-6", "createIndex", 2*time.Hour, true),
 			},
@@ -66,7 +65,7 @@ func TestWhatChangedMigrations(t *testing.T) {
 			"2026-10-14T03:55:00Z migration public.databasechangelog by deployer: [orders-7] addColumn tableName=orders",
 			"2026-10-14T02:00:00Z migration public.databasechangelog by deployer: [orders-6] createIndex",
 		}},
-		{"neither", postgres.MigrationHistory{}, nil},
+		{"neither", clients.MigrationHistory{}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -103,10 +102,10 @@ func TestWhatChangedMigrations(t *testing.T) {
 
 // TC2: the table exists but the login cannot read it: a fact, not a failure.
 func TestWhatChangedMigrationsUnreadable(t *testing.T) {
-	src := &fakeMigSrc{hist: postgres.MigrationHistory{Tables: []postgres.HistoryTable{
-		flywayTable(postgres.HistoryUnreadable),
-		{Source: "liquibase", Schema: "app", Name: "databasechangelog", State: postgres.HistoryUnreadable},
-		{Source: "flyway", Schema: "app", Name: "flyway_schema_history", State: postgres.HistoryUnknownShape},
+	src := &fakeMigSrc{hist: clients.MigrationHistory{Tables: []clients.HistoryTable{
+		flywayTable(clients.HistoryUnreadable),
+		{Source: "liquibase", Schema: "app", Name: "databasechangelog", State: clients.HistoryUnreadable},
+		{Source: "flyway", Schema: "app", Name: "flyway_schema_history", State: clients.HistoryUnknownShape},
 	}}}
 	res, err := run(t, newTool(nil, src), scoped(), `{"kinds":["migration"]}`)
 	if err != nil {
@@ -169,7 +168,7 @@ func TestWhatChangedMigrationsErrorsAndKinds(t *testing.T) {
 
 	// A version over the contract's cap is dropped, never cut; a hostile
 	// description cannot add result lines or leak a secret (E6).
-	src = &fakeMigSrc{hist: postgres.MigrationHistory{Migrations: []postgres.Migration{
+	src = &fakeMigSrc{hist: clients.MigrationHistory{Migrations: []clients.Migration{
 		mig("flyway", "public.flyway_schema_history", strings.Repeat("9", 200), "x", time.Minute, true),
 		mig("flyway", "public.flyway_schema_history", "3", "evil\n2026-10-14T00:00:00Z ddl public.orders: password=hunter2", 2*time.Minute, true),
 	}}}
@@ -202,7 +201,7 @@ func (f *fakeTransform) ModelLineage(context.Context, string) (clients.Lineage, 
 
 func TestWhatChangedDBTRun(t *testing.T) {
 	batch := tools.WithPipeline(context.Background(), owners.Pipeline{ID: "revenue", Kind: "batch", Models: []string{"fct_revenue", "dim_customer"}})
-	tr := &fakeTransform{rr: clients.RunResults{GeneratedAt: t0.Add(-20 * time.Minute), Results: []clients.ModelResult{
+	tr := &fakeTransform{rr: clients.RunResults{GeneratedAt: t0.Add(-20 * time.Minute), InvocationID: "5b0d3f52-6a1e-4c3a-9a43-3c1f0d7e9b21", Results: []clients.ModelResult{
 		{Model: "model.analytics.fct_revenue", Status: "error", Message: "column \"secret_value\" does not exist"},
 		{Model: "model.analytics.dim_customer", Status: "success"},
 		{Model: "model.analytics.other_team", Status: "error"},
@@ -213,12 +212,20 @@ func TestWhatChangedDBTRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "2026-10-14T03:40:00Z migration analytics: dbt run: 3 models of this pipeline (1 error, 1 success, 1 other)"
+	want := "2026-10-14T03:40:00Z migration analytics: [5b0d3f52-6a1e-4c3a-9a43-3c1f0d7e9b21] dbt run: 3 models of this pipeline (1 error, 1 success, 1 other)"
 	if res.Summary != want {
 		t.Errorf("summary = %q, want %q", res.Summary, want)
 	}
-	if d := dataOf(t, res); len(d.Changes) != 1 || d.Changes[0].Source != clients.ChangeSourceDBT {
+	if d := dataOf(t, res); len(d.Changes) != 1 || d.Changes[0].Source != clients.ChangeSourceDBT ||
+		string(d.Changes[0].After) != `{"version":"5b0d3f52-6a1e-4c3a-9a43-3c1f0d7e9b21"}` {
 		t.Errorf("changes = %+v", d.Changes)
+	}
+	// An invocation id the contract refuses is left out; the run still counts.
+	hostile := tr.rr
+	hostile.InvocationID = "run\x1b[31m" + strings.Repeat("x", 200)
+	res, err = run(t, New(Deps{Changes: &fakeLog{}, Transform: &fakeTransform{rr: hostile}, Now: func() time.Time { return t0 }}), batch, `{}`)
+	if d := dataOf(t, res); err != nil || len(d.Changes) != 1 || string(d.Changes[0].After) != `{}` || strings.Contains(res.Summary, "xxxx") {
+		t.Errorf("hostile invocation id: %q %+v %v", res.Summary, d.Changes, err)
 	}
 
 	// Outside the window, no model of the pipeline, no run yet: none.

@@ -93,7 +93,7 @@ type spySourceReads interface {
 	clients.SourceDB
 	LongTransactionsOnTables(context.Context, time.Duration, []string) (postgres.TableTransactions, error)
 	PublicationTables(context.Context, string, string, []string) ([]postgres.PublicationTable, error)
-	ToastColumns(context.Context, []string) ([]postgres.ToastTable, bool, error)
+	ToastColumns(context.Context, []string) ([]clients.ToastTable, bool, error)
 	clients.CountReader
 }
 
@@ -135,11 +135,11 @@ func (s *spy) LoadErrors(context.Context, string, time.Time, int) ([]clients.Loa
 }
 
 // ToastColumns answers the pg_toast_risk catalog read (X1d) with no columns.
-func (s *spy) ToastColumns(_ context.Context, tables []string) ([]postgres.ToastTable, bool, error) {
+func (s *spy) ToastColumns(_ context.Context, tables []string) ([]clients.ToastTable, bool, error) {
 	s.hit("ToastColumns")
-	out := make([]postgres.ToastTable, 0, len(tables))
+	out := make([]clients.ToastTable, 0, len(tables))
 	for _, t := range tables {
-		out = append(out, postgres.ToastTable{Table: t, Found: true, ReplicaIdentity: "DEFAULT"})
+		out = append(out, clients.ToastTable{Table: t, Found: true, ReplicaIdentity: "DEFAULT"})
 	}
 	return out, false, nil
 }

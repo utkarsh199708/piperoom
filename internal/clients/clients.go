@@ -989,6 +989,105 @@ type Reconciler interface {
 	RowTimes(ctx context.Context, table, pkColumn string, keys []string, tsColumns []string) (map[string]map[string]time.Time, error)
 }
 
+// ---- X1: TOAST truncation risk (optional on a SourceDB and a Warehouse) ----
+//
+// pg_toast_risk (X1d, A3): on a table whose REPLICA IDENTITY is not FULL, an
+// UPDATE that leaves an out-of-line (TOASTed) column unchanged makes Debezium
+// send its unavailable.value.placeholder instead of the value, and a sink that
+// upserts the event overwrites the real value. The source side reads catalog
+// facts only (ToastColumnReader); the sink side counts rows holding the
+// placeholder (PlaceholderCounter). Both are asserted at use time like
+// CountReader, never embedded in SourceDB or Warehouse; the source Postgres
+// and the dev Postgres warehouse implement them. Scope fails closed in both,
+// as for Reconciler: the pipeline in ctx (tools.WithPipeline) must list every
+// table in source_tables (source) or sink_tables (sink), else
+// tools.ErrOutOfScope (tools.ErrNoScope with no pipeline), before any I/O.
+// (Moved from internal/clients/postgres and internal/clients/warehouse, which
+// keep aliases, by the X-batch3 review.)
+
+// Caps of the TOAST readers. (X1)
+const (
+	// MaxToastTables caps the tables one ToastColumns call reads; more is
+	// tools.ErrBadInput before any I/O.
+	MaxToastTables = 500
+	// MaxToastColumns caps the column rows one ToastColumns call returns. A
+	// wider result is cut (cut is true), never refused.
+	MaxToastColumns = 5000
+	// MaxPlaceholderBytes caps CountPlaceholder's placeholder: Debezium's
+	// default, __debezium_unavailable_value, is 28 bytes.
+	MaxPlaceholderBytes = 256
+	// MaxPlaceholderWindow caps CountPlaceholder's until - since: the count
+	// scans the window.
+	MaxPlaceholderWindow = 7 * 24 * time.Hour
+)
+
+// ToastTable is one source table as the catalog describes it for TOAST: its
+// replica identity, the size of its TOAST relation and its toastable columns.
+// Catalog facts only: no row, no value, no statistic other than the average
+// stored width. (X1)
+type ToastTable struct {
+	Table string `json:"table"` // "schema.table", as asked
+	// Found is false when no ordinary or partitioned table of that name
+	// exists (or the role cannot see it); the other fields are then empty.
+	Found bool `json:"found"`
+	// ReplicaIdentity is pg_class.relreplident spelled out: DEFAULT, FULL,
+	// INDEX or NOTHING.
+	ReplicaIdentity string `json:"replica_identity"`
+	// ToastBytes is pg_relation_size of the table's TOAST relation: above
+	// zero, some values of the table are (or were, until a VACUUM truncates)
+	// stored out of line. 0 when the table has no TOAST relation (a
+	// partitioned root has none; its partitions do).
+	ToastBytes int64 `json:"toast_bytes"`
+	// Columns are the table's toastable columns (attstorage x or e), in
+	// column order.
+	Columns []ToastColumn `json:"columns,omitempty"`
+}
+
+// ToastColumn is one toastable column. (X1)
+type ToastColumn struct {
+	Name string `json:"name"`
+	// Type is format_type(atttypid, atttypmod), e.g. "text", "jsonb", "bytea".
+	Type string `json:"type"`
+	// Storage is attstorage: "x" (extended: compressed, then out of line) or
+	// "e" (external: out of line, uncompressed).
+	Storage string `json:"storage"`
+	// AvgWidth is pg_stats.avg_width, the average STORED width in bytes (a
+	// value moved out of line counts as its 18-byte TOAST pointer, so a
+	// column of out-of-line values reads as narrow); -1 when the column has
+	// no statistics (never analysed, or not visible to the role).
+	AvgWidth int `json:"avg_width"`
+}
+
+// ToastColumnReader reads the TOAST facts of source tables (optional on a
+// SourceDB, asserted at use time): one ToastTable per entry of tables
+// ("schema.table"), in that order, from pg_namespace, pg_class, pg_attribute,
+// pg_stats.avg_width and the TOAST relation's size; the tables themselves are
+// never scanned. A bad identifier or more than MaxToastTables tables is
+// tools.ErrBadInput, and a table outside the pipeline's source_tables is
+// tools.ErrOutOfScope, both before any I/O. cut is true when the column rows
+// passed MaxToastColumns and the last tables' columns are incomplete.
+// Deadline 10 s. (X1)
+type ToastColumnReader interface {
+	ToastColumns(ctx context.Context, tables []string) (out []ToastTable, cut bool, err error)
+}
+
+// PlaceholderCounter counts the rows of a sink table ("schema.table", one of
+// the pipeline's sink_tables) whose column holds placeholder and whose
+// tsColumn is in [since, until) (optional on a Warehouse, asserted at use
+// time). It returns a count only: no value of any column is selected, and no
+// error quotes one. The column is matched as text against placeholder and
+// against the forms a binary column takes for it (the bytea hex text and the
+// base64 a JSON sink stores); a placeholder with Debezium's "hex:" prefix is
+// decoded first. Identifiers follow ^[a-zA-Z_][a-zA-Z0-9_]*$; a bad one, an
+// empty placeholder or one over MaxPlaceholderBytes, or a window that is empty
+// or over MaxPlaceholderWindow is tools.ErrBadInput, and a table out of scope
+// is tools.ErrOutOfScope, both before any I/O. A missing table or column wraps
+// ErrNotFound; a warehouse that cannot count returns ErrNotSupported.
+// Deadline 10 s. (X1)
+type PlaceholderCounter interface {
+	CountPlaceholder(ctx context.Context, table, column, placeholder, tsColumn string, since, until time.Time) (int64, error)
+}
+
 // ---- X1: duplicate and order scan of a CDC topic (optional on a KafkaAdmin) ----
 //
 // Asserted at use time like RateReader (ds, ok := k.(clients.DupScanner)),
@@ -1194,8 +1293,12 @@ type ModelResult struct {
 
 // RunResults is the latest dbt run_results.json.
 type RunResults struct {
-	GeneratedAt time.Time     `json:"generated_at"` // metadata.generated_at
-	Results     []ModelResult `json:"results"`
+	GeneratedAt time.Time `json:"generated_at"` // metadata.generated_at
+	// InvocationID is metadata.invocation_id, dbt's id of the run ("" when the
+	// file has none): the version of a dbt migration change
+	// (ExternalChange.Version). Untrusted text from the artifact. (X4)
+	InvocationID string        `json:"invocation_id"`
+	Results      []ModelResult `json:"results"`
 }
 
 // Lineage is one model's direct parents and children from manifest.json, as
@@ -1394,6 +1497,89 @@ type ChangeWriter interface {
 	RecordChange(ctx context.Context, c PipelineChange) (inserted bool, err error)
 }
 
+// ---- X4: migration history of the source database (optional on a SourceDB) ----
+//
+// Asserted at use time like CountReader (mr, ok := src.(clients.MigrationReader)),
+// never embedded in SourceDB. The source Postgres implements it (X4b, A3) over
+// Flyway's flyway_schema_history and Liquibase's databasechangelog; the "what
+// changed" tool turns each Migration into a migration PipelineChange (source
+// flyway or liquibase, Object the history table, After {version}). A source
+// without it simply has no migration rows. A MySQL source (Q8) implements the
+// same interface. (Moved from internal/clients/postgres, which keeps aliases,
+// by the X-batch3 review.)
+
+// MaxMigrations is the most rows one RecentMigrations call returns, over every
+// history table. (X4)
+const MaxMigrations = 200
+
+// HistoryState is what RecentMigrations could do with one history table. (X4)
+type HistoryState string
+
+// History table states. (X4)
+const (
+	// HistoryRead: the table was read.
+	HistoryRead HistoryState = "read"
+	// HistoryUnreadable: the login lacks SELECT on the table or USAGE on its
+	// schema. A fact for the room ("grant SELECT on ..."), not an error.
+	HistoryUnreadable HistoryState = "unreadable"
+	// HistoryUnknownShape: a table with the tool's name whose columns are not
+	// the tool's (another product, or a very old version). Skipped.
+	HistoryUnknownShape HistoryState = "unknown_shape"
+)
+
+// HistoryTable is one migration history table found by catalog lookup. (X4)
+type HistoryTable struct {
+	Source string       `json:"source"` // ChangeSourceFlyway or ChangeSourceLiquibase
+	Schema string       `json:"schema"`
+	Name   string       `json:"name"`
+	State  HistoryState `json:"state"`
+}
+
+// Qualified returns "schema.name", the migration change's Object. (X4)
+func (h HistoryTable) Qualified() string { return h.Schema + "." + h.Name }
+
+// Migration is one applied migration: metadata only, never a script's name,
+// contents or checksum. Every string is untrusted text from the customer's
+// database. (X4)
+type Migration struct {
+	Source string `json:"source"` // ChangeSourceFlyway or ChangeSourceLiquibase
+	Table  string `json:"table"`  // the history table, "public.flyway_schema_history"
+	// Version is the Flyway version ("" for a repeatable migration) or the
+	// Liquibase changeset id.
+	Version     string    `json:"version"`
+	Description string    `json:"description"`
+	InstalledBy string    `json:"installed_by"` // Flyway installed_by, Liquibase author
+	InstalledOn time.Time `json:"installed_on"`
+	// Success is Flyway's success column; for Liquibase, exectype is not
+	// FAILED (Liquibase records few failures, so it is nearly always true).
+	Success bool `json:"success"`
+}
+
+// MigrationHistory is the result of RecentMigrations. (X4)
+type MigrationHistory struct {
+	// Migrations are applied migrations at or after since, newest first, at
+	// most the call's limit.
+	Migrations []Migration `json:"migrations"`
+	// Tables are the history tables found, read or not, by schema and name.
+	// None found is not an error: the database simply has no history.
+	Tables []HistoryTable `json:"tables"`
+}
+
+// MigrationReader reads the migration history tables of the source database
+// (optional on a SourceDB, asserted at use time). RecentMigrations looks the
+// tables up in the catalog, only in schemas (the schemas of the pipeline's own
+// source tables, so another team's history table in a shared database is never
+// read), and returns the migrations applied at or after since, newest first,
+// at most limit (1..MaxMigrations). Metadata columns only. No history table is
+// an empty result, not an error; a table the login cannot read is
+// HistoryUnreadable, not an error. Bad input (limit out of range, zero since,
+// a schema that is not a name) is tools.ErrBadInput before any I/O. Errors
+// carry the server's SQLSTATE, never its message (which can quote the
+// customer's text). Deadline 10 s. (X4)
+type MigrationReader interface {
+	RecentMigrations(ctx context.Context, schemas []string, since time.Time, limit int) (MigrationHistory, error)
+}
+
 // ---- X3: watch sample history (Piperoom's own table, fed by the watcher) ----
 //
 // Not a customer system: the room store implements both interfaces over the
@@ -1403,8 +1589,10 @@ type ChangeWriter interface {
 // retention job. A sample is one number per pipeline and metric: never a row
 // value, a record, a config value or free text.
 //
-// Migration numbers: 00017 is reserved by docs/design/onboarding.md
-// (proposed), 00018 here, 00019 and 00020 by the fleet block below. goose
+// Migration numbers: 00018 here (merged), 00019 and 00020 by the fleet block
+// below. 00017, once reserved by docs/design/onboarding.md (proposed), was
+// given up when 00018 merged (X-batch3 review): that design's table takes the
+// next free number after 00020. goose
 // (migrations/migrate.go) refuses to apply a number below one a database
 // already ran, so migrations merge in number order: a reserved number whose
 // row is not ready is given up at merge time (the leads renumber in this
@@ -1469,6 +1657,34 @@ type SampleWriter interface {
 // error. Callers check the pipeline's tenant before they call it. (X3)
 type SampleReader interface {
 	Samples(ctx context.Context, pipelineID, metric string, since time.Time) ([]SamplePoint, error)
+}
+
+// The two metrics the watcher cannot take from reads it already makes come
+// from optional readers, asserted at use time like CountReader and never
+// embedded in SourceDB or KafkaAdmin: a client without one simply has no
+// sample of that metric. (Added by the X-batch3 review from X3a's request;
+// no client implements them yet: A3 adds DBSizeReader to the source Postgres,
+// A2 UnreadAgeReader to the kafka client.)
+
+// DBSizeReader reads the size of the source database (optional on a
+// SourceDB): pg_database_size(current_database()) in bytes, the
+// db_size_bytes sample, judged against owners.yaml watch.db_size_limit. One
+// catalog function, no table read; deadline 10 s. (X3)
+type DBSizeReader interface {
+	DatabaseSize(ctx context.Context) (int64, error)
+}
+
+// UnreadAgeReader reads, for one consumer group, the timestamp of the oldest
+// record it has not consumed yet, per topic (optional on a LagReader): for
+// each partition with lag, the record at the committed offset (or at the log
+// start when the committed offset is below it), and per topic the oldest of
+// them. Topics with nothing
+// unread are absent; no record value or key is returned or kept, only the
+// record's timestamp. The watcher's topic_oldest_unread_age sample is now
+// minus the oldest of the pipeline's own topics, judged against that topic's
+// retention.ms (TopicConfigReader on the same client). Deadline 10 s. (X3)
+type UnreadAgeReader interface {
+	OldestUnread(ctx context.Context, group string) (map[string]time.Time, error)
 }
 
 // ---- Fleet view: cross-pipeline changes, watcher status, connector config versions (X5-0) ----

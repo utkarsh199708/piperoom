@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/postgres"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -18,25 +17,25 @@ import (
 // toastSource is a SourceDB with the ToastColumns catalog read.
 type toastSource struct {
 	fakeSource
-	facts  map[string]postgres.ToastTable
+	facts  map[string]clients.ToastTable
 	err    error
 	calls  int
 	tables []string
 	scoped bool // the call's ctx carried the full pipeline
 }
 
-func (s *toastSource) ToastColumns(ctx context.Context, tables []string) ([]postgres.ToastTable, bool, error) {
+func (s *toastSource) ToastColumns(ctx context.Context, tables []string) ([]clients.ToastTable, bool, error) {
 	s.calls++
 	s.tables = tables
 	_, s.scoped = tools.PipelineFrom(ctx)
 	if s.err != nil {
 		return nil, false, s.err
 	}
-	out := make([]postgres.ToastTable, 0, len(tables))
+	out := make([]clients.ToastTable, 0, len(tables))
 	for _, t := range tables {
 		f, ok := s.facts[t]
 		if !ok {
-			f = postgres.ToastTable{Table: t}
+			f = clients.ToastTable{Table: t}
 		}
 		out = append(out, f)
 	}
@@ -61,10 +60,10 @@ func (w *countingWarehouse) CountPlaceholder(_ context.Context, table, column, p
 	return w.n, w.err
 }
 
-func ordersToast(ident string, avg int, toast int64) map[string]postgres.ToastTable {
-	return map[string]postgres.ToastTable{"public.orders": {
+func ordersToast(ident string, avg int, toast int64) map[string]clients.ToastTable {
+	return map[string]clients.ToastTable{"public.orders": {
 		Table: "public.orders", Found: true, ReplicaIdentity: ident, ToastBytes: toast,
-		Columns: []postgres.ToastColumn{
+		Columns: []clients.ToastColumn{
 			{Name: "notes", Type: "text", Storage: "x", AvgWidth: avg},
 			{Name: "status", Type: "text", Storage: "x", AvgWidth: 7},
 		},
@@ -132,7 +131,12 @@ func TestToastRiskCatalogRule(t *testing.T) {
 			if r.Table != "public.orders" || r.Column != "notes" || r.Evidence != c.evidence || r.ReplicaIdentity != c.ident {
 				t.Errorf("risk = %+v", r)
 			}
-			want := "public.orders.notes (text): TOASTed"
+			// The catalog cannot tell which column's values are out of line,
+			// so that evidence is worded as a possibility.
+			want := "public.orders.notes (text): TOASTed (average width"
+			if c.evidence == toastOutOfLine {
+				want = "public.orders.notes (text): may be TOASTed (the table stores out-of-line values"
+			}
 			if !strings.Contains(res.Summary, want) || !strings.Contains(res.Summary, "replica identity "+c.ident) {
 				t.Errorf("summary lacks %q: %s", want, res.Summary)
 			}
@@ -152,7 +156,7 @@ func TestToastRiskPlaceholderCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Summary, "public.orders.notes (text): TOASTed (out-of-line values stored, TOAST relation 1.0 MiB), replica identity DEFAULT, placeholder seen 14 times in sink analytics.orders last 24 h") {
+	if !strings.Contains(res.Summary, "public.orders.notes (text): may be TOASTed (the table stores out-of-line values, TOAST relation 1.0 MiB), replica identity DEFAULT, placeholder seen 14 times in sink analytics.orders last 24 h") {
 		t.Errorf("summary: %s", res.Summary)
 	}
 	if !strings.Contains(res.Summary, `placeholder "__gone", connector pg-orders-connector config unavailable.value.placeholder`) {
@@ -296,12 +300,12 @@ func TestToastRiskSourceErrors(t *testing.T) {
 // most 10 sink counts run.
 func TestToastRiskSummaryCap(t *testing.T) {
 	var tables []string
-	facts := map[string]postgres.ToastTable{}
+	facts := map[string]clients.ToastTable{}
 	for i := range 200 {
 		name := fmt.Sprintf("public.events_%03d", i)
 		tables = append(tables, name)
-		facts[name] = postgres.ToastTable{Table: name, Found: true, ReplicaIdentity: "DEFAULT", ToastBytes: 1 << 20,
-			Columns: []postgres.ToastColumn{{Name: "payload_document", Type: "jsonb", Storage: "x", AvgWidth: 18}}}
+		facts[name] = clients.ToastTable{Table: name, Found: true, ReplicaIdentity: "DEFAULT", ToastBytes: 1 << 20,
+			Columns: []clients.ToastColumn{{Name: "payload_document", Type: "jsonb", Storage: "x", AvgWidth: 18}}}
 	}
 	p := owners.Pipeline{ID: "events", SourceTables: tables, SinkTables: []string{"analytics.events"}, SinkTSColumn: "updated_at"}
 	d := testDeps()
@@ -331,9 +335,9 @@ func TestToastRiskSummaryGroups(t *testing.T) {
 	d := testDeps()
 	d.Wh = &countingWarehouse{}
 	d.Owners = &owners.Owners{Pipelines: []owners.Pipeline{p}}
-	d.Src = &toastSource{facts: map[string]postgres.ToastTable{
-		"public.a": {Table: "public.a", Found: true, ReplicaIdentity: "DEFAULT", Columns: []postgres.ToastColumn{{Name: "body", Type: "text", Storage: "e", AvgWidth: 5000}}},
-		"public.b": {Table: "public.b", Found: true, ReplicaIdentity: "FULL", ToastBytes: 1 << 20, Columns: []postgres.ToastColumn{{Name: "body", Type: "text", Storage: "x", AvgWidth: 18}}},
+	d.Src = &toastSource{facts: map[string]clients.ToastTable{
+		"public.a": {Table: "public.a", Found: true, ReplicaIdentity: "DEFAULT", Columns: []clients.ToastColumn{{Name: "body", Type: "text", Storage: "e", AvgWidth: 5000}}},
+		"public.b": {Table: "public.b", Found: true, ReplicaIdentity: "FULL", ToastBytes: 1 << 20, Columns: []clients.ToastColumn{{Name: "body", Type: "text", Storage: "x", AvgWidth: 18}}},
 		"public.c": {Table: "public.c", Found: true, ReplicaIdentity: "DEFAULT"},
 	}}
 	res, err := toastTool(t, d).Run(tools.WithPipeline(context.Background(), p), json.RawMessage(`{"pipeline_id":"mix"}`))

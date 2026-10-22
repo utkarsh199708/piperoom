@@ -611,7 +611,9 @@ to order-sync's committed offset **minus the last record** (kept so the topic is
 newest record). The duplicates sit before the end of the log and are consumed, so the sink loses nothing; the
 topic's older history is gone, as with `kafka-delete-records`. A topic with no duplicate event is left alone
 (second run: "skipped"). The count (the check the break and the fix use) is the records in the last 5000 per
-partition that repeat an earlier record's key and value byte for byte.
+partition that repeat an earlier record's key and value byte for byte. Because the cut drops history, run this
+scenario on its own: the fixes of `sink-filtered-rows` and `sink-dropped-column` replay order-sync from the start
+of the topic and only see what is left; `devctl reset` rebuilds the full history.
 
 ### 17. `toast-placeholder` — Debezium emits the unavailable-value placeholder
 

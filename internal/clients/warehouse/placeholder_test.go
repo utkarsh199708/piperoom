@@ -28,13 +28,36 @@ func TestCountPlaceholderSQL(t *testing.T) {
 	if len(q.sqls) != 1 {
 		t.Fatalf("%d statements", len(q.sqls))
 	}
-	want := `SELECT count(*) FROM "analytics"."orders" WHERE "notes"::text = $1 AND "updated_at" >= $2 AND "updated_at" < $3`
+	want := `SELECT count(*) FROM "analytics"."orders" WHERE "notes"::text = ANY($1::text[]) AND "updated_at" >= $2 AND "updated_at" < $3`
 	if q.sqls[0] != want {
 		t.Errorf("sql = %s", q.sqls[0])
 	}
 	a := q.args[0]
-	if a[0] != "__debezium_unavailable_value" || !a[1].(time.Time).Equal(since) || a[2].(time.Time).Location() != time.UTC {
+	forms, _ := a[0].([]string)
+	if len(forms) != 3 || forms[0] != "__debezium_unavailable_value" || !a[1].(time.Time).Equal(since) || a[2].(time.Time).Location() != time.UTC {
 		t.Errorf("args = %#v", a)
+	}
+}
+
+// A bytea sink column reads as hex text and a JSON sink may keep Debezium's
+// base64, so both forms are counted; Debezium's "hex:" placeholder is decoded.
+func TestPlaceholderForms(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want []string
+		err  error
+	}{
+		{"__debezium_unavailable_value", []string{"__debezium_unavailable_value",
+			`\x5f5f646562657a69756d5f756e617661696c61626c655f76616c7565`, "X19kZWJleml1bV91bmF2YWlsYWJsZV92YWx1ZQ=="}, nil},
+		{"hex:5f5f", []string{"__", `\x5f5f`, "X18="}, nil},
+		{"hex:00ff", []string{`\x00ff`, "AP8="}, nil},
+		{"hex:zz", nil, tools.ErrBadInput},
+		{"hex:", nil, tools.ErrBadInput},
+	} {
+		got, err := placeholderForms(c.in)
+		if (err == nil) != (c.err == nil) || (c.err != nil && !errors.Is(err, c.err)) || strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%q: %q %v, want %q %v", c.in, got, err, c.want, c.err)
+		}
 	}
 }
 

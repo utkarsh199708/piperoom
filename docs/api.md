@@ -1002,6 +1002,11 @@ closes; `--demo` forces it off.
 - `room.created.alert_source` is `"watcher"`. `dedup_key` is `watcher:<pipeline>`, for example
   `watcher:orders`. There is **one open watcher room per pipeline**; every signal (connector down, slot
   inactive, slot WAL, DLQ growth, config risk) shares that key. `room.created.alert` holds the watcher's evidence JSON.
+  The one exception (X3a): a room opened by `forecast` signals alone has the dedup key
+  `watcher:<pipeline>:forecast:<metric>` (`watch.ForecastDedupKey`; `<metric>` is the first pending forecast's
+  `clients.WatchMetrics()` name, e.g. `watcher:orders:forecast:slot_wal_bytes`), so its cooldown is per pipeline and
+  metric and closing it never mutes the pipeline's real signals; a real signal that fires while it is open joins it
+  (one room per pipeline still), and its resolved alert carries the same key.
 - **Join-on-open-room.** Before it opens a room, the watcher asks whether any room for that pipeline is
   already open, including one opened by Alertmanager or a person. If so it posts its evidence into that room
   as a join and opens nothing. A later signal or re-fire on the same pipeline joins the same room the same
@@ -1076,7 +1081,12 @@ closes; `--demo` forces it off.
   the series follows one (omitted for a pipeline total); `eta` is when the least-squares line over the last 24 h
   reaches `limit`. It fires only when `slope_per_hour > 0`, `r2 >= 0.6`, at least 8 samples, and `eta` is within
   `PIPEROOM_WATCH_FORECAST_HORIZON` (default 48 h, 1 h to 168 h). A metric with no limit (`dlq_records`,
-  `group_lag`) is sampled for trends but never forecast.
+  `group_lag`) is sampled for trends but never forecast. Once fired it holds until the slope is not positive, `r2`
+  falls below 0.5, or `eta` moves past twice the horizon (hysteresis, so a fit at the bar does not flap). A
+  forecast-only room's dedup key is `watcher:<pipeline>:forecast:<metric>` (see Watcher alerts).
+  `db_size_bytes` and `topic_oldest_unread_age` come from the optional `clients.DBSizeReader` (source) and
+  `clients.UnreadAgeReader` (Kafka, with the topic's `retention.ms` from `clients.TopicConfigReader` as the
+  limit); a client without them has no sample of that metric.
 
   **Config drift (X3).** A `config_drift` signal opens a room "connector config changed outside an approved fix".
   ```json
@@ -1174,13 +1184,19 @@ every tenant, so the reply carries nothing but `stored`.
 **Status-page poller** (C5, X4a). A pipeline's optional `vendor_status_url:` in `owners.yaml` (an absolute `https`
 URL of a status page RSS/Atom feed) is fetched every `config.VendorStatusPollInterval` (5 min, 10 s deadline, body
 capped at 4 MB). Each active incident becomes one `vendor_incident` row (`source: statuspage`; deduplicated by the
-feed's incident id and status); an unreachable feed writes nothing and logs one warning per hour.
+feed's incident id and status); an unreachable feed writes nothing and logs one warning per hour. The fetch dials
+public addresses only (a host or redirect target that resolves to a loopback, private, link-local or cloud-metadata
+address is refused), follows at most 5 redirects and only to `https`, and goes direct (no HTTP proxy).
 
 **Migration readers** (A3, X4b). When the pipeline's source database has `flyway_schema_history` or
-`databasechangelog` (found by catalog lookup in the pipeline's own database), or a dbt run-results reader is
-configured, applied migrations in the window appear as `migration` rows, newest first. Read-only, 10 s deadline, at
-most 200 rows a call. A table the login cannot read is a fact ("migration history not readable (grant SELECT on
-flyway_schema_history)"), not an error.
+`databasechangelog` (found by catalog lookup in the pipeline's own database, only in the schemas of its own source
+tables), or a dbt run-results reader is configured, applied migrations in the window appear as `migration` rows,
+newest first. The source side is the optional `clients.MigrationReader` (`RecentMigrations`, shapes
+`clients.MigrationHistory`); the dbt side is the latest run of the pipeline's models (`clients.RunResults`), one row
+whose `after.version` is the run's `invocation_id` and whose summary counts models per status. Read live by the
+"what changed" tool, not stored. Read-only, 10 s deadline, at most 200 rows a call (`clients.MaxMigrations`). A
+table the login cannot read is a fact ("migration history not readable (grant SELECT on flyway_schema_history)"),
+not an error.
 
 **`owners.yaml` `teams:`** (validated by A3 in `internal/owners`; read by the agent through `agent.Alert.Teams` and by
 `POST /api/rooms/{id}/page-team`):

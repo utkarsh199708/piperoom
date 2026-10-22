@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/postgres"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
@@ -46,21 +45,6 @@ const (
 	// toastWide: the column's average stored width is above 2 KB.
 	toastWide = "wide_values"
 )
-
-// toastColumnsClient is the local adapter for postgres.DB.ToastColumns until
-// a catalog reader for it is on the contract (contract change request in the
-// X1d report).
-type toastColumnsClient interface {
-	ToastColumns(ctx context.Context, tables []string) ([]postgres.ToastTable, bool, error)
-}
-
-// placeholderCounter is the local adapter for warehouse.DB.CountPlaceholder:
-// CountReader counts rows per bucket but cannot match a value. A warehouse
-// without it, or one answering clients.ErrNotSupported, gets
-// noPlaceholderCount.
-type placeholderCounter interface {
-	CountPlaceholder(ctx context.Context, table, column, placeholder, tsColumn string, since, until time.Time) (int64, error)
-}
 
 // ToastRisk is one source column at risk of TOAST truncation: Debezium sends
 // the placeholder instead of an unchanged out-of-line value on UPDATE when
@@ -149,10 +133,10 @@ func pgToastRiskTool(d Deps) tools.Tool {
 			if len(tables) == 0 {
 				return tools.Result{}, fmt.Errorf("%w: pipeline %q has no source_tables", tools.ErrBadInput, p.ID)
 			}
-			if len(tables) > postgres.MaxToastTables {
-				return tools.Result{}, fmt.Errorf("%w: pipeline %q has %d source tables, at most %d per call: pass table", tools.ErrBadInput, p.ID, len(tables), postgres.MaxToastTables)
+			if len(tables) > clients.MaxToastTables {
+				return tools.Result{}, fmt.Errorf("%w: pipeline %q has %d source tables, at most %d per call: pass table", tools.ErrBadInput, p.ID, len(tables), clients.MaxToastTables)
 			}
-			src, ok := d.Src.(toastColumnsClient)
+			src, ok := d.Src.(clients.ToastColumnReader)
 			if !ok {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_toast_risk: source client does not support ToastColumns")
 			}
@@ -178,7 +162,7 @@ func pgToastRiskTool(d Deps) tools.Tool {
 				data.Risks = append(data.Risks, toastRisks(t)...)
 			}
 			if cut {
-				data.Notes = append(data.Notes, fmt.Sprintf("more than %d toastable columns: the last tables' columns are not all listed; pass table", postgres.MaxToastColumns))
+				data.Notes = append(data.Notes, fmt.Sprintf("more than %d toastable columns: the last tables' columns are not all listed; pass table", clients.MaxToastColumns))
 			}
 			if len(data.Risks) > 0 {
 				d.countPlaceholders(ctx, p, &data)
@@ -191,7 +175,7 @@ func pgToastRiskTool(d Deps) tools.Tool {
 
 // toastRisks returns the columns of t at risk. A FULL table has none: its
 // update events carry every column.
-func toastRisks(t postgres.ToastTable) []ToastRisk {
+func toastRisks(t clients.ToastTable) []ToastRisk {
 	if !t.Found || t.ReplicaIdentity == "FULL" {
 		return nil
 	}
@@ -235,7 +219,7 @@ func (d Deps) countPlaceholders(ctx context.Context, p owners.Pipeline, data *To
 		}
 	}
 
-	counter, ok := d.Wh.(placeholderCounter)
+	counter, ok := d.Wh.(clients.PlaceholderCounter)
 	switch {
 	case !ok:
 		data.Notes = append(data.Notes, noPlaceholderCount)
@@ -243,8 +227,8 @@ func (d Deps) countPlaceholders(ctx context.Context, p owners.Pipeline, data *To
 	case p.SinkTSColumn == "":
 		data.Notes = append(data.Notes, "placeholder count needs the pipeline's sink_ts_column in owners.yaml")
 		return
-	case len(data.Placeholder) > 256:
-		data.Notes = append(data.Notes, "placeholder longer than 256 bytes: not counted")
+	case len(data.Placeholder) > clients.MaxPlaceholderBytes:
+		data.Notes = append(data.Notes, fmt.Sprintf("placeholder longer than %d bytes: not counted", clients.MaxPlaceholderBytes))
 		return
 	}
 	until := time.Now().UTC()
@@ -308,7 +292,7 @@ func toastSummary(data ToastRiskData) string {
 			cutShort(data.Placeholder, 64), data.PlaceholderSource)
 	}
 	for _, r := range data.Risks {
-		what := fmt.Sprintf("TOASTed (out-of-line values stored, TOAST relation %s)", sizeText(r.ToastBytes))
+		what := fmt.Sprintf("may be TOASTed (the table stores out-of-line values, TOAST relation %s)", sizeText(r.ToastBytes))
 		if r.Evidence == toastWide {
 			what = fmt.Sprintf("TOASTed (average width %d B, above 2 KB)", r.AvgWidth)
 		}

@@ -22,8 +22,8 @@ import (
 // database; what_changed shows those rows as migration changes. Only metadata
 // columns are selected (version or changeset id, description, who and when,
 // success): never the script name, its contents or its checksum, and never a
-// row of any other table. These methods are not on clients.SourceDB; the
-// what_changed tool finds them with a type assertion, like Freshness.
+// row of any other table. DB implements the optional clients.MigrationReader;
+// the what_changed tool finds it with a type assertion, like Freshness.
 
 // Default history table names. A tool configured with another table name is
 // not found (a known gap: owners.yaml has no setting for it yet).
@@ -32,10 +32,12 @@ const (
 	liquibaseHistoryTable = "databasechangelog"
 )
 
+// MaxMigrations is the most rows one call returns, over every table
+// (clients.MaxMigrations).
+const MaxMigrations = clients.MaxMigrations
+
 // Caps of one RecentMigrations call.
 const (
-	// MaxMigrations is the most rows one call returns, over every table.
-	MaxMigrations = 200
 	// maxHistoryTables bounds the history tables read in one call: one per
 	// tool in each schema searched, and few schemas per pipeline.
 	maxHistoryTables = 8
@@ -48,57 +50,27 @@ const (
 	maxMigrationActorRunes   = 128
 )
 
-// HistoryState is what RecentMigrations could do with one history table.
-type HistoryState string
-
-// History table states.
-const (
-	// HistoryRead: the table was read.
-	HistoryRead HistoryState = "read"
-	// HistoryUnreadable: the login lacks SELECT on the table or USAGE on its
-	// schema. A fact for the room ("grant SELECT on ..."), not an error.
-	HistoryUnreadable HistoryState = "unreadable"
-	// HistoryUnknownShape: a table with the tool's name whose columns are not
-	// the tool's (another product, or a very old version). Skipped.
-	HistoryUnknownShape HistoryState = "unknown_shape"
+// The migration history shapes are clients' (clients.MigrationReader); these
+// aliases keep the package's own names.
+type (
+	// HistoryState is clients.HistoryState.
+	HistoryState = clients.HistoryState
+	// HistoryTable is clients.HistoryTable.
+	HistoryTable = clients.HistoryTable
+	// Migration is clients.Migration.
+	Migration = clients.Migration
+	// MigrationHistory is clients.MigrationHistory.
+	MigrationHistory = clients.MigrationHistory
 )
 
-// HistoryTable is one migration history table found by catalog lookup.
-type HistoryTable struct {
-	Source string       `json:"source"` // clients.ChangeSourceFlyway or clients.ChangeSourceLiquibase
-	Schema string       `json:"schema"`
-	Name   string       `json:"name"`
-	State  HistoryState `json:"state"`
-}
+// History table states (clients.HistoryRead etc.).
+const (
+	HistoryRead         = clients.HistoryRead
+	HistoryUnreadable   = clients.HistoryUnreadable
+	HistoryUnknownShape = clients.HistoryUnknownShape
+)
 
-// Qualified returns "schema.name", the change's Object.
-func (h HistoryTable) Qualified() string { return h.Schema + "." + h.Name }
-
-// Migration is one applied migration: metadata only. Every string is
-// untrusted text from the customer's database.
-type Migration struct {
-	Source string `json:"source"` // clients.ChangeSourceFlyway or clients.ChangeSourceLiquibase
-	Table  string `json:"table"`  // the history table, "public.flyway_schema_history"
-	// Version is the Flyway version ("" for a repeatable migration) or the
-	// Liquibase changeset id.
-	Version     string    `json:"version"`
-	Description string    `json:"description"`
-	InstalledBy string    `json:"installed_by"` // Flyway installed_by, Liquibase author
-	InstalledOn time.Time `json:"installed_on"`
-	// Success is Flyway's success column; for Liquibase, exectype is not
-	// FAILED (Liquibase records few failures, so it is nearly always true).
-	Success bool `json:"success"`
-}
-
-// MigrationHistory is the result of RecentMigrations.
-type MigrationHistory struct {
-	// Migrations are applied migrations at or after since, newest first, at
-	// most the call's limit.
-	Migrations []Migration `json:"migrations"`
-	// Tables are the history tables found, read or not, by schema and name.
-	// None found is not an error: the database simply has no history.
-	Tables []HistoryTable `json:"tables"`
-}
+var _ clients.MigrationReader = (*DB)(nil)
 
 // historySQL selects the metadata columns of one tool's history table; table
 // is the sanitized identifier. installed_on and dateexecuted are "timestamp

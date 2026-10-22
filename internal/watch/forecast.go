@@ -35,24 +35,6 @@ type SampleStore interface {
 	clients.SampleReader
 }
 
-// DBSizeReader is an optional SourceDB extension: pg_database_size of the
-// source database, in bytes. No contract type exists yet (X3a contract change
-// request), so the watcher asserts it at use time; without it db_size_bytes
-// is not sampled.
-type DBSizeReader interface {
-	DatabaseSize(ctx context.Context) (int64, error)
-}
-
-// UnreadAgeReader is an optional LagReader extension: per topic, the
-// timestamp of the oldest record the group has not consumed yet (topics with
-// nothing unread are absent). No contract type exists yet (X3a contract
-// change request); without it topic_oldest_unread_age is not sampled. Its
-// limit is the topic's retention.ms, read through clients.TopicConfigReader on
-// the same client.
-type UnreadAgeReader interface {
-	OldestUnread(ctx context.Context, group string) (map[string]time.Time, error)
-}
-
 // forecastMetrics are the metrics with a limit, in clients.WatchMetrics order.
 // db_size_bytes has no limit until owners.yaml carries watch.db_size_limit
 // (A3), so it is sampled but never fires.
@@ -136,10 +118,10 @@ func (w *Watcher) planSamples(now time.Time, ts []target, bySet map[string]*obse
 		if n, ok := groupLagTotal(t, obs); ok && due(clients.WatchMetricGroupLag) {
 			jobs = append(jobs, sampleJob{t: t, metric: clients.WatchMetricGroupLag, value: float64(n)})
 		}
-		if _, ok := t.src.(DBSizeReader); ok && due(clients.WatchMetricDBSizeBytes) {
+		if _, ok := t.src.(clients.DBSizeReader); ok && due(clients.WatchMetricDBSizeBytes) {
 			jobs = append(jobs, sampleJob{t: t, metric: clients.WatchMetricDBSizeBytes, read: true})
 		}
-		if _, ok := t.lag.(UnreadAgeReader); ok && len(t.groups) > 0 && due(clients.WatchMetricTopicOldestUnreadAge) {
+		if _, ok := t.lag.(clients.UnreadAgeReader); ok && len(t.groups) > 0 && due(clients.WatchMetricTopicOldestUnreadAge) {
 			jobs = append(jobs, sampleJob{t: t, metric: clients.WatchMetricTopicOldestUnreadAge, read: true})
 		}
 	}
@@ -272,14 +254,14 @@ func (w *Watcher) sampleError(pid, metric string, err error) {
 func (w *Watcher) readSample(ctx context.Context, now time.Time, j sampleJob) (sampleJob, error) {
 	switch j.metric {
 	case clients.WatchMetricDBSizeBytes:
-		n, err := call(ctx, w.cfg.CheckTimeout, "database size", j.t.src.(DBSizeReader).DatabaseSize)
+		n, err := call(ctx, w.cfg.CheckTimeout, "database size", j.t.src.(clients.DBSizeReader).DatabaseSize)
 		if err != nil {
 			return j, err
 		}
 		j.value = float64(n) // no limit until watch.db_size_limit exists (A3)
 		return j, nil
 	case clients.WatchMetricTopicOldestUnreadAge:
-		ur := j.t.lag.(UnreadAgeReader)
+		ur := j.t.lag.(clients.UnreadAgeReader)
 		var oldest time.Time
 		for _, g := range j.t.groups {
 			byTopic, err := call(ctx, w.cfg.CheckTimeout, "oldest unread record", func(c context.Context) (map[string]time.Time, error) {
