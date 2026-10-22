@@ -214,18 +214,29 @@ func (a *updateConnectorConfig) Preview(ctx context.Context, raw json.RawMessage
 // a credential-looking key: those values would leave this process for a call
 // that exists only for the preview.
 func (a *updateConnectorConfig) dryRun(ctx context.Context, cfg, changes map[string]string) *DryRunResult {
+	d, err := validateMerged(ctx, a.d.Connect, cfg, changes)
+	if err != nil {
+		return &DryRunResult{Source: sourceValidate, Skipped: dryRunText("validate failed: " + err.Error())}
+	}
+	return d
+}
+
+// validateMerged is the dry run of a config change on Connect client c (the
+// production one for Preview, the staging one for Stage). A non-nil error is
+// the validate call's own failure; the caller words it.
+func validateMerged(ctx context.Context, c any, cfg, changes map[string]string) (*DryRunResult, error) {
 	for k := range cfg {
 		if LooksSecret(k) {
-			return &DryRunResult{Source: sourceValidate, Skipped: "the connector config holds secret keys; not sent to validate"}
+			return &DryRunResult{Source: sourceValidate, Skipped: "the connector config holds secret keys; not sent to validate"}, nil
 		}
 	}
-	v, ok := a.d.Connect.(configValidator)
+	v, ok := c.(configValidator)
 	if !ok {
-		return &DryRunResult{Source: sourceValidate, Skipped: noDryRun}
+		return &DryRunResult{Source: sourceValidate, Skipped: noDryRun}, nil
 	}
 	class := cfg["connector.class"]
 	if class == "" {
-		return &DryRunResult{Source: sourceValidate, Skipped: "the connector config has no connector.class"}
+		return &DryRunResult{Source: sourceValidate, Skipped: "the connector config has no connector.class"}, nil
 	}
 	next := make(map[string]string, len(cfg)+len(changes))
 	for k, val := range cfg {
@@ -236,9 +247,9 @@ func (a *updateConnectorConfig) dryRun(ctx context.Context, cfg, changes map[str
 	}
 	vr, err := v.ValidateConfig(ctx, class, next)
 	if err != nil {
-		return &DryRunResult{Source: sourceValidate, Skipped: dryRunText("validate failed: " + err.Error())}
+		return nil, err
 	}
-	return &DryRunResult{OK: vr.ErrorCount == 0, Source: sourceValidate, Text: validateText(vr)}
+	return &DryRunResult{OK: vr.ErrorCount == 0, Source: sourceValidate, Text: validateText(vr)}, nil
 }
 
 // validateText renders "0 errors" or "2 errors: key: msg; key2: msg".
@@ -320,6 +331,11 @@ func (a *registerSchema) dryRun(ctx context.Context, p registerSchemaParams) *Dr
 	if err != nil {
 		return &DryRunResult{Source: sourceCompat, Skipped: dryRunText("compatibility check failed: " + err.Error())}
 	}
+	return &DryRunResult{OK: compatible, Source: sourceCompat, Text: dryRunText(compatText(compatible, msgs))}
+}
+
+// compatText renders a Registry compatibility verdict and its messages.
+func compatText(compatible bool, msgs []string) string {
 	text := fmt.Sprintf("compatible: %t", compatible)
 	switch {
 	case len(msgs) > 0:
@@ -327,5 +343,5 @@ func (a *registerSchema) dryRun(ctx context.Context, p registerSchemaParams) *Dr
 	case !compatible:
 		text += " (no detail from this Registry version)"
 	}
-	return &DryRunResult{OK: compatible, Source: sourceCompat, Text: dryRunText(text)}
+	return text
 }

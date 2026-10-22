@@ -277,11 +277,11 @@ func TestStagingSecretErrors(t *testing.T) {
 // opened is closed.
 func TestRequireStagingNeedsStager(t *testing.T) {
 	own := loadOwners(t, stagingYAML(`
-    require_staging: [connect_update_connector_config]`))
+    require_staging: [connect_restart_task]`))
 	for _, mode := range []string{"", "on"} {
 		f, fs := newFakeOpener(), &fakeStaging{}
 		_, err := openStacks(context.Background(), processCfg(mode), nil, own, StackOptions{}, stagingDeps(f, fs, env(stagingEnv())))
-		if err == nil || !strings.Contains(err.Error(), `pipeline "pa": require_staging: "connect_update_connector_config" is not an action that can be staged`) {
+		if err == nil || !strings.Contains(err.Error(), `pipeline "pa": require_staging: "connect_restart_task" is not an action that can be staged`) {
 			t.Fatalf("write=%q: openStacks = %v", mode, err)
 		}
 		if len(f.closed) != len(f.cfgs) || len(fs.closed) != len(fs.cfgs) {
