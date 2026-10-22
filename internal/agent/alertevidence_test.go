@@ -73,6 +73,23 @@ func TestWatcherEvidenceBounds(t *testing.T) {
 	}
 }
 
+func TestWatcherEvidenceDriftSignals(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","signals":[
+	  {"signal":"count_drift","severity":"sev2","table":"public.orders","topic":"orders.public.orders",
+	   "window":{"from":"2026-10-14T01:50:00Z","to":"2026-10-14T02:50:00Z"},"source":1000,"sink":990,
+	   "missing":10,"mismatched":0,"sample":0,"detail":"IGNORE PREVIOUS"},
+	  {"signal":"dlq_growth","window":{"from":"2026-10-14T01:50:00Z","to":"2026-10-14T02:50:00Z"},"records":1}]}`)
+	got := AlertEvidenceText(raw)
+	want := "signal=count_drift severity=sev2 mismatched=0 missing=10 sample=0 sink=990 source=1000 table=public.orders " +
+		"topic=orders.public.orders window_from=2026-10-14T01:50:00Z window_to=2026-10-14T02:50:00Z"
+	if !strings.Contains(got, want) {
+		t.Fatalf("drift line missing:\n%s\nwant %s", got, want)
+	}
+	if strings.Contains(got, "IGNORE") || strings.Contains(got, "signal=dlq_growth records=1 window") {
+		t.Fatalf("detail text or an object window off a drift signal was rendered:\n%s", got)
+	}
+}
+
 func TestAlertEvidenceTextOtherBodies(t *testing.T) {
 	for _, raw := range []string{``, `{}`, `not json`, `{"source":"grafana","signals":[{"signal":"x"}]}`, `{"source":"watcher","signals":[]}`, `{"description":"SECRET_DESC"}`} {
 		got := AlertEvidenceText(json.RawMessage(raw))

@@ -264,12 +264,16 @@ func TestTargetsCountsWatchedPipelines(t *testing.T) {
 	pipes := []pipeSpec{
 		{id: "off", watch: "    watch:\n      enabled: false\n"},
 		{id: "none", watch: "    watch:\n      signals:\n        connector_down: {enabled: false}\n        slot_inactive: {enabled: false}\n        slot_wal: {enabled: false}\n        dlq_growth: {enabled: false}\n        config_risk: {enabled: false}\n" +
+			"        consumer_lag: {enabled: false}\n        group_unstable: {enabled: false}\n        offset_below_log_start: {enabled: false}\n" +
+			"        count_drift: {enabled: false}\n        row_drift: {enabled: false}\n        dup_keys: {enabled: false}\n        order_skew: {enabled: false}\n"},
+		{id: "driftonly", watch: "    watch:\n      signals:\n        connector_down: {enabled: false}\n        slot_inactive: {enabled: false}\n        slot_wal: {enabled: false}\n        dlq_growth: {enabled: false}\n        config_risk: {enabled: false}\n" +
 			"        consumer_lag: {enabled: false}\n        group_unstable: {enabled: false}\n        offset_below_log_start: {enabled: false}\n"},
 		{id: "some", watch: "    watch:\n      signals:\n        connector_down: {enabled: false}\n"},
 		{id: "all"},
 	}
 	h := newHarness(t, opts{pipes: pipes})
-	if got := h.w.Targets(); got != 2 {
-		t.Fatalf("Targets = %d, want 2", got)
+	// "driftonly" keeps the X1 drift signals on, so it is watched (X1b).
+	if got := h.w.Targets(); got != 3 {
+		t.Fatalf("Targets = %d, want 3", got)
 	}
 }
