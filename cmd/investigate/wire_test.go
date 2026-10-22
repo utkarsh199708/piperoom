@@ -182,6 +182,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		// P3 (P3-W): listed with write mode off; Execute refuses without a writer.
 		"kafka_reset_consumer_offsets", "dlq_replay", "connect_snapshot_table",
 		"pg_drop_replication_slot", "pg_add_publication_table", "pg_snapshot_signal",
+		// X2a: the recovery action, listed the same way.
+		"pg_resnapshot_rows",
 	}
 	gotActions := make([]string, 0, len(areg.All()))
 	for _, a := range areg.All() {

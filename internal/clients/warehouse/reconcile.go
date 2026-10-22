@@ -37,6 +37,23 @@ func (d *DB) RowTimes(ctx context.Context, table, pkColumn string, keys []string
 	return d.reconcile().RowTimes(ctx, table, pkColumn, keys, tsColumns)
 }
 
+// RangeColumn is pgconv.RangeColumn: a column as the re-snapshot condition
+// of pg_resnapshot_rows (X2a) needs it.
+type RangeColumn = pgconv.RangeColumn
+
+// RangeColumn reads one column of a sink table (sink_tables only): its catalog
+// type, its kind and whether it alone is the primary key (X2a).
+func (d *DB) RangeColumn(ctx context.Context, table, column string) (RangeColumn, error) {
+	return d.reconcile().RangeColumn(ctx, table, column)
+}
+
+// CountRange counts the rows of a sink table (sink_tables only) whose column is
+// in [from, to] (to "" = no upper bound): pg_resnapshot_rows' preview and
+// verification count (X2a). A count only; the receipt never shows a bound.
+func (d *DB) CountRange(ctx context.Context, table, column, from, to string) (int64, error) {
+	return d.reconcile().CountRange(ctx, table, column, from, to)
+}
+
 // queryReceipt is query with the receipt's parameters given apart, so a
 // read by key values records how many keys it read, never which.
 func (d *DB) queryReceipt(ctx context.Context, receipt []any, sql string, args ...any) (pgx.Rows, error) {
