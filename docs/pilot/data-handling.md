@@ -88,6 +88,19 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
     message to the team's own `slack_channel` from `owners.yaml` `teams:`: the hypothesis text, the cited
     change's title and URL, the cited step numbers and the room link. That channel is outside the room's
     Slack thread (see Slack, below); nothing is read back from it.
+- **Lineage, PII tags and retention (X7; contract X7-0, design `docs/design/lineage.md`).** The pipeline map gains
+  column lineage on its edges and `pii`/`retention` tags on its nodes: column **names**, their PII class (from names
+  and types, never values), and declared retention durations. Stored nowhere new: the map is built on request, like
+  before. Shown to anyone who can see the pipeline and to the agent in `pipeline_map`.
+  - **OpenLineage export (X7b, optional, off unless `OPENLINEAGE_URL` is set).** An **outbound** HTTP(S) POST from
+    the server to the lineage server you name (Marquez, DataHub), part of your egress review (section 5): at most one
+    event per pipeline per 15 minutes and one per executed fix step. It sends dataset names (database, schema,
+    table, topic; host and port of your Postgres, Kafka and warehouse, never user or password), column names and
+    their lineage, PII classes per column name, declared retention, layer owners' user ids, action names and
+    proposal ids. Never a row or record value, a config value, node health, room content or an action's output.
+    `OPENLINEAGE_API_KEY` goes only in the `Authorization` header, only over https (or to a loopback host), and is
+    never logged. Every pipeline of the server lands in one namespace (`OPENLINEAGE_NAMESPACE`): with several tenants,
+    use one lineage server per tenant or leave it off.
 - **Slack (optional, outbound only).** Off unless **both** `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`
   are set. A half setting stops the server at start (`cmd/server/main.go`;
   `internal/slackbridge/bridge.go`). It posts into one thread per room in one channel
@@ -190,7 +203,10 @@ auto-approved (`internal/room/autoapprove.go`).
 | `clients.Reconciler` reader (the watcher's `count_drift` and `row_drift`, X1, and a recovery action's `Verify`, X2; not a tool) | row counts of a source or sink table over a time window, the primary-key values of at most 200 of the newest source rows, and the named timestamp columns of at most 1000 keys (`internal/clients/clients.go`). Only for the pipeline's own `source_tables`/`sink_tables`. The keys stay in the caller's memory: the room gets a `DriftSignal` (`internal/events/events.go`) or an `agent.recovery_check`/`agent.verification` with counts and a window only | every non-timestamp column value; key values in events, logs or the model |
 | `clients.WorkerTaskReader` reader (the `connect_task_balance` tool, X6b) | for the whole Connect cluster, one `GET /connectors?expand=status`: worker id (host:port), connector name, type, task id and state (`internal/clients/clients.go`). Cluster metadata, not filtered by pipeline: the tool names only the room pipeline's connectors and counts every other connector's tasks per worker | task traces, connector configs; other pipelines' connector names, types and states |
 | A performance action's `Verify` (`connect_tune_throughput`, X6c; not a tool) | the connector's throughput and the consumer lag's slope before and after the step, as records per minute, from record counts by offset timestamp and the pipeline's `group_lag` watch samples; its preview lists the allow-listed keys it changes with their integer values (`internal/actions/action.go`) | records, row values, any config value outside the allow-list |
-| `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go`) | row data |
+| `clients.ColumnReader` reader (column lineage X7a and PII tags X7c, through the map builder; not a tool) | column name, catalog type name, position and nullability of the pipeline's own `source_tables`/`sink_tables`, from `information_schema`/`pg_attribute` or the warehouse's catalog, at most 1600 per table, 10 s (`internal/clients/clients.go`) | any row or value, column defaults and comments; other pipelines' tables |
+| `clients.TableRetentionReader` reader (the watcher's retention check, X7d; not a tool; no warehouse implements it yet) | whether a sink table has a configured retention, its duration and the name of the setting read | any row or value, the setting's expression |
+| `clients.TopicConfigReader` (the watcher's retention check, X7d; the same read as `kafka_topic_config`) | for a pipeline's own topic: `retention.ms`, `retention.bytes`, `cleanup.policy`, `min.insync.replicas`, partitions, replication factor; the room sees only `config_risk` retention entries (`events.RetentionRisk`: durations and the policy word) | record payloads; any other topic config value |
+| `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go`); with X7, column names and their lineage per edge and `pii`/`retention` tags per node (`docs/design/lineage.md`) | row data |
 | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag, only for the room pipeline's own topics and consumer groups (`kafka_consumer_lag` shows only partitions of the pipeline's topics) | record payloads |
 | `kafka_topic_config` | for a pipeline's own topic: retention, cleanup policy, min in-sync replicas, partition count and replication factor (`kafka_tools.go`) | record payloads |
 | `kafka_find_by_key` | topic, partition, offset, timestamp and **key** of matching records | record **values** |

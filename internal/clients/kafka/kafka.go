@@ -236,19 +236,9 @@ func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.Part
 }
 
 // TopicConfig is one topic's key configuration and shape, as returned by
-// DescribeTopicConfigs. Config values are the raw Kafka strings; "-1" means
-// unlimited where the config allows it. It lives in this package until
-// clients.KafkaAdmin gains the method (contract change request in the PR);
-// it is then meant to move to package clients unchanged.
-type TopicConfig struct {
-	Topic             string `json:"topic"`
-	Partitions        int    `json:"partitions"`
-	ReplicationFactor int    `json:"replication_factor"`
-	RetentionMS       string `json:"retention_ms"`
-	RetentionBytes    string `json:"retention_bytes"`
-	CleanupPolicy     string `json:"cleanup_policy"`
-	MinInsyncReplicas string `json:"min_insync_replicas"`
-}
+// DescribeTopicConfigs. It moved to package clients unchanged (X7-0), so
+// *Client satisfies clients.TopicConfigReader.
+type TopicConfig = clients.TopicConfig
 
 // DescribeTopicConfigs returns the topic's key configs (retention.ms,
 // retention.bytes, cleanup.policy, min.insync.replicas) plus its partition

@@ -672,6 +672,38 @@ positions and Kafka Connect error headers only, never a key or value; per-record
 summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.data` holds counts and positions
 (design: `docs/design/dlq.md`).
 
+#### X7: column lineage and governance tags (X7-0; builder X7a/X7c by A3; design `docs/design/lineage.md`)
+
+Additive like the waves before: `tags`, `columns` and `columns_omitted` are omitted when empty, so a graph from
+before X7 has the same JSON and a client that ignores them reads the map as before.
+```json
+{ "id": "pg:public.orders", "kind": "source_table", "...": "...",
+  "tags": { "pii": "customer_email:email,phone_number:phone", "retention": "7d" } }
+{ "from": "connect:pg-orders-connector", "to": "topic:pg.public.orders",
+  "columns": [ { "input": "pg:public.orders", "from": "id", "to": "after.id" },
+               { "input": "pg:public.orders", "from": "amount", "to": "after.total", "transform": "rename" },
+               { "input": "pg:public.orders", "from": "discount", "transform": "dropped" } ] }
+```
+- Node `tags` (`topology.Node.Tags`): governance labels, at most 16, keys `^[a-z][a-z0-9_]{0,31}$`, values one line of
+  at most 2048 bytes. `pii`: the table's columns classed as personal data from column **names and types only**,
+  `column:class` pairs sorted by column (`topology.FormatPIITag`); classes `email | phone | name | address |
+  national_id | card | ip | dob | other`; `pii_omitted`: how many pairs the cap left out. `retention`: the
+  `owners.yaml` `declared_retention` of the node's topic or table (`7d`, `36h`, `infinite`). Other keys may appear
+  later; show an unknown key as a neutral label.
+- Edge `columns` (`topology.ColumnMap`): the column lineage of a data edge **into a dataset node** (`source_table`,
+  `topic`, `dlq_topic`, `sink_table`, `model`, `kafka_engine`, `materialized_view`). `to` is a column of the edge's
+  `to` node (a topic field by its dotted path, `after.amount`); `input` the upstream dataset node `from` belongs to.
+  `transform`: omitted = same name, `rename`, `unwrap` (Debezium `ExtractNewRecordState`), `dropped` (no `to`: the
+  column does not arrive, "orders.discount not in sink"), `added` (no `from`/`input`: fed by no upstream column).
+  `mapping: "inferred"` on a map = matched by name only (no Schema Registry, or an SMT Piperoom does not model). At
+  most 1000 per edge; `columns_omitted` counts the rest. Absent when unknown (no catalog or schema read).
+- Names, classes and durations only: **never a row value, a sample, a default or a config value.** Same visibility as
+  the map itself: `404 not_found` for an unknown pipeline and for one outside the caller's tenants, then any logged-in
+  user. The catalog readers behind them (`clients.ColumnReader`, `clients.TableRetentionReader`) read the catalog only,
+  for the pipeline's own tables, with a 10 s deadline; they are not called on request (the builder reads them).
+- Optional OpenLineage export (`OPENLINEAGE_URL`, X7b): the mapping, namespaces and spec versions are in
+  `docs/design/lineage.md` section 6. It has no route and changes no response here.
+
 ## REST endpoints
 
 | Method | Path | Body | Result | Notes |
@@ -958,6 +990,25 @@ closes; `--demo` forces it off.
   sent, and every changed key that looks like a credential (`actions.LooksSecret`) is reported once as
   `"<secret key changed>"` (`events.SecretKeyChanged`). A Connect read error changes neither the signal nor the
   baseline.
+
+  **Retention evidence (X7; contract X7-0, watcher X7d by A7; design `docs/design/lineage.md` section 5).** Not a new
+  signal: entries of `config_risk`'s `risks` list (`events.RetentionRisk`), next to the connector risks. Each compares
+  a pipeline topic's configured retention (`retention.ms`, `-1` = infinite; `retention.bytes`; `cleanup.policy`) or,
+  when the warehouse can say, a sink table's, with the `owners.yaml` `declared_retention`, in both directions.
+  ```json
+  { "code": "retention_shorter_than_declared", "sev": "sev4", "topic": "pg.public.orders",
+    "configured": "1d", "declared": "7d", "text": "pg.public.orders retains 1d; declared 7d" }
+  ```
+  `code`: `retention_shorter_than_declared`, `retention_longer_than_declared` (infinite included) or
+  `compact_cdc_topic` (a CDC topic with `cleanup.policy` `compact` and no `delete`: deletes are compacted away, with or
+  without a declaration). `configured`/`declared` are durations (`1d`, `36h`, `infinite`); `topic` or `table`;
+  `retention_bytes?` when a size cap is set; `cleanup_policy?`; `text` one watcher-written line, at most 200 bytes,
+  shown as text. No declaration, or equal values, is no finding. A retention finding is `sev4`: it makes
+  `config_risk` fire (so it is in `/api/fleet` `signals_firing`) but opens no room on its own, whatever
+  `config_risk`'s action; it rides along when another signal of the pipeline opens or joins a room. A topic config
+  the watcher cannot read (no `DescribeConfigs` ACL) gives one INFO log and no finding. Names, durations and the
+  policy word only, never another config value. The agent sees these keys once `agent.AlertEvidenceText` (A4)
+  allow-lists them.
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`. F6 plans `rooms` as
