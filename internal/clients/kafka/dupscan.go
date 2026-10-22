@@ -58,8 +58,8 @@ func KeyFingerprint(key []byte) string {
 // DupScanMaxScan means DupScanMaxScan). The value is decoded only to find
 // source.lsn (JSON, or Confluent Avro with the schema from the registry, by
 // a bounded walker, never a generic decoder); keys are compared as bytes.
-// No key, value or decoded field leaves this method: the report has counts,
-// offsets, positions and KeyFingerprint only.
+// No key or value bytes leave this method: the report has counts, offsets,
+// source positions (the LSNs decoded from the value) and KeyFingerprint only.
 //
 // Deadline DupScanTimeout: a scan it cuts returns the partial report with
 // Partial set and no error. An unknown topic is clients.ErrNotFound. Read

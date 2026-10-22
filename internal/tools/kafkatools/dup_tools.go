@@ -128,11 +128,15 @@ func dupSummary(rep clients.DupReport) string {
 		if i == dupMaxListed {
 			break
 		}
+		// The key fingerprint stays out of these lines: the summary is
+		// recorded into agent.tool_result events, and the DupFinding contract
+		// keeps the fingerprint in tool Data, never in an event (a short key
+		// can be guessed back from it). Data.findings carries it.
 		if f.Kind == clients.DupKindRegression {
-			appendLine(&sb, fmt.Sprintf("  regression: key %s, partition %d offset %d has lsn %d after lsn %d at offset %d", f.Key, f.Partition, f.Offset, f.LSN, f.PrevLSN, f.FirstOffset))
+			appendLine(&sb, fmt.Sprintf("  regression: partition %d offset %d has lsn %d after lsn %d at offset %d", f.Partition, f.Offset, f.LSN, f.PrevLSN, f.FirstOffset))
 			continue
 		}
-		appendLine(&sb, fmt.Sprintf("  duplicate: key %s, partition %d offset %d repeats lsn %d of partition %d offset %d", f.Key, f.Partition, f.Offset, f.LSN, f.FirstPartition, f.FirstOffset))
+		appendLine(&sb, fmt.Sprintf("  duplicate: partition %d offset %d repeats lsn %d of partition %d offset %d", f.Partition, f.Offset, f.LSN, f.FirstPartition, f.FirstOffset))
 	}
 	if n := len(rep.Findings) + rep.FindingsOmitted - min(len(rep.Findings), dupMaxListed); n > 0 {
 		appendLine(&sb, fmt.Sprintf("%d more finding(s) not listed; Data.findings has the first %d", n, clients.MaxDupFindings))
