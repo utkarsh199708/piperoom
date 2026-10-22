@@ -1038,8 +1038,8 @@ closes; `--demo` forces it off.
 
   | `signal` | Default severity | Entry | Fires when |
   |---|---|---|---|
-  | `count_drift` | `sev2` | `DriftSignal` | source and sink row counts over the last closed hour, shifted by the sink's lag, differ by more than `watch.count_tolerance` (default 0.5 %) on 2 checks in a row |
-  | `row_drift` | `sev2` | `DriftSignal` | a sampled source key is missing on the sink after the lag, or one of its timestamp columns differs |
+  | `count_drift` | `sev2` | `DriftSignal` | source and sink row counts over the last closed hour, shifted by the sink's lag (on an idle sink: the hour ending at its newest row), differ by more than `watch.count_tolerance` (default 0.5 %) on 2 checks in a row |
+  | `row_drift` | `sev2` | `DriftSignal` | a sampled source key is missing on the sink after the lag, or one of its timestamp columns differs; or rows that landed on the sink in the last hour hold `sink_ts_column` NULL; or sink rows hold Debezium's unavailable-value placeholder in a toastable column; or a column is missing on the sink |
   | `dup_keys` | `sev3` | `DriftSignal` | the CDC topic holds the same (key, source position) more than once in the window |
   | `order_skew` | `sev3` | `DriftSignal` | the source position goes backwards for one key on the CDC topic |
   | `forecast` | `sev4` | `ForecastSignal` | a pipeline metric's trend reaches its limit within `PIPEROOM_WATCH_FORECAST_HORIZON` (below) |
@@ -1051,7 +1051,16 @@ closes; `--demo` forces it off.
   detail?}`: `window` is half-open `[from, to)` (RFC 3339, UTC), an object here while `dlq_growth`'s `window` is a
   word such as `"15m"`, so a reader goes by `signal` first; the five numbers are always present (0 is evidence).
   `count_drift`: `source`/`sink` are the row counts and `missing` is `source - sink` when positive. `row_drift`:
-  `sample` keys compared (at most 200), `missing` not on the sink, `mismatched` with a differing timestamp.
+  `sample` keys compared (at most 200), `missing` not on the sink, `mismatched` with a differing timestamp; X1b-fix:
+  `mismatched` also counts sampled rows that landed in the last hour (by the wall clock, not shifted by the lag) and
+  that the sink holds with `sink_ts_column` NULL (a sampled row the sink does not hold yet is not judged), and the
+  sink rows of that hour holding Debezium's default `__debezium_unavailable_value` in one of the source's toastable
+  columns (at most 4 columns per table and check, in turn; never `sink_ts_column` or a column whose name looks like
+  personal data); `detail` names the column. A column missing on the sink (`sink_ts_column`, or a column both tables
+  had at an earlier check of this server process) fires with all counts 0, `detail` naming the columns and an empty
+  window (`from` = `to` = the time of the catalog read); with `sink_ts_column` gone no other check runs, since each
+  keys on it. The parts of one check are one `row_drift` entry: their counts are summed and `window` is the first
+  breaching part's.
   `dup_keys`: `source` records scanned, `missing` duplicate events, `sample` keys affected. `order_skew`:
   `source` records scanned, `mismatched` regressions, `sample` keys affected. `detail` is one line of
   watcher-written text, at most 200 bytes; clients render it as text, never HTML. The web shows `count_drift`
@@ -1064,7 +1073,10 @@ closes; `--demo` forces it off.
   `SampleKeys` at most 200 primary-key values of the newest rows in a window `[since, until)` (the watcher samples
   the hour before `now - sink lag - 2 min`, rows that had time to reach the sink; never a table whose key column
   looks like personal data) that stay inside the watcher, and `RowTimes` at most 1000 keys' timestamp columns,
-  never another column. A client without the reader, or answering `ErrNotSupported`, turns
+  never another column. An idle sink (the source has no row newer than the sink's newest, and that row is more than
+  2 min old: nothing is in flight) is not shifted by a lag that grows while idle: `count_drift` and `row_drift` read
+  the hour ending at the sink's newest row. A sink that is behind keeps the shifted windows, so a row in flight is
+  never judged. A client without the reader, or answering `ErrNotSupported`, turns
   the check off for that pipeline with one INFO log. Settings live in `owners.yaml` `watch:`
   (`reconcile_interval` default 15 min, `count_tolerance`, `reconcile: off` per table), not in the environment.
 

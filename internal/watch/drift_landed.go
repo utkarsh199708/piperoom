@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -196,7 +197,9 @@ func structurePart(now time.Time, mem *driftMem, pr tablePair, ts string, cat *c
 			gone = append(gone, n)
 		}
 	}
-	tsGone := !onSnk[ts]
+	// A sink that folds names (UPDATED_AT for updated_at) still has the
+	// column: only a name missing in any case is gone.
+	tsGone := !onSnk[ts] && !slices.ContainsFunc(cat.snk, func(c clients.ColumnInfo) bool { return strings.EqualFold(c.Name, ts) })
 	if tsGone && !slices.Contains(gone, ts) {
 		gone = append(gone, ts)
 	}
@@ -205,7 +208,11 @@ func structurePart(now time.Time, mem *driftMem, pr tablePair, ts string, cat *c
 	}
 	slices.Sort(gone)
 	at := now.UTC().Truncate(time.Second)
-	names := listNames(gone)
+	shown := make([]string, len(gone))
+	for i, n := range gone {
+		shown[i] = columnLabel(n)
+	}
+	names := listNames(shown)
 	return rowPart{
 		v: vBreach, from: at, to: at,
 		value:  fmt.Sprintf("%d %s missing on the sink", len(gone), plural(len(gone), "column", "columns")),
@@ -352,6 +359,20 @@ func (w *Watcher) placeholderPart(ctx context.Context, t target, mem *driftMem, 
 	p.label = fmt.Sprintf("%d sink rows hold Debezium's unavailable-value placeholder (%s)", total, names)
 	p.detail = fmt.Sprintf("unavailable-value placeholder in %s: %d rows", names, total)
 	return []rowPart{p}
+}
+
+// columnLabel shows a catalog column name in a title or detail: a plain
+// identifier as it is, any other quoted in ASCII (cut to 63 bytes first), so
+// a name with spaces, commas or bidirectional controls reads as one name and
+// cannot reorder the room title.
+func columnLabel(n string) string {
+	if validColumn(n) {
+		return n
+	}
+	if len(n) > 63 {
+		n = strings.ToValidUTF8(n[:63], "")
+	}
+	return strconv.QuoteToASCII(n)
 }
 
 // listNames lists at most maxDriftNames names, then how many more.
