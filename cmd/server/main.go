@@ -658,6 +658,13 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	if sampleStore != nil {
 		httpOpts = append(httpOpts, httpapi.WithSamples(sampleStore))
 	}
+	// Connector config versions (X5c): the watcher writes them, the
+	// config-versions routes read them; the change-log retention above
+	// purges them (configVersionsPurger).
+	versionStore, _ := st.(store.ConfigVersionStore)
+	if versionStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithConfigVersions(versionStore))
+	}
 	if s.setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
 	}
@@ -709,6 +716,9 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	}
 	if sampleStore != nil {
 		watchDeps.Samples = sampleStore
+	}
+	if versionStore != nil {
+		watchDeps.ConfigVersions = versionStore
 	}
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)

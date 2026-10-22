@@ -178,6 +178,10 @@ type Deps struct {
 	// config.ParseWatchForecast; a zero Horizon means the default 48 h.
 	Samples  SampleStore
 	Forecast config.WatchForecast
+	// ConfigVersions, when set, keeps every connector config the watcher
+	// reads whose hash or keyed fingerprints changed (X5c,
+	// config_versions.go): the room store's connector_config_versions.
+	ConfigVersions clients.ConfigVersionWriter
 	// Clock defaults to the wall clock.
 	Clock Clock
 	// Log defaults to slog.Default().
@@ -331,6 +335,11 @@ type Watcher struct {
 	// Sample history and forecasts (forecast.go); nil samples = off.
 	samples SampleStore
 	horizon time.Duration
+
+	// Connector config versions (config_versions.go); nil versions = off.
+	// versionJobs are planned under mu by evaluate and written by the tick.
+	versions    clients.ConfigVersionWriter
+	versionJobs []versionJob
 }
 
 const maxClosedRemembered = 256
@@ -376,7 +385,7 @@ func New(d Deps) (*Watcher, error) {
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 		changes: d.Changes, registry: d.Registry, ddl: d.DDL,
 		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
-		samples: d.Samples, horizon: d.Forecast.Horizon,
+		samples: d.Samples, horizon: d.Forecast.Horizon, versions: d.ConfigVersions,
 	}
 	if w.horizon <= 0 {
 		w.horizon = 48 * time.Hour // config.DefaultWatchForecastHorizon
@@ -476,7 +485,13 @@ func (w *Watcher) tick(ctx context.Context) {
 	w.mu.Lock()
 	fired := w.evaluate(now, ts, obs)
 	jobs := w.planSamples(now, ts, obs)
+	vjobs := w.versionJobs
+	w.versionJobs = nil
 	w.mu.Unlock()
+	w.writeVersions(ctx, vjobs)
+	if ctx.Err() != nil {
+		return
+	}
 	w.writeSamples(ctx, now, jobs)
 	if ctx.Err() != nil {
 		return
