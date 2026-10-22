@@ -4,7 +4,9 @@ import type {
   ActionExecutedPayload,
   Actor,
   AgentStatusPayload,
+  AgentRecoveryCheckPayload,
   AgentVerificationPayload,
+  ProposalClass,
   ForecastSummary,
   HandoffSummary,
   HypothesisSummary,
@@ -202,6 +204,20 @@ export interface ProposalState {
    * a cancel, so a later one is ignored (internal/room foldScheduled).
    */
   schedule_seen?: boolean
+  /** X2: proposal.created.class. Left off for a fix, so such a proposal folds as before. */
+  class?: ProposalClass
+  /** X2: recovery proposals only; see RecoveryProgress. */
+  recovery?: RecoveryProgress
+}
+
+/** X2: what the log says about a recovery proposal after its step ran. */
+export interface RecoveryProgress {
+  /** The newest agent.recovery_check of this proposal. */
+  check?: AgentRecoveryCheckPayload
+  /** When the last step finished ok (action.executed): the start of "recovered in 3 min". */
+  ran_at?: string
+  /** When the counted agent.verification arrived. */
+  verified_at?: string
 }
 
 /** A pending proposal.scheduled (P2b). */

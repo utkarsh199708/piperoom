@@ -3,6 +3,7 @@ import type { ProposalState } from '../../state/types'
 import type { Topology } from '../../api/types'
 import { Badge } from '@/components/ui/badge'
 import { Clock } from './Clock'
+import { previewLine } from '../../lib/recovery'
 import { StatusDot } from './StatusDot'
 
 /** How long the "Previewing…" skeleton shows before it gives way to the muted "unavailable". */
@@ -51,6 +52,8 @@ export function BlastRadius({ proposal, topology }: { proposal: ProposalState; t
       {preview.steps.map((sp) => {
         const step = proposal.steps[sp.step_index]
         const pv = sp.preview
+        // X2: read from the target by the action's Preview; a fix has none, so its preview is unchanged.
+        const recovers = pv ? previewLine(pv.count, pv.unit) : undefined
         return (
           <div key={sp.step_index} className="flex flex-col gap-1" data-testid={`preview-step-${sp.step_index}`}>
             {sp.error && (
@@ -67,6 +70,11 @@ export function BlastRadius({ proposal, topology }: { proposal: ProposalState; t
                     {pv.reversible ? 'reversible' : 'not reversible'}
                   </Badge>
                 </div>
+                {recovers && (
+                  <p className="m-0 text-[13px] font-medium leading-[18px] tabular-nums" data-testid={`preview-count-${sp.step_index}`}>
+                    {recovers}
+                  </p>
+                )}
                 <p className="m-0 break-words text-[13px] leading-[18px]">
                   <span className="text-xs font-medium text-subtle-foreground">Current: </span>
                   {pv.current}
