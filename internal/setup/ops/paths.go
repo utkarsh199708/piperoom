@@ -149,11 +149,14 @@ func pathParts(name string) []string {
 
 // deniedDir compares by simple fold and by upper case: strings.EqualFold
 // misses the dotless ı (U+0131), whose upper case is "I", so ".gıt" must be
-// caught by strings.ToUpper.
+// caught by strings.ToUpper. .git and .piperoom are the design's denied
+// directories; .ssh holds private keys and known_hosts and no setup op has a
+// reason to read or write it.
 func deniedDir(part string) bool {
 	up := strings.ToUpper(part)
 	return strings.EqualFold(part, ".git") || strings.EqualFold(part, ".piperoom") ||
-		up == ".GIT" || up == ".PIPEROOM"
+		strings.EqualFold(part, ".ssh") ||
+		up == ".GIT" || up == ".PIPEROOM" || up == ".SSH"
 }
 
 // reservedDevice matches the Windows device names with any extension, as
