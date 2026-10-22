@@ -346,8 +346,26 @@ func TestRunnerWSTokenReconnect(t *testing.T) {
 	if err := writeRunnerFrame(rctx, conn2, protocol.Frame{Type: protocol.FramePing}); err != nil {
 		t.Fatalf("write ping: %v", err)
 	}
-	if pong, err := readRunnerFrame(rctx, conn2); err != nil || pong.Type != protocol.FramePong {
-		t.Fatalf("read pong: %+v, %v", pong, err)
+	// The empty Resume written at reconnect is reconciled asynchronously, and
+	// an op it did not list is re-sent at most once; when that reconciliation
+	// runs after the executor's eager send of op-1, a duplicate op-1 frame
+	// lands here ahead of the pong. Skip it: the duplicate-result test above
+	// already proves answering twice is safe.
+	for {
+		f, err := readRunnerFrame(rctx, conn2)
+		if err != nil {
+			t.Fatalf("read pong: %v", err)
+		}
+		if f.Type == protocol.FrameOp {
+			if f.Op == nil || f.Op.ID != "op-1" {
+				t.Fatalf("unexpected op before pong: %+v", f)
+			}
+			continue
+		}
+		if f.Type != protocol.FramePong {
+			t.Fatalf("read pong: %+v", f)
+		}
+		break
 	}
 
 	// The reconnect is a second setup.runner_attached (the runner sends no
