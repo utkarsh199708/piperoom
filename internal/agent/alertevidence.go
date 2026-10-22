@@ -49,6 +49,8 @@ var evidenceNumberKeys = map[string]bool{
 	"members": true, "total_lag": true, "lag_rate_per_min": true, "state_changes_15m": true,
 	"partition": true, "committed": true, "log_start": true, "records_lost": true,
 	"connectors_omitted": true, "tasks_omitted": true, "restarts": true,
+	// X1 drift signals (events.DriftSignal): counts only.
+	"source": true, "sink": true, "missing": true, "mismatched": true, "sample": true,
 }
 
 // evidenceBoolKeys are watcher keys whose value is a boolean.
@@ -65,7 +67,11 @@ var evidenceWordKeys = map[string]bool{"state": true, "wal_status": true, "eta_b
 
 // evidenceNameKeys are watcher keys that name an object: a slot, a group, a
 // topic, a connector.
-var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true}
+var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true, "table": true}
+
+// driftSignals are the X1 signals whose "window" is an object {from, to}
+// (events.DriftWindow), not a word as in dlq_growth.
+var driftSignals = map[string]bool{"count_drift": true, "row_drift": true, "dup_keys": true, "order_skew": true}
 
 // evidenceWord is the shape of a fixed-vocabulary value.
 var evidenceWord = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
@@ -155,6 +161,9 @@ func signalLine(s map[string]any) string {
 		parts = append(parts, "firing_for="+n+"s")
 	}
 	parts = append(parts, flatFields(s)...)
+	if driftSignals[sig] {
+		parts = append(parts, driftWindowFields(s["window"])...)
+	}
 	parts = append(parts, connectorFields(s["connectors"])...)
 	parts = append(parts, riskFields(s["risks"])...)
 	parts = append(parts, partitionFields(s["worst_partitions"])...)
@@ -232,6 +241,17 @@ func evidenceTime(v any) (string, bool) {
 		return "", false
 	}
 	return t.UTC().Format(time.RFC3339), true
+}
+
+// driftWindowFields renders a drift signal's window {from, to} as two times.
+func driftWindowFields(v any) []string {
+	m, _ := v.(map[string]any)
+	from, ok1 := evidenceTime(m["from"])
+	to, ok2 := evidenceTime(m["to"])
+	if !ok1 || !ok2 {
+		return nil
+	}
+	return []string{"window_from=" + from, "window_to=" + to}
 }
 
 // connectorFields renders connector_down evidence: name, state, and per task

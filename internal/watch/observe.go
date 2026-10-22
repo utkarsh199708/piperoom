@@ -43,6 +43,10 @@ type target struct {
 	lag      LagReader
 	// groups are the pipeline's consumer groups, filtered through the scope.
 	groups []string
+	// wh is the pipeline's sink warehouse (drift.go); scope is the tool scope
+	// of the pipeline, which every drift read is checked against first.
+	wh    clients.WarehouseReader
+	scope tools.Scope
 }
 
 // connObs is what one tick learned about one connector.
@@ -91,7 +95,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		cfg := p.Watch()
 		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
 			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled || cfg.ConsumerLag.Enabled || cfg.GroupUnstable.Enabled ||
-			cfg.OffsetBelowLogStart.Enabled) {
+			cfg.OffsetBelowLogStart.Enabled || driftOn(cfg)) {
 			continue
 		}
 		t := target{p: p, cfg: cfg}
@@ -102,6 +106,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 			w.log.Warn("watch: cannot scope pipeline", "pipeline", p.ID, "err", err)
 			continue
 		}
+		t.scope = sc
 		t.connectors = sc.FilterConnectors(p.Connectors)
 		t.cdcTopics = sc.Topics()
 		for _, topic := range t.cdcTopics {
@@ -111,10 +116,10 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		if w.clientsFor != nil {
 			pc := w.clientsFor(p.ID)
 			t.set, t.src, t.conn, t.kafka, t.lag = pc.Set, pc.Source, pc.Connect, pc.Kafka, pc.Lag
-			t.reg, t.ddl = pc.Registry, pc.DDL
+			t.reg, t.ddl, t.wh = pc.Registry, pc.DDL, pc.Warehouse
 		} else {
 			t.src, t.conn, t.kafka, t.lag = w.src, w.conn, w.kafka, w.lag
-			t.reg, t.ddl = w.registry, w.ddl
+			t.reg, t.ddl, t.wh = w.registry, w.ddl, w.wh
 		}
 		out = append(out, t)
 	}

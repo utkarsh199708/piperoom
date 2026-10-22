@@ -174,7 +174,7 @@ func (w *Watcher) logStill(now time.Time, t target, ps *pipeState) {
 	if now.Sub(ps.lastStill) < stillFiringEvery {
 		return
 	}
-	for _, id := range signalIDs {
+	for _, id := range ps.ids() {
 		ss := ps.sigs[id]
 		if ss == nil || ss.phase == phaseOK {
 			continue
