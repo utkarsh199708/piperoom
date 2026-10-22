@@ -301,7 +301,7 @@ func (fileWriteOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 	if err := checkWriteContent(p.Content); err != nil {
 		return Result{}, err
 	}
-	clean, _, err := env.Confine.prepare(p.Path)
+	clean, denied, err := env.Confine.prepare(p.Path)
 	if err != nil {
 		return Result{}, err
 	}
@@ -347,6 +347,16 @@ func (fileWriteOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 	if werr != nil {
 		_ = env.Confine.root.Remove(tmp)
 		return Result{}, fmt.Errorf("ops: writing %s: %w", clip(p.Path), werr)
+	}
+	// Re-run the walk after the rename: a component swapped to a symlink
+	// between prepare and the writes (a race only a concurrent local process
+	// can stage; these ops cannot create symlinks) is caught here, and the
+	// written file is removed rather than left behind the alias. The window
+	// is narrowed, not closed — closing it needs an fd-resolved path check,
+	// which the standard library does not expose portably.
+	if why := walkRefusal(clean, env.Confine.root.Lstat, denied, os.SameFile); why != "" {
+		_ = env.Confine.root.Remove(clean)
+		return Result{}, fmt.Errorf("%w: %s: %s (path changed during the write; the file was removed)", ErrPath, why, clip(p.Path))
 	}
 	return Result{
 		Summary: fmt.Sprintf("wrote %s (%d bytes)", p.Path, len(p.Content)),
