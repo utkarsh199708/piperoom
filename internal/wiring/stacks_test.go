@@ -85,6 +85,37 @@ func (s *spy) PublicationTables(_ context.Context, _, _ string, tables []string)
 	return out, nil
 }
 
+// Q2a's source-settings reads: the multi-tenant reachability test calls every
+// read tool, so the spy must satisfy the local reader interface (test-only,
+// A4-owned file updated with this PR).
+func (s *spy) Settings(context.Context) ([]postgres.DBSetting, error) {
+	s.hit("Settings")
+	return []postgres.DBSetting{{Name: "wal_level", Value: "logical"}}, nil
+}
+
+func (s *spy) TableReplication(_ context.Context, tables []string) ([]postgres.TableReplication, error) {
+	s.hit("TableReplication")
+	var out []postgres.TableReplication
+	for _, t := range tables {
+		out = append(out, postgres.TableReplication{Table: t, HasPrimaryKey: true, ReplicaIdentity: "default"})
+	}
+	return out, nil
+}
+
+func (s *spy) RoleInfo(_ context.Context, role string, tables []string) (postgres.RoleInfo, error) {
+	s.hit("RoleInfo")
+	ri := postgres.RoleInfo{Role: role, Exists: true, CanLogin: true, Replication: true, Selectable: map[string]bool{}}
+	for _, t := range tables {
+		ri.Selectable[t] = true
+	}
+	return ri, nil
+}
+
+func (s *spy) Blockers(context.Context, time.Duration) ([]postgres.DBSession, error) {
+	s.hit("Blockers")
+	return nil, nil
+}
+
 // spySourceReads are the source methods of spy. spySource holds the spy
 // behind them only, as the real source client (*postgres.DB) has no write
 // method: the P3 pg actions hold the source client, and the reachability
@@ -95,6 +126,11 @@ type spySourceReads interface {
 	PublicationTables(context.Context, string, string, []string) ([]postgres.PublicationTable, error)
 	ToastColumns(context.Context, []string) ([]clients.ToastTable, bool, error)
 	clients.CountReader
+	// Q2a source-settings reads.
+	Settings(context.Context) ([]postgres.DBSetting, error)
+	TableReplication(context.Context, []string) ([]postgres.TableReplication, error)
+	RoleInfo(context.Context, string, []string) (postgres.RoleInfo, error)
+	Blockers(context.Context, time.Duration) ([]postgres.DBSession, error)
 }
 
 type spySource struct{ spySourceReads }
