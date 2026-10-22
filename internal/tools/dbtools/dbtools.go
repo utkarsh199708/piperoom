@@ -28,9 +28,10 @@ type Deps struct {
 	// which table and column names the warehouse tools accept as input.
 	WarehouseKind string
 	Builder       topology.Builder
-	// Connect reads live Kafka Connect connector configs. Only
-	// pg_publication_tables uses it, so it is nil-able; the tool reports a
-	// clear error when it needs Connect and the field is nil.
+	// Connect reads live Kafka Connect connector configs and status.
+	// pg_publication_tables and pg_streaming_liveness use it, so it is
+	// nil-able; the tool reports a clear error when it needs Connect and the
+	// field is nil.
 	Connect clients.ConnectClient
 	// Kafka is read by reconcile for per-bucket topic counts (clients.RateReader,
 	// asserted at use time). Nil-able: reconcile then leaves the topic column out.
@@ -39,10 +40,11 @@ type Deps struct {
 	// to the pipeline named by pipeline_id (security finding F4). It must be
 	// non-nil; the row tools refuse to run without it.
 	Owners *owners.Owners
-	// Wait blocks for the given duration or until ctx ends; nil uses a timer.
+	// wait blocks for the given duration or until ctx ends; nil uses a timer.
 	// pg_streaming_liveness samples the slot twice, and tests replace the wait
-	// so they do not sleep.
-	Wait func(ctx context.Context, d time.Duration) error
+	// so they do not sleep. It is unexported so the test hook stays out of the
+	// production wiring surface.
+	wait func(ctx context.Context, d time.Duration) error
 }
 
 // pipeline resolves the owners.Pipeline for id. A nil Owners is a wiring fault

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +27,7 @@ func livenessSlot(name, flush, restart string, retained int64) clients.Replicati
 }
 
 // livenessDeps scripts the two slot reads and uses the shared orders pipeline.
-// Wait is a no-op so the tests do not sleep.
+// wait is a no-op so the tests do not sleep.
 func livenessDeps(reads ...[]clients.ReplicationSlot) (Deps, *fakeSource) {
 	src := &fakeSource{slotReads: reads}
 	d := Deps{
@@ -47,9 +49,15 @@ func livenessDeps(reads ...[]clients.ReplicationSlot) (Deps, *fakeSource) {
 			},
 		},
 		Owners: testOwners(),
-		Wait:   func(context.Context, time.Duration) error { return nil },
+		wait:   func(context.Context, time.Duration) error { return nil },
 	}
 	return d, src
+}
+
+// setOffsetFlush sets the orders connector's offset.flush.interval.ms, which
+// decides whether a flat confirmed_flush_lsn over the test window is "stuck".
+func setOffsetFlush(d *Deps, ms string) {
+	d.Connect.(*fakeConnect).configs["pg-orders-connector"]["offset.flush.interval.ms"] = ms
 }
 
 func runLiveness(t *testing.T, d Deps, ctx context.Context, in string) (tools.Result, error) {
@@ -88,6 +96,9 @@ func TestStreamingLivenessStuckShowsOldestWriter(t *testing.T) {
 		[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0)},
 		[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0x2000)},
 	)
+	// A 5s window covers the connector's 1s offset-flush interval, so the flat
+	// confirmed_flush_lsn is genuinely stuck.
+	setOffsetFlush(&d, "1000")
 	src.txns = []clients.Transaction{{
 		PID: 42, Username: "app", ApplicationName: "writer", State: "idle in transaction",
 		Age: 12 * time.Minute, WaitEvent: "Client:ClientRead", HasXID: true,
@@ -133,6 +144,7 @@ func TestStreamingLivenessStuckOutsidePipeline(t *testing.T) {
 		[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0)},
 		[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0x2000)},
 	)
+	setOffsetFlush(&d, "1000")
 	src.txns = nil
 	d.Src = &otherWriterSource{
 		fakeSource: src,
@@ -179,6 +191,127 @@ func TestStreamingLivenessQuiet(t *testing.T) {
 	}
 	if rep := res.Data.(livenessReport); rep.Verdict != verdictQuiet || rep.Slot.SourceWALAdvanceBytes != 0 {
 		t.Errorf("report = %+v", rep)
+	}
+}
+
+// TestStreamingLivenessBusySourceShortWindowIsNotStuck is the reviewer's false
+// fault: the source writes (the WAL head moves) but Debezium confirms offsets
+// only about every offset.flush.interval.ms, so a short window cannot show a
+// stall. The verdict must be an explicit not_confirmed, never stuck.
+func TestStreamingLivenessBusySourceShortWindowIsNotStuck(t *testing.T) {
+	cases := []struct {
+		name  string
+		flush string // empty means the connector does not set the property
+	}{
+		{"connect default 60000 ms", ""},
+		{"configured 20000 ms", "20000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, _ := livenessDeps(
+				[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0)},
+				[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0x2000)},
+			)
+			if c.flush != "" {
+				setOffsetFlush(&d, c.flush)
+			}
+			res, err := runLiveness(t, d, roomCtx(), `{"pipeline_id":"orders"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rep := res.Data.(livenessReport)
+			if rep.Verdict != verdictNotConfirmed {
+				t.Fatalf("verdict = %q, want %q (a busy source over a short window is not stuck)", rep.Verdict, verdictNotConfirmed)
+			}
+			wantFlushMS := int64(defaultOffsetFlushInterval / time.Millisecond)
+			if c.flush != "" {
+				ms, _ := strconv.Atoi(c.flush)
+				wantFlushMS = int64(ms)
+			}
+			if rep.OffsetFlushIntervalMS != wantFlushMS {
+				t.Errorf("offset_flush_interval_ms = %d, want %d", rep.OffsetFlushIntervalMS, wantFlushMS)
+			}
+			if rep.Slot.SourceWALAdvanceBytes != 8192 {
+				t.Errorf("source WAL advance = %d, want 8192", rep.Slot.SourceWALAdvanceBytes)
+			}
+			for _, want := range []string{
+				"not_confirmed:",
+				"confirmed_flush_lsn did not move in 5s",
+				"Debezium confirms offsets about every",
+				"offset.flush.interval.ms",
+				"not a fault",
+			} {
+				if !strings.Contains(res.Summary, want) {
+					t.Errorf("summary lacks %q:\n%s", want, res.Summary)
+				}
+			}
+			if rep.OldestTransaction != nil || rep.OldestOtherWriter != nil {
+				t.Errorf("a not_confirmed verdict must not blame a transaction: %+v", rep)
+			}
+		})
+	}
+}
+
+// TestStreamingLivenessStuckRequiresWindowAtLeastOffsetFlushInterval pins the
+// boundary: only a window that covers at least one offset flush may say stuck.
+func TestStreamingLivenessStuckRequiresWindowAtLeastOffsetFlushInterval(t *testing.T) {
+	cases := []struct {
+		name   string
+		window string
+		flush  string
+		want   string
+	}{
+		{"window longer than interval", "5", "1000", verdictStuck},
+		{"window equals interval", "5", "5000", verdictStuck},
+		{"window half the interval", "2", "5000", verdictNotConfirmed},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d, _ := livenessDeps(
+				[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0)},
+				[]clients.ReplicationSlot{livenessSlot("orders_slot", "0/1000", "0/1000", 0x2000)},
+			)
+			setOffsetFlush(&d, c.flush)
+			in := fmt.Sprintf(`{"pipeline_id":"orders","window_seconds":%s}`, c.window)
+			res, err := runLiveness(t, d, roomCtx(), in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rep := res.Data.(livenessReport)
+			if rep.Verdict != c.want {
+				t.Fatalf("verdict = %q, want %q (summary %q)", rep.Verdict, c.want, res.Summary)
+			}
+			if c.want == verdictStuck && !strings.Contains(res.Summary, "stuck:") {
+				t.Errorf("summary = %q, want a stuck verdict", res.Summary)
+			}
+			if c.want == verdictNotConfirmed && strings.Contains(res.Summary, "stuck:") {
+				t.Errorf("summary = %q, must not say stuck", res.Summary)
+			}
+		})
+	}
+}
+
+func TestOffsetFlushFromConfig(t *testing.T) {
+	cases := []struct {
+		in       string
+		want     time.Duration
+		wantNote bool
+	}{
+		{"", defaultOffsetFlushInterval, false},
+		{"1000", time.Second, false},
+		{"0", 0, false},
+		{"-1", defaultOffsetFlushInterval, true},
+		{"abc", defaultOffsetFlushInterval, true},
+	}
+	for _, c := range cases {
+		cfg := map[string]string{}
+		if c.in != "" {
+			cfg["offset.flush.interval.ms"] = c.in
+		}
+		got, note := offsetFlushFromConfig(cfg)
+		if got != c.want || (note != "") != c.wantNote {
+			t.Errorf("offsetFlushFromConfig(%q) = %v, %q; want %v, note=%t", c.in, got, note, c.want, c.wantNote)
+		}
 	}
 }
 
@@ -345,6 +478,9 @@ func TestStreamingLivenessErrorPaths(t *testing.T) {
 	})
 	t.Run("connect down is a note, not a lost verdict", func(t *testing.T) {
 		d, src := base()
+		// The config read still works, so the flush interval is known and the
+		// verdict stands; only the connector status is missing.
+		setOffsetFlush(&d, "1000")
 		d.Connect.(*fakeConnect).statusErr = errors.New("connect down")
 		src.txns = nil
 		res, err := runLiveness(t, d, roomCtx(), `{"pipeline_id":"orders"}`)
@@ -363,7 +499,7 @@ func TestStreamingLivenessErrorPaths(t *testing.T) {
 	})
 	t.Run("deadline respected", func(t *testing.T) {
 		d, _ := base()
-		d.Wait = func(ctx context.Context, _ time.Duration) error {
+		d.wait = func(ctx context.Context, _ time.Duration) error {
 			<-ctx.Done()
 			return ctx.Err()
 		}
