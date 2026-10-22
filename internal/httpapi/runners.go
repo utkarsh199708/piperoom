@@ -48,8 +48,8 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 
 	source := s.clientIP(r)
 
-	// The runner's first frame is a Pair. Nothing is told about the room until
-	// the code checks out.
+	// The runner's first frame is a Pair: exactly one of a pairing code and a
+	// token. Nothing is told about the room until the credential checks out.
 	pctx, pcancel := context.WithTimeout(connCtx, pairReadTimeout)
 	pair, err := readRunnerFrame(pctx, conn)
 	pcancel()
@@ -57,14 +57,9 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 		closeRunner(conn, websocket.StatusPolicyViolation, "pair frame required")
 		return
 	}
-	if pair.Type != protocol.FramePair || pair.Pair == nil {
+	if pair.Type != protocol.FramePair || pair.Pair == nil ||
+		(pair.Pair.Code == "") == (pair.Pair.Token == "") {
 		closeRunner(conn, websocket.StatusPolicyViolation, "pair frame required")
-		return
-	}
-	if pair.Pair.Code == "" {
-		// A token reconnect is U1-5a-2; before it exists the runner must pair
-		// with a fresh code.
-		closeRunner(conn, websocket.StatusPolicyViolation, "token reconnect not supported yet")
 		return
 	}
 	if v, ok := pair.Pair.Version(); ok {
@@ -75,6 +70,10 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 			closeRunner(conn, protocol.CloseProtocolVersion, err.Error())
 			return
 		}
+	}
+	if pair.Pair.Token != "" {
+		s.runnerReconnect(connCtx, conn, pair.Pair.Token, source)
+		return
 	}
 
 	res, err := s.svc.PairRunner(r.Context(), pair.Pair.Code, source)
@@ -156,6 +155,13 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 		closeRunner(conn, websocket.StatusInternalError, "attach failed")
 		return
 	}
+	if !s.svc.BindRunnerWriter(res.Tenant, res.RoomID, res.Creator.ID, token, runnerWriter{conn: conn}) {
+		closeRunner(conn, websocket.StatusInternalError, "attach failed")
+		return
+	}
+	// A failure before runnerLoop must not leave the runner attached forever;
+	// Lost is idempotent and a superseded socket's loss is a no-op.
+	defer s.svc.RunnerLost(connCtx, res.Tenant, res.RoomID, res.Creator.ID, token)
 	if err := writeRunnerFrame(connCtx, conn, protocol.Frame{Type: protocol.FrameToken, Token: &protocol.Token{
 		Token: token, ExpiresAt: tokenExpires.UTC(),
 	}}); err != nil {
@@ -168,6 +174,76 @@ func (s *Server) handleRunnerWS(w http.ResponseWriter, r *http.Request) {
 	// caller's own check.
 	s.runnerLoop(connCtx, conn, res.Tenant, res.RoomID, res.Creator.ID, token)
 }
+
+// runnerReconnect serves a Pair that carried a token: the runner is
+// reattaching after a drop, not pairing again (docs/design/setup-agent.md
+// §2.1). The token must belong to a live record and be within its idle expiry;
+// any other token is refused with setup.pairing {outcome: bad_code | expired}
+// and a policy-violation close, and changes nothing. On success the token is
+// rotated (the old one never authenticates again), setup.runner_attached is
+// emitted, the runner gets a Welcome (updated room target list) and its new
+// Token, and the loop reconciles the Resume it sends next.
+func (s *Server) runnerReconnect(ctx context.Context, conn *websocket.Conn, token, source string) {
+	newToken, expires, err := newRunnerToken()
+	if err != nil {
+		s.log.Error("httpapi: runner token generation failed", "err", err)
+		closeRunner(conn, websocket.StatusInternalError, "token generation failed")
+		return
+	}
+	rn, outcome := s.svc.ReconnectRunner(ctx, token, newToken, expires, source)
+	if outcome != events.PairingOK {
+		closeRunner(conn, websocket.StatusPolicyViolation, "token refused: "+outcome)
+		return
+	}
+	if !s.svc.BindRunnerWriter(rn.Tenant, rn.RoomID, rn.Creator.ID, newToken, runnerWriter{conn: conn}) {
+		closeRunner(conn, websocket.StatusInternalError, "attach failed")
+		return
+	}
+	defer s.svc.RunnerLost(ctx, rn.Tenant, rn.RoomID, rn.Creator.ID, newToken)
+
+	snap, err := s.svc.GetRoom(ctx, rn.RoomID)
+	if err != nil {
+		s.log.Error("httpapi: runner reconnect room lookup failed", "room", rn.RoomID, "err", err)
+		closeRunner(conn, websocket.StatusInternalError, "room lookup failed")
+		return
+	}
+	welcome := protocol.Welcome{
+		RoomID:          rn.RoomID,
+		Title:           snap.Title,
+		PipelineID:      snap.PipelineID,
+		Tenant:          rn.Tenant,
+		Creator:         rn.Creator,
+		ProtocolVersion: protocol.CurrentMajor,
+		ProtocolMinor:   protocol.CurrentMinor,
+	}
+	if err := writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FrameWelcome, Welcome: &welcome}); err != nil {
+		return
+	}
+	if err := writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FrameToken, Token: &protocol.Token{
+		Token: newToken, ExpiresAt: expires.UTC(),
+	}}); err != nil {
+		return
+	}
+	s.runnerLoop(ctx, conn, rn.Tenant, rn.RoomID, rn.Creator.ID, newToken)
+}
+
+// runnerWriter adapts the runner socket to room.RunnerWriter. coder/websocket
+// permits concurrent writes; the short write timeout keeps a stalled peer from
+// holding an Execute call forever.
+type runnerWriter struct{ conn *websocket.Conn }
+
+// WriteRunnerFrame implements room.RunnerWriter.
+func (w runnerWriter) WriteRunnerFrame(ctx context.Context, f protocol.Frame) error {
+	wctx, cancel := context.WithTimeout(ctx, runnerWriteTimeout)
+	defer cancel()
+	if err := writeRunnerFrame(wctx, w.conn, f); err != nil {
+		return fmt.Errorf("httpapi: write runner frame %s: %w", f.Type.Short(), err)
+	}
+	return nil
+}
+
+// runnerWriteTimeout bounds one server-to-runner frame write.
+const runnerWriteTimeout = 10 * time.Second
 
 // runnerLoop reads frames for an attached runner until it is silent for
 // protocol.LostAfter or the connection ends. token is the attachment identity
@@ -197,16 +273,15 @@ func (s *Server) runnerLoop(ctx context.Context, conn *websocket.Conn, tenant, r
 		case protocol.FramePing:
 			_ = writeRunnerFrame(ctx, conn, protocol.Frame{Type: protocol.FramePong})
 		case protocol.FrameRefused:
-			s.svc.RunnerRefused(ctx, tenant, roomID, creatorID, token, events.SetupRunnerRefusedPayload{
-				Op:         f.Refused.Op,
-				Reason:     f.Refused.Reason,
-				ProposalID: f.Refused.ProposalID,
-				StepIndex:  f.Refused.StepIndex,
-			})
+			s.svc.RunnerRefused(ctx, tenant, roomID, creatorID, token, *f.Refused)
+		case protocol.FrameResult:
+			s.svc.RunnerResult(ctx, tenant, roomID, creatorID, token, *f.Result)
+		case protocol.FrameResume:
+			s.svc.RunnerResume(ctx, tenant, roomID, creatorID, token, *f.Resume)
 		}
-		// FrameResult, FrameResume and the rest are consumed by U1-5a-2
-		// (RunnerExecutor / Resume reconciliation); unknown types are already
-		// dropped by Frame.Check in readRunnerFrame.
+		// Server-only types and unknown ones are dropped: Frame.Check already
+		// refused a known type with the wrong payload, and a newer peer's
+		// unknown type is never acted on.
 	}
 }
 
