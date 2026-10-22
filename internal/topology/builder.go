@@ -238,9 +238,11 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			queried = append(queried, d.topic)
 		}
 	}
-	// Kafka and the registry are independent, so they share the budget.
+	// Kafka, the registry and the column catalogs are independent, so they
+	// share the budget.
 	var wg sync.WaitGroup
-	wg.Add(2)
+	var lineage *columnReads
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		b.collectTopics(cctx, queried, info)
@@ -248,6 +250,10 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	go func() {
 		defer wg.Done()
 		b.collectSchemas(cctx, subjects, info)
+	}()
+	go func() {
+		defer wg.Done()
+		lineage = b.collectLineage(cctx, p, fp, info)
 	}()
 	wg.Wait()
 
@@ -326,6 +332,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 		}
 	}
 	g.Edges = append(g.Edges, deps...)
+	b.addColumns(&g, p, info, fp, lineage)
 
 	return g, nil
 }
