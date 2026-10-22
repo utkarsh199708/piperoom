@@ -403,11 +403,16 @@ func (f *fleetView) row(p room.PipelineInfo, c *fleetFacts, now time.Time) Fleet
 			}
 			return a.Since.Compare(b.Since)
 		})
-		for i, g := range sigs {
-			if i == 0 {
-				out.WorstNode = g.Node
+		// worst_node and forecasts name FIRING signals only (docs/api.md): an
+		// acked signal still warns and is listed, but it is handled, so its
+		// node never shadows a firing one and its forecast is not news.
+		worstNamed := false
+		for _, g := range sigs {
+			firing := g.State == clients.WatchFiring
+			if firing && !worstNamed {
+				out.WorstNode, worstNamed = g.Node, true
 			}
-			if g.State == clients.WatchFiring && (g.Severity == "sev1" || g.Severity == "sev2") {
+			if firing && (g.Severity == "sev1" || g.Severity == "sev2") {
 				out.Health = "fail"
 			} else if out.Health == "ok" {
 				out.Health = "warn"
@@ -415,7 +420,7 @@ func (f *fleetView) row(p room.PipelineInfo, c *fleetFacts, now time.Time) Fleet
 			if !slices.Contains(out.SignalsFiring, g.Signal) && len(out.SignalsFiring) < clients.MaxWatchSignals {
 				out.SignalsFiring = append(out.SignalsFiring, g.Signal)
 			}
-			if g.Signal == events.SignalForecast && g.ETA != nil {
+			if firing && g.Signal == events.SignalForecast && g.ETA != nil {
 				out.Forecasts = append(out.Forecasts, FleetForecast{Metric: g.Metric, ETA: g.ETA.UTC()})
 			}
 		}

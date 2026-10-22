@@ -47,10 +47,24 @@ export function formatMetricValue(metric: WatchMetric, v: number): string {
     case 'bytes':
       return humanBytes(v)
     case 'seconds':
-      return durationLabel(v * 1000) ?? '0 min'
+      return spanLabel(v)
     default:
       return `${Math.round(v).toLocaleString('en-US')} records`
   }
+}
+
+/**
+ * A time span as a metric value: "42 s" under a minute, "30 min" under an hour, "18 h" under two days, then
+ * days. No horizon, unlike durationLabel: a value or limit is a fact, not a badge, so a 30-day retention limit
+ * reads "30 d" and never falls back to something smaller.
+ */
+function spanLabel(s: number): string {
+  if (s < 60) return `${Math.round(s)} s`
+  const min = s / 60
+  if (min < 60) return `${Math.floor(min)} min`
+  const h = min / 60
+  if (h < 48) return `${Math.floor(h)} h`
+  return `${Math.floor(h / 24)} d`
 }
 
 /**
