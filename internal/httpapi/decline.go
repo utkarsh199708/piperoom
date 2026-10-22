@@ -35,5 +35,9 @@ func decodeOptionalBody(w http.ResponseWriter, r *http.Request, dst any) error {
 	if err == nil || errors.Is(err, io.EOF) {
 		return nil
 	}
+	var tooBig *http.MaxBytesError
+	if errors.As(err, &tooBig) {
+		return bodyTooLarge(maxBody)
+	}
 	return validation("invalid JSON body")
 }
