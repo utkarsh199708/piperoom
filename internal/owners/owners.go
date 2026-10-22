@@ -90,6 +90,15 @@ type Pipeline struct {
 	// SharedConnections allows a connection reference of this pipeline to be
 	// used by another tenant too (CheckSharedRefs).
 	SharedConnections bool `yaml:"shared_connections"`
+	// Staging is the optional cdc `staging:` block (X8, staging.go): a second
+	// Connect and Schema Registry (and optionally Kafka) to try a fix on
+	// before production. Nil = no staging. Load refuses one that names a
+	// production endpoint.
+	Staging *StagingSpec `yaml:"staging"`
+	// RequireStaging is the optional `require_staging:` list (X8): action
+	// names whose steps need a healthy stage before approval. It needs a
+	// staging: block; wiring checks every name is a registered actions.Stager.
+	RequireStaging []string `yaml:"require_staging"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
@@ -315,6 +324,9 @@ func (o *Owners) validate() error {
 		return err
 	}
 	if err := o.validateTenancy(); err != nil {
+		return err
+	}
+	if err := o.validateStaging(); err != nil {
 		return err
 	}
 	o.indexConsumerGroups()

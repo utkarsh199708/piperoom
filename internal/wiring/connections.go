@@ -121,9 +121,16 @@ var errConnRef = errors.New("connection reference")
 // no login) and one tenant's broker is never sent another tenant's password.
 // Errors name the pipeline, the key and the variable or path, never a value.
 func pipelineConfig(p owners.Pipeline, src connSource) (config.Config, error) {
+	return resolveConnections(p.ID, "connections", p.Connections, src)
+}
+
+// resolveConnections resolves one block of references into an otherwise
+// empty Config; where names the block in errors ("connections", or
+// "staging.connections" for stagingConfig).
+func resolveConnections(id, where string, conns owners.Connections, src connSource) (config.Config, error) {
 	var pc config.Config
-	keys := make([]string, 0, len(p.Connections))
-	for k := range p.Connections {
+	keys := make([]string, 0, len(conns))
+	for k := range conns {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys) // same error for the same file
@@ -131,19 +138,19 @@ func pipelineConfig(p owners.Pipeline, src connSource) (config.Config, error) {
 		field, ok := connFields[k]
 		if !ok {
 			// owners.Load refuses unknown keys; this guards a hand-built Owners.
-			return config.Config{}, fmt.Errorf("wiring: pipeline %q: connections: unknown key %q: %w", p.ID, k, errConnRef)
+			return config.Config{}, fmt.Errorf("wiring: pipeline %q: %s: unknown key %q: %w", id, where, k, errConnRef)
 		}
-		r := p.Connections[k]
+		r := conns[k]
 		v, err := resolveRef(k, r, src)
 		if err != nil {
-			return config.Config{}, fmt.Errorf("wiring: pipeline %q: connections.%s: %w", p.ID, k, err)
+			return config.Config{}, fmt.Errorf("wiring: pipeline %q: %s.%s: %w", id, where, k, err)
 		}
 		// The non-secret settings are checked here, before a client sees them:
 		// the client's own error would quote the value, and a reference that
 		// points at the wrong variable may hold a DSN or a password.
 		if owners.IsLiteralKey(k) && !literalOK(k, v) {
-			return config.Config{}, fmt.Errorf("wiring: pipeline %q: connections.%s: the value from %s is not %s (value not shown): %w",
-				p.ID, k, refName(r), literalWant[k], errConnRef)
+			return config.Config{}, fmt.Errorf("wiring: pipeline %q: %s.%s: the value from %s is not %s (value not shown): %w",
+				id, where, k, refName(r), literalWant[k], errConnRef)
 		}
 		*field(&pc) = v
 	}
