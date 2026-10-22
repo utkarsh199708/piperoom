@@ -206,9 +206,9 @@ func (s *Server) handleFleet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// tenantTeam returns a pipeline's owners.yaml tenant ("" when unset) and
-// team. owners.yaml has no per-pipeline team: key yet (A3 adds it with X4's
-// teams: list), so team is "" for every pipeline until it lands.
+// tenantTeam returns a pipeline's owners.yaml tenant and team: (X5-0), ""
+// when unset. The owners loader has checked that a team of a teams: list
+// serves the pipeline's own tenant.
 func (f *fleetView) tenantTeam(pipelineID string) (tenant, team string) {
 	if f.cfg.Owners == nil {
 		return "", ""
@@ -217,7 +217,7 @@ func (f *fleetView) tenantTeam(pipelineID string) (tenant, team string) {
 	if !ok {
 		return "", ""
 	}
-	return p.Tenant, ""
+	return p.Tenant, p.Team
 }
 
 // get returns facts covering ids, from the cache when they are younger than

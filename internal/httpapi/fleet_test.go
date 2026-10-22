@@ -147,7 +147,7 @@ func (e *fleetEnv) appender(t testing.TB, typ events.Type, payload any) func(str
 const fleetOwners = "pipelines:\n" +
 	"  - id: failing\n    title: Failing\n    topic_prefix: f\n    source_tables: [public.f]\n    connectors: [c1]\n" +
 	"  - id: warning\n    topic_prefix: w\n    source_tables: [public.w]\n    connectors: [c2]\n" +
-	"  - id: healthy\n    title: Healthy\n    topic_prefix: h\n    source_tables: [public.h]\n    connectors: [c3]\n" +
+	"  - id: healthy\n    title: Healthy\n    topic_prefix: h\n    source_tables: [public.h]\n    connectors: [c3]\n    team: orders-core\n" +
 	"  - id: acked\n    topic_prefix: a\n    source_tables: [public.a]\n    connectors: [c4]\n" +
 	"  - id: stale\n    topic_prefix: s\n    source_tables: [public.s]\n    connectors: [c5]\n" +
 	"  - id: roomy\n    topic_prefix: r\n    source_tables: [public.r]\n    connectors: [c6]\n" +
@@ -254,8 +254,12 @@ func TestFleetHealthAndRows(t *testing.T) {
 	if got := e.fleet(t, "meera", "?kind=cdc"); len(got) != 6 {
 		t.Fatalf("kind=cdc: %d rows", len(got))
 	}
-	if got := e.fleet(t, "meera", "?team=orders-core"); len(got) != 0 {
-		t.Fatalf("team filter with no team key matched %d", len(got))
+	// team is the pipeline's owners.yaml team: (X5-0), matched exactly.
+	if got := e.fleet(t, "meera", "?team=orders-core"); len(got) != 1 || got[0].PipelineID != "healthy" || got[0].Team != "orders-core" {
+		t.Fatalf("team=orders-core: %+v", got)
+	}
+	if got := e.fleet(t, "meera", "?team=Orders-core"); len(got) != 0 {
+		t.Fatalf("team filter is case-sensitive, matched %d", len(got))
 	}
 }
 

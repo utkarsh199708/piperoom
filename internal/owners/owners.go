@@ -93,6 +93,11 @@ type Pipeline struct {
 	// Tenant is the optional tenant (docs/design/tenancy.md); read it with
 	// TenantName, which applies the default.
 	Tenant string `yaml:"tenant"`
+	// Team is the optional `team:` (X5-0): the team that owns the pipeline,
+	// for GET /api/fleet?team=. With a teams: list it must be one of its ids
+	// serving the pipeline's tenant; without one it is a free label with the
+	// teams[].id charset (teams.go).
+	Team string `yaml:"team"`
 	// Connections is the optional `connections:` block (tenancy.go): where
 	// this pipeline's DSNs, URLs and logins come from. Nil = the process-wide
 	// settings.

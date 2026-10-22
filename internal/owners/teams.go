@@ -91,6 +91,32 @@ func (o *Owners) validateTeams() error {
 			return fmt.Errorf("team %q: tenant %s needs a tenants: block that declares it", t.ID, quoteName(t.Tenant))
 		}
 	}
+	return o.validatePipelineTeams()
+}
+
+// validatePipelineTeams checks each pipeline's optional team: (X5-0). With a
+// teams: list the id must be listed there for the pipeline's tenant, so the
+// fleet's ?team= filter never names a team of another tenant; without one
+// the label only has to look like a team id.
+func (o *Owners) validatePipelineTeams() error {
+	for _, p := range o.Pipelines {
+		if p.Team == "" {
+			continue
+		}
+		if !teamIDRE.MatchString(p.Team) {
+			return fmt.Errorf("pipeline %q: team %s must match %s", p.ID, quoteName(p.Team), teamIDRE)
+		}
+		if len(o.Teams) == 0 {
+			continue
+		}
+		i := slices.IndexFunc(o.Teams, func(t Team) bool { return t.ID == p.Team })
+		if i < 0 {
+			return fmt.Errorf("pipeline %q: team %q is not declared in teams:", p.ID, p.Team)
+		}
+		if t := o.Teams[i]; t.TenantName() != p.TenantName() {
+			return fmt.Errorf("pipeline %q: team %q serves tenant %q, not the pipeline's tenant %q", p.ID, p.Team, t.TenantName(), p.TenantName())
+		}
+	}
 	return nil
 }
 
