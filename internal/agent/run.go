@@ -85,6 +85,10 @@ type runner struct {
 	// blocks a healthy verdict until a later read of it succeeds (KAN-408).
 	gaps *readFailures
 
+	// causes remembers the external changes this run's what_changed reads
+	// listed and the latest hypothesis's scope (X4c, externalcause.go).
+	causes *externalCauses
+
 	// recoveredIdle is true while the pipeline is verified recovered and nothing
 	// since has broken that (a failed or unknown step, or a NOT recovered
 	// verdict). An episode that ends while it is set stays "done" and waits for
@@ -208,13 +212,14 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		proposals: newProposalTracker(),
 		steps:     steps,
 		gaps:      gaps,
+		causes:    newExternalCauses(alert, time.Now()),
 
 		noneSubjects: map[string]bool{},
 	}, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, roomToolsForKind(newRoomToolsWithGaps(r.deps, r.proposals, r.steps, r.gaps), r.kind, r.deps.Actions))
+	r.toolList = buildToolList(r.deps.Tools, roomToolsForKind(newRoomToolsWithCauses(r.deps, r.proposals, r.steps, r.gaps, r.causes), r.kind, r.deps.Actions))
 	r.system = systemPromptForMode(r.kind, r.mode)
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
@@ -919,10 +924,26 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		TookMS:     took,
 		Provenance: prov,
 	})
-	r.steps.addWithInput(stepID, u.name, string(cleaned), summary, false)
+	// X4c: a what_changed read that lists an external change gets the
+	// runner's ranking beside it (externalcause.go). The ledger keeps it with
+	// the summary, so a hypothesis naming a team or change id it shows is
+	// backed by this step.
+	var ranked string
+	if u.name == whatChangedTool {
+		ranked = r.causes.observe(stepID, res.Data)
+	}
+	ledger := summary
+	if ranked != "" {
+		ledger += "\n" + ranked
+	}
+	r.steps.addWithInput(stepID, u.name, string(cleaned), ledger, false)
+	content := r.readToolContent(u.name, stepID, summary, res.Data)
+	if ranked != "" {
+		content += "\n" + ranked
+	}
 	return toolResult{
 		toolUseID: u.id,
-		content:   r.readToolContent(u.name, stepID, summary, res.Data),
+		content:   content,
 		isError:   false,
 	}
 }

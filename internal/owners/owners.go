@@ -158,6 +158,9 @@ type Owners struct {
 	// Tenants is the optional tenants: block (tenancy.go). Present, it turns
 	// the tenant filter on.
 	Tenants map[string]Tenant `yaml:"tenants"`
+	// Teams is the optional teams: list (teams.go, X4): the teams that own
+	// the services outside the pipelines, which a hypothesis may name.
+	Teams []Team `yaml:"teams"`
 
 	// path and dir are where LoadDir read the config from, so a Live built
 	// over this Owners can re-read it on Reload. dir is "" when there is no
@@ -346,6 +349,9 @@ func (o *Owners) validate() error {
 		return err
 	}
 	if err := o.validateStaging(); err != nil {
+		return err
+	}
+	if err := o.validateTeams(); err != nil {
 		return err
 	}
 	o.indexConsumerGroups()
