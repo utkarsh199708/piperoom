@@ -156,27 +156,28 @@ func playStory(ctx context.Context, rc *runState, steps []step, deps agent.Deps,
 		rc.markIdle()
 		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value."})
 		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "no proposals in this room"})
-		return waitForInput(ctx, rc, watcher, deps, emit)
+		return waitForInput(ctx, rc, watcher, deps, emit, nil)
 	}
 
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal."})
 
-	_, err := deps.Proposals.Create(ctx, events.ProposalCreatedPayload{
-		Title: "Set subject compatibility to NONE and restart the connector task",
-		Steps: []events.ProposalStep{
-			{
-				Action:      ActionSchemaSetCompatibility,
-				Layer:       "schema-registry",
-				Params:      mustJSON(map[string]any{"subject": "pg.public.orders-value", "level": "NONE"}),
-				Description: "Allow the new decimal schema to register under the same subject.",
-			},
-			{
-				Action:      ActionConnectRestartTask,
-				Layer:       "kafka-connect",
-				Params:      mustJSON(map[string]any{"connector": "pg-orders-connector", "task": 0}),
-				Description: "Restart Debezium task 0 so it picks up the new schema.",
-			},
+	fixSteps := []events.ProposalStep{
+		{
+			Action:      ActionSchemaSetCompatibility,
+			Layer:       "schema-registry",
+			Params:      mustJSON(map[string]any{"subject": "pg.public.orders-value", "level": "NONE"}),
+			Description: "Allow the new decimal schema to register under the same subject.",
 		},
+		{
+			Action:      ActionConnectRestartTask,
+			Layer:       "kafka-connect",
+			Params:      mustJSON(map[string]any{"connector": "pg-orders-connector", "task": 0}),
+			Description: "Restart Debezium task 0 so it picks up the new schema.",
+		},
+	}
+	proposalID, err := deps.Proposals.Create(ctx, events.ProposalCreatedPayload{
+		Title:          "Set subject compatibility to NONE and restart the connector task",
+		Steps:          fixSteps,
 		Risk:           "low",
 		Rollback:       "set compatibility back to BACKWARD",
 		RequiredLayers: []string{"schema-registry", "kafka-connect"},
@@ -189,15 +190,32 @@ func playStory(ctx context.Context, rc *runState, steps []step, deps agent.Deps,
 			rc.markIdle()
 			_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "I cannot propose a fix in this room: " + re.Msg})
 			_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "proposals disabled"})
-			return waitForInput(ctx, rc, watcher, deps, emit)
+			return waitForInput(ctx, rc, watcher, deps, emit, nil)
 		}
 		return waitDone, err
 	}
 	rc.markIdle()
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "The fix proposal is waiting for the schema-registry and kafka-connect owners."})
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "1 proposal open"})
-	return waitForInput(ctx, rc, watcher, deps, emit)
+	// The real agent verifies after the last step ran; the scripted one must
+	// do the same or the room waits for a verdict forever (KAN-389). The
+	// verifier's re-check pause is the same ctx-aware step delay.
+	pause := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(delay):
+			return true
+		}
+	}
+	return waitForInput(ctx, rc, watcher, deps, emit, newFixVerifier(proposalID, len(fixSteps), pause, emit))
 }
+
+// recoveredMessage is the room's form of the verdict: it keeps the
+// compatibility follow-up the real agent reports when a fix leaves a subject
+// at NONE. Like every scripted message it names no proposal id (F5b).
+const recoveredMessage = "Verification passed: pg-orders-connector task 0 is RUNNING and new rows reached analytics.orders. " +
+	"pg.public.orders-value compatibility is still NONE; restore BACKWARD with a separate fix."
 
 // storySteps returns the six scripted reads of the schema-change story. The
 // last one is what_changed, whose result carries the F8 change rows the web
@@ -304,8 +322,8 @@ func changeFingerprint(parts ...string) string {
 // results until the room closes. An inbox that is closed (a shadow room) ends
 // it at once with nil. The wait rides on the run's single inbox watcher, so a
 // reset (which returns waitReset) never leaves a second Wait racing for the
-// same input.
-func waitForInput(ctx context.Context, rc *runState, watcher *inboxWatcher, deps agent.Deps, emit func(events.Type, any) error) (runWait, error) {
+// same input. fix may be nil (no proposal in this room).
+func waitForInput(ctx context.Context, rc *runState, watcher *inboxWatcher, deps agent.Deps, emit func(events.Type, any) error, fix *fixVerifier) (runWait, error) {
 	in := deps.Inbox
 	if in == nil {
 		return waitDone, nil
@@ -324,6 +342,7 @@ func waitForInput(ctx context.Context, rc *runState, watcher *inboxWatcher, deps
 		}
 		for _, in := range inputs {
 			handleInput(ctx, deps, in, emit)
+			fix.observe(in)
 		}
 	}
 	return waitDone, nil
@@ -361,6 +380,103 @@ func (w *inboxWatcher) wait(ctx context.Context, rc *runState) runWait {
 			}
 			return waitReady
 		}
+	}
+}
+
+// fixVerifier is the scripted verify-after-fix pass. It mirrors the real
+// agent's rule (internal/agent/verify.go): recovery is verified only once every
+// step of the proposal has succeeded. A failed or unknown step, or a result for
+// another proposal, never produces a verdict, so a room that only partly ran a
+// fix keeps saying "verifying" instead of claiming a recovery it did not see.
+//
+// One verdict is written per run. The fields are only touched by the run's own
+// goroutine (the inbox is drained there), so no lock is needed.
+type fixVerifier struct {
+	proposalID string
+	steps      int
+	pause      func() bool
+	emit       func(events.Type, any) error
+	okSteps    map[int]bool
+	failed     bool
+	verified   bool
+}
+
+// newFixVerifier returns the verifier of proposalID, whose fix has steps steps.
+func newFixVerifier(proposalID string, steps int, pause func() bool, emit func(events.Type, any) error) *fixVerifier {
+	return &fixVerifier{
+		proposalID: proposalID,
+		steps:      steps,
+		pause:      pause,
+		emit:       emit,
+		okSteps:    map[int]bool{},
+	}
+}
+
+// observe reads one agent input and writes the verdict when it completes the
+// fix. A nil verifier (a room with no proposal) ignores every input.
+func (v *fixVerifier) observe(in agent.HumanInput) {
+	if v == nil || v.verified || v.failed || v.steps <= 0 || in.Kind != "action_result" {
+		return
+	}
+	if in.ProposalID != v.proposalID || in.StepIndex == nil {
+		return
+	}
+	if in.OK == nil || !*in.OK {
+		// A failed or unknown step is not a recovery (HumanInput.OK nil means
+		// the executor stopped before recording the outcome).
+		v.failed = true
+		return
+	}
+	if *in.StepIndex < 0 || *in.StepIndex >= v.steps {
+		return
+	}
+	v.okSteps[*in.StepIndex] = true
+	for i := 0; i < v.steps; i++ {
+		if !v.okSteps[i] {
+			return
+		}
+	}
+	// Re-read the pipeline after the last step, as the real agent does; the
+	// pause also keeps "verifying" visible long enough for the demo audience.
+	if !v.pause() {
+		return
+	}
+	v.verified = true
+	_ = v.emit(events.AgentVerification, recoveredVerification(v.proposalID))
+	_ = v.emit(events.AgentMessage, events.AgentMessagePayload{Text: recoveredMessage})
+}
+
+// recoveredVerification is the scripted verdict of the schema-change fix: the
+// same payload the real agent emits, so the room log, the post-mortem and the
+// web render it exactly as a production verification. The checks read the state
+// the fix left behind: the subject at NONE and task 0 RUNNING, and new rows in
+// the warehouse sink.
+func recoveredVerification(proposalID string) events.AgentVerificationPayload {
+	return events.AgentVerificationPayload{
+		ProposalID: proposalID,
+		Checks: []events.VerificationCheck{
+			{
+				Layer:  "schema-registry",
+				Name:   "schema_registry_versions",
+				OK:     true,
+				Detail: "subject pg.public.orders-value: compatibility NONE (was BACKWARD before this fix)",
+			},
+			{
+				Layer:  "kafka-connect",
+				Name:   "connect_status",
+				OK:     true,
+				Detail: "pg-orders-connector (source): RUNNING. Tasks: 0=RUNNING on 172.19.0.5:8083 (was FAILED)",
+			},
+		},
+		DataFlow: &events.DataFlowCheck{
+			Checked: true,
+			Fresh:   true,
+			Sinks: []events.SinkCheck{
+				{Table: "analytics.orders", Passed: true, PassedBy: "rows since proposal"},
+			},
+		},
+		Recovered: true,
+		Verdict:   "recovered: every layer check passed and new rows reached analytics.orders after the fix.",
 	}
 }
 

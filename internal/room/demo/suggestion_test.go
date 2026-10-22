@@ -130,7 +130,7 @@ func TestForwardedSuggestionIsAcknowledgedAndAgentStaysResponsive(t *testing.T) 
 	done := make(chan error, 1)
 	go func() {
 		done <- func() error {
-			_, err := waitForInput(ctx, newRunState(), &inboxWatcher{in: inbox}, agent.Deps{Sink: sink, Inbox: inbox}, sink.emitFn(ctx))
+			_, err := waitForInput(ctx, newRunState(), &inboxWatcher{in: inbox}, agent.Deps{Sink: sink, Inbox: inbox}, sink.emitFn(ctx), nil)
 			return err
 		}()
 	}()
