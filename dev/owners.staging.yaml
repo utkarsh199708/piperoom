@@ -1,9 +1,8 @@
 # Same as owners.yaml plus a `staging:` block on the orders pipeline (X8, docs/api.md "X8 staging").
 # Start the server with OWNERS_FILE=dev/owners.staging.yaml and the staging profile up
 # (`devctl up --staging`, dev/README.md "Staging profile"), with write mode on, to use
-# "Try in staging". Needs the owners loader of X8a: until it lands the server refuses the
-# `staging:` key. Keep the rest in step with dev/owners.yaml: TestOwnersStagingMatchesOwners
-# fails when they drift.
+# "Try in staging". internal/owners TestExistingFilesStayValid loads it. Keep the rest in step
+# with dev/owners.yaml: TestOwnersStagingMatchesOwners fails when they drift.
 pipelines:
   - id: orders
     title: Orders CDC
@@ -16,8 +15,8 @@ pipelines:
     # X8: the second Connect + Schema Registry of the staging profile. The URLs are the host
     # ports (a server run on the host, `go run ./cmd/server`); a server inside the compose
     # network uses http://connect-staging:8083 and http://schema-registry-staging:8081.
-    # They must differ from production (CONNECT_URL / SCHEMA_REGISTRY_URL): owners.Overlap
-    # refuses the file otherwise. kafka_brokers is left out: staging shares the dev Kafka and
+    # They must differ from production (CONNECT_URL / SCHEMA_REGISTRY_URL and every pipeline's
+    # connections:): the server refuses to start otherwise (owners.CheckStagingOverlap). kafka_brokers is left out: staging shares the dev Kafka and
     # its own topics are only read through the staging Connect.
     staging:
       connections:
