@@ -103,7 +103,7 @@ func loadErrorsSummary(table string, since time.Time, errs []clients.LoadError) 
 	}
 	for i, e := range errs {
 		if i >= maxLoadLines {
-			fmt.Fprintf(&sb, "\nâ€¦ %d more", len(errs)-i)
+			fmt.Fprintf(&sb, "\n… %d more", len(errs)-i)
 			break
 		}
 		fmt.Fprintf(&sb, "\n- %s %s rows=%d errors=%d", topology.FormatTS(e.At), e.Status, e.Rows, e.Errors)

@@ -211,38 +211,26 @@ func (d Deps) isBigQuery() bool {
 }
 
 // threePartTables reports whether the kind addresses a table as
-// "database.schema.table" rather than "schema.table": Snowflake, Databricks
-// (catalog.schema.table) and BigQuery (project.dataset.table) all do.
+// "database.schema.table" rather than "schema.table". Only Snowflake does: the
+// Databricks and BigQuery clients deliberately refuse a catalog/project prefix
+// (every table is read in the DSN's catalog/project), so accepting one here
+// would only turn a bad tool input into a client error.
 func (d Deps) threePartTables() bool {
-	return d.isSnowflake() || d.isDatabricks() || d.isBigQuery()
+	return d.isSnowflake()
 }
 
-// bigqueryProjectRe is the first segment of a BigQuery table: a project id,
-// which may contain hyphens (my-project). The schema and table parts still use
-// identRe, and the client quotes every part.
-var bigqueryProjectRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9-]*$`)
-
-// validWarehouseTable reports whether name is a valid warehouse table. Postgres
-// and ClickHouse take "schema.table"; Snowflake, Databricks and BigQuery take
-// "db.schema.table" too, because their sinks can live in another database,
-// catalog or project than the connection's default (KAN-460: a batch pipeline
-// whose sink is analytics.fct_revenue was addressed as
-// warehouse.analytics.fct_revenue and refused). Each part has to match the
-// kind's identifier regex (AGENTS.md section 4, rule 6); the client quotes it
-// again.
+// validWarehouseTable reports whether name is a valid warehouse table. Postgres,
+// ClickHouse, Databricks and BigQuery take "schema.table"; Snowflake also takes
+// "db.schema.table", because its sinks can live in another database than the
+// connection's default. Each part has to match the kind's identifier regex
+// (AGENTS.md section 4, rule 6); the client quotes it again.
 func (d Deps) validWarehouseTable(name string) bool {
 	parts := strings.Split(name, ".")
 	if len(parts) != 2 && !(len(parts) == 3 && d.threePartTables()) {
 		return false
 	}
 	re := d.whIdentRe()
-	for i, p := range parts {
-		if i == 0 && len(parts) == 3 && d.isBigQuery() {
-			if !bigqueryProjectRe.MatchString(p) {
-				return false
-			}
-			continue
-		}
+	for _, p := range parts {
 		if !re.MatchString(p) {
 			return false
 		}
