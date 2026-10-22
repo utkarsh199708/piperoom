@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -359,6 +360,25 @@ type SnapshotSignal struct {
 	Offset    int64  `json:"offset"`
 }
 
+// ---- X2: targeted re-snapshot over a Kafka signal topic (recovery) ----
+
+// SnapshotConditionSignaler is SnapshotSignaler with a row condition: the same
+// execute-snapshot record, plus Debezium's additional-conditions entry
+// {"data-collection": t, "filter": additionalCondition} for every t in tables,
+// so the connector re-emits only the rows that match (pg_resnapshot_rows,
+// X2a, on a connector with signal.kafka.topic). additionalCondition follows
+// the rule of SnapshotConditionWriter: built and checked by the action from
+// typed params, never text from the model; the implementation runs
+// ValidateSnapshotCondition before any I/O and refuses an empty condition
+// (an unconditional snapshot is SendSnapshotSignal). Scope, key and partition
+// rules are SnapshotSignaler's. Optional and separate from SnapshotSignaler,
+// so the Kafka client, fakes and the eval replay compile without it; an
+// action asserts it at use time and refuses before any I/O when it is
+// absent. (X2)
+type SnapshotConditionSignaler interface {
+	SendSnapshotSignalWhere(ctx context.Context, signalTopic, connector, logicalName string, tables []string, additionalCondition string) (SnapshotSignal, error)
+}
+
 // RecordReader reads whole records for dlq_replay (P3a): at most limit
 // records of one partition of topic from offset from, in offset order (fewer
 // when the partition ends first or 32 MiB were read). It changes nothing, so
@@ -503,6 +523,97 @@ type SourceWriter interface {
 	// connector's signal.data.collection, "schema.table") and returns the row
 	// id. connectorID names the connector the signal is for.
 	InsertSnapshotSignal(ctx context.Context, signalTable, connectorID string, tables []string) (signalID string, err error)
+}
+
+// ---- X2: targeted re-snapshot over a signal table (recovery) ----
+
+// SnapshotConditionWriter is implemented by the source Postgres client next to
+// SourceWriter, on the same write pool and under the same rules (write mode
+// on, the room's pipeline scope in ctx, identifiers checked and quoted,
+// tools.ErrOutOfScope / tools.ErrNoScope before any I/O). It is a separate
+// interface so that SourceWriter, its fakes and the eval replay compile
+// unchanged; the recovery action pg_resnapshot_rows (X2a) asserts it at use
+// time and refuses before any I/O when the writer lacks it. (X2)
+type SnapshotConditionWriter interface {
+	// InsertSnapshotSignalWhere inserts one execute-snapshot row like
+	// SourceWriter.InsertSnapshotSignal, whose data also carries
+	// "additional-conditions": [{"data-collection": t, "filter":
+	// additionalCondition}] for every t in tables, so Debezium re-reads only
+	// the matching rows, and returns the row id.
+	//
+	// additionalCondition is a SQL boolean expression that Debezium appends
+	// to its snapshot SELECT, so it is executable text on the source
+	// database. It is validated by the action (allow-listed grammar), never
+	// passed raw from the model: the action builds it from typed params (an
+	// identifier checked against ^[a-zA-Z_][a-zA-Z0-9_]*$ and quoted, the
+	// table's primary key or a timestamp column, a comparison operator from a
+	// fixed set, values bound as quoted literals with ' doubled), and the
+	// model only ever supplies those params. The writer checks it again with
+	// ValidateSnapshotCondition and refuses before any I/O when it fails
+	// (ErrBadSnapshotCondition). The condition and its values are never
+	// logged; errors name the table only.
+	InsertSnapshotSignalWhere(ctx context.Context, signalTable, connectorID string, tables []string, additionalCondition string) (signalID string, err error)
+}
+
+// MaxSnapshotConditionBytes caps a re-snapshot's additionalCondition. One
+// key range or time bound is far shorter; the cap also keeps the signal row
+// under the 2 KiB data column Debezium's signal table documents. (X2)
+const MaxSnapshotConditionBytes = 1024
+
+// ErrBadSnapshotCondition is returned (wrapped) by ValidateSnapshotCondition
+// and by every SnapshotConditionWriter / SnapshotConditionSignaler for a
+// condition that fails it. Nothing was written. (X2)
+var ErrBadSnapshotCondition = errors.New("clients: refused snapshot condition")
+
+// ValidateSnapshotCondition is the writers' second line of defence behind the
+// action's grammar. It is lexical and stricter than any SQL dialect a source
+// speaks: it tracks '…' literals and "…" identifiers (a doubled quote stays
+// inside), and refuses an empty condition, one over
+// MaxSnapshotConditionBytes, a control character (NUL, newline and tab
+// included) or a backslash anywhere, an unterminated quote, and ; -- /* # $
+// or ` outside a quote. So a value such as '1; drop' bound as a literal
+// passes, while a second statement, a comment, a dollar-quoted or
+// backslash-escaped string does not. It does no I/O and returns
+// ErrBadSnapshotCondition wrapped; the message never echoes the condition. (X2)
+func ValidateSnapshotCondition(cond string) error {
+	if cond == "" {
+		return fmt.Errorf("%w: empty", ErrBadSnapshotCondition)
+	}
+	if len(cond) > MaxSnapshotConditionBytes {
+		return fmt.Errorf("%w: %d bytes, at most %d", ErrBadSnapshotCondition, len(cond), MaxSnapshotConditionBytes)
+	}
+	var quote byte // 0 outside a quote, else ' or "
+	for i := 0; i < len(cond); i++ {
+		c := cond[i]
+		if c < 0x20 || c == 0x7f || c == '\\' {
+			return fmt.Errorf("%w: control character or backslash at byte %d", ErrBadSnapshotCondition, i)
+		}
+		if quote != 0 {
+			if c == quote {
+				if i+1 < len(cond) && cond[i+1] == quote {
+					i++ // a doubled quote is an escaped one, not the end
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		next := byte(0)
+		if i+1 < len(cond) {
+			next = cond[i+1]
+		}
+		switch {
+		case c == '\'' || c == '"':
+			quote = c
+		case c == ';', c == '#', c == '$', c == '`',
+			c == '-' && next == '-', c == '/' && next == '*':
+			return fmt.Errorf("%w: %q outside a quote at byte %d", ErrBadSnapshotCondition, c, i)
+		}
+	}
+	if quote != 0 {
+		return fmt.Errorf("%w: unterminated quote", ErrBadSnapshotCondition)
+	}
+	return nil
 }
 
 // SetupSourceWriter holds the writes only a setup makes on the source

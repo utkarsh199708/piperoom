@@ -322,6 +322,41 @@ runner, a name for a secret, a hash for the canary nonce.
   "local", by, approved_by}` (system actor) after the `pipeline_register` step ran and the server reloaded; the room
   then closes with resolution `pipeline live` and `room.labelled` gets `cause: setup`.
 
+### X2 recovery actions (X2-0; payloads in `internal/events/events.go`, rules in `internal/actions/action.go`)
+
+A **recovery** action re-emits data a fault lost (`pg_resnapshot_rows` X2a, `kafka_replay_range` X2b); a **fix**
+changes a system's state (every action before X2). Recovery steps go through the same proposal, approval and
+executor path as fixes; what differs is the preview count and the counted verification after the step ran. Every
+field below is additive and omitted for a fix, so a fix proposal, preview and verification marshal as before.
+
+- **Class.** `proposal.created` gains `class?: "recovery"` when any step's action is a recovery action
+  (`actions.ClassOf`), set by the room service from the action registry, never from the proposer's text; absent
+  reads as `"fix"`. Not part of `params_hash` (it follows from the steps' action names, which are). The registry
+  refuses a recovery action that does not implement `actions.Verifier`.
+- **Preview count.** `proposal.previewed.steps[].preview` gains `count?` and `unit?` (`"rows"` | `"records"`):
+  how much the step would re-emit, read from the target by the action's `Preview` (10 s, read-only), never estimated
+  by the model ("will re-emit 412 rows"). A recovery action refuses at `Validate`/`Preview` above its cap (X2a:
+  `max_rows`, default 100 000; X2b: 100 000 records per proposal).
+- **Verify polls (agent actor).** `agent.recovery_check {proposal_id, step_index, poll, max_polls, before, after,
+  unit}` once per call of the action's `Verify` after its step's `action.executed` with `ok: true`: first 15 s after
+  the step, the wait doubling up to 60 s, until `after` is 0 or 10 min (`actions.RecoveryVerify*`). `poll` counts
+  from 1 and `poll ≤ max_polls`, so a client shows "checking (2 of N)". Progress only, never a verdict.
+- **Verdict (agent actor).** `agent.verification` gains `outcome?`, `before?`, `after?`, `unit?` for a recovery
+  proposal, once, after the last poll. `outcome` is `recovered` (`after` is 0), `partial` (`0 < after < before` at
+  the timeout), `not_recovered` (`after ≥ before` at the timeout) or `unverifiable` (the source or sink cannot
+  count, `clients.ErrNotSupported`; `before`/`after` absent) — `events.RecoveryOutcomeFor` is the one rule.
+  `before` is the gap the action set out to repair (the preview's `count`), `after` what is still missing; `after:
+  0` is present, not omitted. `recovered` (the existing boolean) is `true` only with `outcome: "recovered"`.
+- **Data.** Counts, table, topic and window only: no event, `detail`, `Verify` result or error carries a row value
+  or key. `Verify` runs on the agent's read-only clients with the room's pipeline scope in ctx and a 10 s deadline
+  per call, so it reads only that pipeline's tables and topics; every member and viewer of the room reads these
+  events like any other agent event.
+- **Signals.** The re-snapshot condition (`clients.SnapshotConditionWriter.InsertSnapshotSignalWhere`,
+  `clients.SnapshotConditionSignaler.SendSnapshotSignalWhere`, Debezium `additional-conditions`) is built by the
+  action from typed params (an identifier that is the primary key or a timestamp column, values as quoted
+  literals), never passed from the model, and checked again by the writer (`clients.ValidateSnapshotCondition`,
+  at most 1 024 bytes) before any I/O. It never appears in an event or a log.
+
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
 ```json
@@ -418,6 +453,16 @@ Additive, same rule as the F-wave fields: absent until the task lands, and an ab
   (`GET /api/rooms/{id}`) leaves it out once `run_at` is more than 45 s in the past; the proposal stays open for manual
   approval and can still be cancelled; WebSocket snapshot frames still carry it (P2b-4b, #652).
 - `open_proposals[].fallback_layers`, `open_proposals[].origin` (items 4, 5): copied from `proposal.created`.
+
+#### X2 snapshot field (X2-0; implemented by A5)
+
+```json
+  "open_proposals": [ { "...": "...", "class": "recovery" } ]   // X2: proposal.created.class; absent reads as "fix"
+```
+- `open_proposals[].class`: copied from `proposal.created`. The recovery card (X2d) reads the step's preview
+  `count`/`unit` from `open_proposals[].preview` and, after the proposal leaves `open_proposals` (its last step
+  ran), its `verify` state from the room log: the newest `agent.recovery_check` (`before`, `after`, `poll` of
+  `max_polls`) until the proposal's recovery `agent.verification` (`outcome`, `before`, `after`) arrives.
 
 #### U-wave snapshot fields (U0; implemented by A5)
 
