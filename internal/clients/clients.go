@@ -640,6 +640,80 @@ type CountReader interface {
 	CountByBucket(ctx context.Context, table, tsColumn string, since, until time.Time, width time.Duration) ([]MinuteCount, error)
 }
 
+// ---- X1: silent corruption, source vs sink reconcile (optional) ----
+//
+// Asserted at use time like CountReader (rec, ok := src.(clients.Reconciler)),
+// never embedded in SourceDB or Warehouse, so no existing client or fake has
+// to grow. The source Postgres and the dev Postgres warehouse implement it
+// (X1a, A3); other warehouses return ErrNotSupported from every method until
+// their owners add it. The drift watcher signals (count_drift, row_drift;
+// events.DriftSignal) are its first caller.
+
+// Caps and deadline of every Reconciler implementation. Callers and tests use
+// these constants instead of their own numbers.
+const (
+	// ReconcileMaxSample caps SampleKeys' n: a larger n is cut to it.
+	ReconcileMaxSample = 200
+	// ReconcileMaxKeys caps RowTimes' keys: more is refused, nothing is read.
+	ReconcileMaxKeys = 1000
+	// ReconcileTimeout is the per-call deadline an implementation sets when
+	// ctx has none (or a later one); the source's statement_timeout still
+	// applies on top.
+	ReconcileTimeout = 10 * time.Second
+)
+
+// ReconcileSampleSize is the number of keys SampleKeys reads for a requested
+// n: n cut to ReconcileMaxSample, and 0 when n <= 0 (the implementation then
+// refuses the call with an error wrapping tools.ErrBadInput). Implementations
+// call it so the cap is the same everywhere.
+func ReconcileSampleSize(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	return min(n, ReconcileMaxSample)
+}
+
+// Reconciler reads the row evidence a drift check needs from one side of a
+// pipeline (source or sink): counts, primary-key values and timestamps only.
+// It never returns any other column value, and no method writes.
+//
+// Rules for every method:
+//   - table is "schema.table"; table, pkColumn, tsColumn and every entry of
+//     tsColumns must match ^[a-zA-Z_][a-zA-Z0-9_]*$ per part and are quoted
+//     with pgx.Identifier{...}.Sanitize() (or the warehouse's equivalent).
+//     A bad identifier is an error wrapping tools.ErrBadInput, before any I/O.
+//   - Scope fails closed like SourceWriter: the pipeline in ctx
+//     (tools.WithPipeline; the watcher sets it per pipeline) must list table
+//     in source_tables (source) or sink_tables (sink), else an error wrapping
+//     tools.ErrOutOfScope (tools.ErrNoScope with no pipeline), before any I/O.
+//   - Each call has a deadline of ReconcileTimeout (10 s) at most; a call cut
+//     by it returns an error wrapping context.DeadlineExceeded.
+//   - Times are compared and returned in UTC; tsColumn values that are NULL
+//     are never counted, sampled or returned.
+type Reconciler interface {
+	// CountBetween counts the rows of table whose tsColumn is in the
+	// half-open window [from, to). to before from is tools.ErrBadInput.
+	// It returns a count only, never a value. Deadline 10 s.
+	CountBetween(ctx context.Context, table, tsColumn string, from, to time.Time) (int64, error)
+	// SampleKeys returns the primary-key values (as text) of the newest
+	// rows of table with tsColumn >= since, newest first: at most
+	// ReconcileSampleSize(n) keys, so n > ReconcileMaxSample (200) is cut
+	// to 200 and n <= 0 is tools.ErrBadInput. Keys only, never another
+	// column's value; a caller keeps them in memory and never logs them or
+	// puts them in an event. Deadline 10 s.
+	SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since time.Time, n int) ([]string, error)
+	// RowTimes reads, for each key of keys (primary-key values as text), the
+	// timestamp columns tsColumns of that row: key -> column -> time. It
+	// selects only pkColumn and tsColumns, never another column, so no
+	// non-timestamp value can be returned. A key with no row is absent from
+	// the result; a NULL column is absent from its row's map; no keys is an
+	// empty map and no I/O. More than ReconcileMaxKeys (1000) keys or an
+	// empty tsColumns is tools.ErrBadInput before any I/O; a named column
+	// that is not a date/time type is tools.ErrBadInput too, and no value of
+	// it is returned. Deadline 10 s.
+	RowTimes(ctx context.Context, table, pkColumn string, keys []string, tsColumns []string) (map[string]map[string]time.Time, error)
+}
+
 // ---- Batch pipelines: orchestrator and transform (P4) ----
 //
 // Optional readers, like ClusterReader: wiring holds nil when the system is

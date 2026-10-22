@@ -248,6 +248,78 @@ type RoomCreatedPayload struct {
 // RoomModeSetup is RoomCreatedPayload.Mode of a setup room. (U)
 const RoomModeSetup = "setup"
 
+// ---- X1: silent corruption, the drift watcher signals ----
+//
+// The watcher (internal/watch, X1b) opens or joins a pipeline's room with
+// these signals like slot_wal: one entry of the evidence's "signals" list,
+// {"signal": <kind>, "severity": <sev>, "drift": DriftSignal}. They are not
+// event types; the evidence travels in room.created.alert and in joins
+// (docs/api.md, Watcher alerts).
+
+// Drift signal kinds (DriftSignal.Kind and the evidence "signal" key).
+const (
+	// SignalCountDrift: source and sink row counts over the same closed
+	// window (shifted by the sink's lag) differ by more than the tolerance.
+	SignalCountDrift = "count_drift"
+	// SignalRowDrift: sampled source keys are missing on the sink after the
+	// lag, or a timestamp column differs.
+	SignalRowDrift = "row_drift"
+	// SignalDupKeys: the CDC topic holds the same (key, source position)
+	// more than once in the window.
+	SignalDupKeys = "dup_keys"
+	// SignalOrderSkew: the source position goes backwards for one key on
+	// the CDC topic.
+	SignalOrderSkew = "order_skew"
+)
+
+// DriftSeverity is the default severity of a drift signal kind ("sev2" for
+// count_drift and row_drift, "sev3" for dup_keys and order_skew), and "" for
+// any other kind.
+func DriftSeverity(kind string) string {
+	switch kind {
+	case SignalCountDrift, SignalRowDrift:
+		return "sev2"
+	case SignalDupKeys, SignalOrderSkew:
+		return "sev3"
+	}
+	return ""
+}
+
+// DriftWindow is the half-open time window [From, To) a drift check read.
+type DriftWindow struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+}
+
+// DriftSignal is the evidence of one drift signal. It carries names, counts
+// and a window only: never a key value, a row value or record content. The
+// numbers are always present (0 is evidence too); Table, Topic and Detail
+// are omitted when empty.
+type DriftSignal struct {
+	Kind   string      `json:"kind"`            // one of the Signal* drift kinds
+	Table  string      `json:"table,omitempty"` // "schema.table" of the source table (count_drift, row_drift)
+	Topic  string      `json:"topic,omitempty"` // the CDC topic (dup_keys, order_skew; the table's topic otherwise when known)
+	Window DriftWindow `json:"window"`
+	// Source and Sink are the row counts on each side over Window
+	// (count_drift); for dup_keys and order_skew Source is the records
+	// scanned and Sink is 0.
+	Source int64 `json:"source"`
+	Sink   int64 `json:"sink"`
+	// Missing is rows (count_drift: Source - Sink when positive) or sampled
+	// keys (row_drift) not on the sink; for dup_keys the duplicate events.
+	Missing int `json:"missing"`
+	// Mismatched is sampled keys whose timestamp columns differ (row_drift);
+	// for order_skew the per-key position regressions.
+	Mismatched int `json:"mismatched"`
+	// Sample is the keys compared (row_drift, at most
+	// clients.ReconcileMaxSample) or the distinct keys affected (dup_keys,
+	// order_skew).
+	Sample int `json:"sample"`
+	// Detail is one line of watcher-written text (fixed wording plus names
+	// and numbers, at most 200 bytes), shown as text and never as HTML.
+	Detail string `json:"detail,omitempty"`
+}
+
 // RoomClosedPayload ends a room. A room closed by the open-room limit
 // (PIPEROOM_MAX_OPEN_DAYS) is closed by the system actor with the resolution
 // "retention: open longer than N days".

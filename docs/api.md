@@ -620,6 +620,35 @@ closes; `--demo` forces it off.
   reports a connector set to drop records silently (`errors.tolerance=all` with no DLQ and no error log, or on a
   source connector) or a sink whose configured DLQ topic does not exist. Records that were in the DLQ before
   the watcher started never fire. A pipeline with no DLQ topics costs the watcher no Kafka call.
+- **Drift signals (X1: silent corruption; contract X1-0, watcher X1b).** Four signals make a "green but wrong"
+  pipeline a symptom. They open or join the pipeline's room exactly like `slot_wal`; the cooldown is per
+  (pipeline, table, kind). Each is one entry of the evidence's `signals` list:
+  `{"signal": <kind>, "severity": <sev>, "drift": DriftSignal}` (`events.DriftSignal`, `events.DriftSeverity`).
+
+  | Kind | Default severity | Fires when |
+  |---|---|---|
+  | `count_drift` | `sev2` | source and sink row counts over the last closed hour, shifted by the sink's lag, differ by more than `watch.count_tolerance` (default 0.5 %) on 2 checks in a row |
+  | `row_drift` | `sev2` | a sampled source key is missing on the sink after the lag, or one of its timestamp columns differs |
+  | `dup_keys` | `sev3` | the CDC topic holds the same (key, source position) more than once in the window |
+  | `order_skew` | `sev3` | the source position goes backwards for one key on the CDC topic |
+
+  `DriftSignal` is `{kind, table?, topic?, window: {from, to}, source, sink, missing, mismatched, sample, detail?}`:
+  `window` is half-open `[from, to)` (RFC 3339, UTC); the five numbers are always present (0 is evidence).
+  `count_drift`: `source`/`sink` are the row counts and `missing` is `source - sink` when positive. `row_drift`:
+  `sample` keys compared (at most 200), `missing` not on the sink, `mismatched` with a differing timestamp.
+  `dup_keys`: `source` records scanned, `missing` duplicate events, `sample` keys affected. `order_skew`:
+  `source` records scanned, `mismatched` regressions, `sample` keys affected. `detail` is one line of
+  watcher-written text, at most 200 bytes; clients render it as text, never HTML. The web shows `count_drift`
+  and `row_drift` on the sink node of `table`, `dup_keys` and `order_skew` on the node of `topic`, and an unknown
+  kind as a neutral fact.
+
+  The signal carries names, counts and a window only: **never a key value, a row value or record content.**
+  The counts come from the optional reader `clients.Reconciler` (source and sink, read-only, scoped to the
+  pipeline's `source_tables`/`sink_tables`, deadline 10 s per call): `CountBetween` returns counts,
+  `SampleKeys` at most 200 primary-key values that stay inside the watcher, and `RowTimes` at most 1000 keys'
+  timestamp columns, never another column. A client without the reader, or answering `ErrNotSupported`, turns
+  the check off for that pipeline with one INFO log. Settings live in `owners.yaml` `watch:`
+  (`reconcile_interval` default 15 min, `count_tolerance`, `reconcile: off` per table), not in the environment.
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`. F6 plans `rooms` as
