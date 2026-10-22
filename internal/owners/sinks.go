@@ -191,7 +191,7 @@ func (p *Pipeline) validateSinks() error {
 	if len(p.Sinks) == 0 {
 		return nil
 	}
-	if len(p.SinkTables) > 0 {
+	if len(p.SinkTables) > 0 && !p.sinksMerged {
 		return fmt.Errorf("sinks and sink_tables are both set: declare each sink table once, in sinks")
 	}
 	seen := make(map[string]bool, len(p.Sinks))
@@ -255,6 +255,7 @@ func (p *Pipeline) validateSinks() error {
 	}
 	p.SinkTables = tables
 	p.ConsumerGroups = p.ConsumerGroupNames()
+	p.sinksMerged = true
 	return nil
 }
 
