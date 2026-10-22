@@ -116,16 +116,19 @@ func (fileReadOp) Execute(ctx context.Context, params json.RawMessage, env Env) 
 	if !utf8.Valid(data) {
 		return Result{}, fmt.Errorf("%w: %s is not UTF-8 text", ErrNotText, clip(p.Path))
 	}
-	content := string(data)
+	// A config file can carry credentials (database.password=..., tokens), and
+	// §2.4 of this package's contract says no op reads a secret back; the path
+	// deny-list alone only catches secret-named files. Redact the content like
+	// http_get redacts its body, before it reaches the server or the model —
+	// and before the content cap: a cap applied first could cut a credential
+	// in half and leave a raw prefix the redaction patterns no longer match.
+	content, _ := redact.Text(string(data))
 	if len(content) > maxReadContent {
 		content = content[:maxReadContent]
 		truncated = true
 	}
-	// A config file can carry credentials (database.password=..., tokens), and
-	// §2.4 of this package's contract says no op reads a secret back; the path
-	// deny-list alone only catches secret-named files. Redact the content like
-	// http_get redacts its body, before it reaches the server or the model.
-	content, _ = redact.Text(content)
+	// "bytes" counts the raw bytes read from disk (capped at maxReadBytes);
+	// content is the redacted, and possibly capped, text.
 	summary := fmt.Sprintf("read %s (%d bytes)", p.Path, len(data))
 	if truncated {
 		summary += ", truncated"
@@ -641,13 +644,13 @@ func writablePath(p string, mounts []string) error {
 	}
 	for _, part := range pathParts(p) {
 		// .husky and .githooks hold scripts git runs whatever their names.
-		if strings.EqualFold(part, ".husky") || strings.EqualFold(part, ".githooks") {
+		if foldEqual(part, ".husky") || foldEqual(part, ".githooks") {
 			return refuse("a git hook")
 		}
 	}
 	if strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml") {
 		for _, part := range pathParts(p) {
-			if strings.EqualFold(part, "k8s") || strings.EqualFold(part, "manifests") {
+			if foldEqual(part, "k8s") || foldEqual(part, "manifests") {
 				return refuse("a Kubernetes manifest")
 			}
 		}

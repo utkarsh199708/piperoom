@@ -85,6 +85,10 @@ var (
 	// ErrStoreUnsafe: the store path or a materialised path is a symlink, not
 	// a regular file, or otherwise not something the runner may write.
 	ErrStoreUnsafe = errors.New("setup: secret store is not a regular file")
+	// ErrStorePath: a custom store path (PIPEROOM_SETUP_SECRETS_FILE) resolves
+	// inside the project directory but outside .piperoom/, where neither the
+	// generated .gitignore entry nor the ops package's deny-list protects it.
+	ErrStorePath = errors.New("setup: secret store path is unprotected")
 	// ErrStoreCorrupt: the store file does not parse, or carries a duplicate
 	// name.
 	ErrStoreCorrupt = errors.New("setup: secret store is corrupt")
@@ -107,7 +111,12 @@ type Store struct {
 // OpenStore opens (and creates on first use) the secret store for a project
 // directory. file is PIPEROOM_SETUP_SECRETS_FILE: "" means
 // <projectDir>/.piperoom/secrets.env; a relative path is taken under
-// projectDir.
+// projectDir and must stay under .piperoom/. A custom path inside the project
+// but outside .piperoom/ is refused (ErrStorePath): only .piperoom/ is covered
+// by the generated .gitignore entry and the ops package's read/write/delete
+// deny-list, so a store anywhere else in the project could be committed or
+// read back by a file op. A path outside the project is the operator's own
+// choice and is allowed.
 //
 // The store refuses to follow a symlink or a reparse point at the store file
 // or its directory, generates the receipt key on first use, and ensures the
@@ -128,8 +137,19 @@ func OpenStore(projectDir, file string) (*Store, error) {
 
 	if file = strings.TrimSpace(file); file == "" {
 		file = filepath.Join(dir, secretsDirName, defaultSecretsFileName)
-	} else if !filepath.IsAbs(file) {
-		file = filepath.Join(dir, file)
+	} else {
+		if !filepath.IsAbs(file) {
+			// A relative path is taken under the project, so it must be local:
+			// a ".." that climbs out of the project is refused outright rather
+			// than joined and resolved to wherever it lands.
+			if !filepath.IsLocal(file) {
+				return nil, fmt.Errorf("%w: %q is relative but not local to the project", ErrStorePath, scrub(file, maxPrintedFieldLen))
+			}
+			file = filepath.Join(dir, file)
+		}
+		if err := checkStorePath(dir, file); err != nil {
+			return nil, err
+		}
 	}
 	storeDir := filepath.Dir(file)
 	if err := ensureSecretDir(storeDir); err != nil {
@@ -175,6 +195,29 @@ func OpenStore(projectDir, file string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// checkStorePath refuses a custom store file that resolves inside the project
+// directory but not under .piperoom/. Such a file escapes both protections the
+// store relies on — the generated .gitignore entry names only .piperoom/, and
+// the ops package's deny-list refuses only .piperoom/** — so a commit or a
+// file op could expose it. A file outside the project is allowed: where to
+// keep an external store is the operator's choice.
+func checkStorePath(projectDir, file string) error {
+	rel, err := filepath.Rel(projectDir, file)
+	if err != nil || !filepath.IsLocal(rel) {
+		return nil // outside the project: the operator's choice
+	}
+	first := rel
+	if i := strings.IndexByte(filepath.ToSlash(rel), '/'); i >= 0 {
+		first = filepath.ToSlash(rel)[:i]
+	} else {
+		return fmt.Errorf("%w: %s is at the project root, outside %s/", ErrStorePath, file, secretsDirName)
+	}
+	if first != secretsDirName {
+		return fmt.Errorf("%w: %s is inside the project but outside %s/", ErrStorePath, file, secretsDirName)
+	}
+	return nil
 }
 
 // ensureSecretDir creates the store's directory 0700 or checks an existing
@@ -619,11 +662,19 @@ func CleanMaterialisedPath(p string) (string, error) {
 		switch {
 		case part == "" || part == "." || part == "..":
 			return "", fmt.Errorf("%w: materialised path %q is not clean", ErrStoreUnsafe, scrub(p, maxPrintedFieldLen))
-		case strings.EqualFold(part, ".piperoom"), strings.EqualFold(part, ".git"):
+		case foldEqual(part, ".piperoom"), foldEqual(part, ".git"):
 			return "", fmt.Errorf("%w: materialised path %q names a denied directory", ErrStoreUnsafe, scrub(p, maxPrintedFieldLen))
 		}
 	}
 	return clean, nil
+}
+
+// foldEqual compares two path components case-insensitively, by simple fold
+// and by upper case: strings.EqualFold alone misses the dotless ı (U+0131),
+// whose upper case is "I", so "confıg" opens "config" on a case-folding file
+// system while EqualFold says they differ.
+func foldEqual(a, b string) bool {
+	return strings.EqualFold(a, b) || strings.ToUpper(a) == strings.ToUpper(b)
 }
 
 // underPath reports whether clean is one of dirs or below one of them,
@@ -637,7 +688,7 @@ func underPath(clean string, dirs []string) bool {
 		}
 		ok := true
 		for i := range dp {
-			if !strings.EqualFold(dp[i], parts[i]) {
+			if !foldEqual(dp[i], parts[i]) {
 				ok = false
 				break
 			}
@@ -683,9 +734,30 @@ func (s *Store) redactions() []redaction {
 	return out
 }
 
+// redactedRefPattern is exactly the span Redact may copy untouched: one
+// well-formed ${secret:NAME} reference under ValidateSecretName's rule (an
+// identifier of at most MaxSecretNameBytes bytes), anchored at the start. A
+// looser skip — anything from "${secret:" to the first "}" — would let a raw
+// value wrapped as "${secret:<value>}" pass through unredacted.
+var redactedRefPattern = regexp.MustCompile(`^\$\{secret:[a-zA-Z_][a-zA-Z0-9_]{0,63}\}`)
+
+// containsStoredValue reports whether any stored value appears inside span.
+// A reference whose text carries a stored value is not a placeholder this
+// store emitted: it must be redacted, never copied through.
+func containsStoredValue(span string, rs []redaction) bool {
+	for _, r := range rs {
+		if strings.Contains(span, r.value) {
+			return true
+		}
+	}
+	return false
+}
+
 // Redact replaces every stored value in text literally by ${secret:NAME}, in
-// one pass. An existing ${secret:...} reference is copied untouched, so
-// redaction is idempotent.
+// one pass. An existing well-formed ${secret:NAME} reference that carries no
+// stored value is copied untouched, so redaction is idempotent; anything else
+// that merely starts with "${secret:" is ordinary text and is matched byte by
+// byte, so wrapping a raw value in a fake reference does not smuggle it out.
 func (s *Store) Redact(text string) string {
 	if text == "" {
 		return text
@@ -698,9 +770,9 @@ func (s *Store) Redact(text string) string {
 	b.Grow(len(text))
 	for i := 0; i < len(text); {
 		if strings.HasPrefix(text[i:], "${secret:") {
-			if end := strings.IndexByte(text[i:], '}'); end >= 0 {
-				b.WriteString(text[i : i+end+1])
-				i += end + 1
+			if ref := redactedRefPattern.FindString(text[i:]); ref != "" && !containsStoredValue(ref, rs) {
+				b.WriteString(ref)
+				i += len(ref)
 				continue
 			}
 		}

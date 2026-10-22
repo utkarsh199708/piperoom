@@ -37,6 +37,13 @@ func TestFileOpsRefuseMaterialisedPaths(t *testing.T) {
 		t.Fatalf("case variant = %v, want ErrSecretPath", err)
 	}
 
+	// The dotless ı (U+0131) upper-cases to "I", so "confıg" opens "config" on
+	// a case-folding file system; strings.EqualFold alone misses it.
+	writeFile(t, r.env.ProjectDir, ".piperoom/materialised", "connect/secrets.properties\nconfig/app.properties\n")
+	if _, err := runOpErr(t, r, "file_read", map[string]string{"path": "confıg/app.properties"}); !errors.Is(err, ErrSecretPath) {
+		t.Fatalf("dotless-ı variant = %v, want ErrSecretPath", err)
+	}
+
 	// The registry can be handed the list directly (the wiring path before a
 	// template driver registers a rendered file).
 	r2, err := New(Config{ProjectDir: r.env.ProjectDir, Materialised: []string{"connect/secrets.properties"}})

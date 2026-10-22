@@ -274,6 +274,43 @@ func TestStoreRedact(t *testing.T) {
 	}
 }
 
+// TestStoreRedactWrappedValue: wrapping a raw stored value in reference syntax
+// must not smuggle it past the idempotence skip. Only a well-formed
+// ${secret:NAME} span that carries no stored value is copied untouched;
+// anything else is matched byte by byte and the value inside is redacted.
+func TestStoreRedactWrappedValue(t *testing.T) {
+	st := mustStore(t, t.TempDir())
+	if err := st.Set("DB_PASS", "hunter2secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Set("OTHER", "zz9plural"); err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{
+		// The value itself posing as the reference's name.
+		"prefix ${secret:hunter2secret} suffix",
+		// A malformed reference with the value before the first "}".
+		"${secret: oops hunter2secret and more }",
+		// A well-formed name that carries another stored value inside it.
+		"${secret:xxzz9pluralyy}",
+		// An unterminated reference followed by the value.
+		"${secret:hunter2secret with no close",
+	}
+	for _, in := range cases {
+		got := st.Redact(in)
+		if strings.Contains(got, "hunter2secret") || strings.Contains(got, "zz9plural") {
+			t.Fatalf("Redact(%q) leaked a value: %q", in, got)
+		}
+	}
+	// A genuine reference is still copied untouched, so redaction stays
+	// idempotent, the receipt key's placeholder included.
+	for _, ref := range []string{"${secret:DB_PASS}", "${secret:" + runner.ReceiptKeyName + "}"} {
+		if got := st.Redact(ref); got != ref {
+			t.Fatalf("Redact(%q) = %q, want it untouched", ref, got)
+		}
+	}
+}
+
 // TestStoreSanitizeResult: a stored value is replaced in Summary, Data
 // (strings and keys) and the receipt, and the size caps still hold.
 func TestStoreSanitizeResult(t *testing.T) {
@@ -376,6 +413,14 @@ func TestStoreMaterialisedPaths(t *testing.T) {
 	if st.IsMaterialised("connect/other.properties") {
 		t.Fatalf("IsMaterialised(connect/other.properties) = true")
 	}
+	// The dotless ı (U+0131) upper-cases to "I", so "confıg" opens "config" on
+	// a case-folding file system; strings.EqualFold alone misses it.
+	if err := st.RegisterMaterialised("config/app.properties"); err != nil {
+		t.Fatalf("RegisterMaterialised: %v", err)
+	}
+	if !st.IsMaterialised("confıg/app.properties") {
+		t.Fatalf("IsMaterialised(confıg, dotless ı) = false")
+	}
 	for _, p := range []string{"", ".", "/abs/x", "../escape", ".piperoom/x", ".git/x"} {
 		if err := st.RegisterMaterialised(p); err == nil {
 			t.Fatalf("RegisterMaterialised(%q) succeeded", p)
@@ -452,18 +497,39 @@ func TestStoreSatisfiesClientSecretStore(t *testing.T) {
 	}
 }
 
-// TestStoreCustomFile: PIPEROOM_SETUP_SECRETS_FILE is honoured, a relative
-// path is taken under the project, and .piperoom/ is still ignored by git.
+// TestStoreCustomFile: PIPEROOM_SETUP_SECRETS_FILE is honoured only where the
+// store stays protected. A path inside the project but outside .piperoom/
+// would escape both the generated .gitignore entry and the ops deny-list, so
+// it is refused fail-closed; a path under .piperoom/ and a path outside the
+// project (the operator's choice) stay allowed.
 func TestStoreCustomFile(t *testing.T) {
 	dir := t.TempDir()
-	st, err := runner.OpenStore(dir, "conf/runner.secrets")
+
+	refused := []string{
+		"conf/runner.secrets",                        // relative, inside the project, outside .piperoom
+		"runner.secrets",                             // relative, at the project root
+		"../escape.secrets",                          // relative, climbing out of the project
+		filepath.Join(dir, "conf", "runner.secrets"), // absolute, inside the project, outside .piperoom
+	}
+	for _, p := range refused {
+		if _, err := runner.OpenStore(dir, p); !errors.Is(err, runner.ErrStorePath) {
+			t.Fatalf("OpenStore(%q) = %v, want ErrStorePath", p, err)
+		}
+	}
+	// A refused path must leave nothing behind: no store file and no directory.
+	if _, err := os.Stat(filepath.Join(dir, "conf")); !os.IsNotExist(err) {
+		t.Fatalf("a refused path created its directory")
+	}
+
+	// A custom name under .piperoom/ keeps both protections and is allowed.
+	st, err := runner.OpenStore(dir, filepath.Join(".piperoom", "alt.env"))
 	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
+		t.Fatalf("OpenStore(.piperoom/alt.env): %v", err)
 	}
 	if err := st.Set("DB_PASSWORD", "s3cret-value"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "conf", "runner.secrets")); err != nil {
+	if _, err := os.Stat(filepath.Join(dir, ".piperoom", "alt.env")); err != nil {
 		t.Fatalf("custom store file: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".piperoom", "secrets.env")); !os.IsNotExist(err) {
@@ -472,5 +538,14 @@ func TestStoreCustomFile(t *testing.T) {
 	ignore, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	if !strings.Contains(string(ignore), ".piperoom/") {
 		t.Fatalf(".gitignore does not list .piperoom/: %q", ignore)
+	}
+
+	// An absolute path outside the project is the operator's choice.
+	outside := filepath.Join(t.TempDir(), "runner.secrets")
+	if _, err := runner.OpenStore(dir, outside); err != nil {
+		t.Fatalf("OpenStore(outside the project) = %v", err)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Fatalf("outside store file: %v", err)
 	}
 }

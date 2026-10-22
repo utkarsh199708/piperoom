@@ -22,6 +22,15 @@ var errDuplicateStep = errors.New("setup: step already started")
 // in the PR for adding it there.
 const refuseStartPersist = "start_persist"
 
+// refuseStoreUnavailable is the reason the runner refuses an op when the
+// secret store cannot be opened: without the store there is no redaction set
+// and no receipt key, so no OpResult could pass SanitizeResult or carry an
+// OutMAC. Refusing keeps the invariant that every OpResult leaves the runner
+// redacted and MAC'd; nothing is marked started, so the server may send the
+// step again once the store is writable. Like refuseStartPersist, this reason
+// is not yet one of protocol.Refuse*.
+const refuseStoreUnavailable = "store_unavailable"
+
 // tierRank orders tiers T0..T3; an unknown tier string ranks as T0.
 func tierRank(t string) int {
 	switch t {
@@ -249,7 +258,7 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 	store, err := r.secretStore()
 	if err != nil {
 		r.log.Error("secret store unavailable", "op", req.Op, "err", err)
-		r.withhold(ctx, req)
+		r.refuse(ctx, req, refuseStoreUnavailable)
 		return
 	}
 
@@ -335,21 +344,6 @@ func (r *Runner) executeOp(ctx context.Context, req protocol.OpRequest) (protoco
 		return r.executeBuiltin(ctx, req)
 	}
 	return r.catalogue.Execute(ctx, req)
-}
-
-// withhold reports a result without running the op, for the case where the
-// runner cannot redact or MAC its output (the secret store is unavailable).
-// Nothing is marked started, so the server may send the step again once the
-// store is writable.
-func (r *Runner) withhold(ctx context.Context, req *protocol.OpRequest) {
-	res := protocol.OpResult{
-		ID:      req.ID,
-		OK:      false,
-		Summary: "setup: the secret store is unavailable; the op did not run",
-	}
-	if err := r.writeFrame(ctx, protocol.Frame{Type: protocol.FrameResult, Result: &res}); err != nil {
-		r.log.Debug("writing withheld result failed", "op", req.Op, "id", req.ID, "err", err)
-	}
 }
 
 // frozenProposal returns the frozen proposal the runner cached for req,

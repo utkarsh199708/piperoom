@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -119,9 +118,12 @@ func decodeSecretParams(raw json.RawMessage, dst *secretSetParams) error {
 
 // promptSecret prints the secret's name and reads one line from the runner's
 // terminal. The value is never written to stdout, a log or an error; the
-// terminal's own echo is the person's screen, not a log. The read is
-// serialized with every other terminal prompt (stdinMu) and returns when a
-// line arrives or ctx ends.
+// terminal's own echo is the person's screen, not a log. The line comes from
+// the single stdin-reader goroutine (stdinCh), serialized with every other
+// terminal prompt under stdinMu, and arrives when the person answers or ctx
+// (the op deadline included) ends; an abandoned prompt leaves no orphaned
+// read behind, so a value typed late answers the next prompt instead of
+// vanishing into a dead channel.
 func (r *Runner) promptSecret(ctx context.Context, name string) (string, error) {
 	r.stdinMu.Lock()
 	defer r.stdinMu.Unlock()
@@ -131,20 +133,8 @@ func (r *Runner) promptSecret(ctx context.Context, name string) (string, error) 
 		return "", ctx.Err()
 	default:
 	}
-	if r.stdinReader == nil {
-		r.stdinReader = bufio.NewReader(r.stdin)
-	}
+	ch := r.stdinCh()
 	fmt.Fprintf(r.stdout, "secret %s: value (stored in the runner's secret store, never printed or logged)\nvalue: ", scrub(name, MaxSecretNameBytes))
-
-	type result struct {
-		line string
-		err  error
-	}
-	ch := make(chan result, 1)
-	go func() {
-		line, err := r.stdinReader.ReadString('\n')
-		ch <- result{line, err}
-	}()
 
 	select {
 	case <-ctx.Done():

@@ -10,7 +10,6 @@
 package runner
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -123,11 +122,13 @@ type Runner struct {
 	roomID      string
 	negotiated  protocol.Version
 
-	// stdinMu serializes terminal confirmation prompts and their reads (ask)
-	// and guards stdinReader, the single shared reader, so two concurrent T3
-	// confirms cannot read each other's answer or buffer each other's input.
-	stdinMu     sync.Mutex
-	stdinReader *bufio.Reader
+	// stdinMu serializes terminal prompts (ask, promptSecret) and guards the
+	// lazy start of the stdin-reader goroutine. stdinLines is fed by that one
+	// goroutine, the only reader of r.stdin (see stdinCh), so two concurrent
+	// prompts cannot read each other's answer and an abandoned prompt never
+	// leaves an orphaned read racing the next one.
+	stdinMu    sync.Mutex
+	stdinLines chan stdinLine
 
 	// handshakeMu guards handshakeDone. handshakeDone is non-nil while a
 	// reconnect handshake is in progress (the window between setConn and the
