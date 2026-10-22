@@ -1065,6 +1065,9 @@ var agentEventTypes = map[events.Type]bool{
 	// The verdict on an executed fix (internal/agent verify.go); the
 	// post-mortem and the verification card read it.
 	events.AgentVerification: true,
+	// One poll of a recovery action's Verify (X2, internal/agent): progress
+	// for the recovery card; the verdict is still the agent.verification.
+	events.AgentRecoveryCheck: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
