@@ -97,9 +97,11 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
     contents or checksum, never a row of another table. Read live by `what_changed`, not stored. Read-only, 10 s, at
     most 200 rows. A history table the login cannot read is reported as a fact
     ("grant SELECT on ..."), not read.
-  - **The vendor status poller** (X4a) fetches a pipeline's `owners.yaml` `vendor_status_url` (a vendor's
-    public status feed) every 5 minutes from the server: an **outbound** HTTPS request to a host you name, part
-    of your egress review (section 5). It sends nothing but the request. It connects directly (no HTTP proxy) and
+  - **The vendor status poller** (X4a; **not running on this commit**: `alertin.StatusPoller` is written and
+    tested, but the server does not start it and the `owners.yaml` loader has no `vendor_status_url` key, so the
+    file is refused). When it is wired, it fetches a pipeline's `vendor_status_url` (a vendor's public status
+    feed) every 5 minutes from the server: an **outbound** HTTPS request to a host you name, part of your egress
+    review (section 5). It sends nothing but the request. It connects directly (no HTTP proxy) and
     only to public addresses: a feed host, or a redirect target, that resolves to a loopback, private, link-local or
     cloud-metadata address is refused; redirects stay on `https` (at most 5); 10 s per fetch, body at most 4 MB.
   - **Paging a team** (`POST /api/rooms/{id}/page-team`, X4d, a driver's click, never automatic) posts one
@@ -110,20 +112,36 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
     escaped (no mentions, no links). No tool result, row or config value. That channel is outside the room's
     Slack thread (see Slack, below); nothing is read back from it. The room stores only `room.team_paged`
     (team, hypothesis seq, change id), never the text.
-- **Lineage, PII tags and retention (X7; contract X7-0, design `docs/design/lineage.md`).** The pipeline map gains
-  column lineage on its edges and `pii`/`retention` tags on its nodes: column **names**, their PII class (from names
-  and types, never values), and declared retention durations. Stored nowhere new: the map is built on request, like
-  before. Shown to anyone who can see the pipeline and to the agent in `pipeline_map`.
-  - **OpenLineage export (X7b, optional, off unless `OPENLINEAGE_URL` is set).** An **outbound** HTTP(S) POST from
-    the server to the lineage server you name (Marquez, DataHub), part of your egress review (section 5): at most one
-    event per pipeline per 15 minutes and one per executed fix step, sent by the elected leader replica only, through a
-    dialer that refuses link-local and cloud-metadata addresses, with no proxy and no redirect. It sends dataset names (database, schema,
-    table, topic; host and port of your Postgres, Kafka and warehouse, never user or password), column names and
-    their lineage, PII classes per column name, declared retention, layer owners' user ids, action names and
-    proposal ids. Never a row or record value, a config value, node health, room content or an action's output.
-    `OPENLINEAGE_API_KEY` goes only in the `Authorization` header, only over https (or to a loopback host), and is
-    never logged. Every pipeline of the server lands in one namespace (`OPENLINEAGE_NAMESPACE`): with several tenants,
-    use one lineage server per tenant or leave it off.
+- **Lineage, PII tags and retention (X7; contract X7-0, design `docs/design/lineage.md`; what each proves:
+  [governance.md](governance.md)).** The pipeline map gains column lineage on its edges and `pii` tags on its
+  table nodes: column **names**, their PII class (from names and types, never values). The contract also names a
+  `retention` tag (the declared duration), but no code sets it yet. Stored nowhere new: the map is built on
+  request, like before. Shown to anyone who can see the pipeline (`GET /api/pipelines/{pid}/topology`) and to the
+  agent in `pipeline_map`, which sends the column names and their classes to the model provider. The retention
+  comparison is a separate reader (section 2, `clients.TopicConfigReader`) and reaches the room only as
+  `config_risk` entries of durations and a policy word.
+  - **OpenLineage export (X7b, `internal/discover/openlineage`; optional, off unless `OPENLINEAGE_URL` is set).** An
+    **outbound** HTTP(S) POST from the server to the lineage server you name (Marquez, DataHub), part of your egress
+    review (section 5). Off, no goroutine starts and nothing is sent. On, it runs on the elected leader replica only
+    (election name `openlineage`) and sends one `RunEvent` for a pipeline's map at most every 15 minutes (only when the
+    room service builds the map on the leader: an agent run starting, a fix preview, a trace, the map page
+    `GET /api/pipelines/{pid}/topology`; the agent's own `pipeline_map` calls do not count), and one per executed fix
+    step
+    (`action.executed`: `COMPLETE`, `FAIL`, or `OTHER` when the outcome is unknown), through a dialer that refuses
+    link-local and cloud-metadata addresses (`connprobe.Guard`; loopback and private ranges are allowed), with no
+    proxy and no redirect; 10 s per POST, a network error, 429 or 5xx retried 3 times with backoff and then dropped
+    with one warning; a body over 1 MiB is sent without its column facets or dropped; at most 64 events wait (the
+    oldest is dropped). It sends dataset names (database, schema, table, topic; host and port of your Postgres,
+    Kafka and warehouse, never user, password or DSN parameters), column names and their lineage, the PII class per
+    column name, declared retention (when a node carries the `retention` tag; none does yet), layer owners' user
+    ids, action names, pipeline and proposal ids and step indexes. Never a row or record value, a config value or a
+    step's params beyond the topic and table names it matches against the map, node health or facts, room content
+    or an action's output (the room clears `output` before the hook, `room.Deps.OnActionResult`).
+    `OPENLINEAGE_API_KEY` goes only in the `Authorization: Bearer` header, only over https (or http to a loopback
+    host; `config.ParseOpenLineage` refuses the rest at start), and is never logged or put in a body. Every
+    pipeline of the server lands in one namespace (`OPENLINEAGE_NAMESPACE`): with several tenants, use one lineage
+    server per tenant or leave it off. Left out: a pipeline with its own `connections:` block (its datasets are not
+    the process-wide ones), MySQL sources, dbt models, and a sink table of a warehouse other than `WAREHOUSE_KIND`.
 - **Staging (X8; optional, only with a pipeline's `owners.yaml` `staging:` block and write mode on; contract in
   `internal/actions/action.go`, `docs/api.md` "X8 staging").** When the driver clicks "Try in staging", the server
   writes the proposal's change to **your staging** Kafka Connect or Schema Registry with the staging credentials you
@@ -246,7 +264,10 @@ auto-approved (`internal/room/autoapprove.go`).
 | `clients.ColumnReader` reader (column lineage X7a and PII tags X7c, through the map builder and the watcher's `row_drift` column choice; not a tool) | column name, catalog type name, position and nullability of the pipeline's own `source_tables`/`sink_tables`, at most 1600 per table, 10 s (`internal/clients/clients.go`). Implemented for the source Postgres and the dev Postgres warehouse from `pg_catalog` (`pg_class`, `pg_attribute`, `format_type` without the type modifier; `internal/clients/pgconv/columns.go`, X7a); the client checks the table name and the pipeline scope before any I/O and runs no query on the table itself. Other warehouses do not implement it yet: their sink hops have no column lineage and their sink tables no `pii` tag. The PII classifier (`internal/redact/columns.go`, X7c) sees only these column names and type names, corrected by the pipeline's `owners.yaml` `pii:` include/exclude; the watcher's `row_drift` never samples a column it or `pii.include` names. The map builder also reads each pipeline topic's latest `<topic>-value` schema from Schema Registry and keeps only its field names (`internal/topology/lineage_smt.go`); with the connectors' `transforms` class and field-list settings (`ExtractNewRecordState`, `ReplaceField$Value` `renames`/`exclude`/`include`), these give each edge's column map | any row or value, column defaults and comments, schema defaults and docs, any other connector config value; other pipelines' tables |
 | `clients.TableRetentionReader` reader (the watcher's retention check, X7d; not a tool; no warehouse implements it yet) | whether a sink table has a configured retention, its duration and the name of the setting read | any row or value, the setting's expression |
 | `clients.TopicConfigReader` (the watcher's retention check, X7d; the same read as `kafka_topic_config`) | for a pipeline's own topic: `retention.ms`, `retention.bytes`, `cleanup.policy`, `min.insync.replicas`, partitions, replication factor; the room sees only `config_risk` retention entries (`events.RetentionRisk`: durations and the policy word) | record payloads; any other topic config value |
-| `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go`); with X7, column names and their lineage per edge and `pii`/`retention` tags per node (`docs/design/lineage.md`) | row data |
+| Migration history readers (X4b; the optional `clients.MigrationReader` on the source client, read by the tool `what_changed`; not a tool of their own) | for the schemas of the pipeline's own `source_tables`, from a table named `flyway_schema_history` or `databasechangelog` found by a catalog lookup: version or changeset id, description (cut at 300 characters), applied time, who applied it and a success flag, at most 200 rows, 10 s each (`internal/clients/postgres/migrations.go`); with a dbt reader, the latest run's time, `invocation_id` and counts of the pipeline's models per status. Read live, not stored; the description is untrusted text from your own migration tool, shown to the model inside the untrusted-data wrapper. A history table the login cannot read is a fact ("grant SELECT on ..."), not read. Only those two default table names are looked for | the script's name, body or checksum, any other column of the history table, any row of another table |
+| PII classifier (X7c; `redact.ClassifyColumn`, `internal/redact/columns.go`; not a tool, no I/O of its own) | it reads no system: its input is the column names and type names the `clients.ColumnReader` row above returned, plus the pipeline's `owners.yaml` `pii:` include and exclude lists. Its output is the `pii` tag (`column:class` pairs, at most 2048 bytes) on the pipeline map's table nodes, and a "never read this column" decision in the watcher's `row_drift` (`redact.PersonalColumn`). Names only: it cannot see that a column named `notes` holds an address, and it never sees a value | any row, value, default or comment |
+| OpenLineage emitter (X7b, `OPENLINEAGE_URL`; **not implemented on this commit**: `config.ParseOpenLineage` has no caller and no code builds or sends an event, so nothing leaves the server) | today: nothing. When it lands, by the design in `docs/design/lineage.md` section 6: an outbound POST to the lineage server named in `OPENLINEAGE_URL` of dataset names (host and port, no user or password), column names and lineage, PII classes per column name, declared retention, layer owners' user ids, action names and proposal ids, at most one event per pipeline per 15 minutes and one per executed fix step | row or record values, config values, node health, room content, an action's `output`, the API key outside the `Authorization` header |
+| `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go`); with X7, column names and their lineage per edge and `pii` tags per table node (the contract's `retention` tag is not set yet; `docs/design/lineage.md`) | row data |
 | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag, only for the room pipeline's own topics and consumer groups (`kafka_consumer_lag` shows only partitions of the pipeline's topics) | record payloads |
 | `kafka_topic_config` | for a pipeline's own topic: retention, cleanup policy, min in-sync replicas, partition count and replication factor (`kafka_tools.go`) | record payloads |
 | `kafka_find_by_key` | topic, partition, offset, timestamp and **key** of matching records | record **values** |
@@ -382,7 +403,8 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
 - Turn Slack on only with a **private** channel whose members may see every room mirrored into it.
   Leave `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` unset if they may not. A `teams:` entry's `slack_channel`
   (X4) receives the pages its team gets; give it the same care.
-- Set a `vendor_status_url` (X4) only to a status feed host your egress policy allows (section 1).
+- When the status-page poller is wired (section 1: not yet), set a `vendor_status_url` (X4) only to a status feed
+  host your egress policy allows.
 - Pin or unset `ANTHROPIC_BASE_URL`; unset `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` on the host
   (section 1).
 - Keep the HTTP port on loopback or behind your VPN ([setup.md](setup.md#network-exposure)).
