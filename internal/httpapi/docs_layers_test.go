@@ -4,22 +4,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
-	"strings"
 	"testing"
 
 	"piperoom/internal/events"
 )
 
-// docs/api.md is part of the API contract, but its prose repeats facts the
-// code owns: how many layers the solo user gets from GET /api/me and how many
-// incident layers a label accepts. These claims drifted once (KAN-396: the doc
-// said eight while events.Layers had nine after the environment layer landed),
-// so the test pins them to events.Layers and events.IncidentLayers().
-
-// soloLayersClaim is "every entry of `events.Layers` (nine: postgres, ...)".
-var soloLayersClaim = regexp.MustCompile("every entry of `events\\.Layers` \\(([a-z0-9]+): ([^)]*)\\)")
+// docs/api.md is part of the API contract, but its prose repeats a fact the
+// code owns: how many incident layers a label accepts. That claim drifted once
+// (KAN-396), so the test pins it to events.IncidentLayers(). The solo-layer
+// wording is deliberately not pinned: /api/me depends on the pipeline kinds
+// owners.yaml uses (events.LayersOf), so the leads own that sentence.
 
 // incidentLayersClaim covers "the eight incident layers" and
 // "`events.IncidentLayers()`, eight;" -- both spell out the count in words.
@@ -31,20 +26,6 @@ func TestAPIDocLayerCounts(t *testing.T) {
 		t.Fatalf("read docs/api.md: %v", err)
 	}
 	text := string(doc)
-
-	t.Run("solo GET /api/me lists every events.Layers entry", func(t *testing.T) {
-		m := soloLayersClaim.FindStringSubmatch(text)
-		if m == nil {
-			t.Fatalf("docs/api.md no longer spells out the solo layers as %q; update this test with the new wording", soloLayersClaim)
-		}
-		if got, want := number(t, m[1]), len(events.Layers); got != want {
-			t.Errorf("docs/api.md says the solo user gets %s layers, events.Layers has %d", m[1], want)
-		}
-		names := strings.Split(m[2], ", ")
-		if !slices.Equal(names, events.Layers) {
-			t.Errorf("docs/api.md lists %v, events.Layers is %v (names and order must match)", names, events.Layers)
-		}
-	})
 
 	t.Run("incident layer counts match events.IncidentLayers", func(t *testing.T) {
 		ms := incidentLayersClaim.FindAllStringSubmatch(text, -1)
