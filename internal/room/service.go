@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -116,6 +117,22 @@ type Deps struct {
 	// ExportMaxEvents caps the events one audit export may contain; a larger
 	// room answers 413 export_too_large. Zero means DefaultExportMaxEvents.
 	ExportMaxEvents int64
+
+	// Setup is the server's setup settings (config.ParseSetup). With Enabled
+	// false every setup route answers 404 setup_disabled and nothing setup
+	// runs. (U)
+	Setup config.Setup
+	// SetupLocal is true when this server itself listens on loopback only
+	// (quickstart, standalone): a loopback target is then this machine, so the
+	// denylist of design §2.6 allows it. On a team server a loopback target is
+	// another host's and is refused. (U)
+	SetupLocal bool
+	// SetupOwnAddrs are this server's own non-loopback addresses: a target that
+	// resolves to one is refused (design §2.6). (U)
+	SetupOwnAddrs []netip.Addr
+	// SetupResolver resolves a target's host at registration; nil means
+	// net.DefaultResolver. Tests inject a fake. (U)
+	SetupResolver TargetResolver
 
 	// Sessions lets LookupPerson find a person who is not in users.yaml by their
 	// newest live session (design section 2.1). Nil: users.yaml only.
@@ -313,6 +330,11 @@ type Service struct {
 	soloUser        string
 	writeOff        bool // Deps.WriteModeOff
 	limits          config.Limits
+	// Setup rooms (setup.go; U wave).
+	setupCfg      config.Setup
+	setupLocal    bool
+	setupOwn      []netip.Addr
+	setupResolver TargetResolver
 	// Auto-approve policy (autoapprove.go). autoDelay is
 	// Deps.AutoApproveDelay (0 = off). autoTickDone, when set (tests only),
 	// runs after each check of the loop. autoSkip remembers what the loop
@@ -464,6 +486,10 @@ func New(d Deps) *Service {
 		soloUser:        d.SoloUser,
 		writeOff:        d.WriteModeOff,
 		limits:          d.Limits,
+		setupCfg:        d.Setup,
+		setupLocal:      d.SetupLocal,
+		setupOwn:        d.SetupOwnAddrs,
+		setupResolver:   d.SetupResolver,
 		autoDelay:       d.AutoApproveDelay,
 		autoTicker:      d.AutoApproveTicker,
 		leaseTicker:     d.LeaseTicker,
@@ -1197,8 +1223,13 @@ func (s *Service) knownPipeline(pipelineID string) bool {
 // pipeline is unknown to the owners config, so there is nothing to scope a
 // fix against (docs/api.md:103). It derives from the snapshot's pipeline id,
 // so it survives a restart: a webhook room opened for an unknown pipeline
-// keeps proposals disabled after the service rebuilds from the log.
+// keeps proposals disabled after the service rebuilds from the log. A setup
+// room is the exception: its pipeline is provisional until pipeline_register
+// writes the owners entry, and owners.Provisional is what scopes it (U).
 func (s *Service) proposalsDisabled(st *roomState) bool {
+	if st.snap.IsSetupRoom() {
+		return false
+	}
 	return s.pipelineProposalsDisabled(st.snap.PipelineID)
 }
 

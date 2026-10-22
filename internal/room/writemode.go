@@ -36,6 +36,9 @@ func (s *Service) RoomFor(ctx context.Context, u User, roomID string) (RoomSnaps
 		return RoomSnapshot{}, err
 	}
 	snap.Mode = &Mode{Write: !s.writeOff, Solo: s.soloFor(u, snap.PipelineID), AutoApprove: s.autoApproveFor(snap.PipelineID)}
+	// The setup member's server-side fields: the configured token budget and
+	// whether the maintenance window has ended (docs/api.md).
+	s.fillSetupRuntime(&snap)
 	// A countdown past run_at plus the grace is not shown (P2b-4b); the
 	// published snapshot keeps it, as the log does.
 	s.hideStaleCountdowns(&snap)

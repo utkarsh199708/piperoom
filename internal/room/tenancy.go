@@ -110,32 +110,36 @@ func (s *Service) CheckRoomVisible(ctx context.Context, u User, roomID string) e
 // loaded a row (proposal, hand-off) of roomID. It must run before any answer
 // that depends on the row (409 already decided, 403 not the recipient), so a
 // person outside the tenant learns nothing from it. It takes no lock.
+//
+// The room's own snapshot answers, not its row's pipeline id: a setup room's
+// pipeline is provisional and absent from owners.yaml, so its tenant comes
+// from room.created (SetupRequest.tenant) until pipeline_register. A room this
+// replica has not published is loaded first, exactly as the handler would.
 func (s *Service) checkVisible(ctx context.Context, u User, roomID string) error {
 	if !s.TenancyOn() {
 		return nil
 	}
-	pipelineID, err := s.roomPipelineID(ctx, roomID)
+	snap, err := s.readRoom(ctx, roomID)
 	if err != nil {
-		return err
+		return mapStoreErr(err)
 	}
-	if !s.CanSeePipeline(u, pipelineID) {
+	if !s.canSeeRoom(u, snap) {
 		return errHidden()
 	}
 	return nil
 }
 
-// roomPipelineID returns a room's pipeline id from its published snapshot,
-// else from its rooms row: no lock is waited for, and no snapshot is cloned or
-// rebuilt for a visibility check. A missing room is the 404 of mapStoreErr.
-func (s *Service) roomPipelineID(ctx context.Context, roomID string) (string, error) {
-	if p := s.published(roomID); p != nil {
-		return p.PipelineID, nil
+// canSeeRoom reports whether the person may see the room: the setup room's
+// tenant, or the pipeline's tenant for every other room.
+func (s *Service) canSeeRoom(u User, snap *RoomSnapshot) bool {
+	if !s.TenancyOn() || s.IsSolo(u.ID) {
+		return true
 	}
-	row, err := s.store.GetRoom(ctx, roomID)
-	if err != nil {
-		return "", mapStoreErr(err)
+	if snap.IsSetupRoom() {
+		tenant := snap.SetupTenant()
+		return tenant != "" && s.owners.InTenant(tenant, u.ID, u.Groups)
 	}
-	return row.PipelineID, nil
+	return s.owners.CanSeePipeline(snap.PipelineID, u.ID, u.Groups)
 }
 
 // checkTargetVisible refuses to give control or a hand-off to a person who
@@ -150,18 +154,25 @@ func (s *Service) checkTargetVisible(to User, pipelineID string) error {
 // ListRoomsFor is ListRooms without the rooms outside the person's tenants.
 // It filters the ordered list, so the rooms it keeps are in the same order as
 // ListRooms (see roomListLess); GET /api/rooms and the room list socket both
-// answer through this method and therefore agree (KAN-382).
+// answer through this method and therefore agree (KAN-382). Setup rooms are
+// filtered by their own tenant (canSeeRoom), and every row carries only the
+// setup fields the list documents (trimSetupForList).
 func (s *Service) ListRoomsFor(ctx context.Context, u User) ([]RoomSnapshot, error) {
 	all, err := s.ListRooms(ctx)
-	if err != nil || !s.TenancyOn() || s.IsSolo(u.ID) {
+	if err != nil {
 		return all, err
 	}
-	visible, _ := s.owners.VisiblePipelines(u.ID, u.Groups)
-	out := make([]RoomSnapshot, 0, len(all))
-	for _, r := range all {
-		if visible[r.PipelineID] {
-			out = append(out, r)
+	out := all
+	if s.TenancyOn() && !s.IsSolo(u.ID) {
+		out = make([]RoomSnapshot, 0, len(all))
+		for i := range all {
+			if s.canSeeRoom(u, &all[i]) {
+				out = append(out, all[i])
+			}
 		}
+	}
+	for i := range out {
+		trimSetupForList(&out[i])
 	}
 	return out, nil
 }

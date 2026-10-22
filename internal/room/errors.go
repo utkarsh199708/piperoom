@@ -142,3 +142,48 @@ func alreadyNudged(msg string) *Error {
 func tooManyProposals() *Error {
 	return &Error{Status: http.StatusTooManyRequests, Code: "too_many_proposals", Msg: "at most 5 open driver-authored proposals per room"}
 }
+
+// ---- Setup rooms (U wave; docs/api.md, "Setup rooms") ----
+
+// setupDisabled is 404 setup_disabled: every setup route and
+// /api/runners/ws while PIPEROOM_SETUP_ENABLED is off.
+func setupDisabled() *Error {
+	return &Error{Status: http.StatusNotFound, Code: "setup_disabled", Msg: "setup is not enabled on this server"}
+}
+
+// notTenantMember is 403 not_tenant_member: POST /api/setup for a tenant the
+// caller is not in (or one no tenants: block declares, which is the same
+// answer so a tenant name does not leak).
+func notTenantMember() *Error {
+	return &Error{Status: http.StatusForbidden, Code: "not_tenant_member", Msg: "you are not a member of that tenant"}
+}
+
+// pipelineExists is 409 pipeline_exists: POST /api/setup for a pipeline
+// owners.yaml already defines, or one an open setup room is already building.
+func pipelineExists(id string) *Error {
+	return &Error{Status: http.StatusConflict, Code: "pipeline_exists", Msg: "pipeline " + id + " already exists"}
+}
+
+// notSetupRoom is 400 not_setup_room: a setup route on an incident room.
+func notSetupRoom() *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "not_setup_room", Msg: "this room is not a setup room"}
+}
+
+// addressRefused is 400 address_refused: a target address on the denylist of
+// design §2.6. The message carries no part of the address (a URL form may hold
+// credentials).
+func addressRefused() *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "address_refused", Msg: "the target address is not allowed: cloud metadata endpoints, link-local, multicast, unspecified and loopback addresses of another host are refused, as are this server's own addresses"}
+}
+
+// classLowered is 400 class_lowered: a class below the one the server derived
+// (a class is a floor that only rises).
+func classLowered(msg string) *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "class_lowered", Msg: msg}
+}
+
+// windowTooLong is 400 window_too_long: a maintenance window over 4 hours or
+// more than 24 hours ahead.
+func windowTooLong(msg string) *Error {
+	return &Error{Status: http.StatusBadRequest, Code: "window_too_long", Msg: msg}
+}

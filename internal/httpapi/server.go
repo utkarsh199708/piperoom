@@ -233,6 +233,14 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/people", s.handlePeople)
 				short.Get("/rooms", s.handleListRooms)
 				short.Post("/rooms", s.handleCreateRoom)
+				// Setup rooms (setup.go; U wave). Mounted always: with setup
+				// off the service answers 404 setup_disabled, as docs/api.md
+				// says.
+				short.Post("/setup", s.handleSetupCreate)
+				short.Post("/rooms/{id}/setup/targets", visible(s.handleSetupAddTarget))
+				short.Post("/rooms/{id}/setup/targets/{t}/class", visible(s.handleSetupRaiseClass))
+				short.Post("/rooms/{id}/setup/pipeline", visible(s.handleSetupExtendPipeline))
+				short.Post("/rooms/{id}/setup/maintenance-window", visible(s.handleSetupMaintenanceWindow))
 				short.Get("/actions", s.handleActions)
 				if !s.authSettings.IsOIDC() {
 					// Unsigned: dev mode only (design §4). In oidc mode this
