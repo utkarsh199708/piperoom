@@ -10,7 +10,6 @@
 package runner
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,6 +84,10 @@ type Options struct {
 	// of a transient connect or handshake failure; nil = exponential backoff
 	// from connectBackoffBase, capped at connectBackoffMax.
 	Backoff func(attempt int) time.Duration
+	// SecretsFile is the runner's secret store (PIPEROOM_SETUP_SECRETS_FILE);
+	// "" = <project dir>/.piperoom/secrets.env. The store is opened on first
+	// use, so a runner that never runs an op creates no file.
+	SecretsFile string
 }
 
 // Runner is one paired (or pairing) setup runner.
@@ -103,6 +106,13 @@ type Runner struct {
 	catalogueV string
 	backoff    func(attempt int) time.Duration
 	url        *url.URL
+	secretsF   string
+
+	// storeMu guards the lazily opened secret store (see secretStore): the
+	// first op or secret frame opens it, and a runner that never handles one
+	// leaves the project directory untouched.
+	storeMu sync.Mutex
+	store   *Store
 
 	connMu sync.Mutex
 	conn   *websocket.Conn
@@ -112,11 +122,13 @@ type Runner struct {
 	roomID      string
 	negotiated  protocol.Version
 
-	// stdinMu serializes terminal confirmation prompts and their reads (ask)
-	// and guards stdinReader, the single shared reader, so two concurrent T3
-	// confirms cannot read each other's answer or buffer each other's input.
-	stdinMu     sync.Mutex
-	stdinReader *bufio.Reader
+	// stdinMu serializes terminal prompts (ask, promptSecret) and guards the
+	// lazy start of the stdin-reader goroutine. stdinLines is fed by that one
+	// goroutine, the only reader of r.stdin (see stdinCh), so two concurrent
+	// prompts cannot read each other's answer and an abandoned prompt never
+	// leaves an orphaned read racing the next one.
+	stdinMu    sync.Mutex
+	stdinLines chan stdinLine
 
 	// handshakeMu guards handshakeDone. handshakeDone is non-nil while a
 	// reconnect handshake is in progress (the window between setConn and the
@@ -154,6 +166,7 @@ func New(o Options) (*Runner, error) {
 		catalogue:  o.Catalogue,
 		catalogueV: orDefault(o.CatalogueVersion, catalogueVersion),
 		backoff:    o.Backoff,
+		secretsF:   o.SecretsFile,
 		started:    make(map[stepKey]struct{}),
 		proposals:  make(map[string]events.ProposalCreatedPayload),
 		floors:     make(map[string]string),
@@ -610,6 +623,16 @@ func (r *Runner) serve(ctx context.Context) error {
 			go r.runOp(ctx, f.Op)
 		case protocol.FrameCancel:
 			r.cancelOp(f.Cancel.ID)
+		case protocol.FrameSecret:
+			// The driver typed a value into Piperoom; the server forwards it
+			// once and stores it nowhere. Storing it is quick (one small
+			// atomic file write), so it runs on the read loop; the frame is
+			// never logged.
+			r.storeSecretFrame(f.Secret)
+		case protocol.FrameRegisterCredentials:
+			// The terminal confirmation blocks, so it runs in its own
+			// goroutine and pings keep flowing.
+			go r.registerCredentials(ctx, f.RegisterCredentials)
 		default:
 			r.log.Debug("frame not handled yet", "type", f.Type.Short())
 		}

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"piperoom/internal/events"
+	"piperoom/internal/setup/plan"
 	"piperoom/internal/setup/protocol"
 	"piperoom/internal/setup/runner"
 	"piperoom/internal/tools"
@@ -103,6 +104,30 @@ func TestGuardTable(t *testing.T) {
 	for _, c := range cases {
 		if got := r.GuardForbidden(c.op, c.class); got != c.want {
 			t.Errorf("GuardForbidden(%q, %q) = %v, want %v", c.op, c.class, got, c.want)
+		}
+	}
+}
+
+// TestGuardTableAgreesWithPlan: the runner's guard table and the server's
+// (internal/setup/plan) refuse the same pairs for every op name they share,
+// so a step the server would refuse is never run because the runner's shorter
+// table spells it differently. Both directions are checked with the strictest
+// facts.
+func TestGuardTableAgreesWithPlan(t *testing.T) {
+	r := testRegistry(t)
+	for op, classes := range guardTable {
+		for _, class := range classes {
+			if _, forbidden := plan.Forbidden(plan.GuardRequest{Op: op, Class: class}); !forbidden {
+				t.Errorf("the runner forbids %s on %s, the plan table does not", op, class)
+			}
+		}
+	}
+	for _, row := range plan.GuardRows() {
+		if _, ok := r.Get(row.Op); !ok {
+			continue // the runner's catalogue does not implement this op
+		}
+		if !r.GuardForbidden(row.Op, row.Class) {
+			t.Errorf("the plan table forbids %s on %s, the runner does not", row.Op, row.Class)
 		}
 	}
 }

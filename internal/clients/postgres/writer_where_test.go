@@ -42,9 +42,14 @@ func TestInsertSnapshotSignalWhereSQL(t *testing.T) {
 	if err := json.Unmarshal([]byte(wantData), &data); err != nil || len(data.AdditionalConditions) != 1 || data.AdditionalConditions[0].Filter != whereCond {
 		t.Fatalf("data does not parse back: %v %+v", err, data)
 	}
-	// The provenance receipt never carries the condition.
+	// The provenance receipt never carries the condition. The receipt does
+	// carry the random signal id, whose hex can contain "100", so that one
+	// bound param is skipped rather than substring-matched.
 	for _, c := range rec.Calls() {
 		for _, p := range c.ParamsRedacted {
+			if strings.Contains(p, id) {
+				continue
+			}
 			if strings.Contains(p, "drop") || strings.Contains(p, "100") {
 				t.Fatalf("receipt shows the condition: %q", p)
 			}

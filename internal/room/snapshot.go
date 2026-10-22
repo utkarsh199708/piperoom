@@ -267,6 +267,10 @@ type RoomSnapshot struct {
 	// and 4). Set on the room view only (RoomFor), never by Apply; nil, and
 	// left out of the JSON, everywhere else.
 	Mode *Mode `json:"mode,omitempty"`
+	// Setup is the setup room's state (U wave; docs/api.md "U-wave snapshot
+	// fields"), folded from the setup.* events of the log. Nil on every
+	// incident room, so it is absent there.
+	Setup *SetupSnapshot `json:"setup,omitempty"`
 
 	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
 	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
@@ -433,6 +437,7 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		m.AutoApprove = append([]string{}, s.Mode.AutoApprove...)
 		c.Mode = &m
 	}
+	c.Setup = s.Setup.clone()
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)
 	c.warnedFor = cloneTime(s.warnedFor)
@@ -897,6 +902,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
 		}
 	}
+
+	// The setup member folds from the setup.* events (setup_snapshot.go). It
+	// runs after the switch so a setup room folds exactly like every other room
+	// plus this member.
+	snap = applySetup(snap, e)
 
 	return normalize(snap)
 }

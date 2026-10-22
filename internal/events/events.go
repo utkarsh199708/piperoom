@@ -1477,10 +1477,13 @@ type ActionExecutedPayload struct {
 // SetupReceipt is the setup equivalent of ToolCall: proof of what the runner
 // executed for one step. Argv is the exact argv of an exec op with every
 // secret as ${secret:name}; Target is the host, URL, file path or database
-// the op reached, never credentials; OutMAC is HMAC-SHA256 of the raw output
-// under a key only the runner holds, so the output itself never leaves the
-// runner and a dispute is settled by re-running the receipt there. A receipt
-// never holds a secret value, a token or raw output.
+// the op reached, never credentials; OutMAC is HMAC-SHA256, under a key only
+// the runner holds, over the redacted result exactly as the server receives
+// it (the OK flag and the redacted Summary and Data), so it proves the
+// transport integrity of the redacted result: whoever alters it in flight or
+// at rest cannot mint a matching MAC, and the runner's store re-verifies it
+// on a dispute. The raw output itself is never MAC'd and never leaves the
+// runner. A receipt never holds a secret value, a token or raw output.
 type SetupReceipt struct {
 	Kind     string    `json:"kind"`           // "exec" | "http" | "sql" | "file"
 	Argv     []string  `json:"argv,omitempty"` // exec only

@@ -131,6 +131,11 @@ type Config struct {
 	// MountDirs are directories a rendered template mounts into a container
 	// or builds from; file_write refuses every path under one (§2.5).
 	MountDirs []string
+	// Materialised lists project-relative paths whose content came from the
+	// runner's secret store (the store also persists them in
+	// .piperoom/materialised, which every file op reads); file_read,
+	// dir_list, file_write and file_delete refuse them (§2.4).
+	Materialised []string
 	// Now, LookPath and Exec are injectable for tests.
 	Now      func() time.Time
 	LookPath func(string) (string, error)
@@ -151,14 +156,17 @@ type Env struct {
 	ProjectDir string
 	Targets    []events.SetupTarget
 	MountDirs  []string
-	Now        func() time.Time
-	LookPath   func(string) (string, error)
-	Exec       func(ctx context.Context, name string, args ...string) ([]byte, int, error)
-	Resolver   *net.Resolver
-	Confine    *Confiner
-	HTTP       *http.Client
-	Dial       func(ctx context.Context, network, address string) (net.Conn, error)
-	Probe      NetProbe
+	// Materialised lists project-relative paths the runner materialised from
+	// its secret store; no file op may read, list, write or delete them.
+	Materialised []string
+	Now          func() time.Time
+	LookPath     func(string) (string, error)
+	Exec         func(ctx context.Context, name string, args ...string) ([]byte, int, error)
+	Resolver     *net.Resolver
+	Confine      *Confiner
+	HTTP         *http.Client
+	Dial         func(ctx context.Context, network, address string) (net.Conn, error)
+	Probe        NetProbe
 }
 
 // Registry holds the catalogue in registration order and implements the
@@ -204,7 +212,7 @@ func New(cfg Config) (*Registry, error) {
 	}
 	r := &Registry{
 		ops:    make(map[string]Op),
-		env:    Env{ProjectDir: confine.Dir(), Targets: cfg.Targets, MountDirs: cfg.MountDirs, Now: now, LookPath: look, Exec: run, Resolver: cfg.Resolver, Confine: confine, HTTP: httpc, Dial: dialer.DialContext, Probe: probe},
+		env:    Env{ProjectDir: confine.Dir(), Targets: cfg.Targets, MountDirs: cfg.MountDirs, Materialised: append([]string(nil), cfg.Materialised...), Now: now, LookPath: look, Exec: run, Resolver: cfg.Resolver, Confine: confine, HTTP: httpc, Dial: dialer.DialContext, Probe: probe},
 		mounts: append([]string(nil), cfg.MountDirs...),
 	}
 	for _, op := range []Op{

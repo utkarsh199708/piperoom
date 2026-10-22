@@ -238,6 +238,10 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"GET", "/api/pipelines/{pid}/connectors/{name}/config-versions", "/api/pipelines/pb/connectors/pb-c/config-versions", ""},
 		{"GET", "/api/pipelines/{pid}/connectors/{name}/config-versions", "/api/pipelines/pb/connectors/pb-c/config-versions?diff=" + strings.Repeat("a", 64) + ".." + strings.Repeat("b", 64), ""},
 		{"GET", "/api/rooms/{id}/usage", "/api/rooms/" + f.rb + "/usage", ""},
+		{"POST", "/api/rooms/{id}/setup/targets", "/api/rooms/" + f.rb + "/setup/targets", `{"kind":"connect","address":"connect.acme:8083"}`},
+		{"POST", "/api/rooms/{id}/setup/targets/{t}/class", "/api/rooms/" + f.rb + "/setup/targets/db.acme%3A5432/class", `{"class":"production"}`},
+		{"POST", "/api/rooms/{id}/setup/pipeline", "/api/rooms/" + f.rb + "/setup/pipeline", `{"add_tables":["public.b2"]}`},
+		{"POST", "/api/rooms/{id}/setup/maintenance-window", "/api/rooms/" + f.rb + "/setup/maintenance-window", `{"start":"2026-10-21T10:00:00Z","end":"2026-10-21T11:00:00Z"}`},
 		{"GET", "/api/usage", "/api/usage?pipeline=pb", ""},
 	}
 }
@@ -250,6 +254,7 @@ var aggregateRoutes = []string{
 	"GET /api/rooms/ws",
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
+	"POST /api/setup",
 	"GET /api/pipelines",
 	"GET /api/fleet",         // TestFleetTenancy
 	"GET /api/fleet/changes", // TestFleetTenancy

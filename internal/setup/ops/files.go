@@ -31,6 +31,12 @@ const (
 	maxWriteBytes = 256 << 10
 	// maxDirEntries caps dir_list.
 	maxDirEntries = 500
+	// secretsDir is the runner's own directory under the project (secret
+	// store, op log, materialised-path list).
+	secretsDir = ".piperoom"
+	// materialisedListFile is the store's persisted list of paths whose
+	// content came from it; every file op refuses them (§2.4).
+	materialisedListFile = secretsDir + "/materialised"
 )
 
 // fileReadOp reads one UTF-8 text file under the project dir.
@@ -70,7 +76,7 @@ func (fileReadOp) Validate(params json.RawMessage, env Env) error {
 	if err := secretReadPath(p.Path); err != nil {
 		return err
 	}
-	return nil
+	return materialisedRefusal(p.Path, env)
 }
 
 func (fileReadOp) Execute(ctx context.Context, params json.RawMessage, env Env) (Result, error) {
@@ -82,6 +88,9 @@ func (fileReadOp) Execute(ctx context.Context, params json.RawMessage, env Env) 
 		return Result{}, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
 	if err := secretReadPath(p.Path); err != nil {
+		return Result{}, err
+	}
+	if err := materialisedRefusal(p.Path, env); err != nil {
 		return Result{}, err
 	}
 	clean, denied, err := env.Confine.prepare(p.Path)
@@ -107,16 +116,19 @@ func (fileReadOp) Execute(ctx context.Context, params json.RawMessage, env Env) 
 	if !utf8.Valid(data) {
 		return Result{}, fmt.Errorf("%w: %s is not UTF-8 text", ErrNotText, clip(p.Path))
 	}
-	content := string(data)
+	// A config file can carry credentials (database.password=..., tokens), and
+	// §2.4 of this package's contract says no op reads a secret back; the path
+	// deny-list alone only catches secret-named files. Redact the content like
+	// http_get redacts its body, before it reaches the server or the model —
+	// and before the content cap: a cap applied first could cut a credential
+	// in half and leave a raw prefix the redaction patterns no longer match.
+	content, _ := redact.Text(string(data))
 	if len(content) > maxReadContent {
 		content = content[:maxReadContent]
 		truncated = true
 	}
-	// A config file can carry credentials (database.password=..., tokens), and
-	// §2.4 of this package's contract says no op reads a secret back; the path
-	// deny-list alone only catches secret-named files. Redact the content like
-	// http_get redacts its body, before it reaches the server or the model.
-	content, _ = redact.Text(content)
+	// "bytes" counts the raw bytes read from disk (capped at maxReadBytes);
+	// content is the redacted, and possibly capped, text.
 	summary := fmt.Sprintf("read %s (%d bytes)", p.Path, len(data))
 	if truncated {
 		summary += ", truncated"
@@ -165,7 +177,7 @@ func (dirListOp) Validate(params json.RawMessage, env Env) error {
 			return fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 		}
 	}
-	return nil
+	return materialisedRefusal(p.Path, env)
 }
 
 func (dirListOp) Execute(ctx context.Context, params json.RawMessage, env Env) (Result, error) {
@@ -175,6 +187,9 @@ func (dirListOp) Execute(ctx context.Context, params json.RawMessage, env Env) (
 	}
 	if p.Path == "" {
 		p.Path = "."
+	}
+	if err := materialisedRefusal(p.Path, env); err != nil {
+		return Result{}, err
 	}
 	clean, denied, err := env.Confine.prepare(p.Path)
 	if err != nil {
@@ -281,6 +296,9 @@ func (fileWriteOp) Validate(params json.RawMessage, env Env) error {
 	if err := writablePath(p.Path, env.MountDirs); err != nil {
 		return err
 	}
+	if err := materialisedRefusal(p.Path, env); err != nil {
+		return err
+	}
 	if err := checkWriteContent(p.Content); err != nil {
 		return err
 	}
@@ -296,6 +314,9 @@ func (fileWriteOp) Execute(ctx context.Context, params json.RawMessage, env Env)
 		return Result{}, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
 	if err := writablePath(p.Path, env.MountDirs); err != nil {
+		return Result{}, err
+	}
+	if err := materialisedRefusal(p.Path, env); err != nil {
 		return Result{}, err
 	}
 	if err := checkWriteContent(p.Content); err != nil {
@@ -413,7 +434,10 @@ func (fileDeleteOp) Validate(params json.RawMessage, env Env) error {
 	if why := lexicalRefusal(p.Path); why != "" {
 		return fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
-	return deletablePath(p.Path, env.MountDirs)
+	if err := deletablePath(p.Path, env.MountDirs); err != nil {
+		return err
+	}
+	return materialisedRefusal(p.Path, env)
 }
 
 func (fileDeleteOp) Execute(ctx context.Context, params json.RawMessage, env Env) (Result, error) {
@@ -425,6 +449,9 @@ func (fileDeleteOp) Execute(ctx context.Context, params json.RawMessage, env Env
 		return Result{}, fmt.Errorf("%w: %s: %s", ErrPath, why, clip(p.Path))
 	}
 	if err := deletablePath(p.Path, env.MountDirs); err != nil {
+		return Result{}, err
+	}
+	if err := materialisedRefusal(p.Path, env); err != nil {
 		return Result{}, err
 	}
 	clean, _, err := env.Confine.prepare(p.Path)
@@ -472,6 +499,49 @@ func secretReadPath(p string) error {
 		return fmt.Errorf("%w: %s names a secret file", ErrSecretPath, clip(p))
 	}
 	return nil
+}
+
+// materialisedRefusal refuses a path that is, or is under, a path the runner
+// materialised from its secret store (design §2.4: no op can read a secret
+// back). The list is the one the registry was configured with plus the one
+// the store persists in .piperoom/materialised, read through the project
+// root, so the denial survives a restart and needs no extra wiring.
+func materialisedRefusal(p string, env Env) error {
+	clean := strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+	if clean == "" {
+		clean = "."
+	}
+	list := env.Materialised
+	if env.Confine != nil {
+		list = append(append([]string(nil), list...), materialisedFromStore(env)...)
+	}
+	if underAny(clean, list) {
+		return fmt.Errorf("%w: %s is a materialised secret file", ErrSecretPath, clip(p))
+	}
+	return nil
+}
+
+// materialisedFromStore reads .piperoom/materialised through the project
+// root: a symlinked .piperoom or list is ignored (the store refuses to create
+// one), and a missing list means nothing was materialised yet.
+func materialisedFromStore(env Env) []string {
+	fi, err := env.Confine.root.Lstat(secretsDir)
+	if err != nil || !fi.IsDir() || fi.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+		return nil
+	}
+	raw, err := env.Confine.root.ReadFile(materialisedListFile)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
 }
 
 // deletablePath refuses the paths file_delete must not remove: everything
@@ -565,6 +635,12 @@ func writablePath(p string, mounts []string) error {
 		strings.HasSuffix(base, ".socket"), strings.HasSuffix(base, ".path"),
 		strings.HasSuffix(base, ".mount"):
 		return refuse("an executable, script, archive or unit file")
+	case strings.HasSuffix(base, ".properties"):
+		// A Kafka Connect worker loads .properties config with code-loading
+		// keys (plugin.path, config.providers.*.class); properties_write
+		// allow-lists those keys, and file_write must not offer a way around
+		// that allow-list.
+		return refuse("a properties file; properties_write validates these")
 	case base == "compose.yaml", base == "compose.yml",
 		base == "compose.override.yaml", base == "compose.override.yml":
 		return refuse("a compose file")
@@ -574,19 +650,22 @@ func writablePath(p string, mounts []string) error {
 	}
 	for _, part := range pathParts(p) {
 		// .husky and .githooks hold scripts git runs whatever their names.
-		if strings.EqualFold(part, ".husky") || strings.EqualFold(part, ".githooks") {
+		if foldEqual(part, ".husky") || foldEqual(part, ".githooks") {
 			return refuse("a git hook")
 		}
 	}
 	if strings.HasSuffix(base, ".yaml") || strings.HasSuffix(base, ".yml") {
 		for _, part := range pathParts(p) {
-			if strings.EqualFold(part, "k8s") || strings.EqualFold(part, "manifests") {
+			if foldEqual(part, "k8s") || foldEqual(part, "manifests") {
 				return refuse("a Kubernetes manifest")
 			}
 		}
 	}
 	if underAny(strings.ReplaceAll(p, "\\", "/"), mounts) {
 		return fmt.Errorf("%w: %s is under a directory a template mounts or builds from", ErrExecutedName, clip(p))
+	}
+	if err := secretReadPath(p); err != nil {
+		return err
 	}
 	return nil
 }
