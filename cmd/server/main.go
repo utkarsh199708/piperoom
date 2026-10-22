@@ -658,6 +658,10 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	if sampleStore != nil {
 		httpOpts = append(httpOpts, httpapi.WithSamples(sampleStore))
 	}
+	// The fleet view (X5a) reads the watcher's status rows, which the leader's
+	// watcher writes, so every replica answers alike.
+	fleetStore, _ := st.(store.FleetStore)
+	httpOpts = append(httpOpts, httpapi.WithFleet(fleetOptions(own, st, fleetStore, s.watchCfg, changesDays)))
 	if s.setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
 	}
@@ -709,6 +713,9 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	}
 	if sampleStore != nil {
 		watchDeps.Samples = sampleStore
+	}
+	if fleetStore != nil {
+		watchDeps.Status = fleetStore
 	}
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
