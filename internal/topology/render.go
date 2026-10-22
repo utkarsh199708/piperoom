@@ -2,7 +2,9 @@ package topology
 
 import (
 	"fmt"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -63,6 +65,12 @@ func (b *builder) Render(g Graph) string {
 			blk.WriteString("  from: ")
 			blk.WriteString(renderLinks(in, func(e Edge) string { return e.From }, pos))
 			blk.WriteByte('\n')
+		}
+		for _, e := range inputs[n.ID] {
+			if len(e.Columns) > 0 || e.ColumnsOmitted > 0 {
+				blk.WriteString(renderColumns(e))
+				blk.WriteByte('\n')
+			}
 		}
 		if dep := needs[n.ID]; len(dep) > 0 {
 			blk.WriteString("  depends on: ")
@@ -204,7 +212,96 @@ func renderNode(i int, n Node) string {
 	for _, k := range keys {
 		fmt.Fprintf(&sb, " %s=%s", printable(k), printable(n.Facts[k]))
 	}
+	// X7 tags after the facts, in key order; "tag." keeps them apart from a
+	// fact of the same name.
+	keys = keys[:0]
+	for k := range n.Tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		fmt.Fprintf(&sb, " tag.%s=%s", printable(k), printable(n.Tags[k]))
+	}
 	return sb.String()
+}
+
+// maxRenderColumnNames caps each list of a "columns:" line; the rest is
+// counted, so a 1600-column table cannot fill the map.
+const maxRenderColumnNames = 20
+
+// renderColumns is the "columns:" line of an edge with column lineage: where
+// the columns come from, then only the changes by kind (same-name columns
+// counted). "(unconfirmed)" when any map is matched by name only.
+func renderColumns(e Edge) string {
+	var inputs []string
+	var renamed, unwrapped, dropped, added []string
+	same, unconfirmed := 0, false
+	for _, c := range e.Columns {
+		unconfirmed = unconfirmed || c.Mapping == MappingInferred
+		if c.Input != "" && !slices.Contains(inputs, c.Input) {
+			inputs = append(inputs, c.Input)
+		}
+		switch c.Transform {
+		case ColumnSame:
+			same++
+		case ColumnRename:
+			renamed = append(renamed, columnName(c.From)+"->"+columnName(c.To))
+		case ColumnUnwrap:
+			unwrapped = append(unwrapped, columnName(c.To))
+		case ColumnDropped:
+			dropped = append(dropped, columnName(c.From))
+		case ColumnAdded:
+			added = append(added, columnName(c.To))
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString("  columns")
+	if unconfirmed {
+		sb.WriteString(" (unconfirmed)")
+	}
+	sb.WriteString(":")
+	if len(inputs) > 0 {
+		for i := range inputs {
+			inputs[i] = printable(inputs[i])
+		}
+		sb.WriteString(" from " + strings.Join(inputs, ", "))
+		if len(inputs) > 1 || inputs[0] != printable(e.From) {
+			sb.WriteString(" via " + printable(e.From))
+		}
+		sb.WriteString(";")
+	}
+	fmt.Fprintf(&sb, " %d same", same)
+	for _, l := range []struct {
+		kind  string
+		names []string
+	}{{"renamed", renamed}, {"unwrapped", unwrapped}, {"dropped", dropped}, {"added", added}} {
+		if len(l.names) == 0 {
+			continue
+		}
+		fmt.Fprintf(&sb, "; %s %s", l.kind, strings.Join(l.names[:min(len(l.names), maxRenderColumnNames)], " "))
+		if n := len(l.names) - maxRenderColumnNames; n > 0 {
+			fmt.Fprintf(&sb, " +%d more", n)
+		}
+	}
+	if e.ColumnsOmitted > 0 {
+		fmt.Fprintf(&sb, "; %d more columns not listed", e.ColumnsOmitted)
+	}
+	return sb.String()
+}
+
+// columnName shows a plain name as it is and quotes any other (a space, a
+// comma or a non-ASCII rune in a catalog name), so one name cannot pass for
+// two or forge a line.
+func columnName(s string) string {
+	for _, r := range s {
+		if !(r == '_' || r == '.' || r == '$' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return strconv.QuoteToASCII(s)
+		}
+	}
+	if s == "" {
+		return `""`
+	}
+	return s
 }
 
 // printable shows every rune outside printable ASCII as
