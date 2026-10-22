@@ -3,10 +3,13 @@
 // them into warehouse.analytics.orders. It can be told to fail or slow down,
 // so the failure scenarios in dev/scenarios.md have a realistic consumer.
 //
-// Two knobs play a bad release: SKIP_OPS (a build that drops some change
-// events but commits their offsets: consumer-bad-deploy) and REJECT_STATUS (a
+// Four knobs play a bad release: SKIP_OPS (a build that drops some change
+// events but commits their offsets: consumer-bad-deploy), REJECT_STATUS (a
 // build that rejects a status value and routes those records to DLQ_TOPIC:
-// dlq-backlog).
+// dlq-backlog), SKIP_WHERE (a build whose filter drops the rows matching a
+// predicate: sink-filtered-rows) and DROP_COLUMNS (a build whose upsert no
+// longer writes a column: sink-dropped-column). The last two fail nothing: the
+// consumer stays in its group with lag 0.
 package main
 
 import (
@@ -42,6 +45,10 @@ type options struct {
 	// rejectStatus: an order with this status is rejected to dlqTopic.
 	rejectStatus string
 	dlqTopic     string
+	// skipWhere: an order matching it is dropped without loading (zero = off).
+	skipWhere skipWhere
+	// dropColumns are the analytics.orders columns this build never writes.
+	dropColumns map[string]bool
 }
 
 func main() {
@@ -74,8 +81,18 @@ func main() {
 	skipRaw := flag.String("skip-ops", env("SKIP_OPS", ""), "Debezium ops to drop without loading, comma separated (c,u,d,r); a bad build")
 	flag.StringVar(&o.rejectStatus, "reject-status", env("REJECT_STATUS", ""), "reject orders with this status to the DLQ; a bad build")
 	flag.StringVar(&o.dlqTopic, "dlq-topic", env("DLQ_TOPIC", ""), "dead-letter topic for rejected records")
+	skipWhereRaw := flag.String("skip-where", env("SKIP_WHERE", ""), "drop orders matching column=value without loading (status, customer_id, id); a bad build")
+	dropColsRaw := flag.String("drop-columns", env("DROP_COLUMNS", ""), "analytics.orders columns the upsert does not write, comma separated (customer_id,amount,status,updated_at); a bad build")
 	flag.Parse()
 	if o.skipOps, err = parseSkipOps(*skipRaw); err != nil {
+		fmt.Fprintf(os.Stderr, "devconsumer: %v\n", err)
+		os.Exit(2)
+	}
+	if o.skipWhere, err = parseSkipWhere(*skipWhereRaw); err != nil {
+		fmt.Fprintf(os.Stderr, "devconsumer: %v\n", err)
+		os.Exit(2)
+	}
+	if o.dropColumns, err = parseDropColumns(*dropColsRaw); err != nil {
 		fmt.Fprintf(os.Stderr, "devconsumer: %v\n", err)
 		os.Exit(2)
 	}
@@ -117,7 +134,8 @@ func run(ctx context.Context, o options, log *slog.Logger) error {
 
 	schemas := newSchemaCache(o.registry)
 	log.Info("devconsumer started", "topic", o.topic, "group", o.group, "fail_on_id", o.failOnID, "delay", o.delay,
-		"skip_ops", joinOps(o.skipOps), "reject_status", o.rejectStatus, "dlq_topic", o.dlqTopic)
+		"skip_ops", joinOps(o.skipOps), "reject_status", o.rejectStatus, "dlq_topic", o.dlqTopic,
+		"skip_where", o.skipWhere.String(), "drop_columns", joinColumns(o.dropColumns))
 
 	for {
 		// PollRecords caps each batch, so a large --delay cannot make a single
@@ -189,13 +207,13 @@ func handle(ctx context.Context, r *kgo.Record, schemas *schemaCache, pool *pgxp
 	if err := check(c, o); err != nil {
 		return err
 	}
-	if o.skipOps[c.Op] {
+	if o.skipOps[c.Op] || o.skipWhere.matches(c) {
 		return nil
 	}
-	return apply(ctx, pool, c)
+	return apply(ctx, pool, c, o.dropColumns)
 }
 
-func apply(ctx context.Context, pool *pgxpool.Pool, c change) error {
+func apply(ctx context.Context, pool *pgxpool.Pool, c change, dropped map[string]bool) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if c.After == nil {
@@ -204,25 +222,30 @@ func apply(ctx context.Context, pool *pgxpool.Pool, c change) error {
 		}
 		return nil
 	}
-	var amount pgtype.Numeric
-	if err := amount.Scan(c.After.Amount); err != nil {
-		return fmt.Errorf("devconsumer: amount %q: %w", c.After.Amount, err)
+	query, cols := upsertSQL(dropped)
+	args := make([]any, 0, len(cols)+1)
+	args = append(args, c.After.ID)
+	for _, col := range cols {
+		switch col {
+		case colCustomerID:
+			args = append(args, c.After.CustomerID)
+		case colAmount:
+			var amount pgtype.Numeric
+			if err := amount.Scan(c.After.Amount); err != nil {
+				return fmt.Errorf("devconsumer: amount %q: %w", c.After.Amount, err)
+			}
+			args = append(args, amount)
+		case colStatus:
+			args = append(args, c.After.Status)
+		case colUpdatedAt:
+			var updated pgtype.Timestamptz
+			if !c.After.UpdatedAt.IsZero() {
+				updated = pgtype.Timestamptz{Time: c.After.UpdatedAt, Valid: true}
+			}
+			args = append(args, updated)
+		}
 	}
-	var updated pgtype.Timestamptz
-	if !c.After.UpdatedAt.IsZero() {
-		updated = pgtype.Timestamptz{Time: c.After.UpdatedAt, Valid: true}
-	}
-	_, err := pool.Exec(ctx, `
-		INSERT INTO analytics.orders (id, customer_id, amount, status, updated_at, loaded_at)
-		VALUES ($1, $2, $3, $4, $5, now())
-		ON CONFLICT (id) DO UPDATE SET
-		  customer_id = EXCLUDED.customer_id,
-		  amount      = EXCLUDED.amount,
-		  status      = EXCLUDED.status,
-		  updated_at  = EXCLUDED.updated_at,
-		  loaded_at   = now()`,
-		c.After.ID, c.After.CustomerID, amount, c.After.Status, updated)
-	if err != nil {
+	if _, err := pool.Exec(ctx, query, args...); err != nil {
 		return fmt.Errorf("devconsumer: upsert order %d: %w", c.ID, err)
 	}
 	return nil
