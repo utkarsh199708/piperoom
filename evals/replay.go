@@ -87,6 +87,11 @@ func (definitionKafka) ACLs(context.Context, []string, []string) ([]clients.ACLE
 	return nil, errNotReplayed
 }
 
+// DupScan registers kafka_dup_keys (X1c), as the production Kafka client does.
+func (definitionKafka) DupScan(context.Context, string, time.Time, int) (clients.DupReport, error) {
+	return clients.DupReport{}, errNotReplayed
+}
+
 // LiveActions returns the production write actions, backed by replay clients
 // that know only res and what recs recorded: actions.Register's seven and
 // the P3 actions (replay_actions.go). The agent can propose them (their real

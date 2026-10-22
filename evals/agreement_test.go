@@ -357,6 +357,11 @@ var syntheticLabels = map[string]Label{
 	"dead-slot-wal-no-context": {"kafka-connect", []string{"stopped", "never resumed", "retains all wal"}},
 	"consumer-bad-deploy":      {"consumer", []string{"deploy", "committed", "offsets"}},
 	"dlq-backlog":              {"consumer", []string{"validation", "gift"}},
+	// The X1e silent-corruption scenarios (KAN-420).
+	"sink-filtered-rows":  {"consumer", []string{"filter*", "skip*", "2.16.0"}},
+	"consumer-duplicates": {"kafka", []string{"same lsn", "redeliver*", "same key"}},
+	"sink-dropped-column": {"consumer", []string{"upsert", "2.16.1"}},
+	"toast-placeholder":   {"kafka-connect", []string{"replica identity", "toast*"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -416,6 +421,16 @@ var syntheticTruth = map[string]map[string]truth{
 	"dead-slot-wal-no-context": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"consumer-bad-deploy":      {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	"dlq-backlog":              {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// X1e: lazy texts are the alert titles (the watcher's count_drift and
+	// dup_keys titles, the hand-written dbt test titles); none names the cause.
+	// The dup_keys title names the topic (kafka); the toast title blames
+	// analytics.orders (warehouse). The matcher misses the layer of two good
+	// texts: sink-filtered-rows' failure clause names the warehouse, and
+	// toast-placeholder's names the WAL (postgres) before Debezium.
+	"sink-filtered-rows":  {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"consumer-duplicates": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"sink-dropped-column": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"toast-placeholder":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.

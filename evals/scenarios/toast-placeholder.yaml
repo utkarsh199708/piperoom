@@ -1,0 +1,678 @@
+# C7 incident scenario (X1e): public.orders was switched from REPLICA IDENTITY FULL to DEFAULT;
+# an update that leaves a TOASTed column unchanged makes Debezium emit its unavailable-value
+# placeholder, and order-sync upserts that string over the real status. Counts match, lag is 0,
+# timestamps match. Format: evals/README.md (C6). Built on `devctl break toast-placeholder`
+# (X1g, dev/scenarios.md §17) and X1d's pg_toast_risk.
+#
+# RECORDED: NO (synthesised from the code paths). Every summary and data payload below is the
+# exact output of the real kafkatools, dbtools and topology code at c71c4477, run by a throwaway
+# generator (not committed) over fake clients holding the state the break leaves on an idle dev
+# stack, scoped like dev/owners.yaml. Clock: 2026-10-21T09:40:00Z. Nothing was read from a
+# running stack; it must be re-recorded there (evals/scenarios/README.md, "Silent-corruption
+# scenarios (X1e)"). The reconcile answer was run on the fixed clock with an explicit window.
+#
+# Two assumptions about the stack, to check when re-recording:
+#   - pg_stats.avg_width of orders.status is 7 B: autovacuum analysed the table when it held
+#     only short statuses, and three out-of-line values (an 18-byte TOAST pointer each) among
+#     ~1300 rows do not move it or trigger a new analyse. pg_toast_risk then lists no risk
+#     ("no out-of-line or wide toastable column"): its out_of_line_values rule needs an average
+#     of at least 18 B. If the stack's avg_width is >= 18 or unset (-1), the tool flags
+#     orders.status with "placeholder seen 3 times" instead; regenerate then.
+#   - The TOAST relation holds 3 pages (24 KiB) for the three 12.8 kB values.
+#
+# How the room opens: a data test, not the drift watcher. The generator ran the real watcher
+# over this state from 09:24:30 to 11:40: it never fires. row_drift compares timestamp columns
+# only (RowTimes), and the placeholder is in a text column whose rows have the right updated_at.
+# dev/scenarios.md §17 expects row_drift; that does not hold for this code. The alert title is
+# hand-written: the dbt accepted_values test a warehouse team runs on status.
+#
+# First failing layer: kafka-connect (Debezium emits the placeholder; Postgres serves as
+# configured). Root-cause layer: postgres (the REPLICA IDENTITY DEFAULT change at 09:24:10Z).
+#
+# Expected fix: none automated (no action sets a replica identity). A human runs ALTER TABLE
+#   public.orders REPLICA IDENTITY FULL, then rewrites status on the affected source rows so a
+#   full event is emitted (`devctl fix toast-placeholder`). The events already on the topic keep
+#   the placeholder.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - Connect
+#     is RUNNING; a restart changes nothing about what the WAL carries.
+#   Forbidden: schema_register, schema_set_compatibility, connect_update_connector_config - the
+#     schema is unchanged; a config change cannot recover a value the WAL never carried.
+#
+# Traps:
+#   - pg_toast_risk says "no TOAST truncation risk" (see the avg_width assumption above).
+#   - Counts and timestamps match: reconcile shows no drift, warehouse_row matches updated_at.
+#   - Only pg_recent_ddl (the ALTER) and trace_record (diff_columns=status) point at the cause;
+#     the placeholder string is in the alert title.
+#   - Not a consumer bug: order-sync loads what the event carries.
+#
+# Sources:
+#   - cmd/devctl/scenarios_silent.go breakToastPlaceholder: ALTER TABLE public.orders REPLICA
+#     IDENTITY DEFAULT, 3 orders (customer g, amount 300+g) with a 12.8 kB status, then UPDATE
+#     amount + 1, updated_at = now() once they are in the warehouse.
+#   - dev/postgres-init/01-orders.sql (REPLICA IDENTITY FULL by default), 02-ddl-audit.sql (the
+#     audit row: command tag, object identity, query, session user).
+#   - internal/tools/dbtools/toast.go toastRisks: the 18-byte rule.
+
+name: toast-placeholder
+description: |
+  At 09:24:10 UTC public.orders was switched from REPLICA IDENTITY FULL to DEFAULT (an ALTER TABLE
+  run as piperoom). Right after, three orders with a 12.8 kB status (stored out of line by TOAST)
+  were inserted, loaded, and at 09:24:13 updated in amount and updated_at only. With identity
+  DEFAULT the update's WAL record carries no value for the unchanged TOASTed status, so Debezium
+  sent '__debezium_unavailable_value' in its place and order-sync upserted that string into
+  analytics.orders.status. The source rows keep the real status. Counts and timestamps match,
+  lag is 0, Connect and the slot are healthy. A dbt accepted_values test on
+  analytics.orders.status opened the room.
+
+  Root cause: REPLICA IDENTITY DEFAULT on public.orders, so updates that leave the TOASTed status
+  unchanged carry no value for it and Debezium emits its unavailable-value placeholder.
+
+  Expected fix: none automated; REPLICA IDENTITY FULL again, then rewrite the affected rows'
+  status at the source.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: "orders: dbt test accepted_values_orders_status failed on analytics.orders: 3 rows with status '__debezium_unavailable_value' (passed 09:00Z, failed 09:30Z)"
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=15m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=15m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=15m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=15m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot_active: "true"
+            slot_retained: 1.1 MiB
+            wal_status: reserved
+          health: ok
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - health: ok
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 15m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 15m
+            ts_column: updated_at
+          health: warn
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 1
+      subject: pg.public.orders-key
+      versions:
+        - 1
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–435 (435 records), newest 15 min ago
+      partition 1: 0–436 (436 records), newest 15 min ago
+      partition 2: 0–435 (435 records), newest 15 min ago
+    data:
+      partitions:
+        - end: 435
+          last_timestamp: "2026-10-21T09:24:13.387Z"
+          partition: 0
+          start: 0
+        - end: 436
+          last_timestamp: "2026-10-21T09:24:13.387Z"
+          partition: 1
+          start: 0
+        - end: 435
+          last_timestamp: "2026-10-21T09:24:13.387Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 1306
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders, table: public.orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=1, 3 partitions, replication factor 1
+    data:
+      cleanup_policy: delete
+      min_insync_replicas: "1"
+      partitions: 3
+      replication_factor: 1
+      retention_bytes: "-1"
+      retention_ms: "604800000"
+      topic: pg.public.orders
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 435, end 435, lag 0
+        pg.public.orders/1: committed 436, end 436, lag 0
+        pg.public.orders/2: committed 435, end 435, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 435
+          end: 435
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 436
+          end: 436
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 435
+          end: 435
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=1.1 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 3B/4C0BB078
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3B/4C0BAE80
+        retained_wal_bytes: 1146880
+        wal_status: reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-21T09:24:10.318Z ALTER TABLE public.orders | ALTER TABLE public.orders REPLICA IDENTITY DEFAULT | piperoom
+    data:
+      - at: "2026-10-21T09:24:10.318Z"
+        command_tag: ALTER TABLE
+        object_identity: public.orders
+        query: ALTER TABLE public.orders REPLICA IDENTITY DEFAULT
+        username: piperoom
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      publication: dbz_publication
+      publication_source: default
+      publication_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+      source_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-21T09:24:13.207Z (idle: no writes at the source for 15m; sink in sync; source newest=2026-10-21T09:24:13.207Z)
+    data:
+      idle: true
+      lag_seconds: 0
+      newest: "2026-10-21T09:24:13.207Z"
+      source_age: 15m
+      source_newest: "2026-10-21T09:24:13.207Z"
+      source_table: public.orders
+      stale_for: 15m
+      table: analytics.orders
+      tolerance: 2m
+      ts_column: updated_at
+      verdict: idle
+  - tool: reconcile
+    input: {table: public.orders}
+    summary: |
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 10m0s from 2026-10-21T07:40:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      07:40 | 8 | 8 | 8 | +0
+      07:50 | 8 | 8 | 8 | +0
+      08:00 | 9 | 9 | 9 | +0
+      08:10 | 8 | 8 | 8 | +0
+      08:20 | 9 | 9 | 9 | +0
+      08:30 | 8 | 8 | 8 | +0
+      08:40 | 6 | 6 | 6 | +0
+      08:50 | 0 | 0 | 0 | +0
+      09:00 | 0 | 0 | 0 | +0
+      09:10 | 0 | 0 | 0 | +0
+      09:20 | 3 | 6 | 3 | +0
+      09:30 | 0 | 0 | 0 | +0
+      verdict: the sink matches the source in every bucket (within 2%)
+      keys by id: source 59, sink 59; missing 0; extra 0
+      keys: the same 59 rows are in source and sink for this window (no drift)
+    data:
+      buckets:
+        - bucket: "2026-10-21T07:40:00Z"
+          sink: 8
+          source: 8
+          topic: 8
+        - bucket: "2026-10-21T07:50:00Z"
+          sink: 8
+          source: 8
+          topic: 8
+        - bucket: "2026-10-21T08:00:00Z"
+          sink: 9
+          source: 9
+          topic: 9
+        - bucket: "2026-10-21T08:10:00Z"
+          sink: 8
+          source: 8
+          topic: 8
+        - bucket: "2026-10-21T08:20:00Z"
+          sink: 9
+          source: 9
+          topic: 9
+        - bucket: "2026-10-21T08:30:00Z"
+          sink: 8
+          source: 8
+          topic: 8
+        - bucket: "2026-10-21T08:40:00Z"
+          sink: 6
+          source: 6
+          topic: 6
+        - bucket: "2026-10-21T08:50:00Z"
+          sink: 0
+          source: 0
+          topic: 0
+        - bucket: "2026-10-21T09:00:00Z"
+          sink: 0
+          source: 0
+          topic: 0
+        - bucket: "2026-10-21T09:10:00Z"
+          sink: 0
+          source: 0
+          topic: 0
+        - bucket: "2026-10-21T09:20:00Z"
+          sink: 3
+          source: 3
+          topic: 6
+        - bucket: "2026-10-21T09:30:00Z"
+          sink: 0
+          source: 0
+          topic: 0
+      keys:
+        column: id
+        extra: 0
+        missing: 0
+        sink: 59
+        sink_column: id
+        source: 59
+  - tool: kafka_dup_keys
+    input: {topic: pg.public.orders}
+    summary: |-
+      pg.public.orders: 0 duplicate events across 0 keys, 0 order regressions in 62 records
+    data:
+      capped: false
+      duplicates: 0
+      keys: 0
+      max_scan: 50000
+      order_regressions: 0
+      partial: false
+      partitions:
+        - done: true
+          end: 435
+          from: 414
+          next: 435
+          partition: 0
+          scanned: 21
+        - done: true
+          end: 436
+          from: 415
+          next: 436
+          partition: 1
+          scanned: 21
+        - done: true
+          end: 435
+          from: 415
+          next: 435
+          partition: 2
+          scanned: 20
+      regression_keys: 0
+      scanned: 62
+      since: "2026-10-21T07:40:00Z"
+      tombstones: 0
+      topic: pg.public.orders
+      undecodable: 0
+  - tool: pg_toast_risk
+    input: {pipeline_id: orders}
+    summary: |
+      pg_toast_risk pipeline orders: no TOAST truncation risk found in 1 source table
+      no out-of-line or wide toastable column: public.orders
+    data:
+      pipeline: orders
+      placeholder: ""
+      placeholder_source: ""
+      risks: []
+      tables:
+        - found: true
+          replica_identity: DEFAULT
+          table: public.orders
+          toast_bytes: 24576
+          toastable_columns: 1
+  - tool: pg_row
+    input: {key: "1301", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, updated_at=2026-10-21T09:24:13.207Z, columns=[amount, customer_id, id=1301, status, updated_at=2026-10-21T09:24:13.207Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1301"
+      status: null
+      updated_at: "2026-10-21T09:24:13.207Z"
+  - tool: warehouse_row
+    input: {key: "1301", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      found: yes, loaded_at=2026-10-21T09:24:13.607Z, updated_at=2026-10-21T09:24:13.207Z
+    data:
+      loaded_at: "2026-10-21T09:24:13.607Z"
+      updated_at: "2026-10-21T09:24:13.207Z"
+  - tool: kafka_find_by_key
+    input: {key: "1301", topic: pg.public.orders}
+    summary: |-
+      found 2 record(s) with key "1301"
+        partition 2, offset 434, 2026-10-21T09:24:13Z
+        partition 2, offset 433, 2026-10-21T09:24:11Z
+    data:
+      found: true
+      key: "1301"
+      records:
+        - key: "1301"
+          offset: 433
+          partition: 2
+          timestamp: "2026-10-21T09:24:11.082Z"
+          topic: pg.public.orders
+        - key: "1301"
+          offset: 434
+          partition: 2
+          timestamp: "2026-10-21T09:24:13.387Z"
+          topic: pg.public.orders
+      topic: pg.public.orders
+      truncated: false
+  - tool: trace_record
+    input: {key: "1301", pipeline_id: orders, table: public.orders}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-21T09:24:13.207Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=434 partition=2
+      consumer order-sync: seen committed=435
+      warehouse analytics.orders: seen diff_columns=status
+    data:
+      - facts:
+          updated_at: "2026-10-21T09:24:13.207Z"
+        layer: postgres
+        name: public.orders
+        status: seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: seen
+      - facts:
+          offset: "434"
+          partition: "2"
+        layer: kafka
+        name: pg.public.orders
+        status: seen
+      - facts:
+          committed: "435"
+        layer: consumer
+        name: order-sync
+        status: seen
+      - facts:
+          diff_columns: status
+        layer: warehouse
+        name: analytics.orders
+        status: seen
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: connect_status
+    error: 'out of scope: connector "orders-connector" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: connect_config
+    error: 'out of scope: connector "orders-connector" is not part of this room''s pipeline "orders" (allowed connectors: pg-orders-connector)'
+  - tool: schema_registry_versions
+    error: 'out of scope: subject "orders-value" is not part of this room''s pipeline "orders" (allowed subjects: pg.public.orders-key, pg.public.orders-value)'
+  - tool: kafka_topic_offsets
+    error: 'out of scope: topic "orders.events" is not part of this room''s pipeline "orders" (allowed topics: pg.public.orders)'
+  - tool: kafka_consumer_lag
+    error: 'out of scope: consumer group "orders-consumer" is not part of this room''s pipeline "orders" (allowed consumer groups: order-sync)'
+  - tool: pg_row
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: warehouse_row
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: kafka_find_by_key
+    summary: |-
+      not found: no record with key "999999" since 2026-10-21T06:40:00Z
+    data:
+      found: false
+      key: "999999"
+      records: null
+      topic: pg.public.orders
+      truncated: false
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+    data:
+      - layer: postgres
+        name: public.orders
+        status: not_seen
+      - layer: kafka-connect
+        name: pg-orders-connector
+        status: not_seen
+      - layer: kafka
+        name: pg.public.orders
+        status: not_seen
+      - layer: consumer
+        name: order-sync
+        status: not_seen
+      - layer: warehouse
+        name: analytics.orders
+        status: not_seen
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+
+inputs:
+  - kind: steer
+    text: "Where does this value come from, and what stops it happening again?"
+
+expect:
+  root_cause:
+    - ['replica identity']
+    - [default]
+    - [toast*, unchanged, 'out of line', large]
+  root_cause_forbidden:
+    - ['pipeline is healthy']
+    - ['pipeline healthy']
+    - ['false positive']
+    - ['false alarm']
+    - ['nothing is wrong']
+    - [consumer, bug]
+    - [order-sync, bug]
+    - ['connector side']
+    - ['slot was lost']
+    - [schema registry, reject*]
+    - [incompatib*]
+  first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  evidence_tools: [pg_recent_ddl]
+  expected_facts:
+    - id: f_replica_default
+      tool: pg_recent_ddl
+      match: [replica identity default]
+      required: true
+    - id: f_trace_status
+      tool: trace_record
+      match: [warehouse analytics orders seen diff columns status]
+    - id: f_lag_zero
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+    - id: f_counts_match
+      tool: reconcile
+      match: [sink matches the source]
+  claims:
+    - about: root_cause
+      facts: [f_replica_default]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility, connect_update_connector_config]
+  max_tool_calls: 14
