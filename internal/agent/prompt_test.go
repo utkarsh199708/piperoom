@@ -901,7 +901,7 @@ func TestSystemPromptTreatsPausedConnectorAsIncident(t *testing.T) {
 	// resume checks, never a drop (TC6).
 	for _, want := range []string{
 		"If retired, the root cause is the orphaned slot (postgres layer), not the stopped connector.",
-		"Without that context, a slot retaining WAL behind a stopped connector calls for the resume checks below, never a drop.",
+		"Without that, a slot behind a stopped connector calls for the resume checks, never a drop.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("dead-slot rule lost %q", want)
