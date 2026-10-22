@@ -92,6 +92,21 @@ func TestClassifyColumn(t *testing.T) {
 		{"notes", "text", ""},
 		{"", "text", ""},
 		{"___", "", ""},
+		// Postgres format_type spellings (X7a's ColumnReader reads
+		// format_type(atttypid, NULL), not information_schema): arrays as
+		// "<type>[]", domains and user types by their (maybe qualified or
+		// quoted) name.
+		{"emails", "text[]", ColumnEmail},
+		{"phone_numbers", "bigint[]", ColumnPhone},
+		{"login_ips", "inet[]", ColumnIP},
+		{"email", "timestamp with time zone[]", ""},
+		{"customer_email", "public.email_address", ColumnEmail},
+		{"contact_email", "citext", ColumnEmail},
+		{"dob", "public.birth_date_t", ColumnDOB},
+		{"first_name", "\"PersonName\"", ColumnName},
+		{"status", "public.order_status", ""},
+		{"email", "ARRAY", ColumnEmail},
+		{"email", "USER-DEFINED", ColumnEmail},
 	} {
 		got, ok := ClassifyColumn(tc.name, tc.typ)
 		if ok != (tc.want != "") || got != tc.want {
@@ -127,6 +142,11 @@ func TestColumnTypeKind(t *testing.T) {
 		"integer": kindNumber, "bigint": kindNumber, "numeric(12,2)": kindNumber, "NUMBER(38,0)": kindNumber,
 		"INT64": kindNumber, "FLOAT64": kindNumber, "double precision": kindNumber, "Decimal(10, 2)": kindNumber,
 		"UInt32": kindNumber, "integer[]": kindNumber,
+		// format_type spellings: arrays, a typmod before the brackets,
+		// domains and user types by name (never ruled out).
+		"timestamp with time zone[]": kindTime, "date[]": kindTime, "interval[]": kindTime, "inet[]": kindNet,
+		"boolean[]": kindBool, "uuid[]": kindUUID, "numeric(12,2)[]": kindNumber, "character varying(64)[]": kindOther,
+		"text[]": kindOther, "public.email_address": kindOther, `"OrderStatus"`: kindOther, "citext": kindOther,
 		"inet": kindNet, "cidr": kindNet, "macaddr8": kindNet, "IPv6": kindNet,
 		"text": kindOther, "character varying": kindOther, "VARCHAR(255)": kindOther, "String": kindOther,
 		"LowCardinality(String)": kindOther, "jsonb": kindOther, "bytea": kindOther, "USER-DEFINED": kindOther,
