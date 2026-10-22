@@ -13,6 +13,7 @@ import (
 
 	"github.com/hamba/avro/v2"
 
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
 
@@ -57,6 +58,15 @@ var scenarios = map[string]scenario{
 	"consumer-bad-deploy": {breakIt: breakConsumerBadDeploy, fix: fixConsumerBadDeploy, alert: badDeployAlert, owners: p3OwnersFile},
 	"dlq-backlog": {breakIt: breakDLQBacklog, fix: fixDLQBacklog, owners: p3OwnersFile,
 		signals: []string{owners.SignalDLQGrowth}},
+
+	// X1g (silent corruption): nothing fails and `devctl health` stays green;
+	// the drift signals are the only way in. They run on the baseline
+	// dev/owners.yaml; the checks fire every watch.reconcile_interval (15 m by
+	// default, dev/scenarios.md §14).
+	"sink-filtered-rows":  {breakIt: breakSinkFilteredRows, fix: fixSinkFilteredRows, signals: []string{events.SignalCountDrift}},
+	"sink-dropped-column": {breakIt: breakSinkDroppedColumn, fix: fixSinkDroppedColumn, signals: []string{events.SignalRowDrift}},
+	"consumer-duplicates": {breakIt: breakConsumerDuplicates, fix: fixConsumerDuplicates, signals: []string{events.SignalDupKeys}},
+	"toast-placeholder":   {breakIt: breakToastPlaceholder, fix: fixToastPlaceholder, signals: []string{events.SignalRowDrift}},
 
 	// Batch pipeline daily-revenue (dev/batch.md). A batch pipeline has no
 	// watcher signals, so each break raises its alert instead; the pipeline is

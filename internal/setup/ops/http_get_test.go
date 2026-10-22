@@ -1,0 +1,240 @@
+package ops
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"piperoom/internal/events"
+	"piperoom/internal/setup/protocol"
+)
+
+func targetFor(rawURL string) events.SetupTarget {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		panic(err)
+	}
+	return events.SetupTarget{Kind: "connect", Address: u.Host}
+}
+
+func TestHTTPGet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"version":"7.6.0"}`)
+	}))
+	defer srv.Close()
+	r := testRegistry(t, targetFor(srv.URL))
+
+	res, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL + "/"})
+	if err != nil {
+		t.Fatalf("http_get: %v", err)
+	}
+	var data httpGetData
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Status != 200 || !strings.Contains(data.Body, "7.6.0") {
+		t.Fatalf("data = %+v", data)
+	}
+	if res.Receipt.Kind != "http" {
+		t.Fatalf("receipt = %+v", res.Receipt)
+	}
+}
+
+func TestHTTPGetHEAD(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Errorf("method = %s, want HEAD", r.Method)
+		}
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	r := testRegistry(t, targetFor(srv.URL))
+	if _, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL + "/", "method": "HEAD"}); err != nil {
+		t.Fatalf("http_get HEAD: %v", err)
+	}
+}
+
+func TestHTTPGetNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "no such connector", http.StatusNotFound)
+	}))
+	defer srv.Close()
+	r := testRegistry(t, targetFor(srv.URL))
+	res, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL + "/connectors/x"})
+	if !errors.Is(err, ErrHTTPStatus) {
+		t.Fatalf("err = %v, want ErrHTTPStatus", err)
+	}
+	if res.OK || !strings.Contains(res.Summary, "404") {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestHTTPGetRefusesHostOutsideTargets(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	r := testRegistry(t, events.SetupTarget{Kind: "connect", Address: "127.0.0.1:1"})
+	if _, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL}); !errors.Is(err, ErrTarget) {
+		t.Fatalf("err = %v, want ErrTarget", err)
+	}
+	r2 := testRegistry(t)
+	if _, err := runOpErr(t, r2, "http_get", map[string]string{"url": srv.URL}); !errors.Is(err, ErrTarget) {
+		t.Fatalf("no targets: err = %v, want ErrTarget", err)
+	}
+}
+
+func TestHTTPGetURLRules(t *testing.T) {
+	r := testRegistry(t, events.SetupTarget{Kind: "connect", Address: "127.0.0.1:8083"})
+	cases := map[string]string{
+		"userinfo": "http://user:pass@127.0.0.1:8083/",
+		"scheme":   "ftp://127.0.0.1:8083/",
+		"fragment": "http://127.0.0.1:8083/#x",
+		"no host":  "http:///x",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := runOpErr(t, r, "http_get", map[string]string{"url": raw})
+			if !errors.Is(err, ErrParams) && !errors.Is(err, ErrTarget) {
+				t.Fatalf("err = %v, want a params or target refusal", err)
+			}
+		})
+	}
+}
+
+func TestHTTPGetOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(bytesOf('a', maxHTTPBody+1024))
+	}))
+	defer srv.Close()
+	r := testRegistry(t, targetFor(srv.URL))
+	res, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL})
+	if err != nil {
+		t.Fatalf("http_get: %v", err)
+	}
+	if !res.Truncated {
+		t.Fatal("Truncated = false")
+	}
+	var data httpGetData
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Body) != maxHTTPBody {
+		t.Fatalf("body = %d bytes, want %d", len(data.Body), maxHTTPBody)
+	}
+	if len(res.Data) > protocol.MaxDataBytes {
+		t.Fatalf("Data = %d bytes, cap %d", len(res.Data), protocol.MaxDataBytes)
+	}
+}
+
+func TestHTTPGetRefusesRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+	r := testRegistry(t, targetFor(srv.URL))
+	if _, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL}); !errors.Is(err, errRedirectRefused) {
+		t.Fatalf("err = %v, want errRedirectRefused", err)
+	}
+}
+
+func TestHTTPGetContextCancellation(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	r := testRegistry(t, targetFor(srv.URL))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	raw, _ := json.Marshal(map[string]string{"url": srv.URL})
+	_, err := r.Execute(ctx, protocol.OpRequest{ID: "op", Op: "http_get", Params: raw, Tier: protocol.TierT0})
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want a context error", err)
+	}
+}
+
+func bytesOf(b byte, n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+// An http_get failure must not leak the query string through the wrapped
+// *url.Error, whose text embeds the full URL (a query can carry a token).
+func TestHTTPGetErrorOmitsQuery(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/elsewhere", http.StatusFound)
+	}))
+	defer srv.Close()
+	r := testRegistry(t, targetFor(srv.URL))
+	_, err := runOpErr(t, r, "http_get", map[string]string{"url": srv.URL + "/?custom_param=sekret123TOKEN"})
+	if !errors.Is(err, errRedirectRefused) {
+		t.Fatalf("err = %v, want errRedirectRefused", err)
+	}
+	if strings.Contains(err.Error(), "sekret123TOKEN") {
+		t.Fatalf("error leaks the query string: %v", err)
+	}
+}
+
+// A target registered without a port offers only the scheme's standard port,
+// never every service on the machine.
+func TestHTTPGetPortlessTargetMatchesOnlyStandardPorts(t *testing.T) {
+	env := Env{Targets: []events.SetupTarget{{Kind: "connect", Address: "connect.example"}}}
+	for _, raw := range []string{
+		"http://connect.example:8083/connectors",
+		"https://connect.example:2375/",
+		"http://connect.example:443/", // the other scheme's default is still not this scheme's
+	} {
+		if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"`+raw+`"}`), env); !errors.Is(err, ErrTarget) {
+			t.Errorf("decode(%q) = %v, want ErrTarget", raw, err)
+		}
+	}
+	for _, raw := range []string{
+		"http://connect.example/connectors",
+		"http://connect.example:80/connectors",
+		"https://connect.example/subjects",
+		"https://connect.example:443/subjects",
+	} {
+		if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"`+raw+`"}`), env); err != nil {
+			t.Errorf("decode(%q) = %v, want nil", raw, err)
+		}
+	}
+}
+
+// The request's URL is rebuilt from the matched target's own address: the
+// model's spelling of the host never reaches the dial.
+func TestHTTPGetUsesTargetHostSpelling(t *testing.T) {
+	env := Env{Targets: []events.SetupTarget{{Kind: "connect", Address: "connect.example:8083"}}}
+	_, rebuilt, err := decodeHTTPGet(json.RawMessage(`{"url":"http://CONNECT.EXAMPLE:8083/x?a=b"}`), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.Host != "connect.example:8083" || rebuilt.Path != "/x" || rebuilt.RawQuery != "a=b" {
+		t.Fatalf("rebuilt = %q", rebuilt.String())
+	}
+}
+
+// A URL-form target without an explicit port pins its scheme's own port: an
+// https target does not also offer port 80.
+func TestHTTPGetURLTargetPinsSchemePort(t *testing.T) {
+	env := Env{Targets: []events.SetupTarget{{Kind: "connect", Address: "https://connect.example"}}}
+	if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"http://connect.example/"}`), env); !errors.Is(err, ErrTarget) {
+		t.Errorf("http on an https target = %v, want ErrTarget", err)
+	}
+	if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"https://connect.example/subjects"}`), env); err != nil {
+		t.Errorf("https on an https target = %v, want nil", err)
+	}
+}

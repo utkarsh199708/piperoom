@@ -267,7 +267,7 @@ func TestScriptedSummariesMatchFreshRoomPreview(t *testing.T) {
 	rec := &recordingSink{}
 	sink := &stopAfter{sink: rec, tool: "schema_registry_versions", cancel: cancel}
 
-	if err := Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: idProposals{}, Inbox: &closedInbox{}}, agent.Options{}); err != nil {
+	if err := runFast(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: idProposals{}, Inbox: &closedInbox{}}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

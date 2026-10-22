@@ -26,6 +26,10 @@
 // The consumer-group signals (F6): consumer_lag, group_unstable and
 // offset_below_log_start read GroupLag per group (Deps.Lag) and the log-start
 // offsets of the CDC topics (lag_signals.go).
+//
+// The drift signals (X1b): count_drift, row_drift, dup_keys and order_skew
+// compare source and sink rows and scan the CDC topics every
+// reconcile_interval through optional readers (drift.go).
 package watch
 
 import (
@@ -34,6 +38,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,6 +124,9 @@ type PipelineClients struct {
 	// Lag reads consumer-group lag on the set's cluster (nil: the
 	// consumer-group signals stay unknown, as with Deps.Lag).
 	Lag LagReader
+	// Warehouse is the set's sink warehouse (nil: count_drift and row_drift
+	// are off for the set's pipelines, as with Deps.Warehouse).
+	Warehouse clients.WarehouseReader
 }
 
 // Deps are the watcher's dependencies.
@@ -144,6 +152,13 @@ type Deps struct {
 	// with one log line. offset_below_log_start also needs Kafka for the
 	// log-start offsets.
 	Lag LagReader
+	// Warehouse is the sink warehouse client. The drift signals (X1b,
+	// drift.go) find their optional readers on it and on Source and Kafka by
+	// type assertion: clients.Reconciler on Source and Warehouse for
+	// count_drift and row_drift, clients.DupScanner on Kafka (or Lag) for
+	// dup_keys and order_skew. Nil, or a client without the reader, turns
+	// those checks off for the pipeline with one INFO line.
+	Warehouse clients.WarehouseReader
 	// ClientsFor, when set, gives each pipeline the clients of its own client
 	// set (docs/design/tenancy.md section 5) and Source, Connect and Kafka are
 	// not used (nor Lag). Pipelines of one set share each read of a tick.
@@ -158,6 +173,11 @@ type Deps struct {
 	// from PIPEROOM_MAX_AGENTS: a room beyond the agent pool still opens, gets
 	// the triage pass and queues for an agent. Zero means 6.
 	MaxOpenRooms int
+	// Samples, when set, turns on the sample history and forecasts (X3a,
+	// forecast.go): the room store's watch_samples. Forecast comes from
+	// config.ParseWatchForecast; a zero Horizon means the default 48 h.
+	Samples  SampleStore
+	Forecast config.WatchForecast
 	// Clock defaults to the wall clock.
 	Clock Clock
 	// Log defaults to slog.Default().
@@ -180,10 +200,12 @@ const (
 )
 
 // signalIDs lists the signals in a fixed order, so titles and logs are stable.
-// New signals go at the end so existing titles keep their order.
-var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
+// New signals go at the end so existing titles keep their order; the
+// forecasts (one id per metric, forecast.go) come last. config_drift has one
+// id per connector (config_drift.go), after these (pipeState.ids).
+var signalIDs = append([]string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
-	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}
+	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}, forecastIDs()...)
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -229,6 +251,21 @@ type pipeState struct {
 	// ackLocked, in memory). A storm follower never had a room under its own
 	// dedup key, so the room service cannot tell its cooldown; this can.
 	lastClosed time.Time
+	// roomKey is the dedup key the watcher opened roomID under (DedupKey or a
+	// ForecastDedupKey); "" for a room it only joined.
+	roomKey string
+	// lastSample is when each metric was last sampled (forecast.go).
+	lastSample map[string]time.Time
+	// fcClosed is, per forecast metric, when a room carrying its forecast
+	// closed: the per-metric cooldown the watcher saw itself.
+	fcClosed map[string]time.Time
+	// drift is the memory of the drift checks (drift.go); driftClosed is,
+	// per drift id, when a room carrying it closed: the (pipeline, table,
+	// kind) cooldown.
+	drift       *driftMem
+	driftClosed map[string]time.Time
+	// cfgBase is each connector's approved config (config_drift.go).
+	cfgBase map[string]*driftBase
 	// warned* keep "skipped" lines to one per episode.
 	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }
@@ -248,6 +285,7 @@ type Watcher struct {
 	conn       ConnectClient
 	kafka      clients.DLQReader
 	lag        LagReader
+	wh         clients.WarehouseReader
 	clientsFor func(pipelineID string) PipelineClients
 	own        *owners.Owners
 	rooms      RoomSink
@@ -289,6 +327,10 @@ type Watcher struct {
 	chgFailing bool
 	// lagNoReaderLogged keeps the "no lag reader" line to one.
 	lagNoReaderLogged bool
+
+	// Sample history and forecasts (forecast.go); nil samples = off.
+	samples SampleStore
+	horizon time.Duration
 }
 
 const maxClosedRemembered = 256
@@ -328,12 +370,16 @@ func New(d Deps) (*Watcher, error) {
 		cfg.Cooldown = 60 * time.Minute
 	}
 	w := &Watcher{
-		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
+		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, wh: d.Warehouse, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 		changes: d.Changes, registry: d.Registry, ddl: d.DDL,
 		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
+		samples: d.Samples, horizon: d.Forecast.Horizon,
+	}
+	if w.horizon <= 0 {
+		w.horizon = 48 * time.Hour // config.DefaultWatchForecastHorizon
 	}
 	if w.maxRooms <= 0 {
 		w.maxRooms = defaultMaxOpenRooms
@@ -429,7 +475,16 @@ func (w *Watcher) tick(ctx context.Context) {
 	}
 	w.mu.Lock()
 	fired := w.evaluate(now, ts, obs)
+	jobs := w.planSamples(now, ts, obs)
 	w.mu.Unlock()
+	w.writeSamples(ctx, now, jobs)
+	if ctx.Err() != nil {
+		return
+	}
+	w.checkDrift(ctx, now, ts, fired)
+	if ctx.Err() != nil {
+		return
+	}
 	if w.cfg.Mode == config.WatchRooms {
 		w.emit(ctx, now, ts, fired)
 	}
@@ -462,16 +517,40 @@ func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 }
 
 // ackLocked turns firing signals into acked and forgets the room.
+//
+// A room the watcher opened for forecasts alone (ForecastDedupKey) starts the
+// cooldown of those forecasts only: a real signal later on the pipeline must
+// still open a room (X3).
 func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
+	now := w.clock.Now()
+	real := !strings.HasPrefix(ps.roomKey, ForecastDedupKey(pipelineID, ""))
 	for id, ss := range ps.sigs {
+		m := forecastMetric(id)
+		if m == "" && ss.phase != phaseOK && ss.notified {
+			real = true
+		}
 		if ss.phase == phaseFiring {
 			ss.ack()
+			if driftKind(id) != "" {
+				if ps.driftClosed == nil {
+					ps.driftClosed = map[string]time.Time{}
+				}
+				ps.driftClosed[id] = now
+			}
+			if m != "" {
+				if ps.fcClosed == nil {
+					ps.fcClosed = map[string]time.Time{}
+				}
+				ps.fcClosed[m] = now
+			}
 			w.log.Info("watch: signal acked, room closed while it still fires",
 				"mode", string(w.cfg.Mode), "pipeline", pipelineID, "signal", id, "room", roomID)
 		}
 	}
-	ps.roomID, ps.owned, ps.follower = "", false, false
-	ps.lastClosed = w.clock.Now()
+	ps.roomID, ps.owned, ps.follower, ps.roomKey = "", false, false, ""
+	if real {
+		ps.lastClosed = now
+	}
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
 }
 

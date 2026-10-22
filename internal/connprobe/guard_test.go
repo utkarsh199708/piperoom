@@ -138,3 +138,67 @@ func TestRunUnknownKindAndOK(t *testing.T) {
 		t.Fatalf("connect probe without settings: %+v", r)
 	}
 }
+
+// An IPv6 transition-mechanism address that embeds a blocked IPv4 address is
+// refused like the plain one; one embedding an allowed address still passes.
+func TestCheckAddrEmbeddedIPv4(t *testing.T) {
+	g := Guard{AllowLoopback: true, AllowPrivate: true}
+	for _, raw := range []string{
+		"64:ff9b::a9fe:a9fe",   // NAT64 well-known of 169.254.169.254
+		"64:ff9b:1::a9fe:a9fe", // NAT64 local-use of 169.254.169.254
+		"2002:a9fe:a9fe::1",    // 6to4 of 169.254.169.254
+		"2001::5601:5601",      // Teredo of 169.254.169.254 (stored inverted)
+		"64:ff9b::6464:64c8",   // NAT64 of 100.100.100.200 (metadata)
+	} {
+		if err := g.CheckAddr(netip.MustParseAddr(raw)); err == nil {
+			t.Errorf("CheckAddr(%s) = nil, want blocked", raw)
+		}
+	}
+	for _, raw := range []string{
+		"64:ff9b::808:808", // NAT64 of 8.8.8.8
+		"2002:808:808::1",  // 6to4 of 8.8.8.8
+	} {
+		if err := g.CheckAddr(netip.MustParseAddr(raw)); err != nil {
+			t.Errorf("CheckAddr(%s) = %v, want nil", raw, err)
+		}
+	}
+	strict := Guard{}
+	if err := strict.CheckAddr(netip.MustParseAddr("64:ff9b::a00:1")); err == nil {
+		t.Error("NAT64 of 10.0.0.1 passed a guard that blocks private ranges")
+	}
+}
+
+// A zone suffix must not slip an address past the prefix checks, and the
+// deprecated IPv4-compatible form embeds an IPv4 address too.
+func TestCheckAddrZoneAndV4Compatible(t *testing.T) {
+	g := Guard{AllowLoopback: true, AllowPrivate: true}
+	for _, raw := range []string{
+		"fe80::1%eth0",      // zoned link-local
+		"fe80::1%25",        // numeric zone
+		"::169.254.169.254", // IPv4-compatible of the metadata address
+		"2001:0:808:808::1", // Teredo whose SERVER bytes are fine but still checked
+	} {
+		a := netip.MustParseAddr(raw)
+		err := g.CheckAddr(a)
+		switch raw {
+		case "2001:0:808:808::1":
+			// server 8.8.8.8 allowed, client ^0:^0:^0:^1 = 255.255.255.254 allowed
+			if err != nil {
+				t.Errorf("CheckAddr(%s) = %v, want nil", raw, err)
+			}
+		default:
+			if err == nil {
+				t.Errorf("CheckAddr(%s) = nil, want blocked", raw)
+			}
+		}
+	}
+	// A Teredo address whose embedded SERVER is blocked is refused even when
+	// the inverted client bytes are fine.
+	if err := g.CheckAddr(netip.MustParseAddr("2001:0:a9fe:a9fe::1:2")); err == nil {
+		t.Error("Teredo with metadata server address passed")
+	}
+	// :: and ::1 keep their own classification, not an embedded-v4 one.
+	if err := g.CheckAddr(netip.MustParseAddr("::1")); err != nil {
+		t.Errorf("CheckAddr(::1) with loopback allowed = %v", err)
+	}
+}

@@ -146,7 +146,7 @@ func toolPackages() []toolPackage {
 		// tool says "change log unavailable". A set without a source skips the
 		// live DDL read (changes.Deps.Src nil).
 		{name: "what_changed", register: func(reg *tools.Registry, w *Wired) error {
-			chg := changes.Deps{Src: w.Source, Owners: w.Owners}
+			chg := changes.Deps{Src: w.Source, Transform: w.Transform, Owners: w.Owners}
 			if cr, ok := w.Rooms.(clients.ChangeReader); ok {
 				chg.Changes = cr
 			}

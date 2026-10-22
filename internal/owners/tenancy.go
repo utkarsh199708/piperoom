@@ -452,14 +452,17 @@ func refEnv(name string) string { return "env:" + strings.ToUpper(name) }
 
 // CheckSharedRefs fails when one reference is used by pipelines of two or more
 // tenants, unless every pipeline that uses it sets shared_connections: true.
-// extra adds references found only when the connections are resolved
-// (pipeline id -> references), such as the process AWS identity of MSK IAM.
+// A pipeline's staging: references count as its own (X8): a staging
+// credential is a write credential too. extra adds references found only
+// when the connections are resolved (pipeline id -> references), such as the
+// process AWS identity of MSK IAM.
 func (o *Owners) CheckSharedRefs(extra map[string][]string) error {
 	type use struct{ tenant, pipeline string }
 	users := map[string][]use{}
 	shared := map[string]bool{}
 	for _, p := range o.Pipelines {
-		refs := append(p.ConnRefs(), extra[p.ID]...)
+		refs := append(p.ConnRefs(), p.stagingRefs()...)
+		refs = append(refs, extra[p.ID]...)
 		shared[p.ID] = p.SharedConnections
 		for _, r := range refs {
 			users[r] = append(users[r], use{p.TenantName(), p.ID})
@@ -559,25 +562,8 @@ func validateConnections(c Connections, kind string) error {
 			// open a client to a system the pipeline does not have.
 			return fmt.Errorf("connections.%s is a %s setting, but the pipeline kind is %s", k, info.kind, kind)
 		}
-		r := c[k]
-		n := 0
-		for _, s := range []string{r.Env, r.File, r.Value} {
-			if s != "" {
-				n++
-			}
-		}
-		if n != 1 {
-			return fmt.Errorf("connections.%s: set exactly one of env, file or value", k)
-		}
-		// The bad text is not quoted: a misplaced DSN or password must not
-		// reach the start-up log.
-		switch {
-		case r.Value != "" && !info.literal:
-			return fmt.Errorf("connections.%s: value: is allowed only for non-secret settings; use env: or file:", k)
-		case r.Env != "" && !envNameRE.MatchString(r.Env):
-			return fmt.Errorf("connections.%s: env: is not a variable name (want %s)", k, envNameRE)
-		case r.File != "" && !isAbsPath(r.File):
-			return fmt.Errorf("connections.%s: file: must be an absolute path", k)
+		if err := checkRef("connections", k, info, c[k]); err != nil {
+			return err
 		}
 	}
 	if err := checkWriteRole(c); err != nil {
@@ -589,6 +575,32 @@ func validateConnections(c Connections, kind string) error {
 				return fmt.Errorf("connections: %s is required for kind %s", k, kind)
 			}
 		}
+	}
+	return nil
+}
+
+// checkRef checks one reference of a connections: block (where is
+// "connections") or of a staging: block ("staging.connections"): exactly one
+// of env, file and value, value only for a non-secret key, a variable name,
+// an absolute path. The bad text is never quoted: a misplaced DSN or password
+// must not reach the start-up log.
+func checkRef(where, k string, info connKey, r ConnRef) error {
+	n := 0
+	for _, s := range []string{r.Env, r.File, r.Value} {
+		if s != "" {
+			n++
+		}
+	}
+	if n != 1 {
+		return fmt.Errorf("%s.%s: set exactly one of env, file or value", where, k)
+	}
+	switch {
+	case r.Value != "" && !info.literal:
+		return fmt.Errorf("%s.%s: value: is allowed only for non-secret settings; use env: or file:", where, k)
+	case r.Env != "" && !envNameRE.MatchString(r.Env):
+		return fmt.Errorf("%s.%s: env: is not a variable name (want %s)", where, k, envNameRE)
+	case r.File != "" && !isAbsPath(r.File):
+		return fmt.Errorf("%s.%s: file: must be an absolute path", where, k)
 	}
 	return nil
 }
@@ -711,6 +723,19 @@ func checkNullBlocks(root *yaml.Node) error {
 					return fmt.Errorf("line %d: %s: auto_approve: has an empty (null) entry; name an action or remove the entry", item.Line, name)
 				}
 			}
+		}
+		// X8: a dropped null require_staging: entry would drop a requirement,
+		// and a null staging: block would read as "no staging" while the
+		// file seems to declare one.
+		if v, ok := mapValue(p, "require_staging"); ok && v.Kind == yaml.SequenceNode {
+			for _, item := range v.Content {
+				if isNull(item) {
+					return fmt.Errorf("line %d: %s: require_staging: has an empty (null) entry; name an action or remove the entry", item.Line, name)
+				}
+			}
+		}
+		if v, ok := mapValue(p, "staging"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: staging: is empty (null); declare its connections:, or remove the key", v.Line, name)
 		}
 		// The same for dags: and models: of a batch pipeline: a dropped null
 		// entry would shrink the scope the file seems to give.

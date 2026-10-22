@@ -78,6 +78,9 @@ type Options struct {
 	LookupIP   LookupIPFunc     // nil = the system resolver
 	Now        func() time.Time // nil = time.Now; the runner's clock (tests inject one)
 	Catalogue  Catalogue        // nil = nopCatalogue (no op runs until ops lands)
+	// CatalogueVersion is what Hello advertises; "" = "0" (the nop
+	// catalogue's version). cmd/setup passes ops.CatalogueVersion.
+	CatalogueVersion string
 	// Backoff returns how long to wait before the attempt-th retry (1-based)
 	// of a transient connect or handshake failure; nil = exponential backoff
 	// from connectBackoffBase, capped at connectBackoffMax.
@@ -97,6 +100,7 @@ type Runner struct {
 	lookupIP   LookupIPFunc
 	now        func() time.Time
 	catalogue  Catalogue
+	catalogueV string
 	backoff    func(attempt int) time.Duration
 	url        *url.URL
 
@@ -148,6 +152,7 @@ func New(o Options) (*Runner, error) {
 		lookupIP:   o.LookupIP,
 		now:        o.Now,
 		catalogue:  o.Catalogue,
+		catalogueV: orDefault(o.CatalogueVersion, catalogueVersion),
 		backoff:    o.Backoff,
 		started:    make(map[stepKey]struct{}),
 		proposals:  make(map[string]events.ProposalCreatedPayload),
@@ -446,7 +451,7 @@ func (r *Runner) pair(ctx context.Context) error {
 		Label:            r.label,
 		Tools:            map[string]string{}, // PATH detection lands with the ops catalogue
 		ProjectDir:       r.projectDir,
-		CatalogueVersion: catalogueVersion,
+		CatalogueVersion: r.catalogueV,
 		ProtocolVersion:  cur.Major,
 		ProtocolMinor:    cur.Minor,
 	}}); err != nil {

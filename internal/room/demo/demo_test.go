@@ -383,6 +383,55 @@ func TestFakeActionDepsAreWired(t *testing.T) {
 }
 
 // recordingSink keeps every emitted event; it is safe for concurrent use.
+// runFast is Run with the test step delay: the same story, proposal and
+// waits, only the pauses between steps are shortened (runStory injects the
+// delay). A full story at stepDelay takes about 10 s, so a test that waited
+// for it with a 10 s deadline raced the clock and failed under load.
+func runFast(ctx context.Context, alert agent.Alert, deps agent.Deps) error {
+	return runStory(ctx, alert, deps, agent.Options{}, time.Now(), roomTestDelay)
+}
+
+// Run itself, the production entry, keeps the presenter's stepDelay between a
+// step's start and its result; only tests shorten it, through runStory. A
+// timer never fires early, so the lower bound is exact.
+func TestRunKeepsStepDelay(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &timedSink{cancel: cancel}
+	if err := Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Inbox: newBlockingInbox()}, agent.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.start.IsZero() || sink.result.IsZero() {
+		t.Fatalf("no step start or result: %+v", sink)
+	}
+	if d := sink.result.Sub(sink.start); d < stepDelay {
+		t.Fatalf("first step took %v, want at least stepDelay %v", d, stepDelay)
+	}
+}
+
+// timedSink notes when the first step starts and when its result arrives,
+// then cancels the run.
+type timedSink struct {
+	mu            sync.Mutex
+	start, result time.Time
+	cancel        context.CancelFunc
+}
+
+func (s *timedSink) Emit(_ context.Context, typ events.Type, _ any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case typ == events.AgentStepStart && s.start.IsZero():
+		s.start = time.Now()
+	case typ == events.AgentToolResult && s.result.IsZero():
+		s.result = time.Now()
+		s.cancel()
+	}
+	return nil
+}
+
 type recordingSink struct {
 	mu    sync.Mutex
 	types []events.Type
@@ -432,7 +481,7 @@ func TestDemoStopsWhenProposalsDisabled(t *testing.T) {
 	inbox := &closedInbox{}
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: failingProposals{}, Inbox: inbox}, agent.Options{})
+		done <- runFast(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: failingProposals{}, Inbox: inbox})
 	}()
 	select {
 	case err := <-done:
@@ -474,7 +523,7 @@ func TestDemoMessagesCarryNoIds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	sink := &recordingSink{}
-	if err := Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: idProposals{}, Inbox: &closedInbox{}}, agent.Options{}); err != nil {
+	if err := runFast(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: idProposals{}, Inbox: &closedInbox{}}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	re := regexp.MustCompile(`\bp_[0-9A-Z]{26}\b`)

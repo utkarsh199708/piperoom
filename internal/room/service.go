@@ -187,6 +187,15 @@ type Deps struct {
 	// idempotent, so a room reported twice closes its sockets once. Nil means
 	// no-op.
 	OnRoomDeleted func(roomID string, deleted events.Event)
+
+	// OnActionExecuted, when set, is called once per action.executed this
+	// replica folds into a cached room, whichever replica appended it, with
+	// the room's pipeline and the step that ran (its action and frozen
+	// params), OK or not. The watcher's config_drift (X3b) uses it to move a
+	// connector's approved config after an approved fix. Each call runs in
+	// its own goroutine with the service lifetime ctx, never under a room's
+	// lock; it must return promptly. Nil means no-op.
+	OnActionExecuted func(ctx context.Context, pipelineID string, step events.ProposalStep)
 }
 
 type roomState struct {
@@ -305,6 +314,7 @@ type Service struct {
 	onRoomOpened    func(ctx context.Context, roomID string)
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	onRoomDeleted   func(roomID string, deleted events.Event)
+	onActionExec    func(ctx context.Context, pipelineID string, step events.ProposalStep)
 	slots           *agentSlots // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store
@@ -390,6 +400,9 @@ type Service struct {
 	// runners is the setup runner registry: pairing codes and the attached
 	// runners (runners.go; U wave).
 	runners *RunnerRegistry
+	// runnerExec dispatches OpRequests to the attached runner and reconciles
+	// its results and Resume frames (runner_exec.go; U1-5a).
+	runnerExec *RunnerExecutor
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -453,6 +466,7 @@ func New(d Deps) *Service {
 		onRoomOpened:    d.OnRoomOpened,
 		onRoomClosed:    d.OnRoomClosed,
 		onRoomDeleted:   d.OnRoomDeleted,
+		onActionExec:    d.OnActionExecuted,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,
@@ -486,6 +500,10 @@ func New(d Deps) *Service {
 		}
 	}
 	s.runners = NewRunnerRegistry(now, s.EmitSetup, log)
+	s.runnerExec = NewRunnerExecutor(s.runners, RunnerResults{
+		Result:  s.applyRunnerResult,
+		Unknown: s.applyRunnerUnknown,
+	}, log)
 	return s
 }
 

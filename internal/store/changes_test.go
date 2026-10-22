@@ -60,3 +60,16 @@ func TestNormalizeChange(t *testing.T) {
 		}
 	}
 }
+
+// Every kind of clients.ChangeKinds is stored, the X4 external kinds included,
+// so the change webhook, the migration readers and the status-page poller
+// can write their rows.
+func TestNormalizeChangeAcceptsEveryKind(t *testing.T) {
+	for _, kind := range clients.ChangeKinds() {
+		c := baseChange()
+		c.Kind = kind
+		if _, err := store.NormalizeChange(c); err != nil {
+			t.Errorf("%s: %v", kind, err)
+		}
+	}
+}

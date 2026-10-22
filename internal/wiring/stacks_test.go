@@ -93,6 +93,7 @@ type spySourceReads interface {
 	clients.SourceDB
 	LongTransactionsOnTables(context.Context, time.Duration, []string) (postgres.TableTransactions, error)
 	PublicationTables(context.Context, string, string, []string) ([]postgres.PublicationTable, error)
+	ToastColumns(context.Context, []string) ([]clients.ToastTable, bool, error)
 	clients.CountReader
 }
 
@@ -131,6 +132,16 @@ func (s *spy) Freshness(context.Context, string, string) (time.Time, error) {
 func (s *spy) LoadErrors(context.Context, string, time.Time, int) ([]clients.LoadError, error) {
 	s.hit("LoadErrors")
 	return nil, nil
+}
+
+// ToastColumns answers the pg_toast_risk catalog read (X1d) with no columns.
+func (s *spy) ToastColumns(_ context.Context, tables []string) ([]clients.ToastTable, bool, error) {
+	s.hit("ToastColumns")
+	out := make([]clients.ToastTable, 0, len(tables))
+	for _, t := range tables {
+		out = append(out, clients.ToastTable{Table: t, Found: true, ReplicaIdentity: "DEFAULT"})
+	}
+	return out, false, nil
 }
 func (s *spy) CountByBucket(context.Context, string, string, time.Time, time.Time, time.Duration) ([]clients.MinuteCount, error) {
 	s.hit("CountByBucket")

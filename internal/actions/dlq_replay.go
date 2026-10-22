@@ -155,17 +155,21 @@ func checkReplayNames(sc tools.Scope, dlqTopic, toTopic string) error {
 // the room's whole pipeline in ctx (tools.WithPipeline), or the explicit
 // opt-out (tools.WithUnscoped; CLI and integration tests). Anything else,
 // a bare ctx or a pipeline id only, wraps tools.ErrNoScope.
-func dlqScope(ctx context.Context) (tools.Scope, error) {
+func dlqScope(ctx context.Context) (tools.Scope, error) { return pipelineScope(ctx, dlqReplayName) }
+
+// pipelineScope is dlqScope for the action named action (kafka_replay_range
+// too).
+func pipelineScope(ctx context.Context, action string) (tools.Scope, error) {
 	if _, ok := tools.PipelineFrom(ctx); !ok {
 		sc, err := tools.ScopeFor(ctx, nil)
 		if err == nil && sc.Unscoped() {
 			return sc, nil
 		}
-		return tools.Scope{}, fmt.Errorf("actions: %s: %w: needs the room's pipeline in ctx", dlqReplayName, tools.ErrNoScope)
+		return tools.Scope{}, fmt.Errorf("actions: %s: %w: needs the room's pipeline in ctx", action, tools.ErrNoScope)
 	}
 	sc, err := tools.ScopeFor(ctx, nil)
 	if err != nil {
-		return tools.Scope{}, fmt.Errorf("actions: %s: %w", dlqReplayName, err)
+		return tools.Scope{}, fmt.Errorf("actions: %s: %w", action, err)
 	}
 	return sc, nil
 }

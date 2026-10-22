@@ -233,10 +233,19 @@ func TestTraceSinkValueMaskHostile(t *testing.T) {
 		{"Got VALUE_", false},
 	} {
 		line := "Caused by: x: " + strings.Repeat(tt.unit, (64<<10)/len(tt.unit)) + "Leak"
-		start := time.Now()
-		got := maskSinkValues(line)
-		if d := time.Since(start); d > 50*time.Millisecond {
-			t.Errorf("%q x 64 KiB took %v, want < 50ms", tt.unit, d)
+		// The best of a few runs: on a loaded machine one run can be held up
+		// by the scheduler or a GC pause for far longer than the mask takes
+		// (about 1 ms here). A quadratic mask is slow on every run (seconds
+		// at 64 KiB), so the bound still catches one.
+		var got string
+		best := time.Duration(1<<63 - 1)
+		for range 5 {
+			start := time.Now()
+			got = maskSinkValues(line)
+			best = min(best, time.Since(start))
+		}
+		if best > 50*time.Millisecond {
+			t.Errorf("%q x 64 KiB took %v (best of 5), want < 50ms", tt.unit, best)
 		}
 		if tt.opener && strings.Contains(got, "Leak") {
 			t.Errorf("%q: the value after the last opener is not masked: ...%s", tt.unit, got[max(0, len(got)-80):])

@@ -71,6 +71,19 @@ type ConnectFixWriter interface {
 	UpdateConnectorConfigKeys(ctx context.Context, name string, changes map[string]string) error
 }
 
+// X8: ConnectConfigPutter replaces a connector's whole config (PUT
+// /connectors/{name}/config). Implemented by internal/clients/connect (X8b)
+// and asserted at use time like ConnectFixWriter, so the existing fakes need
+// not grow. In X8 only an action's Stage holds one, on the staging client
+// (actions.Staging), to give the staging connector back the config it had
+// before the stage. PUT also creates a connector that does not exist, so the
+// caller first checks that it exists (ConnectReader.ListConnectors) and never
+// creates one. cfg is the whole config as ConnectReader.Config returned it;
+// it is never logged or put in an error. (X8)
+type ConnectConfigPutter interface {
+	PutConnectorConfig(ctx context.Context, name string, cfg map[string]string) error
+}
+
 // ConnectClient is the whole Kafka Connect client.
 type ConnectClient interface {
 	ConnectReader
@@ -95,6 +108,52 @@ type TaskStatus struct {
 	State    string `json:"state"`
 	WorkerID string `json:"worker_id"`
 	Trace    string `json:"trace,omitempty"` // stack trace when FAILED
+}
+
+// ---- X6: Connect worker task assignments (optional on a ConnectReader) ----
+//
+// Asserted at use time like RateReader (wr, ok := c.(clients.WorkerTaskReader)),
+// never embedded in ConnectReader, so no existing client or fake has to grow.
+// internal/clients/connect implements it (X6b, A2); the connect_task_balance
+// tool (X6b) is its caller.
+
+// WorkerTasksTimeout is the per-call deadline a WorkerTasks implementation
+// sets when ctx has none (or a later one). (X6)
+const WorkerTasksTimeout = 10 * time.Second
+
+// UnassignedWorker is the WorkerTasks key of a task Connect reports with no
+// worker id (UNASSIGNED during a rebalance). (X6)
+const UnassignedWorker = ""
+
+// TaskAssignment is one task of one connector as Connect's status reports
+// it: names and states only, never the task's trace or the connector's
+// config. (X6)
+type TaskAssignment struct {
+	Connector string `json:"connector"`
+	Type      string `json:"type"`  // "source" | "sink"; "" when Connect does not say
+	Task      int    `json:"task"`  // task id within the connector
+	State     string `json:"state"` // RUNNING | PAUSED | FAILED | UNASSIGNED | RESTARTING
+}
+
+// WorkerTaskReader reads which worker runs which task, for the whole Connect
+// cluster at once: one GET /connectors?expand=status (Connect 2.3+), the
+// response capped at 4 MB, within WorkerTasksTimeout. An older Connect
+// without expand=status answers ErrNotSupported. (X6)
+//
+// The result maps a worker id as Connect reports it (host:port) to that
+// worker's tasks, each slice sorted by connector and task id. A worker that
+// runs a connector instance but no task is present with an empty slice; a
+// worker that runs nothing does not show in Connect's status and is absent,
+// so callers say "workers seen", not "workers". A task with no worker id is
+// under UnassignedWorker.
+//
+// Tenancy: it is cluster metadata, not filtered by the pipeline in ctx (like
+// ListConnectors). The caller shows only the room's own connectors
+// (tools.Scope.CheckConnector) by name, type and state, and reduces every
+// other connector to a task count per worker: never its name, type or
+// state, in Summary, Data or a log.
+type WorkerTaskReader interface {
+	WorkerTasks(ctx context.Context) (map[string][]TaskAssignment, error)
 }
 
 // ---- Schema Registry (Confluent REST API) ----
@@ -269,8 +328,11 @@ type DLQReader interface {
 // room's pipeline scope in ctx (tools.WithPipeline) and refuses a target
 // outside it before any I/O (tools.ErrOutOfScope); without a scope it refuses
 // with tools.ErrNoScope unless the caller opted out with tools.WithUnscoped
-// (tests, CLI). Read helpers on the same type are scoped by the action's
-// CheckScope instead.
+// (tests, CLI). For Produce and ProduceAll the pipeline's topics are its CDC
+// topics (<topic_prefix>.<source_table>) plus its declared reprocess_topic
+// (owners.yaml, X2b; kafka_replay_range's only target); no other write method
+// accepts the reprocess_topic. Read helpers on the same type are scoped by the
+// action's CheckScope instead.
 
 // ErrGroupActive is returned (wrapped) by ResetGroupOffsets when the group
 // has active members: committed offsets of a live group are overwritten by
@@ -315,8 +377,29 @@ type KafkaWriter interface {
 	// the target; the group must have no active members (ErrGroupActive).
 	ResetGroupOffsets(ctx context.Context, group string, to OffsetTarget) (moved int, err error)
 	// Produce writes records to topic in order and returns how many were acked.
-	// It stops at the first record that is not acked.
+	// It stops at the first record that is not acked. topic is one of the
+	// room pipeline's CDC topics or its declared reprocess_topic (above).
 	Produce(ctx context.Context, topic string, recs []Record) (acked int, err error)
+}
+
+// BulkProducer is optional on a KafkaWriter: Produce for a bulk copy, where a
+// round trip per record is too slow (kafka_replay_range copies up to 100 000
+// records inside one 30 s step, X2b). Asserted at use time; a writer without
+// it gets Produce. The Kafka write client implements it. (X2)
+//
+// ProduceAll writes recs to topic with every record in flight at once and
+// returns how many the broker acked, an exact count. Scope, the per-record
+// size cap and the Record rules (topic argument, key partitioner, produce
+// time) are Produce's, checked before any record is sent. The producer is
+// idempotent: a target partition gets its records in the order given, and
+// every record buffered behind a failed one on that partition fails too, so
+// order holds per partition (and so per key). Across partitions it does not:
+// after an error acked is not a prefix of recs, a copy cannot resume from it,
+// and a re-run copies again. When ctx ends with records in flight, those
+// whose outcome is not known within a short grace (about a second) are not
+// counted, and the error says how many may still be written.
+type BulkProducer interface {
+	ProduceAll(ctx context.Context, topic string, recs []Record) (acked int, err error)
 }
 
 // GroupResetPlanner is implemented by the Kafka write client; an action's
@@ -351,7 +434,8 @@ type OffsetMove struct {
 // otherwise, as KafkaWriter does. Implemented by the Kafka write client
 // (internal/clients/kafka, #620); optional, asserted by connect_snapshot_table,
 // so fakes and the eval replay need not implement it. KafkaWriter.Produce is not
-// used for signals: its scope allows CDC topics only. The Kafka client's own
+// used for signals: its scope allows the CDC topics and the reprocess_topic
+// only. The Kafka client's own
 // type becomes an alias of SnapshotSignal (A2 follow-up), as with OffsetMove.
 type SnapshotSignaler interface {
 	SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (SnapshotSignal, error)
@@ -440,6 +524,33 @@ type ClusterHealth struct {
 // topics; log dirs need DescribeConfigs on Cluster and are best-effort.
 type ClusterReader interface {
 	ClusterHealth(ctx context.Context, topics ...string) (ClusterHealth, error)
+}
+
+// ---- X7: topic retention settings (optional on a KafkaAdmin) ----
+
+// TopicConfig is one topic's key configuration and shape. Values are the raw,
+// effective Kafka strings (a broker default counts when the topic has no
+// override); "-1" means unlimited where the config allows it. Only these keys
+// are ever read, so no other topic config value can leak. (Moved from
+// internal/clients/kafka, which keeps it as an alias, by X7-0.)
+type TopicConfig struct {
+	Topic             string `json:"topic"`
+	Partitions        int    `json:"partitions"`
+	ReplicationFactor int    `json:"replication_factor"`
+	RetentionMS       string `json:"retention_ms"`
+	RetentionBytes    string `json:"retention_bytes"`
+	CleanupPolicy     string `json:"cleanup_policy"` // "delete", "compact" or "compact,delete"
+	MinInsyncReplicas string `json:"min_insync_replicas"`
+}
+
+// TopicConfigReader reads one topic's TopicConfig (optional on a KafkaAdmin,
+// asserted at use time; the kafka client implements it over DescribeConfigs
+// and ListTopics). Needs DescribeConfigs on the topic: without that ACL the
+// call fails, and a caller such as the watcher's retention check (X7d) logs
+// once and judges nothing. An unknown topic wraps ErrNotFound. The caller
+// scopes topic to its pipeline before the call; deadline 10 s.
+type TopicConfigReader interface {
+	DescribeTopicConfigs(ctx context.Context, topic string) (TopicConfig, error)
 }
 
 // PartitionRate is records written to one partition in a window.
@@ -757,6 +868,76 @@ type CountReader interface {
 	CountByBucket(ctx context.Context, table, tsColumn string, since, until time.Time, width time.Duration) ([]MinuteCount, error)
 }
 
+// ---- X7: table catalog and declared retention (optional) ----
+//
+// Asserted at use time like CountReader, never embedded in SourceDB or
+// Warehouse, so no existing client or fake has to grow. ColumnReader feeds
+// column lineage (X7a: source and sink columns of topology.Edge.Columns) and
+// the PII classifier (X7c: names and types only, topology.TagPII);
+// TableRetentionReader lets the watcher compare a sink table's retention
+// with owners.yaml declared_retention (X7d). A client that cannot answer
+// returns ErrNotSupported and the caller leaves that part out. Both read the
+// catalog only: never a row, a value, a default expression or a comment.
+
+// Caps and deadline of every ColumnReader and TableRetentionReader.
+const (
+	// MaxTableColumns caps Columns: Postgres allows 1600 columns per table;
+	// the rest of a wider table is cut, not refused.
+	MaxTableColumns = 1600
+	// CatalogTimeout is the per-call deadline an implementation sets when ctx
+	// has none (or a later one).
+	CatalogTimeout = 10 * time.Second
+)
+
+// ColumnInfo is one column of a table as the catalog describes it.
+type ColumnInfo struct {
+	Name string `json:"name"`
+	// Type is the catalog's type name as the database spells it, e.g.
+	// "text", "timestamp with time zone", "character varying" (Postgres
+	// information_schema.columns.data_type) or "VARCHAR" (Snowflake). The PII
+	// classifier uses it only to rule columns out (a boolean phone_verified
+	// is not a phone number).
+	Type     string `json:"type"`
+	Position int    `json:"position"` // 1-based ordinal position
+	Nullable bool   `json:"nullable"`
+}
+
+// ColumnReader reads the columns of one table from the database catalog
+// (information_schema.columns or pg_attribute on Postgres; the warehouse's
+// INFORMATION_SCHEMA elsewhere), in ordinal order, at most MaxTableColumns.
+// Rules, as for Reconciler: table is "schema.table" with each part matching
+// ^[a-zA-Z_][a-zA-Z0-9_]*$ (else tools.ErrBadInput before any I/O); scope
+// fails closed on the pipeline in ctx (tools.WithPipeline): table must be
+// one of its source_tables (source) or sink_tables (sink), else
+// tools.ErrOutOfScope (tools.ErrNoScope with no pipeline) before any I/O; an
+// unknown table wraps ErrNotFound; deadline CatalogTimeout (10 s). It runs
+// no query on the table itself.
+type ColumnReader interface {
+	Columns(ctx context.Context, table string) ([]ColumnInfo, error)
+}
+
+// TableRetention is how long a warehouse keeps a table's rows, as the
+// warehouse configures it: BigQuery table or partition expiration,
+// ClickHouse TTL, a Snowflake or Databricks retention property. Set says
+// whether any is configured; Infinite is "configured to keep forever".
+// Source names the setting read (e.g. "partition_expiration_days"), a fixed
+// word, never a value or an expression.
+type TableRetention struct {
+	Table    string        `json:"table"`
+	Set      bool          `json:"set"`
+	Infinite bool          `json:"infinite,omitempty"`
+	After    time.Duration `json:"after_ns,omitempty"` // rows older than this are removed; 0 when !Set or Infinite
+	Source   string        `json:"source,omitempty"`
+}
+
+// TableRetentionReader reads a sink table's configured retention (optional
+// on a Warehouse). Same identifier, scope (sink_tables), deadline and
+// catalog-only rules as ColumnReader. No warehouse client implements it in
+// X7-0; until one does, X7d compares topics only.
+type TableRetentionReader interface {
+	TableRetention(ctx context.Context, table string) (TableRetention, error)
+}
+
 // ---- X1: silent corruption, source vs sink reconcile (optional) ----
 //
 // Asserted at use time like CountReader (rec, ok := src.(clients.Reconciler)),
@@ -815,12 +996,17 @@ type Reconciler interface {
 	// It returns a count only, never a value. Deadline 10 s.
 	CountBetween(ctx context.Context, table, tsColumn string, from, to time.Time) (int64, error)
 	// SampleKeys returns the primary-key values (as text) of the newest
-	// rows of table with tsColumn >= since, newest first: at most
-	// ReconcileSampleSize(n) keys, so n > ReconcileMaxSample (200) is cut
-	// to 200 and n <= 0 is tools.ErrBadInput. Keys only, never another
+	// rows of table whose tsColumn is in the half-open window [since,
+	// until), newest first: at most ReconcileSampleSize(n) keys, so n >
+	// ReconcileMaxSample (200) is cut to 200 and n <= 0 is
+	// tools.ErrBadInput. until before since is tools.ErrBadInput; an empty
+	// window (until == since) is no keys and no I/O. The upper bound lets a
+	// caller sample rows old enough to have reached the sink (the drift
+	// watcher passes now - lag - settle), so a busy table's newest, still
+	// in-flight rows do not take the whole sample. Keys only, never another
 	// column's value; a caller keeps them in memory and never logs them or
 	// puts them in an event. Deadline 10 s.
-	SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since time.Time, n int) ([]string, error)
+	SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since, until time.Time, n int) ([]string, error)
 	// RowTimes reads, for each key of keys (primary-key values as text), the
 	// timestamp columns tsColumns of that row: key -> column -> time. It
 	// selects only pkColumn and tsColumns, never another column, so no
@@ -831,6 +1017,238 @@ type Reconciler interface {
 	// that is not a date/time type is tools.ErrBadInput too, and no value of
 	// it is returned. Deadline 10 s.
 	RowTimes(ctx context.Context, table, pkColumn string, keys []string, tsColumns []string) (map[string]map[string]time.Time, error)
+}
+
+// ---- X1: TOAST truncation risk (optional on a SourceDB and a Warehouse) ----
+//
+// pg_toast_risk (X1d, A3): on a table whose REPLICA IDENTITY is not FULL, an
+// UPDATE that leaves an out-of-line (TOASTed) column unchanged makes Debezium
+// send its unavailable.value.placeholder instead of the value, and a sink that
+// upserts the event overwrites the real value. The source side reads catalog
+// facts only (ToastColumnReader); the sink side counts rows holding the
+// placeholder (PlaceholderCounter). Both are asserted at use time like
+// CountReader, never embedded in SourceDB or Warehouse; the source Postgres
+// and the dev Postgres warehouse implement them. Scope fails closed in both,
+// as for Reconciler: the pipeline in ctx (tools.WithPipeline) must list every
+// table in source_tables (source) or sink_tables (sink), else
+// tools.ErrOutOfScope (tools.ErrNoScope with no pipeline), before any I/O.
+// (Moved from internal/clients/postgres and internal/clients/warehouse, which
+// keep aliases, by the X-batch3 review.)
+
+// Caps of the TOAST readers. (X1)
+const (
+	// MaxToastTables caps the tables one ToastColumns call reads; more is
+	// tools.ErrBadInput before any I/O.
+	MaxToastTables = 500
+	// MaxToastColumns caps the column rows one ToastColumns call returns. A
+	// wider result is cut (cut is true), never refused.
+	MaxToastColumns = 5000
+	// MaxPlaceholderBytes caps CountPlaceholder's placeholder: Debezium's
+	// default, __debezium_unavailable_value, is 28 bytes.
+	MaxPlaceholderBytes = 256
+	// MaxPlaceholderWindow caps CountPlaceholder's until - since: the count
+	// scans the window.
+	MaxPlaceholderWindow = 7 * 24 * time.Hour
+)
+
+// ToastTable is one source table as the catalog describes it for TOAST: its
+// replica identity, the size of its TOAST relation and its toastable columns.
+// Catalog facts only: no row, no value, no statistic other than the average
+// stored width. (X1)
+type ToastTable struct {
+	Table string `json:"table"` // "schema.table", as asked
+	// Found is false when no ordinary or partitioned table of that name
+	// exists (or the role cannot see it); the other fields are then empty.
+	Found bool `json:"found"`
+	// ReplicaIdentity is pg_class.relreplident spelled out: DEFAULT, FULL,
+	// INDEX or NOTHING.
+	ReplicaIdentity string `json:"replica_identity"`
+	// ToastBytes is pg_relation_size of the table's TOAST relation: above
+	// zero, some values of the table are (or were, until a VACUUM truncates)
+	// stored out of line. 0 when the table has no TOAST relation (a
+	// partitioned root has none; its partitions do).
+	ToastBytes int64 `json:"toast_bytes"`
+	// Columns are the table's toastable columns (attstorage x or e), in
+	// column order.
+	Columns []ToastColumn `json:"columns,omitempty"`
+}
+
+// ToastColumn is one toastable column. (X1)
+type ToastColumn struct {
+	Name string `json:"name"`
+	// Type is format_type(atttypid, atttypmod), e.g. "text", "jsonb", "bytea".
+	Type string `json:"type"`
+	// Storage is attstorage: "x" (extended: compressed, then out of line) or
+	// "e" (external: out of line, uncompressed).
+	Storage string `json:"storage"`
+	// AvgWidth is pg_stats.avg_width, the average STORED width in bytes (a
+	// value moved out of line counts as its 18-byte TOAST pointer, so a
+	// column of out-of-line values reads as narrow); -1 when the column has
+	// no statistics (never analysed, or not visible to the role).
+	AvgWidth int `json:"avg_width"`
+}
+
+// ToastColumnReader reads the TOAST facts of source tables (optional on a
+// SourceDB, asserted at use time): one ToastTable per entry of tables
+// ("schema.table"), in that order, from pg_namespace, pg_class, pg_attribute,
+// pg_stats.avg_width and the TOAST relation's size; the tables themselves are
+// never scanned. A bad identifier or more than MaxToastTables tables is
+// tools.ErrBadInput, and a table outside the pipeline's source_tables is
+// tools.ErrOutOfScope, both before any I/O. cut is true when the column rows
+// passed MaxToastColumns and the last tables' columns are incomplete.
+// Deadline 10 s. (X1)
+type ToastColumnReader interface {
+	ToastColumns(ctx context.Context, tables []string) (out []ToastTable, cut bool, err error)
+}
+
+// PlaceholderCounter counts the rows of a sink table ("schema.table", one of
+// the pipeline's sink_tables) whose column holds placeholder and whose
+// tsColumn is in [since, until) (optional on a Warehouse, asserted at use
+// time). It returns a count only: no value of any column is selected, and no
+// error quotes one. The column is matched as text against placeholder and
+// against the forms a binary column takes for it (the bytea hex text and the
+// base64 a JSON sink stores); a placeholder with Debezium's "hex:" prefix is
+// decoded first. Identifiers follow ^[a-zA-Z_][a-zA-Z0-9_]*$; a bad one, an
+// empty placeholder or one over MaxPlaceholderBytes, or a window that is empty
+// or over MaxPlaceholderWindow is tools.ErrBadInput, and a table out of scope
+// is tools.ErrOutOfScope, both before any I/O. A missing table or column wraps
+// ErrNotFound; a warehouse that cannot count returns ErrNotSupported.
+// Deadline 10 s. (X1)
+type PlaceholderCounter interface {
+	CountPlaceholder(ctx context.Context, table, column, placeholder, tsColumn string, since, until time.Time) (int64, error)
+}
+
+// ---- X1: duplicate and order scan of a CDC topic (optional on a KafkaAdmin) ----
+//
+// Asserted at use time like RateReader (ds, ok := k.(clients.DupScanner)),
+// never embedded in KafkaAdmin, so no existing client or fake has to grow.
+// internal/clients/kafka implements it (X1c, A2; its DupReport and the
+// constants below are aliases there); the kafka_dup_keys tool (X1c) and the
+// watcher's dup_keys and order_skew checks (X1b, events.DriftSignal) are its
+// callers. The watcher fills a DriftSignal from a report, counts only:
+//   - dup_keys: Topic = Topic, Source = Scanned, Missing = Duplicates,
+//     Sample = Keys;
+//   - order_skew: Topic = Topic, Source = Scanned, Mismatched =
+//     OrderRegressions, Sample = RegressionKeys;
+//   - both: Window = [Since, the time the watcher started the scan); a
+//     Capped or Partial report says so in Detail. Findings, offsets and key
+//     fingerprints stay out of the signal.
+
+// Caps and deadline of every DupScanner. Callers and tests use these
+// constants instead of their own numbers. (X1)
+const (
+	// DupScanMaxScan caps DupScan's maxScan (records over all partitions); a
+	// larger one is cut to it and maxScan <= 0 means it.
+	DupScanMaxScan = 50_000
+	// DupScanTimeout is DupScan's deadline when ctx has none or a later one.
+	DupScanTimeout = 10 * time.Second
+	// MaxDupFindings caps DupReport.Findings; the rest are counted in
+	// FindingsOmitted.
+	MaxDupFindings = 20
+)
+
+// Why a record has no usable (key, source.lsn): the keys of
+// DupReport.UndecodableReasons. Fixed words, never record text. (X1)
+const (
+	DupUndecodableNoKey     = "no_key"         // empty record key
+	DupUndecodableNoLSN     = "no_lsn"         // an envelope without source.lsn (not Postgres, or null)
+	DupUndecodableFormat    = "not_envelope"   // neither a JSON object nor Confluent Avro
+	DupUndecodableMalformed = "malformed"      // JSON or Avro that does not parse
+	DupUndecodableRegistry  = "registry"       // no schema registry, or it was unreachable
+	DupUndecodableSchema    = "schema_refused" // schema missing, too large or unparseable
+)
+
+// DupFinding kinds. (X1)
+const (
+	DupKindDuplicate  = "duplicate"
+	DupKindRegression = "regression"
+)
+
+// DupReport is what DupScan found on one topic: counts, offsets, source
+// positions and key fingerprints only. A record key or value never enters
+// it; Findings name a key by its fingerprint (DupFinding.Key). (X1)
+type DupReport struct {
+	Topic   string    `json:"topic"`
+	Since   time.Time `json:"since"`
+	MaxScan int       `json:"max_scan"`
+	// Scanned is the data records read (transaction markers excluded).
+	Scanned int `json:"scanned"`
+	// Capped: the scan stopped at MaxScan with records left to read.
+	Capped bool `json:"capped"`
+	// Partial: the deadline cut the scan; the counts cover what was read.
+	Partial bool `json:"partial"`
+	// Duplicates is the records whose (key, source.lsn) was already seen;
+	// Keys is the distinct keys among them.
+	Duplicates int `json:"duplicates"`
+	Keys       int `json:"keys"`
+	// OrderRegressions is the records whose source.lsn is below one the
+	// same key already had earlier in the same partition (a duplicate is
+	// not also a regression); RegressionKeys is the distinct keys.
+	OrderRegressions int `json:"order_regressions"`
+	RegressionKeys   int `json:"regression_keys"`
+	// Undecodable is the records with no usable key or source.lsn, by reason
+	// (the DupUndecodable* constants). Tombstones (empty values) are counted
+	// apart: they carry no position.
+	Undecodable        int            `json:"undecodable"`
+	UndecodableReasons map[string]int `json:"undecodable_reasons,omitempty"`
+	Tombstones         int            `json:"tombstones"`
+	Partitions         []DupPartition `json:"partitions"`
+	// Findings are the first MaxDupFindings duplicates and regressions in
+	// read order; FindingsOmitted counts the rest.
+	Findings        []DupFinding `json:"findings,omitempty"`
+	FindingsOmitted int          `json:"findings_omitted,omitempty"`
+}
+
+// DupPartition is one partition's part of a DupScan. (X1)
+type DupPartition struct {
+	Partition int32 `json:"partition"`
+	From      int64 `json:"from"` // first offset at or after since
+	Next      int64 `json:"next"` // first offset not read
+	End       int64 `json:"end"`  // readable end when the scan started
+	Scanned   int   `json:"scanned"`
+	Done      bool  `json:"done"`
+}
+
+// DupFinding is one duplicate or order regression. First* point at the
+// earlier record: the first with the same (key, lsn) for a duplicate, the
+// one with the higher PrevLSN for a regression. Key is "sha256:" and the
+// first 8 bytes of the SHA-256 of the raw key bytes in hex (16 digits): it
+// tells keys apart without showing them, but a short key (an integer id)
+// can be guessed back from it, so it stays in tool Data and is never put in
+// an event. (X1)
+type DupFinding struct {
+	Kind           string `json:"kind"` // DupKindDuplicate or DupKindRegression
+	Key            string `json:"key"`
+	Partition      int32  `json:"partition"`
+	Offset         int64  `json:"offset"`
+	FirstPartition int32  `json:"first_partition"`
+	FirstOffset    int64  `json:"first_offset"`
+	LSN            int64  `json:"lsn"`
+	PrevLSN        int64  `json:"prev_lsn,omitempty"`
+}
+
+// DupScanner scans a Debezium Postgres CDC topic for duplicate change events
+// (the same key and source.lsn more than once, on any partition) and per-key
+// source.lsn regressions (within one partition). (X1)
+//
+// DupScan reads topic from the first offset at or after since up to each
+// partition's readable end as it was when the scan started, round-robin over
+// the partitions, at most maxScan records (maxScan <= 0 or above
+// DupScanMaxScan means DupScanMaxScan; Capped when records were left). It
+// decodes a value only to find source.lsn (JSON, or Confluent Avro with the
+// registry's writer schema through a walker bounded by the value's bytes,
+// never a generic decoder) and compares keys as bytes; no key, value or
+// decoded field leaves the method: the report has counts, offsets, positions
+// and fingerprints only, and so do its errors. It only reads.
+//
+// Deadline DupScanTimeout: a scan cut by a deadline (its own or the
+// caller's) returns the report so far with Partial set and a nil error; a
+// caller's cancel is an error. An unknown topic wraps ErrNotFound; a value it
+// cannot decode is counted in Undecodable, never an error. Like the other
+// Kafka reads it does not read the pipeline in ctx: the caller scopes topic
+// to its pipeline (tools.Scope.CheckTopic) before the call.
+type DupScanner interface {
+	DupScan(ctx context.Context, topic string, since time.Time, maxScan int) (DupReport, error)
 }
 
 // ---- Batch pipelines: orchestrator and transform (P4) ----
@@ -905,8 +1323,12 @@ type ModelResult struct {
 
 // RunResults is the latest dbt run_results.json.
 type RunResults struct {
-	GeneratedAt time.Time     `json:"generated_at"` // metadata.generated_at
-	Results     []ModelResult `json:"results"`
+	GeneratedAt time.Time `json:"generated_at"` // metadata.generated_at
+	// InvocationID is metadata.invocation_id, dbt's id of the run ("" when the
+	// file has none): the version of a dbt migration change
+	// (ExternalChange.Version). Untrusted text from the artifact. (X4)
+	InvocationID string        `json:"invocation_id"`
+	Results      []ModelResult `json:"results"`
 }
 
 // Lineage is one model's direct parents and children from manifest.json, as
@@ -1105,6 +1527,89 @@ type ChangeWriter interface {
 	RecordChange(ctx context.Context, c PipelineChange) (inserted bool, err error)
 }
 
+// ---- X4: migration history of the source database (optional on a SourceDB) ----
+//
+// Asserted at use time like CountReader (mr, ok := src.(clients.MigrationReader)),
+// never embedded in SourceDB. The source Postgres implements it (X4b, A3) over
+// Flyway's flyway_schema_history and Liquibase's databasechangelog; the "what
+// changed" tool turns each Migration into a migration PipelineChange (source
+// flyway or liquibase, Object the history table, After {version}). A source
+// without it simply has no migration rows. A MySQL source (Q8) implements the
+// same interface. (Moved from internal/clients/postgres, which keeps aliases,
+// by the X-batch3 review.)
+
+// MaxMigrations is the most rows one RecentMigrations call returns, over every
+// history table. (X4)
+const MaxMigrations = 200
+
+// HistoryState is what RecentMigrations could do with one history table. (X4)
+type HistoryState string
+
+// History table states. (X4)
+const (
+	// HistoryRead: the table was read.
+	HistoryRead HistoryState = "read"
+	// HistoryUnreadable: the login lacks SELECT on the table or USAGE on its
+	// schema. A fact for the room ("grant SELECT on ..."), not an error.
+	HistoryUnreadable HistoryState = "unreadable"
+	// HistoryUnknownShape: a table with the tool's name whose columns are not
+	// the tool's (another product, or a very old version). Skipped.
+	HistoryUnknownShape HistoryState = "unknown_shape"
+)
+
+// HistoryTable is one migration history table found by catalog lookup. (X4)
+type HistoryTable struct {
+	Source string       `json:"source"` // ChangeSourceFlyway or ChangeSourceLiquibase
+	Schema string       `json:"schema"`
+	Name   string       `json:"name"`
+	State  HistoryState `json:"state"`
+}
+
+// Qualified returns "schema.name", the migration change's Object. (X4)
+func (h HistoryTable) Qualified() string { return h.Schema + "." + h.Name }
+
+// Migration is one applied migration: metadata only, never a script's name,
+// contents or checksum. Every string is untrusted text from the customer's
+// database. (X4)
+type Migration struct {
+	Source string `json:"source"` // ChangeSourceFlyway or ChangeSourceLiquibase
+	Table  string `json:"table"`  // the history table, "public.flyway_schema_history"
+	// Version is the Flyway version ("" for a repeatable migration) or the
+	// Liquibase changeset id.
+	Version     string    `json:"version"`
+	Description string    `json:"description"`
+	InstalledBy string    `json:"installed_by"` // Flyway installed_by, Liquibase author
+	InstalledOn time.Time `json:"installed_on"`
+	// Success is Flyway's success column; for Liquibase, exectype is not
+	// FAILED (Liquibase records few failures, so it is nearly always true).
+	Success bool `json:"success"`
+}
+
+// MigrationHistory is the result of RecentMigrations. (X4)
+type MigrationHistory struct {
+	// Migrations are applied migrations at or after since, newest first, at
+	// most the call's limit.
+	Migrations []Migration `json:"migrations"`
+	// Tables are the history tables found, read or not, by schema and name.
+	// None found is not an error: the database simply has no history.
+	Tables []HistoryTable `json:"tables"`
+}
+
+// MigrationReader reads the migration history tables of the source database
+// (optional on a SourceDB, asserted at use time). RecentMigrations looks the
+// tables up in the catalog, only in schemas (the schemas of the pipeline's own
+// source tables, so another team's history table in a shared database is never
+// read), and returns the migrations applied at or after since, newest first,
+// at most limit (1..MaxMigrations). Metadata columns only. No history table is
+// an empty result, not an error; a table the login cannot read is
+// HistoryUnreadable, not an error. Bad input (limit out of range, zero since,
+// a schema that is not a name) is tools.ErrBadInput before any I/O. Errors
+// carry the server's SQLSTATE, never its message (which can quote the
+// customer's text). Deadline 10 s. (X4)
+type MigrationReader interface {
+	RecentMigrations(ctx context.Context, schemas []string, since time.Time, limit int) (MigrationHistory, error)
+}
+
 // ---- X3: watch sample history (Piperoom's own table, fed by the watcher) ----
 //
 // Not a customer system: the room store implements both interfaces over the
@@ -1114,8 +1619,10 @@ type ChangeWriter interface {
 // retention job. A sample is one number per pipeline and metric: never a row
 // value, a record, a config value or free text.
 //
-// Migration numbers: 00017 is reserved by docs/design/onboarding.md
-// (proposed), 00018 here, 00019 and 00020 by the fleet block below. goose
+// Migration numbers: 00018 here (merged), 00019 and 00020 by the fleet block
+// below. 00017, once reserved by docs/design/onboarding.md (proposed), was
+// given up when 00018 merged (X-batch3 review): that design's table takes the
+// next free number after 00020. goose
 // (migrations/migrate.go) refuses to apply a number below one a database
 // already ran, so migrations merge in number order: a reserved number whose
 // row is not ready is given up at merge time (the leads renumber in this
@@ -1180,6 +1687,34 @@ type SampleWriter interface {
 // error. Callers check the pipeline's tenant before they call it. (X3)
 type SampleReader interface {
 	Samples(ctx context.Context, pipelineID, metric string, since time.Time) ([]SamplePoint, error)
+}
+
+// The two metrics the watcher cannot take from reads it already makes come
+// from optional readers, asserted at use time like CountReader and never
+// embedded in SourceDB or KafkaAdmin: a client without one simply has no
+// sample of that metric. (Added by the X-batch3 review from X3a's request;
+// no client implements them yet: A3 adds DBSizeReader to the source Postgres,
+// A2 UnreadAgeReader to the kafka client.)
+
+// DBSizeReader reads the size of the source database (optional on a
+// SourceDB): pg_database_size(current_database()) in bytes, the
+// db_size_bytes sample, judged against owners.yaml watch.db_size_limit. One
+// catalog function, no table read; deadline 10 s. (X3)
+type DBSizeReader interface {
+	DatabaseSize(ctx context.Context) (int64, error)
+}
+
+// UnreadAgeReader reads, for one consumer group, the timestamp of the oldest
+// record it has not consumed yet, per topic (optional on a LagReader): for
+// each partition with lag, the record at the committed offset (or at the log
+// start when the committed offset is below it), and per topic the oldest of
+// them. Topics with nothing
+// unread are absent; no record value or key is returned or kept, only the
+// record's timestamp. The watcher's topic_oldest_unread_age sample is now
+// minus the oldest of the pipeline's own topics, judged against that topic's
+// retention.ms (TopicConfigReader on the same client). Deadline 10 s. (X3)
+type UnreadAgeReader interface {
+	OldestUnread(ctx context.Context, group string) (map[string]time.Time, error)
 }
 
 // ---- Fleet view: cross-pipeline changes, watcher status, connector config versions (X5-0) ----

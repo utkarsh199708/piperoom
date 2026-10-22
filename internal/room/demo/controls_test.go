@@ -512,7 +512,7 @@ func TestRunWithoutControls(t *testing.T) {
 	sink := &recordingSink{}
 	done := make(chan error, 1)
 	go func() {
-		done <- Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: &countProposals{}, Inbox: newBlockingInbox()}, agent.Options{})
+		done <- runFast(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: &countProposals{}, Inbox: newBlockingInbox()})
 	}()
 	waitFor(t, 10*time.Second, "the proposal", func() bool { return hasMessage(sink, "The fix proposal is waiting") })
 	cancel()

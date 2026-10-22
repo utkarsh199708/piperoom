@@ -308,6 +308,26 @@ evals and the picker**; the board's After column is the only hard dependency. Th
 decisions on 2026-10-19 ("configure all of them", design §15): the leads' recommendations are the defaults and each
 is a setting where safe; the metadata deny list, the untrusted-data wrapper and key handling are never configurable.
 
+### X wave (planned 2026-10-22; source plan "X-WAVE delivery plan (Jira epic KAN-413)")
+
+PR titles start with the ticket's tag: `[X<n>-0]` for an area's contract row (leads), `[X<n><letter>]` for an
+implementation row (e.g. `[X1c] kafka, kafkatools: DupScan reader and kafka_dup_keys tool`); the Jira key (KAN-4xx)
+goes in the PR body. Same rules as the P to V waves: each row stays inside its owner's folders as the plan lists them
+(the rows above; the wave creates no new folders); a file outside them is asked for in the thread, never edited.
+**Contract changes come only through the `X<n>-0` rows:** an implementation row that needs one writes a
+`## Contract change request` and keeps a local adapter until the leads apply it (as they applied X1c's
+`clients.DupScanner`). The wave closes the gaps between "diagnosed" and the data engineer's job: silent corruption
+(X1), recovery (X2), prevention (X3), external causes (X4), fleet view (X5), performance and cost (X6), governance
+(X7), change safety (X8). Each gap becomes a watcher signal, an action (Preview → approval → Execute → Verify) or a
+view, never a new path to customer systems. A new watcher signal ships with a `devctl break` and a recorded scenario,
+a new reader with its `docs/pilot/data-handling.md` row, in the same PR. Migrations 00018 to 00020 are reserved in the
+X3 block of `internal/clients/clients.go` and merge in number order.
+
+Order: **X1 → X2; X3 → X5; X4 independent; X8 → X6; X7 last** (X7c earlier if PII is a customer condition), after
+P3 closes and the eval baseline is recorded. Inside an area its `X<n>-0` lands first; the plan's "Depends on" column
+is the only hard dependency between rows. Contracts merged: X1-0 to X5-0 (`da3ac65`), X6-0, X7-0 and X8-0 (with the
+X1a and X1c rows, review branch `review/x-batch2`).
+
 ### Contract files (read them, code against them, never edit them)
 
 - `internal/tools/tool.go` — `Tool`, `Result`, `Registry`

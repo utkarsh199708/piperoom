@@ -55,10 +55,13 @@ func (f *fakeReconciler) CountBetween(_ context.Context, _, _ string, from, to t
 	return int64(len(f.keys)), nil
 }
 
-func (f *fakeReconciler) SampleKeys(_ context.Context, _, _, _ string, _ time.Time, n int) ([]string, error) {
+func (f *fakeReconciler) SampleKeys(_ context.Context, _, _, _ string, since, until time.Time, n int) ([]string, error) {
 	size := clients.ReconcileSampleSize(n)
 	if size == 0 {
 		return nil, fmt.Errorf("fake: n %d: %w", n, errBadInput)
+	}
+	if until.Before(since) {
+		return nil, fmt.Errorf("fake: window: %w", errBadInput)
 	}
 	f.calls++
 	return f.keys[:min(size, len(f.keys))], nil
@@ -102,12 +105,15 @@ func TestFakeReconcilerHonoursCaps(t *testing.T) {
 	f := &fakeReconciler{keys: keys, times: map[string]map[string]time.Time{"1": {"updated_at": time.Unix(0, 0).UTC()}}}
 	ctx := context.Background()
 
-	got, err := f.SampleKeys(ctx, "public.orders", "id", "updated_at", time.Time{}, 500)
+	got, err := f.SampleKeys(ctx, "public.orders", "id", "updated_at", time.Time{}, time.Unix(1, 0), 500)
 	if err != nil || len(got) != clients.ReconcileMaxSample {
 		t.Fatalf("SampleKeys(500) = %d keys, %v; want %d", len(got), err, clients.ReconcileMaxSample)
 	}
-	if _, err := f.SampleKeys(ctx, "public.orders", "id", "updated_at", time.Time{}, 0); !errors.Is(err, errBadInput) {
+	if _, err := f.SampleKeys(ctx, "public.orders", "id", "updated_at", time.Time{}, time.Unix(1, 0), 0); !errors.Is(err, errBadInput) {
 		t.Fatalf("SampleKeys(0) err = %v, want bad input", err)
+	}
+	if _, err := f.SampleKeys(ctx, "public.orders", "id", "updated_at", time.Unix(2, 0), time.Unix(1, 0), 5); !errors.Is(err, errBadInput) {
+		t.Fatalf("SampleKeys(until before since) err = %v, want bad input", err)
 	}
 
 	before := f.calls

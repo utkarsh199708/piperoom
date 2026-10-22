@@ -118,32 +118,16 @@ func buildA2Clients(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error) {
 	// means none: registry stays nil.
 	var registry *schemareg.Client
 	if cfg.SchemaRegistryURL != "" {
-		r, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
-			Username: cfg.SchemaRegistryUsername,
-			Password: netsec.Secret(cfg.SchemaRegistryPassword),
-			TLS: netsec.TLS{
-				CAFile:   cfg.SchemaRegistryTLSCAFile,
-				CertFile: cfg.SchemaRegistryTLSCertFile,
-				KeyFile:  cfg.SchemaRegistryTLSKeyFile,
-			},
-		})
+		r, err := newRegistryClient(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("wiring: schema registry client: %w", err)
+			return nil, err
 		}
 		registry = r
 	}
 
-	connectClient, err := connect.NewSecure(cfg.ConnectURL, netsec.HTTP{
-		Username: cfg.ConnectUsername,
-		Password: netsec.Secret(cfg.ConnectPassword),
-		TLS: netsec.TLS{
-			CAFile:   cfg.ConnectTLSCAFile,
-			CertFile: cfg.ConnectTLSCertFile,
-			KeyFile:  cfg.ConnectTLSKeyFile,
-		},
-	})
+	connectClient, err := newConnectClient(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("wiring: connect client: %w", err)
+		return nil, err
 	}
 
 	sec, err := kafkaSecurity(cfg, awsCfg)
@@ -156,6 +140,43 @@ func buildA2Clients(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error) {
 	}
 
 	return &a2Clients{Connect: connectClient, Kafka: kafkaClient, Registry: registry}, nil
+}
+
+// newRegistryClient builds the Schema Registry client of cfg with its login
+// and TLS settings (netsec). It is the one mapping for production and
+// staging (staging.go) alike.
+func newRegistryClient(cfg config.Config) (*schemareg.Client, error) {
+	r, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
+		Username: cfg.SchemaRegistryUsername,
+		Password: netsec.Secret(cfg.SchemaRegistryPassword),
+		TLS: netsec.TLS{
+			CAFile:   cfg.SchemaRegistryTLSCAFile,
+			CertFile: cfg.SchemaRegistryTLSCertFile,
+			KeyFile:  cfg.SchemaRegistryTLSKeyFile,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wiring: schema registry client: %w", err)
+	}
+	return r, nil
+}
+
+// newConnectClient builds the Kafka Connect client of cfg with its login and
+// TLS settings (netsec), for production and staging alike.
+func newConnectClient(cfg config.Config) (*connect.Client, error) {
+	c, err := connect.NewSecure(cfg.ConnectURL, netsec.HTTP{
+		Username: cfg.ConnectUsername,
+		Password: netsec.Secret(cfg.ConnectPassword),
+		TLS: netsec.TLS{
+			CAFile:   cfg.ConnectTLSCAFile,
+			CertFile: cfg.ConnectTLSCertFile,
+			KeyFile:  cfg.ConnectTLSKeyFile,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wiring: connect client: %w", err)
+	}
+	return c, nil
 }
 
 // kafkaSecurity maps the Kafka security settings of cfg onto netsec. With
@@ -425,7 +446,7 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if !kindsOf(w.Owners).cdc() {
 		return nil
 	}
-	if err := registerActions(areg, w); err != nil {
+	if err := registerActions(areg, w, nil); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)
 	}
 	return nil
@@ -439,9 +460,13 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 // the room previews as before. The room's executor already runs nothing then
 // (P1a-1); this keeps an action that got past it from writing anyway. The
 // P3 actions follow (registerP3Actions over RegisterP3Actions, actions_p3.go).
-func registerActions(areg *actions.Registry, w *Wired) error {
+//
+// staging is the pipeline's staging client set (X8a, staging.go), handed to
+// the actions as Deps.Staging with write mode on only: off, Deps.Staging is
+// nil whatever is passed, so nothing can be staged.
+func registerActions(areg *actions.Registry, w *Wired, staging *actions.Staging) error {
 	if w.write {
-		if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
+		if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w), Staging: staging}); err != nil {
 			return err
 		}
 	} else if err := actions.Register(areg, actions.Deps{Connect: readOnlyActionConnect(w), Registry: readOnlyActionRegistry(w)}); err != nil {

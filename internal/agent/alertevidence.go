@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/events"
 	"piperoom/internal/redact"
 )
 
@@ -49,6 +50,11 @@ var evidenceNumberKeys = map[string]bool{
 	"members": true, "total_lag": true, "lag_rate_per_min": true, "state_changes_15m": true,
 	"partition": true, "committed": true, "log_start": true, "records_lost": true,
 	"connectors_omitted": true, "tasks_omitted": true, "restarts": true,
+	// X1 drift signals (events.DriftSignal): counts only.
+	"source": true, "sink": true, "missing": true, "mismatched": true, "sample": true,
+	// X3 forecast (events.ForecastSignal) and config_drift
+	// (events.ConfigDriftSignal).
+	"current": true, "limit": true, "slope_per_hour": true, "r2": true, "samples": true, "keys_omitted": true,
 }
 
 // evidenceBoolKeys are watcher keys whose value is a boolean.
@@ -57,15 +63,23 @@ var evidenceBoolKeys = map[string]bool{
 }
 
 // evidenceTimeKeys are watcher keys whose value is an RFC 3339 time.
-var evidenceTimeKeys = map[string]bool{"first_seen": true}
+var evidenceTimeKeys = map[string]bool{"first_seen": true, "eta": true}
 
 // evidenceWordKeys are watcher keys with a fixed vocabulary (a state, a
 // wal_status, an ETA basis, a window like "15m"): one short word.
 var evidenceWordKeys = map[string]bool{"state": true, "wal_status": true, "eta_basis": true, "window": true}
 
 // evidenceNameKeys are watcher keys that name an object: a slot, a group, a
-// topic, a connector.
-var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true}
+// topic, a table, a connector, a forecast's metric and object.
+var evidenceNameKeys = map[string]bool{"slot": true, "group": true, "topic": true, "table": true,
+	"connector": true, "metric": true, "object": true}
+
+// maxEvidenceChangedKeys caps the config_drift key names rendered.
+const maxEvidenceChangedKeys = 8
+
+// driftSignals are the X1 signals whose "window" is an object {from, to}
+// (events.DriftWindow), not a word as in dlq_growth.
+var driftSignals = map[string]bool{"count_drift": true, "row_drift": true, "dup_keys": true, "order_skew": true}
 
 // evidenceWord is the shape of a fixed-vocabulary value.
 var evidenceWord = regexp.MustCompile(`^[A-Za-z0-9_]{1,32}$`)
@@ -155,6 +169,10 @@ func signalLine(s map[string]any) string {
 		parts = append(parts, "firing_for="+n+"s")
 	}
 	parts = append(parts, flatFields(s)...)
+	if driftSignals[sig] {
+		parts = append(parts, driftWindowFields(s["window"])...)
+	}
+	parts = append(parts, changedKeyFields(s["changed_keys"])...)
 	parts = append(parts, connectorFields(s["connectors"])...)
 	parts = append(parts, riskFields(s["risks"])...)
 	parts = append(parts, partitionFields(s["worst_partitions"])...)
@@ -232,6 +250,50 @@ func evidenceTime(v any) (string, bool) {
 		return "", false
 	}
 	return t.UTC().Format(time.RFC3339), true
+}
+
+// driftWindowFields renders a drift signal's window {from, to} as two times.
+func driftWindowFields(v any) []string {
+	m, _ := v.(map[string]any)
+	from, ok1 := evidenceTime(m["from"])
+	to, ok2 := evidenceTime(m["to"])
+	if !ok1 || !ok2 {
+		return nil
+	}
+	return []string{"window_from=" + from, "window_to=" + to}
+}
+
+// changedKeyFields renders config_drift's changed key names (never values):
+// the first maxEvidenceChangedKeys that look like names, comma-joined, the
+// count of the rest, and whether a secret key changed (events.SecretKeyChanged
+// stands for its name, so only the fact is rendered).
+func changedKeyFields(v any) []string {
+	items, _ := v.([]any)
+	var names []string
+	more, secret := 0, false
+	for _, it := range items {
+		k, _ := it.(string)
+		switch {
+		case k == events.SecretKeyChanged:
+			secret = true
+		case !evidenceName.MatchString(k):
+		case len(names) == maxEvidenceChangedKeys:
+			more++
+		default:
+			names = append(names, k)
+		}
+	}
+	var out []string
+	if len(names) > 0 {
+		out = append(out, "changed_keys="+strings.Join(names, ","))
+	}
+	if more > 0 {
+		out = append(out, "changed_keys_more="+strconv.Itoa(more))
+	}
+	if secret {
+		out = append(out, "secret_key_changed=true")
+	}
+	return out
 }
 
 // connectorFields renders connector_down evidence: name, state, and per task

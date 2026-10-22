@@ -231,6 +231,8 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/handoffs/{hid}/accept", "/api/handoffs/" + f.handoff + "/accept", ""},
 		{"GET", "/api/pipelines/{pid}/topology", "/api/pipelines/pb/topology", ""},
 		{"GET", "/api/pipelines/{pid}/agent-stats", "/api/pipelines/pb/agent-stats", ""},
+		{"GET", "/api/pipelines/{pid}/trends", "/api/pipelines/pb/trends?metric=slot_wal_bytes", ""},
+		{"POST", "/api/pipelines/{pid}/connectors/{name}/accept-config", "/api/pipelines/pb/connectors/pb-c/accept-config", ""},
 		{"GET", "/api/rooms/{id}/usage", "/api/rooms/" + f.rb + "/usage", ""},
 		{"GET", "/api/usage", "/api/usage?pipeline=pb", ""},
 	}
