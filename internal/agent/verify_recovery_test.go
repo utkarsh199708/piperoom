@@ -396,6 +396,10 @@ func TestRecoveryUnverifiable(t *testing.T) {
 		calls int
 	}{
 		{"not supported", verifyAnswer{err: fmt.Errorf("warehouse cannot count: %w", clients.ErrNotSupported)}, 1},
+		// A refusal before any I/O does not change between polls: one call.
+		{"no scope", verifyAnswer{err: fmt.Errorf("pg_resnapshot_rows: %w", tools.ErrNoScope)}, 1},
+		{"out of scope", verifyAnswer{err: fmt.Errorf("pg_resnapshot_rows: %w", tools.ErrOutOfScope)}, 1},
+		{"bad params", verifyAnswer{err: fmt.Errorf("pg_resnapshot_rows: %w", tools.ErrBadInput)}, 1},
 		{"every call fails", verifyAnswer{err: errors.New("connection refused")}, 11},
 		{"counts out of range", verifyAnswer{res: actions.VerifyResult{Before: 10, After: 11, Unit: events.RecoveryUnitRows}}, 11},
 	}

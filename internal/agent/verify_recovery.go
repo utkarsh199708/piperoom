@@ -38,8 +38,9 @@ type recoveryStep struct {
 	v     actions.Verifier
 	// last is the newest counted call; nil until one succeeded.
 	last *actions.VerifyResult
-	// unsupported is set when Verify answered clients.ErrNotSupported: the
-	// source or sink cannot count, so the outcome is unverifiable.
+	// unsupported is set when Verify answered an error no later poll can
+	// cure (cannotCount): the source or sink cannot count, or the call is
+	// refused, so the outcome is unverifiable.
 	unsupported bool
 	// lastErr is the newest failed call's error, scrubbed, for the evidence.
 	lastErr string
@@ -199,7 +200,7 @@ func (r *runner) pollRecovery(ctx context.Context, id string, steps []*recoveryS
 			head := fmt.Sprintf("poll %d of %d, step %d (%s): ", poll, len(plan), st.index+1, st.step.Action)
 			if err != nil {
 				st.lastErr = err.Error()
-				if errors.Is(err, clients.ErrNotSupported) {
+				if cannotCount(err) {
 					st.unsupported = true
 					lines = append(lines, head+"cannot be counted: "+clipLine(st.lastErr))
 					return lines, nil
@@ -219,6 +220,16 @@ func (r *runner) pollRecovery(ctx context.Context, id string, steps []*recoveryS
 		}
 	}
 	return lines, nil
+}
+
+// cannotCount reports a Verify error that polling again cannot cure: the
+// source or sink cannot count (clients.ErrNotSupported), or the call is
+// refused before any I/O (no or another pipeline's scope, bad params). Such a
+// step is unverifiable at once instead of after the whole timeout, during
+// which the run would read nothing else.
+func cannotCount(err error) bool {
+	return errors.Is(err, clients.ErrNotSupported) || errors.Is(err, tools.ErrNoScope) ||
+		errors.Is(err, tools.ErrOutOfScope) || errors.Is(err, tools.ErrBadInput)
 }
 
 // countLine renders one counted call for the evidence.
