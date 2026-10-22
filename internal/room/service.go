@@ -651,7 +651,9 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, w
 			// A shadow room never resumes its agent, so the "steer to
 			// resume" notice would be wrong there (the sweep in Load marks
 			// its run interrupted instead).
-			if restarted && !snap.Shadow && s.restartNoticeDue(r.ID, st, leases) {
+			// A quiet forecast room had no agent to pause: its trend note
+			// still says how to start one.
+			if restarted && !snap.Shadow && !quietRoom(snap) && s.restartNoticeDue(r.ID, st, leases) {
 				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
 					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
 				}
@@ -1063,6 +1065,9 @@ var agentEventTypes = map[events.Type]bool{
 	// The verdict on an executed fix (internal/agent verify.go); the
 	// post-mortem and the verification card read it.
 	events.AgentVerification: true,
+	// One poll of a recovery action's Verify (X2, internal/agent): progress
+	// for the recovery card; the verdict is still the agent.verification.
+	events.AgentRecoveryCheck: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
@@ -1548,19 +1553,20 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentCancel = cancel
 	st.agentRun++
 	run := st.agentRun
+	openedAt := st.snap.OpenedAt
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	var firstLook <-chan agent.TriageResult
 	if st.firstLook && s.triage != nil {
 		// Before the slot: a room queued behind the cap still gets its
 		// diagnosis. It runs once per room, never on a restart.
-		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, raw))
+		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, openedAt, raw))
 	}
 	st.firstLook = false
 	go func() {
 		defer s.wg.Done()
 		// However the supervisor ends, its slot or queue entry goes back.
 		defer gate.release()
-		alert := s.newAlert(roomID, title, pipelineID, raw)
+		alert := s.newAlert(roomID, title, pipelineID, openedAt, raw)
 		deps := agent.Deps{
 			Tools:     s.toolsFor(pipelineID),
 			Actions:   s.actionsFor(pipelineID),

@@ -70,6 +70,9 @@ type Pipeline struct {
 	// SetupSpec is the optional `setup:` block (see setup.go), written by
 	// pipeline_register. Read it with Setup(). Allowed on both kinds.
 	SetupSpec *SetupSpec `yaml:"setup"`
+	// RecoverySpec is the optional cdc `recovery:` block (recovery.go, X2).
+	// Read it with RecoveryMaxRows.
+	RecoverySpec *RecoverySpec `yaml:"recovery"`
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
 	// replaces the top-level `layers:` entry for this pipeline. Load refuses a
 	// layer that is not one of the pipeline's Layers().
@@ -155,6 +158,9 @@ type Owners struct {
 	// Tenants is the optional tenants: block (tenancy.go). Present, it turns
 	// the tenant filter on.
 	Tenants map[string]Tenant `yaml:"tenants"`
+	// Teams is the optional teams: list (teams.go, X4): the teams that own
+	// the services outside the pipelines, which a hypothesis may name.
+	Teams []Team `yaml:"teams"`
 
 	// path and dir are where LoadDir read the config from, so a Live built
 	// over this Owners can re-read it on Reload. dir is "" when there is no
@@ -312,6 +318,9 @@ func (o *Owners) validate() error {
 		if err := p.validateReprocessTopic(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if err := p.validateRecovery(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
 		if p.isBatch() {
 			// No watch: block (validateKind) and nothing to watch.
 			w := batchWatch()
@@ -340,6 +349,9 @@ func (o *Owners) validate() error {
 		return err
 	}
 	if err := o.validateStaging(); err != nil {
+		return err
+	}
+	if err := o.validateTeams(); err != nil {
 		return err
 	}
 	o.indexConsumerGroups()

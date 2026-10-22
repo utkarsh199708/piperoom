@@ -46,9 +46,17 @@ func newRoomToolsWith(d Deps, track *proposalTracker, steps *stepLedger) []tools
 // healthy verdict is refused while a component is unreachable (KAN-408). A nil
 // gaps turns the guard off, for the same harnesses as a nil ledger.
 func newRoomToolsWithGaps(d Deps, track *proposalTracker, steps *stepLedger, gaps *readFailures) []tools.Tool {
+	return newRoomToolsWithCauses(d, track, steps, gaps, nil)
+}
+
+// newRoomToolsWithCauses is newRoomToolsWithGaps with the run's external
+// causes (X4c): update_hypothesis checks scope, team and change_id against
+// them, and propose_fix labels a proposal a mitigation while the hypothesis
+// puts the cause outside the pipeline. A nil causes knows no change and no team.
+func newRoomToolsWithCauses(d Deps, track *proposalTracker, steps *stepLedger, gaps *readFailures, causes *externalCauses) []tools.Tool {
 	return []tools.Tool{
-		&updateHypothesisTool{sink: d.Sink, steps: steps, gaps: gaps},
-		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, steps: steps, log: d.Logger},
+		&updateHypothesisTool{sink: d.Sink, steps: steps, gaps: gaps, causes: causes},
+		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track, steps: steps, log: d.Logger, causes: causes},
 		&postMessageTool{sink: d.Sink, gaps: gaps},
 	}
 }
@@ -109,6 +117,9 @@ type updateHypothesisTool struct {
 	// gaps is the run's failed reads; an unresolved unreachable component
 	// refuses a healthy verdict (KAN-408). Nil turns the guard off.
 	gaps *readFailures
+	// causes checks scope, team and change_id (X4c); nil knows no change
+	// and no team, so only a hypothesis without them passes.
+	causes *externalCauses
 }
 
 // stepIDRe is the shape of a step id (newStepID): "s_" and 26 Crockford digits.
@@ -222,6 +233,14 @@ func (t *updateHypothesisTool) InputSchema() map[string]any {
 			"type": "string",
 			"enum": []string{"low", "medium", "high"},
 		},
+		// X4c: optional, so a hypothesis written as before still passes.
+		"scope": map[string]any{
+			"type":        "string",
+			"enum":        []string{string(events.ScopePipeline), string(events.ScopeUpstreamApp), string(events.ScopeVendor), string(events.ScopeUnknown)},
+			"description": "where the cause is: pipeline, upstream_app (an application deploy or migration), vendor (a vendor incident) or unknown",
+		},
+		"team":      map[string]any{"type": "string", "description": "upstream_app or vendor only: the owning team's id"},
+		"change_id": map[string]any{"type": "integer", "description": "the change_id of the deploy, migration or vendor incident it rests on"},
 	}, "text", "based_on_steps", "confidence")
 }
 
@@ -229,6 +248,10 @@ type hypothesisInput struct {
 	Text         string   `json:"text"`
 	BasedOnSteps []string `json:"based_on_steps"`
 	Confidence   string   `json:"confidence"`
+	// Scope, Team and ChangeID are X4c's; externalCauses.resolve checks them.
+	Scope    string `json:"scope"`
+	Team     string `json:"team"`
+	ChangeID int64  `json:"change_id"`
 }
 
 func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -254,6 +277,10 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	if err := checkHealthyVerdict(t.gaps, in.Text); err != nil {
 		return tools.Result{}, err
 	}
+	scope, team, changeID, err := t.causes.resolve(in)
+	if err != nil {
+		return tools.Result{}, err
+	}
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
 	}
@@ -264,11 +291,25 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 		Confidence:    in.Confidence,
 		Confirmed:     false,
 		UnbackedTerms: unbacked,
+		Scope:         scope,
+		Team:          team,
+		ChangeID:      changeID,
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit hypothesis: %w", err)
 	}
 	t.steps.setHypothesisSteps(in.BasedOnSteps)
-	return tools.Result{Summary: "hypothesis recorded" + unbackedNote(unbacked)}, nil
+	t.causes.record(scope, team)
+	return tools.Result{Summary: "hypothesis recorded" + scopeNote(scope, team) + unbackedNote(unbacked)}, nil
+}
+
+// scopeNote tells the model the scope it recorded when the cause is outside
+// the pipeline, and what that means for its proposals.
+func scopeNote(scope events.HypothesisScope, team string) string {
+	owner := rootFixOwner(scope, team)
+	if owner == "" {
+		return ""
+	}
+	return "; scope " + string(scope) + ": the root fix is " + owner + "'s, so a proposal of yours is labelled a mitigation"
 }
 
 // ---- post_message ----
@@ -337,6 +378,10 @@ type proposeFixTool struct {
 	steps *stepLedger
 	// log takes the guard's one warn line per refused step; nil logs nothing.
 	log *slog.Logger
+	// causes holds the latest hypothesis's scope (X4c): while it is
+	// upstream_app or vendor every proposal is labelled a mitigation. Nil
+	// labels none.
+	causes *externalCauses
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -727,10 +772,13 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		}
 	}
 
+	// X4c: with the cause outside the pipeline, no pipeline change is the
+	// root fix; the proposal says it is a mitigation.
+	title, owner := t.causes.mitigationTitle(in.Title)
 	createCtx, cancel := context.WithTimeout(ctx, proposalTimeout)
 	defer cancel()
 	id, err := t.proposals.Create(createCtx, events.ProposalCreatedPayload{
-		Title:          in.Title,
+		Title:          title,
 		Steps:          steps,
 		Risk:           in.Risk,
 		Rollback:       in.Rollback,
@@ -742,8 +790,12 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if t.track != nil {
 		t.track.record(id, steps)
 	}
+	summary := fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", "))
+	if owner != "" {
+		summary += "; labelled a mitigation: your hypothesis puts the cause outside the pipeline, so the root fix is " + owner + "'s"
+	}
 	return tools.Result{
-		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", ")),
+		Summary: summary,
 		Data:    proposeFixResult{ProposalID: id},
 	}, nil
 }

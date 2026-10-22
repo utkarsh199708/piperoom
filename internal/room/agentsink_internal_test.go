@@ -22,7 +22,7 @@ func TestAgentSinkAcceptsEveryAgentType(t *testing.T) {
 	for _, typ := range []events.Type{
 		events.AgentStatus, events.AgentStepStart, events.AgentToolCall, events.AgentToolResult,
 		events.AgentMessage, events.AgentHypothesis, events.AgentUsage, events.AgentTriage,
-		events.AgentVerification,
+		events.AgentVerification, events.AgentRecoveryCheck,
 	} {
 		if !agentEventTypes[typ] {
 			t.Errorf("agent sink refuses %s", typ)
@@ -31,6 +31,10 @@ func TestAgentSinkAcceptsEveryAgentType(t *testing.T) {
 	if err := rig.svc.agentEmit(ctx, snap.ID, outsideRun, events.AgentVerification,
 		events.AgentVerificationPayload{ProposalID: "p_1"}); err != nil {
 		t.Fatalf("agent.verification through the sink: %v", err)
+	}
+	if err := rig.svc.agentEmit(ctx, snap.ID, outsideRun, events.AgentRecoveryCheck,
+		events.AgentRecoveryCheckPayload{ProposalID: "p_1", Poll: 1, MaxPolls: 3, Before: 20, After: 20, Unit: events.RecoveryUnitRows}); err != nil {
+		t.Fatalf("agent.recovery_check through the sink: %v", err)
 	}
 	if err := rig.svc.agentEmit(ctx, snap.ID, outsideRun, events.ControlGranted, events.ControlGrantedPayload{}); err == nil {
 		t.Fatal("agent sink accepted control.granted")

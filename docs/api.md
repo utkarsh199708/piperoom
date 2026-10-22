@@ -371,7 +371,9 @@ hashes are unchanged; clients ignore `room.escalated` until they know it.
 - **Forecast rooms.** `room.created.origin: "forecast"` (`events.RoomOriginForecast`, server X3c): a forecast signal
   opened the room, `severity: "sev4"`, the trend summary is its first system message and **no agent runs** (no
   `agent.*` event, no usage) until the first `steer.sent`, the first `comment.added` with `mentions_agent: true`, or a
-  `room.escalated`. The room's driver, proposals and close work as in any room.
+  `room.escalated`. The room's driver, proposals and close work as in any room. On a pipeline in shadow mode the
+  one-shot shadow run starts at open as in any shadow room (lead ruling, batch 5): steers never start a shadow run,
+  so a quiet shadow room would otherwise never be measured, even after it escalates.
 - **`room.escalated {severity, from, signal}`** (system actor; X3c). The watcher's normal signal on the same pipeline
   (for example `slot_wal` once the slot really fills) joined an open room of lower severity: `severity` is the new
   level, `from` the old, `signal` the signal that caused it. The snapshot's `severity` is the newest one. In a
@@ -386,7 +388,9 @@ Additive like the F wave. Implemented by A4 (agent, X4c), A5 and C12 (page, X4d)
 - **Hypothesis scope.** `agent.hypothesis` may carry `scope` ∈ `pipeline | upstream_app | vendor | unknown`, `team?`
   and `change_id?`. `scope` is where the cause is: `pipeline` (a pipeline fix is the root fix), `upstream_app` (an
   application deploy or migration outside the pipeline; the agent proposes only mitigations, labelled as such),
-  `vendor` (a vendor's incident), `unknown` (not established). `unknown` is never written: the key is omitted, and a
+  `vendor` (a vendor's incident; the root fix is the vendor's, so proposals are labelled mitigations too: X4c's
+  `propose_fix` prefixes the title with `Mitigation: ` while the latest hypothesis is `upstream_app` or `vendor`),
+  `unknown` (not established). `unknown` is never written: the key is omitted, and a
   missing, `null` or unrecognised `scope` (every hypothesis written before X4) reads as `unknown`, so old events and
   their export hashes are unchanged. `team` is an `owners.yaml` `teams[].id` (see External changes), set only with
   `upstream_app` or `vendor`. `change_id` is the `PipelineChange.id` the scope rests on (`0`/absent when none).

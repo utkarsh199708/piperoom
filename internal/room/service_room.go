@@ -210,6 +210,12 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	// shadow.
 	shadow := s.pipelineShadow(pipelineID)
 	resolved := a.Status == alertin.StatusResolved
+	// Only the built-in watcher holds a "watcher:" key: no HTTP route can
+	// send that source (alertin.Sources), so no sender can open a quiet room.
+	origin := ""
+	if a.Source == alertin.Watcher && isForecastKey(pipelineID, a.DedupKey) {
+		origin = events.RoomOriginForecast
+	}
 	indexKey := alertIndexKey(pipelineID, a.DedupKey)
 	roomID := NewID("r_")
 	now := s.now().UTC()
@@ -260,7 +266,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 
 	created, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
-		AlertSource: alertSource, DedupKey: indexKey, Shadow: shadow,
+		AlertSource: alertSource, DedupKey: indexKey, Shadow: shadow, Origin: origin,
 	})
 	if err != nil {
 		s.discardNewRoomLocked(ctx, roomID, st)
@@ -279,6 +285,12 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	if indexKey != "" {
 		s.setAlertKey(roomID, st, indexKey, true)
+	}
+	if origin != "" {
+		// The trend summary is the room's first message: it is all a quiet
+		// room shows until someone asks the agent.
+		_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: forecastNote(raw)})
+		s.afterAppend(roomID, "forecast note", err, "pipeline", pipelineID)
 	}
 	// A missing/unknown pipeline opens with a system message so the room shows
 	// why no fix is proposed. events.go has no dedicated system-message type,
@@ -300,7 +312,12 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	snap := st.snap.Clone()
 	st.firstLook = true
-	s.startAgentLocked(roomID, title, pipelineID, raw, st)
+	// A forecast room opens quietly: its agent (and first look) starts on
+	// the first steer or @agent comment, or on escalation (forecast.go). A
+	// shadow pipeline's run is silent already and keeps its start here.
+	if origin == "" || shadow {
+		s.startAgentLocked(roomID, title, pipelineID, raw, st)
+	}
 	s.notifyRoomOpenedLocked(roomID)
 	s.unlockRoom(st)
 	return snap, true, nil

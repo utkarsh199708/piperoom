@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -383,7 +384,18 @@ func (w *Writer) DropReplicationSlot(ctx context.Context, slot string) error {
 type snapshotSignal struct {
 	DataCollections []string `json:"data-collections"`
 	Type            string   `json:"type"`
+	// AdditionalConditions is set by InsertSnapshotSignalWhere only (X2).
+	AdditionalConditions []additionalCondition `json:"additional-conditions,omitempty"`
 }
+
+// additionalCondition is one entry of Debezium's additional-conditions: the
+// snapshot of DataCollection reads only the rows matching Filter.
+type additionalCondition struct {
+	DataCollection string `json:"data-collection"`
+	Filter         string `json:"filter"`
+}
+
+var _ clients.SnapshotConditionWriter = (*Writer)(nil)
 
 // InsertSnapshotSignal inserts one Debezium execute-snapshot row into
 // signalTable ("schema.table", the connector's signal.data.collection) asking
@@ -399,6 +411,28 @@ type snapshotSignal struct {
 // schema separator of a name that has the same length, so each entry
 // matches its own table and no other.
 func (w *Writer) InsertSnapshotSignal(ctx context.Context, signalTable, connectorID string, tables []string) (string, error) {
+	return w.insertSignal(ctx, signalTable, connectorID, tables, "")
+}
+
+// InsertSnapshotSignalWhere implements clients.SnapshotConditionWriter (X2):
+// InsertSnapshotSignal whose data also carries Debezium's
+// additional-conditions, one {"data-collection", "filter"} entry per table,
+// so the connector re-reads only the matching rows. The condition is checked
+// with clients.ValidateSnapshotCondition before anything else (an empty one
+// included: an unconditional snapshot is InsertSnapshotSignal) and is never
+// logged or echoed: the provenance receipt shows a placeholder for the data
+// value, and a server error is reported by SQLSTATE only, since its detail
+// can quote the row.
+func (w *Writer) InsertSnapshotSignalWhere(ctx context.Context, signalTable, connectorID string, tables []string, additionalCondition string) (string, error) {
+	if err := clients.ValidateSnapshotCondition(additionalCondition); err != nil {
+		return "", fmt.Errorf("postgres: snapshot signal: %w", err)
+	}
+	return w.insertSignal(ctx, signalTable, connectorID, tables, additionalCondition)
+}
+
+// insertSignal is InsertSnapshotSignal with an optional row condition (cond
+// "" = none).
+func (w *Writer) insertSignal(ctx context.Context, signalTable, connectorID string, tables []string, cond string) (string, error) {
 	if w == nil || w.db == nil {
 		return "", ErrNoWriter
 	}
@@ -420,7 +454,7 @@ func (w *Writer) InsertSnapshotSignal(ctx context.Context, signalTable, connecto
 	for i, t := range list {
 		collections[i] = t.String()
 	}
-	data, err := signalData(collections)
+	data, err := signalData(collections, cond)
 	if err != nil {
 		return "", err
 	}
@@ -432,14 +466,25 @@ func (w *Writer) InsertSnapshotSignal(ctx context.Context, signalTable, connecto
 	defer cancel()
 
 	insert := "INSERT INTO " + pgx.Identifier{sigSchema, sigTable}.Sanitize() + " (id, type, data) VALUES ($1, 'execute-snapshot', $2)"
+	// A conditional signal's data holds the condition: its receipt shows a
+	// placeholder, and a server error only its SQLSTATE.
+	receipt := []any{id, string(data)}
+	if cond != "" {
+		receipt[1] = "<signal data with a row condition>"
+	}
 	err = w.inTx(ctx, func(tx writeTx) error {
-		if err := w.exec(ctx, tx, insert, id, string(data)); err != nil {
-			if pgCode(err) == "42P01" { // undefined_table
-				return fmt.Errorf("insert: signal table does not exist: %w: %w", clients.ErrNotFound, err)
-			}
-			return fmt.Errorf("insert: %w", err)
+		err := w.execReceipt(ctx, tx, insert, receipt, id, string(data))
+		if err == nil {
+			return nil
 		}
-		return nil
+		code := pgCode(err)
+		if cond != "" && code != "" {
+			err = fmt.Errorf("server error SQLSTATE %s", code)
+		}
+		if code == "42P01" { // undefined_table
+			return fmt.Errorf("insert: signal table does not exist: %w: %w", clients.ErrNotFound, err)
+		}
+		return fmt.Errorf("insert: %w", err)
 	})
 	if err != nil {
 		return "", fmt.Errorf("postgres: snapshot signal for connector %q into %s: %w", cutParam(connectorID), signalTable, err)
@@ -470,9 +515,15 @@ func (w *Writer) inTx(ctx context.Context, fn func(tx writeTx) error) error {
 
 // exec runs one statement in tx and records it as a provenance call.
 func (w *Writer) exec(ctx context.Context, tx writeTx, sql string, args ...any) error {
+	return w.execReceipt(ctx, tx, sql, args, args...)
+}
+
+// execReceipt is exec recording receipt in place of args, so a value that
+// must not be logged (a snapshot condition) is never in the record.
+func (w *Writer) execReceipt(ctx context.Context, tx writeTx, sql string, receipt []any, args ...any) error {
 	start := time.Now()
 	_, err := tx.Exec(ctx, sql, args...)
-	recordSQL(ctx, w.target, start, sql, args)
+	recordSQL(ctx, w.target, start, sql, receipt)
 	return err
 }
 
@@ -547,18 +598,29 @@ func checkWriteScope(ctx context.Context, connector string, tables []sourceTable
 	return nil
 }
 
-// signalData encodes the execute-snapshot data and refuses a value longer
-// than the signal table's data column, naming how many of the tables fit.
-func signalData(collections []string) ([]byte, error) {
+// signalData encodes the execute-snapshot data, with cond as every table's
+// additional condition when it is not "", and refuses a value longer than
+// the signal table's data column, naming how many of the tables fit.
+func signalData(collections []string, cond string) ([]byte, error) {
 	encode := func(c []string) ([]byte, error) {
 		// Upper case as in Debezium's documented examples and the Kafka
 		// signal of connect_snapshot_table (#620 ruling): one format for both
 		// channels.
-		b, err := json.Marshal(snapshotSignal{DataCollections: c, Type: "INCREMENTAL"})
-		if err != nil {
+		sig := snapshotSignal{DataCollections: c, Type: "INCREMENTAL"}
+		if cond != "" {
+			for _, t := range c {
+				sig.AdditionalConditions = append(sig.AdditionalConditions, additionalCondition{DataCollection: t, Filter: cond})
+			}
+		}
+		// No HTML escaping: a condition's >= stays as written (Debezium
+		// would decode > too, but it costs bytes of the 2 KiB column).
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(sig); err != nil {
 			return nil, fmt.Errorf("postgres: snapshot signal: encode data: %w", err)
 		}
-		return b, nil
+		return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 	}
 	data, err := encode(collections)
 	if err != nil || len(data) <= maxSignalDataBytes {

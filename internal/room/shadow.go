@@ -113,13 +113,14 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 	st.agentRun++
 	run := st.agentRun
 	st.shadowActive = true
+	openedAt := st.snap.OpenedAt
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	go func() {
 		defer s.wg.Done()
 		defer cancel()
 		defer gate.release()
 		var tokens atomic.Int64
-		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens, run)
+		status := s.superviseShadow(ctx, roomID, title, pipelineID, openedAt, raw, st, gate, &tokens, run)
 		gate.release()
 		s.finishShadow(roomID, st, status, tokens.Load())
 	}()
@@ -129,7 +130,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 // "" when the run row could not be created (then nothing ran and nothing is
 // written). A nil return maps to ShadowHypothesised here; finishShadow lowers
 // it to no_hypothesis when the run emitted none.
-func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64, run uint64) string {
+func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, openedAt time.Time, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64, run uint64) string {
 	// Second try (the first was at open): no row means nothing could store
 	// the run's output, so no tokens are spent on it.
 	cctx, ccancel := context.WithTimeout(ctx, shadowWriteTimeout)
@@ -138,7 +139,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	if err != nil {
 		return ""
 	}
-	alert := s.newAlert(roomID, title, pipelineID, raw)
+	alert := s.newAlert(roomID, title, pipelineID, openedAt, raw)
 	// Actions and Proposals stay nil: propose_fix lists "(none)" and refuses,
 	// so a shadow run can never reach a write (design section 4).
 	deps := agent.Deps{

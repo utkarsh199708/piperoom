@@ -3,6 +3,7 @@ package room
 import (
 	"encoding/json"
 	"slices"
+	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/alertin"
@@ -27,12 +28,30 @@ func (s *Service) pipelineKind(pipelineID string) string {
 
 // newAlert builds the agent.Alert of a room's run: the main run, the triage
 // pass and the shadow run all come through here, so none of them forgets the
-// pipeline kind (P4b filters the room's tools by it).
-func (s *Service) newAlert(roomID, title, pipelineID string, raw json.RawMessage) agent.Alert {
+// pipeline kind (P4b filters the room's tools by it), the teams or the
+// alert's time (X4). openedAt is the room's snapshot OpenedAt, read by the
+// caller under the room's lock (the run's goroutine must not read st.snap).
+func (s *Service) newAlert(roomID, title, pipelineID string, openedAt time.Time, raw json.RawMessage) agent.Alert {
 	return agent.Alert{
 		RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw,
 		PipelineKind: s.pipelineKind(pipelineID),
+		Teams:        s.alertTeams(pipelineID),
+		At:           openedAt,
 	}
+}
+
+// alertTeams is agent.Alert.Teams (X4): the owners.yaml teams of the
+// pipeline's tenant, ids and owned services only; the Slack channel stays
+// with the room service (page-team). nil without owners or teams.
+func (s *Service) alertTeams(pipelineID string) []agent.Team {
+	if s.owners == nil {
+		return nil
+	}
+	var out []agent.Team
+	for _, t := range s.owners.TeamsFor(pipelineID) {
+		out = append(out, agent.Team{ID: t.ID, Owns: t.Owns})
+	}
+	return out
 }
 
 // knownLayers returns the layers of the pipeline kinds owners.yaml uses
