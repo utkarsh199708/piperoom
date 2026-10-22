@@ -103,9 +103,13 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
     only to public addresses: a feed host, or a redirect target, that resolves to a loopback, private, link-local or
     cloud-metadata address is refused; redirects stay on `https` (at most 5); 10 s per fetch, body at most 4 MB.
   - **Paging a team** (`POST /api/rooms/{id}/page-team`, X4d, a driver's click, never automatic) posts one
-    message to the team's own `slack_channel` from `owners.yaml` `teams:`: the hypothesis text, the cited
-    change's title and URL, the cited step numbers and the room link. That channel is outside the room's
-    Slack thread (see Slack, below); nothing is read back from it.
+    message to the team's own `slack_channel` from `owners.yaml` `teams:`: the driver's display name, the room
+    and pipeline ids, the hypothesis's scope (fixed words), confidence and text (up to 1500 bytes), the cited
+    change's kind, service, time, summary (up to 600 bytes) and URL (linked only when it is a plain absolute
+    http(s) URL), the cited step numbers and the room link (`internal/slackbridge/teampage.go`). Untrusted text is
+    escaped (no mentions, no links). No tool result, row or config value. That channel is outside the room's
+    Slack thread (see Slack, below); nothing is read back from it. The room stores only `room.team_paged`
+    (team, hypothesis seq, change id), never the text.
 - **Lineage, PII tags and retention (X7; contract X7-0, design `docs/design/lineage.md`).** The pipeline map gains
   column lineage on its edges and `pii`/`retention` tags on its nodes: column **names**, their PII class (from names
   and types, never values), and declared retention durations. Stored nowhere new: the map is built on request, like
