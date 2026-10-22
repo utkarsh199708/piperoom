@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronsLeftRight, ChevronsRightLeft, Route } from 'lucide-react'
-import type { Topology, TopologyNode } from '../api/types'
+import type { ForecastSummary, Topology, TopologyNode } from '../api/types'
 import { updatedAgoLabel } from '../lib/time'
 import { factLabel, factPhrase, factValue } from '../lib/facts'
 import { driftLabel, driftPhrase, placeDrift, windowClock } from '../lib/drift'
@@ -14,6 +14,10 @@ import { useLaneOverflow } from '../hooks/useLaneOverflow'
 import { hasEmptyDlq, laneStorageKey, visibleNodes, worstNode } from '../lib/lane'
 import { StatusDot } from './room/StatusDot'
 import type { DotTone } from './room/StatusDot'
+import { EtaBadge, Sparkline } from './room/TrendChart'
+import { laneTrends, sparklineLabel } from '../lib/trends'
+import type { NodeTrend } from '../lib/trends'
+import type { TrendSeries } from '../hooks/useTrends'
 
 const KIND_LABEL: Record<TopologyNode['kind'], string> = {
   source_table: 'Source',
@@ -165,11 +169,17 @@ function Node({
   onSelect,
   healed = false,
   drift,
+  trend,
+  now = 0,
 }: {
   /** The node just went from fail/warn to ok: it flashes once. */
   healed?: boolean
   /** X1: the watcher's drift facts placed on this node (lib/drift placeDrift). */
   drift?: DriftFact[]
+  /** X3: the watcher metric this node carries (sparkline) and its forecast (ETA badge), if any. */
+  trend?: NodeTrend
+  /** The lane's clock, for the ETA badge. */
+  now?: number
   node: TopologyNode
   compact: boolean
   worst: boolean
@@ -183,6 +193,8 @@ function Node({
   const runState = runKey !== undefined && node.facts?.[runKey] !== undefined ? facts[0] : undefined
   // The hover names the owner and, where the compact strip has no room for them, the facts.
   const tip = [`owner: ${node.owner}`, ...facts.map(([k, v]) => factPhrase(k, v)), ...(drift ? driftTip(drift) : [])].join('\n')
+  const spark = trend && trend.points.length > 0 ? trend : undefined
+  const badge = trend?.forecast ? <EtaBadge forecast={trend.forecast} now={now} /> : null
   const shared = cn(
     'rounded-lg border bg-card text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
     // Status is never a card border, except a failed node.
@@ -218,14 +230,24 @@ function Node({
           <SkippedNote count={skipped} />
           {drift && drift.length > 0 && <DriftInline facts={drift} />}
           <span className="sr-only">, {node.layer},</span>
+          {badge}
           <StatusDot tone={health.tone} className="ml-auto" />
           <span className={cn('whitespace-nowrap', node.health === 'fail' ? 'text-destructive-fg' : 'text-muted-foreground')}>
             {health.word}
           </span>
         </span>
-        <span className="min-w-0 truncate font-mono text-sm font-medium" title={node.name}>
-          {node.name}
-        </span>
+        {spark ? (
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="min-w-0 truncate font-mono text-sm font-medium" title={node.name}>
+              {node.name}
+            </span>
+            <Sparkline points={spark.points} label={sparklineLabel(spark.metric, spark.points)} width={48} height={14} className="ml-auto" />
+          </span>
+        ) : (
+          <span className="min-w-0 truncate font-mono text-sm font-medium" title={node.name}>
+            {node.name}
+          </span>
+        )}
       </button>
     )
   }
@@ -251,6 +273,12 @@ function Node({
         {node.name}
       </div>
       {drift && drift.length > 0 && <DriftLines facts={drift} />}
+      {(spark || badge) && (
+        <div data-trend="" className="flex min-w-0 items-center gap-2">
+          {spark && <Sparkline points={spark.points} label={sparklineLabel(spark.metric, spark.points)} width={96} height={20} />}
+          {badge}
+        </div>
+      )}
       <div className="mt-auto flex flex-col gap-1">
       <div
         className={cn(
@@ -328,10 +356,16 @@ export function PipelineMap({
   notFound = false,
   onRetry,
   drift,
+  trends,
+  forecast,
 }: {
   topology: Topology | null
   /** X1: the drift facts of a watcher-opened room; each is drawn on the node it names (lib/drift placeDrift). */
   drift?: DriftFact[]
+  /** X3: the last 24 h per watcher metric (useTrends); a node of the metric's kind draws it as a sparkline. */
+  trends?: TrendSeries
+  /** X3: the room's newest forecast; its node shows the ETA badge. */
+  forecast?: ForecastSummary | null
   /** The server answered 404 for this pipeline: it is not in owners.yaml. */
   notFound?: boolean
   onRetry?: () => void
@@ -377,6 +411,7 @@ export function PipelineMap({
   const worst = worstNode(nodes)
   const worstId = worst && worst.health !== 'ok' ? worst.id : null
   const driftByNode = topology && drift && drift.length > 0 ? placeDrift(topology, drift) : null
+  const nodeTrends = trends || forecast ? laneTrends(nodes, trends ?? {}, forecast) : null
 
   // Nodes that went from fail/warn to ok since the last render flash once (animate-heal, 600 ms). The ref is
   // read while rendering and written after it, so a re-render for another reason does not replay the flash
@@ -501,6 +536,8 @@ export function PipelineMap({
                     worst={n.id === worstId}
                     healed={healedIds.has(n.id)}
                     drift={driftByNode?.get(n.id)}
+                    trend={nodeTrends?.get(n.id)}
+                    now={now}
                     selected={selectedLayer === n.layer}
                     onSelect={onSelectLayer ? () => onSelectLayer(selectedLayer === n.layer ? null : n.layer) : undefined}
                   />
