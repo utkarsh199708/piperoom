@@ -187,7 +187,8 @@ const (
 
 // signalIDs lists the signals in a fixed order, so titles and logs are stable.
 // New signals go at the end so existing titles keep their order; the
-// forecasts (one id per metric, forecast.go) come last.
+// forecasts (one id per metric, forecast.go) come last. config_drift has one
+// id per connector (config_drift.go), after these (pipeSignalIDs).
 var signalIDs = append([]string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
 	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}, forecastIDs()...)
@@ -244,6 +245,8 @@ type pipeState struct {
 	// fcClosed is, per forecast metric, when a room carrying its forecast
 	// closed: the per-metric cooldown the watcher saw itself.
 	fcClosed map[string]time.Time
+	// drift is each connector's approved config (config_drift.go).
+	drift map[string]*driftBase
 	// warned* keep "skipped" lines to one per episode.
 	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }

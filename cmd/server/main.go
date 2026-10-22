@@ -541,6 +541,7 @@ func runWith(d startDeps) error {
 		Limits:            limits,
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,
+		OnActionExecuted:  closedHook.onActionExecuted,
 		OnRoomDeleted:     deletedHook.onDeleted,
 	}, authSettings, usage)
 
@@ -614,6 +615,10 @@ func runWith(d startDeps) error {
 			PipelineDailyCostUSD: spend.cost.PipelineDailyCostUSD,
 		})}
 	httpOpts = append(httpOpts, httpapi.WithChangesWebhook(changeWebhook(cfg, own, st, log)))
+	if watchCfg.Mode != config.WatchOff {
+		// config_drift accept-config (X3b): the current term's watcher.
+		httpOpts = append(httpOpts, httpapi.WithConfigAccept(closedHook))
+	}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
 	}

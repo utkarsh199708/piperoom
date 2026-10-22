@@ -77,6 +77,7 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 		}
 		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
 		w.evaluateLag(now, t, ps, obs, fired)
+		w.evaluateConfigDrift(now, t, ps, obs, fired)
 		w.logStill(now, t, ps)
 	}
 	return fired
@@ -174,7 +175,7 @@ func (w *Watcher) logStill(now time.Time, t target, ps *pipeState) {
 	if now.Sub(ps.lastStill) < stillFiringEvery {
 		return
 	}
-	for _, id := range signalIDs {
+	for _, id := range pipeSignalIDs(ps) {
 		ss := ps.sigs[id]
 		if ss == nil || ss.phase == phaseOK {
 			continue

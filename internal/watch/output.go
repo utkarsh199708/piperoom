@@ -70,6 +70,9 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 	if forecastMetric(id) != "" {
 		return forecastSignal
 	}
+	if configDriftConnector(id) != "" {
+		return configDriftSignal
+	}
 	switch id {
 	case owners.SignalConnectorDown:
 		return cfg.ConnectorDown
@@ -95,7 +98,7 @@ func (w *Watcher) viewOf(t target, ps *pipeState) view {
 		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, sev: "sev9", risks: ps.risks,
 		roomKey: ps.roomKey}
 	v.leaderGone = ps.follower && ps.roomID != "" && !w.roomLedLocked(ps.roomID)
-	for _, id := range signalIDs {
+	for _, id := range pipeSignalIDs(ps) {
 		ss := ps.sigs[id]
 		sc := signalCfg(t.cfg, id)
 		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom {
@@ -138,7 +141,7 @@ func (w *Watcher) roomLedLocked(roomID string) bool {
 // ackSev moves to the new severity at the next close, so each level re-opens at
 // most once. Caller holds w.mu.
 func (w *Watcher) reviveWorse(id string, ps *pipeState, t target) {
-	for _, sid := range signalIDs {
+	for _, sid := range pipeSignalIDs(ps) {
 		sc := signalCfg(t.cfg, sid)
 		ss := ps.sigs[sid]
 		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom || ss.phase != phaseAcked {
@@ -642,7 +645,14 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 func compose(pipelineID string, now time.Time, v view, reason string, affected []string) (string, json.RawMessage) {
 	var frags []string
 	var sigs []map[string]any
-	for _, id := range signalIDs {
+	// viewOf lists config_drift ids (one per connector) after signalIDs.
+	ids := signalIDs[:len(signalIDs):len(signalIDs)]
+	for _, s := range v.active {
+		if configDriftConnector(s.id) != "" {
+			ids = append(ids, s.id)
+		}
+	}
+	for _, id := range ids {
 		for _, s := range v.active {
 			if s.id != id {
 				continue
