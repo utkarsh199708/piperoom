@@ -116,7 +116,8 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
   before. Shown to anyone who can see the pipeline and to the agent in `pipeline_map`.
   - **OpenLineage export (X7b, optional, off unless `OPENLINEAGE_URL` is set).** An **outbound** HTTP(S) POST from
     the server to the lineage server you name (Marquez, DataHub), part of your egress review (section 5): at most one
-    event per pipeline per 15 minutes and one per executed fix step. It sends dataset names (database, schema,
+    event per pipeline per 15 minutes and one per executed fix step, sent by the elected leader replica only, through a
+    dialer that refuses link-local and cloud-metadata addresses, with no proxy and no redirect. It sends dataset names (database, schema,
     table, topic; host and port of your Postgres, Kafka and warehouse, never user or password), column names and
     their lineage, PII classes per column name, declared retention, layer owners' user ids, action names and
     proposal ids. Never a row or record value, a config value, node health, room content or an action's output.
