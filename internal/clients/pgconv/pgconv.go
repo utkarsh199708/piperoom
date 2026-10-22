@@ -1,7 +1,8 @@
 // Package pgconv shares helpers used by the Postgres-backed clients (postgres
 // and warehouse): converting pgx-decoded values into JSON-friendly values,
 // rendering numerics without float rounding, applying a per-call deadline, the
-// read-only pool wrapper, and scrubbing a DSN out of start-up errors.
+// read-only pool wrapper, scrubbing a DSN out of start-up errors, and the
+// clients.Reconciler both clients share (reconcile.go).
 package pgconv
 
 import (
