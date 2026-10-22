@@ -436,6 +436,59 @@ const SecretKeyChanged = "<secret key changed>"
 // few dozen keys, so more than this means the config was replaced. (X3)
 const MaxChangedKeys = 50
 
+// ---- X7: retention evidence in config_risk (watcher X7d) ----
+//
+// Retention findings are entries of the existing config_risk signal's
+// "risks" list (internal/watch), next to the connector risks
+// ({connector, code, sev, text, table?}); they are not a new signal. Each
+// compares a pipeline topic's (or, when a clients.TableRetentionReader
+// answers, a sink table's) configured retention with its owners.yaml
+// declared_retention, in both directions: keeping data shorter than declared
+// loses it, keeping it longer than declared breaks the retention promise.
+// A topic with no declaration is never judged; an unreadable topic config
+// (no DescribeConfigs ACL) gives one INFO log and no finding.
+
+// Retention risk codes (RetentionRisk.Code).
+const (
+	// RiskRetentionShorter: the configured retention is shorter than
+	// declared ("pg.public.orders retains 1d; declared 7d").
+	RiskRetentionShorter = "retention_shorter_than_declared"
+	// RiskRetentionLonger: the configured retention is longer than declared,
+	// infinite (retention.ms=-1) included.
+	RiskRetentionLonger = "retention_longer_than_declared"
+	// RiskCompactCDCTopic: a CDC topic of the pipeline has cleanup.policy
+	// compact without delete, so delete events are compacted away after
+	// delete.retention.ms and a re-read cannot replay them.
+	RiskCompactCDCTopic = "compact_cdc_topic"
+)
+
+// RetentionRiskSeverity is the severity of every retention finding: it fires
+// config_risk (it is listed in /api/fleet signals_firing and logged) but opens
+// no room on its own, whatever config_risk's action; when another signal of
+// the pipeline opens or joins a room, the finding rides along in the
+// evidence.
+const RetentionRiskSeverity = "sev4"
+
+// RetentionRisk is one retention entry of config_risk's "risks" list (X7d).
+// Configured and Declared are topology.FormatRetention text ("1d", "36h",
+// "infinite"); Configured is "" for RiskCompactCDCTopic. Text is a fixed
+// sentence per code with names and these durations filled in, at most 200
+// bytes, rendered as text. Names, durations and the policy word only: never
+// a record, a row or any other config value.
+type RetentionRisk struct {
+	Code       string `json:"code"`            // RiskRetentionShorter, RiskRetentionLonger or RiskCompactCDCTopic
+	Sev        string `json:"sev"`             // RetentionRiskSeverity; "sev" like the connector risks
+	Topic      string `json:"topic,omitempty"` // the pipeline topic judged
+	Table      string `json:"table,omitempty"` // or the sink table ("schema.table")
+	Configured string `json:"configured,omitempty"`
+	Declared   string `json:"declared,omitempty"`
+	// RetentionBytes is the topic's retention.bytes when set (> 0): a size
+	// cap can cut retention short of retention.ms, so the finding names it.
+	RetentionBytes int64  `json:"retention_bytes,omitempty"`
+	CleanupPolicy  string `json:"cleanup_policy,omitempty"` // the topic's cleanup.policy word(s)
+	Text           string `json:"text"`
+}
+
 // RoomClosedPayload ends a room. A room closed by the open-room limit
 // (PIPEROOM_MAX_OPEN_DAYS) is closed by the system actor with the resolution
 // "retention: open longer than N days".

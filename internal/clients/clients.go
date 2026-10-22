@@ -440,6 +440,33 @@ type ClusterReader interface {
 	ClusterHealth(ctx context.Context, topics ...string) (ClusterHealth, error)
 }
 
+// ---- X7: topic retention settings (optional on a KafkaAdmin) ----
+
+// TopicConfig is one topic's key configuration and shape. Values are the raw,
+// effective Kafka strings (a broker default counts when the topic has no
+// override); "-1" means unlimited where the config allows it. Only these keys
+// are ever read, so no other topic config value can leak. (Moved from
+// internal/clients/kafka, which keeps it as an alias, by X7-0.)
+type TopicConfig struct {
+	Topic             string `json:"topic"`
+	Partitions        int    `json:"partitions"`
+	ReplicationFactor int    `json:"replication_factor"`
+	RetentionMS       string `json:"retention_ms"`
+	RetentionBytes    string `json:"retention_bytes"`
+	CleanupPolicy     string `json:"cleanup_policy"` // "delete", "compact" or "compact,delete"
+	MinInsyncReplicas string `json:"min_insync_replicas"`
+}
+
+// TopicConfigReader reads one topic's TopicConfig (optional on a KafkaAdmin,
+// asserted at use time; the kafka client implements it over DescribeConfigs
+// and ListTopics). Needs DescribeConfigs on the topic: without that ACL the
+// call fails, and a caller such as the watcher's retention check (X7d) logs
+// once and judges nothing. An unknown topic wraps ErrNotFound. The caller
+// scopes topic to its pipeline before the call; deadline 10 s.
+type TopicConfigReader interface {
+	DescribeTopicConfigs(ctx context.Context, topic string) (TopicConfig, error)
+}
+
 // PartitionRate is records written to one partition in a window.
 type PartitionRate struct {
 	Topic         string `json:"topic"`
@@ -753,6 +780,76 @@ type MinuteCount struct {
 // (optional on a SourceDB and a Warehouse). Counts only, never values.
 type CountReader interface {
 	CountByBucket(ctx context.Context, table, tsColumn string, since, until time.Time, width time.Duration) ([]MinuteCount, error)
+}
+
+// ---- X7: table catalog and declared retention (optional) ----
+//
+// Asserted at use time like CountReader, never embedded in SourceDB or
+// Warehouse, so no existing client or fake has to grow. ColumnReader feeds
+// column lineage (X7a: source and sink columns of topology.Edge.Columns) and
+// the PII classifier (X7c: names and types only, topology.TagPII);
+// TableRetentionReader lets the watcher compare a sink table's retention
+// with owners.yaml declared_retention (X7d). A client that cannot answer
+// returns ErrNotSupported and the caller leaves that part out. Both read the
+// catalog only: never a row, a value, a default expression or a comment.
+
+// Caps and deadline of every ColumnReader and TableRetentionReader.
+const (
+	// MaxTableColumns caps Columns: Postgres allows 1600 columns per table;
+	// the rest of a wider table is cut, not refused.
+	MaxTableColumns = 1600
+	// CatalogTimeout is the per-call deadline an implementation sets when ctx
+	// has none (or a later one).
+	CatalogTimeout = 10 * time.Second
+)
+
+// ColumnInfo is one column of a table as the catalog describes it.
+type ColumnInfo struct {
+	Name string `json:"name"`
+	// Type is the catalog's type name as the database spells it, e.g.
+	// "text", "timestamp with time zone", "character varying" (Postgres
+	// information_schema.columns.data_type) or "VARCHAR" (Snowflake). The PII
+	// classifier uses it only to rule columns out (a boolean phone_verified
+	// is not a phone number).
+	Type     string `json:"type"`
+	Position int    `json:"position"` // 1-based ordinal position
+	Nullable bool   `json:"nullable"`
+}
+
+// ColumnReader reads the columns of one table from the database catalog
+// (information_schema.columns or pg_attribute on Postgres; the warehouse's
+// INFORMATION_SCHEMA elsewhere), in ordinal order, at most MaxTableColumns.
+// Rules, as for Reconciler: table is "schema.table" with each part matching
+// ^[a-zA-Z_][a-zA-Z0-9_]*$ (else tools.ErrBadInput before any I/O); scope
+// fails closed on the pipeline in ctx (tools.WithPipeline): table must be
+// one of its source_tables (source) or sink_tables (sink), else
+// tools.ErrOutOfScope (tools.ErrNoScope with no pipeline) before any I/O; an
+// unknown table wraps ErrNotFound; deadline CatalogTimeout (10 s). It runs
+// no query on the table itself.
+type ColumnReader interface {
+	Columns(ctx context.Context, table string) ([]ColumnInfo, error)
+}
+
+// TableRetention is how long a warehouse keeps a table's rows, as the
+// warehouse configures it: BigQuery table or partition expiration,
+// ClickHouse TTL, a Snowflake or Databricks retention property. Set says
+// whether any is configured; Infinite is "configured to keep forever".
+// Source names the setting read (e.g. "partition_expiration_days"), a fixed
+// word, never a value or an expression.
+type TableRetention struct {
+	Table    string        `json:"table"`
+	Set      bool          `json:"set"`
+	Infinite bool          `json:"infinite,omitempty"`
+	After    time.Duration `json:"after_ns,omitempty"` // rows older than this are removed; 0 when !Set or Infinite
+	Source   string        `json:"source,omitempty"`
+}
+
+// TableRetentionReader reads a sink table's configured retention (optional
+// on a Warehouse). Same identifier, scope (sink_tables), deadline and
+// catalog-only rules as ColumnReader. No warehouse client implements it in
+// X7-0; until one does, X7d compares topics only.
+type TableRetentionReader interface {
+	TableRetention(ctx context.Context, table string) (TableRetention, error)
 }
 
 // ---- X1: silent corruption, source vs sink reconcile (optional) ----
