@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -94,9 +93,8 @@ func (s *Server) handleAdminTest(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID string `json:"id"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxAdminTestBody)
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		s.writeErr(w, validation("invalid JSON body"))
+	if err := decodeBodyLimit(w, r, &body, maxAdminTestBody); err != nil {
+		s.writeErr(w, err)
 		return
 	}
 	if strings.TrimSpace(body.ID) == "" {

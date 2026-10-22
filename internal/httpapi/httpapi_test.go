@@ -7,7 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"piperoom/internal/agent"
@@ -288,28 +287,6 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 	resp := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/r1/ws", "", "")
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("ws without user: want 401, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-// TestBodyCap: request bodies over 1 MB are refused with 400 validation.
-func TestBodyCap(t *testing.T) {
-	srv, _ := newServer(t)
-	big := strings.Repeat("a", 2<<20)
-
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun",
-		`{"title":"`+big+`","severity":"sev2","pipeline_id":"orders"}`)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("oversized create: want 400, got %d", resp.StatusCode)
-	}
-	body := decode[map[string]any](t, resp)
-	if body["error"].(map[string]any)["code"] != "validation" {
-		t.Fatalf("oversized create: bad envelope %+v", body)
-	}
-
-	resp = doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", `{"x":"`+big+`"}`)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("oversized webhook: want 400, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

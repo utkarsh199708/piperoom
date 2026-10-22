@@ -82,6 +82,21 @@ describe('DecisionBar', () => {
     expect(window.sessionStorage.getItem('piperoom.dismissed.p1')).toBe('1')
   })
 
+  it('a rejection names the layer that stopped it and the layers it cancelled (KAN-393)', () => {
+    const rejected = prop({
+      status: 'rejected',
+      approvals: { 'schema-registry': 'pending', 'kafka-connect': 'rejected' },
+      decisions: { 'kafka-connect': { outcome: 'rejected', reason: 'no', by: { kind: 'human', id: 'k', name: 'Kabir' }, params_hash: 'h' } },
+    })
+    show(room(rejected))
+    const bar = screen.getByRole('region', { name: 'Decision' })
+    // One rejection rejects the whole proposal: the bar must not leave the other layer looking pending.
+    expect(bar).toHaveTextContent(/Rejected by/)
+    expect(bar).toHaveTextContent(/\(kafka-connect\); schema-registry cancelled/)
+    expect(bar).not.toHaveTextContent(/Waiting for|Proposal rejected/)
+    expect(screen.queryByRole('button', { name: /Nudge/ })).not.toBeInTheDocument()
+  })
+
   it('done ok shows for 3 s after the fix ran, then goes', () => {
     vi.useFakeTimers()
     const approved = prop({ status: 'approved', approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' } })
