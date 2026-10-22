@@ -480,3 +480,58 @@ jobs:
         run: npm run build
       - name: Unit tests
         run: npx vitest run
+
+  # X-QA2-ci (KAN-146): the Playwright smoke (web/e2e, KAN-168) in a real
+  # browser against the real Go server in --demo mode. playwright.config.ts
+  # starts that server itself (`go run ../cmd/server --demo`, in-memory store,
+  # scripted agent: no Docker, no API key) and `npm run e2e` builds the UI
+  # first, so this job needs Go, Node and a browser only.
+  web-e2e:
+    name: Web e2e (--demo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install dependencies (all install scripts disabled, except esbuild's)
+        # Same allowlist as the web job above; see README.md "Web tooling".
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/esbuild/install.js
+      - name: Install the Playwright browser (chromium, with its system libraries)
+        # Playwright's own installer, not an npm lifecycle script, so it is
+        # unaffected by --ignore-scripts above.
+        run: npx playwright install --with-deps chromium
+      - name: npm run e2e (server started by playwright.config.ts with --demo)
+        # The config's reporter is `list` only; add the HTML report here so a
+        # failure leaves something to open. The config is the web agent's.
+        run: npm run e2e -- --reporter=list,html
+      - name: Upload the Playwright report and traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report
+            web/test-results
+          if-no-files-found: ignore
+          retention-days: 7
