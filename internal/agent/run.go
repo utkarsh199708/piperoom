@@ -896,7 +896,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	r.steps.addWithInput(stepID, u.name, string(cleaned), summary, false)
 	return toolResult{
 		toolUseID: u.id,
-		content:   r.wrapReadToolOutput(u.name, stepID, summary),
+		content:   r.readToolContent(u.name, stepID, summary, res.Data),
 		isError:   false,
 	}
 }

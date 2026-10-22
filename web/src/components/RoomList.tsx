@@ -301,7 +301,7 @@ export function RoomList() {
                       aria-label={`Clear pipeline filter ${pipeline}`}
                       onClick={() => setPipeline(null)}
                     >
-                      <X className="!size-3" aria-hidden="true" />
+                      <X className="size-3!" aria-hidden="true" />
                       Clear
                     </Button>
                   )}
@@ -471,7 +471,7 @@ function PipelineFilter({
           ) : (
             'Pipeline'
           )}
-          <ChevronDown className="!size-3" aria-hidden="true" />
+          <ChevronDown className="size-3!" aria-hidden="true" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[10rem]">
@@ -641,7 +641,7 @@ function RoomRow({
       </td>
       <td className={TD}>
         <Badge variant={severityVariant(room.severity)} className="uppercase">
-          {room.severity}
+          {room.severity || 'unknown'}
         </Badge>
       </td>
       <td className={cn(TD, 'max-md:hidden')}>

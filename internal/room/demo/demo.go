@@ -7,6 +7,9 @@
 // analytics.orders): an amount int → numeric(12,2) change registers an
 // incompatible Avro schema and kills the Debezium task; the agent diagnoses it
 // and proposes schema_set_compatibility + connect_restart_task.
+//
+// Controls (controls.go) adds the --demo presenter controls: skip to the next
+// step, pause and resume the steps, and reset the fake clients and the story.
 package demo
 
 import (
@@ -61,50 +64,84 @@ type step struct {
 	input, data              any
 }
 
+// story is the scripted story with the clock pinned at the zero time. A run
+// replays storySteps built from the room's own clock, so the recorded change
+// times track when the room opened; the ids, titles, tools and order here
+// never change. The controls and their tests use it for step ids and count.
+var story = storySteps(time.Time{}, "")
+
 // Run is a scripted fake agent.Run. It replays the schema-change story with
-// realistic delays, then waits for steers and approval results.
+// realistic delays, then waits for steers and approval results. It has no
+// presenter controls; the --demo server runs Controls.Run instead.
 func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options) error {
 	return runStory(ctx, alert, deps, opts, time.Now(), stepDelay)
 }
 
-// runStory is Run with the story clock and the pause between scripted events
-// injected, so tests can pin the recorded change times and skip the demo's
-// delays; both stay parameters so the package keeps no mutable state.
+// runStory is Run with the story clock and the step delay injected, so tests
+// can pin the recorded change times and skip the demo's delays.
 func runStory(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options, now time.Time, delay time.Duration) error {
+	return runControlled(ctx, newRunState(), nil, alert, deps, now, delay)
+}
+
+// runControlled replays the story until the room closes. A reset request
+// restarts it from step 1, after the fake clients go back to their starting
+// state.
+func runControlled(ctx context.Context, rc *runState, fakes *Fakes, alert agent.Alert, deps agent.Deps, now time.Time, delay time.Duration) error {
+	if delay <= 0 {
+		delay = stepDelay
+	}
 	emit := func(typ events.Type, payload any) error {
 		return deps.Sink.Emit(ctx, typ, payload)
 	}
-	pause := func() bool {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-time.After(delay):
-			return true
+	steps := storySteps(now, alert.PipelineID)
+	watcher := &inboxWatcher{in: deps.Inbox}
+	for {
+		res, err := playStory(ctx, rc, steps, deps, watcher, emit, delay)
+		if err != nil {
+			return err
+		}
+		switch res {
+		case waitDone:
+			return nil
+		case waitReset:
+			rc.takeReset()
+			if fakes != nil {
+				fakes.Reset(rc.roomID)
+			}
+			rc.restartStory()
 		}
 	}
+}
 
+// playStory replays the steps, the hypothesis and the fix proposal, then waits
+// for human input. It returns waitReset when a presenter asked to replay.
+func playStory(ctx context.Context, rc *runState, steps []step, deps agent.Deps, watcher *inboxWatcher, emit func(events.Type, any) error, delay time.Duration) (runWait, error) {
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "working", Detail: "investigating"})
 
-	for _, st := range storySteps(now, alert.PipelineID) {
-		if !pause() {
-			return nil
+	for i, st := range steps {
+		if res, _ := rc.boundary(ctx); res != waitReady {
+			return res, nil
 		}
+		rc.beginStep(i + 1)
 		_ = emit(events.AgentStepStart, events.AgentStepStartPayload{StepID: st.id, Title: st.title})
-		if !pause() {
-			return nil
+		if res := rc.hold(ctx, delay); res != waitReady {
+			return res, nil
 		}
 		input := st.input
 		if input == nil {
 			input = map[string]any{"probe": true}
 		}
 		_ = emit(events.AgentToolCall, events.AgentToolCallPayload{StepID: st.id, ToolUseID: "tu_" + st.id, Tool: st.tool, Input: mustJSON(input)})
-		if !pause() {
-			return nil
+		if res := rc.hold(ctx, delay); res != waitReady {
+			return res, nil
 		}
 		_ = emit(events.AgentToolResult, events.AgentToolResultPayload{
 			StepID: st.id, ToolUseID: "tu_" + st.id, Tool: st.tool,
 			Summary: st.summary, Data: mustJSON(st.data), IsError: false, TookMS: 120,
 		})
+		if res := rc.hold(ctx, delay); res != waitReady {
+			return res, nil
+		}
 	}
 
 	_ = emit(events.AgentHypothesis, events.AgentHypothesisPayload{
@@ -116,9 +153,10 @@ func runStory(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agen
 	// A shadow room has no proposal creator (docs/design/shadow.md 3.7): the
 	// run stops at the hypothesis and ends on the closed inbox.
 	if deps.Proposals == nil {
+		rc.markIdle()
 		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value."})
 		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "no proposals in this room"})
-		return waitForInput(ctx, deps, emit, nil)
+		return waitForInput(ctx, rc, watcher, deps, emit, nil)
 	}
 
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal."})
@@ -149,17 +187,28 @@ func runStory(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agen
 		// not a failure to retry (a retry would replay the whole story).
 		var re *room.Error
 		if errors.As(err, &re) && re.Code == "validation" {
+			rc.markIdle()
 			_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "I cannot propose a fix in this room: " + re.Msg})
 			_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "proposals disabled"})
-			return waitForInput(ctx, deps, emit, nil)
+			return waitForInput(ctx, rc, watcher, deps, emit, nil)
 		}
-		return err
+		return waitDone, err
 	}
+	rc.markIdle()
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "The fix proposal is waiting for the schema-registry and kafka-connect owners."})
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "1 proposal open"})
 	// The real agent verifies after the last step ran; the scripted one must
-	// do the same or the room waits for a verdict forever (KAN-389).
-	return waitForInput(ctx, deps, emit, newFixVerifier(proposalID, len(fixSteps), pause, emit))
+	// do the same or the room waits for a verdict forever (KAN-389). The
+	// verifier's re-check pause is the same ctx-aware step delay.
+	pause := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(delay):
+			return true
+		}
+	}
+	return waitForInput(ctx, rc, watcher, deps, emit, newFixVerifier(proposalID, len(fixSteps), pause, emit))
 }
 
 // recoveredMessage is the room's form of the verdict: it keeps the
@@ -271,22 +320,67 @@ func changeFingerprint(parts ...string) string {
 
 // waitForInput answers steers, comments, forwarded suggestions and approval
 // results until the room closes. An inbox that is closed (a shadow room) ends
-// it at once with nil. fix may be nil (no proposal in this room).
-func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, any) error, fix *fixVerifier) error {
+// it at once with nil. The wait rides on the run's single inbox watcher, so a
+// reset (which returns waitReset) never leaves a second Wait racing for the
+// same input. fix may be nil (no proposal in this room).
+func waitForInput(ctx context.Context, rc *runState, watcher *inboxWatcher, deps agent.Deps, emit func(events.Type, any) error, fix *fixVerifier) (runWait, error) {
+	in := deps.Inbox
+	if in == nil {
+		return waitDone, nil
+	}
+	rc.markIdle()
 	for ctx.Err() == nil {
-		if err := deps.Inbox.Wait(ctx); err != nil {
-			return nil // room closed or ctx cancelled
+		switch watcher.wait(ctx, rc) {
+		case waitDone:
+			return waitDone, nil
+		case waitReset:
+			return waitReset, nil
 		}
-		inputs, err := deps.Inbox.Drain(ctx)
+		inputs, err := in.Drain(ctx)
 		if err != nil {
-			return nil
+			return waitDone, nil
 		}
 		for _, in := range inputs {
 			handleInput(ctx, deps, in, emit)
 			fix.observe(in)
 		}
 	}
-	return nil
+	return waitDone, nil
+}
+
+// inboxWatcher keeps one Inbox.Wait call in flight across the whole run. The
+// demo's idle loop selects on it together with the presenter controls, so a
+// reset can be noticed without abandoning a waiter that would race the next
+// one for an input.
+type inboxWatcher struct {
+	in   agent.Inbox
+	done chan error // nil while no Wait is in flight
+}
+
+// wait blocks until an input is pending (waitReady: the caller drains), the
+// room closes (waitDone) or a presenter asks to replay (waitReset).
+func (w *inboxWatcher) wait(ctx context.Context, rc *runState) runWait {
+	for {
+		if rc.resetPending() {
+			return waitReset
+		}
+		if w.done == nil {
+			w.done = make(chan error, 1)
+			go func(ch chan error) { ch <- w.in.Wait(ctx) }(w.done)
+		}
+		select {
+		case <-ctx.Done():
+			return waitDone
+		case <-rc.wake:
+			// A pause, skip or reset signal: re-check the state.
+		case err := <-w.done:
+			w.done = nil
+			if err != nil {
+				return waitDone // room closed or ctx cancelled
+			}
+			return waitReady
+		}
+	}
 }
 
 // fixVerifier is the scripted verify-after-fix pass. It mirrors the real

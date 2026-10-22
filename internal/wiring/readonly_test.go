@@ -92,6 +92,12 @@ func (s *writeSpy) Register(context.Context, string, string) (int, error) {
 	s.writes = append(s.writes, "Register")
 	return 1, nil
 }
+func (s *writeSpy) SubjectsIncludingDeleted(context.Context) ([]string, error) {
+	return []string{"s", "gone"}, nil
+}
+func (s *writeSpy) VersionsIncludingDeleted(context.Context, string) ([]int, error) {
+	return []int{1, 2}, nil
+}
 
 func TestReadOnlyClients(t *testing.T) {
 	ctx := context.Background()
@@ -128,6 +134,30 @@ func TestReadOnlyClients(t *testing.T) {
 	}
 	if lvl, _, err := r.Compatibility(ctx, "s"); err != nil || lvl != "BACKWARD" {
 		t.Fatalf("Compatibility = %v, %v", lvl, err)
+	}
+
+	// The deleted-state reads pass through too: kafkatools' registry tools
+	// find them by a type assertion on their client (KAN-407), so the
+	// wrapper must keep them when the client has them, or the deleted-state
+	// path is unreachable in production.
+	dr, ok := r.(deletedSubjectLister)
+	if !ok {
+		t.Fatalf("readRegistry(%T) = %T, which hides the deleted-state reads", sp, r)
+	}
+	if got, err := dr.SubjectsIncludingDeleted(ctx); err != nil || len(got) != 2 {
+		t.Fatalf("SubjectsIncludingDeleted = %v, %v", got, err)
+	}
+	if got, err := dr.VersionsIncludingDeleted(ctx, "s"); err != nil || len(got) != 2 {
+		t.Fatalf("VersionsIncludingDeleted = %v, %v", got, err)
+	}
+
+	// A registry without the deleted-state reads must not grow them through
+	// the wrapper: the tools' assertion must fail exactly when it would fail
+	// on the client itself.
+	if plain := readRegistry(&Wired{Registry: noRegistry{}}); plain != nil {
+		if _, ok := plain.(deletedSubjectLister); ok {
+			t.Fatalf("readRegistry(noRegistry) = %T, which fakes the deleted-state reads", plain)
+		}
 	}
 
 	// Writes refuse and never reach the client.
@@ -183,8 +213,9 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 	regW := reflect.TypeOf((*clients.SchemaRegistryWriter)(nil)).Elem()
 	fixW := reflect.TypeOf((*clients.ConnectFixWriter)(nil)).Elem()
 	allowed := map[reflect.Type]bool{
-		reflect.TypeOf(readOnlyConnect{}):  true,
-		reflect.TypeOf(readOnlyRegistry{}): true,
+		reflect.TypeOf(readOnlyConnect{}):         true,
+		reflect.TypeOf(readOnlyRegistry{}):        true,
+		reflect.TypeOf(readOnlyRegistryDeleted{}): true,
 	}
 	canWrite := func(ty reflect.Type) bool {
 		if allowed[ty] {

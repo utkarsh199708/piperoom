@@ -147,7 +147,7 @@ export function RoomHeader({
           {state.title}
         </h1>
         <Badge variant={state.severity} className="uppercase">
-          {state.severity}
+          {state.severity || 'unknown'}
         </Badge>
         {state.alert && (
           <span className="inline-flex items-center gap-1">

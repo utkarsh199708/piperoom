@@ -128,7 +128,12 @@ func TestForwardedSuggestionIsAcknowledgedAndAgentStaysResponsive(t *testing.T) 
 	sink := newFeedSink()
 	inbox := newFeedInbox()
 	done := make(chan error, 1)
-	go func() { done <- waitForInput(ctx, agent.Deps{Sink: sink, Inbox: inbox}, sink.emitFn(ctx), nil) }()
+	go func() {
+		done <- func() error {
+			_, err := waitForInput(ctx, newRunState(), &inboxWatcher{in: inbox}, agent.Deps{Sink: sink, Inbox: inbox}, sink.emitFn(ctx), nil)
+			return err
+		}()
+	}()
 
 	// A non-driver's steer forwarded by the driver reaches the inbox as a
 	// "suggestion" under the watcher's name (internal/room/service.go inputFor).

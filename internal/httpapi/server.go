@@ -67,6 +67,10 @@ type Server struct {
 	// Model spend routes (WithSpend): usage.go.
 	spend Spend
 
+	// Scripted demo presenter controls (WithDemoControls, --demo only):
+	// demo.go. Nil outside --demo, and then the routes are not mounted.
+	demo DemoControls
+
 	// GET /metrics: metrics.go.
 	metrics *metrics
 
@@ -257,6 +261,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
+				// The scripted demo's presenter controls; no-op outside --demo.
+				s.mountDemo(short)
 			})
 		})
 
