@@ -486,6 +486,15 @@ func clipName(s string) string { return clipTo(s, maxLoggedNameBytes) }
 
 func clipTo(s string, max int) string {
 	s = strings.ToValidUTF8(s, "?")
+	// A clipped string can come from a hostile endpoint (a certificate CN, a
+	// Content-Type); a control character in it could inject terminal escapes
+	// or forged log lines into a summary an operator reads.
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
 	if len(s) <= max {
 		return s
 	}

@@ -64,6 +64,9 @@ func newGuardedHTTPClient(d *net.Dialer) *http.Client {
 		ResponseHeaderTimeout: 10 * time.Second,
 		IdleConnTimeout:       30 * time.Second,
 		DisableKeepAlives:     true,
+		// A hostile endpoint must not make the runner buffer the default
+		// 10 MiB of response headers; the body is capped far lower too.
+		MaxResponseHeaderBytes: 64 << 10,
 	}
 	return &http.Client{
 		Transport: tr,

@@ -79,33 +79,47 @@ var (
 	teredo         = netip.MustParsePrefix("2001::/32")
 )
 
-// embeddedV4 returns the IPv4 address an IPv6 transition-mechanism address
-// carries, if any. On a network that routes these, the packet reaches that
-// IPv4 host, so the guard judges the embedded address too.
-func embeddedV4(a netip.Addr) (netip.Addr, bool) {
+// v4Compatible is the deprecated IPv4-compatible IPv6 form ::a.b.c.d. Only ::
+// and ::1 inside it are ordinary addresses; anything else embeds an IPv4
+// address a legacy translator may deliver to.
+var v4Compatible = netip.MustParsePrefix("::/96")
+
+// embeddedV4s returns the IPv4 addresses an IPv6 transition-mechanism address
+// carries, if any. On a network that routes these, the packet reaches those
+// IPv4 hosts, so the guard judges the embedded addresses too.
+func embeddedV4s(a netip.Addr) []netip.Addr {
 	if !a.Is6() || a.Is4In6() {
-		return netip.Addr{}, false
+		return nil
 	}
 	b := a.As16()
+	last4 := netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]})
 	switch {
 	case nat64WellKnown.Contains(a) || nat64LocalUse.Contains(a):
-		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
+		return []netip.Addr{last4}
 	case sixToFour.Contains(a):
-		return netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]}), true
+		return []netip.Addr{netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]})}
 	case teredo.Contains(a):
-		// Teredo stores the client IPv4 inverted in the last four bytes.
-		return netip.AddrFrom4([4]byte{^b[12], ^b[13], ^b[14], ^b[15]}), true
+		// Teredo embeds the server IPv4 in bytes 4..7 and the client IPv4,
+		// inverted, in the last four bytes.
+		return []netip.Addr{
+			netip.AddrFrom4([4]byte{b[4], b[5], b[6], b[7]}),
+			netip.AddrFrom4([4]byte{^b[12], ^b[13], ^b[14], ^b[15]}),
+		}
+	case v4Compatible.Contains(a) && !a.IsUnspecified() && !a.IsLoopback():
+		return []netip.Addr{last4}
 	}
-	return netip.Addr{}, false
+	return nil
 }
 
-// CheckAddr reports whether the guard allows a. IPv4-mapped IPv6 addresses
-// are checked as IPv4, so ::ffff:169.254.169.254 is refused like the plain
-// one, and an address that embeds an IPv4 address (NAT64, 6to4, Teredo) is
-// refused whenever the embedded address would be.
+// CheckAddr reports whether the guard allows a. The IPv6 zone, which no
+// prefix comparison sees, is stripped first, so fe80::1%eth0 is refused like
+// fe80::1. IPv4-mapped IPv6 addresses are checked as IPv4, so
+// ::ffff:169.254.169.254 is refused like the plain one, and an address that
+// embeds an IPv4 address (NAT64, 6to4, Teredo, IPv4-compatible) is refused
+// whenever any embedded address would be.
 func (g *Guard) CheckAddr(a netip.Addr) error {
-	a = a.Unmap()
-	if v4, ok := embeddedV4(a); ok {
+	a = a.WithZone("").Unmap()
+	for _, v4 := range embeddedV4s(a) {
 		if err := g.CheckAddr(v4); err != nil {
 			return fmt.Errorf("%w (embedded in %s)", err, a)
 		}

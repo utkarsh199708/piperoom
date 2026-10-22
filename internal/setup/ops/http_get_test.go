@@ -226,3 +226,15 @@ func TestHTTPGetUsesTargetHostSpelling(t *testing.T) {
 		t.Fatalf("rebuilt = %q", rebuilt.String())
 	}
 }
+
+// A URL-form target without an explicit port pins its scheme's own port: an
+// https target does not also offer port 80.
+func TestHTTPGetURLTargetPinsSchemePort(t *testing.T) {
+	env := Env{Targets: []events.SetupTarget{{Kind: "connect", Address: "https://connect.example"}}}
+	if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"http://connect.example/"}`), env); !errors.Is(err, ErrTarget) {
+		t.Errorf("http on an https target = %v, want ErrTarget", err)
+	}
+	if _, _, err := decodeHTTPGet(json.RawMessage(`{"url":"https://connect.example/subjects"}`), env); err != nil {
+		t.Errorf("https on an https target = %v, want nil", err)
+	}
+}

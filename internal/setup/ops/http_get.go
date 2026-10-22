@@ -248,7 +248,19 @@ func splitTargetAddress(addr string) (host, port string) {
 	}
 	if strings.Contains(addr, "://") {
 		if u, err := url.Parse(addr); err == nil && u.Hostname() != "" {
-			return strings.ToLower(u.Hostname()), u.Port()
+			port := u.Port()
+			if port == "" {
+				// A URL-form target without an explicit port pins the
+				// scheme's own port: https://connect.internal was not a bare
+				// host, and must not also offer port 80.
+				switch u.Scheme {
+				case "https":
+					port = "443"
+				case "http":
+					port = "80"
+				}
+			}
+			return strings.ToLower(u.Hostname()), port
 		}
 		return "", ""
 	}
