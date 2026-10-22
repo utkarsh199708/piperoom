@@ -360,6 +360,11 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		if err := s.checkParamsHash(ctx, &p, paramsHash, false); err != nil {
 			return err
 		}
+		// X8: a require_staging: step needs a healthy stage of the
+		// current params first; nothing is recorded otherwise.
+		if err := s.stagingGateLocked(st, proposalID); err != nil {
+			return err
+		}
 		if grant == "solo" {
 			if err := checkSoloConfirm(st.snap.PipelineID, layer, confirm); err != nil {
 				return err

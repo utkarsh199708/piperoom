@@ -37,6 +37,7 @@ func (s *Service) newAlert(roomID, title, pipelineID string, openedAt time.Time,
 		PipelineKind: s.pipelineKind(pipelineID),
 		Teams:        s.alertTeams(pipelineID),
 		At:           openedAt,
+		Staging:      s.stagingOn(pipelineID),
 	}
 }
 
