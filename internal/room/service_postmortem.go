@@ -97,7 +97,9 @@ func (s *Service) choosePostmortem(ctx context.Context, roomID string, evs []eve
 	if handoffID != "" && handoffSeq > lastWork {
 		return events.PostmortemDrafted, events.PostmortemDraftedPayload{Source: "handoff", SummaryRef: handoffID}
 	}
-	if s.writePostmortem == nil || !allowModel {
+	// A forecast room closed before anyone asked its agent has nothing for a
+	// model to summarise, and must spend nothing (X3c).
+	if s.writePostmortem == nil || !allowModel || quietLog(evs) {
 		return events.PostmortemDrafted, events.PostmortemDraftedPayload{Source: "events"}
 	}
 	wctx, cancel := context.WithTimeout(ctx, postmortemTimeout)

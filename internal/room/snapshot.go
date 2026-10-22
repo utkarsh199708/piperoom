@@ -202,7 +202,12 @@ type RoomSnapshot struct {
 	// Shadow is room.created.shadow: the room's pipeline had shadow mode on at
 	// open, so the agent ran silently and proposes nothing
 	// (docs/design/shadow.md).
-	Shadow             bool         `json:"shadow"`
+	Shadow bool `json:"shadow"`
+	// Origin is room.created.origin: "forecast" for a room a forecast signal
+	// opened (X3), omitted otherwise. Forecast is the newest forecast signal
+	// of the room's watcher evidence (forecast.go), omitted when none.
+	Origin             string       `json:"origin,omitempty"`
+	Forecast           *Forecast    `json:"forecast,omitempty"`
 	LastSeq            int64        `json:"last_seq"`
 	Driver             *Driver      `json:"driver"`
 	AgentStatus        AgentStatus  `json:"agent_status"`
@@ -281,6 +286,10 @@ type RoomSnapshot struct {
 	// service_solemember.go). Unexported: not part of the snapshot JSON.
 	alertRoom        bool
 	controlRequested bool
+
+	// agentRan is true once the log holds an event of the agent actor. A
+	// forecast room without one is quiet (quietRoom): nothing has run in it.
+	agentRan bool
 }
 
 // PostmortemState mirrors the snapshot's postmortem member (docs/api.md).
@@ -348,6 +357,10 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		}
 		h.Verdicts = append([]Verdict{}, s.Hypothesis.Verdicts...)
 		c.Hypothesis = &h
+	}
+	if s.Forecast != nil {
+		f := *s.Forecast
+		c.Forecast = &f
 	}
 	if s.Triage != nil {
 		t := *s.Triage
@@ -461,6 +474,10 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	if e.Actor.Kind == events.ActorHuman {
 		snap.Members = upsertMember(snap.Members, e.Actor, "watching")
 	}
+	if e.Actor.Kind == events.ActorAgent {
+		snap.agentRan = true
+	}
+	applyForecastEvidence(&snap, e)
 	switch e.Type {
 	case events.RoomCreated:
 		p, ok := decode[events.RoomCreatedPayload](e)
@@ -472,6 +489,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Severity = p.Severity
 		snap.PipelineID = p.PipelineID
 		snap.Shadow = p.Shadow
+		snap.Origin = p.Origin
 		snap.alertRoom = p.AlertSource != "" || len(p.Alert) > 0
 		snap.Status = "open"
 		snap.OpenedAt = e.At
@@ -484,6 +502,12 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			}
 			m[nudgeKey(p.ProposalID, p.Layer)] = e.At
 			snap.nudges = m
+		}
+
+	case events.RoomEscalated:
+		// The service writes only a raise; the fold takes the event as is.
+		if p, ok := decode[events.RoomEscalatedPayload](e); ok && severities[p.Severity] {
+			snap.Severity = p.Severity
 		}
 
 	case events.RoomLabelled:
