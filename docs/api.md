@@ -389,6 +389,53 @@ Additive like the F wave. Implemented by A4 (agent, X4c), A5 and C12 (page, X4d)
   `POST /api/rooms/{id}/page-team`). Ids only: the Slack text is rendered when sent and not stored. Never written by
   the agent (its Sink refuses the type) and never automatic.
 
+### X6 performance actions (X6-0; payloads in `internal/events/events.go`, rules in `internal/actions/action.go`)
+
+A **performance** action tunes throughput (`connect_tune_throughput`, X6c by A2): it changes only allow-listed
+connector keys and is verified by throughput before and after. It goes through the same proposal, approval and
+executor path as a fix. Every field below is additive and omitted for other classes, so fix and recovery
+proposals, previews and verifications marshal as before.
+
+- **Allow-list** (`actions.TunableKeys`, owned by the leads; adding a key is a contract change). Integer values only,
+  within the static bounds; `actions.CheckTunable` refuses any other key, a `LooksSecret` key and a key of the other
+  connector type (`ErrNotTunable`), and a value outside the bounds (`ErrTuningBounds`, the message names them). The
+  action checks target bounds on top (`tasks.max` ≤ the topic's partitions for a sink; `max.queue.size` >
+  `max.batch.size`).
+
+  | Key | Connector | Bounds |
+  |---|---|---|
+  | `tasks.max` | source, sink | 1–128 |
+  | `max.batch.size` | source | 1–20 480 |
+  | `max.queue.size` | source | 2–163 840 |
+  | `poll.interval.ms` | source | 10–60 000 |
+  | `snapshot.fetch.size` | source | 1–100 000 |
+  | `snapshot.max.threads` | source | 1–16 |
+  | `consumer.override.max.poll.records` (the consumer's `max.poll.records`, per sink connector) | sink | 1–10 000 |
+- **Class.** `proposal.created.class: "performance"` (`events.ActionClassPerformance`) when any step's action is a
+  performance action, set by the room service from the registry like `recovery`; a proposal that mixes recovery and
+  performance steps is refused (`400 validation`: one verdict per proposal). The registry refuses a performance
+  action without `actions.Verifier` or `actions.Preview`. The snapshot's `open_proposals[].class` copies it.
+- **Preview.** `proposal.previewed.steps[].preview` gains `tuning?: [{key, current, proposed}]`: every key the step
+  changes, its value now (`""` when unset, shown as "unset") and the value it sets, read from the connector's config
+  by `Preview` (10 s, read-only), plus Connect's `validate` in `dry_run`. `current` is the rollback the card offers.
+- **Verdict (agent actor).** One `agent.verification` per performance proposal with `outcome` ∈ `improved |
+  no_change | worse | unverifiable`, `before`/`after` (the connector's throughput, `unit: "records_per_min"`) and
+  `lag_slope_before?`/`lag_slope_after?` (the sink's consumer lag change, records per minute, positive = growing;
+  absent for a source connector or without lag history). `events.PerformanceOutcomeFor` is the one rule: `improved`
+  at +10 % throughput or a growing lag's slope down 10 %; else `worse` at −10 % throughput or a lag that starts or
+  grows 10 % faster; else `no_change`. Windows (`actions.PerformanceVerify*`): before = the 15 min up to the step's
+  `action.executed`, after = the 15 min from 2 min after it; the agent calls `Verify` once the after window closed,
+  retries a failed call every 60 s, and reports `unverifiable` (no counts) when a window cannot be measured or 30 min
+  after the step. On `worse` the card offers the preview's `current` values as a rollback proposal; nothing is
+  rolled back automatically. `recovered` keeps its F4 meaning (every layer check passed after the restart).
+- **Data.** Throughput, lag and config key names and integers only; no record, row value or other config value.
+  `Verify` reads only (`RateReader`, the pipeline's `group_lag` watch samples), with the room's pipeline scope in ctx
+  and a 10 s deadline per call. Every member and viewer of the room reads these events like any other agent event.
+- **Worker tasks** (`clients.WorkerTaskReader`, optional on a `ConnectReader`; `connect_task_balance` X6b): worker id →
+  `[{connector, type, task, state}]` for the whole Connect cluster, one `GET /connectors?expand=status`, 4 MB and
+  10 s caps. Cluster metadata, so the tool names only the room pipeline's connectors and shows every other connector
+  as a task count per worker, never its name, type or state.
+
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
 ```json
@@ -558,6 +605,27 @@ has the value; `cost_available` is false when every room is unpriced; `enough_da
 counts, never a rate, below it). A graded room needs a human grade of the hypothesis: `room.labelled` (F8)
 carries no grade, so a labelled live room counts in `labelled` only, and `graded`, `layer_correct`, `root_cause`
 and `by_confidence` come from shadow rooms until a grade for live rooms is added by a later contract change.
+
+#### X6 `infra` (X6-0; server X6d by A5, web X6d by A6)
+Additive: `infra` is absent until X6d lands. Infrastructure cost hints from the pipeline's watch samples
+(`clients.SampleReader`, X3a), in units only, never a currency (prices are the customer's):
+```json
+  "infra": { "from": "…", "to": "…", "samples": 672,
+             "wal_retained_gb_days": 30.0,      // null when no slot_wal_bytes sample
+             "dlq_records": 1200,               // newest dlq_records sample; null when none
+             "oldest_unread_age_s": 5400 }      // newest topic_oldest_unread_age sample; null when none
+```
+- **Window.** The samples since `to − 7 d` (`config.WatchSampleRetention`), whatever `days` is: the samples are kept
+  7 days. `from`/`to` are the first and newest sample used; `samples` counts the samples of all three metrics used.
+- **GB-days.** Each `slot_wal_bytes` sample holds until the next sample, at most one hour (a gap in sampling counts
+  nothing), the newest sample counts nothing; the sum of bytes × days, over 10⁹ (GB, not GiB). 10 GB for 24 h then
+  20 GB for 24 h is `30.0`.
+- **DLQ.** In records, not bytes: the watcher samples `dlq_records` (X3a) and no DLQ byte size. A byte size needs a new
+  watch metric (a later contract change).
+- **No history.** `infra: null` (not zeros) when the pipeline has no sample of any of the three metrics in the window;
+  clients show "not enough history". The existing fields do not change.
+- **Access.** As the route: visibility first (`404 not_found` outside the caller's tenants), then any logged-in user.
+  Numbers only: no slot, topic or table name, no record.
 
 ### Topology (pipeline map)
 ```json

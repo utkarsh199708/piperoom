@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -141,7 +142,8 @@ const (
 	RecoveryVerifyTimeout   = 10 * time.Minute
 )
 
-// Verifier is implemented by every recovery action: it measures, without
+// Verifier is implemented by every recovery action (and every performance
+// action, with the X6 measure below): it measures, without
 // writing, how much of the gap the action set out to repair is still open.
 // The agent (X2c) calls it after the step's action.executed with ok: true,
 // once per poll of the schedule above, with the step's params and the time
@@ -172,12 +174,137 @@ type Verifier interface {
 // every call. After is the part of Before not yet found at the target, 0 <=
 // After <= Before. Unit is events.RecoveryUnitRows or RecoveryUnitRecords.
 // Detail is one optional line of counts and names (table, topic, window), at
-// most 200 bytes, never values. (X2)
+// most 200 bytes, never values. (X2) A performance action fills it with
+// throughput instead (X6 block below): there After may exceed Before.
 type VerifyResult struct {
 	Before int64  `json:"before"`
 	After  int64  `json:"after"`
 	Unit   string `json:"unit"`
 	Detail string `json:"detail,omitempty"`
+	// X6: set by a performance action only (omitted otherwise, so a recovery
+	// result marshals as before); see the X6 block below.
+	LagSlopeBefore *int64 `json:"lag_slope_before,omitempty"`
+	LagSlopeAfter  *int64 `json:"lag_slope_after,omitempty"`
+}
+
+// ---- X6: the performance action class ----
+
+// ClassPerformance is the class of an action that tunes throughput
+// (connect_tune_throughput, X6c). Registry.Register refuses one that does
+// not implement Verifier (throughput before and after) and Preview (the
+// TuningChange list whose Current values are the rollback the card offers).
+// It changes only keys of TunableKeys, checked with CheckTunable in Validate
+// and again in Execute. (X6)
+const ClassPerformance = events.ActionClassPerformance
+
+// Verify schedule of a performance action. Verify derives both windows from
+// executedAt, never from the clock: Before is the throughput over
+// [executedAt-PerformanceVerifyWindow, executedAt), After over
+// [executedAt+PerformanceVerifySettle, executedAt+PerformanceVerifySettle+
+// PerformanceVerifyWindow) (the settle time skips the task restart and
+// rebalance a config change causes). The agent makes its first call once
+// the After window has closed, retries a failed call every
+// RecoveryVerifyMaxPoll, and stops at PerformanceVerifyTimeout after the
+// step ran (then the outcome is events.PerformanceUnverifiable). (X6)
+const (
+	PerformanceVerifyWindow  = 15 * time.Minute
+	PerformanceVerifySettle  = 2 * time.Minute
+	PerformanceVerifyTimeout = 30 * time.Minute
+)
+
+// A performance action's Verify follows the Verifier rules above (read
+// methods only, 10 s per call, the room's pipeline scope in ctx, counts
+// only) with this VerifyResult:
+//   - Before and After are the throughput of the step's connector, in
+//     events.PerformanceUnitRecordsPerMinute (Unit): for a source connector
+//     the records it wrote to its topics, for a sink connector the records
+//     its consumer group consumed, the same measure the kafka_throughput
+//     tool (X6a) reports. Both are >= 0.
+//   - LagSlopeBefore and LagSlopeAfter are the change of the sink's
+//     consumer lag over each window in records per minute (positive: lag
+//     grows), nil for a source connector or when not measured.
+//   - Detail names the connector and topic and the two windows, never a
+//     value.
+//
+// Verify keeps no state between calls: it reads only history the call can
+// reach at that moment (record counts by offset timestamp,
+// clients.RateReader; the pipeline's group_lag watch samples,
+// clients.SampleReader). When a window cannot be measured from it, the error
+// wraps clients.ErrNotSupported and the outcome is unverifiable. The agent
+// applies events.PerformanceOutcomeFor to the result. (X6)
+
+// TunableKey is one connector config key a performance action may change,
+// with the static bounds of its value: a base-10 integer v, Min <= v <= Max.
+// Connector is the connector type the key applies to ("source", "sink"), or
+// "" for both. Bounds that depend on the target (tasks.max at most the
+// topic's partitions for a sink, max.queue.size above max.batch.size) are
+// the action's to check on top. (X6)
+type TunableKey struct {
+	Key       string `json:"key"`
+	Connector string `json:"connector,omitempty"`
+	Min       int64  `json:"min"`
+	Max       int64  `json:"max"`
+}
+
+// TunableKeys returns the allow-list of the performance class, in a stable
+// order, as a fresh slice (like clients.ChangeKinds). It is the leads': a
+// key is added only by a contract change (a test pins the list). Any other
+// key, including every LooksSecret key, is out of the class. The consumer's
+// max.poll.records is set per sink connector through Connect's client
+// override, consumer.override.max.poll.records (the worker must allow
+// overrides). (X6)
+func TunableKeys() []TunableKey {
+	return []TunableKey{
+		{Key: "tasks.max", Min: 1, Max: 128},
+		{Key: "max.batch.size", Connector: "source", Min: 1, Max: 20480},
+		{Key: "max.queue.size", Connector: "source", Min: 2, Max: 163840},
+		{Key: "poll.interval.ms", Connector: "source", Min: 10, Max: 60000},
+		{Key: "snapshot.fetch.size", Connector: "source", Min: 1, Max: 100000},
+		{Key: "snapshot.max.threads", Connector: "source", Min: 1, Max: 16},
+		{Key: "consumer.override.max.poll.records", Connector: "sink", Min: 1, Max: 10000},
+	}
+}
+
+// TuningChange is the event type (PreviewResult.Tuning), so one definition
+// serves the action, the room log and the API. (X6)
+type TuningChange = events.TuningChange
+
+// ErrNotTunable: the key is outside TunableKeys, looks secret, or does not
+// apply to the connector's type. (X6)
+var ErrNotTunable = errors.New("actions: key is not tunable")
+
+// ErrTuningBounds: the value is not a base-10 integer or is outside the
+// key's static bounds; the message names the bounds. (X6)
+var ErrTuningBounds = errors.New("actions: tuning value out of bounds")
+
+// CheckTunable checks one change of a performance step against the
+// allow-list: connectorType is the connector's type from
+// clients.ConnectorStatus.Type ("source" or "sink"; anything else is
+// refused), key must be in TunableKeys for that type and value a base-10
+// integer within its bounds. It does no I/O. The error wraps ErrNotTunable
+// or ErrTuningBounds and never echoes a value of a key outside the
+// allow-list. (X6)
+func CheckTunable(connectorType, key, value string) error {
+	if connectorType != "source" && connectorType != "sink" {
+		return fmt.Errorf("%w: connector type %q is not source or sink", ErrNotTunable, connectorType)
+	}
+	if LooksSecret(key) {
+		return fmt.Errorf("%w: %q looks like a credential", ErrNotTunable, key)
+	}
+	for _, k := range TunableKeys() {
+		if k.Key != key {
+			continue
+		}
+		if k.Connector != "" && k.Connector != connectorType {
+			return fmt.Errorf("%w: %s applies to %s connectors only", ErrNotTunable, key, k.Connector)
+		}
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || v < k.Min || v > k.Max {
+			return fmt.Errorf("%w: %s must be an integer from %d to %d", ErrTuningBounds, key, k.Min, k.Max)
+		}
+		return nil
+	}
+	return fmt.Errorf("%w: %q is not in the performance allow-list", ErrNotTunable, key)
 }
 
 // secretKeySubstrings are the fragments that mark a config key as a
@@ -382,7 +509,8 @@ func NewRegistry() *Registry {
 
 // Register adds a. It fails on an empty or duplicate name, an unknown class,
 // and a recovery action that does not implement Verifier (X2): a repair that
-// cannot be counted afterwards is never registered.
+// cannot be counted afterwards is never registered. A performance action
+// needs Verifier and Preview (X6).
 func (r *Registry) Register(a Action) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -395,6 +523,13 @@ func (r *Registry) Register(a Action) error {
 	case ClassRecovery:
 		if _, ok := a.(Verifier); !ok {
 			return fmt.Errorf("actions: recovery action %q does not implement Verifier", name)
+		}
+	case ClassPerformance: // X6: a tuning is measured after it ran and can be rolled back from its preview
+		if _, ok := a.(Verifier); !ok {
+			return fmt.Errorf("actions: performance action %q does not implement Verifier", name)
+		}
+		if _, ok := a.(Preview); !ok {
+			return fmt.Errorf("actions: performance action %q does not implement Preview", name)
 		}
 	default:
 		return fmt.Errorf("actions: action %q has unknown class %q", name, class)

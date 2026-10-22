@@ -865,6 +865,23 @@ type PreviewResult struct {
 	// RecoveryUnitRecords whenever Count is set.
 	Count *int64 `json:"count,omitempty"`
 	Unit  string `json:"unit,omitempty"`
+	// X6: a performance action (connect_tune_throughput) lists every key it
+	// would change, with the value now and the value it sets, read from the
+	// connector's config by Preview; Current is the rollback value the card
+	// offers when the verdict is PerformanceWorse. Nil for every other
+	// action (and omitted, so other previews marshal as before).
+	Tuning []TuningChange `json:"tuning,omitempty"`
+}
+
+// TuningChange is one allow-listed key of a performance step
+// (actions.TunableKeys): the key, its value now and the value the step sets.
+// Values are base-10 integers as Connect stores them, never another key's
+// value; Current is "" when the key is unset (Connect's default applies; the
+// card says "unset"). (X6)
+type TuningChange struct {
+	Key      string `json:"key"`
+	Current  string `json:"current"`
+	Proposed string `json:"proposed"`
 }
 
 // DryRunResult is the target system's own answer to "would this be accepted"
@@ -938,6 +955,18 @@ type AgentVerificationPayload struct {
 	Before  *int64 `json:"before,omitempty"`
 	After   *int64 `json:"after,omitempty"`
 	Unit    string `json:"unit,omitempty"` // RecoveryUnitRows | RecoveryUnitRecords, with Before/After
+	// X6: a proposal of class performance sets Outcome to one of the
+	// Performance* outcomes, Before and After to the step's throughput in
+	// the window before and after it ran, and Unit to
+	// PerformanceUnitRecordsPerMinute (actions.Verifier). LagSlopeBefore and
+	// LagSlopeAfter are the consumer lag's change over the same windows, in
+	// records per minute (positive: lag grows), absent when not measured (a
+	// source connector, no lag history). Recovered keeps its F4 meaning on a
+	// performance proposal (every layer check passed: a tuning restarts
+	// tasks, which can fail them); the throughput verdict is Outcome. Absent
+	// on every other verification, which marshals as before.
+	LagSlopeBefore *int64 `json:"lag_slope_before,omitempty"`
+	LagSlopeAfter  *int64 `json:"lag_slope_after,omitempty"`
 }
 
 // ---- X2: recovery actions (class, outcomes, verify progress) ----
@@ -1002,6 +1031,75 @@ type AgentRecoveryCheckPayload struct {
 	Unit       string `json:"unit"` // RecoveryUnitRows | RecoveryUnitRecords
 }
 
+// ---- X6: performance actions (class, throughput verdict) ----
+
+// ActionClassPerformance is the class of an action that tunes throughput
+// (connect_tune_throughput, X6c): it changes only allow-listed keys
+// (actions.TunableKeys) and, like a recovery, must be verifiable
+// (actions.Verifier, measuring throughput before and after it ran). (X6)
+const ActionClassPerformance = "performance"
+
+// Performance outcomes, AgentVerificationPayload.Outcome of a performance
+// proposal; PerformanceOutcomeFor is the rule. Unverifiable is the recovery
+// value: Verify could not measure a window (the reader answered
+// clients.ErrNotSupported, or no history covers it), and Before/After are
+// then absent. (X6)
+const (
+	PerformanceImproved     = "improved"
+	PerformanceNoChange     = "no_change"
+	PerformanceWorse        = "worse"
+	PerformanceUnverifiable = RecoveryUnverifiable
+)
+
+// PerformanceUnitRecordsPerMinute is the unit of a performance Verify's
+// Before/After and of the lag slopes: records per minute averaged over the
+// window, so a consumer under 1 record/s still compares in whole numbers.
+// Clients may show it per second. (X6)
+const PerformanceUnitRecordsPerMinute = "records_per_min"
+
+// PerformanceChangePercent is the least relative change that counts: a
+// throughput or lag slope that moves less is no_change. (X6)
+const PerformanceChangePercent = 10
+
+// PerformanceOutcomeFor is the verdict on a performance step from its
+// throughput before and after (records per minute, >= 0) and, when both are
+// measured, the lag slopes (records per minute; positive: lag grows). It is
+// the one rule the agent, the post-mortem and the web share; a verification
+// that could not measure reports PerformanceUnverifiable instead of calling
+// it.
+//
+//   - improved: after >= before + 10 % (any after > 0 when before is 0), or
+//     a growing lag (slope before > 0) whose slope fell by at least 10 %
+//     (also when the lag now shrinks);
+//   - else worse: after <= before - 10 %, or a lag that was not growing
+//     (slope before <= 0) now grows, or a growing lag whose slope rose by at
+//     least 10 %;
+//   - else no_change.
+//
+// Improved is checked first: a step that raised the consume rate while the
+// producer sped up even more did what it was for. (X6)
+func PerformanceOutcomeFor(before, after int64, lagSlopeBefore, lagSlopeAfter *int64) string {
+	const p = PerformanceChangePercent
+	lag := lagSlopeBefore != nil && lagSlopeAfter != nil
+	var lb, la int64
+	if lag {
+		lb, la = *lagSlopeBefore, *lagSlopeAfter
+	}
+	switch {
+	case after > before && after*100 >= before*(100+p):
+		return PerformanceImproved
+	case lag && lb > 0 && la*100 <= lb*(100-p):
+		return PerformanceImproved
+	case after < before && after*100 <= before*(100-p):
+		return PerformanceWorse
+	case lag && lb <= 0 && la > 0:
+		return PerformanceWorse
+	case lag && lb > 0 && la*100 >= lb*(100+p):
+		return PerformanceWorse
+	}
+	return PerformanceNoChange
+}
+
 // ProposalCreatedPayload is a fix waiting for approvals.
 type ProposalCreatedPayload struct {
 	ProposalID     string         `json:"proposal_id"`
@@ -1029,6 +1127,10 @@ type ProposalCreatedPayload struct {
 	// registry, never from the proposer's text. Empty reads as
 	// ActionClassFix, so a fix proposal marshals as before. Not part of
 	// params_hash: it follows from the steps' action names, which are. (X2)
+	// X6: ActionClassPerformance when any step's action is a performance
+	// action. A proposal has one verdict, so the room service refuses one
+	// that mixes recovery and performance steps (400 validation); fix steps
+	// may join either.
 	Class string `json:"class,omitempty"`
 }
 
