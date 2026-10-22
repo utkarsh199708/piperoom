@@ -178,6 +178,10 @@ type Deps struct {
 	// config.ParseWatchForecast; a zero Horizon means the default 48 h.
 	Samples  SampleStore
 	Forecast config.WatchForecast
+	// Status, when set, gets one clients.WatchStatus per watched pipeline at
+	// the end of every tick (X5a, status.go): the room store's watch_status,
+	// which the fleet view reads on any replica.
+	Status clients.WatchStatusWriter
 	// Clock defaults to the wall clock.
 	Clock Clock
 	// Log defaults to slog.Default().
@@ -331,6 +335,9 @@ type Watcher struct {
 	// Sample history and forecasts (forecast.go); nil samples = off.
 	samples SampleStore
 	horizon time.Duration
+
+	// status receives the tick's status rows (status.go); nil = off.
+	status clients.WatchStatusWriter
 }
 
 const maxClosedRemembered = 256
@@ -376,7 +383,7 @@ func New(d Deps) (*Watcher, error) {
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 		changes: d.Changes, registry: d.Registry, ddl: d.DDL,
 		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
-		samples: d.Samples, horizon: d.Forecast.Horizon,
+		samples: d.Samples, horizon: d.Forecast.Horizon, status: d.Status,
 	}
 	if w.horizon <= 0 {
 		w.horizon = 48 * time.Hour // config.DefaultWatchForecastHorizon
@@ -487,6 +494,12 @@ func (w *Watcher) tick(ctx context.Context) {
 	}
 	if w.cfg.Mode == config.WatchRooms {
 		w.emit(ctx, now, ts, fired)
+	}
+	if w.status != nil && ctx.Err() == nil {
+		w.mu.Lock()
+		rows := w.buildStatusesLocked(now, ts)
+		w.mu.Unlock()
+		w.writeStatuses(ctx, rows)
 	}
 	w.log.Debug("watch: tick done", "mode", string(w.cfg.Mode), "pipelines", len(ts),
 		"took", w.clock.Now().Sub(now).String())

@@ -247,6 +247,8 @@ var aggregateRoutes = []string{
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
 	"GET /api/pipelines",
+	"GET /api/fleet",         // TestFleetTenancy
+	"GET /api/fleet/changes", // TestFleetTenancy
 	"POST /api/alerts/webhook",
 	"POST /api/alerts/{source}",
 }
