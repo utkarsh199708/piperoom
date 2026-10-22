@@ -73,6 +73,9 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 	if k := driftKind(id); k != "" {
 		return driftSignalCfg(cfg, k)
 	}
+	if configDriftConnector(id) != "" {
+		return configDriftSignal
+	}
 	switch id {
 	case owners.SignalConnectorDown:
 		return cfg.ConnectorDown

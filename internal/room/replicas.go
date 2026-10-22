@@ -1159,6 +1159,8 @@ func (s *Service) catchUpLocked(ctx context.Context, roomID string, st *roomStat
 // room, this replica stops what it runs for the room. Caller holds st's lock.
 func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, e events.Event, remote bool) {
 	wasOpen := s.roomOpen(st)
+	// Before Apply: the step's proposal leaves OpenProposals with its last step.
+	s.actionExecutedLocked(st, e)
 	st.snap = Apply(st.snap, e)
 	// The store counts the same bytes (len of the payload JSON) for the
 	// room's log cap, whichever replica appended the event.

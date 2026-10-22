@@ -77,6 +77,7 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 		}
 		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
 		w.evaluateLag(now, t, ps, obs, fired)
+		w.evaluateConfigDrift(now, t, ps, obs, fired)
 		w.logStill(now, t, ps)
 	}
 	return fired

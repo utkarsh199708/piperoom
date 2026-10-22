@@ -83,6 +83,9 @@ type Server struct {
 	// Watch sample history (WithSamples): trends.go.
 	samples clients.SampleReader
 
+	// config_drift's accept-config (WithConfigAccept): acceptconfig.go.
+	configAccept ConfigAccepter
+
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
 	// runnerCtx is the lifecycle of the runner WebSocket connections: Close
@@ -271,6 +274,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 				short.Get("/pipelines/{pid}/trends", s.handleTrends)
+				short.Post("/pipelines/{pid}/connectors/{name}/accept-config", s.handleAcceptConfig)
 				// The scripted demo's presenter controls; no-op outside --demo.
 				s.mountDemo(short)
 			})
