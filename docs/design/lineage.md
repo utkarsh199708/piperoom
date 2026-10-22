@@ -219,8 +219,12 @@ row or record value, any config value, credentials, the API key.
 ### 6.3 Transport
 
 - `OPENLINEAGE_URL` is the full endpoint the events are POSTed to (`application/json`); the emitter appends no path.
-  Marquez serves `POST /api/v1/lineage`; DataHub's OpenLineage endpoint is `/openapi/openlineage/api/v1/lineage`. X7b
-  confirms both in its notes. Empty URL = off: no goroutine starts and nothing is sent (TC3).
+  Marquez serves `POST /api/v1/lineage`; DataHub's OpenLineage endpoint is `/openapi/openlineage/api/v1/lineage`
+  (X7b checked both on 2026-10-22: Marquez `api/src/main/java/marquez/api/OpenLineageResource.java`, `@Path("/api/v1")`
+  + `@POST @Path("/lineage")`; DataHub `docs/lineage/openlineage.md`, `POST GMS_SERVER_HOST:GMS_PORT/openapi/openlineage/api/v1/lineage`).
+  Empty URL = off: no goroutine starts and nothing is sent (TC3). With several replicas the emitter runs on the elected
+  leader only (`openlineage`), so each build or step is sent once; a pipeline with its own `connections:` block is left
+  out of topology events (its namespaces are not the process-wide ones).
 - `OPENLINEAGE_API_KEY`, when set, is sent as `Authorization: Bearer <key>` and only over https or to a loopback host
   (`config.ParseOpenLineage` refuses the rest at start). It is never logged and never in a body (TC4).
 - One `*http.Client`; each POST has `OpenLineageTimeout` (10 s); a response is read to at most 4 MB and discarded. A

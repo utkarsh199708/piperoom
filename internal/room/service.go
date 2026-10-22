@@ -215,6 +215,11 @@ type Deps struct {
 	// its own goroutine with the service lifetime ctx, never under a room's
 	// lock; it must return promptly. Nil means no-op.
 	OnActionExecuted func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
+	// OnActionResult is OnActionExecuted with the step's result too (ok,
+	// outcome_unknown, proposal and step index), called the same way. The
+	// result's Output is cleared: it is untrusted text. The OpenLineage
+	// emitter (X7b) uses it. Nil means no-op.
+	OnActionResult func(ctx context.Context, pipelineID string, step events.ProposalStep, res events.ActionExecutedPayload)
 
 	// TeamPager posts the driver's page of an application team (X4d,
 	// PageTeam). Nil means the Slack bridge is off: page-team answers 409
@@ -342,6 +347,7 @@ type Service struct {
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	onRoomDeleted   func(roomID string, deleted events.Event)
 	onActionExec    func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
+	onActionResult  func(ctx context.Context, pipelineID string, step events.ProposalStep, res events.ActionExecutedPayload)
 	teamPager       TeamPager            // nil = Slack bridge off (X4d)
 	changes         clients.ChangeReader // nil when the store keeps no change log
 	slots           *agentSlots          // global cap on concurrent agent runs
@@ -508,6 +514,7 @@ func New(d Deps) *Service {
 		onRoomClosed:    d.OnRoomClosed,
 		onRoomDeleted:   d.OnRoomDeleted,
 		onActionExec:    d.OnActionExecuted,
+		onActionResult:  d.OnActionResult,
 		teamPager:       d.TeamPager,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
