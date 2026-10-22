@@ -584,7 +584,21 @@ export function RoomScreen() {
 
       {traceOpen && !viewer && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
       {handoffOpen && (
-        <HandoffDialog state={state} user={user} actions={actions} onClose={() => setHandoffOpen(false)} />
+        <HandoffDialog
+          state={state}
+          user={user}
+          actions={actions}
+          onClose={() => setHandoffOpen(false)}
+          // Nobody to hand off to (solo mode): the dialog offers closing the room instead.
+          onCloseRoom={
+            openClose
+              ? () => {
+                  setHandoffOpen(false)
+                  openClose()
+                }
+              : undefined
+          }
+        />
       )}
       {/* Gone once room.closed arrives: the "Resolved" strip above takes over. */}
       {closeOpen && state.status === 'open' && (

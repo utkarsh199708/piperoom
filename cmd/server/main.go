@@ -9,6 +9,23 @@
 // only, write mode off and a one-user users file written for the run
 // (quickstart.go). Owners are loaded and cross-checked against the users file
 // in every mode.
+//
+// PIPEROOM_FAKE_AGENT=scripted replaces every model path (the agent run, the
+// hand-off and post-mortem writers, triage) with the scripted story of
+// internal/room/demo while keeping the real path around it: Postgres store and
+// migrations, tools, actions, topology, watcher, HTTP and WebSocket API. It
+// needs no model call and no ANTHROPIC_API_KEY. Because a scripted
+// investigation is not real, it is accepted only with dev login, write mode
+// off and no Slack token; the documented demo start is
+//
+//	PIPEROOM_FAKE_AGENT=scripted PIPEROOM_AUTH_MODE=dev \
+//	PIPEROOM_DEV_ACK=dev-login-has-no-password PIPEROOM_WRITE_MODE=off \
+//	PIPEROOM_WATCH_MODE=rooms go run ./cmd/server
+//
+// Any other value, or a scripted request that would reach real users or run
+// fixes, stops the start through config.ParseFakeAgent. --demo and
+// --quickstart ignore the variable (--demo already runs the scripted agent and
+// forces write mode on).
 package main
 
 import (

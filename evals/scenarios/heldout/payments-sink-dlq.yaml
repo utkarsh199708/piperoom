@@ -452,12 +452,16 @@ recordings:
   - tool: warehouse_freshness
     input: {table: analytics.payments, ts_column: updated_at}
     summary: |-
-      newest=2026-10-11T08:52:45Z (stale for 47m)
+      newest=2026-10-11T08:52:45Z (stale for 47m); source unknown, age only: the source client cannot read a newest timestamp
     data:
       newest: "2026-10-11T08:52:45Z"
+      source_error: the source client cannot read a newest timestamp
+      source_table: public.payments
       stale_for: 47m
       table: analytics.payments
+      tolerance: 2m
       ts_column: updated_at
+      verdict: unknown
   - tool: pg_row
     input: {key: "88123401", pipeline_id: payments, pk_column: id, table: public.payments}
     summary: |-

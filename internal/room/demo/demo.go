@@ -14,15 +14,20 @@ package demo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/changes"
 	"piperoom/internal/topology"
 )
 
@@ -40,50 +45,58 @@ const (
 
 const stepDelay = 550 * time.Millisecond
 
-// step is one scripted investigation step of the schema-change story.
+// whatChangedWindow is the window the scripted what_changed step asks for.
+const whatChangedWindow = "6h"
+
+// How long before the room opens each recorded change happened, newest first.
+// The DDL and the connector config change are the suspects just before the
+// alert; the schema version was registered earlier by the same rollout.
+const (
+	ddlAgo             = 90 * time.Second
+	connectorConfigAgo = 12 * time.Minute
+	schemaVersionAgo   = 41 * time.Minute
+)
+
+// step is one scripted investigation step. input nil means the demo's generic
+// {"probe": true} tool input; data is the tool result's Data.
 type step struct {
 	id, title, tool, summary string
-	data                     any
+	input, data              any
 }
 
-// story is the schema-change story, in order. It never changes after init.
-var story = []step{
-	{"s_1", "Check the Debezium connector", "connect_status",
-		"pg-orders-connector (source): RUNNING. Tasks: 0=FAILED on 172.19.0.5:8083.\nTask 0 error: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\n  Caused by: ... Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path /fields/0/type/1 in the old schema'}, {oldSchemaVersion: 1}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409\nRejected schema vs pg.public.orders-value v1: amount: int → bytes(decimal 12,2)",
-		map[string]any{"connector": "pg-orders-connector", "state": "RUNNING", "tasks": []any{map[string]any{"id": 0, "state": "FAILED", "worker": "172.19.0.5:8083"}}}},
-	{"s_2", "Inspect the Schema Registry subject", "schema_registry_versions",
-		"subject pg.public.orders-value: versions [1], latest id 1, compatibility BACKWARD (subject-level)",
-		map[string]any{"subject": "pg.public.orders-value", "versions": []int{1}, "latest_id": 1, "compatibility": "BACKWARD", "level": "subject"}},
-	{"s_3", "Diff the attempted schema against v1", "schema_registry_diff",
-		"amount: int → bytes(decimal 12,2)",
-		map[string]any{"subject": "pg.public.orders-value", "from_version": 1, "field_diffs": []any{map[string]any{"field": "amount", "from": "int", "to": "bytes(decimal 12,2)"}}}},
-	{"s_4", "Check consumer lag", "kafka_consumer_lag",
-		"group order-sync: state Stable, members 1, total lag 0",
-		map[string]any{"group": "order-sync", "state": "Stable", "members": 1, "total_lag": 0}},
-	{"s_5", "Check the DDL log", "pg_recent_ddl",
-		"2026-10-11T09:47:00Z ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) by etl",
-		map[string]any{"command": "ALTER TABLE", "object": "public.orders", "sql": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", "username": "etl", "at": "2026-10-11T09:47:00Z"}},
-}
+// story is the scripted story with the clock pinned at the zero time. A run
+// replays storySteps built from the room's own clock, so the recorded change
+// times track when the room opened; the ids, titles, tools and order here
+// never change. The controls and their tests use it for step ids and count.
+var story = storySteps(time.Time{}, "")
 
 // Run is a scripted fake agent.Run. It replays the schema-change story with
 // realistic delays, then waits for steers and approval results. It has no
 // presenter controls; the --demo server runs Controls.Run instead.
 func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options) error {
-	return runStory(ctx, newRunState(), nil, deps, stepDelay)
+	return runStory(ctx, alert, deps, opts, time.Now(), stepDelay)
 }
 
-// runStory replays the story until the room closes. A reset request restarts
-// it from step 1, after the fake clients go back to their starting state.
-func runStory(ctx context.Context, rc *runState, fakes *Fakes, deps agent.Deps, delay time.Duration) error {
+// runStory is Run with the story clock and the step delay injected, so tests
+// can pin the recorded change times and skip the demo's delays.
+func runStory(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options, now time.Time, delay time.Duration) error {
+	return runControlled(ctx, newRunState(), nil, alert, deps, now, delay)
+}
+
+// runControlled replays the story until the room closes. A reset request
+// restarts it from step 1, after the fake clients go back to their starting
+// state.
+func runControlled(ctx context.Context, rc *runState, fakes *Fakes, alert agent.Alert, deps agent.Deps, now time.Time, delay time.Duration) error {
 	if delay <= 0 {
 		delay = stepDelay
 	}
 	emit := func(typ events.Type, payload any) error {
 		return deps.Sink.Emit(ctx, typ, payload)
 	}
+	steps := storySteps(now, alert.PipelineID)
 	watcher := &inboxWatcher{in: deps.Inbox}
 	for {
-		res, err := playStory(ctx, rc, deps, watcher, emit, delay)
+		res, err := playStory(ctx, rc, steps, deps, watcher, emit, delay)
 		if err != nil {
 			return err
 		}
@@ -102,10 +115,10 @@ func runStory(ctx context.Context, rc *runState, fakes *Fakes, deps agent.Deps, 
 
 // playStory replays the steps, the hypothesis and the fix proposal, then waits
 // for human input. It returns waitReset when a presenter asked to replay.
-func playStory(ctx context.Context, rc *runState, deps agent.Deps, watcher *inboxWatcher, emit func(events.Type, any) error, delay time.Duration) (runWait, error) {
+func playStory(ctx context.Context, rc *runState, steps []step, deps agent.Deps, watcher *inboxWatcher, emit func(events.Type, any) error, delay time.Duration) (runWait, error) {
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "working", Detail: "investigating"})
 
-	for i, st := range story {
+	for i, st := range steps {
 		if res, _ := rc.boundary(ctx); res != waitReady {
 			return res, nil
 		}
@@ -114,7 +127,11 @@ func playStory(ctx context.Context, rc *runState, deps agent.Deps, watcher *inbo
 		if res := rc.hold(ctx, delay); res != waitReady {
 			return res, nil
 		}
-		_ = emit(events.AgentToolCall, events.AgentToolCallPayload{StepID: st.id, ToolUseID: "tu_" + st.id, Tool: st.tool, Input: mustJSON(map[string]any{"probe": true})})
+		input := st.input
+		if input == nil {
+			input = map[string]any{"probe": true}
+		}
+		_ = emit(events.AgentToolCall, events.AgentToolCallPayload{StepID: st.id, ToolUseID: "tu_" + st.id, Tool: st.tool, Input: mustJSON(input)})
 		if res := rc.hold(ctx, delay); res != waitReady {
 			return res, nil
 		}
@@ -129,7 +146,7 @@ func playStory(ctx context.Context, rc *runState, deps agent.Deps, watcher *inbo
 
 	_ = emit(events.AgentHypothesis, events.AgentHypothesisPayload{
 		Text:         "A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.",
-		BasedOnSteps: []string{"s_1", "s_3", "s_5"},
+		BasedOnSteps: []string{"s_1", "s_3", "s_5", "s_6"},
 		Confidence:   "high",
 		Confirmed:    false,
 	})
@@ -180,6 +197,107 @@ func playStory(ctx context.Context, rc *runState, deps agent.Deps, watcher *inbo
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "The fix proposal is waiting for the schema-registry and kafka-connect owners."})
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "1 proposal open"})
 	return waitForInput(ctx, rc, watcher, deps, emit)
+}
+
+// storySteps returns the six scripted reads of the schema-change story. The
+// last one is what_changed, whose result carries the F8 change rows the web
+// "What changed" lane renders; without it the lane stays empty in --demo.
+func storySteps(now time.Time, pipelineID string) []step {
+	recorded := storyChanges(now, pipelineID)
+	// s_5 and s_6 describe the same ALTER, so they use the same recorded time:
+	// what_changed's newest row. A fixed timestamp here would date the DDL log
+	// line days before a room opened today.
+	ddlAt := now.UTC().Truncate(time.Second).Add(-ddlAgo)
+	ddlStamp := ddlAt.Format(time.RFC3339)
+	return []step{
+		{"s_1", "Check the Debezium connector", "connect_status",
+			"pg-orders-connector (source): RUNNING. Tasks: 0=FAILED on 172.19.0.5:8083.\nTask 0 error: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\n  Caused by: ... Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path /fields/0/type/1 in the old schema'}, {oldSchemaVersion: 1}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409\nRejected schema vs pg.public.orders-value v1: amount: int → bytes(decimal 12,2)",
+			nil, map[string]any{"connector": "pg-orders-connector", "state": "RUNNING", "tasks": []any{map[string]any{"id": 0, "state": "FAILED", "worker": "172.19.0.5:8083"}}}},
+		{"s_2", "Inspect the Schema Registry subject", "schema_registry_versions",
+			"subject pg.public.orders-value: versions [1], latest id 1, compatibility BACKWARD (subject-level)",
+			nil, map[string]any{"subject": "pg.public.orders-value", "versions": []int{1}, "latest_id": 1, "compatibility": "BACKWARD", "level": "subject"}},
+		{"s_3", "Diff the attempted schema against v1", "schema_registry_diff",
+			"amount: int → bytes(decimal 12,2)",
+			nil, map[string]any{"subject": "pg.public.orders-value", "from_version": 1, "field_diffs": []any{map[string]any{"field": "amount", "from": "int", "to": "bytes(decimal 12,2)"}}}},
+		{"s_4", "Check consumer lag", "kafka_consumer_lag",
+			"group order-sync: state Stable, members 1, total lag 0",
+			nil, map[string]any{"group": "order-sync", "state": "Stable", "members": 1, "total_lag": 0}},
+		{"s_5", "Check the DDL log", "pg_recent_ddl",
+			ddlStamp + " ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) by etl",
+			nil, map[string]any{"command": "ALTER TABLE", "object": "public.orders", "sql": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", "username": "etl", "at": ddlStamp}},
+		{"s_6", "Check what changed before the alert", changes.ToolName,
+			whatChangedSummary(recorded),
+			map[string]any{"window": whatChangedWindow}, recorded},
+	}
+}
+
+// storyChanges is the recorded what_changed result of the story, newest
+// first: the DDL and the connector config change are the suspects just before
+// the alert, and the schema version was registered earlier by the same
+// rollout. It is built from the real tool's changes.Data type, so the demo
+// lane parses exactly the shape production emits.
+func storyChanges(now time.Time, pipelineID string) changes.Data {
+	if pipelineID == "" {
+		pipelineID = "orders"
+	}
+	now = now.UTC().Truncate(time.Second)
+	at := func(d time.Duration) time.Time { return now.Add(-d) }
+	ddlAt, cfgAt, verAt := at(ddlAgo), at(connectorConfigAgo), at(schemaVersionAgo)
+	return changes.Data{
+		Window: whatChangedWindow,
+		Changes: []clients.PipelineChange{
+			{
+				ID: 3, PipelineID: pipelineID, Kind: clients.ChangeDDL, Object: "public.orders", At: ddlAt,
+				Actor: "etl", Source: "ddl_audit",
+				Fingerprint: changeFingerprint(clients.ChangeDDL, "public.orders", ddlAt.Format(time.RFC3339Nano)),
+				Summary:     "ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)",
+			},
+			{
+				ID: 2, PipelineID: pipelineID, Kind: clients.ChangeConnectorConfig, Object: "pg-orders-connector", At: cfgAt,
+				Source:      "watcher",
+				Fingerprint: changeFingerprint(clients.ChangeConnectorConfig, "pg-orders-connector", "heartbeat.interval.ms"),
+				Before:      mustJSON(map[string]string{"heartbeat.interval.ms": "10000"}),
+				After:       mustJSON(map[string]string{"heartbeat.interval.ms": "5000"}),
+				Summary:     "config of pg-orders-connector: 1 key changed (heartbeat.interval.ms)",
+			},
+			{
+				ID: 1, PipelineID: pipelineID, Kind: clients.ChangeSchemaVersion, Object: "pg.public.orders-value", At: verAt,
+				Source:      "watcher",
+				Fingerprint: changeFingerprint(clients.ChangeSchemaVersion, "pg.public.orders-value", "0", "1"),
+				Before:      mustJSON(map[string]int{"version": 0}),
+				After:       mustJSON(map[string]int{"version": 1}),
+				Summary:     "schema pg.public.orders-value: version 1 registered (was 0)",
+			},
+		},
+	}
+}
+
+// whatChangedSummary renders the recorded changes as the tool's one-line-per-
+// change summary, so the investigation feed and the lane tell one story.
+func whatChangedSummary(d changes.Data) string {
+	var sb strings.Builder
+	for i, c := range d.Changes {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(c.At.Format(time.RFC3339))
+		sb.WriteByte(' ')
+		sb.WriteString(c.Kind)
+		sb.WriteByte(' ')
+		sb.WriteString(c.Object)
+		if c.Actor != "" {
+			sb.WriteString(" by " + c.Actor)
+		}
+		sb.WriteString(": " + c.Summary)
+	}
+	return sb.String()
+}
+
+// changeFingerprint is the opaque dedup key the change log stores: sha256 of
+// the change's identity, hex encoded.
+func changeFingerprint(parts ...string) string {
+	h := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(h[:])
 }
 
 // waitForInput answers steers, comments, forwarded suggestions and approval

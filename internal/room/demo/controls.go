@@ -64,7 +64,7 @@ func (c *Controls) Run(ctx context.Context, alert agent.Alert, deps agent.Deps, 
 	}
 	c.register(alert.RoomID, rc)
 	defer c.unregister(alert.RoomID, rc)
-	return runStory(ctx, rc, c.fakes, deps, c.delay)
+	return runControlled(ctx, rc, c.fakes, alert, deps, time.Now(), c.delay)
 }
 
 // Skip advances the scripted story to the next step without waiting for the

@@ -148,6 +148,9 @@ func (s *Service) checkTargetVisible(to User, pipelineID string) error {
 }
 
 // ListRoomsFor is ListRooms without the rooms outside the person's tenants.
+// It filters the ordered list, so the rooms it keeps are in the same order as
+// ListRooms (see roomListLess); GET /api/rooms and the room list socket both
+// answer through this method and therefore agree (KAN-382).
 func (s *Service) ListRoomsFor(ctx context.Context, u User) ([]RoomSnapshot, error) {
 	all, err := s.ListRooms(ctx)
 	if err != nil || !s.TenancyOn() || s.IsSolo(u.ID) {
