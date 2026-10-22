@@ -292,6 +292,9 @@ func (o *Owners) validate() error {
 		if err := resolveDLQTopics(*p, &w); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if err := resolveReconcileTables(*p, &w); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
 		p.watch = &w
 	}
 	if err := o.validateDLQ(); err != nil {

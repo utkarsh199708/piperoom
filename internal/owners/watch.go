@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"piperoom/internal/dlq"
+	"piperoom/internal/events"
 )
 
 // Watch actions: what a firing signal does.
@@ -37,9 +38,11 @@ const (
 	SignalOffsetBelowLogStart = "offset_below_log_start"
 )
 
-// knownSignals lists every signal the watcher reads, for error messages.
+// knownSignals lists every signal the watcher reads, for error messages. The
+// X1 drift names are the events.Signal* constants (one spelling everywhere).
 var knownSignals = []string{SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, SignalDLQGrowth, SignalConfigRisk,
-	SignalConsumerLag, SignalGroupUnstable, SignalOffsetBelowLogStart}
+	SignalConsumerLag, SignalGroupUnstable, SignalOffsetBelowLogStart,
+	events.SignalCountDrift, events.SignalRowDrift, events.SignalDupKeys, events.SignalOrderSkew}
 
 // maxFlaps bounds group_unstable.flaps: the watcher keeps the last 12 group
 // states, so it can count at most 11 changes.
@@ -82,6 +85,13 @@ type WatchSpec struct {
 	DLQTopics []DLQTopicSpec `yaml:"dlq_topics"`
 	// DLQPeek holds the dlq_peek tool settings.
 	DLQPeek DLQPeekSpec `yaml:"dlq_peek"`
+	// ReconcileInterval is how often the X1 drift checks run ("15m").
+	ReconcileInterval string `yaml:"reconcile_interval"`
+	// CountTolerance is the count_drift tolerance as a percentage ("0.5%").
+	CountTolerance string `yaml:"count_tolerance"`
+	// Tables holds per-table drift settings, keyed by "schema.table" (see
+	// reconcile.go).
+	Tables map[string]WatchTableSpec `yaml:"tables"`
 }
 
 // DLQTopicSpec is one watch.dlq_topics[] entry as written in YAML. It is
@@ -122,7 +132,8 @@ func (s *DLQPeekSpec) UnmarshalYAML(node *yaml.Node) error {
 // UnmarshalYAML rejects unknown keys in the watch block: yaml.Unmarshal ignores
 // them, so a typo such as `wal_headroom:` would silently keep the default.
 func (s *WatchSpec) UnmarshalYAML(node *yaml.Node) error {
-	if err := checkKeys(node, "watch", "enabled", "slot", "wal_headroom_bytes", "signals", "dlq_topics", "dlq_peek"); err != nil {
+	if err := checkKeys(node, "watch", "enabled", "slot", "wal_headroom_bytes", "signals", "dlq_topics", "dlq_peek",
+		"reconcile_interval", "count_tolerance", "tables"); err != nil {
 		return err
 	}
 	type plain WatchSpec // no methods, so Decode does not recurse into this one
@@ -260,6 +271,23 @@ type WatchConfig struct {
 	DLQTopics []DLQTopic
 	// DLQPeekHeaders is one of the DLQHeaders* modes.
 	DLQPeekHeaders string
+
+	// The X1 drift signals (internal/watch, X1b). They have no `for`:
+	// count_drift needs two failing checks in a row, the others fire on the
+	// check that finds them.
+	CountDrift WatchSignal
+	RowDrift   WatchSignal
+	DupKeys    WatchSignal
+	OrderSkew  WatchSignal
+	// ReconcileInterval is how often count_drift and row_drift run.
+	ReconcileInterval time.Duration
+	// CountTolerance is the largest |source - sink| / source that is not
+	// count_drift, as a fraction (0.005 = 0.5 %).
+	CountTolerance float64
+	// ReconcileOff lists the tables (as written in source_tables or the sink
+	// tables, sorted) with `reconcile: off`: no drift check reads them. Ask
+	// with Reconciles.
+	ReconcileOff []string
 }
 
 // DefaultWatch returns the settings used when a pipeline has no `watch:` block.
@@ -294,6 +322,12 @@ func DefaultWatch() WatchConfig {
 		},
 		OffsetBelowLogStart: WatchSignal{Enabled: true, Action: ActionRoom},
 		DLQPeekHeaders:      DLQHeadersClasses,
+		CountDrift:          WatchSignal{Enabled: true, Action: ActionRoom},
+		RowDrift:            WatchSignal{Enabled: true, Action: ActionRoom},
+		DupKeys:             WatchSignal{Enabled: true, Action: ActionRoom},
+		OrderSkew:           WatchSignal{Enabled: true, Action: ActionRoom},
+		ReconcileInterval:   DefaultReconcileInterval,
+		CountTolerance:      DefaultCountTolerance,
 	}
 }
 
@@ -304,7 +338,8 @@ func DefaultWatch() WatchConfig {
 func (p Pipeline) Watch() WatchConfig {
 	if p.watch != nil {
 		w := *p.watch
-		w.DLQTopics = slices.Clone(w.DLQTopics) // callers must not edit the shared slice
+		w.DLQTopics = slices.Clone(w.DLQTopics) // callers must not edit the shared slices
+		w.ReconcileOff = slices.Clone(w.ReconcileOff)
 		return w
 	}
 	if p.isBatch() {
@@ -342,6 +377,9 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 		}
 		w.DLQPeekHeaders = m
 	}
+	if err := applyReconcile(&w, spec); err != nil {
+		return WatchConfig{}, err
+	}
 
 	for _, name := range sortedKeys(spec.Signals) {
 		node := spec.Signals[name]
@@ -367,8 +405,8 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			allowed = append(allowed, "fire", "clear", "members_expected")
 		case SignalGroupUnstable:
 			allowed = append(allowed, "flaps", "window")
-		case SignalOffsetBelowLogStart:
-			allowed = []string{"enabled", "action"} // fires at once; clears on connector_down.for
+		case SignalOffsetBelowLogStart, events.SignalCountDrift, events.SignalRowDrift, events.SignalDupKeys, events.SignalOrderSkew:
+			allowed = []string{"enabled", "action"} // fire on the check (or checks) that find them; no for
 		}
 		if err := checkKeys(&node, "watch.signals."+name, allowed...); err != nil {
 			return WatchConfig{}, err
@@ -394,6 +432,14 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			err = applyDLQ(&w.DLQGrowth, s)
 		case SignalConfigRisk:
 			err = applySignal(&w.ConfigRisk, s)
+		case events.SignalCountDrift:
+			err = applySignal(&w.CountDrift, s)
+		case events.SignalRowDrift:
+			err = applySignal(&w.RowDrift, s)
+		case events.SignalDupKeys:
+			err = applySignal(&w.DupKeys, s)
+		case events.SignalOrderSkew:
+			err = applySignal(&w.OrderSkew, s)
 		}
 		if err != nil {
 			return WatchConfig{}, fmt.Errorf("watch.signals.%s: %w", name, err)
