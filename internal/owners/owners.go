@@ -118,6 +118,9 @@ type Pipeline struct {
 	// overrides of the column-name PII classifier. Read it with
 	// PIIOverrideFor.
 	PII *PIISpec `yaml:"pii"`
+	// DeclaredRetention is the optional `declared_retention:` block (X7,
+	// declared_retention.go). Nil = nothing declared.
+	DeclaredRetention *DeclaredRetention `yaml:"declared_retention"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
@@ -333,6 +336,9 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if err := p.validatePII(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		if err := p.validateDeclaredRetention(); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if p.isBatch() {

@@ -405,8 +405,10 @@ func windowed(st *dlqTopicState, now time.Time, window, slack time.Duration) (ne
 // evaluateDLQ steps config_risk and dlq_growth for one pipeline. Caller holds w.mu.
 func (w *Watcher) evaluateDLQ(now time.Time, t target, ps *pipeState, obs *observation, snaps map[string]dlqSnap, fired map[string][]string) {
 	ps.risks = nil
+	// Retention findings (retention.go) are config_risk entries too.
+	ret := w.evaluateRetention(now, t, ps, fired)
 	if t.cfg.ConfigRisk.Enabled {
-		w.evaluateConfigRisk(now, t, ps, obs, snaps, fired)
+		w.evaluateConfigRisk(now, t, ps, obs, snaps, ret, fired)
 	}
 	if !t.cfg.DLQGrowth.Enabled {
 		return
@@ -651,7 +653,10 @@ const riskConnectorTableOutsideScope = "connector_table_outside_scope"
 // Its verdict is breach on any sev2/sev3 finding (info never breaches), clear
 // when none, unknown when nothing is breaching and a config could not be read.
 // The findings (codes only) are kept on the pipeline so any room carries them.
-func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs *observation, snaps map[string]dlqSnap, fired map[string][]string) {
+// ret are the retention findings (retention.go): listed after the connector
+// risks, in the pipeline's risks and in a breach's evidence, but never a
+// breach of their own (they step retentionID, which opens no room).
+func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs *observation, snaps map[string]dlqSnap, ret []map[string]any, fired map[string][]string) {
 	var found []connRisk
 	var firstErr error
 	existsUnknown := false
@@ -700,6 +705,12 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 		}
 		ps.risks = append(ps.risks, ev)
 	}
+	for _, ev := range ret {
+		if len(ps.risks) >= maxEvidenceRisks {
+			break
+		}
+		ps.risks = append(ps.risks, ev)
+	}
 
 	var bad []connRisk
 	sev := "sev9"
@@ -729,6 +740,12 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 				}
 				evs = append(evs, ev)
 			}
+		}
+		for _, ev := range ret {
+			if len(evs) >= maxEvidenceRisks {
+				break
+			}
+			evs = append(evs, ev)
 		}
 		shown := parts[:min(len(parts), maxEvidenceConnectors)]
 		label := "config risk " + strings.ReplaceAll(strings.Join(shown, ", "), ": ", " ")
