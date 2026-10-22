@@ -88,8 +88,11 @@ type Phase struct {
 }
 
 // Step is one step of the plan. Op, ParamsHint and Verify are the model's;
-// Target, Class, Tier and Layer are filled by the server from the resolved
-// endpoint (design §3.3) and never from the model's text.
+// Index, Target, Class, Tier and Layer are filled by the server from the
+// resolved endpoint (design §3.3) and never from the model's text: Decode
+// refuses input that carries any of them, so they can only be set after the
+// plan is parsed. The json tags exist so Payload round-trips in tests, not so
+// the wire may fill them.
 type Step struct {
 	Index      int    `json:"index,omitempty"` // filled by Resolve
 	Op         string `json:"op"`
@@ -102,8 +105,10 @@ type Step struct {
 }
 
 // Decode parses a setup_plan tool input. It refuses input over MaxPlanBytes,
-// JSON nested deeper than MaxPlanDepth, an unknown field and trailing data,
-// so what Resolve sees is exactly the plan and nothing hidden beside it. The
+// JSON nested deeper than MaxPlanDepth, an unknown field, trailing data and a
+// step that carries a server-owned field (index, target, class, tier, layer),
+// so what Resolve sees is exactly the plan and nothing hidden beside it, and
+// the fields the server decides can never arrive from the model's text. The
 // caps are checked before the parse, on the model's bytes.
 func Decode(raw []byte) (Plan, error) {
 	var p Plan
@@ -129,7 +134,35 @@ func Decode(raw []byte) (Plan, error) {
 	if err := dec.Decode(&extra); err == nil {
 		return Plan{}, fmt.Errorf("%w: trailing JSON", ErrPlan)
 	}
+	for _, phase := range p.Phases {
+		for _, step := range phase.Steps {
+			if field := step.serverOwnedField(); field != "" {
+				return Plan{}, fmt.Errorf("%w: %q is filled by the server, never by the plan's text", ErrPlan, field)
+			}
+		}
+	}
 	return p, nil
+}
+
+// serverOwnedField names the first server-owned field this step carries, or
+// "" when it carries none. Decode calls it on every parsed step: a plan from
+// the wire must leave Index, Target, Class, Tier and Layer at their zero
+// values, because a model that could write them would choose its own class
+// and dodge the guard table and the tier floor.
+func (s *Step) serverOwnedField() string {
+	switch {
+	case s.Index != 0:
+		return "index"
+	case s.Target != "":
+		return "target"
+	case s.Class != "":
+		return "class"
+	case s.Tier != "":
+		return "tier"
+	case s.Layer != "":
+		return "layer"
+	}
+	return ""
 }
 
 // jsonDepth is the deepest bracket nesting of raw, after json.Decoder has
@@ -164,9 +197,9 @@ func jsonDepth(raw []byte) (int, error) {
 // and the floor require (a tier can be raised, never lowered) and a step the
 // guard table forbids on its class.
 //
-// facts answers the guard's exceptions for a step (whether this room created
-// the object, the ALTER SYSTEM parameter, whether a compose_down keeps its
-// volumes); nil means the strictest answer, so a guarded step is refused. A
+// facts answers the guard's exceptions for a step (the ALTER SYSTEM
+// parameter, whether a compose_down keeps its volumes); nil means the
+// strictest answer, so a guarded step is refused. A
 // returned error wraps ErrEmptyPlan, ErrTooLarge, ErrUnknownOp, ErrClass,
 // ErrTier or ErrGuard.
 func (p *Plan) Resolve(cat Catalogue, facts func(Step) StepFacts) error {
@@ -278,11 +311,14 @@ func resolveStep(cat Catalogue, step *Step, facts func(Step) StepFacts) error {
 // Payload is the plan as the room stores it (events.SetupPlanPayload). The
 // model's ParamsHint and the server's Class are not part of the payload: the
 // hint is never stored, and the class is the targets' business
-// (setup.target_classed), not the plan's.
+// (setup.target_classed), not the plan's. Every model-written string the
+// payload keeps (the phase name, the verify sentence) goes through cleanText,
+// so a stored plan never carries a control character or invalid UTF-8 to a
+// reader.
 func (p Plan) Payload() events.SetupPlanPayload {
 	out := events.SetupPlanPayload{PlanID: p.PlanID, Supersedes: p.Supersedes}
 	for _, phase := range p.Phases {
-		stored := events.SetupPlanPhase{Name: phase.Name}
+		stored := events.SetupPlanPhase{Name: cleanText(phase.Name, MaxPhaseNameBytes)}
 		for _, step := range phase.Steps {
 			stored.Steps = append(stored.Steps, events.SetupPlanStep{
 				Index:  step.Index,
@@ -290,7 +326,7 @@ func (p Plan) Payload() events.SetupPlanPayload {
 				Target: step.Target,
 				Tier:   step.Tier,
 				Layer:  step.Layer,
-				Verify: step.Verify,
+				Verify: cleanText(step.Verify, MaxVerifyBytes),
 			})
 		}
 		out.Phases = append(out.Phases, stored)

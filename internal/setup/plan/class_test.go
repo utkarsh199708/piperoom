@@ -246,6 +246,13 @@ func TestMatchProdPattern(t *testing.T) {
 		{name: "question mark does not match two", patterns: []string{"db?.acme.com"}, subject: "db12.acme.com", want: false},
 		{name: "star spans dots", patterns: []string{"*acme.com"}, subject: "db.eu.acme.com", want: true},
 		{name: "empty entry matches nothing", patterns: []string{"", "  "}, subject: "db.acme.com", want: false},
+		{name: "a trailing FQDN dot is the same host", patterns: []string{"db-*.acme.com"}, subject: "db-1.acme.com.", want: true},
+		{name: "a host:port spelling is the same host", patterns: []string{"db-*.acme.com"}, subject: "db-1.acme.com:5432", want: true},
+		{name: "a URL spelling is the same host", patterns: []string{"db-*.acme.com"}, subject: "postgres://admin@db-1.acme.com:5432/orders", want: true},
+		{name: "a bare IPv6 literal survives whole", patterns: []string{"2001:db8::*"}, subject: "2001:db8::1", want: true},
+		{name: "a bracketed IPv6 literal with a port is the same address", patterns: []string{"2001:db8::*"}, subject: "[2001:db8::1]:5432", want: true},
+		{name: "a hostname without a port survives whole", patterns: []string{"db-1.acme.com"}, subject: "db-1.acme.com", want: true},
+		{name: "normalization widens matching, never the pattern", patterns: []string{"db-1.acme.com:5432"}, subject: "db-1.acme.com:9999", want: false},
 		{name: "empty subject", patterns: []string{"*"}, subject: "", want: false},
 		{name: "one entry among many", patterns: []string{"x", "", "db.acme.com"}, subject: "db.acme.com", want: true},
 	}

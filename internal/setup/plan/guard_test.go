@@ -39,10 +39,12 @@ func TestGuardRowRefuses(t *testing.T) {
 	}
 }
 
-// TestGuardRows are the exceptions each row names (plan §3.6): an object this
-// room created, an ALTER SYSTEM parameter on the allow-list, a compose_down
-// that keeps its volumes. Rows with no exception stay forbidden whatever the
-// facts.
+// TestGuardExceptions are the exceptions each row names (plan §3.6): an ALTER
+// SYSTEM parameter on the allow-list, a compose_down that keeps its volumes.
+// Rows with no exception stay forbidden whatever the facts — in particular,
+// CreatedByRoom waives nothing, because the room's receipts are
+// endpoint-granular and cannot say this room created the slot, publication or
+// connector the op acts on.
 func TestGuardExceptions(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -54,21 +56,21 @@ func TestGuardExceptions(t *testing.T) {
 	}{
 		{name: "drop table is refused even when this room created it", op: OpSourceDropTable, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonDropTable},
 		{name: "truncate table is refused even when this room created it", op: OpSourceTruncateTable, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonTruncateTable},
-		{name: "drop slot is refused when this room did not create it", op: OpSourceDropSlot, class: ClassProduction, forbidden: true, reason: ReasonDropSlot},
-		{name: "drop slot is allowed when this room created it", op: OpSourceDropSlot, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: false},
-		{name: "drop publication is refused when this room did not create it", op: OpSourceDropPublication, class: ClassProduction, forbidden: true, reason: ReasonDropPublication},
-		{name: "drop publication is allowed when this room created it", op: OpSourceDropPublication, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: false},
+		{name: "drop slot is refused unconditionally", op: OpSourceDropSlot, class: ClassProduction, forbidden: true, reason: ReasonDropSlot},
+		{name: "drop slot is refused even when this room reached the endpoint", op: OpSourceDropSlot, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonDropSlot},
+		{name: "drop publication is refused unconditionally", op: OpSourceDropPublication, class: ClassProduction, forbidden: true, reason: ReasonDropPublication},
+		{name: "drop publication is refused even when this room reached the endpoint", op: OpSourceDropPublication, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonDropPublication},
 		{name: "alter system is refused without a parameter", op: OpSourceAlterSystem, class: ClassProduction, forbidden: true, reason: ReasonAlterSystem},
 		{name: "alter system outside the allow-list is refused", op: OpSourceAlterSystem, class: ClassProduction, facts: StepFacts{Param: "shared_buffers"}, forbidden: true, reason: ReasonAlterSystem},
 		{name: "alter system on wal_level is allowed", op: OpSourceAlterSystem, class: ClassProduction, facts: StepFacts{Param: "wal_level"}, forbidden: false},
-		{name: "delete connector is refused when this room did not create it", op: OpConnectDeleteConnector, class: ClassProduction, forbidden: true, reason: ReasonDeleteConnector},
-		{name: "delete connector is allowed when this room created it", op: OpConnectDeleteConnector, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: false},
+		{name: "delete connector is refused unconditionally", op: OpConnectDeleteConnector, class: ClassProduction, forbidden: true, reason: ReasonDeleteConnector},
+		{name: "delete connector is refused even when this room reached the endpoint", op: OpConnectDeleteConnector, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonDeleteConnector},
 		{name: "delete topic is refused even when this room created it", op: OpKafkaDeleteTopic, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonDeleteTopic},
 		{name: "compose down with volumes is refused", op: OpComposeDown, class: ClassProduction, forbidden: true, reason: ReasonComposeDownVolumes},
 		{name: "compose down keeping volumes is allowed", op: OpComposeDown, class: ClassProduction, facts: StepFacts{KeepsVolumes: true}, forbidden: false},
 		{name: "delete namespace is refused even when this room created it", op: OpK8sDeleteNamespace, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonDeleteNamespace},
-		{name: "delete cloud connector is refused when this room did not create it", op: OpMSKDeleteConnector, class: ClassProduction, forbidden: true, reason: ReasonDeleteCloud},
-		{name: "delete cloud connector is allowed when this room created it", op: OpMSKDeleteConnector, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: false},
+		{name: "delete cloud connector is refused unconditionally", op: OpMSKDeleteConnector, class: ClassProduction, forbidden: true, reason: ReasonDeleteCloud},
+		{name: "delete cloud connector is refused even when this room reached the endpoint", op: OpMSKDeleteConnector, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonDeleteCloud},
 		{name: "file write on production is refused", op: OpFileWrite, class: ClassProduction, facts: StepFacts{CreatedByRoom: true}, forbidden: true, reason: ReasonLocalFileOnProduction},
 		{name: "file delete on production is refused", op: OpFileDelete, class: ClassProduction, facts: StepFacts{KeepsVolumes: true}, forbidden: true, reason: ReasonLocalFileOnProduction},
 	}
@@ -86,10 +88,11 @@ func TestGuardExceptions(t *testing.T) {
 }
 
 // TestGuardOnlyProduction: the table's rows are production-only; local and
-// shared targets, and a class that is not a class, are never refused by it.
+// shared targets are never refused by it, and an op outside the table is
+// allowed on every valid class.
 func TestGuardOnlyProduction(t *testing.T) {
 	for _, row := range GuardRows() {
-		for _, class := range []string{ClassLocal, ClassShared, "", "prod"} {
+		for _, class := range []string{ClassLocal, ClassShared} {
 			if _, forbidden := Forbidden(GuardRequest{Op: row.Op, Class: class}); forbidden {
 				t.Errorf("Forbidden(%s on %q) = true", row.Op, class)
 			}
@@ -100,6 +103,55 @@ func TestGuardOnlyProduction(t *testing.T) {
 			if _, forbidden := Forbidden(GuardRequest{Op: op, Class: class}); forbidden {
 				t.Errorf("Forbidden(%q on %s) = true", op, class)
 			}
+		}
+	}
+}
+
+// TestGuardFailsClosedOnUnknownClass: a class that is not a class is
+// forbidden, whatever the op and whatever the facts. The guard is the last
+// boundary before a destructive step, so an unvalidated class must read as a
+// refusal, never as "matches no row".
+func TestGuardFailsClosedOnUnknownClass(t *testing.T) {
+	for _, class := range []string{"", "prod", "Production", "LOCAL"} {
+		for _, op := range []string{OpSourceDropTable, "file_read", "no_such_op", ""} {
+			row, forbidden := Forbidden(GuardRequest{Op: op, Class: class, Facts: StepFacts{CreatedByRoom: true, KeepsVolumes: true, Param: "wal_level"}})
+			if !forbidden {
+				t.Errorf("Forbidden(%q on %q) = false, want true", op, class)
+				continue
+			}
+			if row.Reason != ReasonUnknownClass {
+				t.Errorf("Forbidden(%q on %q) reason = %q, want %q", op, class, row.Reason, ReasonUnknownClass)
+			}
+		}
+	}
+}
+
+// TestGuardTableComplete pins every destructive op this package names to a
+// production row: removing a row is a deliberate table change, never an
+// accident this test lets through. With the strictest facts, each op is
+// refused on production.
+func TestGuardTableComplete(t *testing.T) {
+	ops := []string{
+		OpSourceDropTable,
+		OpSourceTruncateTable,
+		OpSourceDropSlot,
+		OpSourceDropPublication,
+		OpSourceAlterSystem,
+		OpConnectDeleteConnector,
+		OpKafkaDeleteTopic,
+		OpComposeDown,
+		OpK8sDeleteNamespace,
+		OpMSKDeleteConnector,
+		OpFileWrite,
+		OpFileDelete,
+	}
+	rows := GuardRows()
+	if len(rows) != len(ops) {
+		t.Errorf("the guard table has %d rows, want one per destructive op (%d)", len(rows), len(ops))
+	}
+	for _, op := range ops {
+		if _, forbidden := Forbidden(GuardRequest{Op: op, Class: ClassProduction}); !forbidden {
+			t.Errorf("Forbidden(%s on production) = false: the op has lost its row", op)
 		}
 	}
 }

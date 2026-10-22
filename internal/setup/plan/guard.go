@@ -43,6 +43,9 @@ const (
 	ReasonDeleteNamespace       = "delete_namespace"
 	ReasonDeleteCloud           = "delete_cloud_resource"
 	ReasonLocalFileOnProduction = "local_file_on_production"
+	// ReasonUnknownClass is the reason Forbidden returns for a class that is
+	// not a class: the guard boundary fails closed, never open.
+	ReasonUnknownClass = "unknown_class"
 )
 
 // StepFacts are the per-step facts a guard row's exception reads. The server
@@ -52,8 +55,12 @@ const (
 // a caller that does not answer a question gets the refusal, not the
 // exception.
 type StepFacts struct {
-	// CreatedByRoom: the table, slot, publication or connector the op acts on
-	// was created by this room (plan.CreatedByRoom over the room log).
+	// CreatedByRoom: a receipt in this room's log names the step's endpoint
+	// (plan.CreatedByRoom over the room log). The receipt is endpoint-granular,
+	// not object-granular — it does not say this room created the slot,
+	// publication or connector the op acts on — so no guard row reads it: a
+	// destructive op on production stays refused whatever this field says,
+	// until receipts carry object identity.
 	CreatedByRoom bool
 	// Param is the ALTER SYSTEM parameter name.
 	Param string
@@ -86,27 +93,25 @@ type GuardRow struct {
 // The plain local writes (file_write, file_delete) are here too, so the server
 // and the runner's own table (internal/setup/ops) refuse the same pairs.
 //
-// msk_delete_connector is "unless this room created it", following its row
-// (U13b2: T2, T3 on production) rather than reading plan §3.6's "deleting a
-// cloud resource" as an unconditional refusal; every other cloud delete the
-// wave adds must get its own row here.
+// Dropping a slot or a publication, and deleting a Connect or MSK connector,
+// are refused on production unconditionally: the room's receipts name the
+// endpoint a step reached, not the object it created, so "created by this
+// room" cannot distinguish a slot this room made from one that was always
+// there. The rows get their exception back when receipts carry object
+// identity; every other cloud delete the wave adds must get its own row here.
 var guardRows = []GuardRow{
 	{Op: OpSourceDropTable, Class: ClassProduction, Reason: ReasonDropTable},
 	{Op: OpSourceTruncateTable, Class: ClassProduction, Reason: ReasonTruncateTable},
-	{Op: OpSourceDropSlot, Class: ClassProduction, Reason: ReasonDropSlot,
-		Allowed: func(f StepFacts) bool { return f.CreatedByRoom }},
-	{Op: OpSourceDropPublication, Class: ClassProduction, Reason: ReasonDropPublication,
-		Allowed: func(f StepFacts) bool { return f.CreatedByRoom }},
+	{Op: OpSourceDropSlot, Class: ClassProduction, Reason: ReasonDropSlot},
+	{Op: OpSourceDropPublication, Class: ClassProduction, Reason: ReasonDropPublication},
 	{Op: OpSourceAlterSystem, Class: ClassProduction, Reason: ReasonAlterSystem,
 		Allowed: func(f StepFacts) bool { return AlterSystemAllowed(f.Param) }},
-	{Op: OpConnectDeleteConnector, Class: ClassProduction, Reason: ReasonDeleteConnector,
-		Allowed: func(f StepFacts) bool { return f.CreatedByRoom }},
+	{Op: OpConnectDeleteConnector, Class: ClassProduction, Reason: ReasonDeleteConnector},
 	{Op: OpKafkaDeleteTopic, Class: ClassProduction, Reason: ReasonDeleteTopic},
 	{Op: OpComposeDown, Class: ClassProduction, Reason: ReasonComposeDownVolumes,
 		Allowed: func(f StepFacts) bool { return f.KeepsVolumes }},
 	{Op: OpK8sDeleteNamespace, Class: ClassProduction, Reason: ReasonDeleteNamespace},
-	{Op: OpMSKDeleteConnector, Class: ClassProduction, Reason: ReasonDeleteCloud,
-		Allowed: func(f StepFacts) bool { return f.CreatedByRoom }},
+	{Op: OpMSKDeleteConnector, Class: ClassProduction, Reason: ReasonDeleteCloud},
 	{Op: OpFileWrite, Class: ClassProduction, Reason: ReasonLocalFileOnProduction},
 	{Op: OpFileDelete, Class: ClassProduction, Reason: ReasonLocalFileOnProduction},
 }
@@ -118,12 +123,15 @@ func GuardRows() []GuardRow {
 }
 
 // Forbidden evaluates the guard table for req and returns the row that
-// forbids the op on the class. A class that is not a class and an op that is
-// not in the table match no row: callers validate the class first (Resolve
-// does), so an unanswered guard question never reads as forbidden, and the
-// zero StepFacts reads as the strictest answer for every row that has an
-// exception.
+// forbids the op on the class. A class that is not a class is forbidden
+// outright, with ReasonUnknownClass: the boundary fails closed, so a caller
+// that skipped class validation gets a refusal, never a pass. An op that is
+// not in the table matches no row, and the zero StepFacts reads as the
+// strictest answer for every row that has an exception.
 func Forbidden(req GuardRequest) (GuardRow, bool) {
+	if !ValidClass(req.Class) {
+		return GuardRow{Op: req.Op, Class: req.Class, Reason: ReasonUnknownClass}, true
+	}
 	for _, row := range guardRows {
 		if row.Op != req.Op || row.Class != req.Class {
 			continue

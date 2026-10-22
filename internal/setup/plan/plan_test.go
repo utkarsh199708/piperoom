@@ -234,6 +234,51 @@ func TestDecode(t *testing.T) {
 	}
 }
 
+// TestDecodeRefusesServerFields: the server-owned fields of a step are never
+// read from the wire. A plan whose input carries any of them is refused with
+// an error that names the field, so a model cannot choose its own class, tier
+// or target and dodge the guard table or the tier floor.
+func TestDecodeRefusesServerFields(t *testing.T) {
+	tests := map[string]string{
+		"index":  `{"phases":[{"name":"stack","steps":[{"op":"compose_up","index":3}]}]}`,
+		"target": `{"phases":[{"name":"stack","steps":[{"op":"compose_up","target":"db"}]}]}`,
+		"class":  `{"phases":[{"name":"stack","steps":[{"op":"compose_up","class":"local"}]}]}`,
+		"tier":   `{"phases":[{"name":"stack","steps":[{"op":"compose_up","tier":"T0"}]}]}`,
+		"layer":  `{"phases":[{"name":"stack","steps":[{"op":"compose_up","layer":"postgres"}]}]}`,
+	}
+	for field, in := range tests {
+		t.Run(field, func(t *testing.T) {
+			_, err := Decode([]byte(in))
+			if !errors.Is(err, ErrPlan) {
+				t.Fatalf("Decode error = %v, want ErrPlan", err)
+			}
+			if !strings.Contains(err.Error(), `"`+field+`"`) {
+				t.Errorf("error %q does not name the field %q", err, field)
+			}
+		})
+	}
+}
+
+// TestPayloadCleansModelText: every model-written string the stored payload
+// keeps goes through cleanText, so a control character in a phase name or a
+// verify sentence never reaches a stored event.
+func TestPayloadCleansModelText(t *testing.T) {
+	p := &Plan{Phases: []Phase{{
+		Name:  "stack\x1b[2J",
+		Steps: []Step{{Op: "compose_up", Class: ClassLocal, Verify: "docker ps\r\nshows them"}},
+	}}}
+	if err := p.Resolve(testCatalogue, nil); err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	payload := p.Payload()
+	if got, want := payload.Phases[0].Name, "stack?[2J"; got != want {
+		t.Errorf("payload phase name = %q, want %q", got, want)
+	}
+	if got, want := payload.Phases[0].Steps[0].Verify, "docker ps??shows them"; got != want {
+		t.Errorf("payload verify = %q, want %q", got, want)
+	}
+}
+
 // TestPayload: the stored payload carries what the server filled and neither
 // the model's hint nor the resolved class.
 func TestPayload(t *testing.T) {

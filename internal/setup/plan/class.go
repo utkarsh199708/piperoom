@@ -3,6 +3,8 @@ package plan
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 
 	"piperoom/internal/events"
@@ -135,6 +137,12 @@ func Classify(f Facts) (class, reason string, err error) {
 // target as what it reached. Events of any other type, failed steps, steps
 // with an unknown outcome and receipts for another target do not count, and
 // model text is not an input at all (design §3.5; U7b).
+//
+// The answer is endpoint-granular, not object-granular: any successful
+// receipt that names the endpoint counts, so it says this room reached the
+// target, never that it created the particular slot, publication or connector
+// a step acts on. It is an input to Classify's class floor only, and must not
+// gate a destructive op: the guard table takes no exception from it.
 func CreatedByRoom(roomEvents []events.Event, target string) bool {
 	if target == "" {
 		return false
@@ -165,7 +173,16 @@ func CreatedByRoom(roomEvents []events.Event, target string) bool {
 // character, and every other character — the '/' of a context name included —
 // is literal. Empty entries match nothing, so a stray comma in the
 // configuration cannot make every target production.
+//
+// The subject is normalized before matching, so every spelling of one
+// endpoint hits the same patterns: the canonical form is the bare, lower-case
+// host (or context name or account id), with a URL's scheme, userinfo and
+// path, a port and one trailing FQDN dot stripped. "DB-1.acme.com.",
+// "db-1.acme.com:5432" and "postgres://admin@db-1.acme.com/orders" all match
+// a pattern written for "db-1.acme.com", so an equivalent spelling cannot
+// dodge a configured production mark.
 func MatchProdPattern(patterns []string, subject string) bool {
+	subject = normalizeSubject(subject)
 	if subject == "" {
 		return false
 	}
@@ -179,6 +196,32 @@ func MatchProdPattern(patterns []string, subject string) bool {
 		}
 	}
 	return false
+}
+
+// normalizeSubject reduces a subject to MatchProdPattern's canonical form.
+// Each reduction is applied at most once and only when its form is
+// unambiguous: a subject with a scheme is parsed as a URL and reduced to its
+// host; one host:port split is taken when the subject splits cleanly (a bare
+// IPv6 literal and a host without a port do not split, and survive whole); a
+// bracketed IPv6 literal loses its brackets; one trailing dot — the FQDN
+// spelling of the same host — is stripped; and the result is lower-cased. A
+// subject that is none of those forms, a kubectl context name or an account
+// id, is only trimmed and lower-cased.
+func normalizeSubject(subject string) string {
+	subject = strings.TrimSpace(subject)
+	if strings.Contains(subject, "://") {
+		if u, err := url.Parse(subject); err == nil && u.Host != "" {
+			subject = u.Host
+		}
+	}
+	if host, _, err := net.SplitHostPort(subject); err == nil && host != "" {
+		subject = host
+	}
+	if strings.HasPrefix(subject, "[") && strings.HasSuffix(subject, "]") {
+		subject = subject[1 : len(subject)-1]
+	}
+	subject = strings.TrimSuffix(subject, ".")
+	return strings.ToLower(subject)
 }
 
 // globMatch is MatchProdPattern's matcher: '*' and '?' only, no character
