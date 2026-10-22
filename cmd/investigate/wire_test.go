@@ -179,6 +179,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 	wantActions := []string{
 		"connect_restart_task", "connect_restart_connector", "connect_resume_connector", "connect_pause_connector", "connect_update_connector_config",
 		"schema_set_compatibility", "schema_register",
+		// X6c: the performance action, listed with write mode off too.
+		"connect_tune_throughput",
 		// P3 (P3-W): listed with write mode off; Execute refuses without a writer.
 		"kafka_reset_consumer_offsets", "dlq_replay", "kafka_replay_range", "connect_snapshot_table",
 		"pg_drop_replication_slot", "pg_add_publication_table", "pg_snapshot_signal",

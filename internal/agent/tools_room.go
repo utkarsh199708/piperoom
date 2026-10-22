@@ -759,6 +759,12 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		if n := utf8.RuneCountInString(verify); n > maxStepVerifyChars {
 			return tools.Result{}, fmt.Errorf("%w: step %d: verify is %d characters; the limit is %d", tools.ErrBadInput, i+1, n, maxStepVerifyChars)
 		}
+		if actions.ClassOf(a) == actions.ClassPerformance {
+			// X6c: a tuning only on a measured bottleneck (tuning_gate.go).
+			if err := t.steps.tuningEvidence(i+1, s.Action, s.Description+"\n"+verify); err != nil {
+				return tools.Result{}, err
+			}
+		}
 		steps = append(steps, events.ProposalStep{
 			Action:      s.Action,
 			Layer:       layer,

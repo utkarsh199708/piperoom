@@ -54,16 +54,24 @@ func (s *recoveryStep) done() bool {
 // recoverySteps returns the steps of a proposal whose action is a recovery
 // action of the run's registry, in step order. None means a fix proposal.
 func (r *runner) recoverySteps(steps []events.ProposalStep) []*recoveryStep {
+	return r.classSteps(steps, actions.ClassRecovery)
+}
+
+// classSteps returns the steps of a proposal whose action is of class (a
+// recovery or, X6c, a performance action) in the run's registry, in step
+// order, with their Verifier.
+func (r *runner) classSteps(steps []events.ProposalStep, class string) []*recoveryStep {
 	if r.deps.Actions == nil {
 		return nil
 	}
 	var out []*recoveryStep
 	for i, s := range steps {
 		a, ok := r.deps.Actions.Get(s.Action)
-		if !ok || actions.ClassOf(a) != actions.ClassRecovery {
+		if !ok || actions.ClassOf(a) != class {
 			continue
 		}
-		// Registry.Register refuses a recovery action without Verifier.
+		// Registry.Register refuses a recovery or performance action without
+		// Verifier.
 		if v, ok := a.(actions.Verifier); ok {
 			out = append(out, &recoveryStep{index: i, step: s, v: v})
 		}
@@ -148,7 +156,24 @@ func (r *runner) actionScope(ctx context.Context) context.Context {
 // tool deadline. The error is scrubbed of secrets; a result that breaks the
 // Verifier's rules (After outside [0, Before], an unknown unit) is an error,
 // never a count.
-func (r *runner) callVerify(ctx context.Context, st *recoveryStep, executedAt time.Time) (res actions.VerifyResult, err error) {
+func (r *runner) callVerify(ctx context.Context, st *recoveryStep, executedAt time.Time) (actions.VerifyResult, error) {
+	res, err := r.callVerifyRaw(ctx, st, executedAt)
+	if err != nil {
+		return res, err
+	}
+	switch {
+	case res.Before < 0 || res.After < 0 || res.After > res.Before:
+		return actions.VerifyResult{}, fmt.Errorf("agent: verify %s: counts out of range (before %d, after %d)", st.step.Action, res.Before, res.After)
+	case res.Unit != events.RecoveryUnitRows && res.Unit != events.RecoveryUnitRecords:
+		return actions.VerifyResult{}, fmt.Errorf("agent: verify %s: unknown unit %q", st.step.Action, clipLine(res.Unit))
+	}
+	return res, nil
+}
+
+// callVerifyRaw is one Verify call under the room's pipeline scope and the
+// tool deadline, with the error scrubbed and a panic turned into an error;
+// the caller checks the result against its class's rules.
+func (r *runner) callVerifyRaw(ctx context.Context, st *recoveryStep, executedAt time.Time) (res actions.VerifyResult, err error) {
 	vctx, cancel := context.WithTimeout(r.actionScope(ctx), r.timing.toolTimeout)
 	defer cancel()
 	defer func() {
@@ -159,12 +184,6 @@ func (r *runner) callVerify(ctx context.Context, st *recoveryStep, executedAt ti
 	res, err = st.v.Verify(vctx, st.step.Params, executedAt)
 	if err != nil {
 		return actions.VerifyResult{}, r.scrubToolError(st.step.Action, err)
-	}
-	switch {
-	case res.Before < 0 || res.After < 0 || res.After > res.Before:
-		return actions.VerifyResult{}, fmt.Errorf("agent: verify %s: counts out of range (before %d, after %d)", st.step.Action, res.Before, res.After)
-	case res.Unit != events.RecoveryUnitRows && res.Unit != events.RecoveryUnitRecords:
-		return actions.VerifyResult{}, fmt.Errorf("agent: verify %s: unknown unit %q", st.step.Action, clipLine(res.Unit))
 	}
 	return res, nil
 }
