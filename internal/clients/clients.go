@@ -328,8 +328,11 @@ type DLQReader interface {
 // room's pipeline scope in ctx (tools.WithPipeline) and refuses a target
 // outside it before any I/O (tools.ErrOutOfScope); without a scope it refuses
 // with tools.ErrNoScope unless the caller opted out with tools.WithUnscoped
-// (tests, CLI). Read helpers on the same type are scoped by the action's
-// CheckScope instead.
+// (tests, CLI). For Produce and ProduceAll the pipeline's topics are its CDC
+// topics (<topic_prefix>.<source_table>) plus its declared reprocess_topic
+// (owners.yaml, X2b; kafka_replay_range's only target); no other write method
+// accepts the reprocess_topic. Read helpers on the same type are scoped by the
+// action's CheckScope instead.
 
 // ErrGroupActive is returned (wrapped) by ResetGroupOffsets when the group
 // has active members: committed offsets of a live group are overwritten by
@@ -374,8 +377,29 @@ type KafkaWriter interface {
 	// the target; the group must have no active members (ErrGroupActive).
 	ResetGroupOffsets(ctx context.Context, group string, to OffsetTarget) (moved int, err error)
 	// Produce writes records to topic in order and returns how many were acked.
-	// It stops at the first record that is not acked.
+	// It stops at the first record that is not acked. topic is one of the
+	// room pipeline's CDC topics or its declared reprocess_topic (above).
 	Produce(ctx context.Context, topic string, recs []Record) (acked int, err error)
+}
+
+// BulkProducer is optional on a KafkaWriter: Produce for a bulk copy, where a
+// round trip per record is too slow (kafka_replay_range copies up to 100 000
+// records inside one 30 s step, X2b). Asserted at use time; a writer without
+// it gets Produce. The Kafka write client implements it. (X2)
+//
+// ProduceAll writes recs to topic with every record in flight at once and
+// returns how many the broker acked, an exact count. Scope, the per-record
+// size cap and the Record rules (topic argument, key partitioner, produce
+// time) are Produce's, checked before any record is sent. The producer is
+// idempotent: a target partition gets its records in the order given, and
+// every record buffered behind a failed one on that partition fails too, so
+// order holds per partition (and so per key). Across partitions it does not:
+// after an error acked is not a prefix of recs, a copy cannot resume from it,
+// and a re-run copies again. When ctx ends with records in flight, those
+// whose outcome is not known within a short grace (about a second) are not
+// counted, and the error says how many may still be written.
+type BulkProducer interface {
+	ProduceAll(ctx context.Context, topic string, recs []Record) (acked int, err error)
 }
 
 // GroupResetPlanner is implemented by the Kafka write client; an action's
@@ -410,7 +434,8 @@ type OffsetMove struct {
 // otherwise, as KafkaWriter does. Implemented by the Kafka write client
 // (internal/clients/kafka, #620); optional, asserted by connect_snapshot_table,
 // so fakes and the eval replay need not implement it. KafkaWriter.Produce is not
-// used for signals: its scope allows CDC topics only. The Kafka client's own
+// used for signals: its scope allows the CDC topics and the reprocess_topic
+// only. The Kafka client's own
 // type becomes an alias of SnapshotSignal (A2 follow-up), as with OffsetMove.
 type SnapshotSignaler interface {
 	SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (SnapshotSignal, error)

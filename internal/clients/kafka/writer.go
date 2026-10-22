@@ -584,8 +584,10 @@ func checkProduce(ctx context.Context, topic string, recs []clients.Record) erro
 	return nil
 }
 
-// ProduceAll writes recs to topic with every record in flight at once and
-// returns how many the broker acked. It is Produce for a bulk copy
+var _ clients.BulkProducer = (*Writer)(nil)
+
+// ProduceAll implements clients.BulkProducer: it writes recs to topic with
+// every record in flight at once and returns how many the broker acked. It is Produce for a bulk copy
 // (kafka_replay_range, up to 100 000 records in one 30 s step, where a round
 // trip per record is too slow), with the same checks, scope and record
 // handling. Order holds per target partition: the producer is idempotent,

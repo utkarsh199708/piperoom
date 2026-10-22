@@ -15,14 +15,6 @@ import (
 	"piperoom/internal/tools"
 )
 
-// bulkProducer is the Kafka write client's pipelined produce
-// (kafka.Writer.ProduceAll): every record of a chunk in flight at once, an
-// exact acked count. Asserted on KafkaDeps.Writer at use time; a writer
-// without it (fakes) gets KafkaWriter.Produce, a round trip per record.
-type bulkProducer interface {
-	ProduceAll(ctx context.Context, topic string, recs []clients.Record) (int, error)
-}
-
 var (
 	_ Scoped   = (*replayRange)(nil)
 	_ Preview  = (*replayRange)(nil)
@@ -55,7 +47,7 @@ func (a *replayRange) Name() string  { return replayRangeName }
 func (a *replayRange) Layer() string { return "kafka" }
 func (a *replayRange) Class() string { return ClassRecovery }
 func (a *replayRange) Describe() string {
-	return "Recovery: copies the records of one CDC topic of this pipeline, as offset ranges per partition (last offset included) or a past time window [from_time, to_time) resolved to offsets, into the pipeline's reprocess_topic declared in owners.yaml, with key, value and headers (Kafka Connect's __connect.errors.* headers are dropped), in offset order per partition. At most 100000 records per proposal. A range that starts below a partition's log start is refused: those records were deleted, re-emit the rows from the source with pg_resnapshot_rows instead. The CDC topic is not changed. Not idempotent: running it twice copies twice. Afterwards the agent counts the records that reached the reprocess topic."
+	return "Recovery: copies the records of one CDC topic of this pipeline, as offset ranges per partition (last offset included) or a past time window [from_time, to_time) resolved to offsets, into the pipeline's reprocess_topic declared in owners.yaml, with key, value and headers (Kafka Connect's __connect.errors.* headers are dropped), produced in offset order per source partition (the target partition follows the key, so each key keeps its order). At most 100000 records per proposal. A range that starts below a partition's log start is refused: those records were deleted, re-emit the rows from the source with pg_resnapshot_rows instead. The CDC topic is not changed. Not idempotent: running it twice copies twice. Afterwards the agent counts the records that reached the reprocess topic."
 }
 
 func (a *replayRange) ParamsSchema() map[string]any {
@@ -438,9 +430,10 @@ func (a *replayRange) Preview(ctx context.Context, raw json.RawMessage) (Preview
 	return PreviewResult{
 		Target:  fmt.Sprintf("topic %s, %d partition(s), %d records → reprocess topic %s", p.Topic, len(spans), total, p.ToTopic),
 		Current: fmt.Sprintf("%s: %s; reprocess topic %s exists", p.Topic, strings.Join(cur, "; "), p.ToTopic),
-		Expected: fmt.Sprintf("will re-emit %d records%s to %s, in offset order per partition: %s. First keys (redacted): %s. "+
+		Expected: fmt.Sprintf("will re-emit %d records%s to %s, in offset order per source partition (each key keeps its order): %s. First keys (redacted): %s. "+
 			"Key, value and other headers are kept; the %s* headers are dropped. %s is not changed. "+
-			"The count is offsets: one that holds no record (compaction, transaction markers) is skipped. A second run copies again.",
+			"The count is offsets: one that holds no record (compaction, transaction markers) is skipped. "+
+				"Not idempotent: running it again, or approving another proposal for the same range, copies the records again.",
 			total, window, p.ToTopic, strings.Join(exp, "; "), keys, connectErrorsPrefix, p.Topic),
 		Reversible: false, // a produced record cannot be taken back
 		Count:      &count,
@@ -492,7 +485,7 @@ func (a *replayRange) Execute(ctx context.Context, raw json.RawMessage) (string,
 		}
 		parts = append(parts, fmt.Sprintf("p%d %d–%d", s.partition, s.from, s.to))
 	}
-	return fmt.Sprintf("replayed %s (%s) to %s: acked %d records of %d offsets, in offset order per partition; %d %s* headers dropped; %s unchanged",
+	return fmt.Sprintf("replayed %s (%s) to %s: acked %d records of %d offsets, in offset order per source partition; %d %s* headers dropped; %s unchanged",
 		p.Topic, strings.Join(parts, ", "), p.ToTopic, acked, total, dropped, connectErrorsPrefix, p.Topic), nil
 }
 
@@ -529,7 +522,9 @@ func (a *replayRange) copySpan(ctx context.Context, p replayRangeParams, s repla
 func (a *replayRange) produce(ctx context.Context, topic string, recs []clients.Record) (int, error) {
 	var n int
 	var err error
-	if bp, ok := a.d.Writer.(bulkProducer); ok {
+	// The pipelined produce (clients.BulkProducer) when the writer has it;
+	// else Produce, a round trip per record (fakes).
+	if bp, ok := a.d.Writer.(clients.BulkProducer); ok {
 		n, err = bp.ProduceAll(ctx, topic, recs)
 	} else {
 		n, err = a.d.Writer.Produce(ctx, topic, recs)

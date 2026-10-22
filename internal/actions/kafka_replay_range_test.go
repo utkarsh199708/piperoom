@@ -142,6 +142,8 @@ type bulkWriter struct {
 	bulk int
 }
 
+var _ clients.BulkProducer = (*bulkWriter)(nil)
+
 func (b *bulkWriter) ProduceAll(ctx context.Context, topic string, recs []clients.Record) (int, error) {
 	b.bulk++
 	return b.Produce(ctx, topic, recs)
