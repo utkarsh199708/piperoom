@@ -296,12 +296,35 @@ to what a read-only reader needs (`internal/clients/databricks/dsn.go`; `README.
 token:<personal-access-token>@<host>[:<port>]/<http-path>?catalog=<catalog>[&schema=<schema>]
 ```
 
-**Identity:** a **personal access token** of a user or (better) a service principal, held in the
-DSN. Keep the DSN in a secret store; errors never quote it or the token (`dsn.go` `Redact`).
-OAuth M2M (service-principal client credentials) is **not supported yet** in the pilot — use a
-personal access token. OAuth U2M is refused (it opens a browser) and `http://` is refused (the token
-would travel in clear text) (`dsn.go`). Requires Databricks Runtime 14.1 or later on the SQL
-warehouse (named parameters, `README.md`).
+**Identity:** a **service principal** (better) or a user. Two login forms exist; the DSN holds
+exactly one (checked against `main` @ `cd330eb`):
+
+| Form | DSN part | Code |
+|---|---|---|
+| OAuth M2M (service principal client credentials) | `clientId=<id>&clientSecret=<secret>[&authType=OAuthM2M]`, no `token:` user info | `internal/clients/databricks/dsn.go:185-193` (parse); `internal/clients/databricks/databricks.go:86-98` (authenticator); `internal/clients/databricks/README.md:18-21` |
+| Personal access token (PAT) | `token:<pat>@` (or `accessToken=<pat>`); use a PAT of a service principal, not of a person | `internal/clients/databricks/dsn.go:195-197`; `internal/clients/databricks/databricks.go:99-100`; `internal/clients/databricks/README.md:15` |
+
+- **Prefer OAuth M2M.** OAuth M2M landed with P4e-3 (merged as #720, `ea1522d`), so the earlier
+  advice "OAuth M2M is not supported, use a PAT" no longer holds. A workspace that disables
+  personal access tokens can connect with M2M. Whether your workspace allows PATs or service
+  principal OAuth secrets is a workspace setting that this repository cannot tell: not verified,
+  check the Databricks admin docs.
+- M2M tokens are minted by Piperoom's own authenticator over one bounded HTTP client (10 s timeout,
+  4 MB body cap), cached until a minute before expiry, with scope `all-apis`. A hung token endpoint
+  fails the query within the cap and the query never reaches the warehouse
+  (`internal/clients/databricks/m2m.go:19-30, 64-76`; `internal/clients/databricks/README.md:57-66`).
+  The client secret and the token never appear in errors (`internal/clients/databricks/m2m.go:62-63`).
+- A DSN that mixes a token with client credentials, has only one of `clientId`/`clientSecret`, or has
+  no credential stops the start (`internal/clients/databricks/dsn.go:187-197`). OAuth U2M is refused
+  because it opens a browser, and `http://` is refused because the credential would travel in clear
+  text (`internal/clients/databricks/dsn.go:89-90, 146`).
+- Keep the DSN in a secret store; errors never quote it, the token or the client secret
+  (`internal/clients/databricks/dsn.go` `Redact`; `internal/wiring/warehouse.go:111, 129`). A bad or
+  expired credential, or a missing `CAN USE` on the warehouse, surfaces as `ErrPermissionDenied`
+  (HTTP 401/403) (`internal/clients/databricks/errors.go:16-20`).
+- Requires Databricks Runtime 14.1 or later on the SQL warehouse (named parameters,
+  `internal/clients/databricks/README.md:24`).
+- **Update when the code changes:** this row describes `main` @ `cd330eb`, after P4e-3 (#720).
 
 **Minimum grants** — read-only comes from the principal, not from code; the driver has no read-only
 session switch (`internal/clients/databricks/databricks.go`; `README.md`):
@@ -526,6 +549,6 @@ Pick one provider. The default is `anthropic` (the section above).
 - [ ] Airflow: the login (basic auth or a bearer token) is dedicated to Piperoom, over `https`, and has the `Viewer` role only.
 - [ ] dbt: `DBT_ARTIFACTS_DIR` is readable only by the server's user, or the `DBT_CLOUD_TOKEN` is a read-only (Job Viewer) service token over `https`.
 - [ ] If `WAREHOUSE_KIND=bigquery`: the service account has only `roles/bigquery.dataViewer` on the sink datasets, `roles/bigquery.jobUser` on the billing project and `roles/bigquery.resourceViewer` on the data project.
-- [ ] If `WAREHOUSE_KIND=databricks`: the token is a dedicated personal access token, and its principal has only `CAN USE` on the warehouse and `USE CATALOG`/`USE SCHEMA`/`SELECT` in Unity Catalog.
+- [ ] If `WAREHOUSE_KIND=databricks`: the credential is a dedicated service principal's OAuth M2M client id and secret (or, if you must, that principal's personal access token), and the principal has only `CAN USE` on the warehouse and `USE CATALOG`/`USE SCHEMA`/`SELECT` in Unity Catalog.
 - [ ] `ANTHROPIC_BASE_URL` is unset or pinned, and `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` are unset on the host (`anthropic-sdk-go@v1.80.0/client.go:52-82`).
 - [ ] The room service's HTTP port (`PIPEROOM_HTTP_ADDR`) is not reachable from outside the pilot team's network.
