@@ -464,7 +464,7 @@ it got from the client, the client always returns the redacted full set):
 
 | mode | the summary shows per record | notes |
 |---|---|---|
-| `counts_only` | partition, offset, timestamp | for pilots that want no free text at all |
+| `counts_only` | partition, offset, timestamp, and the value-free reject-rule name (`x-piperoom-reject-rule`) when a record carries one | for pilots that want no free text at all |
 | `classes` (**default**) | plus `exception.class.name`, `stage`, `class.name`, `connector.name`, `task.id`, original `topic/partition/offset` | fixed-vocabulary values and positions; no message |
 | `messages` | plus `exception.message` and the stack-trace first line, redacted and capped | opt-in; the summary carries a line "messages: on (owners.yaml); redacted" |
 
@@ -675,14 +675,15 @@ New row for the table in `data-handling.md` (C14):
 
 | Tool | Exposes | Does **not** expose |
 |---|---|---|
-| `dlq_peek` | DLQ topic name, partition, offset and timestamp of the newest records; exception **class** counts; per record, by `watch.dlq_peek.headers` mode: `counts_only` nothing more; `classes` (default) the `__connect.errors.*` exception class, stage, connector name, task id and original topic/partition/offset; `messages` (opt-in) also the exception message and stack-trace first line, capped at 300 runes and **redacted** (`[Source:` tails, `Detail:`/`Where:` tails, braces, brackets and quoted strings removed). **Summary and `Data` are stored permanently in `room_events` and shown to every room member.** `Data` holds counts and positions only, never per-record text | record **values**, record **keys**, any other header, exception messages in the default mode |
+| `dlq_peek` | DLQ topic name, partition, offset and timestamp of the newest records; exception **class** counts; per record, by `watch.dlq_peek.headers` mode: `counts_only` only the value-free reject-rule name (`x-piperoom-reject-rule`, e.g. `status_enum`; redacted, shape-checked, shown as `?` otherwise); `classes` (default) the `__connect.errors.*` exception class, stage, connector name, task id and original topic/partition/offset; `messages` (opt-in) also the exception message and stack-trace first line, capped at 300 runes and **redacted** (`[Source:` tails, `Detail:`/`Where:` tails, braces, brackets and quoted strings removed). **Summary and `Data` are stored permanently in `room_events` and shown to every room member.** `Data` holds counts and positions only, never per-record text | record **values**, record **keys**, any other header, exception messages in the default mode |
 
 How "never values" is enforced, not promised:
 1. `clients.DLQRecord` (§5.1) has no `Key` and no `Value` field. The kafka client fills it from
    `kgo.Record` and the record is garbage after that. The tool, the room, the export and the model only
    ever see the DTO.
-2. The header allow-list is a prefix check in the client, so an application header named `password` on a
-   DLQ record is never returned.
+2. The header allow-list in the client is the `__connect.errors.` prefix plus the one exact key
+   `x-piperoom-reject-rule` (value-free by contract, redacted and shape-checked by the tool), so an
+   application header named `password` on a DLQ record is never returned.
 3. Redaction runs in the client (`dlq.RedactMessage`), so no reader can forget it.
 4. The default mode shows no free text at all; messages are a per-pipeline opt-in in `owners.yaml`.
 5. Caps: 300 runes per header value, first line of the stack trace, `limit ≤ 20` in total, 8 MiB per call.
