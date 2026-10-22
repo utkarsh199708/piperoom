@@ -29,9 +29,35 @@ var (
 	_ clients.SchemaRegistryClient = (*FakeRegistry)(nil)
 )
 
-// FakeActionDeps returns the fake clients the demo actions run over.
+// FakeActionDeps returns fresh fake clients the demo actions run over.
 func FakeActionDeps() actions.Deps {
-	return actions.Deps{Connect: NewFakeConnect(), Registry: NewFakeRegistry()}
+	return NewFakes().Actions()
+}
+
+// Fakes is the demo's in-memory client pair. The --demo server registers the
+// real actions over this pair and hands the same pair to Controls; a reset
+// returns one room's state to the state the story starts from.
+type Fakes struct {
+	Connect  *FakeConnect
+	Registry *FakeRegistry
+}
+
+// NewFakes returns the demo's fake clients in their starting state.
+func NewFakes() *Fakes {
+	return &Fakes{Connect: NewFakeConnect(), Registry: NewFakeRegistry()}
+}
+
+// Actions returns the actions.Deps that run over these clients.
+func (f *Fakes) Actions() actions.Deps {
+	return actions.Deps{Connect: f.Connect, Registry: f.Registry}
+}
+
+// Reset puts one room's clients back to the state the story starts from: the
+// connector's task 0 is FAILED and the subject compatibility is BACKWARD.
+// Other rooms keep their own state.
+func (f *Fakes) Reset(roomID string) {
+	f.Connect.Reset(roomID)
+	f.Registry.Reset(roomID)
 }
 
 const (
