@@ -114,7 +114,10 @@ func toolPackages() []toolPackage {
 			return dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: w.Builder, Owners: w.Owners, Connect: readConnect(w), Kafka: w.Kafka})
 		}},
 		{name: "kafka tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
-			return kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners})
+			// kafka_throughput reads the watcher's group_lag samples from the
+			// room store when it has them (X6a); without, it says so.
+			samples, _ := w.Rooms.(clients.SampleReader)
+			return kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners, Samples: samples})
 		}},
 		{name: "debezium tools", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
 			return debeziumtools.Register(reg, debeziumtools.Deps{Connect: readConnect(w), Metrics: w.DebeziumMetrics, Owners: w.Owners})
