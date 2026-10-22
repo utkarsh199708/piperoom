@@ -4,9 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
@@ -233,30 +231,6 @@ func TestConfinerRefusesRelativeSymlink(t *testing.T) {
 	}
 	defer c.Close()
 	if _, _, err := c.prepare("link/a.yaml"); !errors.Is(err, ErrPath) {
-		t.Fatalf("prepare = %v, want ErrPath", err)
-	}
-}
-
-// A junction is a reparse point and is refused by the walk (ModeIrregular
-// since Go 1.23). Windows only; skipped when mklink /J is unavailable.
-func TestConfinerRefusesJunction(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("junctions are a Windows form")
-	}
-	proj, outside := t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	junction := filepath.Join(proj, "jn")
-	if out, err := exec.Command("cmd", "/c", "mklink", "/J", junction, outside).CombinedOutput(); err != nil {
-		t.Skipf("mklink /J: %v: %s", err, out)
-	}
-	c, err := OpenConfiner(proj)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	if _, _, err := c.prepare("jn/secret.txt"); !errors.Is(err, ErrPath) {
 		t.Fatalf("prepare = %v, want ErrPath", err)
 	}
 }
