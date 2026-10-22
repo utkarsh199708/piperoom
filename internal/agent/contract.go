@@ -105,6 +105,12 @@ type Alert struct {
 	// owners.yaml does not know). It decides which tools the room offers and
 	// the prompt's per-kind section (P4b). (P4)
 	PipelineKind string `json:"pipeline_kind,omitempty"`
+	// X4: Teams are owners.yaml's teams visible to the room's pipeline (its
+	// tenant's teams with a tenants: block), filled by the room service. A
+	// hypothesis's team must be one of their ids; the agent maps a cited
+	// change's ExternalChange.Service to the team whose Owns lists it. Nil
+	// when owners.yaml has no teams: the hypothesis then names no team. (X4)
+	Teams []Team `json:"teams,omitempty"`
 	// Mode is "" for an incident room and ModeSetup for a setup room
 	// (room.created.mode). In setup mode Raw holds the events.SetupRequest,
 	// PipelineID the pipeline being set up (no owners.yaml entry yet: the
@@ -114,6 +120,14 @@ type Alert struct {
 	// (docs/design/setup-agent.md §3.1). The untrusted-data wrapper, receipts
 	// and hypothesis grounding apply unchanged. (U)
 	Mode string `json:"mode,omitempty"`
+}
+
+// Team is one owners.yaml teams[] entry as the agent sees it: the id and the
+// service names it owns. The Slack channel is the room service's business
+// (room.team_paged), never the model's. (X4)
+type Team struct {
+	ID   string   `json:"id"`
+	Owns []string `json:"owns"`
 }
 
 // ModeSetup is Alert.Mode of a setup room; it equals events.RoomModeSetup. (U)

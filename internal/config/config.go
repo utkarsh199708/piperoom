@@ -103,6 +103,13 @@ type Config struct {
 	GenericAlertSecret   string // GENERIC_ALERT_SECRET (HMAC for /api/alerts/generic)
 	DefaultAlertPipeline string // DEFAULT_ALERT_PIPELINE: used when an alert names no pipeline
 
+	// X4: ChangesWebhookSecret signs POST /api/changes/webhook with the
+	// generic alert scheme (X-Piperoom-Signature: t=<unix ts>,v1=<hex
+	// HMAC-SHA256("<ts>.<body>")>, ±5 min). Comma-separated for rotation,
+	// like GENERIC_ALERT_SECRET. Empty = the route answers 401. Secret; never
+	// log it. Limits: ChangesWebhookMaxBodyBytes, ChangesWebhookPerMinute.
+	ChangesWebhookSecret string // CHANGES_WEBHOOK_SECRET
+
 	// Agent cost guard: at most this many agent runs working at once on THIS
 	// replica, across all its rooms; further rooms wait in a queue (round-robin
 	// across pipelines, FIFO within one). 0 or empty = default 3. With several
@@ -135,6 +142,8 @@ type Config struct {
 	WatchCheckTimeout string // PIPEROOM_WATCH_CHECK_TIMEOUT: per-check deadline, default 10s (max 10s = the pilot role's statement_timeout)
 	WatchCooldown     string // PIPEROOM_WATCH_COOLDOWN: quiet time after a watcher room is closed, default 60m
 	WatchMaxOpenRooms string // PIPEROOM_WATCH_MAX_OPEN_ROOMS: rooms the watcher keeps open at once; default 6, min 1 (F6; ParseWatchMaxOpenRooms)
+	// X3: how far ahead a forecast signal looks (ParseWatchForecast).
+	WatchForecastHorizon string // PIPEROOM_WATCH_FORECAST_HORIZON: Go duration, default 48h, 1h..168h
 
 	// Triage pass (F6): one bounded first look on a cheap model before the
 	// full investigation, outside the agent pool. Not PIPEROOM_TRIAGE_MODEL,
@@ -341,6 +350,7 @@ func Load() Config {
 		DatadogAlertToken:    get("DATADOG_ALERT_TOKEN", ""),
 		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
 		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
+		ChangesWebhookSecret: get("CHANGES_WEBHOOK_SECRET", ""), // X4
 
 		MaxAgents:        get("PIPEROOM_MAX_AGENTS", ""),
 		MaxAgentsGlobal:  get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
@@ -352,6 +362,8 @@ func Load() Config {
 		WatchCheckTimeout: get("PIPEROOM_WATCH_CHECK_TIMEOUT", DefaultWatchCheckTimeout),
 		WatchCooldown:     get("PIPEROOM_WATCH_COOLDOWN", DefaultWatchCooldown),
 		WatchMaxOpenRooms: get("PIPEROOM_WATCH_MAX_OPEN_ROOMS", DefaultWatchMaxOpenRooms),
+		// X3
+		WatchForecastHorizon: get("PIPEROOM_WATCH_FORECAST_HORIZON", DefaultWatchForecastHorizon),
 
 		TriagePass:        get("PIPEROOM_TRIAGE_PASS", DefaultTriagePass),
 		TriagePassModel:   get("PIPEROOM_TRIAGE_PASS_MODEL", DefaultTriagePassModel),
@@ -1001,6 +1013,53 @@ func parseWatchDuration(name, v, def string) (time.Duration, error) {
 	return d, nil
 }
 
+// ---- X3: watch sample history and forecasts ----
+
+// Sample history and forecast settings. Only the horizon is configurable:
+// the sample period, retention, fit window and fit threshold are fixed by the
+// X3a design, and the trends route and the web chart (X3d) assume them. (X3)
+const (
+	// WatchSampleInterval is the least time between two samples of one
+	// pipeline and metric, whatever PIPEROOM_WATCH_INTERVAL is.
+	WatchSampleInterval = 15 * time.Minute
+	// WatchSampleRetention is how long watch_samples rows are kept; it is
+	// also the largest ?days= of GET /api/pipelines/{pid}/trends.
+	WatchSampleRetention = 7 * 24 * time.Hour
+	// WatchForecastFitWindow is the history the least-squares line uses.
+	WatchForecastFitWindow = 24 * time.Hour
+	// WatchForecastMinR2 is the least goodness of fit that may fire: a noisy
+	// series says nothing about when it reaches a limit.
+	WatchForecastMinR2 = 0.6
+	// WatchForecastMinSamples is the fewest points a fit may use (2 h).
+	WatchForecastMinSamples = 8
+
+	DefaultWatchForecastHorizon = "48h"
+	MinWatchForecastHorizon     = time.Hour
+	// MaxWatchForecastHorizon: past a week a 24 h line says too little, and
+	// the web shows no ETA badge beyond 7 d.
+	MaxWatchForecastHorizon = 7 * 24 * time.Hour
+)
+
+// WatchForecast holds the typed forecast settings. (X3)
+type WatchForecast struct {
+	// Horizon: a forecast fires when the metric's ETA to its limit is less.
+	Horizon time.Duration
+}
+
+// ParseWatchForecast validates PIPEROOM_WATCH_FORECAST_HORIZON: a Go
+// duration from 1h to 168h; empty = 48h. The error names the env var. (X3)
+func ParseWatchForecast(c Config) (WatchForecast, error) {
+	h, err := parseWatchDuration("PIPEROOM_WATCH_FORECAST_HORIZON", c.WatchForecastHorizon, DefaultWatchForecastHorizon)
+	if err != nil {
+		return WatchForecast{}, err
+	}
+	if h < MinWatchForecastHorizon || h > MaxWatchForecastHorizon {
+		return WatchForecast{}, fmt.Errorf("config: PIPEROOM_WATCH_FORECAST_HORIZON=%q: must be between %s and %s",
+			c.WatchForecastHorizon, MinWatchForecastHorizon, MaxWatchForecastHorizon)
+	}
+	return WatchForecast{Horizon: h}, nil
+}
+
 // ---- F wave (F2, F6, F8, F12) ----
 
 // DefaultWatchMaxOpenRooms is the watcher's open-room cap (F6). It is not
@@ -1101,6 +1160,19 @@ const (
 	// MaxChangesPerPipeline is the row cap per pipeline the store keeps
 	// whatever the retention.
 	MaxChangesPerPipeline = 5000
+)
+
+// X4: limits of POST /api/changes/webhook (docs/api.md, External changes).
+const (
+	// ChangesWebhookMaxBodyBytes caps the body; a larger one is 413
+	// too_large and nothing is stored.
+	ChangesWebhookMaxBodyBytes = 4096
+	// ChangesWebhookPerMinute is how many verified requests one pipeline may
+	// send per minute; the next is 429 rate_limited.
+	ChangesWebhookPerMinute = 60
+	// VendorStatusPollInterval is how often an owners.yaml vendor_status_url
+	// is fetched; an unreachable feed logs one warning per hour.
+	VendorStatusPollInterval = 5 * time.Minute
 )
 
 // ParseChangesRetentionDays validates PIPEROOM_CHANGES_RETENTION_DAYS: a whole

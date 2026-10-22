@@ -30,6 +30,26 @@ Query-log and Kafka exception text are intentionally not returned because they
 can contain record values. FirstError contains only a generic error category or
 a numeric ClickHouse error code.
 
+## Kafka engine consumer group
+
+`EngineConsumerGroup` reads the Kafka consumer group a Kafka engine table
+consumes with (`EngineConsumerGroup(ctx, "analytics.orders_kafka")`). It runs
+`SHOW CREATE TABLE` and parses `kafka_group_name` from the statement; the
+topology draws that group as the sink's own consumer and `kafka_consumer_lag`
+reads its lag, so a stalled warehouse sink is not blamed on the pipeline's
+declared CDC group. The statement itself is never returned or logged: the same
+`SETTINGS` clause can name broker credentials.
+
+`system.kafka_consumers` cannot answer this: its columns name the engine table
+and a consumer id, its assignments and exceptions, but not the group id. The
+existing `SELECT` grant on the sink tables covers `SHOW CREATE TABLE` (verified
+against ClickHouse 25.8; the reader needs no extra grant). A table that does not
+exist is reported as not found; a table that is not a Kafka engine table, sets
+no `kafka_group_name`, or names a group that is not a plain Kafka group id
+(`[A-Za-z0-9._-]`, at most 255 characters) is reported as not supported, so
+there is no consumer to watch. The read runs under the same 10 second deadline
+and read-only session as every other query.
+
 ## Tables and behavior
 
 - Table names are table or database.table; column names must match

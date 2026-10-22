@@ -41,18 +41,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          # List every package, then ask `go test -list '^Fuzz'` in each one.
-          # The output is a JSON matrix of {pkg, fuzz} pairs consumed by the
-          # fuzz job's strategy.matrix.include below.
-          items=""
-          while IFS= read -r pkg; do
-            while IFS= read -r fuzz; do
-              [ -n "$fuzz" ] || continue
-              items="${items:+${items},}$(jq -nc --arg pkg "$pkg" --arg fuzz "$fuzz" '{pkg: $pkg, fuzz: $fuzz}')"
-            done < <(go test -list '^Fuzz' "$pkg" 2>/dev/null | grep -E '^Fuzz' || true)
-          done < <(go list ./...)
+          # One `go test -list` over every package (a build error fails the
+          # step instead of silently dropping that package's targets). Each
+          # package prints its Fuzz* names, then an `ok <pkg> ...` line, so the
+          # awk below pairs names with the package that follows them.
+          list="$(go test -list '^Fuzz' ./...)"
+          matrix="$(printf '%s\n' "$list" | awk '
+            /^Fuzz/ { names[n++] = $1; next }
+            /^ok[ \t]/ { for (i = 0; i < n; i++) printf "{\"pkg\":\"%s\",\"fuzz\":\"%s\"}\n", $2, names[i]; n = 0; next }
+            { n = 0 }
+          ' | jq -sc '.')"
 
-          matrix="[${items}]"
+          if [ "$(echo "$matrix" | jq 'length')" = "0" ]; then
+            echo "::error::no Fuzz* targets discovered; the discovery step is broken"
+            exit 1
+          fi
           echo "Discovered fuzz targets:"
           echo "$matrix" | jq -r '.[] | "  \(.pkg) -> \(.fuzz)"'
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"

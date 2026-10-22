@@ -7,14 +7,23 @@ package actions
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
 	"sync"
+	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
+	"piperoom/internal/redact"
 )
 
 // Action is one write operation.
@@ -92,6 +101,85 @@ type Tiered interface {
 	Tier(params json.RawMessage, class string) (string, error)
 }
 
+// ---- X2: the recovery action class ----
+
+// Action classes. Every action is a fix unless it implements Classed and says
+// otherwise; the values are the event constants (events.ActionClass*). (X2)
+const (
+	ClassFix      = events.ActionClassFix
+	ClassRecovery = events.ActionClassRecovery
+)
+
+// Classed is implemented by an action that is not a plain fix. A recovery
+// action re-emits data a fault lost (pg_resnapshot_rows, kafka_replay_range)
+// and must also implement Verifier: Registry.Register refuses it otherwise.
+// Class must not do I/O and returns the same value on every call. It is the
+// action's kind, unrelated to the endpoint class Tiered.Tier takes (local |
+// shared | production). (X2)
+type Classed interface {
+	Class() string
+}
+
+// ClassOf returns a's class: Class() when a implements Classed and says
+// something, ClassFix otherwise (every action from before X2). (X2)
+func ClassOf(a Action) string {
+	if c, ok := a.(Classed); ok {
+		if v := c.Class(); v != "" {
+			return v
+		}
+	}
+	return ClassFix
+}
+
+// Default poll schedule of a recovery verification: the agent calls Verify
+// first RecoveryVerifyFirstPoll after the step ran, doubles the wait up to
+// RecoveryVerifyMaxPoll, and stops when After is 0 or RecoveryVerifyTimeout
+// after the step ran (A4 may make them settings). (X2)
+const (
+	RecoveryVerifyFirstPoll = 15 * time.Second
+	RecoveryVerifyMaxPoll   = 60 * time.Second
+	RecoveryVerifyTimeout   = 10 * time.Minute
+)
+
+// Verifier is implemented by every recovery action: it measures, without
+// writing, how much of the gap the action set out to repair is still open.
+// The agent (X2c) calls it after the step's action.executed with ok: true,
+// once per poll of the schedule above, with the step's params and the time
+// the step ran (the action.executed event time), and writes one
+// agent.recovery_check per poll and one agent.verification with the
+// outcome (events.RecoveryOutcomeFor) at the end. The agent runs it, not the
+// room service, on the same action instance the executor runs (the agent's
+// Deps.Actions is the pipeline's registry, built over write clients when
+// write mode is on), so the rule is Verify's own: it calls only *Reader
+// client methods (the Reconciler counts of X1, CountReader, Kafka offsets)
+// and never a writer, whatever write mode says.
+//
+// Each call is bounded by the caller with a 10 s deadline and must stop when
+// ctx ends; the room's pipeline scope is in ctx, so a read outside it is
+// refused (tools.ErrOutOfScope). It reads counts and timestamps only and
+// returns counts only: never a row value or key, in VerifyResult or in an
+// error. An error wrapping clients.ErrNotSupported (the source or sink cannot
+// count) makes the outcome events.RecoveryUnverifiable; any other error is
+// one failed poll and the agent keeps polling until its timeout. (X2)
+type Verifier interface {
+	Verify(ctx context.Context, raw json.RawMessage, executedAt time.Time) (VerifyResult, error)
+}
+
+// VerifyResult is one Verify measurement. Before is the size of the gap the
+// action set out to repair, measured for the window or range in params (for
+// pg_resnapshot_rows the source rows the condition matches, the preview's
+// Count; for kafka_replay_range the records in the range) and the same on
+// every call. After is the part of Before not yet found at the target, 0 <=
+// After <= Before. Unit is events.RecoveryUnitRows or RecoveryUnitRecords.
+// Detail is one optional line of counts and names (table, topic, window), at
+// most 200 bytes, never values. (X2)
+type VerifyResult struct {
+	Before int64  `json:"before"`
+	After  int64  `json:"after"`
+	Unit   string `json:"unit"`
+	Detail string `json:"detail,omitempty"`
+}
+
 // secretKeySubstrings are the fragments that mark a config key as a
 // credential. The rule is shared, not configurable: a runner op, a validator
 // and a connector-config action must agree on what is secret.
@@ -124,6 +212,162 @@ func LooksSecret(key string) bool {
 	return false
 }
 
+// ---- Connector config: redaction, hash and changed keys (X3-0, X5-0) ----
+//
+// One scheme for the watcher's config_drift (X3b), the accept-config route
+// (X3b) and the stored config versions (X5c):
+//   - RedactConfig is the only form of a config that is stored or shown.
+//   - ConfigHash of that form is the config's public id: config_drift's
+//     old_hash/new_hash, accept-config's hash and a config version's hash.
+//     No secret value enters it, so it is never a guessing oracle.
+//   - DigestConfig is what the watcher keeps between polls: the hash and the
+//     redacted form, plus a keyed fingerprint per key that stays in the
+//     process, so ChangedConfigKeys also sees a change the redacted form
+//     hides (a secret value, or a password inside a JDBC URL).
+//   - events.SecretKeyChanged is the one placeholder for a changed credential
+//     key's name, in config_drift and in a config version's changed_keys.
+
+// RedactedValue replaces the value of a LooksSecret key in a stored config.
+// (X5)
+const RedactedValue = "<redacted>"
+
+// MaxConfigValueBytes cuts one redacted config value; a longer one ends in
+// "…" within the limit. (X5)
+const MaxConfigValueBytes = 4096
+
+// RedactConfig returns the form of a connector config that may be stored and
+// shown (X5c config versions): a LooksSecret key's value becomes
+// RedactedValue, every other value passes redact.Text (so a password inside a
+// JDBC URL is masked) and is cut at MaxConfigValueBytes on a rune boundary.
+// It never modifies cfg and returns a non-nil map. Apply it once, to the raw
+// config: redact.Text is not idempotent (a masked "[redacted 16]" may be
+// masked again), so the watcher (X3b) redacts (DigestConfig does) and hands
+// ConfigDigest.Redacted on, and the store (X5c) keeps it as given. (X5)
+func RedactConfig(cfg map[string]string) map[string]string {
+	out := make(map[string]string, len(cfg))
+	for k, v := range cfg {
+		if LooksSecret(k) {
+			out[k] = RedactedValue
+			continue
+		}
+		v, _ = redact.Text(v)
+		out[k] = cutValue(v)
+	}
+	return out
+}
+
+// cutValue cuts v to at most MaxConfigValueBytes bytes, ending in "…",
+// without splitting a rune.
+func cutValue(v string) string {
+	if len(v) <= MaxConfigValueBytes {
+		return v
+	}
+	const ell = "…"
+	n := MaxConfigValueBytes - len(ell)
+	for n > 0 && !utf8.RuneStart(v[n]) {
+		n--
+	}
+	return v[:n] + ell
+}
+
+// ConfigHash is the id of a redacted config: the lowercase hex SHA-256 of its
+// JSON encoding (encoding/json writes map keys sorted, so key order never
+// matters; nil and empty are the same). Pass RedactConfig's result: hashing a
+// raw config would make the hash a guessing oracle for a secret value. Two
+// configs that differ only where RedactConfig masks (a secret value) have the
+// same hash. (X3, X5)
+func ConfigHash(redacted map[string]string) string {
+	if redacted == nil {
+		redacted = map[string]string{}
+	}
+	// json.Marshal of a map[string]string cannot fail: strings always encode
+	// (invalid UTF-8 becomes U+FFFD), so there is no error to report.
+	b, _ := json.Marshal(redacted)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// ConfigDigest is what the watcher keeps of a connector config between two
+// polls (X3b), in memory only: Hash is ConfigHash(Redacted), the config's
+// public id; Redacted is RedactConfig of the raw config, the form a config
+// version stores (X5c). The per-key fingerprints are unexported, keyed with a
+// random per-process key (HMAC-SHA256), never marshalled, printed or logged
+// (String, GoString and LogValue show Hash only), and comparable only between
+// digests of the same process. Build one with DigestConfig. (X3, X5)
+type ConfigDigest struct {
+	Hash     string            `json:"hash"`
+	Redacted map[string]string `json:"-"`
+	keys     map[string][sha256.Size]byte
+}
+
+// String returns the hash only, so a digest in a format verb or a log line
+// never shows a fingerprint.
+func (d ConfigDigest) String() string { return d.Hash }
+
+// GoString is String, for %#v.
+func (d ConfigDigest) GoString() string { return d.Hash }
+
+// LogValue is the hash only, for log/slog.
+func (d ConfigDigest) LogValue() slog.Value { return slog.StringValue(d.Hash) }
+
+// fingerprintKey keys ConfigDigest's per-key fingerprints. It is random per
+// process and never leaves it, so a fingerprint cannot be checked against a
+// guessed value elsewhere. Set once, never changed.
+var fingerprintKey = sync.OnceValue(func() []byte {
+	k := make([]byte, 32)
+	_, _ = rand.Read(k) // never fails (crypto/rand: it crashes the program instead)
+	return k
+})
+
+// DigestConfig reduces cfg (clients.ConnectReader.Config) to a ConfigDigest.
+// It keeps no raw value. (X3, X5)
+func DigestConfig(cfg map[string]string) ConfigDigest {
+	red := RedactConfig(cfg)
+	d := ConfigDigest{Hash: ConfigHash(red), Redacted: red, keys: make(map[string][sha256.Size]byte, len(cfg))}
+	key := fingerprintKey()
+	for k, v := range cfg {
+		m := hmac.New(sha256.New, key)
+		// Length prefixes keep "a"+"bc" and "ab"+"c" apart.
+		fmt.Fprintf(m, "%d:%s%d:%s", len(k), k, len(v), v)
+		var fp [sha256.Size]byte
+		copy(fp[:], m.Sum(nil))
+		d.keys[k] = fp
+	}
+	return d
+}
+
+// ChangedConfigKeys returns the names of the keys added, removed or changed
+// from old to cur, sorted and without repeats, with every name LooksSecret
+// matches replaced by events.SecretKeyChanged (once, however many). Names
+// only, never a value; not nil, so none encodes as []. It compares the raw
+// values' fingerprints, so it also reports a change that keeps Hash (a
+// secret value: then old.Hash == cur.Hash and the result holds
+// events.SecretKeyChanged). The config_drift signal keeps the first
+// events.MaxChangedKeys and counts the rest in KeysOmitted; a config version
+// keeps up to clients.MaxConfigKeys. (X3, X5)
+func ChangedConfigKeys(old, cur ConfigDigest) []string {
+	var names []string
+	for k, fp := range old.keys {
+		if c, ok := cur.keys[k]; !ok || c != fp {
+			names = append(names, k)
+		}
+	}
+	for k := range cur.keys {
+		if _, ok := old.keys[k]; !ok {
+			names = append(names, k)
+		}
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if LooksSecret(n) {
+			n = events.SecretKeyChanged
+		}
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
 // Registry holds actions in registration order.
 type Registry struct {
 	mu    sync.RWMutex
@@ -136,13 +380,24 @@ func NewRegistry() *Registry {
 	return &Registry{byKey: map[string]Action{}}
 }
 
-// Register adds a. It fails on an empty or duplicate name.
+// Register adds a. It fails on an empty or duplicate name, an unknown class,
+// and a recovery action that does not implement Verifier (X2): a repair that
+// cannot be counted afterwards is never registered.
 func (r *Registry) Register(a Action) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := a.Name()
 	if name == "" {
 		return errors.New("actions: empty action name")
+	}
+	switch class := ClassOf(a); class {
+	case ClassFix:
+	case ClassRecovery:
+		if _, ok := a.(Verifier); !ok {
+			return fmt.Errorf("actions: recovery action %q does not implement Verifier", name)
+		}
+	default:
+		return fmt.Errorf("actions: action %q has unknown class %q", name, class)
 	}
 	if _, dup := r.byKey[name]; dup {
 		return fmt.Errorf("actions: duplicate action %q", name)

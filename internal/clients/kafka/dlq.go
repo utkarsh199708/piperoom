@@ -20,10 +20,13 @@ import (
 
 var _ clients.DLQReader = (*Client)(nil)
 
-// knownConnectErrorHeaders are the headers Kafka Connect's dead letter queue
-// reporter writes. Any other key under the prefix was not written by Connect,
-// so it is dropped rather than passed on as untrusted text.
-var knownConnectErrorHeaders = map[string]bool{
+// knownDLQHeaders are the headers PeekDLQ returns. Kafka Connect's dead
+// letter queue reporter writes the __connect.errors.* context headers; the
+// reject-rule header is Piperoom's own (a value-free rule name, e.g.
+// status_enum, written by the consumer that rejected the record). Any other
+// key was written by neither, so it is dropped rather than passed on as
+// untrusted text.
+var knownDLQHeaders = map[string]bool{
 	connectErrorsPrefix + "topic":                true,
 	connectErrorsPrefix + "partition":            true,
 	connectErrorsPrefix + "offset":               true,
@@ -34,13 +37,19 @@ var knownConnectErrorHeaders = map[string]bool{
 	connectErrorsPrefix + "exception.class.name": true,
 	headerMessage:                                true,
 	headerStacktrace:                             true,
+	headerRejectRule:                             true,
 }
 
 const (
-	// connectErrorsPrefix is the only header namespace PeekDLQ returns.
+	// connectErrorsPrefix is the Connect header namespace PeekDLQ returns.
 	connectErrorsPrefix = "__connect.errors."
 	headerStacktrace    = connectErrorsPrefix + "exception.stacktrace"
 	headerMessage       = connectErrorsPrefix + "exception.message"
+	// headerRejectRule is Piperoom's own DLQ header: the name of the rule that
+	// rejected the record, without the rejected value. It is deliberately
+	// outside Connect's prefix so dlq_peek can show it in every header mode,
+	// the most restrictive included.
+	headerRejectRule = "x-piperoom-reject-rule"
 
 	defaultPeekLimit = 5
 	maxPeekLimit     = 20
@@ -147,8 +156,9 @@ func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][
 // topic the caller named is worth reporting). A topic with no records returns
 // an empty slice and no error.
 //
-// Only __connect.errors.* headers are returned; neither key nor value ever
-// leaves this function. The fetch does bring record bytes into the process
+// Only the known DLQ headers are returned (Connect's __connect.errors.*
+// context headers and Piperoom's x-piperoom-reject-rule); neither key nor
+// value ever leaves this function. The fetch does bring record bytes into the process
 // for a moment (Kafka has no headers-only fetch). Known limits: the read
 // stops at 8 MiB of record bytes and returns what it has, with no flag; if
 // the deadline cuts the read short and at least one record arrived, those
@@ -416,14 +426,15 @@ func dlqRecordFrom(topic string, r *kgo.Record) clients.DLQRecord {
 	}
 }
 
-// connectErrorHeaders keeps only the known __connect.errors.* headers. Header values
+// connectErrorHeaders keeps only the known DLQ headers (Connect's
+// __connect.errors.* ones and Piperoom's reject rule). Header values
 // are written by whoever produced the record, so they are untrusted text:
 // control characters are removed, the value is capped, the stack trace is cut
-// to its first line, and message and trace line are redacted.
+// to its first line, and message, trace line and reject rule are redacted.
 func connectErrorHeaders(hs []kgo.RecordHeader) map[string]string {
 	var out map[string]string
 	for _, h := range hs {
-		if !knownConnectErrorHeaders[h.Key] {
+		if !knownDLQHeaders[h.Key] {
 			continue
 		}
 		v := string(h.Value)
@@ -431,6 +442,12 @@ func connectErrorHeaders(hs []kgo.RecordHeader) map[string]string {
 		case headerStacktrace:
 			v = dlq.RedactMessage(cleanHeader(firstNonEmptyLine(v)))
 		case headerMessage:
+			v = dlq.RedactMessage(cleanHeader(v))
+		case headerRejectRule:
+			// A rule name is value-free by construction, but the writer is
+			// untrusted: a writer that puts the rejection text (or a record
+			// value) here must not carry it out. Redaction is idempotent on a
+			// plain name, so "status_enum" is unchanged.
 			v = dlq.RedactMessage(cleanHeader(v))
 		default:
 			v = cleanHeader(v)

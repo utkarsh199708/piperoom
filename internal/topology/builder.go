@@ -215,9 +215,9 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	var hops []clickhouseHopSpec
 	switch {
 	case p.UsesSinkBlocks():
-		hops = explicitClickhouseHopSpecs(p, fp.topics)
+		hops = explicitClickhouseHopSpecs(p, fp.topics, info)
 	case whKind == "clickhouse":
-		hops = clickhouseHopSpecs(p, fp.topics)
+		hops = clickhouseHopSpecs(p, fp.topics, info)
 	}
 	b.wireClickhouseHops(&fp, hops, p.UsesSinkBlocks())
 	dlqs := discoverDLQs(p, info)
@@ -268,22 +268,6 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
 		}
 	}
-	// ClickHouse hop nodes sit between the topic and the sink in data-flow
-	// order, so they are appended before the group and sink nodes (which keeps
-	// the engine listed before the sink it feeds).
-	for _, h := range hops {
-		if h.topic == "" && !p.UsesSinkBlocks() {
-			continue
-		}
-		g.Nodes = append(g.Nodes,
-			b.kafkaEngineNode(h.engine, info, p.UsesSinkBlocks()),
-			b.materializedViewNode(h.view),
-		)
-	}
-	th := ThresholdsFor(b.t, p)
-	for _, d := range dlqs {
-		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
-	}
 	// The pipeline's topics, for the group lag: the ones derived from the
 	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
 	// the filter still knows them while Connect is down.
@@ -295,6 +279,27 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 		for _, t := range p.SourceTables {
 			ownTopics[p.TopicPrefix+"."+t] = true
 		}
+	}
+	// ClickHouse hop nodes sit between the topic and the sink in data-flow
+	// order, so they are appended before the group and sink nodes (which keeps
+	// the engine listed before the sink it feeds). The engine's own consumer
+	// group, when the warehouse reported one, comes first: topic -> group ->
+	// engine. A group owners.yaml already declares is not repeated.
+	for _, h := range hops {
+		if h.topic == "" && !p.UsesSinkBlocks() {
+			continue
+		}
+		if h.group != "" && !h.declared {
+			g.Nodes = append(g.Nodes, b.kafkaEngineGroupNode(h.engine, info.engineGroups[h.engine], ownTopics))
+		}
+		g.Nodes = append(g.Nodes,
+			b.kafkaEngineNode(h.engine, info, p.UsesSinkBlocks()),
+			b.materializedViewNode(h.view),
+		)
+	}
+	th := ThresholdsFor(b.t, p)
+	for _, d := range dlqs {
+		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
 	}
 	for _, gr := range p.ConsumerGroupNames() {
 		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))

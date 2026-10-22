@@ -25,10 +25,11 @@ const (
 	dlqDefaultLimit = 5
 	dlqMaxLimit     = 20
 
-	// headerPrefix is the only header namespace the tool looks at. The client
-	// already drops everything else; the tool checks again, because a reader
-	// other than the real client (a fake, a future one) must not be able to
-	// carry an application header into a summary.
+	// headerPrefix is the Connect header namespace the tool reads with
+	// connectHeaders (plus the single reject-rule header, read by rejectRule).
+	// The client already drops everything else; the tool checks again, because
+	// a reader other than the real client (a fake, a future one) must not be
+	// able to carry an application header into a summary.
 	headerPrefix = "__connect.errors."
 )
 
@@ -46,6 +47,13 @@ const (
 	hExcTrace   = "exception.stacktrace"
 )
 
+// hRejectRule is Piperoom's own DLQ header: the name of the rule that
+// rejected the record ("status_enum"), never the rejected value. It sits
+// outside Connect's prefix, so it is read with its own lookup rather than
+// connectHeaders, and it is shown in every header mode: a rule name is fixed
+// vocabulary, not record text (KAN-412).
+const hRejectRule = "x-piperoom-reject-rule"
+
 // Header values are written by whoever produced the DLQ record, so each field
 // is checked against the narrowest shape its real values have. A value that
 // fails is shown as "?": the fixed-vocabulary promise holds even when the
@@ -57,6 +65,11 @@ var (
 	// identRE is a plain name, for a connector name when there is no
 	// pipeline to compare it with.
 	identRE = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.\-]{0,119}$`)
+	// ruleRE is a reject-rule name: an identifier of at most 64 characters,
+	// starting with a letter. No spaces, quotes, angle brackets or dots, so a
+	// record value (a card number, an e-mail address, markup) cannot pass for a
+	// rule name and the most restrictive header mode stays free text (KAN-412).
+	ruleRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
 )
 
 const (
@@ -123,6 +136,26 @@ func stageName(v string) string {
 	return "?"
 }
 
+// rejectRule returns the reject-rule name of one record, or "" when the record
+// carries no such header (absent is not an error: a Connect sink writes none).
+// The writer is untrusted, so the value is redacted with the same rule as an
+// exception message and then checked against ruleRE. A value that is not a
+// plain name is shown as "?", so a writer that puts record text in this header
+// cannot bring free text into a counts_only summary.
+func rejectRule(h map[string]string) string {
+	v := strings.TrimSpace(h[hRejectRule])
+	if v == "" {
+		return ""
+	}
+	// The client redacts already; redacting again is idempotent and keeps a
+	// reader that did not redact from leaking record bytes.
+	v = dlq.RedactMessage(v)
+	if !ruleRE.MatchString(v) {
+		return "?"
+	}
+	return v
+}
+
 type dlqPeek struct{ d Deps }
 
 func (t *dlqPeek) Name() string     { return "dlq_peek" }
@@ -140,7 +173,7 @@ func (t *dlqPeek) InputSchema() map[string]any {
 	})
 }
 func (t *dlqPeek) Description() string {
-	return "Peeks a dead-letter topic: record count, arrival rate and, for the newest records, the Kafka Connect error headers (exception class, stage, original topic/partition/offset, connector and task; exception messages only when the pipeline opts in). Never record values or keys. Give `connector` for a sink's DLQ or `topic` for a DLQ declared in owners.yaml."
+	return "Peeks a dead-letter topic: record count, arrival rate and, for the newest records, the Kafka Connect error headers (exception class, stage, original topic/partition/offset, connector and task; exception messages only when the pipeline opts in) plus the value-free reject rule (x-piperoom-reject-rule, e.g. status_enum) when the consumer writes one. Never record values or keys. Give `connector` for a sink's DLQ or `topic` for a DLQ declared in owners.yaml."
 }
 
 type dlqPeekInput struct {
@@ -502,9 +535,20 @@ func (t *dlqPeek) summary(topic string, d dlqData, recs []clients.DLQRecord, wit
 		}
 		fmt.Fprintf(&sb, "\nexception classes in the sample of %d: %s", len(recs), strings.Join(parts, ", "))
 	}
+	hasRule := false
+	for _, r := range recs {
+		if rule := rejectRule(r.Headers); rule != "" && rule != "?" {
+			hasRule = true
+			break
+		}
+	}
 	switch d.HeaderMode {
 	case owners.DLQHeadersCountsOnly:
-		sb.WriteString("\nheaders: counts_only (owners.yaml watch.dlq_peek.headers); positions and timestamps only")
+		if hasRule {
+			sb.WriteString("\nheaders: counts_only (owners.yaml watch.dlq_peek.headers); positions, timestamps and the reject-rule name")
+		} else {
+			sb.WriteString("\nheaders: counts_only (owners.yaml watch.dlq_peek.headers); positions and timestamps only")
+		}
 	case owners.DLQHeadersMessages:
 		sb.WriteString("\nheaders: messages (owners.yaml); exception messages are redacted and capped")
 	default:
@@ -528,9 +572,15 @@ func (t *dlqPeek) summary(topic string, d dlqData, recs []clients.DLQRecord, wit
 
 // recordLine renders one record for the mode. In counts_only it holds the
 // partition, offset and timestamp. In classes it adds header values that pass
-// identRE (or are numbers). Messages mode adds the redacted free text.
+// identRE (or are numbers). Messages mode adds the redacted free text. The
+// value-free reject rule (x-piperoom-reject-rule) is shown in every mode,
+// counts_only included, because naming the rule that fired is the answer the
+// model needs and a rule name is not record text (KAN-412).
 func recordLine(r clients.DLQRecord, mode string, sc tools.Scope) string {
 	line := fmt.Sprintf("p%d@%d %s", r.Partition, r.Offset, r.Timestamp.UTC().Format(time.RFC3339))
+	if rule := rejectRule(r.Headers); rule != "" {
+		line += " rule=" + rule
+	}
 	if mode == owners.DLQHeadersCountsOnly {
 		return line
 	}
