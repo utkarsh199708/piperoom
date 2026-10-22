@@ -535,9 +535,20 @@ func (t *dlqPeek) summary(topic string, d dlqData, recs []clients.DLQRecord, wit
 		}
 		fmt.Fprintf(&sb, "\nexception classes in the sample of %d: %s", len(recs), strings.Join(parts, ", "))
 	}
+	hasRule := false
+	for _, r := range recs {
+		if rule := rejectRule(r.Headers); rule != "" && rule != "?" {
+			hasRule = true
+			break
+		}
+	}
 	switch d.HeaderMode {
 	case owners.DLQHeadersCountsOnly:
-		sb.WriteString("\nheaders: counts_only (owners.yaml watch.dlq_peek.headers); positions and timestamps only")
+		if hasRule {
+			sb.WriteString("\nheaders: counts_only (owners.yaml watch.dlq_peek.headers); positions, timestamps and the reject-rule name")
+		} else {
+			sb.WriteString("\nheaders: counts_only (owners.yaml watch.dlq_peek.headers); positions and timestamps only")
+		}
 	case owners.DLQHeadersMessages:
 		sb.WriteString("\nheaders: messages (owners.yaml); exception messages are redacted and capped")
 	default:

@@ -25,8 +25,8 @@ func TestDLQPeekRejectRuleInEveryMode(t *testing.T) {
 		wantNot []string
 	}{
 		{"counts_only",
-			[]string{"headers: counts_only", "p1@412 2026-10-13T09:58:00Z rule=status_enum"},
-			[]string{"gift", "hunter2", "unknown status", "msg=", "stage="}},
+			[]string{"headers: counts_only", "positions, timestamps and the reject-rule name", "p1@412 2026-10-13T09:58:00Z rule=status_enum"},
+			[]string{"gift", "hunter2", "unknown status", "msg=", "stage=", "positions and timestamps only"}},
 		{"classes",
 			[]string{"headers: classes", "p1@412 2026-10-13T09:58:00Z rule=status_enum org.apache.kafka.connect.errors.DataException stage=VALUE_CONVERTER"},
 			[]string{"gift", "hunter2", "unknown status", "msg="}},
@@ -186,5 +186,24 @@ func TestRejectRuleShape(t *testing.T) {
 	}
 	if got := rejectRule(nil); got != "" {
 		t.Errorf("rejectRule(nil) = %q, want empty", got)
+	}
+}
+
+// Without a reject-rule header the counts_only caption stays byte-identical.
+func TestDLQPeekCountsOnlyCaptionWithoutRule(t *testing.T) {
+	rec := clients.DLQRecord{
+		Topic: "orders-dlq", Partition: 0, Offset: 9, Timestamp: ts(5),
+		Headers: hdr("org.apache.kafka.connect.errors.DataException", `unknown status "gift"`),
+	}
+	k := &fakeDLQ{fakeKafka: &fakeKafka{}, offsets: okOffsets(), recs: []clients.DLQRecord{rec}}
+	r, err := peekTool(t, dlqDeps(t, "counts_only", k, defaultCfgs())).Run(scoped(), json.RawMessage(`{"connector":"pg-orders-sink"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Summary, "positions and timestamps only") {
+		t.Fatalf("summary lost the old counts_only caption:\n%s", r.Summary)
+	}
+	if strings.Contains(r.Summary, "reject-rule name") {
+		t.Fatalf("summary claims a rule is shown without one:\n%s", r.Summary)
 	}
 }
