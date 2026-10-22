@@ -157,6 +157,9 @@ type Proposal struct {
 	// to it when the snapshot is folded. The auto-approve policy never
 	// schedules a driver's proposal (autoapprove.go). (P3c)
 	Origin string `json:"origin"`
+	// Class is proposal.created.class (X2/X6): "recovery" or "performance";
+	// "" (omitted) reads as "fix", so a fix proposal marshals as before.
+	Class string `json:"class,omitempty"`
 	// sched is the fold of the proposal's policy countdown (autoapprove.go).
 	sched schedState
 }
@@ -801,6 +804,9 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			FallbackLayers: append([]string{}, p.FallbackLayers...),
 			Origin:         proposalOrigin(p.Origin),
 		}
+		if p.Class != events.ActionClassFix {
+			np.Class = p.Class
+		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv
 			rest := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews))
@@ -1035,8 +1041,6 @@ func isLastStep(proposals []Proposal, proposalID string, stepIndex int) bool {
 	return false
 }
 
-// setApproval records a decision on a proposal's approvals map without
-// mutating a shared map.
 // foldStageStarted folds a proposal.stage_started into its open proposal:
 // the stage runs until a proposal.staged (or its expires_at, which the room
 // view and the stage route read), and it counts toward the per-proposal cap.
@@ -1071,6 +1075,8 @@ func foldStaged(proposals []Proposal, p events.ProposalStagedPayload) {
 	}
 }
 
+// setApproval records a decision on a proposal's approvals map without
+// mutating a shared map.
 func setApproval(proposals []Proposal, proposalID, layer, decision string) {
 	for i := range proposals {
 		if proposals[i].ProposalID == proposalID {
