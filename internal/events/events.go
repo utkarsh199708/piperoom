@@ -93,6 +93,12 @@ const (
 	// cancelled (POST /api/proposals/{pid}/cancel). Counted like
 	// proposal.scheduled. (P2)
 	ProposalCancelled Type = "proposal.cancelled"
+	// ProposalStaged records a dry run of a proposal against the pipeline's
+	// staging connections (POST /api/proposals/{pid}/stage, driver only):
+	// every step's actions.Stager result. Actor: the driver who asked.
+	// Informational like proposal.previewed: not part of params_hash, never
+	// an approval, and a proposal may have none or several. (X8)
+	ProposalStaged Type = "proposal.staged"
 
 	// HypothesisVerdict is a person's confirm or dispute of the agent's
 	// current hypothesis (POST /api/rooms/{id}/hypothesis). HypothesisSeq is
@@ -889,6 +895,36 @@ type ProposalPreviewedPayload struct {
 	ProposalID string        `json:"proposal_id"`
 	Steps      []StepPreview `json:"steps"`
 	At         time.Time     `json:"at"`
+}
+
+// StageResult is what one step did on staging (actions.Stager). Applied says
+// the write went through on the staging systems; Healthy that the staged
+// target was healthy afterwards (the step's own read-back, e.g. task RUNNING).
+// Detail is one line, redacted, ≤ 500 bytes. DurationMS is the wall time of
+// the stage, apply and read-back. (X8)
+type StageResult struct {
+	Applied    bool   `json:"applied"`
+	Healthy    bool   `json:"healthy"`
+	Detail     string `json:"detail"`
+	DurationMS int64  `json:"duration_ms"`
+}
+
+// StepStage is one step's stage result, or the reason there is none (the
+// action is not a Stager, the stage failed). (X8)
+type StepStage struct {
+	StepIndex int          `json:"step_index"`
+	Result    *StageResult `json:"result,omitempty"`
+	Error     string       `json:"error,omitempty"` // redacted, ≤ 500 bytes
+}
+
+// ProposalStagedPayload carries every step's stage result, in step order.
+// ParamsHash is the proposal's params_hash the stage ran, so a client can
+// tell that the staged proposal is the one waiting for approval. (X8)
+type ProposalStagedPayload struct {
+	ProposalID string      `json:"proposal_id"`
+	ParamsHash string      `json:"params_hash,omitempty"`
+	Steps      []StepStage `json:"steps"`
+	At         time.Time   `json:"at"`
 }
 
 // VerificationCheck is one read-tool check of a layer after a fix. (F4)

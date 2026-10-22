@@ -640,6 +640,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve; the caller must be allowed the layer as for `approve`, so the room's driver may reject a `fallback_layers` entry (P2b-3b), checked when the event is appended |
 | POST | `/api/proposals/{pid}/approve-all` | `{params_hash, confirm?}` | `[Event]` (the `approval.given` events, in `required_layers` order) | P0 item 4; server P2b. The caller must be allowed **every** `required_layers` entry (owner or backup, `PIPEROOM_SOLO_USER`, or the driver for a `fallback_layers` entry), else `403 not_layer_owner` naming the first layer the caller lacks, and nothing is recorded. Same `params_hash` rule as `approve` (`409 params_mismatch`); in solo mode `confirm: "<pipeline_id>/*"` once per call (`400 validation` otherwise). Then one `approval.given` per `required_layers` entry not yet approved, in that order, each with its `grant`, under one lock, and the steps run as after the last `approve`. Stops a pending policy countdown without a `proposal.cancelled`. Open rooms only (`409 room_closed`); a proposal already decided (rejected, or every layer approved) `409 already_decided` |
 | POST | `/api/proposals/{pid}/cancel` | `{reason?}` | `Event` (`proposal.cancelled`) | P0 item 4; server P2b. The driver or an owner of any `required_layers` entry (`403 not_layer_owner` otherwise; viewers `403 viewer`); only while a `proposal.scheduled` of the proposal is pending (`409 not_scheduled` otherwise, also after the policy ran); a pending countdown the room view hides (`run_at` more than 45 s past) is still accepted. Cancellable until the policy starts (its first approval is logged); a cancel after `cancel_until` still wins if it lands first. `reason` ≤ 500 characters, typed-text rule. The proposal stays open for manual approval |
+| POST | `/api/proposals/{pid}/stage` | `{}` | `Event` (`proposal.staged`) | X8 (X8-0 contract; server X8b, A5; staging clients X8a, A4 wiring and A3 owners). Runs every step of an open proposal against the pipeline's `staging:` connections (`actions.Stager`), see Staging below. **Driver only** (`403 not_driver`; viewers `403 viewer`); open rooms only (`409 room_closed`); the proposal must be open, not executed or rejected (`409 already_decided`); the pipeline must have a `staging:` block (`400 no_staging`); one stage per proposal at a time (`409 stage_in_progress`); write mode off `409 write_mode_off` (staging writes, on staging systems). Never in a shadow or setup room (`400 validation`). Never an approval: no proposal state, no `params_hash` and no policy countdown changes. Production clients are never used |
 | POST | `/api/rooms/{id}/proposals` | `{title, risk, rollback, steps: [{action, layer, params, description?}]}` | `Event` (`proposal.created`, `origin: "driver"`) | P0 item 5; server P3c. A driver-authored fix: driver only (`403 not_driver`), open rooms only (`409 room_closed`), never in a shadow room (`400 validation`: a shadow room has no proposals). Validated exactly like an agent proposal: a registered action, `layer` equal to the action's `Layer()`, `Validate`, `CheckScope` against the room's pipeline, `params_hash`, then the preview (`proposal.previewed`); a refused step answers `400 validation` naming the step index. At most 5 open driver-authored proposals per room (`429 too_many_proposals`). The agent hears of it (`HumanInput` kind `proposal_created`) and verifies after it runs (`proposal_executed`). The auto-approve policy never applies to it. There is no free-form command: only registered actions with their params |
 | GET | `/api/actions` | – | `[{name, layer, describe, params_schema, preview}]` | P0 item 5; server P3c, web P3d. The write actions the agent proposes from (the full registry, also when write mode is off), in registration order, for any logged-in member (viewers included). `describe` is the action's `Describe()`, `params_schema` its `ParamsSchema()` (a JSON Schema object), `preview` whether it implements `actions.Preview`. Never includes client state, connection settings or credentials. The P3d form is generated from `params_schema` |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
@@ -976,6 +977,33 @@ A room sees the teams of its pipeline's tenant (all teams without a `tenants:` b
 `agent.hypothesis.team` only to one of them; the page route refuses any other id as unknown. The page posts to the
 team's `slack_channel` with the bridge's bot token: that channel sees the hypothesis text, the cited change's title
 and URL, the cited step numbers and the room link (`docs/pilot/data-handling.md`, Slack).
+
+### Staging (X8-0; owners A3 and wiring A4 (X8a), server A5 (X8b), devctl profile A1 (X8d))
+
+A fix can run on staging systems before anyone approves it for production. Additive: a pipeline without a `staging:`
+block, and an action without `actions.Stager`, behave exactly as before.
+
+**`owners.yaml` `staging:`** per pipeline, next to `connections:` (validated by A3 in `internal/owners`):
+```yaml
+pipelines:
+  - id: orders
+    staging:
+      connections:              # the same keys and {env|file|value} references as connections:
+        connect_url: {value: "http://connect-staging:8083"}
+        schema_registry_url: {env: STAGING_SR_URL}
+```
+A host-naming key (`source_db_url`, `source_db_write_url`, `warehouse_db_url`, `kafka_brokers`, `connect_url`,
+`schema_registry_url`) whose resolved endpoint equals a production endpoint of **any** pipeline is a load error that
+names the staging key and the production pipeline and key (the `owners.Overlap` host comparison). A key absent from
+`staging.connections` has no staging system: a step that needs it is `not stageable`, never staged on production.
+
+**`proposal.staged {proposal_id, params_hash?, steps: [{step_index, result?: {applied, healthy, detail,
+duration_ms}, error?}], at}`** (actor: the driver who called `POST /api/proposals/{pid}/stage`). Wiring builds an
+`actions.Stager` with staging clients only. Each step goes through `Validate` and `CheckScope` against the room's
+pipeline first. Steps run in order and stop at the first that is not `applied`. A step whose action is not a `Stager`
+gets `error: "not stageable"`. `applied` means the write went through on staging; `healthy` means the staged target
+read back healthy. `detail` is one redacted line (≤ 500 bytes), and `false`, `0` and `""` are on the wire. The event
+is informational like `proposal.previewed`: not part of `params_hash`, never an approval, zero or more per proposal.
 
 ### Spend limits (design `docs/design/cost.md`)
 

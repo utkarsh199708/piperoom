@@ -77,6 +77,24 @@ type (
 	DryRunResult  = events.DryRunResult
 )
 
+// Stager is implemented by an action that can run its step against the
+// pipeline's staging systems (owners.yaml staging: connections) instead of
+// production, then read back whether the staged target is healthy. Wiring
+// builds a Stager with the staging clients only (X8a): Stage never holds or
+// reaches a production client, and an action that would have to is not a
+// Stager. The room service calls it per step for POST
+// /api/proposals/{pid}/stage, after Validate and CheckScope, with the
+// pipeline scope in ctx, and stores the results on proposal.staged. A
+// staging run is never an approval and never counts as Execute. Stage bounds
+// itself with its own deadline, as Execute does. An action without Stager is
+// unaffected: its step is reported "not stageable". (X8)
+type Stager interface {
+	Stage(ctx context.Context, params json.RawMessage) (StageResult, error)
+}
+
+// StageResult is the event type, like PreviewResult.
+type StageResult = events.StageResult
+
 // Receipted is implemented by an action whose Execute can hand back a receipt
 // of what was done: the setup actions, which forward one typed op to the
 // paired runner and get its events.SetupReceipt back. The executor prefers
