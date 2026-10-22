@@ -42,17 +42,20 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // pipeline map's retired marker and a connector Connect no longer lists as
 // the retirement evidence, so a dead slot behind a retired connector gets the
 // drop while a stopped connector without that evidence still gets the resume
-// checks; the wording stays inside the 1335-word ceiling.
+// checks. KAN-406 moved it a sixth time: a PAUSED or STOPPED connector is the
+// incident unless a record shows a person paused it, replacing the C7 rule
+// that an unexplained pause was deliberate; the wording stays inside the
+// 1335-word ceiling.
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "5d900b46db55b216a9fd79fc644f613357d702af31a18c3c69e0ba2428931b46"
+const cdcPromptSHA256 = "2f9aca65c68becdaa9de0f117e8acb27f57341636bd7cd56c5e39e3a72b23dad"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it.
-const cdcPromptWriteOffSHA256 = "dd628686b24ce253424ad60ba23620dbb893c90e7b606c3056c8c00097ca1761"
+const cdcPromptWriteOffSHA256 = "40aaee33177262611866a6b088e2301d8bad12860ba1ab69ff69023575b46db8"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.
