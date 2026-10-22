@@ -1401,7 +1401,13 @@ function Proposal({
       />
       <RecoveryProgress proposal={proposal} />
       {proposal.verification && (
-        <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} recovery={proposal.recovery} />
+        <VerificationCard
+          verification={proposal.verification}
+          title={proposal.title}
+          nudge={nudge}
+          isRecovery={proposal.class === 'recovery'}
+          recovery={proposal.recovery}
+        />
       )}
     </article>
   )

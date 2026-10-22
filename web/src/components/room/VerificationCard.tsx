@@ -63,12 +63,18 @@ export function VerificationCard({
   verification,
   title,
   nudge,
+  isRecovery = false,
   recovery,
 }: {
   verification: AgentVerificationPayload
   /** The proposal's title, for the pre-filled resolution. */
   title: string
   nudge: CloseNudge
+  /**
+   * X2: the proposal's class is recovery. Only then is `outcome` a recovery outcome: a performance proposal (X6)
+   * carries its own outcomes, "unverifiable" among them, which the recovery wording would misname.
+   */
+  isRecovery?: boolean
   /** X2: the recovery proposal's timing, for "recovered in 3 min". */
   recovery?: RecoveryProgress
 }) {
@@ -81,7 +87,7 @@ export function VerificationCard({
   }
   const kind = verdictKind(verification)
   // X2: a recovery proposal carries a counted outcome, which says more than the boolean (partial is not "not recovered").
-  const outcome = recoveryOutcome(verification)
+  const outcome = isRecovery ? recoveryOutcome(verification) : undefined
   const ok = outcome ? outcome === 'recovered' && verification.recovered : kind === 'recovered'
   const flow = verification.data_flow
   return (

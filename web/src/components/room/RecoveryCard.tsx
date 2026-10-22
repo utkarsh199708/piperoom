@@ -2,7 +2,7 @@ import { CircleCheck, CircleHelp, CircleX, LoaderCircle, TriangleAlert } from 'l
 import type { AgentVerificationPayload, RecoveryOutcome } from '../../api/types'
 import type { ProposalState, RecoveryProgress as RecoveryProgressState } from '../../state/types'
 import { cn } from '@/lib/utils'
-import { asCount, checkingLabel, countWithUnit, gapLine, outcomeView, tookLabel } from '../../lib/recovery'
+import { asCount, checkingLabel, countWithUnit, gapLine, tookLabel, verdictView } from '../../lib/recovery'
 import type { RecoveryTone } from '../../lib/recovery'
 
 const TONE_TEXT: Record<RecoveryTone, string> = {
@@ -52,14 +52,16 @@ export function RecoveryResult({
   outcome: RecoveryOutcome
   recovery?: RecoveryProgressState
 }) {
-  const view = outcomeView(outcome)
-  const Icon = OUTCOME_ICON[outcome]
+  // Recovered counts with a failed layer check are not a recovery (the agent's verdict says NOT recovered).
+  const checkFailed = outcome === 'recovered' && !verification.recovered
+  const view = verdictView(outcome, verification.recovered)
+  const Icon = checkFailed ? CircleX : OUTCOME_ICON[outcome]
   const counted = outcome !== 'unverifiable'
   const gap = counted ? gapLine(verification.before, verification.after, verification.unit) : undefined
   const left = counted ? asCount(verification.after) : undefined
-  const took = outcome === 'recovered' ? tookLabel(recovery?.ran_at, recovery?.verified_at) : ''
+  const took = outcome === 'recovered' && !checkFailed ? tookLabel(recovery?.ran_at, recovery?.verified_at) : ''
   return (
-    <div className="flex flex-col gap-0.5" data-testid="recovery-result" data-outcome={outcome}>
+    <div className="flex flex-col gap-0.5" data-testid="recovery-result" data-outcome={outcome} data-recovered={String(verification.recovered)}>
       <p className={cn('m-0 inline-flex items-center gap-1.5 font-medium', TONE_TEXT[view.tone])}>
         <Icon className="size-4 shrink-0" aria-hidden="true" />
         {view.word}

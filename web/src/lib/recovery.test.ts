@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { asCount, checkingLabel, countWithUnit, gapLine, outcomeView, previewLine, recoveryOutcome, tookLabel } from './recovery'
+import { asCount, checkingLabel, countWithUnit, gapLine, outcomeView, previewLine, recoveryOutcome, tookLabel, verdictView } from './recovery'
 
 describe('asCount', () => {
   it.each([
@@ -54,6 +54,11 @@ describe('outcome', () => {
     expect(outcomeView('partial').tone).toBe('warning')
     expect(outcomeView('not_recovered').tone).toBe('danger')
     expect(outcomeView('unverifiable').tone).toBe('muted')
+  })
+  it('recovered counts with recovered: false (a layer check failed) are not a recovery', () => {
+    expect(verdictView('recovered', true)).toEqual(outcomeView('recovered'))
+    expect(verdictView('recovered', false)).toEqual({ word: 'Not recovered: a check failed', tone: 'danger' })
+    expect(verdictView('partial', false)).toEqual(outcomeView('partial'))
   })
 })
 

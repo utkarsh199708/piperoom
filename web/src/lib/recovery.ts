@@ -55,6 +55,15 @@ export function outcomeView(o: RecoveryOutcome): OutcomeView {
   }
 }
 
+/**
+ * The heading of a counted verdict. A count that reached 0 while a layer check failed is not a recovery: the
+ * agent's verdict says "NOT recovered" (`recovered: false` next to outcome "recovered"), so the card does too.
+ */
+export function verdictView(o: RecoveryOutcome, recovered: boolean): OutcomeView {
+  if (o === 'recovered' && !recovered) return { word: 'Not recovered: a check failed', tone: 'danger' }
+  return outcomeView(o)
+}
+
 /** "412 missing → 0 rows": the gap before, then what is still missing. Undefined without a `before`. */
 export function gapLine(before: unknown, after: unknown, unit: unknown): string | undefined {
   const b = asCount(before)

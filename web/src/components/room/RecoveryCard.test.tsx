@@ -46,7 +46,9 @@ function card(s: RoomState) {
   return render(
     <>
       <RecoveryProgress proposal={p} />
-      {p.verification && <VerificationCard verification={p.verification} title={p.title} nudge={nudge} recovery={p.recovery} />}
+      {p.verification && (
+        <VerificationCard verification={p.verification} title={p.title} nudge={nudge} isRecovery={p.class === 'recovery'} recovery={p.recovery} />
+      )}
     </>,
   )
 }
@@ -110,6 +112,27 @@ describe('recovery verdict (TC1)', () => {
     ] as const) {
       const { unmount } = card(fold(created('recovery'), executed(2), verdict(3, { outcome, recovered: outcome === 'recovered', before: 3, after: outcome === 'recovered' ? 0 : 1, unit: 'rows' })))
       expect(screen.getByText(word)).toBeInTheDocument()
+      unmount()
+    }
+  })
+
+  it('recovered counts with a failed layer check: not a recovery, no "recovered in", no close nudge', () => {
+    card(fold(created('recovery'), executed(2), verdict(192, { recovered: false, outcome: 'recovered', before: 412, after: 0, unit: 'rows', verdict: 'NOT recovered: a layer check did not pass' })))
+    const result = screen.getByTestId('recovery-result')
+    expect(result).toHaveAttribute('data-recovered', 'false')
+    expect(within(result).getByText('Not recovered: a check failed')).toHaveClass('text-destructive-fg')
+    expect(within(result).queryByText('Recovered')).toBeNull()
+    expect(result).toHaveTextContent('412 missing → 0 rows')
+    expect(screen.queryByText(/recovered in/)).toBeNull()
+    expect(screen.queryByText('Pipeline recovered.')).toBeNull()
+  })
+
+  it('a performance verdict (X6 outcomes, unverifiable included) never takes the recovery wording', () => {
+    for (const outcome of ['unverifiable', 'improved']) {
+      const { unmount } = card(fold(created('performance'), executed(2), verdict(3, { outcome, verdict: 'throughput not measured' })))
+      expect(screen.queryByTestId('recovery-result')).toBeNull()
+      expect(screen.queryByText(/could not be counted/)).toBeNull()
+      expect(screen.getByText('throughput not measured')).toBeInTheDocument()
       unmount()
     }
   })

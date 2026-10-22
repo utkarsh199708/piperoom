@@ -114,6 +114,8 @@ describe('describeEvent agent.verification', () => {
     [{ recovered: false, outcome: 'partial', before: 4, after: 1, unit: 'rows' }, 'Verification: partially recovered'],
     [{ recovered: true, outcome: 'recovered', before: 4, after: 0, unit: 'rows' }, 'Verification: recovered'],
     [{ recovered: false, outcome: 'unverifiable' }, 'Verification: could not verify'],
+    // Counts back to 0 but a layer check failed: the agent says NOT recovered, so the feed does too.
+    [{ recovered: false, outcome: 'recovered', before: 4, after: 0, unit: 'rows' }, 'Verification: not recovered: a check failed'],
   ])('%j reads %j', (p, text) => {
     expect(v({ verdict: 'v', ...p })).toEqual({ text, kind: 'decision' })
   })
