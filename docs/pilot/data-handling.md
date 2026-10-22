@@ -79,8 +79,12 @@ Closing a room drops its count: the server calls `Endpoint.Forget` from the room
     1024 bytes and `http`/`https` only), shown as text, given to the model only inside the untrusted-data wrapper,
     and never logged.
   - **Migration history readers** (X4b) read, from the pipeline's own source database, the metadata columns of
-    `flyway_schema_history` or `databasechangelog` (version, description, applied time, applied by), or dbt run
-    results when configured; never a script's contents or checksum, never a row of another table. Read-only, 10 s.
+    `flyway_schema_history` or `databasechangelog` (version or changeset id, description, applied time, applied by,
+    success), found by a catalog lookup only in the schemas of the pipeline's own source tables, or dbt run
+    results when configured (the run time and a count of the pipeline's models per status, never dbt's messages);
+    never a script's name, contents or checksum, never a row of another table. Read live by `what_changed`, not
+    stored. Read-only, 10 s, at most 200 rows. A history table the login cannot read is reported as a fact
+    ("grant SELECT on ..."), not read.
   - **The vendor status poller** (X4a) fetches a pipeline's `owners.yaml` `vendor_status_url` (a vendor's
     public status feed) every 5 minutes from the server: an **outbound** HTTPS request to a host you name, part
     of your egress review (section 5). It sends nothing but the request.
