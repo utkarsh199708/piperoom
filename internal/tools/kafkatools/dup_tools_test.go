@@ -169,3 +169,16 @@ func TestDupKeysKFake(t *testing.T) {
 		t.Errorf("data has no fingerprint of the duplicated key: %s", data)
 	}
 }
+
+// TestDupKeysManyOpenPartitions (review of X1c): a partial scan of a topic
+// with hundreds of partitions names the first 20 and counts the rest.
+func TestDupKeysManyOpenPartitions(t *testing.T) {
+	parts := make([]clients.DupPartition, 500)
+	for i := range parts {
+		parts[i] = clients.DupPartition{Partition: int32(i)}
+	}
+	s := dupSummary(clients.DupReport{Topic: "pg.public.orders", Scanned: 9, Partial: true, Partitions: parts})
+	if !strings.Contains(s, "19] and 480 more") || strings.Contains(s, " 20 ") || len(s) > 400 {
+		t.Fatalf("summary = %q", s)
+	}
+}

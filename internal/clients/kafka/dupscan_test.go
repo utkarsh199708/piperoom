@@ -414,3 +414,55 @@ func FuzzDupScan(f *testing.F) {
 		}
 	})
 }
+
+// TestDupScanSlowValuesHonourDeadline (review of X1c): values whose schema
+// makes every walk spend the whole ops budget end the scan at the deadline,
+// not at the end of a 1000-record chunk; the records decoded so far count.
+func TestDupScanSlowValuesHonourDeadline(t *testing.T) {
+	nested := `{"type":"record","name":"R0","fields":[]}`
+	for i := 1; i <= 40; i++ {
+		nested = fmt.Sprintf(`{"type":"record","name":"R%d","fields":[{"name":"a","type":%s},{"name":"b","type":"R%d"}]}`, i, nested, i-1)
+	}
+	env := parseEnvelope(`{"type":"record","name":"E","fields":[{"name":"x","type":` + nested + `},` +
+		`{"name":"source","type":{"type":"record","name":"S","fields":[{"name":"lsn","type":"long"}]}}]}`)
+	if env.why != "" {
+		t.Fatal(env.why)
+	}
+	hostile := append([]byte{0, 0, 0, 0, 9}, binary.AppendUvarint(nil, 1<<62)...)
+	rr := &seqReader{end: 1000, gen: func(int32, int64) clients.Record { return clients.Record{Key: []byte("k"), Value: hostile} }}
+	c := readerClient(rr, 1000, 0)
+	c.envCache = map[int]*dbzEnvelope{9: env}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	rep, err := c.DupScan(ctx, "t", epoch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("took %s, want about the 150ms deadline", took)
+	}
+	if !rep.Partial || rep.Scanned == 0 || rep.Scanned >= 1000 || rep.UndecodableReasons[UndecodableMalformed] != rep.Scanned {
+		t.Fatalf("report = %+v, want a partial scan of malformed values", rep)
+	}
+}
+
+// staleReader returns only records before from: a reader that never moves
+// forward must not spin the scan until the deadline.
+type staleReader struct{ calls atomic.Int32 }
+
+func (s *staleReader) ReadRecords(_ context.Context, topic string, p int32, from int64, _ int) ([]clients.Record, error) {
+	s.calls.Add(1)
+	return []clients.Record{{Topic: topic, Partition: p, Offset: from - 1, Key: []byte("k"), Value: dbzJSON(1, 1)}}, nil
+}
+
+func TestDupScanNoProgressEndsPartition(t *testing.T) {
+	rr := &staleReader{}
+	rep, err := readerClient(rr, 10, 0).DupScan(context.Background(), "t", epoch, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := rr.calls.Load(); n != 1 || rep.Partial || rep.Scanned != 0 || !rep.Partitions[0].Done {
+		t.Fatalf("calls = %d, report = %+v; want one read and the partition ended", n, rep)
+	}
+}

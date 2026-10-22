@@ -170,8 +170,16 @@ func scanDups(ctx context.Context, rr clients.RecordReader, lsnOf func([]byte) (
 				return cutDup(ctx, rep)
 			}
 			limit := min(maxReadRecords, rep.MaxScan-rep.Scanned)
+			from := p.Next
 			recs, err := rr.ReadRecords(ctx, rep.Topic, p.Partition, p.Next, limit)
 			for _, r := range recs {
+				// The deadline is checked per record too: a hostile
+				// registry schema can make one value cost the walker's
+				// whole ops budget (~15 ms), so a 1000-record chunk could
+				// otherwise outlast the deadline by many seconds.
+				if ctx.Err() != nil {
+					return cutDup(ctx, rep)
+				}
 				if r.Offset < p.Next {
 					continue
 				}
@@ -188,7 +196,10 @@ func scanDups(ctx context.Context, rr clients.RecordReader, lsnOf func([]byte) (
 				}
 				return fmt.Errorf("read partition %d from %d: %w", p.Partition, p.Next, err)
 			}
-			if len(recs) == 0 || p.Next >= p.End {
+			// No record past from (an empty read, or a reader that only
+			// returned older offsets) ends the partition, so the loop
+			// always makes progress.
+			if len(recs) == 0 || p.Next >= p.End || p.Next == from {
 				p.Done = true
 			}
 		}

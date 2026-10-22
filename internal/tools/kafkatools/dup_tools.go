@@ -107,10 +107,10 @@ func dupSummary(rep clients.DupReport) string {
 	case rep.Scanned == 0 && !rep.Partial:
 		appendLine(&sb, "no records since "+rep.Since.Format(time.RFC3339))
 	case rep.Capped:
-		appendLine(&sb, fmt.Sprintf("scanned %s (capped): max_scan stopped the scan before the end of partition(s) %v; newer records were not checked, use a later since", group(rep.Scanned), open))
+		appendLine(&sb, fmt.Sprintf("scanned %s (capped): max_scan stopped the scan before the end of partition(s) %s; newer records were not checked, use a later since", group(rep.Scanned), partList(open)))
 	}
 	if rep.Partial {
-		appendLine(&sb, fmt.Sprintf("partial: the time limit cut the scan before the end of partition(s) %v; the counts cover the %s read", open, plural(rep.Scanned, "record")))
+		appendLine(&sb, fmt.Sprintf("partial: the time limit cut the scan before the end of partition(s) %s; the counts cover the %s read", partList(open), plural(rep.Scanned, "record")))
 	}
 	if rep.Undecodable > 0 {
 		reasons := make([]string, 0, len(rep.UndecodableReasons))
@@ -138,6 +138,19 @@ func dupSummary(rep clients.DupReport) string {
 		appendLine(&sb, fmt.Sprintf("%d more finding(s) not listed; Data.findings has the first %d", n, clients.MaxDupFindings))
 	}
 	return sb.String()
+}
+
+// dupMaxPartsListed caps the partition numbers a summary line names, so a
+// topic with hundreds of partitions does not push the findings past the
+// summary cap.
+const dupMaxPartsListed = 20
+
+// partList is "[0 3 7]", or the first dupMaxPartsListed and "and N more".
+func partList(ps []int32) string {
+	if len(ps) <= dupMaxPartsListed {
+		return fmt.Sprint(ps)
+	}
+	return fmt.Sprintf("%v and %d more", ps[:dupMaxPartsListed], len(ps)-dupMaxPartsListed)
 }
 
 // plural is "1 key", "2 keys", with thousands grouped.
