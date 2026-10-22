@@ -35,13 +35,13 @@ func TestX3PayloadsRoundTrip(t *testing.T) {
 		name string
 		v    any
 	}{
-		{"forecast", events.ForecastSignal{Signal: events.SignalForecast, Severity: events.ForecastSeverity,
+		{"forecast", events.ForecastSignal{Signal: events.SignalForecast, Severity: events.SignalSeverity(events.SignalForecast),
 			Metric: "slot_wal_bytes", Object: "orders_slot", Current: 64 << 30, Limit: 100 << 30, ETA: eta,
 			Slope: 1 << 30, R2: 0.97, Samples: 96}},
 		{"forecast zero", events.ForecastSignal{}},
 		{"forecast fractional", events.ForecastSignal{Metric: "topic_oldest_unread_age", Current: 518400.5,
 			Limit: 604800, ETA: eta, Slope: 3600.25, R2: 0.6, Samples: 8}},
-		{"config_drift", events.ConfigDriftSignal{Signal: events.SignalConfigDrift, Severity: events.ConfigDriftSeverity,
+		{"config_drift", events.ConfigDriftSignal{Signal: events.SignalConfigDrift, Severity: events.SignalSeverity(events.SignalConfigDrift),
 			Connector: "orders-src", OldHash: strings.Repeat("a", 64), NewHash: strings.Repeat("b", 64),
 			ChangedKeys: []string{events.SecretKeyChanged, "decimal.handling.mode"}, KeysOmitted: 3}},
 		{"config_drift empty keys", events.ConfigDriftSignal{Connector: "c", ChangedKeys: []string{}}},

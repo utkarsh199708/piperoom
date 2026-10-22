@@ -762,7 +762,8 @@ type CountReader interface {
 // to grow. The source Postgres and the dev Postgres warehouse implement it
 // (X1a, A3); other warehouses return ErrNotSupported from every method until
 // their owners add it. The drift watcher signals (count_drift, row_drift;
-// events.DriftSignal) are its first caller.
+// events.DriftSignal) are its first caller; a recovery action's Verify (X2,
+// actions.Verifier) is the second.
 
 // Caps and deadline of every Reconciler implementation. Callers and tests use
 // these constants instead of their own numbers.
@@ -798,9 +799,10 @@ func ReconcileSampleSize(n int) int {
 //     with pgx.Identifier{...}.Sanitize() (or the warehouse's equivalent).
 //     A bad identifier is an error wrapping tools.ErrBadInput, before any I/O.
 //   - Scope fails closed like SourceWriter: the pipeline in ctx
-//     (tools.WithPipeline; the watcher sets it per pipeline) must list table
-//     in source_tables (source) or sink_tables (sink), else an error wrapping
-//     tools.ErrOutOfScope (tools.ErrNoScope with no pipeline), before any I/O.
+//     (tools.WithPipeline; the watcher sets it per pipeline, the agent per
+//     room) must list table in source_tables (source) or sink_tables (sink),
+//     else an error wrapping tools.ErrOutOfScope (tools.ErrNoScope with no
+//     pipeline), before any I/O.
 //   - Each call has a deadline of ReconcileTimeout (10 s) at most; a call cut
 //     by it returns an error wrapping context.DeadlineExceeded.
 //   - Times are compared and returned in UTC; tsColumn values that are NULL
@@ -1093,6 +1095,91 @@ type ChangeReader interface {
 	ListChanges(ctx context.Context, pipelineID string, since, until time.Time, kinds []string, limit int) ([]PipelineChange, error)
 }
 
+// ChangeWriter records a change. A row with the same (pipeline, kind, object,
+// fingerprint) is not written again; inserted reports whether it was.
+// It writes Piperoom's own table, never a customer system, so the Reader /
+// Writer rule above does not apply: the watcher (F8c) may hold one.
+type ChangeWriter interface {
+	RecordChange(ctx context.Context, c PipelineChange) (inserted bool, err error)
+}
+
+// ---- X3: watch sample history (Piperoom's own table, fed by the watcher) ----
+//
+// Not a customer system: the room store implements both interfaces over the
+// table watch_samples(pipeline_id, metric, at, value); its migration number
+// 00018 (migrations/00018_watch_samples.sql) is reserved for A5 (X3a). Rows
+// older than config.WatchSampleRetention are deleted by the store's
+// retention job. A sample is one number per pipeline and metric: never a row
+// value, a record, a config value or free text.
+//
+// Migration numbers: 00017 is reserved by docs/design/onboarding.md
+// (proposed), 00018 here, 00019 and 00020 by the fleet block below. goose
+// (migrations/migrate.go) refuses to apply a number below one a database
+// already ran, so migrations merge in number order: a reserved number whose
+// row is not ready is given up at merge time (the leads renumber in this
+// comment in the same PR), never filled in later.
+
+// Metric names of a watch sample (watch_samples.metric, ?metric= of
+// GET /api/pipelines/{pid}/trends, events.ForecastSignal.Metric,
+// clients.WatchSignal.Metric). (X3)
+const (
+	WatchMetricSlotWALBytes         = "slot_wal_bytes"          // WAL the replication slot retains; limit: watch.wal_headroom_bytes
+	WatchMetricDLQRecords           = "dlq_records"             // records in the pipeline's dead-letter topics; no limit (trend only)
+	WatchMetricGroupLag             = "group_lag"               // total consumer lag of the pipeline's groups; no limit (trend only)
+	WatchMetricDBSizeBytes          = "db_size_bytes"           // pg_database_size of the source; limit: watch.db_size_limit
+	WatchMetricTopicOldestUnreadAge = "topic_oldest_unread_age" // seconds, the oldest unconsumed record of any pipeline topic; limit: that topic's retention.ms
+)
+
+// WatchMetrics returns every metric name, in a stable order, as a fresh slice
+// (like ChangeKinds). A name outside it is refused by the store and by the
+// trends route (400 validation). (X3)
+func WatchMetrics() []string {
+	return []string{WatchMetricSlotWALBytes, WatchMetricDLQRecords, WatchMetricGroupLag,
+		WatchMetricDBSizeBytes, WatchMetricTopicOldestUnreadAge}
+}
+
+// WatchMetricUnit returns the unit of a metric ("bytes", "records" or
+// "seconds"), or "" for a name outside WatchMetrics(). (X3)
+func WatchMetricUnit(metric string) string {
+	switch metric {
+	case WatchMetricSlotWALBytes, WatchMetricDBSizeBytes:
+		return "bytes"
+	case WatchMetricDLQRecords, WatchMetricGroupLag:
+		return "records"
+	case WatchMetricTopicOldestUnreadAge:
+		return "seconds"
+	}
+	return ""
+}
+
+// MaxSamplesPerSeries caps what Samples returns for one pipeline and metric:
+// one sample per 15 minutes for 7 days. (X3)
+const MaxSamplesPerSeries = 7 * 24 * 4
+
+// SamplePoint is one watch sample; a list of them, oldest first, is the body
+// of GET /api/pipelines/{pid}/trends. (X3)
+type SamplePoint struct {
+	At    time.Time `json:"at"`
+	Value float64   `json:"value"`
+}
+
+// SampleWriter appends one sample. A second sample with the same (pipeline,
+// metric, at) is not written again and is not an error. An unknown metric,
+// an empty pipeline id, or a NaN or infinite value is refused (an error, no
+// row). It writes Piperoom's own table, never a customer system, so the
+// watcher (X3a) may hold one, as it holds a ChangeWriter. (X3)
+type SampleWriter interface {
+	AppendSample(ctx context.Context, pipelineID, metric string, at time.Time, value float64) error
+}
+
+// SampleReader lists the samples of one pipeline and metric with At >= since,
+// oldest first, at most MaxSamplesPerSeries (the newest ones when more
+// match). None is an empty list, not an error; an unknown metric is an
+// error. Callers check the pipeline's tenant before they call it. (X3)
+type SampleReader interface {
+	Samples(ctx context.Context, pipelineID, metric string, since time.Time) ([]SamplePoint, error)
+}
+
 // ---- Fleet view: cross-pipeline changes, watcher status, connector config versions (X5-0) ----
 //
 // Piperoom's own tables again, not customer systems: the room store (store.PG,
@@ -1101,7 +1188,10 @@ type ChangeReader interface {
 // not apply, as for ChangeWriter); the fleet routes of docs/api.md ("Fleet
 // view") only read. Nothing here carries a row value; a connector config value
 // is stored only after actions.RedactConfig. Every method takes a context and
-// the store bounds it at 10 s when the caller set no deadline.
+// the store bounds it at 10 s when the caller set no deadline. Tables, for A5:
+// watch_status (migration 00019, X5a) and connector_config_versions (00020,
+// X5c; not docs/design/onboarding.md's config_versions); the numbering rule is
+// in the X3 block above.
 
 // Caps of the fleet shapes, enforced by the store on write and by the routes
 // on read.
@@ -1141,7 +1231,7 @@ const (
 // cannot name one). Metric and ETA are set only for Signal "forecast" (X3a):
 // the sample metric and the time the forecast reaches its limit.
 type WatchSignal struct {
-	Signal   string     `json:"signal"`   // an owners.Signal* name, "forecast", "config_drift", later X-wave kinds
+	Signal   string     `json:"signal"`   // an owners.Signal* name or an X-wave events.Signal* name (count_drift … config_drift)
 	State    string     `json:"state"`    // WatchFiring | WatchAcked
 	Severity string     `json:"severity"` // "sev1".."sev4"
 	Node     string     `json:"node,omitempty"`
@@ -1174,22 +1264,22 @@ type WatchStatusReader interface {
 	WatchStatuses(ctx context.Context, pipelineIDs []string) ([]WatchStatus, error)
 }
 
-// SecretKeyChanged stands for the name of a changed credential key
-// (actions.LooksSecret) in ConnectorConfigVersion.ChangedKeys and in the
-// config_drift signal's changed keys (X3-0): not even the key name is shown.
-const SecretKeyChanged = "<secret key changed>"
-
 // ConnectorConfigVersion is one config of a connector as the watcher saw it
 // (X3b records, X5c stores). Config holds the values after
-// actions.RedactConfig, applied once by the caller (a raw config never
-// crosses this interface), and Hash is actions.ConfigHash of that map, so no
+// actions.RedactConfig, applied once by the caller (actions.DigestConfig's
+// Redacted; a raw config never crosses this interface), and Hash is
+// actions.ConfigHash of that map, the same id as config_drift's hashes, so no
 // secret value is stored or hashed. The store computes Hash itself (a
 // caller's Hash is ignored) and refuses a Config in which an
-// actions.LooksSecret key holds anything but actions.RedactedValue. ChangedKeys are
-// the key names that differ from the connector's previous version, sorted,
-// with SecretKeyChanged for a credential key; empty on the first version. By
-// is "proposal:<id>" when an executed Piperoom proposal produced the config,
-// "" otherwise. Config is empty in list answers.
+// actions.LooksSecret key holds anything but actions.RedactedValue.
+// ChangedKeys is actions.ChangedConfigKeys from the watcher's previous digest
+// of the connector: names only, sorted, events.SecretKeyChanged for a
+// credential key, so a change only to a secret value is a new version with
+// the same Hash. It is empty when the watcher has no earlier digest in
+// memory (its first poll after it starts); the diff route compares the
+// stored forms either way. By is "proposal:<id>" when an executed Piperoom
+// proposal produced the config, "" otherwise. Config is empty in list
+// answers.
 type ConnectorConfigVersion struct {
 	PipelineID  string            `json:"pipeline_id"`
 	Connector   string            `json:"connector"`
@@ -1215,80 +1305,4 @@ type ConfigVersionWriter interface {
 type ConfigVersionReader interface {
 	ConfigVersions(ctx context.Context, pipelineID, connector string, limit int) ([]ConnectorConfigVersion, error)
 	ConfigVersion(ctx context.Context, pipelineID, connector, hash string) (ConnectorConfigVersion, error)
-}
-
-// ---- end Fleet view (X5-0) ----
-
-// ChangeWriter records a change. A row with the same (pipeline, kind, object,
-// fingerprint) is not written again; inserted reports whether it was.
-// It writes Piperoom's own table, never a customer system, so the Reader /
-// Writer rule above does not apply: the watcher (F8c) may hold one.
-type ChangeWriter interface {
-	RecordChange(ctx context.Context, c PipelineChange) (inserted bool, err error)
-}
-
-// ---- X3: watch sample history (Piperoom's own table, fed by the watcher) ----
-//
-// Not a customer system: the room store implements both interfaces over the
-// table watch_samples(pipeline_id, metric, at, value); its migration number
-// 00018 (migrations/00018_watch_samples.sql) is reserved for A5 (X3a). Rows
-// older than config.WatchSampleRetention are deleted by the store's
-// retention job. A sample is one number per pipeline and metric: never a row
-// value, a record, a config value or free text.
-
-// Metric names of a watch sample (watch_samples.metric, ?metric= of
-// GET /api/pipelines/{pid}/trends, events.ForecastSignal.Metric). (X3)
-const (
-	WatchMetricSlotWALBytes         = "slot_wal_bytes"          // WAL the replication slot retains; limit: watch.wal_headroom_bytes
-	WatchMetricDLQRecords           = "dlq_records"             // records in the pipeline's dead-letter topics; no limit (trend only)
-	WatchMetricGroupLag             = "group_lag"               // total consumer lag of the pipeline's groups; no limit (trend only)
-	WatchMetricDBSizeBytes          = "db_size_bytes"           // pg_database_size of the source; limit: watch.db_size_limit
-	WatchMetricTopicOldestUnreadAge = "topic_oldest_unread_age" // seconds, the oldest unconsumed record of any pipeline topic; limit: that topic's retention.ms
-)
-
-// WatchMetrics lists every metric name, in a stable order. A name outside it
-// is refused by the store and by the trends route (400 validation). (X3)
-var WatchMetrics = []string{WatchMetricSlotWALBytes, WatchMetricDLQRecords, WatchMetricGroupLag,
-	WatchMetricDBSizeBytes, WatchMetricTopicOldestUnreadAge}
-
-// WatchMetricUnit returns the unit of a metric ("bytes", "records" or
-// "seconds"), or "" for a name outside WatchMetrics. (X3)
-func WatchMetricUnit(metric string) string {
-	switch metric {
-	case WatchMetricSlotWALBytes, WatchMetricDBSizeBytes:
-		return "bytes"
-	case WatchMetricDLQRecords, WatchMetricGroupLag:
-		return "records"
-	case WatchMetricTopicOldestUnreadAge:
-		return "seconds"
-	}
-	return ""
-}
-
-// MaxSamplesPerSeries caps what Samples returns for one pipeline and metric:
-// one sample per 15 minutes for 7 days. (X3)
-const MaxSamplesPerSeries = 7 * 24 * 4
-
-// SamplePoint is one watch sample; a list of them, oldest first, is the body
-// of GET /api/pipelines/{pid}/trends. (X3)
-type SamplePoint struct {
-	At    time.Time `json:"at"`
-	Value float64   `json:"value"`
-}
-
-// SampleWriter appends one sample. A second sample with the same (pipeline,
-// metric, at) is not written again and is not an error. An unknown metric,
-// an empty pipeline id, or a NaN or infinite value is refused (an error, no
-// row). It writes Piperoom's own table, never a customer system, so the
-// watcher (X3a) may hold one, as it holds a ChangeWriter. (X3)
-type SampleWriter interface {
-	AppendSample(ctx context.Context, pipelineID, metric string, at time.Time, value float64) error
-}
-
-// SampleReader lists the samples of one pipeline and metric with At >= since,
-// oldest first, at most MaxSamplesPerSeries (the newest ones when more
-// match). None is an empty list, not an error; an unknown metric is an
-// error. Callers check the pipeline's tenant before they call it. (X3)
-type SampleReader interface {
-	Samples(ctx context.Context, pipelineID, metric string, since time.Time) ([]SamplePoint, error)
 }

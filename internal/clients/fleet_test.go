@@ -69,7 +69,7 @@ func TestFleetShapesRoundTrip(t *testing.T) {
 	t.Run("WatchStatus", func(t *testing.T) {
 		b := strictRoundTrip(t, WatchStatus{PipelineID: "orders", CheckedAt: at, Signals: []WatchSignal{
 			{Signal: "connector_down", State: WatchFiring, Severity: "sev2", Node: "connect:pg-orders", Since: at},
-			{Signal: "forecast", State: WatchFiring, Severity: "sev3", Since: at, Metric: "slot_wal_bytes", ETA: &eta},
+			{Signal: "forecast", State: WatchFiring, Severity: "sev4", Since: at, Metric: "slot_wal_bytes", ETA: &eta},
 		}})
 		if !strings.Contains(string(b), `"eta":"2026-10-23T04:01:00Z"`) {
 			t.Fatalf("eta not encoded as RFC 3339: %s", b)
@@ -89,7 +89,7 @@ func TestFleetShapesRoundTrip(t *testing.T) {
 	})
 	t.Run("ConnectorConfigVersion", func(t *testing.T) {
 		strictRoundTrip(t, ConnectorConfigVersion{PipelineID: "orders", Connector: "pg-orders", Hash: strings.Repeat("a", 64),
-			At: at, By: "proposal:p_01", ChangedKeys: []string{"decimal.handling.mode", SecretKeyChanged},
+			At: at, By: "proposal:p_01", ChangedKeys: []string{"<secret key changed>", "decimal.handling.mode"},
 			Config: map[string]string{"decimal.handling.mode": "double", "database.password": "<redacted>"}})
 		// A list answer: Config empty is omitted; By and ChangedKeys stay.
 		b := strictRoundTrip(t, ConnectorConfigVersion{PipelineID: "orders", Connector: "pg-orders", Hash: "h", At: at, ChangedKeys: []string{}})
@@ -134,8 +134,5 @@ func TestFleetCaps(t *testing.T) {
 		if tc.got != tc.want {
 			t.Errorf("%s = %d, docs/api.md says %d", tc.name, tc.got, tc.want)
 		}
-	}
-	if SecretKeyChanged != "<secret key changed>" {
-		t.Errorf("SecretKeyChanged = %q", SecretKeyChanged)
 	}
 }

@@ -7,11 +7,14 @@ package actions
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -145,10 +148,11 @@ const (
 // the step ran (the action.executed event time), and writes one
 // agent.recovery_check per poll and one agent.verification with the
 // outcome (events.RecoveryOutcomeFor) at the end. The agent runs it, not the
-// room service, so it runs over the read-only clients the agent's registry
-// was built with: Verify must call only *Reader client methods (the
-// Reconciler counts of X1, CountReader, Kafka offsets) and never a writer,
-// whatever write mode says.
+// room service, on the same action instance the executor runs (the agent's
+// Deps.Actions is the pipeline's registry, built over write clients when
+// write mode is on), so the rule is Verify's own: it calls only *Reader
+// client methods (the Reconciler counts of X1, CountReader, Kafka offsets)
+// and never a writer, whatever write mode says.
 //
 // Each call is bounded by the caller with a 10 s deadline and must stop when
 // ctx ends; the room's pipeline scope is in ctx, so a read outside it is
@@ -208,87 +212,27 @@ func LooksSecret(key string) bool {
 	return false
 }
 
-// ---- X3: config_drift (connector config changed outside an approved fix) ----
-
-// ConfigDigest is a connector config reduced to hashes, so the watcher can
-// tell which keys changed without keeping a value. Hash (lowercase hex
-// SHA-256 over the keys in sorted order, each key and value length-prefixed)
-// is the config's identity: key order does not change it, a nil and an
-// empty config are the same. Keys maps each key to the hex SHA-256 of its
-// key and value; it never leaves the process (json:"-") and is never logged.
-// (X3)
-type ConfigDigest struct {
-	Hash string            `json:"hash"`
-	Keys map[string]string `json:"-"`
-}
-
-// DigestConfig hashes cfg (clients.ConnectReader.Config). It keeps no value.
-// (X3)
-func DigestConfig(cfg map[string]string) ConfigDigest {
-	names := make([]string, 0, len(cfg))
-	for k := range cfg {
-		names = append(names, k)
-	}
-	slices.Sort(names)
-	all := sha256.New()
-	d := ConfigDigest{Keys: make(map[string]string, len(cfg))}
-	for _, k := range names {
-		// Length prefixes keep "a"+"bc" and "ab"+"c" apart.
-		entry := fmt.Sprintf("%d:%s%d:%s", len(k), k, len(cfg[k]), cfg[k])
-		all.Write([]byte(entry))
-		one := sha256.Sum256([]byte(entry))
-		d.Keys[k] = hex.EncodeToString(one[:])
-	}
-	d.Hash = hex.EncodeToString(all.Sum(nil))
-	return d
-}
-
-// ChangedConfigKeys returns the names of the keys added, removed or changed
-// between two digests, masked by MaskChangedKeys and cut at
-// events.MaxChangedKeys; omitted counts the names cut. Names only: a digest
-// holds no value to leak. (X3)
-func ChangedConfigKeys(old, cur ConfigDigest) (keys []string, omitted int) {
-	var names []string
-	for k, h := range old.Keys {
-		if cur.Keys[k] != h {
-			names = append(names, k)
-		}
-	}
-	for k := range cur.Keys {
-		if _, ok := old.Keys[k]; !ok {
-			names = append(names, k)
-		}
-	}
-	keys = MaskChangedKeys(names)
-	if len(keys) > events.MaxChangedKeys {
-		omitted = len(keys) - events.MaxChangedKeys
-		keys = keys[:events.MaxChangedKeys]
-	}
-	return keys, omitted
-}
-
-// MaskChangedKeys returns names sorted and without repeats, each name that
-// LooksSecret replaced by events.SecretKeyChanged (once, however many). Not
-// nil, so an empty result encodes as []. It does not change names. (X3)
-func MaskChangedKeys(names []string) []string {
-	out := make([]string, 0, len(names))
-	for _, n := range names {
-		if LooksSecret(n) {
-			n = events.SecretKeyChanged
-		}
-		out = append(out, n)
-	}
-	slices.Sort(out)
-	return slices.Compact(out)
-}
-
-// ---- Connector config redaction and hash (X5-0; fleet config versions) ----
+// ---- Connector config: redaction, hash and changed keys (X3-0, X5-0) ----
+//
+// One scheme for the watcher's config_drift (X3b), the accept-config route
+// (X3b) and the stored config versions (X5c):
+//   - RedactConfig is the only form of a config that is stored or shown.
+//   - ConfigHash of that form is the config's public id: config_drift's
+//     old_hash/new_hash, accept-config's hash and a config version's hash.
+//     No secret value enters it, so it is never a guessing oracle.
+//   - DigestConfig is what the watcher keeps between polls: the hash and the
+//     redacted form, plus a keyed fingerprint per key that stays in the
+//     process, so ChangedConfigKeys also sees a change the redacted form
+//     hides (a secret value, or a password inside a JDBC URL).
+//   - events.SecretKeyChanged is the one placeholder for a changed credential
+//     key's name, in config_drift and in a config version's changed_keys.
 
 // RedactedValue replaces the value of a LooksSecret key in a stored config.
+// (X5)
 const RedactedValue = "<redacted>"
 
 // MaxConfigValueBytes cuts one redacted config value; a longer one ends in
-// "…" within the limit.
+// "…" within the limit. (X5)
 const MaxConfigValueBytes = 4096
 
 // RedactConfig returns the form of a connector config that may be stored and
@@ -297,8 +241,8 @@ const MaxConfigValueBytes = 4096
 // JDBC URL is masked) and is cut at MaxConfigValueBytes on a rune boundary.
 // It never modifies cfg and returns a non-nil map. Apply it once, to the raw
 // config: redact.Text is not idempotent (a masked "[redacted 16]" may be
-// masked again), so the watcher (X3b) redacts and hands the result on, and
-// the store (X5c) keeps it as given.
+// masked again), so the watcher (X3b) redacts (DigestConfig does) and hands
+// ConfigDigest.Redacted on, and the store (X5c) keeps it as given. (X5)
 func RedactConfig(cfg map[string]string) map[string]string {
 	out := make(map[string]string, len(cfg))
 	for k, v := range cfg {
@@ -326,11 +270,12 @@ func cutValue(v string) string {
 	return v[:n] + ell
 }
 
-// ConfigHash is the version id of a redacted config: the lowercase hex
-// SHA-256 of its JSON encoding (encoding/json writes map keys sorted, so key
-// order never matters). Pass RedactConfig's result: hashing a raw config would
-// make the hash a guessing oracle for a secret value. Two configs that differ
-// only in a secret value have the same hash.
+// ConfigHash is the id of a redacted config: the lowercase hex SHA-256 of its
+// JSON encoding (encoding/json writes map keys sorted, so key order never
+// matters; nil and empty are the same). Pass RedactConfig's result: hashing a
+// raw config would make the hash a guessing oracle for a secret value. Two
+// configs that differ only where RedactConfig masks (a secret value) have the
+// same hash. (X3, X5)
 func ConfigHash(redacted map[string]string) string {
 	if redacted == nil {
 		redacted = map[string]string{}
@@ -342,7 +287,86 @@ func ConfigHash(redacted map[string]string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ---- end connector config redaction and hash (X5-0) ----
+// ConfigDigest is what the watcher keeps of a connector config between two
+// polls (X3b), in memory only: Hash is ConfigHash(Redacted), the config's
+// public id; Redacted is RedactConfig of the raw config, the form a config
+// version stores (X5c). The per-key fingerprints are unexported, keyed with a
+// random per-process key (HMAC-SHA256), never marshalled, printed or logged
+// (String, GoString and LogValue show Hash only), and comparable only between
+// digests of the same process. Build one with DigestConfig. (X3, X5)
+type ConfigDigest struct {
+	Hash     string            `json:"hash"`
+	Redacted map[string]string `json:"-"`
+	keys     map[string][sha256.Size]byte
+}
+
+// String returns the hash only, so a digest in a format verb or a log line
+// never shows a fingerprint.
+func (d ConfigDigest) String() string { return d.Hash }
+
+// GoString is String, for %#v.
+func (d ConfigDigest) GoString() string { return d.Hash }
+
+// LogValue is the hash only, for log/slog.
+func (d ConfigDigest) LogValue() slog.Value { return slog.StringValue(d.Hash) }
+
+// fingerprintKey keys ConfigDigest's per-key fingerprints. It is random per
+// process and never leaves it, so a fingerprint cannot be checked against a
+// guessed value elsewhere. Set once, never changed.
+var fingerprintKey = sync.OnceValue(func() []byte {
+	k := make([]byte, 32)
+	_, _ = rand.Read(k) // never fails (crypto/rand: it crashes the program instead)
+	return k
+})
+
+// DigestConfig reduces cfg (clients.ConnectReader.Config) to a ConfigDigest.
+// It keeps no raw value. (X3, X5)
+func DigestConfig(cfg map[string]string) ConfigDigest {
+	red := RedactConfig(cfg)
+	d := ConfigDigest{Hash: ConfigHash(red), Redacted: red, keys: make(map[string][sha256.Size]byte, len(cfg))}
+	key := fingerprintKey()
+	for k, v := range cfg {
+		m := hmac.New(sha256.New, key)
+		// Length prefixes keep "a"+"bc" and "ab"+"c" apart.
+		fmt.Fprintf(m, "%d:%s%d:%s", len(k), k, len(v), v)
+		var fp [sha256.Size]byte
+		copy(fp[:], m.Sum(nil))
+		d.keys[k] = fp
+	}
+	return d
+}
+
+// ChangedConfigKeys returns the names of the keys added, removed or changed
+// from old to cur, sorted and without repeats, with every name LooksSecret
+// matches replaced by events.SecretKeyChanged (once, however many). Names
+// only, never a value; not nil, so none encodes as []. It compares the raw
+// values' fingerprints, so it also reports a change that keeps Hash (a
+// secret value: then old.Hash == cur.Hash and the result holds
+// events.SecretKeyChanged). The config_drift signal keeps the first
+// events.MaxChangedKeys and counts the rest in KeysOmitted; a config version
+// keeps up to clients.MaxConfigKeys. (X3, X5)
+func ChangedConfigKeys(old, cur ConfigDigest) []string {
+	var names []string
+	for k, fp := range old.keys {
+		if c, ok := cur.keys[k]; !ok || c != fp {
+			names = append(names, k)
+		}
+	}
+	for k := range cur.keys {
+		if _, ok := old.keys[k]; !ok {
+			names = append(names, k)
+		}
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if LooksSecret(n) {
+			n = events.SecretKeyChanged
+		}
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
+}
 
 // Registry holds actions in registration order.
 type Registry struct {

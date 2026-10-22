@@ -271,39 +271,69 @@ type RoomCreatedPayload struct {
 // RoomModeSetup is RoomCreatedPayload.Mode of a setup room. (U)
 const RoomModeSetup = "setup"
 
-// ---- X1: silent corruption, the drift watcher signals ----
-//
-// The watcher (internal/watch, X1b) opens or joins a pipeline's room with
-// these signals like slot_wal: one entry of the evidence's "signals" list,
-// {"signal": <kind>, "severity": <sev>, "drift": DriftSignal}. They are not
-// event types; the evidence travels in room.created.alert and in joins
-// (docs/api.md, Watcher alerts).
+// RoomOriginForecast is RoomCreatedPayload.Origin of a room a forecast
+// signal opened. (X3)
+const RoomOriginForecast = "forecast"
 
-// Drift signal kinds (DriftSignal.Kind and the evidence "signal" key).
+// RoomEscalatedPayload raises an open room's severity. Severity is the new
+// level, always more severe than From; Signal is the watcher signal that
+// caused it (e.g. "slot_wal"). Escalating a forecast room also starts its
+// agent when none has run yet. (X3)
+type RoomEscalatedPayload struct {
+	Severity string `json:"severity"` // "sev1".."sev3"
+	From     string `json:"from"`
+	Signal   string `json:"signal"`
+}
+
+// ---- X wave: watcher signals (X1 drift, X3 forecast and config_drift) ----
+//
+// The watcher (internal/watch) puts one flat object per firing signal in the
+// "signals" list of its evidence JSON (room.created.alert and its joins),
+// like every older signal: "signal" and "severity" first, then the signal's
+// own keys. DriftSignal, ForecastSignal and ConfigDriftSignal are those
+// objects for the X-wave signals, so the watcher, the room service, the
+// snapshot, the web and the agent's evidence renderer
+// (agent.AlertEvidenceText) agree on one set of keys. They are not event
+// types. Like all watcher evidence they carry names, counts, hashes and times
+// only: never a key value, a row value, record content or a connector config
+// value. The names are also the owners.yaml watch.signals names and
+// clients.WatchSignal.Signal values.
+
+// X-wave watcher signal names (the evidence's signals[].signal).
 const (
-	// SignalCountDrift: source and sink row counts over the same closed
+	// SignalCountDrift (X1): source and sink row counts over the same closed
 	// window (shifted by the sink's lag) differ by more than the tolerance.
 	SignalCountDrift = "count_drift"
-	// SignalRowDrift: sampled source keys are missing on the sink after the
-	// lag, or a timestamp column differs.
+	// SignalRowDrift (X1): sampled source keys are missing on the sink after
+	// the lag, or a timestamp column differs.
 	SignalRowDrift = "row_drift"
-	// SignalDupKeys: the CDC topic holds the same (key, source position)
-	// more than once in the window.
+	// SignalDupKeys (X1): the CDC topic holds the same (key, source
+	// position) more than once in the window.
 	SignalDupKeys = "dup_keys"
-	// SignalOrderSkew: the source position goes backwards for one key on
-	// the CDC topic.
+	// SignalOrderSkew (X1): the source position goes backwards for one key
+	// on the CDC topic.
 	SignalOrderSkew = "order_skew"
+	// SignalForecast (X3): a pipeline metric will reach its limit within the
+	// forecast horizon.
+	SignalForecast = "forecast"
+	// SignalConfigDrift (X3): a connector's config changed outside an
+	// approved fix.
+	SignalConfigDrift = "config_drift"
 )
 
-// DriftSeverity is the default severity of a drift signal kind ("sev2" for
-// count_drift and row_drift, "sev3" for dup_keys and order_skew), and "" for
-// any other kind.
-func DriftSeverity(kind string) string {
-	switch kind {
+// SignalSeverity is the default severity of an X-wave watcher signal: "sev2"
+// for count_drift and row_drift, "sev3" for dup_keys, order_skew and
+// config_drift, "sev4" for forecast; "" for any other name (the older
+// signals' severities are the watcher's and owners.yaml's). It is the one
+// table docs/api.md (Watcher alerts) shows.
+func SignalSeverity(signal string) string {
+	switch signal {
 	case SignalCountDrift, SignalRowDrift:
 		return "sev2"
-	case SignalDupKeys, SignalOrderSkew:
+	case SignalDupKeys, SignalOrderSkew, SignalConfigDrift:
 		return "sev3"
+	case SignalForecast:
+		return "sev4"
 	}
 	return ""
 }
@@ -314,15 +344,18 @@ type DriftWindow struct {
 	To   time.Time `json:"to"`
 }
 
-// DriftSignal is the evidence of one drift signal. It carries names, counts
-// and a window only: never a key value, a row value or record content. The
-// numbers are always present (0 is evidence too); Table, Topic and Detail
-// are omitted when empty.
+// DriftSignal is the evidence entry of one drift signal (X1). It carries
+// names, counts and a window only: never a key value, a row value or record
+// content. The numbers are always present (0 is evidence too); Table, Topic
+// and Detail are omitted when empty. Window is an object here, while an
+// older signal's "window" (dlq_growth) is a word like "15m": a reader goes by
+// "signal" first.
 type DriftSignal struct {
-	Kind   string      `json:"kind"`            // one of the Signal* drift kinds
-	Table  string      `json:"table,omitempty"` // "schema.table" of the source table (count_drift, row_drift)
-	Topic  string      `json:"topic,omitempty"` // the CDC topic (dup_keys, order_skew; the table's topic otherwise when known)
-	Window DriftWindow `json:"window"`
+	Kind     string      `json:"signal"`          // SignalCountDrift, SignalRowDrift, SignalDupKeys or SignalOrderSkew
+	Severity string      `json:"severity"`        // SignalSeverity(Kind) unless owners.yaml sets another
+	Table    string      `json:"table,omitempty"` // "schema.table" of the source table (count_drift, row_drift)
+	Topic    string      `json:"topic,omitempty"` // the CDC topic (dup_keys, order_skew; the table's topic otherwise when known)
+	Window   DriftWindow `json:"window"`
 	// Source and Sink are the row counts on each side over Window
 	// (count_drift); for dup_keys and order_skew Source is the records
 	// scanned and Sink is 0.
@@ -343,54 +376,19 @@ type DriftSignal struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-// ---- X3: preventive signals (watch sample history, forecast, config_drift) ----
-//
-// The watcher (internal/watch) puts one object per firing signal in the
-// "signals" list of its evidence JSON (room.created.alert and its joins).
-// These are the typed shapes of the two X3 signals, so the watcher, the room
-// service, the snapshot and the agent's evidence renderer agree on one set of
-// keys. Like all watcher evidence they carry names, counts, hashes and times
-// only: never a row value, a record, or a connector config value.
-
-// RoomOriginForecast is RoomCreatedPayload.Origin of a room a forecast
-// signal opened. (X3)
-const RoomOriginForecast = "forecast"
-
-// RoomEscalatedPayload raises an open room's severity. Severity is the new
-// level, always more severe than From; Signal is the watcher signal that
-// caused it (e.g. "slot_wal"). Escalating a forecast room also starts its
-// agent when none has run yet. (X3)
-type RoomEscalatedPayload struct {
-	Severity string `json:"severity"` // "sev1".."sev3"
-	From     string `json:"from"`
-	Signal   string `json:"signal"`
-}
-
-// Signal names of the X3 signals, as they appear in the evidence's
-// signals[].signal and in owners.yaml watch.signals. (X3)
-const (
-	SignalForecast    = "forecast"
-	SignalConfigDrift = "config_drift"
-)
-
-// Default severities of the X3 signals. (X3)
-const (
-	ForecastSeverity    = "sev4"
-	ConfigDriftSeverity = "sev3"
-)
-
-// ForecastSignal says a pipeline metric will reach its limit within the
-// forecast horizon: a least-squares line over the last
-// config.WatchForecastFitWindow of watch samples (clients.SampleReader),
-// fired when the ETA is inside config.WatchForecast.Horizon and the fit's
-// R² is at least config.WatchForecastMinR2. Metric is one of the
-// clients.WatchMetric* names; Current, Limit and Slope are in that metric's
-// unit (clients.WatchMetricUnit; Slope per hour). Object names the slot,
-// topic, group or database the series follows when it is one object, ""
-// for a pipeline total. Numbers and names only. (X3)
+// ForecastSignal is the evidence entry of a forecast signal (X3): a pipeline
+// metric will reach its limit within the forecast horizon, by a
+// least-squares line over the last config.WatchForecastFitWindow of watch
+// samples (clients.SampleReader), fired when the ETA is inside
+// config.WatchForecast.Horizon and the fit's R² is at least
+// config.WatchForecastMinR2. Metric is one of clients.WatchMetrics();
+// Current, Limit and Slope are in that metric's unit
+// (clients.WatchMetricUnit; Slope per hour). Object names the slot, topic,
+// group or database the series follows when it is one object, "" for a
+// pipeline total. Numbers and names only.
 type ForecastSignal struct {
 	Signal   string    `json:"signal"`   // SignalForecast
-	Severity string    `json:"severity"` // ForecastSeverity
+	Severity string    `json:"severity"` // SignalSeverity(SignalForecast), "sev4"
 	Metric   string    `json:"metric"`
 	Object   string    `json:"object,omitempty"`
 	Current  float64   `json:"current"`
@@ -401,30 +399,37 @@ type ForecastSignal struct {
 	Samples  int       `json:"samples"`        // points in the fit
 }
 
-// ConfigDriftSignal says a connector's config changed outside an approved
-// fix: its hash (actions.DigestConfig) differs from the last approved one,
-// which moves at server start, on every action.executed that touches the
-// connector, and on POST /api/pipelines/{pid}/connectors/{name}/accept-config.
-// OldHash and NewHash are actions.ConfigDigest.Hash values. (X3)
+// ConfigDriftSignal is the evidence entry of a config_drift signal (X3): a
+// connector's config changed outside an approved fix, that is
+// actions.ChangedConfigKeys between the last approved digest and the current
+// one is not empty. The approved digest moves at server start, on every
+// action.executed that touches the connector, and on POST
+// /api/pipelines/{pid}/connectors/{name}/accept-config. OldHash and NewHash
+// are actions.ConfigHash of the two redacted configs (ConfigDigest.Hash, the
+// same id as a config version's hash, X5): no secret value enters them, so
+// they are equal when only a secret value changed.
 type ConfigDriftSignal struct {
 	Signal    string `json:"signal"`   // SignalConfigDrift
-	Severity  string `json:"severity"` // ConfigDriftSeverity
+	Severity  string `json:"severity"` // SignalSeverity(SignalConfigDrift), "sev3"
 	Connector string `json:"connector"`
 	OldHash   string `json:"old_hash"`
 	NewHash   string `json:"new_hash"`
 	// ChangedKeys are the NAMES of the keys added, removed or changed, sorted,
-	// at most MaxChangedKeys (actions.ChangedConfigKeys). Values, old or new,
-	// are never stored, logged or sent: not here, not in the room log, and
-	// not in the watcher's memory beyond a per-key hash. A secret-looking key
-	// (actions.LooksSecret) is reported as SecretKeyChanged instead of its
-	// name, once however many such keys changed.
+	// the first MaxChangedKeys of actions.ChangedConfigKeys. Values, old or
+	// new, are never stored, logged or sent: not here, not in the room log,
+	// and not in the watcher's memory beyond a keyed per-key fingerprint. A
+	// secret-looking key (actions.LooksSecret) is reported as
+	// SecretKeyChanged instead of its name, once however many such keys
+	// changed.
 	ChangedKeys []string `json:"changed_keys"`
 	// KeysOmitted counts the changed names past MaxChangedKeys.
 	KeysOmitted int `json:"keys_omitted,omitempty"`
 }
 
-// SecretKeyChanged stands in ConfigDriftSignal.ChangedKeys for the changed
-// keys that look like credentials. (X3)
+// SecretKeyChanged stands for the name of a changed credential key
+// (actions.LooksSecret): in ConfigDriftSignal.ChangedKeys and in
+// clients.ConnectorConfigVersion.ChangedKeys (X5). It is the only placeholder
+// for it; not even the key's name is shown. (X3)
 const SecretKeyChanged = "<secret key changed>"
 
 // MaxChangedKeys caps ConfigDriftSignal.ChangedKeys. A connector config has a

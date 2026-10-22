@@ -59,10 +59,16 @@ func TestWatchMetrics(t *testing.T) {
 		"slot_wal_bytes": "bytes", "dlq_records": "records", "group_lag": "records",
 		"db_size_bytes": "bytes", "topic_oldest_unread_age": "seconds",
 	}
-	if len(clients.WatchMetrics) != len(want) {
-		t.Fatalf("WatchMetrics = %v; want the %d names of X3a", clients.WatchMetrics, len(want))
+	metrics := clients.WatchMetrics()
+	if len(metrics) != len(want) {
+		t.Fatalf("WatchMetrics() = %v; want the %d names of X3a", metrics, len(want))
 	}
-	for _, m := range clients.WatchMetrics {
+	// A fresh slice: a caller that changes it cannot change the contract.
+	metrics[0] = "changed"
+	if clients.WatchMetrics()[0] != clients.WatchMetricSlotWALBytes {
+		t.Fatal("WatchMetrics() shares its slice between calls")
+	}
+	for _, m := range clients.WatchMetrics() {
 		if got := clients.WatchMetricUnit(m); got != want[m] {
 			t.Errorf("WatchMetricUnit(%q) = %q; want %q", m, got, want[m])
 		}
