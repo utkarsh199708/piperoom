@@ -92,6 +92,13 @@ const (
 	// set by the agent: clients and the snapshot derive it from these events. (F9)
 	HypothesisVerdict Type = "hypothesis.verdict"
 
+	// X4: RoomTeamPaged records that the driver paged the team that owns an
+	// upstream cause (POST /api/rooms/{id}/page-team): one Slack post to the
+	// team's owners.yaml slack_channel, never automatic, at most one per team
+	// per room per hour. Actor: the driver. The team's reply is not ingested.
+	// The room's agent Sink refuses it. (X4)
+	RoomTeamPaged Type = "room.team_paged"
+
 	// HandoffRequested is written when the driver asks for a hand-off, before
 	// the agent writes the summary (which can take minutes). It ends with
 	// handoff.created or handoff.failed for the same request_id, or at its
@@ -418,6 +425,94 @@ type AgentHypothesisPayload struct {
 	// the cited steps' summaries contain (agent grounding, F3). The UI marks
 	// them; they never block the hypothesis. At most 20, each ≤ 80 bytes.
 	UnbackedTerms []string `json:"unbacked_terms,omitempty"`
+	// X4: Scope says where the cause is (HypothesisScope); omitted on the
+	// wire when unknown, and an event written before X4 decodes as
+	// ScopeUnknown. Team is an owners.yaml teams[].id, set only with
+	// ScopeUpstreamApp or ScopeVendor, else "". ChangeID is the
+	// clients.PipelineChange.ID the scope rests on (the deploy, migration or
+	// vendor incident the agent cites), 0 when none. (X4)
+	Scope    HypothesisScope `json:"scope,omitzero"`
+	Team     string          `json:"team,omitempty"`
+	ChangeID int64           `json:"change_id,omitempty"`
+}
+
+// UnmarshalJSON defaults Scope to ScopeUnknown, so a hypothesis written
+// before X4 (no "scope" key) replays as unknown, not as "". (X4)
+func (p *AgentHypothesisPayload) UnmarshalJSON(b []byte) error {
+	type plain AgentHypothesisPayload
+	v := plain{Scope: ScopeUnknown}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*p = AgentHypothesisPayload(v)
+	return nil
+}
+
+// ---- X4: hypothesis scope and team pages ----
+
+// HypothesisScope is where the agent places the cause of the incident. Only
+// the four constants below are ever held after decoding: an absent, null,
+// empty or unrecognised value reads as ScopeUnknown, so an old or a newer
+// writer never breaks replay. (X4)
+type HypothesisScope string
+
+const (
+	// ScopePipeline: the cause is in the pipeline (source DB settings,
+	// connector, registry, Kafka, consumer, sink); a pipeline fix is the root
+	// fix.
+	ScopePipeline HypothesisScope = "pipeline"
+	// ScopeUpstreamApp: an application change outside the pipeline (a deploy
+	// or a migration) caused it. The agent may propose only a mitigation,
+	// labelled as such, never a pipeline fix as the root fix.
+	ScopeUpstreamApp HypothesisScope = "upstream_app"
+	// ScopeVendor: a vendor's incident (managed Kafka, Connect, registry).
+	ScopeVendor HypothesisScope = "vendor"
+	// ScopeUnknown: not established, or written before X4.
+	ScopeUnknown HypothesisScope = "unknown"
+)
+
+// Normalize returns s when it is one of the three known scopes, else
+// ScopeUnknown.
+func (s HypothesisScope) Normalize() HypothesisScope {
+	switch s {
+	case ScopePipeline, ScopeUpstreamApp, ScopeVendor:
+		return s
+	}
+	return ScopeUnknown
+}
+
+// IsZero makes omitzero drop an unknown scope, so a hypothesis without a
+// scope marshals byte for byte as before X4 (export hashes).
+func (s HypothesisScope) IsZero() bool { return s.Normalize() == ScopeUnknown }
+
+// MarshalJSON writes the normalised value.
+func (s HypothesisScope) MarshalJSON() ([]byte, error) {
+	return json.Marshal(string(s.Normalize()))
+}
+
+// UnmarshalJSON accepts any JSON string or null; a value that is not one of
+// the scopes becomes ScopeUnknown. A non-string is an error.
+func (s *HypothesisScope) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*s = ScopeUnknown
+		return nil
+	}
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
+		return fmt.Errorf("events: hypothesis scope: %w", err)
+	}
+	*s = HypothesisScope(v).Normalize()
+	return nil
+}
+
+// TeamPagedPayload is room.team_paged. Team is the owners.yaml teams[].id;
+// HypothesisSeq the seq of the agent.hypothesis the page carried; ChangeID
+// that hypothesis's change_id (0 when none). Ids only: the Slack message is
+// rendered from the room log when sent and never stored. (X4)
+type TeamPagedPayload struct {
+	Team          string `json:"team"`
+	HypothesisSeq int64  `json:"hypothesis_seq"`
+	ChangeID      int64  `json:"change_id,omitempty"`
 }
 
 // HypothesisVerdictPayload: Verdict is "confirmed" or "disputed"; Note is the

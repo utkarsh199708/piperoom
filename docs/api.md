@@ -233,6 +233,21 @@ never as HTML or Markdown.
   `checklist.step_done {step_id, tool_use_id, hit, item, done, note?}` (a person ticked or unticked item `item` of
   `hits[hit].items` in the `runbook_lookup` result `tool_use_id`).
 
+### X4 events: hypothesis scope and team pages (X4-0; payloads in `internal/events/events.go`)
+
+Additive like the F wave. Implemented by A4 (agent, X4c), A5 and C12 (page, X4d).
+
+- **Hypothesis scope.** `agent.hypothesis` may carry `scope` ∈ `pipeline | upstream_app | vendor | unknown`, `team?`
+  and `change_id?`. `scope` is where the cause is: `pipeline` (a pipeline fix is the root fix), `upstream_app` (an
+  application deploy or migration outside the pipeline; the agent proposes only mitigations, labelled as such),
+  `vendor` (a vendor's incident), `unknown` (not established). `unknown` is never written: the key is omitted, and a
+  missing, `null` or unrecognised `scope` (every hypothesis written before X4) reads as `unknown`, so old events and
+  their export hashes are unchanged. `team` is an `owners.yaml` `teams[].id` (see External changes), set only with
+  `upstream_app` or `vendor`. `change_id` is the `PipelineChange.id` the scope rests on (`0`/absent when none).
+- **`room.team_paged {team, hypothesis_seq, change_id?}`** (actor: the driver who clicked
+  `POST /api/rooms/{id}/page-team`). Ids only: the Slack text is rendered when sent and not stored. Never written by
+  the agent (its Sink refuses the type) and never automatic.
+
 ### P-wave events (P0; payloads in `internal/events/events.go`, items in `tasks/P0-contracts.md`)
 
 Additive like the F wave: unknown types are ignored by clients, and every new field on an existing payload is
@@ -393,6 +408,14 @@ as its empty value. The shapes are fixed here.
   `Usage` rule); zeros in a shadow room. `GET /api/rooms` rows carry it.
 - `open_proposals[].preview` (F4, implemented by A5): the `proposal.previewed` payload of that proposal.
 
+#### X4 snapshot fields (X4-0; implemented by A5)
+
+Additive, same rule: absent until X4d lands.
+```json
+  "hypothesis": { "...": "...", "scope": "upstream_app", "team": "checkout", "change_id": 812 },  // copied from agent.hypothesis; scope "unknown" when the payload has none, team "" and change_id 0 when unset
+  "team_pages": [ { "team": "checkout", "hypothesis_seq": 17, "by": { "id": "arjun", "name": "Arjun", "verified": true }, "at": "..." } ]  // room.team_paged events in seq order; [] when none
+```
+
 #### P-wave snapshot fields (P0; implemented by A5)
 
 Additive, same rule as the F-wave fields: absent until the task lands, and an absent field reads as its empty value.
@@ -519,6 +542,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation`. R4: `title` at most 200 characters (Unicode code points), else `400 validation` (the message gives the length and the limit, never the text). An alert's title is clipped to 200 with `…` instead, so an alert is never refused for it |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; without a valid `pipeline_id` (the `alertin.ValidPipelineID` shape), a top-level string `dag_id` selects the one `kind: batch` pipeline whose `dags` lists it (exact, case-sensitive match; a DAG listed by two pipelines, or by none, is ignored and the body resolves as if it had no `dag_id`), the same rule as the signed routes (P4a-3, P4a-4); the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
 | POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert, in this order: a `pipeline`/`pipeline_id` label or field; a `dag_id` label (Alertmanager, Grafana) or field (generic) → the one batch pipeline whose `dags` lists it (P4a-3; an unknown id is skipped, a DAG listed by two pipelines is not guessed); the `PAGERDUTY_SERVICES` map; an owners match; or `DEFAULT_ALERT_PIPELINE`. The dev `POST /api/alerts/webhook` maps `pipeline_id` only; the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
+| POST | `/api/changes/webhook` | `{pipeline_id, kind, at, title, service, url?, actor?, id?, status?}` | `202 {"stored": true\|false}` | X4 (X4-0 contract; implemented by C5 in `internal/alertin`, X4a). Records a deploy, migration or vendor incident in the pipeline's change log; opens no room and wakes no agent. **No `X-User`**: signed like `/api/alerts/generic` with `CHANGES_WEBHOOK_SECRET`. Full rules under External changes below. `stored: false` = a repeat of a stored change (deduplicated). Errors: bad / missing / stale signature or no secret `401 unauthenticated`; body over 4 KB `413 too_large`; verified but invalid `400 validation`; unknown pipeline `404 not_found`; the 61st verified request of one pipeline within a minute `429 rate_limited` |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
 | POST | `/api/rooms/{id}/comments` | `{step_id?, text, client_id?}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation`. `client_id`: optional idempotency key, see Idempotent posts (`409 client_id_reused`) |
@@ -529,6 +553,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
 | POST | `/api/rooms/{id}/hypothesis` | `{verdict: "confirmed"\|"disputed", note?}` | `Event` (`hypothesis.verdict`) | F9 (server F9b, implemented by A5; web F9c, A6). Any member (viewers `403 viewer`); open rooms only (`409 room_closed`); a shadow room `409 room_open`; no hypothesis yet `409 no_hypothesis`; the same person repeating the same verdict on the same hypothesis `409 already_decided`; `note` ≤ 500 characters, typed-text rule. The event carries `hypothesis_seq`; a new `agent.hypothesis` clears every verdict. The agent receives it as a comment and wakes. Renews the driver lease only when the caller is the driver |
+| POST | `/api/rooms/{id}/page-team` | `{team}` | `Event` (`room.team_paged`) | X4 (X4-0 contract; server and Slack post X4d by A5 and C12; web follow-up A6). The driver pages a team that owns an upstream cause: one Slack post to the team's `slack_channel` with the current hypothesis text, the cited change's summary and URL (`change_id`), the cited step numbers and the room link. Never automatic; the team's reply is not ingested. Driver only (`403 not_driver`; viewers `403 viewer`); open rooms only (`409 room_closed`); `team` must be a `teams[].id` of `owners.yaml` visible to the room's pipeline (its tenant's teams with a `tenants:` block), else `400 validation` (another tenant's team reads as unknown); no hypothesis, or the current one's `scope` is not `upstream_app` or `vendor`, `409 no_hypothesis`; Slack not configured (`SLACK_BOT_TOKEN` unset) `409 slack_off`, nothing written; the same team paged in this room in the last hour `429 rate_limited` (the message says when). The event carries `hypothesis_seq` and `change_id` of the hypothesis paged. The page text is untrusted: titles and hypothesis text are escaped (no mentions, no links but the room's and the change's `url`) |
 | POST | `/api/rooms/{id}/nudge` | `{proposal_id, layer}` | `Event` (`approval.nudged`) | F9 (implemented by A5). Any member (viewers `403 viewer`); open rooms (`409 room_closed`); the proposal must be open and `layer` pending on it (`409 already_decided`); one per proposal and layer per 10 minutes (`409 already_nudged`). Mirrored to the Slack thread when the bridge is on (C12 follow-up) |
 | POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the incident layers (`events.IncidentLayers()`, eight; `environment` is refused) or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
 | POST | `/api/rooms/{id}/checklist` | `{step_id, tool_use_id, hit, item, done, note?}` | `Event` (`checklist.step_done`) | F8 (implemented by A5). Open rooms only (`409 room_closed`); any member (viewers `403 viewer`); `tool_use_id` must be a `runbook_lookup` result of this room and `hit`/`item` within its `data` (`400 validation`); `note` ≤ 300 characters, typed-text rule; idempotent (the same state again still appends) |
@@ -632,6 +657,76 @@ closes; `--demo` forces it off.
 - **Triage pass (F6, implemented by A4 and A5).** Before an agent slot is taken, a bounded first look
   (`PIPEROOM_TRIAGE_PASS`, model `PIPEROOM_TRIAGE_PASS_MODEL`, deadline `PIPEROOM_TRIAGE_PASS_TIMEOUT`) writes its
   own steps and one `agent.triage`; not in shadow rooms or rooms restored after a restart.
+
+### External changes (X4-0; webhook and poller C5 (X4a), migration readers A3 (X4b), agent A4 (X4c), page A5 + C12 (X4d))
+
+Many incidents start outside the pipeline. Deploys, schema migrations and vendor incidents are rows of the same
+pipeline change log as F8's (`clients.PipelineChange`, written through `ChangeWriter`, read through `ChangeReader`
+and the "what changed" tool), with three more kinds and five more sources (`internal/clients/clients.go`, X4 block):
+
+| `kind` | `source` | `object` | `summary` | `actor` | `after` (`clients.ExternalChange`) |
+|---|---|---|---|---|---|
+| `deploy` | `webhook` | the service | the title | who deployed | `{url?, service}` |
+| `migration` | `webhook` | the service | the title | who ran it | `{url?, service, version?}` |
+| `migration` | `flyway`, `liquibase`, `dbt` | the history table (`public.flyway_schema_history`, `public.databasechangelog`) or the dbt project | the migration's description | `installed_by` / author | `{version}` |
+| `vendor_incident` | `webhook`, `statuspage` | the vendor component (`confluent-cloud`, `msk`, `aiven-kafka`) | the incident title | `""` | `{url?, service, status?}` |
+
+`before` is empty for these kinds. `status` ∈ `investigating | identified | monitoring | resolved`. Every text field
+is untrusted (the sender's or the customer database's): stored and shown as text, given to the model only inside the
+agent's untrusted-data wrapper, never logged (logs carry pipeline, kind and whether a row was stored). Caps:
+`summary` 300 runes (control characters removed, as for every change), `url` 1024 bytes and only absolute `http`/`https`
+without user info, `service` and `version` 128 bytes (`ExternalChange.Validate`). **Timestamps and metadata only**:
+a migration reader never reads a script's contents or checksums, and no row value of any table is ever stored.
+
+**Who may read them.** The same as the pipeline's other changes: the "what changed" tool of a room of that pipeline
+(the room's tenancy), the retention loop (`PIPEROOM_CHANGES_RETENTION_DAYS`) and the 5000-rows-per-pipeline cap.
+There is no HTTP read route.
+
+**`POST /api/changes/webhook`** (C5, X4a). Signed like `/api/alerts/generic`:
+`X-Piperoom-Signature: t=<unix ts>,v1=<hex HMAC-SHA256("<ts>.<body>")>`, timestamp within ±5 min, secret
+`CHANGES_WEBHOOK_SECRET` (comma-separated for rotation; empty = every request `401`). Body (JSON object, unknown
+fields `400 validation`):
+
+| Field | Rule |
+|---|---|
+| `pipeline_id` | required; an `owners.yaml` pipeline, else `404 not_found` |
+| `kind` | required; `deploy`, `migration` or `vendor_incident` (the F8 kinds are the watcher's, `400 validation`) |
+| `at` | required; RFC 3339, not more than 5 min in the future and not older than 7 days |
+| `title` | required; 1–300 runes after control characters are removed |
+| `service` | required; 1–128 bytes, the name `owners.yaml` `teams[].owns` uses (or the vendor component) |
+| `url`, `actor`, `status`, `id` | optional; `url` as above, `actor` ≤ 128 bytes, `status` for `vendor_incident` only, `id` the sender's own id (≤ 128 bytes) |
+
+The fingerprint is a hash of `kind`, `service` and `id` when `id` is sent, else of `kind`, `service`, `at` and `title`:
+a redelivery is not stored twice (`202 {"stored": false}`). Limits: body `config.ChangesWebhookMaxBodyBytes` (4 KB,
+`413 too_large`); `config.ChangesWebhookPerMinute` (60) verified requests per pipeline per minute, then
+`429 rate_limited`; the store write has the room store's deadline. Like the alert routes, the secret is shared by
+every tenant, so the reply carries nothing but `stored`.
+
+**Status-page poller** (C5, X4a). A pipeline's optional `vendor_status_url:` in `owners.yaml` (an absolute `https`
+URL of a status page RSS/Atom feed) is fetched every `config.VendorStatusPollInterval` (5 min, 10 s deadline, body
+capped at 4 MB). Each active incident becomes one `vendor_incident` row (`source: statuspage`; deduplicated by the
+feed's incident id and status); an unreachable feed writes nothing and logs one warning per hour.
+
+**Migration readers** (A3, X4b). When the pipeline's source database has `flyway_schema_history` or
+`databasechangelog` (found by catalog lookup in the pipeline's own database), or a dbt run-results reader is
+configured, applied migrations in the window appear as `migration` rows, newest first. Read-only, 10 s deadline, at
+most 200 rows a call. A table the login cannot read is a fact ("migration history not readable (grant SELECT on
+flyway_schema_history)"), not an error.
+
+**`owners.yaml` `teams:`** (validated by A3 in `internal/owners`; read by the agent through `agent.Alert.Teams` and by
+`POST /api/rooms/{id}/page-team`):
+```yaml
+teams:
+  - id: checkout                       # required, unique; ^[a-z0-9][a-z0-9_-]{0,63}$
+    slack_channel: C0123ABCD            # required; a Slack channel id, not a name
+    owns: [checkout-api, orders-writer]  # required, ≥ 1; service names as the webhook's `service` sends them; a service owned by two teams is a load error
+    tenant: acme                        # required with a tenants: block (a team serves one tenant), refused without one
+pipelines:
+  - id: orders
+    vendor_status_url: https://status.confluent.cloud/history.rss   # optional (X4a poller)
+```
+A room sees the teams of its pipeline's tenant (all teams without a `tenants:` block). The agent may set
+`agent.hypothesis.team` only to one of them; the page route refuses any other id as unknown.
 
 ### Spend limits (design `docs/design/cost.md`)
 
