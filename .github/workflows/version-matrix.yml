@@ -1,0 +1,131 @@
+name: Version matrix
+
+# X-QA7b (KAN-195): the integration suite against more than one set of dev-stack
+# images, so a fix that only works on the default versions is caught within a
+# week. The images come from the variables dev/docker-compose.yml reads
+# (KAN-141, dev/README.md "Image versions"); the defaults themselves are
+# covered by the Go integration job in ci.yml on every PR, and are repeated
+# here as the "default" set so a matrix failure can be compared with it.
+#
+# Not a PR check: weekly, plus workflow_dispatch for a run on demand.
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per ref at a time; a manual run does not cancel the weekly one.
+concurrency:
+  group: version-matrix-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  integration:
+    name: Integration (${{ matrix.set.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # A broken set must not hide the result of the others.
+      fail-fast: false
+      matrix:
+        set:
+          - name: default
+            postgres: postgres:17
+            kafka: apache/kafka:4.1.0
+            registry: confluentinc/cp-schema-registry:8.0.0
+            debezium: 3.2.0.Final
+          - name: previous
+            postgres: postgres:16
+            kafka: apache/kafka:3.9.1
+            registry: confluentinc/cp-schema-registry:7.9.2
+            debezium: 3.0.8.Final
+          - name: mixed
+            postgres: postgres:16
+            kafka: apache/kafka:4.0.0
+            registry: confluentinc/cp-schema-registry:7.9.2
+            debezium: 3.2.0.Final
+    # Same services and env as the fullstack job in ci.yml: the room-database
+    # tests get their own Postgres so their WAL does not sit behind the slot.
+    services:
+      roomdb:
+        image: postgres:16@sha256:ca0bd484cb98bf4b24eb1010e73fb3fcbd6714d240fbc1a10eea5b7dbecb641d
+        env:
+          POSTGRES_USER: piperoom
+          # CI-only throwaway database on the job's own network; not a secret.
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: piperoom
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U piperoom -d piperoom"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PIPEROOM_STACK_OWNER: ci
+      PIPEROOM_STACK_LOCK: /tmp/piperoom-ci/stack.lock
+      POSTGRES_IMAGE: ${{ matrix.set.postgres }}
+      KAFKA_IMAGE: ${{ matrix.set.kafka }}
+      SCHEMA_REGISTRY_IMAGE: ${{ matrix.set.registry }}
+      DEBEZIUM_VERSION: ${{ matrix.set.debezium }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.mod
+            go.sum
+      - name: Start the dev stack on this image set
+        run: docker compose -f dev/docker-compose.yml up -d --build
+      - name: Wait until Connect and the Schema Registry answer
+        run: .github/scripts/wait-for-stack.sh 300
+      - name: Register the connector (devctl up is idempotent)
+        run: |
+          mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
+          go run ./cmd/devctl lock --owner ci
+          go run ./cmd/devctl up --owner ci
+      - name: Start the optional ClickHouse profile
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse up -d --wait clickhouse
+      - name: Create the ClickHouse sink (devctl clickhouse init)
+        run: go run ./cmd/devctl clickhouse init --owner ci
+      - name: go test -tags integration ./internal/... ./cmd/...
+        env:
+          PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
+          CLICKHOUSE_INTEGRATION_DSN: clickhouse://piperoom_reader:piperoom-clickhouse-reader@127.0.0.1:9001/analytics
+          CLICKHOUSE_INTEGRATION_ADMIN_DSN: clickhouse://piperoom_admin:piperoom-clickhouse-admin@127.0.0.1:9001/analytics
+        run: |
+          set +e
+          go test -count=1 -timeout 30m -json -tags integration ./internal/... ./cmd/... > test.json
+          rc=$?
+          set -e
+          jq -rs '
+            ([.[] | select(.Action == "fail" and (.Test // "") != "") | "\(.Package) \(.Test)"]) as $failed
+            | .[] | select(.Action == "output" and (.Test // "") != ""
+                           and (("\(.Package) \(.Test)") as $k | $failed | index($k)))
+            | .Output' test.json | grep -v '^$' || true
+          exit "$rc"
+      - name: Skipped integration tests are failures
+        if: success() || failure()
+        run: .github/scripts/fail-on-skips.sh test.json
+      - name: Dump stack logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse logs --no-color --tail=300
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: version-matrix-${{ matrix.set.name }}-test-json
+          path: test.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Tear down
+        if: always()
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse down -v --remove-orphans
