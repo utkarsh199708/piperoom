@@ -7,9 +7,12 @@ package actions
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -201,6 +204,80 @@ func LooksSecret(key string) bool {
 		}
 	}
 	return false
+}
+
+// ---- X3: config_drift (connector config changed outside an approved fix) ----
+
+// ConfigDigest is a connector config reduced to hashes, so the watcher can
+// tell which keys changed without keeping a value. Hash (lowercase hex
+// SHA-256 over the keys in sorted order, each key and value length-prefixed)
+// is the config's identity: key order does not change it, a nil and an
+// empty config are the same. Keys maps each key to the hex SHA-256 of its
+// key and value; it never leaves the process (json:"-") and is never logged.
+// (X3)
+type ConfigDigest struct {
+	Hash string            `json:"hash"`
+	Keys map[string]string `json:"-"`
+}
+
+// DigestConfig hashes cfg (clients.ConnectReader.Config). It keeps no value.
+// (X3)
+func DigestConfig(cfg map[string]string) ConfigDigest {
+	names := make([]string, 0, len(cfg))
+	for k := range cfg {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	all := sha256.New()
+	d := ConfigDigest{Keys: make(map[string]string, len(cfg))}
+	for _, k := range names {
+		// Length prefixes keep "a"+"bc" and "ab"+"c" apart.
+		entry := fmt.Sprintf("%d:%s%d:%s", len(k), k, len(cfg[k]), cfg[k])
+		all.Write([]byte(entry))
+		one := sha256.Sum256([]byte(entry))
+		d.Keys[k] = hex.EncodeToString(one[:])
+	}
+	d.Hash = hex.EncodeToString(all.Sum(nil))
+	return d
+}
+
+// ChangedConfigKeys returns the names of the keys added, removed or changed
+// between two digests, masked by MaskChangedKeys and cut at
+// events.MaxChangedKeys; omitted counts the names cut. Names only: a digest
+// holds no value to leak. (X3)
+func ChangedConfigKeys(old, cur ConfigDigest) (keys []string, omitted int) {
+	var names []string
+	for k, h := range old.Keys {
+		if cur.Keys[k] != h {
+			names = append(names, k)
+		}
+	}
+	for k := range cur.Keys {
+		if _, ok := old.Keys[k]; !ok {
+			names = append(names, k)
+		}
+	}
+	keys = MaskChangedKeys(names)
+	if len(keys) > events.MaxChangedKeys {
+		omitted = len(keys) - events.MaxChangedKeys
+		keys = keys[:events.MaxChangedKeys]
+	}
+	return keys, omitted
+}
+
+// MaskChangedKeys returns names sorted and without repeats, each name that
+// LooksSecret replaced by events.SecretKeyChanged (once, however many). Not
+// nil, so an empty result encodes as []. It does not change names. (X3)
+func MaskChangedKeys(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if LooksSecret(n) {
+			n = events.SecretKeyChanged
+		}
+		out = append(out, n)
+	}
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // Registry holds actions in registration order.

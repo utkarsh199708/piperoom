@@ -126,11 +126,11 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); X3: `watch_off` (`accept-config` while the watcher is off) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket); P3: `too_many_proposals` (a sixth open driver-authored proposal in one room) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
-| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
+| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working); X3: `connect_unavailable` (`accept-config` could not read Kafka Connect) |
 
 Every text field a person types (for example titles, comments, steers, resolutions, trace keys, labels, verdict notes, decline and delete reasons, checklist notes, shadow grades, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Such text that contains a bidirectional control character (U+202A–U+202E, U+2066–U+2069) is refused the same way with `400 validation` ("text contains bidirectional control characters (U+202A-U+202E, U+2066-U+2069)") (#358). Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD, bidirectional control characters are dropped). Alert room titles, watcher notes, a label's `cause` and `fix_that_worked`, and a close resolution (which the web app pre-fills from agent text) have bidirectional control characters dropped instead of refused.
 
@@ -164,7 +164,8 @@ Exactly `events.Event` from `internal/events/events.go`:
 `actor.verified` is decided when the event is written (see **Verified people** under Login).
 
 `room.created` (`events.RoomCreatedPayload`) carries, besides `title`, `severity`, `pipeline_id`, `alert`,
-`alert_source`, `dedup_key`, `shadow` and `mode` (U0: `"setup"` for a setup room, absent otherwise), the server's
+`alert_source`, `dedup_key`, `shadow`, `mode` (U0: `"setup"` for a setup room, absent otherwise) and `origin` (X3:
+`"forecast"` for a room a forecast signal opened, absent otherwise; see X3 events), the server's
 verification of the alert **sender** (R3 #135 contract change
 request; A5 implements):
 
@@ -357,6 +358,42 @@ field below is additive and omitted for a fix, so a fix proposal, preview and ve
   literals), never passed from the model, and checked again by the writer (`clients.ValidateSnapshotCondition`,
   at most 1 024 bytes) before any I/O. It never appears in an event or a log.
 
+### X3 events and signals (X3-0; payloads in `internal/events/events.go`)
+
+Additive like the waves before: `origin` is omitted when empty, so events written before X3-0 and their export
+hashes are unchanged; clients ignore `room.escalated` until they know it.
+
+- **Forecast rooms.** `room.created.origin: "forecast"` (`events.RoomOriginForecast`, server X3c): a forecast signal
+  opened the room, `severity: "sev4"`, the trend summary is its first system message and **no agent runs** (no
+  `agent.*` event, no usage) until the first `steer.sent`, the first `comment.added` with `mentions_agent: true`, or a
+  `room.escalated`. The room's driver, proposals and close work as in any room.
+- **`room.escalated {severity, from, signal}`** (system actor; X3c). The watcher's normal signal on the same pipeline
+  (for example `slot_wal` once the slot really fills) joined an open room of lower severity: `severity` is the new
+  level, `from` the old, `signal` the signal that caused it. The snapshot's `severity` is the newest one. In a
+  forecast room it also starts the agent when none has run. A room is never lowered.
+- **Watcher signals `forecast` and `config_drift`** (X3a, X3b; implemented by A7). Like every watcher signal they are
+  one object of the evidence's `signals` list (`room.created.alert`, joins); see Watcher alerts.
+  ```json
+  { "signal": "forecast", "severity": "sev4", "metric": "slot_wal_bytes", "object": "orders_slot",
+    "current": 64424509440, "limit": 107374182400, "eta": "2026-10-24T03:00:00Z",
+    "slope_per_hour": 1073741824, "r2": 0.97, "samples": 96 }
+  { "signal": "config_drift", "severity": "sev3", "connector": "orders-src",
+    "old_hash": "9f2c…", "new_hash": "41ab…",
+    "changed_keys": ["<secret key changed>", "decimal.handling.mode"], "keys_omitted": 0 }
+  ```
+  `forecast` (`events.ForecastSignal`): `metric` is one of the five names under **Trends** below; `current`,
+  `limit` and `slope_per_hour` are in its unit; `object` names the slot, topic, group or database when the series
+  follows one (omitted for a pipeline total); `eta` is when the least-squares line over the last 24 h reaches `limit`.
+  It fires only when `slope_per_hour > 0`, `r2 >= 0.6`, at least 8 samples, and `eta` is within
+  `PIPEROOM_WATCH_FORECAST_HORIZON` (default 48 h). A metric with no limit (`dlq_records`, `group_lag`) is sampled
+  for trends but never forecast.
+  `config_drift` (`events.ConfigDriftSignal`): the connector's config hash (`actions.DigestConfig`: SHA-256 over the
+  sorted keys, so key order never fires it) differs from the last **approved** hash, which moves at server start, on
+  every `action.executed` that touches the connector, and on `accept-config` (below). `changed_keys` are key
+  **names** only, sorted, at most 50 (`keys_omitted` counts the rest): config values, old or new, are never stored,
+  logged or sent, and every changed key that looks like a credential (`actions.LooksSecret`) is reported once as
+  `"<secret key changed>"`. A Connect read error changes neither the signal nor the baseline.
+
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
 ```json
@@ -483,6 +520,18 @@ setup room (`room.created.mode: "setup"`).
 `GET /api/rooms` rows carry `setup.mode`, `setup.runner.connected` and `setup.phase` only. Nothing in the snapshot is
 a secret value, a pairing code or a token: `runner.tools` are versions, `targets[].address` is what the person typed.
 
+#### X3 snapshot fields (X3-0; implemented by A5 in X3c)
+
+Additive, same rule: absent until X3c lands, and an absent field reads as its empty value.
+```json
+  "origin": "forecast",            // room.created.origin; absent for every other room
+  "severity": "sev2",              // unchanged field: after a room.escalated it is that event's severity
+  "forecast": { "metric": "slot_wal_bytes", "object": "orders_slot", "current": 64424509440,
+                "limit": 107374182400, "eta": "2026-10-24T03:00:00Z", "slope_per_hour": 1073741824,
+                "r2": 0.97, "at": "..." }    // the newest forecast signal of the room's evidence, "at" its time; absent when none
+```
+`GET /api/rooms` rows carry `origin` and `forecast` too, so a room list can show the ETA without opening the room.
+
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
 
 ### AgentStats (F11, implemented by A5)
@@ -593,6 +642,8 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | GET | `/api/pipelines` | – | `[{id, title, shadow, kind}]` | R0; server R4, web R3. The pipelines this server knows: every pipeline of `owners.yaml`, in file order (with a `tenants:` block, only those of the caller's tenants; the solo user sees all). `title` is the pipeline's `title:` (`""` when unset); `shadow` is `true` when its `shadow:` block is enabled (rooms from alerts open as shadow rooms). `kind` (P0 item 8; server P4a-4 (A5)) is the pipeline's `kind:`, `"cdc"` or `"batch"` (`"cdc"` when the file names none). Any logged-in user, viewers included. No other field (connections, owners, watch settings) is returned. `[]` when there are none: clients must not fall back to a made-up pipeline id such as `orders`; the new-room form then has no pipeline to offer |
 | GET | `/api/pipelines/{pid}/topology` | – | `Topology` | unknown pipeline → `404 not_found` |
 | GET | `/api/pipelines/{pid}/agent-stats?days=90` | – | `AgentStats` | F11 (server F11a, implemented by A5; web F11b, A6). The agent's track record on one pipeline over the last `days` (1–365, default 90, else `400 validation`) of **closed** rooms: counts, graded hit rate, reliability by confidence (`by_confidence[]` with the field names of `evals.ReliabilityBucket`), medians of time to first hypothesis, human MTTR and cost, plus the shadow subset. Visibility first (`404 not_found` for an unknown pipeline or one outside the caller's tenants), then any logged-in user, viewers included. `enough_data` is false under 10 graded rooms: clients show counts, never a rate. Cached 2 minutes per pipeline. Sources: `shadow.labelled/graded` and F8's `room.labelled`; before F8 only shadow rooms are graded |
+| GET | `/api/pipelines/{pid}/trends?metric=slot_wal_bytes&days=1` | – | `[{at, value}]` | X3 (contract X3-0; server X3a, A5; web X3d, A6). **Trends**: the watcher's samples of one metric of one pipeline (`clients.SamplePoint`), oldest first, at most one per 15 min and 672 in all (`clients.MaxSamplesPerSeries`); `at` RFC 3339 UTC, `value` a number in the metric's unit. `metric` is required, one of `slot_wal_bytes` (bytes), `dlq_records` (records), `group_lag` (records), `db_size_bytes` (bytes), `topic_oldest_unread_age` (seconds) (`clients.WatchMetrics`); anything else → `400 validation`. `days` 1–7 (default 1; samples are kept 7 days), else `400 validation`. `[]` when there are no samples yet (watcher off, new pipeline). Visibility first: `404 not_found` for an unknown pipeline **and** for one outside the caller's tenants (the Tenants rule: never `403`, so the route does not confirm another tenant's pipeline id), then any logged-in user, viewers included. Served from Piperoom's own `watch_samples` table: a request makes no call to a customer system and returns numbers only, never a row value, a record, a config value or free text. Store read deadline 10 s |
+| POST | `/api/pipelines/{pid}/connectors/{name}/accept-config` | – | `{connector, hash}` | X3 (contract X3-0; server X3b, A5 with the watcher, A7). Makes the connector's **current** config the approved baseline of `config_drift`, so the next poll is quiet until it changes again; `hash` is the new baseline (`actions.DigestConfig`). Visibility first (`404 not_found` for an unknown pipeline, one outside the caller's tenants, or a connector that is not one of the pipeline's), then only an approver or backup of the pipeline's `kafka-connect` layer, or `PIPEROOM_SOLO_USER`: anyone else `403 not_layer_owner` (a viewer `403 viewer`). `409 watch_off` when `PIPEROOM_WATCH_MODE=off` (there is no baseline to move); `503 connect_unavailable` when Kafka Connect cannot be read within 10 s, and the baseline is unchanged. Writes no room event and changes no customer system; the server logs the caller, pipeline, connector and both hashes, never a config value |
 | POST | `/api/rooms/{id}/trace` | `{table, key}` | `Event` | runs a record trace; emits `trace.pinned`; table not in the pipeline or empty key → `400 validation` |
 | POST | `/api/rooms/{id}/shadow/blind` | `{actual_layer, root_cause_terms}` | `Event` (`shadow.labelled`) | closed shadow rooms only; once per room (`409 already_decided`); caller must be a member of the room's pipeline: the solo user, or an approver or backup for any layer of that pipeline in `owners.yaml` (in dev mode also a `users.yaml` user whose `layers:` grant a layer the pipeline's `owners:` block does not replace), the same rule as the export minus auditors; else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the incident layers (`events.IncidentLayers()`), `root_cause_terms` 1–20 strings of 1–200 chars → else `400 validation`; the event carries `identity` with the qualifying `grant` |
 | GET | `/api/rooms/{id}/shadow?include=data,room` | – | `{run: ShadowRun, events: [Event + "shadow": true]}` | closed shadow rooms only; `409 not_labelled` until the blind label; any logged-in user, viewers included (`include=data` too, as with `tool_result.data` on `GET /events`); `events` have their own `seq` and are never fed to the room reducer; `tool_result.data` is omitted unless `include=data`; `include=room` adds `room: {created, labelled, graded}` for the eval builder. `ShadowRun` = `{room_id, status, model, pipeline_map, started_at, first_hypothesis_at, final_hypothesis_at, finished_at, finished_after_close, final_hypothesis, tool_calls, tokens, revealed_at}` (null times when unset; `status` ∈ `queued\|running\|hypothesised\|no_hypothesis\|error\|budget\|interrupted`) |
@@ -706,6 +757,13 @@ closes; `--demo` forces it off.
 - **Triage pass (F6, implemented by A4 and A5).** Before an agent slot is taken, a bounded first look
   (`PIPEROOM_TRIAGE_PASS`, model `PIPEROOM_TRIAGE_PASS_MODEL`, deadline `PIPEROOM_TRIAGE_PASS_TIMEOUT`) writes its
   own steps and one `agent.triage`; not in shadow rooms or rooms restored after a restart.
+- **Sample history, forecasts and config drift (X3, implemented by A7 and A5).** Every pipeline gets one sample per
+  metric at most every 15 minutes in `watch_samples` (kept 7 days; read with **Trends** under REST endpoints). A
+  `forecast` signal opens a quiet forecast room (`origin: "forecast"`, sev4, no agent run) with its own cooldown per
+  pipeline and metric; when the metric's real signal fires later on the same pipeline it joins that room as usual and
+  escalates it (`room.escalated`). A `config_drift` signal (sev3) opens a room "connector config changed outside an
+  approved fix" with the changed key names only. Both payloads are under **X3 events and signals**. The agent sees
+  a key only once `agent.AlertEvidenceText` (A4) allow-lists it, as for every watcher key.
 
 ### Spend limits (design `docs/design/cost.md`)
 

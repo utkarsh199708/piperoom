@@ -28,6 +28,11 @@ const (
 	RoomLogCapWarning    Type = "room.log_cap_warning"
 	RoomDeleted          Type = "room.deleted"
 
+	// RoomEscalated raises the severity of an open room: a forecast room whose
+	// metric reached its limit, so the watcher's normal signal joined it.
+	// System actor; the snapshot's severity is the newest one. (X3)
+	RoomEscalated Type = "room.escalated"
+
 	AgentStatus     Type = "agent.status"
 	AgentStepStart  Type = "agent.step.started"
 	AgentToolCall   Type = "agent.tool_call"
@@ -248,6 +253,12 @@ type RoomCreatedPayload struct {
 	// Empty (omitted) for every incident room, so events from before the U
 	// wave serialise exactly as before. Never set together with Shadow. (U)
 	Mode string `json:"mode,omitempty"`
+	// Origin is RoomOriginForecast for a room a forecast signal opened: it
+	// opens quietly, sev4, with the trend summary as its first system message
+	// and no agent run (zero tokens) until the first steer, the first @agent
+	// comment or a room.escalated. Empty (omitted) for every other room, so
+	// events from before the X wave serialise exactly as before. (X3)
+	Origin string `json:"origin,omitempty"`
 }
 
 // RoomModeSetup is RoomCreatedPayload.Mode of a setup room. (U)
@@ -324,6 +335,94 @@ type DriftSignal struct {
 	// and numbers, at most 200 bytes), shown as text and never as HTML.
 	Detail string `json:"detail,omitempty"`
 }
+
+// ---- X3: preventive signals (watch sample history, forecast, config_drift) ----
+//
+// The watcher (internal/watch) puts one object per firing signal in the
+// "signals" list of its evidence JSON (room.created.alert and its joins).
+// These are the typed shapes of the two X3 signals, so the watcher, the room
+// service, the snapshot and the agent's evidence renderer agree on one set of
+// keys. Like all watcher evidence they carry names, counts, hashes and times
+// only: never a row value, a record, or a connector config value.
+
+// RoomOriginForecast is RoomCreatedPayload.Origin of a room a forecast
+// signal opened. (X3)
+const RoomOriginForecast = "forecast"
+
+// RoomEscalatedPayload raises an open room's severity. Severity is the new
+// level, always more severe than From; Signal is the watcher signal that
+// caused it (e.g. "slot_wal"). Escalating a forecast room also starts its
+// agent when none has run yet. (X3)
+type RoomEscalatedPayload struct {
+	Severity string `json:"severity"` // "sev1".."sev3"
+	From     string `json:"from"`
+	Signal   string `json:"signal"`
+}
+
+// Signal names of the X3 signals, as they appear in the evidence's
+// signals[].signal and in owners.yaml watch.signals. (X3)
+const (
+	SignalForecast    = "forecast"
+	SignalConfigDrift = "config_drift"
+)
+
+// Default severities of the X3 signals. (X3)
+const (
+	ForecastSeverity    = "sev4"
+	ConfigDriftSeverity = "sev3"
+)
+
+// ForecastSignal says a pipeline metric will reach its limit within the
+// forecast horizon: a least-squares line over the last
+// config.WatchForecastFitWindow of watch samples (clients.SampleReader),
+// fired when the ETA is inside config.WatchForecast.Horizon and the fit's
+// R² is at least config.WatchForecastMinR2. Metric is one of the
+// clients.WatchMetric* names; Current, Limit and Slope are in that metric's
+// unit (clients.WatchMetricUnit; Slope per hour). Object names the slot,
+// topic, group or database the series follows when it is one object, ""
+// for a pipeline total. Numbers and names only. (X3)
+type ForecastSignal struct {
+	Signal   string    `json:"signal"`   // SignalForecast
+	Severity string    `json:"severity"` // ForecastSeverity
+	Metric   string    `json:"metric"`
+	Object   string    `json:"object,omitempty"`
+	Current  float64   `json:"current"`
+	Limit    float64   `json:"limit"`
+	ETA      time.Time `json:"eta"`            // when the line reaches Limit, UTC
+	Slope    float64   `json:"slope_per_hour"` // > 0: a flat or shrinking series never fires
+	R2       float64   `json:"r2"`             // goodness of fit, 0..1
+	Samples  int       `json:"samples"`        // points in the fit
+}
+
+// ConfigDriftSignal says a connector's config changed outside an approved
+// fix: its hash (actions.DigestConfig) differs from the last approved one,
+// which moves at server start, on every action.executed that touches the
+// connector, and on POST /api/pipelines/{pid}/connectors/{name}/accept-config.
+// OldHash and NewHash are actions.ConfigDigest.Hash values. (X3)
+type ConfigDriftSignal struct {
+	Signal    string `json:"signal"`   // SignalConfigDrift
+	Severity  string `json:"severity"` // ConfigDriftSeverity
+	Connector string `json:"connector"`
+	OldHash   string `json:"old_hash"`
+	NewHash   string `json:"new_hash"`
+	// ChangedKeys are the NAMES of the keys added, removed or changed, sorted,
+	// at most MaxChangedKeys (actions.ChangedConfigKeys). Values, old or new,
+	// are never stored, logged or sent: not here, not in the room log, and
+	// not in the watcher's memory beyond a per-key hash. A secret-looking key
+	// (actions.LooksSecret) is reported as SecretKeyChanged instead of its
+	// name, once however many such keys changed.
+	ChangedKeys []string `json:"changed_keys"`
+	// KeysOmitted counts the changed names past MaxChangedKeys.
+	KeysOmitted int `json:"keys_omitted,omitempty"`
+}
+
+// SecretKeyChanged stands in ConfigDriftSignal.ChangedKeys for the changed
+// keys that look like credentials. (X3)
+const SecretKeyChanged = "<secret key changed>"
+
+// MaxChangedKeys caps ConfigDriftSignal.ChangedKeys. A connector config has a
+// few dozen keys, so more than this means the config was replaced. (X3)
+const MaxChangedKeys = 50
 
 // RoomClosedPayload ends a room. A room closed by the open-room limit
 // (PIPEROOM_MAX_OPEN_DAYS) is closed by the system actor with the resolution
