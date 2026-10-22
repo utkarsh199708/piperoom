@@ -40,6 +40,9 @@ func (f *fakePager) PageTeam(ctx context.Context, p room.TeamPage) error {
 	if f.err != nil {
 		return f.err
 	}
+	if err := ctx.Err(); err != nil {
+		return err // as the Slack client: a cancelled post fails
+	}
 	f.pages = append(f.pages, p)
 	return nil
 }
@@ -382,4 +385,31 @@ func TestSnapshotHypothesisScopeDefaults(t *testing.T) {
 	if len(snap.TeamPages) != 0 || len(next.TeamPages) != 1 || len(next.Clone().TeamPages) != 1 {
 		t.Fatalf("Apply must not change its input: %v / %v", snap.TeamPages, next.TeamPages)
 	}
+}
+
+// E5: the driver's request going away while Slack takes the page does not
+// cancel the post: the page that went out is recorded, so a retry is 429.
+func TestPageTeamSurvivesDisconnect(t *testing.T) {
+	pager := &fakePager{started: make(chan struct{}, 1), gate: make(chan struct{})}
+	r := newPageRig(t, pager)
+	roomID := createRoom(t, r.svc, "arjun").ID
+	arjun := mustUser(t, r.svc, "arjun")
+	r.mustEmit(t, events.AgentHypothesis, upstreamHyp("checkout", 0))
+	reqCtx, disconnect := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.svc.PageTeam(reqCtx, arjun, roomID, "checkout")
+		done <- err
+	}()
+	<-pager.started
+	disconnect()
+	close(pager.gate)
+	if err := <-done; err != nil {
+		t.Fatalf("page after a disconnect: %v", err)
+	}
+	if pager.count() != 1 || len(r.teamPaged(t, roomID)) != 1 {
+		t.Fatalf("pages %d events %d, want the page posted and recorded", pager.count(), len(r.teamPaged(t, roomID)))
+	}
+	_, err := r.svc.PageTeam(context.Background(), arjun, roomID, "checkout")
+	wantCode(t, err, "rate_limited")
 }

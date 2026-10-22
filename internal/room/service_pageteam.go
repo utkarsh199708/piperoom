@@ -148,7 +148,10 @@ func (s *Service) PageTeam(ctx context.Context, user User, roomID, team string) 
 		st.mu.Unlock()
 	}()
 
-	pctx, cancel := context.WithTimeout(ctx, teamPageTimeout)
+	// The post outlives the driver's request: a client that disconnects
+	// while Slack is taking the page must not cancel a post that may already
+	// be out, or it would go unrecorded and a retry would page twice.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), teamPageTimeout)
 	defer cancel()
 	page.Steps = s.stepNumbers(pctx, roomID, hypSeq, cited)
 	page.Change = s.citedChange(pctx, page.PipelineID, page.ChangeID, openedAt)
