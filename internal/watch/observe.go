@@ -43,6 +43,10 @@ type target struct {
 	lag      LagReader
 	// groups are the pipeline's consumer groups, filtered through the scope.
 	groups []string
+	// wh is the pipeline's sink warehouse (drift.go); scope is the tool scope
+	// of the pipeline, which every drift read is checked against first.
+	wh    clients.WarehouseReader
+	scope tools.Scope
 }
 
 // connObs is what one tick learned about one connector.
@@ -57,7 +61,10 @@ type connObs struct {
 // observation is the raw material of one tick.
 type observation struct {
 	// set is the client set this observation read (target.set).
-	set        string
+	set string
+	// at is when the reads started: config_drift judges a config only when
+	// it was read after the connector's baseline last moved.
+	at         time.Time
 	slots      []clients.ReplicationSlot
 	slotsErr   error
 	slotsTried bool
@@ -91,7 +98,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		cfg := p.Watch()
 		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
 			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled || cfg.ConsumerLag.Enabled || cfg.GroupUnstable.Enabled ||
-			cfg.OffsetBelowLogStart.Enabled) {
+			cfg.OffsetBelowLogStart.Enabled || driftOn(cfg)) {
 			continue
 		}
 		t := target{p: p, cfg: cfg}
@@ -102,6 +109,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 			w.log.Warn("watch: cannot scope pipeline", "pipeline", p.ID, "err", err)
 			continue
 		}
+		t.scope = sc
 		t.connectors = sc.FilterConnectors(p.Connectors)
 		t.cdcTopics = sc.Topics()
 		for _, topic := range t.cdcTopics {
@@ -111,10 +119,10 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		if w.clientsFor != nil {
 			pc := w.clientsFor(p.ID)
 			t.set, t.src, t.conn, t.kafka, t.lag = pc.Set, pc.Source, pc.Connect, pc.Kafka, pc.Lag
-			t.reg, t.ddl = pc.Registry, pc.DDL
+			t.reg, t.ddl, t.wh = pc.Registry, pc.DDL, pc.Warehouse
 		} else {
 			t.src, t.conn, t.kafka, t.lag = w.src, w.conn, w.kafka, w.lag
-			t.reg, t.ddl = w.registry, w.ddl
+			t.reg, t.ddl, t.wh = w.registry, w.ddl, w.wh
 		}
 		out = append(out, t)
 	}
@@ -163,18 +171,14 @@ func (w *Watcher) observe(ctx context.Context, ts []target) map[string]*observat
 // broken layer never holds up or hides another (same shape as devctl's
 // runHealth).
 func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src SourceDB, conn ConnectClient, kafka clients.DLQReader, lr LagReader) *observation {
-	obs := &observation{set: set, conns: map[string]*connObs{}}
-	needCfg := map[string]bool{}
+	obs := &observation{set: set, conns: map[string]*connObs{}, at: w.clock.Now()}
 	for _, t := range ts {
-		// The slot name, the heartbeat, the DLQ topic and the risks all come from the config.
-		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled ||
-			t.cfg.DLQGrowth.Enabled || t.cfg.ConfigRisk.Enabled
+		// Every connector's config is read: config_drift (X3b) judges each
+		// one, and the slot name, the heartbeat, the DLQ topic and the risks
+		// come from it too.
 		for _, c := range t.connectors {
 			if _, ok := obs.conns[c]; !ok {
 				obs.conns[c] = &connObs{}
-			}
-			if slotCfg || w.changes != nil {
-				needCfg[c] = true // slot name and heartbeat come from the config
 			}
 		}
 	}
@@ -208,7 +212,7 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 				co.status, co.statusErr = call(ctx, w.cfg.CheckTimeout, "connector status", func(c context.Context) (clients.ConnectorStatus, error) {
 					return conn.Status(c, name)
 				})
-				if co.statusErr != nil || !needCfg[name] {
+				if co.statusErr != nil {
 					return
 				}
 				co.cfgTried = true

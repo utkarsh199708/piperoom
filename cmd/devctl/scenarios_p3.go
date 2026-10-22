@@ -271,23 +271,33 @@ func (s *stack) publishAndSnapshotRefunds(ctx context.Context) error {
 // registerConnectorWith re-registers the connector from dev/connectors with
 // the given keys replaced.
 func (s *stack) registerConnectorWith(ctx context.Context, set map[string]string) error {
+	b, err := s.connectorConfigWith(set)
+	if err != nil {
+		return err
+	}
+	_, err = s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", b, http.StatusOK, http.StatusCreated)
+	return err
+}
+
+// connectorConfigWith is the JSON body of dev/connectors/<connector>.json with
+// the given keys replaced.
+func (s *stack) connectorConfigWith(set map[string]string) ([]byte, error) {
 	body, err := os.ReadFile(filepath.Join(s.root, "dev", "connectors", connectorName+".json"))
 	if err != nil {
-		return fmt.Errorf("devctl: read connector config: %w", err)
+		return nil, fmt.Errorf("devctl: read connector config: %w", err)
 	}
 	var cfg map[string]any
 	if err := json.Unmarshal(body, &cfg); err != nil {
-		return fmt.Errorf("devctl: decode connector config: %w", err)
+		return nil, fmt.Errorf("devctl: decode connector config: %w", err)
 	}
 	for k, v := range set {
 		cfg[k] = v
 	}
 	b, err := json.Marshal(cfg)
 	if err != nil {
-		return fmt.Errorf("devctl: encode connector config: %w", err)
+		return nil, fmt.Errorf("devctl: encode connector config: %w", err)
 	}
-	_, err = s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", b, http.StatusOK, http.StatusCreated)
-	return err
+	return b, nil
 }
 
 // deleteSubject removes a Schema Registry subject for good (soft delete, then

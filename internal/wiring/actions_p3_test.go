@@ -26,7 +26,7 @@ import (
 // p3ActionNames are the P3 write actions RegisterP3Actions adds (P3a, P3b),
 // in its registration order.
 var p3ActionNames = []string{
-	"kafka_reset_consumer_offsets", "dlq_replay", "connect_snapshot_table",
+	"kafka_reset_consumer_offsets", "dlq_replay", "kafka_replay_range", "connect_snapshot_table",
 	"pg_drop_replication_slot", "pg_add_publication_table", "pg_snapshot_signal",
 }
 
@@ -37,6 +37,7 @@ func p3Params(id string) map[string]json.RawMessage {
 	return map[string]json.RawMessage{
 		"kafka_reset_consumer_offsets": json.RawMessage(`{"group":"` + id + `-sync","topics":["` + id + `.public.a"],"to":"earliest"}`),
 		"dlq_replay":                   json.RawMessage(`{"dlq_topic":"` + id + `-dlq","to_topic":"` + id + `.public.a","count":1}`),
+		"kafka_replay_range":           json.RawMessage(`{"topic":"` + id + `.public.a","to_topic":"` + id + `-reprocess","ranges":[{"partition":0,"from_offset":0,"to_offset":0}]}`),
 		"connect_snapshot_table":       json.RawMessage(`{"connector":"` + id + `-connector","tables":["public.a"],"via":"signal_topic"}`),
 		"pg_drop_replication_slot":     json.RawMessage(`{"connector":"` + id + `-connector","slot":"` + id + `_slot"}`),
 		"pg_add_publication_table":     json.RawMessage(`{"connector":"` + id + `-connector","publication":"` + id + `_pub","table":"public.a"}`),

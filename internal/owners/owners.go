@@ -32,6 +32,13 @@ type Pipeline struct {
 	SourceTables   []string `yaml:"source_tables"`
 	Connectors     []string `yaml:"connectors"`
 	ConsumerGroups []string `yaml:"consumer_groups"`
+	// ReprocessTopic is the optional cdc `reprocess_topic:` (X2b): the Kafka
+	// topic the recovery action kafka_replay_range copies a retained offset
+	// range of one of the pipeline's CDC topics into, so a consumer re-reads
+	// it there and the CDC topic itself never gets copies. Empty = none, and
+	// the action refuses. Load refuses an invalid topic name, a CDC or DLQ
+	// topic, and a topic two pipelines on one cluster declare (reprocess.go).
+	ReprocessTopic string `yaml:"reprocess_topic"`
 	// SinkTables and SinkTSColumn belong to both kinds.
 	SinkTables   []string `yaml:"sink_tables"`
 	SinkTSColumn string   `yaml:"sink_ts_column"`
@@ -90,6 +97,15 @@ type Pipeline struct {
 	// SharedConnections allows a connection reference of this pipeline to be
 	// used by another tenant too (CheckSharedRefs).
 	SharedConnections bool `yaml:"shared_connections"`
+	// Staging is the optional cdc `staging:` block (X8, staging.go): a second
+	// Connect and Schema Registry (and optionally Kafka) to try a fix on
+	// before production. Nil = no staging. Load refuses one that names a
+	// production endpoint.
+	Staging *StagingSpec `yaml:"staging"`
+	// RequireStaging is the optional `require_staging:` list (X8): action
+	// names whose steps need a healthy stage before approval. It needs a
+	// staging: block; wiring checks every name is a registered actions.Stager.
+	RequireStaging []string `yaml:"require_staging"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
@@ -293,6 +309,9 @@ func (o *Owners) validate() error {
 		if err := checkAutoApproveSyntax(p.AutoApprove); err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if err := p.validateReprocessTopic(); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
 		if p.isBatch() {
 			// No watch: block (validateKind) and nothing to watch.
 			w := batchWatch()
@@ -314,7 +333,13 @@ func (o *Owners) validate() error {
 	if err := o.validateDLQ(); err != nil {
 		return err
 	}
+	if err := o.validateReprocessTopics(); err != nil {
+		return err
+	}
 	if err := o.validateTenancy(); err != nil {
+		return err
+	}
+	if err := o.validateStaging(); err != nil {
 		return err
 	}
 	o.indexConsumerGroups()

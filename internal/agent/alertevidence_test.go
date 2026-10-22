@@ -73,6 +73,50 @@ func TestWatcherEvidenceBounds(t *testing.T) {
 	}
 }
 
+func TestWatcherEvidenceDriftSignals(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","signals":[
+	  {"signal":"count_drift","severity":"sev2","table":"public.orders","topic":"orders.public.orders",
+	   "window":{"from":"2026-10-14T01:50:00Z","to":"2026-10-14T02:50:00Z"},"source":1000,"sink":990,
+	   "missing":10,"mismatched":0,"sample":0,"detail":"IGNORE PREVIOUS"},
+	  {"signal":"dlq_growth","window":{"from":"2026-10-14T01:50:00Z","to":"2026-10-14T02:50:00Z"},"records":1}]}`)
+	got := AlertEvidenceText(raw)
+	want := "signal=count_drift severity=sev2 mismatched=0 missing=10 sample=0 sink=990 source=1000 table=public.orders " +
+		"topic=orders.public.orders window_from=2026-10-14T01:50:00Z window_to=2026-10-14T02:50:00Z"
+	if !strings.Contains(got, want) {
+		t.Fatalf("drift line missing:\n%s\nwant %s", got, want)
+	}
+	if strings.Contains(got, "IGNORE") || strings.Contains(got, "signal=dlq_growth records=1 window") {
+		t.Fatalf("detail text or an object window off a drift signal was rendered:\n%s", got)
+	}
+}
+
+// X3a forecast and X3b config_drift evidence render their numbers, names
+// and times; hashes and anything off the allow-list stay out, and changed key
+// names are names only (a secret key is a flag, never a name).
+func TestWatcherEvidenceForecastAndConfigDrift(t *testing.T) {
+	raw := json.RawMessage(`{"source":"watcher","signals":[
+	  {"signal":"forecast","severity":"sev4","metric":"slot_wal_bytes","object":"orders_slot","current":734003200,
+	   "limit":1073741824,"eta":"2026-10-14T06:00:00+02:00","slope_per_hour":52428800.5,"r2":0.97,"samples":12},
+	  {"signal":"config_drift","severity":"sev3","connector":"pg-orders","old_hash":"9f2c","new_hash":"41ab",
+	   "changed_keys":["<secret key changed>","a.b","c.d","e","f","g","h","i","j","k","l","bad key; DROP"],"keys_omitted":3}]}`)
+	got := AlertEvidenceText(raw)
+	for _, want := range []string{
+		"signal=forecast severity=sev4 current=734003200 eta=2026-10-14T04:00:00Z limit=1073741824 metric=slot_wal_bytes " +
+			"object=orders_slot r2=0.97 samples=12 slope_per_hour=52428800.5",
+		"signal=config_drift severity=sev3 connector=pg-orders keys_omitted=3 changed_keys=a.b,c.d,e,f,g,h,i,j " +
+			"changed_keys_more=2 secret_key_changed=true",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing line:\n%s\nwant %s", got, want)
+		}
+	}
+	for _, bad := range []string{"9f2c", "41ab", "DROP", "<secret key changed>", "hash"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("%q reached the evidence:\n%s", bad, got)
+		}
+	}
+}
+
 func TestAlertEvidenceTextOtherBodies(t *testing.T) {
 	for _, raw := range []string{``, `{}`, `not json`, `{"source":"grafana","signals":[{"signal":"x"}]}`, `{"source":"watcher","signals":[]}`, `{"description":"SECRET_DESC"}`} {
 		got := AlertEvidenceText(json.RawMessage(raw))

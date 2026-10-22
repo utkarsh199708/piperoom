@@ -51,9 +51,15 @@ func TestReconcilerIntegration(t *testing.T) {
 		t.Fatalf("CountBetween(after) = %d, %v; want 0", n, err)
 	}
 
-	keys, err := db.SampleKeys(sctx, "public."+table, "id", "updated_at", from, 5)
+	keys, err := db.SampleKeys(sctx, "public."+table, "id", "updated_at", from, to, 5)
 	if err != nil || strings.Join(keys, ",") != "100,99,98,97,96" {
 		t.Fatalf("SampleKeys = %v, %v; want the newest five", keys, err)
+	}
+	// The upper bound is excluded: row g has updated_at = from + 30 s * g,
+	// so until = from + 25.5 min keeps rows 1 to 50.
+	keys, err = db.SampleKeys(sctx, "public."+table, "id", "updated_at", from, from.Add(51*30*time.Second), 5)
+	if err != nil || strings.Join(keys, ",") != "50,49,48,47,46" {
+		t.Fatalf("SampleKeys(until) = %v, %v; want rows 50 down to 46", keys, err)
 	}
 
 	got, err := db.RowTimes(sctx, "public."+table, "id", []string{"1", "100", "424242"}, []string{"updated_at", "created_on"})

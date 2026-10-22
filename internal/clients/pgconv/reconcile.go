@@ -93,9 +93,10 @@ func (r Reconcile) CountBetween(ctx context.Context, table, tsColumn string, fro
 }
 
 // SampleKeys returns the primary-key values, as text, of the newest rows of
-// table with tsColumn >= since, newest first, at most
-// clients.ReconcileSampleSize(n). Only pkColumn is selected.
-func (r Reconcile) SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since time.Time, n int) ([]string, error) {
+// table whose tsColumn is in [since, until), newest first, at most
+// clients.ReconcileSampleSize(n). Only pkColumn is selected. An empty window
+// (until == since) is no keys with no I/O.
+func (r Reconcile) SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since, until time.Time, n int) ([]string, error) {
 	rel, err := r.table(table)
 	if err != nil {
 		return nil, err
@@ -110,13 +111,20 @@ func (r Reconcile) SampleKeys(ctx context.Context, table, pkColumn, tsColumn str
 	if size == 0 {
 		return nil, fmt.Errorf("%s: sample keys of %s: n %d: want at least 1: %w", r.Name, table, n, tools.ErrBadInput)
 	}
+	if until.Before(since) {
+		return nil, fmt.Errorf("%s: sample keys of %s: window ends (%s) before it starts (%s): %w", r.Name, table,
+			until.UTC().Format(time.RFC3339), since.UTC().Format(time.RFC3339), tools.ErrBadInput)
+	}
 	if err := r.scope(ctx, table); err != nil {
 		return nil, err
+	}
+	if until.Equal(since) {
+		return []string{}, nil
 	}
 	ctx, cancel := WithDeadline(ctx, clients.ReconcileTimeout)
 	defer cancel()
 
-	rows, err := r.Query(ctx, nil, sampleKeysSQL(rel, pkColumn, tsColumn), since.UTC(), size)
+	rows, err := r.Query(ctx, nil, sampleKeysSQL(rel, pkColumn, tsColumn), since.UTC(), until.UTC(), size)
 	if err != nil {
 		return nil, r.fail(ctx, "sample keys of "+table, err)
 	}
@@ -300,11 +308,11 @@ func countBetweenSQL(rel pgx.Identifier, ts string) string {
 	return fmt.Sprintf(`SELECT count(*) FROM %s WHERE %s >= $1 AND %s < $2`, rel.Sanitize(), c, c)
 }
 
-// sampleKeysSQL builds the newest-keys read: the key as text and nothing
-// else. The key breaks ties so a sample is repeatable.
+// sampleKeysSQL builds the newest-keys read over [$1, $2): the key as text
+// and nothing else. The key breaks ties so a sample is repeatable.
 func sampleKeysSQL(rel pgx.Identifier, pk, ts string) string {
 	k, c := pgx.Identifier{pk}.Sanitize(), pgx.Identifier{ts}.Sanitize()
-	return fmt.Sprintf(`SELECT %[1]s::text FROM %[2]s WHERE %[3]s >= $1 AND %[1]s IS NOT NULL ORDER BY %[3]s DESC, %[1]s DESC LIMIT $2`, k, rel.Sanitize(), c)
+	return fmt.Sprintf(`SELECT %[1]s::text FROM %[2]s WHERE %[3]s >= $1 AND %[3]s < $2 AND %[1]s IS NOT NULL ORDER BY %[3]s DESC, %[1]s DESC LIMIT $3`, k, rel.Sanitize(), c)
 }
 
 // rowTimesSQL builds the timestamp read: the key as text and the named

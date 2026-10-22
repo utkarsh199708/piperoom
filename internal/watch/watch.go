@@ -26,6 +26,10 @@
 // The consumer-group signals (F6): consumer_lag, group_unstable and
 // offset_below_log_start read GroupLag per group (Deps.Lag) and the log-start
 // offsets of the CDC topics (lag_signals.go).
+//
+// The drift signals (X1b): count_drift, row_drift, dup_keys and order_skew
+// compare source and sink rows and scan the CDC topics every
+// reconcile_interval through optional readers (drift.go).
 package watch
 
 import (
@@ -120,6 +124,9 @@ type PipelineClients struct {
 	// Lag reads consumer-group lag on the set's cluster (nil: the
 	// consumer-group signals stay unknown, as with Deps.Lag).
 	Lag LagReader
+	// Warehouse is the set's sink warehouse (nil: count_drift and row_drift
+	// are off for the set's pipelines, as with Deps.Warehouse).
+	Warehouse clients.WarehouseReader
 }
 
 // Deps are the watcher's dependencies.
@@ -145,6 +152,13 @@ type Deps struct {
 	// with one log line. offset_below_log_start also needs Kafka for the
 	// log-start offsets.
 	Lag LagReader
+	// Warehouse is the sink warehouse client. The drift signals (X1b,
+	// drift.go) find their optional readers on it and on Source and Kafka by
+	// type assertion: clients.Reconciler on Source and Warehouse for
+	// count_drift and row_drift, clients.DupScanner on Kafka (or Lag) for
+	// dup_keys and order_skew. Nil, or a client without the reader, turns
+	// those checks off for the pipeline with one INFO line.
+	Warehouse clients.WarehouseReader
 	// ClientsFor, when set, gives each pipeline the clients of its own client
 	// set (docs/design/tenancy.md section 5) and Source, Connect and Kafka are
 	// not used (nor Lag). Pipelines of one set share each read of a tick.
@@ -187,7 +201,8 @@ const (
 
 // signalIDs lists the signals in a fixed order, so titles and logs are stable.
 // New signals go at the end so existing titles keep their order; the
-// forecasts (one id per metric, forecast.go) come last.
+// forecasts (one id per metric, forecast.go) come last. config_drift has one
+// id per connector (config_drift.go), after these (pipeState.ids).
 var signalIDs = append([]string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
 	owners.SignalDLQGrowth, owners.SignalConfigRisk,
 	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}, forecastIDs()...)
@@ -244,6 +259,13 @@ type pipeState struct {
 	// fcClosed is, per forecast metric, when a room carrying its forecast
 	// closed: the per-metric cooldown the watcher saw itself.
 	fcClosed map[string]time.Time
+	// drift is the memory of the drift checks (drift.go); driftClosed is,
+	// per drift id, when a room carrying it closed: the (pipeline, table,
+	// kind) cooldown.
+	drift       *driftMem
+	driftClosed map[string]time.Time
+	// cfgBase is each connector's approved config (config_drift.go).
+	cfgBase map[string]*driftBase
 	// warned* keep "skipped" lines to one per episode.
 	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }
@@ -263,6 +285,7 @@ type Watcher struct {
 	conn       ConnectClient
 	kafka      clients.DLQReader
 	lag        LagReader
+	wh         clients.WarehouseReader
 	clientsFor func(pipelineID string) PipelineClients
 	own        *owners.Owners
 	rooms      RoomSink
@@ -347,7 +370,7 @@ func New(d Deps) (*Watcher, error) {
 		cfg.Cooldown = 60 * time.Minute
 	}
 	w := &Watcher{
-		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
+		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, wh: d.Warehouse, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
@@ -458,6 +481,10 @@ func (w *Watcher) tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	w.checkDrift(ctx, now, ts, fired)
+	if ctx.Err() != nil {
+		return
+	}
 	if w.cfg.Mode == config.WatchRooms {
 		w.emit(ctx, now, ts, fired)
 	}
@@ -504,6 +531,12 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
 		}
 		if ss.phase == phaseFiring {
 			ss.ack()
+			if driftKind(id) != "" {
+				if ps.driftClosed == nil {
+					ps.driftClosed = map[string]time.Time{}
+				}
+				ps.driftClosed[id] = now
+			}
 			if m != "" {
 				if ps.fcClosed == nil {
 					ps.fcClosed = map[string]time.Time{}

@@ -45,6 +45,9 @@ type stack struct {
 	// belowLogStartFn replaces the committed-below-log-start read (retention-loss)
 	// in unit tests, since the fake broker does not delete retained segments.
 	belowLogStartFn func(ctx context.Context, group, topic string) (bool, []int32, error)
+	// stagingStepTimeout bounds the slot drop and the topic delete of
+	// stagingDown (default 30 s each).
+	stagingStepTimeout time.Duration
 	// poll is how often waitFor checks its condition (default 2 s).
 	poll time.Duration
 	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init
@@ -114,8 +117,23 @@ func (s *stack) psql(ctx context.Context, db string, sql ...string) (string, err
 	return strings.TrimSpace(out.String()), nil
 }
 
-func (s *stack) up(ctx context.Context) error {
-	if err := s.compose(ctx, nil, "up", "-d", "--build", "--wait"); err != nil {
+func (s *stack) up(ctx context.Context) error { return s.upWith(ctx, false) }
+
+// upWith is `devctl up`; staging adds the staging profile (second Connect and
+// Schema Registry, staging.go) and registers the connector there too. Without
+// it the compose call and the steps are the ones `up` always had.
+func (s *stack) upWith(ctx context.Context, staging bool) error {
+	var stg stagingEndpoints
+	args := []string{"up", "-d", "--build", "--wait"}
+	if staging {
+		// Refuse before the image build when staging would point at production.
+		var err error
+		if stg, err = resolveStaging(s.cfg, os.Getenv); err != nil {
+			return err
+		}
+		args = append([]string{"--profile", stagingProfile}, args...)
+	}
+	if err := s.compose(ctx, nil, args...); err != nil {
 		return err
 	}
 	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connectors", 2*time.Minute); err != nil {
@@ -128,14 +146,25 @@ func (s *stack) up(ctx context.Context) error {
 		return err
 	}
 	s.log.Info("stack is up", "connect", s.cfg.ConnectURL, "registry", s.cfg.SchemaRegistryURL, "kafka", s.cfg.KafkaBrokers)
+	if staging {
+		return s.stagingUp(ctx, stg)
+	}
 	return nil
 }
 
-func (s *stack) reset(ctx context.Context) error {
-	if err := s.compose(ctx, nil, "down", "-v", "--remove-orphans"); err != nil {
+func (s *stack) reset(ctx context.Context) error { return s.resetWith(ctx, false) }
+
+// resetWith wipes the stack and starts it again. The teardown always names the
+// staging profile: compose's `down` leaves the containers of a profile that is
+// not enabled alone, so without it connect-staging would outlive its Kafka and
+// Postgres. The staging stack comes back only with `reset --staging`. Reset
+// never touches the room database: that lives in its own compose project
+// (dev/demo-room-db.yml) or in your own Postgres, and nothing here names it.
+func (s *stack) resetWith(ctx context.Context, staging bool) error {
+	if err := s.compose(ctx, nil, "--profile", stagingProfile, "down", "-v", "--remove-orphans"); err != nil {
 		return err
 	}
-	if err := s.up(ctx); err != nil {
+	if err := s.upWith(ctx, staging); err != nil {
 		return err
 	}
 	// Wait until the initial snapshot reached the warehouse, so "reset" ends
@@ -147,6 +176,12 @@ func (s *stack) reset(ctx context.Context) error {
 		}
 		return n != "0", nil
 	})
+}
+
+// down stops the whole stack, staging included (see resetWith for why the
+// profile is named).
+func (s *stack) down(ctx context.Context) error {
+	return s.compose(ctx, nil, "--profile", stagingProfile, "down")
 }
 
 func (s *stack) registerConnector(ctx context.Context) error {
@@ -177,8 +212,14 @@ type connectorStatus struct {
 }
 
 func (s *stack) connectorStatus(ctx context.Context) (connectorStatus, error) {
+	return s.connectorStatusAt(ctx, s.cfg.ConnectURL)
+}
+
+// connectorStatusAt reads the connector's status from the Connect worker at
+// base (production or staging).
+func (s *stack) connectorStatusAt(ctx context.Context, base string) (connectorStatus, error) {
 	var st connectorStatus
-	b, err := s.do(ctx, http.MethodGet, s.cfg.ConnectURL+"/connectors/"+connectorName+"/status", nil, http.StatusOK)
+	b, err := s.do(ctx, http.MethodGet, base+"/connectors/"+connectorName+"/status", nil, http.StatusOK)
 	if err != nil {
 		return st, err
 	}
@@ -190,8 +231,13 @@ func (s *stack) connectorStatus(ctx context.Context) (connectorStatus, error) {
 
 // waitConnector waits until the connector and task 0 are in state want.
 func (s *stack) waitConnector(ctx context.Context, want string, timeout time.Duration) error {
+	return s.waitConnectorAt(ctx, s.cfg.ConnectURL, want, timeout)
+}
+
+// waitConnectorAt is waitConnector on the Connect worker at base.
+func (s *stack) waitConnectorAt(ctx context.Context, base, want string, timeout time.Duration) error {
 	return s.waitFor(ctx, timeout, func() (bool, error) {
-		st, err := s.connectorStatus(ctx)
+		st, err := s.connectorStatusAt(ctx, base)
 		if err != nil {
 			return false, nil
 		}

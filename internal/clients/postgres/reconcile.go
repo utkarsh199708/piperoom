@@ -26,8 +26,8 @@ func (d *DB) CountBetween(ctx context.Context, table, tsColumn string, from, to 
 }
 
 // SampleKeys implements clients.Reconciler on a source table.
-func (d *DB) SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since time.Time, n int) ([]string, error) {
-	return d.reconcile().SampleKeys(ctx, table, pkColumn, tsColumn, since, n)
+func (d *DB) SampleKeys(ctx context.Context, table, pkColumn, tsColumn string, since, until time.Time, n int) ([]string, error) {
+	return d.reconcile().SampleKeys(ctx, table, pkColumn, tsColumn, since, until, n)
 }
 
 // RowTimes implements clients.Reconciler on a source table.
