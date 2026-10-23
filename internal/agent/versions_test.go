@@ -150,8 +150,9 @@ type pluginsTool struct {
 	data any
 	err  error
 
-	mu   sync.Mutex
-	runs int
+	mu     sync.Mutex
+	runs   int
+	marked []bool
 }
 
 func (p *pluginsTool) Name() string        { return connectPluginsTool }
@@ -160,9 +161,10 @@ func (p *pluginsTool) InputSchema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
 func (p *pluginsTool) Kind() tools.Kind { return tools.KindRead }
-func (p *pluginsTool) Run(context.Context, json.RawMessage) (tools.Result, error) {
+func (p *pluginsTool) Run(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
 	p.mu.Lock()
 	p.runs++
+	p.marked = append(p.marked, IsRunningVersionsRead(ctx))
 	p.mu.Unlock()
 	return tools.Result{Summary: "Kafka 3.6.1: 1 plugins", Data: p.data}, p.err
 }
@@ -266,6 +268,14 @@ func TestRunbookLookupGetsRunningVersions(t *testing.T) {
 	)
 	if n := plugins.count(); n != 1 {
 		t.Fatalf("connect_plugins ran %d times, want once per room", n)
+	}
+	// The read is the runner's own, so a replay does not count it as the
+	// model's call (or as a miss where a scenario has no recording).
+	if !plugins.marked[0] {
+		t.Error("the runner's connect_plugins read is not marked IsRunningVersionsRead")
+	}
+	if IsRunningVersionsRead(context.Background()) || IsPastIncidentsLookup(context.WithValue(context.Background(), versionsReadKey{}, true)) {
+		t.Error("the versions-read mark is set where it was not, or reads as the past-incidents lookup")
 	}
 
 	calls := sink.ofType(events.AgentToolCall)

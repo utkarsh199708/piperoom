@@ -231,10 +231,18 @@ type replayer struct {
 	marks      []ReplayMark
 	unexecuted []string
 	misses     []Miss
-	// isLookup tells the agent's own room-start past-incidents lookup from a
-	// call the model made. It is a field so a test can mark a context; the
-	// production value is agent.IsPastIncidentsLookup.
+	// isLookup tells the agent's own reads (the room-start past-incidents
+	// lookup, the connect_plugins read of the running versions) from a call
+	// the model made. It is a field so a test can mark a context; the
+	// production value is agentOwnRead.
 	isLookup func(context.Context) bool
+}
+
+// agentOwnRead reports a read the agent runner makes on its own: it is
+// answered when recorded but is never a miss, never counts toward
+// after_calls and never moves a sequence.
+func agentOwnRead(ctx context.Context) bool {
+	return agent.IsPastIncidentsLookup(ctx) || agent.IsRunningVersionsRead(ctx)
 }
 
 // replayRecord is a Recording with its results already converted to JSON, so
@@ -320,7 +328,7 @@ func newPhasedReplayer(recs []Recording, phases []string, transitions []Transiti
 		transitions: transitions,
 		calls:       map[string]int{},
 		seqPos:      map[int]int{},
-		isLookup:    agent.IsPastIncidentsLookup,
+		isLookup:    agentOwnRead,
 	}
 	if len(phases) > 0 {
 		r.phase = phases[0]
