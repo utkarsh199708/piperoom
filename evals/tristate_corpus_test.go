@@ -292,7 +292,7 @@ func TestJudgedCorpusGrades(t *testing.T) {
 		t.Fatal("the ambiguous-set manifest has no entries")
 	}
 	if n < len(set.Entries) {
-		t.Fatalf("judge cache holds %d verdict(s) for %d manifest entries: refill with go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json (paid, needs the owner's approval, #454)", n, len(set.Entries))
+		t.Fatalf("judge cache holds %d verdict(s) for %d manifest entries: refill with go run -tags livejudge ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json (paid, needs the owner's approval, #454)", n, len(set.Entries))
 	}
 	cfg := Config{DefaultJudge: JudgeAuto, JudgeCache: "judgecache", JudgeCacheOnly: true}
 	g := newJudgeGate(cfg)
