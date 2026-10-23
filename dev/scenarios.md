@@ -690,7 +690,8 @@ plugin.
 **Caveats:**
 - `wal-level-replica` is the invasive one on a *running* stack: Postgres
   refuses to start with an existing logical slot at `wal_level=replica`, so the
-  break drops the slot. The fix re-snapshots the source (no data loss, but the
+  break drops the dev connector's slot, and refuses when any other logical slot
+  exists (the staging connector's, a q5 scenario's). The fix re-snapshots the source (no data loss, but the
   rows are re-emitted). A *fresh* setup has no slot, which is the state the
   break reproduces without that cost.
 - A Connect restart reloads every plugin the Debezium image ships; on a busy
@@ -698,13 +699,17 @@ plugin.
   (6 min) in `cmd/devctl/setupbreaks.go` is the wait.
 - The setup agent's model turns are not replayed here. The integration test
   (`go test -tags integration ./cmd/devctl -run TestIntegrationSetupBreaks`)
-  applies each break and its recorded fix on the dev stack and asserts the
-  named check fails, then passes: the recorded fix *is* the scenario's fix
-  op sequence. The recordings themselves are U1-19/U1-20 (`evals/setup`).
+  applies each break that leaves the shared servers and connector alone
+  (`flat-plugin-dir`, `missing-converter-jars`) and its recorded fix on the dev
+  stack and asserts the named check fails, then passes: the recorded fix *is*
+  the scenario's fix op sequence. The breaks that restart Postgres or Connect,
+  or take `pg-orders-connector` down, run only against the fake stack there,
+  since other integration packages use the same stack in parallel; their
+  real-stack run is the U1-16 job. The recordings themselves are U1-19/U1-20 (`evals/setup`).
 - A setup stack of its own (not the dev stack) is `setupstack.Setup(t)` in
-  `internal/testenv/setup.go`: it renders kafka + connect + source-postgres in
+  `internal/testenv/setupstack/setup.go`: it renders kafka + connect + source-postgres in
   a temp directory, installs the plugin, and tears the project down with the
-  compose ops. `internal/testenv/setup_integration_test.go` also proves the
+  compose ops. `internal/testenv/setupstack/setup_integration_test.go` also proves the
   compose validator refuses a `privileged: true` file before `compose_up`.
 
 ## Recovery: `rows-lost-after-retention`, `consumer-skipped-range`

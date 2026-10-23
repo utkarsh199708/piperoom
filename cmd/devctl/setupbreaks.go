@@ -133,11 +133,13 @@ func setupFixCmd(ctx context.Context, s *stack, name string) error {
 	if !ok {
 		return fmt.Errorf("unknown setup-break scenario %q (%s)", name, strings.Join(setupScenarioNames(), ", "))
 	}
+	// A check that cannot run (the component it reads is down, often because
+	// of the break) does not block the fix: the fix restarts that component,
+	// and the check after it decides.
 	okNow, _, err := sc.verify(ctx, s)
 	if err != nil {
-		return fmt.Errorf("devctl: check %s: %w", sc.check, err)
-	}
-	if okNow {
+		s.log.Info("check "+sc.check+" cannot run; applying the fix", "check", sc.check, "err", err.Error())
+	} else if okNow {
 		s.log.Info("skipped: the stack already passes check "+sc.check, "check", sc.check)
 		return nil
 	}
@@ -418,6 +420,16 @@ func verifyWALLevel(ctx context.Context, s *stack) (bool, string, error) {
 // meets, before any slot exists). So the connector stops and its slot is
 // dropped first; the fix recreates the slot and Debezium re-snapshots.
 func breakWALLevelReplica(ctx context.Context, s *stack) error {
+	// Postgres refuses to start at wal_level=replica while any logical slot
+	// exists, and only debezium_orders is dropped here: another slot (the
+	// staging connector's, a q5 scenario's) would leave the server down.
+	others, err := s.psql(ctx, "orders", sqlOtherLogicalSlots)
+	if err != nil {
+		return err
+	}
+	if others = strings.TrimSpace(others); others != "" && others != "0" {
+		return fmt.Errorf("refusing: %s other logical slot(s) exist on the dev Postgres (staging or another scenario); Postgres would not start at wal_level=replica. Drop them or run without them first", others)
+	}
 	if err := s.stopConnectorUntilSlotInactive(ctx); err != nil {
 		return err
 	}
@@ -704,14 +716,18 @@ func fixSetupMissingGrant(ctx context.Context, s *stack) error {
 // (which tries a connection and refuses a bad host) does not reject it; only
 // the network path from the worker is broken. /etc/hosts is a bind mount, so
 // the change survives a task restart and is undone by rewriting the file.
+// sqlOtherLogicalSlots counts the logical slots other than the dev
+// connector's, which breakWALLevelReplica drops itself.
+const sqlOtherLogicalSlots = "SELECT count(*) FROM pg_replication_slots WHERE slot_type = 'logical' AND slot_name <> '" + slotName + "'"
+
 const (
 	// scriptBlockSource appends the black-hole line for the host in $1.
 	scriptBlockSource = `set -e; printf "\n192.0.2.1 %s\n" "$1" >> /etc/hosts`
 	// scriptProbeTCP opens a TCP connection to $1:$2 from inside the worker,
 	// with a 3 s timeout. It is the reachability read the check makes. The
-	// host is validated in Go before it is passed (hostNameRE), so the shell
-	// never sees free text.
-	scriptProbeTCP = `timeout 3 bash -c "exec 3<>/dev/tcp/$1/$2"`
+	// host and port reach the inner bash as positional arguments, never as
+	// script text, and are validated in Go first (hostNameRE, portRE).
+	scriptProbeTCP = `timeout 3 bash -c 'exec 3<>/dev/tcp/$1/$2' _ "$1" "$2"`
 )
 
 // hostNameRE is the only shape a database.hostname may take before it reaches
@@ -732,7 +748,7 @@ func verifyConnectSourceReachable(ctx context.Context, s *stack) (bool, string, 
 		return false, "database.hostname is not set", nil
 	}
 	if !hostNameRE.MatchString(host) {
-		return false, "database.hostname " + host + " is not a host name", nil
+		return false, fmt.Sprintf("database.hostname %q is not a host name", host), nil
 	}
 	port, err := s.connectorSetting(ctx, "database.port")
 	if err != nil {
@@ -742,7 +758,7 @@ func verifyConnectSourceReachable(ctx context.Context, s *stack) (bool, string, 
 		port = "5432"
 	}
 	if !portRE.MatchString(port) {
-		return false, "database.port " + port + " is not a port", nil
+		return false, fmt.Sprintf("database.port %q is not a port", port), nil
 	}
 	_, code, err := s.execIn(ctx, connectContainer, "bash", "-c", scriptProbeTCP, "_", host, port)
 	if err != nil {

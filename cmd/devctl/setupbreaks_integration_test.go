@@ -57,7 +57,7 @@ func TestIntegrationSetupBreaks(t *testing.T) {
 	applied := map[string]bool{}
 	t.Cleanup(func() {
 		for name := range applied {
-			cctx, stop := context.WithTimeout(context.Background(), 2*time.Minute)
+			cctx, stop := context.WithTimeout(context.Background(), 15*time.Minute) // a fix may wait out two Connect plugin scans
 			if err := setupFixCmd(cctx, s, name); err != nil {
 				t.Logf("cleanup: setup-fix %s: %v", name, err)
 			}
@@ -103,17 +103,25 @@ func TestIntegrationSetupBreaks(t *testing.T) {
 	}
 }
 
+// sharedStackDisruptive are the breaks that restart a shared server or take
+// the shared connector down; other integration packages run against the same
+// Postgres, Connect worker and pg-orders-connector in parallel.
+var sharedStackDisruptive = map[string]bool{
+	"wal-level-replica":           true, // restarts Postgres
+	"plugin-after-scan":           true, // restarts Connect twice, removes the plugin between
+	"db-unreachable-from-connect": true, // restarts Connect
+	"missing-grant":               true, // moves pg-orders-connector to a role whose task fails
+}
+
 // integrationSetupBreaks is the breaks this test may apply to the shared dev
-// stack. wal-level-replica restarts the dev Postgres, and the integration job
-// runs packages in parallel: another package can hold a logical slot at that
-// moment, and Postgres then refuses to start at wal_level=replica. Its
-// break/fix pair stays covered against the fake stack
-// (TestSetupBreakFixPair); the real-stack run belongs to the dedicated setup
-// matrix job (U1-16), where the test owns the stack.
+// stack while the integration job runs packages in parallel. The others keep
+// their break/fix pair covered against the fake stack (TestSetupBreakFixPair);
+// their real-stack run belongs to the dedicated setup matrix job (U1-16),
+// where the test owns the stack.
 func integrationSetupBreaks() []string {
 	out := make([]string, 0, len(setupScenarios))
 	for _, name := range setupScenarioNames() {
-		if name == "wal-level-replica" {
+		if sharedStackDisruptive[name] {
 			continue
 		}
 		out = append(out, name)

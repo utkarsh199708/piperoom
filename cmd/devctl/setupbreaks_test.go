@@ -39,6 +39,7 @@ type setupWorld struct {
 	blockedHost    bool
 	composeCall    []string
 	sqlCalls       []string
+	otherSlots     int
 }
 
 // healthySetupWorld is the stack `devctl reset` leaves: one connector
@@ -196,6 +197,8 @@ func (w *setupWorld) sql(_ context.Context, _ string, queries ...string) (string
 				return "", nil
 			}
 			return boolText(w.slotActive) + "|1024", nil
+		case q == sqlOtherLogicalSlots:
+			return fmt.Sprint(w.otherSlots), nil
 		case q == sqlDropSlot:
 			w.slotExists, w.slotActive = false, false
 			return "", nil
