@@ -357,21 +357,34 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	reg, err := rp.registry(defs)
+	fx, err := newRoomFixture(sc)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	live, wl, err := liveActions(sc.resources(), sc.Recordings)
+	live, wl, fg, err := liveActionsForge(sc.resources(), sc.Recordings)
+	if err != nil {
+		return RunResult{}, Transcript{}, err
+	}
+	// The repository tools of a pipeline with repos: run live over the run's
+	// replay forge, scoped by the run's owners file (replay_forge.go).
+	var liveTools map[string]tools.Tool
+	if fg != nil {
+		freg := tools.NewRegistry()
+		if err := registerForgeTools(freg, fg, fx.owners); err != nil {
+			return RunResult{}, Transcript{}, err
+		}
+		liveTools = map[string]tools.Tool{}
+		for _, t := range freg.All() {
+			liveTools[t.Name()] = t
+		}
+	}
+	reg, err := rp.registryWith(defs, liveTools)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
 	exec := &execScript{rp: rp, log: wl}
 	attempts := &attemptLog{exec: exec}
 	areg, err := attempts.wrap(live)
-	if err != nil {
-		return RunResult{}, Transcript{}, err
-	}
-	fx, err := newRoomFixture(sc)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}

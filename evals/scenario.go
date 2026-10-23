@@ -170,6 +170,13 @@ type Resources struct {
 	// actions a room of that source gets (Q8j: a MySQL room's binlog reader
 	// and no pg_* action).
 	SourceKind string `yaml:"-"`
+	// Repos are the fixture repositories of the pipeline's repos: block, by
+	// repo id: what the replay forge holds (replay_forge.go, Q7j).
+	Repos map[string]RepoFixture `yaml:"repos"`
+	// PipelineRepos is pipeline.repos, copied by ParseScenario like
+	// SourceKind: the repos the forge tools and repo_open_pull_request may
+	// touch. Empty, the room gets neither, as without a forge.
+	PipelineRepos []owners.Repo `yaml:"-"`
 }
 
 // TopicState is one topic of resources.topics.
@@ -345,6 +352,10 @@ type Expect struct {
 	// (matched like a recording's input). Set, it makes the fix check
 	// strict: see fixscore.go.
 	FixTargets map[string]map[string]any `yaml:"fix_targets"`
+	// FixFiles are the pull-request steps a good fix proposes, each the repo
+	// and, per file, the lines it removes and adds: the "right files
+	// changed" check (rightfiles.go, Q7j).
+	FixFiles []FixFiles `yaml:"fix_files"`
 	// ForbiddenActions must never be proposed in this scenario.
 	ForbiddenActions []string `yaml:"forbidden_actions"`
 	// MaxVerifyCalls is the read-tool budget after the first executed fix
@@ -446,6 +457,7 @@ func ParseScenario(b []byte) (Scenario, error) {
 		s.pipelineYAML = &raw.Pipeline
 	}
 	s.Resources.SourceKind = s.Pipeline.SourceKind
+	s.Resources.PipelineRepos = s.Pipeline.Repos
 	return s, nil
 }
 
@@ -460,6 +472,7 @@ func (s Scenario) sourceKind() string {
 func (s Scenario) resources() Resources {
 	r := s.Resources
 	r.SourceKind = s.sourceKind()
+	r.PipelineRepos = s.Pipeline.Repos
 	return r
 }
 
@@ -475,6 +488,9 @@ func LoadScenario(path string) (Scenario, error) {
 	}
 	if s.Name == "" {
 		s.Name = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	}
+	if err := s.Resources.loadRepoDirs(filepath.Dir(path)); err != nil {
+		return Scenario{}, fmt.Errorf("%s: %w", path, err)
 	}
 	// The pipeline as the server loads it: its watch block resolved, which
 	// dlq_replay's and pg_drop_replication_slot's CheckScope read
@@ -638,7 +654,11 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 			}
 		}
 		fields, isTool := toolInputs[r.Tool]
-		if !isTool {
+		if isForgeTool(r.Tool) {
+			// The repository tools run live over resources.repos; a
+			// recording of one would never answer.
+			errs = append(errs, fmt.Errorf("recordings[%d]: %s runs over resources.repos and is never replayed; put the file in the fixture repo", i, r.Tool))
+		} else if !isTool {
 			errs = append(errs, fmt.Errorf("recordings[%d]: unknown tool %q", i, r.Tool))
 		} else {
 			// A key the schema does not have can never appear in a real call
@@ -668,6 +688,8 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	}
 	errs = append(errs, s.validatePhases(toolInputs, actionNames)...)
 	errs = append(errs, s.Resources.validate()...)
+	errs = append(errs, s.resources().validateRepos()...)
+	errs = append(errs, s.checkFixFiles()...)
 	for _, t := range s.Expect.EvidenceTools {
 		if _, ok := toolInputs[t]; !ok {
 			errs = append(errs, fmt.Errorf("expect.evidence_tools: unknown tool %q", t))
@@ -738,6 +760,7 @@ func (s Scenario) checkOutcome() []error {
 		"root_cause_layer_alt": len(e.RootCauseLayerAlt) > 0,
 		"fix":                  len(e.Fix) > 0,
 		"fix_targets":          len(e.FixTargets) > 0,
+		"fix_files":            len(e.FixFiles) > 0,
 		"claims":               len(e.Claims) > 0,
 	} {
 		if set {

@@ -882,6 +882,11 @@ func TestEveryScenarioCanPass(t *testing.T) {
 	for name, fix := range q8jFixes {
 		p3Fixes[name] = fix
 	}
+	// The pull-request fixes (Q7j): offered only in a room whose pipeline
+	// lists repos:, over the scenario's fixture repo.
+	for name, fix := range q7jFixes {
+		p3Fixes[name] = fix
+	}
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
 		t.Fatal(err)
@@ -953,6 +958,8 @@ func canPassScript(t *testing.T, sc Scenario, fix []events.ProposalStep) []step 
 			t.Fatalf("no good hypothesis for %s in scoring_test.go", sc.Name)
 		}
 		script = append(script, step{hypothesis: h.good})
+		// A pull-request step needs its files read first (its base_sha).
+		script = append(script, prReads(t, fix)...)
 		if len(fix) > 0 {
 			script = append(script, proposal(fix...))
 		}

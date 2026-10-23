@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -129,8 +130,23 @@ func (definitionHistoryKafka) SchemaHistoryTail(context.Context, string, int) ([
 // scenarioTools returns the tool definitions of sc's room: pg are the
 // Postgres room's (the caller's list, LiveTools() in production), a MySQL
 // scenario gets LiveToolsFor(mysql). my caches that list across calls; a nil
-// my builds it every time.
+// my builds it every time. A pipeline that lists repos: also gets the
+// repository tools after them, as Q7f's wiring registers them last
+// (replay_forge.go); every other room's list is the one it had before.
 func scenarioTools(sc Scenario, pg []tools.Tool, my *[]tools.Tool) ([]tools.Tool, error) {
+	defs, err := sourceTools(sc, pg, my)
+	if err != nil || len(sc.Pipeline.Repos) == 0 {
+		return defs, err
+	}
+	fdefs, err := forgeToolDefs()
+	if err != nil {
+		return nil, err
+	}
+	return append(slices.Clone(defs), fdefs...), nil
+}
+
+// sourceTools is scenarioTools without the repository tools.
+func sourceTools(sc Scenario, pg []tools.Tool, my *[]tools.Tool) ([]tools.Tool, error) {
 	if sc.sourceKind() != owners.SourceKindMySQL {
 		return pg, nil
 	}
@@ -172,8 +188,10 @@ func (definitionKafka) DupScan(context.Context, string, time.Time, int) (clients
 // LiveActions returns the production write actions, backed by replay clients
 // that know only res and what recs recorded: actions.Register's seven, the
 // P3 actions (replay_actions.go), the Q2 source admin actions
-// (replay_source.go) and the Q5 connector lifecycle actions
-// (replay_connect.go). The agent can propose them (their real
+// (replay_source.go), the Q5 connector lifecycle actions
+// (replay_connect.go) and, for a pipeline that lists repos:,
+// repo_open_pull_request over the replay forge (replay_forge.go). The agent
+// can propose them (their real
 // Validate runs against that) but nothing is ever written: every write of a
 // replay client is a no-op that only records the call.
 func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
@@ -183,15 +201,26 @@ func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
 
 // liveActions is LiveActions plus the log of the writes its clients took.
 func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog, error) {
+	reg, wl, _, err := liveActionsForge(res, recs)
+	return reg, wl, err
+}
+
+// liveActionsForge is liveActions plus the run's replay forge (nil when the
+// pipeline lists no repos), which the run's repository tools read too.
+func liveActionsForge(res Resources, recs []Recording) (*actions.Registry, *writeLog, *replayForge, error) {
 	statuses, err := connectStatuses(recs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	sk, err := agent.SourceKind(res.SourceKind)
 	if err != nil {
-		return nil, nil, fmt.Errorf("evals: resources: %w", err)
+		return nil, nil, nil, fmt.Errorf("evals: resources: %w", err)
 	}
 	wl := &writeLog{}
+	fg, err := newReplayForge(res, wl)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	reg := actions.NewRegistry()
 	deps := actions.Deps{
 		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses, log: wl},
@@ -213,27 +242,31 @@ func liveActions(res Resources, recs []Recording) (*actions.Registry, *writeLog,
 		deps.Binlog = binlog
 	}
 	if err := actions.Register(reg, deps); err != nil {
-		return nil, nil, fmt.Errorf("evals: action definitions: %w", err)
+		return nil, nil, nil, fmt.Errorf("evals: action definitions: %w", err)
 	}
 	if err := registerP3(reg, res, recs, wl); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := registerSourceActions(reg, res, recs, wl); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := registerLifecycle(reg, res, recs, wl, binlog); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	// Last, as wiring's registerFixPR, and only for a pipeline with repos:.
+	if err := registerFixPR(reg, fg); err != nil {
+		return nil, nil, nil, err
 	}
 	if sk == owners.SourceKindPostgres {
-		return reg, wl, nil
+		return reg, wl, fg, nil
 	}
 	// Only the source's actions reach the room (agent.ActionServesSource), as
 	// wiring registers them: a MySQL room has no pg_* action.
 	out, err := agent.ActionsForSource(reg, sk)
 	if err != nil {
-		return nil, nil, fmt.Errorf("evals: %w", err)
+		return nil, nil, nil, fmt.Errorf("evals: %w", err)
 	}
-	return out, wl, nil
+	return out, wl, fg, nil
 }
 
 // replayMySQLConnect is a MySQL room's Connect client for actions.Register's
@@ -506,10 +539,18 @@ func runsLive(name string) bool { return name == runbooks.ToolName }
 // registry wraps every definition in a replay tool, except pure tools, which
 // are registered as they are.
 func (r *replayer) registry(defs []tools.Tool) (*tools.Registry, error) {
+	return r.registryWith(defs, nil)
+}
+
+// registryWith is registry with live tools that take the place of their
+// definitions by name: the repository tools over the run's replay forge.
+func (r *replayer) registryWith(defs []tools.Tool, live map[string]tools.Tool) (*tools.Registry, error) {
 	reg := tools.NewRegistry()
 	for _, d := range defs {
 		var t tools.Tool = &replayTool{def: d, r: r}
-		if runsLive(d.Name()) {
+		if lt, ok := live[d.Name()]; ok {
+			t = lt
+		} else if runsLive(d.Name()) {
 			t = d
 		}
 		if err := reg.Register(t); err != nil {
@@ -899,7 +940,7 @@ type attemptLog struct {
 func (l *attemptLog) wrap(reg *actions.Registry) (*actions.Registry, error) {
 	out := actions.NewRegistry()
 	for _, a := range reg.All() {
-		if err := out.Register(&recordingAction{Action: a, log: l}); err != nil {
+		if err := out.Register(l.wrapAction(a)); err != nil {
 			return nil, fmt.Errorf("evals: wrap action: %w", err)
 		}
 	}

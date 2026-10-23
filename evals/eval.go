@@ -10,6 +10,7 @@ import (
 
 	evalsetup "piperoom/evals/setup"
 	"piperoom/internal/actions"
+	"piperoom/internal/actions/fixpr"
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
@@ -300,6 +301,9 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 			}
 		}
 	}
+	// repo_open_pull_request is offered only in a room whose pipeline lists
+	// repos: (Q7j); any scenario may still name it.
+	actionNames = append(actionNames, fixpr.Name)
 	var mysqlDefs []tools.Tool
 	var mysqlInputs map[string][]string
 	var errs []error
@@ -314,13 +318,26 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 		inputs, scAreg := toolInputs, areg
 		if sc.sourceKind() == owners.SourceKindMySQL {
 			if mysqlInputs == nil {
-				d, err := scenarioTools(sc, defs, &mysqlDefs)
+				d, err := sourceTools(sc, defs, &mysqlDefs)
 				if err != nil {
 					return err
 				}
 				mysqlInputs = ToolInputs(d)
 			}
 			inputs, scAreg = mysqlInputs, myAreg
+		}
+		if len(sc.Pipeline.Repos) > 0 {
+			// The room of a pipeline with repos: has the repository tools
+			// and repo_open_pull_request over its fixture repos.
+			d, err := scenarioTools(sc, defs, &mysqlDefs)
+			if err != nil {
+				return err
+			}
+			inputs = ToolInputs(d)
+			if scAreg, err = LiveActions(sc.resources(), nil); err != nil {
+				errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, err))
+				continue
+			}
 		}
 		errs = append(errs, sc.Validate(inputs, actionNames))
 		if fe := sc.checkFixTargets(scAreg); len(fe) > 0 {
