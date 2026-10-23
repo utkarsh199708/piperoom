@@ -174,7 +174,8 @@ func (r *runner) verifyDriverProposal(ctx context.Context, in HumanInput) action
 		verdict := fmt.Sprintf("NOT recovered: step %d of the driver's fix did not succeed; recovery was not checked.", failed+1)
 		r.emitVerification(ctx, events.AgentVerificationPayload{ProposalID: id, Checks: []events.VerificationCheck{}, Verdict: verdict})
 		r.setDriverVerdict(id, false)
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)}}
+		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + fmt.Sprintf("proposal %q (the driver's): %s", id, verdict)},
+			failures: []failedStep{{proposalID: id, index: failed, steps: r.driverSteps(ctx, id), text: in.Text}}}
 	case none || unknown >= 0:
 		// An unknown outcome claims neither way: no verdict is stored, so a
 		// later report of the same proposal is judged on its own.

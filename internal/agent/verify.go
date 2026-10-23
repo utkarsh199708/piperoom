@@ -164,6 +164,9 @@ type actionOutcome struct {
 	// notes are the [verification] lines for the model, to be sent in the same
 	// user message as the inputs they judge.
 	notes []string
+	// failures are the steps of this batch that did not succeed; the runner
+	// reads their logs before the model re-plans (replan.go).
+	failures []failedStep
 }
 
 // handleActionResults runs verify-after-fix for every input in the batch and
@@ -189,7 +192,11 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 		out.needsModel = out.needsModel || one.needsModel
 		out.statusSet = out.statusSet || one.statusSet
 		out.notes = append(out.notes, one.notes...)
+		out.failures = append(out.failures, one.failures...)
 	}
+	// U5b: the logs and the known issues of a failed step go in the same
+	// message as the failure, so the model reads them before it re-plans.
+	out.notes = append(out.notes, r.readAfterFailure(ctx, out.failures)...)
 	switch {
 	case out.broken:
 		r.recoveredIdle = false
@@ -215,7 +222,8 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
 	case !*in.OK:
 		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: failedStepText(id, step, parsed)})
-		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
+		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)},
+			failures: []failedStep{r.failedOwnStep(id, step, parsed, in.Text)}}
 	}
 	if !parsed {
 		return actionOutcome{}
@@ -247,7 +255,27 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		}
 	}
 
-	return r.verifyExecuted(ctx, rec, r.executedAt(in, id, step))
+	out := r.verifyExecuted(ctx, rec, r.executedAt(in, id, step))
+	if !out.recovered && r.alert.Mode == ModeSetup {
+		// In a setup room a failed verification is a failed step (design
+		// §3.3): the model re-plans from the logs of the step that ran last.
+		out.failures = append(out.failures, failedStep{proposalID: id, index: step, steps: rec.steps})
+	}
+	return out
+}
+
+// failedOwnStep describes a failed step of the agent's own proposal. A result
+// without its fields, or for a proposal the runner did not record, is still a
+// failure; its step is unknown.
+func (r *runner) failedOwnStep(id string, step int, parsed bool, text string) failedStep {
+	f := failedStep{proposalID: id, index: -1, text: text}
+	if !parsed {
+		return f
+	}
+	if rec, ok := r.proposals.get(id); ok {
+		f.index, f.steps = step, rec.steps
+	}
+	return f
 }
 
 // verifyExecuted runs the verification pass of a proposal whose every step
