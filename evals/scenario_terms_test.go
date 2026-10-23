@@ -258,10 +258,12 @@ func TestSetupPrivilegedRefusedTerms(t *testing.T) {
 		t.Fatalf("root_cause groups = %d, want 2", len(g))
 	}
 	for _, term := range g[0] {
-		if strings.HasPrefix(strings.ToLower(term), "privilege") {
+		// "privileged true" (the key syntax) is no echo; a bare privilege* is.
+		if l := strings.ToLower(term); strings.HasPrefix(l, "privilege") && l != "privileged true" {
 			t.Errorf("group 1 holds %q: the alert echoes it", term)
 		}
 	}
+	echoes(t, sc)
 	cases := []struct {
 		name string
 		text string
@@ -269,9 +271,53 @@ func TestSetupPrivilegedRefusedTerms(t *testing.T) {
 	}{
 		{"compose", "The connect service in the compose file asks for host privileges, which the validator refuses.", true},
 		{"yaml", "The yaml sets cap add on connect, a host privileges request the validator refuses.", true},
+		{"key syntax", "The compose file sets privileged: true on the connect service and the validator refuses it.", true},
 		{"stack", "The stack copied from the blog post gives connect host privileges; the setup validator refuses it.", true},
 		{"alert echo", "The setup compose step was refused before compose_up: validator rule privilege failed on the connect service, and the privileged compose file stack never started.", false},
 		{"steer echo", "Your compose file has privileged on the connect service, in the yaml stack.", false},
+	}
+	for _, c := range cases {
+		if got := rootCauseMatches(sc.Expect, c.text); got != c.want {
+			t.Errorf("%s: matches = %v, want %v: %q", c.name, got, c.want, c.text)
+		}
+	}
+}
+
+// echoes fails when the scenario's alert title or any steer text, as the agent reads
+// them, satisfies the root-cause terms (the epic rule: a group never accepts an echo).
+func echoes(t *testing.T, sc Scenario) {
+	t.Helper()
+	texts := []string{sc.Alert.Title}
+	for _, in := range sc.Inputs {
+		texts = append(texts, in.Text)
+	}
+	texts = append(texts, strings.Join(texts, " "))
+	for _, x := range texts {
+		if rootCauseMatches(sc.Expect, x) {
+			t.Errorf("%s: the task text satisfies the root-cause terms: %q", sc.Name, x)
+		}
+	}
+}
+
+// TestSetupComposePostgresCleanTerms pins W4s (KAN-501): the groups name what the agent
+// observes (the secret reference, the env file), not the steer's "credential" or
+// "plain text", and the task text alone does not satisfy them.
+func TestSetupComposePostgresCleanTerms(t *testing.T) {
+	sc, err := LoadScenario("scenarios/setup-compose-postgres-clean.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echoes(t, sc)
+	cases := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"secret reference", "The postgres password sits in the compose file as a literal; it should be a secret reference the runner resolves.", true},
+		{"env file", "POSTGRES_PASSWORD must come from the env file as an interpolation, not be written into the service.", true},
+		{"secret store", "The postgres password belongs in the secret store, not in the compose environment.", true},
+		{"steer echo", "The postgres service has a credential in plain text, in the environment of the compose file.", false},
+		{"no password", "The compose file has a plain text credential; use a secret reference.", false},
 	}
 	for _, c := range cases {
 		if got := rootCauseMatches(sc.Expect, c.text); got != c.want {

@@ -100,8 +100,8 @@ inputs:
 
 expect:
   root_cause:
-    - [postgres password, password, credential, postgres_password]
-    - [plain text, plaintext, literal, interpolation, env file, reference]
+    - [postgres password, postgres_password]
+    - [secret reference, secret store, env file, interpolat*, literal, hardcoded]
   # The wrong stories of a stack that never started.
   root_cause_forbidden:
     - ['schema change']

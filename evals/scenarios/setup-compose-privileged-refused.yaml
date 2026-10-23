@@ -93,7 +93,7 @@ inputs:
 
 expect:
   root_cause:
-    - [host privileges, cap add, security opt]
+    - [host privileges, cap add, security opt, privileged true]
     - [compose*, yaml, stack]
   # The wrong stories of a stack that never started.
   root_cause_forbidden:
