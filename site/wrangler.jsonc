@@ -1,0 +1,17 @@
+// Cloudflare Worker that serves the static landing page at piperoom.ai.
+// Deploy: `npx wrangler@4.148.0 deploy` from this folder, or the `site` workflow on push to main.
+{
+  "$schema": "https://unpkg.com/wrangler@4.148.0/config-schema.json",
+  "name": "piperoom-site",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "404-page"
+  },
+  // custom_domain makes Cloudflare create the DNS record and certificate,
+  // so the piperoom.ai zone must be in the same Cloudflare account.
+  "routes": [
+    { "pattern": "piperoom.ai", "custom_domain": true },
+    { "pattern": "www.piperoom.ai", "custom_domain": true }
+  ]
+}
