@@ -377,7 +377,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"what_changed", "pg_recent_ddl", "connect_status", "update_hypothesis", "propose_fix", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "pg_drop_replication_slot", "connect_pause_connector", "connect_resume_connector", "connect_update_connector_config", "pg_add_publication_table", "pg_snapshot_signal", "connect_config", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "pg_recent_ddl", "connect_status", "update_hypothesis", "propose_fix", "pg_replication_slots", "kafka_consumer_lag", "warehouse_freshness", "similar_incidents", "pg_drop_replication_slot", "connect_pause_connector", "connect_resume_connector", "connect_validate_config", "connect_update_connector_config", "pg_add_publication_table", "pg_snapshot_signal", "connect_config", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
@@ -1069,6 +1069,36 @@ func TestSystemPromptCDCEvalFixes(t *testing.T) {
 	}
 	if n := strings.Count(prompt, "one short question with post_message"); n != 1 {
 		t.Errorf("CDC prompt has %d ambiguous-steer rules, want 1", n)
+	}
+}
+
+// TestSystemPromptValidatesAConnectorConfigBeforeCreate pins Q4b: a connector
+// the room does not have yet is validated with connect_validate_config before
+// any create is proposed, a validation error stops the proposal, the full
+// config is sent when there is no base connector to inherit from, and a
+// renamed key's known-issue id is named. The batch prompt has no connector,
+// so it must not carry the rule.
+func TestSystemPromptValidatesAConnectorConfigBeforeCreate(t *testing.T) {
+	prompt := systemPrompt()
+	start := strings.Index(prompt, "- Connector missing:")
+	if start < 0 {
+		t.Fatal("system prompt has no connector-create validation rule")
+	}
+	rule := prompt[start:]
+	rule = rule[:strings.Index(rule, "\n")]
+	for _, want := range []string{
+		"connect_validate_config",
+		"before proposing a create",
+		"no base connector: from scratch",
+		"propose nothing on errors",
+		"known-issue id",
+	} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("create-validation rule lacks %q: %s", want, rule)
+		}
+	}
+	if strings.Contains(systemPromptFor(events.PipelineKindBatch), "connect_validate_config") {
+		t.Error("the batch prompt carries the CDC create-validation rule")
 	}
 }
 

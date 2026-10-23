@@ -8,6 +8,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -68,6 +69,12 @@ func (s *writeSpy) Status(context.Context, string) (clients.ConnectorStatus, err
 func (s *writeSpy) Config(context.Context, string) (map[string]string, error) {
 	return map[string]string{"k": "v"}, nil
 }
+func (s *writeSpy) ValidateConfig(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+	return connect.ValidateResult{}, nil
+}
+func (s *writeSpy) PluginConfigDef(context.Context, string) ([]connect.ConfigKeyDef, error) {
+	return []connect.ConfigKeyDef{{Name: "k"}}, nil
+}
 func (s *writeSpy) RestartTask(context.Context, string, int) error {
 	s.writes = append(s.writes, "RestartTask")
 	return nil
@@ -99,6 +106,15 @@ func (s *writeSpy) VersionsIncludingDeleted(context.Context, string) ([]int, err
 	return []int{1, 2}, nil
 }
 
+// validateOnlyConnect is a Connect client with the config validate call but
+// not the plugin config definitions: connect_validate_config must stay
+// unregistered over it.
+type validateOnlyConnect struct{ clients.ConnectClient }
+
+func (validateOnlyConnect) ValidateConfig(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+	return connect.ValidateResult{}, nil
+}
+
 func TestReadOnlyClients(t *testing.T) {
 	ctx := context.Background()
 	sp := &writeSpy{}
@@ -122,6 +138,19 @@ func TestReadOnlyClients(t *testing.T) {
 	}
 	if cfg, err := c.Config(ctx, "c"); err != nil || cfg["k"] != "v" {
 		t.Fatalf("Config = %v, %v", cfg, err)
+	}
+	// The config validation pair (Q4b) passes through: connect_validate_config
+	// finds it by a type assertion on its client, so the wrapper must keep it
+	// when the client has it.
+	vc, ok := c.(connectConfigValidator)
+	if !ok {
+		t.Fatalf("readConnect(%T) = %T, which hides the config validation pair", sp, c)
+	}
+	if _, err := vc.ValidateConfig(ctx, "c", map[string]string{"k": "v"}); err != nil {
+		t.Fatalf("ValidateConfig = %v", err)
+	}
+	if defs, err := vc.PluginConfigDef(ctx, "c"); err != nil || len(defs) != 1 {
+		t.Fatalf("PluginConfigDef = %v, %v", defs, err)
 	}
 	if got, err := r.Subjects(ctx); err != nil || len(got) != 1 {
 		t.Fatalf("Subjects = %v, %v", got, err)
@@ -157,6 +186,15 @@ func TestReadOnlyClients(t *testing.T) {
 	if plain := readRegistry(&Wired{Registry: noRegistry{}}); plain != nil {
 		if _, ok := plain.(deletedSubjectLister); ok {
 			t.Fatalf("readRegistry(noRegistry) = %T, which fakes the deleted-state reads", plain)
+		}
+	}
+
+	// The same for the config validation pair: a client with ValidateConfig
+	// but no PluginConfigDef stays unregistered for connect_validate_config
+	// rather than offering the model a tool that always fails.
+	if plain := readConnect(&Wired{Connect: validateOnlyConnect{sp}}); plain != nil {
+		if _, ok := plain.(connectConfigValidator); ok {
+			t.Fatalf("readConnect(%T) = %T, which fakes PluginConfigDef", validateOnlyConnect{}, plain)
 		}
 	}
 
@@ -208,15 +246,22 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 	if err := RegisterTools(reg, actions.NewRegistry(), w); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
+	// A client that validates configs gives the model connect_validate_config
+	// (Q4b); the tool is read-only, so it belongs in this registry.
+	if _, ok := reg.Get("connect_validate_config"); !ok {
+		t.Error("connect_validate_config is not registered over a client with the config validation pair")
+	}
 
 	connW := reflect.TypeOf((*clients.ConnectWriter)(nil)).Elem()
 	regW := reflect.TypeOf((*clients.SchemaRegistryWriter)(nil)).Elem()
 	fixW := reflect.TypeOf((*clients.ConnectFixWriter)(nil)).Elem()
 	allowed := map[reflect.Type]bool{
-		reflect.TypeOf(readOnlyConnect{}):         true,
-		reflect.TypeOf(readOnlyConnectTasks{}):    true,
-		reflect.TypeOf(readOnlyRegistry{}):        true,
-		reflect.TypeOf(readOnlyRegistryDeleted{}): true,
+		reflect.TypeOf(readOnlyConnect{}):              true,
+		reflect.TypeOf(readOnlyConnectTasks{}):         true,
+		reflect.TypeOf(readOnlyConnectValidate{}):      true,
+		reflect.TypeOf(readOnlyConnectValidateTasks{}): true,
+		reflect.TypeOf(readOnlyRegistry{}):             true,
+		reflect.TypeOf(readOnlyRegistryDeleted{}):      true,
 	}
 	canWrite := func(ty reflect.Type) bool {
 		if allowed[ty] {

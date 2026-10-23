@@ -145,11 +145,13 @@ func ifaceOf[T any]() reflect.Type { return reflect.TypeOf((*T)(nil)).Elem() }
 // refusingAdapters are the only types reachable from the actions with write
 // mode off that carry a write method of the contract: each one refuses.
 var refusingAdapters = map[reflect.Type]bool{
-	reflect.TypeOf(readOnlyConnect{}):        true,
-	reflect.TypeOf(readOnlyConnectDryRun{}):  true,
-	reflect.TypeOf(readOnlyRegistry{}):       true,
-	reflect.TypeOf(readOnlyRegistryDryRun{}): true,
-	reflect.TypeOf(noRegistry{}):             true,
+	reflect.TypeOf(readOnlyConnect{}):              true,
+	reflect.TypeOf(readOnlyConnectDryRun{}):        true,
+	reflect.TypeOf(readOnlyConnectValidate{}):      true,
+	reflect.TypeOf(readOnlyConnectValidateTasks{}): true,
+	reflect.TypeOf(readOnlyRegistry{}):             true,
+	reflect.TypeOf(readOnlyRegistryDryRun{}):       true,
+	reflect.TypeOf(noRegistry{}):                   true,
 }
 
 // readOnlyKafkaViews are the only types reachable from the actions with write
