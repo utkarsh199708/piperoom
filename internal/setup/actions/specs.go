@@ -95,6 +95,7 @@ func EnvironmentSpecs() []Spec {
 			// preview shows the effective services before they start.
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
+			CheckParams:   checkStackParams,
 			PreviewDecode: composeConfigPreview("up"),
 			// The first up pulls the Kafka and Connect images.
 			Timeout: longOpTimeout,
@@ -108,6 +109,7 @@ func EnvironmentSpecs() []Spec {
 			Scope:         ScopeFree,
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
+			CheckParams:   checkStackParams,
 			PreviewDecode: composeConfigPreview("restart"),
 		},
 		{
@@ -119,6 +121,7 @@ func EnvironmentSpecs() []Spec {
 			Scope:         ScopeFree,
 			PreviewOp:     "compose_config",
 			PreviewParams: fileOnlyParams,
+			CheckParams:   checkStackParams,
 			PreviewDecode: composeConfigPreview("down"),
 		},
 		{
@@ -173,8 +176,8 @@ func stackSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"file": map[string]any{"type": "string", "maxLength": 512},
 		"services": map[string]any{
-			"type": "array", "maxItems": 16,
-			"items": map[string]any{"type": "string", "minLength": 1, "maxLength": 63},
+			"type": "array", "maxItems": maxStackServices,
+			"items": map[string]any{"type": "string", "minLength": 1, "maxLength": 63, "pattern": composeServicePattern},
 		},
 	})
 }

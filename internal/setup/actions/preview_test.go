@@ -3,6 +3,10 @@ package setupactions
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -184,7 +188,7 @@ func TestPreviewMapsParamsForARealPreviewOp(t *testing.T) {
 	if strings.Contains(res.Expected, "image:") || strings.Contains(res.Current, "image:") {
 		t.Fatalf("the render leaked into a sentence: %+v", res)
 	}
-	if res.DryRun == nil || !res.DryRun.OK || res.DryRun.Source != "compose config" || !strings.Contains(res.DryRun.Text, "image: debezium/connect") {
+	if res.DryRun == nil || !res.DryRun.OK || res.DryRun.Source != "compose config (render only)" || !strings.Contains(res.DryRun.Text, "image: debezium/connect") {
 		t.Fatalf("dry run = %+v, want the render under DryRun", res.DryRun)
 	}
 	if res.Reversible {
@@ -260,8 +264,8 @@ func TestComposePreviewSentencesPerOp(t *testing.T) {
 		{"compose_up", `{"services":["kafka","connect"]}`, "start services kafka, connect from compose.yaml in the background"},
 		{"compose_restart", `{}`, "restart every service of compose.yaml in place; volumes kept"},
 		{"compose_restart", `{"services":["connect"]}`, "restart services connect of compose.yaml in place; volumes kept"},
-		{"compose_down", `{}`, "stop the stack of compose.yaml; volumes kept"},
-		{"compose_down", `{"file":"compose.yaml","services":["registry"]}`, "stop services registry of compose.yaml; volumes kept"},
+		{"compose_down", `{}`, "stop and remove the containers and networks of the stack of compose.yaml; volumes kept"},
+		{"compose_down", `{"file":"compose.yaml","services":["registry"]}`, "stop and remove the containers of services registry of compose.yaml; volumes kept"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.action+tc.params, func(t *testing.T) {
@@ -288,8 +292,18 @@ func TestComposePreviewSentencesPerOp(t *testing.T) {
 }
 
 func TestComposePreviewCapsTheDryRunText(t *testing.T) {
-	// A render well over 2 KiB, with a multi-byte rune straddling the cap.
-	body := "services:\n" + strings.Repeat("a", maxDryRunText-12) + strings.Repeat("é", 400)
+	// A render over 2 KiB whose line on the cut carries a URL with a password:
+	// a fragment of it ("postgres://app:S3cr") could lose the shape the
+	// room's redaction matches, so no part of that line may survive.
+	head := "services:\n  source:\n    image: postgres:16\n"
+	filler := strings.Repeat("    # "+strings.Repeat("x", 70)+"\n", 25)
+	secretLine := "    url: postgres://app:S3cretPassw0rd@db.internal:5432/orders_replica\n"
+	body := head + filler + secretLine + strings.Repeat("    tail: line\n", 40)
+	cut := maxDryRunText - len(truncatedMarker)
+	start := len(head) + len(filler)
+	if start >= cut || start+len(secretLine) <= cut {
+		t.Fatalf("fixture: the secret line [%d,%d) must straddle the cut at %d", start, start+len(secretLine), cut)
+	}
 	data, err := json.Marshal(map[string]any{"file": "compose.yaml", "body": body, "bytes": len(body)})
 	if err != nil {
 		t.Fatal(err)
@@ -306,19 +320,97 @@ func TestComposePreviewCapsTheDryRunText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Preview: %v", err)
 	}
-	if res.DryRun == nil || len(res.DryRun.Text) > maxDryRunText || len(res.DryRun.Text) < maxDryRunText-4 {
-		t.Fatalf("dry run text is %d bytes, want just under %d", len(res.DryRun.Text), maxDryRunText)
+	text := res.DryRun.Text
+	if len(text) > maxDryRunText {
+		t.Fatalf("dry run text is %d bytes, want at most %d", len(text), maxDryRunText)
 	}
-	if !utf8.ValidString(res.DryRun.Text) {
-		t.Fatal("dry run text was cut inside a rune")
+	if text != head+filler+truncatedMarker {
+		t.Fatalf("dry run text does not end at the last whole line before the cut plus the marker:\n%q", text[len(text)-120:])
+	}
+	for _, frag := range []string{"postgres://", "S3cr", "url:"} {
+		if strings.Contains(text, frag) {
+			t.Fatalf("a part of the line on the cut survived (%q)", frag)
+		}
 	}
 	if len(res.Expected) > 200 || len(res.Current) > 200 {
 		t.Fatalf("sentences are not short: %q / %q", res.Expected, res.Current)
 	}
 }
 
+func TestClipRender(t *testing.T) {
+	cases := []struct {
+		name, in string
+		limit    int
+		want     string
+	}{
+		{"fits", "a\nb\n", 64, "a\nb\n"},
+		{"cut drops the partial line", "line one\nline two is long\n", 24, "line one\n" + truncatedMarker},
+		{"no newline before the cut", strings.Repeat("y", 100), 40, truncatedMarker},
+		{"invalid UTF-8 is replaced", "ok\xff\n", 64, "ok?\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := clipRender(tc.in, tc.limit)
+			if got != tc.want {
+				t.Fatalf("clipRender(%q, %d) = %q, want %q", tc.in, tc.limit, got, tc.want)
+			}
+			if len(got) > tc.limit || !utf8.ValidString(got) {
+				t.Fatalf("clipRender = %q: over the limit or invalid UTF-8", got)
+			}
+		})
+	}
+}
+
+func TestPreviewLine(t *testing.T) {
+	cases := []struct {
+		name, in string
+		want     string
+	}{
+		{"line separator", "comp\u2028ose.yaml", "comp ose.yaml"},
+		{"paragraph separator", "a\u2029b", "a b"},
+		{"zero width space", "comp\u200bose.yaml", "comp ose.yaml"},
+		{"bom and bidi override", "\ufeffa\u202eb", "a b"},
+		{"control", "a\x1b[31mb\n", "a [31mb"},
+		{"invalid UTF-8", "a\xffb", "a?b"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := previewLine(tc.in, maxPreviewFile); got != tc.want {
+				t.Fatalf("previewLine(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	// A cut stays within the limit including the ellipsis, and never splits
+	// a rune: "é" (2 bytes) straddles every odd cut point here.
+	long := "xy" + strings.Repeat("é", 200)
+	got := previewLine(long, maxPreviewFile)
+	if len(got) > maxPreviewFile {
+		t.Fatalf("previewLine is %d bytes, want at most %d", len(got), maxPreviewFile)
+	}
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "…") {
+		t.Fatalf("previewLine = %q, want valid UTF-8 ending in an ellipsis", got)
+	}
+	if want := "xy" + strings.Repeat("é", 61) + "…"; got != want {
+		t.Fatalf("previewLine cut = %q, want %q", got, want)
+	}
+}
+
+func TestComposeServicePatternMatchesTheRunner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "targets", "compose", "templates.go"))
+	if err != nil {
+		t.Fatalf("reading the runner's templates.go: %v", err)
+	}
+	m := regexp.MustCompile("serviceNameRE = regexp.MustCompile\\(`([^`]+)`\\)").FindSubmatch(src)
+	if m == nil {
+		t.Fatal("serviceNameRE not found in targets/compose/templates.go")
+	}
+	if string(m[1]) != composeServicePattern {
+		t.Fatalf("runner service pattern %q, this package %q: keep them identical", m[1], composeServicePattern)
+	}
+}
+
 func TestComposePreviewSanitisesTheRunnerFileName(t *testing.T) {
-	data := json.RawMessage(`{"file":"comp\u001b[31mose.yaml\n","body":"services: {}","bytes":12}`)
+	data := json.RawMessage(`{"file":"comp\u001b[31mose\u2028.yaml\n","body":"services: {}","bytes":12}`)
 	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
 		return protocol.OpResult{ID: req.ID, OK: true, Data: data}, nil
 	}}
@@ -332,24 +424,53 @@ func TestComposePreviewSanitisesTheRunnerFileName(t *testing.T) {
 		t.Fatalf("Preview: %v", err)
 	}
 	for _, s := range []string{res.Target, res.Current, res.Expected} {
-		if strings.ContainsAny(s, "\x1b\n") {
-			t.Fatalf("a control character reached a preview sentence: %q", s)
+		if strings.ContainsAny(s, "\x1b\n\u2028") {
+			t.Fatalf("a control or separator character reached a preview sentence: %q", s)
 		}
 	}
 }
 
-func TestComposePreviewRefusesABadServiceName(t *testing.T) {
-	f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
-		return protocol.OpResult{ID: req.ID, OK: true, Data: realComposeConfigData}, nil
-	}}
-	a, err := New(composeSpec(t, "compose_up"), Deps{Runner: f, RoomID: "r_setup"})
-	if err != nil {
-		t.Fatalf("New: %v", err)
+func TestComposeStepsRefuseBadServices(t *testing.T) {
+	many := make([]string, maxStackServices+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("svc%d", i)
 	}
-	for _, svc := range []string{"<b>x</b>", "a b", "-x", "x\\u0007"} {
-		params := json.RawMessage(`{"services":["` + svc + `"]}`)
-		if _, err := a.Preview(tools.WithPipeline(testContext(t, params), testPipeline()), params); !errors.Is(err, ErrBadPreview) {
-			t.Fatalf("Preview(services %q) = %v, want ErrBadPreview", svc, err)
+	tooMany, _ := json.Marshal(map[string]any{"services": many})
+	bad := []json.RawMessage{json.RawMessage(tooMany)}
+	for _, svc := range []string{"<b>x</b>", "a b", "-x", "x\\u0007", "Kafka", "a.b"} {
+		bad = append(bad, json.RawMessage(`{"services":["`+svc+`"]}`))
+	}
+	for _, name := range []string{"compose_up", "compose_restart", "compose_down"} {
+		for _, params := range bad {
+			f := &fakeRunner{answer: func(req protocol.OpRequest) (protocol.OpResult, error) {
+				return protocol.OpResult{ID: req.ID, OK: true, Data: realComposeConfigData}, nil
+			}}
+			a, err := New(composeSpec(t, name), Deps{Runner: f, RoomID: "r_setup"})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			ctx := tools.WithPipeline(testContext(t, params), testPipeline())
+			if _, err := a.Preview(ctx, params); !errors.Is(err, ErrBadInput) {
+				t.Fatalf("%s Preview(%s) = %v, want ErrBadInput", name, params, err)
+			}
+			if err := a.Validate(ctx, params); !errors.Is(err, ErrBadInput) {
+				t.Fatalf("%s Validate(%s) = %v, want ErrBadInput", name, params, err)
+			}
+			if _, err := a.Execute(ctx, params); !errors.Is(err, ErrBadInput) {
+				t.Fatalf("%s Execute(%s) = %v, want ErrBadInput", name, params, err)
+			}
+			if got := len(f.recorded()); got != 0 {
+				t.Fatalf("%s with %s sent %d ops, want 0", name, params, got)
+			}
+			// The decoder refuses them on its own too.
+			if _, err := composeConfigPreview("up")(params, realComposeConfigData); err == nil {
+				t.Fatalf("composeConfigPreview accepted %s", params)
+			}
 		}
+	}
+	// Exactly the cap is fine.
+	ok, _ := json.Marshal(map[string]any{"services": many[:maxStackServices]})
+	if err := checkStackParams(ok); err != nil {
+		t.Fatalf("%d services refused: %v", maxStackServices, err)
 	}
 }

@@ -118,6 +118,12 @@ type Spec struct {
 	// itself; an op whose Data has another shape (compose_config) must set
 	// it, or its preview is refused as empty.
 	PreviewDecode func(params, data json.RawMessage) (events.PreviewResult, error)
+	// CheckParams is an optional no-I/O check of the params beyond their
+	// shape (a cap or a vocabulary the schema states but nothing validates
+	// here). validateParams runs it, so Validate, Tier, CheckScope, Preview
+	// and Execute all refuse such params before anything is sent; a refusal
+	// is ErrBadInput.
+	CheckParams func(json.RawMessage) error
 	// Timeout bounds one write request of this action (OpRequest.Deadline,
 	// the time at which the runner stops the op). Zero uses the tier's
 	// default (writeTimeout for T1/T2, t3Timeout for T3); a T3 step gets the
@@ -441,6 +447,11 @@ func (a *Adapter) validateParams(params json.RawMessage) error {
 	}
 	if obj == nil {
 		return fmt.Errorf("%w: %s: params must be a JSON object", ErrBadInput, a.spec.Name)
+	}
+	if a.spec.CheckParams != nil {
+		if err := a.spec.CheckParams(raw); err != nil {
+			return fmt.Errorf("%w: %s: %v", ErrBadInput, a.spec.Name, err)
+		}
 	}
 	return nil
 }
