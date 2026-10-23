@@ -10,7 +10,7 @@ import (
 )
 
 // lifecycleSpy is the writing spy plus what the real Connect client grew in
-// the Q wave: the offsets, version and plugin reads (Q1c, Q5a) and the
+// the Q wave: the offsets, version, plugin and logger reads (Q1c, Q5a, Q3a) and the
 // lifecycle writes (Q5a), which record like the spy's other writes.
 type lifecycleSpy struct{ *writeSpy }
 
@@ -27,6 +27,9 @@ func (lifecycleSpy) ServerInfo(context.Context) (connect.ServerInfo, error) {
 }
 func (lifecycleSpy) Plugins(context.Context) ([]connect.Plugin, error) {
 	return []connect.Plugin{{Class: "io.debezium.connector.postgresql.PostgresConnector", Type: "source", Version: "2.5.1.Final"}}, nil
+}
+func (lifecycleSpy) Loggers(context.Context) ([]connect.LoggerLevel, error) {
+	return []connect.LoggerLevel{{Logger: "root", Level: "INFO"}, {Logger: "io.debezium", Level: "DEBUG"}}, nil
 }
 func (s lifecycleSpy) CreateConnector(context.Context, string, map[string]string) error {
 	s.writes = append(s.writes, "CreateConnector")

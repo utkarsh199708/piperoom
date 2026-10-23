@@ -25,6 +25,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/logtools"
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 )
@@ -69,11 +70,44 @@ type Wired struct {
 	Builder topology.Builder
 	// Owners is the loaded owners config.
 	Owners *owners.Owners
+	// WorkerLogs reads the Connect workers' logs for connect_worker_logs
+	// (Q3c). Nil leaves the tool registered and answering "not configured".
+	// Like Rooms, the caller sets it after Open, before RegisterTools: the
+	// Loki settings (WORKER_LOGS_LOKI_URL, _SELECTOR, _TOKEN, _USER, _ORG_ID)
+	// are not in internal/config yet (Q3e contract change request), so
+	// nothing in production sets it today.
+	WorkerLogs logtools.Reader
+	// ConnectMetricsPrefix is the metric name prefix of connect_worker_metrics
+	// (CONNECT_METRICS_PREFIX, Q3b); "" is
+	// debeziumtools.DefaultWorkerMetricsPrefix. Set by the caller, as
+	// WorkerLogs, until internal/config has it.
+	ConnectMetricsPrefix string
+	// ConnectInternalTopics is CONNECT_INTERNAL_TOPICS (Q3a): the Connect
+	// cluster's config, offset and status topics, comma separated, in that
+	// order. "" lets connect_worker_info find them by name. Set by the caller,
+	// as WorkerLogs, until internal/config has it.
+	ConnectInternalTopics string
+
+	// ProbeTools registers net_probe (Q6a) over this set. It is a hook, not
+	// a direct call, because nettools imports internal/connprobe, which
+	// imports this package, so wiring cannot import nettools. The caller sets
+	// it to netwire.Register (internal/wiring/netwire) after Open, or in
+	// StackOptions.Prepare, before RegisterTools. Nil leaves net_probe
+	// unregistered.
+	ProbeTools func(reg *tools.Registry, w *Wired) error
+
 	// Rooms is where similar_incidents reads past closed rooms (the room
 	// store). The caller that owns the store sets it after Open, before
 	// RegisterTools; nil leaves the tool unregistered (CLI runs have no room
 	// store).
 	Rooms similarincidents.Source
+
+	// conn is the connection settings this set was opened with (the
+	// process-wide settings, or one pipeline's resolved connections: block).
+	// net_probe lists its targets from them, so a set never names another
+	// set's host. Zero for a Wired built by hand: net_probe then offers only
+	// the pipeline's literal connections and its connectors' hosts.
+	conn config.Config
 
 	// write is true when the set was opened with write mode on
 	// (PIPEROOM_WRITE_MODE=on and not StackOptions.ReadOnly). Only then do
@@ -343,6 +377,7 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 	w.DebeziumMetrics = dm
 	w.Orchestrator, w.Transform = orch, tr
 	w.write, w.writers = write, wc
+	w.conn = cfg
 	return w, nil
 }
 
