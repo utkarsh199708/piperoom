@@ -77,9 +77,11 @@ func TestMatchesRecordSnippetIsTheRegexp(t *testing.T) {
 // sanitizeTrace and condenseTrace stay linear: main's regexps took 28-44 ms
 // on 64 KiB, growing with the square of the length. An absolute budget on
 // shared CI runners flaked (#698: 12.9 ms against 10 ms), so the test checks
-// how time scales instead: the same unit on 4x the bytes must take under 8x
-// the time. Linear work gives about 4x; quadratic work gives about 16x, so 8x
-// leaves room for noise on either side without letting a blowup through.
+// how time scales instead: the same unit on 4x the bytes must take under 12x
+// the time. Linear work gives about 4x; quadratic work gives about 16x. The
+// bound was 8x, but shared CI runners measured genuinely linear passes at
+// 8.1–8.3x twice in one day (scheduler noise on the ~3 ms small run), so 12x:
+// still well under quadratic, no longer a coin flip on a noisy runner.
 // Each time is the best of several runs of the thread's work (workTime),
 // since CI runs packages in parallel. A generous absolute bound on top, over
 // what redact.Text and dlq.RedactMessage (main's passes from other packages)
@@ -88,7 +90,7 @@ func TestSanitizeTraceHostileSpeed(t *testing.T) {
 	const (
 		small    = 64 << 10 // the line of #533
 		large    = 4 * small
-		maxRatio = 8.0
+		maxRatio = 12.0
 		// Below this the large run is too short for its ratio to mean
 		// anything (timer and scheduler noise), and too short to matter.
 		noiseFloor = time.Millisecond
