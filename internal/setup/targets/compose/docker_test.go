@@ -83,8 +83,24 @@ func baseArgv(dir, sub string) []string {
 	}
 }
 
+// assertArgv compares an argv with the pinned shape. A stack op runs docker
+// on a private snapshot of the validated compose file (stackSnapshot), so the
+// -f value it carries is that snapshot, named like the project's file; the
+// comparison accepts it in place of the project path.
 func assertArgv(t *testing.T, got, want []string) {
 	t.Helper()
+	got = append([]string(nil), got...)
+	for i := 0; i+1 < len(got) && i+1 < len(want); i++ {
+		if got[i] != "-f" || want[i] != "-f" {
+			continue
+		}
+		snapDir := filepath.Dir(got[i+1])
+		if filepath.Dir(snapDir) == filepath.Clean(os.TempDir()) &&
+			strings.HasPrefix(filepath.Base(snapDir), "piperoom-compose-") &&
+			filepath.Base(got[i+1]) == filepath.Base(want[i+1]) {
+			got[i+1] = want[i+1]
+		}
+	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("argv = %q, want %q", got, want)
 	}

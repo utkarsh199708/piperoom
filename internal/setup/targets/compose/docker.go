@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -137,31 +138,128 @@ func stackFiles(env ops.Env, file string) (string, error) {
 	return clean, nil
 }
 
-// validateStackFile re-validates the on-disk compose file against the S1
-// rules (ValidateYAML) before docker reads it. compose_write validated the
+// stackSnapshot reads the on-disk compose file once, validates exactly those
+// bytes against the S1 rules (validateDoc) and writes them to a fresh private
+// file that docker reads instead of the project's. compose_write validated the
 // bytes it wrote, but the file a later up, restart or down names is whatever
 // is on disk NOW: a file replaced since the write (another tool, a person
-// editing the project) would otherwise run with every privilege it asks for,
-// and the whole validator would hang on nothing but the file staying put.
-func validateStackFile(env ops.Env, clean, class string) error {
+// editing the project) would otherwise run with every privilege it asks for.
+// Handing docker the project path after the check would leave a window in
+// which the file can be swapped between the read and docker's own open; the
+// snapshot closes it. The pinned argv's --project-directory keeps relative
+// binds and the default project name anchored at the project.
+//
+// The bind sources the document mounts are checked on disk too: a component
+// that is a symlink would make a lexically local ./x bind any host path.
+//
+// The caller runs docker with the returned path and then calls cleanup.
+func stackSnapshot(env ops.Env, clean, class string) (string, func(), error) {
 	root, err := projectRoot(env)
 	if err != nil {
-		return err
+		return "", nil, err
 	}
 	defer root.Close()
+	fi, err := root.Lstat(clean)
+	if err != nil {
+		return "", nil, fmt.Errorf("compose: stat %s: %w", q(clean), err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", nil, fmt.Errorf("%w: %s is not a regular file", ErrStack, q(clean))
+	}
 	f, err := root.Open(clean)
 	if err != nil {
-		return fmt.Errorf("compose: opening %s: %w", q(clean), err)
+		return "", nil, fmt.Errorf("compose: opening %s: %w", q(clean), err)
 	}
-	defer f.Close()
 	doc, err := io.ReadAll(io.LimitReader(f, maxComposeBytes+1))
+	f.Close()
 	if err != nil {
-		return fmt.Errorf("compose: reading %s: %w", q(clean), err)
+		return "", nil, fmt.Errorf("compose: reading %s: %w", q(clean), err)
 	}
-	if err := ValidateYAML(doc, class); err != nil {
-		return fmt.Errorf("%w: %s on disk no longer passes validation (run compose_write again): %w", ErrStack, q(clean), err)
+	binds, err := validateDoc(doc, class)
+	if err == nil {
+		err = checkBindsOnDisk(root, binds)
+	}
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: %s on disk no longer passes validation (run compose_write again): %w", ErrStack, q(clean), err)
+	}
+	dir, err := os.MkdirTemp("", "piperoom-compose-")
+	if err != nil {
+		return "", nil, fmt.Errorf("compose: creating the compose snapshot: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	snap := filepath.Join(dir, path.Base(clean))
+	out, err := os.OpenFile(snap, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		_, err = out.Write(doc)
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("compose: writing the compose snapshot: %w", err)
+	}
+	return snap, cleanup, nil
+}
+
+// checkBindsOnDisk refuses a bind source any component of which is a symlink
+// (or anything but a directory or regular file at the leaf): the lexical
+// check keeps ./x under the project, and this keeps the path docker resolves
+// there too. A component that does not exist yet is fine: docker creates a
+// missing bind source as a directory at that path.
+func checkBindsOnDisk(root *os.Root, binds []string) error {
+	for _, src := range binds {
+		parts := strings.Split(strings.TrimPrefix(src, "./"), "/")
+		for i := range parts {
+			p := strings.Join(parts[:i+1], "/")
+			fi, err := root.Lstat(p)
+			if errors.Is(err, fs.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return ruleError(RuleMount, "", "bind source %s: %s", q(src), clip(err.Error()))
+			}
+			if fi.Mode()&fs.ModeSymlink != 0 {
+				return ruleError(RuleMount, "", "bind source %s goes through the symlink %s", q(src), q(p))
+			}
+			if !fi.IsDir() && !(i == len(parts)-1 && fi.Mode().IsRegular()) {
+				return ruleError(RuleMount, "", "bind source %s is not a directory or a regular file", q(src))
+			}
+		}
 	}
 	return nil
+}
+
+// snapshotArgv points the pinned argv's -f at the validated snapshot.
+func snapshotArgv(argv []string, snap string) ([]string, error) {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "-f" {
+			out := append([]string(nil), argv...)
+			out[i+1] = snap
+			return out, nil
+		}
+	}
+	return nil, errors.New("compose: the pinned argv names no compose file")
+}
+
+// pinnedStackArgv validates the on-disk compose file, snapshots it, and
+// builds the pinned argv for sub against the snapshot. The caller defers
+// cleanup.
+func pinnedStackArgv(env ops.Env, file, clean, class, sub string, flags, services []string) ([]string, func(), error) {
+	argv, err := stackArgv(env.Confine.Dir(), file, sub, flags, services)
+	if err != nil {
+		return nil, nil, err
+	}
+	snap, cleanup, err := stackSnapshot(env, clean, class)
+	if err != nil {
+		return nil, nil, err
+	}
+	argv, err = snapshotArgv(argv, snap)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return argv, cleanup, nil
 }
 
 // commandResult is one docker invocation: the capped output, the exit code,
@@ -410,10 +508,11 @@ func (o composePSOp) Execute(ctx context.Context, params json.RawMessage, env op
 	if err != nil {
 		return ops.Result{}, err
 	}
-	argv, err := stackArgv(env.Confine.Dir(), p.File, "ps", []string{"--format", "json"}, p.Services)
+	argv, cleanup, err := pinnedStackArgv(env, p.File, clean, o.d.classOrDefault(), "ps", []string{"--format", "json"}, p.Services)
 	if err != nil {
 		return ops.Result{}, err
 	}
+	defer cleanup()
 	start := now(env)
 	res, err := dockerCommand(ctx, env, argv)
 	if err != nil {
@@ -553,10 +652,11 @@ func (o composeConfigOp) Execute(ctx context.Context, params json.RawMessage, en
 	// --no-interpolate keeps the ${KEY} references instead of resolving them
 	// from the environment; the mask then hides the values of credential-named
 	// keys, so the preview never carries a secret the person typed.
-	argv, err := stackArgv(env.Confine.Dir(), p.File, "config", []string{"--no-interpolate"}, p.Services)
+	argv, cleanup, err := pinnedStackArgv(env, p.File, clean, o.d.classOrDefault(), "config", []string{"--no-interpolate"}, p.Services)
 	if err != nil {
 		return ops.Result{}, err
 	}
+	defer cleanup()
 	start := now(env)
 	res, err := dockerCommand(ctx, env, argv)
 	if err != nil {
@@ -782,10 +882,11 @@ func (o containerInspectOp) Execute(ctx context.Context, params json.RawMessage,
 	start := now(env)
 	// The ids come from this project's compose file, so a service name can
 	// never name a container outside it.
-	psArgv, err := stackArgv(env.Confine.Dir(), p.File, "ps", []string{"-q"}, []string{p.Service})
+	psArgv, cleanup, err := pinnedStackArgv(env, p.File, clean, o.d.classOrDefault(), "ps", []string{"-q"}, []string{p.Service})
 	if err != nil {
 		return ops.Result{}, err
 	}
+	defer cleanup()
 	psRes, err := dockerCommand(ctx, env, psArgv)
 	if err != nil {
 		return ops.Result{}, err
