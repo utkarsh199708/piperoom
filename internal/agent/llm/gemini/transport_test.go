@@ -26,6 +26,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"piperoom/internal/agent/llm"
+	"piperoom/internal/agent/llm/retry"
 	"piperoom/internal/config"
 )
 
@@ -279,7 +280,7 @@ func TestVertexTwoTransports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.retry = noRetry{}
+	m.policy = retry.Policy{}
 	if _, err := m.Turn(context.Background(), baseReq("gemini-2.5-pro")); err != nil {
 		t.Fatal(err)
 	}

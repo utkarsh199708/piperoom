@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"piperoom/internal/agent/llm"
+	"piperoom/internal/agent/llm/retry"
+	"piperoom/internal/config"
 )
 
 // recorder answers each request with the next scripted reply (the last one
@@ -377,11 +379,13 @@ func TestRequestEncoding(t *testing.T) {
 	}
 }
 
-// TestRetryPolicy: 429 and 503 retried at most twice with the backoff; a
-// quota 429 is billing and sent once; a server hint is honoured and capped.
+// TestRetryPolicy: on the shared policy (llm/retry), 429 and 503 are retried
+// at most twice with the backoff; a quota 429 is billing and sent once;
+// Gemini's RetryInfo.retryDelay and a Retry-After are honoured and capped.
 func TestRetryPolicy(t *testing.T) {
 	okBody := `{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1}}`
 	rate := `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"7s"}]}}`
+	rateLong := `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"300s"}]}}`
 	daily := `{"error":{"code":429,"message":"You exceeded your current quota","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.QuotaFailure","violations":[{"quotaMetric":"generativelanguage.googleapis.com/generate_content_requests","quotaId":"GenerateRequestsPerDayPerProjectPerModel"}]}]}}`
 	free := `{"error":{"code":429,"message":"Quota exceeded for metric: x, limit: 0","status":"RESOURCE_EXHAUSTED"}}`
 	unavailable := `{"error":{"code":503,"message":"The model is overloaded.","status":"UNAVAILABLE"}}`
@@ -393,6 +397,7 @@ func TestRetryPolicy(t *testing.T) {
 		waits   []time.Duration
 	}{
 		{"429 then ok", []reply{{status: 429, body: rate}, ok(okBody)}, 2, "", []time.Duration{7 * time.Second}},
+		{"retryDelay capped", []reply{{status: 429, body: rateLong}, ok(okBody)}, 2, "", []time.Duration{60 * time.Second}},
 		{"503 twice then overloaded", []reply{{status: 503, body: unavailable}}, 3, llm.ErrOverloaded, []time.Duration{time.Second, 4 * time.Second}},
 		{"retry-after capped", []reply{{status: 503, header: map[string]string{"Retry-After": "600"}, body: unavailable}, ok(okBody)}, 2, "", []time.Duration{60 * time.Second}},
 		{"daily quota not retried", []reply{{status: 429, body: daily}}, 1, llm.ErrBilling, nil},
@@ -403,10 +408,10 @@ func TestRetryPolicy(t *testing.T) {
 			s := newRecorder(t, tc.replies...)
 			m := newTestModel(t, s.URL, nil)
 			var waits []time.Duration
-			b := newBackoff()
-			b.jitter = func(d time.Duration) time.Duration { return d }
-			b.sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
-			m.retry = b
+			p := retry.Default()
+			p.Jitter = 0
+			p.Sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+			m.policy = p
 			_, err := m.Turn(context.Background(), baseReq("gemini-2.5-pro"))
 			if n := len(s.requests()); n != tc.reqs {
 				t.Fatalf("requests = %d, want %d", n, tc.reqs)
@@ -433,10 +438,31 @@ func TestRetryPolicy(t *testing.T) {
 	}
 }
 
+// TestOptionsRetryUsed: a Policy passed in Options replaces the default.
+func TestOptionsRetryUsed(t *testing.T) {
+	s := newRecorder(t, reply{status: 503, body: `{"error":{"code":503,"status":"UNAVAILABLE"}}`})
+	b, err := config.ParseBaseURL("PIPEROOM_MODEL_BASE_URL", s.URL, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waits int
+	p := retry.Policy{MaxRetries: 1, Sleep: func(context.Context, time.Duration) error { waits++; return nil }}
+	m, err := New(context.Background(), Options{APIKey: testKey, BaseURL: &b, Retry: &p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Turn(context.Background(), baseReq("gemini-2.5-pro")); err == nil {
+		t.Fatal("want overloaded")
+	}
+	if n := len(s.requests()); n != 2 || waits != 1 {
+		t.Fatalf("requests = %d, waits = %d, want 2 and 1 (MaxRetries 1)", n, waits)
+	}
+}
+
 func TestRetryStopsAtDeadline(t *testing.T) {
 	s := newRecorder(t, reply{status: 503, body: `{"error":{"code":503,"status":"UNAVAILABLE"}}`})
 	m := newTestModel(t, s.URL, nil)
-	m.retry = newBackoff()
+	m.policy = retry.Default()
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -447,16 +473,6 @@ func TestRetryStopsAtDeadline(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second || len(s.requests()) != 1 {
 		t.Fatalf("slept into the deadline: %s, %d requests", time.Since(start), len(s.requests()))
-	}
-}
-
-func TestJitterBounds(t *testing.T) {
-	b := newBackoff()
-	for range 200 {
-		d := b.jitter(4 * time.Second)
-		if d < 3200*time.Millisecond || d > 4800*time.Millisecond {
-			t.Fatalf("jitter %s outside ±20%%", d)
-		}
 	}
 }
 
@@ -480,40 +496,50 @@ func TestErrorKinds(t *testing.T) {
 	}
 }
 
-func TestTPMLimiterWaits(t *testing.T) {
-	now := time.Unix(0, 0)
-	var waits []time.Duration
-	l := newEndpointLimiter(0, 600, nil)
-	l.now = func() time.Time { return now }
-	l.last = now
-	l.sleep = func(_ context.Context, d time.Duration) error { waits = append(waits, d); now = now.Add(d); return nil }
-	for range 2 {
-		release, err := l.acquire(context.Background(), 400)
-		if err != nil {
-			t.Fatal(err)
-		}
-		release()
+// TestLimiterWaitPastDeadline: the shared limiter's refusal is rate_limited
+// and nothing is sent.
+func TestLimiterWaitPastDeadline(t *testing.T) {
+	s := newRecorder(t, ok(`{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1}}`))
+	lim := retry.NewLimiter("test", retry.Limits{TPM: 60}, nil)
+	m := newTestModel(t, s.URL, func(o *Options) { o.Limiter = lim })
+	// Drain the bucket, then ask for more than a 1 s deadline can refill.
+	release, err := lim.Acquire(context.Background(), 60)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(waits) != 1 || waits[0] != 20*time.Second {
-		t.Fatalf("waits = %v, want one 20s refill wait", waits)
+	release(60)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err = m.Turn(ctx, baseReq("gemini-2.5-pro"))
+	var ae *llm.APIError
+	if !errors.As(err, &ae) || ae.Kind != llm.ErrRateLimited || !errors.Is(err, llm.ErrNotSent) {
+		t.Fatalf("err = %v, want rate_limited, not sent", err)
+	}
+	if n := len(s.requests()); n != 0 {
+		t.Fatalf("requests = %d, want 0", n)
 	}
 }
 
-func TestConcurrencyBound(t *testing.T) {
-	l := newEndpointLimiter(1, 0, nil)
-	release, err := l.acquire(context.Background(), 1)
+// TestLimiterConcurrencyBound: a held slot on the shared limiter keeps the
+// turn from sending until the caller's context ends.
+func TestLimiterConcurrencyBound(t *testing.T) {
+	s := newRecorder(t, ok(`{"candidates":[{"content":{"parts":[{"text":"x"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1}}`))
+	lim := retry.NewLimiter("test", retry.Limits{MaxConcurrency: 1}, nil)
+	m := newTestModel(t, s.URL, func(o *Options) { o.Limiter = lim })
+	release, err := lim.Acquire(context.Background(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	if _, err := l.acquire(ctx, 1); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("second acquire = %v, want to wait for the slot", err)
+	if _, err := m.Turn(ctx, baseReq("gemini-2.5-pro")); !errors.Is(err, llm.ErrNotSent) {
+		t.Fatalf("err = %v, want not sent while the slot is held", err)
 	}
-	release()
-	if r2, err := l.acquire(context.Background(), 1); err != nil {
+	release(0)
+	if _, err := m.Turn(context.Background(), baseReq("gemini-2.5-pro")); err != nil {
 		t.Fatal(err)
-	} else {
-		r2()
+	}
+	if n := len(s.requests()); n != 1 {
+		t.Fatalf("requests = %d, want 1", n)
 	}
 }
