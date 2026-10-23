@@ -34,10 +34,16 @@ itself; the row named in it applies it.
   not scored per turn, so R5 needs no `evals/score.go` edit and names no editor for it. Ruled 2026-10-23 (leads,
   owner-delegated).
 - **R6 — setup/compose-\*.** The pair `setup/compose-postgres-clean` and `setup/compose-privileged-refused` is
-  **counted** in the pass rate. Its precondition U1-20 (PR #920) has landed on `main` (`edf4497`: `evals/setup/`
-  with recordings for all six setup scenarios), so no `pending_harness` marker is added. W4s (KAN-501) does the
-  counted branch (the privileged-refused groups). W4z-1 (KAN-511) covers **42** scenarios. The workflow's
-  `n_scenarios` exclusion is not needed. Ruled 2026-10-23 (leads, owner-delegated).
+  **held out** of the pass rate until U1-10 lands (A4: setup mode, `wiring.SetupStack`), followed by a C6 eval hookup
+  that runs the episode in `Alert.Mode = setup` against the U1-20 replay session.
+  - Why: U1-20 (PR #920, `edf4497`) delivered the replay harness, not an agent that uses it. Live run 40030412424
+    showed that the agent has no setup tools (10 of 12 calls errored).
+  - How: W4s (KAN-501) adds `pending_harness: U1-10`. evalrun reports the pair apart, and `-validate` refuses the
+    marker once `SetupStack` exists.
+  - Effect: W4z-1 (KAN-511) covers **40** scenarios, and W4z-2 (KAN-512) reports the pair apart. A C1 follow-up
+    (after W4t, KAN-509) excludes pending scenarios from `n_scenarios`.
+
+  Ruled 2026-10-23 and amended the same day (leads, owner-delegated).
 - **R7 — C6 `on_error` facts.** A fact is not established from an errored result: `on_error` facts stay unsupported.
   W4a works without it. Ruled 2026-10-23 (leads, owner-delegated).
 
