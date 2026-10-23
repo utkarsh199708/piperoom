@@ -8,9 +8,11 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"syscall"
 	"time"
 
 	"piperoom/internal/clients/netsec"
+	"piperoom/internal/connprobe"
 	"piperoom/internal/owners"
 )
 
@@ -57,13 +59,41 @@ type Location interface {
 }
 
 // ProcessLocation is the location of the process itself: the system resolver
-// and a plain net.Dialer.
+// and a net.Dialer that refuses link-local, cloud-metadata, multicast and
+// unspecified addresses at dial time (processDialGuard). A probe target can
+// come from remote data (a broker's advertised listener, a connector's
+// database.hostname), so without the guard a rogue broker could point the
+// room service at 169.254.169.254.
 type ProcessLocation struct{}
 
-// Dial implements Location.
+// processDialGuard allows loopback and private ranges, where real pipelines
+// and dev stacks live, and refuses the rest of connprobe's blocked ranges.
+var processDialGuard = connprobe.Guard{AllowLoopback: true, AllowPrivate: true}
+
+// Dial implements Location. The check runs in ControlContext, on the address
+// the kernel is about to connect to, so a DNS answer cannot differ between a
+// check and the connect.
 func (ProcessLocation) Dial(ctx context.Context, network, address string) (net.Conn, error) {
-	var d net.Dialer
+	d := net.Dialer{ControlContext: func(_ context.Context, _, address string, _ syscall.RawConn) error {
+		return checkProcessDial(address)
+	}}
 	return d.DialContext(ctx, network, address)
+}
+
+// checkProcessDial refuses a resolved address processDialGuard blocks.
+func checkProcessDial(address string) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("nettools: dial guard: %w", err)
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return fmt.Errorf("nettools: dial guard: %q is not an IP address", host)
+	}
+	if err := processDialGuard.CheckAddr(a); err != nil {
+		return fmt.Errorf("nettools: refusing dial: %w", err)
+	}
+	return nil
 }
 
 // Lookup implements Location.
@@ -249,7 +279,11 @@ func (p Prober) tls(ctx context.Context, e Endpoint) Check {
 	base := fmt.Sprintf("subject %q, issuer %q, expires %s (%d days), %s",
 		clip(info.Subject), clip(info.Issuer), info.NotAfter.UTC().Format(time.DateOnly), info.DaysLeft, chain)
 	if len(info.DNSNames) > 0 {
-		base += ", SAN " + strings.Join(info.DNSNames, ", ")
+		names := make([]string, len(info.DNSNames))
+		for i, n := range info.DNSNames {
+			names[i] = clip(n)
+		}
+		base += ", SAN " + strings.Join(names, ", ")
 	}
 	c := Check{ID: "tls", Addr: e.Addr, MS: ms, Detail: base}
 	switch {

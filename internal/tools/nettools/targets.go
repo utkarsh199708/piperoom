@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/config"
@@ -462,11 +463,14 @@ func hostPortOf(raw, defaultPort string) string {
 	return canonicalAddr(host, port)
 }
 
-// clip bounds text that came from input or a server before it is echoed.
+// clip bounds text that came from input or a server before it is echoed, and
+// turns every control, format (bidi overrides) and line/paragraph separator
+// character into a space, so remote text cannot forge a line, hide text or
+// restyle a terminal.
 func clip(s string) string {
 	const max = 120
 	s = strings.TrimSpace(strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return ' '
 		}
 		return r
