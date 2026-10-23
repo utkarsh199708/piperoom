@@ -26,7 +26,10 @@ import (
 // off is not offered. errors.tolerance is deliberately absent: on a source
 // connector "all" drops CDC events for good and setting it back does not
 // restore them. errors.log.include.messages is absent too: it writes record
-// values into the worker log. Anything not listed is refused: the action must never become a
+// values into the worker log. The two Debezium heartbeat keys have an empty
+// value set: their values are not a fixed list, and heartbeatValueCheck
+// (heartbeat_keys.go) checks them instead; they apply to Debezium source
+// connectors only. Anything not listed is refused: the action must never become a
 // general "edit any connector config" tool. A function, not a package variable,
 // so nothing can mutate the list at run time.
 func defaultConnectorConfigAllowList() map[string]map[string]bool {
@@ -37,6 +40,9 @@ func defaultConnectorConfigAllowList() map[string]map[string]bool {
 		// Visibility only; "true" is the only value offered (see above).
 		"errors.log.enable":                             {"true": true},
 		"errors.deadletterqueue.context.headers.enable": {"true": true},
+		// Checked by heartbeatValueCheck, not by value (see above).
+		keyHeartbeatInterval: {},
+		keyHeartbeatQuery:    {},
 	}
 }
 
@@ -71,7 +77,7 @@ func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Changes one or more settings that set the connector's output schema or precision, in one request and one approval: params {connector, changes: {key: value, ...}} (the old one-key form {connector, key, value} is still accepted). Allowed: decimal.handling.mode precise|string (double is not offered: it loses precision); time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks once. To undo an output setting, set the old value."
+	return "Changes one or more settings that set the connector's output schema or precision, in one request and one approval: params {connector, changes: {key: value, ...}} (the old one-key form {connector, key, value} is still accepted). Allowed: decimal.handling.mode precise|string (double is not offered: it loses precision); time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). On a Debezium source connector only: heartbeat.interval.ms 0 (off) or 1000..3600000, and heartbeat.action.query, one INSERT INTO or UPDATE of a schema-qualified table that is one of the pipeline's source_tables or in their schema, with literal values, NOW(), CLOCK_TIMESTAMP() or CURRENT_TIMESTAMP only (e.g. the query source_create_heartbeat_table names). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks once. To undo an output setting, set the old value."
 }
 
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
@@ -91,6 +97,11 @@ func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 			vals = append(vals, v)
 		}
 		sort.Strings(vals)
+		if len(vals) == 0 {
+			// A heartbeat key: checked in code (heartbeatValueCheck), not by enum.
+			changeProps[k] = map[string]any{"type": "string", "description": heartbeatSchemaText(k)}
+			continue
+		}
 		changeProps[k] = map[string]any{"type": "string", "enum": vals}
 	}
 	return map[string]any{
@@ -202,6 +213,15 @@ func checkConfigChange(allow map[string]map[string]bool, key, value string) erro
 	if len(value) > maxConfigValueLen {
 		return fmt.Errorf("actions: value for %s is longer than %d bytes", key, maxConfigValueLen)
 	}
+	if isHeartbeatKey(key) && len(values) == 0 {
+		if err := heartbeatValueCheck(key, value); err != nil {
+			return err
+		}
+		if heartbeatValueLooksSecret(key, value) {
+			return fmt.Errorf("actions: the value for %s looks like a credential; secrets never travel through a proposal", key)
+		}
+		return nil
+	}
 	if valueLooksSecret(value) {
 		// The value is not echoed: it may be the secret.
 		return fmt.Errorf("actions: the value for %s looks like a credential; secrets never travel through a proposal", key)
@@ -261,6 +281,9 @@ func (a *updateConnectorConfig) Validate(ctx context.Context, raw json.RawMessag
 	if err := ctxConnectorScope(ctx, set.connector); err != nil {
 		return err
 	}
+	if err := ctxHeartbeatScope(ctx, set, false); err != nil {
+		return err
+	}
 	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
 	if err := a.d.connectorExists(ctx, set.connector); err != nil {
@@ -280,7 +303,9 @@ func (a *updateConnectorConfig) Validate(ctx context.Context, raw json.RawMessag
 func (s configChangeSet) hasGuarded() bool {
 	_, log := s.changes[dlq.KeyLogEnable]
 	_, hdr := s.changes[dlq.KeyContextHeaders]
-	return log || hdr
+	_, hbi := s.changes[keyHeartbeatInterval]
+	_, hbq := s.changes[keyHeartbeatQuery]
+	return log || hdr || hbi || hbq
 }
 
 // checkGuards runs checkVisibilityGuard on every key of the set.
@@ -310,6 +335,8 @@ func checkVisibilityGuard(connector, key string, cfg map[string]string) error {
 		if !dlq.Parse(cfg).IsSink {
 			return fmt.Errorf("actions: %s only applies to a sink connector; %s is not one", key, connector)
 		}
+	case keyHeartbeatInterval, keyHeartbeatQuery:
+		return checkHeartbeatGuard(connector, key, cfg)
 	}
 	return nil
 }
@@ -321,7 +348,19 @@ func (a *updateConnectorConfig) CheckScope(p owners.Pipeline, raw json.RawMessag
 	if err := json.Unmarshal(raw, &params); err != nil {
 		return fmt.Errorf("actions: bad params: %w", err)
 	}
-	return inScopeConnector(p, params.Connector)
+	if err := inScopeConnector(p, params.Connector); err != nil {
+		return err
+	}
+	// A heartbeat query names a table on the source database: it must be the
+	// pipeline's too. Other keys need no more than the connector.
+	set, err := a.parseParams(raw)
+	if err != nil {
+		if _, hb := set.changes[keyHeartbeatQuery]; hb {
+			return err
+		}
+		return nil
+	}
+	return set.checkScope(p)
 }
 
 // configText renders one config value for a result or preview: "unset" when
@@ -334,7 +373,12 @@ func configText(cfg map[string]string, key string) string {
 		return "unset"
 	}
 	v, _ = redact.Text(v)
-	const maxLen = 80
+	maxLen := 80
+	if key == keyHeartbeatQuery {
+		// The whole statement, so the preview shows what will run; it is
+		// capped at write time to maxConfigValueLen, a stored one here.
+		maxLen = maxConfigValueLen
+	}
 	if len(v) > maxLen {
 		return strings.ToValidUTF8(v[:maxLen], "") + "..."
 	}
@@ -362,6 +406,9 @@ func (a *updateConnectorConfig) Execute(ctx context.Context, raw json.RawMessage
 		return "", err
 	}
 	if err := ctxConnectorScope(ctx, set.connector); err != nil {
+		return "", err
+	}
+	if err := ctxHeartbeatScope(ctx, set, true); err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -438,4 +485,57 @@ func sortedStringKeys(m map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// undoValues returns the values that undo writing todoKeys, or nil when no
+// full undo exists. Undo needs, for every key written, a stored value the
+// action accepts again; an unset key (or a value we truncated or do not
+// offer) cannot be restored by an action, and a partial undo is not offered.
+// Two heartbeat cases are restorable all the same: an unset
+// heartbeat.interval.ms is Debezium's default 0, and an unset
+// heartbeat.action.query never runs while the interval is 0, so the undo sets
+// the interval to 0 (note says so) when that is where it goes back to.
+func (a *updateConnectorConfig) undoValues(ctx context.Context, cfg map[string]string, todoKeys []string) (map[string]string, string) {
+	var pl *owners.Pipeline
+	if p, ok := tools.PipelineFrom(ctx); ok {
+		pl = &p
+	}
+	allow := a.allowList()
+	prev := make(map[string]string, len(todoKeys))
+	queryUnset := false
+	for _, k := range todoKeys {
+		v, set := cfg[k]
+		switch {
+		case isHeartbeatKey(k) && len(allow[k]) == 0:
+			switch {
+			case k == keyHeartbeatInterval && !set:
+				v = "0"
+			case k == keyHeartbeatQuery && !set:
+				queryUnset = true
+				continue
+			case !heartbeatRestorable(k, v, pl):
+				return nil, ""
+			}
+		case !set || !allow[k][v]:
+			return nil, ""
+		}
+		prev[k] = v
+	}
+	if !queryUnset {
+		return prev, ""
+	}
+	iv, written := prev[keyHeartbeatInterval]
+	if !written {
+		// The interval is not changed by this proposal: the undo can stop the
+		// query only if heartbeats are off now, and writes that 0 explicitly.
+		if cur, set := cfg[keyHeartbeatInterval]; set && cur != "0" {
+			return nil, ""
+		}
+		iv = "0"
+	}
+	if iv != "0" {
+		return nil, ""
+	}
+	prev[keyHeartbeatInterval] = "0"
+	return prev, "heartbeat.action.query was unset and this action cannot remove a key; the undo sets heartbeat.interval.ms to 0, so the query never runs"
 }
