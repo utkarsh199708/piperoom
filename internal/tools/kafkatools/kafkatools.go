@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -108,6 +109,13 @@ func Register(reg *tools.Registry, d Deps) error {
 	}
 	if _, ok := d.Kafka.(clients.ACLReader); ok {
 		if err := reg.Register(&kafkaACLs{d: d}); err != nil {
+			return err
+		}
+	}
+	// The KIP-875 offsets read is optional on the Connect client: a fake or
+	// eval replay without it gets no tool the model could call in vain.
+	if _, ok := d.Connect.(connect.SourceOffsetReader); ok {
+		if err := reg.Register(&connectSourceOffsets{d: d}); err != nil {
 			return err
 		}
 	}
