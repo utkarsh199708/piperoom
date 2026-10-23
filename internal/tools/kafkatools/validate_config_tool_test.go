@@ -187,15 +187,6 @@ func mustRunValidate(t *testing.T, tl tools.Tool, input string) tools.Result {
 	return r
 }
 
-func dataJSON(t *testing.T, r tools.Result) string {
-	t.Helper()
-	b, err := json.Marshal(r.Data)
-	if err != nil {
-		t.Fatalf("marshal data: %v", err)
-	}
-	return string(b)
-}
-
 func TestConnectValidateConfigHappyPath(t *testing.T) {
 	api := newValidateAPI(t)
 	api.validateBody = `{"error_count":1,"configs":[
