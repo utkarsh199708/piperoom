@@ -53,6 +53,9 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		// Q4b
 		"connect_validate_config": `{"class":"io.debezium.connector.postgresql.PostgresConnector","config":{"topic.prefix":"pg"}}`,
 
+		// Q3a
+		"connect_worker_info": `{}`,
+
 		// X6b
 		"debezium_snapshot_progress": `{"connector":"pg-orders-connector"}`,
 	}

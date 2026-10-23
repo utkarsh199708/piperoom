@@ -47,6 +47,7 @@ type Client struct {
 	offs       offsetLister
 	meta       metaReader
 	clusterFn  clusterAdmin
+	connectFn  connectClusterAdmin
 	consumerFn func(opts []kgo.Opt) (pollConsumer, error)
 	probeFn    func(ctx context.Context, topic string, wins map[int32]readWindow) map[int32]int64
 

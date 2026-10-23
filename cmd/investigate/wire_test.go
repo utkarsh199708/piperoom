@@ -14,6 +14,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
+	"piperoom/internal/clients/kafka"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -93,6 +94,25 @@ func (f *fakeClients) FindByKey(_ context.Context, topic, key string, _ time.Tim
 	f.findByKeyCalls.Add(1)
 	return []clients.RecordRef{{Topic: topic, Partition: 0, Offset: 5, Timestamp: f.now, Key: key}}, nil
 }
+
+// Q3a: the real kafka client is a ConnectClusterReader, so the fake is one
+// too and connect_worker_info is registered.
+func (f *fakeClients) ConnectWorkerGroups(context.Context) ([]kafka.ConnectWorkerGroup, error) {
+	return []kafka.ConnectWorkerGroup{{
+		GroupID: "connect-cluster", State: "Stable",
+		Workers: []kafka.ConnectWorker{{MemberID: "worker-1", Host: "10.0.0.1", URL: "http://10.0.0.1:8083"}},
+	}}, nil
+}
+
+func (f *fakeClients) InternalTopics(_ context.Context, names []string) ([]kafka.InternalTopic, error) {
+	out := make([]kafka.InternalTopic, 0, len(names))
+	for _, name := range names {
+		out = append(out, kafka.InternalTopic{Name: name, Partitions: 1, ReplicationFactor: 3, CleanupPolicy: "compact", MinInSyncReplicas: 2})
+	}
+	return out, nil
+}
+
+func (f *fakeClients) BrokerCount(context.Context) (int, error) { return 1, nil }
 
 // SchemaRegistryClient
 func (f *fakeClients) Subjects(context.Context) ([]string, error) {
@@ -174,6 +194,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"dlq_peek",
 		// Q4b: registered because the fake Connect client validates configs.
 		"connect_validate_config",
+		// Q3a: registered because the fake Kafka client reads Connect groups.
+		"connect_worker_info",
 		"debezium_metrics", "debezium_snapshot_progress",
 		"runbook_lookup",
 		"what_changed",
