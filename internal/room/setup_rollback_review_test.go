@@ -187,3 +187,54 @@ func TestSetupRollbackSupersededPlanKeepsRanSteps(t *testing.T) {
 		t.Fatalf("rollback steps = %v, want connect_delete_connector, compose_down: the superseded plan's step still ran", got)
 	}
 }
+
+// TestSetupUndoneIndexCanonicalParams: an executed undo matches its recorded
+// rollback by canonical JSON, so a store that re-serialises params (key order,
+// spacing) still marks the step undone.
+func TestSetupUndoneIndexCanonicalParams(t *testing.T) {
+	ran := []setupRanStep{{PlanIndex: 0, Action: "source_create_publication", Rollback: `source_drop_publication {"publication": "x", "schema": "public"}`}}
+	if i := setupUndoneIndex(ran, walkStep("source_drop_publication", `{ "schema":"public","publication":"x" }`)); i != 0 {
+		t.Fatalf("index = %d, want 0: the same params in another key order are the same undo", i)
+	}
+	if i := setupUndoneIndex(ran, walkStep("source_drop_publication", `{"publication":"y","schema":"public"}`)); i != -1 {
+		t.Fatalf("index = %d, want -1 for other params", i)
+	}
+}
+
+// TestSetupWalkKeepsStepWithoutProposal: a plan step whose proposal is not in
+// the log slice stays in ran with no action, so the derivation refuses it by
+// name instead of dropping it.
+func TestSetupWalkKeepsStepWithoutProposal(t *testing.T) {
+	evs := []events.Event{walkEvent(t, 1, events.ActionExecuted, walkExecuted("p_missing", intp(0), true, false))}
+	ran, executed := setupWalkRan(evs)
+	if executed != 1 || len(ran) != 1 || ran[0].Action != "" {
+		t.Fatalf("ran = %+v, executed = %d; want the step kept with no action", ran, executed)
+	}
+}
+
+// TestSetupRoomNotClosedWhenNothingRan: a proposal that executes in a setup
+// room whose plan ran no step does not close the room "rolled back".
+func TestSetupRoomNotClosedWhenNothingRan(t *testing.T) {
+	r := newTierRig(t, tierOpts{local: true})
+	ctx := context.Background()
+	target := setupRollbackLocalTarget
+	roomID := r.openSetup("idle-setup", "a", "alice", target, "")
+	r.classify(roomID, target, plan.ClassLocal)
+	r.plan(roomID, target, "connect_create_connector")
+	ev, err := r.svc.CreateDriverProposal(ctx, r.user("alice"), roomID, events.ProposalCreatedPayload{
+		Title: "restart the stack", Risk: "low", Rollback: "compose_down",
+		Steps: []events.ProposalStep{walkStep("compose_up", fmt.Sprintf(`{"target":%q}`, target))},
+	})
+	if err != nil {
+		t.Fatalf("CreateDriverProposal: %v", err)
+	}
+	p := rollbackProposal(t, ev)
+	if err := r.approve(roomID, p.ProposalID, events.LayerEnvironment, "alice"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	waitPayload[events.ActionExecutedPayload](t, r.svc, roomID, events.ActionExecuted, p.ProposalID)
+	time.Sleep(100 * time.Millisecond)
+	if snap := mustRoom(t, r.svc, roomID); snap.Status != "open" || snap.Resolution != "" {
+		t.Fatalf("room = %s/%q, want open: no plan step ran, so nothing was rolled back", snap.Status, snap.Resolution)
+	}
+}
