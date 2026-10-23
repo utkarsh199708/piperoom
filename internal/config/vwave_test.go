@@ -121,10 +121,14 @@ func TestParseBaseURLKeepsPath(t *testing.T) {
 	if err != nil || b.String() != "https://res.openai.azure.com/openai/v1" {
 		t.Fatalf("got %q, %v", b.String(), err)
 	}
+	if got := b.Redacted(); got != "https://res.openai.azure.com" {
+		t.Fatalf("Redacted = %q", got)
+	}
 }
 
 func TestModelAddrLists(t *testing.T) {
-	for _, s := range []string{"169.254.169.254", "169.254.170.2", "fd00:ec2::254", "100.100.100.200", "fe80::1", "::ffff:169.254.169.254", "0.0.0.0", "::", "ff02::1", "255.255.255.255", "0.1.2.3"} {
+	for _, s := range []string{"169.254.169.254", "169.254.170.2", "fd00:ec2::254", "100.100.100.200", "fe80::1", "::ffff:169.254.169.254", "0.0.0.0", "::", "ff02::1", "255.255.255.255", "0.1.2.3",
+		"::169.254.169.254", "64:ff9b::a9fe:a9fe", "64:ff9b:1::a9fe:a9fe", "2002:a9fe:a9fe::1"} {
 		a := netip.MustParseAddr(s)
 		if !ModelAddrDenied(a) || ModelPrivateHTTPAddr(a) {
 			t.Errorf("%s: denied %v, private-http %v; want denied", s, ModelAddrDenied(a), ModelPrivateHTTPAddr(a))
@@ -135,7 +139,7 @@ func TestModelAddrLists(t *testing.T) {
 			t.Errorf("%s: want private-http allowed", s)
 		}
 	}
-	for _, s := range []string{"8.8.8.8", "172.32.0.1", "100.64.0.1", "2001:db8::1"} {
+	for _, s := range []string{"8.8.8.8", "172.32.0.1", "100.64.0.1", "2001:db8::1", "2002:808:808::1", "64:ff9b:1::808:808"} {
 		if a := netip.MustParseAddr(s); ModelPrivateHTTPAddr(a) || ModelAddrDenied(a) {
 			t.Errorf("%s: want public (not denied, not private-http)", s)
 		}
