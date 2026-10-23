@@ -2,7 +2,7 @@
 // room scrolls (F1b). It draws `decisionFor`; its buttons go through the approval card's own
 // handlers (DecisionHandleContext), so there is no second copy of the approval logic.
 import { useContext, useEffect, useRef, useState } from "react";
-import { ArrowDown, TriangleAlert } from "lucide-react";
+import { ArrowDown, TriangleAlert, Wrench } from "lucide-react";
 import type { RoomState } from "@/state/types";
 import type { CurrentUser } from "@/state/permissions";
 import { decisionFor } from "@/lib/decision";
@@ -12,6 +12,7 @@ import { STAGING_REQUIRED_SHORT, stagingRequired } from "@/lib/staging";
 import { focusSetupPairing, openSetupStepper, stepLabel } from "@/lib/setup";
 import type { Decision } from "@/lib/decision";
 import { cn } from "@/lib/utils";
+import { canProposeFix } from "@/lib/proposeFix";
 import { PersonName } from "@/components/VerifiedBadge";
 import { Button } from "@/components/ui/button";
 import { Kbd } from "@/components/ui/kbd";
@@ -39,11 +40,18 @@ export function DecisionBar({
   state,
   user,
   placement = "top",
+  onProposeFix,
 }: {
   state: RoomState;
   user: CurrentUser;
   /** 'top': sticky under the header. 'sheet': fixed to the bottom on phones, buttons full width (F7c). */
   placement?: "top" | "sheet";
+  /**
+   * P3d-2: opens "Propose a fix yourself". The button shows for the room's driver only
+   * (lib/proposeFix canProposeFix), and only in the 'top' placement: the phone sheet keeps to the
+   * one decision it asks for. With nothing to decide, the driver still gets a quiet bar holding it.
+   */
+  onProposeFix?: () => void;
 }) {
   const registry = useContext(DecisionHandleContext);
   const decision = decisionFor(state, user);
@@ -95,7 +103,82 @@ export function DecisionBar({
     return () => window.clearTimeout(t);
   }, [doneId, wasSeen]);
 
-  if (!decision) return null;
+  const propose =
+    !sheet && onProposeFix && canProposeFix(state, user) ? (
+      <Button
+        variant="outline"
+        size="sm"
+        className="coarse:h-11"
+        onClick={onProposeFix}
+      >
+        <Wrench aria-hidden="true" />
+        Propose a fix yourself
+      </Button>
+    ) : null;
+
+  // The bar's frame, shared by every decision and by the driver's quiet bar.
+  const frame = (
+    kind: string,
+    tone: string,
+    text: React.ReactNode,
+    actions: React.ReactNode,
+  ) => (
+    <div
+      ref={setBarEl}
+      role="region"
+      aria-label="Decision"
+      data-placement={placement}
+      data-kind={kind}
+      className={cn(
+        "bg-background motion-safe:transition-opacity motion-safe:duration-200",
+        sheet
+          ? "fixed inset-x-0 bottom-0 z-30 border-t border-border shadow-lg"
+          : "sticky top-0 z-20",
+      )}
+    >
+      <div
+        className={cn(
+          BAR,
+          tone,
+          sheet &&
+            "border-b-0 px-4 pt-3 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-4",
+          sheet && kind === "needs-you" && "flex-col items-stretch",
+        )}
+      >
+        <div className="flex min-w-0 flex-1 items-center gap-2">{text}</div>
+        {actions && (
+          <div
+            className={cn(
+              "flex flex-wrap items-center gap-2",
+              sheet && kind === "needs-you" ? "w-full flex-nowrap" : "shrink-0",
+            )}
+          >
+            {actions}
+          </div>
+        )}
+        {(decision?.kind === "executing" ||
+          (decision?.kind === "setup" && decision.status === "running")) && (
+          <Progress
+            className="h-0.5 basis-full bg-transparent"
+            indicatorClassName="bg-agent"
+            aria-label="Running the step"
+          />
+        )}
+      </div>
+    </div>
+  );
+  // Nothing to decide: the driver keeps "Propose a fix yourself", everyone else sees no bar.
+  const idle = () =>
+    propose
+      ? frame(
+          "idle",
+          "bg-card text-muted-foreground",
+          <span className="min-w-0 truncate">Nothing needs a decision</span>,
+          propose,
+        )
+      : null;
+
+  if (!decision) return idle();
   const handle = () => registry?.get() ?? null;
 
   let tone = "bg-card text-muted-foreground";
@@ -202,7 +285,7 @@ export function DecisionBar({
       break;
     case "done":
       if (decision.ok) {
-        if (!wasSeen || doneGone === decision.proposal.proposal_id) return null;
+        if (!wasSeen || doneGone === decision.proposal.proposal_id) return idle();
         tone = "bg-success-subtle text-success-foreground";
         const n = decision.proposal.steps.length;
         text = <span aria-live="polite">{`Fix ran · ${n} of ${n} steps`}</span>;
@@ -215,7 +298,7 @@ export function DecisionBar({
       break;
     case "rejected": {
       const id = decision.proposal.proposal_id;
-      if (readDismissed(id, memory.current)) return null;
+      if (readDismissed(id, memory.current)) return idle();
       const who = decision.byActor ? (
         <PersonName person={decision.byActor} />
       ) : (
@@ -399,51 +482,17 @@ export function DecisionBar({
   }
 
   // The tints are translucent: an opaque base keeps the room from showing through the sticky bar.
-  return (
-    <div
-      ref={setBarEl}
-      role="region"
-      aria-label="Decision"
-      data-placement={placement}
-      data-kind={(decision as Decision).kind}
-      className={cn(
-        "bg-background motion-safe:transition-opacity motion-safe:duration-200",
-        sheet
-          ? "fixed inset-x-0 bottom-0 z-30 border-t border-border shadow-lg"
-          : "sticky top-0 z-20",
-      )}
-    >
-      <div
-        className={cn(
-          BAR,
-          tone,
-          sheet &&
-            "border-b-0 px-4 pt-3 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-4",
-          sheet && decision.kind === "needs-you" && "flex-col items-stretch",
-        )}
-      >
-        <div className="flex min-w-0 flex-1 items-center gap-2">{text}</div>
-        {actions && (
-          <div
-            className={cn(
-              "flex flex-wrap items-center gap-2",
-              sheet && decision.kind === "needs-you"
-                ? "w-full flex-nowrap"
-                : "shrink-0",
-            )}
-          >
-            {actions}
-          </div>
-        )}
-        {(decision.kind === "executing" ||
-          (decision.kind === "setup" && decision.status === "running")) && (
-          <Progress
-            className="h-0.5 basis-full bg-transparent"
-            indicatorClassName="bg-agent"
-            aria-label="Running the step"
-          />
-        )}
-      </div>
-    </div>
+  return frame(
+    (decision as Decision).kind,
+    tone,
+    text,
+    propose ? (
+      <>
+        {actions}
+        {propose}
+      </>
+    ) : (
+      actions
+    ),
   );
 }
