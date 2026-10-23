@@ -115,9 +115,15 @@ func (r *Runner) ask(ctx context.Context, prompt string) (bool, error) {
 	defer r.stdinMu.Unlock()
 
 	// An op whose ctx already ended has nothing to confirm; return before
-	// printing a prompt (nothing was asked, so nothing is abandoned).
+	// printing a prompt. Its op may already have been announced (and the
+	// person may be typing a "y" for it), so a line read before the next
+	// prompt is shown is discarded, as for an abandoned prompt. The reader
+	// is started now so such a line is stamped when it arrives, not when the
+	// next prompt first reads it.
 	select {
 	case <-ctx.Done():
+		r.stdinAbandoned = true
+		r.stdinCh()
 		return false, ctx.Err()
 	default:
 	}
