@@ -47,6 +47,10 @@ const (
 	// again. A one-member set elects itself in seconds; the row's bar for the
 	// whole profile is two minutes.
 	mongoStartTimeout = 2 * time.Minute
+	// mongoRecreateHint is how to recreate the profile from nothing. The
+	// init script (dev/mongo/init/01-capture-user.js) creates the capture user
+	// only on an empty data volume, so a volume from before it lacks the user.
+	mongoRecreateHint = "recreate the profile so its init script runs: docker compose -f dev/docker-compose.yml --profile " + mongoProfile + " down -v, then up -d --wait " + mongoService
 )
 
 // The named checks of the MongoDB breaks, unique across every setup scenario
@@ -168,7 +172,11 @@ func fixStandaloneMongod(ctx context.Context, s *stack) error {
 // (mongod still starting) is retried until the timeout.
 func (s *stack) waitMongoCheck(ctx context.Context, check func(context.Context, *stack) (bool, string, error), want bool) error {
 	var last string
-	err := s.waitFor(ctx, mongoStartTimeout, func() (bool, error) {
+	timeout := s.mongoStartTimeout
+	if timeout <= 0 {
+		timeout = mongoStartTimeout
+	}
+	err := s.waitFor(ctx, timeout, func() (bool, error) {
 		ok, detail, err := check(ctx, s)
 		if err != nil {
 			last = err.Error()
@@ -195,9 +203,13 @@ const (
 )
 
 // mongoAdminEval is the argv that runs script with mongosh as the profile's
-// root user (dev-only credentials, dev/docker-compose.yml).
+// root user. The credentials never enter the docker exec argv (which shows in
+// ps on the host and in devctl's own error text): the shell inside the
+// container reads them from the container's environment
+// (MONGO_INITDB_ROOT_*, dev/docker-compose.yml). The script is passed as $1,
+// never spliced into the shell text.
 func mongoAdminEval(script string) []string {
-	return []string{"mongosh", "--quiet", "--norc", "-u", "piperoom_admin", "-p", "piperoom-mongo-admin", "--authenticationDatabase", "admin", "--eval", script}
+	return []string{"sh", "-c", `exec mongosh --quiet --norc -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin --eval "$1"`, "mongosh", script}
 }
 
 // verifyMongoOplogRead is the mongo-oplog-read check: the client's RoleInfo
@@ -212,7 +224,7 @@ func verifyMongoOplogRead(ctx context.Context, s *stack) (bool, string, error) {
 		return false, "", err
 	}
 	if !ri.Exists {
-		return false, "capture user " + mongoCaptureRole + " does not exist", nil
+		return false, "capture user " + mongoCaptureRole + " does not exist (" + mongoRecreateHint + ")", nil
 	}
 	if !ri.Replication {
 		return false, "capture user " + mongoCaptureRole + " cannot read local.oplog.rs (no read role on local)", nil
@@ -230,7 +242,7 @@ func breakNoOplogRole(ctx context.Context, s *stack) error {
 
 func fixNoOplogRole(ctx context.Context, s *stack) error {
 	if err := s.mongoAdmin(ctx, scriptGrantOplogRead); err != nil {
-		return fmt.Errorf("granting read on local: %w", err)
+		return fmt.Errorf("granting read on local: %w (if the capture user %s is missing, %s)", err, mongoCaptureRole, mongoRecreateHint)
 	}
 	s.log.Info("fixed: " + mongoCaptureRole + " has read on local again")
 	return nil

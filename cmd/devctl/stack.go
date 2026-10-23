@@ -71,6 +71,9 @@ type stack struct {
 	// mongoFn replaces the mongo profile's client (the checks of the MongoDB
 	// setup breaks, setupbreaks_mongo.go) in unit tests.
 	mongoFn func(ctx context.Context) (mongoSource, error)
+	// mongoStartTimeout bounds the wait for a restarted mongod (default
+	// mongoStartTimeout, setupbreaks_mongo.go); unit tests shorten it.
+	mongoStartTimeout time.Duration
 }
 
 func newStack(log *slog.Logger) (*stack, error) {

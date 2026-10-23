@@ -4,8 +4,9 @@ package main
 
 // The real run of the MongoDB setup breaks (U7c): on the `mongo` compose
 // profile, each break makes its named check of internal/clients/mongodb fail,
-// and its fix makes it pass again. It skips when the profile is not up, so the
-// integration suite stays green without it.
+// and its fix makes it pass again. It skips when the profile is not up, so a
+// local integration run stays green without it; the full-stack CI jobs start
+// the profile, where a skip fails the job (fail-on-skips.sh).
 
 import (
 	"context"

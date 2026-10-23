@@ -72,7 +72,7 @@ func (w *mongoWorld) connect(context.Context) (mongoSource, error) {
 
 func (w *mongoWorld) exec(_ context.Context, container string, argv ...string) (string, int, error) {
 	w.execCalls = append(w.execCalls, append([]string{container}, argv...))
-	if container != mongoContainer || len(argv) == 0 || argv[0] != "mongosh" {
+	if container != mongoContainer || len(argv) != 5 || argv[0] != "sh" || argv[1] != "-c" || !strings.HasPrefix(argv[2], "exec mongosh ") {
 		return "unexpected command", 127, nil
 	}
 	if w.mongoshExit != 0 {
@@ -371,8 +371,37 @@ func TestMongoSetupBreakErrorPaths(t *testing.T) {
 			log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 			mongoFn: func(context.Context) (mongoSource, error) { return noUser{}, nil },
 		})
-		if err != nil || ok || !strings.Contains(detail, "does not exist") {
+		if err != nil || ok || !strings.Contains(detail, "does not exist") || !strings.Contains(detail, "--profile mongo down -v") {
 			t.Fatalf("missing user: ok=%v %q err=%v", ok, detail, err)
+		}
+	})
+
+	t.Run("fix cannot grant", func(t *testing.T) {
+		w := healthyMongoWorld()
+		w.oplogRead = false
+		w.mongoshExit = 1
+		s := testMongoStack(t, w)
+		err := setupFixCmd(ctx, s, "no-oplog-role")
+		if err == nil || !strings.Contains(err.Error(), "not authorized") || !strings.Contains(err.Error(), "docker compose -f dev/docker-compose.yml --profile mongo down -v") {
+			t.Fatalf("fix with mongosh failing = %v, want the recreate hint", err)
+		}
+	})
+
+	t.Run("mongod never comes back", func(t *testing.T) {
+		w := healthyMongoWorld()
+		s := testMongoStack(t, w)
+		s.mongoStartTimeout = 20 * time.Millisecond
+		// The restart leaves mongod unreachable: the wait gives up and
+		// names the last thing the check saw.
+		s.composeOverrideFn = func(context.Context, string, ...string) error {
+			w.down = true
+			return nil
+		}
+		err := setupBreakCmd(ctx, s, "standalone-mongod")
+		if err == nil || !strings.Contains(err.Error(), "did not come back as a standalone") ||
+			!strings.Contains(err.Error(), "timed out") || !strings.Contains(err.Error(), "(last: ") ||
+			!strings.Contains(err.Error(), "connection refused") {
+			t.Fatalf("break with mongod never back = %v", err)
 		}
 	})
 }
@@ -411,10 +440,18 @@ func TestComposeMongoProfile(t *testing.T) {
 			t.Errorf("mongo healthcheck lacks %q: %s", want, hc)
 		}
 	}
-	// The breaks log in as these (mongoAdminEval, mongoDevURI).
+	// The breaks log in as the service's root user (mongoAdminEval), read
+	// from the container's environment: the password never enters the docker
+	// exec argv, which ps and devctl's errors show.
 	argv := strings.Join(mongoAdminEval("x"), " ")
-	if !strings.Contains(argv, "-u "+m.Environment["MONGO_INITDB_ROOT_USERNAME"]+" ") || !strings.Contains(argv, "-p "+m.Environment["MONGO_INITDB_ROOT_PASSWORD"]+" ") {
-		t.Errorf("mongoAdminEval credentials %q differ from the service's root user", argv)
+	if m.Environment["MONGO_INITDB_ROOT_USERNAME"] == "" || m.Environment["MONGO_INITDB_ROOT_PASSWORD"] == "" {
+		t.Errorf("the mongo service sets no MONGO_INITDB_ROOT_* credentials")
+	}
+	if !strings.Contains(argv, `-u "$MONGO_INITDB_ROOT_USERNAME"`) || !strings.Contains(argv, `-p "$MONGO_INITDB_ROOT_PASSWORD"`) {
+		t.Errorf("mongoAdminEval %q does not log in with the service's MONGO_INITDB_ROOT_* credentials", argv)
+	}
+	if strings.Contains(argv, m.Environment["MONGO_INITDB_ROOT_PASSWORD"]) {
+		t.Errorf("mongoAdminEval %q carries the root password in its argv", argv)
 	}
 	if !strings.Contains(hc, m.Environment["MONGO_INITDB_ROOT_PASSWORD"]) {
 		t.Errorf("the healthcheck does not use the root user")
