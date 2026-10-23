@@ -840,6 +840,10 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ...(p.class === "recovery" || p.class === "performance"
               ? { class: p.class }
               : {}),
+            // P3c: only a driver-authored fix is marked, so the agent's fold exactly as before.
+            ...(p.origin === "driver"
+              ? { origin: "driver" as const, author: { ...event.actor } }
+              : {}),
             // X8: only the snapshot knows what can be staged and whether a stage is owed.
             ...(state.snapshot_staging?.[p.proposal_id]
               ? {

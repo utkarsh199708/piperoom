@@ -244,6 +244,7 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)
+      if (p.origin === 'driver') return { text: `${who} proposed a fix · ${clip(p.title, 80)}`, kind: 'decision' }
       return { text: `Agent proposed a fix · ${clip(p.title, 80)}`, kind: 'decision' }
     }
     case 'proposal.previewed':

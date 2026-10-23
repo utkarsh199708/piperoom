@@ -1304,12 +1304,20 @@ function Proposal({
               </p>
             )}
           </div>
-          <span className="flex shrink-0 items-center gap-2 text-xs text-subtle-foreground">
+          <span className="flex shrink-0 flex-wrap items-center gap-2 text-xs text-subtle-foreground">
             {proposal.status === 'approved' && <Badge variant="success">approved</Badge>}
             {proposal.status === 'rejected' && <Badge variant="destructive">rejected</Badge>}
+            {/* P3d-2: a fix the driver wrote, named by the event's actor (the server's, never typed text). */}
+            {proposal.origin === 'driver' && (
+              <Badge variant="info" data-testid="authored-by">
+                authored by {proposal.author ? <PersonName person={proposal.author} /> : 'the driver'}
+              </Badge>
+            )}
             {open && mine.length === 0 && pending.length > 0
               ? `waiting for ${waitingOn} · ${approved} of ${proposal.required_layers.length} approved`
-              : 'proposed by the agent'}
+              : proposal.origin === 'driver'
+                ? null
+                : 'proposed by the agent'}
           </span>
         </div>
 

@@ -1,6 +1,7 @@
 package room
 
 import (
+	"slices"
 	"strconv"
 	"time"
 
@@ -162,6 +163,31 @@ type Proposal struct {
 	Class string `json:"class,omitempty"`
 	// sched is the fold of the proposal's policy countdown (autoapprove.go).
 	sched schedState
+	// outcomes is each step's action.executed outcome so far, by step index
+	// (outcomeNotRun until one arrives). Copy-on-write in Apply. It feeds the
+	// proposal_executed input of a driver's proposal (proposalExecutedInput).
+	outcomes []stepOutcome
+}
+
+// stepOutcome is one step's folded action.executed result.
+type stepOutcome uint8
+
+const (
+	outcomeNotRun stepOutcome = iota
+	outcomeOK
+	outcomeFailed
+	outcomeUnknown // action.executed outcome_unknown
+)
+
+// finishedProposal is a driver-authored proposal whose run ended with the
+// event at seq: its last step ran, or a step failed (the executor stops
+// there). Set by Apply for that event only, so the input it yields is derived
+// once per log, the same way on every replica and on every rebuild. (P3c)
+type finishedProposal struct {
+	seq        int64
+	proposalID string
+	origin     string
+	outcomes   []stepOutcome // one per step; outcomeNotRun for a step that never ran
 }
 
 // proposalOrigin normalises proposal.created.origin for the room view: "" (an
@@ -261,6 +287,11 @@ type RoomSnapshot struct {
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
+
+	// finished is the driver-authored proposal the last folded event ended
+	// (action.executed), nil after any other event. Never mutated once set.
+	finished *finishedProposal
+
 	// Insight is the room's cost and clock facts (F11), folded from the log.
 	Insight Insight `json:"insight"`
 	// Mode is what the server does with the caller's approvals (P0 items 1
@@ -527,6 +558,7 @@ func cloneProposals(in []Proposal) []Proposal {
 			out[i].StageRunning = &sr
 		}
 		out[i].Staged = cloneStaged(p.Staged)
+		out[i].outcomes = append([]stepOutcome(nil), p.outcomes...)
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
 			for k, v := range p.Approvals {
@@ -545,6 +577,7 @@ func cloneProposals(in []Proposal) []Proposal {
 // (docs/api.md).
 func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	snap.LastSeq = e.Seq
+	snap.finished = nil
 	// Copy the slice headers whose elements Apply may mutate, so the input
 	// snapshot is never modified (Apply is a pure function).
 	snap.Members = append([]Member(nil), snap.Members...)
@@ -896,6 +929,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		if !ok {
 			break
 		}
+		foldStepOutcome(&snap, e.Seq, p)
 		// The proposal leaves the open list when its last step runs, or when
 		// any step fails (the executor stops there, so it is decided).
 		if !p.OK || isLastStep(snap.OpenProposals, p.ProposalID, p.StepIndex) {
@@ -1040,6 +1074,41 @@ func removeProposal(proposals []Proposal, id string) []Proposal {
 		}
 	}
 	return out
+}
+
+// foldStepOutcome records an action.executed outcome on its open proposal
+// and, when that ends a driver-authored proposal's run (the last step, or a
+// failed or unknown step), sets snap.finished. Runs before the proposal leaves
+// the open list. snap.OpenProposals is already Apply's copy; the outcomes
+// slice is copied before it changes.
+func foldStepOutcome(snap *RoomSnapshot, seq int64, p events.ActionExecutedPayload) {
+	i := slices.IndexFunc(snap.OpenProposals, func(pr Proposal) bool { return pr.ProposalID == p.ProposalID })
+	if i < 0 {
+		return
+	}
+	pr := &snap.OpenProposals[i]
+	n := len(pr.Steps)
+	if p.StepIndex < 0 || p.StepIndex >= n {
+		return
+	}
+	out := make([]stepOutcome, n)
+	copy(out, pr.outcomes)
+	switch {
+	case p.OutcomeUnknown:
+		out[p.StepIndex] = outcomeUnknown
+	case p.OK:
+		out[p.StepIndex] = outcomeOK
+	default:
+		out[p.StepIndex] = outcomeFailed
+	}
+	pr.outcomes = out
+	if pr.Origin != events.ProposalOriginDriver {
+		return
+	}
+	if p.OK && p.StepIndex < n-1 {
+		return
+	}
+	snap.finished = &finishedProposal{seq: seq, proposalID: pr.ProposalID, origin: pr.Origin, outcomes: out}
 }
 
 func isLastStep(proposals []Proposal, proposalID string, stepIndex int) bool {
