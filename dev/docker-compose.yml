@@ -480,3 +480,25 @@ services:
       start_period: 30s
       interval: 5s
       retries: 30
+
+  # A container that plays a Linux host for the host-target setup breaks (U8c,
+  # dev/scenarios.md "Setup breaks: host target"): a JDK, a Kafka
+  # distribution's bin/ scripts, the systemd unit service_install renders and
+  # the worker files properties_write writes, under /piperoom-host/project.
+  # Nothing listens on a port, runs systemd or starts a worker: `devctl
+  # setup-break wrong-standalone-args | plugin-path-unset | java-too-old` reads
+  # and rewrites those files through `docker exec`. Profile "host":
+  # `docker compose --profile host up -d --wait host`; the break and fix start
+  # it themselves. A container restart copies the baked base again, so it heals
+  # every break.
+  host:
+    profiles: ["host"]
+    build:
+      context: ./host
+    image: piperoom-dev/host:1
+    healthcheck:
+      # The start script has laid the project down: the unit file the three
+      # checks read is there.
+      test: ["CMD-SHELL", "test -f /piperoom-host/project/systemd/piperoom-connect.service"]
+      interval: 2s
+      retries: 30
