@@ -165,7 +165,7 @@ the time to healthy here (the row's target is under 2 minutes).
 
 ## Local models: the `llm` profile (V17)
 
-Run Piperoom's agent on a free local model. Profile `llm` adds Ollama (`ollama/ollama:0.12.6`, pinned) with
+Run Piperoom's agent on a free local model. Profile `llm` adds Ollama (`ollama/ollama:0.40.1`, pinned) with
 `OLLAMA_CONTEXT_LENGTH=131072`: Ollama cuts a prompt past its context window without an error, and its default
 window (2k to 4k tokens) is far under one investigation turn (`docs/design/model-providers.md` §6.2). It listens on
 `127.0.0.1:11434` only and keeps models in the named volume `ollama-models`. Without the profile nothing changes.
