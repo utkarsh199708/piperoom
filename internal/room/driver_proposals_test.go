@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
@@ -253,5 +254,142 @@ func TestDriverProposalShadowRoomRefused(t *testing.T) {
 	wantCode(t, err, "validation")
 	if err == nil || !strings.Contains(err.Error(), "shadow") {
 		t.Fatalf("want a shadow-room error, got %v", err)
+	}
+}
+
+// TestDriverProposalAgentInputs pins the agent side of P3c end to end through
+// the route's service call: the driver's proposal reaches the agent's inbox as
+// one proposal_created (the driver's words, origin "driver"), and after its
+// run one proposal_executed with a StepsOK entry per step (a step after the
+// failed one never ran: false). The per-step action_result inputs stay. An
+// agent proposal run in the same room yields neither kind.
+func TestDriverProposalAgentInputs(t *testing.T) {
+	good := &fakeAction{name: "good_act", layer: "postgres"}
+	bad := &fakeAction{name: "bad_act", layer: "postgres", fail: true}
+	reg := actions.NewRegistry()
+	for _, a := range []actions.Action{good, bad} {
+		if err := reg.Register(a); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	inboxCh := make(chan agent.Inbox, 1)
+	svc := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			inboxCh <- deps.Inbox
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	roomID := createRoom(t, svc, "arjun").ID
+	inbox := <-inboxCh
+
+	step := func(a string) events.ProposalStep {
+		return events.ProposalStep{Action: a, Layer: "postgres", Params: json.RawMessage(`{"table":"public.orders"}`)}
+	}
+	run := func(steps ...events.ProposalStep) string {
+		t.Helper()
+		p := driverProposal("driver fix")
+		p.Steps = steps
+		ev, err := svc.CreateDriverProposal(ctx, mustUser(t, svc, "arjun"), roomID, p)
+		if err != nil {
+			t.Fatalf("driver proposal: %v", err)
+		}
+		dp, _ := events.Decode[events.ProposalCreatedPayload](ev)
+		approveLayer(t, svc, "priya", dp.ProposalID, "postgres")
+		return dp.ProposalID
+	}
+	allOK := run(step("good_act"), step("good_act"))
+	failed := run(step("good_act"), step("bad_act"), step("good_act"))
+	ap := driverProposal("agent fix")
+	ap.Steps = []events.ProposalStep{step("good_act")}
+	agentPID, err := svc.CreateProposal(ctx, roomID, ap, events.AgentActor)
+	if err != nil {
+		t.Fatalf("agent proposal: %v", err)
+	}
+	approveLayer(t, svc, "priya", agentPID, "postgres")
+
+	waitFor(t, 5*time.Second, func() bool {
+		var n int
+		for _, pid := range []string{allOK, failed, agentPID} {
+			if p, err := st.GetProposal(ctx, pid); err == nil && (p.Status == "executed" || p.Status == "failed") {
+				n++
+			}
+		}
+		return n == 3
+	})
+	var inputs []agent.HumanInput
+	waitFor(t, 5*time.Second, func() bool {
+		got, err := inbox.Drain(ctx)
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+		inputs = append(inputs, got...)
+		n := 0
+		for _, in := range inputs {
+			if in.Kind == "proposal_executed" {
+				n++
+			}
+		}
+		return n >= 2
+	})
+
+	created := map[string]agent.HumanInput{}
+	executed := map[string][]*bool{}
+	results := map[string]int{}
+	for _, in := range inputs {
+		switch in.Kind {
+		case "proposal_created":
+			if _, dup := created[in.ProposalID]; dup {
+				t.Fatalf("second proposal_created for %s", in.ProposalID)
+			}
+			created[in.ProposalID] = in
+		case "proposal_executed":
+			if _, dup := executed[in.ProposalID]; dup {
+				t.Fatalf("second proposal_executed for %s", in.ProposalID)
+			}
+			if in.Origin != events.ProposalOriginDriver {
+				t.Fatalf("proposal_executed origin = %q", in.Origin)
+			}
+			executed[in.ProposalID] = in.StepsOK
+		case "action_result":
+			results[in.ProposalID]++
+		}
+	}
+	for _, pid := range []string{allOK, failed} {
+		in, ok := created[pid]
+		if !ok {
+			t.Fatalf("no proposal_created for driver proposal %s", pid)
+		}
+		if in.Origin != events.ProposalOriginDriver || in.Actor.ID != "arjun" || !strings.Contains(in.Text, "good_act") || !strings.Contains(in.Text, "public.orders") {
+			t.Fatalf("proposal_created fields: %+v", in)
+		}
+	}
+	if _, ok := created[agentPID]; ok {
+		t.Fatal("an agent proposal produced proposal_created")
+	}
+	if _, ok := executed[agentPID]; ok {
+		t.Fatal("an agent proposal produced proposal_executed")
+	}
+	wantSteps := func(pid string, want ...bool) {
+		t.Helper()
+		got := executed[pid]
+		if len(got) != len(want) {
+			t.Fatalf("StepsOK of %s = %v, want %v", pid, got, want)
+		}
+		for i := range want {
+			if got[i] == nil || *got[i] != want[i] {
+				t.Fatalf("StepsOK[%d] of %s = %v, want %v", i, pid, got[i], want[i])
+			}
+		}
+	}
+	wantSteps(allOK, true, true)
+	wantSteps(failed, true, false, false)
+	if results[allOK] != 2 || results[failed] != 2 || results[agentPID] != 1 {
+		t.Fatalf("action_result inputs per proposal = %v, want 2, 2 and 1", results)
 	}
 }
