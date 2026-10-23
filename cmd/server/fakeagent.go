@@ -17,6 +17,7 @@ import (
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/wiring"
+	"piperoom/internal/wiring/netwire"
 )
 
 // fakeAgentSetup reads PIPEROOM_FAKE_AGENT (config.ParseFakeAgent) and reports
@@ -125,8 +126,12 @@ func wireAgent(
 		// being built.
 		ReadOnly: !in.writeOn,
 		// similar_incidents reads past closed rooms from the room store; each
-		// set's Owners holds only its own pipelines.
-		Prepare: func(wired *wiring.Wired) { wired.Rooms = similarincidents.FromStore(in.st) },
+		// set's Owners holds only its own pipelines. net_probe is registered
+		// through the set's hook (netwire: wiring cannot import nettools).
+		Prepare: func(wired *wiring.Wired) {
+			wired.Rooms = similarincidents.FromStore(in.st)
+			wired.ProbeTools = netwire.Register
+		},
 	})
 	if err != nil {
 		return agentWiring{}, fmt.Errorf("server: open the data stack: %w", err)

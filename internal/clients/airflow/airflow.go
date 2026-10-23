@@ -310,14 +310,21 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 	if maxBytes <= 0 {
 		maxBytes = DefaultLogTailBytes
 	}
-	maxBytes = min(maxBytes, MaxResponseBytes)
+	// An explicit bound (not min) so static analysis sees maxBytes+1 below
+	// cannot overflow.
+	if maxBytes > MaxResponseBytes {
+		maxBytes = MaxResponseBytes
+	}
 	path := runPath(dagID, runID) + "/taskInstances/" + url.PathEscape(taskID) + "/logs/" + strconv.Itoa(try)
 	if mapIndex >= 0 {
 		path += "?map_index=" + strconv.Itoa(mapIndex)
 	}
 	// One byte more than the tail lets tailFrom see whether the window
-	// starts at a line.
-	tb := &tailBuffer{buf: make([]byte, maxBytes+1)}
+	// starts at a line. The extra byte is appended rather than added to the
+	// make size, so no allocation size is computed from the caller's value
+	// (maxBytes is already cut to MaxResponseBytes above).
+	buf := append(make([]byte, maxBytes), 0)
+	tb := &tailBuffer{buf: buf[:len(buf):len(buf)]}
 	err = c.get(ctx, path, acceptLogPlain, func(r io.Reader) error {
 		if _, err := io.Copy(tb, io.LimitReader(r, c.ceiling())); err != nil {
 			return fmt.Errorf("read log: %w", err)

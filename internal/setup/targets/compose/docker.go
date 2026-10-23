@@ -246,8 +246,7 @@ func checkBindsOnDisk(root *os.Root, binds []string) error {
 func snapshotArgv(argv []string, snap, project string) ([]string, error) {
 	for i := 0; i+1 < len(argv); i++ {
 		if argv[i] == "-f" {
-			out := make([]string, 0, len(argv)+2)
-			out = append(out, argv[:i]...)
+			out := append([]string{}, argv[:i]...)
 			out = append(out, "-f", snap, "-p", project)
 			return append(out, argv[i+2:]...), nil
 		}

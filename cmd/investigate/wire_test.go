@@ -20,6 +20,7 @@ import (
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/wiring"
+	"piperoom/internal/wiring/netwire"
 )
 
 // fakeClients implements every client interface the wiring touches, replaying
@@ -150,6 +151,8 @@ func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) 
 		Kafka:     f,
 		Registry:  f,
 		Owners:    testOwners(),
+		// As main.go's Prepare sets it (Q6b).
+		ProbeTools: netwire.Register,
 	}
 	if err := wiring.RegisterTools(reg, areg, w); err != nil {
 		t.Fatalf("wiring.RegisterTools: %v", err)
@@ -175,6 +178,10 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		// Q4b: registered because the fake Connect client validates configs.
 		"connect_validate_config",
 		"debezium_metrics", "debezium_snapshot_progress",
+		// Q3e: the Connect worker tools, registered whatever is configured.
+		"connect_worker_metrics", "connect_worker_logs",
+		// Q6b: through the netwire hook.
+		"net_probe",
 		"runbook_lookup",
 		"what_changed",
 	}
@@ -201,6 +208,8 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"pg_resnapshot_rows",
 		// Q2e: the source admin actions, listed the same way.
 		"pg_set_replica_identity", "source_create_heartbeat_table", "source_grant_select", "source_end_session",
+		// Q5d: the connector lifecycle actions, listed the same way (P0 ruling #606).
+		"connect_stop_connector", "connect_reset_source_offsets", "connect_create_connector", "connect_delete_connector",
 	}
 	gotActions := make([]string, 0, len(areg.All()))
 	for _, a := range areg.All() {

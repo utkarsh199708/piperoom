@@ -348,12 +348,38 @@ func TestStopConnectorAlreadyStoppedWritesNothing(t *testing.T) {
 	}
 }
 
-func TestStopConnectorWithoutWriter(t *testing.T) {
-	f := newLifecycleFake()
-	f.setState("RUNNING")
-	a := &stopConnector{d: LifecycleDeps{Connect: noExtras{f}}}
-	if _, err := a.Execute(scoped(), json.RawMessage(stopIn)); err == nil || !strings.Contains(err.Error(), "write mode") {
-		t.Fatalf("Execute without a lifecycle writer: %v", err)
+// TestLifecycleExecuteWithoutWriter: with a read-only Connect client (write
+// mode off) every lifecycle action refuses at Execute with the shared "no
+// write credentials" refusal, before any Connect call. A nil client refuses
+// the same way instead of panicking.
+func TestLifecycleExecuteWithoutWriter(t *testing.T) {
+	in := map[string]string{
+		StopConnectorName:      stopIn,
+		ResetSourceOffsetsName: resetEmptyIn,
+		CreateConnectorName:    createIn,
+		DeleteConnectorName:    deleteIn,
+	}
+	for _, nilClient := range []bool{false, true} {
+		f := newLifecycleFake()
+		f.setState("RUNNING")
+		d := LifecycleDeps{Connect: noExtras{f}}
+		if nilClient {
+			d.Connect = nil
+		}
+		reg := NewRegistry()
+		if err := RegisterLifecycle(reg, d); err != nil {
+			t.Fatal(err)
+		}
+		for name, raw := range in {
+			a, _ := reg.Get(name)
+			_, err := a.Execute(scoped(), json.RawMessage(raw))
+			if !errors.Is(err, ErrNoLifecycleWriter) || !strings.Contains(err.Error(), "no write credentials") {
+				t.Errorf("%s (nil client %v): Execute = %v, want the no write credentials refusal", name, nilClient, err)
+			}
+		}
+		if n := f.listCalls + f.statusCalls + f.configCalls + f.offsetCalls + f.validateCalls; n != 0 || f.refusedWrites() != 0 {
+			t.Errorf("nil client %v: %d reads and %d writes before the refusal", nilClient, n, f.refusedWrites())
+		}
 	}
 }
 

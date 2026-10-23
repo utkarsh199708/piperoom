@@ -14,8 +14,9 @@ in the same PR.
 | [quickstart.md](quickstart.md) | get a read-only room on your own pipelines in two commands, before reading anything else |
 | [permissions.md](permissions.md) | create **least-privilege** credentials for each system Piperoom touches |
 | [clickhouse.md](clickhouse.md) | point the warehouse at ClickHouse: DSN, least-privilege `readonly=2` reader, what works, limits |
-| [write-roles.md](write-roles.md) | create the **write** credentials for the P3 fix actions, only if you turn write mode on |
+| [write-roles.md](write-roles.md) | create the **write** credentials for the P3 fix actions and the connector lifecycle actions (each Connect call with the Kafka version it needs), only if you turn write mode on |
 | [source-admin.md](source-admin.md) | add the source admin actions: replica identity, the connector's `SELECT` grant, ending a blocking session, the heartbeat table |
+| [worker-visibility.md](worker-visibility.md) | let the agent read Kafka Connect worker logs (Loki) and JMX metrics: the least-privilege Loki token, the proposed `WORKER_LOGS_*` settings, the exporter rules, what reaches the model |
 | [setup.md](setup.md) | the ten variables a first install sets, then the reference: prerequisites, configure Piperoom against your pipeline, start the room service and verify it |
 | [data-handling.md](data-handling.md) | know exactly what data Piperoom reads, what reaches the model, where it goes (including Slack), and who sees it |
 | [governance.md](governance.md) | know what Piperoom can attest about drift, column lineage, PII tags and retention, and what it cannot (value-level correctness, erasure, business metrics), before you tell an auditor anything |

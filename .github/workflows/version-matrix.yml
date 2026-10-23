@@ -118,6 +118,10 @@ jobs:
         run: docker compose -f dev/docker-compose.yml --profile clickhouse up -d --wait clickhouse
       - name: Create the ClickHouse sink
         run: go run ./cmd/devctl clickhouse init --owner ci
+      # The MongoDB profile, so TestIntegrationMongoSetupBreaks runs instead of
+      # skipping (ci.yml's fullstack job does the same).
+      - name: Start the optional MongoDB profile
+        run: docker compose -f dev/docker-compose.yml --profile mongo up -d --wait mongo
       - name: go test -tags integration ./internal/... ./cmd/...
         env:
           PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5433/piperoom?sslmode=disable
@@ -146,7 +150,7 @@ jobs:
           .github/scripts/wait-healthy.sh 180
       - name: Dump stack logs
         if: failure()
-        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging logs --no-color --tail=300
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging --profile mongo logs --no-color --tail=300
       - name: Upload test output
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -157,4 +161,4 @@ jobs:
           retention-days: 7
       - name: Tear down
         if: always()
-        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging down -v --remove-orphans
+        run: docker compose -f dev/docker-compose.yml --profile clickhouse --profile staging --profile mongo down -v --remove-orphans

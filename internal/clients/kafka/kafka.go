@@ -49,6 +49,9 @@ type Client struct {
 	clusterFn  clusterAdmin
 	consumerFn func(opts []kgo.Opt) (pollConsumer, error)
 	probeFn    func(ctx context.Context, topic string, wins map[int32]readWindow) map[int32]int64
+	// connectFn stands in for the Connect cluster reads (connect_cluster.go);
+	// a test seam, nil in production.
+	connectFn connectAdmin
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema

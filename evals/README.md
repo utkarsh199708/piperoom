@@ -669,7 +669,8 @@ repository is public, so the job never uses `pull_request_target`, runs PRs only
 branches, and uploads only the report of the committed synthetic scenarios (`cand.json`, 14 days). The learned
 set stays in a private store and is never passed with `-learned`. When a baseline file exists the run adds
 `-baseline evals/baseline/default.json -fail-on-regression`: the job fails on a regression by the rule above,
-or when misses per run grew over the scenarios both reports ran (an `-only` run is compared with the same
+or when misses per run (the job's own check) or invalid tool calls per run (`evalrun`, [Invalid tool
+calls](#invalid-tool-calls-v9r)) grew over the scenarios both reports ran (an `-only` run is compared with the same
 scenarios of the baseline, and a 3-run report with a 1-run baseline per run, not by totals). It prints the
 paired comparison and the cost-per-run delta, and never fails on cost alone.
 
@@ -899,6 +900,57 @@ group's topics: a scenario that needs a partition outside the 5 cannot record it
 DLQ record values are not replayed: `dlq_replay`'s preview says
 so, and its `Validate` needs only the offsets. A timestamp offset reset is planned to the log start.
 
+### Resources for the source admin actions (Q2h)
+
+The four source admin actions (`pg_set_replica_identity`, `source_create_heartbeat_table`,
+`source_grant_select`, `source_end_session`) are registered after the P3 actions through
+`wiring.RegisterSourceActions`, production's call (`replay_source.go`). Their reads answer what the
+matching tool recording answers, so a scenario that records the evidence needs nothing more:
+
+| read | from |
+|---|---|
+| connector config (`database.user`, `connector.class`, `publication.name`) | as for the P3 actions |
+| replica identity and primary key | the `source_table_replication` recordings' data, else `resources.tables` (`replica_identity` d/n/f/i, `primary_key`); a table in neither is not replayed |
+| role rights | the `source_role_grants` recording whose `connector_user` (or `role_info.role`) is the role; only the recorded tables (`role_info.selectable`) are replayed |
+| blocking sessions | the `source_blocking_sessions` recording the tool call with the same `older_than_minutes` would get (the most specific input that matches, as the replayer picks); a session's `user` and `in_scope` are as recorded |
+| database settings | the `source_settings` recording (no action reads it today) |
+
+Every admin write (`SetReplicaIdentity`, `GrantSelect`, `CreateHeartbeatTable`, `EndSession`) is a
+no-op recorded in the run's write log. `source_end_session` refuses a session whose `user` is the
+connector's `database.user` and, in a room, one recorded with `in_scope: false` unless it also has
+`blocks_slot: true` (it holds the oldest xid horizon, so it holds back the pipeline's slot): record
+the blocker as the room would see it. For such a hidden session the action checks the user through
+the unscoped read, which in replay answers the same recording; with the room's blank `user` that
+check passes, so the scenario cannot test the connector-role refusal of a hidden session
+(`q2_source_test.go` does, with a recording whose `user` is set).
+
+### Worker, version, offset and network reads; the lifecycle actions (Q6d)
+
+The model is offered `connect_plugins` (Q1c), `connect_worker_info` (Q3a), `connect_validate_config`
+(Q4a), `connect_source_offsets` (Q5a), `connect_worker_metrics` (Q3b), `connect_worker_logs` (Q3c) and
+`net_probe` (Q6a) with their production definitions (`replay_connect.go`); like every read they are
+answered from recordings, so a scenario may now record them (ten files do since the Q batch 4
+review: `q6_replay_test.go` lists them). Production registers the last three since Q3e and Q6b. Since Q1d the agent itself calls `connect_plugins` with `{}` on its
+first `runbook_lookup` and passes the versions from its `data` (`kafka_version`, `plugins[]`) to the
+lookup: record it (no input, with data) where the running versions matter; without a recording that
+read is a miss (at most two per run) and no versions are passed, as before.
+
+`connect_stop_connector`, `connect_reset_source_offsets`, `connect_create_connector` and
+`connect_delete_connector` are registered after the source admin actions through
+`actions.RegisterLifecycle`, the call production's wiring makes. Their reads:
+
+| read | from |
+|---|---|
+| connector names | `resources.connectors` |
+| state | the first `connect_status` recording's data; `connect_stop_connector` executed in the run makes it `STOPPED` |
+| type (`source`/`sink`) | `connect_status`'s data `type` if a scenario sets it, else its summary's `<name> (<type>):` |
+| config | as for the P3 actions (`connect_config` data, `resources.connector_configs`): the reset's Preview and the delete need it |
+| stored offsets | the `connect_source_offsets` recording for `{connector}` (or one without input that lists it); numbers stay exact |
+| config validation | the `connect_validate_config` recording for `{class}`: its `error_count` and `errors` |
+
+Every lifecycle write (`StopConnector`, `ResetSourceOffsets`, `AlterSourceOffsets`, `CreateConnector`,
+`DeleteConnector`) is a no-op recorded in the run's write log, without config values or positions.
+
 ## Answers that list every cause
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from
@@ -955,6 +1007,34 @@ prompt, a tool description or schema, or the actions in `propose_fix` changes it
 run is listed in `prompt_hashes`. `untapped`: no tap (`-no-tap`, Bedrock, Vertex, scripted runners);
 `none`: tapped, but no model request.
 
+## Invalid tool calls (V9r)
+
+`invalid_tool_calls` counts the tool calls the agent refused **before running them**: the call named no
+registered tool (`unknown_tool`), its arguments were not valid JSON (`invalid_json`), or they failed the
+tool's input schema (`invalid_input`). The agent marks each such `agent.tool_result` with `rejected` (V1t);
+the harness counts those results, each once (`invalid_calls.go`). A tool that ran and returned an error is
+not counted, and neither is a result the room wrote as the system.
+
+It is **not** `rejected_attempts` (the "rejected fixes" column): that counts `propose_fix` steps an action's
+`Validate` refused, where the model called the tool well and proposed something the action does not allow.
+An invalid tool call is the model failing to call a tool at all, the reliability measure of the model gate
+(`invalid_tool_calls / tool_calls ≤ 2%`, `docs/design/model-providers.md` §5.1).
+
+- **Per run**: `invalid_tool_calls`, `invalid_tool_call_reasons` (by reason) and `all_tool_calls` (every
+  `agent.tool_call`, the rejected ones and the reads after a fix included; `tool_calls` leaves those out).
+- **Per scenario and overall** (`overall` in the report): `invalid_tool_calls`, `all_tool_calls` and
+  `invalid_tool_call_rate`, the first over the second. Overall pools every tool call (the gate's ratio), it
+  is not a mean of scenario rates. The markdown table has an "invalid tool calls" column (count and rate)
+  and a line under it with the overall count by reason.
+- **Unknown, not zero**: a run that was not checked (an infra run, or a report written before V9r) has no
+  counter, and a scenario or overall total over such a run is left out of the JSON and printed `-`.
+- **Comparison** (`-baseline`, `-compare`): invalid tool calls per run over the scenarios both reports
+  scored, as evals-live compares misses (so a 1-run candidate compares with a 3-run baseline, and an `-only`
+  run with the same scenarios of the baseline). Growth is printed in bold and fails `-fail-on-regression`
+  (exit 2) without counting as a regressed scenario. When either report lacks the counter for a shared
+  scenario, the line says "unknown, not compared" and nothing fails: a baseline written before V9r never
+  turns into a regression. It does not change any run's score or pass.
+
 ## Scoring (per run, 0–100)
 
 | part | points | rule |
@@ -995,6 +1075,8 @@ Per run the result also gives:
   first group no later step met ([Right action proposed](#right-action-proposed-p3g-2))
 - misses, action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes"
   column), idles, duration
+- `invalid_tool_calls`, `invalid_tool_call_reasons` and `all_tool_calls` ([Invalid tool
+  calls](#invalid-tool-calls-v9r))
 
 The report adds, over all runs (`calibration.go`; runs that ended in a run error are left out):
 - **Calibration**, on **diagnose** runs only: confidence is read as a probability (low 0.3, medium 0.6,

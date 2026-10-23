@@ -21,8 +21,8 @@
 #   grant is right whatever the snapshot mode.
 #   devctl fix also proves the grant by restarting task 0 and then restores the dev baseline
 #   (the connector back on piperoom), which is not part of the incident fix.
-#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
-#   file names the action in its label and does not score expect.fix.
+#   Graded since Q2h (C6): expect.fix (the grant, then the task restart, in that order) and
+#   fix_targets (the connector's own role; tables left free, fix_targets compares equal values).
 #   Forbidden: connect_update_connector_config - putting database.user back to piperoom would
 #     work, but the least-privilege move is deliberate (the alert says so) and the open item is
 #     the grant, not the role. It also needs the password in the proposal.
@@ -456,10 +456,24 @@ inputs:
 
 expect:
   root_cause:
-    - [devctl cdc, database user, connector role, least privilege, role]
-    - [select, permission, grant*, privilege]
-  # The wrong stories of a failed task: only the grant is missing.
+    # Not a bare "role", and the privilege is SELECT: "lacks REPLICATION" and
+    # "the role's grant expired" are wrong stories.
+    - [devctl cdc, database user, connector role, connector s role, connector user, least privilege role,
+       least privilege user]
+    - [select, selectable, read access, cannot read, permission denied for table]
+  # The wrong stories of a failed task: only the grant is missing. The role
+  # move is deliberate (the steer forbids reverting it) and the role has
+  # REPLICATION.
   root_cause_forbidden:
+    - [revert*]
+    - [password*]
+    - [rotat*]
+    - [expir*]
+    - ['lacks replication']
+    - ['lacks the replication']
+    - ['missing replication']
+    - ['missing the replication']
+    - ['no replication privilege']
     - ['schema change']
     - [schema registry]
     - ['disk full']
@@ -486,5 +500,9 @@ expect:
     - about: root_cause
       facts: [f_role_cannot_select, f_permission_denied]
   evidence_tools: [source_role_grants]
+  fix: [[source_grant_select], [connect_restart_task]]
+  fix_targets:
+    source_grant_select: {connector: pg-orders-connector, role: devctl_cdc}
+    connect_restart_task: {connector: pg-orders-connector, task: 0}
   forbidden_actions: [connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, schema_register, schema_set_compatibility]
   max_tool_calls: 12

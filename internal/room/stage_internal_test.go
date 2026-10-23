@@ -256,7 +256,11 @@ func TestStageHappyPath(t *testing.T) {
 		t.Fatalf("running = %+v", p0.StageRunning)
 	}
 
-	waitForCond(t, 5*time.Second, func() bool { return len(logOf(t, r.st, roomID, events.ProposalStaged)) == 1 }, "no proposal.staged")
+	// The store holds proposal.staged a moment before the room folds it, so
+	// wait for the snapshot, not the log.
+	waitForCond(t, 5*time.Second, func() bool {
+		return len(logOf(t, r.st, roomID, events.ProposalStaged)) == 1 && openProposalMust(t, r, roomID, pid).Staged != nil
+	}, "no proposal.staged")
 	got, _ := events.Decode[events.ProposalStagedPayload](logOf(t, r.st, roomID, events.ProposalStaged)[0])
 	if got.ParamsHash != p0.ParamsHash || len(got.Steps) != 2 || got.Steps[0].StepIndex != 1 || got.Steps[1].StepIndex != 2 || !got.Healthy() {
 		t.Fatalf("staged = %+v", got)

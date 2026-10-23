@@ -245,6 +245,7 @@ var readOnlyAdapterMethods = map[string]bool{
 	"Subjects": true, "Versions": true, "Schema": true, "Compatibility": true,
 	"SubjectsIncludingDeleted": true, "VersionsIncludingDeleted": true,
 	"CheckCompatibility": true,
+	"SourceOffsets":      true, "ServerInfo": true, "Plugins": true, "Loggers": true,
 	// Writes that refuse (ErrReadOnly, or errNoRegistry on noRegistry).
 	"RestartTask": true, "RestartConnector": true,
 	"SetCompatibility": true, "Register": true,
@@ -268,39 +269,50 @@ func assertAdapterMethodSet(t *testing.T, path string, ty reflect.Type) {
 //
 // It cannot see a client captured by a closure (func values are opaque).
 func TestRegisteredToolsHoldNoWriter(t *testing.T) {
-	sp := &writeSpy{}
+	// The spy has every Connect read and write the real client has, the Q5
+	// lifecycle writes included, so the walk sees what production wires.
+	sp := lifecycleSpy{&writeSpy{}}
 	w := &Wired{Connect: sp, Registry: sp, Owners: &owners.Owners{}}
 	reg := tools.NewReadOnlyRegistry()
 	if err := RegisterTools(reg, actions.NewRegistry(), w); err != nil {
 		t.Fatalf("RegisterTools: %v", err)
 	}
 	// A client that validates configs gives the model connect_validate_config
-	// (Q4b); the tool is read-only, so it belongs in this registry.
-	if _, ok := reg.Get("connect_validate_config"); !ok {
-		t.Error("connect_validate_config is not registered over a client with the config validation pair")
+	// (Q4b); the tool is read-only, so it belongs in this registry. So do
+	// connect_plugins (Q1c, registered by Q1d) and connect_source_offsets
+	// (Q5a) over a client with the plugin, version and offsets reads.
+	for _, name := range []string{"connect_validate_config", "connect_plugins", "connect_source_offsets"} {
+		if _, ok := reg.Get(name); !ok {
+			t.Errorf("%s is not registered over a client with its reads", name)
+		}
 	}
 
 	connW := reflect.TypeOf((*clients.ConnectWriter)(nil)).Elem()
 	regW := reflect.TypeOf((*clients.SchemaRegistryWriter)(nil)).Elem()
 	fixW := reflect.TypeOf((*clients.ConnectFixWriter)(nil)).Elem()
+	lifeW := reflect.TypeOf((*connect.ConnectLifecycleWriter)(nil)).Elem()
 	allowed := map[reflect.Type]bool{
-		reflect.TypeOf(readOnlyConnect{}):              true,
-		reflect.TypeOf(readOnlyConnectTasks{}):         true,
-		reflect.TypeOf(readOnlyConnectValidate{}):      true,
-		reflect.TypeOf(readOnlyConnectValidateTasks{}): true,
-		reflect.TypeOf(readOnlyRegistry{}):             true,
-		reflect.TypeOf(readOnlyRegistryDeleted{}):      true,
+		reflect.TypeOf(readOnlyConnect{}):               true,
+		reflect.TypeOf(readOnlyConnectTasks{}):          true,
+		reflect.TypeOf(readOnlyConnectValidate{}):       true,
+		reflect.TypeOf(readOnlyConnectValidateTasks{}):  true,
+		reflect.TypeOf(readOnlyConnectQ{}):              true,
+		reflect.TypeOf(readOnlyConnectTasksQ{}):         true,
+		reflect.TypeOf(readOnlyConnectValidateQ{}):      true,
+		reflect.TypeOf(readOnlyConnectValidateTasksQ{}): true,
+		reflect.TypeOf(readOnlyRegistry{}):              true,
+		reflect.TypeOf(readOnlyRegistryDeleted{}):       true,
 	}
 	canWrite := func(ty reflect.Type) bool {
 		if allowed[ty] {
 			return false
 		}
-		if ty.Implements(connW) || ty.Implements(regW) || ty.Implements(fixW) {
+		if ty.Implements(connW) || ty.Implements(regW) || ty.Implements(fixW) || ty.Implements(lifeW) {
 			return true
 		}
 		// Any one write method is enough, even on a type that implements
 		// none of the writer interfaces in full.
-		for _, m := range []string{"Resume", "UpdateConfig", "PauseConnector", "UpdateConnectorConfigKeys"} {
+		for _, m := range []string{"Resume", "UpdateConfig", "PauseConnector", "UpdateConnectorConfigKeys", "StopConnector", "ResetSourceOffsets", "AlterSourceOffsets", "CreateConnector", "DeleteConnector"} {
 			if _, ok := ty.MethodByName(m); ok {
 				return true
 			}

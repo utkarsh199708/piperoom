@@ -73,17 +73,29 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // proposing a config change." (the Q2a settings tools); to stay at the
 // ceiling, two ", and" joins became ";", the rule-3 example lost "task 0"
 // and the schema bullet ends "high-risk: last resort only."
+// Q5d (KAN-309) moved it an eleventh time: both write modes gain the bullet
+// "Reset source offsets only if their position is gone; snapshot a table
+// missing rows instead." (the Q5 lifecycle actions are registered in both
+// modes, P0 ruling #606; the write-off prompt is at 1335 words). To stay
+// under the ceiling, wording the prompt says elsewhere went: Style's "One step
+// per tool call." (the runner makes every call its own step), "(forwarded by
+// the driver)" after a suggestion, "(same component and state)" became "a
+// past room's component and state", and the approval bullet reads "On
+// \"approval result\" or \"action result\", update your hypothesis; ok=false
+// or unknown is not done." Q1d's upgrade rule is not in the prompt: it sits
+// beside the runbook_lookup result that shows an affected known issue
+// (versions.go), as X4c's ranking does.
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.
-const cdcPromptSHA256 = "abde809a00b4ce53b2482839fd3d23bb1055339e302211bbbbf7650489bcaaae"
+const cdcPromptSHA256 = "fb477a7b3e01bb8429e84326cb09e6cbe32c8fb22c1f537ac8c37aec65f3d65b"
 
 // cdcPromptWriteOffSHA256 is the hash of the CDC system prompt with write mode
 // off (P2d): the same CDC prompt, except the scheduling note becomes the
 // "will not run here" note. Pinned beside its snapshot so a regenerated
 // snapshot cannot silently move it. X4c moved it with cdcPromptSHA256, and so
-// did Q4b and Q2e.
-const cdcPromptWriteOffSHA256 = "dd10be48b9b24ccd3639997c98146f19c5ae354355ec10ff18af163a2d55681c"
+// did Q4b and Q2e, and Q5d (its trims and the offsets bullet).
+const cdcPromptWriteOffSHA256 = "0c351d168f2f2f14c4375f0631defff132b308f234228283d9ea6bf8aa26ab91"
 
 // TestSystemPromptSnapshotCDC proves the CDC prompt is byte-identical to the
 // pinned one: the snapshot file and the pinned hash must both match.

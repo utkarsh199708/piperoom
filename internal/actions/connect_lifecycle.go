@@ -11,8 +11,9 @@ import (
 	"piperoom/internal/clients"
 )
 
-// Q5b and Q5c: the Kafka Connect lifecycle actions. They are registered only
-// with write mode on (Q5d), so with writes off none of them is reachable:
+// Q5b and Q5c: the Kafka Connect lifecycle actions. Wiring registers them in
+// both write modes (Q5d, P0 ruling #606); with writes off they hold a
+// read-only Connect value, so Execute refuses before any I/O:
 //
 //   - connect_stop_connector stops a connector and its tasks (KIP-875);
 //   - connect_reset_source_offsets clears a stopped source connector's stored
@@ -38,6 +39,13 @@ const (
 	DeleteConnectorName = "connect_delete_connector"
 )
 
+// ErrNoLifecycleWriter is the Execute refusal of the four lifecycle actions
+// when their Connect client is not a connect.ConnectLifecycleWriter: write
+// mode is off (wiring hands them the read-only client), so the step can be
+// proposed and previewed but not run. It is returned before any I/O and
+// worded like the source actions' refusal.
+var ErrNoLifecycleWriter = errors.New("no write credentials: the Connect lifecycle writer is not configured (PIPEROOM_WRITE_MODE=on is needed)")
+
 // LifecycleDeps is what the Q5b/Q5c actions read and write through. Connect
 // must be the whole client when write mode is on: the actions assert for
 // connect.ConnectLifecycleWriter and connect.SourceOffsetReader at use time,
@@ -59,8 +67,10 @@ type LifecycleDeps struct {
 	PollInterval time.Duration
 }
 
-// RegisterLifecycle adds the four Q5b/Q5c actions to reg. Wiring calls it only
-// with write mode on (Q5d): with writes off no lifecycle action is reachable.
+// RegisterLifecycle adds the four Q5b/Q5c actions to reg. Wiring calls it in
+// both write modes (Q5d); with writes off d.Connect has no
+// connect.ConnectLifecycleWriter, so the agent can propose and preview a step
+// and Execute refuses it before any I/O.
 func RegisterLifecycle(reg *Registry, d LifecycleDeps) error {
 	for _, a := range []Action{
 		&stopConnector{d: d},
