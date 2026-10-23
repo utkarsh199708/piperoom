@@ -217,7 +217,7 @@ func TestWorkerInfoTopicsHiddenWhenUntied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"6 other Connect internal topics not shown", "no Connect internal topic is tied to this room's worker group by name; set CONNECT_INTERNAL_TOPICS"} {
+	for _, want := range []string{"6 other Connect internal topics not shown", "no Connect internal topic is tied to this room's worker group by name, so none is shown"} {
 		if !strings.Contains(r.Summary, want) {
 			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
 		}
@@ -238,6 +238,36 @@ func TestWorkerInfoTopicsHiddenWhenUntied(t *testing.T) {
 	}
 	if !strings.Contains(r.Summary, "config _connect_configs:") || strings.Contains(r.Summary, "legacy-billing") || !strings.Contains(r.Summary, "1 other Connect internal topic not shown") {
 		t.Errorf("summary:\n%s", r.Summary)
+	}
+}
+
+func TestWorkerInfoHiddenTopicVerdictsWhenNoGroupIsLive(t *testing.T) {
+	// The workers do not start on a deleted config topic, so no group is
+	// live and the topic cannot be tied to the room: its verdict is counted,
+	// its name is not shown.
+	fk := &fakeWorkerKafka{fakeKafka: &fakeKafka{}, topics: func([]string) ([]kafka.InternalTopic, error) {
+		return []kafka.InternalTopic{{Name: "connect-configs", Role: "config", Partitions: 1, ReplicationFactor: 3, CleanupPolicy: "delete", Brokers: 3}}, nil
+	}}
+	tool := workerInfoTool(t, Deps{Kafka: fk, Connect: &fakeConnect{}})
+	r, err := tool.Run(ordersCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Summary, "not tied to it (not named here; they may be another Connect cluster's): 1 not compacted") {
+		t.Errorf("summary lacks the hidden verdict:\n%s", r.Summary)
+	}
+	if strings.Contains(r.Summary, "connect-configs") {
+		t.Errorf("hidden topic named:\n%s", r.Summary)
+	}
+
+	// With the groups unreadable nothing says the room's workers are down.
+	fk.groupsErr = errors.New("broker down")
+	r, err = tool.Run(ordersCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(r.Summary, "not compacted") {
+		t.Errorf("hidden verdict without a groups read:\n%s", r.Summary)
 	}
 }
 

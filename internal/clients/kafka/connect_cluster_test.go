@@ -231,6 +231,12 @@ func TestAttributeInternalTopics(t *testing.T) {
 			[]string{"eu-configs"}, []string{"eu-west", "eu-north"}, map[string]string{}},
 		{"no groups (unreadable): nothing tied",
 			[]string{"connect-configs", "prod-configs"}, nil, map[string]string{}},
+		{"a group's words inside a longer topic name are not a match",
+			[]string{"orders-archive-connect-offsets", "tenantb-orders-configs"}, []string{"orders-connect", "other-live"},
+			map[string]string{}},
+		{"two generic topics of one role: a stopped cluster's beside the live one's",
+			[]string{"connect-configs", "my_connect_configs", "connect-offsets"}, []string{"orders-connect"},
+			map[string]string{}},
 		{"case and separators do not matter",
 			[]string{"Connect_Prod-offsets"}, []string{"connect-prod"}, map[string]string{"Connect_Prod-offsets": "connect-prod"}},
 	} {

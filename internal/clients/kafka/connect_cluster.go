@@ -354,19 +354,20 @@ func containsRun(long, short []string) bool {
 //
 //   - A topic whose distinguishing words (connectNameWords) equal a group's
 //     belongs to that group; failing that, one whose words are a contiguous
-//     run of a group's words, or the reverse. Two groups matching equally
-//     well is ambiguous: the topic stays unattributed.
+//     run of a group's words ("staging" in "piperoom-connect-staging"). The
+//     reverse, a group's words inside a longer topic name, is never a match:
+//     "tenantb-orders-configs" is not group "orders-connect"'s. Two groups
+//     matching equally well is ambiguous: the topic stays unattributed.
 //   - A topic with only generic words ("connect-configs", "_connect_status",
 //     "my_connect_offsets") belongs to the one group no specific topic was
-//     tied to, if there is exactly one; with several such groups it could
-//     be anyone's and stays unattributed.
+//     tied to, if there is exactly one and the generic names hold at most
+//     one topic per role; otherwise they could be anyone's (a stopped
+//     cluster's beside the live one's) and stay unattributed.
 //
 // The result maps topic name to group id; an unattributed topic is absent.
-// The caller shows a scoped room only its own groups' topics. Attribution
-// is by name only: a wrong guess can hide a topic, and it can show another
-// cluster's topic only when that cluster has no live group of its own (its
-// specific topic shares the room group's words, or its generic topic falls
-// to the room's group as the one unclaimed group).
+// The caller shows a scoped room only its own groups' topics, so a wrong
+// guess must hide a topic rather than show another cluster's: every rule
+// above leaves a topic unattributed when a second owner is plausible.
 func AttributeInternalTopics(topics, groupIDs []string) map[string]string {
 	out := map[string]string{}
 	groupWords := make([][]string, len(groupIDs))
@@ -387,7 +388,7 @@ func AttributeInternalTopics(topics, groupIDs []string) map[string]string {
 			switch {
 			case slices.Equal(tw, gw):
 				score = 2
-			case containsRun(gw, tw) || containsRun(tw, gw):
+			case containsRun(gw, tw):
 				score = 1
 			}
 			switch {
@@ -412,6 +413,15 @@ func AttributeInternalTopics(topics, groupIDs []string) map[string]string {
 			break
 		}
 		free = i
+	}
+	perRole := map[string]int{}
+	for _, t := range generic {
+		perRole[InternalTopicRole(t)]++
+	}
+	for _, n := range perRole {
+		if n > 1 {
+			free = -2 // two configs topics: two clusters' names
+		}
 	}
 	if free >= 0 {
 		for _, t := range generic {

@@ -99,6 +99,7 @@ func (t *workerInfo) Run(ctx context.Context, _ json.RawMessage) (tools.Result, 
 		return tools.Result{}, fmt.Errorf("kafkatools: connect_worker_info: %w", clients.ErrNotSupported)
 	}
 	var data workerInfoData
+	var hiddenFindings []string
 
 	gctx, cancel := withTimeout(ctx)
 	groups, gErr := kr.ConnectWorkerGroups(gctx)
@@ -129,7 +130,14 @@ func (t *workerInfo) Run(ctx context.Context, _ json.RawMessage) (tools.Result, 
 		data.InternalTopics = topics
 	}
 	if len(names) == 0 && !sc.Unscoped() {
-		data.InternalTopics, data.TopicsNotShown = scopeInternalTopics(data.InternalTopics, groups, data.Groups)
+		var hidden []kafka.InternalTopic
+		data.InternalTopics, hidden = scopeInternalTopics(data.InternalTopics, groups, data.Groups)
+		data.TopicsNotShown = len(hidden)
+		if gErr == nil && len(data.Groups) == 0 {
+			// No live group of this room's: its workers may be down because
+			// of one of these topics, which then cannot be tied to it.
+			hiddenFindings = hiddenTopicFindings(hidden)
+		}
 	}
 	if gErr != nil && tErr != nil {
 		return tools.Result{}, fmt.Errorf("kafkatools: connect_worker_info: %w", errors.Join(gErr, tErr))
@@ -137,7 +145,7 @@ func (t *workerInfo) Run(ctx context.Context, _ json.RawMessage) (tools.Result, 
 	if data.InternalTopics == nil {
 		data.InternalTopics = []kafka.InternalTopic{}
 	}
-	data.Findings = internalTopicFindings(data.InternalTopics, data.TopicsSource, data.TopicsNotShown)
+	data.Findings = append(internalTopicFindings(data.InternalTopics, data.TopicsSource, data.TopicsNotShown), hiddenFindings...)
 
 	t.plugins(ctx, &data)
 	t.loggers(ctx, &data)
@@ -214,7 +222,7 @@ func showGroup(g kafka.ConnectWorkerGroup, own func(string) bool, why string) wo
 // tied to (a stopped cluster's, or a name that fits two groups) is hidden
 // too, since it may be anyone's. With the groups unreadable nothing can be
 // tied, so every topic is a count.
-func scopeInternalTopics(topics []kafka.InternalTopic, groups []kafka.ConnectWorkerGroup, shown []workerInfoGroup) ([]kafka.InternalTopic, int) {
+func scopeInternalTopics(topics []kafka.InternalTopic, groups []kafka.ConnectWorkerGroup, shown []workerInfoGroup) (kept, hidden []kafka.InternalTopic) {
 	names := make([]string, len(topics))
 	for i, it := range topics {
 		names[i] = it.Name
@@ -228,13 +236,52 @@ func scopeInternalTopics(topics []kafka.InternalTopic, groups []kafka.ConnectWor
 	for _, g := range shown {
 		isShown[g.GroupID] = true
 	}
-	kept := []kafka.InternalTopic{}
+	kept = []kafka.InternalTopic{}
 	for _, it := range topics {
 		if g, ok := owner[it.Name]; ok && isShown[pluginText(g)] {
 			kept = append(kept, it)
+		} else {
+			hidden = append(hidden, it)
 		}
 	}
-	return kept, len(topics) - len(kept)
+	return kept, hidden
+}
+
+// hiddenTopicFindings counts the Q3a rule breaks among topics a scoped room
+// does not see, without naming them: they may be another cluster's. A
+// worker refuses to start on a storage topic that is not compacted, so with
+// no live group of the room's, a hidden topic can be the cause.
+func hiddenTopicFindings(hidden []kafka.InternalTopic) []string {
+	var notCompact, configParts, rf1 int
+	for _, it := range hidden {
+		if it.Missing {
+			continue
+		}
+		if it.Role == kafka.InternalRoleConfig && it.Partitions > 1 {
+			configParts++
+		}
+		if it.CleanupPolicy != "" && !strings.Contains(it.CleanupPolicy, "compact") {
+			notCompact++
+		}
+		if it.ReplicationFactor == 1 && it.Brokers > 1 {
+			rf1++
+		}
+	}
+	var parts []string
+	if notCompact > 0 {
+		parts = append(parts, fmt.Sprintf("%d not compacted", notCompact))
+	}
+	if configParts > 0 {
+		parts = append(parts, fmt.Sprintf("%d config topic with more than 1 partition", configParts))
+	}
+	if rf1 > 0 {
+		parts = append(parts, fmt.Sprintf("%d with replication factor 1", rf1))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return []string{"this room's worker group is not live, and among the Connect internal topics not tied to it (not named here; they may be another Connect cluster's): " +
+		strings.Join(parts, ", ") + "; a worker does not start on a storage topic that is not compacted, so check its config.storage.topic, offset.storage.topic and status.storage.topic"}
 }
 
 // ParseInternalTopics splits CONNECT_INTERNAL_TOPICS: a comma list of the
@@ -271,7 +318,7 @@ func internalTopicFindings(topics []kafka.InternalTopic, source string, notShown
 	switch {
 	case len(topics) > 0 || source != "name match":
 	case notShown > 0:
-		out = append(out, "no Connect internal topic is tied to this room's worker group by name; set CONNECT_INTERNAL_TOPICS to name them")
+		out = append(out, "no Connect internal topic is tied to this room's worker group by name, so none is shown; the workers' config.storage.topic, offset.storage.topic and status.storage.topic name them")
 	default:
 		out = append(out, "no topic looks like a Connect internal topic (a name with the word connect ending in configs, offsets or status); set CONNECT_INTERNAL_TOPICS to name them")
 	}

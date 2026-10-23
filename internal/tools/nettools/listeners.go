@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,7 +94,7 @@ func (t *netProbe) listenerChecks(ctx context.Context, endpointChecks []Check, t
 			continue
 		}
 		mismatched = append(mismatched, fmt.Sprintf("node %d advertises %s, which is not a configured broker address", b.NodeID, addr))
-		checks := prober.Probe(ctx, Target{Label: tgt.Label, Kind: tgt.Kind, Endpoints: []Endpoint{{Addr: addr, TLS: tlsOn, Config: tlsCfg}}})
+		checks := prober.Probe(ctx, Target{Label: tgt.Label, Kind: tgt.Kind, Endpoints: []Endpoint{{Addr: addr, TLS: tlsOn, Config: tlsCfg, Remote: !anyLoopback(tgt.Endpoints)}}})
 		out = append(out, checks...)
 		// A name that does not resolve here is as unreachable as a refused
 		// port: it is the typical listener that exists only inside the
@@ -130,6 +132,31 @@ func (t *netProbe) listenerChecks(ctx context.Context, endpointChecks []Check, t
 	}
 	c.MS = time.Since(start).Milliseconds()
 	return append(out, c)
+}
+
+// anyLoopback reports whether the operator's settings already reach the
+// target over loopback (a port-forward or a dev stack), where an advertised
+// loopback address is expected rather than planted.
+func anyLoopback(es []Endpoint) bool {
+	for _, e := range es {
+		if !e.Remote && isLoopbackAddr(e.Addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLoopbackAddr reports whether host:port names localhost or a loopback IP.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
 }
 
 // allTCPOK reports whether the endpoint checks include at least one TCP check
