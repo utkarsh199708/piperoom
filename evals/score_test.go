@@ -867,75 +867,23 @@ func TestEveryScenarioCanPass(t *testing.T) {
 		"rows-lost-after-retention": {ps("pg_resnapshot_rows", `{"connector":"pg-orders-connector","table":"public.orders","key_range":{"column":"id","from":"1301","to":"1340"}}`)},
 		"consumer-skipped-range":    {ps("kafka_replay_range", `{"topic":"pg.public.orders","to_topic":"pg.public.orders.reprocess","ranges":[{"partition":0,"from_offset":433,"to_offset":445},{"partition":1,"from_offset":434,"to_offset":446},{"partition":2,"from_offset":433,"to_offset":446}]}`)},
 	}
+	// The Q2 source admin fixes (Q2h), proposed once C7 grades them
+	// (expect.fix). blocked-slot has none: its labelled source_end_session
+	// is refused on its recordings (see q2_source_test.go).
+	for name, fix := range q2Fixes {
+		p3Fixes[name] = fix
+	}
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, sc := range scs {
 		t.Run(sc.Name, func(t *testing.T) {
-			var script []step
-			called := map[string]bool{}
-			// call reads tool until it gets a successful result that ok
-			// accepts. Only recordings the run can reach before any fix count
-			// (start-phase or untagged); the k-th result of a sequence takes
-			// k+1 calls.
-			call := func(tool string, ok func(Observation) bool) {
-				for _, r := range sc.Recordings {
-					if r.Tool != tool || (r.Phase != "" && r.Phase != sc.startPhase()) {
-						continue
-					}
-					for k, o := range recordingResults(r) {
-						if o.Error == "" && ok(o) {
-							for range k + 1 {
-								script = append(script, step{tool: tool, input: r.Input})
-							}
-							called[tool] = true
-							return
-						}
-					}
-				}
-				t.Fatalf("no successful %s recording to call", tool)
+			fix := fixes[sc.Name]
+			if p3, ok := p3Fixes[sc.Name]; ok && len(sc.Expect.Fix) > 0 {
+				fix = p3
 			}
-			for _, f := range sc.Expect.ExpectedFacts {
-				call(f.Tool, func(o Observation) bool { return factIn(f, o.Summary) })
-			}
-			for _, tool := range sc.Expect.EvidenceTools {
-				if !called[tool] {
-					call(tool, func(Observation) bool { return true })
-				}
-			}
-			switch sc.Expect.outcome() {
-			case OutcomeHealthy:
-				script = append(script, step{message: "The pipeline is healthy; nothing to fix."})
-			case OutcomeAbstain:
-				script = append(script, step{hypothesis: "Cause unknown from this evidence.", confidence: "low"})
-			case OutcomeAsk:
-				script = append(script, step{idle: true}, step{message: "Which of these do you mean?"})
-			default:
-				h, ok := hypotheses[sc.Name]
-				if !ok {
-					t.Fatalf("no good hypothesis for %s in scoring_test.go", sc.Name)
-				}
-				script = append(script, step{hypothesis: h.good})
-				fix := fixes[sc.Name]
-				if p3, ok := p3Fixes[sc.Name]; ok && len(sc.Expect.Fix) > 0 {
-					fix = p3
-				}
-				if len(fix) > 0 {
-					script = append(script, proposal(fix...))
-				}
-			}
-			script = append(script, step{idle: true})
-			// After an executed fix, re-check the state in the recovered phase.
-			if rec := sc.recoveredPhases(); len(rec) > 0 {
-				for _, r := range sc.Recordings {
-					if res := recordingResults(r); rec[r.Phase] && len(res) > 0 && res[0].Error == "" {
-						script = append(script, step{tool: r.Tool, input: r.Input})
-						break
-					}
-				}
-			}
-			r, _ := evalOnce(t, sc, script)
+			r, _ := evalOnce(t, sc, canPassScript(t, sc, fix))
 			if !r.Pass || r.Score != 100 || len(r.Misses) != 0 {
 				t.Errorf("pass=%v score=%v misses=%v failures=%v facts missing=%v", r.Pass, r.Score, r.Misses, r.Failures, r.FactsMissing)
 			}
@@ -944,6 +892,73 @@ func TestEveryScenarioCanPass(t *testing.T) {
 			}
 		})
 	}
+}
+
+// canPassScript is a focused run of sc that passes: it calls every expected
+// fact's and evidence tool's recording, ends as the scenario's outcome says
+// (with sc's good hypothesis and a proposal of fix when it diagnoses), and
+// re-checks the recovered phase after an executed fix.
+func canPassScript(t *testing.T, sc Scenario, fix []events.ProposalStep) []step {
+	t.Helper()
+	var script []step
+	called := map[string]bool{}
+	// call reads tool until it gets a successful result that ok
+	// accepts. Only recordings the run can reach before any fix count
+	// (start-phase or untagged); the k-th result of a sequence takes
+	// k+1 calls.
+	call := func(tool string, ok func(Observation) bool) {
+		for _, r := range sc.Recordings {
+			if r.Tool != tool || (r.Phase != "" && r.Phase != sc.startPhase()) {
+				continue
+			}
+			for k, o := range recordingResults(r) {
+				if o.Error == "" && ok(o) {
+					for range k + 1 {
+						script = append(script, step{tool: tool, input: r.Input})
+					}
+					called[tool] = true
+					return
+				}
+			}
+		}
+		t.Fatalf("no successful %s recording to call", tool)
+	}
+	for _, f := range sc.Expect.ExpectedFacts {
+		call(f.Tool, func(o Observation) bool { return factIn(f, o.Summary) })
+	}
+	for _, tool := range sc.Expect.EvidenceTools {
+		if !called[tool] {
+			call(tool, func(Observation) bool { return true })
+		}
+	}
+	switch sc.Expect.outcome() {
+	case OutcomeHealthy:
+		script = append(script, step{message: "The pipeline is healthy; nothing to fix."})
+	case OutcomeAbstain:
+		script = append(script, step{hypothesis: "Cause unknown from this evidence.", confidence: "low"})
+	case OutcomeAsk:
+		script = append(script, step{idle: true}, step{message: "Which of these do you mean?"})
+	default:
+		h, ok := hypotheses[sc.Name]
+		if !ok {
+			t.Fatalf("no good hypothesis for %s in scoring_test.go", sc.Name)
+		}
+		script = append(script, step{hypothesis: h.good})
+		if len(fix) > 0 {
+			script = append(script, proposal(fix...))
+		}
+	}
+	script = append(script, step{idle: true})
+	// After an executed fix, re-check the state in the recovered phase.
+	if rec := sc.recoveredPhases(); len(rec) > 0 {
+		for _, r := range sc.Recordings {
+			if res := recordingResults(r); rec[r.Phase] && len(res) > 0 && res[0].Error == "" {
+				script = append(script, step{tool: r.Tool, input: r.Input})
+				break
+			}
+		}
+	}
+	return script
 }
 
 // rawTranscript builds a transcript from events in the given order, for

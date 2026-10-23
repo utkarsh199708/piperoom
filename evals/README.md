@@ -899,6 +899,26 @@ group's topics: a scenario that needs a partition outside the 5 cannot record it
 DLQ record values are not replayed: `dlq_replay`'s preview says
 so, and its `Validate` needs only the offsets. A timestamp offset reset is planned to the log start.
 
+### Resources for the source admin actions (Q2h)
+
+The four source admin actions (`pg_set_replica_identity`, `source_create_heartbeat_table`,
+`source_grant_select`, `source_end_session`) are registered after the P3 actions through
+`wiring.RegisterSourceActions`, production's call (`replay_source.go`). Their reads answer what the
+matching tool recording answers, so a scenario that records the evidence needs nothing more:
+
+| read | from |
+|---|---|
+| connector config (`database.user`, `connector.class`, `publication.name`) | as for the P3 actions |
+| replica identity and primary key | the `source_table_replication` recordings' data, else `resources.tables` (`replica_identity` d/n/f/i, `primary_key`); a table in neither is not replayed |
+| role rights | the `source_role_grants` recording whose `connector_user` (or `role_info.role`) is the role; only the recorded tables (`role_info.selectable`) are replayed |
+| blocking sessions | the `source_blocking_sessions` recording the tool call with the same `older_than_minutes` would get (the most specific input that matches, as the replayer picks); a session's `user` and `in_scope` are as recorded |
+| database settings | the `source_settings` recording (no action reads it today) |
+
+Every admin write (`SetReplicaIdentity`, `GrantSelect`, `CreateHeartbeatTable`, `EndSession`) is a
+no-op recorded in the run's write log. `source_end_session` refuses a session whose `user` is the
+connector's `database.user` and, in a room, one recorded with `in_scope: false`: record the blocker
+as the room would see it.
+
 ## Answers that list every cause
 
 A hypothesis that names every candidate holds the right terms by construction. Two guards keep it from
