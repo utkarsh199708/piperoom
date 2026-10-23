@@ -1,6 +1,10 @@
 package room
 
-import "context"
+import (
+	"context"
+
+	"piperoom/internal/tools"
+)
 
 // roomIDKey carries a room's id in an action call's context. The real write
 // clients ignore it; --demo's in-memory clients use it to keep one state per
@@ -28,4 +32,18 @@ func RoomID(ctx context.Context) string {
 // id lets a per-room client implementation tell concurrent demo rooms apart.
 func (s *Service) actionCtx(ctx context.Context, roomID, pipelineID string) context.Context {
 	return WithRoomID(s.pipelineCtx(ctx, pipelineID), roomID)
+}
+
+// actionCtxFor is actionCtx with the room's snapshot: a setup room's action
+// calls are scoped to the provisional pipeline before registration (design
+// §3.2), so its Validate, Scope and Execute see the pipeline the person
+// described, not an owners.yaml entry that does not exist yet.
+func (s *Service) actionCtxFor(ctx context.Context, roomID string, snap *RoomSnapshot, pipelineID string) context.Context {
+	base := s.actionCtx(ctx, roomID, pipelineID)
+	if snap != nil && snap.IsSetupRoom() {
+		if prov, ok := snap.SetupProvisional(); ok {
+			base = tools.WithPipeline(base, prov)
+		}
+	}
+	return base
 }

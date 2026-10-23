@@ -74,7 +74,64 @@ func proposalFallbackLayers(st *roomState, proposalID string) []string {
 // them, then the fallback (checkFallbackLocked). It returns the principal
 // detail; GrantFallback for the fallback. approve and approve-all both call
 // it, so the two routes never disagree about a layer. Caller holds st's lock.
+//
+// A setup room routes by its steps' tier instead (authorizeSetupLayer): the
+// provisional pipeline nobody owns yet cannot be approved by a generic
+// fallback on a team server (design §3.6).
 func (s *Service) authorizeProposalLayer(st *roomState, p store.ProposalRow, user User, layer, confirm string, needConfirm bool) (string, error) {
+	if st.snap.IsSetupRoom() {
+		return s.authorizeSetupLayer(st, p, user, layer, confirm, needConfirm)
+	}
+	return s.authorizeProposalLayerGeneric(st, p, user, layer, confirm, needConfirm)
+}
+
+// authorizeSetupLayer is the approver rule of design §3.6 for a T2 or T3 step
+// of a setup room: an owner of an overlapping pipeline, else a tenant admin
+// (grant "admin"); the driver's fallback only in solo mode on the standalone
+// server. A T1 step is a local write and keeps the generic rule (owner, solo,
+// driver fallback). Caller holds st's lock.
+func (s *Service) authorizeSetupLayer(st *roomState, p store.ProposalRow, user User, layer, confirm string, needConfirm bool) (string, error) {
+	_, steps, err := rowParamsHash(p)
+	if err != nil {
+		return "", validation("the proposal cannot be read: " + err.Error())
+	}
+	origin := ""
+	if prop, ok := openProposal(st.snap, p.ProposalID); ok {
+		origin = prop.Origin
+	}
+	route, err := setupRouteTier(&st.snap, s.actionsFor(st.snap.PipelineID), steps, origin, s.now().UTC())
+	if err != nil {
+		return "", err
+	}
+	if tierRank(route.Tier) < 2 {
+		return s.authorizeProposalLayerGeneric(st, p, user, layer, confirm, needConfirm)
+	}
+	solo := s.setupSolo(&st.snap) && s.setupLocal
+	if origin == events.ProposalOriginDriver && !solo && s.isDriver(st, user.ID) {
+		// §3.6: a destructive setup step needs a non-self approver on a team
+		// server. A driver-origin proposal is the driver's own write, so the
+		// driver approving it alone would be self-approval — even for a
+		// driver who is also a tenant admin or an overlap owner. Solo mode on
+		// the standalone server is the one ceremony that allows it.
+		return "", notAdmin()
+	}
+	if detail, ok := s.setupOverlapApprover(&st.snap, user, layer); ok {
+		return detail, nil
+	}
+	if s.TenancyOn() && s.owners.IsTenantAdmin(st.snap.SetupTenant(), user.ID, user.Groups) {
+		return events.GrantAdmin, nil
+	}
+	if solo {
+		// The standalone server's one person: the driver's fallback (or the
+		// solo user's own grant) is the ceremony §3.6 keeps for solo mode.
+		return s.authorizeProposalLayerGeneric(st, p, user, layer, confirm, needConfirm)
+	}
+	return "", notAdmin()
+}
+
+// authorizeProposalLayerGeneric is the rule for every incident room and for a
+// T1 setup step. Caller holds st's lock.
+func (s *Service) authorizeProposalLayerGeneric(st *roomState, p store.ProposalRow, user User, layer, confirm string, needConfirm bool) (string, error) {
 	detail, err := s.authorizeLayer(st.snap.PipelineID, user, layer, confirm, needConfirm)
 	if err == nil {
 		return detail, nil
