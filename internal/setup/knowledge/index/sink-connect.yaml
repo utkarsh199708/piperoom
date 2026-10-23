@@ -1,0 +1,307 @@
+# Kafka Connect sink connectors. Schema: Entry in ../index.go.
+#
+# Keys and defaults were read from the source named in "source": a sources
+# jar on Maven Central, or the connector's config class on GitHub (read
+# 2026-10-23 from the default branch, so "versions" is "*" where the
+# release line could not be pinned). Archives are pinned only where the
+# digest was verified against Maven Central: the .sha512 file the archive
+# publishes, or the SHA-512 computed over the downloaded bytes and
+# cross-checked with the published .sha1. Confluent Hub
+# (hub-downloads.confluent.io) and GitHub release assets could not be
+# fetched, so those sinks are "unpinned" and plugin_install refuses them.
+
+- name: debezium-jdbc-sink
+  kind: sink
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.jdbc.JdbcSinkConnector
+  versions: ">=2.2.0.Final"
+  summary: Debezium's JDBC sink; writes change events to a relational database through Hibernate dialects.
+  install: pinned
+  runtime_image: connect
+  archives:
+    - release: 3.2.0.Final
+      url: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.2.0.Final/debezium-connector-jdbc-3.2.0.Final-plugin.tar.gz
+      digest: sha512:4c6102e1c9266c00eeb3179cc0e218c5c6db0b96f105b997a3157c6da833fb2c0b6118704b465edb022853dc86ad45d6da36caf8c13e40bfc6fe3dc2819dcf00
+      source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.2.0.Final/debezium-connector-jdbc-3.2.0.Final-plugin.tar.gz.sha512
+    - release: 3.1.3.Final
+      url: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.1.3.Final/debezium-connector-jdbc-3.1.3.Final-plugin.tar.gz
+      digest: sha512:be334fc3dcbea0d06cad9959da9ef7cbf84f8103fb77a785e66b5ed97f9f2b4eb79ae63a1cc3585f9a8e8a8d7ec8e09c1c13a230d9fbdeddd46b5d412cc82746
+      source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.1.3.Final/debezium-connector-jdbc-3.1.3.Final-plugin.tar.gz.sha512
+    # 3.0.x and 2.7.x publish no .sha512: computed over the archive bytes;
+    # .sha1 cross-checks 04e2d4785bcdaba2c34d2345004f5143e5b237b5 (3.0.7)
+    # and 303b8a210651f71fbbc9373404f3d4a441779f39 (2.7.2).
+    - release: 3.0.7.Final
+      url: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.0.7.Final/debezium-connector-jdbc-3.0.7.Final-plugin.tar.gz
+      digest: sha512:099d002bda2c228859ff8ab02710ce20f267798b07184b76335dd205c7e275718eb2751dfd6e7844e1901f887606dcb8fe3395d26aac36373a71d20efb760032
+      source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/3.0.7.Final/debezium-connector-jdbc-3.0.7.Final-plugin.tar.gz
+    - release: 2.7.2.Final
+      url: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/2.7.2.Final/debezium-connector-jdbc-2.7.2.Final-plugin.tar.gz
+      digest: sha512:fe4fc16f885a0240f7825e7d3045593b0c52e4bed000c538fbc3eb45f6c2c3a45f248892bf5c41ca52194c2b28bbf1d88f114e8f50acfee81f762a3061d353ed
+      source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-jdbc/2.7.2.Final/debezium-connector-jdbc-2.7.2.Final-plugin.tar.gz
+  keys:
+    - {name: connection.url, required: true, credentials_in_value: true, check: "Keep the user and password out of the URL (a userinfo part or a password= parameter); use connection.username and connection.password with a secret reference."}
+    - {name: connection.username, required: true}
+    - {name: connection.password, secret: true}
+    - {name: connection.provider, default: "org.hibernate.c3p0.internal.C3P0ConnectionProvider"}
+    - {name: connection.pool.min_size, default: "5"}
+    - {name: connection.pool.max_size, default: "32"}
+    - {name: connection.pool.acquire_increment, default: "32"}
+    - {name: connection.pool.timeout, default: "1800"}
+    - {name: insert.mode, default: "insert", values: [insert, upsert, update], check: "upsert needs primary.key.mode and primary.key.fields."}
+    - {name: delete.enabled, default: "false", check: "true requires primary.key.mode=record_key (the connector refuses the config otherwise)."}
+    - {name: truncate.enabled, default: "false"}
+    - {name: primary.key.mode, default: "none", values: [none, kafka, record_key, record_value, record_header]}
+    - {name: primary.key.fields}
+    - {name: schema.evolution, default: "none", values: [none, basic], check: "none needs the target tables to exist with matching columns; basic creates tables and adds new columns."}
+    - {name: quote.identifiers, default: "false"}
+    - name: collection.name.format
+      default: "${topic}"
+      since: 3.0.2.Final
+      formerly: [table.name.format]
+      check: table.name.format is a deprecated alias from 3.0.2.Final (the release that moved the common sink keys to debezium-sink).
+    - name: collection.naming.strategy
+      default: "io.debezium.sink.naming.DefaultCollectionNamingStrategy"
+      since: 3.0.2.Final
+      formerly: [table.naming.strategy]
+      check: table.naming.strategy is a deprecated alias from 3.0.2.Final.
+    - name: use.time.zone
+      default: "UTC"
+      since: 3.0.2.Final
+      formerly: [database.time_zone]
+      check: database.time_zone is a deprecated alias from 3.0.2.Final.
+    - {name: batch.size, default: "500"}
+    - {name: use.reduction.buffer, default: "false"}
+    - {name: field.include.list}
+    - {name: field.exclude.list}
+    - {name: flush.max.retries, default: "5", since: 3.0.0.Final}
+    - {name: flush.retry.delay.ms, default: "1000", since: 3.0.0.Final}
+    - {name: connection.restart.on.errors, default: "false", since: 3.1.0.Final}
+    - {name: dialect.postgres.postgis.schema, default: "public"}
+    - {name: dialect.sqlserver.identity.insert, default: "false"}
+  checks:
+    - Reads the Debezium change event envelope natively and also accepts records flattened by ExtractNewRecordState.
+    - Deletes need delete.enabled=true with primary.key.mode=record_key; with the default primary.key.mode=none rows have no key and upserts cannot work.
+    - The 3.2.0.Final archive bundles the Postgres, MySQL, MariaDB, SQL Server and Oracle JDBC drivers; any other target database needs its driver added to the plugin directory.
+    - The debezium/connect image ships this plugin, so on that image it needs no install.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/jdbc.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-sink/3.2.0.Final/debezium-sink-3.2.0.Final-sources.jar
+
+- name: debezium-mongodb-sink
+  kind: sink
+  component: debezium
+  runtime: connect
+  class: io.debezium.connector.mongodb.MongoDbSinkConnector
+  versions: ">=3.0.0.Final"
+  summary: Debezium's MongoDB sink; writes change events to MongoDB collections.
+  install: bundled
+  runtime_image: connect
+  plugin_ref: mongodb
+  keys:
+    - {name: mongodb.connection.string, required: true, credentials_in_value: true, check: "A mongodb:// URI with a user and password embeds a credential; pass it as a secret reference or authenticate without one in the URI."}
+    - {name: sink.database, required: true}
+    - {name: column.naming.strategy}
+    - {name: field.include.list}
+    - {name: field.exclude.list}
+  checks:
+    - Ships in the MongoDB connector plugin (the same archive as the MongoDB source), not in a sink archive of its own.
+    - Not in Debezium before 3.0.
+  doc: https://debezium.io/documentation/reference/3.2/connectors/mongodb-sink.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-connector-mongodb/3.2.0.Final/debezium-connector-mongodb-3.2.0.Final-sources.jar
+
+- name: confluent-jdbc-sink
+  kind: sink
+  component: confluent
+  runtime: connect
+  class: io.confluent.connect.jdbc.JdbcSinkConnector
+  versions: "*"
+  summary: Confluent's JDBC sink; writes flat records to a relational database.
+  install: unpinned
+  unpinned_reason: The archive is distributed through Confluent Hub, which the build environment could not reach, so no digest was verified.
+  keys:
+    - {name: connection.url, required: true, credentials_in_value: true, check: "Keep the user and password out of the URL (a userinfo part or a password= parameter); use connection.user and connection.password with a secret reference."}
+    - {name: insert.mode, default: "insert", values: [insert, upsert, update]}
+    - {name: pk.mode, default: "none", values: [none, kafka, record_key, record_value]}
+    - {name: pk.fields, default: ""}
+    - {name: auto.create, default: "false"}
+    - {name: auto.evolve, default: "false"}
+    - {name: delete.enabled, default: "false", check: "true requires pk.mode=record_key."}
+    - {name: batch.size, default: "3000"}
+    - {name: table.name.format, default: "${topic}"}
+    - {name: max.retries, default: "10"}
+    - {name: retry.backoff.ms, default: "3000"}
+    - {name: db.timezone, default: "UTC"}
+  checks:
+    - Needs flat records; put ExtractNewRecordState in front of it for Debezium topics, since nested envelope structs cannot be written as columns.
+    - insert.mode=upsert needs a pk.mode other than none.
+    - Not Debezium's io.debezium.connector.jdbc.JdbcSinkConnector; the keys differ (pk.mode, not primary.key.mode).
+  doc: https://docs.confluent.io/kafka-connectors/jdbc/current/sink-connector/sink_config_options.html
+  source: https://raw.githubusercontent.com/confluentinc/kafka-connect-jdbc/master/src/main/java/io/confluent/connect/jdbc/sink/JdbcSinkConfig.java
+
+- name: elasticsearch-sink
+  kind: sink
+  component: confluent
+  runtime: connect
+  class: io.confluent.connect.elasticsearch.ElasticsearchSinkConnector
+  versions: "*"
+  summary: Confluent's Elasticsearch sink; indexes records as documents.
+  install: unpinned
+  unpinned_reason: The archive is distributed through Confluent Hub, which the build environment could not reach, so no digest was verified.
+  keys:
+    - {name: connection.url, required: true, credentials_in_value: true, check: "Keep the user and password out of the URL (a userinfo part or a password= parameter); use connection.username and connection.password with a secret reference."}
+    - {name: connection.username}
+    - {name: connection.password, secret: true}
+    - {name: key.ignore, default: "false"}
+    - {name: schema.ignore, default: "false"}
+    - {name: behavior.on.null.values, default: "FAIL", values: [IGNORE, DELETE, FAIL]}
+    - {name: behavior.on.malformed.documents, default: "FAIL", values: [IGNORE, WARN, FAIL]}
+    - {name: write.method, default: "INSERT", values: [INSERT, UPSERT]}
+    - {name: batch.size, default: "2000"}
+    - {name: max.retries, default: "5"}
+    - {name: retry.backoff.ms, default: "100"}
+    - {name: data.stream.type, default: "NONE"}
+  checks:
+    - With key.ignore=false the record key is the document id, so a change to a row replaces its document; deletes arrive as tombstones and need behavior.on.null.values=DELETE, else the task fails on the first one.
+    - Needs flat records; put ExtractNewRecordState in front of it for Debezium topics.
+  doc: https://docs.confluent.io/kafka-connectors/elasticsearch/current/configuration_options.html
+  source: https://raw.githubusercontent.com/confluentinc/kafka-connect-elasticsearch/master/src/main/java/io/confluent/connect/elasticsearch/ElasticsearchSinkConnectorConfig.java
+
+- name: s3-sink
+  kind: sink
+  component: confluent
+  runtime: connect
+  class: io.confluent.connect.s3.S3SinkConnector
+  versions: "*"
+  summary: Confluent's Amazon S3 sink; writes records to objects in a bucket in Avro, JSON, Parquet or raw bytes.
+  install: unpinned
+  unpinned_reason: The archive is distributed through Confluent Hub, which the build environment could not reach, so no digest was verified.
+  keys:
+    - {name: s3.bucket.name, required: true}
+    - {name: s3.region, default: "us-west-2"}
+    - {name: s3.part.size, default: "26214400"}
+    - {name: flush.size, required: true, check: "Records per object; there is no default."}
+    - {name: storage.class, required: true, check: "io.confluent.connect.s3.storage.S3Storage."}
+    - {name: format.class, required: true}
+    - {name: behavior.on.null.values, default: "fail"}
+    - {name: s3.compression.type, default: "none"}
+    - {name: store.kafka.keys, default: "false"}
+  checks:
+    - Tombstones fail the task under the default behavior.on.null.values=fail; Debezium topics need ignore, or tombstones dropped before the sink.
+    - flush.size, storage.class and format.class have no defaults.
+  doc: https://docs.confluent.io/kafka-connectors/s3-sink/current/configuration_options.html
+  source: https://raw.githubusercontent.com/confluentinc/kafka-connect-storage-cloud/master/kafka-connect-s3/src/main/java/io/confluent/connect/s3/S3SinkConnectorConfig.java
+
+- name: bigquery-sink
+  kind: sink
+  component: confluent
+  runtime: connect
+  class: com.wepay.kafka.connect.bigquery.BigQuerySinkConnector
+  versions: "*"
+  summary: The BigQuery sink (originally WePay's, now maintained by Confluent); streams or batch-loads records into BigQuery tables.
+  install: unpinned
+  unpinned_reason: Current releases are distributed through Confluent Hub, which the build environment could not reach; Maven Central holds only old WePay builds (up to 2.0.0-alpha).
+  keys:
+    - {name: project, required: true}
+    - {name: defaultDataset, required: true}
+    - {name: keyfile}
+    - {name: keySource, default: "FILE"}
+    - {name: autoCreateTables, default: "true"}
+    - {name: allowNewBigQueryFields, default: "false"}
+    - {name: allowBigQueryRequiredFieldRelaxation, default: "false"}
+    - {name: sanitizeTopics, default: "false"}
+    - {name: upsertEnabled, default: "false"}
+    - {name: deleteEnabled, default: "false"}
+    - {name: kafkaKeyFieldName}
+    - {name: mergeIntervalMs, default: "60000"}
+    - {name: bigQueryRetry, default: "0"}
+  checks:
+    - upsertEnabled and deleteEnabled need kafkaKeyFieldName set.
+    - With allowNewBigQueryFields=false (the default) the connector does not add columns, so a record with a new field cannot be written until the table schema has it.
+  doc: https://docs.confluent.io/kafka-connectors/bigquery/current/kafka_connect_bigquery_config.html
+  source: https://raw.githubusercontent.com/confluentinc/kafka-connect-bigquery/master/kcbq-connector/src/main/java/com/wepay/kafka/connect/bigquery/config/BigQuerySinkConfig.java
+
+- name: snowflake-sink
+  kind: sink
+  component: snowflake
+  runtime: connect
+  class: com.snowflake.kafka.connector.SnowflakeSinkConnector
+  versions: ">=3.0.0 <4.0.0"
+  summary: The Snowflake connector, 3.x line; loads records through Snowpipe or Snowpipe Streaming.
+  install: pinned
+  successor: snowflake-streaming-sink
+  archives:
+    - release: 3.5.4
+      url: https://repo1.maven.org/maven2/com/snowflake/snowflake-kafka-connector/3.5.4/snowflake-kafka-connector-3.5.4.jar
+      digest: sha512:01b451c08f4634f7ca854d968fccbeae26e29036a0735d9c9575118d4c6770bf3a1a38243117b7cb6ed15530dbe6db9077e9bae5ac020200b767128394258b08
+      source: https://repo1.maven.org/maven2/com/snowflake/snowflake-kafka-connector/3.5.4/snowflake-kafka-connector-3.5.4.jar.sha512
+  keys:
+    - {name: snowflake.url.name, required: true}
+    - {name: snowflake.user.name, required: true}
+    - {name: snowflake.private.key, secret: true}
+    - {name: snowflake.database.name, required: true}
+    - {name: snowflake.schema.name, required: true}
+    - {name: snowflake.role.name}
+    - {name: snowflake.topic2table.map}
+    - {name: snowflake.ingestion.method, default: "SNOWPIPE", values: [SNOWPIPE, SNOWPIPE_STREAMING]}
+    - {name: snowflake.enable.schematization, default: "false"}
+    - {name: buffer.count.records, default: "10000"}
+    - {name: buffer.flush.time, default: "120", check: "Seconds; the minimum is 10."}
+    - {name: buffer.size.bytes, default: "5000000"}
+  checks:
+    - 4.0.0 replaced this class with com.snowflake.kafka.connector.SnowflakeStreamingSinkConnector; moving to 4.x changes connector.class.
+    - Without snowflake.enable.schematization rows land in RECORD_CONTENT and RECORD_METADATA variant columns, not one column per field.
+  doc: https://docs.snowflake.com/en/user-guide/kafka-connector-install
+  source: https://raw.githubusercontent.com/snowflakedb/snowflake-kafka-connector/v3.5.4/src/main/java/com/snowflake/kafka/connector/SnowflakeSinkConnectorConfig.java
+
+- name: snowflake-streaming-sink
+  kind: sink
+  component: snowflake
+  runtime: connect
+  class: com.snowflake.kafka.connector.SnowflakeStreamingSinkConnector
+  versions: ">=4.0.0"
+  summary: The Snowflake connector, 4.x line; loads records through Snowpipe Streaming.
+  install: pinned
+  archives:
+    - release: 4.2.2
+      url: https://repo1.maven.org/maven2/com/snowflake/snowflake-kafka-connector/4.2.2/snowflake-kafka-connector-4.2.2.jar
+      digest: sha512:a7fe944d63b043e422b2bae3ef4b9c8c9ac2006aeff51fc865bae2d48d508660f95947d55fc0aa5a92ddfd26dd396231c3c5d3582fd0195cb0909666acc5a36a
+      source: https://repo1.maven.org/maven2/com/snowflake/snowflake-kafka-connector/4.2.2/snowflake-kafka-connector-4.2.2.jar.sha512
+  keys:
+    - {name: snowflake.url.name, required: true}
+    - {name: snowflake.user.name, required: true}
+    - {name: snowflake.private.key, secret: true}
+    - {name: snowflake.authenticator}
+    - {name: snowflake.database.name, required: true}
+    - {name: snowflake.schema.name, required: true}
+    - {name: snowflake.role.name}
+    - {name: snowflake.topic2table.map}
+    - {name: snowflake.enable.schematization, default: "true"}
+    - {name: behavior.on.null.values, default: "DEFAULT", values: [DEFAULT, IGNORE]}
+  checks:
+    - Schematization is on by default in 4.x (it was off in 3.x), so tables get one column per field.
+  doc: https://docs.snowflake.com/en/user-guide/kafka-connector-install
+  source: https://repo1.maven.org/maven2/com/snowflake/snowflake-kafka-connector/4.2.2/snowflake-kafka-connector-4.2.2-sources.jar
+
+- name: aiven-http-sink
+  kind: sink
+  component: aiven
+  runtime: connect
+  class: io.aiven.kafka.connect.http.HttpSinkConnector
+  versions: "*"
+  summary: Aiven's HTTP sink (Apache 2.0); POSTs records to an HTTP endpoint, one by one or in batches.
+  install: unpinned
+  unpinned_reason: Released as GitHub release assets, which the build environment could not fetch, so no digest was verified.
+  keys:
+    - {name: http.url, required: true}
+    - {name: http.authorization.type, required: true, values: [none, static, oauth2]}
+    - {name: http.headers.authorization, secret: true}
+    - {name: http.headers.content.type}
+    - {name: batching.enabled, default: "false"}
+    - {name: batch.max.size, default: "500"}
+    - {name: max.retries, default: "1"}
+    - {name: retry.backoff.ms, default: "3000"}
+    - {name: http.timeout, default: "30", check: "Seconds."}
+  checks:
+    - http.authorization.type has no default; static needs http.headers.authorization, oauth2 needs the oauth2.* keys.
+  doc: https://github.com/Aiven-Open/http-connector-for-apache-kafka
+  source: https://raw.githubusercontent.com/Aiven-Open/http-connector-for-apache-kafka/main/src/main/java/io/aiven/kafka/connect/http/config/HttpSinkConfig.java
