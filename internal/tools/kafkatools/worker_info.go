@@ -76,14 +76,17 @@ type workerInfoData struct {
 	TopicsSource   string                `json:"topics_source"`
 	InternalTopics []kafka.InternalTopic `json:"internal_topics"`
 	TopicsError    string                `json:"topics_error,omitempty"`
-	Findings       []string              `json:"findings,omitempty"`
-	KafkaVersion   string                `json:"kafka_version,omitempty"`
-	PluginCount    int                   `json:"plugin_count"`
-	PluginsByType  map[string]int        `json:"plugins_by_type,omitempty"`
-	Plugins        []connectPluginRow    `json:"plugins,omitempty"`
-	PluginsNote    string                `json:"plugins_note,omitempty"`
-	Loggers        []workerInfoLogger    `json:"loggers,omitempty"`
-	LoggersNote    string                `json:"loggers_note,omitempty"`
+	// TopicsNotShown counts name-matched topics a scoped room does not see:
+	// another Connect cluster's, or ones no shown group's name ties to.
+	TopicsNotShown int                `json:"topics_not_shown,omitempty"`
+	Findings       []string           `json:"findings,omitempty"`
+	KafkaVersion   string             `json:"kafka_version,omitempty"`
+	PluginCount    int                `json:"plugin_count"`
+	PluginsByType  map[string]int     `json:"plugins_by_type,omitempty"`
+	Plugins        []connectPluginRow `json:"plugins,omitempty"`
+	PluginsNote    string             `json:"plugins_note,omitempty"`
+	Loggers        []workerInfoLogger `json:"loggers,omitempty"`
+	LoggersNote    string             `json:"loggers_note,omitempty"`
 }
 
 func (t *workerInfo) Run(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
@@ -125,13 +128,16 @@ func (t *workerInfo) Run(ctx context.Context, _ json.RawMessage) (tools.Result, 
 		}
 		data.InternalTopics = topics
 	}
+	if len(names) == 0 && !sc.Unscoped() {
+		data.InternalTopics, data.TopicsNotShown = scopeInternalTopics(data.InternalTopics, groups, data.Groups)
+	}
 	if gErr != nil && tErr != nil {
 		return tools.Result{}, fmt.Errorf("kafkatools: connect_worker_info: %w", errors.Join(gErr, tErr))
 	}
 	if data.InternalTopics == nil {
 		data.InternalTopics = []kafka.InternalTopic{}
 	}
-	data.Findings = internalTopicFindings(data.InternalTopics, data.TopicsSource)
+	data.Findings = internalTopicFindings(data.InternalTopics, data.TopicsSource, data.TopicsNotShown)
 
 	t.plugins(ctx, &data)
 	t.loggers(ctx, &data)
@@ -200,6 +206,37 @@ func showGroup(g kafka.ConnectWorkerGroup, own func(string) bool, why string) wo
 	return out
 }
 
+// scopeInternalTopics keeps the name-matched topics that belong to a shown
+// group (kafka.AttributeInternalTopics, over every Connect group on the
+// cluster so another cluster's topics are claimed by their own group) and
+// counts the rest. Name matching finds every Connect cluster's storage
+// topics, and their names name the other clusters; a topic no group can be
+// tied to (a stopped cluster's, or a name that fits two groups) is hidden
+// too, since it may be anyone's. With the groups unreadable nothing can be
+// tied, so every topic is a count.
+func scopeInternalTopics(topics []kafka.InternalTopic, groups []kafka.ConnectWorkerGroup, shown []workerInfoGroup) ([]kafka.InternalTopic, int) {
+	names := make([]string, len(topics))
+	for i, it := range topics {
+		names[i] = it.Name
+	}
+	ids := make([]string, len(groups))
+	for i, g := range groups {
+		ids[i] = g.GroupID
+	}
+	owner := kafka.AttributeInternalTopics(names, ids)
+	isShown := map[string]bool{}
+	for _, g := range shown {
+		isShown[g.GroupID] = true
+	}
+	kept := []kafka.InternalTopic{}
+	for _, it := range topics {
+		if g, ok := owner[it.Name]; ok && isShown[pluginText(g)] {
+			kept = append(kept, it)
+		}
+	}
+	return kept, len(topics) - len(kept)
+}
+
 // ParseInternalTopics splits CONNECT_INTERNAL_TOPICS: a comma list of the
 // config, offset and status topics, in that order. Empty entries are dropped.
 // The wiring (Q3e) passes the result as Deps.ConnectInternalTopics.
@@ -229,9 +266,13 @@ func configuredRoles(names []string) map[string]string {
 // internalTopicFindings applies the three rules of the Q3a row, plus a
 // configured topic that does not exist. Each finding names the topic and why
 // Connect cares.
-func internalTopicFindings(topics []kafka.InternalTopic, source string) []string {
+func internalTopicFindings(topics []kafka.InternalTopic, source string, notShown int) []string {
 	var out []string
-	if len(topics) == 0 && source == "name match" {
+	switch {
+	case len(topics) > 0 || source != "name match":
+	case notShown > 0:
+		out = append(out, "no Connect internal topic is tied to this room's worker group by name; set CONNECT_INTERNAL_TOPICS to name them")
+	default:
 		out = append(out, "no topic looks like a Connect internal topic (…-configs, …-offsets, …-status); set CONNECT_INTERNAL_TOPICS to name them")
 	}
 	for _, it := range topics {
@@ -361,6 +402,7 @@ func renderWorkerInfo(d workerInfoData) string {
 	appendLine(&sb, pluginsLine(d))
 	appendLine(&sb, loggersLine(d))
 	appendLine(&sb, tools.NotShown(d.OtherGroups, "Connect worker group", "Connect worker groups"))
+	appendLine(&sb, tools.NotShown(d.TopicsNotShown, "Connect internal topic", "Connect internal topics"))
 	return sb.String()
 }
 
