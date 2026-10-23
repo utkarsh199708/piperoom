@@ -67,22 +67,22 @@ func newPicker(t *testing.T, base string) *pickerEnv {
 		Env:    p.env,
 		Panel:  httpapi.PanelInput{Supported: groqSupported(), Getenv: p.env.get},
 		Now:    func() time.Time { return time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC) },
-		Build: func(ctx context.Context, cfg config.Config) (func(), error) {
+		Build: func(ctx context.Context, cfg config.Config) (func(), func(), error) {
 			p.builds.Add(1)
 			if p.buildErr != nil {
-				return nil, p.buildErr
+				return nil, nil, p.buildErr
 			}
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.ModelBaseURL+"/models", nil)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			req.Header.Set("Authorization", "Bearer "+p.env.get(config.EnvModelAPIKey))
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			resp.Body.Close()
-			return func() { p.installed.Store(cfg.ModelBaseURL) }, nil
+			return func() { p.installed.Store(cfg.ModelBaseURL) }, func() {}, nil
 		},
 	})
 	return p
