@@ -96,8 +96,15 @@ type Finding struct {
 	Issue    string
 }
 
-// ErrEmbeddedVersions is returned when a declared version does not parse.
+// ErrEmbeddedVersions is returned when the declared versions are not usable
+// at all (a negative Java release). A version string that does not parse is
+// not an error: see CheckEmbedded.
 var ErrEmbeddedVersions = errors.New("setup/knowledge: bad embedded versions")
+
+// RuleVersionUnparsed is the Rule of the info finding CheckEmbedded returns
+// for a declared version it cannot read; the rules on that component are
+// skipped.
+const RuleVersionUnparsed = "version-unparsed"
 
 const (
 	rn20  = "https://debezium.io/releases/2.0/release-notes"
@@ -168,14 +175,14 @@ var embeddedRules = []VersionRule{
 		Source: rn31 + "#release-3.1.0-final", Quote: fmt.Sprintf(kafkaCompat, "3.9.0", "3.9.0"),
 	},
 	{
-		// The 3.2.0 to 3.2.6 notes say 4.0.0 (DBZ-8875), but their Maven
+		// The 3.2.0 to 3.2.6 notes say 4.0.0 (the move is DBZ-8875, in
+		// 3.2.0.Alpha1, not this rule's anchor), but their Maven
 		// parent still pinned version.kafka 3.9.0 until 3.3.0.Alpha2 moved
 		// it (DBZ-9300), so debezium-bom resolves 3.9: both lines are what
 		// the release was built or tested with.
 		ID: "kafka-line-3.2", Check: CheckKafkaLine, On: OnEngine, From: "3.2.0.Final", Until: "3.2.7.Final", Want: "4.0|3.9", Severity: SeverityWarn,
 		Title: "Debezium 3.2.0 to 3.2.6 were built against Kafka Connect 4.0", Fix: "Pin the Kafka client to 4.0.x (the release notes) or 3.9.x (what debezium-bom resolves), or remove the pin.",
-		Source: rn32 + "#release-3.2.0-final", Issue: "DBZ-8875",
-		Quote: fmt.Sprintf(kafkaCompat, "4.0.0", "4.0.0") + " Debezium is now built and tested with Kafka 4.0.",
+		Source: rn32 + "#release-3.2.0-final", Quote: fmt.Sprintf(kafkaCompat, "4.0.0", "4.0.0"),
 	},
 	{
 		ID: "kafka-line-3.2.7", Check: CheckKafkaLine, On: OnEngine, From: "3.2.7.Final", Until: "3.3.0.Alpha1", Want: "3.9", Severity: SeverityWarn,
@@ -207,7 +214,10 @@ var embeddedRules = []VersionRule{
 	outboxLine("3.2.1.Final", "3.3.0.Alpha1", "3.23", "3.23.4", rn32+"#release-3.2.1-final", "DBZ-9219", "Update Outbox Extension to Quarkus 3.23.4 & Align to Hibernate 7.x"),
 	outboxLine("3.3.0.Alpha1", "3.4.0.Alpha1", "3.23", "3.23.4", rn33+"#release-3.3.0-alpha1", "DBZ-9219", "Update Outbox Extension to Quarkus 3.23.4 & Align to Hibernate 7.x"),
 
-	// Engine APIs that are gone.
+	// Engine APIs that are gone. These fire on every project on 2.5+ or
+	// 3.2+, since the build files cannot show whether the code still uses
+	// EmbeddedEngine: U6b should surface them only when project_inspect finds
+	// an io.debezium.embedded.EmbeddedEngine import.
 	{
 		ID: "dbz25-embeddedengine-interface-removed", Check: CheckEngineAPI, On: OnEngine, From: "2.5.0.Alpha2", Severity: SeverityInfo,
 		Title:  "The deprecated EmbeddedEngine API was removed in 2.5",
@@ -362,43 +372,83 @@ func ValidateEmbedded() error {
 }
 
 // CheckEmbedded applies the shipped rules to a project's declared versions
-// and returns the findings in rule order. A rule whose inputs are not
-// declared does not fire. A Confluent Platform Kafka build ("7.5.0-ccs")
-// is not held against an Apache Kafka line: CP 7.5 ships Kafka 3.5, not 7.5.
+// and returns the findings in rule order, after any RuleVersionUnparsed
+// findings. A rule whose inputs are not declared does not fire.
+//
+// A vendor build suffix is cut before parsing: Red Hat's "-redhat-00001" or
+// ".redhat-00002" and Maven's "-SNAPSHOT" (a snapshot ranks as its
+// release). A version that still does not parse skips the rules on that
+// component and yields one RuleVersionUnparsed info finding in its place,
+// so the other components are still checked.
+//
+// A Confluent Platform Kafka build ("7.5.0-ccs", "8.0.0-ce") is mapped to
+// the Apache Kafka line it ships: CP 7.0 to 7.9 are Kafka 3.0 to 3.9, CP 8.0
+// is Kafka 4.0. Any other CP line skips the Kafka rules, since CP 7.5 is not
+// Kafka 7.5.
 func CheckEmbedded(v EmbeddedVersions) ([]Finding, error) {
 	return checkRules(embeddedRules, v)
 }
 
 func checkRules(rules []VersionRule, v EmbeddedVersions) ([]Finding, error) {
+	if v.Java < 0 {
+		return nil, fmt.Errorf("%w: java release is negative", ErrEmbeddedVersions)
+	}
+	v.Engine = strings.TrimSpace(v.Engine)
+	v.Outbox = strings.TrimSpace(v.Outbox)
+	v.Kafka = strings.TrimSpace(v.Kafka)
+	v.Quarkus = strings.TrimSpace(v.Quarkus)
+
+	var out []Finding
+	unparsed := func(what string) {
+		out = append(out, Finding{
+			Rule: RuleVersionUnparsed, Severity: SeverityInfo,
+			Message: "the " + what + " version the build declares is not a release number; its rules were not checked",
+			Fix:     "Declare a plain release version (for example 3.2.0.Final or 3.9.0), or check this component by hand.",
+		})
+	}
 	parsed := map[RuleOn]*dbzVersion{}
-	var kafkaVendor bool
-	for on, raw := range map[RuleOn]string{OnEngine: v.Engine, OnOutbox: v.Outbox, OnKafka: v.Kafka} {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
+	var kafkaVendor bool // a Confluent build of no known Kafka line
+	for _, c := range []struct {
+		on   RuleOn
+		raw  string
+		name string
+	}{{OnEngine, v.Engine, "debezium-embedded"}, {OnOutbox, v.Outbox, "debezium-quarkus-outbox"}, {OnKafka, v.Kafka, "Kafka"}} {
+		if c.raw == "" {
 			continue
 		}
-		if on == OnKafka {
+		raw := cutBuildSuffix(c.raw)
+		if c.on == OnKafka {
 			if base, ok := cutVendorSuffix(raw); ok {
-				kafkaVendor = true
-				raw = base
+				pv, err := parseDbzVersion(base)
+				if err != nil {
+					unparsed(c.name)
+					continue
+				}
+				if k, ok := confluentKafka(pv); ok {
+					parsed[OnKafka] = &k
+					v.Kafka += " (Kafka " + k.line() + ")"
+				} else {
+					kafkaVendor = true
+				}
+				continue
 			}
 		}
 		pv, err := parseDbzVersion(raw)
 		if err != nil {
-			return nil, fmt.Errorf("%w: %s version does not parse", ErrEmbeddedVersions, on)
+			unparsed(c.name)
+			continue
 		}
-		parsed[on] = &pv
+		parsed[c.on] = &pv
 	}
 	var quarkus *dbzVersion
-	if q := strings.TrimSpace(v.Quarkus); q != "" {
-		pv, err := parseDbzVersion(q)
-		if err != nil {
-			return nil, fmt.Errorf("%w: quarkus version does not parse", ErrEmbeddedVersions)
+	if v.Quarkus != "" {
+		if pv, err := parseDbzVersion(cutBuildSuffix(v.Quarkus)); err != nil {
+			unparsed("Quarkus")
+		} else {
+			quarkus = &pv
 		}
-		quarkus = &pv
 	}
 
-	var out []Finding
 	for _, r := range rules {
 		on := parsed[r.On]
 		if on == nil || (r.On == OnKafka && kafkaVendor) {
@@ -424,18 +474,18 @@ func checkRules(rules []VersionRule, v EmbeddedVersions) ([]Finding, error) {
 				continue
 			}
 			msg = fmt.Sprintf("debezium-embedded %s was built against Kafka %s; the project pins Kafka %s",
-				v.Engine, strings.ReplaceAll(r.Want, "|", " or "), strings.TrimSpace(v.Kafka))
+				v.Engine, strings.ReplaceAll(r.Want, "|", " or "), v.Kafka)
 		case CheckQuarkusMajor:
 			want, _ := strconv.Atoi(r.Want)
 			if quarkus == nil || quarkus.nums[0] >= want {
 				continue
 			}
-			msg = fmt.Sprintf("the Outbox extension %s needs Quarkus %d; the project uses Quarkus %s", v.Outbox, want, strings.TrimSpace(v.Quarkus))
+			msg = fmt.Sprintf("the Outbox extension %s needs Quarkus %d; the project uses Quarkus %s", v.Outbox, want, v.Quarkus)
 		case CheckQuarkusLine:
 			if quarkus == nil || lineIn(quarkus.line(), r.Want) {
 				continue
 			}
-			msg = fmt.Sprintf("the Outbox extension %s was built against Quarkus %s; the project uses Quarkus %s", v.Outbox, r.Want, strings.TrimSpace(v.Quarkus))
+			msg = fmt.Sprintf("the Outbox extension %s was built against Quarkus %s; the project uses Quarkus %s", v.Outbox, r.Want, v.Quarkus)
 		case CheckEngineAPI:
 			msg = fmt.Sprintf("debezium-embedded %s: %s", v.Engine, r.Title)
 		default:
@@ -464,6 +514,31 @@ func lineIn(line, want string) bool {
 		}
 	}
 	return false
+}
+
+// buildSuffixRe matches the build suffixes CheckEmbedded cuts before parsing:
+// Red Hat's "-redhat-00001" / ".redhat-00002" and Maven's "-SNAPSHOT".
+var buildSuffixRe = regexp.MustCompile(`(?i)([.-]redhat-\d{1,8})?(-SNAPSHOT)?$`)
+
+// cutBuildSuffix strips a Red Hat build suffix and a -SNAPSHOT, so
+// "2.7.3.Final-redhat-00001" reads as 2.7.3.Final and "3.3.0-SNAPSHOT" as
+// 3.3.0.
+func cutBuildSuffix(s string) string {
+	return buildSuffixRe.ReplaceAllString(s, "")
+}
+
+// confluentKafka maps a Confluent Platform version to the Apache Kafka line
+// it ships: CP 7.x is Kafka 3.x (7.0 is 3.0 to 7.9 is 3.9) and CP 8.0 is
+// Kafka 4.0. The patch number is not carried over (CP 7.5.3 ships Kafka
+// 3.5.x, not 3.5.3); the rules compare lines and x.y.0 bounds only.
+func confluentKafka(cp dbzVersion) (dbzVersion, bool) {
+	switch {
+	case cp.nums[0] == 7 && cp.nums[1] <= 9:
+		return dbzVersion{nums: [3]int{3, cp.nums[1], 0}, rank: 3}, true
+	case cp.nums[0] == 8 && cp.nums[1] == 0:
+		return dbzVersion{nums: [3]int{4, 0, 0}, rank: 3}, true
+	}
+	return dbzVersion{}, false
 }
 
 // cutVendorSuffix strips a Confluent build suffix ("-ccs", "-ce") and reports

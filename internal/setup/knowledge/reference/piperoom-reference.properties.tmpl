@@ -15,6 +15,16 @@ database.hostname={{.Host}}
 database.port={{.Port}}
 database.user={{.User}}
 database.password=${secret:{{.PasswordSecret}}}
+{{- if eq .TLS "verify"}}
+# TLS with the server certificate and host name checked (see the README for
+# pointing at your CA).
+{{- else if eq .TLS "require"}}
+# TLS without a certificate check: encrypted, but open to a man in the middle.
+# Use {{if eq .Source "postgres"}}verify-full{{else}}verify_identity{{end}} once the CA is set up (see the README).
+{{- else}}
+# Plain text: no TLS at all. Only for a database on this host.
+{{- end}}
+{{.TLSKey}}={{.TLSValue}}
 {{- if eq .Source "postgres"}}
 database.dbname={{.Database}}
 plugin.name=pgoutput

@@ -9,6 +9,8 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -22,8 +24,10 @@ import java.util.regex.Pattern;
  * Piperoom reference project: the smallest Debezium Engine application for a
  * {{.SourceTitle}} source on Debezium {{.Release}}. Piperoom generated it and
  * never builds or runs it; you do. Every change event is printed as one line
- * that starts with "piperoom-reference event", so the log of this program
- * shows the setup canary.
+ * that starts with "piperoom-reference event" and names only its destination:
+ * no key or row value is ever printed, because the log goes to Piperoom. An
+ * event whose value contains a canary nonce from PIPEROOM_CANARY also prints
+ * "piperoom-reference canary NONCE seen", the line the setup check looks for.
  */
 public final class ReferenceApp {
 
@@ -36,6 +40,9 @@ public final class ReferenceApp {
     /** The files the engine writes; their folders must exist before it starts. */
     private static final String[] FILE_KEYS = {"offset.storage.file.filename", "schema.history.internal.file.filename"};
 
+    /** A canary nonce: a token Piperoom inserted, never row data. */
+    private static final Pattern CANARY = Pattern.compile("^[A-Za-z0-9-]{8,64}$");
+
     private ReferenceApp() {
     }
 
@@ -46,6 +53,10 @@ public final class ReferenceApp {
             props.load(in);
         }
         if (!resolveSecrets(props)) {
+            System.exit(2);
+        }
+        List<String> canaries = canaries(System.getenv("PIPEROOM_CANARY"));
+        if (canaries == null) {
             System.exit(2);
         }
         for (String key : FILE_KEYS) {
@@ -63,8 +74,19 @@ public final class ReferenceApp {
         DebeziumEngine<ChangeEvent<String, String>> engine = DebeziumEngine
                 .create(Json.class, Json.class, Json.class, ENGINE_FACTORY)
                 .using(props)
-                .notifying(event -> System.out.println("piperoom-reference event destination=" + event.destination()
-                        + " key=" + event.key() + " value=" + event.value()))
+                .notifying(event -> {
+                    String destination = event.destination();
+                    System.out.println("piperoom-reference event destination=" + destination);
+                    String value = event.value();
+                    if (value == null) {
+                        return;
+                    }
+                    for (String nonce : canaries) {
+                        if (value.contains(nonce)) {
+                            System.out.println("piperoom-reference canary " + nonce + " seen destination=" + destination);
+                        }
+                    }
+                })
                 .using((success, message, error) -> {
                     if (!success) {
                         failed.set(true);
@@ -94,6 +116,30 @@ public final class ReferenceApp {
         if (failed.get()) {
             System.exit(1);
         }
+    }
+
+    /**
+     * Reads the comma-separated canary nonces of PIPEROOM_CANARY (none when
+     * it is unset). Returns null, without echoing the value, when one is not
+     * a nonce.
+     */
+    private static List<String> canaries(String env) {
+        List<String> out = new ArrayList<>();
+        if (env == null) {
+            return out;
+        }
+        for (String part : env.split(",")) {
+            String nonce = part.trim();
+            if (nonce.isEmpty()) {
+                continue;
+            }
+            if (!CANARY.matcher(nonce).matches()) {
+                System.err.println("piperoom-reference: PIPEROOM_CANARY must be nonces of 8 to 64 letters, digits or '-', separated by commas");
+                return null;
+            }
+            out.add(nonce);
+        }
+        return out;
     }
 
     /**

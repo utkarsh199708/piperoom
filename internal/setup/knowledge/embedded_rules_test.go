@@ -136,8 +136,28 @@ func TestCheckEmbedded(t *testing.T) {
 		{"2.x on Java 8", EmbeddedVersions{Engine: "2.4.2.Final", Java: 8}, []string{"dbz2-java11"}},
 		{"3.0.1 with Kafka 3.9", EmbeddedVersions{Engine: "3.0.1.Final", Kafka: "3.9.0", Java: 17},
 			[]string{"kafka-line-3.0.0", "dbz25-embeddedengine-interface-removed"}},
-		{"Confluent Kafka build is not held against Apache lines", EmbeddedVersions{Engine: "3.1.3.Final", Kafka: "7.5.0-ccs", Java: 17},
+		{"Confluent 7.9 is Kafka 3.9", EmbeddedVersions{Engine: "3.1.3.Final", Kafka: "7.9.0-ccs", Java: 17},
 			[]string{"dbz25-embeddedengine-interface-removed"}},
+		{"Confluent 7.5 is Kafka 3.5, not 7.5", EmbeddedVersions{Engine: "3.1.3.Final", Kafka: "7.5.0-ccs", Java: 17},
+			[]string{"kafka-line-3.1", "dbz25-embeddedengine-interface-removed"}},
+		{"Confluent 8.0 is Kafka 4.0 and needs Java 17", EmbeddedVersions{Engine: "2.7.2.Final", Kafka: "8.0.0-ccs", Java: 11},
+			[]string{"kafka4-java17", "kafka-line-2.7", "dbz25-embeddedengine-interface-removed"}},
+		{"Confluent line with no known Kafka line skips the Kafka rules", EmbeddedVersions{Engine: "2.7.2.Final", Kafka: "9.1.0-ce", Java: 11},
+			[]string{"dbz25-embeddedengine-interface-removed"}},
+		{"engine at the 3.0.2 boundary with Kafka 3.8", EmbeddedVersions{Engine: "3.0.2.Final", Kafka: "3.8.0", Java: 17},
+			[]string{"kafka-line-3.0.2", "dbz25-embeddedengine-interface-removed"}},
+		{"engine at the 3.0.2 boundary with Kafka 3.9", EmbeddedVersions{Engine: "3.0.2.Final", Kafka: "3.9.0", Java: 17},
+			[]string{"dbz25-embeddedengine-interface-removed"}},
+		{"engine at the 3.2.7 boundary with Kafka 4.0", EmbeddedVersions{Engine: "3.2.7.Final", Kafka: "4.0.0", Java: 17},
+			[]string{"kafka-line-3.2.7", "dbz25-embeddedengine-interface-removed", "dbz32-embeddedengine-class-removed"}},
+		{"outbox at the 3.2.1 boundary on Quarkus 3.22", EmbeddedVersions{Outbox: "3.2.1.Final", Quarkus: "3.22.3", Java: 21},
+			[]string{"outbox-quarkus-3.23-from-3.2.1.final"}},
+		{"Red Hat builds read as their release", EmbeddedVersions{Engine: "2.7.3.Final-redhat-00001", Kafka: "3.9.0.redhat-00002", Java: 11},
+			[]string{"kafka-line-2.7", "dbz25-embeddedengine-interface-removed"}},
+		{"Red Hat Quarkus build", EmbeddedVersions{Outbox: "3.2.0.Final", Quarkus: "3.15.1.redhat-00003", Java: 21},
+			[]string{"outbox-quarkus-3.22-from-3.2.0.beta1"}},
+		{"a snapshot reads as its release", EmbeddedVersions{Engine: "3.3.0-SNAPSHOT", Kafka: "4.1.0", Java: 17},
+			[]string{"dbz25-embeddedengine-interface-removed", "dbz32-embeddedengine-class-removed"}},
 		{"outbox 3.2 on an old Quarkus line", EmbeddedVersions{Outbox: "3.2.0.Final", Quarkus: "3.15.4", Java: 21},
 			[]string{"outbox-quarkus-3.22-from-3.2.0.beta1"}},
 		{"outbox 3.2 on its own line", EmbeddedVersions{Outbox: "3.2.0.Final", Quarkus: "3.22.3", Java: 21}, nil},
@@ -157,6 +177,9 @@ func TestCheckEmbedded(t *testing.T) {
 			var got []string
 			for _, f := range fs {
 				got = append(got, f.Rule)
+				if f.Rule == RuleVersionUnparsed {
+					t.Errorf("unexpected %s finding: %+v", f.Rule, f)
+				}
 				if f.Source == "" || f.Message == "" || f.Fix == "" || f.Severity == "" {
 					t.Errorf("finding %s is missing a field: %+v", f.Rule, f)
 				}
@@ -169,7 +192,7 @@ func TestCheckEmbedded(t *testing.T) {
 }
 
 func TestCheckEmbeddedMessages(t *testing.T) {
-	fs, err := CheckEmbedded(EmbeddedVersions{Engine: "3.1.3.Final", Kafka: "4.0.0", Java: 11})
+	fs, err := CheckEmbedded(EmbeddedVersions{Engine: " 3.1.3.Final\n", Kafka: "4.0.0 ", Java: 11})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,16 +209,82 @@ func TestCheckEmbeddedMessages(t *testing.T) {
 	if got := byRule["kafka4-java17"]; got.Severity != SeverityError || got.Source != kf400 {
 		t.Errorf("kafka4-java17 = %+v", got)
 	}
+	if got := byRule["dbz25-embeddedengine-interface-removed"].Message; got != "debezium-embedded 3.1.3.Final: The deprecated EmbeddedEngine API was removed in 2.5" {
+		t.Errorf("engine-api message = %q", got)
+	}
+
+	fs, err = CheckEmbedded(EmbeddedVersions{Outbox: " 3.2.0.Final ", Quarkus: " 3.15.4", Java: 21})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 1 || fs[0].Message != "the Outbox extension 3.2.0.Final was built against Quarkus 3.22; the project uses Quarkus 3.15.4" {
+		t.Errorf("outbox findings = %+v", fs)
+	}
+
+	fs, err = CheckEmbedded(EmbeddedVersions{Engine: "3.1.3.Final", Kafka: "7.5.0-ccs", Java: 11})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range fs {
+		if f.Rule == "kafka-line-3.1" && f.Message != "debezium-embedded 3.1.3.Final was built against Kafka 3.9; the project pins Kafka 7.5.0-ccs (Kafka 3.5)" {
+			t.Errorf("confluent kafka message = %q", f.Message)
+		}
+	}
 }
 
-func TestCheckEmbeddedRefusesUnparseableVersions(t *testing.T) {
-	for _, in := range []EmbeddedVersions{
-		{Engine: "latest"},
-		{Kafka: "3.9.x"},
-		{Outbox: "3.2.0.Final", Quarkus: "three"},
+// A version that does not parse skips only its own component's rules, with
+// one info finding that does not echo it; the other components are checked.
+func TestCheckEmbeddedSkipsUnparseableVersions(t *testing.T) {
+	cases := []struct {
+		name string
+		in   EmbeddedVersions
+		want []string
+	}{
+		{"engine", EmbeddedVersions{Engine: "latest", Kafka: "4.0.0", Java: 11}, []string{RuleVersionUnparsed, "kafka4-java17"}},
+		{"kafka", EmbeddedVersions{Engine: "3.1.3.Final", Kafka: "3.9.x", Java: 11},
+			[]string{RuleVersionUnparsed, "dbz3-java17", "dbz25-embeddedengine-interface-removed"}},
+		{"confluent", EmbeddedVersions{Kafka: "seven-ccs"}, []string{RuleVersionUnparsed}},
+		{"quarkus", EmbeddedVersions{Outbox: "3.2.0.Final", Quarkus: "three", Java: 17}, []string{RuleVersionUnparsed, "dbz3-outbox-java21"}},
+		{"two of them", EmbeddedVersions{Engine: "3.2.0.Snapshot", Outbox: "next", Java: 17}, []string{RuleVersionUnparsed, RuleVersionUnparsed}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, err := CheckEmbedded(tc.in)
+			if err != nil {
+				t.Fatalf("CheckEmbedded: %v", err)
+			}
+			var got []string
+			for _, f := range fs {
+				got = append(got, f.Rule)
+				if f.Rule != RuleVersionUnparsed {
+					continue
+				}
+				if f.Severity != SeverityInfo || f.Message == "" || f.Fix == "" {
+					t.Errorf("finding %+v", f)
+				}
+				for _, raw := range []string{tc.in.Engine, tc.in.Outbox, tc.in.Kafka, tc.in.Quarkus} {
+					if raw != "" && strings.Contains(f.Message, raw) {
+						t.Errorf("message %q echoes %q", f.Message, raw)
+					}
+				}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("rules = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if _, err := CheckEmbedded(EmbeddedVersions{Engine: "3.2.0.Final", Java: -1}); !errors.Is(err, ErrEmbeddedVersions) {
+		t.Errorf("negative Java: err = %v, want ErrEmbeddedVersions", err)
+	}
+}
+
+func TestCutBuildSuffix(t *testing.T) {
+	for in, want := range map[string]string{
+		"2.7.3.Final-redhat-00001": "2.7.3.Final", "3.9.0.redhat-00002": "3.9.0", "3.15.1.redhat-00003": "3.15.1",
+		"3.3.0-SNAPSHOT": "3.3.0", "3.3.0-snapshot": "3.3.0", "3.2.0.Final": "3.2.0.Final", "7.5.0-ccs": "7.5.0-ccs",
 	} {
-		if _, err := CheckEmbedded(in); !errors.Is(err, ErrEmbeddedVersions) {
-			t.Errorf("CheckEmbedded(%+v) err = %v, want ErrEmbeddedVersions", in, err)
+		if got := cutBuildSuffix(in); got != want {
+			t.Errorf("cutBuildSuffix(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

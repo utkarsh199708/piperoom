@@ -42,6 +42,24 @@ const (
 	SourceMySQL    SourceKind = "mysql"
 )
 
+// TLSMode is how a reference project connects to its source database.
+type TLSMode string
+
+// The TLS modes a reference project is rendered for. The empty mode is
+// TLSVerify, so a caller that sets nothing gets the strict default.
+const (
+	// TLSVerify requires TLS and checks the server certificate and host name:
+	// Postgres database.sslmode=verify-full, MySQL database.ssl.mode=
+	// verify_identity.
+	TLSVerify TLSMode = "verify"
+	// TLSRequire requires TLS but checks no certificate (Postgres require,
+	// MySQL required): encrypted, open to a man in the middle.
+	TLSRequire TLSMode = "require"
+	// TLSDisable connects in plain text (Postgres disable, MySQL disabled),
+	// for a database on the same host only.
+	TLSDisable TLSMode = "disable"
+)
+
 // ErrEmbeddedParams is returned when reference project params fail
 // validation. Compare with errors.Is.
 var ErrEmbeddedParams = errors.New("setup/knowledge: bad reference project params")
@@ -70,6 +88,8 @@ type EmbeddedParams struct {
 	SlotName        string // Postgres only: the replication slot
 	PublicationName string // Postgres only; empty means SlotName
 	ServerID        uint32 // MySQL only: database.server.id, unique among replicas
+
+	TLS TLSMode // verify (the default when empty), require or disable
 }
 
 // EmbeddedFile is one rendered file of a reference project. Path is relative
@@ -144,6 +164,11 @@ func (p EmbeddedParams) Validate() error {
 	case SourcePostgres, SourceMySQL:
 	default:
 		return bad("Source", "must be postgres or mysql")
+	}
+	switch p.TLS {
+	case "", TLSVerify, TLSRequire, TLSDisable:
+	default:
+		return bad("TLS", "must be verify, require or disable")
 	}
 	if !groupIDRe.MatchString(p.GroupID) {
 		return bad("GroupID", "must be a lowercase Java package such as com.example.cdc")
@@ -283,6 +308,8 @@ type renderData struct {
 	BuildCommand      string
 	RunCommand        string
 	RunCommandWindows string
+	TLSKey            string // database.sslmode (Postgres) or database.ssl.mode (MySQL)
+	TLSValue          string // the source's value for the TLS mode
 }
 
 // RenderEmbedded validates p and renders the reference project's files:
@@ -294,6 +321,9 @@ func RenderEmbedded(p EmbeddedParams) ([]EmbeddedFile, error) {
 	}
 	if p.Source == SourcePostgres && p.PublicationName == "" {
 		p.PublicationName = p.SlotName
+	}
+	if p.TLS == "" {
+		p.TLS = TLSVerify
 	}
 	java, err := JavaRelease(p.Release)
 	if err != nil {
@@ -317,10 +347,14 @@ func RenderEmbedded(p EmbeddedParams) ([]EmbeddedFile, error) {
 		d.SourceTitle = "Postgres"
 		d.ConnectorClass = "io.debezium.connector.postgresql.PostgresConnector"
 		d.ConnectorArtifact = "debezium-connector-postgres"
+		d.TLSKey = "database.sslmode"
+		d.TLSValue = map[TLSMode]string{TLSVerify: "verify-full", TLSRequire: "require", TLSDisable: "disable"}[p.TLS]
 	case SourceMySQL:
 		d.SourceTitle = "MySQL"
 		d.ConnectorClass = "io.debezium.connector.mysql.MySqlConnector"
 		d.ConnectorArtifact = "debezium-connector-mysql"
+		d.TLSKey = "database.ssl.mode"
+		d.TLSValue = map[TLSMode]string{TLSVerify: "verify_identity", TLSRequire: "required", TLSDisable: "disabled"}[p.TLS]
 	}
 	d.BuildTitle = "Maven"
 	if p.Build == BuildGradle {

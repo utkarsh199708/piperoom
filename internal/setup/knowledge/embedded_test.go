@@ -74,14 +74,17 @@ func TestRenderEmbeddedAllCombos(t *testing.T) {
 					"database.password=${secret:orders_db_password}\n", "database.dbname=orders\n",
 					"slot.name=orders_cdc\n", "publication.name=orders_cdc\n", "publication.autocreate.mode=filtered\n",
 					`table.include.list=public\\.orders,public\\.customers` + "\n", "topic.prefix=orders\n",
-					"database.hostname=db.internal\n", "database.port=5432\n",
+					"database.hostname=db.internal\n", "database.port=5432\n", "database.sslmode=verify-full\n",
 				},
-				"src/main/java/com/example/cdc/ReferenceApp.java": {"package com.example.cdc;", "ConvertingAsyncEngineBuilderFactory", "piperoom-reference event"},
-				"README.md": {"PIPEROOM_SECRET_orders_db_password", "mvn -B -q package -DskipTests", "java -jar target/orders-cdc-1.0.0.jar", "pg_drop_replication_slot('orders_cdc')"},
+				"src/main/java/com/example/cdc/ReferenceApp.java": {"package com.example.cdc;", "ConvertingAsyncEngineBuilderFactory", "piperoom-reference event", `"piperoom-reference canary "`},
+				"README.md": {"read -rs PIPEROOM_SECRET_orders_db_password", "Read-Host -MaskInput", "mvn -B -q package -DskipTests", "database.sslrootcert", "REPLICATION", "java -jar target/orders-cdc-1.0.0.jar", "pg_drop_replication_slot('orders_cdc')"},
 			},
 			notIn: map[string][]string{
 				"pom.xml":                       {"debezium-connector-mysql", "debezium-storage-file"},
-				"piperoom-reference.properties": {"schema.history", "server.id"},
+				"piperoom-reference.properties": {"schema.history", "server.id", "ssl.mode"},
+				// The log goes to Piperoom: no key or row value is printed.
+				"src/main/java/com/example/cdc/ReferenceApp.java": {"event.key()", `" value="`},
+				"README.md": {"=<password>"},
 			},
 		},
 		{
@@ -108,8 +111,9 @@ func TestRenderEmbeddedAllCombos(t *testing.T) {
 					"connector.class=io.debezium.connector.mysql.MySqlConnector\n", "database.server.id=184054\n",
 					"database.include.list=inventory\n", `table.include.list=inventory\\.products` + "\n",
 					"schema.history.internal=io.debezium.storage.file.history.FileSchemaHistory\n",
-					"database.password=${secret:inventory_db_password}\n",
+					"database.password=${secret:inventory_db_password}\n", "database.ssl.mode=verify_identity\n",
 				},
+				"README.md": {"database.ssl.truststore=", "REPLICATION SLAVE, REPLICATION CLIENT"},
 			},
 			notIn: map[string][]string{
 				"pom.xml":                       {"debezium-connector-postgres"},
@@ -286,6 +290,8 @@ func TestRenderEmbeddedRefusesBadParams(t *testing.T) {
 		{"mysql server id zero", mysqlParams, func(p *EmbeddedParams) { p.ServerID = 0 }, ""},
 		{"mysql with a slot", mysqlParams, func(p *EmbeddedParams) { p.SlotName = "s" }, ""},
 		{"mysql table in another database", mysqlParams, func(p *EmbeddedParams) { p.Tables = []string{"other.products"} }, ""},
+		{"tls mode unknown", pgParams, func(p *EmbeddedParams) { p.TLS = "prefer" }, "prefer"},
+		{"tls mode injection", mysqlParams, func(p *EmbeddedParams) { p.TLS = "disabled\ndatabase.password=x" }, "database.password"},
 	}
 	for _, tc := range cases {
 		for _, build := range []BuildTool{BuildMaven, BuildGradle} {
@@ -332,6 +338,45 @@ func TestEmbeddedCommands(t *testing.T) {
 	}
 }
 
+// Each TLS mode renders the source's own property: verify (also the default
+// when empty) checks the certificate and host name, the others say why not.
+func TestRenderEmbeddedTLS(t *testing.T) {
+	cases := []struct {
+		base func(BuildTool) EmbeddedParams
+		mode TLSMode
+		want string
+	}{
+		{pgParams, "", "database.sslmode=verify-full\n"},
+		{pgParams, TLSVerify, "database.sslmode=verify-full\n"},
+		{pgParams, TLSRequire, "database.sslmode=require\n"},
+		{pgParams, TLSDisable, "database.sslmode=disable\n"},
+		{mysqlParams, "", "database.ssl.mode=verify_identity\n"},
+		{mysqlParams, TLSVerify, "database.ssl.mode=verify_identity\n"},
+		{mysqlParams, TLSRequire, "database.ssl.mode=required\n"},
+		{mysqlParams, TLSDisable, "database.ssl.mode=disabled\n"},
+	}
+	for _, tc := range cases {
+		p := tc.base(BuildMaven)
+		p.TLS = tc.mode
+		files, err := RenderEmbedded(p)
+		if err != nil {
+			t.Fatalf("%s/%q: %v", p.Source, tc.mode, err)
+		}
+		m := fileMap(t, files)
+		props := m["piperoom-reference.properties"]
+		if !strings.Contains(props, tc.want) || strings.Count(props, "ssl") != 1 {
+			t.Errorf("%s/%q: properties want exactly %q:\n%s", p.Source, tc.mode, tc.want, props)
+		}
+		readme := m["README.md"]
+		if !strings.Contains(readme, "`"+strings.TrimSpace(tc.want)+"`") {
+			t.Errorf("%s/%q: README does not name %q", p.Source, tc.mode, tc.want)
+		}
+		if tc.mode == TLSDisable && !strings.Contains(readme, "plain text") {
+			t.Errorf("%s/%q: README does not warn about plain text", p.Source, tc.mode)
+		}
+	}
+}
+
 // Rendering is deterministic: the same params give the same bytes, so a
 // re-run of the write step is a no-op.
 func TestRenderEmbeddedDeterministic(t *testing.T) {
@@ -370,7 +415,7 @@ func TestJavaRelease(t *testing.T) {
 }
 
 func TestParseDbzVersionOrder(t *testing.T) {
-	ordered := []string{"2.7.0.Alpha1", "2.7.0.Alpha2", "2.7.0.Beta1", "2.7.0.CR1", "2.7.0.Final", "2.7.2.Final", "3.0.0.Alpha1", "3.0.0", "3.0.2.Final", "3.10.0"}
+	ordered := []string{"2.7.0.Alpha1", "2.7.0.Alpha2", "2.7.0.Beta1", "2.7.0.CR1", "2.7.0.Final", "2.7.2.Final", "3.0.0.Alpha1", "3.0.0", "3.0.2.Final", "3.9.0-rc1", "3.9.0", "3.10.0"}
 	for i := 1; i < len(ordered); i++ {
 		a, errA := parseDbzVersion(ordered[i-1])
 		b, errB := parseDbzVersion(ordered[i])

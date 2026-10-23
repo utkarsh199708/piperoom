@@ -32,7 +32,7 @@ import (
 // the four reference projects (Maven and Gradle, Postgres and MySQL) is
 // rendered, built with the real build tool and run, and its output shows a
 // row inserted after start-up (the canary nonce) and then a second one that
-// can only arrive by streaming. This is the CI integration job running the
+// can only arrive by streaming, while no row value ever reaches the output. This is the CI integration job running the
 // build tools, never the setup runner: the runner has no op that builds or
 // runs a reference project (U6b).
 //
@@ -79,7 +79,10 @@ func TestReferenceProjectsBuildAndRun(t *testing.T) {
 }
 
 // runReferenceProject renders p into a temp folder, builds it, starts it,
-// inserts two nonces and waits for both in its output, then stops it.
+// inserts two nonces and waits for the canary line of each in its output,
+// then stops it. The nonces are passed in PIPEROOM_CANARY, and outside its
+// canary lines the output must not carry them: the program prints no row
+// values.
 func runReferenceProject(t *testing.T, p EmbeddedParams, insert func(context.Context, string) error, env []string) {
 	t.Helper()
 	files, err := RenderEmbedded(p)
@@ -119,7 +122,10 @@ func runReferenceProject(t *testing.T, p EmbeddedParams, insert func(context.Con
 	defer cancelRun()
 	run := exec.CommandContext(runCtx, runArgv[0], runArgv[1:]...)
 	run.Dir = dir
-	run.Env = append(os.Environ(), env...)
+	// The first nonce may arrive in the snapshot or the stream; the second
+	// is inserted after the first is seen, so it can only be streamed.
+	nonces := []string{"canary-a-" + randHex(t, 6), "canary-b-" + randHex(t, 6)}
+	run.Env = append(append(os.Environ(), env...), "PIPEROOM_CANARY="+strings.Join(nonces, ","))
 	// Stop it as a person would (Ctrl-C), so the shutdown hook closes the
 	// engine and flushes offsets; kill only if it does not stop in time.
 	run.Cancel = func() error {
@@ -150,12 +156,13 @@ func runReferenceProject(t *testing.T, p EmbeddedParams, insert func(context.Con
 		stop()
 		t.Fatalf("the program did not start; output:\n%s", out.tail(8000))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	// The first nonce may arrive in the snapshot or the stream; the second
-	// is inserted after the first is seen, so it can only be streamed.
-	for _, nonce := range []string{"canary-a-" + randHex(t, 6), "canary-b-" + randHex(t, 6)} {
-		if err := insert(ctx, nonce); err != nil {
+	for _, nonce := range nonces {
+		// A fresh deadline per insert: the wait for the previous event may
+		// have used minutes.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := insert(ctx, nonce)
+		cancel()
+		if err != nil {
 			t.Fatalf("insert %s: %v", nonce, err)
 		}
 		if !out.waitForEvent(nonce, 3*time.Minute) {
@@ -166,6 +173,13 @@ func runReferenceProject(t *testing.T, p EmbeddedParams, insert func(context.Con
 	stop()
 	if strings.Contains(out.String(), "engine stopped with an error") {
 		t.Errorf("the engine reported an error:\n%s", out.tail(8000))
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		for _, nonce := range nonces {
+			if strings.Contains(line, nonce) && !strings.HasPrefix(line, "piperoom-reference canary "+nonce+" seen ") {
+				t.Errorf("a row value reached the output: %q", line)
+			}
+		}
 	}
 }
 
@@ -212,6 +226,7 @@ func (s *pgSource) project(t *testing.T, build BuildTool, release, suffix string
 		Release: release, Host: host, Port: port, Database: strings.TrimPrefix(s.url.Path, "/"),
 		User: s.url.User.Username(), PasswordSecret: "it_pg_password", TopicPrefix: name,
 		Tables: []string{"public." + name}, SlotName: name,
+		TLS: TLSDisable, // the dev stack's Postgres is local and has no server certificate
 	}
 	insert := func(ctx context.Context, nonce string) error {
 		_, err := s.conn.Exec(ctx, "INSERT INTO "+pgx.Identifier{"public", name}.Sanitize()+" (note) VALUES ($1)", nonce)
@@ -333,6 +348,7 @@ func (s *mysqlSource) project(t *testing.T, build BuildTool, release, suffix str
 		Release: release, Host: "127.0.0.1", Port: s.port, Database: db, User: "root",
 		PasswordSecret: "it_mysql_password", TopicPrefix: db, Tables: []string{db + ".events"},
 		ServerID: uint32(server%4000000000) + 1000, // never the server's own id 1
+		TLS:      TLSDisable,                       // a local container with a self-signed certificate
 	}
 	insert := func(ctx context.Context, nonce string) error {
 		if !regexp.MustCompile(`^[a-z0-9-]+$`).MatchString(nonce) {
@@ -380,10 +396,10 @@ func (l *lineLog) waitFor(s string, d time.Duration) bool {
 	return l.waitLine(d, func(line string) bool { return strings.Contains(line, s) })
 }
 
-// waitForEvent reports whether a change event line carrying nonce appeared.
+// waitForEvent reports whether the canary line of nonce appeared.
 func (l *lineLog) waitForEvent(nonce string, d time.Duration) bool {
 	return l.waitLine(d, func(line string) bool {
-		return strings.HasPrefix(line, "piperoom-reference event ") && strings.Contains(line, nonce)
+		return strings.HasPrefix(line, "piperoom-reference canary "+nonce+" seen ")
 	})
 }
 
