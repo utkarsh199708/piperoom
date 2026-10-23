@@ -1196,9 +1196,20 @@ func ParseTriagePass(c Config) (TriagePass, error) {
 	}
 	t.Model = strings.TrimSpace(c.TriagePassModel)
 	if t.Model == "" {
-		// The same default as ParseModelRoles: claude-haiku-5-5 on a Claude
-		// provider (today's value), the main model on a new one (V0).
-		t.Model = defaultFirstLookModel(firstLookProvider(c), strings.TrimSpace(c.Model))
+		// The same default and refusal as ParseModelRoles: claude-haiku-5-5
+		// on a Claude provider (today's value), the main model on a new one
+		// (V0), and none for a first-look provider other than the main one
+		// unless it is a Claude provider, so a first look moved to openai
+		// never silently runs the main Claude model instead.
+		p, main := firstLookProvider(c), mainProvider(c)
+		if p != main && !claudeProvider(p) {
+			return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_MODEL is required when PIPEROOM_TRIAGE_PASS_PROVIDER (%s) differs from PIPEROOM_MODEL_PROVIDER (%s)", p, main)
+		}
+		mainModel := strings.TrimSpace(c.Model)
+		if mainModel == "" {
+			mainModel = DefaultModel
+		}
+		t.Model = defaultFirstLookModel(p, mainModel)
 	}
 	if strings.ContainsAny(t.Model, " \t\r\n") {
 		return TriagePass{}, fmt.Errorf("config: PIPEROOM_TRIAGE_PASS_MODEL=%q: want a model id without spaces", c.TriagePassModel)
