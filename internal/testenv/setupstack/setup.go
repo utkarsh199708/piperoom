@@ -227,7 +227,7 @@ func setupProjectName(t *testing.T) string {
 	if _, err := rand.Read(b[:]); err != nil {
 		t.Fatalf("testenv: project name: %v", err)
 	}
-	return "setup-" + hex.EncodeToString(b[:])
+	return "piperoom-setup-" + hex.EncodeToString(b[:])
 }
 
 // freeLoopbackPort binds an ephemeral port and releases it: the stack's

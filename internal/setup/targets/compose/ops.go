@@ -56,7 +56,7 @@ func (composeWriteOp) ParamsSchema() map[string]any {
 					TemplateKafka, TemplateConnect, TemplateRegistry, TemplatePostgres,
 				}},
 			},
-			"project":  map[string]any{"type": "string", "pattern": `^[a-z0-9][a-z0-9_-]{0,62}$`},
+			"project":  map[string]any{"type": "string", "pattern": `^piperoom-[a-z0-9_-]{1,54}$`},
 			"ports":    map[string]any{"type": "object", "maxProperties": maxPorts, "additionalProperties": map[string]any{"type": "integer", "minimum": minPort, "maximum": maxPort}},
 			"registry": map[string]any{"type": "boolean"},
 			"file":     map[string]any{"type": "string"},

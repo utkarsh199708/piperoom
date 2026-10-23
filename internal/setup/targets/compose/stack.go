@@ -94,13 +94,12 @@ func (o *stackWriteOp) Execute(ctx context.Context, params json.RawMessage, env 
 	if err != nil {
 		return ops.Result{}, err
 	}
-	if err := validateStackFile(env, clean, o.d.classOrDefault()); err != nil {
-		return ops.Result{}, err
-	}
-	argv, err := stackArgv(env.Confine.Dir(), p.File, o.sub, o.flags, p.Services)
+	// docker reads the validated snapshot, never the project file itself.
+	argv, cleanup, err := pinnedStackArgv(env, p.File, clean, o.d.classOrDefault(), o.sub, o.flags, p.Services)
 	if err != nil {
 		return ops.Result{}, err
 	}
+	defer cleanup()
 	start := now(env)
 	res, err := dockerCommand(ctx, env, argv)
 	if err != nil {
