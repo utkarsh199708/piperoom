@@ -689,7 +689,7 @@ func TestRegisterLifecycle(t *testing.T) {
 	if err := RegisterLifecycle(reg, LifecycleDeps{Connect: f}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{StopConnectorName, ResetSourceOffsetsName} {
+	for _, name := range []string{StopConnectorName, ResetSourceOffsetsName, CreateConnectorName, DeleteConnectorName} {
 		a, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("%s not registered", name)
@@ -704,7 +704,7 @@ func TestRegisterLifecycle(t *testing.T) {
 			t.Fatalf("%s layer %q", name, a.Layer())
 		}
 	}
-	if len(reg.All()) != 2 {
+	if len(reg.All()) != 4 {
 		t.Fatalf("registered %d actions", len(reg.All()))
 	}
 	// The write-mode-off registration must not make them reachable.
@@ -712,7 +712,7 @@ func TestRegisterLifecycle(t *testing.T) {
 	if err := Register(readOnly, Deps{Connect: f}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{StopConnectorName, ResetSourceOffsetsName} {
+	for _, name := range []string{StopConnectorName, ResetSourceOffsetsName, CreateConnectorName, DeleteConnectorName} {
 		if _, ok := readOnly.Get(name); ok {
 			t.Fatalf("%s is registered by the read-only action set", name)
 		}

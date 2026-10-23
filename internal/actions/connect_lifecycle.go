@@ -11,12 +11,16 @@ import (
 	"piperoom/internal/clients"
 )
 
-// Q5b: the Kafka Connect connector lifecycle actions. They are registered only
+// Q5b and Q5c: the Kafka Connect lifecycle actions. They are registered only
 // with write mode on (Q5d), so with writes off none of them is reachable:
 //
 //   - connect_stop_connector stops a connector and its tasks (KIP-875);
 //   - connect_reset_source_offsets clears a stopped source connector's stored
-//     offsets or replaces one partition's position (KIP-875).
+//     offsets or replaces one partition's position (KIP-875);
+//   - connect_create_connector registers a connector the pipeline's
+//     owners.yaml already names, after Connect's own config validation;
+//   - connect_delete_connector deletes a connector whose stored config can be
+//     given back (no plaintext credential), leaving its offsets under the name.
 //
 // Every action is an ordinary proposal step: Validate and Preview read only,
 // Execute writes through connect.ConnectLifecycleWriter after the approvals.
@@ -26,6 +30,12 @@ const (
 	// ResetSourceOffsetsName is the registered name of
 	// connect_reset_source_offsets.
 	ResetSourceOffsetsName = "connect_reset_source_offsets"
+	// CreateConnectorName is the registered name of
+	// connect_create_connector.
+	CreateConnectorName = "connect_create_connector"
+	// DeleteConnectorName is the registered name of
+	// connect_delete_connector.
+	DeleteConnectorName = "connect_delete_connector"
 )
 
 // LifecycleDeps is what the Q5b/Q5c actions read and write through. Connect
@@ -44,12 +54,14 @@ type LifecycleDeps struct {
 	PollInterval time.Duration
 }
 
-// RegisterLifecycle adds the Q5b actions to reg. Wiring calls it only with
-// write mode on (Q5d): with writes off no lifecycle action is reachable.
+// RegisterLifecycle adds the four Q5b/Q5c actions to reg. Wiring calls it only
+// with write mode on (Q5d): with writes off no lifecycle action is reachable.
 func RegisterLifecycle(reg *Registry, d LifecycleDeps) error {
 	for _, a := range []Action{
 		&stopConnector{d: d},
 		&resetSourceOffsets{d: d},
+		&createConnector{d: d},
+		&deleteConnector{d: d},
 	} {
 		if err := reg.Register(a); err != nil {
 			return err
