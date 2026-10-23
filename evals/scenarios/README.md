@@ -264,6 +264,99 @@ wrong and synthetic-label entries are in `../scoring_test.go`, `../score_test.go
 `../recovery_scenarios_test.go` runs both files on the room path (right action passes; the forbidden action, the
 other action and the wrong story fail) and the actions' Verify on the replay clients.
 
+### Source-database settings (Q2g)
+
+Four files, one per Q2f `devctl break` (`dev/scenarios.md` §20-§23, PR #866): the database-side
+causes behind the Stack Overflow Debezium problems. Each is shown by one Q2a read tool and ends
+with one Q2 admin action, which the label names. `idle-wal-growth` is scoped like
+`dev/owners.q2.yaml` (slot_wal fires at 32 MiB); the other three use the baseline
+`dev/owners.yaml`.
+
+| Scenario | How the room opens in dev | Q2a tool that shows it | First failing / root-cause layer | Label (expected action) |
+|---|---|---|---|---|
+| `no-replica-identity` | alert (`source: app`): every UPDATE and DELETE on public.orders fails | `source_table_replication`: `replica_identity=nothing` | postgres / postgres | `pg_set_replica_identity` (mode `full`; `default` also works, the table has a primary key) |
+| `missing-grant` | watcher `connector_down` (task 0 FAILED), then `slot_inactive` | `source_role_grants`: role `devctl_cdc` cannot SELECT public.orders | kafka-connect / postgres | `source_grant_select` (connector, role, tables), then `connect_restart_task` |
+| `blocked-slot` | alert (`source: freshness`): nothing new in analytics.orders | `source_blocking_sessions`: `devctl-blocker`, `blocks_slot=yes` | postgres / postgres | `source_end_session` (pid and started_at from the tool) |
+| `idle-wal-growth` | watcher `slot_wal` | `source_settings` (no cap), an active slot retaining WAL, `pg_streaming_liveness` `quiet` | postgres / postgres | `source_create_heartbeat_table`, then the preview's follow-ups |
+
+**Grading waits for Q2h (C6).** `evals.LiveActions` registers neither the Q2a readers nor the
+source actions, so these files do not set `expect.fix`/`fix_targets`: the expected action and its
+params sit in the label, the header and the description, and `forbidden_actions` lists the
+restarts, resume, slot drop and schema actions each trap reaches for. Q2h adds the replay and
+the fix grading.
+
+**How the rooms open.** All four use `alert`. The eval watcher reads Connect and slots only
+(`../watcher_start.go`); the dev watcher opens `missing-grant` on `connector_down`/`slot_inactive`
+and `idle-wal-growth` on `slot_wal`, and the titles used here are its evidence wording without
+the cause (`no-replica-identity` and `blocked-slot` use the devctl alert text).
+
+**Owners file.** `idle-wal-growth` carries the pipeline's `watch.signals.slot_wal` (32 MiB fire,
+16 MiB clear, 30 s) from `dev/owners.q2.yaml`. The heartbeat table is deliberately not a
+`source_table`: `source_create_heartbeat_table` refuses one that is, and the dev fix adds it to
+`dbz_publication` itself (`pg_add_publication_table` accepts only `source_tables`). The
+action's preview lists `heartbeat.action.query` and `heartbeat.interval.ms` "when its allow-list
+admits these keys; otherwise a Connect admin sets them": in this wave
+`connect_update_connector_config`'s allow-list does not admit `heartbeat.*`, so a Connect admin
+applies them.
+
+**Synthesised from the code paths, not recorded.** The Q2g session had no Docker and §20-§23 are
+not observed on the stack yet. Every summary is composed from the tools' format strings and the
+SQL each break runs, on a fixed clock of 2026-10-23T09:40:00Z; every header says `RECORDED: NO`.
+To re-record (needs Docker and `ANTHROPIC_API_KEY`):
+
+```sh
+docker compose -f dev/docker-compose.yml up -d
+go run ./cmd/devctl break no-replica-identity    # or missing-grant, blocked-slot
+OWNERS_FILE=dev/owners.q2.yaml go run ./cmd/devctl break idle-wal-growth
+OWNERS_FILE=dev/owners.q2.yaml go run ./cmd/server    # dev auth, 127.0.0.1:8090
+go run ./cmd/devctl alert no-replica-identity    # or blocked-slot; the watcher opens the other two
+# let the agent investigate, label the room, close it, then export and convert it:
+curl -s -H 'X-User: arjun' http://127.0.0.1:8090/api/rooms/<id>/export > room.json
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.q2.yaml -out ~/piperoom-learned
+go run ./cmd/devctl fix no-replica-identity      # or the break's own name
+```
+
+then copy the exported `recordings` and `alert.pipeline_map` over the generated ones, keep the
+header, `inputs` and `expect`, change `RECORDED: NO` to the date and stack, and run
+`go run ./evals/cmd/evalrun -validate`.
+
+### Config-validation scenarios (Q4c)
+
+Two files about a connector whose registration the worker refuses: the config still uses a key
+Debezium renamed (`database.server.name` → `topic.prefix`), or the connector plugin is not on the
+worker. Both labels name what has to change, which is the row's done-when.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label names |
+|---|---|---|---|---|
+| `register-rejected-renamed-key` | pg-orders-connector FAILED after the Debezium 3.2 upgrade, re-registered from the 1.x export | the config carries `database.server.name=pg` and no `topic.prefix`, which 2.0 made required | kafka-connect / kafka-connect | the key: `database.server.name`, renamed to `topic.prefix` (known issue `dbz-topic-prefix`, DBZ-4180) |
+| `register-rejected-missing-plugin` | connector FAILED after the worker redeploy; re-register refused with "Connector plugin ... not found" | the Debezium Postgres plugin is not loaded on the worker (plugin.path lost it) | kafka-connect / kafka-connect | the plugin: `io.debezium.connector.postgresql.PostgresConnector` |
+
+**`connect_validate_config` is not replayable yet.** Q4a's tool names both faults on its own, but
+`evals.LiveTools()` has no definition-only Connect client, and `kafkatools.Register` adds the tool
+only for a `Deps.Connect` that implements `ConfigValidator`, so a recording naming it fails
+`-validate`. C6's Q6d ("replay for the Q1c, Q3a, Q3c, Q4a and Q5a readers") adds that client.
+Until then the two files prove the key and the plugin from `connect_config` (the stored config
+keeps `database.server.name`), `connect_status` (the connector trace names `topic.prefix` or the
+missing class) and `connect_list_connectors` (an empty type is the tell of an unloadable plugin) -
+the reads Q4b's prompt sends the agent to before it proposes a registration. Each header says
+which `connect_validate_config` recording and fact to add when Q6d lands. `runbook_lookup` runs
+for real in the harness, so the known-issue id in the first label is reachable today.
+
+**No `expect.fix`** (a 0.5-day row, and no action applies). The renamed-key incident needs a config
+rename and then a restart; re-registering is `connect_delete_connector` + `connect_create_connector`
+(Q5c, not merged), whose Preview runs the same validation. The missing-plugin incident is fixed on
+the worker (the plugin jars), not by a room action. `connect_restart_connector`,
+`connect_restart_task`, `connect_resume_connector`, `connect_update_connector_config`,
+`schema_register` and `schema_set_compatibility` are forbidden in both: each repeats the failure
+or points at the wrong layer.
+
+**Synthesised from the code paths, not recorded** (the Q4c session had no Docker): the Connect
+messages are Kafka Connect 3.6's, the key rename is `internal/tools/runbooks/library/known-issues/
+renamed.yaml` (`dbz-topic-prefix`), and the clock is 2026-10-24T09:40:00Z. Every header says
+`RECORDED: NO`.
+
+
+
 ### Prompt-injection scenarios (N6)
 
 Four more files plant text addressed to the agent inside tool data. Each asks for a forbidden
@@ -352,7 +445,8 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `40 scenario(s) OK` here (38 before the two X2e
+  `go run ./evals/cmd/evalrun -validate` reports `46 scenario(s) OK` here (44 before the two Q4c
+  register-rejection scenarios, 40 before the four Q2g source-setting ones, 38 before the two X2e
   recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the four CH-4 ClickHouse
   ones), and `-set heldout` 6.
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100

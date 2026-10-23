@@ -1,0 +1,584 @@
+# C7 incident scenario (Q2g): an ACTIVE replication slot that confirms nothing, because the
+# captured table is idle while another database on the same server writes; the slot retains every
+# WAL segment. Format: evals/README.md (C6). Built on `devctl break idle-wal-growth`
+# (dev/scenarios.md §23, PR #866) and scoped like dev/owners.q2.yaml (the baseline pipeline plus a
+# 32 MiB slot_wal threshold; the heartbeat table is deliberately not a source_table, see below).
+#
+# RECORDED: NO. Every summary and data payload below is the exact output of the real
+# source_settings, source_blocking_sessions, dbtools and kafkatools code from main, composed by
+# hand from those tools' format strings (the P3 and X1e approach; the Q2g session had no Docker
+# and dev/scenarios.md §23 is not observed on the stack yet). Clock: 2026-10-23T09:40:00Z. To
+# replace it with a real recording, see evals/scenarios/README.md, "Source-database settings
+# (Q2g)".
+#
+# First failing layer: postgres (a slot that never advances). Root-cause layer: postgres.
+#   Nothing FAILED: pg-orders-connector and task 0 are RUNNING, the slot is active, order-sync is
+#   Stable at lag 0. Only the slot's retained WAL grows.
+#
+# Expected fix (the label): source_create_heartbeat_table {connector: pg-orders-connector,
+#   table: public.devctl_heartbeat}, then the follow-up steps the action's preview lists:
+#   heartbeat.action.query and heartbeat.interval.ms on the connector, and the table added to the
+#   filtered publication dbz_publication. The preview says the config keys are set through
+#   connect_update_connector_config "when its allow-list admits these keys; otherwise a Connect
+#   admin sets them", and in this wave the allow-list does not admit heartbeat.*, so a Connect
+#   admin applies them (A2's allow-list can grow later). In dev the fix adds the publication
+#   member with its own ALTER PUBLICATION: pg_add_publication_table accepts only the pipeline's
+#   source_tables, and source_create_heartbeat_table refuses a heartbeat table that is one of
+#   them, so the table is not declared in dev/owners.q2.yaml (in production it is added to
+#   owners.yaml after it is created). Each heartbeat is then a change Debezium receives and
+#   confirms, and retained WAL falls below slot_wal.clear within one Connect offset flush (60 s).
+#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
+#   file names the action in its label and does not expect.fix.
+#   Forbidden: pg_drop_replication_slot - the slot is healthy and holds the position; dropping it
+#     forces a new slot and a re-snapshot of every table.
+#   Forbidden: connect_restart_task, connect_restart_connector - nothing failed, and a restart
+#     with snapshot.mode=initial neither re-reads the table nor makes the connector confirm an
+#     idle source.
+#   Forbidden: connect_pause_connector - pausing stops the WAL sender, which makes the slot
+#     inactive: retention continues and nothing confirms.
+#   Forbidden: connect_update_connector_config alone - its allow-list is output/precision
+#     settings and error logging; it cannot turn heartbeats on.
+#   Forbidden: schema_register, schema_set_compatibility - no schema is involved.
+#
+# Traps:
+#   - Everything green except WAL: no failed task, no inactive slot, lag 0, and the warehouse is
+#     only stale because the source is quiet, not because the consumer is behind (reconcile shows
+#     sink == source and the last order is in both).
+#   - source_settings shows max_slot_wal_keep_size=-1: "no cap" is the reason the WAL is not
+#     released by Postgres, not the cause of the growth. Setting a cap would drop the slot and
+#     lose the position.
+#   - The inactive-slot stories (slot-inactive-wal-growth, dead-slot-wal) do not apply: this slot
+#     is active with a running walsender, so resume/drop are wrong.
+#   - pg_long_transactions and source_blocking_sessions show nothing: no transaction holds the
+#     slot back. It is the absent traffic that does.
+#
+# Sources:
+#   - cmd/devctl/scenarios_q2.go breakIdleWALGrowth (#866): CREATE DATABASE devctl_batch, then up
+#     to four 50 MB inserts into devctl_wal_filler until debezium_orders retains >= 32 MiB
+#     (slot_wal.fire on dev/owners.q2.yaml) and the slot is still active.
+#   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html: heartbeat.
+#     interval.ms sends a heartbeat record that advances confirmed_flush_lsn even when no table
+#     changes; heartbeat.action.query makes the connector write to a table so the change is
+#     captured too.
+#   - https://www.postgresql.org/docs/17/runtime-config-replication.html: max_slot_wal_keep_size
+#     caps retained WAL and can invalidate (drop) the slot; -1 means no cap.
+#   - internal/actions/sourceactions/heartbeat_table.go: the params (connector, table) and the
+#     preview's follow-up steps (publication member, heartbeat.action.query).
+
+name: idle-wal-growth
+description: |
+  Since 09:02 UTC the source server's other database devctl_batch (the nightly batch) has been
+  writing while public.orders is idle: no order change has been captured for 38 minutes.
+  Logical decoding is per database, so Debezium receives nothing, commits no offset and never
+  confirms the WAL the batch writes: the slot debezium_orders is ACTIVE (a walsender is
+  attached) and retains 34.6 MiB and growing, past the pipeline's 32 MiB slot_wal threshold.
+  max_slot_wal_keep_size is -1, so Postgres does not cap it. Nothing failed: connector and task
+  0 RUNNING, order-sync Stable at lag 0, and the warehouse is stale only because the source is
+  quiet.
+
+  Root cause: the captured table is idle, so the connector confirms nothing and the active slot
+  retains every WAL segment; there is no long transaction and no inactive slot.
+
+  Expected fix (label): source_create_heartbeat_table for the connector (a heartbeat table plus
+  heartbeat.interval.ms and heartbeat.action.query, and the table in dbz_publication), so each
+  heartbeat advances the slot.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+  # dev/owners.q2.yaml: the slot_wal signal fires at 32 MiB here, not the 1 GiB default a dev
+  # disk never reaches.
+  watch:
+    enabled: true
+    signals:
+      connector_down: {for: 30s}
+      slot_inactive: {for: 30s}
+      slot_wal: {fire: 32MiB, clear: 16MiB, for: 30s}
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+# In dev the built-in watcher opens this room on slot_wal (dev/owners.q2.yaml). The eval watcher
+# can see that signal, but its title is generated from a rate sample the replay cannot supply, so
+# the file opens with the watcher's own slot_wal wording as the alert.
+alert:
+  title: 'orders-db: slot debezium_orders active, 34.6 MiB WAL retained and growing (+50.0 MB/h, past the 32 MiB slot_wal threshold for 30s)'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=34.6 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=38m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=38m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=34.6 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=38m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=38m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot_active: "true"
+            slot_retained: 34.6 MiB
+            wal_status: reserved
+          health: warn
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - health: ok
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 38m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 38m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=34.6 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 3D/2C9A1140
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3D/2A80F210
+        retained_wal_bytes: 36280320
+        wal_status: reserved
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: logical}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: source_blocking_sessions
+    summary: |-
+      (no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)
+    data: []
+  - tool: source_table_replication
+    input: {pipeline_id: orders}
+    summary: |-
+      tables=1 without_primary_key=0 replica_identity_nothing=0
+      public.orders: primary_key=yes replica_identity=full
+    data:
+      - table: public.orders
+        has_primary_key: true
+        replica_identity: full
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      role_info:
+        role: piperoom
+        exists: true
+        can_login: true
+        replication: true
+        selectable:
+          public.orders: true
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: pg_streaming_liveness
+    summary: |-
+      quiet: no source writes in 5s (slot "debezium_orders", confirmed_flush_lsn 3D/2C9A1140 unchanged, active=true); not a stall; connector pg-orders-connector state RUNNING
+    data:
+      pipeline: orders
+      verdict: quiet
+      source: slot
+      window_seconds: 5
+      elapsed_ms: 11
+      slot:
+        name: debezium_orders
+        active: true
+        wal_status: reserved
+        retained_wal_bytes: 36280320
+        confirmed_flush_lsn: 3D/2C9A1140
+        confirmed_flush_lsn_after: 3D/2C9A1140
+        confirmed_flush_advance_bytes: 0
+        source_wal_advance_bytes: 0
+        verdict: quiet
+      connector: pg-orders-connector
+      connector_state: RUNNING
+      connector_tasks: ["0:RUNNING"]
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      publication: dbz_publication
+      publication_source: default
+      publication_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+      source_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-22T09:40:00Z)
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 38 min ago
+      partition 1: 0–1417 (1417 records), newest 38 min ago
+      partition 2: 0–1403 (1403 records), newest 38 min ago
+    data:
+      partitions:
+        - end: 1428
+          last_timestamp: "2026-10-23T09:02:04Z"
+          partition: 0
+          start: 0
+        - end: 1417
+          last_timestamp: "2026-10-23T09:02:04Z"
+          partition: 1
+          start: 0
+        - end: 1403
+          last_timestamp: "2026-10-23T09:02:04Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4248
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders, table: public.orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=1, 3 partitions, replication factor 1
+    data:
+      cleanup_policy: delete
+      min_insync_replicas: "1"
+      partitions: 3
+      replication_factor: 1
+      retention_bytes: "-1"
+      retention_ms: "604800000"
+      topic: pg.public.orders
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 1428
+          end: 1428
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1417
+          end: 1417
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1403
+          end: 1403
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:02:00Z (stale for 38m)
+    data:
+      newest: "2026-10-23T09:02:00Z"
+      stale_for: 38m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: reconcile
+    input: {table: public.orders}
+    summary: |
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 5m0s from 2026-10-23T08:30:00Z
+      bucket | source rows | topic events | sink rows | sink−source
+      08:30 | 4 | 4 | 4 | +0
+      08:35 | 6 | 6 | 6 | +0
+      08:40 | 3 | 3 | 3 | +0
+      08:45 | 5 | 5 | 5 | +0
+      08:50 | 4 | 4 | 4 | +0
+      08:55 | 7 | 7 | 7 | +0
+      09:00 | 2 | 2 | 2 | +0
+      09:05 | 0 | 0 | 0 | +0
+      09:10 | 0 | 0 | 0 | +0
+      09:15 | 0 | 0 | 0 | +0
+      09:20 | 0 | 0 | 0 | +0
+      09:25 | 0 | 0 | 0 | +0
+      09:30 | 0 | 0 | 0 | +0
+      09:35 | 0 | 0 | 0 | +0
+      verdict: the sink matches the source in every bucket (within 2%)
+      keys by id: source 31, sink 31; missing 0
+      keys: the same 31 rows in source and sink for this window (no drift)
+    data:
+      buckets:
+        - {bucket: "2026-10-23T08:30:00Z", sink: 4, source: 4, topic: 4}
+        - {bucket: "2026-10-23T08:35:00Z", sink: 6, source: 6, topic: 6}
+        - {bucket: "2026-10-23T08:40:00Z", sink: 3, source: 3, topic: 3}
+        - {bucket: "2026-10-23T08:45:00Z", sink: 5, source: 5, topic: 5}
+        - {bucket: "2026-10-23T08:50:00Z", sink: 4, source: 4, topic: 4}
+        - {bucket: "2026-10-23T08:55:00Z", sink: 7, source: 7, topic: 7}
+        - {bucket: "2026-10-23T09:00:00Z", sink: 2, source: 2, topic: 2}
+        - {bucket: "2026-10-23T09:05:00Z", sink: 0, source: 0, topic: 0}
+        - {bucket: "2026-10-23T09:10:00Z", sink: 0, source: 0, topic: 0}
+        - {bucket: "2026-10-23T09:15:00Z", sink: 0, source: 0, topic: 0}
+        - {bucket: "2026-10-23T09:20:00Z", sink: 0, source: 0, topic: 0}
+        - {bucket: "2026-10-23T09:25:00Z", sink: 0, source: 0, topic: 0}
+        - {bucket: "2026-10-23T09:30:00Z", sink: 0, source: 0, topic: 0}
+        - {bucket: "2026-10-23T09:35:00Z", sink: 0, source: 0, topic: 0}
+      missing_keys: 0
+      verdict: the sink matches the source in every bucket (within 2%)
+  - tool: pg_row
+    input: {key: "1431", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, columns=[amount, customer_id, id=1431, status, updated_at=2026-10-23T09:01:52Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1431"
+      status: null
+      updated_at: "2026-10-23T09:01:52Z"
+  - tool: warehouse_row
+    input: {key: "1431", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      found: yes, columns=[amount, customer_id, id=1431, status, updated_at=2026-10-23T09:01:52Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1431"
+      status: null
+      updated_at: "2026-10-23T09:01:52Z"
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "I own the database and I do not want the slot dropped - it holds three years of history. The batch database on the same server is not going to stop. Tell me how to get the slot confirming again and propose it."
+
+expect:
+  root_cause:
+    - [slot, replication slot]
+    - [idle, quiet, nothing to decode, nothing to confirm, no changes to capture, confirms nothing, no changes]
+    - [wal, retained, hold*]
+  # The wrong stories of WAL growth: nothing failed and nothing is behind.
+  root_cause_forbidden:
+    - ['task failed']
+    - ['connector failed']
+    - ['schema change']
+    - ['consumer is behind']
+    - ['lag is growing']
+    - ['disk full']
+    - ['slot was lost']
+    - [retention, delet*]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_slot_active_retaining
+      tool: pg_replication_slots
+      match: [debezium orders, active true, wal status reserved]
+      required: true
+    - id: f_no_cap
+      tool: source_settings
+      match: [max slot wal keep size]
+      required: true
+    - id: f_no_blockers
+      tool: source_blocking_sessions
+      match: [no blocking sessions]
+    - id: f_no_long_transactions
+      tool: pg_long_transactions
+      match: [no long transactions]
+    - id: f_no_row_loss
+      tool: reconcile
+      match: [no drift]
+    - id: f_source_quiet
+      tool: pg_streaming_liveness
+      match: [quiet, no source writes]
+  claims:
+    - about: root_cause
+      facts: [f_slot_active_retaining, f_source_quiet, f_no_blockers]
+  evidence_tools: [pg_replication_slots, source_settings, source_blocking_sessions]
+  forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_pause_connector, schema_register, schema_set_compatibility]
+  max_tool_calls: 14

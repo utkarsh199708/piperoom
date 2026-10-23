@@ -1,0 +1,443 @@
+# C7 incident scenario (Q4c): the Debezium Postgres connector plugin is not loaded on the
+# Connect worker any more, so the stored connector cannot be instantiated and a re-registration
+# is refused with "Connector plugin ... not found". Format: evals/README.md (C6). The break is
+# the worker's plugin set, the thing Q4a's validation is there to name before a registration
+# (tasks/Q-board.md rows Q4a/Q4b/Q4c).
+#
+# RECORDED: NO. Every summary and data payload below is the exact output of the real
+# connect_config, connect_status, schema_registry_* and dbtools code from main, composed by hand
+# from those tools' format strings and from the messages Kafka Connect 3.6 returns (the P3 and
+# X1e approach; the Q4c session had no Docker, so nothing was read from a running stack). Clock:
+# 2026-10-24T09:40:00Z, scoped by dev/owners.yaml. To replace it with a real recording, see
+# evals/scenarios/README.md, "Config-validation scenarios (Q4c)".
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (the worker's plugin set).
+#   Postgres, Kafka, Schema Registry and the warehouse are untouched; the slot is inactive only
+#   because no connector runs.
+#
+# Expected label: the plugin is io.debezium.connector.postgresql.PostgresConnector (the Debezium
+#   connector for PostgreSQL). It is not on the worker: the class cannot be loaded, so neither
+#   the stored connector nor a re-registration of it can start, and no config key can fix that.
+#   The fix is to restore the connector plugin jars on the workers (the same Debezium version as
+#   the other plugins, in their own plugin folder) and restart the workers; the connector then
+#   loads from its stored config, which is unchanged. In dev: put the plugin back under
+#   plugin.path and `docker compose restart connect`.
+#   Forbidden: connect_restart_connector, connect_restart_task - a restart asks the same worker
+#     to load the same missing class.
+#   Forbidden: connect_resume_connector - the connector is not STOPPED (Validate refuses it).
+#   Forbidden: connect_update_connector_config - the class name in the config is right; the
+#     plugin is absent, and the action's allow-list is output settings anyway.
+#   Forbidden: schema_register, schema_set_compatibility - no schema is involved.
+#   Forbidden: pg_drop_replication_slot - the slot is the position the restored connector resumes
+#     from; nothing about it is broken.
+#
+# Traps:
+#   - "Connector plugin ... not found" also appears when the class name in the config is wrong.
+#     connect_config shows the class that ran on the old host, so the class is right.
+#   - connect_list_connectors shows the connector's type empty: Connect cannot report the type of
+#     a connector whose plugin is missing. That is the tell, not a second fault.
+#   - A half-replaced plugin folder (two Debezium versions) fails differently: NoSuchMethodError
+#     or NoClassDefFoundError from a class that IS loaded (known issue
+#     connect-mixed-debezium-versions). Here the class is absent.
+#
+# Sources:
+#   - internal/tools/runbooks/library/known-issues/plugin-mismatch.yaml, id
+#     connect-driver-outside-plugin: Connect loads each plug-in in its own class loader from
+#     plugin.path, so a jar outside it is invisible; id connect-mixed-debezium-versions: replace
+#     the whole plugin folder on upgrade. The message naming the missing class is Kafka Connect's
+#     (Worker/AbstractHerder: "Failed to find any class that implements Connector and which name
+#     matches <class>, available connectors are: ...").
+#   - internal/tools/kafkatools/validate_config_tool.go: on a worker without the plugin,
+#     PluginConfigDef and ValidateConfig both answer 404, so connect_validate_config returns
+#     "Connector plugin <class> not found" before any config key is judged. The eval harness
+#     cannot replay that tool yet (C6's Q6d adds the definition-only Connect client), so this
+#     file proves the missing plugin from connect_status and connect_config; when Q6d lands, add
+#     the connect_validate_config read (input {class}) with that error and count it as the probe
+#     that separates "plugin absent" from "config wrong".
+#   - internal/tools/kafkatools/connect_tools.go: connect_list_connectors and connect_status
+#     render an empty type as "()" when Connect cannot name the connector's type.
+
+name: register-rejected-missing-plugin
+description: |
+  At 09:05 UTC the Connect workers were redeployed on a new image whose plugin.path no longer
+  contains the Debezium connector plugins (the folder was mounted at the old path only). On
+  start, Connect cannot instantiate pg-orders-connector: "Failed to find any class that
+  implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector"
+  and the connector is FAILED with no tasks. A re-registration of the same config is refused
+  with "Connector plugin io.debezium.connector.postgresql.PostgresConnector not found". The slot
+  debezium_orders is inactive with 1.1 MiB retained; nothing reaches Kafka and analytics.orders
+  is 35 minutes stale. The connector's config never changed and the database is healthy.
+
+  Root cause: the Debezium Postgres connector plugin (class
+  io.debezium.connector.postgresql.PostgresConnector) is not installed on the Connect worker, so
+  the connector cannot be loaded or registered.
+
+  Expected label: restore the Debezium connector plugin on the workers (plugin.path) and restart
+  the workers; no connector setting or restart alone brings the class back.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders: pg-orders-connector is FAILED and analytics.orders is 35m stale after the Connect worker redeploy; re-registering it is refused'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot_active: "false"
+            slot_retained: 1.1 MiB
+            wal_status: reserved
+          health: warn
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - health: fail
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 35m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 35m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (): FAILED, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: FAILED
+        type: ""
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (): FAILED on connect:8083:
+      org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSinkConnector, name='org.apache.kafka.connect.file.FileStreamSinkConnector', version='3.6.1', encodedVersion=3.6.1, type=sink, typeName='sink', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSourceConnector, name='org.apache.kafka.connect.file.FileStreamSourceConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}
+    data:
+      name: pg-orders-connector
+      state: FAILED
+      tasks: []
+      worker: connect:8083
+      error: "org.apache.kafka.connect.errors.ConnectException: Failed to find any class that implements Connector and which name matches io.debezium.connector.postgresql.PostgresConnector, available connectors are: PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSinkConnector, name='org.apache.kafka.connect.file.FileStreamSinkConnector', version='3.6.1', encodedVersion=3.6.1, type=sink, typeName='sink', location='classpath'}, PluginDesc{klass=class org.apache.kafka.connect.file.FileStreamSourceConnector, name='org.apache.kafka.connect.file.FileStreamSourceConnector', version='3.6.1', encodedVersion=3.6.1, type=source, typeName='source', location='classpath'}"
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=1.1 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 3D/4A11C920
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3D/4A11C7D0
+        retained_wal_bytes: 1153434
+        wal_status: reserved
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      role_info:
+        role: piperoom
+        exists: true
+        can_login: true
+        replication: true
+        selectable:
+          public.orders: true
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: logical}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      no field changes
+    data:
+      changes: []
+      from_version: 1
+      subject: pg.public.orders-value
+      to_version: 2
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-23T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-23T09:40:00Z)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 35 min ago
+      partition 1: 0–1417 (1417 records), newest 35 min ago
+      partition 2: 0–1403 (1403 records), newest 35 min ago
+    data:
+      partitions:
+        - end: 1428
+          last_timestamp: "2026-10-24T09:05:14Z"
+          partition: 0
+          start: 0
+        - end: 1417
+          last_timestamp: "2026-10-24T09:05:14Z"
+          partition: 1
+          start: 0
+        - end: 1403
+          last_timestamp: "2026-10-24T09:05:14Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4248
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 1428
+          end: 1428
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1417
+          end: 1417
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1403
+          end: 1403
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-24T09:05:10Z (stale for 35m)
+    data:
+      newest: "2026-10-24T09:05:10Z"
+      stale_for: 35m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: pg_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, columns=[amount, customer_id, id=1432, status, updated_at=2026-10-24T09:39:41Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1432"
+      status: null
+      updated_at: "2026-10-24T09:39:41Z"
+  - tool: warehouse_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "I own the Connect workers. The config is the one that ran before the redeploy - I only changed the image. Re-registering it is refused. Tell me what is actually missing on the worker."
+
+expect:
+  root_cause:
+    - [plugin]
+    - [missing, not installed, not found, absent, removed, not loaded, not on the worker, classpath]
+  # The wrong stories of a connector that cannot be loaded.
+  root_cause_forbidden:
+    - ['schema change']
+    - ['database server name']
+    - ['topic prefix']
+    - ['permission denied']
+    - ['slot was lost']
+    - ['disk full']
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_plugin_class_missing
+      tool: connect_status
+      match: [failed to find any class, postgres connector]
+      required: true
+    - id: f_class_in_config
+      tool: connect_config
+      match: [connector class, postgres connector]
+      required: true
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+    - id: f_source_role_ok
+      tool: source_role_grants
+      match: [selectable yes]
+  claims:
+    - about: root_cause
+      facts: [f_plugin_class_missing]
+  evidence_tools: [connect_status, connect_config]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility, pg_drop_replication_slot]
+  max_tool_calls: 12

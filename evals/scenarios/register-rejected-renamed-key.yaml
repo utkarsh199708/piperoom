@@ -1,0 +1,454 @@
+# C7 incident scenario (Q4c): the connector's config still names the Debezium 1.x logical server
+# key database.server.name, which 2.0 replaced with topic.prefix; the upgraded worker refuses
+# the config and the connector sits FAILED at load. Format: evals/README.md (C6). The break is
+# the config a registration uses, so this is the Q4a "validate before registering" story
+# (tasks/Q-board.md rows Q4a/Q4b/Q4c).
+#
+# RECORDED: NO. Every summary and data payload below is the exact output of the real
+# connect_config, connect_status, schema_registry_* and dbtools code from main, composed by hand
+# from those tools' format strings and from the messages Debezium 3.2 and Kafka Connect 3.6
+# return (the P3 and X1e approach; the Q4c session had no Docker, so nothing was read from a
+# running stack). Clock: 2026-10-24T09:40:00Z, scoped by dev/owners.yaml. To replace it with a
+# real recording, see evals/scenarios/README.md, "Config-validation scenarios (Q4c)".
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (a connector config key).
+#   Nothing is wrong in Postgres, Kafka or the warehouse: the slot is inactive only because the
+#   connector cannot be instantiated.
+#
+# Expected label: the key is database.server.name. Debezium 2.0 replaced it with topic.prefix
+#   (known issue dbz-topic-prefix, DBZ-4180); renaming it with the same value (pg) keeps the topic
+#   names, the schema subject names and the stored offsets, so the connector can start where it
+#   stopped. The fix is a config change plus a restart of the connector (Connect cannot load it
+#   at all while the required key is missing). connect_update_connector_config cannot do it: its
+#   allow-list is output/precision settings and error logging. Re-registering by delete then
+#   create is connect_delete_connector + connect_create_connector (Q5c, not merged yet); its
+#   Preview runs ValidateConfig, which is the check that refuses this config today.
+#   Forbidden: connect_restart_connector, connect_restart_task - a restart re-reads the same
+#     stored config and fails with the same message.
+#   Forbidden: connect_resume_connector - the connector is not STOPPED (Validate refuses it).
+#   Forbidden: schema_register, schema_set_compatibility - both subjects have one version and the
+#     schema is not what is missing; the required connector key is.
+#   Forbidden: connect_update_connector_config - it cannot rename a key (see above).
+#
+# Traps:
+#   - "topic.prefix is invalid" reads like a schema or topic-naming problem; the fix is the
+#     connector's own config key, and pg_recent_ddl shows no DDL at all.
+#   - The connector's config also lacks topic.prefix, which the agent can only see by reading
+#     connect_config (the tool shows database.server.name and hides nothing here).
+#   - The slot is inactive with 1.1 MiB retained: small, so a slot_wal / dead-slot story fails.
+#
+# Sources:
+#   - internal/tools/runbooks/library/known-issues/renamed.yaml, id dbz-topic-prefix:
+#     database.server.name was replaced by topic.prefix (DBZ-4180), affected >=2.0.0.Beta1;
+#     "rename database.server.name to topic.prefix with the same value so topic names and stored
+#     offsets stay the same".
+#   - internal/tools/kafkatools/validate_config_tool.go: connect_validate_config reports an unknown
+#     key with the nearest known key from PluginConfigDef, and names the Q1 known-issue id when
+#     Deps.RenamedKey is wired (A4's wiring does not pass it yet; until then the rename is
+#     resolved from runbook_lookup, which reads the same embedded index and runs for real in the
+#     harness). The eval harness cannot replay connect_validate_config at all yet (C6's Q6d adds
+#     the definition-only Connect client), so this file proves the key from connect_config and
+#     the connector trace instead; when Q6d lands, add the connect_validate_config read (input
+#     {class}) with its summary and a fact on it.
+#   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html: topic.prefix is
+#     required; it replaced database.server.name in 2.0.
+#   - Kafka Connect: an invalid stored config makes the connector FAILED at load with
+#     "Connector configuration is invalid and contains the following 1 error(s)"; the REST config
+#     endpoint still serves the stored config.
+
+name: register-rejected-renamed-key
+description: |
+  At 09:08 UTC the Connect workers were upgraded to Debezium 3.2. pg-orders-connector was
+  re-registered from the export taken on the old 1.x cluster, so its config still carries the
+  logical server name in the 1.x key database.server.name=pg and has no topic.prefix. The
+  upgraded worker refuses the config ("The 'topic.prefix' value is invalid: A value is required")
+  and the connector sits FAILED at load: no task runs, the slot debezium_orders is inactive and
+  order-sync and analytics.orders have been idle for 32 minutes. Nothing else changed: the
+  schema has one version, no DDL ran, the source role can read the table.
+
+  Root cause: the connector's config still uses database.server.name, which Debezium 2.0 renamed
+  to topic.prefix, and topic.prefix is required, so Connect cannot instantiate the connector.
+
+  Expected label: rename database.server.name to topic.prefix with the value pg (known issue
+  DBZ-4180) and restart the connector; the topic names, subject names and stored offsets stay
+  the same. Re-registering (delete plus create, connect_delete_connector + connect_create_connector
+  from Q5c) runs the same validation, which now passes.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders: pg-orders-connector is FAILED and analytics.orders is 32m stale after the Debezium 3.2 upgrade; the connector was re-registered from the 1.x export'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=32m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=32m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.1 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=32m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=32m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot_active: "false"
+            slot_retained: 1.1 MiB
+            wal_status: reserved
+          health: warn
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - health: fail
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 32m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 32m
+            ts_column: updated_at
+          health: fail
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): FAILED, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: FAILED
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): FAILED on connect:8083:
+      org.apache.kafka.connect.errors.ConnectException: Connector configuration is invalid and contains the following 1 error(s):
+      The 'topic.prefix' value is invalid: A value is required
+    data:
+      name: pg-orders-connector
+      state: FAILED
+      tasks: []
+      worker: connect:8083
+      error: "org.apache.kafka.connect.errors.ConnectException: Connector configuration is invalid and contains the following 1 error(s):\nThe 'topic.prefix' value is invalid: A value is required"
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.server.name: pg
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.server.name: pg
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=1.1 MiB wal_status=reserved
+    data:
+      - active: false
+        confirmed_flush_lsn: 3D/4A11C920
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3D/4A11C7D0
+        retained_wal_bytes: 1153434
+        wal_status: reserved
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 1
+      subject: pg.public.orders-key
+      versions:
+        - 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      no field changes
+    data:
+      changes: []
+      from_version: 1
+      subject: pg.public.orders-value
+      to_version: 2
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-23T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-23T09:40:00Z)
+  - tool: source_role_grants
+    input: {pipeline_id: orders}
+    summary: |-
+      connector pg-orders-connector role piperoom: exists=yes login=yes replication=yes
+      selectable tables: 1 of 1
+      public.orders: selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      role_info:
+        role: piperoom
+        exists: true
+        can_login: true
+        replication: true
+        selectable:
+          public.orders: true
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: logical}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1428 (1428 records), newest 32 min ago
+      partition 1: 0–1417 (1417 records), newest 32 min ago
+      partition 2: 0–1403 (1403 records), newest 32 min ago
+    data:
+      partitions:
+        - end: 1428
+          last_timestamp: "2026-10-24T09:08:10Z"
+          partition: 0
+          start: 0
+        - end: 1417
+          last_timestamp: "2026-10-24T09:08:10Z"
+          partition: 1
+          start: 0
+        - end: 1403
+          last_timestamp: "2026-10-24T09:08:10Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4248
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1428, end 1428, lag 0
+        pg.public.orders/1: committed 1417, end 1417, lag 0
+        pg.public.orders/2: committed 1403, end 1403, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 1428
+          end: 1428
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1417
+          end: 1417
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1403
+          end: 1403
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-24T09:08:06Z (stale for 32m)
+    data:
+      newest: "2026-10-24T09:08:06Z"
+      stale_for: 32m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: pg_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, columns=[amount, customer_id, id=1432, status, updated_at=2026-10-24T09:39:41Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1432"
+      status: null
+      updated_at: "2026-10-24T09:39:41Z"
+  - tool: warehouse_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      not found
+    data:
+      found: false
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: arjun
+    text: "I did the upgrade and the re-register. The worker refuses the config - it says The 'topic.prefix' value is invalid: A value is required - and the connector will not start. I own the connector: tell me which setting to change and I will re-register it the same way."
+
+expect:
+  root_cause:
+    - [database server name]
+    - [topic prefix, rename*, replaced]
+  # The wrong stories of a connector that will not start.
+  root_cause_forbidden:
+    - ['schema change']
+    - [schema registry]
+    - ['permission denied']
+    - ['plugin']
+    - ['slot was lost']
+    - ['disk full']
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_topic_prefix_required
+      tool: connect_status
+      match: [topic prefix, value is invalid]
+      required: true
+    - id: f_old_key_in_config
+      tool: connect_config
+      match: [database server name, pg]
+      required: true
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl]
+    - id: f_one_schema_version
+      tool: schema_registry_versions
+      match: [versions 1, latest id 2]
+  claims:
+    - about: root_cause
+      facts: [f_topic_prefix_required, f_old_key_in_config]
+  evidence_tools: [connect_config, connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 12
