@@ -79,7 +79,7 @@ func assertLifecycleExecuteRefuses(t *testing.T, areg *actions.Registry, ctx con
 			continue
 		}
 		_, err := a.Execute(ctx, params[n])
-		if err == nil || !strings.Contains(err.Error(), "connect.ConnectLifecycleWriter") {
+		if err == nil || !strings.Contains(err.Error(), "no write credentials") {
 			t.Errorf("%s: Execute = %v, want the refusal for want of a lifecycle writer", n, err)
 		}
 	}
