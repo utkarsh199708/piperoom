@@ -73,6 +73,11 @@ type setupScenario struct {
 	breakIt func(ctx context.Context, s *stack) error
 	fix     func(ctx context.Context, s *stack) error
 	verify  func(ctx context.Context, s *stack) (ok bool, detail string, err error)
+	// profile is the compose profile the scenario's service runs in ("" for
+	// the base dev stack). A profile scenario has its own fake and its own
+	// integration test (setupbreaks_<profile>*.go), so the base-stack tests
+	// skip it.
+	profile string
 }
 
 // setupScenarios are the six breaks of U1-15. The names match the evals
@@ -84,6 +89,10 @@ var setupScenarios = map[string]setupScenario{
 	"missing-grant":               {name: "missing-grant", check: checkSourceRoleGrants, breakIt: breakSetupMissingGrant, fix: fixSetupMissingGrant, verify: verifySourceRoleGrants},
 	"db-unreachable-from-connect": {name: "db-unreachable-from-connect", check: checkConnectSourceReach, breakIt: breakDBUnreachable, fix: fixDBUnreachable, verify: verifyConnectSourceReachable},
 	"plugin-after-scan":           {name: "plugin-after-scan", check: checkConnectPluginScan, breakIt: breakPluginAfterScan, fix: fixPluginAfterScan, verify: verifyConnectPluginScan},
+	// Profile "oracle" (U9c, setupbreaks_oracle.go).
+	"no-archivelog":           {name: "no-archivelog", check: checkOracleArchiveLog, profile: oracleProfile, breakIt: breakOracleNoArchiveLog, fix: fixOracleNoArchiveLog, verify: verifyOracleArchiveLog},
+	"no-supplemental-logging": {name: "no-supplemental-logging", check: checkOracleSupplementalLogging, profile: oracleProfile, breakIt: breakOracleNoSupplementalLogging, fix: fixOracleNoSupplementalLogging, verify: verifyOracleSupplementalLogging},
+	"missing-logminer-grant":  {name: "missing-logminer-grant", check: checkOracleLogMinerGrants, profile: oracleProfile, breakIt: breakOracleMissingLogMinerGrant, fix: fixOracleMissingLogMinerGrant, verify: verifyOracleLogMinerGrants},
 }
 
 // setupScenarioNames returns the names sorted, for usage text and errors.
@@ -93,6 +102,18 @@ func setupScenarioNames() []string {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	return names
+}
+
+// setupScenarioNamesFor returns the sorted names of one profile's scenarios
+// ("" = the base dev stack).
+func setupScenarioNamesFor(profile string) []string {
+	var names []string
+	for _, n := range setupScenarioNames() {
+		if setupScenarios[n].profile == profile {
+			names = append(names, n)
+		}
+	}
 	return names
 }
 

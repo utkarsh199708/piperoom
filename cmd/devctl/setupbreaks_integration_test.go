@@ -120,7 +120,7 @@ var sharedStackDisruptive = map[string]bool{
 // where the test owns the stack.
 func integrationSetupBreaks() []string {
 	out := make([]string, 0, len(setupScenarios))
-	for _, name := range setupScenarioNames() {
+	for _, name := range setupScenarioNamesFor("") {
 		if sharedStackDisruptive[name] {
 			continue
 		}

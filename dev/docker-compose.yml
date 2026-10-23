@@ -340,3 +340,34 @@ services:
       test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
       interval: 5s
       retries: 40
+
+  # Oracle source for the setup breaks (U9c, dev/oracle/README.md): Oracle
+  # Database Free with ARCHIVELOG, supplemental logging and the LogMiner user
+  # C##DBZUSER, set up on the first start by dev/oracle/cdc-setup.sh.
+  # Profile "oracle": `docker compose -f dev/docker-compose.yml --profile oracle
+  # up -d --wait oracle` starts it alone; nothing else depends on it.
+  oracle:
+    profiles: ["oracle"]
+    # 23.9, the last "Oracle Database 23ai Free" release: 23.26.x reports itself
+    # as "Oracle AI Database 26ai", a banner the U9a client does not read yet
+    # (ORACLE_IMAGE=gvenzl/oracle-free:23.26.3 runs it; dev/oracle/README.md).
+    # The regular variant, not -slim (which strips more components); this one
+    # was run with a LogMiner session as C##DBZUSER. Exact release and
+    # multi-arch index digest (verified with docker pull, 2026-10-23).
+    image: ${ORACLE_IMAGE:-gvenzl/oracle-free:23.9@sha256:eb47a5c4abbb473efb27398d967ff96462cae67b099caa5cb70ac2dd94bf6a3f}
+    environment:
+      # SYS and SYSTEM; dev stack only (AGENTS.md section 3).
+      ORACLE_PASSWORD: piperoom-dev
+    # Host loopback only: the dev passwords are in this file.
+    ports: ["127.0.0.1:1521:1521"]
+    volumes:
+      - ./oracle/cdc-setup.sh:/opt/piperoom/oracle/cdc-setup.sh:ro
+      - ./oracle/initdb:/container-entrypoint-initdb.d:ro
+    healthcheck:
+      # The image's own check: FREEPDB1 open READ WRITE and no first-start
+      # script still running (the CDC setup is one of them).
+      test: ["CMD", "healthcheck.sh"]
+      start_period: 30s
+      interval: 5s
+      timeout: 10s
+      retries: 54

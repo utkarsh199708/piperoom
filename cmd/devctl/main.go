@@ -75,6 +75,7 @@ scenarios: %s
 
 setup-break scenarios: flat-plugin-dir, missing-converter-jars, wal-level-replica,
 missing-grant, db-unreachable-from-connect, plugin-after-scan
+oracle profile (dev/oracle/README.md): no-archivelog, no-supplemental-logging, missing-logminer-grant
 `
 
 func main() {
