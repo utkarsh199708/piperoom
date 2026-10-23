@@ -576,12 +576,9 @@ func writeTables(tables []string) ([]sourceTable, error) {
 // owners config to resolve it and must not guess. connector "" and no tables
 // check only that a scope is there.
 func checkWriteScope(ctx context.Context, connector string, tables []sourceTable) error {
-	sc, err := tools.ScopeFor(ctx, nil)
+	sc, err := writeScope(ctx)
 	if err != nil {
-		if !errors.Is(err, tools.ErrNoScope) {
-			err = fmt.Errorf("%w: %w", tools.ErrNoScope, err)
-		}
-		return fmt.Errorf("postgres: write refused: it needs the room's whole pipeline in ctx (tools.WithPipeline) or the explicit tools.WithUnscoped opt-out: %w", err)
+		return err
 	}
 	if sc.Unscoped() {
 		return nil
@@ -596,6 +593,21 @@ func checkWriteScope(ctx context.Context, connector string, tables []sourceTable
 		}
 	}
 	return nil
+}
+
+// writeScope resolves the writer's fail-closed scope: the room's whole
+// pipeline, the explicit opt-out, or an error. A context that names the
+// pipeline only by id (tools.WithPipelineID) is ErrNoScope, because the
+// writer has no owners config to resolve it and must not guess.
+func writeScope(ctx context.Context) (tools.Scope, error) {
+	sc, err := tools.ScopeFor(ctx, nil)
+	if err != nil {
+		if !errors.Is(err, tools.ErrNoScope) {
+			err = fmt.Errorf("%w: %w", tools.ErrNoScope, err)
+		}
+		return tools.Scope{}, fmt.Errorf("postgres: write refused: it needs the room's whole pipeline in ctx (tools.WithPipeline) or the explicit tools.WithUnscoped opt-out: %w", err)
+	}
+	return sc, nil
 }
 
 // signalData encodes the execute-snapshot data, with cond as every table's
