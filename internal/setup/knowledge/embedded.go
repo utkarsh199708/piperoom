@@ -457,13 +457,3 @@ func (v dbzVersion) compare(o dbzVersion) int {
 func (v dbzVersion) line() string {
 	return strconv.Itoa(v.nums[0]) + "." + strconv.Itoa(v.nums[1])
 }
-
-func cmpInt(a, b int) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
-}
