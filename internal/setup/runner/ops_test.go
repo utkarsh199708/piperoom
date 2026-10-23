@@ -990,3 +990,55 @@ func TestT3OffByDefault(t *testing.T) {
 		t.Fatalf("a disabled T3 op prompted: %q", stdout.String())
 	}
 }
+
+// slowCheckCatalogue holds every op in its target check until release is
+// closed, so a test can land a FrameCancel while the op is still in runOp's
+// checks (not started, not prompting).
+type slowCheckCatalogue struct {
+	*fakeCatalogue
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *slowCheckCatalogue) CheckTarget(protocol.OpRequest) string {
+	c.entered <- struct{}{}
+	<-c.release
+	return ""
+}
+
+// TestCancelDuringChecksStopsTheOp: a FrameCancel read while the op is still
+// in its checks reaches it (the read loop registers the op's cancel before
+// its goroutine starts), so the op is refused and never runs.
+func TestCancelDuringChecksStopsTheOp(t *testing.T) {
+	cat := &slowCheckCatalogue{
+		fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT1}},
+		entered:       make(chan struct{}, 1),
+		release:       make(chan struct{}),
+	}
+	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+		doHandshake(t, conn, ctx, "tok", time.Now, nil)
+		p1 := testProposalWithAction("p1", "source_restart")
+		a := opReqPtr("a", "source_restart", protocol.TierT1, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+		a.Deadline = time.Now().Add(time.Hour)
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+		<-cat.entered
+		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
+		// The read loop handles a cancel at once; give it ample time before
+		// the check returns.
+		time.Sleep(300 * time.Millisecond)
+		close(cat.release)
+		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+	})
+	defer srv.Close()
+	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Log: quiet(), Catalogue: cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	<-done
+	if n := cat.callCount(); n != 0 {
+		t.Fatalf("op ran %d time(s) after it was cancelled during its checks", n)
+	}
+}

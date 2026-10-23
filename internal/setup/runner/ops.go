@@ -205,10 +205,11 @@ func (r *Runner) dropDone(ids []string) {
 // confirmation), executes through the catalogue (or the runner's built-in
 // secret_set), redacts the result literally under the secret store and mints
 // its OutMAC, and reports Result or Refused.
-func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
-	opCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
+//
+// opCtx is the op's own context and cancel its cancel func, registered by the
+// read loop before this goroutine started (watchConfirm), so a FrameCancel
+// that arrives during the checks below is never lost.
+func (r *Runner) runOp(ctx, opCtx context.Context, cancel context.CancelFunc, req *protocol.OpRequest) {
 	if !req.Deadline.IsZero() && !r.now().Before(req.Deadline) {
 		r.refuse(ctx, req, protocol.RefuseDeadline)
 		return
@@ -294,9 +295,7 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 		// (or reports unknown) the step, so a "y" typed after it must not
 		// start the op.
 		if req.Tier == protocol.TierT3 {
-			unwatch := r.watchConfirm(req.ID, cancel)
 			ok, err := r.confirmT3(opCtx, req)
-			unwatch()
 			switch {
 			case err != nil && ctx.Err() != nil:
 				return // the connection ended; the op does not run
@@ -335,6 +334,17 @@ func (r *Runner) runOp(ctx context.Context, req *protocol.OpRequest) {
 			}
 		}
 
+		// A FrameCancel (or the deadline) that landed during the checks or
+		// just after the "y" stops the op here, before its start record: a
+		// cancelled op never starts.
+		if err := opCtx.Err(); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				r.refuse(ctx, req, protocol.RefuseDeadline)
+			} else {
+				r.refuse(ctx, req, protocol.RefuseNotConfirmed)
+			}
+			return
+		}
 		if err := r.markStarted(req, target, eff, cancel); err != nil {
 			if errors.Is(err, errDuplicateStep) {
 				r.refuse(ctx, req, protocol.RefuseDuplicateStep)
@@ -677,9 +687,10 @@ func (r *Runner) cancelOp(id string) {
 	}
 }
 
-// watchConfirm registers the cancel of a T3 op waiting for its "y", so a
-// FrameCancel reaches the prompt; the returned func unregisters it. A second
-// request with the same id does not unregister the first one's entry.
+// watchConfirm registers the cancel of an op that is not started yet (in its
+// checks, or a T3 op waiting for its "y"), so a FrameCancel reaches it; the
+// returned func unregisters it. A second request with the same id does not
+// unregister the first one's entry.
 func (r *Runner) watchConfirm(id string, cancel context.CancelFunc) (unwatch func()) {
 	entry := &cancel
 	r.opMu.Lock()
