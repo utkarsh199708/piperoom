@@ -254,3 +254,118 @@ func TestEndSessionNoScopedReader(t *testing.T) {
 		t.Fatal("fell back to the full read")
 	}
 }
+
+// TestEndSessionHorizonHolderOutOfScope: a session that locks none of the
+// pipeline's tables but holds the oldest xid horizon (blocks_slot, the classic
+// slot-creation blocker) holds back this pipeline's slot, so the room may end
+// it; its identity stays withheld in the preview, and pid and started_at are
+// re-checked at Execute.
+func TestEndSessionHorizonHolderOutOfScope(t *testing.T) {
+	_, src, w, a := esFixture()
+	src.sessions[0].InScope = false
+	src.sessions[0].BlocksSlot = true // user "app", application "billing"
+	if err := a.Validate(scopedCtx(), esParams(4242, testStart)); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	res, err := a.Preview(scopedCtx(), esParams(4242, testStart))
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if !strings.Contains(res.Current, "a session of another user or database; identity withheld") || !strings.Contains(res.Current, "oldest xmin") {
+		t.Fatalf("Preview Current = %q", res.Current)
+	}
+	for _, leak := range []string{"billing", `"app"`, "orders"} {
+		if strings.Contains(res.Current+res.Expected+res.Target, leak) {
+			t.Fatalf("Preview shows withheld identity %q: %+v", leak, res)
+		}
+	}
+	if !strings.HasPrefix(res.Expected, "pg_terminate_backend(4242)") {
+		t.Fatalf("Preview Expected = %q", res.Expected)
+	}
+	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart)); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(w.calls) != 1 {
+		t.Fatalf("writes = %+v, want one", w.calls)
+	}
+
+	// A different start time at Execute is refused before the writer.
+	if _, err := a.Execute(scopedCtx(), esParams(4242, testStart.Add(time.Second))); !errors.Is(err, postgres.ErrSessionChanged) {
+		t.Fatalf("Execute with a changed start = %v, want ErrSessionChanged", err)
+	}
+	if len(w.calls) != 1 {
+		t.Fatalf("writer called for a changed session: %+v", w.calls)
+	}
+}
+
+// TestEndSessionHorizonHolderRefusals: an out-of-scope horizon holder is still
+// refused when it is the connector's own database.user (checked through the
+// unscoped read, never shown), when database.user cannot be read, when the
+// client cannot do that check, and when the full read no longer lists it.
+func TestEndSessionHorizonHolderRefusals(t *testing.T) {
+	t.Run("connector's own user", func(t *testing.T) {
+		_, src, w, a := esFixture()
+		src.sessions[0].InScope, src.sessions[0].BlocksSlot, src.sessions[0].User = false, true, "Debezium"
+		err := a.Validate(scopedCtx(), esParams(4242, testStart))
+		if !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "own database.user") {
+			t.Fatalf("Validate = %v", err)
+		}
+		if _, err := a.Execute(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, errRefused) {
+			t.Fatalf("Execute = %v", err)
+		}
+		res, err := a.Preview(scopedCtx(), esParams(4242, testStart))
+		if err != nil || !strings.HasPrefix(res.Expected, "no change: this step is refused") {
+			t.Fatalf("Preview = %v %+v", err, res)
+		}
+		if strings.Contains(res.Current+res.Expected, "Debezium") {
+			t.Fatalf("Preview shows the withheld user: %+v", res)
+		}
+		if len(w.calls) != 0 {
+			t.Fatalf("writer called: %+v", w.calls)
+		}
+	})
+	t.Run("database.user unreadable", func(t *testing.T) {
+		conn, src, _, a := esFixture()
+		conn.cfg["pg-orders"]["database.user"] = "${env:DB_USER}"
+		src.sessions[0].InScope, src.sessions[0].BlocksSlot = false, true
+		if err := a.Validate(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "not readable") {
+			t.Fatalf("Validate = %v", err)
+		}
+		if src.unscoped != 0 {
+			t.Fatal("read the full list although the check could not be made")
+		}
+	})
+	t.Run("no unscoped read", func(t *testing.T) {
+		conn, src, w, _ := esFixture()
+		src.sessions[0].InScope, src.sessions[0].BlocksSlot = false, true
+		a := &endSession{d: EndSessionDeps{Connect: conn, Source: onlyScopedBlockers{s: src}, Writer: w}}
+		if err := a.Validate(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, errRefused) || !strings.Contains(err.Error(), "no Blockers") {
+			t.Fatalf("Validate = %v", err)
+		}
+	})
+	t.Run("gone from the full read", func(t *testing.T) {
+		_, src, _, a := esFixture()
+		src.sessions[0].InScope, src.sessions[0].BlocksSlot = false, true
+		calls := 0
+		src.sessionHook = func() {
+			calls++
+			if calls == 2 { // the scoped read saw it; the full read does not
+				src.sessions = src.sessions[1:]
+			}
+		}
+		if err := a.Validate(scopedCtx(), esParams(4242, testStart)); !errors.Is(err, postgres.ErrSessionChanged) {
+			t.Fatalf("Validate = %v, want ErrSessionChanged", err)
+		}
+	})
+}
+
+// onlyScopedBlockers is a source that can scope its blocking list but has no
+// unscoped read.
+type onlyScopedBlockers struct {
+	clients.SourceDB
+	s *fakeSource
+}
+
+func (o onlyScopedBlockers) BlockersOnTables(ctx context.Context, d time.Duration, tables []string) ([]DBSession, error) {
+	return o.s.BlockersOnTables(ctx, d, tables)
+}
