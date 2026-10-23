@@ -1,0 +1,126 @@
+# C7 setup scenario (U7d): the person's MongoDB capture user holds readAnyDatabase, which never
+# covers the local database, so it cannot read local.oplog.rs and the setup run stops at the oplog
+# check before it registers a connector. The label names the failing check and the fixing op with
+# its tier (tasks/U-board.md rows U7a and U7d, step 7). Format: evals/README.md (C6). Built on
+# `devctl setup-break no-oplog-role` (dev/mongo/README.md, cmd/devctl/setupbreaks_mongo.go, U7c).
+#
+# RECORDED: NO, and only one pipeline read is replayed: the run stopped before it registered
+# mongo-orders-connector, so Connect, Kafka and the registry have nothing of this pipeline yet (the
+# real tools' not-found answers are recorded), and the check's result is the setup run's own
+# (devctl's verifyMongoOplogRead, which reads the U7a client's RoleInfo). The one replayed read is
+# similar_incidents, the past-room lookup that answers before the pipeline exists; it is the
+# evidence the hypothesis cites, as in setup/compose-postgres-clean (U1-19). Clock:
+# 2026-10-27T09:40:00Z. Runner session: evals/setup/recordings/setup-no-oplog-role.json (the check
+# failing, then passing after the person's grant, and the run to a green verification). To
+# re-record both on the dev stack, see evals/scenarios/README.md, "Setup scenarios: MongoDB (U7d)".
+#
+# First failing layer: postgres (the source layer: the capture user's roles; owners.yaml has no
+#   mongodb source_kind yet, so the source layer is named postgres). Root-cause layer: postgres.
+#
+# Expected label: failing check mongo-oplog-read ("capture user admin.piperoom_cdc cannot read
+#   local.oplog.rs (no read role on local)"); fix: give the capture user read on local. The user is
+#   the person's own, so the grant is a documented ask to their user administrator:
+#   db.getSiblingDB('admin').grantRolesToUser('piperoom_cdc', [{role: 'read', db: 'local'}]) (no
+#   setup op grants a role to an existing MongoDB user). The setup's own alternative is
+#   source_create_read_role (T2, U7a: "the oplog user as the read role"), a capture user created
+#   with read on local and the captured database, its password stored as a secret. Then the run
+#   re-runs the checks and goes on. Neither is a room action in evals.LiveActions, so there is no
+#   expect.fix.
+#   Forbidden: connect_create_connector - registering before the check passes starts a connector
+#     on a user the setup has just found short of a role.
+#   Forbidden: connect_update_connector_config, connect_restart_connector, connect_restart_task -
+#     no connector exists yet.
+#   Forbidden: schema_register, schema_set_compatibility - nothing reached the registry.
+#
+# Traps:
+#   - readAnyDatabase sounds like it reads everything; MongoDB's any-database roles leave out
+#     local, config and admin.
+#   - The server is a healthy replica set member (mongo-change-streams passed): a standalone or
+#     replica set story fails.
+#
+# Sources:
+#   - cmd/devctl/setupbreaks_mongo.go: breakNoOplogRole (revokeRolesFromUser('piperoom_cdc',
+#     [{role: 'read', db: 'local'}])), verifyMongoOplogRead's detail "capture user <user> cannot
+#     read local.oplog.rs (no read role on local)", check name mongo-oplog-read; fixNoOplogRole
+#     (grantRolesToUser of the same role).
+#   - dev/mongo/init/01-capture-user.js and dev/scenarios.md: "readAnyDatabase never covers
+#     local"; the capture user's documented roles are readAnyDatabase, read on local and on config.
+#   - internal/clients/mongodb/settings.go: RoleInfo's Replication is "the user can read the
+#     oplog (local.oplog.rs)".
+#   - https://www.mongodb.com/docs/manual/reference/built-in-roles/#mongodb-authrole-readAnyDatabase:
+#     readAnyDatabase does not apply to the local and config databases.
+
+name: setup/no-oplog-role
+description: |
+  The person ran piperoom-setup on the Compose target with their MongoDB 7.0 replica set (rs0) as
+  the source and their capture user piperoom_cdc, which their user administrator created with
+  readAnyDatabase only. The run rendered Kafka, Connect and the Schema Registry, and stopped at the
+  source checks: mongo-change-streams passed (PRIMARY of rs0), mongo-oplog-read failed with
+  "capture user admin.piperoom_cdc cannot read local.oplog.rs (no read role on local)". No connector
+  was registered and nothing of the pipeline is in Kafka yet.
+
+  Root cause: the capture user piperoom_cdc lacks read on the local database, where the oplog
+  lives; readAnyDatabase leaves local out.
+
+  Expected label: failing check mongo-oplog-read; fix: grant piperoom_cdc read on local (a
+  documented ask to the person's user administrator: grantRolesToUser with {role: 'read', db:
+  'local'}), or let the setup create its own capture user with source_create_read_role (T2); then
+  re-run the checks.
+
+setup:
+  source_kind: mongodb
+  target: compose
+
+pipeline:
+  id: orders-mongo
+  title: Orders CDC (MongoDB)
+  topic_prefix: mongo
+  source_tables: [inventory.orders]
+  connectors: [mongo-orders-connector]
+
+alert:
+  # The title names the step and the check, not the check's message: the message states the cause
+  # (it is in the description), and a title that hands the cause back must not pass.
+  title: 'orders-mongo setup: stopped at the source checks before registering mongo-orders-connector; prerequisite check mongo-oplog-read failed'
+  # No pipeline_map: nothing of this pipeline runs yet, so the room has no topology to show.
+
+recordings:
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mongo (0 past rooms searched).
+  # The room's source tools have no MongoDB reader on main: the real tools' answer.
+  - tool: source_settings
+    error: 'dbtools: source_settings: the source client cannot read database settings'
+  - tool: source_role_grants
+    error: 'dbtools: source_role_grants: the source client cannot read database settings'
+  # Nothing is registered yet: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "Our admin created piperoom_cdc with readAnyDatabase, which I thought reads everything, and the setup still stops at the oplog check. What exactly is missing on the user, and who or what has to fix it?"
+
+expect:
+  root_cause:
+    - [oplog, local.oplog.rs, local]
+    - [read, role, privilege*, grant*]
+    - [piperoom_cdc, capture user, readanydatabase]
+  # The wrong stories of a run that stopped at a role check.
+  root_cause_forbidden:
+    - [standalone]
+    - [replset]
+    - [network]
+    - [password*]
+    - [authenticat*]
+    - [schema registry]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  evidence_tools: [similar_incidents]
+  forbidden_actions: [connect_create_connector, connect_update_connector_config, connect_restart_connector, connect_restart_task, schema_register, schema_set_compatibility]
+  max_tool_calls: 6

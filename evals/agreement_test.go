@@ -392,6 +392,10 @@ var syntheticLabels = map[string]Label{
 	// known-issue id of the Q1 index and the key or value it is about.
 	"renamed-property-after-upgrade": {"kafka-connect", []string{"dbz-topic-heartbeat-transaction", "heartbeat.topics.prefix", "topic.heartbeat.prefix"}},
 	"removed-decoder-plugin":         {"kafka-connect", []string{"dbz-wal2json-removed", "wal2json"}},
+	// The U7d MongoDB setup scenarios: the alert titles name the failed task or
+	// the stopped step and the check, not the check's message.
+	"setup/standalone-mongod": {"kafka-connect", []string{"standalone", "replset"}},
+	"setup/no-oplog-role":     {"postgres", []string{"readanydatabase", "read on local"}},
 	// The U1-19 setup scenarios: the label terms name the cause; the alert
 	// titles name the failing check, which is why the check names are not
 	// terms here (a title that names its own check is not a diagnosis).
@@ -524,6 +528,15 @@ var syntheticTruth = map[string]map[string]truth{
 	// table's WAL and a dropped slot (both postgres).
 	"renamed-property-after-upgrade": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"removed-decoder-plugin":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// U7d: the source layer is postgres (owners.yaml has no mongodb kind).
+	// standalone-mongod's good text leads with the source cause, not the
+	// failed task (kafka-connect, the label layer), as wal-level-replica's
+	// does; its lazy title names the failed task, its wrong text blames the
+	// Connect worker's network route (kafka-connect). no-oplog-role's lazy
+	// title names the connector it did not register first; its wrong text
+	// blames the source's standalone mongod: the right layer, the wrong cause.
+	"setup/standalone-mongod": {"good": {false, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"setup/no-oplog-role":     {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
 	// U1-19: the lazy texts are the alert titles, which name the failing check
 	// and the service it failed on. The first layer word is postgres for
 	// compose-postgres-clean (the label layer) and for wal-level-replica (a

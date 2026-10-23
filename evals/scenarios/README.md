@@ -530,6 +530,39 @@ connector key fixes either), the slot drop and the offset reset.
 `devctl break` for either incident (an A1 follow-up: a second listener on the dev broker that advertises an
 unresolvable name, and a firewall rule between the Connect and Postgres containers). Re-record them with the
 procedure of "Stale source offsets (Q5f)" above once those breaks exist.
+### Setup scenarios: MongoDB (U7d)
+
+Three setup scenarios on a MongoDB 7.0 source (the `mongo` dev profile, a one-member replica set `rs0`,
+`dev/mongo/README.md`) and the Compose target, each with a runner session in `evals/setup/recordings` (the eval
+replay). Two are built on the U7c `devctl setup-break` names; their labels name the failing check (the check names
+and messages of `cmd/devctl/setupbreaks_mongo.go`, which read the U7a client `internal/clients/mongodb`) and the fix
+with its tier from `tasks/U-board.md` (U7a, U7b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-mongodb-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every MongoDB check passed | - | outcome `healthy`; no proposal |
+| `setup/standalone-mongod` | task 0 FAILED (`MongoTimeoutException`); check `mongo-change-streams` failed | mongod recreated without `--replSet rs0`: a standalone has no change streams, and the driver (`replicaSet=rs0`) drops it from its cluster view | kafka-connect / postgres | `mongo-change-streams`; restart mongod with `--replSet rs0` (a documented ask: the person's own mongod; T1 only when the room created it, by receipt), then `connect_restart_task` |
+| `setup/no-oplog-role` | the run stopped at the source checks; check `mongo-oplog-read` failed | the capture user `piperoom_cdc` holds `readAnyDatabase`, which leaves out `local`, so it cannot read `local.oplog.rs` | postgres / postgres | `mongo-oplog-read`; grant read on `local` (a documented ask to the person's user administrator), or the setup's own capture user with `source_create_read_role` (T2) |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U7a client's DTOs, and the MongoDB driver (U7b) and the client's `SetupSourceWriter` half are not on main, so the
+check reads are recorded under the remote clients' source op names (`source_settings`, `source_role_info`).
+Digests are synthetic placeholders. `standalone-mongod`'s task trace is composed from the MongoDB Java driver's
+server-selection timeout and Debezium's change-event-producer wrapper. `no-oplog-role` stops before a connector
+exists, so, like `setup/compose-postgres-clean`, it replays only `similar_incidents` and has no `expected_facts`;
+its runner session goes on past the person's grant to a green verification. Conventions shared with the other
+setup sources: the source database is graded as the source layer `postgres` (owners.yaml has no `mongodb`
+source kind), the room's `source_*` tools record their real "cannot read database settings" error, and a title names
+the step and the check, not the check's message. A MongoDB topic is `<topic.prefix>.<db>.<collection>`, which is
+owners.yaml's `<topic_prefix>.<table>` for a `db.collection` table.
+
+To re-record on the dev stack once U7b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile mongo up -d --wait mongo`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then `devctl setup-break standalone-mongod` after the first verification (or
+`no-oplog-role` before the run), re-verify and re-run the checks. Take the room's tool results from `GET
+/api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl setup-fix`
+restores the profile.
+
 ### Setup scenarios (U1-19)
 
 Six files about `piperoom-setup`, where the failure is a setup check, a compose validator rule or the
