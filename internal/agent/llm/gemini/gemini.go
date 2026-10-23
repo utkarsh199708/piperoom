@@ -31,6 +31,7 @@ import (
 	"golang.org/x/oauth2"
 
 	"piperoom/internal/agent/llm"
+	"piperoom/internal/agent/llm/retry"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/config"
 )
@@ -87,11 +88,13 @@ type Options struct {
 	Proxy bool
 	// ContextTokens overrides the context window (PIPEROOM_MODEL_CONTEXT_TOKENS).
 	ContextTokens int64
-	// MaxConcurrency bounds requests in flight (PIPEROOM_MODEL_MAX_CONCURRENCY);
-	// 0 = no bound.
-	MaxConcurrency int64
-	// TPM is a tokens-per-minute budget (PIPEROOM_MODEL_TPM); 0 = none.
-	TPM int64
+	// Retry is the retry policy; nil means retry.Default(). A zero Policy
+	// never retries.
+	Retry *retry.Policy
+	// Limiter is the endpoint's shared limiter (retry.Limiters.For, so every
+	// role on the endpoint shares PIPEROOM_MODEL_MAX_CONCURRENCY and
+	// PIPEROOM_MODEL_TPM); nil limits nothing.
+	Limiter *retry.Limiter
 	// Log gets debug detail (redacted error bodies) and the long-wait note;
 	// nil = slog.Default().
 	Log *slog.Logger
@@ -105,8 +108,8 @@ type Model struct {
 	region   string
 	ctxToks  int64
 	client   *http.Client
-	retry    retrier
-	limit    limiter
+	policy   retry.Policy
+	limiter  *retry.Limiter
 	log      *slog.Logger
 	endpoint string // for logs: scheme://host only
 	// hideKey removes the key from error text. A closure, not the key: fmt's
@@ -139,8 +142,11 @@ func New(ctx context.Context, o Options) (*Model, error) {
 			}
 			return s
 		},
-		retry: newBackoff(),
-		limit: newEndpointLimiter(o.MaxConcurrency, o.TPM, o.Log),
+		policy:  retry.Default(),
+		limiter: o.Limiter,
+	}
+	if o.Retry != nil {
+		m.policy = *o.Retry
 	}
 	if m.backend == "" {
 		m.backend = config.GeminiBackendAPI
@@ -194,7 +200,7 @@ func New(ctx context.Context, o Options) (*Model, error) {
 	}
 	m.client = &http.Client{
 		Timeout:       TurnTimeout,
-		Transport:     &hostGuard{host: m.base.URL.Host, base: auth},
+		Transport:     &hostGuard{scheme: m.base.URL.Scheme, host: m.base.URL.Host, base: auth},
 		CheckRedirect: refuseRedirect,
 	}
 	return m, nil
@@ -260,42 +266,22 @@ func (m *Model) Turn(ctx context.Context, req llm.Request) (llm.Response, error)
 	ctx, cancel := context.WithTimeout(ctx, TurnTimeout)
 	defer cancel()
 
-	release, err := m.limit.acquire(ctx, int64(len(body)/3)+req.MaxTokens)
-	if err != nil {
-		return llm.Response{}, &llm.APIError{Provider: llm.ProviderGemini, Kind: llm.ErrRateLimited, Err: fmt.Errorf("%w: %w", llm.ErrNotSent, err)}
-	}
-	defer release()
-
 	var (
 		status  int
-		header  http.Header
 		payload []byte
-		sendErr error
 	)
 	url := m.url(model)
-	waitErr := m.retry.do(ctx, func(ctx context.Context) attempt {
-		status, header, payload, sendErr = m.send(ctx, url, body)
-		if sendErr != nil {
-			return attempt{retryable: retryableSendError(ctx, sendErr)}
-		}
-		if status == http.StatusOK {
-			return attempt{status: status}
-		}
-		e := parseError(status, payload)
-		return attempt{status: status, retryable: e.retryable, retryAfter: max(e.retryAfter, retryAfterHeader(header))}
+	est := int64(len(body)/3) + req.MaxTokens
+	err = m.policy.Do(ctx, func(ctx context.Context) (retry.Outcome, error) {
+		var (
+			out retry.Outcome
+			err error
+		)
+		status, payload, out, err = m.attempt(ctx, url, body, est)
+		return out, err
 	})
-	if sendErr != nil {
-		if waitErr != nil {
-			sendErr = errors.Join(sendErr, waitErr)
-		}
-		m.log.Debug("llm/gemini: request failed", "endpoint", m.endpoint, "kind", llm.ErrNetwork, "err", m.scrub(sendErr.Error()))
-		return llm.Response{}, &llm.APIError{Provider: llm.ProviderGemini, Kind: llm.ErrNetwork, Err: sendErr}
-	}
-	if status != http.StatusOK {
-		e := parseError(status, payload)
-		ae := &llm.APIError{Provider: llm.ProviderGemini, Status: status, Kind: e.kind, Body: m.scrub(string(payload)), Err: waitErr}
-		m.log.Debug("llm/gemini: request failed", "endpoint", m.endpoint, "status", status, "kind", ae.Kind, "body", ae.Body)
-		return llm.Response{}, ae
+	if err != nil {
+		return llm.Response{}, err
 	}
 	resp, err := decodeResponse(model, req, payload)
 	if err != nil {
@@ -310,6 +296,37 @@ func (m *Model) Turn(ctx context.Context, req llm.Request) (llm.Response, error)
 		return resp, &llm.APIError{Provider: llm.ProviderGemini, Status: status, Kind: llm.ErrTruncated}
 	}
 	return resp, nil
+}
+
+// attempt sends body once, under the endpoint's limiter, and classifies the
+// answer for the retry policy: a quota or billing 429 is never retried, and
+// Gemini's RetryInfo.retryDelay or a Retry-After replaces the backoff (the
+// policy caps it). It returns the status and body of a 200.
+func (m *Model) attempt(ctx context.Context, url string, body []byte, estimate int64) (int, []byte, retry.Outcome, error) {
+	release, err := m.limiter.Acquire(ctx, estimate)
+	if err != nil {
+		kind := llm.ErrNetwork
+		if errors.Is(err, retry.ErrWaitPastDeadline) {
+			kind = llm.ErrRateLimited
+		}
+		return 0, nil, retry.Outcome{}, &llm.APIError{Provider: llm.ProviderGemini, Kind: kind, Err: fmt.Errorf("%w: %w", llm.ErrNotSent, err)}
+	}
+	status, header, payload, err := m.send(ctx, url, body)
+	if err != nil {
+		release(0)
+		m.log.Debug("llm/gemini: request failed", "endpoint", m.endpoint, "kind", llm.ErrNetwork, "err", m.scrub(err.Error()))
+		return 0, nil, retry.Outcome{Retry: retryableSendError(ctx, err)}, &llm.APIError{Provider: llm.ProviderGemini, Kind: llm.ErrNetwork, Err: err}
+	}
+	m.limiter.Observe(header)
+	if status != http.StatusOK {
+		release(0)
+		e := parseError(status, payload)
+		ae := &llm.APIError{Provider: llm.ProviderGemini, Status: status, Kind: e.kind, Body: m.scrub(string(payload))}
+		m.log.Debug("llm/gemini: request failed", "endpoint", m.endpoint, "status", status, "kind", ae.Kind, "body", ae.Body)
+		return status, nil, retry.Outcome{Retry: e.retryable, RetryAfter: max(e.retryAfter, retry.After(header, time.Now()))}, ae
+	}
+	release(usedTokens(payload, estimate))
+	return status, payload, retry.Outcome{}, nil
 }
 
 // scrub removes the key literally and other secrets by pattern, and caps s.
@@ -346,17 +363,30 @@ type startedError struct{ err error }
 func (e *startedError) Error() string { return "llm/gemini: read response: " + e.err.Error() }
 func (e *startedError) Unwrap() error { return e.err }
 
-// retryableSendError reports a failure with no response byte that a retry
-// may fix: not the caller's context, not a policy refusal (deny list,
-// redirect, wrong host), not a response that had started.
+// retryableSendError reports a failure that a retry may fix (design 7.4):
+// a connection reset or closed before any response byte (retry.ConnReset).
+// Never the caller's context, a policy refusal (deny list, redirect, wrong
+// host) or a response that had started.
 func retryableSendError(ctx context.Context, err error) bool {
 	var se *startedError
-	switch {
-	case ctx.Err() != nil, errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded),
-		errors.Is(err, errDenied), errors.Is(err, errRedirect), errors.As(err, &se):
+	if ctx.Err() != nil || errors.Is(err, errDenied) || errors.Is(err, errRedirect) || errors.As(err, &se) {
 		return false
 	}
-	return true
+	return retry.ConnReset(err)
+}
+
+// usedTokens is what a 200 cost, for the limiter's bucket: the reported
+// usage, else the estimate.
+func usedTokens(payload []byte, estimate int64) int64 {
+	var w struct {
+		UsageMetadata struct {
+			Total int64 `json:"totalTokenCount"`
+		} `json:"usageMetadata"`
+	}
+	if json.Unmarshal(payload, &w) == nil && w.UsageMetadata.Total > 0 {
+		return w.UsageMetadata.Total
+	}
+	return estimate
 }
 
 func notSent(err error) error {

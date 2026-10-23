@@ -7,6 +7,7 @@ import (
 
 	"piperoom/internal/agent/llm"
 	"piperoom/internal/agent/llm/llmtest"
+	"piperoom/internal/agent/llm/retry"
 	"piperoom/internal/config"
 )
 
@@ -28,7 +29,7 @@ func newTestModel(t *testing.T, baseURL string, mutate func(*Options)) *Model {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	m.retry = noRetry{}
+	m.policy = retry.Policy{}
 	return m
 }
 

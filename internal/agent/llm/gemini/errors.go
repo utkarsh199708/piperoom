@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"piperoom/internal/agent/llm"
+	"piperoom/internal/agent/llm/retry"
 )
 
 // wireError is a Google API error body.
@@ -33,9 +34,6 @@ type classifiedError struct {
 	retryable  bool
 	retryAfter time.Duration // the server's hint (RetryInfo.retryDelay); 0 = none
 }
-
-// retryStatuses are retried by the policy of design 7.4.
-var retryStatuses = map[int]bool{408: true, 429: true, 500: true, 502: true, 503: true, 504: true, 529: true}
 
 // parseError classifies a non-200 answer by its status and body:
 //
@@ -71,7 +69,7 @@ func parseError(status int, body []byte) classifiedError {
 			}
 		}
 	}
-	c := classifiedError{retryable: retryStatuses[status], retryAfter: delay}
+	c := classifiedError{retryable: retry.RetryableStatus(status), retryAfter: delay}
 	switch {
 	case reasons["BILLING_DISABLED"]:
 		c.kind, c.retryable = llm.ErrBilling, false
