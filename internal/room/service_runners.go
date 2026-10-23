@@ -126,6 +126,13 @@ func (s *Service) RunnerRefused(ctx context.Context, tenant, roomID, creatorID, 
 	if !s.runners.Refuse(ctx, tenant, roomID, creatorID, token, payload) {
 		return
 	}
+	// A terminal refusal of a RegisterCredentials releases the room's pending
+	// request (matched by id), per the protocol contract: the server forgets
+	// it when answered, refused, or the runner is lost. The driver may then
+	// ask again.
+	if ref.Op == setupOpRegisterCredentials {
+		s.dropCredentialRequest(roomID, ref.ID)
+	}
 	s.runnerExec.DeliverRefusal(roomID, ref)
 }
 

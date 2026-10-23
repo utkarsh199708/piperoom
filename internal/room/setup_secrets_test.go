@@ -583,3 +583,127 @@ func TestSetupCredentialsSymlinkDirRefused(t *testing.T) {
 		t.Fatalf("the value was written through the directory symlink: %v", entries)
 	}
 }
+
+// TestSetupCredentialsTerminalRefusalReleasesPending: the runner declining on
+// its terminal sends a Refusal frame; per the protocol contract the server
+// then forgets the pending request, so the driver may ask again. A refusal
+// with another request id releases nothing.
+func TestSetupCredentialsTerminalRefusalReleasesPending(t *testing.T) {
+	ctx := context.Background()
+	env := newSetupEnv(t, setupOptions{})
+	res := createSetup(t, env, secretSetupRequest("orders-setup"))
+	roomID := res.Room.ID
+	w, token := attachSetupRunner(t, env, roomID)
+	if err := env.svc.SetSetupSecret(ctx, alice(), roomID, "source_password", "longenough"); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.RegisterSetupCredentials(ctx, alice(), roomID); err != nil {
+		t.Fatal(err)
+	}
+	id := framesOfType(w, protocol.FrameRegisterCredentials)[0].RegisterCredentials.RequestID
+
+	// A refusal of some other request releases nothing: still 409.
+	env.svc.RunnerRefused(ctx, "", roomID, "alice", token, protocol.Refusal{
+		ID: "cred_other", Op: "register_credentials", Reason: protocol.RefuseCredentials,
+	})
+	err := env.svc.RegisterSetupCredentials(ctx, alice(), roomID)
+	wantSetupError(t, err, 409, "already_decided")
+
+	// The real refusal releases the pending request.
+	env.svc.RunnerRefused(ctx, "", roomID, "alice", token, protocol.Refusal{
+		ID: id, Op: "register_credentials", Reason: protocol.RefuseCredentials,
+	})
+	if err := env.svc.RegisterSetupCredentials(ctx, alice(), roomID); err != nil {
+		t.Fatalf("register after a terminal refusal: %v", err)
+	}
+	if n := len(framesOfType(w, protocol.FrameRegisterCredentials)); n != 2 {
+		t.Fatalf("register frames = %d, want 2", n)
+	}
+	assertNoFiles(t, env.secretsDir)
+}
+
+// TestSetupCredentialsRunnerSwapForgetsPending: replacing the runner the
+// request was sent to forgets the pending request (its answer can never
+// arrive), and a frame from the superseded attachment is ignored outright:
+// no file, no registered event, no refusal event.
+func TestSetupCredentialsRunnerSwapForgetsPending(t *testing.T) {
+	ctx := context.Background()
+	env := newSetupEnv(t, setupOptions{})
+	res := createSetup(t, env, secretSetupRequest("orders-setup"))
+	roomID := res.Room.ID
+	w, oldToken := attachSetupRunner(t, env, roomID)
+	const value = "read-role-password"
+	if err := env.svc.SetSetupSecret(ctx, alice(), roomID, "source_password", value); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.svc.RegisterSetupCredentials(ctx, alice(), roomID); err != nil {
+		t.Fatal(err)
+	}
+	id := framesOfType(w, protocol.FrameRegisterCredentials)[0].RegisterCredentials.RequestID
+
+	// A new attachment replaces the runner the request went to.
+	creator := events.Actor{Kind: events.ActorHuman, ID: "alice", Name: "Alice"}
+	if err := env.svc.AttachRunner(ctx, "CODE2"+roomID, room.Runner{
+		RoomID: roomID, Creator: creator, Label: "laptop2", OS: "linux", Arch: "amd64",
+		Token: "tok2-" + roomID, TokenExpiresAt: env.now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !env.svc.BindRunnerWriter("", roomID, "alice", "tok2-"+roomID, &captureWriter{}) {
+		t.Fatal("bind replacement writer refused")
+	}
+
+	// The superseded runner's answer is not this room's answer.
+	before := len(roomEvents(t, env.svc, roomID))
+	env.svc.RunnerCredentials(ctx, "", roomID, "alice", oldToken, protocol.Credentials{
+		RequestID: id, Secrets: []protocol.Secret{{Name: "source_password", Value: value}},
+	})
+	assertNoFiles(t, env.secretsDir)
+	if n := len(eventsOf[events.SetupCredentialsRegisteredPayload](t, env.svc, roomID, events.SetupCredentialsRegistered)); n != 0 {
+		t.Fatalf("registered events = %d, want 0", n)
+	}
+	if after := len(roomEvents(t, env.svc, roomID)); after != before {
+		t.Fatalf("a superseded frame wrote %d event(s)", after-before)
+	}
+
+	// The pending request died with the old runner: the driver can ask again.
+	if err := env.svc.RegisterSetupCredentials(ctx, alice(), roomID); err != nil {
+		t.Fatalf("register after the swap: %v", err)
+	}
+}
+
+// TestSetupRoomDottedPipelineID: "." and ".." match the pipeline id regex but
+// name the secrets root and its parent, not a pipeline directory; a setup room
+// never opens for them.
+func TestSetupRoomDottedPipelineID(t *testing.T) {
+	ctx := context.Background()
+	env := newSetupEnv(t, setupOptions{})
+	for _, id := range []string{".", "..", "..."} {
+		req := secretSetupRequest(id)
+		if _, err := env.svc.CreateSetupRoom(ctx, alice(), req); err == nil {
+			t.Errorf("pipeline id %q: want a validation refusal, got a room", id)
+		} else {
+			wantSetupError(t, err, 400, "validation")
+		}
+	}
+	assertNoFiles(t, env.secretsDir)
+}
+
+// TestSetupSecretNameLengthCap: a 129-character name is refused before any
+// frame or path exists; 128 characters still pass the name rule.
+func TestSetupSecretNameLengthCap(t *testing.T) {
+	ctx := context.Background()
+	env := newSetupEnv(t, setupOptions{})
+	res := createSetup(t, env, secretSetupRequest("orders-setup"))
+	roomID := res.Room.ID
+	w, _ := attachSetupRunner(t, env, roomID)
+	long := "a" + strings.Repeat("b", 128)
+	err := env.svc.SetSetupSecret(ctx, alice(), roomID, long, "longenough")
+	wantSetupError(t, err, 400, "validation")
+	if n := len(framesOfType(w, protocol.FrameSecret)); n != 0 {
+		t.Fatalf("secret frames = %d, want 0 for an over-long name", n)
+	}
+	if err := env.svc.SetSetupSecret(ctx, alice(), roomID, long[:128], "longenough"); err != nil {
+		t.Fatalf("128-character name: %v", err)
+	}
+}

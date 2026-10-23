@@ -44,10 +44,21 @@ const (
 	maxSetupSecretBytes = 4 << 10
 )
 
-// setupSecretNameRe is protocol.Secret's name rule. A name is never a path
-// segment ("/", "\" and "." are impossible), so it is also a file name under
-// PIPEROOM_SECRETS_DIR, and it is checked before any path is built.
-var setupSecretNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+// setupSecretNameRe is protocol.Secret's name rule plus a length cap. A name
+// is never a path segment ("/", "\" and "." are impossible), so it is also a
+// file name under PIPEROOM_SECRETS_DIR, and it is checked before any path is
+// built; the cap keeps it well under any filesystem's NAME_MAX and out of
+// oversized events and frames.
+var setupSecretNameRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,127}$`)
+
+// secretsPipelineID reports whether the pipeline id is usable as a path
+// segment under PIPEROOM_SECRETS_DIR. pipelineIDRe alone admits "." and "..":
+// os.Root refuses ".." but opens "." as the secrets root itself, which would
+// write the room's files at the top level, where a file named like another
+// pipeline's id blocks that pipeline's directory for good.
+func secretsPipelineID(id string) bool {
+	return pipelineIDRe.MatchString(id) && strings.Trim(id, ".") != ""
+}
 
 // setupOpRegisterCredentials is the op name a credentials refusal carries
 // (the runner's own refusal uses the same name).
@@ -143,7 +154,7 @@ func (s *Service) RegisterSetupCredentials(ctx context.Context, user User, roomI
 	s.unlockRoom(st)
 	// The pipeline id becomes <dir>/<pipeline>: validate it before any path
 	// exists. The room validated it at create; this is the second line.
-	if !pipelineIDRe.MatchString(pipelineID) {
+	if !secretsPipelineID(pipelineID) {
 		return validation("the room's pipeline id is not a valid pipeline id")
 	}
 	if len(names) == 0 {
@@ -192,10 +203,26 @@ func (s *Service) RunnerCredentials(ctx context.Context, tenant, roomID, creator
 		return // a superseded attachment's frame is not this room's answer
 	}
 	if err := s.acceptCredentials(ctx, roomID, creds); err != nil {
+		// The runner answers once per request: when its answer is refused,
+		// the pending request it answered is released (matched by id, so a
+		// replayed or foreign frame releases nothing) and the driver may ask
+		// again.
+		s.dropCredentialRequest(roomID, creds.RequestID)
+		if errors.Is(err, errCredentialsEmitFailed) {
+			// The files are on disk; only the record is missing. A refusal
+			// event here would claim the opposite of what happened.
+			s.log.Error("room: credentials registered but the event was not recorded", "room", roomID, "request_id", safeRequestID(creds.RequestID), "err", err)
+			return
+		}
 		s.log.Warn("room: credentials frame refused", "room", roomID, "request_id", safeRequestID(creds.RequestID), "reason", err)
 		s.emitCredentialsRefusal(ctx, roomID)
 	}
 }
+
+// errCredentialsEmitFailed marks the one refusal path where the values were
+// already written: emitting setup.credentials_registered failed after the
+// files landed. The caller must not record it as a runner refusal.
+var errCredentialsEmitFailed = errors.New("room: setup.credentials_registered was not recorded")
 
 // acceptCredentials validates and stores one Credentials frame. The pending
 // request is consumed when the request id matches, so a second frame with the
@@ -209,7 +236,7 @@ func (s *Service) acceptCredentials(ctx context.Context, roomID string, creds pr
 	}
 	pipelineID := snap.PipelineID
 	// The names and the pipeline id are checked before any path is built.
-	if !pipelineIDRe.MatchString(pipelineID) {
+	if !secretsPipelineID(pipelineID) {
 		return fmt.Errorf("the room's pipeline id is not a valid pipeline id")
 	}
 	names, ok := s.takeCredentialRequest(roomID, creds.RequestID)
@@ -240,7 +267,7 @@ func (s *Service) acceptCredentials(ctx context.Context, roomID string, creds pr
 		Names:       registered,
 		RunnerLabel: label,
 	}); err != nil {
-		return fmt.Errorf("emit setup.credentials_registered: %w", err)
+		return fmt.Errorf("%w: %v", errCredentialsEmitFailed, err)
 	}
 	return nil
 }
@@ -357,7 +384,7 @@ var errSetupSecretPath = errors.New("setup: credentials path is not a regular fi
 // links that stay inside the root), and the opened temporary file is created
 // with O_EXCL so a planted name cannot redirect the write.
 func writePipelineSecrets(ctx context.Context, dir, pipelineID string, secrets []protocol.Secret) error {
-	if !pipelineIDRe.MatchString(pipelineID) {
+	if !secretsPipelineID(pipelineID) {
 		return fmt.Errorf("%w: the pipeline id is not a valid pipeline id", errSetupSecretPath)
 	}
 	for _, secret := range secrets {
