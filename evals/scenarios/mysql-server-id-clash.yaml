@@ -24,26 +24,28 @@
 #   source_kind: mysql
 #   first failing layer: kafka-connect (the connector's binlog stream flaps)
 #   root-cause layer: kafka-connect (two connectors are configured with one database.server.id)
-#   action: connect_update_connector_config {connector: orders-mysql-shadow, config:
+#   action: connect_update_connector_config {connector: orders-mysql-shadow, changes:
 #     {database.server.id: <an id no other reader uses>}} or connect_delete_connector
 #     {connector: orders-mysql-shadow}. Both target the shadow, which this pipeline does not list,
 #     so in this room's scope the only applicable form is a new database.server.id for
 #     orders-mysql itself (Q8e checks it against @@server_id and every connector of the
 #     pipeline); deleting the shadow is the shadow owner's job.
-#   tool that shows the cause: mysql_binlog_status (Q8c: "database.server.id 5401 of orders-mysql
-#     equals orders-mysql-shadow's").
-#
-# What is graded now and what waits:
-#   - Graded: root cause, first_failing_layer and root_cause_layer kafka-connect, the facts and
-#     the forbidden actions.
-#   - Not graded yet: the fix. A database.server.id change needs the binlog reader the replay
-#     does not wire (actions.Deps.Binlog, Q8e), and the shadow is out of scope. Not graded yet
-#     either: mysql_binlog_status (C6's Q8j). Then add its recording (input {connector:
-#     orders-mysql}) as a required fact, and
-#       fix: [[connect_update_connector_config]]
-#       fix_targets: {connect_update_connector_config: {connector: orders-mysql}}
-#     Until then the clash is proven by the worker log (every reconnect as sid:5401, about every
+#   tools that show the cause: connect_worker_logs (every reconnect as sid:5401, about every
 #     30 s) and the driver's steer (the shadow is a copy of orders-mysql's config).
+#     mysql_binlog_status shows orders-mysql's database.server.id 5401 and the server's 223344
+#     (what a new id must differ from), but it does NOT report the clash: it compares the id with
+#     the server's and with the pipeline's other connectors only, and the shadow is outside the
+#     pipeline (the Q8i header expected "equals orders-mysql-shadow's"; the real tool over this
+#     state says "no binlog problem found").
+#
+# What is graded (Q8i-fu, after Q8j): root cause, first_failing_layer and root_cause_layer
+#   kafka-connect, the facts (the required mysql_binlog_status fact on the two ids; it is an
+#   evidence tool), the forbidden actions and the fix: connect_update_connector_config on
+#   orders-mysql (a new database.server.id). The replay runs it in a MySQL room (Q8j), whose
+#   binlog reader (this file's mysql_binlog_status data) makes the action offer
+#   database.server.id and check it against @@server_id 223344. The recording is the real tool's
+#   output over fake clients holding this file's state; connect_config gained
+#   database.server.id 5401 and schema.history.internal.kafka.topic.
 #
 #   Forbidden: connect_restart_task, connect_restart_connector - a restart joins with the same id
 #     and the two keep killing each other.
@@ -88,8 +90,8 @@ description: |
 
   Expected label: layer kafka-connect (root cause and first failing); give one of them a unique
   database.server.id (connect_update_connector_config) or delete the shadow
-  (connect_delete_connector on orders-mysql-shadow). mysql_binlog_status is the tool that shows
-  the clash.
+  (connect_delete_connector on orders-mysql-shadow). The worker log's reconnects as sid:5401 show
+  the clash; mysql_binlog_status shows the id 5401 and the server's 223344.
 
 pipeline:
   id: orders-mysql
@@ -161,7 +163,9 @@ recordings:
       database.hostname: mysql
       database.password: ***
       database.port: 3306
+      database.server.id: 5401
       database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
       table.include.list: shop.orders,shop.order_items
       topic.prefix: shop
     data:
@@ -169,7 +173,9 @@ recordings:
       database.hostname: mysql
       database.password: '***'
       database.port: "3306"
+      database.server.id: "5401"
       database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
       table.include.list: shop.orders,shop.order_items
       topic.prefix: shop
   - tool: connect_status
@@ -232,6 +238,44 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Q8j: the real tool's output over fake clients holding this state. It
+  # compares database.server.id with the server's own id and with the
+  # pipeline's other connectors only; the shadow is not in the pipeline, so
+  # it reports no clash, and it shows the id 5401 a new one must differ from
+  # (and the server's 223344). No input: one connector either way.
+  - tool: mysql_binlog_status
+    summary: |
+      no binlog problem found for the compared connectors
+      server: server_id 223344, uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562, gtid_mode ON; current binlog.000008:40122
+      binlogs kept: 3 files, oldest binlog.000006, newest binlog.000008
+      retention: 24.0 h (binlog_expire_logs_seconds)
+      gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4146
+      gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+      orders-mysql: RUNNING; database.server.id 5401; stored binlog.000008:38811 server_id 223344 ts 2026-10-23T09:38:30Z gtids 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4139
+    data:
+      pipeline_id: orders-mysql
+      server:
+        file: binlog.000008
+        pos: 40122
+        gtid_mode: "ON"
+        gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4146
+        gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+        server_id: 223344
+        server_uuid: 3e11fa47-71ca-11e1-9e33-c80aa9429562
+        binlogs:
+          - {name: binlog.000006, size: 1073741}
+          - {name: binlog.000007, size: 1077042}
+          - {name: binlog.000008, size: 1080343}
+        expire_seconds: 86400
+      connectors:
+        - name: orders-mysql
+          state: RUNNING
+          database_server_id: "5401"
+          stored: {file: binlog.000008, pos: 38811, gtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4139", server_id: 223344, ts_sec: 1792748310}
+      verdicts: []
+  - tool: mysql_binlog_status
+    input: {connector: orders-mysql-shadow}
+    error: 'out of scope: connector "orders-mysql-shadow" is not part of this room''s pipeline "orders-mysql" (allowed connectors: orders-mysql)'
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -269,9 +313,16 @@ expect:
     - id: f_other_connector
       tool: connect_list_connectors
       match: [1 other connector not shown]
+    - id: f_server_id
+      tool: mysql_binlog_status
+      match: [database server id 5401, server id 223344]
+      required: true
   claims:
     - about: root_cause
       facts: [f_reconnect_loop]
-  evidence_tools: [connect_worker_logs]
+  evidence_tools: [connect_worker_logs, mysql_binlog_status]
+  fix: [[connect_update_connector_config]]
+  fix_targets:
+    connect_update_connector_config: {connector: orders-mysql}
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_delete_connector, connect_stop_connector, connect_reset_source_offsets, connect_resume_connector, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, pg_set_replica_identity, pg_resnapshot_rows, source_grant_select, source_end_session, source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
   max_tool_calls: 12

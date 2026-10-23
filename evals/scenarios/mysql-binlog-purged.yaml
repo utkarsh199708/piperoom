@@ -29,28 +29,21 @@
 #   tools that show the cause: mysql_binlog_status (Q8c: "the binlog the connector needs is
 #     purged"), connect_source_offsets (the stored file and GTIDs), pipeline_map (binlog_oldest).
 #
-# What is graded now and what waits (the Q5f precedent):
-#   - Graded: first_failing_layer kafka-connect, the fix (stop + reset, both Q5b actions that
-#     evals.LiveActions registers; a reset to empty needs no binlog reader) and the facts below.
-#   - Not graded yet: root_cause_layer mysql. events.Layers does not list the mysql layer until
-#     the Q0 item 7 contract lands (owners.KnownLayers adds it locally, design §5.1), and
-#     expect.root_cause_layer must be one of events.IncidentLayers(). Then add
-#       root_cause_layer: mysql
-#   - Not graded yet: mysql_binlog_status. evals.LiveTools() does not register mysqltools (C6's
-#     Q8j adds "the MySQL tool set when a scenario says source_kind: mysql"). Then add its
-#     recording (input {connector: orders-mysql}): "stored file binlog.000003 is purged (oldest
-#     on the server binlog.000006); stored gtids miss gtid_purged: the binlog the connector needs
-#     is purged", make it a required fact and an evidence tool. Until then the purge is proven
-#     from connect_source_offsets (file binlog.000003) against pipeline_map (binlog_oldest
-#     binlog.000006) and the task's error.
+# What is graded (Q8i-fu, after Q8j): first_failing_layer kafka-connect, root_cause_layer mysql
+#   (the Q0 item 7 layer), the fix (stop + reset in one proposal) and the facts below, including
+#   the required mysql_binlog_status fact (an evidence tool). The replay runs it in a MySQL room
+#   (Q8j: LiveToolsFor(mysql), a binlog reader behind the Connect actions). The
+#   mysql_binlog_status recording is the real tool's output over fake clients holding this
+#   file's state: its GTID check fires first (916 transactions of gtid_purged missing from the
+#   stored set); the connect_config recording gained database.server.id 5401 and
+#   schema.history.internal.kafka.topic, which a Debezium MySQL config carries.
 #
 #   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - every
 #     start reads the same stored position and fails the same way (and the connector is not
 #     paused or stopped).
 #   Forbidden: connect_update_connector_config - snapshot.mode=recovery (the only MySQL
 #     snapshot.mode it sets) rebuilds the schema history and keeps the purged position; the
-#     history topic is fine. On this replay the MySQL keys are not offered at all (no binlog
-#     reader is wired).
+#     history topic is fine. The MySQL room offers the key, so the run can try it.
 #   Forbidden: connect_delete_connector - deleting the connector loses its config and topics'
 #     producer; the reset does what is needed.
 #   Forbidden: pg_* actions - the source is MySQL (Q8g offers none in a MySQL room).
@@ -167,7 +160,9 @@ recordings:
       database.hostname: mysql
       database.password: ***
       database.port: 3306
+      database.server.id: 5401
       database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
       table.include.list: shop.orders,shop.order_items
       topic.prefix: shop
     data:
@@ -175,7 +170,9 @@ recordings:
       database.hostname: mysql
       database.password: '***'
       database.port: "3306"
+      database.server.id: "5401"
       database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
       table.include.list: shop.orders,shop.order_items
       topic.prefix: shop
   - tool: connect_source_offsets
@@ -244,6 +241,43 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Q8j: the real tool's output over fake clients holding this state (the
+  # server's binlog files and GTID sets, the connector's config, status and
+  # stored offset above). No input: the call with or without the connector
+  # reads the pipeline's one connector.
+  - tool: mysql_binlog_status
+    summary: |
+      FAULT orders-mysql: the binlog the connector needs is purged: 916 transactions of gtid_purged are not in the stored GTID set (3e11fa47-71ca-11e1-9e33-c80aa9429562:1288-2203), so they were never read; the connector cannot resume without a new snapshot or a reset
+      server: server_id 223344, uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562, gtid_mode ON; current binlog.000007:15530
+      binlogs kept: 2 files, oldest binlog.000006, newest binlog.000007
+      retention: 24.0 h (binlog_expire_logs_seconds)
+      gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2310
+      gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2203
+      orders-mysql: RUNNING; database.server.id 5401; stored binlog.000003:4523 server_id 223344 ts 2026-10-22T22:00:00Z gtids 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1287
+    data:
+      pipeline_id: orders-mysql
+      server:
+        file: binlog.000007
+        pos: 15530
+        gtid_mode: "ON"
+        gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2310
+        gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-2203
+        server_id: 223344
+        server_uuid: 3e11fa47-71ca-11e1-9e33-c80aa9429562
+        binlogs:
+          - {name: binlog.000006, size: 1073741}
+          - {name: binlog.000007, size: 1077042}
+        expire_seconds: 86400
+      connectors:
+        - name: orders-mysql
+          state: RUNNING
+          database_server_id: "5401"
+          stored: {file: binlog.000003, pos: 4523, gtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1287", server_id: 223344, ts_sec: 1792706400}
+      verdicts:
+        - severity: fault
+          code: binlog_purged
+          connector: orders-mysql
+          text: 'the binlog the connector needs is purged: 916 transactions of gtid_purged are not in the stored GTID set (3e11fa47-71ca-11e1-9e33-c80aa9429562:1288-2203), so they were never read; the connector cannot resume without a new snapshot or a reset'
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -271,6 +305,7 @@ expect:
     - [repoint*]
     - [schema change]
   first_failing_layer: kafka-connect
+  root_cause_layer: mysql
   expected_facts:
     - id: f_task_failed_binlog
       tool: connect_status
@@ -286,10 +321,14 @@ expect:
     - id: f_expire
       tool: source_settings
       match: [binlog expire logs seconds 86400]
+    - id: f_binlog_purged
+      tool: mysql_binlog_status
+      match: [the binlog the connector needs is purged]
+      required: true
   claims:
     - about: root_cause
-      facts: [f_task_failed_binlog, f_stored_position, f_oldest_binlog]
-  evidence_tools: [connect_status, connect_source_offsets]
+      facts: [f_task_failed_binlog, f_stored_position, f_oldest_binlog, f_binlog_purged]
+  evidence_tools: [connect_status, connect_source_offsets, mysql_binlog_status]
   fix: [[connect_stop_connector], [connect_reset_source_offsets]]
   fix_targets:
     connect_stop_connector: {connector: orders-mysql}

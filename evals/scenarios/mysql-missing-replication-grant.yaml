@@ -24,12 +24,12 @@
 #     granted. A restart before the GRANT fails the same way.
 #   tool that shows the cause: source_role_grants (REPLICATION SLAVE=no for debezium@%).
 #
-# What is graded now and what waits:
-#   - Graded: everything but the root-cause layer: the root cause, first_failing_layer
-#     kafka-connect, the required source_role_grants fact, no fix expected, and the forbidden
-#     actions (source_grant_select grants SELECT only and the tables are already selectable).
-#   - Not graded yet: root_cause_layer mysql (not in events.Layers until the Q0 item 7 contract
-#     lands; then add `root_cause_layer: mysql`).
+# What is graded (Q8i-fu, after Q8j): the root cause, first_failing_layer kafka-connect,
+#   root_cause_layer mysql (the Q0 item 7 layer), the required source_role_grants fact, no fix
+#   expected, and the forbidden actions (source_grant_select grants SELECT only and the tables
+#   are already selectable). The replay runs it in a MySQL room (Q8j); its mysql_binlog_status
+#   recording (the real tool's output over this file's state: no binlog problem, the stored
+#   binlog.000008 is on the server) is there so the read is not a miss, and grades nothing.
 #
 #   Forbidden: source_grant_select - SELECT on the captured tables is there (2 of 2); a SELECT
 #     grant does not give REPLICATION SLAVE, and the action never grants it.
@@ -143,7 +143,9 @@ recordings:
       database.hostname: mysql
       database.password: ***
       database.port: 3306
+      database.server.id: 5401
       database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
       table.include.list: shop.orders,shop.order_items
       topic.prefix: shop
     data:
@@ -151,7 +153,9 @@ recordings:
       database.hostname: mysql
       database.password: '***'
       database.port: "3306"
+      database.server.id: "5401"
       database.user: debezium
+      schema.history.internal.kafka.topic: schema-history.shop
       table.include.list: shop.orders,shop.order_items
       topic.prefix: shop
   - tool: source_role_grants
@@ -216,6 +220,39 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Q8j: the real tool's output over fake clients holding this state: the
+  # binlog and the stored position are fine (the stream is refused by
+  # privilege, not by position). No input: one connector either way.
+  - tool: mysql_binlog_status
+    summary: |
+      no binlog problem found for the compared connectors
+      server: server_id 223344, uuid 3e11fa47-71ca-11e1-9e33-c80aa9429562, gtid_mode ON; current binlog.000008:9012
+      binlogs kept: 3 files, oldest binlog.000006, newest binlog.000008
+      retention: 24.0 h (binlog_expire_logs_seconds)
+      gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3388
+      gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+      orders-mysql: RUNNING; database.server.id 5401; stored binlog.000008:1187 server_id 223344 ts 2026-10-23T09:00:00Z gtids 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3310
+    data:
+      pipeline_id: orders-mysql
+      server:
+        file: binlog.000008
+        pos: 9012
+        gtid_mode: "ON"
+        gtid_executed: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3388
+        gtid_purged: 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1650
+        server_id: 223344
+        server_uuid: 3e11fa47-71ca-11e1-9e33-c80aa9429562
+        binlogs:
+          - {name: binlog.000006, size: 1073741}
+          - {name: binlog.000007, size: 1077042}
+          - {name: binlog.000008, size: 1080343}
+        expire_seconds: 86400
+      connectors:
+        - name: orders-mysql
+          state: RUNNING
+          database_server_id: "5401"
+          stored: {file: binlog.000008, pos: 1187, gtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-3310", server_id: 223344, ts_sec: 1792746000}
+      verdicts: []
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: pipeline_map
     error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
@@ -237,6 +274,7 @@ expect:
     - [history topic]
     - [server id, clash]
   first_failing_layer: kafka-connect
+  root_cause_layer: mysql
   expected_facts:
     - id: f_task_access_denied
       tool: connect_status
