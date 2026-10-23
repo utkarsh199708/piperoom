@@ -191,7 +191,7 @@ open(out_md, 'w').write(ROWS_TEXT + '\n\n<!-- PER-SCENARIO -->\n\n' + PER_TEXT +
 out = {
     'run_id': 39994729845,
     'commit': cand['commit'],
-    'model': cand['model'],
+    'model': "the run's model (see the run's report)",
     'prompt_hashes': cand['prompt_hashes'],
     'runs_per_scenario': cand['runs_per_scenario'],
     'source': {'report': 'cand artifact (cand.json)', 'transcripts': 'transcripts artifact, one <scenario>-<run>.json per run, setup/ written as setup_'},

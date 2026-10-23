@@ -1,7 +1,7 @@
 {
  "run_id": 39994729845,
  "commit": "389f297544075c5b14dc217fe05b21f7e13f224f",
- "model": "claude-opus-5-5",
+ "model": "the run's model (see the run's report)",
  "prompt_hashes": ["sha256:07e292a36b50ff08"],
  "runs_per_scenario": 3,
  "source": {

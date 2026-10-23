@@ -7,7 +7,7 @@ Jira KAN-490, epic KAN-489 (W4: evals to 100%). Row W4-0, leads (`[LEAD-ARCH]`).
 | What | Value |
 |---|---|
 | Run | GitHub Actions run 39994729845 (`evals-live`, full suite, 60 scenarios x 3 runs) |
-| Commit / model / effort | `389f297544075c5b14dc217fe05b21f7e13f224f` / `claude-opus-5-5` / high, `max_turns` 25 |
+| Commit / model / effort | `389f297544075c5b14dc217fe05b21f7e13f224f` / the run's model (see the run's report) / high, `max_turns` 25 |
 | Prompt | `sha256:07e292a36b50ff08` |
 | Report | the run's `cand` artifact (`cand.json`): 180 results, 77 passes, 422 misses |
 | Transcripts | the run's **`transcripts`** artifact, uploaded by the owner and unpacked as a folder `transcripts/` of 180 files named `<scenario>-<run>.json` (a `setup/<x>` scenario is written `setup_<x>`, e.g. `setup_compose-privileged-refused-2.json`); 8.8 MB, not committed. Each file holds `result` (the report row) and `transcript.events` (the room events: `agent.tool_call`, `agent.tool_result`, `steer.sent`, `comment.added`, `agent.status`, ...). Later rows (W4c, W4d, W4k, W4l, W4m, W4o, W4p) read this folder from the owner's upload. |
