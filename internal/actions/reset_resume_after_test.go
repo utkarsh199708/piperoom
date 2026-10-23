@@ -296,6 +296,19 @@ func TestResetResumeAfterNoResumerWritesNothing(t *testing.T) {
 	}
 }
 
+// Validate refuses it too, at proposal create: by Execute an earlier stop step
+// would already have run.
+func TestResetResumeAfterNoResumerRefusedByValidate(t *testing.T) {
+	f := newLifecycleFake()
+	a := &resetSourceOffsets{d: LifecycleDeps{Connect: f, PollInterval: time.Millisecond}}
+	if err := a.Validate(scoped(), json.RawMessage(resetResumeIn)); !errors.Is(err, ErrNoLifecycleWriter) {
+		t.Fatalf("Validate err %v, want ErrNoLifecycleWriter", err)
+	}
+	if f.refusedWrites() != 0 {
+		t.Fatalf("refused writes %d", f.refusedWrites())
+	}
+}
+
 // Preview, the schema and the description tell the approver and the agent
 // about resume_after.
 func TestResetResumeAfterPreviewSchemaDescribe(t *testing.T) {

@@ -428,6 +428,14 @@ func (a *resetSourceOffsets) Validate(ctx context.Context, raw json.RawMessage) 
 	if err := ctxConnectorScope(ctx, p.Connector); err != nil {
 		return err
 	}
+	// Refused here, not only in Execute: by Execute an earlier stop step of
+	// the same proposal has run, so the connector would be left STOPPED with
+	// nothing reset.
+	if p.ResumeAfter {
+		if _, ok := a.d.Connect.(connectorResumer); !ok {
+			return fmt.Errorf("actions: %s: resume_after: this Connect client cannot resume a connector: %w", ResetSourceOffsetsName, ErrNoLifecycleWriter)
+		}
+	}
 	ctx, cancel := a.d.ctx(ctx)
 	defer cancel()
 	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
@@ -674,8 +682,8 @@ func (a *resetSourceOffsets) resumeAfterReset(ctx context.Context, rc connectorR
 	ctx, cancel := a.d.ctx(ctx)
 	defer cancel()
 	if err := rc.Resume(ctx, name); err != nil {
-		return "", fmt.Errorf("actions: %s: %s; the reset succeeded but the resume failed, so %s stays STOPPED: resume it by hand (%s, or PUT /connectors/%s/resume): %w: %w",
-			ResetSourceOffsetsName, done, name, "connect_resume_connector", url.PathEscape(name), ErrResumeAfterReset, err)
+		return "", fmt.Errorf("actions: %s: %s; the reset succeeded but the resume failed, so %s may still be STOPPED (check connect_status): resume it by hand (connect_resume_connector, or PUT /connectors/%s/resume): %w: %w",
+			ResetSourceOffsetsName, done, name, url.PathEscape(name), ErrResumeAfterReset, err)
 	}
 	state, running, err := awaitState(ctx, a.d.poll(), "RUNNING", func(ctx context.Context) (string, error) {
 		st, err := a.d.Connect.Status(ctx, name)
