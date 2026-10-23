@@ -104,6 +104,7 @@ recordings:
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     summary: |-
+      pg.public.orders-value: v3 → v4 (latest vs previous; pass from_version to pick another pair)
       + Value.risk_score: [null, double]
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}

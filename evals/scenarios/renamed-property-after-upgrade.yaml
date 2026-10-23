@@ -181,7 +181,7 @@ recordings:
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     summary: |-
-      no field changes
+      pg.public.orders-value version 1 has no earlier version (available versions: [1]), so there is nothing to diff; pass schema to compare a candidate against it
   - tool: pg_recent_ddl
     summary: |
       (no DDL since 2026-10-22T09:40:00Z)

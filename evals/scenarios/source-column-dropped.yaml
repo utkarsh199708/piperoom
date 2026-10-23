@@ -165,7 +165,9 @@ recordings:
       + Value.total_amount: [null, bytes(decimal 12,2)]
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    error: 'bad tool input: from_version or schema is required'
+    summary: |-
+      pg.public.orders-value: v2 → v3 (latest vs previous; pass from_version to pick another pair)
+      - Value.amount: int
   - tool: kafka_find_by_key
     input: {topic: pg.public.orders, key: '5634120'}
     summary: |-
