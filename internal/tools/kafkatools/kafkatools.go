@@ -129,6 +129,12 @@ func Register(reg *tools.Registry, d Deps) error {
 			return err
 		}
 	}
+	// The plugin/version read is optional for the same reason (Q1c).
+	if _, ok := d.Connect.(connect.PluginReader); ok {
+		if err := reg.Register(&connectPlugins{d: d}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

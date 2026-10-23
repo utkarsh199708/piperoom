@@ -122,6 +122,34 @@ type SetupTargetState struct {
 	Kind    string `json:"kind"`
 	Address string `json:"address"`
 	Class   string `json:"class"`
+	// pinned is set once a person decided the class (setup.target_classed
+	// by "person"): a server decision may then only raise it, never refine
+	// it downward. Fold state, not part of the documented shape; it is
+	// rebuilt from the log wherever the snapshot is.
+	pinned bool
+}
+
+// applyClass folds one setup.target_classed decision into the target. A
+// person raises, never lowers (design §3.5), and pins the class: once a
+// person decided it, a later server decision may only raise it. The server's
+// own decision raises too, and may refine the server's own derived "shared"
+// down to "local" — env_detect is what turns a loopback endpoint local after
+// Hello — but never a class a person stated (planSetupTarget records a typed
+// floor as the person's even when it equals the derivation), and never a
+// class above shared. by is setup.target_classed.by.
+func (t *SetupTargetState) applyClass(class, by string) {
+	if !validSetupClass(class) {
+		return
+	}
+	if by == "person" {
+		t.Class = classAtLeast(t.Class, class)
+		t.pinned = true
+		return
+	}
+	if t.Class == "" || setupClassRank[class] > setupClassRank[t.Class] ||
+		(!t.pinned && t.Class == protocolClassShared && class == protocolClassLocal) {
+		t.Class = class
+	}
 }
 
 // SetupProvisionalState is the provisional pipeline's scope. Consumer groups
@@ -289,13 +317,14 @@ func newSetupSnapshot(req events.SetupRequest) *SetupSnapshot {
 		Connectors:  append([]string{}, req.Connectors...),
 	}
 	for _, t := range req.Targets {
-		// The request's class is a floor; the classed events that follow
-		// room.created carry the decision, so this only seeds the list.
-		class := t.Class
-		if !validSetupClass(class) {
-			class = protocolClassShared
+		// The request's class is the floor the server already combined with
+		// its derivation; the setup.target_classed events that follow
+		// room.created carry the decision, which env_detect may refine.
+		target := SetupTargetState{Kind: t.Kind, Address: t.Address}
+		if validSetupClass(t.Class) {
+			target.Class = t.Class
 		}
-		st.Targets = append(st.Targets, SetupTargetState{Kind: t.Kind, Address: t.Address, Class: class})
+		st.Targets = append(st.Targets, target)
 	}
 	return st
 }
@@ -373,14 +402,20 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
-		if !ok || snap.Setup == nil || len(snap.Setup.phases) == 0 {
+		// Only PlanStepIndex may key the executed map: StepIndex is the
+		// step's index inside its PROPOSAL (service_executor emits it per
+		// proposal step), while the map and advance() are keyed by the plan's
+		// own step index (events.SetupPlanStep.Index). An event without a
+		// plan index — a driver's own fix outside the plan, a refusal that
+		// never ran, an event from before U1-6 — consumes no plan step.
+		if !ok || snap.Setup == nil || len(snap.Setup.phases) == 0 || p.PlanStepIndex == nil {
 			return snap
 		}
 		snap.Setup = snap.Setup.clone()
 		if snap.Setup.executed == nil {
 			snap.Setup.executed = map[int]bool{}
 		}
-		snap.Setup.executed[p.StepIndex] = true
+		snap.Setup.executed[*p.PlanStepIndex] = true
 		snap.Setup.advance()
 
 	case events.SetupTargetRegistered:
@@ -389,14 +424,19 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			return snap
 		}
 		snap.Setup = snap.Setup.clone()
+		by := "server"
+		if p.By.Kind == events.ActorHuman {
+			by = "person"
+		}
 		for i := range snap.Setup.Targets {
 			if snap.Setup.Targets[i].Address == p.Address {
 				snap.Setup.Targets[i].Kind = p.Kind
-				snap.Setup.Targets[i].Class = classAtLeast(snap.Setup.Targets[i].Class, p.Class)
+				snap.Setup.Targets[i].applyClass(p.Class, by)
 				return snap
 			}
 		}
-		snap.Setup.Targets = append(snap.Setup.Targets, SetupTargetState{Kind: p.Kind, Address: p.Address, Class: p.Class})
+		target := SetupTargetState{Kind: p.Kind, Address: p.Address, Class: p.Class}
+		snap.Setup.Targets = append(snap.Setup.Targets, target)
 
 	case events.SetupTargetClassed:
 		p, ok := decode[events.SetupTargetClassedPayload](e)
@@ -406,8 +446,7 @@ func applySetup(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Setup = snap.Setup.clone()
 		for i := range snap.Setup.Targets {
 			if snap.Setup.Targets[i].Address == p.Target {
-				// A class only rises.
-				snap.Setup.Targets[i].Class = classAtLeast(snap.Setup.Targets[i].Class, p.Class)
+				snap.Setup.Targets[i].applyClass(p.Class, p.By)
 				return snap
 			}
 		}

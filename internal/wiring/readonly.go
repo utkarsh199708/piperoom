@@ -62,6 +62,36 @@ func (readOnlyRegistry) Register(context.Context, string, string) (int, error) {
 	return 0, ErrReadOnly
 }
 
+// connectConfigValidator is kafkatools.ConfigValidator's shape (Q4b): the pair
+// behind connect_validate_config. Both calls only read — the validate request
+// asks Connect for a verdict and creates nothing — so the read tools keep them,
+// while connect_validate_config finds them by a type assertion on its client.
+type connectConfigValidator interface {
+	connectValidator
+	PluginConfigDef(ctx context.Context, class string) ([]connect.ConfigKeyDef, error)
+}
+
+// The real client has both calls, so the read tools keep them through the
+// wrapper.
+var _ connectConfigValidator = (*connect.Client)(nil)
+
+// readOnlyConnectValidate is readOnlyConnect plus the config validation reads
+// (Q4b). It exists so the read-only value has them exactly when the client
+// does: a fake without PluginConfigDef leaves connect_validate_config
+// unregistered rather than offering the model a tool that always fails.
+type readOnlyConnectValidate struct {
+	readOnlyConnect
+	v connectConfigValidator
+}
+
+func (c readOnlyConnectValidate) ValidateConfig(ctx context.Context, class string, cfg map[string]string) (connect.ValidateResult, error) {
+	return c.v.ValidateConfig(ctx, class, cfg)
+}
+
+func (c readOnlyConnectValidate) PluginConfigDef(ctx context.Context, class string) ([]connect.ConfigKeyDef, error) {
+	return c.v.PluginConfigDef(ctx, class)
+}
+
 // readOnlyConnectTasks is readOnlyConnect plus the cluster-wide task read
 // (clients.WorkerTaskReader, X6b), which connect_task_balance finds by a type
 // assertion. Like readOnlyRegistryDeleted, it exists so the read-only value
@@ -75,15 +105,34 @@ func (c readOnlyConnectTasks) WorkerTasks(ctx context.Context) (map[string][]cli
 	return c.wt.WorkerTasks(ctx)
 }
 
+// readOnlyConnectValidateTasks is readOnlyConnectValidate plus the
+// cluster-wide task read: the real client has both, and each consumer of the
+// wrapper type-asserts for the one read it needs.
+type readOnlyConnectValidateTasks struct {
+	readOnlyConnectValidate
+	wt clients.WorkerTaskReader
+}
+
+func (c readOnlyConnectValidateTasks) WorkerTasks(ctx context.Context) (map[string][]clients.TaskAssignment, error) {
+	return c.wt.WorkerTasks(ctx)
+}
+
 // readConnect returns w's Connect client for read tools: nil when none is
 // configured (the tools then say so), else read-only, with the worker-task
-// read when the client has it.
+// read (X6b) and the config validation pair (Q4b) when the client has them.
 func readConnect(w *Wired) clients.ConnectClient {
 	if w.Connect == nil {
 		return nil
 	}
 	ro := readOnlyConnect{r: w.Connect}
-	if wt, ok := w.Connect.(clients.WorkerTaskReader); ok {
+	val, hasVal := w.Connect.(connectConfigValidator)
+	wt, hasTasks := w.Connect.(clients.WorkerTaskReader)
+	switch {
+	case hasVal && hasTasks:
+		return readOnlyConnectValidateTasks{readOnlyConnectValidate: readOnlyConnectValidate{readOnlyConnect: ro, v: val}, wt: wt}
+	case hasVal:
+		return readOnlyConnectValidate{readOnlyConnect: ro, v: val}
+	case hasTasks:
 		return readOnlyConnectTasks{readOnlyConnect: ro, wt: wt}
 	}
 	return ro

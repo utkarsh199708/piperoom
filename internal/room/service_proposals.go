@@ -12,6 +12,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
+	"piperoom/internal/tools"
 )
 
 // stepTimeout bounds each action execution (rule 4).
@@ -182,8 +183,17 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	acts := s.actionsFor(pipelineID)
 	// Validate runs under the room's pipeline scope and room id, as the
 	// executor and the preview do, so an action reads that pipeline's whole
-	// config and that room's per-room client state.
+	// config and that room's per-room client state. A setup room runs before
+	// pipeline_register, so its pipeline is the provisional one
+	// (owners.Provisional, design §3.2): Validate and the scope check see that
+	// pipeline, never a pipeline owners.yaml does not define yet.
+	setupSnap := s.setupSnapshot(ctx, roomID)
 	vctx := s.actionCtx(ctx, roomID, pipelineID)
+	if setupSnap != nil {
+		if prov, ok := setupSnap.SetupProvisional(); ok {
+			vctx = tools.WithPipeline(vctx, prov)
+		}
+	}
 	// Structural checks first: they do not need the room state.
 	// The class comes from the registry, never from the proposer (X2, X6).
 	p.Class = ""
@@ -243,24 +253,36 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 	// violation is a validation error, not a server error.
 	for i, step := range p.Steps {
 		a, _ := acts.Get(step.Action)
-		if err := s.scopeCheck(st.snap.PipelineID, a, step.Params); err != nil {
+		if err := s.scopeCheckRoom(&st.snap, st.snap.PipelineID, a, step.Params); err != nil {
 			return "", events.Event{}, validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
 	}
 
-	// The required layers are the union of the step layers: a proposal needs
-	// approval from every layer it writes to, never fewer.
-	required := make([]string, 0, len(p.Steps))
-	seen := map[string]bool{}
-	for _, step := range p.Steps {
-		if !seen[step.Layer] {
-			seen[step.Layer] = true
-			required = append(required, step.Layer)
+	if st.snap.IsSetupRoom() {
+		// The tier decides the route (T1 scheduled, T2/T3 an approver), the
+		// guard table and the maintenance window are checked here for the
+		// first time, and an agent proposal must come from the latest
+		// setup.plan (setup_route.go; design §3.3, §3.5).
+		route, rerr := resolveSetupRoute(&st.snap, acts, p.Steps, setupNeedsPlan(p.Origin), 0, s.now().UTC())
+		if rerr != nil {
+			return "", events.Event{}, rerr
 		}
+		p.RequiredLayers, p.FallbackLayers = s.setupLayers(&st.snap, route, p.Steps)
+	} else {
+		// The required layers are the union of the step layers: a proposal needs
+		// approval from every layer it writes to, never fewer.
+		required := make([]string, 0, len(p.Steps))
+		seen := map[string]bool{}
+		for _, step := range p.Steps {
+			if !seen[step.Layer] {
+				seen[step.Layer] = true
+				required = append(required, step.Layer)
+			}
+		}
+		p.RequiredLayers = required
+		// Fixed at creation like the required layers; never set by the caller.
+		p.FallbackLayers = s.fallbackLayersFor(st.snap.PipelineID, required)
 	}
-	p.RequiredLayers = required
-	// Fixed at creation like the required layers; never set by the caller.
-	p.FallbackLayers = s.fallbackLayersFor(st.snap.PipelineID, required)
 
 	p.ProposalID = NewID("p_")
 	stepsJSON, err := json.Marshal(p.Steps)
@@ -401,13 +423,15 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 // approver is who gives one approval and on what right: the event actor,
 // the identity recorded with it (nil for the policy, which has none),
 // authorizeLayer's principal detail ("user:priya", "backup:user:meera",
-// "solo", "fallback", or GrantPolicy for the auto-approve policy), the person
-// (nil for the policy) and the condition the append is made under (nil: none
+// "solo", "fallback", GrantAdmin or GrantPolicy for a policy), the person
+// (nil for the policy), the policy name for a policy approval (PolicyAutoApprove
+// or PolicySetupLocal) and the condition the append is made under (nil: none
 // beyond the caller's checks).
 type approver struct {
 	actor  events.Actor
 	ident  *events.Identity
 	detail string
+	policy string
 	user   *User
 	check  func() error
 }
@@ -458,7 +482,10 @@ func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p sto
 		ProposalID: p.ProposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: a.ident, Grant: grant,
 	}
 	if grant == events.GrantPolicy {
-		payload.Policy = events.PolicyAutoApprove
+		payload.Policy = a.policy
+		if payload.Policy == "" {
+			payload.Policy = events.PolicyAutoApprove
+		}
 	}
 	var ev events.Event
 	var err error
@@ -486,8 +513,10 @@ func (s *Service) appendApprovalLocked(ctx context.Context, st *roomState, p sto
 
 // approvalGrant maps authorizeLayer's principal detail to approval.given's
 // grant: the solo user's detail is "solo", the driver's on an unowned layer
-// is "fallback" (authorizeProposalLayer), every other detail is an owner
-// right (owners.yaml principal or backup, or the users.yaml layers list).
+// is "fallback" (authorizeProposalLayer), a policy's is "policy", a tenant
+// admin's is "admin" (Events.GrantAdmin, setup rooms); every other detail is
+// an owner right (owners.yaml principal or backup, or the users.yaml layers
+// list).
 func approvalGrant(detail string) string {
 	switch detail {
 	case events.GrantSolo:
@@ -496,6 +525,8 @@ func approvalGrant(detail string) string {
 		return events.GrantFallback
 	case events.GrantPolicy:
 		return events.GrantPolicy
+	case events.GrantAdmin:
+		return events.GrantAdmin
 	}
 	return events.GrantOwner
 }
