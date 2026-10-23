@@ -198,6 +198,10 @@ func (r runner) run(ctx context.Context, args []string, stdout, stderr io.Writer
 		return exitError
 	}
 
+	if *writeOwners != "" {
+		res = keepOneSourceKind(res, ownedSourceKind(cfg.SourceDBURL))
+	}
+
 	// Render everything fully before opening any output so a failure never
 	// creates or truncates a file.
 	var draftBuf, ownersBuf, usersBuf bytes.Buffer
