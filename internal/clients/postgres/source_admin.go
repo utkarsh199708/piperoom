@@ -131,9 +131,19 @@ const adminSessionSQL = `
 		FROM pg_stat_activity
 		WHERE pid = $1`
 
+// clearStatSnapshotSQL discards the transaction's cached pg_stat_activity
+// rows. Within one transaction PostgreSQL serves the activity view from the
+// snapshot taken by its first read, so without this the terminate statement's
+// backend_start recheck would re-read the very rows the first check saw and
+// could never detect a pid reused in between. Clearing the snapshot makes the
+// recheck a genuinely fresh read.
+const clearStatSnapshotSQL = `SELECT pg_stat_clear_snapshot()`
+
 // terminateSessionSQL ends pid only if it still started at $2, so a pid
-// reused between the re-read and the call is not killed. A missing row means
-// the session is gone or replaced (ErrSessionChanged).
+// reused between the re-read and the call is not killed. It runs after
+// clearStatSnapshotSQL, so it sees fresh activity rows, not the transaction's
+// first snapshot. A missing row means the session is gone or replaced
+// (ErrSessionChanged).
 const terminateSessionSQL = `
 		SELECT pg_terminate_backend(a.pid)
 		FROM pg_stat_activity a
@@ -193,7 +203,8 @@ func (w *Writer) SetReplicaIdentity(ctx context.Context, table, mode, index stri
 // GrantSelect grants SELECT and nothing else on tables ("schema.table" each)
 // to role, in one GRANT statement: all tables or none. The action checks that
 // role is the connector's database.user; here role must be a valid identifier
-// (at most 63 bytes, not a reserved grantee such as PUBLIC) and every table
+// (at most 63 bytes, not a reserved grantee such as PUBLIC, and not in the
+// reserved pg_ namespace of the predefined roles) and every table
 // must be a source table of the room's pipeline (tools.ErrOutOfScope). A
 // missing table or role is clients.ErrNotFound. The write role must own the
 // tables or hold GRANT OPTION on them; without that the server's 42501 is
@@ -252,6 +263,9 @@ func checkGrantRole(role string) error {
 	if reservedGrantRole(role) {
 		return fmt.Errorf("postgres: grant SELECT: %q is a reserved grantee (it names the current session or every role)", role)
 	}
+	if strings.HasPrefix(strings.ToLower(role), "pg_") {
+		return fmt.Errorf("postgres: grant SELECT: %q is in the reserved pg_ role namespace (a grant to a predefined role reaches every one of its members, and a connector's database.user is never one)", role)
+	}
 	return nil
 }
 
@@ -305,8 +319,10 @@ func (w *Writer) CreateHeartbeatTable(ctx context.Context, table string) error {
 // streaming from the source), this write pool's own backend, another session
 // of the writer's role and a session whose application_name starts with
 // "piperoom" are ErrSessionProtected. Only then does it call
-// pg_terminate_backend, in the same transaction and again bound to pid and
-// backend_start; a session gone or replaced in between is ErrSessionChanged.
+// pg_terminate_backend, in the same transaction, after discarding the
+// transaction's pg_stat_activity snapshot (pg_stat_clear_snapshot) and again
+// bound to pid and backend_start against the fresh rows; a session gone or
+// replaced in between is ErrSessionChanged.
 //
 // The terminate is not transactional: once it returned true the session is
 // gone even if the commit fails, and the error says so. It needs a superuser
@@ -353,6 +369,12 @@ func (w *Writer) EndSession(ctx context.Context, pid int64, startedAt time.Time)
 			return fmt.Errorf("%w: pid %d is another session of the writer's role %q", ErrSessionProtected, pid, cutParam(user))
 		case piperoomApp(app):
 			return fmt.Errorf("%w: pid %d is Piperoom's own session (application_name %q)", ErrSessionProtected, pid, cutParam(app))
+		}
+		// The checks above read the transaction's activity snapshot;
+		// discard it so the terminate's backend_start recheck reads
+		// fresh rows (a pid reused since the snapshot must not match).
+		if err := w.exec(ctx, tx, clearStatSnapshotSQL); err != nil {
+			return fmt.Errorf("refresh activity snapshot: %w", err)
 		}
 		var ok bool
 		if err := w.queryRow(ctx, tx, terminateSessionSQL, []any{pid, startedAt}, &ok); err != nil {

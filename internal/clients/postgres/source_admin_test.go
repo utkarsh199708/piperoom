@@ -266,6 +266,11 @@ func TestGrantSelectRefusesBadInput(t *testing.T) {
 		{"role public", "public", []string{"public.orders"}},
 		{"role PUBLIC", "PUBLIC", []string{"public.orders"}},
 		{"role current_user", "current_user", []string{"public.orders"}},
+		{"role Current_User", "Current_User", []string{"public.orders"}},
+		{"role session_user", "session_user", []string{"public.orders"}},
+		{"predefined role", "pg_monitor", []string{"public.orders"}},
+		{"predefined role read all", "pg_read_all_data", []string{"public.orders"}},
+		{"predefined role mixed case", "PG_Monitor", []string{"public.orders"}},
 		{"no tables", "debezium", nil},
 		{"no schema", "debezium", []string{"orders"}},
 		{"table injection", "debezium", []string{"public.orders; DROP TABLE x"}},
@@ -435,13 +440,17 @@ func TestEndSessionSQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkTx(t, tx, true)
-	if got, want := tx.sqls(), []string{adminSessionSQL, terminateSessionSQL}; !reflect.DeepEqual(got, want) {
+	// The snapshot clear must sit between the re-read and the terminate:
+	// within one transaction pg_stat_activity is served from the first
+	// read's snapshot, and without the clear the terminate's backend_start
+	// recheck could never see a pid reused since that first read.
+	if got, want := tx.sqls(), []string{adminSessionSQL, clearStatSnapshotSQL, terminateSessionSQL}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("statements:\n got %q\nwant %q", got, want)
 	}
 	if got, want := tx.stmts[1].args, []any{int64(4242)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("re-read args = %#v, want %#v", got, want)
 	}
-	if got, want := tx.stmts[2].args, []any{int64(4242), start}; !reflect.DeepEqual(got, want) {
+	if got, want := tx.stmts[3].args, []any{int64(4242), start}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("terminate args = %#v, want pid %d and backend_start bound", got, 4242)
 	}
 }
@@ -481,6 +490,11 @@ func TestEndSessionRefusals(t *testing.T) {
 			}
 			if terminated {
 				t.Fatal("a refused EndSession must not call pg_terminate_backend")
+			}
+			for _, sql := range tx.sqls() {
+				if sql == clearStatSnapshotSQL || sql == terminateSessionSQL {
+					t.Fatalf("a refused EndSession must stop at the re-read, ran %q", sql)
+				}
 			}
 			checkTx(t, tx, false)
 		})
