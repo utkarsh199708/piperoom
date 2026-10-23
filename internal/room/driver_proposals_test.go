@@ -393,3 +393,95 @@ func TestDriverProposalAgentInputs(t *testing.T) {
 		t.Fatalf("action_result inputs per proposal = %v, want 2, 2 and 1", results)
 	}
 }
+
+// TestDriverProposalStartsStoppedAgent pins the P3e flow when the room has no
+// agent run (Load starts none after a restart): the driver's proposal starts
+// one, as a steer does, and its proposal_created reaches that run's inbox;
+// after the proposal runs, the same run gets the proposal_executed, and its
+// Proposals reads the driver's steps (agent.ProposalStepsReader), which is
+// what the runner's verification pass builds its layer checks from.
+func TestDriverProposalStartsStoppedAgent(t *testing.T) {
+	good := &fakeAction{name: "good_act", layer: "postgres"}
+	reg := actions.NewRegistry()
+	if err := reg.Register(good); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	svc1 := room.New(room.Deps{Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	roomID := createRoom(t, svc1, "arjun").ID
+	svc1.Close() // the old process dies here
+
+	var runs atomic.Int32
+	depsCh := make(chan agent.Deps, 4)
+	svc2 := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			runs.Add(1)
+			depsCh <- deps
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc2.Close)
+	ctx := context.Background()
+	if err := svc2.Load(ctx); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := runs.Load(); n != 0 {
+		t.Fatalf("Load started %d run(s), want 0", n)
+	}
+
+	p := driverProposal("driver fix")
+	p.Steps = []events.ProposalStep{{Action: "good_act", Layer: "postgres", Params: json.RawMessage(`{"table":"public.orders"}`)}}
+	ev, err := svc2.CreateDriverProposal(ctx, mustUser(t, svc2, "arjun"), roomID, p)
+	if err != nil {
+		t.Fatalf("driver proposal: %v", err)
+	}
+	dp, _ := events.Decode[events.ProposalCreatedPayload](ev)
+	var deps agent.Deps
+	select {
+	case deps = <-depsCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the driver's proposal did not start the agent")
+	}
+
+	drainKind := func(kind string) agent.HumanInput {
+		t.Helper()
+		var found *agent.HumanInput
+		waitFor(t, 5*time.Second, func() bool {
+			got, err := deps.Inbox.Drain(ctx)
+			if err != nil {
+				t.Fatalf("drain: %v", err)
+			}
+			for i := range got {
+				if got[i].Kind == kind && got[i].ProposalID == dp.ProposalID {
+					found = &got[i]
+				}
+			}
+			return found != nil
+		})
+		return *found
+	}
+	if in := drainKind("proposal_created"); in.Origin != events.ProposalOriginDriver {
+		t.Fatalf("proposal_created origin = %q", in.Origin)
+	}
+
+	approveLayer(t, svc2, "priya", dp.ProposalID, "postgres")
+	in := drainKind("proposal_executed")
+	if len(in.StepsOK) != 1 || in.StepsOK[0] == nil || !*in.StepsOK[0] {
+		t.Fatalf("StepsOK = %v, want [true]", in.StepsOK)
+	}
+	if n := runs.Load(); n != 1 {
+		t.Fatalf("runs = %d, want 1 (the executed input must reach the same run)", n)
+	}
+	sr, ok := deps.Proposals.(agent.ProposalStepsReader)
+	if !ok {
+		t.Fatal("the room's Proposals does not implement agent.ProposalStepsReader")
+	}
+	steps, err := sr.ProposalSteps(ctx, dp.ProposalID)
+	if err != nil || len(steps) != 1 || steps[0].Action != "good_act" {
+		t.Fatalf("ProposalSteps = %+v, %v", steps, err)
+	}
+}

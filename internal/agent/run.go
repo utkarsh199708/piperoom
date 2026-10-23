@@ -453,7 +453,10 @@ func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.B
 	if note := stagingNote(r.alert, r.deps.Actions); note != "" {
 		blocks = append(blocks, anthropic.NewBetaTextBlock(note))
 	}
-	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
+	// The opening turn has read nothing yet, so a driver's proposal in it gets
+	// the idle wording (a read or two first), not "answer from the evidence
+	// you already have" (driverproposal.go).
+	blocks = append(blocks, r.idleInputBlocks(inputs, notes)...)
 	return anthropic.NewBetaUserMessage(blocks...)
 }
 

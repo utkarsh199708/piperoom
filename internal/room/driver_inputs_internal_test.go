@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
@@ -287,15 +288,11 @@ func TestAutoApproveNeverSchedulesRouteDriverProposal(t *testing.T) {
 	}
 }
 
-// proposalStepsReader mirrors agent.ProposalStepsReader (P3e, internal/agent/
-// driverproposal.go): the runner type-asserts its Proposals to it.
-type proposalStepsReader interface {
-	ProposalSteps(ctx context.Context, proposalID string) ([]events.ProposalStep, error)
-}
-
+// The runner type-asserts Deps.Proposals to agent.ProposalStepsReader (P3e,
+// internal/agent/driverproposal.go); the room passes proposalCreator by value.
 var (
-	_ proposalStepsReader = (*proposalCreator)(nil)
-	_ proposalStepsReader = proposalCreator{}
+	_ agent.ProposalStepsReader = (*proposalCreator)(nil)
+	_ agent.ProposalStepsReader = proposalCreator{}
 )
 
 // TestProposalCreatorProposalSteps: the room's agent.Proposals returns the
@@ -310,7 +307,7 @@ func TestProposalCreatorProposalSteps(t *testing.T) {
 	ctx := context.Background()
 
 	var reader any = proposalCreator{s: r.svc, roomID: roomA, run: 1}
-	pr, ok := reader.(proposalStepsReader)
+	pr, ok := reader.(agent.ProposalStepsReader)
 	if !ok {
 		t.Fatal("proposalCreator does not implement ProposalSteps")
 	}
@@ -332,5 +329,24 @@ func TestProposalCreatorProposalSteps(t *testing.T) {
 		if !errors.As(err, &re) || re.Code != codeNotFound {
 			t.Fatalf("%s: err = %v, want not_found", name, err)
 		}
+	}
+}
+
+// TestDriverProposalTextBounded: the proposal_created Text is at most
+// maxDriverProposalText bytes, valid UTF-8, and says it was cut; a small
+// proposal is rendered whole.
+func TestDriverProposalTextBounded(t *testing.T) {
+	small := threeStepProposal(events.ProposalOriginDriver)
+	if got := driverProposalText(small); strings.Contains(got, "truncated") || !strings.Contains(got, "rollback: none needed") {
+		t.Fatalf("small proposal text = %q", got)
+	}
+	big := threeStepProposal(events.ProposalOriginDriver)
+	big.Risk = strings.Repeat("é", 1<<19) // 1 MB of two-byte runes
+	got := driverProposalText(big)
+	if len(got) > maxDriverProposalText {
+		t.Fatalf("len = %d, want <= %d", len(got), maxDriverProposalText)
+	}
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, driverProposalTruncated) || !strings.HasPrefix(got, "title: restart the connector") {
+		t.Fatalf("bounded text: valid=%v suffix=%v prefix=%q", utf8.ValidString(got), strings.HasSuffix(got, driverProposalTruncated), got[:40])
 	}
 }

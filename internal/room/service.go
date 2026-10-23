@@ -1034,9 +1034,14 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 		s.fillGapLocked(ctx, roomID, st, e.Seq)
 	}
 	s.foldLocked(ctx, roomID, st, e, false)
+	// Read before the cap check: its warning event folds over e.
+	wake := startsAgent(st.snap, e)
 	// Only the replica that wrote the event decides the cap warning, so the
 	// warning is written once.
 	s.checkCapLocked(ctx, st, roomID)
+	if wake {
+		s.ensureAgentLocked(roomID, st)
+	}
 	return e, nil
 }
 
@@ -1489,6 +1494,22 @@ func inputsFor(snap RoomSnapshot, e events.Event) []agent.HumanInput {
 	return out
 }
 
+// startsAgent reports whether event e (folded into snap) carries a driver
+// proposal input: "proposal_created" or "proposal_executed". Like a steer,
+// these start the room's agent when it has no run (a room restored by Load,
+// or one whose run was released after a failure), so the agent answers the
+// driver's fix and verifies it after it runs (P3e) instead of the input
+// waiting in the inbox for the next steer. Only the replica that wrote the
+// event decides it (emitLocked), as for a steer.
+func startsAgent(snap RoomSnapshot, e events.Event) bool {
+	for _, in := range inputsFor(snap, e) {
+		if in.Kind == "proposal_created" || in.Kind == "proposal_executed" {
+			return true
+		}
+	}
+	return false
+}
+
 // proposalExecutedInput is the "proposal_executed" input (P3c): sent once,
 // with the action.executed that ended a driver-authored proposal's run, so
 // the agent verifies the driver's fix as after its own. StepsOK has one entry
@@ -1526,11 +1547,32 @@ func proposalExecutedInput(snap RoomSnapshot, e events.Event) *agent.HumanInput 
 	}
 }
 
+// maxDriverProposalText bounds the "proposal_created" input's Text. The route
+// caps only the request body (1 MB), so the driver's title, risk, rollback and
+// params could otherwise put a megabyte of their words into every later model
+// turn; a steer is capped at 4000 characters. Two steer's worth leaves room
+// for a few steps' params; the full proposal stays in the room for people.
+const maxDriverProposalText = 8192
+
+// driverProposalTruncated ends a proposal_created Text cut at
+// maxDriverProposalText, so the agent knows it did not read all of it.
+const driverProposalTruncated = "\n[truncated: the full proposal is in the room]"
+
 // driverProposalText renders a driver-authored proposal for the agent's
 // "proposal_created" input: title, each step's action, layer and params, the
-// risk and the rollback. Everything in it was typed by the driver, so the
-// agent reads it as untrusted data (agent.HumanInput.Origin).
+// risk and the rollback, at most maxDriverProposalText bytes. Everything in it
+// was typed by the driver, so the agent reads it as untrusted data
+// (agent.HumanInput.Origin).
 func driverProposalText(p events.ProposalCreatedPayload) string {
+	s := renderDriverProposal(p)
+	if len(s) <= maxDriverProposalText {
+		return s
+	}
+	return cutUTF8(s, maxDriverProposalText-len(driverProposalTruncated)) + driverProposalTruncated
+}
+
+// renderDriverProposal is driverProposalText before the size bound.
+func renderDriverProposal(p events.ProposalCreatedPayload) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "title: %s\n", p.Title)
 	for i, st := range p.Steps {
