@@ -94,7 +94,12 @@ func TestStartFailures(t *testing.T) {
 		want []string
 	}{
 		{"unknown flavor is refused by the parser", config.Config{ModelProvider: "openai", ModelFlavor: "nope"}, nil, []string{"PIPEROOM_MODEL_FLAVOR"}},
-		{"a V3b flavor is not served yet", config.Config{ModelProvider: "openai", ModelFlavor: "groq", Model: "m"}, map[string]string{"GROQ_API_KEY": "k"}, []string{"not served yet"}},
+		{"groq without GROQ_API_KEY", config.Config{ModelProvider: "openai", ModelFlavor: "groq", Model: "openai/gpt-oss-120b", ModelUnverified: "on"}, nil,
+			[]string{"PIPEROOM_MODEL_PROVIDER=openai", "flavor groq", "needs an API key", "GROQ_API_KEY"}},
+		{"summary on groq reads only GROQ_API_KEY", config.Config{Model: "claude-opus-5-5", ModelFlavor: "groq", SummaryProvider: "openai", SummaryModel: "openai/gpt-oss-120b"},
+			map[string]string{"PIPEROOM_MODEL_API_KEY": "main-key-value"}, []string{"PIPEROOM_SUMMARY_PROVIDER=openai", "GROQ_API_KEY"}},
+		{"deepseek with its key but without the acknowledgement", config.Config{ModelProvider: "openai", ModelFlavor: "deepseek", Model: "deepseek-chat", ModelUnverified: "on"},
+			map[string]string{"DEEPSEEK_API_KEY": "sk-deepseek-value"}, []string{"api.deepseek.com", "PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes"}},
 		{"missing main key", config.Config{ModelProvider: "openai", Model: "gpt-x"}, nil, []string{"PIPEROOM_MODEL_PROVIDER=openai", "OPENAI_API_KEY", "PIPEROOM_MODEL_API_KEY"}},
 		{"a role reads its own provider's key, never the main one", config.Config{ModelProvider: "openai", Model: "gpt-x", JudgeProvider: "gemini", JudgeModel: "gemini-3-pro"},
 			map[string]string{"PIPEROOM_MODEL_API_KEY": "main-key"}, []string{"PIPEROOM_JUDGE_PROVIDER=gemini", "GEMINI_API_KEY"}},
@@ -416,5 +421,52 @@ func TestSupportedListParses(t *testing.T) {
 		if _, err := llm.ParseSupported([]byte(b)); err == nil {
 			t.Errorf("accepted %s", b)
 		}
+	}
+}
+
+// TestChinaEndpointRefusedByTheAdaptersAnswer: the acknowledgement is checked
+// again on llm/openai's ChinaOperated, so an EndpointConfig whose knobs did
+// not come through config.ParseModelKnobs cannot skip it; with the
+// acknowledgement the endpoint builds without sending anything.
+func TestChinaEndpointRefusedByTheAdaptersAnswer(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		cfg  config.Config
+		env  map[string]string
+		host string
+	}{
+		{"deepseek default host", config.Config{ModelProvider: "openai", ModelFlavor: "deepseek", Model: "deepseek-chat"},
+			map[string]string{"DEEPSEEK_API_KEY": "sk-deepseek-value"}, "api.deepseek.com"},
+		{"qwen on the DashScope China endpoint", config.Config{ModelProvider: "openai", ModelFlavor: "qwen", Model: "qwen-plus",
+			ModelBaseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+			map[string]string{"DASHSCOPE_API_KEY": "sk-dashscope-value"}, "dashscope.aliyuncs.com"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := tt.cfg
+			c.ModelAckCNEndpoint = "yes"
+			k, err := config.ParseModelKnobs(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ec := EndpointConfig{Provider: c.ModelProvider, Knobs: &k}
+			if _, err := newEndpoint(context.Background(), ec, envOf(tt.env), testLoaders(nil), discardLogger()); err != nil {
+				t.Fatalf("with the acknowledgement: %v", err)
+			}
+			k.AckCNEndpoint = false
+			_, err = newEndpoint(context.Background(), ec, envOf(tt.env), testLoaders(nil), discardLogger())
+			if err == nil {
+				t.Fatal("want a start-up error without the acknowledgement")
+			}
+			for _, s := range []string{tt.host, "PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes", "PIPEROOM_MODEL_PROVIDER=openai"} {
+				if !strings.Contains(err.Error(), s) {
+					t.Fatalf("error %q does not contain %q", err, s)
+				}
+			}
+			for _, v := range tt.env {
+				if strings.Contains(err.Error(), v) {
+					t.Fatalf("error carries a key: %q", err)
+				}
+			}
+		})
 	}
 }

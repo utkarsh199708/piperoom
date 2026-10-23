@@ -184,11 +184,8 @@ func triageOnMainProvider(sp roleSpec) error {
 }
 
 // knownQualifiers are the provider and flavor names a model id may be
-// qualified with.
-var knownQualifiers = []string{
-	llm.ProviderOpenAI, llm.ProviderGemini, llm.ProviderBedrockConverse,
-	"azure", "deepseek", "qwen", "mistral", "groq", "together", "openrouter", "xai", "ollama", "vllm", "generic",
-}
+// qualified with: the new providers and every flavor llm/openai serves.
+var knownQualifiers = append([]string{llm.ProviderGemini, llm.ProviderBedrockConverse}, openai.Flavors()...)
 
 // localFlavor reports a host whose tool behaviour depends on its own chat
 // template and tool parser: the probe runs whether or not the model is listed.

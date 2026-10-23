@@ -197,6 +197,12 @@ func (b clientBuilder) openAI(env string, r config.ModelRole, main bool) (model,
 	if flavor == "" {
 		flavor = openai.FlavorOpenAI
 	}
+	// Refused before the key is read: config.ParseModelKnobs checks the same
+	// rule, and this repeats it on the adapter's own answer, so a hand-made
+	// EndpointConfig cannot skip it (design 15, decision 7).
+	if err := b.checkChina(env, main, openai.ChinaOperatedEndpoint(flavor, r.BaseURL)); err != nil {
+		return nil, err
+	}
 	key, err := openai.LoadKey(flavor, main, b.getenv, b.readFile)
 	if err != nil {
 		return nil, fmt.Errorf("agent: %w", err)
@@ -227,7 +233,20 @@ func (b clientBuilder) openAI(env string, r config.ModelRole, main bool) (model,
 	if err != nil {
 		return nil, fmt.Errorf("agent: %s: %w", providerVar(env, main), err)
 	}
+	if err := b.checkChina(env, main, m.ChinaOperated()); err != nil {
+		return nil, err
+	}
 	return m, nil
+}
+
+// checkChina refuses an endpoint operated in the People's Republic of China
+// (host non-empty) without PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes.
+func (b clientBuilder) checkChina(env string, main bool, host string) error {
+	if host == "" || b.c.knobs().AckCNEndpoint {
+		return nil
+	}
+	return fmt.Errorf("agent: %s=openai: endpoint %s is operated in the People's Republic of China: set PIPEROOM_MODEL_ACK_CN_ENDPOINT=yes to acknowledge where incident data goes",
+		providerVar(env, main), host)
 }
 
 func (b clientBuilder) gemini(ctx context.Context, env string, r config.ModelRole, main bool) (model, error) {
