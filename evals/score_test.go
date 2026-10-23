@@ -1053,7 +1053,9 @@ func TestAsksQuestion(t *testing.T) {
 // fault; a healthy phrase beside a fault word goes to the judge.
 
 // w4dRun loads transcript n (1-3) of healthy-after-recovery from run
-// 39994729845, verbatim (evals/testdata/w4d).
+// 39994729845, verbatim (evals/testdata/w4d) except that the agent.usage
+// events' model name is blanked: no model id goes into a committed artifact,
+// and no grade reads it.
 func w4dRun(t *testing.T, n int) Transcript {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("testdata", "w4d", fmt.Sprintf("healthy-after-recovery-%d.json", n)))
