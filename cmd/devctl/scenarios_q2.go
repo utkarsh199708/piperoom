@@ -26,12 +26,12 @@ const q2OwnersFile = "dev/owners.q2.yaml"
 const (
 	// missing-grant: the least-privilege role the connector moves to.
 	cdcRole = "devctl_cdc"
-	// blocked-slot: the analyst's own login role and the application_name of
-	// the session it leaves open. It must not be the connector's
-	// database.user (piperoom): source_end_session never ends the connector's
-	// own sessions, so a blocker running as piperoom could not be fixed by it.
-	blockerRole = "devctl_blocker"
+	// blocked-slot: application_name of the session left open, and the
+	// analyst's role it runs as. The role is not the connector's
+	// database.user (piperoom): source_end_session never ends a session of
+	// that user, so a blocker running as piperoom could not be ended.
 	blockerApp  = "devctl-blocker"
+	blockerRole = "devctl_analyst"
 	// idle-wal-growth: the busy database next to the captured one, and the
 	// heartbeat table of the fix.
 	batchDB        = "devctl_batch"
@@ -70,22 +70,17 @@ const (
 	sqlDropCDCRole = "DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'devctl_cdc') THEN EXECUTE 'DROP OWNED BY devctl_cdc'; EXECUTE 'DROP ROLE devctl_cdc'; END IF; END $$"
 
 	// blocked-slot
-	sqlBlockerOpen = "SELECT count(*) FROM pg_stat_activity WHERE usename = 'devctl_blocker' AND backend_xid IS NOT NULL"
-	// The analyst's role: LOGIN only, no grant on any table (the blocker
-	// touches none: it holds an xid, not a lock). Local socket logins in the
-	// dev container need no password.
-	sqlCreateBlockerRole = "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'devctl_blocker') THEN CREATE ROLE devctl_blocker LOGIN; END IF; END $$"
-	sqlBlockerConnect    = "GRANT CONNECT ON DATABASE orders TO devctl_blocker"
+	sqlBlockerOpen = "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'devctl-blocker' AND backend_xid IS NOT NULL"
+	// The analyst's role: LOGIN only (PUBLIC has CONNECT on orders; the
+	// session reads no table). Created if missing, so the break is safe to
+	// run on a stack a half-run fix left it on.
+	sqlCreateBlockerRole = "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'devctl_analyst') THEN CREATE ROLE devctl_analyst LOGIN; END IF; END $$"
+	// The role owns nothing; DROP ROLE does not wait for its terminated sessions.
+	sqlDropBlockerRole = "DROP ROLE IF EXISTS devctl_analyst"
 	// CREATE_REPLICATION_SLOT waits in XactLockTableWait for every transaction
 	// with an xid that was running when it started: a Lock wait on transactionid.
 	sqlSlotCreateWaits = "SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'walsender' AND wait_event_type = 'Lock' AND wait_event = 'transactionid'"
-	// By role and, for a session an older devctl opened as piperoom, by
-	// application_name.
-	sqlEndBlocker      = "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = 'devctl_blocker' OR application_name = 'devctl-blocker'"
-	sqlBlockerSessions = "SELECT count(*) FROM pg_stat_activity WHERE usename = 'devctl_blocker'"
-	// The role owns no object and holds only CONNECT on orders, which DROP
-	// OWNED revokes.
-	sqlDropBlockerRole = "DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'devctl_blocker') THEN EXECUTE 'DROP OWNED BY devctl_blocker'; EXECUTE 'DROP ROLE devctl_blocker'; END IF; END $$"
+	sqlEndBlocker      = "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE application_name = 'devctl-blocker'"
 
 	// idle-wal-growth
 	sqlBatchDBExists = "SELECT count(*) FROM pg_database WHERE datname = 'devctl_batch'"
@@ -291,12 +286,14 @@ func fixMissingGrant(ctx context.Context, s *stack) error {
 // ------------------------------------------------------------------- blocked-slot
 
 // blocked-slot: the connector is moved to a new host and set up again — its
-// slot dropped, its stored offsets cleared — while an analyst's session (its
-// own role, devctl_blocker) holds a transaction open. Debezium's CREATE_REPLICATION_SLOT waits for every
+// slot dropped, its stored offsets cleared — while an analyst's session holds
+// a transaction open. Debezium's CREATE_REPLICATION_SLOT waits for every
 // transaction that was running when it started, so the task never gets past
 // start: nothing streams and nothing fails. source_blocking_sessions shows the
-// session (blocks_slot=true: it holds the oldest xmin); it locks no pipeline
-// table, so in a room its identity is withheld.
+// session (blocks_slot=true: it holds the oldest xmin). The session runs as
+// devctl_analyst, not as the connector's piperoom, so source_end_session may
+// end it; in a pipeline room its identity is hidden (it locks no pipeline
+// table), only its pid, times, state and blocks_slot show.
 func breakBlockedSlot(ctx context.Context, s *stack) error {
 	if slot, ok, err := s.slotRow(ctx); err != nil {
 		return err
@@ -308,7 +305,7 @@ func breakBlockedSlot(ctx context.Context, s *stack) error {
 	} else if n != "0" {
 		return fmt.Errorf("devctl: a %s session is already open — run `devctl fix blocked-slot` first", blockerApp)
 	}
-	if _, err := s.psql(ctx, "orders", sqlCreateBlockerRole, sqlBlockerConnect); err != nil {
+	if _, err := s.psql(ctx, "orders", sqlCreateBlockerRole); err != nil {
 		return err
 	}
 	// docker exec -d keeps the session alive after devctl exits. The xid
@@ -354,7 +351,6 @@ func breakBlockedSlot(ctx context.Context, s *stack) error {
 
 // The fix is what source_end_session does: end the blocking session. The
 // slot creation then finishes, Debezium snapshots (no offsets) and streams.
-// The analyst's role is dropped once its sessions are gone.
 // The fix waits for an active slot, a marker row in the warehouse and lag 0;
 // a connector left STOPPED by a half-run break is resumed. Idempotent.
 func fixBlockedSlot(ctx context.Context, s *stack) error {
@@ -363,12 +359,6 @@ func fixBlockedSlot(ctx context.Context, s *stack) error {
 		return err
 	}
 	s.log.Info("ended "+blockerApp+" sessions", "count", strings.TrimSpace(out))
-	if err := s.waitFor(ctx, 15*time.Second, func() (bool, error) {
-		n, err := s.psql(ctx, "orders", sqlBlockerSessions)
-		return err == nil && n == "0", nil
-	}); err != nil {
-		return fmt.Errorf("devctl: %s sessions did not end: %w", blockerRole, err)
-	}
 	if _, err := s.psql(ctx, "orders", sqlDropBlockerRole); err != nil {
 		return err
 	}

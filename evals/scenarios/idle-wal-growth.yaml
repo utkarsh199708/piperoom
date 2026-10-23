@@ -199,7 +199,7 @@ recordings:
       slot debezium_orders: active=true retained=34.6 MiB wal_status=reserved
     data:
       - active: true
-        confirmed_flush_lsn: 3D/2C9A1140
+        confirmed_flush_lsn: 3D/2A80F2C8
         name: debezium_orders
         plugin: pgoutput
         restart_lsn: 3D/2A80F210
@@ -210,13 +210,13 @@ recordings:
       wal_level=logical
       max_replication_slots=10
       max_wal_senders=10
-      max_slot_wal_keep_size=-1
+      max_slot_wal_keep_size=-1 MB
       wal_sender_timeout=60000 ms
     data:
       - {name: wal_level, value: logical}
       - {name: max_replication_slots, value: "10"}
       - {name: max_wal_senders, value: "10"}
-      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: max_slot_wal_keep_size, value: "-1", unit: MB}
       - {name: wal_sender_timeout, value: "60000", unit: ms}
   - tool: source_blocking_sessions
     summary: |-
@@ -294,7 +294,7 @@ recordings:
       topic.prefix: pg
   - tool: pg_streaming_liveness
     summary: |-
-      quiet: no source writes in 5s (slot "debezium_orders", confirmed_flush_lsn 3D/2C9A1140 unchanged, active=true); not a stall; connector pg-orders-connector state RUNNING
+      quiet: no source writes in 5s (slot "debezium_orders", confirmed_flush_lsn 3D/2A80F2C8 unchanged, active=true); not a stall; connector pg-orders-connector state RUNNING
     data:
       pipeline: orders
       verdict: quiet
@@ -306,8 +306,8 @@ recordings:
         active: true
         wal_status: reserved
         retained_wal_bytes: 36280320
-        confirmed_flush_lsn: 3D/2C9A1140
-        confirmed_flush_lsn_after: 3D/2C9A1140
+        confirmed_flush_lsn: 3D/2A80F2C8
+        confirmed_flush_lsn_after: 3D/2A80F2C8
         confirmed_flush_advance_bytes: 0
         source_wal_advance_bytes: 0
         verdict: quiet

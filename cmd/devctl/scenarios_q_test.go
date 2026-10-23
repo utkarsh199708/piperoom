@@ -271,8 +271,8 @@ func TestBlockedSlotBreakAndFix(t *testing.T) {
 		t.Fatalf("break: %v\n%s", err, logs)
 	}
 	w.with(func() {
-		if !w.blockerOpen || !w.slotWaiting || w.slotExists {
-			t.Errorf("after break: blocker %v waiting %v slot %v", w.blockerOpen, w.slotWaiting, w.slotExists)
+		if !w.blockerOpen || !w.slotWaiting || w.slotExists || !w.blockerRole {
+			t.Errorf("after break: blocker %v waiting %v slot %v role %v", w.blockerOpen, w.slotWaiting, w.slotExists, w.blockerRole)
 		}
 		if w.offsetLSN != 0 {
 			t.Error("offsets not cleared")
@@ -280,14 +280,10 @@ func TestBlockedSlotBreakAndFix(t *testing.T) {
 		if !slices.Equal(w.ops, []string{"stop", "drop-slot", "delete-offsets", "resume"}) {
 			t.Errorf("ops = %v", w.ops)
 		}
+		// The blocker is not the connector's database.user (piperoom):
+		// source_end_session refuses that user's sessions.
 		if len(w.detached) != 1 || !strings.Contains(strings.Join(w.detached[0], " "), "-d -e PGAPPNAME="+blockerApp+" "+pgContainer+" psql -U "+blockerRole+" ") {
 			t.Errorf("detached = %v", w.detached)
-		}
-		// The connector's database.user is piperoom: a blocker running as it
-		// would be refused by source_end_session, which never ends the
-		// connector's own sessions.
-		if !w.blockerRole || (len(w.detached) == 1 && strings.Contains(strings.Join(w.detached[0], " "), "-U piperoom")) {
-			t.Errorf("blocker role %v, detached %v: the blocker must run as %s", w.blockerRole, w.detached, blockerRole)
 		}
 	})
 	if err := breakBlockedSlot(ctx, s); err == nil || !strings.Contains(err.Error(), "missing or inactive") {

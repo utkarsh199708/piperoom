@@ -142,9 +142,10 @@ func TestQ2ActionsValidateOnReplay(t *testing.T) {
 		{"idle-wal-growth", "source_create_heartbeat_table", `{"connector":"pg-orders-connector","table":"public.devctl_heartbeat"}`, ""},
 		{"idle-wal-growth", "source_create_heartbeat_table", `{"connector":"pg-orders-connector","table":"public.orders"}`, "heartbeat"},
 		{"blocked-slot", "source_end_session", `{"connector":"pg-orders-connector","pid":48213,"started_at":"2026-10-23T09:00:00Z","older_than_minutes":20}`, "now names a session"},
-		// older_than_minutes 5 (the default) is answered by the catch-all
-		// recording, as the tool call would be: no session listed.
-		{"blocked-slot", "source_end_session", `{"connector":"pg-orders-connector","pid":48213,"started_at":"2026-10-23T09:14:12Z"}`, "is not in source_blocking_sessions"},
+		// One recording answers every call (the blocker holds the oldest
+		// xid horizon, so any older_than_minutes lists it): a pid it does
+		// not list is refused.
+		{"blocked-slot", "source_end_session", `{"connector":"pg-orders-connector","pid":48214,"started_at":"2026-10-23T09:14:12Z"}`, "is not in source_blocking_sessions"},
 	}
 	for _, c := range cases {
 		t.Run(c.scenario+"/"+c.action+"/"+c.refused, func(t *testing.T) {
@@ -205,13 +206,13 @@ func TestQ2BlockedSlotHiddenBlockerValidates(t *testing.T) {
 }
 
 // withBlockerUser returns sc with the blocking session of its
-// older_than_minutes 20 recording owned by user, as the action's unscoped
+// source_blocking_sessions recording owned by user, as the action's unscoped
 // check would read it.
 func withBlockerUser(t *testing.T, sc Scenario, user string) Scenario {
 	t.Helper()
 	sc.Recordings = slices.Clone(sc.Recordings)
 	for i, r := range sc.Recordings {
-		if r.Tool != "source_blocking_sessions" || len(r.Input) == 0 {
+		if r.Tool != "source_blocking_sessions" {
 			continue
 		}
 		rows, ok := r.Data.([]any)
@@ -227,7 +228,7 @@ func withBlockerUser(t *testing.T, sc Scenario, user string) Scenario {
 		sc.Recordings[i] = r
 		return sc
 	}
-	t.Fatal("no source_blocking_sessions recording with input")
+	t.Fatal("no source_blocking_sessions recording")
 	return sc
 }
 

@@ -415,20 +415,20 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		wrong: "The replication slot debezium_orders went idle after the host move, so the pipeline stalls. Drop and recreate the slot with a fresh snapshot.",
 	},
 	"blocked-slot": {
-		good:  "An analyst's session (pid 48213, listed with identity hidden as outside the pipeline's tables) holds a transaction open, so Debezium's CREATE_REPLICATION_SLOT waits for every transaction that was open when it started; pg-orders-connector task 0 stays in STARTING and the slot debezium_orders is still pending. source_blocking_sessions lists that session with blocks_slot=yes. End it with source_end_session and slot creation completes.",
+		good:  "An unrelated session (pid 48213, open for 25 minutes) holds a transaction open, so Debezium's CREATE_REPLICATION_SLOT waits for every transaction that was open when it started; pg-orders-connector task 0 stays UNASSIGNED while the slot debezium_orders is still being created. source_blocking_sessions lists that session with blocks_slot=yes. End it with source_end_session and slot creation completes.",
 		wrong: "The replication slot debezium_orders was dropped in the host move; re-create the slot by hand and take a new snapshot.",
 	},
 	"idle-wal-growth": {
-		good:  "public.orders stays idle for 38 minutes while the batch database on the same server writes, so Debezium's heartbeat confirms only when a source event arrives; the active slot debezium_orders retains 34.6 MiB of WAL, and max_slot_wal_keep_size=-1 leaves retention unlimited, so Postgres keeps the WAL. source_blocking_sessions lists short transactions only. Add a heartbeat table with heartbeat.action.query (source_create_heartbeat_table) so the slot advances.",
+		good:  "public.orders stays idle for 38 minutes while the batch database on the same server writes, so Debezium's heartbeat confirms only when a source event arrives; the active slot debezium_orders retains 34.6 MiB of WAL, and max_slot_wal_keep_size=-1 leaves retention unlimited, so Postgres keeps the WAL. source_blocking_sessions lists no blocking session. Add a heartbeat table with heartbeat.action.query (source_create_heartbeat_table) so the slot advances.",
 		wrong: "order-sync is lagging behind the batch database, so the pipeline is slow; raise max_slot_wal_keep_size and restart the connector to release the WAL.",
 	},
 	// The Q4c config-validation scenarios.
 	"register-rejected-renamed-key": {
-		good:  "The stored config of pg-orders-connector uses the removed key database.server.name=pg; Debezium 2.0 requires topic.prefix, so the upgraded worker rejects the config with Missing required configuration topic.prefix and leaves the connector FAILED before it starts tasks. Rename the key to topic.prefix=pg and restart the connector; the topic and subject names and the stored offsets stay the same.",
+		good:  "The stored config of pg-orders-connector uses the removed key database.server.name=pg; Debezium 2.0 requires topic.prefix, so after the upgrade task 0 FAILED with Error configuring an instance of PostgresConnectorTask, and Connect rejects the re-registered 1.x config with The 'topic.prefix' value is invalid: A value is required. Rename the key to topic.prefix=pg and restart the connector; the topic and subject names and the stored offsets stay the same.",
 		wrong: "The Schema Registry rejected the schema after the upgrade, so pg-orders-connector fails to start; set the subject's compatibility to NONE and restart the connector.",
 	},
 	"register-rejected-missing-plugin": {
-		good:  "The Debezium Postgres plugin jar set is absent from the Connect worker's plugin.path: the class io.debezium.connector.postgresql.PostgresConnector shows as unavailable in GET /connector-plugins, so pg-orders-connector FAILED and a re-registration fails during plugin discovery. Restore the plugin jars in plugin.path and restart the workers; the stored config is correct.",
+		good:  "The Debezium Postgres plugin jar set is absent from the Connect worker's plugin.path: Connect fails to find any class that implements Connector and matches io.debezium.connector.postgresql.PostgresConnector, so pg-orders-connector FAILED and a re-registration fails during plugin discovery. Restore the plugin jars in plugin.path and restart the workers; the stored config is correct.",
 		wrong: "The connector's database.user piperoom lost its privileges on public.orders after the redeploy, so the snapshot fails; grant SELECT again and restart it.",
 	},
 }
