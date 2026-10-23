@@ -152,6 +152,7 @@ func TestCatalogue(t *testing.T) {
 		"service_status": protocol.TierT0, "properties_read": protocol.TierT0,
 		"properties_write": protocol.TierT1,
 		"service_install":  protocol.TierT2, "service_restart": protocol.TierT2,
+		"journal_tail": protocol.TierT0,
 	}
 	for name, tier := range want {
 		op, ok := f.reg.Get(name)

@@ -152,7 +152,7 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	}
 	for _, op := range []ops.Op{
 		serviceStatusOp{d: d}, propertiesReadOp{d: d}, propertiesWriteOp{d: d},
-		serviceInstallOp{d: d}, serviceRestartOp{d: d},
+		serviceInstallOp{d: d}, serviceRestartOp{d: d}, JournalTailOp{},
 	} {
 		if err := r.Register(op); err != nil {
 			return nil, fmt.Errorf("host: registering %s: %w", op.Name(), err)
