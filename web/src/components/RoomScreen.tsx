@@ -37,6 +37,7 @@ import { WriteModeBanner } from './WriteModeBanner'
 import { ChangesLane } from './room/ChangesLane'
 import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
+import { PipelineCostPanel } from './room/PipelineCostPanel'
 import type { ChecklistWiring, CitedStep } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { Badge } from '@/components/ui/badge'
@@ -429,6 +430,8 @@ export function RoomScreen() {
     />
   )
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
+  // Pipeline-wide (X6), not this room's spend: the room's own cost is the header chip.
+  const pipelineCost = <PipelineCostPanel pipelineId={state.pipeline_id} />
   const openProposals = state.proposals.filter((p) => p.status === 'open').length
 
   return (
@@ -555,6 +558,7 @@ export function RoomScreen() {
               <TabsContent value="activity" forceMount hidden={tab !== 'activity'}>
                 {suggestions}
                 <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
+                {pipelineCost}
                 <div className="h-px shrink-0 bg-border" />
                 <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
               </TabsContent>
@@ -588,6 +592,7 @@ export function RoomScreen() {
             <div className="h-px shrink-0 bg-border" />
             {suggestions}
             <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
+            {pipelineCost}
             <div className="h-px shrink-0 bg-border" />
             <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
           </aside>

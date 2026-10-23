@@ -14,12 +14,13 @@ import (
 const configLayer = "kafka-connect"
 
 // actionExecutedLocked hands an action.executed, with the step that ran, to
-// Deps.OnActionExecuted on its own goroutine. The step comes from the room's
-// open proposals, so it must run before Apply removes the proposal. An event
-// whose proposal or step the snapshot does not hold (a rebuilt room) is
-// skipped. Caller holds st's lock.
+// Deps.OnActionExecuted and, with its result, Deps.OnActionResult (X7b), on
+// its own goroutine. The step comes from the room's open proposals, so it
+// must run before Apply removes the proposal. An event whose proposal or step
+// the snapshot does not hold (a rebuilt room) is skipped. Caller holds st's
+// lock.
 func (s *Service) actionExecutedLocked(st *roomState, e events.Event) {
-	if s.onActionExec == nil || e.Type != events.ActionExecuted {
+	if (s.onActionExec == nil && s.onActionResult == nil) || e.Type != events.ActionExecuted {
 		return
 	}
 	p, ok := decode[events.ActionExecutedPayload](e)
@@ -36,9 +37,15 @@ func (s *Service) actionExecutedLocked(st *roomState, e events.Event) {
 	if !s.addWorker() {
 		return
 	}
+	p.Output = ""
 	go func() {
 		defer s.wg.Done()
-		s.onActionExec(s.ctx, pipelineID, proposalID, step)
+		if s.onActionExec != nil {
+			s.onActionExec(s.ctx, pipelineID, proposalID, step)
+		}
+		if s.onActionResult != nil {
+			s.onActionResult(s.ctx, pipelineID, step, p)
+		}
 	}()
 }
 

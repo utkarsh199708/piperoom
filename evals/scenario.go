@@ -106,6 +106,16 @@ type Resources struct {
 	// Publications list each publication's tables ("schema.table"). A
 	// publication not listed does not exist.
 	Publications map[string][]string `yaml:"publications"`
+	// Topics are Kafka topics that exist on the recorded stack but that no
+	// read tool may show, by name: the pipeline's reprocess_topic, which
+	// kafka_topic_offsets refuses (it reads CDC topics only) and
+	// kafka_replay_range writes to (X2e). Each is empty: start = end = 0.
+	Topics map[string]TopicState `yaml:"topics"`
+}
+
+// TopicState is one topic of resources.topics.
+type TopicState struct {
+	Partitions int `yaml:"partitions"`
 }
 
 // TableState is one source table as pg_add_publication_table and
@@ -123,7 +133,16 @@ type TableState struct {
 	// SignalColumns: the table has the id, type and data columns of a
 	// Debezium signal table.
 	SignalColumns bool `yaml:"signal_columns"`
+	// KeyColumn is the table's integer key column and KeyRanges the key
+	// ranges that hold rows, each [from, to] with both ends included: what
+	// pg_resnapshot_rows reads and counts (RangeColumn, CountRange; X2e).
+	// No read tool counts a key range, so it is declared here.
+	KeyColumn string    `yaml:"key_column"`
+	KeyRanges [][]int64 `yaml:"key_ranges"`
 }
+
+// columnRe is one column name, as pg_resnapshot_rows accepts it.
+var columnRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`)
 
 // tableRe is a "schema.table" as owners.yaml lists source tables.
 var tableRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -151,6 +170,25 @@ func (r Resources) validate() []error {
 		case "", "d", "n", "f", "i":
 		default:
 			errs = append(errs, fmt.Errorf("resources.tables.%s: replica_identity %q is not one of d, n, f, i", t, st.ReplicaIdentity))
+		}
+		if st.KeyColumn != "" && !columnRe.MatchString(st.KeyColumn) {
+			errs = append(errs, fmt.Errorf("resources.tables.%s: key_column %q is not a column name", t, st.KeyColumn))
+		}
+		if len(st.KeyRanges) > 0 && st.KeyColumn == "" {
+			errs = append(errs, fmt.Errorf("resources.tables.%s: key_ranges needs key_column", t))
+		}
+		for i, kr := range st.KeyRanges {
+			switch {
+			case len(kr) != 2:
+				errs = append(errs, fmt.Errorf("resources.tables.%s: key_ranges[%d] is not [from, to]", t, i))
+			case kr[0] > kr[1]:
+				errs = append(errs, fmt.Errorf("resources.tables.%s: key_ranges[%d] starts at %d, after its end %d", t, i, kr[0], kr[1]))
+			}
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(r.Topics)) {
+		if r.Topics[name].Partitions < 1 {
+			errs = append(errs, fmt.Errorf("resources.topics.%s: partitions must be at least 1", name))
 		}
 	}
 	for _, p := range slices.Sorted(maps.Keys(r.Publications)) {

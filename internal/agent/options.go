@@ -93,6 +93,13 @@ type timing struct {
 	recoveryFirstPoll time.Duration
 	recoveryMaxPoll   time.Duration
 	recoveryTimeout   time.Duration
+	// perfWindow, perfSettle and perfTimeout are the schedule of a
+	// performance proposal's throughput verification (X6c,
+	// verify_performance.go): the actions.PerformanceVerify* defaults. A
+	// failed call is retried every recoveryMaxPoll.
+	perfWindow  time.Duration
+	perfSettle  time.Duration
+	perfTimeout time.Duration
 }
 
 // defaultTiming returns the production waits and deadlines.
@@ -110,5 +117,9 @@ func defaultTiming() timing {
 		recoveryFirstPoll: actions.RecoveryVerifyFirstPoll,
 		recoveryMaxPoll:   actions.RecoveryVerifyMaxPoll,
 		recoveryTimeout:   actions.RecoveryVerifyTimeout,
+
+		perfWindow:  actions.PerformanceVerifyWindow,
+		perfSettle:  actions.PerformanceVerifySettle,
+		perfTimeout: actions.PerformanceVerifyTimeout,
 	}
 }

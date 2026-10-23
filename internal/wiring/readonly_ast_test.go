@@ -22,6 +22,10 @@ var rawClientAllow = map[string]bool{
 	"readRegistry":   true,
 	"actionRegistry": true,
 	"assemble":       true,
+	// X6c: hands the whole Connect client to connect_tune_throughput with
+	// write mode on only (the read-only adapter otherwise), like the
+	// actions.Register call in registerActions.
+	"registerTuning": true,
 }
 
 // stubImporter gives every import an empty, complete package. The check only

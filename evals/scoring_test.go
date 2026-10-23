@@ -281,6 +281,15 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "order-sync 2.15.0's new status validation rejects orders with the new status 'gift' and routes them to its DLQ devctl.order-sync.dlq (20 records, devconsumer.ValidationError), then commits them, so lag is 0 while the 20 gift orders are missing from analytics.orders. 2.15.1 accepts gift; replay the DLQ into pg.public.orders.",
 		wrong: "The Kafka Connect source task 0 failed and dropped 20 change events before they reached the topic.",
 	},
+	// X2e recovery scenarios (C7, KAN-427).
+	"rows-lost-after-retention": {
+		good:  "A retention.ms=1000 override on the Kafka topic pg.public.orders, set at 09:05, deleted the change events of orders 1301-1340 before order-sync, stopped for a node drain, read them: the log start moved to offsets 446/447, and key 1301 is absent from the topic. order-sync then resumed at the earliest retained offset, so its lag is 0 while the 40 rows are missing from analytics.orders.",
+		wrong: "The connector lost the change events of orders 1301-1340: pg-orders-connector dropped them before they reached Kafka.",
+	},
+	"consumer-skipped-range": {
+		good:  "The deploy job's leftover step reset order-sync's committed offsets to the latest offsets of pg.public.orders while it was stopped, skipping the change events of orders 1301-1340: they are on the topic (key 1301 at partition 2, offset 433), and the consumer order-sync committed past them, so lag is 0 and the 40 rows are missing from analytics.orders.",
+		wrong: "order-sync 2.17.0 has a new filter that drops the 40 orders before they reach analytics.orders.",
+	},
 	// X1e silent-corruption scenarios (C7, KAN-420).
 	"sink-filtered-rows": {
 		good:  "The order-sync 2.16.0 release deployed at 08:29Z skips (filters out) the 40 backfill orders written at 08:31 and commits past them: reconcile shows the sink is missing 40 rows in 08:31-08:32, and trace_record shows id 3763 in pg.public.orders, consumed and committed by order-sync, but stopped at the warehouse. Lag is 0.",

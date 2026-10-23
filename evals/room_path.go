@@ -299,11 +299,21 @@ func (x *execScript) execute(action string, params json.RawMessage) (string, err
 		if !ok {
 			return "", errors.New(in.Text)
 		}
+		x.ran(action, params)
 		return in.Text, nil
 	}
 	ok := true
 	x.rp.executed(action, &ok)
+	x.ran(action, params)
 	return "succeeded", nil
+}
+
+// ran tells the replay clients a step succeeded, so a recovery action's
+// Verify counts what it re-emitted (X2e).
+func (x *execScript) ran(action string, params json.RawMessage) {
+	if x.log != nil {
+		x.log.stepRan(action, params)
+	}
 }
 
 // note logs an executed step with its target names only: the params of a

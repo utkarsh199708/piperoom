@@ -52,6 +52,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
+	"piperoom/internal/discover/openlineage"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
 	"piperoom/internal/quickstart"
@@ -438,6 +439,14 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	}
 	defer slack.stop(mirrorStopTimeout)
 
+	// OpenLineage (X7b): off unless OPENLINEAGE_URL is set; then it sends on
+	// the elected leader only. A bad setting refuses start.
+	lineage, stopLineage, err := openlineage.Start(ctx, cfg, own, elector, log)
+	if err != nil {
+		return err
+	}
+	defer stopLineage()
+
 	var (
 		acts     *actions.Registry
 		toolsReg = tools.NewRegistry()
@@ -516,7 +525,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		triageTimeout = w.triageTimeout
 		stacks = w.stacks
 		stackFor = w.stackFor
-		topo = w.topo
+		topo = lineage.Wrap(w.topo)
 	}
 
 	// The auto-approve lists name actions of the proposal registry: acts in
@@ -578,6 +587,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,
 		OnActionExecuted:  closedHook.onActionExecuted,
+		OnActionResult:    lineage.ActionHook(),
 		OnRoomDeleted:     deletedHook.onDeleted,
 		TeamPager:         slack.teamPager(),
 	}, s.authSettings, usage)

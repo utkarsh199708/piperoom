@@ -72,7 +72,7 @@ type tenancyEnv struct {
 	svc *room.Service
 }
 
-func newTenancyEnv(t *testing.T, withTenants bool) *tenancyEnv {
+func newTenancyEnv(t *testing.T, withTenants bool, opts ...httpapi.Option) *tenancyEnv {
 	t.Helper()
 	users, err := room.ParseUsers([]byte(tenancyUsers))
 	if err != nil {
@@ -102,7 +102,8 @@ func newTenancyEnv(t *testing.T, withTenants bool) *tenancyEnv {
 		},
 	})
 	now := time.Now()
-	api := httpapi.New(svc, st, nil, httpapi.WithAlertIngest(alertin.Config{GenericSecret: genericSecret, Now: func() time.Time { return now }}))
+	opts = append([]httpapi.Option{httpapi.WithAlertIngest(alertin.Config{GenericSecret: genericSecret, Now: func() time.Time { return now }})}, opts...)
+	api := httpapi.New(svc, st, nil, opts...)
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() {
 		srv.Close()

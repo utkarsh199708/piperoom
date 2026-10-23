@@ -207,6 +207,9 @@ func (s *stack) groupCommittedOffsets(ctx context.Context, group, topic string) 
 
 // logStartOffsets returns the log start offset per partition of topic.
 func (s *stack) logStartOffsets(ctx context.Context, topic string) (map[int32]int64, error) {
+	if s.logStartFn != nil {
+		return s.logStartFn(ctx, topic)
+	}
 	cl, err := s.kafkaClient()
 	if err != nil {
 		return nil, err

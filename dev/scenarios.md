@@ -645,3 +645,61 @@ The timestamps agree, so row_drift comes from its placeholder count: the source'
 placeholder (`status = status || ''` builds a new value, so the change event carries it in full) and wait until
 no placeholder is left. With no placeholder row only the `ALTER` runs. The change events already on the topic
 keep the placeholder (history is not rewritten).
+
+## Recovery: `rows-lost-after-retention`, `consumer-skipped-range`
+
+Two breaks where orders are missing from `analytics.orders` while order-sync runs at lag 0, each ended by one X2
+recovery action (Preview → approval → Execute → Verify counts). No watcher signal sees them on an idle stack, so
+each has a reconciliation alert (`devctl alert <scenario>`). **They need the server on
+`OWNERS_FILE=dev/owners.recovery.yaml`**: `dev/owners.yaml` plus the pipeline's `reprocess_topic`
+(`pg.public.orders.reprocess`), the one topic `kafka_replay_range` may write to (`TestOwnersRecoveryMatchesBaseline`
+keeps the two files in step). Both breaks register the connector with the signal table `public.devctl_signal`
+(in `table.include.list` and `signal.data.collection`) so `pg_resnapshot_rows` can signal it, and create the
+reprocess topic; both fixes put the connector, the publication and the topics back as `devctl reset` leaves them.
+The orders a break writes are marked by `customer_id` (9001-9050, 9101-9140), so a fix finds them without saved
+state. Eval scenarios: `evals/scenarios/rows-lost-after-retention.yaml`, `consumer-skipped-range.yaml` (X2e).
+
+Not yet observed on a live stack (no Docker in the session that wrote them): the *Expected* blocks come from the
+code and from Kafka/Debezium behaviour. Unit tests: `go test ./cmd/devctl -run 'RowsLost|SkippedRange|Recovery'`.
+
+### 18. `rows-lost-after-retention` — retention deleted change events before order-sync read them
+
+**Break:** stops devconsumer (order-sync's offsets stay committed), sets `retention.ms=1000` and `segment.ms=1000`
+on `pg.public.orders`, and writes 50 orders in five batches of 10, 1.5 s apart, each once the previous one is on
+the topic: each batch's first record rolls a new segment. It waits until the log start of every partition
+reached the last batch (every older segment deleted: the topic's history and the first 40 orders), then
+**removes the overrides** (nothing more is deleted) and starts devconsumer. Its committed offsets are below the
+log start, so it resumes at the earliest retained offset (`auto.offset.reset=earliest`) without an error and
+loads the last batch; a marker order proves it streams. The break logs the id span and how many are missing.
+
+**Expected:**
+```
+consumer    order-sync: state Stable, members 1, total lag 0
+kafka       pg.public.orders: log start = the last batch's offsets; ~11 records retained
+warehouse   the first 40 of the 50 orders missing (fewer if the last batch missed a partition)
+reconcile   "sink is missing 40 rows ... (connector side)": deleted records look unwritten to offsets by time
+```
+**Fix (what the agent proposes):** `pg_resnapshot_rows` on `public.orders` with `key_range` over the missing ids:
+the connector re-emits exactly those rows from the source (`kafka_replay_range` refuses: the range is below the
+log start). `devctl fix rows-lost-after-retention` removes any leftover override, inserts the same signal row
+(`execute-snapshot`, INCREMENTAL, `additional-conditions` on `id`) when an order is missing, waits until none
+is, and restores the baseline.
+
+### 19. `consumer-skipped-range` — order-sync's offsets moved past events still on the topic
+
+**Break:** stops devconsumer, writes 40 orders, waits until they are on `pg.public.orders`, commits order-sync's
+offsets at the topic's end (`kafka-consumer-groups --reset-offsets --to-latest`, the deploy job's leftover step),
+starts devconsumer and checks that none of the 40 reached the warehouse (a marker order does).
+
+**Expected:**
+```
+consumer    order-sync: state Stable, members 1, total lag 0
+kafka       the 40 change events retained (kafka_find_by_key / trace_record show their offsets)
+warehouse   the 40 orders missing
+```
+**Fix (what the agent proposes):** `kafka_replay_range` of the skipped offsets per partition into
+`pg.public.orders.reprocess`. On the dev stack devconsumer reads one topic; to watch the copy load, run a second
+consumer on it: `docker compose -f dev/docker-compose.yml run --rm -e TOPIC=pg.public.orders.reprocess -e
+GROUP=order-sync-reprocess devconsumer`. `devctl fix consumer-skipped-range` does not copy: it replays order-sync
+from the start of the topic (the load is an upsert by id), waits until no skipped order is missing, and restores
+the baseline (the reprocess topic is deleted).

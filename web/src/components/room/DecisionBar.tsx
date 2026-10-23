@@ -8,6 +8,7 @@ import type { CurrentUser } from '@/state/permissions'
 import { decisionFor } from '@/lib/decision'
 import { writeModeOff } from '@/lib/writeMode'
 import { approveAllLabel } from '@/lib/approveAll'
+import { STAGING_REQUIRED_SHORT, stagingRequired } from '@/lib/staging'
 import type { Decision } from '@/lib/decision'
 import { cn } from '@/lib/utils'
 import { PersonName } from '@/components/VerifiedBadge'
@@ -102,8 +103,10 @@ export function DecisionBar({
     case 'needs-you': {
       const title = decision.proposal.title
       const writeOff = writeModeOff(state.mode)
+      // X8: a healthy stage is owed first. The card says so; the bar says it too and keeps Approve off.
+      const held = stagingRequired(decision.proposal)
       tone = 'bg-warning-subtle text-warning-foreground'
-      live = `Needs your approval · ${(decision.all ?? [decision.layer]).join(' · ')} — ${title}`
+      live = `Needs your approval · ${(decision.all ?? [decision.layer]).join(' · ')} — ${title}${held ? ` · ${STAGING_REQUIRED_SHORT.toLowerCase()}` : ''}`
       text = (
         <>
           <TriangleAlert className="size-4 shrink-0" aria-hidden="true" />
@@ -129,6 +132,7 @@ export function DecisionBar({
             size="sm"
             className={sheet ? 'h-11 flex-1' : 'coarse:h-11'}
             aria-keyshortcuts="A"
+            disabled={held}
             onClick={() => handle()?.approve()}
           >
             {decision.all ? approveAllLabel(writeOff) : `Approve ${decision.layer}${writeOff ? ' (will not run)' : ''}`}

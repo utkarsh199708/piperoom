@@ -863,6 +863,9 @@ func TestEveryScenarioCanPass(t *testing.T) {
 		"dead-slot-wal":       {ps("pg_drop_replication_slot", `{"connector":"pg-orders-connector","slot":"debezium_orders"}`)},
 		"consumer-bad-deploy": {ps("kafka_reset_consumer_offsets", `{"group":"order-sync","topics":["pg.public.orders"],"to":"timestamp","timestamp":"2026-10-18T08:50:00Z"}`)},
 		"dlq-backlog":         {ps("dlq_replay", `{"dlq_topic":"devctl.order-sync.dlq","to_topic":"pg.public.orders","count":20,"partition":0}`)},
+		// The X2e recovery scenarios.
+		"rows-lost-after-retention": {ps("pg_resnapshot_rows", `{"connector":"pg-orders-connector","table":"public.orders","key_range":{"column":"id","from":"1301","to":"1340"}}`)},
+		"consumer-skipped-range":    {ps("kafka_replay_range", `{"topic":"pg.public.orders","to_topic":"pg.public.orders.reprocess","ranges":[{"partition":0,"from_offset":433,"to_offset":445},{"partition":1,"from_offset":434,"to_offset":446},{"partition":2,"from_offset":433,"to_offset":446}]}`)},
 	}
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {

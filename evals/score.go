@@ -11,6 +11,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
+	"piperoom/internal/tools"
 )
 
 // Score weights. They add up to 100. Root cause dominates on purpose: a
@@ -748,8 +749,11 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 			continue
 		}
 		// Judge is pure scoring with no caller context to inherit, and Validate
-		// runs against recorded resources; its own deadline bounds it.
-		if err := a.Validate(context.Background(), st.Params); err != nil {
+		// runs against recorded resources; its own deadline bounds it. The
+		// scenario's pipeline is in ctx as the room puts it there: an action
+		// that refuses without the room's pipeline (pg_resnapshot_rows, X2a)
+		// would otherwise never validate here.
+		if err := a.Validate(tools.WithPipeline(context.Background(), sc.Pipeline), st.Params); err != nil {
 			bad = append(bad, fmt.Sprintf("step %d (%s): %v", i, st.Action, err))
 			continue
 		}

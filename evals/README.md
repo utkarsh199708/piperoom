@@ -301,6 +301,8 @@ against the live tool and action names.
 | `resources.connector_configs` | map | no | per connector, config keys merged over its `connect_config` recording; for the keys that tool hides (`publication.*`, `signal.*`), see [Resources for the P3 actions](#resources-for-the-p3-actions) |
 | `resources.tables` | map | no | source tables by `schema.table`: `relkind` (default `r`), `replica_identity` (default `d`), `primary_key`, `estimated_rows`, `signal_columns`. A table not listed does not exist |
 | `resources.publications` | map | no | publication name → its tables (each in `resources.tables`). A publication not listed does not exist |
+| `resources.tables.<t>.key_column`, `.key_ranges` | string, [[from, to]] | no | the table's integer key column and the key ranges that hold rows (both ends included), which `pg_resnapshot_rows` counts (X2e; `replay_actions.go`) |
+| `resources.topics` | map | no | topic name → `{partitions: N}`: a topic that exists, empty, but that no read tool may show (the pipeline's `reprocess_topic`, which `kafka_replay_range` writes to) |
 | `alert.title` | string | yes | alert title the room opens with |
 | `alert.pipeline_map` | string | no | topology text the model gets up front |
 | `phases` | []string | no | the states the recorded stack goes through, start phase first (e.g. `[broken, recovered]`). Absent = a static scenario. See [Phases, sequences and executed fixes](#phases-sequences-and-executed-fixes) |

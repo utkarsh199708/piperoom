@@ -6,6 +6,8 @@ import { checkingLabel, gapLine, recoveryOutcome, verdictView } from '../lib/rec
 import { stripBidi } from '../lib/title'
 import { policyLabel } from '../lib/countdown'
 import { clockTimeSeconds } from '../lib/time'
+import { stagedVerdict } from '../lib/staging'
+import type { StagedVerdict } from '../lib/staging'
 import type {
   ActionExecutedPayload,
   AgentRecoveryCheckPayload,
@@ -30,6 +32,7 @@ import type {
   ApprovalNudgedPayload,
   ProposalCancelledPayload,
   ProposalCreatedPayload,
+  ProposalStagedPayload,
   ProposalScheduledPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
@@ -40,6 +43,13 @@ import type {
   TracePinnedPayload,
 } from '../api/types'
 import { argTags } from '../lib/toolLayers'
+
+const STAGE_WORDS: Record<StagedVerdict, string> = {
+  healthy: 'healthy',
+  failed: 'failed',
+  not_applied: 'not applied',
+  no_verdict: 'no verdict',
+}
 
 export type ActivityKind = 'step' | 'human' | 'decision' | 'control' | 'system'
 export interface Described {
@@ -238,6 +248,12 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'proposal.previewed':
       return { text: 'Previewed what the fix will do', kind: 'decision' }
+    case 'proposal.stage_started':
+      return { text: `${who} is trying the fix in staging`, kind: 'decision' }
+    case 'proposal.staged': {
+      const p = as<ProposalStagedPayload>(e)
+      return { text: `Staging result: ${STAGE_WORDS[stagedVerdict(p)]}`, kind: 'decision' }
+    }
     case 'agent.verification': {
       const p = as<AgentVerificationPayload>(e)
       // A repeat re-states the first verdict (no check ran again): one line already announced it.
