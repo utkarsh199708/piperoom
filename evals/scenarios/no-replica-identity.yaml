@@ -175,7 +175,6 @@ recordings:
       public.orders: primary_key=yes replica_identity=nothing
     data:
       - table: public.orders
-        has_primary_key: true
         replica_identity: nothing
   - tool: connect_list_connectors
     summary: |-

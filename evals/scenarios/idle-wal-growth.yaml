@@ -228,7 +228,6 @@ recordings:
       public.orders: primary_key=yes replica_identity=full
     data:
       - table: public.orders
-        has_primary_key: true
         replica_identity: full
   - tool: source_role_grants
     input: {pipeline_id: orders}
