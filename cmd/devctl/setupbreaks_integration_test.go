@@ -65,7 +65,7 @@ func TestIntegrationSetupBreaks(t *testing.T) {
 		}
 	})
 
-	for _, name := range setupScenarioNames() {
+	for _, name := range integrationSetupBreaks() {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			sc := setupScenarios[name]
@@ -101,4 +101,22 @@ func TestIntegrationSetupBreaks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// integrationSetupBreaks is the breaks this test may apply to the shared dev
+// stack. wal-level-replica restarts the dev Postgres, and the integration job
+// runs packages in parallel: another package can hold a logical slot at that
+// moment, and Postgres then refuses to start at wal_level=replica. Its
+// break/fix pair stays covered against the fake stack
+// (TestSetupBreakFixPair); the real-stack run belongs to the dedicated setup
+// matrix job (U1-16), where the test owns the stack.
+func integrationSetupBreaks() []string {
+	out := make([]string, 0, len(setupScenarios))
+	for _, name := range setupScenarioNames() {
+		if name == "wal-level-replica" {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }

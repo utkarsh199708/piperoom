@@ -701,7 +701,7 @@ plugin.
   applies each break and its recorded fix on the dev stack and asserts the
   named check fails, then passes: the recorded fix *is* the scenario's fix
   op sequence. The recordings themselves are U1-19/U1-20 (`evals/setup`).
-- A setup stack of its own (not the dev stack) is `testenv.Setup(t)` in
+- A setup stack of its own (not the dev stack) is `setupstack.Setup(t)` in
   `internal/testenv/setup.go`: it renders kafka + connect + source-postgres in
   a temp directory, installs the plugin, and tears the project down with the
   compose ops. `internal/testenv/setup_integration_test.go` also proves the

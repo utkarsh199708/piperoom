@@ -1,6 +1,6 @@
 //go:build integration
 
-package testenv
+package setupstack
 
 // Setup brings up the setup driver's own stack for a test: the Compose
 // project the Compose target renders (kafka-kraft, connect, source-postgres)

@@ -1,6 +1,6 @@
 //go:build integration
 
-package testenv_test
+package setupstack_test
 
 // The setup stack Testenv.Setup brings up (U1-15): a rendered Compose project
 // with Kafka, Connect and the source Postgres, the Debezium Postgres plugin
@@ -22,11 +22,11 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"piperoom/internal/setup/targets/compose"
-	"piperoom/internal/testenv"
+	"piperoom/internal/testenv/setupstack"
 )
 
 func TestSetupStackComesUp(t *testing.T) {
-	st := testenv.Setup(t)
+	st := setupstack.Setup(t)
 
 	// The plugin the setup run installed is the one the worker lists: the
 	// stack is the environment a ConnectorConfig is written for.
