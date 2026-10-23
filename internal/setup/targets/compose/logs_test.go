@@ -113,7 +113,8 @@ func TestContainerLogsRefusesOutsideProject(t *testing.T) {
 		{"another stack's container name", map[string]any{"service": "other-project-db-1"}, ErrNotInProject},
 		{"flag as service", map[string]any{"service": "-f"}, ErrParams},
 		{"path as service", map[string]any{"service": "../connect"}, ErrParams},
-		{"container id as service", map[string]any{"service": "Connect"}, ErrParams},
+		{"uppercase service name", map[string]any{"service": "Connect"}, ErrParams},
+		{"container id as service", map[string]any{"service": logsTestID}, ErrNotInProject},
 		{"unknown field", map[string]any{"service": "connect", "lines": 5000}, ErrParams},
 		{"file outside the project", map[string]any{"service": "connect", "file": "../compose.yaml"}, ErrPath},
 	}
@@ -320,11 +321,12 @@ func TestContainerLogsCapsLines(t *testing.T) {
 		if d.OmittedLong != 2 || len(d.Lines) != 2 {
 			t.Fatalf("data = %+v", d)
 		}
-		cut := strings.LastIndex(d.Lines[0], " …[")
-		if len(d.Lines[0]) > maxLogLineBytes+64 || cut < 0 || !strings.HasSuffix(d.Lines[0][:cut], "word") {
-			t.Fatalf("long line not cut at a blank: %.80q…", d.Lines[0])
+		// Nothing of an over-long line is kept, blanks or not: a head cut at
+		// a blank could still be the head of a stored value with blanks.
+		if strings.Contains(d.Lines[0], "word") || !strings.HasPrefix(d.Lines[0], "2026-10-23T10:00:00Z [a ") {
+			t.Fatalf("a long line with blanks kept text: %.80q", d.Lines[0])
 		}
-		if strings.Contains(d.Lines[1], "zzz") || !strings.Contains(d.Lines[1], "omitted") {
+		if strings.Contains(d.Lines[1], "zzz") || !strings.HasPrefix(d.Lines[1], "2026-10-23T10:00:01Z [a ") {
 			t.Fatalf("a line with no blank was cut through: %.80q", d.Lines[1])
 		}
 	})
@@ -455,5 +457,226 @@ func assertNoShell(t *testing.T, file, program string) {
 	})
 	if argvs == 0 {
 		t.Fatalf("%s builds no %s argv: the check would pass vacuously", file, program)
+	}
+}
+
+// pemBody is the body of a test key, long enough that every line of it
+// would be recognisable if one leaked.
+var pemBody = []string{
+	"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj",
+	"MzEfYyjiWA4R4/M2bS1GB4t7NXp98C3SC6dVMvDuictGeurT8jNbvJZHtCSuYEvu",
+	"NMoSfm76oqFvAp8Gy0iz5sxjZmSnXyCdPEovGhLa0VzMaQ8s+CLOyS56YyCFGeJZ",
+}
+
+func TestContainerLogsPEMWithInterleavedLine(t *testing.T) {
+	// The key went to stdout line by line; one stderr line landed inside
+	// the block in the capture. Its timestamp sorts it after the key.
+	out := strings.Join([]string{
+		"2026-10-23T10:00:00.000000000Z INFO loading key",
+		"2026-10-23T10:00:01.000000000Z -----BEGIN RSA PRIVATE KEY-----",
+		"2026-10-23T10:00:01.100000000Z " + pemBody[0],
+		"2026-10-23T10:00:05.000000000Z WARN from stderr",
+		"2026-10-23T10:00:01.200000000Z " + pemBody[1],
+		"2026-10-23T10:00:01.300000000Z " + pemBody[2],
+		"2026-10-23T10:00:01.400000000Z -----END RSA PRIVATE KEY-----",
+		"2026-10-23T10:00:06.000000000Z INFO key loaded",
+	}, "\n") + "\n"
+	reg, _, _, _ := newDockerHarness(t, Options{}, logsFake(func(int) ([]byte, int, error) {
+		return []byte(out), 0, nil
+	}))
+	res, err := runOp(t, reg, "container_logs", map[string]any{"service": "connect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range pemBody {
+		for _, part := range []string{body, body[:20], body[len(body)-20:]} {
+			if strings.Contains(res.Summary, part) || strings.Contains(string(res.Data), part) {
+				t.Fatalf("PEM body %q left the op: %s", part, res.Data)
+			}
+		}
+	}
+	d := decodeLogsData(t, res)
+	if d.Count != 8 || d.Masked < 1 {
+		t.Fatalf("data = %+v, want 8 lines with the block masked", d)
+	}
+	if d.Lines[0] != "2026-10-23T10:00:00.000000000Z INFO loading key" || d.Lines[7] != "2026-10-23T10:00:06.000000000Z INFO key loaded" {
+		t.Fatalf("lines outside the block changed or the timestamps were lost: %q", d.Lines)
+	}
+	for _, line := range d.Lines[1:6] {
+		if !strings.HasPrefix(line, "2026-10-23T10:00:01.") || !strings.HasSuffix(line, pemMask) {
+			t.Fatalf("a block line lost its timestamp or was not masked: %q", d.Lines)
+		}
+	}
+}
+
+func TestShapeLogPEM(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+	}{
+		{"no END line (cut off)", []string{"-----BEGIN PRIVATE KEY-----", pemBody[0], pemBody[1]}},
+		{"BEGIN after text", []string{"key: -----BEGIN EC PRIVATE KEY-----", pemBody[0], "-----END EC PRIVATE KEY-----"}},
+		{"one-line JSON escapes", []string{`{"key":"-----BEGIN PRIVATE KEY-----\n` + pemBody[0] + `\n-----END PRIVATE KEY-----\n"}`}},
+		{"continuation lines without a timestamp", []string{"2026-10-23T10:00:00Z -----BEGIN PRIVATE KEY-----", pemBody[0], "  " + pemBody[1], "-----END PRIVATE KEY-----"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := shapeLog([]byte(strings.Join(tc.in, "\n")+"\n"), false, true)
+			got := strings.Join(s.lines, "\n")
+			for _, body := range pemBody[:2] {
+				if strings.Contains(got, body[:24]) || strings.Contains(got, body[len(body)-24:]) {
+					t.Fatalf("PEM body left: %q", got)
+				}
+			}
+			if s.masked < 1 {
+				t.Fatalf("masked = %d", s.masked)
+			}
+		})
+	}
+	// A certificate opened and closed on one line, then a normal line: only
+	// the block is touched, nothing after it.
+	s := shapeLog([]byte("2026-10-23T10:00:00Z ca -----BEGIN CERTIFICATE-----MIIB-----END CERTIFICATE-----\n2026-10-23T10:00:01Z INFO after the block\n"), false, true)
+	if len(s.lines) != 2 || s.lines[1] != "2026-10-23T10:00:01Z INFO after the block" || s.masked != 0 {
+		t.Fatalf("shaped = %+v", s)
+	}
+}
+
+// hostileChars are characters that must not survive into a line or summary:
+// bare CR, backspace, a lone ESC, C1 NEL, the Unicode line and paragraph
+// separators, a bidi override and zero-width characters.
+var hostileChars = []string{"\r", "\x08", "\x1b", "\u0085", "\u2028", "\u2029", "\u202e", "\u200b", "\u200d", string(rune(0xfeff))}
+
+func TestContainerLogsControlCharacters(t *testing.T) {
+	out := "2026-10-23T10:00:00Z INFO a" + strings.Join(hostileChars, "b") + "c\n"
+	reg, _, _, _ := newDockerHarness(t, Options{}, logsFake(func(int) ([]byte, int, error) {
+		return []byte(out), 0, nil
+	}))
+	res, err := runOp(t, reg, "container_logs", map[string]any{"service": "connect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decodeLogsData(t, res)
+	if d.Count != 1 {
+		t.Fatalf("lines = %q, want one", d.Lines)
+	}
+	for _, c := range hostileChars {
+		if strings.Contains(d.Lines[0], c) || strings.Contains(res.Summary, c) {
+			t.Fatalf("%q survived: %q / %q", c, d.Lines[0], res.Summary)
+		}
+	}
+}
+
+func TestContainerLogsDataCap(t *testing.T) {
+	// '<' is six bytes in JSON (\u003c): 150 lines of 400 of them are far
+	// over maxLogDataBytes once encoded, though the raw text fits the
+	// capture.
+	var lines []string
+	for i := 0; i < 150; i++ {
+		lines = append(lines, fmt.Sprintf("2026-10-23T10:00:%02d.%03dZ n%03d %s", i/60, i%1000, i, strings.Repeat("<", 400)))
+	}
+	reg, _, _, _ := newDockerHarness(t, Options{}, logsFake(func(int) ([]byte, int, error) {
+		return []byte(strings.Join(lines, "\n") + "\n"), 0, nil
+	}))
+	res, err := runOp(t, reg, "container_logs", map[string]any{"service": "connect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decodeLogsData(t, res)
+	if d.DroppedOldest == 0 || !d.Truncated || len(res.Data) > protocol.MaxDataBytes {
+		t.Fatalf("dropped %d truncated %v, Data %d bytes", d.DroppedOldest, d.Truncated, len(res.Data))
+	}
+	if last := d.Lines[len(d.Lines)-1]; !strings.Contains(last, " n149 ") {
+		t.Fatalf("the newest line was dropped: %.40q", last)
+	}
+}
+
+func TestContainerLogsContainerChoice(t *testing.T) {
+	const other = "fedcba9876543210fedc"
+	t.Run("several running containers", func(t *testing.T) {
+		reg, _, _, _ := newDockerHarness(t, Options{}, func(argv []string) ([]byte, int, error) {
+			if argv[1] == "compose" {
+				return []byte(logsTestID + "\n" + other + "\n"), 0, nil
+			}
+			if argv[len(argv)-1] != logsTestID {
+				t.Errorf("read %q, want the first id", argv)
+			}
+			// A continuation line without a timestamp stays with its line.
+			return []byte("2026-10-23T10:00:01Z ERROR boom\n\tat Foo.bar(Foo.java:1)\n2026-10-23T10:00:00Z INFO start\n"), 0, nil
+		})
+		res, err := runOp(t, reg, "container_logs", map[string]any{"service": "connect"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := decodeLogsData(t, res)
+		if d.Containers != 2 || d.Stopped || !strings.Contains(res.Summary, "first of 2") {
+			t.Fatalf("data %+v summary %q", d, res.Summary)
+		}
+		want := []string{"2026-10-23T10:00:00Z INFO start", "2026-10-23T10:00:01Z ERROR boom", "\tat Foo.bar(Foo.java:1)"}
+		if strings.Join(d.Lines, "\n") != strings.Join(want, "\n") {
+			t.Fatalf("lines = %q, want %q", d.Lines, want)
+		}
+	})
+	t.Run("only a stopped container", func(t *testing.T) {
+		reg, fr, dir, _ := newDockerHarness(t, Options{}, func(argv []string) ([]byte, int, error) {
+			if argv[1] == "compose" {
+				if strings.Contains(strings.Join(argv, " "), " ps -a -q ") {
+					return []byte(other + "\n"), 0, nil
+				}
+				return nil, 0, nil // nothing running
+			}
+			return []byte("2026-10-23T10:00:00Z FATAL crashed\n"), 0, nil
+		})
+		res, err := runOp(t, reg, "container_logs", map[string]any{"service": "connect"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fr.calls) != 3 {
+			t.Fatalf("calls = %q, want ps -q, ps -a -q, logs", fr.calls)
+		}
+		assertArgv(t, fr.calls[1], append(pinnedArgv(dir, "ps"), "-a", "-q", "connect"))
+		assertArgv(t, fr.calls[2], []string{"docker", "logs", "--timestamps", "--tail", "200", other})
+		d := decodeLogsData(t, res)
+		if !d.Stopped || d.Containers != 1 || !strings.Contains(res.Summary, "not running") || !strings.HasSuffix(res.Summary, "FATAL crashed") {
+			t.Fatalf("data %+v summary %q", d, res.Summary)
+		}
+	})
+}
+
+func TestContainerLogsFailureOutputShaped(t *testing.T) {
+	// docker logs printed lines, then failed: the output is returned shaped
+	// like the log, never as a raw tail that could start mid-token.
+	var lines []string
+	for i := 0; i < 300; i++ {
+		lines = append(lines, fmt.Sprintf("2026-10-23T10:00:00Z line-%03d database.password=hunter2hunter2 \x1b[31mred\x1b[0m\u202e", i))
+	}
+	out := strings.Join(lines, "\n") + "\nError response from daemon: container is being removed\n"
+	reg, _, _, _ := newDockerHarness(t, Options{}, logsFake(func(int) ([]byte, int, error) {
+		return []byte(out), 1, nil
+	}))
+	res, err := runOp(t, reg, "container_logs", map[string]any{"service": "connect"})
+	if !errors.Is(err, ops.ErrExec) {
+		t.Fatalf("err = %v, want ops.ErrExec", err)
+	}
+	if !strings.HasSuffix(res.Summary, "container is being removed") {
+		t.Fatalf("summary = %q, want the last line", res.Summary)
+	}
+	var data struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Output == "" || len(data.Output) > maxFailureOutput {
+		t.Fatalf("output is %d bytes", len(data.Output))
+	}
+	for _, bad := range []string{"hunter2", "\x1b", "\u202e"} {
+		if strings.Contains(data.Output, bad) || strings.Contains(res.Summary, bad) {
+			t.Fatalf("%q left the op: %q", bad, data.Output)
+		}
+	}
+	for _, line := range strings.Split(data.Output, "\n") {
+		if !strings.HasPrefix(line, "2026-10-23T10:00:00Z line-") && !strings.HasPrefix(line, "Error response") {
+			t.Fatalf("output has a partial line: %q", line)
+		}
 	}
 }

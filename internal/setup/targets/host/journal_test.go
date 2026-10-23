@@ -380,3 +380,193 @@ func litValue(l *ast.BasicLit) string {
 	}
 	return l.Value
 }
+
+// pemBody is the body of a test key, long enough that every line of it
+// would be recognisable if one leaked.
+var pemBody = []string{
+	"MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7VJTUt9Us8cKj",
+	"MzEfYyjiWA4R4/M2bS1GB4t7NXp98C3SC6dVMvDuictGeurT8jNbvJZHtCSuYEvu",
+	"NMoSfm76oqFvAp8Gy0iz5sxjZmSnXyCdPEovGhLa0VzMaQ8s+CLOyS56YyCFGeJZ",
+}
+
+func TestJournalTailPEMInPrefixedLines(t *testing.T) {
+	// The service logged the key one line per entry, so every body line
+	// carries the short-iso prefix.
+	const p = "2026-10-23T10:00:02+0000 host kafka-connect[9]: "
+	for _, tc := range []struct {
+		name string
+		tail []string
+	}{
+		{"with END", []string{p + "-----END PRIVATE KEY-----", p + "INFO key loaded"}},
+		{"cut off before END", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lines := []string{p + "INFO loading key", p + "-----BEGIN PRIVATE KEY-----"}
+			for _, body := range pemBody {
+				lines = append(lines, p+body)
+			}
+			lines = append(lines, tc.tail...)
+			reg, _, _ := newJournalHarness(t, staticJournal(strings.Join(lines, "\n")+"\n"))
+			res, err := runJournal(t, reg, map[string]any{"unit": "kafka-connect.service"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, body := range pemBody {
+				for _, part := range []string{body, body[:20], body[len(body)-20:]} {
+					if strings.Contains(res.Summary, part) || strings.Contains(string(res.Data), part) {
+						t.Fatalf("PEM body %q left the op: %s", part, res.Data)
+					}
+				}
+			}
+			d := decodeJournalData(t, res)
+			if d.Count != len(lines) || d.Masked < 1 || d.Lines[0] != p+"INFO loading key" {
+				t.Fatalf("data = %+v", d)
+			}
+			if tc.tail != nil && d.Lines[len(d.Lines)-1] != p+"INFO key loaded" {
+				t.Fatalf("the line after the block changed: %q", d.Lines)
+			}
+			for _, line := range d.Lines[1 : 2+len(pemBody)] {
+				if !strings.HasPrefix(line, p) || !strings.HasSuffix(line, pemMask) {
+					t.Fatalf("a block line lost its prefix or was not masked: %q", d.Lines)
+				}
+			}
+		})
+	}
+}
+
+func TestJournalTailControlCharacters(t *testing.T) {
+	hostile := []string{"\r", "\x08", "\x1b", "\u0085", "\u2028", "\u2029", "\u202e", "\u200b", "\u200d", string(rune(0xfeff))}
+	out := "2026-10-23T10:00:00+0000 host kafka[1]: a" + strings.Join(hostile, "b") + "c\n"
+	reg, _, _ := newJournalHarness(t, staticJournal(out))
+	res, err := runJournal(t, reg, map[string]any{"unit": "kafka.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decodeJournalData(t, res)
+	if d.Count != 1 {
+		t.Fatalf("lines = %q, want one", d.Lines)
+	}
+	for _, c := range hostile {
+		if strings.Contains(d.Lines[0], c) || strings.Contains(res.Summary, c) {
+			t.Fatalf("%q survived: %q / %q", c, d.Lines[0], res.Summary)
+		}
+	}
+}
+
+func TestJournalTailOneLineOverTheCapture(t *testing.T) {
+	// Every -n fills the capture with one partial line: it is dropped at
+	// every size, never returned cut.
+	reg, jf, _ := newJournalHarness(t, staticJournal(strings.Repeat("a", 100<<10)))
+	res, err := runJournal(t, reg, map[string]any{"unit": "kafka.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decodeJournalData(t, res)
+	if d.Count != 0 || d.Tail != 1 || d.OmittedLong != 1 || !d.Truncated {
+		t.Fatalf("data = %+v, want the partial line omitted", d)
+	}
+	if len(jf.calls) != 8 {
+		t.Fatalf("%d reads, want 8 (200 halved down to 1)", len(jf.calls))
+	}
+	if strings.Contains(res.Summary, "aaaa") {
+		t.Fatal("the partial line reached the summary")
+	}
+}
+
+func TestJournalTailDataCap(t *testing.T) {
+	// '<' is six bytes in JSON (\u003c): 140 lines of 400 are far over
+	// maxJournalDataBytes once encoded, though the raw text fits the 64 KiB
+	// capture (150 would not, and the fake ignores -n).
+	var lines []string
+	for i := 0; i < 140; i++ {
+		lines = append(lines, fmt.Sprintf("2026-10-23T10:%02d:%02d+0000 host kafka[1]: n%03d %s", i/60, i%60, i, strings.Repeat("<", 400)))
+	}
+	reg, _, _ := newJournalHarness(t, staticJournal(strings.Join(lines, "\n")+"\n"))
+	res, err := runJournal(t, reg, map[string]any{"unit": "kafka.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decodeJournalData(t, res)
+	if d.DroppedOldest == 0 || !d.Truncated || len(res.Data) > protocol.MaxDataBytes {
+		t.Fatalf("dropped %d truncated %v, Data %d bytes", d.DroppedOldest, d.Truncated, len(res.Data))
+	}
+	if last := d.Lines[len(d.Lines)-1]; !strings.Contains(last, " n139 ") {
+		t.Fatalf("the newest line was dropped: %.50q", last)
+	}
+}
+
+func TestJournalTailRestricted(t *testing.T) {
+	out := "Hint: You are currently not seeing messages from other users and the system.\n" +
+		"      Users in groups 'adm', 'systemd-journal' can see all messages.\n" +
+		"      Pass -q to turn off this notice.\n" +
+		"-- No entries --\n"
+	reg, _, _ := newJournalHarness(t, staticJournal(out))
+	res, err := runJournal(t, reg, map[string]any{"unit": "kafka.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := decodeJournalData(t, res)
+	if !d.Restricted || d.Count != 0 || !strings.Contains(res.Summary, "restricted") || strings.Contains(res.Summary, "Hint") {
+		t.Fatalf("data %+v summary %q", d, res.Summary)
+	}
+	// A log entry saying the same is a log line, not the notice.
+	reg, _, _ = newJournalHarness(t, staticJournal("2026-10-23T10:00:00+0000 host kafka[1]: Hint: You are currently not seeing messages from other users\n"))
+	res, err = runJournal(t, reg, map[string]any{"unit": "kafka.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := decodeJournalData(t, res); d.Restricted || d.Count != 1 {
+		t.Fatalf("a logged hint was taken for the notice: %+v", d)
+	}
+}
+
+func TestJournalTailFailureOutputShaped(t *testing.T) {
+	var lines []string
+	for i := 0; i < 300; i++ {
+		lines = append(lines, fmt.Sprintf("2026-10-23T10:00:00+0000 host kafka[1]: line-%03d database.password=hunter2hunter2 \x1b[31mred\x1b[0m\u202e", i))
+	}
+	out := strings.Join(lines, "\n") + "\nFailed to iterate through journal: Bad message\n"
+	reg, _, _ := newJournalHarness(t, func(context.Context, []string) ([]byte, int, error) {
+		return []byte(out), 1, nil
+	})
+	res, err := runJournal(t, reg, map[string]any{"unit": "kafka.service"})
+	if !errors.Is(err, ops.ErrExec) || !strings.HasSuffix(res.Summary, "Bad message") {
+		t.Fatalf("err = %v, summary %q", err, res.Summary)
+	}
+	var data struct {
+		Output string `json:"output"`
+	}
+	if err := json.Unmarshal(res.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Output == "" || len(data.Output) > 4<<10 {
+		t.Fatalf("output is %d bytes", len(data.Output))
+	}
+	for _, bad := range []string{"hunter2", "\x1b", "\u202e"} {
+		if strings.Contains(data.Output, bad) || strings.Contains(res.Summary, bad) {
+			t.Fatalf("%q left the op: %q", bad, data.Output)
+		}
+	}
+	for _, line := range strings.Split(data.Output, "\n") {
+		if !strings.HasPrefix(line, "2026-10-23T10:00:00+0000 host kafka[1]: line-") && !strings.HasPrefix(line, "Failed to iterate") {
+			t.Fatalf("output has a partial line: %q", line)
+		}
+	}
+}
+
+func TestJournalTailSecretInPrefix(t *testing.T) {
+	// The identifier is the logging process's to choose; it is redacted
+	// like the message.
+	out := "2026-10-23T10:00:00+0000 host password=hunter2hunter2[7]: INFO started\n"
+	reg, _, _ := newJournalHarness(t, staticJournal(out))
+	res, err := runJournal(t, reg, map[string]any{"unit": "kafka.service"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(res.Data), "hunter2") || strings.Contains(res.Summary, "hunter2") {
+		t.Fatalf("a secret in the prefix left the op: %s", res.Data)
+	}
+	if d := decodeJournalData(t, res); d.Count != 1 || d.Masked < 1 {
+		t.Fatalf("data = %+v", d)
+	}
+}

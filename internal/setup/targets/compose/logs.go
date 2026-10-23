@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -26,10 +27,9 @@ import (
 const (
 	// LogLines is how many of the newest lines one read asks docker for.
 	LogLines = 200
-	// maxLogLineBytes caps one line. A longer line is cut at a blank so no
-	// token is split (a cut through a secret would leave a fragment that
-	// literal redaction can no longer recognise); a line with no blank
-	// before the cap is replaced by a marker.
+	// maxLogLineBytes caps one line. A longer line is replaced by a marker
+	// (capLine): a cut anywhere would leave a fragment of a secret that
+	// literal redaction can no longer recognise.
 	maxLogLineBytes = 4 << 10
 	// maxLogDataBytes caps the JSON-encoded lines in Data. It sits under
 	// protocol.MaxDataBytes (64 KiB) so the runner's literal redaction, which
@@ -48,7 +48,8 @@ var ErrNotInProject = errors.New("compose: service is not in the compose project
 
 // LogsParams are container_logs' typed params: one service of the rendered
 // project. The line count is fixed (LogLines); no field reaches docker except
-// the service name, which only selects a container id from `compose ps -q`.
+// the service name, which only selects a container id from `compose ps -q`
+// (running) or `compose ps -a -q` (stopped too).
 type LogsParams struct {
 	Service string `json:"service"`
 	File    string `json:"file,omitempty"`
@@ -57,19 +58,24 @@ type LogsParams struct {
 // containerLogsData is container_logs' Data. Lines are oldest first, newest
 // last, redacted by pattern here and literally by the runner after.
 type containerLogsData struct {
-	Service    string   `json:"service"`
-	File       string   `json:"file"`
-	Container  string   `json:"container"`
-	Containers int      `json:"containers"`
-	Lines      []string `json:"lines"`
-	Count      int      `json:"count"`
+	Service    string `json:"service"`
+	File       string `json:"file"`
+	Container  string `json:"container"`
+	Containers int    `json:"containers"`
+	// Stopped: the service has no running container, so a stopped one
+	// (`compose ps -a`) was read: the logs of a crash.
+	Stopped bool     `json:"stopped,omitempty"`
+	Lines   []string `json:"lines"`
+	Count   int      `json:"count"`
 	// Tail is the --tail the kept read used: LogLines, or less when 200
 	// lines did not fit the 64 KiB the command runner keeps.
-	Tail          int  `json:"tail"`
-	DroppedOldest int  `json:"dropped_oldest,omitempty"`
-	OmittedLong   int  `json:"omitted_long,omitempty"`
-	Masked        int  `json:"masked,omitempty"`
-	Truncated     bool `json:"truncated,omitempty"`
+	Tail          int `json:"tail"`
+	DroppedOldest int `json:"dropped_oldest,omitempty"`
+	OmittedLong   int `json:"omitted_long,omitempty"`
+	// Masked counts the values masked in the whole read, lines later
+	// dropped to fit the caps included.
+	Masked    int  `json:"masked,omitempty"`
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // container_logs (T0) reads the newest lines of one service's container.
@@ -125,32 +131,44 @@ func (o containerLogsOp) Execute(ctx context.Context, params json.RawMessage, en
 	if !containsName(services, p.Service) {
 		return ops.Result{}, fmt.Errorf("%w: %s is not a service of %s (services: %s)", ErrNotInProject, q(p.Service), q(clean), strings.Join(services, ", "))
 	}
-	psArgv, err := stackArgv(env.Confine.Dir(), p.File, "ps", []string{"-q"}, []string{p.Service})
-	if err != nil {
-		return ops.Result{}, err
+	// A crashed container is the main reason to read logs, and `compose ps
+	// -q` lists running containers only: a running one is preferred, and
+	// with none the stopped ones (`ps -a -q`) are read instead.
+	ids, stopped := []string(nil), false
+	for _, flags := range [][]string{{"-q"}, {"-a", "-q"}} {
+		psArgv, err := stackArgv(env.Confine.Dir(), p.File, "ps", flags, []string{p.Service})
+		if err != nil {
+			return ops.Result{}, err
+		}
+		if psArgv, err = snapshotArgv(psArgv, snap, project); err != nil {
+			return ops.Result{}, err
+		}
+		psRes, err := dockerCommand(ctx, env, psArgv)
+		if err != nil {
+			return ops.Result{}, err
+		}
+		if err := ctx.Err(); err != nil {
+			return ops.Result{}, fmt.Errorf("compose: container_logs: %w", err)
+		}
+		if psRes.code != 0 {
+			line, output := logFailure(psRes)
+			return ops.Result{
+				Summary:   failureLine("compose ps "+strings.Join(flags, " ")+" "+p.Service, psRes.code, line),
+				Data:      map[string]any{"service": p.Service, "argv": psArgv, "exit_code": psRes.code, "output": output},
+				Truncated: psRes.truncated,
+				Receipt:   events.SetupReceipt{Kind: "exec", Argv: psArgv, Target: clean, At: start, ExitCode: psRes.code},
+			}, fmt.Errorf("%w: compose ps exited %d", ops.ErrExec, psRes.code)
+		}
+		if ids, _ = parseContainerIDs(psRes.out); len(ids) > 0 {
+			break
+		}
+		stopped = true
 	}
-	if psArgv, err = snapshotArgv(psArgv, snap, project); err != nil {
-		return ops.Result{}, err
-	}
-	psRes, err := dockerCommand(ctx, env, psArgv)
-	if err != nil {
-		return ops.Result{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return ops.Result{}, fmt.Errorf("compose: container_logs: %w", err)
-	}
-	if psRes.code != 0 {
-		return ops.Result{
-			Summary:   failureSummary("compose ps -q "+p.Service, psRes),
-			Data:      map[string]any{"service": p.Service, "argv": psArgv, "exit_code": psRes.code, "output": tailText(psRes.out, maxFailureOutput)},
-			Truncated: psRes.truncated,
-			Receipt:   events.SetupReceipt{Kind: "exec", Argv: psArgv, Target: clean, At: start, ExitCode: psRes.code},
-		}, fmt.Errorf("%w: compose ps exited %d", ops.ErrExec, psRes.code)
-	}
-	ids, _ := parseContainerIDs(psRes.out)
 	if len(ids) == 0 {
-		return ops.Result{}, fmt.Errorf("%w: service %s has no container in %s; run compose_up first", ErrStack, q(p.Service), q(clean))
+		return ops.Result{}, fmt.Errorf("%w: service %s has no container, running or stopped, in %s; run compose_up first", ErrStack, q(p.Service), q(clean))
 	}
+	// Several containers (a scaled service): the first one ps printed is
+	// read, and the summary says "first of N".
 	id := ids[0]
 
 	read, err := readDockerLogs(ctx, env, id)
@@ -158,9 +176,10 @@ func (o containerLogsOp) Execute(ctx context.Context, params json.RawMessage, en
 		return ops.Result{}, err
 	}
 	if read.res.code != 0 {
+		line, output := logFailure(read.res)
 		return ops.Result{
-			Summary:   failureSummary("docker logs", read.res),
-			Data:      map[string]any{"service": p.Service, "argv": read.argv, "exit_code": read.res.code, "output": tailText(read.res.out, maxFailureOutput)},
+			Summary:   failureLine("docker logs", read.res.code, line),
+			Data:      map[string]any{"service": p.Service, "argv": read.argv, "exit_code": read.res.code, "output": output},
 			Truncated: read.res.truncated,
 			Receipt:   events.SetupReceipt{Kind: "exec", Argv: read.argv, Target: clean, At: start, ExitCode: read.res.code},
 		}, fmt.Errorf("%w: docker logs exited %d", ops.ErrExec, read.res.code)
@@ -172,6 +191,7 @@ func (o containerLogsOp) Execute(ctx context.Context, params json.RawMessage, en
 		File:          clean,
 		Container:     shortID(id),
 		Containers:    len(ids),
+		Stopped:       stopped,
 		Lines:         shaped.lines,
 		Count:         len(shaped.lines),
 		Tail:          read.tail,
@@ -181,6 +201,9 @@ func (o containerLogsOp) Execute(ctx context.Context, params json.RawMessage, en
 	}
 	data.Truncated = read.tail < LogLines || shaped.dropped > 0 || shaped.omitted > 0
 	head := fmt.Sprintf("%s logs (container %s", p.Service, shortID(id))
+	if stopped {
+		head += ", not running"
+	}
 	if len(ids) > 1 {
 		head += fmt.Sprintf(", first of %d", len(ids))
 	}
@@ -286,22 +309,28 @@ func readDockerLogs(ctx context.Context, env ops.Env, id string) (logRead, error
 type shapedLog struct {
 	lines   []string // oldest first, newest last
 	dropped int      // older lines dropped to fit maxLogDataBytes or LogLines
-	omitted int      // lines too long to keep (partial at the capture cap, or no blank to cut at)
-	masked  int      // values redact.Text masked
+	omitted int      // lines too long to keep (partial at the capture cap, or over the line cap)
+	masked  int      // values masked anywhere in the read, dropped lines included
 }
 
 // ansiRE matches the terminal escape sequences (colours, cursor moves) many
 // images print; they are noise to the model and can hide text from a person.
 var ansiRE = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
 
+// dockerStampRE is the RFC 3339 timestamp and blank `docker logs
+// --timestamps` puts before every line.
+var dockerStampRE = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}) `)
+
 // shapeLog turns captured output into at most LogLines lines, newest last:
-// invalid UTF-8 and escape sequences out, redacted by pattern over the whole
-// text (a PEM block or a multi-line JSON value spans lines), control
-// characters replaced, long lines cut at a blank, and the oldest lines
-// dropped until the JSON-encoded lines fit maxLogDataBytes. byTime sorts by
-// the leading RFC 3339 timestamp `docker logs --timestamps` prints: docker
-// writes the container's stdout and stderr to two pipes, so their lines can
-// arrive out of order.
+// invalid UTF-8 and escape sequences out, redacted by pattern, control
+// characters replaced, over-long lines omitted, and the oldest lines dropped
+// until the JSON-encoded lines fit maxLogDataBytes. Redaction runs over the
+// messages with their timestamps taken off and joined in capture order, so a
+// value that spans lines (a PEM block, a quoted value) is one span again, and
+// every PEM block is masked line by line first (maskPEMLines), so an
+// interleaved line cannot split one. byTime then sorts by the timestamp:
+// docker writes the container's stdout and stderr to two pipes, so their
+// lines can arrive out of order.
 func shapeLog(raw []byte, cut, byTime bool) shapedLog {
 	var out shapedLog
 	// "?" never grows the text, so it stays inside redact.MaxScan.
@@ -314,15 +343,22 @@ func shapeLog(raw []byte, cut, byTime bool) shapedLog {
 		out.omitted++
 	}
 	text = ansiRE.ReplaceAllString(text, "")
-	text, st := redact.Text(text)
-	out.masked = st.Total
-
-	var lines []string
+	var stamps, msgs []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
+		stamp := dockerStampRE.FindString(line)
+		stamps = append(stamps, stamp)
+		msgs = append(msgs, line[len(stamp):])
+	}
+	out.masked = maskPEMLines(msgs)
+	redacted, n := redactLines(stamps, msgs)
+	out.masked += n
+
+	var lines []string
+	for _, line := range redacted {
 		line, long := capLine(controlFree(line))
 		if long {
 			out.omitted++
@@ -351,33 +387,138 @@ func shapeLog(raw []byte, cut, byTime bool) shapedLog {
 	return out
 }
 
-// controlFree replaces control characters other than tab, so a log line
-// cannot move a terminal cursor or forge a line break in a summary.
+// pemMask replaces a line, or the rest of one, inside a PEM block.
+const pemMask = "[redacted PEM block line]"
+
+// maskPEMLines masks, in place and in capture order, every message from the
+// one that opens a PEM block ("-----BEGIN ") through the one that closes it
+// ("-----END "), or to the last message when none closes it, and returns how
+// many blocks it masked. A block opened and closed within one message (a
+// JSON string with \n escapes) is left to redact.Text, which masks it there.
+// This does not depend on redact.Text seeing the block as one span, which a
+// line prefix or a line interleaved from the other stream would break; the
+// cost is that a line interleaved inside a block is masked with it.
+func maskPEMLines(msgs []string) int {
+	blocks, open := 0, false
+	for i, msg := range msgs {
+		wasOpen := open
+		open = pemOpenAfter(msg, open)
+		switch {
+		case wasOpen:
+			msgs[i] = pemMask
+		case open:
+			blocks++
+			msgs[i] = msg[:strings.Index(msg, "-----BEGIN ")] + pemMask
+		}
+	}
+	return blocks
+}
+
+// pemOpenAfter reports whether a PEM block is still open after msg, given
+// whether one was open before it.
+func pemOpenAfter(msg string, open bool) bool {
+	for {
+		mark := "-----BEGIN "
+		if open {
+			mark = "-----END "
+		}
+		i := strings.Index(msg, mark)
+		if i < 0 {
+			return open
+		}
+		msg, open = msg[i+len(mark):], !open
+	}
+}
+
+// redactLines runs redact.Text over the messages joined in order and puts
+// each prefix back on its message. When a mask spanned a line break, so the
+// redacted messages no longer line up with their prefixes, or when a prefix
+// itself holds something redact.Text masks, it redacts the prefixed lines
+// instead. It returns the lines and how many values it masked.
+func redactLines(prefixes, msgs []string) ([]string, int) {
+	text, st := redact.Text(strings.Join(msgs, "\n"))
+	joined := strings.Join(prefixes, "\n")
+	clean, _ := redact.Text(joined)
+	if lines := strings.Split(text, "\n"); len(lines) == len(msgs) && clean == joined {
+		for i := range lines {
+			lines[i] = prefixes[i] + lines[i]
+		}
+		return lines, st.Total
+	}
+	whole := make([]string, len(msgs))
+	for i := range msgs {
+		whole[i] = prefixes[i] + msgs[i]
+	}
+	text, st = redact.Text(strings.Join(whole, "\n"))
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines, st.Total
+}
+
+// controlFree replaces control and format characters other than tab (C0,
+// DEL, C1, the Unicode line and paragraph separators, and format characters
+// such as bidi overrides and zero-width spaces), so a log line cannot move a
+// terminal cursor, forge a line break in a summary or hide text from a
+// person.
 func controlFree(s string) string {
 	return strings.Map(func(r rune) rune {
 		if r == '\t' {
 			return r
 		}
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Zl, unicode.Zp) {
 			return '?'
 		}
 		return r
 	}, s)
 }
 
-// capLine cuts a line longer than maxLogLineBytes at its last blank before
-// the cap, and reports whether it cut. A line with no blank in the second
-// half of the cap is replaced by a marker: cutting through a token could
-// leave the head of a secret the runner's literal pass cannot match.
+// capLine replaces a line longer than maxLogLineBytes by a marker, keeping
+// its timestamp, and reports whether it did. Nothing of the line is kept: a
+// cut anywhere, even at a blank, could leave the head of a secret (a stored
+// value can hold blanks and be longer than the cap) that the runner's
+// literal pass can no longer match.
 func capLine(s string) (string, bool) {
 	if len(s) <= maxLogLineBytes {
 		return s, false
 	}
-	i := strings.LastIndexAny(s[:maxLogLineBytes], " \t")
-	if i < maxLogLineBytes/2 {
-		return fmt.Sprintf("[a %d-byte line omitted: no break before the %d-byte line cap]", len(s), maxLogLineBytes), true
+	return dockerStampRE.FindString(s) + fmt.Sprintf("[a %d-byte line omitted: over the %d-byte line cap]", len(s), maxLogLineBytes), true
+}
+
+// logFailure is a failed command's output made safe to return: shaped like a
+// log (redacted, control-free, whole lines only, so no line starts or ends
+// mid-token) in capture order. It returns the last line, for the summary,
+// and the newest lines that fit maxFailureOutput, for Data.
+func logFailure(res commandResult) (string, string) {
+	shaped := shapeLog(res.out, len(res.out) >= maxCommandOutput, false)
+	if len(shaped.lines) == 0 {
+		return "", ""
 	}
-	return s[:i] + fmt.Sprintf(" …[%d bytes cut]", len(s)-i), true
+	keep, size := len(shaped.lines)-1, len(shaped.lines[len(shaped.lines)-1])
+	for keep > 0 && size+len(shaped.lines[keep-1])+1 <= maxFailureOutput {
+		keep--
+		size += len(shaped.lines[keep]) + 1
+	}
+	return shaped.lines[len(shaped.lines)-1], strings.Join(shaped.lines[keep:], "\n")
+}
+
+// maxFailureLine bounds the output line a failure summary quotes. A longer
+// line is not cut (a cut could split a secret); Data holds it whole.
+const maxFailureLine = 512
+
+// failureLine is the summary of a failed command: what ran, its exit code
+// and its last shaped output line.
+func failureLine(what string, code int, line string) string {
+	switch {
+	case line == "":
+		return fmt.Sprintf("%s failed (exit %d)", what, code)
+	case len(line) > maxFailureLine:
+		return fmt.Sprintf("%s failed (exit %d); the output is in data", what, code)
+	}
+	return fmt.Sprintf("%s failed (exit %d): %s", what, code, line)
 }
 
 // sortByTimestamp stable-sorts lines by their leading RFC 3339 timestamp. A
@@ -427,10 +568,10 @@ func logSummary(head string, s shapedLog) string {
 		fmt.Fprintf(&b, "; %d older lines dropped to fit the cap", s.dropped)
 	}
 	if s.omitted > 0 {
-		fmt.Fprintf(&b, "; %d over-long lines cut or omitted", s.omitted)
+		fmt.Fprintf(&b, "; %d over-long or partial lines omitted", s.omitted)
 	}
 	if s.masked > 0 {
-		fmt.Fprintf(&b, "; %d values masked", s.masked)
+		fmt.Fprintf(&b, "; %d values masked in the read", s.masked)
 	}
 	shown := 0
 	size := 0
