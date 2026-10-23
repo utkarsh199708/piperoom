@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -617,5 +618,45 @@ func TestCreateConnectorValidateRetriesATimedOutList(t *testing.T) {
 	f3 := &slowListFake{lifecycleFake: newLifecycleFake(), listErrs: []error{context.DeadlineExceeded, context.DeadlineExceeded, context.DeadlineExceeded}}
 	if err := createAction(t, f3).Validate(scoped(), json.RawMessage(repl)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Validate on a list that keeps timing out: %v", err)
+	}
+}
+
+// configRetryFake answers Config with errs in order, then the stored config.
+type configRetryFake struct {
+	*lifecycleFake
+	errs  []error
+	reads int
+}
+
+func (f *configRetryFake) Config(ctx context.Context, name string) (map[string]string, error) {
+	f.reads++
+	if f.reads <= len(f.errs) {
+		return nil, f.errs[f.reads-1]
+	}
+	return f.lifecycleFake.Config(ctx, name)
+}
+
+// The delete's config guard re-read retries a transient rebalance (a busy
+// Connect answers it on GET .../config right after a create) and a request
+// timeout, and never retries a real failure.
+func TestDeleteConnectorConfigReadRetriesRebalance(t *testing.T) {
+	rebalance := fmt.Errorf("connect: GET /connectors/x/config: %w", connect.ErrRebalancing)
+	f := &configRetryFake{lifecycleFake: newLifecycleFake(), errs: []error{rebalance, context.DeadlineExceeded}}
+	f.allowWrites = true
+	if _, err := deleteAction(t, f).Execute(scoped(), json.RawMessage(deleteIn)); err != nil {
+		t.Fatalf("Execute through a rebalance: %v", err)
+	}
+	if f.reads != 3 || len(f.deleted) != 1 {
+		t.Fatalf("reads=%d deleted=%v, want 3 reads and one delete", f.reads, f.deleted)
+	}
+
+	boom := errors.New("connect: GET /connectors/x/config: status 500: disk full")
+	f2 := &configRetryFake{lifecycleFake: newLifecycleFake(), errs: []error{boom}}
+	f2.allowWrites = true
+	if _, err := deleteAction(t, f2).Execute(scoped(), json.RawMessage(deleteIn)); !errors.Is(err, boom) {
+		t.Fatalf("Execute on a real failure: %v", err)
+	}
+	if f2.reads != 1 || len(f2.deleted) != 0 {
+		t.Fatalf("reads=%d deleted=%v, want one read and no delete", f2.reads, f2.deleted)
 	}
 }

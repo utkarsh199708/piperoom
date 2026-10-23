@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -349,13 +350,17 @@ func sortedKeys(m map[string]string) []string {
 // sensitiveKey reports whether a config key holds a credential. The substring
 // list mirrors actions.LooksSecret (secretKeySubstrings), so the tools and the
 // actions agree on what is a credential; ".key" additionally targets fields
-// like "ssl.key.password"/"api.key" but not "key.converter".
+// like "ssl.key.password"/"api.key" but not "key.converter", and a last
+// segment authorization, seed or jwt marks a credential as in LooksSecret.
 func sensitiveKey(k string) bool {
 	lower := strings.ToLower(k)
-	for _, s := range []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private"} {
+	for _, s := range secretKeySubstrings {
 		if strings.Contains(lower, s) {
 			return true
 		}
+	}
+	if i := strings.LastIndexAny(lower, "._-"); slices.Contains(secretKeyLastSegments, lower[i+1:]) {
+		return true
 	}
 	return strings.Contains(lower, ".key")
 }

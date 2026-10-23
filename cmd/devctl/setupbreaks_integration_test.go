@@ -121,8 +121,8 @@ var sharedStackDisruptive = map[string]bool{
 func integrationSetupBreaks() []string {
 	out := make([]string, 0, len(setupScenarios))
 	for _, name := range setupScenarioNamesFor("") {
-		if sharedStackDisruptive[name] {
-			continue
+		if sharedStackDisruptive[name] || isMSSQLSetupScenario(name) {
+			continue // profile scenarios have their own integration tests
 		}
 		out = append(out, name)
 	}

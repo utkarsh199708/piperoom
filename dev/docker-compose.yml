@@ -372,6 +372,42 @@ services:
       timeout: 10s
       retries: 54
 
+  # SQL Server source (U4c, dev/mssql/README.md): SQL Server 2022 Developer
+  # with SQL Server Agent on and CDC off, so a setup run enables CDC itself.
+  # The image's own setup hook runs dev/mssql/init on a fresh data directory
+  # (database orders, table dbo.orders, 100 rows). Profile "mssql":
+  # `docker compose -f dev/docker-compose.yml --profile mssql up -d --wait mssql`
+  # starts it alone (it depends on nothing); without the profile nothing here
+  # starts. `devctl setup-break agent-stopped | cdc-not-enabled-table`.
+  mssql:
+    profiles: ["mssql"]
+    # 2022 CU27 GDR1 on Ubuntu 22.04, exact tag and digest (verified with
+    # `docker buildx imagetools inspect` on 2026-10-23; built 2026-10-03).
+    # amd64 only: Microsoft publishes no arm64 SQL Server image.
+    image: mcr.microsoft.com/mssql/server:2022-CU27-GDR1-ubuntu-22.04@sha256:cf8f0ab2ebe61feec2eed2629061a07d247f791c2a8ddda74a4ac9f06a291718
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      # Dev-only sa password (the stack's test credentials, AGENTS.md §3); it
+      # meets SQL Server's complexity rule, which refuses to start otherwise.
+      MSSQL_SA_PASSWORD: Piperoom-dev-1
+      MSSQL_AGENT_ENABLED: "true"
+    # Host loopback only, and not 1433, so a SQL Server installed on the dev
+    # machine keeps its port. DSN: dev/mssql/README.md.
+    ports: ["127.0.0.1:11433:1433"]
+    volumes:
+      - ./mssql/init:/mssql-server-setup-scripts.d:ro
+    healthcheck:
+      # Healthy once the init script ran (the seeded table answers) and SQL
+      # Server Agent is connected (its sessions exist), so the Agent check
+      # and `devctl setup-break agent-stopped` never see the Agent still
+      # starting. tools18's sqlcmd encrypts by default; -C trusts the image's
+      # self-signed cert.
+      test: ["CMD-SHELL", "SQLCMDPASSWORD=\"$$MSSQL_SA_PASSWORD\" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -b -h -1 -Q \"SET NOCOUNT ON; SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.dm_exec_sessions WHERE program_name LIKE N'SQLAgent - %') THEN (SELECT COUNT(*) FROM orders.dbo.orders) ELSE 0 END\" | grep -q '[1-9]'"]
+      start_period: 30s
+      interval: 5s
+      retries: 36
+
   # MongoDB source (U7c, dev/mongo/README.md): a one-member replica set rs0
   # with auth, for the setup checks of internal/clients/mongodb and the
   # `devctl setup-break` scenarios standalone-mongod and no-oplog-role.

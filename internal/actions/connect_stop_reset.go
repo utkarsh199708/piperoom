@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
@@ -347,23 +348,47 @@ func checkStopStep(name, state string, stopFirst bool) error {
 // have run, because Connect refuses offset changes on a running connector.
 // A stop is applied asynchronously and the stop step reports success once the
 // stop is accepted, so a connector still mid-stop gets a short settling poll
-// (a few poll intervals) before the refusal; the refusal then tells a slow
-// stop apart from a missing stop step.
+// before the refusal; the refusal then tells a slow stop apart from a missing
+// stop step.
+//
+// The settling poll ends after both settleMinReads status reads and
+// 6 poll intervals, never later than max(6 intervals, settleHardCap). Counting
+// reads, not only wall-clock time, keeps a short poll interval from giving a
+// slow (loaded or -race) machine only one or two reads; with the default
+// interval the window is the same 6 intervals as before.
 func (a *resetSourceOffsets) requireStoppedNow(ctx context.Context, name, state string) error {
 	if state == "STOPPED" {
 		return nil
 	}
-	pctx, cancel := context.WithTimeout(ctx, 6*a.d.poll())
+	poll := a.d.poll()
+	window := 6 * poll
+	pctx, cancel := context.WithTimeout(ctx, max(window, settleHardCap))
 	defer cancel()
-	last, stopped, _ := awaitState(pctx, a.d.poll(), "STOPPED", func(ctx context.Context) (string, error) {
-		st, err := a.d.Connect.Status(ctx, name)
+	deadline := time.Now().Add(window)
+	last := ""
+	for reads := 1; ; reads++ {
+		st, err := a.d.Connect.Status(pctx, name)
 		if err != nil {
-			return "", err
+			// A failed read ends the wait; the refusal below names the last
+			// state seen, as a never-settling stop would.
+			break
 		}
-		return st.State, nil
-	})
-	if stopped {
-		return nil
+		if st.State != "" {
+			last = st.State
+		}
+		if st.State == "STOPPED" {
+			return nil
+		}
+		if reads >= settleMinReads && !time.Now().Before(deadline) {
+			break
+		}
+		select {
+		case <-pctx.Done():
+		case <-time.After(poll):
+		}
+		if pctx.Err() != nil {
+			break
+		}
 	}
 	if last == "" {
 		last = state
@@ -371,6 +396,14 @@ func (a *resetSourceOffsets) requireStoppedNow(ctx context.Context, name, state 
 	return fmt.Errorf("actions: %s: connector %s is %s at execution; if the %s step just ran, its stop has not settled yet (retry shortly); otherwise that step must run before this one in the same proposal: %w",
 		ResetSourceOffsetsName, name, orUnknown(last), StopConnectorName, ErrStopStepRequired)
 }
+
+// settleMinReads is how many status reads requireStoppedNow makes at least
+// before it refuses a connector that is not STOPPED yet.
+const settleMinReads = 6
+
+// settleHardCap bounds requireStoppedNow's settling poll when the poll
+// interval is short, so the read count cannot stretch it without limit.
+const settleHardCap = 2 * time.Second
 
 func (a *resetSourceOffsets) Validate(ctx context.Context, raw json.RawMessage) error {
 	p, err := parseResetParams(raw)
