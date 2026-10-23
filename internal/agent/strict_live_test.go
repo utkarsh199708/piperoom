@@ -4,12 +4,15 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+
+	"piperoom/internal/agent/llm"
 )
 
 // strictCapCandidates are the caps the live bisect probes: the shipped cap plus
@@ -55,7 +58,7 @@ func TestLiveStrictToolCap(t *testing.T) {
 			t.Fatalf("cap %d produced %d strict tools, want %d: buildToolListWithCap is broken", cap, got, cap)
 		}
 
-		ok, reason := strictRequestAccepted(ctx, m, tl.params)
+		ok, reason := strictRequestAccepted(ctx, m, tl.defs)
 		if ok {
 			maxAccepted = max(maxAccepted, cap)
 		}
@@ -76,17 +79,23 @@ func TestLiveStrictToolCap(t *testing.T) {
 	}
 }
 
-// strictRequestAccepted sends params once with a single output token and
+// strictRequestAccepted sends the tools once with a single output token and
 // classifies the reply. Rejections for the strict cap carry the API's own
-// wording; anything else is returned verbatim so the failure is visible.
-func strictRequestAccepted(ctx context.Context, m model, params []anthropic.BetaToolUnionParam) (bool, string) {
-	req := anthropic.BetaMessageNewParams{
+// wording (in the SDK error the adapter keeps); anything else is returned
+// verbatim so the failure is visible.
+func strictRequestAccepted(ctx context.Context, m model, defs []llm.ToolDef) (bool, string) {
+	req := llm.Request{
 		Model:     defaultModel,
 		MaxTokens: 1, // one output token per call keeps cost ~0
-		Tools:     params,
-		Messages:  []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("ping"))},
+		Tools:     defs,
+		Cache:     llm.CacheHints{Tools: true},
+		Messages:  []llm.Message{userMessage(textPart("ping"))},
 	}
 	if _, err := m.Turn(ctx, req); err != nil {
+		var apierr *anthropic.Error
+		if errors.As(err, &apierr) {
+			err = apierr
+		}
 		lower := strings.ToLower(err.Error())
 		switch {
 		case strings.Contains(lower, "compiled grammar is too large"):

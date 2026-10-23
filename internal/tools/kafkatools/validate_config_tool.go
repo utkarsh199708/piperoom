@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -197,17 +198,21 @@ func looksSecretKey(key string) bool {
 			return true
 		}
 	}
-	for _, seg := range strings.FieldsFunc(k, func(r rune) bool {
+	segs := strings.FieldsFunc(k, func(r rune) bool {
 		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
-	}) {
+	})
+	for _, seg := range segs {
 		if seg == "key" {
 			return true
 		}
 	}
-	return false
+	return len(segs) > 0 && slices.Contains(secretKeyLastSegments, segs[len(segs)-1])
 }
 
-var secretKeySubstrings = []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private"}
+var secretKeySubstrings = []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private", "connectionstring"}
+
+// secretKeyLastSegments mirrors actions.secretKeyLastSegments.
+var secretKeyLastSegments = []string{"authorization", "seed", "jwt"}
 
 // plaintextSecretKey reports whether a config key names a credential under the
 // shared looksSecret rule. looksSecret also flags the converter class

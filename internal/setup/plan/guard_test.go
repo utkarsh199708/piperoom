@@ -1,7 +1,11 @@
 package plan
 
 import (
+	"encoding/json"
+	"errors"
 	"testing"
+
+	"piperoom/internal/setup/protocol"
 )
 
 // TestGuardRowRefuses is the test per row of the guard table: every row from
@@ -187,5 +191,27 @@ func TestAlterSystemAllowed(t *testing.T) {
 	params[0] = "shared_buffers"
 	if AlterSystemAllowed("shared_buffers") {
 		t.Error("AlterSystemParams shares its backing array with the allow-list")
+	}
+}
+
+// TestDecodeAlterSystemStep: the guard's read of the parameter name is the
+// executor's decode, so a key spelled in another case is the name both see,
+// and two keys that fold together (the probe) are refused, never judged on
+// one and run as the other.
+func TestDecodeAlterSystemStep(t *testing.T) {
+	p, err := DecodeAlterSystemStep(json.RawMessage(`{"target":"db:5432","NAME":"archive_command","value":"x"}`))
+	if err != nil || p.Name != "archive_command" {
+		t.Fatalf("decode = %+v, %v; want the folded key's value, as the executor reads it", p, err)
+	}
+	for _, raw := range []string{
+		`{"name":"wal_level","NAME":"archive_command","value":"x"}`,
+		`{"name":"wal_level","name":"archive_command","value":"x"}`,
+	} {
+		if _, err := DecodeAlterSystemStep(json.RawMessage(raw)); !errors.Is(err, protocol.ErrParamKeys) {
+			t.Fatalf("decode(%s) = %v, want ErrParamKeys", raw, err)
+		}
+	}
+	if ClientFloor(OpSourceAlterSystem) != TierT3 || ClientFloor(OpSourceDropSlot) != "" {
+		t.Fatal("ClientFloor: alter system is sent at T3, other ops at their routed tier")
 	}
 }

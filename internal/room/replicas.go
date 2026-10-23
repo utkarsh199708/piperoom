@@ -29,7 +29,9 @@ const (
 	DefaultTakeoverScan = 10 * time.Second
 	DefaultExecSweep    = 30 * time.Second
 	// DefaultClaimStale is when an executor claim counts as dead: no refresh
-	// for one step timeout plus a margin for the result writes.
+	// for one step timeout plus a margin for the result writes. A step bound
+	// longer than stepTimeout (a setup T3 step) keeps its claim fresh while it
+	// runs (keepClaimFresh), so this window holds for every room.
 	DefaultClaimStale = stepTimeout + 2*time.Minute
 	// DefaultUnclaimedStale is how long a fully approved proposal may wait for
 	// an executor to claim it.
@@ -595,6 +597,50 @@ func layersApproved(required []string, apps []store.ApprovalRow) bool {
 		}
 	}
 	return true
+}
+
+// keepClaimFresh refreshes this replica's claim on proposalID every
+// LeaseRenew until the returned stop is called, so a step that may outrun
+// ClaimStale (a setup T3 step waiting for a person) is never swept as dead
+// while it runs. A claim found lost calls lost, which must cancel the running
+// step: the sweep has already recorded the run as interrupted, so the step
+// must not go on (a runner op is sent a FrameCancel, which drops a pending
+// confirmation prompt). The executor's own finish then sees the lost claim.
+// With a single-process store it does nothing.
+func (s *Service) keepClaimFresh(proposalID string, lost context.CancelFunc) (stop func()) {
+	if s.coord == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(s.timing.LeaseRenew)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-s.ctx.Done():
+				return
+			case <-t.C:
+				ok, err := s.touchExecution(s.ctx, proposalID)
+				if err != nil {
+					s.log.Warn("room: refresh a running step's claim failed", "proposal", proposalID, "err", err)
+					continue
+				}
+				if !ok {
+					s.log.Warn("room: a running step's claim was taken by the stale sweep; cancelling the step", "proposal", proposalID)
+					lost()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-exited
+	}
 }
 
 // touchExecution refreshes this replica's claim before a step. false: the

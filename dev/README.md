@@ -15,6 +15,7 @@ variables existed.
 | `KAFKA_IMAGE` | `apache/kafka:4.1.0` | the `kafka` service image |
 | `SCHEMA_REGISTRY_IMAGE` | `confluentinc/cp-schema-registry:8.0.0` | the `schema-registry` service image |
 | `DEBEZIUM_VERSION` | `3.2.0.Final` | the Debezium Connect base image the `connect` service builds from (`dev/connect/Dockerfile`) |
+| `ORACLE_IMAGE` | `gvenzl/oracle-free:23.9` (by digest) | the `oracle` profile's image (`dev/oracle/README.md`) |
 
 Example (PowerShell):
 

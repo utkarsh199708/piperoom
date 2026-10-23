@@ -586,12 +586,22 @@ func CheckTunable(connectorType, key, value string) error {
 // secretKeySubstrings are the fragments that mark a config key as a
 // credential. The rule is shared, not configurable: a runner op, a validator
 // and a connector-config action must agree on what is secret.
-var secretKeySubstrings = []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private"}
+var secretKeySubstrings = []string{"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private", "connectionstring"}
+
+// secretKeyLastSegments are credential words that mark a key only as its
+// last segment: debezium.sink.nats-jetstream.auth.seed, auth.jwt and
+// http.headers.authorization hold credentials, but http.authorization.type
+// and a jwt.url do not, and a substring match would flag those too.
+var secretKeyLastSegments = []string{"authorization", "seed", "jwt"}
 
 // LooksSecret reports whether a config key probably names a credential: the
 // key contains one of password, passwd, secret, token, credential, jaas,
-// apikey or private (any case), or has a bare "key" segment (api.key,
-// ssl.key.password, key.converter credentials). It is the one rule the
+// apikey, private or connectionstring (any case), its last segment is
+// authorization, seed or jwt, or it has a bare "key" segment (api.key,
+// ssl.key.password, key.converter credentials). A URL or DSN key
+// (connection.url, mongodb.connection.string) is not a credential by name:
+// the host guard must read its value, and a password inside it is caught by
+// the value rule (redact.Text, valueLooksSecret) instead. It is the one rule the
 // connector-config actions, the config validator (Q4a) and the runner's ops
 // and artifact validators share, so a value for such a key is refused in
 // plain text everywhere and allowed only as a ${secret:name} or
@@ -605,14 +615,15 @@ func LooksSecret(key string) bool {
 			return true
 		}
 	}
-	for _, seg := range strings.FieldsFunc(k, func(r rune) bool {
+	segs := strings.FieldsFunc(k, func(r rune) bool {
 		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
-	}) {
+	})
+	for _, seg := range segs {
 		if seg == "key" {
 			return true
 		}
 	}
-	return false
+	return len(segs) > 0 && slices.Contains(secretKeyLastSegments, segs[len(segs)-1])
 }
 
 // ---- Connector config: redaction, hash and changed keys (X3-0, X5-0) ----

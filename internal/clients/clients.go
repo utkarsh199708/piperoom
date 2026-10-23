@@ -43,6 +43,13 @@ var ErrNotFound = errors.New("not found")
 // ErrNotSupported is returned by an optional read a client cannot do. (F12)
 var ErrNotSupported = errors.New("clients: not supported by this client")
 
+// ErrWriteSpent is wrapped by a write that must not be retried under the same
+// approval: the setup clients send a proposal step's write to the runner at
+// most once (the runner runs a step once), so whatever that attempt returned,
+// a second call cannot run. A caller's retry loop stops on it; a retry is a
+// new proposal step.
+var ErrWriteSpent = errors.New("clients: this approved write was already sent; retrying it needs a new approval")
+
 // ---- Kafka Connect (REST) ----
 
 // ConnectReader is the read half of the Kafka Connect client.

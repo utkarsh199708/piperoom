@@ -188,7 +188,7 @@ func TestRunnerOffersOnlyTheRoomKindTools(t *testing.T) {
 		m := &toolsCapture{call: tt.call}
 		r, err := newRunnerWith(Alert{Title: "t", PipelineID: "p", PipelineKind: tt.kind}, Deps{
 			Tools: reg, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: &fakeSink{}, Logger: discardLogger(),
-		}, Options{MaxTurns: 3}, m)
+		}, Options{MaxTurns: 3}, viaSDK(m))
 		if err != nil {
 			t.Fatalf("kind %q: %v", tt.kind, err)
 		}
@@ -215,7 +215,7 @@ func TestRunnerRefusesUnknownPipelineKind(t *testing.T) {
 	reg, _ := kindTestRegistry(t)
 	_, err := newRunnerWith(Alert{Title: "t", PipelineID: "p", PipelineKind: "stream"}, Deps{
 		Tools: reg, Inbox: &fakeInbox{}, Sink: &fakeSink{}, Logger: discardLogger(),
-	}, Options{}, &toolsCapture{})
+	}, Options{}, viaSDK(&toolsCapture{}))
 	if err == nil || !strings.Contains(err.Error(), "PipelineKind") {
 		t.Fatalf("err = %v", err)
 	}

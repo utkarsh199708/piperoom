@@ -69,7 +69,7 @@ func newBatchVerifyRunner(t *testing.T, regTools ...tools.Tool) (*runner, *fakeS
 	sink := &fakeSink{}
 	r, err := newRunnerWith(Alert{Title: "orders_daily failed", PipelineID: "orders_batch", PipelineKind: events.PipelineKindBatch}, Deps{
 		Tools: reg, Inbox: &fakeInbox{}, Sink: sink, Logger: discardLogger(),
-	}, Options{MaxTurns: 3}, &promptCapture{})
+	}, Options{MaxTurns: 3}, viaSDK(&promptCapture{}))
 	if err != nil {
 		t.Fatal(err)
 	}

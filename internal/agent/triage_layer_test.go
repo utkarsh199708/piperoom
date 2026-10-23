@@ -83,7 +83,7 @@ func TestRunDoesNotAnchorOnTriageLayer(t *testing.T) {
 			r, err := newRunnerWith(
 				Alert{Title: "orders stale", PipelineID: "orders", Triage: triageWithLayer(tt.layer)},
 				Deps{Tools: reg, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: sink, Logger: discardLogger()},
-				Options{MaxTurns: 4}, m,
+				Options{MaxTurns: 4}, viaSDK(m),
 			)
 			if err != nil {
 				t.Fatalf("newRunnerWith: %v", err)

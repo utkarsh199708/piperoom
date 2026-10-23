@@ -21,7 +21,7 @@ func TestJudgeHandoffParsesVerdict(t *testing.T) {
 		Content: []anthropic.BetaContentBlockUnion{{Type: "text",
 			Text: `{"contradictions":[{"claim":"lag is 0","evidence":"lag=5"}]}`}},
 	}, params: &gotParams}
-	v, err := judgeHandoff(context.Background(), c.events, c.summary, Options{}.withDefaults(), m)
+	v, err := judgeHandoff(context.Background(), c.events, c.summary, Options{}.withDefaults(), viaSDK(m))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestJudgeHandoffRejectsBadVerdict(t *testing.T) {
 			StopReason: anthropic.BetaStopReasonEndTurn,
 			Content:    []anthropic.BetaContentBlockUnion{{Type: "text", Text: text}},
 		}, params: new(anthropic.BetaMessageNewParams)}
-		if _, err := judgeHandoff(context.Background(), c.events, c.summary, Options{}.withDefaults(), m); err == nil {
+		if _, err := judgeHandoff(context.Background(), c.events, c.summary, Options{}.withDefaults(), viaSDK(m)); err == nil {
 			t.Errorf("%q: want error", text)
 		}
 	}

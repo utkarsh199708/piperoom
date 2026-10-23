@@ -609,3 +609,17 @@ func TestLeak(t *testing.T) {
 		}
 	}
 }
+
+// A pipeline's mysql layer owner is shown: the view walks owners.KnownLayers,
+// not events.Layers, which has no mysql.
+func TestPipelineViewMySQLOwner(t *testing.T) {
+	own := &owners.Owners{Layers: owners.UserLayers(map[string]string{"mysql": "dana", "kafka": "arjun"})}
+	v := (&Provider{own: own}).pipelineView(owners.Pipeline{ID: "orders-mysql", SourceKind: owners.SourceKindMySQL})
+	var layers []string
+	for _, r := range v.Owners {
+		layers = append(layers, r.Layer)
+	}
+	if !slices.Contains(layers, "mysql") || !slices.Contains(layers, "kafka") {
+		t.Fatalf("owner rows = %+v, want mysql and kafka", v.Owners)
+	}
+}

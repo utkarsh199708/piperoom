@@ -308,6 +308,11 @@ func (a *createConnector) Execute(ctx context.Context, raw json.RawMessage) (str
 // only believed after the registered config reads back as the approved one:
 // without that, a timed-out POST that never landed plus a concurrent create
 // of the same name would be reported as this create's success.
+//
+// A write that may not be sent again (clients.ErrWriteSpent: the setup
+// runner runs a proposal step's write once) ends the loop at once, after the
+// landed check: over the runner, a transient 409 or a timeout costs a
+// re-proposal rather than a retry.
 func (a *createConnector) createWithRetry(ctx context.Context, lw connect.ConnectLifecycleWriter, name string, cfg map[string]string) error {
 	var last error
 	timedOut := false
@@ -330,6 +335,9 @@ func (a *createConnector) createWithRetry(ctx context.Context, lw connect.Connec
 		case errors.Is(err, connect.ErrRebalancing):
 			last = err
 		default:
+			return err
+		}
+		if errors.Is(err, clients.ErrWriteSpent) {
 			return err
 		}
 		select {
@@ -389,7 +397,7 @@ func (a *deleteConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) err
 // readConfig reads the connector config and refuses one with a plaintext
 // credential. The config never leaves this function.
 func (a *deleteConnector) readConfig(ctx context.Context, name string) error {
-	cfg, err := a.d.Connect.Config(ctx, name)
+	cfg, err := a.configWithRetry(ctx, name)
 	if err != nil {
 		return fmt.Errorf("actions: %s: read config of %s: %w", DeleteConnectorName, name, err)
 	}
@@ -397,6 +405,31 @@ func (a *deleteConnector) readConfig(ctx context.Context, name string) error {
 		return fmt.Errorf("actions: %s: connector %s: %w", DeleteConnectorName, name, err)
 	}
 	return nil
+}
+
+// configWithRetry reads name's config, retrying with a growing pause while
+// ctx has time left when Connect answers that its workers are rebalancing (a
+// 500 "rebalance is expected" on this read, common right after a create or
+// delete) or the request outlasts the HTTP client's own bound. Only this read
+// is retried; it changes nothing on Connect, and ctx (the action's read or
+// write bound) still caps the whole wait.
+func (a *deleteConnector) configWithRetry(ctx context.Context, name string) (map[string]string, error) {
+	pause := 250 * time.Millisecond
+	for {
+		cfg, err := a.d.Connect.Config(ctx, name)
+		if err == nil {
+			return cfg, nil
+		}
+		if ctx.Err() != nil || (!isTimeoutErr(err) && !connect.IsRebalancing(err)) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(pause):
+		}
+		pause = min(2*pause, 2*time.Second)
+	}
 }
 
 func (a *deleteConnector) Validate(ctx context.Context, raw json.RawMessage) error {
@@ -481,7 +514,9 @@ func (a *deleteConnector) Execute(ctx context.Context, raw json.RawMessage) (str
 }
 
 // deleteWithRetry deletes name, retrying a rebalance and treating a timed-out
-// request that did remove the connector (or a 404) as done.
+// request that did remove the connector (or a 404) as done. Like
+// createWithRetry it stops at once on clients.ErrWriteSpent (after the
+// removal check): over the setup runner a transient 409 costs a re-proposal.
 func (a *deleteConnector) deleteWithRetry(ctx context.Context, lw connect.ConnectLifecycleWriter, name string) error {
 	var last error
 	for attempt := 0; attempt < 3; attempt++ {
@@ -503,6 +538,9 @@ func (a *deleteConnector) deleteWithRetry(ctx context.Context, lw connect.Connec
 		case errors.Is(err, connect.ErrRebalancing):
 			last = err
 		default:
+			return err
+		}
+		if errors.Is(err, clients.ErrWriteSpent) {
 			return err
 		}
 		select {

@@ -24,7 +24,11 @@ import (
 // delete-then-create proposal (replace: true).
 func TestConnectCreateDeleteActionsIntegration(t *testing.T) {
 	cfgCfg := testenv.Require(t)
-	c := connect.New(cfgCfg.ConnectURL, &http.Client{Timeout: 10 * time.Second})
+	// The shared CI worker rebalances whenever another package creates or
+	// deletes a connector; a request can then hang past 10 s. Each request
+	// gets 30 s and the read-only calls below retry a busy worker
+	// (retryBusyConnect).
+	c := connect.New(cfgCfg.ConnectURL, &http.Client{Timeout: 30 * time.Second})
 	bg := tools.WithUnscoped(context.Background())
 	name := testenv.Name("cc")
 	connCfg := map[string]string{
@@ -50,10 +54,14 @@ func TestConnectCreateDeleteActionsIntegration(t *testing.T) {
 	del := mustGet(t, reg, DeleteConnectorName)
 
 	params, _ := json.Marshal(map[string]any{"connector": name, "config": connCfg})
-	if err := create.Validate(ctx, params); err != nil {
+	if err := retryBusyConnect(t, "create Validate", func() error { return create.Validate(ctx, params) }); err != nil {
 		t.Fatalf("create Validate: %v", err)
 	}
-	res, err := create.(Preview).Preview(ctx, params)
+	var res PreviewResult
+	err := retryBusyConnect(t, "create Preview", func() (err error) {
+		res, err = create.(Preview).Preview(ctx, params)
+		return err
+	})
 	if err != nil {
 		t.Fatalf("create Preview (Connect's validate refuses errors): %v", err)
 	}
@@ -72,21 +80,27 @@ func TestConnectCreateDeleteActionsIntegration(t *testing.T) {
 	})
 
 	// The name is registered now: a plain create is refused.
-	if err := create.Validate(ctx, params); !errors.Is(err, connect.ErrConnectorExists) {
+	err = retryBusyConnect(t, "create Validate of a registered name", func() error { return create.Validate(ctx, params) })
+	if !errors.Is(err, connect.ErrConnectorExists) {
 		t.Fatalf("create of a registered name: %v", err)
 	}
 
-	if err := del.Validate(ctx, json.RawMessage(`{"connector":"`+name+`"}`)); err != nil {
+	delParams := json.RawMessage(`{"connector":"` + name + `"}`)
+	if err := retryBusyConnect(t, "delete Validate", func() error { return del.Validate(ctx, delParams) }); err != nil {
 		t.Fatalf("delete Validate: %v", err)
 	}
-	dres, err := del.(Preview).Preview(ctx, json.RawMessage(`{"connector":"`+name+`"}`))
+	var dres PreviewResult
+	err = retryBusyConnect(t, "delete Preview", func() (err error) {
+		dres, err = del.(Preview).Preview(ctx, delParams)
+		return err
+	})
 	if err != nil {
 		t.Fatalf("delete Preview: %v", err)
 	}
 	if !strings.Contains(dres.Expected, "stored offsets under the name") {
 		t.Fatalf("delete preview = %+v", dres)
 	}
-	out, err = del.Execute(ctx, json.RawMessage(`{"connector":"`+name+`"}`))
+	out, err = executeDelete(t, del, ctx, delParams)
 	if err != nil {
 		t.Fatalf("delete Execute: %v", err)
 	}
@@ -95,7 +109,7 @@ func TestConnectCreateDeleteActionsIntegration(t *testing.T) {
 	// Re-register is delete then create in one proposal: the create step carries
 	// replace: true and runs after the delete.
 	replace, _ := json.Marshal(map[string]any{"connector": name, "config": connCfg, "replace": true})
-	if err := create.Validate(ctx, replace); err != nil {
+	if err := retryBusyConnect(t, "re-register Validate", func() error { return create.Validate(ctx, replace) }); err != nil {
 		t.Fatalf("re-register Validate: %v", err)
 	}
 	out, err = create.Execute(ctx, replace)
@@ -103,9 +117,31 @@ func TestConnectCreateDeleteActionsIntegration(t *testing.T) {
 		t.Fatalf("re-register Execute: %v", err)
 	}
 	t.Logf("re-register: %s", out)
-	if _, err := del.Execute(ctx, json.RawMessage(`{"connector":"`+name+`"}`)); err != nil {
+	// Let the re-registered connector start before deleting it: its create
+	// triggers a rebalance, during which Connect refuses the delete's reads.
+	testenv.WaitFor(t, 60*time.Second, func() (bool, error) {
+		st, err := c.Status(bg, name)
+		return err == nil && st.State == "RUNNING", nil
+	})
+	if _, err := executeDelete(t, del, ctx, delParams); err != nil {
 		t.Fatalf("delete after re-register: %v", err)
 	}
+}
+
+// executeDelete runs the delete action, re-running it only when it failed on
+// a busy worker before it removed anything. A busy-worker error leaves the
+// connector registered (the action reads its config first, and its own
+// delete loop resolves a timed-out DELETE that did land), so a rerun is the
+// same approved step, not a second delete. A rerun that finds the name gone
+// fails the test, as it should.
+func executeDelete(t *testing.T, del Action, ctx context.Context, params json.RawMessage) (string, error) {
+	t.Helper()
+	var out string
+	err := retryBusyConnect(t, "delete Execute", func() (err error) {
+		out, err = del.Execute(ctx, params)
+		return err
+	})
+	return out, err
 }
 
 // deleteConnectorHTTP deletes a leftover it_ connector without failing the

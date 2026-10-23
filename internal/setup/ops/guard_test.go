@@ -205,3 +205,23 @@ func TestRegisterMountDir(t *testing.T) {
 		t.Fatal("RegisterMountDir accepted dot-dot")
 	}
 }
+
+// TestDecodeParamsRefusesCaseCollidingKeys: two keys the decoder would fold
+// into one field are refused, at any depth, instead of letting the last win.
+func TestDecodeParamsRefusesCaseCollidingKeys(t *testing.T) {
+	var dst struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	for _, raw := range []string{
+		`{"name":"wal_level","NAME":"archive_command","value":"x"}`,
+		`{"name":"wal_level","name":"archive_command","value":"x"}`,
+	} {
+		if err := decodeParams(json.RawMessage(raw), &dst); !errors.Is(err, ErrParams) {
+			t.Fatalf("decodeParams(%s) = %v, want ErrParams", raw, err)
+		}
+	}
+	if err := decodeParams(json.RawMessage(`{"name":"wal_level","value":"logical"}`), &dst); err != nil || dst.Name != "wal_level" {
+		t.Fatalf("decodeParams = %v (%+v), want the value", err, dst)
+	}
+}

@@ -447,9 +447,15 @@ func matchGlob(pattern, name string) bool {
 	// match[i][j]: pat[i:] matches segs[j:]. A table rather than backtracking,
 	// so a glob of many "**" segments costs len(pat)*len(segs), not an
 	// exponential search on a path the model chose.
-	match := make([][]bool, len(pat)+1)
+	// Both sides passed CheckRepoPath, so neither has more segments than
+	// MaxRepoPathBytes; the table is built by append so no size is computed
+	// from a length plus one.
+	if len(pat) > MaxRepoPathBytes || len(segs) > MaxRepoPathBytes {
+		return false
+	}
+	match := append(make([][]bool, len(pat)), nil)
 	for i := range match {
-		match[i] = make([]bool, len(segs)+1)
+		match[i] = append(make([]bool, len(segs)), false)
 	}
 	match[len(pat)][len(segs)] = true
 	for i := len(pat) - 1; i >= 0; i-- {

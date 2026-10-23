@@ -118,7 +118,7 @@ func TestRunFlagsInjectedToolResults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.model = model
+	r.model = viaSDK(model)
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}

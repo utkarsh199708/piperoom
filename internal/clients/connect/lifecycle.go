@@ -393,6 +393,23 @@ func rebalancing(err error) bool {
 	return errors.As(err, &se) && se.Code == http.StatusConflict && rebalanceMessage(se)
 }
 
+// IsRebalancing reports whether err is a transient worker-group rebalance:
+// ErrRebalancing, or Connect's 409 or 500 whose JSON error message names a
+// rebalance. Plain reads surface the latter as a status error — GET
+// /connectors/{name}/config answers 500 "Request cannot be completed because
+// a rebalance is expected" while the group rebalances — so a caller that
+// retries a read needs this to tell it from a real failure. The match is on
+// the decoded envelope's message, never on an echoed request value.
+func IsRebalancing(err error) bool {
+	if errors.Is(err, ErrRebalancing) {
+		return true
+	}
+	var se *statusError
+	return errors.As(err, &se) &&
+		(se.Code == http.StatusConflict || se.Code == http.StatusInternalServerError) &&
+		rebalanceMessage(se)
+}
+
 func rebalanceMessage(se *statusError) bool {
 	return strings.Contains(strings.ToLower(connectMessage(se)), "rebalance")
 }

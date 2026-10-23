@@ -111,16 +111,22 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	}
 	f.connector, f.topic = conn, topic
 
-	// Primary key lookup. A failure here means the source DB is unreachable;
-	// fall back to "id" and let the source row read report the problem.
+	// Primary key lookup. It fails closed: only a source client that has no
+	// key lookup at all reads by "id". A composite key, a table without a
+	// key (ErrNotFound from the Postgres client) or a failed lookup leaves
+	// every stage unknown and reads nothing: a read by a guessed column could
+	// return another row (another tenant's, with its timestamps) (#483).
 	pk, err := b.pkColumn(ctx, table)
-	if errors.Is(err, clients.ErrNotSupported) {
-		// A composite key: the row, its Kafka key and its sink row cannot be
-		// found by one value, so no stage can be judged (#483).
+	switch {
+	case errors.Is(err, clients.ErrNotSupported):
 		return compositeKeyTrace(f), nil
-	}
-	if err != nil {
-		pk = "id"
+	case errors.Is(err, clients.ErrNotFound):
+		return keyUnknownTrace(f, "no primary key, or the table is not visible: the trace needs one key column"), nil
+	case err != nil:
+		// Driver errors can carry host, user or SQL: a fixed phrase in the
+		// trace, the raw error in the debug log only.
+		b.log.DebugContext(ctx, "topology: source key lookup failed", "table", table, "err", err)
+		return keyUnknownTrace(f, "primary key lookup failed: the trace does not read by a guessed key"), nil
 	}
 
 	// 1. Source row.
@@ -402,17 +408,22 @@ func (b *builder) checkSinkKey(ctx context.Context, sink, pk string) error {
 	return nil
 }
 
+// pkColumn returns the source key column of table. Only a source client
+// without a key lookup (no pkColumner) gets the "id" fallback; an empty
+// answer from one that has it is ErrNotFound, never "id".
 func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
-	if d, ok := b.src.(pkColumner); ok {
-		col, err := d.PrimaryKeyColumn(ctx, table)
-		if err != nil {
-			return "", fmt.Errorf("topology: primary key of %s: %w", table, err)
-		}
-		if col != "" {
-			return col, nil
-		}
+	d, ok := b.src.(pkColumner)
+	if !ok {
+		return "id", nil
 	}
-	return "id", nil
+	col, err := d.PrimaryKeyColumn(ctx, table)
+	if err != nil {
+		return "", fmt.Errorf("topology: primary key of %s: %w", table, err)
+	}
+	if col == "" {
+		return "", fmt.Errorf("topology: primary key of %s: empty key column: %w", table, clients.ErrNotFound)
+	}
+	return col, nil
 }
 
 // srcLayer is the layer of the trace's source stage.
@@ -427,8 +438,14 @@ func (f traceFacts) srcLayer() string {
 // one column: a lookup by one value would read another row (another tenant's,
 // with its timestamps), so every stage is unknown, never "seen" or "not_seen".
 func compositeKeyTrace(f traceFacts) []events.TraceStage {
+	return keyUnknownTrace(f, "composite primary key: the trace needs every key column")
+}
+
+// keyUnknownTrace is the trace of a table whose one key column is not known
+// (composite, absent, or the lookup failed): every stage unknown with why.
+func keyUnknownTrace(f traceFacts, why string) []events.TraceStage {
 	facts := func() map[string]string {
-		return map[string]string{"error": "composite primary key: the trace needs every key column"}
+		return map[string]string{"error": why}
 	}
 	return []events.TraceStage{
 		{Layer: f.srcLayer(), Name: f.table, Status: "unknown", Facts: facts()},

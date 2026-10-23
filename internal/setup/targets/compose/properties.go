@@ -3,6 +3,7 @@ package compose
 import (
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -76,26 +77,34 @@ var (
 // the connector-config rule, this is the artifact-validator rule.
 var credentialWords = []string{
 	"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "accesskey", "private",
+	"connectionstring",
 }
+
+// credentialLastWords are the words of actions.LooksSecret that mark a key
+// only as its last segment (DEBEZIUM_SINK_NATS_JETSTREAM_AUTH_SEED,
+// http.headers.authorization), so http.authorization.type is not refused.
+var credentialLastWords = []string{"authorization", "seed", "jwt"}
 
 // looksCredential reports whether key names a credential. Separators are
 // dropped before the match, so API_KEY, api.key and S3_ACCESS_KEY read as
 // apikey and accesskey: each spelling names the same credential, and a mask
 // that knows only the glued form would print the separated ones.
 func looksCredential(key string) bool {
+	lower := strings.ToLower(key)
 	k := strings.Map(func(r rune) rune {
 		switch r {
 		case '_', '.', '-':
 			return -1
 		}
 		return r
-	}, strings.ToLower(key))
+	}, lower)
 	for _, w := range credentialWords {
 		if strings.Contains(k, w) {
 			return true
 		}
 	}
-	return false
+	last := lower[strings.LastIndexAny(lower, "_.-")+1:]
+	return slices.Contains(credentialLastWords, last)
 }
 
 // kindOf classifies the file name. Only the three exact names this driver

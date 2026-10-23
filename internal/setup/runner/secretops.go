@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/setup/protocol"
@@ -122,8 +123,8 @@ func decodeSecretParams(raw json.RawMessage, dst *secretSetParams) error {
 // the single stdin-reader goroutine (stdinCh), serialized with every other
 // terminal prompt under stdinMu, and arrives when the person answers or ctx
 // (the op deadline included) ends; an abandoned prompt leaves no orphaned
-// read behind, so a value typed late answers the next prompt instead of
-// vanishing into a dead channel.
+// read behind, and a line read before this prompt was printed (typed for an
+// abandoned one) is discarded rather than stored as this secret (nextLine).
 func (r *Runner) promptSecret(ctx context.Context, name string) (string, error) {
 	r.stdinMu.Lock()
 	defer r.stdinMu.Unlock()
@@ -133,22 +134,21 @@ func (r *Runner) promptSecret(ctx context.Context, name string) (string, error) 
 		return "", ctx.Err()
 	default:
 	}
-	ch := r.stdinCh()
+	shown := time.Now()
 	fmt.Fprintf(r.stdout, "secret %s: value (stored in the runner's secret store, never printed or logged)\nvalue: ", scrub(name, MaxSecretNameBytes))
 
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case res := <-ch:
-		if res.err != nil && !errors.Is(res.err, io.EOF) {
-			return "", fmt.Errorf("setup: reading the secret value: %w", res.err)
-		}
-		value := strings.TrimSuffix(strings.TrimSuffix(res.line, "\n"), "\r")
-		if value == "" && res.err != nil {
-			return "", errors.New("setup: no secret value was entered")
-		}
-		return value, nil
+	res, err := r.nextLine(ctx, shown)
+	if err != nil {
+		return "", err
 	}
+	if res.err != nil && !errors.Is(res.err, io.EOF) {
+		return "", fmt.Errorf("setup: reading the secret value: %w", res.err)
+	}
+	value := strings.TrimSuffix(strings.TrimSuffix(res.line, "\n"), "\r")
+	if value == "" && res.err != nil {
+		return "", errors.New("setup: no secret value was entered")
+	}
+	return value, nil
 }
 
 // storeSecretFrame handles FrameSecret, the UI path: the driver typed the

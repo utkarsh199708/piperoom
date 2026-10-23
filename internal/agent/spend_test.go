@@ -14,6 +14,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
@@ -49,7 +50,7 @@ func spendRooms(t *testing.T, ids ...string) *memstore.Store {
 	return st
 }
 
-func spendEndpoint(t *testing.T, m model, limit int64, l SpendLedger, o SpendOptions) *Endpoint {
+func spendEndpoint(t *testing.T, m sdkModel, limit int64, l SpendLedger, o SpendOptions) *Endpoint {
 	t.Helper()
 	ep := testEndpoint(m, limit)
 	o.Ledger = l
@@ -166,8 +167,8 @@ func concurrentBurst(t *testing.T, st store.SpendStore, rooms []string, roomCap,
 		wg.Add(1)
 		go func(id string) {
 			defer wg.Done()
-			bm := &budgetModel{inner: m, budget: ep.budget(id), loop: true, guard: ep.guard(id, "orders")}
-			if _, err := bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"}); err != nil {
+			bm := &budgetModel{inner: viaSDK(m), budget: ep.budget(id), loop: true, guard: ep.guard(id, "orders")}
+			if _, err := bm.Turn(context.Background(), llm.Request{Model: "m"}); err != nil {
 				if _, ok := asBudgetError(err); !ok {
 					t.Errorf("Turn: %v", err)
 				}
