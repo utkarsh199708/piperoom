@@ -1,0 +1,139 @@
+{
+  "scenario": "setup/db-unreachable-from-connect",
+  "source": "postgres",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-25T09:40:00Z",
+  "note": "Composed from net_probe's check list (internal/setup/ops/net_probe.go, U1-2/Q6a) and compose_restart's argv, on the fixed clock of the U1-19 setup scenarios. No Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19).",
+  "ops": [
+    {
+      "op": "net_probe",
+      "tier": "T0",
+      "class": "local",
+      "params": {"from": "connect", "target": "postgres"},
+      "result": {
+        "ok": false,
+        "summary": "connect -> postgres:5432: resolved 192.0.2.1, TCP connect timed out",
+        "data": {
+          "from": "connect",
+          "to": "postgres:5432",
+          "resolved": ["192.0.2.1"],
+          "checks": [
+            {"name": "dns", "ok": true, "detail": "postgres resolves to 192.0.2.1"},
+            {"name": "tcp", "ok": false, "detail": "dial tcp 192.0.2.1:5432: i/o timeout"}
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "--project-directory", "C:\\orders", "-f", "compose.yaml", "--env-file", ".env", "exec", "-T", "connect", "getent", "hosts", "postgres"],
+          "target": "connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:14Z",
+          "took_ms": 10012,
+          "out_mac": "5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f47c9e1a3b5d8f0a2c4e6b8d1f3a"
+        }
+      }
+    },
+    {
+      "op": "compose_restart",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "2b3d4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f901",
+      "params": {"services": ["connect"]},
+      "result": {
+        "ok": true,
+        "summary": "compose restart: connect",
+        "data": {"project": "piperoom-orders", "services": [{"service": "connect", "state": "running"}]},
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "--project-directory", "C:\\orders", "-f", "compose.yaml", "--env-file", ".env", "restart", "connect"],
+          "target": "connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:42:20Z",
+          "took_ms": 8874,
+          "out_mac": "8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f47c9e1a3b5d"
+        }
+      }
+    },
+    {
+      "op": "net_probe",
+      "tier": "T0",
+      "class": "local",
+      "params": {"from": "connect", "target": "postgres"},
+      "result": {
+        "ok": true,
+        "summary": "connect -> postgres:5432: resolved 172.18.0.2, TCP connect ok (4 ms)",
+        "data": {
+          "from": "connect",
+          "to": "postgres:5432",
+          "resolved": ["172.18.0.2"],
+          "checks": [
+            {"name": "dns", "ok": true, "detail": "postgres resolves to 172.18.0.2"},
+            {"name": "tcp", "ok": true, "detail": "connected in 4 ms"}
+          ]
+        },
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "--project-directory", "C:\\orders", "-f", "compose.yaml", "--env-file", ".env", "exec", "-T", "connect", "getent", "hosts", "postgres"],
+          "target": "connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:43:02Z",
+          "took_ms": 29,
+          "out_mac": "e9b0d2f4a6c8e1b3d5f7902a4c6e8b0d2f47c9e1a3b5d8f0a2c4e6b8d1f3a5c7"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_setup",
+    "nonce_hash": "29654c444daab10f544bc97271139ee943c860e9c9681e284dace9c14667ea5a",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:44:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:44:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {"topic": "pg.public.orders", "partitions": [{"partition": 0, "start": 0, "end": 2}], "total_records": 2},
+        "at": "2026-10-25T09:44:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {"connector": "pg-orders-connector", "metrics_found": 11, "snapshot": {"SnapshotCompleted": 1, "SnapshotRunning": 0}},
+        "at": "2026-10-25T09:44:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {"topic": "pg.public.orders", "key": "0b3f8d2a7c4e19f6a5d8b0c2e4f60718", "found": true, "records": [{"partition": 0, "offset": 1}]},
+        "at": "2026-10-25T09:44:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {"subjects": ["pg.public.orders-key", "pg.public.orders-value"], "deleted_subjects": []},
+        "at": "2026-10-25T09:44:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {"name": "connector_running", "ok": true, "note": "the connector is RUNNING"},
+        {"name": "tasks_running", "ok": true, "note": "1 task(s) RUNNING"},
+        {"name": "canary_topic", "ok": true, "note": "the topic exists with 1 partition(s)"},
+        {"name": "snapshot_complete", "ok": true, "note": "SnapshotCompleted"},
+        {"name": "canary_event", "ok": true, "note": "the canary event with the nonce as key is on the topic"},
+        {"name": "canary_subject", "ok": true, "note": "2 subject(s) under the canary topic's prefix"},
+        {"name": "sink_row", "ok": true, "note": "no sink was set up"},
+        {"name": "person_change", "ok": false, "note": "awaiting the person's change"}
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}
