@@ -441,6 +441,10 @@ export interface SetupState {
   blocked?: { reason: string; question: string; step_index?: number };
   /** pipeline.registered.watched_by: "server", "local", or "" before registration. */
   watched_by: string;
+  /** setup.secret_set names, in the order they were set, each once. Names only: never a value. */
+  secret_names: string[];
+  /** setup.credentials_registered: the names the runner registered, once it has. */
+  credentials?: { names: string[]; runner_label: string };
   /** The request room.created carries (the form's values); absent until the replay reaches it. */
   request?: SetupRequest;
   /** The current setup.plan's phases; [] before the first plan. */
@@ -478,6 +482,9 @@ export function setupFromSnapshot(snapshot: SetupSnapshot): SetupState {
     verified: snapshot.verified ?? [],
     ...(snapshot.blocked ? { blocked: snapshot.blocked } : {}),
     watched_by: snapshot.watched_by ?? "",
+    // The snapshot lists no secret and no credentials: both are names the log carries, folded
+    // from setup.secret_set / setup.credentials_registered as the replay reaches them.
+    secret_names: [],
     phases: [],
     executed: {},
   };
@@ -506,6 +513,7 @@ export function newSetupState(request?: SetupRequest): SetupState {
     },
     verified: [],
     watched_by: "",
+    secret_names: [],
     ...(request ? { request } : {}),
     phases: [],
     executed: {},

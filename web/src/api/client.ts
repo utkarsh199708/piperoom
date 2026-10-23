@@ -26,6 +26,7 @@ import type {
   PipelineInfo,
   CreateSetupResponse,
   RoomSnapshot,
+  SetupPipelineExtendBody,
   SetupRequest,
   ShadowBlindBody,
   ShadowGradeBody,
@@ -224,6 +225,31 @@ export const api = {
   // U: opens a setup room; the answer carries the single-use pairing code and the line to paste.
   createSetup: (body: SetupRequest) =>
     request<CreateSetupResponse>('/api/setup', { method: 'POST', body: JSON.stringify(body) }),
+  // U1-5b: a driver's setup clicks (docs/api.md "Setup rooms"). Every one is driver only and
+  // answers the event the room log received; the runner re-checks the resolved IP at dial time.
+  setupTarget: (roomId: string, body: { kind: string; address: string; class?: string }) =>
+    request<Event>(`${room(roomId)}/setup/targets`, { method: 'POST', body: JSON.stringify(body) }),
+  // Raise only: the server answers 400 class_lowered for a class that is not higher.
+  setupTargetClass: (roomId: string, target: string, body: { class: string }) =>
+    request<Event>(`${room(roomId)}/setup/targets/${encodeURIComponent(target)}/class`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  setupPipeline: (roomId: string, body: SetupPipelineExtendBody) =>
+    request<Event>(`${room(roomId)}/setup/pipeline`, { method: 'POST', body: JSON.stringify(body) }),
+  setupMaintenanceWindow: (roomId: string, body: { start: string; end: string }) =>
+    request<Event>(`${room(roomId)}/setup/maintenance-window`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  // 204: the value goes to the paired runner and is stored nowhere on the server, so it is in no
+  // answer, event or log line (the route is excluded from request logging).
+  setupSecret: (roomId: string, body: { name: string; value: string }) =>
+    request<void>(`${room(roomId)}/setup/secret`, { method: 'POST', body: JSON.stringify(body) }),
+  // 202, no body: asks the runner to register the read credentials it generated. The values travel
+  // in the runner's frame after the person confirms on its terminal, never in this request.
+  setupCredentials: (roomId: string) =>
+    request<void>(`${room(roomId)}/setup/credentials`, { method: 'POST' }),
   room: (roomId: string) => request<RoomSnapshot>(room(roomId)),
   events: (roomId: string, after: number, limit = 500) =>
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
