@@ -1008,38 +1008,56 @@ func (c *slowCheckCatalogue) CheckTarget(protocol.OpRequest) string {
 
 // TestCancelDuringChecksStopsTheOp: a FrameCancel read while the op is still
 // in its checks reaches it (the read loop registers the op's cancel before
-// its goroutine starts), so the op is refused and never runs.
+// its goroutine starts), so the op is refused and never runs, at T0 as at T1.
+// Sending the same op twice (a resend after a reconnect) is stopped by the one
+// cancel too.
 func TestCancelDuringChecksStopsTheOp(t *testing.T) {
-	cat := &slowCheckCatalogue{
-		fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": protocol.TierT1}},
-		entered:       make(chan struct{}, 1),
-		release:       make(chan struct{}),
-	}
-	srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
-		doHandshake(t, conn, ctx, "tok", time.Now, nil)
-		p1 := testProposalWithAction("p1", "source_restart")
-		a := opReqPtr("a", "source_restart", protocol.TierT1, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
-		a.Deadline = time.Now().Add(time.Hour)
-		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
-		<-cat.entered
-		writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
-		// The read loop handles a cancel at once; give it ample time before
-		// the check returns.
-		time.Sleep(300 * time.Millisecond)
-		close(cat.release)
-		assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
-	})
-	defer srv.Close()
-	r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Log: quiet(), Catalogue: cat})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := r.Run(context.Background()); err != nil {
-		t.Fatalf("Run = %v", err)
-	}
-	<-done
-	if n := cat.callCount(); n != 0 {
-		t.Fatalf("op ran %d time(s) after it was cancelled during its checks", n)
+	for _, tc := range []struct {
+		name  string
+		tier  string
+		sends int
+	}{
+		{"t0", protocol.TierT0, 1},
+		{"t1", protocol.TierT1, 1},
+		{"t1 resent", protocol.TierT1, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := &slowCheckCatalogue{
+				fakeCatalogue: &fakeCatalogue{floor: map[string]string{"source_restart": tc.tier}},
+				entered:       make(chan struct{}, tc.sends),
+				release:       make(chan struct{}),
+			}
+			srv, done := runServer(t, func(conn *websocket.Conn, ctx context.Context) {
+				doHandshake(t, conn, ctx, "tok", time.Now, nil)
+				p1 := testProposalWithAction("p1", "source_restart")
+				a := opReqPtr("a", "source_restart", tc.tier, "p1", 0, proposalHash(t, p1), proposalRaw(t, p1))
+				a.Deadline = time.Now().Add(time.Hour)
+				for i := 0; i < tc.sends; i++ {
+					writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameOp, Op: a})
+					<-cat.entered
+				}
+				writeFrameJSON(t, conn, ctx, protocol.Frame{Type: protocol.FrameCancel, Cancel: &protocol.Cancel{ID: "a"}})
+				// The read loop handles a cancel at once; give it ample time
+				// before the checks return.
+				time.Sleep(300 * time.Millisecond)
+				close(cat.release)
+				for i := 0; i < tc.sends; i++ {
+					assertRefused(t, conn, ctx, protocol.RefuseNotConfirmed)
+				}
+			})
+			defer srv.Close()
+			r, err := runner.New(runner.Options{ServerURL: srv.URL, Code: "ABCDEFGH", Yes: true, ProjectDir: t.TempDir(), Log: quiet(), Catalogue: cat})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.Run(context.Background()); err != nil {
+				t.Fatalf("Run = %v", err)
+			}
+			<-done
+			if n := cat.callCount(); n != 0 {
+				t.Fatalf("op ran %d time(s) after it was cancelled during its checks", n)
+			}
+		})
 	}
 }
 

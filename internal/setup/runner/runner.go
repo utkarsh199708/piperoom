@@ -159,8 +159,8 @@ type Runner struct {
 	// confirming holds the cancel of each op from the moment its frame is
 	// read until runOp returns: an op still in its checks or waiting for its
 	// T3 "y" is not started (not in inflight), but a FrameCancel must still
-	// stop it.
-	confirming map[string]*context.CancelFunc
+	// stop it. A resent request with the same id adds its own entry.
+	confirming map[string][]*context.CancelFunc
 	opLog      *opLog
 	opLogDone  bool // op log closed; late appends are no-ops
 }
@@ -187,7 +187,7 @@ func New(o Options) (*Runner, error) {
 		proposals:  make(map[string]events.ProposalCreatedPayload),
 		floors:     make(map[string]string),
 		inflight:   make(map[string]*inflightOp),
-		confirming: make(map[string]*context.CancelFunc),
+		confirming: make(map[string][]*context.CancelFunc),
 	}
 	if r.stdin == nil {
 		r.stdin = os.Stdin
