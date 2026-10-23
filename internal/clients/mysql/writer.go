@@ -300,9 +300,19 @@ func accountFail(err error) error {
 
 // grantSelectSQL is SELECT on one table to one account, no GRANT OPTION. Every
 // part already passed its rule: db and table identRe, user identRe, host
-// hostRe.
+// hostRe, so no quote can appear; the user and host are still escaped by
+// quoteLiteral, so the statement stays one account even if a rule loosens.
 func grantSelectSQL(db, table, user, host string) string {
-	return "GRANT SELECT ON " + quoteIdent(db) + "." + quoteIdent(table) + " TO '" + user + "'@'" + host + "'"
+	return "GRANT SELECT ON " + quoteIdent(db) + "." + quoteIdent(table) + " TO " + quoteLiteral(user) + "@" + quoteLiteral(host)
+}
+
+// quoteLiteral is s as a single-quoted MySQL string literal. A backslash is
+// doubled and a single quote is doubled, so under any sql_mode the text can
+// never close the literal early.
+func quoteLiteral(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "'", "''")
+	return "'" + s + "'"
 }
 
 // checkGrantUser validates the grantee name before any I/O: the rule-6

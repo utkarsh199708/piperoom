@@ -432,3 +432,21 @@ func TestEndSessionDeadline(t *testing.T) {
 		t.Fatal("no error after the deadline")
 	}
 }
+
+// TestQuoteLiteral: the account parts of a GRANT stay one literal each, even
+// for text the name rules would refuse.
+func TestQuoteLiteral(t *testing.T) {
+	for in, want := range map[string]string{
+		"debezium":    `'debezium'`,
+		"%":           `'%'`,
+		"o'brien":     `'o''brien'`,
+		`a\' OR 1 --`: `'a\\'' OR 1 --'`,
+	} {
+		if got := quoteLiteral(in); got != want {
+			t.Errorf("quoteLiteral(%q) = %s, want %s", in, got, want)
+		}
+	}
+	if got, want := grantSelectSQL("shop", "orders", "debezium", "%"), "GRANT SELECT ON `shop`.`orders` TO 'debezium'@'%'"; got != want {
+		t.Errorf("grantSelectSQL = %s, want %s", got, want)
+	}
+}
