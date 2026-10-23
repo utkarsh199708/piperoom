@@ -238,7 +238,7 @@ func validateMerged(ctx context.Context, c any, cfg, changes map[string]string) 
 	if class == "" {
 		return &DryRunResult{Source: sourceValidate, Skipped: "the connector config has no connector.class"}, nil
 	}
-	next := make(map[string]string, len(cfg)+len(changes))
+	next := make(map[string]string, len(cfg))
 	for k, val := range cfg {
 		next[k] = val
 	}
