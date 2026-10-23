@@ -1996,9 +1996,53 @@ type ShadowGradedPayload struct {
 
 // Layers are the pipeline layers that own nodes and approve fixes, of every
 // pipeline kind: the six CDC layers first, then the batch-only ones (P4),
-// then the setup layer (U). A check of "is this a known layer" uses Layers;
-// the layers of one pipeline come from LayersOf(its kind).
-var Layers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform", LayerEnvironment}
+// then the setup layer (U), then the MySQL source layer (Q8: appended after
+// LayerEnvironment so no existing position moves). A check of "is this a
+// known layer" uses Layers; the layers of one pipeline come from
+// LayersOfSource(its kind, its source_kind).
+var Layers = []string{"postgres", "kafka-connect", "schema-registry", "kafka", "consumer", "warehouse", "orchestrator", "transform", LayerEnvironment, LayerMySQL}
+
+// Source kinds of a CDC pipeline: owners.yaml source_kind (Q8). The same
+// strings as SetupRequest.SourceKind.
+const (
+	SourceKindPostgres = "postgres"
+	SourceKindMySQL    = "mysql"
+)
+
+// LayerMySQL is the source layer of a pipeline whose source_kind is mysql: it
+// takes the place of "postgres" in LayersOfSource. (Q8)
+const LayerMySQL = "mysql"
+
+// SourceLayer returns the layer of a source database of the given source kind
+// ("" = postgres), or "" for an unknown kind, which fails closed: no owner
+// owns "". (Q8)
+func SourceLayer(sourceKind string) string {
+	switch sourceKind {
+	case "", SourceKindPostgres:
+		return "postgres"
+	case SourceKindMySQL:
+		return LayerMySQL
+	}
+	return ""
+}
+
+// LayersOfSource returns the layers of a pipeline of kind and sourceKind,
+// upstream first: LayersOf(kind) with its source layer (index 0 of a cdc
+// pipeline) replaced by SourceLayer(sourceKind). A batch pipeline ignores
+// sourceKind. An unknown sourceKind on a cdc pipeline answers nil. New slice
+// per call. (Q8)
+func LayersOfSource(kind, sourceKind string) []string {
+	l := LayersOf(kind)
+	if kind != "" && kind != PipelineKindCDC {
+		return l
+	}
+	sl := SourceLayer(sourceKind)
+	if sl == "" || len(l) == 0 {
+		return nil
+	}
+	l[0] = sl
+	return l
+}
 
 // IncidentLayers are the layers an incident can be in: Layers without the
 // setup layer. The triage schema's suspected_layer enum, the room label,

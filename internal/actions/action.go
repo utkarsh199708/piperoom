@@ -269,6 +269,34 @@ func ClassOf(a Action) string {
 	return ClassFix
 }
 
+// SourceLayered marks an action on the pipeline's source database whose
+// approving layer is the pipeline's source layer (events.SourceLayer of its
+// source_kind: postgres or mysql), not Layer(). Layer() of such an action
+// answers "postgres", the value a caller without a pipeline shows. The room
+// and the agent take the layer from LayerFor. (Q8)
+type SourceLayered interface {
+	Action
+	// SourceLayered has no behaviour; it only marks the action.
+	SourceLayered()
+}
+
+// LayerFor returns the layer whose owner approves a step of a on a pipeline
+// whose source_kind is sourceKind ("" = postgres): SourceLayer(sourceKind)
+// for a SourceLayered action ("" for an unknown kind, which no owner owns),
+// a.Layer() otherwise. (Q8)
+//
+// Q0 item 6 (Q7-0c, the fix-PR action's Layered.LayerFor) also makes a
+// step's approving layer depend on context and is not in this file yet.
+// Whichever of items 6 and 7 lands second folds the two rules into one entry
+// point (e.g. StepLayer(a, p owners.Pipeline, params)) that the room and the
+// agent call instead of this function (tasks/Q-board.md, "7. MySQL source").
+func LayerFor(a Action, sourceKind string) string {
+	if _, ok := a.(SourceLayered); ok {
+		return events.SourceLayer(sourceKind)
+	}
+	return a.Layer()
+}
+
 // Default poll schedule of a recovery verification: the agent calls Verify
 // first RecoveryVerifyFirstPoll after the step ran, doubles the wait up to
 // RecoveryVerifyMaxPoll, and stops when After is 0 or RecoveryVerifyTimeout

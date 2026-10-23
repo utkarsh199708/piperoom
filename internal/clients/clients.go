@@ -585,19 +585,27 @@ type ACLReader interface {
 	ACLs(ctx context.Context, topics, groups []string) ([]ACLEntry, error)
 }
 
-// ---- Source Postgres (the CDC source) ----
+// ---- Source database (the CDC source: Postgres, or MySQL from Q8) ----
 
-// SourceReader is the source Postgres client as read-only tools take it.
+// SourceReader is the source database client as read-only tools take it:
+// Postgres, or MySQL when the pipeline's source_kind is mysql (Q8).
 type SourceReader interface {
+	// ReplicationSlots lists the Postgres replication slots. MySQL has none:
+	// ErrNotSupported.
 	ReplicationSlots(ctx context.Context) ([]ReplicationSlot, error)
 	// RecentDDL reads the DDL audit table written by an event trigger
-	// (see dev/postgres-init). Newest first.
+	// (see dev/postgres-init). Newest first. MySQL has no DDL trigger:
+	// ErrNotSupported; a MySQL pipeline's DDL is in the connector's schema
+	// history topic (tool kafka_schema_history).
 	RecentDDL(ctx context.Context, since time.Time, limit int) ([]DDLChange, error)
 	// LongTransactions lists open transactions older than olderThan. Read-only
 	// ones are included (they block DDL and VACUUM); Transaction.HasXID marks
-	// writers, the only ones that hold the WAL horizon for a slot.
+	// writers, the only ones that hold the WAL horizon for a slot. On MySQL
+	// PID is the processlist id and HasXID means the transaction has
+	// modified rows.
 	LongTransactions(ctx context.Context, olderThan time.Duration) ([]Transaction, error)
-	// Row reads one row by primary key. table is "schema.table".
+	// Row reads one row by primary key. table is "schema.table" on Postgres,
+	// "db.table" on MySQL.
 	Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error)
 }
 
@@ -640,6 +648,201 @@ type SourceWriter interface {
 	// connector's signal.data.collection, "schema.table") and returns the row
 	// id. connectorID names the connector the signal is for.
 	InsertSnapshotSignal(ctx context.Context, signalTable, connectorID string, tables []string) (signalID string, err error)
+}
+
+// ---- Q0 item 2: source settings and admin (Q2a, Q2b; MySQL Q8) ----
+
+// SourceSettingsReader is the read-only source-settings surface of a CDC
+// source. Postgres (Q2a) and MySQL (Q8b) implement it. It is not embedded in
+// SourceDB: a tool asserts it at use time, so the fakes and the eval replay
+// need not implement it. Every method is read-only and bounded by a 10 s
+// deadline. Table identifiers are validated (^[a-zA-Z_][a-zA-Z0-9_]*$) before
+// any I/O.
+type SourceSettingsReader interface {
+	// Settings returns the fixed list of CDC-relevant settings that the
+	// server reports, in the client's report order. A setting the server
+	// does not have (max_slot_wal_keep_size before PG 13,
+	// rds.logical_replication outside RDS/Aurora) is simply absent from the
+	// result.
+	Settings(ctx context.Context) ([]DBSetting, error)
+	// TableReplication returns one entry per table, in that order, with its
+	// primary key presence and replica identity (default, full, index or
+	// nothing). A table that does not exist is ErrNotFound.
+	TableReplication(ctx context.Context, tables []string) ([]TableReplication, error)
+	// RoleInfo reports whether role exists, can log in and may replicate,
+	// and its SELECT privilege on each table. A missing role is not an error:
+	// Exists is false and every table is false in Selectable.
+	RoleInfo(ctx context.Context, role string, tables []string) (RoleInfo, error)
+	// Blockers lists the sessions that can hold back the CDC stream: an open
+	// transaction older than olderThan, or (Postgres) the session holding the
+	// oldest xmin. Query is redacted (N5) and cut to a short fragment.
+	Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession, error)
+}
+
+// ScopedBlockerReader is the pipeline-scoped Blockers: a session that holds or
+// waits for no lock on one of tables comes back anonymised (InScope false).
+// Postgres (Q2a) and MySQL (Q8b) implement it next to SourceSettingsReader.
+type ScopedBlockerReader interface {
+	BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]DBSession, error)
+}
+
+// DBSetting is one server setting with its changed-but-not-yet-applied flag.
+type DBSetting struct {
+	Name           string `json:"name"`
+	Value          string `json:"value"`
+	Unit           string `json:"unit,omitempty"`
+	PendingRestart bool   `json:"pending_restart,omitempty"`
+}
+
+// TableReplication is a table's primary key presence, replica identity and
+// (MySQL) storage engine.
+type TableReplication struct {
+	Table           string `json:"table"`
+	HasPrimaryKey   bool   `json:"has_primary_key"`
+	ReplicaIdentity string `json:"replica_identity,omitempty"` // default | full | index | nothing; "" when the source has none (MySQL)
+	// Engine is the MySQL storage engine (InnoDB, MyISAM, ...); "" on
+	// Postgres. A non-transactional engine changes what a snapshot can
+	// promise. (Q8)
+	Engine string `json:"engine,omitempty"`
+}
+
+// RoleInfo is a source role's login/replication rights and SELECT privilege
+// per table.
+type RoleInfo struct {
+	Role        string          `json:"role"`
+	Exists      bool            `json:"exists"`
+	CanLogin    bool            `json:"can_login"`
+	Replication bool            `json:"replication"` // Postgres REPLICATION; MySQL REPLICATION SLAVE and REPLICATION CLIENT
+	Selectable  map[string]bool `json:"selectable"`  // table -> SELECT
+	// Accounts are the MySQL accounts ("user@host") with this user name;
+	// nil on Postgres. With more than one, every flag above and in
+	// Privileges is true only if it is true for every account. (Q8)
+	Accounts []string `json:"accounts,omitempty"`
+	// Privileges are the further global privileges the source's CDC
+	// connector needs, by the source's own name (MySQL: RELOAD, LOCK TABLES,
+	// SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT); nil when the
+	// source has none to report. (Q8)
+	Privileges map[string]bool `json:"privileges,omitempty"`
+}
+
+// DBSession is one session that can hold back the CDC stream. Query is
+// untrusted text: redacted and cut before it leaves the client. InScope is
+// false for a session a scoped read anonymised (ScopedBlockerReader): its
+// User, App and Query are blank because they belong to another pipeline, user
+// or database.
+type DBSession struct {
+	// PID is the backend pid on Postgres, the processlist id (what KILL
+	// takes) on MySQL.
+	PID int64 `json:"pid"`
+	// StartedAt is, with PID, the identity EndSession re-checks: the backend
+	// start on Postgres; on MySQL the open transaction's start
+	// (innodb_trx.trx_started), or zero for a session without one.
+	StartedAt time.Time `json:"started_at"`
+	XactStart time.Time `json:"xact_start"`
+	User      string    `json:"user"`
+	App       string    `json:"application"`
+	State     string    `json:"state"`
+	Query     string    `json:"query"` // untrusted, redacted, at most 200 bytes
+	// BlocksSlot is true on Postgres for the session holding back the
+	// slot's horizon; on MySQL it means "holds a lock a session of the
+	// connector's user waits for".
+	BlocksSlot bool `json:"blocks_slot"`
+	InScope    bool `json:"in_scope"`
+	// OldXact, SameDB and ClientBackend are never shown: the session's
+	// transaction is older than the read's threshold (by the server's
+	// clock), it is connected to the database this client reads (not
+	// another tenant's database on the server), and it is an ordinary client
+	// backend (not autovacuum, a logical replication worker or another
+	// background process). source_end_session needs all three before it ends
+	// a session whose identity the scoped read withheld.
+	OldXact       bool `json:"-"`
+	SameDB        bool `json:"-"`
+	ClientBackend bool `json:"-"`
+}
+
+// SourceAdminWriter is the source admin writer (Q2b; MySQL Q8f). It is built
+// only with write mode on, on the SOURCE_DB_WRITE_URL pool, never on the
+// read-only SourceDB pool; no SOURCE_DB_WRITE_URL = no writer. Not embedded in
+// SourceDB or SourceWriter. Every method requires the room's pipeline scope in
+// ctx (tools.WithPipeline) or the explicit tools.WithUnscoped opt-out, and
+// refuses with tools.ErrNoScope / tools.ErrOutOfScope before any I/O.
+// Identifiers are checked against ^[a-zA-Z_][a-zA-Z0-9_]*$ and quoted by the
+// source's rule (AGENTS.md §4 rule 6); values are parameters; no statement is
+// built from untrusted text.
+type SourceAdminWriter interface {
+	// SetReplicaIdentity sets ALTER TABLE ... REPLICA IDENTITY: mode full |
+	// default | index, where index is the unique index's name and only mode
+	// index takes one.
+	SetReplicaIdentity(ctx context.Context, table, mode, index string) error
+	// GrantSelect grants SELECT and nothing else on tables to role.
+	GrantSelect(ctx context.Context, role string, tables []string) error
+	// CreateHeartbeatTable creates the Debezium heartbeat table if it does
+	// not exist.
+	CreateHeartbeatTable(ctx context.Context, table string) error
+	// EndSession ends the session pid, refused as ErrSessionChanged when pid
+	// no longer names the session that started at startedAt, and as
+	// ErrSessionProtected for a session Piperoom never ends.
+	EndSession(ctx context.Context, pid int64, startedAt time.Time) error
+}
+
+// ErrSessionChanged is returned (wrapped) by SourceAdminWriter.EndSession when
+// pid no longer names the session that was read: the session is gone, or the
+// pid now names a session that started at another time. Nothing was ended.
+var ErrSessionChanged = errors.New("clients: database session changed since it was read")
+
+// ErrSessionProtected is returned (wrapped) by SourceAdminWriter.EndSession
+// for a session Piperoom never ends: its own pools' sessions, the CDC
+// stream's session (a Postgres walsender, a MySQL binlog dump thread), the
+// server's background threads. Nothing was ended.
+var ErrSessionProtected = errors.New("clients: refusing to end a protected session")
+
+// ---- Q8: MySQL binlog (optional on a SourceDB, asserted at use time) ----
+
+// MaxBinlogFiles caps BinlogStatus.Binlogs; the oldest files are kept,
+// because the oldest file is the fact a purge check needs. (Q8)
+const MaxBinlogFiles = 500
+
+// BinlogReader is implemented by the MySQL source client (Q8b). It is never
+// embedded in SourceDB: a Postgres client, the fakes and the eval replay have
+// none, and a tool that asserts it on them answers ErrNotSupported. Read-only;
+// 10 s per call. (Q8)
+type BinlogReader interface {
+	BinlogStatus(ctx context.Context) (BinlogStatus, error)
+}
+
+// BinlogStatus is the binlog state of a MySQL server: positions and names
+// only, never event contents. (Q8)
+type BinlogStatus struct {
+	// File and Pos are the current write position (SHOW BINARY LOG STATUS,
+	// SHOW MASTER STATUS before 8.2).
+	File string `json:"file"`
+	Pos  int64  `json:"pos"`
+	// GTIDMode is @@gtid_mode (OFF, OFF_PERMISSIVE, ON_PERMISSIVE, ON).
+	GTIDMode string `json:"gtid_mode"`
+	// GTIDExecuted and GTIDPurged are @@global.gtid_executed and
+	// @@global.gtid_purged, as the server prints them; "" with GTIDs off.
+	GTIDExecuted string `json:"gtid_executed"`
+	GTIDPurged   string `json:"gtid_purged"`
+	// ServerID and ServerUUID identify the server, so a stored position from
+	// another server (after a failover) can be told apart.
+	ServerID   int64  `json:"server_id"`
+	ServerUUID string `json:"server_uuid"`
+	// Binlogs are the files the server still has (SHOW BINARY LOGS), oldest
+	// first, at most MaxBinlogFiles; BinlogsOmitted counts the newest ones
+	// left out.
+	Binlogs        []BinlogFile `json:"binlogs"`
+	BinlogsOmitted int          `json:"binlogs_omitted,omitempty"`
+	// ExpireSeconds is binlog_expire_logs_seconds; 0 = never purged by age.
+	// RetentionHours is RDS/Aurora's "binlog retention hours"
+	// (mysql.rds_show_configuration); nil when not on RDS or not readable.
+	ExpireSeconds  int64  `json:"expire_seconds"`
+	RetentionHours *int64 `json:"retention_hours,omitempty"`
+}
+
+// BinlogFile is one binlog file the server still has. (Q8)
+type BinlogFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
 }
 
 // ---- X2: targeted re-snapshot over a signal table (recovery) ----

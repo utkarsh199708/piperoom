@@ -15,105 +15,29 @@ import (
 )
 
 // The Q2a source-settings reads (Q board row Q2a). The interface and its DTOs
-// are the local adapter for the Q board's clients.SourceSettingsReader: the
-// contract file internal/clients/clients.go does not carry them yet, so they
-// live here until Q0 adopts them (see the contract change request in the PR).
-// The shapes and JSON tags are exactly the board's, so adopting them later is
-// a move, not a rewrite.
+// are Q0 item 2 of the contract file internal/clients/clients.go (moved there
+// by Q8-0); the aliases below keep every caller of the postgres names
+// compiling unchanged.
 
-// SourceSettingsReader is the read-only source-settings surface of a CDC
-// source. Postgres implements it here; MySQL (Q8b) implements the same
-// methods. Every method is read-only and bounded by a 10 s deadline. Table
-// identifiers are validated (^[a-zA-Z_][a-zA-Z0-9_]*$) before any I/O.
-type SourceSettingsReader interface {
-	// Settings returns the fixed list of CDC-relevant settings that the
-	// server reports, in the order of settingNames. A setting the server does
-	// not have (max_slot_wal_keep_size before PG 13, rds.logical_replication
-	// outside RDS/Aurora) is simply absent from the result.
-	Settings(ctx context.Context) ([]DBSetting, error)
-	// TableReplication returns one entry per table, in that order, with its
-	// primary key presence and replica identity (default, full, index or
-	// nothing). A table that does not exist is clients.ErrNotFound.
-	TableReplication(ctx context.Context, tables []string) ([]TableReplication, error)
-	// RoleInfo reports whether role exists, can log in and may replicate,
-	// and its SELECT privilege on each table. A missing role is not an error:
-	// Exists is false and every table is false in Selectable.
-	RoleInfo(ctx context.Context, role string, tables []string) (RoleInfo, error)
-	// Blockers lists the sessions that can hold back logical replication:
-	// an open transaction older than olderThan, or the session holding the
-	// oldest xmin. Query is redacted (N5) and at most MaxSessionQueryBytes.
-	Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession, error)
-}
+// SourceSettingsReader is clients.SourceSettingsReader.
+type SourceSettingsReader = clients.SourceSettingsReader
 
-// DBSetting is one server setting with its changed-but-not-yet-applied flag.
-type DBSetting struct {
-	Name           string `json:"name"`
-	Value          string `json:"value"`
-	Unit           string `json:"unit,omitempty"`
-	PendingRestart bool   `json:"pending_restart,omitempty"`
-}
+// DBSetting is clients.DBSetting.
+type DBSetting = clients.DBSetting
 
-// TableReplication is a table's primary key presence, replica identity
-// (Postgres) and storage engine (MySQL).
-type TableReplication struct {
-	Table           string `json:"table"`
-	HasPrimaryKey   bool   `json:"has_primary_key"`
-	ReplicaIdentity string `json:"replica_identity,omitempty"` // default | full | index | nothing; "" when the source has none (MySQL)
-	// Engine is the MySQL storage engine (InnoDB, MyISAM, ...); "" on
-	// Postgres. Additive, as docs/design/mysql-source.md §5.2 (b) has it
-	// (Q8n), so a MySQL read maps onto this type without loss (srcneutral).
-	Engine string `json:"engine,omitempty"`
-}
+// TableReplication is clients.TableReplication.
+type TableReplication = clients.TableReplication
 
-// RoleInfo is a source role's login/replication rights and SELECT privilege
-// per table.
-type RoleInfo struct {
-	Role        string          `json:"role"`
-	Exists      bool            `json:"exists"`
-	CanLogin    bool            `json:"can_login"`
-	Replication bool            `json:"replication"` // Postgres REPLICATION; MySQL REPLICATION SLAVE and CLIENT
-	Selectable  map[string]bool `json:"selectable"`  // table -> SELECT
-	// Accounts are the MySQL accounts ("user@host") with this user name;
-	// nil on Postgres. With more than one, every flag above and in
-	// Privileges is true only if it is true for every account. Additive
-	// (design §5.2 (b), Q8n).
-	Accounts []string `json:"accounts,omitempty"`
-	// Privileges are the further global privileges the source's CDC
-	// connector needs, by the source's own name (MySQL: RELOAD, LOCK TABLES,
-	// SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT); nil on
-	// Postgres. Additive (design §5.2 (b), Q8n).
-	Privileges map[string]bool `json:"privileges,omitempty"`
-}
+// RoleInfo is clients.RoleInfo.
+type RoleInfo = clients.RoleInfo
 
-// DBSession is one session that can hold back logical replication. Query is
-// untrusted text: redacted and cut before it leaves the client. InScope is
-// false for a session a scoped read anonymised (see BlockersOnTables): its
-// User, App and Query are blank because they belong to another pipeline, user
-// or database. (InScope is additive to the Q-board shape; see the PR's
-// contract change request.)
-type DBSession struct {
-	PID        int64     `json:"pid"`
-	StartedAt  time.Time `json:"started_at"` // backend start; with PID, the identity EndSession re-checks
-	XactStart  time.Time `json:"xact_start"`
-	User       string    `json:"user"`
-	App        string    `json:"application"`
-	State      string    `json:"state"`
-	Query      string    `json:"query"` // untrusted, redacted, at most 200 bytes
-	BlocksSlot bool      `json:"blocks_slot"`
-	InScope    bool      `json:"in_scope"`
-	// OldXact, SameDB and ClientBackend are never shown: the session's
-	// transaction is older than the read's threshold (by the server's
-	// clock), it is connected to the database this client reads (not
-	// another tenant's database on the server), and it is an ordinary client
-	// backend (not autovacuum, a logical replication worker or another
-	// background process). source_end_session needs all three before it ends
-	// a session whose identity the scoped read withheld.
-	OldXact       bool `json:"-"`
-	SameDB        bool `json:"-"`
-	ClientBackend bool `json:"-"`
-}
+// DBSession is clients.DBSession.
+type DBSession = clients.DBSession
 
-var _ SourceSettingsReader = (*DB)(nil)
+var (
+	_ SourceSettingsReader        = (*DB)(nil)
+	_ clients.ScopedBlockerReader = (*DB)(nil)
+)
 
 // MaxSessionQueryBytes caps DBSession.Query. The query often holds literal row
 // values, so only a short redacted fragment leaves the client.

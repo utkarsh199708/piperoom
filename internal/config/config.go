@@ -21,8 +21,8 @@ import (
 type Config struct {
 	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default; dev mode off loopback needs PIPEROOM_DEV_ALLOW_NONLOOPBACK)
 	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
-	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
-	SourceDBWriteURL  string // SOURCE_DB_WRITE_URL (P0 item 7): the source Postgres as a separate WRITE role for the pg write actions, never the read-only SOURCE_DB_URL role; empty = no writer (those actions refuse at Execute: "no write credentials"; #606); secret
+	SourceDBURL       string // SOURCE_DB_URL (the CDC source database: postgres:// or mysql://; a pipeline's source_kind must match the scheme, Q8)
+	SourceDBWriteURL  string // SOURCE_DB_WRITE_URL (P0 item 7): the source database (postgres:// or mysql://, matching source_kind, Q8) as a separate WRITE role for the pg write actions, never the read-only SOURCE_DB_URL role; empty = no writer (those actions refuse at Execute: "no write credentials"; #606); secret
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (DSN for the selected warehouse kind)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
 	ConnectURL        string // CONNECT_URL
