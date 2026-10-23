@@ -202,6 +202,9 @@ func newLifecycleFake() *lifecycleFake {
 			"snapshot.mode":      "initial",
 			"topic.prefix":       "orders",
 			"table.include.list": "public.orders",
+			// The host the pipeline already reaches: the create action's host
+			// guard collects it from this registered connector's config.
+			"database.hostname": "postgres",
 		}},
 		offsets: map[string][]connect.SourceOffset{lifecycleConnector: {{
 			Partition: map[string]any{"server": "orders"},

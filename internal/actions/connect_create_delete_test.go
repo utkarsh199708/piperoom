@@ -101,21 +101,45 @@ func TestCreateConnectorConfigGuards(t *testing.T) {
 	}
 }
 
-func TestCreateConnectorAcceptsProviderReferences(t *testing.T) {
-	for _, ref := range []string{"${file:/secrets/pg.properties:password}", "${env:PG_PASSWORD}", "${secret:source_password}"} {
-		t.Run(ref, func(t *testing.T) {
-			f := newLifecycleFake()
-			f.names = nil
-			a := createAction(t, f)
-			in, _ := json.Marshal(map[string]any{
-				"connector": "pg-orders-connector",
-				"config":    map[string]string{"connector.class": "c", "database.password": ref},
-			})
-			if err := a.Validate(scoped(), json.RawMessage(in)); err != nil {
-				t.Fatalf("reference %s refused: %v", ref, err)
-			}
+// Only the ${secret:...} form is accepted from a proposal, and only on a
+// credential or converter key: Connect resolves ${file:}/${env:} server-side
+// during Preview's validate round trip and can echo the resolved value in a
+// validation message, before anyone approves (the Q4a validate tool's rule).
+func TestCreateConnectorReferenceForms(t *testing.T) {
+	validateRef := func(t *testing.T, key, ref string) error {
+		t.Helper()
+		f := newLifecycleFake()
+		f.names = nil
+		a := createAction(t, f)
+		in, _ := json.Marshal(map[string]any{
+			"connector": "pg-orders-connector",
+			"config":    map[string]string{"connector.class": "c", key: ref},
 		})
+		return a.Validate(scoped(), json.RawMessage(in))
 	}
+	if err := validateRef(t, "database.password", "${secret:source_password}"); err != nil {
+		t.Fatalf("${secret:...} on a credential key refused: %v", err)
+	}
+	for _, ref := range []string{"${file:/secrets/pg.properties:password}", "${env:PG_PASSWORD}"} {
+		err := validateRef(t, "database.password", ref)
+		if err == nil {
+			t.Fatalf("reference %s accepted; Connect can resolve and echo it server-side", ref)
+		}
+		if !strings.Contains(err.Error(), "only ${secret:...}") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	// A reference on a non-credential key is refused: a validation message
+	// could echo the resolved value whatever key it sits under.
+	if err := validateRef(t, "tasks.max", "${secret:source_password}"); err == nil || !strings.Contains(err.Error(), "not a credential key") {
+		t.Fatalf("reference on a non-credential key: %v", err)
+	}
+	// A converter key may carry a reference (schema-registry credentials such
+	// as basic.auth.user.info live under it).
+	if err := validateRef(t, "value.converter.basic.auth.user.info", "${secret:sr_auth}"); err != nil {
+		t.Fatalf("reference on a converter key refused: %v", err)
+	}
+
 	// A converter class is not a credential although its key has a "key" segment.
 	f := newLifecycleFake()
 	f.names = nil
@@ -164,9 +188,18 @@ func TestCreateConnectorPreviewRunsValidate(t *testing.T) {
 	if f2.refusedWrites() != 0 || len(f2.created) != 0 {
 		t.Fatal("Preview wrote")
 	}
-	// The config was sent to Connect whole, references included.
+	// The config was sent to Connect whole, references included, and with the
+	// connector's name under "name": Connect's validate endpoint reports a
+	// missing required name otherwise, which would fail every create.
 	if f2.validated["database.password"] != "${secret:source_password}" {
 		t.Fatalf("validated config = %+v", f2.validated)
+	}
+	if f2.validated["name"] != "pg-orders-connector" {
+		t.Fatalf("validated config carries name %q, want the connector's", f2.validated["name"])
+	}
+	// The approver sees where the connector points.
+	if !strings.Contains(res.Current, "database.hostname -> postgres") {
+		t.Fatalf("preview does not name the hosts: %q", res.Current)
 	}
 }
 
@@ -378,6 +411,27 @@ func TestCreateDeleteRetryOnTimeoutAndRebalance(t *testing.T) {
 			t.Fatalf("attempts=%d, want 1 (the landed create is not repeated)", f.attempts)
 		}
 	})
+	t.Run("create times out, another create won", func(t *testing.T) {
+		// The name turns up registered after the timeout, but with a config
+		// that is not the approved one: a concurrent actor won the race, and
+		// claiming "created connector X" would put a false result in the room
+		// log.
+		f := &retryCreateFake{
+			lifecycleFake: newLifecycleFake(),
+			errs:          []error{timeout, timeout, timeout},
+			landed:        true,
+			landedConfig:  map[string]string{"connector.class": "other.Class"},
+		}
+		f.names = nil
+		f.allowWrites = true
+		_, err := createAction(t, f).Execute(scoped(), json.RawMessage(createIn))
+		if err == nil || !strings.Contains(err.Error(), "not claimed") {
+			t.Fatalf("Execute: %v, want the create not claimed", err)
+		}
+		if strings.Contains(err.Error(), "other.Class") || strings.Contains(err.Error(), "source_password") {
+			t.Fatalf("err leaks a config value: %v", err)
+		}
+	})
 	t.Run("create rebalance then succeeds", func(t *testing.T) {
 		f := &retryCreateFake{lifecycleFake: newLifecycleFake(), errs: []error{connect.ErrRebalancing, nil}}
 		f.names = nil
@@ -413,12 +467,14 @@ func TestCreateDeleteRetryOnTimeoutAndRebalance(t *testing.T) {
 
 // retryCreateFake returns queued create errors, one per attempt. landed makes
 // a timed-out attempt append the name, as Connect does when the create was
-// applied but the response was lost.
+// applied but the response was lost; landedConfig registers that config
+// instead of the request's own (a concurrent create of the same name).
 type retryCreateFake struct {
 	*lifecycleFake
-	errs     []error
-	landed   bool
-	attempts int
+	errs         []error
+	landed       bool
+	landedConfig map[string]string
+	attempts     int
 }
 
 func (f *retryCreateFake) CreateConnector(ctx context.Context, name string, cfg map[string]string) error {
@@ -433,6 +489,16 @@ func (f *retryCreateFake) CreateConnector(ctx context.Context, name string, cfg 
 	}
 	if f.landed {
 		f.lifecycleFake.names = append(f.lifecycleFake.names, name)
+		// A landed create stores the config too; Execute's landed detection
+		// reads it back before claiming the create.
+		stored := f.landedConfig
+		if stored == nil {
+			stored = make(map[string]string, len(cfg))
+			for k, v := range cfg {
+				stored[k] = v
+			}
+		}
+		f.lifecycleFake.configs[name] = stored
 		f.landed = false
 	}
 	return err
@@ -497,6 +563,13 @@ func TestConfigSecretKeyExemptions(t *testing.T) {
 		"message.key.columns":                 false,
 		"transforms.unwrap.key.format":        false,
 		"task.max":                            false,
+		// The converter exemption covers only the bare "key" segment: a
+		// credential substring under a converter prefix is still a credential
+		// (a schema-registry keystore password is as much a secret as a
+		// database password).
+		"value.converter.schema.registry.ssl.keystore.password": true,
+		"key.converter.basic.auth.user.secret":                  true,
+		"db.password.key.format":                                true,
 	}
 	for key, want := range tests {
 		if got := lifecycleConfigSecretKey(key); got != want {

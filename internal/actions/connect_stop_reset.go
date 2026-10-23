@@ -130,6 +130,11 @@ func (a *stopConnector) Preview(ctx context.Context, raw json.RawMessage) (Previ
 	}
 	res.Reversible = true
 	res.Rollback = rollbackText("connect_resume_connector", map[string]string{"connector": name})
+	if st.State == "PAUSED" {
+		// A resume moves a connector to RUNNING, never back to PAUSED: the
+		// approver must not read the undo as restoring the paused state.
+		res.Expected += "; note: the undo (connect_resume_connector) sets it RUNNING, not back to PAUSED"
+	}
 	return res, nil
 }
 
@@ -271,7 +276,21 @@ func checkPositionMap(what string, m map[string]any) error {
 			return fmt.Errorf("actions: %s: a %s key is longer than %d bytes", ResetSourceOffsetsName, what, maxPositionKeyBytes)
 		}
 		switch x := v.(type) {
-		case json.Number, string, bool, nil:
+		case json.Number:
+			if len(x.String()) > 64 {
+				return fmt.Errorf("actions: %s: %s.%s is a number longer than 64 bytes", ResetSourceOffsetsName, what, shortText(k))
+			}
+		case string:
+			// Enforced at parse so the no-stored-shape path (after a full
+			// reset) cannot write an unbounded or control-character string:
+			// checkPositionValue only runs against a stored shape.
+			if len(x) > maxPositionStringBytes {
+				return fmt.Errorf("actions: %s: %s.%s is a string longer than %d bytes", ResetSourceOffsetsName, what, shortText(k), maxPositionStringBytes)
+			}
+			if strings.ContainsAny(x, "\x00\r\n") {
+				return fmt.Errorf("actions: %s: %s.%s contains a control character", ResetSourceOffsetsName, what, shortText(k))
+			}
+		case bool, nil:
 		default:
 			return fmt.Errorf("actions: %s: %s.%s is a %T; a position holds only strings, numbers, booleans and null", ResetSourceOffsetsName, what, shortText(k), x)
 		}
@@ -326,12 +345,31 @@ func checkStopStep(name, state string, stopFirst bool) error {
 
 // requireStoppedNow is Execute's re-check: the promised stop step must really
 // have run, because Connect refuses offset changes on a running connector.
-func requireStoppedNow(name, state string) error {
+// A stop is applied asynchronously and the stop step reports success once the
+// stop is accepted, so a connector still mid-stop gets a short settling poll
+// (a few poll intervals) before the refusal; the refusal then tells a slow
+// stop apart from a missing stop step.
+func (a *resetSourceOffsets) requireStoppedNow(ctx context.Context, name, state string) error {
 	if state == "STOPPED" {
 		return nil
 	}
-	return fmt.Errorf("actions: %s: connector %s is %s at execution; the %s step must run before this one in the same proposal: %w",
-		ResetSourceOffsetsName, name, orUnknown(state), StopConnectorName, ErrStopStepRequired)
+	pctx, cancel := context.WithTimeout(ctx, 6*a.d.poll())
+	defer cancel()
+	last, stopped, _ := awaitState(pctx, a.d.poll(), "STOPPED", func(ctx context.Context) (string, error) {
+		st, err := a.d.Connect.Status(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		return st.State, nil
+	})
+	if stopped {
+		return nil
+	}
+	if last == "" {
+		last = state
+	}
+	return fmt.Errorf("actions: %s: connector %s is %s at execution; if the %s step just ran, its stop has not settled yet (retry shortly); otherwise that step must run before this one in the same proposal: %w",
+		ResetSourceOffsetsName, name, orUnknown(last), StopConnectorName, ErrStopStepRequired)
 }
 
 func (a *resetSourceOffsets) Validate(ctx context.Context, raw json.RawMessage) error {
@@ -482,8 +520,20 @@ func (a *resetSourceOffsets) Preview(ctx context.Context, raw json.RawMessage) (
 			return res, nil
 		}
 		res.Expected = "no stored offsets after the reset; " + snapshotRestart(cfg, a.tableEstimate(ctx), false)
-		res.Reversible = true
-		res.Rollback = resetRollback(p.Connector, positions[0])
+		// The advertised rollback writes the cleared position back AFTER the
+		// clear, when the connector stores no shape to compare with: that
+		// path (checkPositionWithoutShape) only accepts a Debezium
+		// {"server": topic.prefix} partition, so for any other stored
+		// partition the rollback would be refused and the reset must not
+		// claim to be reversible.
+		rbPos := sourcePosition{Partition: positions[0].Partition, Offset: positions[0].Offset}
+		if err := checkPositionWithoutShape(p.Connector, cfg, rbPos); err != nil {
+			res.Reversible = false
+			res.Expected += "; this action could not write the cleared position back afterwards (the partition's shape cannot be re-checked once cleared), so the clear is not reversible here"
+		} else {
+			res.Reversible = true
+			res.Rollback = resetRollback(p.Connector, positions[0])
+		}
 	} else if len(offs) == 0 {
 		// No entry to compare with (a full reset left none): the partition was
 		// checked against the config above.
@@ -494,6 +544,11 @@ func (a *resetSourceOffsets) Preview(ctx context.Context, raw json.RawMessage) (
 		stored, err := matchPosition(p.Connector, offs, *p.Position)
 		if err != nil {
 			return PreviewResult{}, previewErr(a.Name(), err)
+		}
+		if sameSourceOffset(stored, *p.Position) {
+			// Execute skips this write; the preview must not promise a change.
+			res.Expected = "no change: the stored offset already is " + formatStoredOffset(stored)
+			return res, nil
 		}
 		extra := ""
 		if len(offs) > 1 {
@@ -538,7 +593,7 @@ func (a *resetSourceOffsets) Execute(ctx context.Context, raw json.RawMessage) (
 	if err := requireSourceStatus(p.Connector, st); err != nil {
 		return "", err
 	}
-	if err := requireStoppedNow(p.Connector, st.State); err != nil {
+	if err := a.requireStoppedNow(ctx, p.Connector, st.State); err != nil {
 		return "", err
 	}
 	offs, err := a.readStoredOffsets(ctx, p.Connector)
@@ -690,12 +745,20 @@ func checkPositionValue(name, key string, stored, want any) error {
 			return fmt.Errorf("actions: %s: connector %s: %s is a number in the stored offset, not a %T: %w",
 				ResetSourceOffsetsName, name, key, want, ErrSourcePosition)
 		}
+		if n.String() == sv.String() {
+			// Writing back exactly what is stored is always sound, whatever
+			// its form: a source may store a negative sentinel (Confluent
+			// JDBC's "incrementing": -1) or an exponent-form number the
+			// uint64 rule below would refuse — which would make the
+			// advertised rollback of such a connector un-runnable.
+			return nil
+		}
 		if len(n.String()) > 20 {
-			return fmt.Errorf("actions: %s: connector %s: %s is not a whole number: %w", ResetSourceOffsetsName, name, key, ErrSourcePosition)
+			return fmt.Errorf("actions: %s: connector %s: %s is longer than 20 digits: %w", ResetSourceOffsetsName, name, key, ErrSourcePosition)
 		}
 		if _, err := strconv.ParseUint(n.String(), 10, 64); err != nil {
 			// ParseUint also refuses a negative value and a decimal fraction.
-			return fmt.Errorf("actions: %s: connector %s: %s must be a whole non-negative number: %w", ResetSourceOffsetsName, name, key, ErrSourcePosition)
+			return fmt.Errorf("actions: %s: connector %s: %s must be a whole non-negative number (or exactly the stored value): %w", ResetSourceOffsetsName, name, key, ErrSourcePosition)
 		}
 	case string:
 		s, ok := want.(string)
@@ -800,13 +863,25 @@ func capPositionText(s string) string {
 	return cutText(s, maxPositionTextBytes)
 }
 
-// resetRollback is the undo of a reset: put the stored position back.
+// resetRollback is the undo of a reset: put the stored position back. The
+// stored maps are untrusted Connect data, so the text is redacted and capped
+// like every other rendering of them (jsonText's rules). For an ordinary
+// position both passes are the identity and the text stays valid params for
+// the action; a position so hostile that redaction or the cap alters it was
+// never one this action could write back anyway.
 func resetRollback(name string, so connect.SourceOffset) string {
-	b, _ := json.Marshal(map[string]any{
+	b, err := json.Marshal(map[string]any{
 		"connector": name,
 		"position":  map[string]any{"partition": so.Partition, "offset": so.Offset},
 	})
-	return ResetSourceOffsetsName + " " + string(b)
+	if err != nil {
+		return ResetSourceOffsetsName
+	}
+	s, _ := redact.Text(string(b))
+	if len(s) > 4*maxPositionTextBytes {
+		s = cutText(s, 4*maxPositionTextBytes)
+	}
+	return ResetSourceOffsetsName + " " + s
 }
 
 // ---- snapshot.mode ----
@@ -830,12 +905,16 @@ func snapshotRestart(cfg map[string]string, estimate string, hasOffset bool) str
 	}
 	if hasOffset {
 		switch mode {
-		case "initial", "when_needed", "schema_only", "never":
+		case "initial", "when_needed", "schema_only", "no_data", "never":
 			return fmt.Sprintf("snapshot.mode=%s does not snapshot while an offset exists; the connector resumes from the stored position", label)
 		case "always":
 			return fmt.Sprintf("snapshot.mode=%s snapshots on every start even though an offset exists; the connector resumes from the stored position after it", label)
 		case "initial_only":
 			return fmt.Sprintf("snapshot.mode=%s does not stream changes after its snapshot; check the connector before relying on it", label)
+		case "recovery", "schema_only_recovery":
+			return fmt.Sprintf("snapshot.mode=%s rebuilds the schema history on start; the connector resumes from the stored position after it", label)
+		case "configuration_based":
+			return fmt.Sprintf("snapshot.mode=%s: the snapshot.mode.configuration.based.* keys decide what runs on start; the connector resumes from the stored position unless they request a data snapshot", label)
 		case "exported", "custom":
 			return fmt.Sprintf("snapshot.mode=%s: a custom or exported snapshot decides what runs; the connector resumes from the stored position after it", label)
 		}
@@ -850,10 +929,14 @@ func snapshotRestart(cfg map[string]string, estimate string, hasOffset bool) str
 		return "snapshot.mode=" + label + ": a full snapshot follows on every start: " + estimate + "; existing rows are re-emitted (op r), then streaming starts"
 	case "initial_only":
 		return "snapshot.mode=" + label + ": a snapshot follows (" + estimate + ") and the connector then stops; it does not stream changes"
-	case "schema_only":
+	case "schema_only", "no_data":
 		return "snapshot.mode=" + label + ": no data snapshot; the connector streams from the change log's current position, so rows written before the reset are not re-emitted"
 	case "never":
 		return "snapshot.mode=" + label + ": no snapshot; the connector streams from the change log's current position, so rows written before the reset are not re-emitted"
+	case "recovery", "schema_only_recovery":
+		return "snapshot.mode=" + label + ": no data snapshot; the schema history is rebuilt and the connector streams from the change log's current position, so rows written before the reset are not re-emitted"
+	case "configuration_based":
+		return "snapshot.mode=" + label + ": the snapshot.mode.configuration.based.* keys decide whether data or schema is snapshotted; check the connector's config"
 	case "exported":
 		return "snapshot.mode=" + label + ": the snapshot comes from an exported snapshot; whether one runs depends on the exporter"
 	case "custom":
