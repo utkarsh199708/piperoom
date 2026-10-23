@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"io"
 	"strings"
@@ -116,7 +117,7 @@ func TestLongTransactions(t *testing.T) {
 
 func TestRow(t *testing.T) {
 	ts := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	srv := (&fakeServer{}).on("SELECT * FROM `shop`.`orders` WHERE `id` = ? LIMIT 1",
+	srv := (&fakeServer{}).onColumns(map[string][]string{"shop.orders": {"id"}}).on("SELECT * FROM `shop`.`orders` WHERE `id` = ? LIMIT 1",
 		[]string{"id", "note", "blob", "amount", "ratio", "created_at", "gone"},
 		row(int64(7), []byte("héllo"), []byte{0xff, 0xfe, 0x00}, []byte("12.50"), float64(0.25), ts, nil))
 	d := newFake(t, srv)
@@ -138,9 +139,11 @@ func TestRow(t *testing.T) {
 
 func TestRowMissingAndErrors(t *testing.T) {
 	srv := (&fakeServer{}).
+		onColumns(map[string][]string{"shop.orders": {"id"}, "shop.secret": {"id"}, "shop.gone": {"id"}}).
 		on("`shop`.`orders`", []string{"id"}).
 		onErr("`shop`.`secret`", &gomysql.MySQLError{Number: 1142, Message: "SELECT command denied"}).
-		onErr("`shop`.`nope`", &gomysql.MySQLError{Number: 1146, Message: "Table 'shop.nope' doesn't exist"})
+		// Dropped between the lookup and the read.
+		onErr("`shop`.`gone`", &gomysql.MySQLError{Number: 1146, Message: "Table 'shop.gone' doesn't exist"})
 	d := newFake(t, srv)
 	if _, ok, err := d.Row(context.Background(), "shop.orders", "id", "1"); ok || err != nil {
 		t.Errorf("missing row: ok=%v err=%v", ok, err)
@@ -148,8 +151,90 @@ func TestRowMissingAndErrors(t *testing.T) {
 	if _, _, err := d.Row(context.Background(), "shop.secret", "id", "1"); !errors.Is(err, ErrPrivilege) || !strings.Contains(err.Error(), "SELECT on shop.secret") {
 		t.Errorf("denied: %v", err)
 	}
-	if _, _, err := d.Row(context.Background(), "shop.nope", "id", "1"); !errors.Is(err, clients.ErrNotFound) {
+	if _, _, err := d.Row(context.Background(), "shop.nope", "id", "1"); !errors.Is(err, clients.ErrNotFound) || !strings.Contains(err.Error(), "table missing") {
 		t.Errorf("no such table: %v", err)
+	}
+	if _, _, err := d.Row(context.Background(), "shop.gone", "id", "1"); !errors.Is(err, clients.ErrNotFound) {
+		t.Errorf("table dropped after lookup: %v", err)
+	}
+	for _, q := range srv.queries() {
+		if strings.Contains(q.query, "`nope`") {
+			t.Errorf("a missing table was queried: %s", q.query)
+		}
+	}
+}
+
+// An unknown column is clients.ErrNotFound naming the column, and no row is
+// read.
+func TestRowUnknownColumn(t *testing.T) {
+	srv := (&fakeServer{}).
+		onColumns(map[string][]string{"shop.orders": {"id", "note"}}).
+		on("`shop`.`orders`", []string{"id"})
+	d := newFake(t, srv)
+	_, ok, err := d.Row(context.Background(), "shop.orders", "order_id", "1")
+	if ok || !errors.Is(err, clients.ErrNotFound) || !strings.Contains(err.Error(), `column "order_id"`) {
+		t.Fatalf("unknown column: ok=%v err=%v", ok, err)
+	}
+	for _, q := range srv.queries() {
+		if strings.Contains(q.query, "SELECT * FROM") {
+			t.Errorf("row read for an unknown column: %s", q.query)
+		}
+	}
+}
+
+// A refused dictionary lookup takes the ErrPrivilege path.
+func TestRowLookupRefused(t *testing.T) {
+	srv := (&fakeServer{}).
+		onErr("information_schema.COLUMNS", &gomysql.MySQLError{Number: 1044, Message: "Access denied for user to database 'information_schema'"}).
+		on("`shop`.`orders`", []string{"id"})
+	d := newFake(t, srv)
+	_, _, err := d.Row(context.Background(), "shop.orders", "id", "1")
+	if !errors.Is(err, ErrPrivilege) || !strings.Contains(err.Error(), "SELECT on shop.orders") {
+		t.Fatalf("refused lookup: %v", err)
+	}
+	if q := srv.queries(); strings.Contains(q[len(q)-1].query, "SELECT * FROM") {
+		t.Errorf("row read after a refused lookup: %s", q[len(q)-1].query)
+	}
+}
+
+// The SELECT is built from the names the server returns, and the lookup binds
+// the caller's names as parameters.
+func TestRowUsesServerNames(t *testing.T) {
+	srv := (&fakeServer{}).
+		onColumns(map[string][]string{"shop.orders": {"id"}}).
+		on("SELECT * FROM `shop`.`orders` WHERE `id` = ? LIMIT 1", []string{"id"}, row(int64(7)))
+	d := newFake(t, srv)
+	if _, ok, err := d.Row(context.Background(), "Shop.ORDERS", "ID", "7"); err != nil || !ok {
+		t.Fatalf("Row: ok=%v err=%v", ok, err)
+	}
+	qs := srv.queries()
+	lookup, sel := qs[len(qs)-2], qs[len(qs)-1]
+	if !strings.Contains(lookup.query, "information_schema.COLUMNS") || len(lookup.args) != 3 ||
+		lookup.args[0] != "ID" || lookup.args[1] != "Shop" || lookup.args[2] != "ORDERS" {
+		t.Errorf("lookup = %+v", lookup)
+	}
+	if strings.Contains(lookup.query, "Shop") || strings.Contains(lookup.query, "ORDERS") {
+		t.Errorf("caller names spliced into the lookup: %s", lookup.query)
+	}
+	if !strings.Contains(sel.query, "`shop`.`orders` WHERE `id` = ?") || strings.Contains(sel.query, "Shop") {
+		t.Errorf("select not built from the server's names: %s", sel.query)
+	}
+}
+
+// A dictionary name outside the identifier rule is refused, never quoted.
+func TestRowRefusesBadServerName(t *testing.T) {
+	srv := (&fakeServer{}).
+		onFunc("information_schema.COLUMNS", func([]driver.NamedValue) result {
+			return result{cols: []string{"a", "b", "c", "d"}, rows: [][]driver.Value{row([]byte("shop"), []byte("ord`ers"), []byte("id"), int64(1))}}
+		})
+	d := newFake(t, srv)
+	if _, _, err := d.Row(context.Background(), "shop.orders", "id", "1"); err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("bad server name: %v", err)
+	}
+	for _, q := range srv.queries() {
+		if strings.Contains(q.query, "SELECT * FROM") {
+			t.Errorf("queried with a bad server name: %s", q.query)
+		}
 	}
 }
 
@@ -218,6 +303,7 @@ func TestCallsCarryADeadline(t *testing.T) {
 		on("@@global.gtid_mode", []string{"a", "b", "c", "d", "e", "f"}, row([]byte("ON"), []byte(""), []byte(""), int64(1), []byte("u"), int64(0))).
 		on("SHOW BINARY LOG STATUS", []string{"File", "Position"}).
 		on("SHOW BINARY LOGS", []string{"Log_name", "File_size"}).
+		onColumns(map[string][]string{"shop.orders": {"id"}}).
 		on("`shop`.`orders`", []string{"id"})
 	d := newFake(t, srv)
 	ctx := context.Background()
@@ -230,7 +316,7 @@ func TestCallsCarryADeadline(t *testing.T) {
 	_, _, _ = d.Row(ctx, "shop.orders", "id", "1")
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	if len(srv.deadlines) < 9 {
+	if len(srv.deadlines) < 10 {
 		t.Fatalf("only %d statements ran", len(srv.deadlines))
 	}
 	for i, dl := range srv.deadlines {
@@ -249,7 +335,7 @@ func firstLine(s string) string {
 }
 
 func TestProvenanceRecorded(t *testing.T) {
-	srv := (&fakeServer{}).on("`shop`.`orders`", []string{"id"}, row(int64(1)))
+	srv := (&fakeServer{}).onColumns(map[string][]string{"shop.orders": {"id"}}).on("`shop`.`orders`", []string{"id"}, row(int64(1)))
 	d := newFake(t, srv)
 	rec := tools.NewRecorder()
 	ctx := tools.WithRecorder(context.Background(), rec)
@@ -257,10 +343,13 @@ func TestProvenanceRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := rec.Calls()
-	if len(calls) != 1 {
+	if len(calls) != 2 {
 		t.Fatalf("calls = %+v", calls)
 	}
-	c := calls[0]
+	if l := calls[0]; !strings.Contains(l.Text, "information_schema.COLUMNS") || len(l.ParamsRedacted) != 3 || l.ParamsRedacted[1] != "?2=shop" {
+		t.Errorf("lookup call = %+v", l)
+	}
+	c := calls[1]
 	if c.Kind != tools.CallSQL || c.Target != "mysql shop@db:3306" || !strings.Contains(c.Text, "WHERE `id` = ?") || len(c.ParamsRedacted) != 1 || c.ParamsRedacted[0] != "?1=1" {
 		t.Fatalf("call = %+v", c)
 	}

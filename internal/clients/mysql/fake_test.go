@@ -169,3 +169,32 @@ func newFakeVersion(t *testing.T, srv *fakeServer, version string) *DB {
 func row(vals ...driver.Value) []driver.Value { return vals }
 
 func newTestLogger(w io.Writer) *slog.Logger { return slog.New(slog.NewTextHandler(w, nil)) }
+
+// onColumns answers Row's information_schema.COLUMNS lookup from tables
+// ("db.table" in the server's case, mapped to its columns). Names match
+// case-insensitively, as on a server with lower_case_table_names = 1, so the
+// row carries the server's spelling, not the caller's.
+func (f *fakeServer) onColumns(tables map[string][]string) *fakeServer {
+	return f.onFunc("information_schema.COLUMNS", func(args []driver.NamedValue) result {
+		cols := []string{"TABLE_SCHEMA", "TABLE_NAME", "COLUMN_NAME", "matched"}
+		if len(args) != 3 {
+			return result{err: fmt.Errorf("fake: columns lookup with %d args", len(args))}
+		}
+		col, _ := args[0].Value.(string)
+		db, _ := args[1].Value.(string)
+		name, _ := args[2].Value.(string)
+		for t, tcols := range tables {
+			sdb, sname, _ := strings.Cut(t, ".")
+			if !strings.EqualFold(sdb, db) || !strings.EqualFold(sname, name) || len(tcols) == 0 {
+				continue
+			}
+			for _, c := range tcols {
+				if strings.EqualFold(c, col) {
+					return result{cols: cols, rows: [][]driver.Value{row([]byte(sdb), []byte(sname), []byte(c), int64(1))}}
+				}
+			}
+			return result{cols: cols, rows: [][]driver.Value{row([]byte(sdb), []byte(sname), []byte(tcols[0]), int64(0))}}
+		}
+		return result{cols: cols}
+	})
+}

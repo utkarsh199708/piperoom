@@ -13,7 +13,9 @@
 //     max_execution_time = 10000; every call also has a 10 s context deadline.
 //   - Values are always ? parameters on server-side prepared statements.
 //     Identifiers pass ^[a-zA-Z_][a-zA-Z0-9_]*$ (at most 64 characters) and are
-//     then backtick-quoted (design §5.6).
+//     then backtick-quoted (design §5.6). Row, whose names come from tool
+//     input, also resolves them in information_schema with bound parameters
+//     and builds its statement from the names the server returns.
 //   - The client never selects mysql.user.authentication_string, and never
 //     runs SHOW GRANTS.
 //   - Statement text of other sessions (PROCESSLIST_INFO) is untrusted: it is

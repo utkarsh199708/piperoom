@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -93,7 +94,9 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 // JSON-friendly: numbers and decimals as strings, times as RFC 3339, bytes
 // as a string when they are valid UTF-8 and "<binary N bytes>" otherwise.
 // The values are customer data and untrusted; the tool redacts and wraps
-// them.
+// them. The table and pkColumn are checked against the identifier rule, then
+// resolved to the server's own names (resolveColumn): a missing table or
+// column is clients.ErrNotFound and no row is read.
 func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error) {
 	db, name, err := splitTable(table)
 	if err != nil {
@@ -105,6 +108,10 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 
+	db, name, pkColumn, err = d.resolveColumn(ctx, table, db, name, pkColumn)
+	if err != nil {
+		return nil, false, err
+	}
 	q := "SELECT * FROM " + quoteIdent(db) + "." + quoteIdent(name) + " WHERE " + quoteIdent(pkColumn) + " = ? LIMIT 1"
 	rows, err := d.query(ctx, q, pk)
 	if err != nil {
@@ -134,6 +141,47 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 		m[c] = toJSON(vals[i])
 	}
 	return m, true, nil
+}
+
+// resolveColumnSQL looks up a table and one of its columns in the data
+// dictionary. Every name is a bound parameter. The = comparisons follow the
+// server's own name rules (the dictionary collation that
+// lower_case_table_names sets for schema and table, case-insensitive for
+// columns), so a name resolves here exactly when the SELECT that follows
+// would resolve it. The last column says whether the requested column
+// matched; ordering by it lets one statement tell a missing table (no row)
+// from a missing column (a row with 0).
+const resolveColumnSQL = `
+		SELECT c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME, c.COLUMN_NAME = ?
+		FROM information_schema.COLUMNS c
+		WHERE c.TABLE_SCHEMA = ? AND c.TABLE_NAME = ?
+		ORDER BY 4 DESC, c.ORDINAL_POSITION
+		LIMIT 1`
+
+// resolveColumn returns the server's names for db.name and column, read from
+// information_schema with bound parameters. Row builds its statement only
+// from these names, never from the caller's text. They are validated again:
+// a dictionary name outside the identifier rule is refused, not quoted.
+// information_schema shows only what the read user holds a privilege on, so
+// a missing table or column is reported as "missing, or not visible".
+func (d *DB) resolveColumn(ctx context.Context, table, db, name, column string) (string, string, string, error) {
+	var (
+		sdb, sname, scol string
+		matched          bool
+	)
+	err := d.queryRow(ctx, resolveColumnSQL, column, db, name).Scan(&sdb, &sname, &scol, &matched)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "", "", "", fmt.Errorf("mysql: read row of %s: table missing, or not visible to the read user: %w", table, clients.ErrNotFound)
+	case err != nil:
+		return "", "", "", fail("look up columns of "+table, "SELECT on "+table, err)
+	case !matched:
+		return "", "", "", fmt.Errorf("mysql: read row of %s: column %q missing, or not visible to the read user: %w", table, column, clients.ErrNotFound)
+	}
+	if !validIdent(sdb) || !validIdent(sname) || !validIdent(scol) {
+		return "", "", "", fmt.Errorf("mysql: read row of %s: the server names the table or column outside %s; refusing to query it", table, identRe)
+	}
+	return sdb, sname, scol, nil
 }
 
 // toJSON converts a value database/sql decoded from the driver into a
