@@ -586,7 +586,20 @@ type AgentToolResultPayload struct {
 	// and capped by the agent (tools.MaxProvenanceCalls). It is outside Data:
 	// a cut Data keeps its receipt. Empty for room tools and replayed tools. (F3)
 	Provenance []ToolCall `json:"provenance,omitempty"`
+	// Rejected is set when the agent refused the call before running it: one
+	// of the ToolRejected* values. IsError is then true and Summary says why.
+	// Empty for a tool that ran, even one that failed. Counted as
+	// invalid_tool_calls by the evals gate (V0; set by A4 in V1t,
+	// docs/design/model-providers.md 5.1).
+	Rejected string `json:"rejected,omitempty"`
 }
+
+// Values of AgentToolResultPayload.Rejected (V0).
+const (
+	ToolRejectedUnknownTool  = "unknown_tool"  // the call named no registered tool
+	ToolRejectedInvalidJSON  = "invalid_json"  // the arguments are not valid JSON
+	ToolRejectedInvalidInput = "invalid_input" // the arguments failed schema or input validation
+)
 
 // ToolCall mirrors tools.Call (same fields and JSON tags) so this package stays
 // a leaf. The agent converts and applies tools' caps before emitting. (F3)
@@ -820,6 +833,14 @@ type AgentUsagePayload struct {
 	OutputTokens             int64    `json:"output_tokens"`
 	LatencyMS                int64    `json:"latency_ms"`
 	CostUSD                  *float64 `json:"cost_usd,omitempty"`
+	// Provider is the PIPEROOM_MODEL_PROVIDER value (llm.Provider*) of the
+	// endpoint that served the call; omitted on events written before V0 (or
+	// before the agent sets it), which all came from a Claude provider. (V0)
+	Provider string `json:"provider,omitempty"`
+	// Estimated is true when the provider reported no usage and the counts
+	// were estimated from request and response sizes; they are charged like
+	// real usage (docs/design/model-providers.md 8.3). (V0)
+	Estimated bool `json:"estimated,omitempty"`
 }
 
 // CommentAddedPayload is a human comment, optionally anchored to a step.
