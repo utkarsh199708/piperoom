@@ -4,8 +4,6 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/anthropics/anthropic-sdk-go/option"
-
 	"piperoom/internal/agent/llm"
 	anthropicllm "piperoom/internal/agent/llm/anthropic"
 )
@@ -29,7 +27,7 @@ const workspaceHeader = anthropicllm.WorkspaceHeader
 
 // clientOptions returns the SDK request options of the Anthropic API
 // provider: the workspace header when ANTHROPIC_WORKSPACE_ID is set.
-func clientOptions(getenv func(string) string) []option.RequestOption {
+func clientOptions(getenv func(string) string) []anthropicllm.RequestOption {
 	return anthropicllm.WorkspaceOptions(getenv)
 }
 
@@ -44,7 +42,7 @@ func newModel(opts Options, log *slog.Logger) model {
 
 // newModelWith is newModel with the environment lookup and extra SDK options
 // (a test server's base URL and key) injected.
-func newModelWith(getenv func(string) string, log *slog.Logger, extra ...option.RequestOption) model {
+func newModelWith(getenv func(string) string, log *slog.Logger, extra ...anthropicllm.RequestOption) model {
 	reqOpts := append(clientOptions(getenv), extra...)
 	return anthropicllm.New(ProviderAnthropic, reqOpts, log)
 }

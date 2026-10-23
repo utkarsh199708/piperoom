@@ -8,8 +8,17 @@ import (
 	"time"
 
 	sdk "github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/bedrock"
 	"github.com/anthropics/anthropic-sdk-go/option"
+	"github.com/anthropics/anthropic-sdk-go/vertex"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"golang.org/x/oauth2/google"
 )
+
+// RequestOption is an SDK client option: a provider's (WorkspaceOptions,
+// BedrockOption, VertexOption) or a test's base URL and key. It is the SDK's
+// own type, so callers outside this package need not import the SDK.
+type RequestOption = option.RequestOption
 
 // TurnTimeout bounds a single model turn. The SDK itself recommends allowing
 // up to ten minutes for a streaming request.
@@ -30,8 +39,8 @@ const WorkspaceHeader = "anthropic-workspace-id"
 // workspace-scoped key behaves exactly as before. The API key is left to the
 // SDK (ANTHROPIC_API_KEY) and is never read or logged here. Bedrock and
 // Vertex sign their own requests and do not get it.
-func WorkspaceOptions(getenv func(string) string) []option.RequestOption {
-	var opts []option.RequestOption
+func WorkspaceOptions(getenv func(string) string) []RequestOption {
+	var opts []RequestOption
 	if id := strings.TrimSpace(getenv(WorkspaceEnv)); id != "" {
 		opts = append(opts, option.WithHeader(WorkspaceHeader, id))
 	}
@@ -42,11 +51,33 @@ func WorkspaceOptions(getenv func(string) string) []option.RequestOption {
 // provider's options: WorkspaceOptions, bedrock.WithConfig or
 // vertex.WithCredentials, plus any base URL or key a caller adds). The client
 // keeps the SDK's own retries.
-func New(provider string, opts []option.RequestOption, log *slog.Logger) *Model {
+func New(provider string, opts []RequestOption, log *slog.Logger) *Model {
 	if log == nil {
 		log = slog.Default()
 	}
 	return NewWithTurner(provider, &streamer{client: sdk.NewClient(opts...), log: log}, log)
+}
+
+// BedrockOption sends the client's requests to Claude on Amazon Bedrock with
+// cfg: its region, and SigV4 with its credentials unless
+// AWS_BEARER_TOKEN_BEDROCK is set (the SDK reads it). The client then skips
+// the first-party credential autoload, so ANTHROPIC_API_KEY never reaches
+// Bedrock.
+func BedrockOption(cfg aws.Config) RequestOption {
+	return bedrock.WithConfig(cfg)
+}
+
+// VertexOption sends the client's requests to Claude on Vertex AI in region
+// and project, authorized by creds. ctx must outlive the client: the token
+// source keeps it for every later refresh. The SDK panics on a failure it
+// cannot report; that comes back as an error.
+func VertexOption(ctx context.Context, region, project string, creds *google.Credentials) (opt RequestOption, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			opt, err = nil, fmt.Errorf("set up vertex client: %v", p)
+		}
+	}()
+	return vertex.WithCredentials(ctx, region, project, creds), nil
 }
 
 // streamer streams a turn through the Beta Messages API and returns the
