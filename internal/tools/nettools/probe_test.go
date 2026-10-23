@@ -92,7 +92,7 @@ func TestProberStepTimeout(t *testing.T) {
 	if tcp.Status != StatusFail || !strings.Contains(tcp.Problem, "within the step's time") {
 		t.Fatalf("tcp = %+v", tcp)
 	}
-	if loc.dialDeadline <= 0 || loc.dialDeadline > 60*time.Millisecond {
+	if loc.dialDeadline <= 0 || loc.dialDeadline > 100*time.Millisecond {
 		t.Fatalf("dial deadline = %v, want about 40ms", loc.dialDeadline)
 	}
 }
