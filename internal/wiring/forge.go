@@ -6,6 +6,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/actions/fixpr"
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/forge"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
@@ -27,13 +28,10 @@ import (
 // created, previewed and approved (P0 ruling #606).
 
 // forgeReader and forgeWriter are the forge interfaces the set holds: the
-// contract's clients.ForgeReader and clients.ForgeWriter once the forge
-// client and the action use the contract types (the C17 switch); until then
-// the forge package's own interfaces of the same methods. Only these two
-// lines change with that switch.
+// contract's clients.ForgeReader and clients.ForgeWriter.
 type (
-	forgeReader = forge.ForgeReader
-	forgeWriter = forge.ForgeWriter
+	forgeReader = clients.ForgeReader
+	forgeWriter = clients.ForgeWriter
 )
 
 // forgeSet is the process's forge, as each client set holds it. The zero
@@ -100,8 +98,7 @@ func registerForgeTools(reg *tools.Registry, w *Wired) error {
 func forgeRepos(p owners.Pipeline) []forgetools.Repo {
 	out := make([]forgetools.Repo, 0, len(p.Repos))
 	for _, r := range p.Repos {
-		ref := r.Ref()
-		fr := forgetools.Repo{Ref: forge.RepoRef{ID: ref.ID, Owner: ref.Owner, Name: ref.Name, Base: ref.Base, Host: ref.Host}}
+		fr := forgetools.Repo{Ref: forge.RefOf(r.Ref())}
 		for _, g := range r.Paths {
 			fr.Paths = append(fr.Paths, forgetools.RepoPath{Glob: g.Glob, Layer: g.Layer})
 		}
