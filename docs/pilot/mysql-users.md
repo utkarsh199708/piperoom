@@ -16,12 +16,13 @@ page could not fetch them either (the vendor hosts were not reachable from this 
 is the page to check against; the rows marked **confirm** are the ones the design flags. Test every grant on a
 staging server before production.
 
-## Status on this release: designed, not built
+## Status on this release: partly built, not wired
 
 | Piece | State | Where |
 |---|---|---|
-| MySQL read client (Q8b), write client (Q8f) | **not in the repo**: no `internal/clients/mysql` on this commit | `tasks/Q-board.md` rows Q8b, Q8f |
-| `source_kind: mysql` in `owners.yaml` (Q8d) | **not in the loader**: `owners.Load` refuses unknown keys (`internal/owners/owners.go`, `KnownFields(true)`), so a pipeline with `source_kind:` does not load | Q-board row Q8d; design §4.2 |
+| MySQL read client (Q8b) | **built, not wired** (`internal/clients/mysql`) | `tasks/Q-board.md` row Q8b |
+| MySQL write client (Q8f) | **not in the repo** | Q-board row Q8f |
+| `source_kind: mysql` in `owners.yaml` (Q8d) | **in the loader** (`internal/owners/source_kind.go`): it loads and is checked, but the server still opens the source with the Postgres client (Q8g) | Q-board row Q8d; design §4.2 |
 | `mysql://` in `SOURCE_DB_URL` / `SOURCE_DB_WRITE_URL` | **not accepted**: the wiring opens the source with the Postgres client only (`internal/wiring/wiring.go`, `postgres.New`); the scheme dispatch is Q8g | design §6.1; Q-board row Q8g |
 | `mysql_binlog_status`, `kafka_schema_history`, the `source_*` tools on MySQL | not in the repo (Q8c, Q8e, Q8n) | design §7 |
 

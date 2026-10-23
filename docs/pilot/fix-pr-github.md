@@ -9,16 +9,17 @@ Written against the design `docs/design/fix-pr.md` (Q7-0, Jira KAN-320) on the i
 Each claim names the design section or the vendor page it comes from. If the design or the code changes, update
 the claim and its citation in the same PR. Where this page and merged code differ, the code wins (design header).
 
-## Status on this release: designed, not built
+## Status on this release: partly built, not wired
 
 | Piece | State | Where |
 |---|---|---|
-| GitHub client, App tokens (Q7b) | **not in the repo**: no `internal/clients/forge` on this commit | `tasks/Q-board.md` row Q7b |
-| Action `repo_open_pull_request` (Q7c), tools `repo_list_files`, `repo_read_file`, `pr_status` (Q7d) | **not in the repo** (`internal/actions/fixpr`, `internal/tools/forgetools`) | Q-board rows Q7c, Q7d |
-| `owners.yaml` `repos:` (Q7a) | **not in the loader yet**: on this commit `owners.Load` refuses an unknown key (`internal/owners/owners.go`, `KnownFields(true)`), so a file with `repos:` does not load | Q-board row Q7a; design §3, §5.8 |
+| GitHub client, App tokens (Q7b) | **built, not wired**: `internal/clients/forge`; no server builds it until Q7-0c's settings and the wiring row land | `tasks/Q-board.md` row Q7b |
+| Tools `repo_list_files`, `repo_read_file`, `pr_status` (Q7d) | **built, not registered** (`internal/tools/forgetools`) | Q-board row Q7d |
+| Action `repo_open_pull_request` (Q7c) | **not in the repo** (`internal/actions/fixpr`) | Q-board row Q7c |
+| `owners.yaml` `repos:` (Q7a) | **in the loader** (`internal/owners/repos.go`): a `repos:` block loads and is checked; nothing reads it until the forge is wired | Q-board row Q7a; design §3, §5.8 |
 | `FORGE_KIND`, `GITHUB_API_URL`, `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_FILE`, `PIPEROOM_FIXPR_APPLY_TIMEOUT` | **proposed only**: the contract PR Q7-0c adds them to `internal/config/config.go`; a server on this commit does not read them | design §5.6; `grep GITHUB internal/config/config.go` finds nothing |
 
-Until those rows land, set none of the settings below on a pilot server and do not add `repos:` to `owners.yaml`.
+Until the settings and wiring land, set none of the settings below on a pilot server; a `repos:` block loads but has no effect yet.
 Create the App and the ruleset now, so the PR fix can be turned on with one restart. The names below are the
 design's; if Q7-0c renames one, its PR updates this page.
 
