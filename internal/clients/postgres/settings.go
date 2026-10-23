@@ -86,6 +86,16 @@ type DBSession struct {
 	Query      string    `json:"query"` // untrusted, redacted, at most 200 bytes
 	BlocksSlot bool      `json:"blocks_slot"`
 	InScope    bool      `json:"in_scope"`
+	// OldXact, SameDB and ClientBackend are never shown: the session's
+	// transaction is older than the read's threshold (by the server's
+	// clock), it is connected to the database this client reads (not
+	// another tenant's database on the server), and it is an ordinary client
+	// backend (not autovacuum, a logical replication worker or another
+	// background process). source_end_session needs all three before it ends
+	// a session whose identity the scoped read withheld.
+	OldXact       bool `json:"-"`
+	SameDB        bool `json:"-"`
+	ClientBackend bool `json:"-"`
 }
 
 var _ SourceSettingsReader = (*DB)(nil)
@@ -313,6 +323,8 @@ const blockersSQL = `
 			SELECT a.pid, a.backend_start, a.xact_start, a.usename, a.application_name, a.state, a.query,
 			       GREATEST(age(a.backend_xid), age(a.backend_xmin)) AS xid_age,
 			       (a.xact_start IS NOT NULL AND a.xact_start < now() - make_interval(secs => $1)) AS old,
+			       COALESCE(a.datname = current_database(), false) AS same_db,
+			       COALESCE(a.backend_type = 'client backend', false) AS client_backend,
 			       (NOT $4::boolean OR COALESCE(a.datname = current_database() AND EXISTS (
 			           SELECT 1 FROM pg_locks l
 			           WHERE l.pid = a.pid
@@ -333,7 +345,10 @@ const blockersSQL = `
 		       COALESCE(a.state, ''),
 		       CASE WHEN a.in_scope THEN COALESCE(a.query, '') ELSE '' END,
 		       (a.xid_age IS NOT NULL AND a.xid_age >= h.max_age) AS blocks_slot,
-		       a.in_scope
+		       a.in_scope,
+		       a.old,
+		       a.same_db,
+		       a.client_backend
 		FROM activity a, horizon h
 		WHERE a.old OR (a.xid_age IS NOT NULL AND a.xid_age >= h.max_age)
 		ORDER BY a.xact_start NULLS LAST, a.pid`
@@ -378,7 +393,7 @@ func (d *DB) blockers(ctx context.Context, olderThan time.Duration, schemas, nam
 	var out []DBSession
 	for rows.Next() {
 		var s DBSession
-		if err := rows.Scan(&s.PID, &s.StartedAt, &s.XactStart, &s.User, &s.App, &s.State, &s.Query, &s.BlocksSlot, &s.InScope); err != nil {
+		if err := rows.Scan(&s.PID, &s.StartedAt, &s.XactStart, &s.User, &s.App, &s.State, &s.Query, &s.BlocksSlot, &s.InScope, &s.OldXact, &s.SameDB, &s.ClientBackend); err != nil {
 			return nil, fmt.Errorf("postgres: scan blocking session: %w", err)
 		}
 		s.Query = RedactSessionQuery(s.Query)

@@ -185,7 +185,13 @@ func TestInternalTopicRole(t *testing.T) {
 		{"my_connect_statuses", InternalRoleStatus},
 		{"_connect_status", InternalRoleStatus},
 		{"_connect_configs_staging", InternalRoleConfig},
-		{"strimzi-cluster-offsets", InternalRoleOffset},
+		{"connect-cluster-offsets", InternalRoleOffset}, // Strimzi's default
+		{"connect-status", InternalRoleStatus},
+		{"strimzi-cluster-offsets", ""}, // no "connect": set CONNECT_INTERNAL_TOPICS
+		{"payments_config", ""},         // an application topic
+		{"order-status", ""},
+		{"__consumer_offsets", ""}, // the broker's own
+		{"__connect_offsets", ""},
 		{"configs", ""},                // one word: not a Connect name
 		{"orders.public.status", ""},   // data topic
 		{"app-events", ""},             // no role word

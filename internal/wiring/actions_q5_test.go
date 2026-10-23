@@ -154,3 +154,42 @@ func TestRegisterLifecycle(t *testing.T) {
 		t.Fatalf("writes reached the client: %v", sp.writes)
 	}
 }
+
+// TestLifecycleHosts (Q5d): the lifecycle actions' AllowedHosts are the set's
+// own CDC endpoints, so a pipeline's first connector may name its brokers
+// (signal.kafka.bootstrap.servers), Schema Registry and source database.
+func TestLifecycleHosts(t *testing.T) {
+	got := lifecycleHosts(config.Config{
+		KafkaBrokers:      " kafka-1:9092 , kafka-2:9092 ",
+		SchemaRegistryURL: "https://sr:8081",
+		SourceDBURL:       "postgres://u:p@pg:5432/orders",
+	})
+	want := []string{"kafka-1:9092", "kafka-2:9092", "https://sr:8081", "postgres://u:p@pg:5432/orders"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("lifecycleHosts = %q, want %q", got, want)
+	}
+	if got := lifecycleHosts(config.Config{}); len(got) != 0 {
+		t.Fatalf("lifecycleHosts(empty) = %q, want none", got)
+	}
+
+	// openClientsWith keeps them for a CDC set only.
+	for _, tt := range []struct {
+		name string
+		o    *owners.Owners
+		want []string
+	}{
+		{"cdc", ownersOf(cdcPipe("a")), lifecycleHosts(devA2Config())},
+		{"batch only", ownersOf(batchPipe("b")), nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w, err := openClientsWith(context.Background(), devA2Config(), nil, tt.o, false, (&openRecorder{}).openers(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer w.Close()
+			if !reflect.DeepEqual(w.lifecycleHosts, tt.want) {
+				t.Fatalf("lifecycleHosts = %q, want %q", w.lifecycleHosts, tt.want)
+			}
+		})
+	}
+}

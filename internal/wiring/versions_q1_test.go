@@ -25,11 +25,11 @@ func (lifecycleSpy) SourceOffsets(context.Context, string) ([]connect.SourceOffs
 func (lifecycleSpy) ServerInfo(context.Context) (connect.ServerInfo, error) {
 	return connect.ServerInfo{Version: "3.6.1"}, nil
 }
+func (lifecycleSpy) Loggers(context.Context) ([]connect.LoggerLevel, error) {
+	return []connect.LoggerLevel{{Logger: "root", Level: "INFO"}}, nil
+}
 func (lifecycleSpy) Plugins(context.Context) ([]connect.Plugin, error) {
 	return []connect.Plugin{{Class: "io.debezium.connector.postgresql.PostgresConnector", Type: "source", Version: "2.5.1.Final"}}, nil
-}
-func (lifecycleSpy) Loggers(context.Context) ([]connect.LoggerLevel, error) {
-	return []connect.LoggerLevel{{Logger: "root", Level: "INFO"}, {Logger: "io.debezium", Level: "DEBUG"}}, nil
 }
 func (s lifecycleSpy) CreateConnector(context.Context, string, map[string]string) error {
 	s.writes = append(s.writes, "CreateConnector")
@@ -95,6 +95,10 @@ func TestReadConnectKeepsLifecycleReads(t *testing.T) {
 			}
 			if offs, err := l.SourceOffsets(ctx, "c"); err != nil || len(offs) != 1 {
 				t.Errorf("SourceOffsets = %v, %v", offs, err)
+			}
+			// connect_worker_info's logger levels (Q3a) read through it.
+			if lv, err := l.Loggers(ctx); err != nil || len(lv) != 1 {
+				t.Errorf("Loggers = %v, %v", lv, err)
 			}
 			if _, ok := c.(connect.ConnectLifecycleWriter); ok {
 				t.Fatalf("readConnect = %T, which carries the lifecycle writes", c)

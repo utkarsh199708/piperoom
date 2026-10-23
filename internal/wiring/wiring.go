@@ -113,8 +113,13 @@ type Wired struct {
 	// (PIPEROOM_WRITE_MODE=on and not StackOptions.ReadOnly). Only then do
 	// the actions get the whole Connect and Schema Registry clients, and only
 	// then does writers hold anything. A Wired built any other way is read-only.
-	write   bool
-	writers writeClients
+	write bool
+	// lifecycleHosts are the endpoints this set was opened with (Kafka
+	// brokers, Schema Registry, source database): the hosts a connector
+	// created by connect_create_connector may name before any connector of
+	// the pipeline is registered (registerLifecycle).
+	lifecycleHosts []string
+	writers        writeClients
 
 	// close is the closer built by Open: it releases the database pools and
 	// the Kafka clients. Only Open sets it, so a zero Wired is safe to Close.
@@ -378,7 +383,23 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 	w.Orchestrator, w.Transform = orch, tr
 	w.write, w.writers = write, wc
 	w.conn = cfg
+	if ks.cdc() {
+		w.lifecycleHosts = lifecycleHosts(cfg)
+	}
 	return w, nil
+}
+
+// lifecycleHosts lists cfg's CDC endpoints as AllowedHosts entries: each
+// broker, and the Schema Registry and source database URLs (the action
+// reduces each to its host and drops userinfo). Unset values are left out.
+func lifecycleHosts(cfg config.Config) []string {
+	hosts := splitBrokers(cfg.KafkaBrokers)
+	for _, u := range []string{cfg.SchemaRegistryURL, cfg.SourceDBURL} {
+		if u = strings.TrimSpace(u); u != "" {
+			hosts = append(hosts, u)
+		}
+	}
+	return hosts
 }
 
 // assemble builds the Wired that Open returns from the clients it opened,

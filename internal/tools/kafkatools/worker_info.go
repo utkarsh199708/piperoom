@@ -273,7 +273,7 @@ func internalTopicFindings(topics []kafka.InternalTopic, source string, notShown
 	case notShown > 0:
 		out = append(out, "no Connect internal topic is tied to this room's worker group by name; set CONNECT_INTERNAL_TOPICS to name them")
 	default:
-		out = append(out, "no topic looks like a Connect internal topic (…-configs, …-offsets, …-status); set CONNECT_INTERNAL_TOPICS to name them")
+		out = append(out, "no topic looks like a Connect internal topic (a name with the word connect ending in configs, offsets or status); set CONNECT_INTERNAL_TOPICS to name them")
 	}
 	for _, it := range topics {
 		name := pluginText(it.Name)

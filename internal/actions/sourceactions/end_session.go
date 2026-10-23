@@ -207,6 +207,16 @@ func (a *endSession) findBlocker(ctx context.Context, p endSessionParams, pl *ow
 				return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d holds or waits for no lock on pipeline %q's source_tables and does not hold the oldest xid horizon, so it is outside this room: %w: %w",
 					EndSessionName, p.PID, pl.ID, errRefused, tools.ErrOutOfScope)
 			}
+			// blocks_slot is relative (the oldest horizon on the server), so
+			// some session always has it. A hidden session is this room's to
+			// end only when it is an ordinary client of the pipeline's own
+			// source database whose transaction is older than
+			// older_than_minutes; one in another database belongs to another
+			// tenant and goes to a human.
+			if !s.OldXact || !s.SameDB || !s.ClientBackend {
+				return DBSession{}, fmt.Errorf("sourceactions: %s: pid %d is a session whose identity is withheld from this room and is not a client of pipeline %q's source database with a transaction older than %d min; hand it to the database owner: %w: %w",
+					EndSessionName, p.PID, pl.ID, int(p.olderThan()/time.Minute), errRefused, tools.ErrOutOfScope)
+			}
 			if err := a.checkHiddenUser(ctx, p, connUser); err != nil {
 				return DBSession{}, err
 			}

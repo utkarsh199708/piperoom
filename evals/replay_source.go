@@ -197,6 +197,15 @@ func (s replaySource) blockers(olderThan time.Duration) ([]postgres.DBSession, e
 	if !ok || json.Unmarshal(b, &out) != nil {
 		return nil, fmt.Errorf("evals: blocking sessions older than %s: %w (record source_blocking_sessions with data for that older_than_minutes)", olderThan, errNotReplayed)
 	}
+	// The read's hidden flags are never in the tool's data, so a recording
+	// cannot carry them. A recording is the scenario pipeline's own source
+	// read, so each session is a client backend of that database; one with
+	// an open transaction is taken as older than the threshold, since the
+	// replay has no clock of the recorded room.
+	for i := range out {
+		out[i].SameDB, out[i].ClientBackend = true, true
+		out[i].OldXact = !out[i].XactStart.IsZero()
+	}
 	return out, nil
 }
 
