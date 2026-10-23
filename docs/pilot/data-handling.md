@@ -302,7 +302,8 @@ Things to know:
   and `pg_long_transactions` shows it as-is.
 - **Worker log lines are free text.** `connect_worker_logs` returns what the Connect worker logged about a connector; a
   converter or sink error can echo a record value or a SQL statement. The lines are masked of secrets and scanned, but
-  the rest is shown as data. Point `WORKER_LOGS_SELECTOR` at the Connect workers' streams only, and give Loki a read-only token.
+  the rest is shown as data. Point `WORKER_LOGS_SELECTOR` at the Connect workers' streams only, and give Loki a read-only token. The token scope, the
+  proposed settings and the order of the protections are in [worker-visibility.md](worker-visibility.md).
 - **Task logs, run notes, dbt messages and dbt SQL are free text.** `task_log_tail` returns the end
   of a task's log and `dbt_model_sql` a model's compiled SQL; both are masked of secrets and scanned
   for instruction-like text, but their content (an error message, a `SELECT`, a literal value in the
