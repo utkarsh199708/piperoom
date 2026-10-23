@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"math/rand/v2"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,21 +12,15 @@ import (
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 
 	"piperoom/internal/agent/llm"
+	llmretry "piperoom/internal/agent/llm/retry"
 )
 
-// The retry bounds of design 7.4, which every adapter shares: at most two
-// retries, 1 s then 4 s with ±20% jitter, Retry-After honoured up to 60 s,
-// never past the turn's deadline (the SDK's retry sleep ends with ctx).
-const (
-	maxAttempts   = 3 // the first try and two retries
-	firstDelay    = 1 * time.Second
-	laterDelay    = 4 * time.Second
-	jitter        = 0.2
-	maxRetryAfter = 60 * time.Second
-)
-
-// retryStatuses are the statuses design 7.4 retries.
-var retryStatuses = map[int]bool{408: true, 429: true, 500: true, 502: true, 503: true, 504: true, 529: true}
+// maxAttempts is the first try plus the shared policy's retries. The bounds
+// are the shared ones of design 7.4 (internal/agent/llm/retry): two retries,
+// 1 s then 4 s with ±20% jitter, Retry-After honoured up to 60 s, never past
+// the turn's deadline (the SDK's retry sleep ends with ctx). The AWS SDK
+// runs the loop, so the policy is expressed as its retryer.
+const maxAttempts = 1 + llmretry.DefaultMaxRetries
 
 // retryPolicy is the SDK retryer set to the design's bounds. attempts and
 // delay are test hooks (Config).
@@ -64,11 +56,11 @@ func (p retryPolicy) retryer() aws.Retryer {
 // any answer; never the caller's cancellation or deadline, and never any
 // other 4xx.
 func retryable(err error) aws.Ternary {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || credentialFailure(err) {
 		return aws.FalseTernary
 	}
 	if status := httpStatus(err); status != 0 {
-		if !retryStatuses[status] {
+		if !llmretry.RetryableStatus(status) {
 			return aws.FalseTernary
 		}
 		var me apiError
@@ -84,36 +76,34 @@ func retryable(err error) aws.Ternary {
 }
 
 // scheduleDelay is the wait before retry attempt (1 for the first retry):
-// the answer's Retry-After when it has one, capped at 60 s, else 1 s then
-// 4 s with ±20% jitter.
+// the answer's Retry-After when it has one, capped at 60 s, else the shared
+// backoff with its jitter.
 func scheduleDelay(attempt int, err error) time.Duration {
 	if d, ok := retryAfter(err); ok {
 		return d
 	}
-	base := firstDelay
-	if attempt > 1 {
-		base = laterDelay
+	i := attempt - 1
+	if i < 0 {
+		i = 0
 	}
-	return time.Duration(float64(base) * (1 - jitter + 2*jitter*rand.Float64()))
+	if i >= len(llmretry.DefaultBackoff) {
+		i = len(llmretry.DefaultBackoff) - 1
+	}
+	base := llmretry.DefaultBackoff[i]
+	j := llmretry.DefaultJitter
+	return time.Duration(float64(base) * (1 - j + 2*j*rand.Float64()))
 }
 
-// retryAfter reads the answer's Retry-After in seconds, capped at 60 s.
+// retryAfter reads the answer's requested wait (llmretry.After: Retry-After
+// in seconds or as a date, or retry-after-ms), capped at 60 s.
 func retryAfter(err error) (time.Duration, bool) {
 	var re *awshttp.ResponseError
 	if !errors.As(err, &re) || re.ResponseError == nil || re.Response == nil || re.Response.Response == nil {
 		return 0, false
 	}
-	v := strings.TrimSpace(re.Response.Header.Get("Retry-After"))
-	if v == "" {
+	d := llmretry.After(re.Response.Header, time.Now())
+	if d <= 0 {
 		return 0, false
 	}
-	secs, perr := strconv.Atoi(v)
-	if perr != nil || secs < 0 {
-		return 0, false
-	}
-	d := time.Duration(secs) * time.Second
-	if d > maxRetryAfter {
-		d = maxRetryAfter
-	}
-	return d, true
+	return min(d, llmretry.MaxRetryAfter), true
 }

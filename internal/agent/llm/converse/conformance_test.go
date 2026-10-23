@@ -29,6 +29,7 @@ func testConfig(baseURL string) Config {
 		AWS:          &aws.Config{Region: "us-east-1", Credentials: staticCreds},
 		BaseEndpoint: baseURL,
 		Getenv:       func(string) string { return "" },
+		loopbackHTTP: true,
 	}
 }
 

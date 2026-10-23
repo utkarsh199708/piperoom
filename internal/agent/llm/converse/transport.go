@@ -1,15 +1,18 @@
 package converse
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sync/atomic"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 
 	"piperoom/internal/agent/llm"
+	llmretry "piperoom/internal/agent/llm/retry"
 )
 
 // maxResponseBytes caps a response body (AGENTS.md rule 7); a model turn is
@@ -69,8 +72,9 @@ func (s *wireSize) response() int64 { return s.resp.Load() }
 // recordingClient records one turn's sizes. It is set per call, so
 // concurrent turns never share one.
 type recordingClient struct {
-	next bedrockruntime.HTTPClient
-	size *wireSize
+	next    bedrockruntime.HTTPClient
+	size    *wireSize
+	limiter *llmretry.Limiter
 }
 
 func (c recordingClient) Do(r *http.Request) (*http.Response, error) {
@@ -81,6 +85,9 @@ func (c recordingClient) Do(r *http.Request) (*http.Response, error) {
 	if err != nil || resp == nil || resp.Body == nil {
 		return resp, err
 	}
+	// Bedrock sends no x-ratelimit-* headers today; Observe ignores what is
+	// missing, and paces the next turn if a front end adds them.
+	c.limiter.Observe(resp.Header)
 	c.size.resp.Store(0)
 	resp.Body = &countingBody{rc: resp.Body, n: &c.size.resp}
 	return resp, nil
@@ -126,3 +133,27 @@ func truncated(u llm.Usage, requestBytes int64) error {
 	}
 	return &classified{api: ae, text: fmt.Sprintf("%s: the model server truncated the prompt (%d prompt tokens reported for a %d-byte request); raise its context length", ae.Error(), prompt, requestBytes)}
 }
+
+// markedCredentials marks a failure to retrieve AWS credentials, so it is
+// classified auth (not network, which would be retried): the SDK reports it
+// as "get identity: ..." with no type of its own.
+type markedCredentials struct {
+	next aws.CredentialsProvider
+}
+
+func (c markedCredentials) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	cr, err := c.next.Retrieve(ctx)
+	if err != nil {
+		return cr, &credentialsError{err: err}
+	}
+	return cr, nil
+}
+
+// credentialsError is a failed credential retrieval.
+type credentialsError struct{ err error }
+
+func (e *credentialsError) Error() string {
+	return "llm/converse: retrieve AWS credentials: " + e.err.Error()
+}
+
+func (e *credentialsError) Unwrap() error { return e.err }

@@ -29,7 +29,7 @@ func TestStructuredOutputOnConverse(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var bodies [][]byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
 		n := len(bodies)
@@ -41,7 +41,7 @@ func TestStructuredOutputOnConverse(t *testing.T) {
 	defer srv.Close()
 
 	m, err := converse.New(converse.Config{
-		AWS: &aws.Config{Region: "us-east-1", Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
+		AWS: &aws.Config{Region: "us-east-1", HTTPClient: srv.Client(), Credentials: aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) {
 			return aws.Credentials{AccessKeyID: "AKIDTEST", SecretAccessKey: "not-real"}, nil
 		})},
 		BaseEndpoint: srv.URL,

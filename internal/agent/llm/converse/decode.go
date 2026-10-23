@@ -101,11 +101,16 @@ func stopReason(r types.StopReason, toolCall bool) llm.StopReason {
 	return llm.StopOther
 }
 
-// decodeUsage normalises Converse usage: Input excludes cached tokens. Bedrock
-// reports inputTokens without the cache reads and writes, and totalTokens as
-// the sum of all four; a model whose total leaves the cache out (total ==
-// input + output) counted the cache inside inputTokens, so it is taken out.
-// An answer without usage gets the byte estimate of design 8.3.
+// decodeUsage normalises Converse usage: Input excludes cached tokens. An
+// answer without usage gets the byte estimate of design 8.3.
+//
+// ASSUMPTION, to verify on the first live Nova call (V10 gate run, record
+// the raw usage in the PR): Bedrock reports inputTokens without the cache
+// reads and writes, and totalTokens as the sum of all four. The heuristic
+// below also covers the other reading: a total that leaves the cache out
+// (total == input + output) is taken to mean the cache was counted inside
+// inputTokens, so it is subtracted. The fixtures are hand-written, not
+// captured, so neither reading is proven yet.
 func decodeUsage(u *types.TokenUsage, size *wireSize) llm.Usage {
 	if u == nil || (u.InputTokens == nil && u.OutputTokens == nil) {
 		return llm.Usage{

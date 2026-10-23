@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 
 	"piperoom/internal/agent/llm"
@@ -68,7 +69,7 @@ var quotaMarkers = []string{"per day", "daily", "quota"}
 // fixed hint per kind and the AWS error code when it is a known one, never
 // the message, which can echo prompt content (design 10.2). log gets the
 // redacted, capped message at debug level.
-func classifyError(err error, key netsec.Secret, log *slog.Logger) error {
+func classifyError(err error, key *netsec.Secret, log *slog.Logger) error {
 	if err == nil {
 		return nil
 	}
@@ -81,6 +82,15 @@ func classifyError(err error, key netsec.Secret, log *slog.Logger) error {
 	var me apiError
 	if errors.As(err, &me) {
 		code, msg = me.ErrorCode(), me.ErrorMessage()
+	}
+	if status == 0 && credentialFailure(err) {
+		// The request was never signed, so never sent: a fresh run repeats
+		// it until the credentials are fixed (unretryable auth).
+		out := &llm.APIError{Provider: llm.ProviderBedrockConverse, Kind: llm.ErrAuth, Err: err}
+		if log != nil {
+			log.Debug("llm/converse: request not signed", "provider", out.Provider, "kind", out.Kind, "err", capText(scrub(err.Error(), key)))
+		}
+		return &classified{api: out, text: out.Error() + ": could not retrieve AWS credentials or sign the request"}
 	}
 	if status == 0 {
 		out := &llm.APIError{Provider: llm.ProviderBedrockConverse, Kind: llm.ErrNetwork, Err: err}
@@ -113,12 +123,21 @@ func classifyError(err error, key netsec.Secret, log *slog.Logger) error {
 
 // scrub masks secrets in s: the Bedrock API key literally (it has no
 // pattern redact knows), then every pattern redact knows.
-func scrub(s string, key netsec.Secret) string {
-	if k := key.Reveal(); k != "" {
-		s = strings.ReplaceAll(s, k, "[redacted]")
+func scrub(s string, key *netsec.Secret) string {
+	if key != nil && key.Reveal() != "" {
+		s = strings.ReplaceAll(s, key.Reveal(), "[redacted]")
 	}
 	s, _ = redact.Text(s)
 	return s
+}
+
+// credentialFailure reports a request that failed before it was sent because
+// the AWS credentials could not be retrieved (markedCredentials) or SigV4
+// signing failed (*v4.SigningError).
+func credentialFailure(err error) bool {
+	var se *v4.SigningError
+	var ce *credentialsError
+	return errors.As(err, &se) || errors.As(err, &ce)
 }
 
 // httpStatus is the status of the HTTP answer err carries, 0 without one.

@@ -25,6 +25,11 @@ type family struct {
 	// for Amazon Nova (and Claude, refused here); elsewhere the agent's
 	// wrapped text already starts "error:" (design 7.3, as OpenAI).
 	toolStatus bool
+	// forcedTool: the model takes toolChoice any. AWS documents forced tool
+	// choice for Amazon Nova and Claude (refused here); a family is listed
+	// only once a fixture proves it. Elsewhere a required tool is sent
+	// without toolChoice.
+	forcedTool bool
 	// contextTokens is the documented context window; 0 = unknown (the agent
 	// assumes 128000; PIPEROOM_MODEL_CONTEXT_TOKENS overrides, V6).
 	contextTokens int64
@@ -36,10 +41,10 @@ var families = []struct {
 	prefix string
 	f      family
 }{
-	{"amazon.nova-premier", family{cacheSystem: true, cacheMessages: true, toolStatus: true, contextTokens: 1_000_000}},
-	{"amazon.nova-pro", family{cacheSystem: true, cacheMessages: true, toolStatus: true, contextTokens: 300_000}},
-	{"amazon.nova-lite", family{cacheSystem: true, cacheMessages: true, toolStatus: true, contextTokens: 300_000}},
-	{"amazon.nova-micro", family{cacheSystem: true, cacheMessages: true, toolStatus: true, contextTokens: 128_000}},
+	{"amazon.nova-premier", family{cacheSystem: true, cacheMessages: true, toolStatus: true, forcedTool: true, contextTokens: 1_000_000}},
+	{"amazon.nova-pro", family{cacheSystem: true, cacheMessages: true, toolStatus: true, forcedTool: true, contextTokens: 300_000}},
+	{"amazon.nova-lite", family{cacheSystem: true, cacheMessages: true, toolStatus: true, forcedTool: true, contextTokens: 300_000}},
+	{"amazon.nova-micro", family{cacheSystem: true, cacheMessages: true, toolStatus: true, forcedTool: true, contextTokens: 128_000}},
 	{"amazon.nova", family{cacheSystem: true, cacheMessages: true, toolStatus: true}},
 }
 
@@ -70,15 +75,36 @@ func (f family) caps() llm.Capabilities {
 // ("us.amazon.nova-pro-v1:0").
 var regionPrefixes = []string{"us-gov.", "us.", "eu.", "apac.", "jp.", "au.", "ca.", "global."}
 
-// baseModel is the foundation model id inside id: the last path segment of an
-// ARN, without a cross-region prefix, lower-cased.
+// baseModel is the foundation model id inside id, lower-cased, without a
+// cross-region prefix: for an ARN, the last segment of its resource.
 func baseModel(id string) string {
+	segs := modelSegments(id)
+	return segs[len(segs)-1]
+}
+
+// modelSegments are the candidate model ids inside id: id itself, or every
+// "/" segment of an ARN's resource (a custom or fine-tuned model ARN names
+// its base model in a middle segment:
+// custom-model/anthropic.claude-3-haiku-.../abc123), each lower-cased and
+// without a cross-region prefix.
+func modelSegments(id string) []string {
 	id = strings.ToLower(strings.TrimSpace(id))
+	var segs []string
 	if strings.HasPrefix(id, "arn:") {
-		if i := strings.LastIndexByte(id, '/'); i >= 0 {
-			id = id[i+1:]
-		}
+		// arn:partition:service:region:account:resource
+		parts := strings.SplitN(id, ":", 6)
+		resource := parts[len(parts)-1]
+		segs = strings.Split(resource, "/")
+	} else {
+		segs = []string{id}
 	}
+	for i, s := range segs {
+		segs[i] = stripRegion(s)
+	}
+	return segs
+}
+
+func stripRegion(id string) string {
 	for _, p := range regionPrefixes {
 		if strings.HasPrefix(id, p) {
 			return id[len(p):]
@@ -87,8 +113,14 @@ func baseModel(id string) string {
 	return id
 }
 
-// isClaude reports a Claude model id in any of its Bedrock spellings.
+// isClaude reports a Claude model id in any of its Bedrock spellings,
+// including a custom or fine-tuned model ARN whose resource names a Claude
+// base model.
 func isClaude(id string) bool {
-	base := baseModel(id)
-	return strings.HasPrefix(base, "anthropic.") || strings.Contains(base, "claude")
+	for _, s := range modelSegments(id) {
+		if strings.HasPrefix(s, "anthropic.") || strings.Contains(s, "claude") {
+			return true
+		}
+	}
+	return false
 }

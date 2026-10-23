@@ -52,21 +52,30 @@ func encodeRequest(req llm.Request, fam family) (*bedrockruntime.ConverseInput, 
 	tools := req.Tools
 	choice := req.ToolChoice
 	if req.OutputSchema != nil {
-		tools = append(append([]llm.ToolDef(nil), tools...), llm.ToolDef{
+		emit := llm.ToolDef{
 			Name:        outputToolName,
 			Description: "Return your answer as this tool's input. Call it exactly once; its input is the whole answer.",
 			Schema:      req.OutputSchema,
-		})
+		}
+		if fam.forcedTool {
+			tools = append(append([]llm.ToolDef(nil), tools...), emit)
+		} else {
+			// The choice cannot be forced on this family: the emit tool is
+			// the only one offered, so calling it is the only tool call the
+			// model can make, and a caller still reads a JSON object from the
+			// text when the model answers in prose (as V2a's fallback does).
+			tools = []llm.ToolDef{emit}
+		}
 		choice = llm.ToolChoiceRequired
 	}
 	if choice == llm.ToolChoiceNone && !usesTools {
 		// Converse has no "none": with no tool blocks in the history the
 		// tools can be left out; with them, Converse needs toolConfig, so the
-		// tools stay and the model decides (auto).
+		// tools stay and no toolChoice is sent (the model decides).
 		tools = nil
 	}
 	if len(tools) > 0 {
-		tc, err := encodeTools(tools, choice, req.Cache.Tools && fam.cacheTools)
+		tc, err := encodeTools(tools, choice == llm.ToolChoiceRequired && fam.forcedTool, req.Cache.Tools && fam.cacheTools)
 		if err != nil {
 			return nil, err
 		}
@@ -86,7 +95,10 @@ func clampInt32(n int64) int32 {
 	return int32(n)
 }
 
-func encodeTools(defs []llm.ToolDef, choice llm.ToolChoice, cache bool) (*types.ToolConfiguration, error) {
+// encodeTools builds toolConfig. toolChoice is sent only to force a tool
+// (any) on a family that takes it: auto is Converse's default, and some
+// families (Meta Llama) reject an explicit toolChoice.
+func encodeTools(defs []llm.ToolDef, force, cache bool) (*types.ToolConfiguration, error) {
 	tc := &types.ToolConfiguration{}
 	for _, d := range defs {
 		schema, err := docValue(d.Schema)
@@ -108,11 +120,8 @@ func encodeTools(defs []llm.ToolDef, choice llm.ToolChoice, cache bool) (*types.
 	if cache {
 		tc.Tools = append(tc.Tools, &types.ToolMemberCachePoint{Value: cachePoint()})
 	}
-	switch choice {
-	case llm.ToolChoiceRequired:
+	if force {
 		tc.ToolChoice = &types.ToolChoiceMemberAny{Value: types.AnyToolChoice{}}
-	default:
-		tc.ToolChoice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
 	}
 	return tc, nil
 }

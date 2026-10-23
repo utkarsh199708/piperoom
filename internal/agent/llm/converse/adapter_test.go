@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -104,7 +105,7 @@ var lagTool = llm.ToolDef{
 	Description: "Consumer group lag.",
 	Schema: map[string]any{
 		"type":                 "object",
-		"properties":           map[string]any{"group": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "maximum": 1000}},
+		"properties":           map[string]any{"group": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer", "maximum": json.Number("12345678901234567890"), "minimum": json.Number("-9007199254740991")}},
 		"required":             []string{"group"},
 		"additionalProperties": false,
 	},
@@ -196,8 +197,13 @@ func TestWireShapeNova(t *testing.T) {
 	if spec.ToolSpec.Name != lagTool.Name || !llmtestSameJSON(spec.ToolSpec.InputSchema.JSON, wantSchema) {
 		t.Fatalf("toolSpec = %s %s", spec.ToolSpec.Name, spec.ToolSpec.InputSchema.JSON)
 	}
-	if _, ok := b.ToolConfig.ToolChoice["auto"]; !ok {
-		t.Fatalf("toolChoice = %v, want auto", b.ToolConfig.ToolChoice)
+	if b.ToolConfig.ToolChoice != nil {
+		t.Fatalf("toolChoice = %v, want none sent (auto is the default)", b.ToolConfig.ToolChoice)
+	}
+	for _, lit := range []string{`"maximum":12345678901234567890`, `"minimum":-9007199254740991`} {
+		if !bytes.Contains(b.ToolConfig.Tools[0], []byte(lit)) {
+			t.Fatalf("schema number %s changed: %s", lit, b.ToolConfig.Tools[0])
+		}
 	}
 
 	if len(b.Messages) != 3 {
@@ -358,7 +364,7 @@ func TestToolChoiceNone(t *testing.T) {
 	if b := parseBody(t, reqs[0].body); b.ToolConfig != nil {
 		t.Fatalf("toolConfig sent without tool history: %+v", b.ToolConfig)
 	}
-	if b := parseBody(t, reqs[1].body); b.ToolConfig == nil || b.ToolConfig.ToolChoice["auto"] == nil {
+	if b := parseBody(t, reqs[1].body); b.ToolConfig == nil || b.ToolConfig.ToolChoice != nil {
 		t.Fatalf("toolConfig with tool history = %+v", b.ToolConfig)
 	}
 }
@@ -468,6 +474,7 @@ func TestClaudeModelRefused(t *testing.T) {
 		"global.anthropic.claude-haiku-5-5",
 		"arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5-v1:0",
 		"claude-opus-5-5",
+		"arn:aws:bedrock:us-east-1:123:custom-model/anthropic.claude-3-haiku-20240307-v1:0:200k/abc123",
 	} {
 		cfg := testConfig("http://127.0.0.1:1")
 		cfg.Models = []string{"amazon.nova-pro-v1:0", id}
@@ -558,6 +565,9 @@ func TestBedrockAPIKey(t *testing.T) {
 	if got := f.requests()[0].header.Get("Authorization"); got != "Bearer "+key {
 		t.Fatalf("Authorization = %q, want the bearer key", got)
 	}
+	if s := fmt.Sprintf("%v %+v %#v", m, *m, m); strings.Contains(s, key) {
+		t.Fatalf("fmt prints the key: %s", s)
+	}
 	_, err := m.Turn(context.Background(), llm.Request{Model: testModel, Messages: []llm.Message{userText("hi")}})
 	var ae *llm.APIError
 	if !errors.As(err, &ae) || ae.Kind != llm.ErrAuth {
@@ -579,7 +589,7 @@ func TestBedrockAPIKey(t *testing.T) {
 func TestBedrockAPIKeyNeedsTLS(t *testing.T) {
 	t.Setenv(BearerTokenEnv, "ABSKbedrock-api-key-not-real")
 	f := newFake(t, false, answer(t, llmtest.Answer{Text: "ok"}))
-	cfg := Config{AWS: &aws.Config{Region: "us-east-1"}, BaseEndpoint: f.URL, attempts: 1}
+	cfg := Config{AWS: &aws.Config{Region: "us-east-1"}, BaseEndpoint: f.URL, attempts: 1, loopbackHTTP: true}
 	if _, err := newModel(t, cfg).Turn(context.Background(), llm.Request{Model: testModel, Messages: []llm.Message{userText("hi")}}); err == nil {
 		t.Fatal("a bearer key went over plain HTTP")
 	}
@@ -588,14 +598,33 @@ func TestBedrockAPIKeyNeedsTLS(t *testing.T) {
 	}
 }
 
+// TestResponseIsCapped: a body past 4 MiB fails the turn instead of being
+// decoded. End to end only the failure is asserted: under load the SDK can
+// report the connection it closed after the read error instead of the error
+// itself; the reader's own behaviour is pinned by TestCappedBody.
 func TestResponseIsCapped(t *testing.T) {
 	big := `{"output":{"message":{"role":"assistant","content":[{"text":"` + strings.Repeat("a", maxResponseBytes) + `"}]}},"stopReason":"end_turn"}`
 	f := newFake(t, false, jsonReply(http.StatusOK, big))
 	cfg := testConfig(f.URL)
 	cfg.attempts = 1
 	_, err := newModel(t, cfg).Turn(context.Background(), llm.Request{Model: testModel, Messages: []llm.Message{userText("hi")}})
-	if err == nil || !errors.Is(err, errResponseTooLarge) {
-		t.Fatalf("err = %v, want the size cap", err)
+	var ae *llm.APIError
+	if !errors.As(err, &ae) || ae.Kind != llm.ErrNetwork {
+		t.Fatalf("err = %v, want a failed turn", err)
+	}
+}
+
+func TestCappedBody(t *testing.T) {
+	read := func(n int) error {
+		b := &cappedBody{rc: io.NopCloser(strings.NewReader(strings.Repeat("a", n))), left: maxResponseBytes}
+		_, err := io.Copy(io.Discard, b)
+		return err
+	}
+	if err := read(maxResponseBytes); err != nil {
+		t.Fatalf("a body of exactly the cap: %v", err)
+	}
+	if err := read(maxResponseBytes + 1); !errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("a body past the cap: %v", err)
 	}
 }
 
