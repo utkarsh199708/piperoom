@@ -141,3 +141,15 @@ func TestGrantSelectExecute(t *testing.T) {
 		t.Fatalf("writer error = %v", err)
 	}
 }
+
+// The connector's database.user changed after approval: Execute grants nothing.
+func TestGrantSelectExecuteRechecksUser(t *testing.T) {
+	conn, _, w, a := grantFixture()
+	conn.cfg["pg-orders"]["database.user"] = "app"
+	if _, err := a.Execute(scopedCtx(), grantParamsJSON("debezium", "public.refunds")); err == nil || !strings.Contains(err.Error(), "is not connector") {
+		t.Fatalf("Execute = %v, want a database.user refusal", err)
+	}
+	if len(w.calls) != 0 {
+		t.Fatalf("writes: %+v", w.calls)
+	}
+}

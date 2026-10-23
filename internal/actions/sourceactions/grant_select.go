@@ -307,6 +307,14 @@ func (a *grantSelect) Execute(ctx context.Context, raw json.RawMessage) (string,
 	if a.d.Writer == nil {
 		return "", fmt.Errorf("sourceactions: %s: %w", GrantSelectName, errNoWriter)
 	}
+	// The connector config may have changed since approval: the grant goes
+	// only to the role that is its database.user now.
+	rctx, cancel := withTimeout(ctx, a.d.timeout)
+	err = a.checkConnectorUser(rctx, p)
+	cancel()
+	if err != nil {
+		return "", err
+	}
 	if err := a.d.Writer.GrantSelect(ctx, p.Role, p.Tables); err != nil {
 		return "", fmt.Errorf("sourceactions: %s: %w", GrantSelectName, err)
 	}
