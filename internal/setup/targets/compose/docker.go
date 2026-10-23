@@ -9,7 +9,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -194,7 +193,9 @@ func stackSnapshot(env ops.Env, clean, class string) (string, string, func(), er
 		return "", "", nil, fmt.Errorf("compose: creating the compose snapshot: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
-	snap := filepath.Join(dir, path.Base(clean))
+	// The snapshot's name is fixed, not taken from the params: docker reads
+	// it through -f, so its name changes nothing compose does.
+	snap := filepath.Join(dir, DefaultFile)
 	out, err := os.OpenFile(snap, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
 		_, err = out.Write(doc)
