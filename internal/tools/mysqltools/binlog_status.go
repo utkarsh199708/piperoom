@@ -154,7 +154,7 @@ func (t *binlogStatusTool) Run(ctx context.Context, input json.RawMessage) (tool
 			if k == "" {
 				k = "none (not a cdc pipeline)"
 			}
-			return tools.Result{}, fmt.Errorf("%w: %s reads MySQL sources only; pipeline %q has source_kind %s", tools.ErrBadInput, NameBinlogStatus, p.ID, k)
+			return tools.Result{}, fmt.Errorf("%w: %s reads MySQL sources only; pipeline %q has source_kind %s", tools.ErrOutOfScope, NameBinlogStatus, p.ID, k)
 		}
 	}
 	targets, err := connectorTargets(sc, in.Connector)

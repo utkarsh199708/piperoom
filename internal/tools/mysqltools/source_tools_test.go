@@ -9,21 +9,16 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/mysql"
-	"piperoom/internal/clients/postgres"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
 )
 
 // Board Q8c: "a test shows the Q2a source_* tools work on MySQL through the
-// interface". The four tools (dbtools, A3) assert the item 2 reader on the
-// source client. Until the "[Q8-0] contracts: item 7" PR moves item 2 into
-// clients.go, dbtools asserts it with the postgres package's DTOs and the
-// MySQL client returns its own identical local copies (mysql/types.go), so
-// the test bridges them with pgShaped: a field-for-field copy and nothing
-// else. Once both packages alias the clients types, pgShaped is deleted and
-// *mysql.DB is the Src as it is (Q8n). What this proves today: a reader with
-// exactly the MySQL client's method set and DTOs drives all four tools in a
-// MySQL room, scoped to the pipeline's db.table names.
+// interface". The four tools (dbtools, A3) assert the item 2 reader
+// (clients.SourceSettingsReader, clients.ScopedBlockerReader) on the source
+// client, and the mysql DTOs alias the clients ones, so a reader with exactly
+// the MySQL client's method set is the Src as it is: it drives all four tools
+// in a MySQL room, scoped to the pipeline's db.table names.
 
 // fakeMySQLReader implements the MySQL client's reader interfaces with its
 // DTOs, as *mysql.DB does (mysql.go asserts the same two).
@@ -78,64 +73,12 @@ func (f *fakeMySQLReader) BlockersOnTables(_ context.Context, _ time.Duration, t
 	}, nil
 }
 
-// pgShaped presents a MySQL reader with the postgres package's DTOs, which
-// dbtools asserts until item 7 lands. Field-for-field; the MySQL-only fields
-// (Engine, Accounts, Privileges) have no postgres twin yet and are dropped.
-type pgShaped struct {
-	clients.SourceDB
-	m interface {
-		mysql.SourceSettingsReader
-		mysql.ScopedBlockerReader
-	}
-}
-
-func (p pgShaped) Settings(ctx context.Context) ([]postgres.DBSetting, error) {
-	in, err := p.m.Settings(ctx)
-	out := make([]postgres.DBSetting, len(in))
-	for i, s := range in {
-		out[i] = postgres.DBSetting(s)
-	}
-	return out, err
-}
-
-func (p pgShaped) TableReplication(ctx context.Context, tables []string) ([]postgres.TableReplication, error) {
-	in, err := p.m.TableReplication(ctx, tables)
-	out := make([]postgres.TableReplication, len(in))
-	for i, t := range in {
-		out[i] = postgres.TableReplication{Table: t.Table, HasPrimaryKey: t.HasPrimaryKey, ReplicaIdentity: t.ReplicaIdentity}
-	}
-	return out, err
-}
-
-func (p pgShaped) RoleInfo(ctx context.Context, role string, tables []string) (postgres.RoleInfo, error) {
-	r, err := p.m.RoleInfo(ctx, role, tables)
-	return postgres.RoleInfo{Role: r.Role, Exists: r.Exists, CanLogin: r.CanLogin, Replication: r.Replication, Selectable: r.Selectable}, err
-}
-
-func sessionsPG(in []mysql.DBSession) []postgres.DBSession {
-	out := make([]postgres.DBSession, len(in))
-	for i, s := range in {
-		out[i] = postgres.DBSession(s)
-	}
-	return out
-}
-
-func (p pgShaped) Blockers(ctx context.Context, d time.Duration) ([]postgres.DBSession, error) {
-	in, err := p.m.Blockers(ctx, d)
-	return sessionsPG(in), err
-}
-
-func (p pgShaped) BlockersOnTables(ctx context.Context, d time.Duration, tables []string) ([]postgres.DBSession, error) {
-	in, err := p.m.BlockersOnTables(ctx, d, tables)
-	return sessionsPG(in), err
-}
-
 func TestSourceToolsOnMySQL(t *testing.T) {
 	o := loadOwners(t)
 	m := &fakeMySQLReader{}
 	conn := &fakeConnect{configs: map[string]map[string]string{"orders-mysql": mysqlCfg("184054"), "orders-mysql-2": mysqlCfg("184055")}}
 	reg := tools.NewRegistry()
-	if err := dbtools.Register(reg, dbtools.Deps{Src: pgShaped{m: m}, Connect: conn, Owners: o}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: m, Connect: conn, Owners: o}); err != nil {
 		t.Fatal(err)
 	}
 	ctx := tools.WithPipeline(context.Background(), pipeline(t, o, "orders-mysql"))

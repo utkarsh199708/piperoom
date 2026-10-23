@@ -352,7 +352,7 @@ func TestBinlogStatusRefusesBeforeIO(t *testing.T) {
 		d    Deps
 		want error
 	}{
-		{"postgres pipeline", pg, `{}`, f.d, tools.ErrBadInput},
+		{"postgres pipeline", pg, `{}`, f.d, tools.ErrOutOfScope},
 		{"connector outside the pipeline", f.scoped(t), `{"connector":"pg-orders-connector"}`, f.d, tools.ErrOutOfScope},
 		{"no scope", context.Background(), `{}`, f.d, tools.ErrNoScope},
 		{"unscoped without a connector", tools.WithUnscoped(context.Background()), `{}`, f.d, tools.ErrBadInput},
