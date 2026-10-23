@@ -593,6 +593,54 @@ func containsString(haystack, needle string) bool {
 	return needle != "" && strings.Contains(haystack, needle)
 }
 
+// TestSetupLadderVerifiedFoldsIntoTheSnapshot: the ladder runner's
+// setup.verified is the room's verdict, and the view folds it — the rungs of
+// the current plan — while a run of an older plan says nothing about this one.
+// The generic emit paths refuse the type (a test of its own), so the runner's
+// own event is the one that must reach the snapshot.
+func TestSetupLadderVerifiedFoldsIntoTheSnapshot(t *testing.T) {
+	r := newLadderRig(t, tierOpts{})
+	ctx := context.Background()
+	roomID := r.openSetup("shipments-setup", "a", "alice", "db.acme:5432", "")
+	r.plan(roomID, "db.acme:5432", "compose_up")
+
+	// What the runner writes: under the room's lock, as systemActor.
+	verify := func(planID string, rungs ...events.SetupRung) {
+		t.Helper()
+		st := r.svc.lockCachedRoom(roomID)
+		defer r.svc.unlockRoom(st)
+		if _, err := r.svc.emitLocked(ctx, st, roomID, events.SetupVerified, systemActor, events.SetupVerifiedPayload{
+			PlanID: planID, NonceHash: setupLadderHash("nonce"), Rungs: rungs,
+		}); err != nil {
+			t.Fatalf("emit setup.verified: %v", err)
+		}
+	}
+	verify("pl_1",
+		events.SetupRung{Name: plan.RungConnector, OK: true, Note: "the connector is RUNNING"},
+		events.SetupRung{Name: plan.RungCanaryEvent, OK: false, Note: "not yet"},
+	)
+	snap := mustRoom(t, r.svc, roomID)
+	if snap.Setup == nil || snap.Setup.PlanID != "pl_1" {
+		t.Fatalf("setup snapshot = %+v, want plan pl_1", snap.Setup)
+	}
+	if len(snap.Setup.Verified) != 2 {
+		t.Fatalf("verified = %+v, want the run's two rungs", snap.Setup.Verified)
+	}
+	if got := snap.Setup.Verified[0]; got.Name != plan.RungConnector || !got.OK || got.Note == "" {
+		t.Fatalf("rung 1 = %+v, want the green connector rung", got)
+	}
+	if got := snap.Setup.Verified[1]; got.Name != plan.RungCanaryEvent || got.OK {
+		t.Fatalf("rung 5 = %+v, want the red canary event rung", got)
+	}
+
+	// A verdict of another plan (an older run) leaves this plan's rungs alone.
+	verify("pl_old", events.SetupRung{Name: plan.RungConnector, OK: false})
+	snap = mustRoom(t, r.svc, roomID)
+	if len(snap.Setup.Verified) != 2 || !snap.Setup.Verified[0].OK {
+		t.Fatalf("verified = %+v, want the current plan's rungs unchanged", snap.Setup.Verified)
+	}
+}
+
 // TestSetupLadderStaleCanaryEventDoesNotMatch: a second run is not decided by
 // the first run's result. Its canary is never approved, and a result for the
 // first run's proposal arriving after the second run started is ignored: the
