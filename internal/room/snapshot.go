@@ -56,6 +56,20 @@ type Hypothesis struct {
 	Seq int64 `json:"seq"`
 	// Verdicts is the latest verdict per person on Seq, in seq order.
 	Verdicts []Verdict `json:"verdicts"`
+	// Scope, Team and ChangeID are copied from the payload (X4): scope
+	// "unknown" when it has none, team "" and change_id 0 when unset.
+	Scope    events.HypothesisScope `json:"scope"`
+	Team     string                 `json:"team"`
+	ChangeID int64                  `json:"change_id"`
+}
+
+// TeamPaged is one room.team_paged of the room (X4d): which team the driver
+// paged, for which hypothesis, by whom and when.
+type TeamPaged struct {
+	Team          string    `json:"team"`
+	HypothesisSeq int64     `json:"hypothesis_seq"`
+	By            Person    `json:"by"`
+	At            time.Time `json:"at"`
 }
 
 // Verdict is one person's current confirm or dispute of the hypothesis.
@@ -123,11 +137,29 @@ type Proposal struct {
 	// set while the policy has neither run nor been stopped; nil otherwise.
 	Scheduled *Scheduled `json:"scheduled,omitempty"`
 
+	// X8 staging (docs/api.md "X8 snapshot fields"). Stageable and
+	// StagingRequired depend on the server's actions and owners.yaml, so the
+	// room view sets them (RoomFor); Apply leaves Stageable empty and
+	// StagingRequired false. StageRunning is the newest proposal.stage_started
+	// with no proposal.staged after it (RoomFor hides it past expires_at);
+	// Staged is the newest proposal.staged, kept while its params_hash differs
+	// from the proposal's (only a matching one counts).
+	Stageable       []int                         `json:"stageable"`
+	StageRunning    *StageRunning                 `json:"stage_running,omitempty"`
+	Staged          *events.ProposalStagedPayload `json:"staged,omitempty"`
+	StagingRequired bool                          `json:"staging_required,omitempty"`
+	// stages counts the proposal's proposal.stage_started events: at most
+	// maxStagesPerProposal (service_stage.go).
+	stages int
+
 	// Origin is proposal.created.origin: "agent" or "driver"
 	// (POST /api/rooms/{id}/proposals); "" reads as "agent" and is normalised
 	// to it when the snapshot is folded. The auto-approve policy never
 	// schedules a driver's proposal (autoapprove.go). (P3c)
 	Origin string `json:"origin"`
+	// Class is proposal.created.class (X2/X6): "recovery" or "performance";
+	// "" (omitted) reads as "fix", so a fix proposal marshals as before.
+	Class string `json:"class,omitempty"`
 	// sched is the fold of the proposal's policy countdown (autoapprove.go).
 	sched schedState
 }
@@ -139,6 +171,17 @@ func proposalOrigin(o string) string {
 		return events.ProposalOriginAgent
 	}
 	return o
+}
+
+// StageRunning is a proposal.stage_started of the proposal with no
+// proposal.staged after it (open_proposals[].stage_running, X8). ParamsHash
+// is the stage's, for the room service; it is not part of the JSON.
+type StageRunning struct {
+	By         Person    `json:"by"`
+	StartedAt  time.Time `json:"started_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Steps      []int     `json:"steps"`
+	paramsHash string
 }
 
 // Scheduled mirrors the pending proposal.scheduled of a proposal
@@ -202,11 +245,18 @@ type RoomSnapshot struct {
 	// Shadow is room.created.shadow: the room's pipeline had shadow mode on at
 	// open, so the agent ran silently and proposes nothing
 	// (docs/design/shadow.md).
-	Shadow             bool         `json:"shadow"`
-	LastSeq            int64        `json:"last_seq"`
-	Driver             *Driver      `json:"driver"`
-	AgentStatus        AgentStatus  `json:"agent_status"`
-	Hypothesis         *Hypothesis  `json:"hypothesis"`
+	Shadow bool `json:"shadow"`
+	// Origin is room.created.origin: "forecast" for a room a forecast signal
+	// opened (X3), omitted otherwise. Forecast is the newest forecast signal
+	// of the room's watcher evidence (forecast.go), omitted when none.
+	Origin      string      `json:"origin,omitempty"`
+	Forecast    *Forecast   `json:"forecast,omitempty"`
+	LastSeq     int64       `json:"last_seq"`
+	Driver      *Driver     `json:"driver"`
+	AgentStatus AgentStatus `json:"agent_status"`
+	Hypothesis  *Hypothesis `json:"hypothesis"`
+	// TeamPages are the room.team_paged events in seq order (X4d); never null.
+	TeamPages          []TeamPaged  `json:"team_pages"`
 	Triage             *Triage      `json:"triage"`
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
@@ -217,6 +267,10 @@ type RoomSnapshot struct {
 	// and 4). Set on the room view only (RoomFor), never by Apply; nil, and
 	// left out of the JSON, everywhere else.
 	Mode *Mode `json:"mode,omitempty"`
+	// Setup is the setup room's state (U wave; docs/api.md "U-wave snapshot
+	// fields"), folded from the setup.* events of the log. Nil on every
+	// incident room, so it is absent there.
+	Setup *SetupSnapshot `json:"setup,omitempty"`
 
 	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
 	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
@@ -281,6 +335,10 @@ type RoomSnapshot struct {
 	// service_solemember.go). Unexported: not part of the snapshot JSON.
 	alertRoom        bool
 	controlRequested bool
+
+	// agentRan is true once the log holds an event of the agent actor. A
+	// forecast room without one is quiet (quietRoom): nothing has run in it.
+	agentRan bool
 }
 
 // PostmortemState mirrors the snapshot's postmortem member (docs/api.md).
@@ -330,6 +388,7 @@ func NewSnapshot() RoomSnapshot {
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
 		ChecklistDone:      map[string]ChecklistTick{},
+		TeamPages:          []TeamPaged{},
 	}
 }
 
@@ -348,6 +407,10 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		}
 		h.Verdicts = append([]Verdict{}, s.Hypothesis.Verdicts...)
 		c.Hypothesis = &h
+	}
+	if s.Forecast != nil {
+		f := *s.Forecast
+		c.Forecast = &f
 	}
 	if s.Triage != nil {
 		t := *s.Triage
@@ -374,6 +437,7 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		m.AutoApprove = append([]string{}, s.Mode.AutoApprove...)
 		c.Mode = &m
 	}
+	c.Setup = s.Setup.clone()
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)
 	c.warnedFor = cloneTime(s.warnedFor)
@@ -381,6 +445,7 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
 	c.ChecklistDone = cloneTicks(s.ChecklistDone)
+	c.TeamPages = append([]TeamPaged{}, s.TeamPages...)
 	return c
 }
 
@@ -421,6 +486,28 @@ func clonePreview(in *events.ProposalPreviewedPayload) *events.ProposalPreviewed
 	return &c
 }
 
+// cloneStaged deep-copies a proposal.staged payload: its steps and their
+// results.
+func cloneStaged(in *events.ProposalStagedPayload) *events.ProposalStagedPayload {
+	if in == nil {
+		return nil
+	}
+	c := *in
+	c.Steps = make([]events.StepStage, len(in.Steps))
+	for i, st := range in.Steps {
+		c.Steps[i] = st
+		if st.Result != nil {
+			r := *st.Result
+			if st.Result.DryRun != nil {
+				dr := *st.Result.DryRun
+				r.DryRun = &dr
+			}
+			c.Steps[i].Result = &r
+		}
+	}
+	return &c
+}
+
 func cloneProposals(in []Proposal) []Proposal {
 	out := make([]Proposal, len(in))
 	for i, p := range in {
@@ -433,6 +520,13 @@ func cloneProposals(in []Proposal) []Proposal {
 			sc := *p.Scheduled
 			out[i].Scheduled = &sc
 		}
+		out[i].Stageable = append([]int{}, p.Stageable...)
+		if p.StageRunning != nil {
+			sr := *p.StageRunning
+			sr.Steps = append([]int{}, p.StageRunning.Steps...)
+			out[i].StageRunning = &sr
+		}
+		out[i].Staged = cloneStaged(p.Staged)
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
 			for k, v := range p.Approvals {
@@ -461,6 +555,10 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	if e.Actor.Kind == events.ActorHuman {
 		snap.Members = upsertMember(snap.Members, e.Actor, "watching")
 	}
+	if e.Actor.Kind == events.ActorAgent {
+		snap.agentRan = true
+	}
+	applyForecastEvidence(&snap, e)
 	switch e.Type {
 	case events.RoomCreated:
 		p, ok := decode[events.RoomCreatedPayload](e)
@@ -472,6 +570,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Severity = p.Severity
 		snap.PipelineID = p.PipelineID
 		snap.Shadow = p.Shadow
+		snap.Origin = p.Origin
 		snap.alertRoom = p.AlertSource != "" || len(p.Alert) > 0
 		snap.Status = "open"
 		snap.OpenedAt = e.At
@@ -484,6 +583,12 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			}
 			m[nudgeKey(p.ProposalID, p.Layer)] = e.At
 			snap.nudges = m
+		}
+
+	case events.RoomEscalated:
+		// The service writes only a raise; the fold takes the event as is.
+		if p, ok := decode[events.RoomEscalatedPayload](e); ok && severities[p.Severity] {
+			snap.Severity = p.Severity
 		}
 
 	case events.RoomLabelled:
@@ -586,7 +691,22 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			Confidence:   p.Confidence,
 			Seq:          e.Seq,
 			Verdicts:     []Verdict{},
+			Scope:        p.Scope.Normalize(),
+			Team:         p.Team,
+			ChangeID:     p.ChangeID,
 		}
+
+	case events.RoomTeamPaged:
+		p, ok := decode[events.TeamPagedPayload](e)
+		if !ok {
+			break
+		}
+		// A full slice expression: the append never writes into the caller's
+		// backing array.
+		snap.TeamPages = append(snap.TeamPages[:len(snap.TeamPages):len(snap.TeamPages)], TeamPaged{
+			Team: p.Team, HypothesisSeq: p.HypothesisSeq,
+			By: Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified}, At: e.At,
+		})
 
 	case events.HypothesisVerdict:
 		p, ok := decode[events.HypothesisVerdictPayload](e)
@@ -689,6 +809,9 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			FallbackLayers: append([]string{}, p.FallbackLayers...),
 			Origin:         proposalOrigin(p.Origin),
 		}
+		if p.Class != events.ActionClassFix {
+			np.Class = p.Class
+		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv
 			rest := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews))
@@ -723,6 +846,16 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			}
 			m[p.ProposalID] = p
 			snap.pendingPreviews = m
+		}
+
+	case events.ProposalStageStarted:
+		if p, ok := decode[events.ProposalStageStartedPayload](e); ok {
+			foldStageStarted(snap.OpenProposals, e, p)
+		}
+
+	case events.ProposalStaged:
+		if p, ok := decode[events.ProposalStagedPayload](e); ok {
+			foldStaged(snap.OpenProposals, p)
 		}
 
 	case events.ApprovalGiven:
@@ -770,6 +903,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 	}
 
+	// The setup member folds from the setup.* events (setup_snapshot.go). It
+	// runs after the switch so a setup room folds exactly like every other room
+	// plus this member.
+	snap = applySetup(snap, e)
+
 	return normalize(snap)
 }
 
@@ -810,9 +948,15 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 		if snap.OpenProposals[i].Approvals == nil {
 			snap.OpenProposals[i].Approvals = map[string]string{}
 		}
+		if snap.OpenProposals[i].Stageable == nil {
+			snap.OpenProposals[i].Stageable = []int{}
+		}
 	}
 	if snap.PendingSuggestions == nil {
 		snap.PendingSuggestions = []Suggestion{}
+	}
+	if snap.TeamPages == nil {
+		snap.TeamPages = []TeamPaged{}
 	}
 	if snap.AgentStatus.State == "" {
 		snap.AgentStatus.State = "idle"
@@ -905,6 +1049,40 @@ func isLastStep(proposals []Proposal, proposalID string, stepIndex int) bool {
 		}
 	}
 	return false
+}
+
+// foldStageStarted folds a proposal.stage_started into its open proposal:
+// the stage runs until a proposal.staged (or its expires_at, which the room
+// view and the stage route read), and it counts toward the per-proposal cap.
+// A stage of a proposal that is no longer open is dropped.
+func foldStageStarted(proposals []Proposal, e events.Event, p events.ProposalStageStartedPayload) {
+	for i := range proposals {
+		if proposals[i].ProposalID != p.ProposalID {
+			continue
+		}
+		proposals[i].stages++
+		proposals[i].StageRunning = &StageRunning{
+			By:         Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified},
+			StartedAt:  e.At.UTC(),
+			ExpiresAt:  p.ExpiresAt.UTC(),
+			Steps:      append([]int{}, p.Steps...),
+			paramsHash: p.ParamsHash,
+		}
+		return
+	}
+}
+
+// foldStaged folds a proposal.staged into its open proposal: it ends the
+// running stage and replaces the previous result (newest stage wins).
+func foldStaged(proposals []Proposal, p events.ProposalStagedPayload) {
+	for i := range proposals {
+		if proposals[i].ProposalID != p.ProposalID {
+			continue
+		}
+		proposals[i].StageRunning = nil
+		proposals[i].Staged = cloneStaged(&p)
+		return
+	}
 }
 
 // setApproval records a decision on a proposal's approvals map without

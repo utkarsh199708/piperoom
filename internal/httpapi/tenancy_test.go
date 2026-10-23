@@ -72,7 +72,7 @@ type tenancyEnv struct {
 	svc *room.Service
 }
 
-func newTenancyEnv(t *testing.T, withTenants bool) *tenancyEnv {
+func newTenancyEnv(t *testing.T, withTenants bool, opts ...httpapi.Option) *tenancyEnv {
 	t.Helper()
 	users, err := room.ParseUsers([]byte(tenancyUsers))
 	if err != nil {
@@ -102,7 +102,8 @@ func newTenancyEnv(t *testing.T, withTenants bool) *tenancyEnv {
 		},
 	})
 	now := time.Now()
-	api := httpapi.New(svc, st, nil, httpapi.WithAlertIngest(alertin.Config{GenericSecret: genericSecret, Now: func() time.Time { return now }}))
+	opts = append([]httpapi.Option{httpapi.WithAlertIngest(alertin.Config{GenericSecret: genericSecret, Now: func() time.Time { return now }})}, opts...)
+	api := httpapi.New(svc, st, nil, opts...)
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() {
 		srv.Close()
@@ -212,6 +213,7 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/suggestions/{sid}/decline", "/api/rooms/" + f.rb + "/suggestions/g_x/decline", ""},
 		{"POST", "/api/rooms/{id}/hypothesis", "/api/rooms/" + f.rb + "/hypothesis", `{"verdict":"confirmed"}`},
 		{"POST", "/api/rooms/{id}/nudge", "/api/rooms/" + f.rb + "/nudge", `{"proposal_id":"p_x","layer":"kafka"}`},
+		{"POST", "/api/rooms/{id}/page-team", "/api/rooms/" + f.rb + "/page-team", `{"team":"checkout"}`},
 		{"POST", "/api/rooms/{id}/proposals", "/api/rooms/" + f.rb + "/proposals", `{"title":"x","risk":"low","rollback":"r","steps":[]}`},
 		{"POST", "/api/rooms/{id}/control/request", "/api/rooms/" + f.rb + "/control/request", ""},
 		{"POST", "/api/rooms/{id}/control/grant", "/api/rooms/" + f.rb + "/control/grant", `{"to":"alice"}`},
@@ -228,12 +230,19 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/proposals/{pid}/reject", "/api/proposals/" + f.open + "/reject", `{"layer":"kafka-connect","reason":"no","params_hash":"x"}`},
 		{"POST", "/api/proposals/{pid}/approve-all", "/api/proposals/" + f.open + "/approve-all", `{"params_hash":"x"}`},
 		{"POST", "/api/proposals/{pid}/cancel", "/api/proposals/" + f.open + "/cancel", `{"reason":"no"}`},
+		{"POST", "/api/proposals/{pid}/stage", "/api/proposals/" + f.open + "/stage", `{}`},
 		{"POST", "/api/handoffs/{hid}/accept", "/api/handoffs/" + f.handoff + "/accept", ""},
 		{"GET", "/api/pipelines/{pid}/topology", "/api/pipelines/pb/topology", ""},
 		{"GET", "/api/pipelines/{pid}/agent-stats", "/api/pipelines/pb/agent-stats", ""},
 		{"GET", "/api/pipelines/{pid}/trends", "/api/pipelines/pb/trends?metric=slot_wal_bytes", ""},
 		{"POST", "/api/pipelines/{pid}/connectors/{name}/accept-config", "/api/pipelines/pb/connectors/pb-c/accept-config", ""},
+		{"GET", "/api/pipelines/{pid}/connectors/{name}/config-versions", "/api/pipelines/pb/connectors/pb-c/config-versions", ""},
+		{"GET", "/api/pipelines/{pid}/connectors/{name}/config-versions", "/api/pipelines/pb/connectors/pb-c/config-versions?diff=" + strings.Repeat("a", 64) + ".." + strings.Repeat("b", 64), ""},
 		{"GET", "/api/rooms/{id}/usage", "/api/rooms/" + f.rb + "/usage", ""},
+		{"POST", "/api/rooms/{id}/setup/targets", "/api/rooms/" + f.rb + "/setup/targets", `{"kind":"connect","address":"connect.acme:8083"}`},
+		{"POST", "/api/rooms/{id}/setup/targets/{t}/class", "/api/rooms/" + f.rb + "/setup/targets/db.acme%3A5432/class", `{"class":"production"}`},
+		{"POST", "/api/rooms/{id}/setup/pipeline", "/api/rooms/" + f.rb + "/setup/pipeline", `{"add_tables":["public.b2"]}`},
+		{"POST", "/api/rooms/{id}/setup/maintenance-window", "/api/rooms/" + f.rb + "/setup/maintenance-window", `{"start":"2026-10-21T10:00:00Z","end":"2026-10-21T11:00:00Z"}`},
 		{"GET", "/api/usage", "/api/usage?pipeline=pb", ""},
 	}
 }
@@ -246,7 +255,10 @@ var aggregateRoutes = []string{
 	"GET /api/rooms/ws",
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
+	"POST /api/setup",
 	"GET /api/pipelines",
+	"GET /api/fleet",         // TestFleetTenancy
+	"GET /api/fleet/changes", // TestFleetTenancy
 	"POST /api/alerts/webhook",
 	"POST /api/alerts/{source}",
 }

@@ -18,7 +18,13 @@ import (
 
 // HumanInput is something a person said that the agent must read.
 type HumanInput struct {
-	Seq       int64        `json:"seq"` // room event seq it came from
+	Seq int64 `json:"seq"` // room event seq it came from
+	// At is the time of the room event the input came from (events.Event.At).
+	// The room service sets it for "action_result": the action.executed time
+	// a recovery step's Verify counts from (actions.Verifier, X2c). Zero when
+	// the sender does not know it (the CLI, a demo inbox): the runner then
+	// uses the time it first read the input, which is never earlier.
+	At        time.Time    `json:"at,omitzero"`
 	Actor     events.Actor `json:"actor"`
 	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update" | "proposal_created" | "proposal_executed" | "proposal_staged"
 	StepID    string       `json:"step_id,omitempty"`
@@ -119,6 +125,14 @@ type Alert struct {
 	// change's ExternalChange.Service to the team whose Owns lists it. Nil
 	// when owners.yaml has no teams: the hypothesis then names no team. (X4)
 	Teams []Team `json:"teams,omitempty"`
+	// X4: At is when the alert opened the room (the room's room.created
+	// time), filled by the room service. The agent measures a change's
+	// distance to the alert from it (X4c ranking), so a run started later
+	// (a quiet forecast room's first steer, X3c; a steer after a restart)
+	// still ranks against the alert, not against its own start. Zero when
+	// the caller has no room (cmd/investigate, evals): the run's start
+	// stands for it. (X4)
+	At time.Time `json:"at,omitzero"`
 	// X8: Staging is true when the room's pipeline declares a staging stack
 	// (owners.yaml staging:) and write mode is on, so the driver can try a
 	// proposal there (POST /api/proposals/{pid}/stage); filled by the room

@@ -219,6 +219,8 @@ func run(o runOptions) (err error) {
 		PipelineMap: pipelineMapFor(ctx, topo, pipeline, slog.Default()),
 		// The agent offers only this kind's tools (agent.ToolsForKind).
 		PipelineKind: kind,
+		// The teams a hypothesis may name (X4c), as the room service fills them.
+		Teams: alertTeams(own, pipeline),
 	}
 
 	err = ep.Run(ctx, alert, agent.Deps{
@@ -232,4 +234,14 @@ func run(o runOptions) (err error) {
 		return fmt.Errorf("investigate: %w", err)
 	}
 	return nil
+}
+
+// alertTeams is agent.Alert.Teams: the owners.yaml teams of the pipeline's
+// tenant, ids and owned services only. nil without an owners file or teams.
+func alertTeams(own *owners.Owners, pipeline string) []agent.Team {
+	var out []agent.Team
+	for _, t := range own.TeamsFor(pipeline) {
+		out = append(out, agent.Team{ID: t.ID, Owns: t.Owns})
+	}
+	return out
 }

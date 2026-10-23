@@ -210,11 +210,26 @@ func (c *Client) roundTrip(ctx context.Context, method, path string, in, out any
 	if out == nil {
 		return nil
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
+	// Read one byte past the cap so an oversized answer is reported as
+	// such, not as the JSON syntax error a cut body would give.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return fmt.Errorf("connect: %s %s: read: %w", method, path, err)
+	}
+	if len(b) > maxResponseBytes {
+		return fmt.Errorf("connect: %s %s: %w", method, path, ErrResponseTooLarge)
+	}
+	if err := json.Unmarshal(b, out); err != nil {
 		return fmt.Errorf("connect: %s %s: decode: %w", method, path, err)
 	}
 	return nil
 }
+
+// maxResponseBytes caps every response body Connect sends (AGENTS.md rule 7).
+const maxResponseBytes = 4 << 20
+
+// ErrResponseTooLarge is wrapped when a response body is over the 4 MB cap.
+var ErrResponseTooLarge = errors.New("response larger than the 4 MB cap")
 
 // ValidateResult is Connect's verdict on a config. Errors maps a config key to
 // its error messages; values are never kept, because they can be secrets.

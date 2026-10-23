@@ -3,8 +3,11 @@
 // filling (seq > last_seq + 1) is the transport's job (see hooks/useRoom.ts).
 import type {
   ActionExecutedPayload,
+  AgentRecoveryCheckPayload,
   AgentVerificationPayload,
   ProposalPreviewedPayload,
+  ProposalStageStartedPayload,
+  ProposalStagedPayload,
   RoomSnapshot,
   Actor,
   AgentHypothesisPayload,
@@ -35,6 +38,7 @@ import type {
   ProposalScheduledPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  RoomEscalatedPayload,
   RoomLabelledPayload,
   SteerDeclinedPayload,
   SteerSentPayload,
@@ -44,10 +48,12 @@ import type {
 import { describeEvent } from './describe'
 import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
+import { driftFacts } from '../lib/drift'
 import { runbookHits } from '../lib/f8'
 import { stripBidi } from '../lib/title'
-import { checklistKey, snapshotWriteMode } from './types'
-import type { HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
+import { checklistKey, snapshotStaging, snapshotWriteMode } from './types'
+import { stageLiftsRequirement } from '../lib/staging'
+import type { AlertInfo, HypothesisHistoryEntry, InsightState, MemberState, ProposalState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -63,6 +69,7 @@ function as<T>(e: Event): T {
  */
 export function applyModeRefresh(state: RoomState, snapshot: RoomSnapshot): RoomState {
   const fresh = snapshotWriteMode(snapshot)
+  const freshStaging = snapshotStaging(snapshot)
   const next: RoomState = {
     ...state,
     ...fresh,
@@ -72,12 +79,24 @@ export function applyModeRefresh(state: RoomState, snapshot: RoomSnapshot): Room
       const proposal = { ...p }
       delete proposal.blocked
       if (blocked) proposal.blocked = blocked
+      // X8: the snapshot is the authority on what can be staged and whether a stage is still owed.
+      const staging = freshStaging.snapshot_staging?.[p.proposal_id]
+      if (staging) {
+        proposal.stageable = staging.stageable
+        if (staging.staging_required) proposal.staging_required = true
+        else {
+          delete proposal.staging_required
+          delete proposal.staging_message
+        }
+      }
       return proposal
     }),
+    ...freshStaging,
   }
   // A snapshot without them (a server from before P1a, or one with nothing blocked) clears the old ones.
   if (!fresh.mode) delete next.mode
   if (!fresh.snapshot_blocked) delete next.snapshot_blocked
+  if (!freshStaging.snapshot_staging) delete next.snapshot_staging
   return next
 }
 
@@ -245,16 +264,19 @@ function applyCore(state: RoomState, event: Event): RoomState {
       // POST /api/rooms has no alert at all. alert_source is server-set and is
       // what the alert badge reads; the body-inferred source is only a label.
       const alertSourceField = typeof p.alert_source === 'string' && p.alert_source !== '' ? p.alert_source : undefined
-      const alert =
+      // Drift facts are read only when the server says the watcher opened the room (X1).
+      const drift = driftFacts(p.alert, alertSourceField)
+      const alert: AlertInfo | null =
         (p.alert === undefined || p.alert === null) && alertSourceField === undefined
           ? null
-          : { source: alertSource(p.alert), alert_source: alertSourceField }
+          : { source: alertSource(p.alert), alert_source: alertSourceField, ...(drift.length > 0 ? { drift } : {}) }
       next = {
         ...state,
         title: stripBidi(p.title),
         severity: p.severity as RoomState['severity'],
         pipeline_id: p.pipeline_id,
         shadow: p.shadow ?? state.shadow,
+        ...(p.origin ? { origin: p.origin } : {}),
         status: 'open',
         opened_at: event.at,
         driver,
@@ -264,6 +286,14 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ? [{ id: event.actor.id, name: event.actor.name, verified: event.actor.verified === true, role: 'driver' }]
             : state.members,
       }
+      break
+    }
+
+    case 'room.escalated': {
+      // The replay folds room.created's first severity; without this the header would drop back to it (X3).
+      const p = as<RoomEscalatedPayload>(event)
+      const rank = (s: string) => (/^sev[1-4]$/.test(s) ? Number(s.slice(3)) : 99)
+      if (rank(p.severity) < rank(state.severity)) next = { ...state, severity: p.severity as RoomState['severity'] }
       break
     }
 
@@ -597,6 +627,15 @@ function applyCore(state: RoomState, event: Event): RoomState {
             ...(state.snapshot_blocked?.[p.proposal_id] ? { blocked: state.snapshot_blocked[p.proposal_id] } : {}),
             // Left off when every layer has an owner, so such a proposal folds as before P2b.
             ...(p.fallback_layers && p.fallback_layers.length > 0 ? { fallback_layers: [...p.fallback_layers] } : {}),
+            // X2/X6: only a non-fix class is kept, so a fix folds exactly as before.
+            ...(p.class === 'recovery' || p.class === 'performance' ? { class: p.class } : {}),
+            // X8: only the snapshot knows what can be staged and whether a stage is owed.
+            ...(state.snapshot_staging?.[p.proposal_id]
+              ? {
+                  stageable: state.snapshot_staging[p.proposal_id].stageable,
+                  ...(state.snapshot_staging[p.proposal_id].staging_required ? { staging_required: true } : {}),
+                }
+              : {}),
           },
         ],
       }
@@ -609,6 +648,53 @@ function applyCore(state: RoomState, event: Event): RoomState {
       next = {
         ...state,
         proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? { ...prop, preview: p } : prop)),
+      }
+      break
+    }
+
+    // X8: a stage the driver started. It runs until a proposal.staged (or its expires_at, which the card
+    // checks against its clock). A second one replaces the first, as the server only lets one run.
+    case 'proposal.stage_started': {
+      const p = as<ProposalStageStartedPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) =>
+          prop.proposal_id === p.proposal_id
+            ? {
+                ...prop,
+                stage_running: {
+                  by: event.actor,
+                  started_at: event.at,
+                  expires_at: p.expires_at,
+                  steps: p.steps ?? [],
+                  params_hash: p.params_hash,
+                },
+                // The steps of a stage are the stageable ones, so a snapshot that did not say still gets an answer.
+                ...(prop.stageable === undefined ? { stageable: p.steps ?? [] } : {}),
+              }
+            : prop,
+        ),
+      }
+      break
+    }
+
+    // X8: the newest stage wins and ends the running one. A healthy stage of this very fix lifts
+    // "staging required" at once; any other leaves it to the snapshot the hook asks for.
+    case 'proposal.staged': {
+      const p = as<ProposalStagedPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          const rest = { ...prop }
+          delete rest.stage_running
+          const lifted = prop.staging_required === true && stageLiftsRequirement(prop, p)
+          if (lifted) {
+            delete rest.staging_required
+            delete rest.staging_message
+          }
+          return { ...rest, staged: p }
+        }),
       }
       break
     }
@@ -652,7 +738,29 @@ function applyCore(state: RoomState, event: Event): RoomState {
         proposals: state.proposals.map((prop) => {
           if (prop.proposal_id !== p.proposal_id) return prop
           if (p.repeat && prop.verification && !prop.verification.repeat) return prop
-          return { ...prop, verification: p }
+          // X2: the counted verdict ends the polling; when it arrived is the end of "recovered in 3 min".
+          const counted = prop.class === 'recovery' && !p.repeat && p.outcome !== undefined
+          return {
+            ...prop,
+            verification: p,
+            ...(counted ? { recovery: { ...prop.recovery, verified_at: event.at } } : {}),
+          }
+        }),
+      }
+      break
+    }
+
+    // X2: progress of a recovery step's Verify. Only the newest poll is kept; a late or replayed
+    // older poll of the same step never moves the count back.
+    case 'agent.recovery_check': {
+      const p = as<AgentRecoveryCheckPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          const cur = prop.recovery?.check
+          if (cur && cur.step_index === p.step_index && cur.poll > p.poll) return prop
+          return { ...prop, recovery: { ...prop.recovery, check: p } }
         }),
       }
       break
@@ -726,7 +834,12 @@ function applyCore(state: RoomState, event: Event): RoomState {
         ...state,
         proposals: state.proposals.map((prop) =>
           prop.proposal_id === p.proposal_id
-            ? { ...prop, executed: [...prop.executed, p] }
+            ? {
+                ...prop,
+                executed: [...prop.executed, p],
+                // X2: the clock of "recovered in 3 min" starts when the last step finished ok.
+                ...(prop.class === 'recovery' && p.ok ? { recovery: { ...prop.recovery, ran_at: event.at } } : {}),
+              }
             : prop,
         ),
       }

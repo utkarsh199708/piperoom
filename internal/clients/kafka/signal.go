@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -39,7 +40,10 @@ var signalTableRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-
 // satisfies clients.SnapshotSignaler (P0 item 7), as with OffsetMove.
 type SnapshotSignal = clients.SnapshotSignal
 
-var _ clients.SnapshotSignaler = (*Writer)(nil)
+var (
+	_ clients.SnapshotSignaler          = (*Writer)(nil)
+	_ clients.SnapshotConditionSignaler = (*Writer)(nil)
+)
 
 type snapshotSignalValue struct {
 	Type string             `json:"type"`
@@ -49,6 +53,16 @@ type snapshotSignalValue struct {
 type snapshotSignalData struct {
 	DataCollections []string `json:"data-collections"`
 	Type            string   `json:"type"`
+	// AdditionalConditions is set by SendSnapshotSignalWhere only (X2a), so
+	// an unconditional signal's bytes are unchanged.
+	AdditionalConditions []signalCondition `json:"additional-conditions,omitempty"`
+}
+
+// signalCondition is one entry of Debezium's additional-conditions: the
+// snapshot of DataCollection reads only the rows matching Filter.
+type signalCondition struct {
+	DataCollection string `json:"data-collection"`
+	Filter         string `json:"filter"`
 }
 
 // SnapshotSignalValue is the value of an incremental execute-snapshot signal
@@ -125,6 +139,46 @@ func signalTables(tables []string) ([]string, error) {
 // more partitions is refused; a missing one is clients.ErrNotFound. Every
 // check runs before anything is produced.
 func (w *Writer) SendSnapshotSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string) (SnapshotSignal, error) {
+	return w.sendSignal(ctx, signalTopic, connector, logicalName, tables, "")
+}
+
+// SendSnapshotSignalWhere implements clients.SnapshotConditionSignaler (X2a,
+// pg_resnapshot_rows on a connector with signal.kafka.topic):
+// SendSnapshotSignal whose data also carries Debezium's
+// additional-conditions, one {"data-collection", "filter"} entry per table,
+// so the connector re-reads only the matching rows. The condition is built
+// by the action from typed params; it is checked here with
+// clients.ValidateSnapshotCondition before anything else (an empty one
+// included: an unconditional snapshot is SendSnapshotSignal), and it is
+// never logged or put in a provenance receipt or an error. Every other rule
+// is SendSnapshotSignal's.
+func (w *Writer) SendSnapshotSignalWhere(ctx context.Context, signalTopic, connector, logicalName string, tables []string, additionalCondition string) (SnapshotSignal, error) {
+	if err := clients.ValidateSnapshotCondition(additionalCondition); err != nil {
+		return SnapshotSignal{}, fmt.Errorf("kafka: snapshot signal: %w", err)
+	}
+	return w.sendSignal(ctx, signalTopic, connector, logicalName, tables, additionalCondition)
+}
+
+// conditionalSignalValue is SnapshotSignalValue with cond as every table's
+// additional condition. No HTML escaping, so the condition's >= stays as
+// written.
+func conditionalSignalValue(list []string, cond string) ([]byte, error) {
+	data := snapshotSignalData{DataCollections: list, Type: "INCREMENTAL"}
+	for _, t := range list {
+		data.AdditionalConditions = append(data.AdditionalConditions, signalCondition{DataCollection: t, Filter: cond})
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(snapshotSignalValue{Type: "execute-snapshot", Data: data}); err != nil {
+		return nil, fmt.Errorf("kafka: snapshot signal: encode: %w", err)
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// sendSignal is SendSnapshotSignal with an optional row condition (cond ""
+// = none); a non-empty cond was validated by the caller.
+func (w *Writer) sendSignal(ctx context.Context, signalTopic, connector, logicalName string, tables []string, cond string) (SnapshotSignal, error) {
 	switch {
 	case strings.TrimSpace(signalTopic) == "":
 		return SnapshotSignal{}, errors.New("kafka: snapshot signal: empty signal topic")
@@ -145,7 +199,12 @@ func (w *Writer) SendSnapshotSignal(ctx context.Context, signalTopic, connector,
 	if err := checkWriteScope(ctx, func(sc tools.Scope) error { return signalScope(sc, signalTopic, connector, logicalName, list) }); err != nil {
 		return SnapshotSignal{}, err
 	}
-	value, err := SnapshotSignalValue(list)
+	var value []byte
+	if cond == "" {
+		value, err = SnapshotSignalValue(list)
+	} else {
+		value, err = conditionalSignalValue(list, cond)
+	}
 	if err != nil {
 		return SnapshotSignal{}, err
 	}

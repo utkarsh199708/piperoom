@@ -19,6 +19,8 @@ import type {
   ProbeResult,
   AdminConfig,
   AgentStats,
+  FleetChangesPage,
+  FleetPipeline,
   PipelineInfo,
   RoomSnapshot,
   ShadowBlindBody,
@@ -26,6 +28,8 @@ import type {
   ShadowMetrics,
   ShadowResponse,
   Topology,
+  TrendPoint,
+  WatchMetric,
 } from './types'
 import { classifyAuthProblem, getAuthEpoch, reportAuthProblem } from '../lib/auth'
 import type { AuthMode } from '../lib/auth'
@@ -218,6 +222,23 @@ export const api = {
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
   topology: (pipelineId: string) =>
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  // X3: the watcher's samples of one metric, oldest first; [] before the first sample. 404 for an unknown
+  // pipeline and for one outside the caller's tenants.
+  trends: (pipelineId: string, metric: WatchMetric, days = 1) =>
+    request<TrendPoint[]>(
+      `/api/pipelines/${encodeURIComponent(pipelineId)}/trends?metric=${encodeURIComponent(metric)}&days=${days}`,
+    ),
+  // X5: one row per pipeline the caller can see, [] when there are none; filtered and sorted in the browser.
+  fleet: () => request<FleetPipeline[]>('/api/fleet'),
+  // X5: what changed across the caller's pipelines (default the last 7 days), newest first, one page per call.
+  // `cursor` is the previous page's `next`, opaque.
+  fleetChanges: (page: { cursor?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams()
+    if (page.limit) q.set('limit', String(page.limit))
+    if (page.cursor) q.set('cursor', page.cursor)
+    const qs = q.toString()
+    return request<FleetChangesPage>(`/api/fleet/changes${qs ? `?${qs}` : ''}`)
+  },
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string; client_id?: string }) =>
@@ -278,6 +299,14 @@ export const api = {
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/cancel`, {
       method: 'POST',
       body: JSON.stringify(reason ? { reason } : {}),
+    }),
+  // X8: the driver tries the proposal on the staging stack. Answers 202 with proposal.stage_started at once; the
+  // result is a proposal.staged over the socket. 409 no_staging / not_stageable / stage_in_progress / staging_required,
+  // 429 rate_limited (a sixth stage of one proposal).
+  stageProposal: (proposalId: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/stage`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
   // paramsHash: the hash shown with the proposal, same rule as approve.
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>

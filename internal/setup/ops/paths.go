@@ -147,13 +147,19 @@ func pathParts(name string) []string {
 	return strings.FieldsFunc(name, func(r rune) bool { return r == '/' || r == '\\' })
 }
 
-// deniedDir compares by simple fold and by upper case: strings.EqualFold
-// misses the dotless ı (U+0131), whose upper case is "I", so ".gıt" must be
-// caught by strings.ToUpper.
+// foldEqual compares two path components by simple fold and by upper case:
+// strings.EqualFold misses the dotless ı (U+0131), whose upper case is "I",
+// so ".gıt" and "confıg" must be caught by strings.ToUpper. Every
+// case-insensitive component comparison in this package goes through it.
+func foldEqual(a, b string) bool {
+	return strings.EqualFold(a, b) || strings.ToUpper(a) == strings.ToUpper(b)
+}
+
+// deniedDir matches the design's denied directories: .git and .piperoom, and
+// .ssh, which holds private keys and known_hosts and which no setup op has a
+// reason to read or write.
 func deniedDir(part string) bool {
-	up := strings.ToUpper(part)
-	return strings.EqualFold(part, ".git") || strings.EqualFold(part, ".piperoom") ||
-		up == ".GIT" || up == ".PIPEROOM"
+	return foldEqual(part, ".git") || foldEqual(part, ".piperoom") || foldEqual(part, ".ssh")
 }
 
 // reservedDevice matches the Windows device names with any extension, as
@@ -299,7 +305,7 @@ func underAny(path string, dirs []string) bool {
 		}
 		ok := true
 		for i := range dp {
-			if !strings.EqualFold(dp[i], parts[i]) {
+			if !foldEqual(dp[i], parts[i]) {
 				ok = false
 				break
 			}
@@ -309,4 +315,12 @@ func underAny(path string, dirs []string) bool {
 		}
 	}
 	return false
+}
+
+// MountedPath reports whether the slash-separated path lies under one of the
+// registered mount directories. It is the refusal file_write applies, exported
+// so another writer in the setup tree (compose_write, properties_write) can
+// refuse the same paths rather than bypass the invariant.
+func MountedPath(p string, mounts []string) bool {
+	return underAny(strings.ReplaceAll(p, "\\", "/"), mounts)
 }

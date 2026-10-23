@@ -88,13 +88,13 @@ func TestNewAlertFillsPipelineKind(t *testing.T) {
 		"ghost": "",
 		"":      "",
 	} {
-		if got := svc.newAlert("r", "t", pid, nil).PipelineKind; got != want {
+		if got := svc.newAlert("r", "t", pid, time.Time{}, nil).PipelineKind; got != want {
 			t.Errorf("PipelineKind(%q) = %q, want %q", pid, got, want)
 		}
 	}
 	// No owners config at all (unit tests, nothing loaded): empty, no panic.
 	bare := kindService(t, nil, "", nil)
-	if got := bare.newAlert("r", "t", "orders", nil).PipelineKind; got != "" {
+	if got := bare.newAlert("r", "t", "orders", time.Time{}, nil).PipelineKind; got != "" {
 		t.Fatalf("no owners: PipelineKind = %q, want empty", got)
 	}
 }
@@ -114,11 +114,14 @@ func TestAgentRunGetsPipelineKind(t *testing.T) {
 		<-ctx.Done()
 		return nil
 	})
+	opened := map[string]time.Time{}
 	for _, pid := range []string{"orders", "revenue", "ghost"} {
 		raw := json.RawMessage(`{"title":"t","pipeline_id":"` + pid + `"}`)
-		if _, _, err := svc.CreateRoomFromAlert(context.Background(), "t", "sev2", pid, raw); err != nil {
+		snap, _, err := svc.CreateRoomFromAlert(context.Background(), "t", "sev2", pid, raw)
+		if err != nil {
 			t.Fatalf("CreateRoomFromAlert(%s): %v", pid, err)
 		}
+		opened[pid] = snap.OpenedAt
 	}
 	for i := 0; i < 3; i++ {
 		select {
@@ -132,6 +135,11 @@ func TestAgentRunGetsPipelineKind(t *testing.T) {
 	for pid, want := range map[string]string{"orders": "cdc", "revenue": "batch", "ghost": ""} {
 		if a, ok := got[pid]; !ok || a.PipelineKind != want {
 			t.Errorf("run for %s: PipelineKind = %q (started %v), want %q", pid, a.PipelineKind, ok, want)
+		}
+		// X4c: the run ranks changes against the alert's time, the room's
+		// opened_at, not its own start.
+		if a := got[pid]; a.At.IsZero() || !a.At.Equal(opened[pid]) {
+			t.Errorf("run for %s: At = %v, want the room's opened_at %v", pid, a.At, opened[pid])
 		}
 	}
 }

@@ -134,6 +134,7 @@ func loadDir(path, dir string) (*Owners, error) {
 			Layers:    o.Layers,
 			Auditors:  o.Auditors,
 			Tenants:   o.Tenants,
+			Teams:     o.Teams,
 			Pipelines: candPipes,
 		}
 		if err := cand.validate(); err != nil {
@@ -151,6 +152,7 @@ func loadDir(path, dir string) (*Owners, error) {
 		Layers:    o.Layers,
 		Auditors:  o.Auditors,
 		Tenants:   o.Tenants,
+		Teams:     o.Teams,
 		Pipelines: append(append([]Pipeline{}, o.Pipelines...), dirPipes...),
 		derived:   &derivedGroups{},
 	}
@@ -164,14 +166,14 @@ func loadDir(path, dir string) (*Owners, error) {
 }
 
 // dirFileOK checks the shape of a per-pipeline file: exactly one pipeline, and
-// no top-level layers:, tenants: or auditors: (the directory adds pipelines
-// only; the shared top-level blocks live in the main file).
+// no top-level layers:, tenants:, auditors: or teams: (the directory adds
+// pipelines only; the shared top-level blocks live in the main file).
 func dirFileOK(d *Owners) error {
 	if len(d.Pipelines) != 1 {
 		return fmt.Errorf("want exactly one pipeline, got %d", len(d.Pipelines))
 	}
-	if len(d.Layers) > 0 || len(d.Tenants) > 0 || len(d.Auditors) > 0 {
-		return fmt.Errorf("a per-pipeline file must not set layers:, tenants: or auditors: (they come from the main file)")
+	if len(d.Layers) > 0 || len(d.Tenants) > 0 || len(d.Auditors) > 0 || len(d.Teams) > 0 {
+		return fmt.Errorf("a per-pipeline file must not set layers:, tenants:, auditors: or teams: (they come from the main file)")
 	}
 	return nil
 }

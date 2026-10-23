@@ -4,13 +4,17 @@ import type {
   ActionExecutedPayload,
   Actor,
   AgentStatusPayload,
+  AgentRecoveryCheckPayload,
   AgentVerificationPayload,
+  ProposalClass,
+  ForecastSummary,
   HandoffSummary,
   HypothesisSummary,
   HypothesisVerdict,
   Identity,
   PostmortemSource,
   ProposalPreviewedPayload,
+  ProposalStagedPayload,
   ProposalStep,
   RoomLabelledPayload,
   RoomMode,
@@ -180,6 +184,23 @@ export interface ProposalState {
   /** The agent's verdict after the last step ran. */
   verification?: AgentVerificationPayload
   /**
+   * X8: step indexes whose action can be staged. From the snapshot (open_proposals[].stageable, the
+   * server's registry knows it, the log does not) or, for a stage that starts, from its `steps`.
+   * Absent until one of them says so.
+   */
+  stageable?: number[]
+  /** X8: a proposal.stage_started with no proposal.staged yet. The card also checks expires_at against its clock. */
+  stage_running?: { by: Actor; started_at: string; expires_at: string; steps: number[]; params_hash: string }
+  /** X8: the newest proposal.staged payload; the card calls it stale when its params_hash is not the proposal's. */
+  staged?: ProposalStagedPayload
+  /**
+   * X8: a step's action is in require_staging: and no healthy stage of this params_hash exists. From
+   * the snapshot, lifted by a healthy proposal.staged, and set by a 409 staging_required on approve.
+   */
+  staging_required?: boolean
+  /** X8: the server's own words from a 409 staging_required (names the step and action); untrusted text. */
+  staging_message?: string
+  /**
    * P1a: every required layer approved while write mode is off, so no step runs. From the snapshot
    * (`open_proposals[].blocked`) or, for an approval that arrives over the socket, from `mode.write`
    * (see the reducer). Read it through `waitingForWriteMode`, which also checks that nothing ran.
@@ -201,6 +222,20 @@ export interface ProposalState {
    * a cancel, so a later one is ignored (internal/room foldScheduled).
    */
   schedule_seen?: boolean
+  /** X2: proposal.created.class. Left off for a fix, so such a proposal folds as before. */
+  class?: ProposalClass
+  /** X2: recovery proposals only; see RecoveryProgress. */
+  recovery?: RecoveryProgress
+}
+
+/** X2: what the log says about a recovery proposal after its step ran. */
+export interface RecoveryProgress {
+  /** The newest agent.recovery_check of this proposal. */
+  check?: AgentRecoveryCheckPayload
+  /** When the last step finished ok (action.executed): the start of "recovered in 3 min". */
+  ran_at?: string
+  /** When the counted agent.verification arrived. */
+  verified_at?: string
 }
 
 /** A pending proposal.scheduled (P2b). */
@@ -276,6 +311,8 @@ export interface AlertInfo {
   source: string | null
   /** Server-set room.created.alert_source: the only input to the alert's verified badge. */
   alert_source?: string
+  /** X1: the drift entries of a watcher-opened room's evidence (cleaned, untrusted text); absent when none. */
+  drift?: DriftFact[]
 }
 
 /** What the agent has cost in this room, folded from agent.usage (F11; same rules as the server's insight). */
@@ -314,7 +351,9 @@ export function emptyInsight(): InsightState {
 
 export type { ActivityKind } from './describe'
 import type { ActivityKind } from './describe'
+import type { DriftFact } from '../lib/drift'
 import { stripBidi } from '../lib/title'
+import { cleanForecast } from '../lib/trends'
 
 /** Who ticked one runbook item and when (checklist.step_done). */
 export interface ChecklistTick {
@@ -383,6 +422,12 @@ export interface RoomState {
    */
   snapshot_blocked?: Record<string, 'write_mode_off'>
   /**
+   * X8: proposal_id -> the snapshot's `stageable` and `staging_required` for the open proposals that
+   * carry either. The reducer copies it onto the proposal when proposal.created replays (same
+   * reason as snapshot_hashes), and applyModeRefresh redoes it.
+   */
+  snapshot_staging?: Record<string, { stageable: number[]; staging_required: boolean }>
+  /**
    * The room GET's `mode` (P1a, P2b). Write mode changes only when the server restarts, which drops
    * the socket, so it is read again on every reconnect (`mode_refreshed`, applyModeRefresh). The
    * socket never carries it. Absent on a server from before P1a, which has write mode on.
@@ -417,6 +462,10 @@ export interface RoomState {
   closed_by?: Actor
   /** F2: null on open rooms, shadow rooms and closed rooms from before F2. */
   postmortem: PostmortemState | null
+  /** X3: room.created.origin; "forecast" for a quiet forecast room. Absent for every other room. */
+  origin?: string
+  /** X3: the snapshot's newest forecast signal (lane ETA badge, forecast room chart); absent when none. */
+  forecast?: ForecastSummary
 }
 
 export function emptyRoomState(id: string): RoomState {
@@ -475,6 +524,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     resolution: snapshot.resolution,
     closed_by: snapshot.closed_by,
     postmortem: postmortemFromSnapshot(snapshot),
+    ...(snapshot.origin ? { origin: snapshot.origin } : {}),
+    ...forecastField(snapshot),
     last_seq: 0,
     shadow: snapshot.shadow === true,
     replay_target: snapshot.last_seq ?? 0,
@@ -484,6 +535,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
         .map((p) => [p.proposal_id, p.params_hash as string]),
     ),
     ...snapshotWriteMode(snapshot),
+    ...snapshotStaging(snapshot),
     driver: snapshot.driver
       ? {
           id: snapshot.driver.id,
@@ -514,6 +566,12 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
   }
 }
 
+// X3: left off when the snapshot has no usable forecast, so an older server's snapshot folds as before.
+function forecastField(snapshot: RoomSnapshot): Pick<RoomState, 'forecast'> {
+  const forecast = cleanForecast(snapshot.forecast)
+  return forecast ? { forecast } : {}
+}
+
 // The P1a fields, left off entirely when the server sent none so a snapshot from an older server
 // folds to the same state as before.
 export function snapshotWriteMode(snapshot: RoomSnapshot): Pick<RoomState, 'mode' | 'snapshot_blocked'> {
@@ -526,6 +584,16 @@ export function snapshotWriteMode(snapshot: RoomSnapshot): Pick<RoomState, 'mode
     ...(snapshot.mode ? { mode: snapshot.mode } : {}),
     ...(Object.keys(blocked).length > 0 ? { snapshot_blocked: blocked } : {}),
   }
+}
+
+// The X8 fields, left off entirely when no open proposal carries one (a server from before X8c).
+export function snapshotStaging(snapshot: RoomSnapshot): Pick<RoomState, 'snapshot_staging'> {
+  const staging = Object.fromEntries(
+    (snapshot.open_proposals ?? [])
+      .filter((p) => p.stageable !== undefined || p.staging_required !== undefined)
+      .map((p) => [p.proposal_id, { stageable: p.stageable ?? [], staging_required: p.staging_required === true }]),
+  )
+  return Object.keys(staging).length > 0 ? { snapshot_staging: staging } : {}
 }
 
 // The snapshot carries status and source only; the replay of postmortem.drafted fills in the rest.

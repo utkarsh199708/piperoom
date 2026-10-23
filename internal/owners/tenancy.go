@@ -734,6 +734,21 @@ func checkNullBlocks(root *yaml.Node) error {
 				}
 			}
 		}
+		// X7c: a dropped null pii.include entry would drop a declared PII
+		// column; a null pii: block would read as "no overrides".
+		if v, ok := mapValue(p, "pii"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: pii: is empty (null); list include: or exclude:, or remove the key", v.Line, name)
+		} else if ok && v.Kind == yaml.MappingNode {
+			for _, key := range []string{"include", "exclude"} {
+				if l, ok := mapValue(v, key); ok && l.Kind == yaml.SequenceNode {
+					for _, item := range l.Content {
+						if isNull(item) {
+							return fmt.Errorf("line %d: %s: pii.%s: has an empty (null) entry; name a column or remove the entry", item.Line, name, key)
+						}
+					}
+				}
+			}
+		}
 		if v, ok := mapValue(p, "staging"); ok && isNull(v) {
 			return fmt.Errorf("line %d: %s: staging: is empty (null); declare its connections:, or remove the key", v.Line, name)
 		}

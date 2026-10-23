@@ -30,7 +30,7 @@ func (c *Client) PartitionRates(ctx context.Context, since time.Time, topics ...
 	firsts, err := adm.ListOffsetsAfterMilli(ctx, ms, topics...)
 	c.record(ctx, start, "kadm.ListOffsetsAfterMilli(since, topics)", "since="+since.UTC().Format(time.RFC3339), topicsParam(topics))
 	if err != nil {
-		return nil, fmt.Errorf("kafka: offsets after %s: %w", since.UTC().Format(time.RFC3339), err)
+		return nil, fmt.Errorf("kafka: offsets after %s: %w", since.UTC().Format(time.RFC3339), notSupported(err))
 	}
 	start = time.Now()
 	ends, err := adm.ListEndOffsets(ctx, topics...)
@@ -57,7 +57,7 @@ func (c *Client) PartitionRates(ctx context.Context, since time.Time, topics ...
 			f, ok := firsts.Lookup(topic, p)
 			if ok && f.Err != nil {
 				// A failed lookup is not "no record since": it would read as zero writes.
-				return nil, fmt.Errorf("kafka: offset after %s for %s/%d: %w", since.UTC().Format(time.RFC3339), topic, p, f.Err)
+				return nil, fmt.Errorf("kafka: offset after %s for %s/%d: %w", since.UTC().Format(time.RFC3339), topic, p, notSupported(f.Err))
 			}
 			if ok && f.Offset >= 0 {
 				r.OffsetAtStart = f.Offset
@@ -75,4 +75,16 @@ func (c *Client) PartitionRates(ctx context.Context, since time.Time, topics ...
 		return out[i].Partition < out[j].Partition
 	})
 	return out, nil
+}
+
+// notSupported adds clients.ErrNotSupported to a broker's refusal of a lookup
+// by time (a topic in the pre-0.10 message format, which has no timestamps,
+// or a broker without the request version), so a caller such as
+// kafka_throughput falls back to lag alone instead of failing. The broker
+// error stays in the chain.
+func notSupported(err error) error {
+	if errors.Is(err, kerr.UnsupportedForMessageFormat) || errors.Is(err, kerr.UnsupportedVersion) {
+		return fmt.Errorf("%w: %w", clients.ErrNotSupported, err)
+	}
+	return err
 }

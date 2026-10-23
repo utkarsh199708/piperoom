@@ -45,6 +45,12 @@ type stack struct {
 	// belowLogStartFn replaces the committed-below-log-start read (retention-loss)
 	// in unit tests, since the fake broker does not delete retained segments.
 	belowLogStartFn func(ctx context.Context, group, topic string) (bool, []int32, error)
+	// logStartFn replaces the log start read (rows-lost-after-retention) in
+	// unit tests, for the same reason.
+	logStartFn func(ctx context.Context, topic string) (map[int32]int64, error)
+	// batchGap spaces the batches of rows-lost-after-retention (default
+	// 1.5 s, past segment.ms).
+	batchGap time.Duration
 	// stagingStepTimeout bounds the slot drop and the topic delete of
 	// stagingDown (default 30 s each).
 	stagingStepTimeout time.Duration

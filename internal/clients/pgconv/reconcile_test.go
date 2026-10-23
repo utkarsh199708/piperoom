@@ -53,6 +53,8 @@ func (r *recRows) Scan(dest ...any) error {
 			*d = v.(string)
 		case *int64:
 			*d = v.(int64)
+		case *bool:
+			*d = v.(bool)
 		case *pgtype.Timestamptz:
 			*d = pgtype.Timestamptz{}
 			if t, ok := v.(time.Time); ok {

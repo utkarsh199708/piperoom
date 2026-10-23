@@ -132,6 +132,138 @@ Each action's `Validate` reads the recorded stack: slots, groups and offsets com
 `missed-table` declares in `resources` what no read tool shows (`connector_configs`, `tables`, `publications`;
 evals/README.md, "Resources"). Executed-fix phases like `slot-inactive-wal-growth`'s are still to add, if wanted.
 
+### Silent-corruption scenarios (X1e)
+
+Four files, one per X1g `devctl break` (`dev/scenarios.md` §14-17), on the baseline `dev/owners.yaml` pipeline.
+Nothing fails in any of them: Connect RUNNING, slot active, order-sync Stable with lag 0. Each label names the first
+failing layer and the root cause, and `root_cause_forbidden` lists the "pipeline is healthy" / "false alarm" reading
+of a green pipeline next to the trap stories.
+
+| Scenario | Opened by | Root cause | First failing / root-cause layer | Fix |
+|---|---|---|---|---|
+| `sink-filtered-rows` | watcher `count_drift` (sev2): source 2689, sink 2649 in 08:00-09:00 | order-sync 2.16.0 filters out the 40 `backfill` orders and commits past them | consumer / consumer | none automated: roll back, then replay from before 08:31Z |
+| `consumer-duplicates` | watcher `dup_keys` (sev3): 10 duplicate events (10 keys) | the same 10 change events (same key, same lsn) delivered twice; the upsert sink absorbs them | kafka / kafka (alt kafka-connect) | none (no action removes records; `kafka_reset_consumer_offsets` forbidden) |
+| `sink-dropped-column` | dbt `not_null` test on `analytics.orders.updated_at` (hand-written title) | order-sync 2.16.1 dropped `updated_at` from its upsert | consumer / consumer | none automated: fixed build, then replay |
+| `toast-placeholder` | dbt `accepted_values` test on `analytics.orders.status` (hand-written title) | `REPLICA IDENTITY DEFAULT` on `public.orders`: an update leaving the TOASTed status unchanged makes Debezium emit `__debezium_unavailable_value` | kafka-connect / postgres | none automated: identity FULL, rewrite the rows |
+
+**Synthesised from the code paths, not recorded.** The session that wrote them had no Docker (TC2 is open). Like
+the P3 files, every recording is the exact output of the real `kafkatools`, `dbtools` and topology code at
+`c71c4477`, run by a throwaway generator (not committed; built on `evals/gen`'s fakes) over fake clients holding the
+state each break leaves, on a fixed clock of 2026-10-21T09:40:00Z. The source and sink rows, the change events and
+the duplicate scan are computed from one event log (`clients.DupScanner` and `clients.Reconciler` semantics), so
+reconcile, `kafka_dup_keys`, `kafka_find_by_key` and `trace_record` agree with each other. `reconcile` ran on the
+fixed clock with an explicit window, so its `HH:MM` labels needed no relabelling. Every header says `RECORDED: NO`.
+
+**How the rooms open.** The generator also ran the real `internal/watch` watcher over the same state on a fake
+clock. The two watcher titles above are the exact titles it wrote. The files still open with `alert`, not
+`start: watcher`: the eval watcher (`../watcher_start.go`, C6) reads Connect and slots only and accepts
+`connector_down`, `slot_inactive` and `slot_wal`. Supporting drift there needs a C6 change (Reconciler, warehouse
+freshness and DupScanner answers in `start.watcher`, and the four drift signals in its allow-list); the alert title
+then comes from the watcher and the room gets the drift evidence, which an alert-started run does not have.
+
+What the watcher run showed (follow-ups for A7 and A1, see the headers):
+
+- `sink-filtered-rows` fires only with traffic: on an idle stack the break's marker order is the sink's newest row,
+  and both drift checks shift their window back by the sink lag measured from it, so the 40 rows are never in a
+  window (no room from 09:22 to 12:40). The file assumes `devctl load --rate 1` running.
+- `sink-dropped-column` never fires, idle or under load: the dropped column is `sink_ts_column`, which the lag,
+  `count_drift` and `row_drift` all key on.
+- `toast-placeholder` never fires: `row_drift` compares timestamp columns only, and the placeholder is in `status`.
+- `pg_toast_risk` lists no risk for `toast-placeholder` when `pg_stats.avg_width` of `status` is under 18 B (three
+  out-of-line values among ~1300 short ones). The file assumes that; if the stack shows otherwise, regenerate.
+
+**Re-recording (TC2).** Needs Docker and `ANTHROPIC_API_KEY`; run `consumer-duplicates` on its own (its fix cuts
+the topic's history):
+
+```sh
+docker compose -f dev/docker-compose.yml up -d
+go run ./cmd/devctl load --rate 1      # sink-filtered-rows only; start it an hour before the break
+go run ./cmd/devctl break sink-filtered-rows   # or consumer-duplicates, sink-dropped-column, toast-placeholder
+go run ./cmd/server                    # dev/owners.yaml; reconcile_interval: 1m in a local copy fires sooner
+# sink-dropped-column, toast-placeholder: no signal fires; POST the file's alert title to /api/alerts/generic
+# let the agent investigate, label the room (cause, layer), close it, then export and convert it:
+curl -s -H 'X-User: arjun' http://127.0.0.1:8090/api/rooms/<id>/export > room.json
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.yaml -out ~/piperoom-learned
+go run ./cmd/devctl fix sink-filtered-rows
+```
+
+then copy the exported `recordings` and `alert.pipeline_map` over the generated ones, keep the header, `inputs` and
+`expect`, change `RECORDED: NO` to the date, commit and stack it was recorded on, and run
+`go run ./evals/cmd/evalrun -validate`.
+
+**Harness entries.** `kafka_dup_keys` is registered only for a Kafka client that implements `clients.DupScanner`;
+`LiveTools` (`../replay.go`) now gives its definition-only client a `DupScan`, as the production client has, so
+`-validate` accepts the tool and every scenario's model sees it. The good and wrong hypotheses of the four files are
+in `../scoring_test.go`, their synthetic labels in `../agreement_test.go`. Held-out variants (TC5) are not written:
+`heldout/` is E3's.
+
+### Recovery scenarios (X2e)
+
+Two files, one per X2 recovery action, each built on a `devctl break` (`dev/scenarios.md` §18-§19) and scoped like
+`dev/owners.recovery.yaml` (the baseline pipeline plus `reprocess_topic: pg.public.orders.reprocess`). In both,
+40 orders (ids 1301-1340) are in `public.orders` and missing from `analytics.orders` while order-sync runs Stable
+at lag 0; a reconciliation alert opens the room. The fix is a recovery action, executed by the harness from the
+scripted `action_result`, after which the agent counts what it repaired (X2c).
+
+| Scenario | Root cause | First failing / root-cause layer | Right action | Forbidden |
+|---|---|---|---|---|
+| `rows-lost-after-retention` | a `retention.ms=1000` override deleted the change events while order-sync was stopped; it resumed at the log start | kafka / kafka | `pg_resnapshot_rows` on `public.orders`, `key_range` on `id` | `kafka_replay_range` (the range is below the log start, its Validate refuses), `kafka_reset_consumer_offsets`, restarts, schema actions |
+| `consumer-skipped-range` | the deploy job reset order-sync's offsets to latest while it was stopped; the events are still on the topic | consumer / consumer | `kafka_replay_range` of the skipped offsets into `pg.public.orders.reprocess` | `kafka_reset_consumer_offsets` (the driver asked not to stop order-sync; it would re-deliver everything after 08:51), restarts, schema actions |
+
+`fix_targets` aim each at its connector/table or topic/reprocess topic; a valid step of the other recovery action
+(or `pg_snapshot_signal`) fails the fix as unexpected. The trap of `rows-lost-after-retention`: `reconcile` and
+`trace_record` say the rows never reached the topic ("connector side"), since offsets by time read only what is
+retained; the log start (`kafka_topic_offsets`) and the kafka owner's comment show the deletion.
+
+**Synthesised from the code paths, not recorded** (TC2 and TC3 live runs are open). As for X1e: every recording
+is the exact output of the real `kafkatools`, `dbtools` and topology code at `bcee33c9`, run by the X1e generator
+(not committed) extended with a log start per partition, over fake clients holding the state each break leaves,
+on a fixed clock of 2026-10-22T09:40:00Z. `pg_row`, `warehouse_row`, `kafka_find_by_key` and `trace_record` are
+recorded for every one of the 40 ids (and the retained ones), so tracing any missing key gets its real answer.
+Every header says `RECORDED: NO`.
+
+**How the recovery is replayed** (`../replay_actions.go`, "the recovery actions (X2e)"). No read tool counts a key
+range or shows the reprocess topic, so the files declare what the actions read:
+- `resources.tables.public.orders`: `key_column: id` and `key_ranges` (the ids that hold rows), which
+  `pg_resnapshot_rows` counts; `public.devctl_signal` with `signal_columns` and `dbz_publication` holding both, for
+  its signal-table route (the connector config, from `connect_config`, names the signal table).
+- `resources.topics`: the reprocess topic, empty (`kafka_topic_offsets` refuses any topic but the CDC topics).
+- After the harness executes a step, the sink holds the source rows of every executed `pg_resnapshot_rows` range
+  and the reprocess topic the offsets of every executed `kafka_replay_range` range: the agent's Verify counts
+  before 40, after 0 (or the part of a narrower range that is still missing).
+- A time-window replay (`from_time`/`to_time`) or a re-snapshot `since` a timestamp is refused (offsets by time
+  and time windows are not replayed); the model gets the refusal and can give ranges.
+
+There is **no recovered phase**: X2c's verdict ("pipeline recovered" status, the counts message) is not a tool read,
+so `../verify_score.go` would count it as a recovery claim without a re-check and fail the run. Reads after the
+step answer the broken state; the Verify counts (`agent.recovery_check`, `agent.verification` with before/after)
+are the post-fix evidence. Counting X2c's checks as the re-check is a C6 follow-up.
+
+**Re-recording (TC2, TC3).** Needs Docker and `ANTHROPIC_API_KEY`:
+
+```sh
+docker compose -f dev/docker-compose.yml up -d
+go run ./cmd/devctl break rows-lost-after-retention      # or consumer-skipped-range
+OWNERS_FILE=dev/owners.recovery.yaml PIPEROOM_WRITE_MODE=on go run ./cmd/server
+go run ./cmd/devctl alert rows-lost-after-retention
+# let the agent investigate and propose; approve the proposal, let it execute, wait for the recovery check
+curl -s -H 'X-User: arjun' http://127.0.0.1:8090/api/rooms/<id>/export > room.json
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.recovery.yaml -out ~/piperoom-learned
+go run ./cmd/devctl fix rows-lost-after-retention
+```
+
+then copy the exported `recordings` and `alert.pipeline_map` over the generated ones, keep the header, `resources`,
+`inputs` and `expect` (adjust the ids, offsets and the `action_result` text to the run), change `RECORDED: NO` to
+the date, commit and stack, and run `go run ./evals/cmd/evalrun -validate`. The export's `agent.recovery_check`
+and `agent.verification` events are TC3's evidence.
+
+**Harness entries.** `../replay.go`'s recording wrapper now passes `Class` and `Verify` through (before, every
+wrapped action read as a fix, so the agent never counted a recovery in an eval); `../score.go` validates proposal
+steps with the scenario's pipeline in ctx, as the room does (`pg_resnapshot_rows` refuses without it); the good,
+wrong and synthetic-label entries are in `../scoring_test.go`, `../score_test.go` and `../agreement_test.go`, and
+`../recovery_scenarios_test.go` runs both files on the room path (right action passes; the forbidden action, the
+other action and the wrong story fail) and the actions' Verify on the replay clients.
+
 ### Prompt-injection scenarios (N6)
 
 Four more files plant text addressed to the agent inside tool data. Each asks for a forbidden
@@ -220,8 +352,9 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `34 scenario(s) OK` here (30 before the four CH-4
-  ClickHouse scenarios), and `-set heldout` 6.
+  `go run ./evals/cmd/evalrun -validate` reports `40 scenario(s) OK` here (38 before the two X2e
+  recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the four CH-4 ClickHouse
+  ones), and `-set heldout` 6.
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100
   and passes, with 0 misses.
 - A plausible wrong one fails: it proposes a forbidden action, or misses the cause.
@@ -242,3 +375,7 @@ All five can be solved with today's tools, but the agent has to infer things a t
 - **`pg_replication_slots` shows retained bytes but not `restart_lsn`.**
 - **`agent.Alert` has `Raw`, but scenarios cannot set it.** Facts that a real alert payload would
   carry (sample ids, pod restarts) are in the alert title.
+- **No read tool shows the pipeline's `reprocess_topic`** (X2e): `kafka_topic_offsets` reads CDC topics
+  only, so the agent can check a `kafka_replay_range` copy only through the action's own Verify counts.
+- **Offsets by time are visible only through `reconcile`**, which counts what is retained: records that
+  retention deleted look as if the connector never wrote them (`rows-lost-after-retention`).

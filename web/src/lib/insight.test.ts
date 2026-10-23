@@ -1,5 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { chipText, chipTooltip, costLabel, elapsedLabel, tokensLabel } from './insight'
+import {
+  chipText,
+  chipTooltip,
+  costLabel,
+  elapsedLabel,
+  gbDaysLabel,
+  infraFacts,
+  modelCostText,
+  tokensLabel,
+  unreadAgeLabel,
+} from './insight'
+import type { AgentStats } from '../api/types'
 import { emptyInsight } from '../state/types'
 import type { InsightState } from '../state/types'
 
@@ -47,5 +58,49 @@ describe('insight formatting', () => {
       '9 model calls · 812,200 tokens (41k cache reads) · claude-opus-5-5 ×7, claude-haiku-5-5 ×2 · first hypothesis in 48 s · 1 tool error',
     )
     expect(chipTooltip(emptyInsight())).toBe('No model calls yet')
+  })
+})
+
+describe('pipeline cost view (X6)', () => {
+  const stats = { pipeline_id: 'orders', window_days: 90, rooms: 23, median_cost_usd: 0.42, cost_available: true } as AgentStats
+
+  it('modelCostText', () => {
+    expect(modelCostText(stats)).toBe('median $0.42 per room · 23 closed rooms · 90 d')
+    expect(modelCostText({ ...stats, rooms: 1, median_cost_usd: 0.004 })).toBe('median <$0.01 per room · 1 closed room · 90 d')
+    expect(modelCostText({ ...stats, cost_available: false })).toBe('23 closed rooms · not priced')
+    expect(modelCostText({ ...stats, median_cost_usd: -1 })).toBe('23 closed rooms · not priced')
+    expect(modelCostText({ ...stats, rooms: 0, window_days: 7 })).toBe('no closed rooms in 7 d')
+  })
+
+  it('gbDaysLabel', () => {
+    expect(gbDaysLabel(30)).toBe('30 GB-days')
+    expect(gbDaysLabel(1.074)).toBe('1.07 GB-days')
+    expect(gbDaysLabel(1234.56)).toBe('1,234.6 GB-days')
+    expect(gbDaysLabel(0.004)).toBe('<0.01 GB-days')
+    expect(gbDaysLabel(0)).toBe('0 GB-days')
+  })
+
+  it('unreadAgeLabel', () => {
+    expect(unreadAgeLabel(45)).toBe('45 s')
+    expect(unreadAgeLabel(720)).toBe('12 min')
+    expect(unreadAgeLabel(5400)).toBe('1 h 30 min')
+    expect(unreadAgeLabel(7200)).toBe('2 h')
+    expect(unreadAgeLabel(183600)).toBe('2 d 3 h')
+  })
+
+  it('infraFacts keeps a missing metric null, never 0', () => {
+    const facts = infraFacts({
+      from: '',
+      to: '',
+      samples: 2,
+      wal_retained_gb_days: null,
+      dlq_records: 1,
+      oldest_unread_age_s: 0,
+    })
+    expect(facts.map((f) => [f.label, f.value])).toEqual([
+      ['WAL retained', null],
+      ['Dead-letter queue', '1 record'],
+      ['Oldest unread', '0 s'],
+    ])
   })
 })

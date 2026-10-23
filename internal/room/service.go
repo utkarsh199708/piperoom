@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
+	"piperoom/internal/clients"
 	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -117,6 +119,22 @@ type Deps struct {
 	// room answers 413 export_too_large. Zero means DefaultExportMaxEvents.
 	ExportMaxEvents int64
 
+	// Setup is the server's setup settings (config.ParseSetup). With Enabled
+	// false every setup route answers 404 setup_disabled and nothing setup
+	// runs. (U)
+	Setup config.Setup
+	// SetupLocal is true when this server itself listens on loopback only
+	// (quickstart, standalone): a loopback target is then this machine, so the
+	// denylist of design §2.6 allows it. On a team server a loopback target is
+	// another host's and is refused. (U)
+	SetupLocal bool
+	// SetupOwnAddrs are this server's own non-loopback addresses: a target that
+	// resolves to one is refused (design §2.6). (U)
+	SetupOwnAddrs []netip.Addr
+	// SetupResolver resolves a target's host at registration; nil means
+	// net.DefaultResolver. Tests inject a fake. (U)
+	SetupResolver TargetResolver
+
 	// Sessions lets LookupPerson find a person who is not in users.yaml by their
 	// newest live session (design section 2.1). Nil: users.yaml only.
 	// SessionLive is the rule that decides whether a session is live: the
@@ -190,12 +208,23 @@ type Deps struct {
 
 	// OnActionExecuted, when set, is called once per action.executed this
 	// replica folds into a cached room, whichever replica appended it, with
-	// the room's pipeline and the step that ran (its action and frozen
-	// params), OK or not. The watcher's config_drift (X3b) uses it to move a
-	// connector's approved config after an approved fix. Each call runs in
+	// the room's pipeline, the proposal and the step that ran (its action
+	// and frozen params), OK or not. The watcher's config_drift (X3b) uses
+	// it to move a connector's approved config after an approved fix, and
+	// the stored config version (X5c) names the proposal. Each call runs in
 	// its own goroutine with the service lifetime ctx, never under a room's
 	// lock; it must return promptly. Nil means no-op.
-	OnActionExecuted func(ctx context.Context, pipelineID string, step events.ProposalStep)
+	OnActionExecuted func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
+	// OnActionResult is OnActionExecuted with the step's result too (ok,
+	// outcome_unknown, proposal and step index), called the same way. The
+	// result's Output is cleared: it is untrusted text. The OpenLineage
+	// emitter (X7b) uses it. Nil means no-op.
+	OnActionResult func(ctx context.Context, pipelineID string, step events.ProposalStep, res events.ActionExecutedPayload)
+
+	// TeamPager posts the driver's page of an application team (X4d,
+	// PageTeam). Nil means the Slack bridge is off: page-team answers 409
+	// slack_off and writes nothing.
+	TeamPager TeamPager
 }
 
 type roomState struct {
@@ -247,6 +276,9 @@ type roomState struct {
 	// firstLook is set on a room opened in this process until its agent
 	// starts: only such a room gets the triage pass (service_triage.go).
 	firstLook bool
+	// teamPaging holds the teams whose page is being posted to Slack outside
+	// the lock (PageTeam), so a double click on this replica posts once.
+	teamPaging map[string]bool
 
 	// Shadow run state (shadow.go). shadowActive is true from the start of
 	// the shadow supervisor until it has written the run's final status.
@@ -314,8 +346,11 @@ type Service struct {
 	onRoomOpened    func(ctx context.Context, roomID string)
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	onRoomDeleted   func(roomID string, deleted events.Event)
-	onActionExec    func(ctx context.Context, pipelineID string, step events.ProposalStep)
-	slots           *agentSlots // global cap on concurrent agent runs
+	onActionExec    func(ctx context.Context, pipelineID, proposalID string, step events.ProposalStep)
+	onActionResult  func(ctx context.Context, pipelineID string, step events.ProposalStep, res events.ActionExecutedPayload)
+	teamPager       TeamPager            // nil = Slack bridge off (X4d)
+	changes         clients.ChangeReader // nil when the store keeps no change log
+	slots           *agentSlots          // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store
 	sessionLive     auth.Liveness
@@ -323,6 +358,11 @@ type Service struct {
 	soloUser        string
 	writeOff        bool // Deps.WriteModeOff
 	limits          config.Limits
+	// Setup rooms (setup.go; U wave).
+	setupCfg      config.Setup
+	setupLocal    bool
+	setupOwn      []netip.Addr
+	setupResolver TargetResolver
 	// Auto-approve policy (autoapprove.go). autoDelay is
 	// Deps.AutoApproveDelay (0 = off). autoTickDone, when set (tests only),
 	// runs after each check of the loop. autoSkip remembers what the loop
@@ -354,6 +394,11 @@ type Service struct {
 	leaseTicker   func(d time.Duration) (<-chan time.Time, func())
 	leaseOnce     sync.Once
 	leaseTickDone func()
+
+	// stageStepTimeout, when set (tests only), replaces
+	// actions.StageStepTimeout as the bound of one step's Stage
+	// (service_stage.go).
+	stageStepTimeout time.Duration
 
 	// retryAfter, when set (tests only), replaces time.After for the wait
 	// between failed agent and shadow attempts, so tests need not sit out the
@@ -440,6 +485,7 @@ func New(d Deps) *Service {
 		topo = noopTopology{}
 	}
 	shadowStore, _ := d.Store.(store.ShadowStore)
+	changes, _ := d.Store.(clients.ChangeReader)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		store:           d.Store,
@@ -461,12 +507,15 @@ func New(d Deps) *Service {
 		shadowOpts:      d.ShadowOptions,
 		shadowGrace:     d.ShadowGrace,
 		shadow:          shadowStore,
+		changes:         changes,
 		log:             log,
 		now:             now,
 		onRoomOpened:    d.OnRoomOpened,
 		onRoomClosed:    d.OnRoomClosed,
 		onRoomDeleted:   d.OnRoomDeleted,
 		onActionExec:    d.OnActionExecuted,
+		onActionResult:  d.OnActionResult,
+		teamPager:       d.TeamPager,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,
@@ -475,6 +524,10 @@ func New(d Deps) *Service {
 		soloUser:        d.SoloUser,
 		writeOff:        d.WriteModeOff,
 		limits:          d.Limits,
+		setupCfg:        d.Setup,
+		setupLocal:      d.SetupLocal,
+		setupOwn:        d.SetupOwnAddrs,
+		setupResolver:   d.SetupResolver,
 		autoDelay:       d.AutoApproveDelay,
 		autoTicker:      d.AutoApproveTicker,
 		leaseTicker:     d.LeaseTicker,
@@ -651,7 +704,9 @@ func (s *Service) loadRows(ctx context.Context, rooms []store.Room, restarted, w
 			// A shadow room never resumes its agent, so the "steer to
 			// resume" notice would be wrong there (the sweep in Load marks
 			// its run interrupted instead).
-			if restarted && !snap.Shadow && s.restartNoticeDue(r.ID, st, leases) {
+			// A quiet forecast room had no agent to pause: its trend note
+			// still says how to start one.
+			if restarted && !snap.Shadow && !quietRoom(snap) && s.restartNoticeDue(r.ID, st, leases) {
 				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
 					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
 				}
@@ -1063,6 +1118,9 @@ var agentEventTypes = map[events.Type]bool{
 	// The verdict on an executed fix (internal/agent verify.go); the
 	// post-mortem and the verification card read it.
 	events.AgentVerification: true,
+	// One poll of a recovery action's Verify (X2, internal/agent): progress
+	// for the recovery card; the verdict is still the agent.verification.
+	events.AgentRecoveryCheck: true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
@@ -1208,8 +1266,13 @@ func (s *Service) knownPipeline(pipelineID string) bool {
 // pipeline is unknown to the owners config, so there is nothing to scope a
 // fix against (docs/api.md:103). It derives from the snapshot's pipeline id,
 // so it survives a restart: a webhook room opened for an unknown pipeline
-// keeps proposals disabled after the service rebuilds from the log.
+// keeps proposals disabled after the service rebuilds from the log. A setup
+// room is the exception: its pipeline is provisional until pipeline_register
+// writes the owners entry, and owners.Provisional is what scopes it (U).
 func (s *Service) proposalsDisabled(st *roomState) bool {
+	if st.snap.IsSetupRoom() {
+		return false
+	}
 	return s.pipelineProposalsDisabled(st.snap.PipelineID)
 }
 
@@ -1461,6 +1524,19 @@ func inputFor(e events.Event) *agent.HumanInput {
 			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
+	case events.ProposalStaged:
+		p, ok := decode[events.ProposalStagedPayload](e)
+		if !ok {
+			return nil
+		}
+		// Staging's verdict is evidence, never approval: OK says whether
+		// every staged step was healthy, and the text (staging's own words)
+		// reaches the model only inside the untrusted-data wrapper. (X8)
+		healthy := p.Healthy()
+		return &agent.HumanInput{
+			Seq: e.Seq, Actor: e.Actor, Kind: "proposal_staged",
+			Text: stagedInputText(p), OK: &healthy, ProposalID: p.ProposalID,
+		}
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
@@ -1476,8 +1552,10 @@ func inputFor(e events.Event) *agent.HumanInput {
 			okp = &stepOK
 		}
 		stepIndex := p.StepIndex
+		// At is the step's execution time, which a recovery's Verify
+		// counts from (X2c).
 		return &agent.HumanInput{
-			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
+			Seq: e.Seq, At: e.At, Actor: e.Actor, Kind: "action_result",
 			Text: fmt.Sprintf("step %d: %s", p.StepIndex+1, p.Output),
 			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
@@ -1548,19 +1626,20 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentCancel = cancel
 	st.agentRun++
 	run := st.agentRun
+	openedAt := st.snap.OpenedAt
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	var firstLook <-chan agent.TriageResult
 	if st.firstLook && s.triage != nil {
 		// Before the slot: a room queued behind the cap still gets its
 		// diagnosis. It runs once per room, never on a restart.
-		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, raw))
+		firstLook = s.startTriageLocked(ctx, roomID, run, s.newAlert(roomID, title, pipelineID, openedAt, raw))
 	}
 	st.firstLook = false
 	go func() {
 		defer s.wg.Done()
 		// However the supervisor ends, its slot or queue entry goes back.
 		defer gate.release()
-		alert := s.newAlert(roomID, title, pipelineID, raw)
+		alert := s.newAlert(roomID, title, pipelineID, openedAt, raw)
 		deps := agent.Deps{
 			Tools:     s.toolsFor(pipelineID),
 			Actions:   s.actionsFor(pipelineID),
@@ -1601,7 +1680,10 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
 				firstLook = nil
 			}
-			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
+			// X2c: the run ctx carries the room's whole pipeline, so the
+			// agent's recovery Verify calls read in its scope (actions need
+			// tools.WithPipeline); the agent's read tools re-scope by id.
+			err := s.runGuarded(s.pipelineCtx(ctx, pipelineID), roomID, alert, deps, s.opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
 			// already written the idle status and the message, so no retry

@@ -33,6 +33,12 @@ type Deps struct {
 	// process (cmd/server); nil in cmd/investigate and the evals, where
 	// dlq_peek then says the arrival rate is unknown.
 	DLQStats func(topic string) (newInWindow int64, window time.Duration, ok bool)
+	// Samples is optional: the watcher's watch samples (the room store).
+	// kafka_throughput reads the pipeline's group_lag samples from it for the
+	// consumed rate and the lag trend, because Kafka keeps no history of
+	// committed offsets. Nil (cmd/investigate, the evals) leaves the tool
+	// with produce rates and current lag only, and it says so.
+	Samples clients.SampleReader
 	// CertTargets are the configured endpoints tls_cert_expiry may dial
 	// (CertTargets(config)). Empty = the tool is not registered.
 	CertTargets []CertTarget
@@ -80,6 +86,9 @@ func Register(reg *tools.Registry, d Deps) error {
 		if err := reg.Register(&partitionRates{d: d}); err != nil {
 			return err
 		}
+		if err := reg.Register(&throughput{d: d}); err != nil {
+			return err
+		}
 	}
 	if _, ok := d.Kafka.(clients.DupScanner); ok {
 		if err := reg.Register(&dupKeys{d: d}); err != nil {
@@ -88,6 +97,12 @@ func Register(reg *tools.Registry, d Deps) error {
 	}
 	if len(d.CertTargets) > 0 {
 		if err := reg.Register(&certExpiry{d: d}); err != nil {
+			return err
+		}
+	}
+	// X6b: the cluster-wide task read is optional on a ConnectReader.
+	if _, ok := d.Connect.(clients.WorkerTaskReader); ok {
+		if err := reg.Register(&taskBalance{d: d}); err != nil {
 			return err
 		}
 	}

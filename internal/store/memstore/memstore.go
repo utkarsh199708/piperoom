@@ -42,6 +42,10 @@ type Store struct {
 	changes changeTable // pipeline_changes (changes.go)
 
 	samples map[sampleKey][]clients.SamplePoint // watch_samples (samples.go)
+
+	status map[string]clients.WatchStatus // watch_status (fleet.go)
+
+	cfgVersions configVersionTable // connector_config_versions (configversions.go)
 }
 
 type roomLog struct {

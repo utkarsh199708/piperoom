@@ -5,7 +5,8 @@ For the platform/data engineer at a pilot team who will connect Piperoom to a re
 These docs describe the code on `main` at `a91d2bd`, except the login, identity and role text,
 which was checked against `main` at `41a2eea` (auth PR 3). The pilot gate G5 pass (restart behaviour,
 login defaults, auth PR 4, shadow rooms, scale, Kafka key decoding) was re-checked against `main` at
-`b5bbbc2`. Each claim names the file it comes from. If a file changes, update the claim and its citation
+`b5bbbc2`. The X-wave text (`governance.md`, the X-wave rows of `setup.md` and `data-handling.md`) was checked
+against the integration branch at `6feaf910`. Each claim names the file it comes from. If a file changes, update the claim and its citation
 in the same PR.
 
 | Doc | Read it to |
@@ -16,6 +17,7 @@ in the same PR.
 | [write-roles.md](write-roles.md) | create the **write** credentials for the P3 fix actions, only if you turn write mode on |
 | [setup.md](setup.md) | the ten variables a first install sets, then the reference: prerequisites, configure Piperoom against your pipeline, start the room service and verify it |
 | [data-handling.md](data-handling.md) | know exactly what data Piperoom reads, what reaches the model, where it goes (including Slack), and who sees it |
+| [governance.md](governance.md) | know what Piperoom can attest about drift, column lineage, PII tags and retention, and what it cannot (value-level correctness, erasure, business metrics), before you tell an auditor anything |
 | [shadow-rooms.md](shadow-rooms.md) | run the agent blind on a pipeline's real alerts, then label and grade it after the incident, before anyone depends on it |
 | [decision.md](decision.md) | see how the first pilot is proposed to run, and the go-live gates |
 
@@ -102,6 +104,10 @@ below is from the code.
   whatever its type (`dbtools.go`). Other tools return their values as described in
   [data-handling.md](data-handling.md#2-what-each-tool-exposes). Table, topic and column names,
   and timestamps, still appear in the room.
+- **Governance facts are evidence, not attestation.** Drift signals compare counts and timestamp columns on a
+  source Postgres and a Postgres warehouse only; PII tags come from column names; the OpenLineage export is
+  optional, leader only and best effort; no warehouse retention is read. Value-level correctness, erasure and business metrics are out of
+  reach. Read [governance.md](governance.md) before you quote any of it.
 - **Write mode is off by default.** With `PIPEROOM_WRITE_MODE` unset or `off`, the agent still
   proposes fixes and people still approve them, but a fully approved fix never runs and no
   `action.executed` is written. The room view marks it `blocked: "write_mode_off"` and `/healthz`

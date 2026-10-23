@@ -68,6 +68,13 @@ var scenarios = map[string]scenario{
 	"consumer-duplicates": {breakIt: breakConsumerDuplicates, fix: fixConsumerDuplicates, signals: []string{events.SignalDupKeys}},
 	"toast-placeholder":   {breakIt: breakToastPlaceholder, fix: fixToastPlaceholder, signals: []string{events.SignalRowDrift}},
 
+	// X2 recovery (X2e, dev/scenarios.md §18-§19): rows missing downstream
+	// that a recovery action re-emits; lag is 0, so a reconciliation alert
+	// opens the room. They need the server on dev/owners.recovery.yaml (the
+	// reprocess_topic kafka_replay_range writes to).
+	"rows-lost-after-retention": {breakIt: breakRowsLostAfterRetention, fix: fixRowsLostAfterRetention, alert: rowsLostAlert, owners: recoveryOwnersFile},
+	"consumer-skipped-range":    {breakIt: breakConsumerSkippedRange, fix: fixConsumerSkippedRange, alert: skippedRangeAlert, owners: recoveryOwnersFile},
+
 	// Batch pipeline daily-revenue (dev/batch.md). A batch pipeline has no
 	// watcher signals, so each break raises its alert instead; the pipeline is
 	// in dev/owners.yaml.

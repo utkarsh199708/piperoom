@@ -83,8 +83,14 @@ type Server struct {
 	// Watch sample history (WithSamples): trends.go.
 	samples clients.SampleReader
 
+	// Fleet view (WithFleet): fleet.go.
+	fleet fleetView
+
 	// config_drift's accept-config (WithConfigAccept): acceptconfig.go.
 	configAccept ConfigAccepter
+
+	// Connector config versions (WithConfigVersions): configversions.go.
+	configVersions clients.ConfigVersionReader
 
 	// Setup runner endpoint (WithSetup): runners.go.
 	setupEnabled bool
@@ -236,6 +242,14 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/people", s.handlePeople)
 				short.Get("/rooms", s.handleListRooms)
 				short.Post("/rooms", s.handleCreateRoom)
+				// Setup rooms (setup.go; U wave). Mounted always: with setup
+				// off the service answers 404 setup_disabled, as docs/api.md
+				// says.
+				short.Post("/setup", s.handleSetupCreate)
+				short.Post("/rooms/{id}/setup/targets", visible(s.handleSetupAddTarget))
+				short.Post("/rooms/{id}/setup/targets/{t}/class", visible(s.handleSetupRaiseClass))
+				short.Post("/rooms/{id}/setup/pipeline", visible(s.handleSetupExtendPipeline))
+				short.Post("/rooms/{id}/setup/maintenance-window", visible(s.handleSetupMaintenanceWindow))
 				short.Get("/actions", s.handleActions)
 				if !s.authSettings.IsOIDC() {
 					// Unsigned: dev mode only (design §4). In oidc mode this
@@ -251,6 +265,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/suggestions/{sid}/decline", visible(s.handleDeclineSuggestion))
 				short.Post("/rooms/{id}/hypothesis", visible(s.handleHypothesisVerdict))
 				short.Post("/rooms/{id}/nudge", visible(s.handleNudge))
+				short.Post("/rooms/{id}/page-team", visible(s.handlePageTeam))
 				short.Post("/rooms/{id}/proposals", visible(s.handleCreateProposal))
 				short.Post("/rooms/{id}/control/request", visible(s.handleRequestControl))
 				short.Post("/rooms/{id}/control/grant", visible(s.handleGrantControl))
@@ -268,13 +283,17 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
 				short.Post("/proposals/{pid}/approve-all", s.handleApproveAllProposal)
 				short.Post("/proposals/{pid}/cancel", s.handleCancelProposal)
+				short.Post("/proposals/{pid}/stage", s.handleStageProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 				short.Get("/pipelines/{pid}/trends", s.handleTrends)
+				short.Get("/fleet", s.handleFleet)
+				short.Get("/fleet/changes", s.handleFleetChanges)
 				short.Post("/pipelines/{pid}/connectors/{name}/accept-config", s.handleAcceptConfig)
+				short.Get("/pipelines/{pid}/connectors/{name}/config-versions", s.handleConfigVersions)
 				// The scripted demo's presenter controls; no-op outside --demo.
 				s.mountDemo(short)
 			})

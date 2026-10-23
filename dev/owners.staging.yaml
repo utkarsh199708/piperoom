@@ -22,9 +22,10 @@ pipelines:
       connections:
         connect_url: {value: "http://localhost:18083"}
         schema_registry_url: {value: "http://localhost:18081"}
-    # Uncomment once an action implements actions.Stager (X8b): approving it then needs a
-    # healthy stage first.
-    # require_staging: [connect_update_connector_config]
+    # X8b: connect_update_connector_config implements actions.Stager, so approving its step
+    # needs a healthy stage first ("Try in staging"). Only in this file: dev/owners.yaml has
+    # no staging: block, and require_staging: needs one.
+    require_staging: [connect_update_connector_config]
     # Short `for` so `devctl break ...` trips the watcher within a few intervals.
     # slot_wal stays at the defaults (fire 1GiB): a healthy dev slot retains
     # 0.8-1.1 MB under load (dev/scenarios.md), so any small fire would warn forever.

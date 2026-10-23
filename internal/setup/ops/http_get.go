@@ -79,7 +79,7 @@ func (httpGetOp) ParamTarget(params json.RawMessage, env Env) string {
 	if err != nil {
 		return ""
 	}
-	if t, ok := matchTarget(env, u); ok {
+	if t, _, _, ok := matchTarget(env, u); ok {
 		return t.Kind
 	}
 	return ""
@@ -176,7 +176,7 @@ func decodeHTTPGet(params json.RawMessage, env Env) (httpGetParams, *url.URL, er
 	case u.Fragment != "":
 		return p, nil, fmt.Errorf("%w: url must not carry a fragment", ErrParams)
 	}
-	t, ok := matchTarget(env, u)
+	_, th, tp, ok := matchTarget(env, u)
 	if !ok {
 		return p, nil, fmt.Errorf("%w: %s is not one of the room's targets", ErrTarget, clip(u.Host))
 	}
@@ -189,7 +189,6 @@ func decodeHTTPGet(params json.RawMessage, env Env) (httpGetParams, *url.URL, er
 	if u.Scheme == "https" {
 		scheme = "https"
 	}
-	th, tp := splitTargetAddress(t.Address)
 	hostport := th
 	if strings.Contains(th, ":") {
 		hostport = "[" + th + "]" // a bare IPv6 literal
@@ -205,29 +204,51 @@ func decodeHTTPGet(params json.RawMessage, env Env) (httpGetParams, *url.URL, er
 }
 
 // matchTarget reports whether the URL's host and port match a registered
-// target's address. A target without a port matches only the scheme's
-// standard port (80 or 443), never an arbitrary port: a bare-host target must
-// not hand the model every service on that machine.
-func matchTarget(env Env, u *url.URL) (events.SetupTarget, bool) {
-	host := strings.ToLower(u.Hostname())
-	port := u.Port()
-	if port == "" {
-		port = schemeDefaultPort(u.Scheme)
+// target's address, and returns the matched address's own host and port, so a
+// caller rebuilds from room configuration, never from the request. A target
+// without a port matches only the scheme's standard port (80 or 443), never
+// an arbitrary port: a bare-host target must not hand the model every service
+// on that machine; the same rule applies to each broker of a kafka list.
+func matchTarget(env Env, u *url.URL) (t events.SetupTarget, host, port string, ok bool) {
+	reqHost := strings.ToLower(u.Hostname())
+	reqPort := u.Port()
+	if reqPort == "" {
+		reqPort = schemeDefaultPort(u.Scheme)
 	}
 	for _, t := range env.Targets {
-		th, tp := splitTargetAddress(t.Address)
-		if th == "" || !strings.EqualFold(th, host) {
-			continue
+		for _, addr := range targetAddresses(t) {
+			th, tp := splitTargetAddress(addr)
+			if th == "" || !strings.EqualFold(th, reqHost) {
+				continue
+			}
+			effective := tp
+			if effective == "" {
+				effective = schemeDefaultPort(u.Scheme)
+			}
+			if effective != reqPort {
+				continue
+			}
+			return t, th, tp, true
 		}
-		if tp == "" {
-			tp = schemeDefaultPort(u.Scheme)
-		}
-		if tp != port {
-			continue
-		}
-		return t, true
 	}
-	return events.SetupTarget{}, false
+	return events.SetupTarget{}, "", "", false
+}
+
+// targetAddresses returns a registered target's addresses: only a kafka
+// target may name a comma-separated broker list (the room validated every
+// broker at registration), and every broker is then matchable on its own. A
+// comma in any other kind's address is part of one opaque spelling, never a
+// list.
+func targetAddresses(t events.SetupTarget) []string {
+	if !strings.EqualFold(t.Kind, "kafka") || !strings.Contains(t.Address, ",") {
+		return []string{t.Address}
+	}
+	parts := strings.Split(t.Address, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, strings.TrimSpace(p))
+	}
+	return out
 }
 
 // schemeDefaultPort is the standard port of the only two schemes http_get

@@ -1,13 +1,16 @@
 package wiring
 
 import (
+	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/actions/pgactions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/postgres"
 )
 
 // The P3 write actions (P3a Kafka, P3b source Postgres) are registered in both
@@ -71,11 +74,16 @@ type P3ActionDeps struct {
 	// write mode is on; a harness may pass writers that perform nothing.
 	SourceWriter clients.SourceWriter
 	KafkaWriter  clients.KafkaWriter
+	// Sink is the read-only warehouse: pg_resnapshot_rows (X2a) counts the
+	// sink side through it in Verify only. nil = unverifiable.
+	Sink clients.Warehouse
 }
 
 // RegisterP3Actions registers kafka_reset_consumer_offsets, dlq_replay,
 // connect_snapshot_table, pg_drop_replication_slot, pg_add_publication_table
-// and pg_snapshot_signal over d, in that order. It is the one place the P3
+// and pg_snapshot_signal over d, in that order, then the X2a recovery action
+// pg_resnapshot_rows (both writers: its signal goes to the signal table or
+// the Kafka signal topic, as the connector config says). It is the one place the P3
 // actions are put together with their readers and writers: wiring calls it
 // for each client set (registerP3Actions), and the evals harness can call it
 // over its replay clients, so both register the same actions the same way.
@@ -103,6 +111,9 @@ func RegisterP3Actions(areg *actions.Registry, d P3ActionDeps) error {
 	if isNilIface(d.KafkaWriter) {
 		d.KafkaWriter = nil
 	}
+	if isNilIface(d.Sink) {
+		d.Sink = nil
+	}
 	if err := actions.RegisterKafka(areg, actions.KafkaDeps{Writer: d.KafkaWriter, Planner: d.Planner, Records: d.Records}); err != nil {
 		return fmt.Errorf("wiring: register P3 kafka actions: %w", err)
 	}
@@ -113,6 +124,7 @@ func RegisterP3Actions(areg *actions.Registry, d P3ActionDeps) error {
 		pgactions.NewDropReplicationSlot(pgactions.DropSlotDeps{Source: d.Source, Connect: d.Connect, Writer: d.SourceWriter}),
 		pgactions.NewAddPublicationTable(pgactions.AddPublicationTableDeps{Connect: d.Connect, Source: d.Source, Writer: d.SourceWriter}),
 		pgactions.NewSnapshotSignal(pgactions.SnapshotSignalDeps{Connect: d.Connect, Source: d.Source, Writer: d.SourceWriter}),
+		pgactions.NewResnapshotRows(pgactions.ResnapshotRowsDeps{Connect: d.Connect, Source: d.Source, Sink: sinkView(d.Sink), Writer: d.SourceWriter, Kafka: d.KafkaWriter}),
 	} {
 		if err := areg.Register(a); err != nil {
 			return fmt.Errorf("wiring: register %s: %w", a.Name(), err)
@@ -133,7 +145,7 @@ func registerP3Actions(areg *actions.Registry, w *Wired) error {
 	var connReader clients.ConnectReader = readConnect(w)
 	return RegisterP3Actions(areg, P3ActionDeps{
 		Connect: connReader, Source: w.Source, Planner: planner, Records: records,
-		SourceWriter: sw, KafkaWriter: kw,
+		SourceWriter: sw, KafkaWriter: kw, Sink: w.Warehouse,
 	})
 }
 
@@ -152,4 +164,46 @@ func isNilIface(v any) bool {
 		return rv.IsNil()
 	}
 	return false
+}
+
+// sinkCounts is the sink view pg_resnapshot_rows' Verify gets (X2a): the
+// warehouse's range and window counts and nothing else, the client in an
+// unexported field, so the action never holds the whole warehouse client.
+// A warehouse without a method answers clients.ErrNotSupported, which makes
+// the recovery unverifiable rather than failed.
+type sinkCounts struct{ wh clients.Warehouse }
+
+var _ pgactions.SinkCounter = sinkCounts{}
+
+// sinkView is nil for no warehouse, so Verify says so before any call.
+func sinkView(wh clients.Warehouse) pgactions.SinkCounter {
+	if wh == nil {
+		return nil
+	}
+	return sinkCounts{wh: wh}
+}
+
+func (s sinkCounts) RangeColumn(ctx context.Context, table, column string) (postgres.RangeColumn, error) {
+	if r, ok := s.wh.(pgactions.RowRangeCounter); ok {
+		return r.RangeColumn(ctx, table, column)
+	}
+	return postgres.RangeColumn{}, fmt.Errorf("wiring: the warehouse client cannot read a column's kind: %w", clients.ErrNotSupported)
+}
+
+func (s sinkCounts) CountRange(ctx context.Context, table, column, from, to string) (int64, error) {
+	if r, ok := s.wh.(pgactions.RowRangeCounter); ok {
+		return r.CountRange(ctx, table, column, from, to)
+	}
+	return 0, fmt.Errorf("wiring: the warehouse client cannot count rows by range: %w", clients.ErrNotSupported)
+}
+
+func (s sinkCounts) CountBetween(ctx context.Context, table, tsColumn string, from, to time.Time) (int64, error) {
+	// The window count of clients.Reconciler alone: the view needs no other
+	// method of it.
+	if r, ok := s.wh.(interface {
+		CountBetween(ctx context.Context, table, tsColumn string, from, to time.Time) (int64, error)
+	}); ok {
+		return r.CountBetween(ctx, table, tsColumn, from, to)
+	}
+	return 0, fmt.Errorf("wiring: the warehouse client cannot count a time window: %w", clients.ErrNotSupported)
 }

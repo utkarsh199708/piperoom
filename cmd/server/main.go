@@ -52,6 +52,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
+	"piperoom/internal/discover/openlineage"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
 	"piperoom/internal/quickstart"
@@ -438,6 +439,14 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	}
 	defer slack.stop(mirrorStopTimeout)
 
+	// OpenLineage (X7b): off unless OPENLINEAGE_URL is set; then it sends on
+	// the elected leader only. A bad setting refuses start.
+	lineage, stopLineage, err := openlineage.Start(ctx, cfg, own, elector, log)
+	if err != nil {
+		return err
+	}
+	defer stopLineage()
+
 	var (
 		acts     *actions.Registry
 		toolsReg = tools.NewRegistry()
@@ -516,7 +525,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		triageTimeout = w.triageTimeout
 		stacks = w.stacks
 		stackFor = w.stackFor
-		topo = w.topo
+		topo = lineage.Wrap(w.topo)
 	}
 
 	// The auto-approve lists name actions of the proposal registry: acts in
@@ -572,10 +581,15 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		WriteModeOff:      !s.writeOn,
 		AutoApproveDelay:  s.autoDelay,
 		Limits:            limits,
+		Setup:             s.setupCfg,
+		SetupLocal:        setupListenLoopback(cfg.HTTPAddr),
+		SetupOwnAddrs:     setupOwnAddrs(cfg.HTTPAddr, log),
 		OnRoomOpened:      slack.onRoomOpened(),
 		OnRoomClosed:      closedHook.onClosed,
 		OnActionExecuted:  closedHook.onActionExecuted,
+		OnActionResult:    lineage.ActionHook(),
 		OnRoomDeleted:     deletedHook.onDeleted,
+		TeamPager:         slack.teamPager(),
 	}, s.authSettings, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
@@ -658,6 +672,17 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 	if sampleStore != nil {
 		httpOpts = append(httpOpts, httpapi.WithSamples(sampleStore))
 	}
+	// The fleet view (X5a) reads the watcher's status rows, which the leader's
+	// watcher writes, so every replica answers alike.
+	fleetStore, _ := st.(store.FleetStore)
+	httpOpts = append(httpOpts, httpapi.WithFleet(fleetOptions(own, st, fleetStore, s.watchCfg, changesDays)))
+	// Connector config versions (X5c): the watcher writes them, the
+	// config-versions routes read them; the change-log retention above
+	// purges them (configVersionsPurger).
+	versionStore, _ := st.(store.ConfigVersionStore)
+	if versionStore != nil {
+		httpOpts = append(httpOpts, httpapi.WithConfigVersions(versionStore))
+	}
 	if s.setupCfg.Enabled {
 		httpOpts = append(httpOpts, httpapi.WithSetup(true))
 	}
@@ -707,9 +732,7 @@ func serve(ctx context.Context, d startDeps, cfg config.Config, own *owners.Owne
 		MaxOpenRooms: s.watchMaxOpenRooms,
 		Forecast:     s.watchForecast,
 	}
-	if sampleStore != nil {
-		watchDeps.Samples = sampleStore
-	}
+	watchStores(&watchDeps, st)
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
 	}

@@ -23,6 +23,9 @@ import { Clock } from './room/Clock'
 import { BlastRadius } from './room/BlastRadius'
 import { ExecutionCard } from './room/ExecutionCard'
 import { VerificationCard } from './room/VerificationCard'
+import { RecoveryProgress } from './room/RecoveryCard'
+import { StagingCard } from './room/StagingCard'
+import { canTryStaging, stagingRequired } from '../lib/staging'
 import type { CloseNudge } from './room/VerificationCard'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
@@ -728,7 +731,13 @@ function ApproveAll({
   noHashNoteId,
   headingId,
   onSolo,
+  stagingHold,
+  stagingNoteId,
 }: {
+  /** X8: a healthy stage is owed first, so Approve and run is off (the card's staging notice says why). */
+  stagingHold: boolean
+  /** The id of that notice, for aria-describedby. */
+  stagingNoteId: string
   proposal: ProposalState
   /** The pending layers the call records (approveAllFor). */
   layers: string[]
@@ -785,7 +794,7 @@ function ApproveAll({
         onSolo()
         setRefusedText(confirm !== undefined)
         setAsked(true)
-      } else if (res.ok || res.mismatch || res.refused) {
+      } else if (res.ok || res.mismatch || res.refused || res.stagingRequired) {
         // Done, stale (the room reloads) or refused (the card goes back to the per-layer rows and
         // says why): the dialog has nothing more to ask.
         closeConfirm()
@@ -800,7 +809,7 @@ function ApproveAll({
   useDecisionKeys(shortcuts, headingId, (key) => {
     if (rejecting || confirming || busy) return false
     if (key === 'a') {
-      if (!hashed) return false
+      if (!hashed || stagingHold) return false
       openConfirm()
     } else {
       setRejecting(true)
@@ -831,8 +840,8 @@ function ApproveAll({
             size="sm"
             className="coarse:h-11 coarse:px-4"
             ref={approveRef}
-            disabled={busy || !hashed}
-            aria-describedby={hashed ? undefined : noHashNoteId}
+            disabled={busy || !hashed || stagingHold}
+            aria-describedby={!hashed ? noHashNoteId : stagingHold ? stagingNoteId : undefined}
             aria-keyshortcuts={shortcuts ? 'A' : undefined}
             onClick={openConfirm}
           >
@@ -886,7 +895,13 @@ function LayerRow({
   writeOff,
   driver,
   bundled,
+  stagingHold,
+  stagingNoteId,
 }: {
+  /** X8: a healthy stage is owed first, so Approve is off (the card's staging notice says why). */
+  stagingHold: boolean
+  /** The id of that notice, for aria-describedby. */
+  stagingNoteId: string
   proposal: ProposalState
   layer: string
   user: CurrentUser
@@ -978,7 +993,7 @@ function LayerRow({
   useDecisionKeys(shortcuts, headingId, (key) => {
     if (!canDecide || rejecting || confirming || runConfirm || busy) return false
     if (key === 'a') {
-      if (!hashed) return false
+      if (!hashed || stagingHold) return false
       startApprove()
     } else {
       setRejecting(true)
@@ -1121,8 +1136,8 @@ function LayerRow({
             size="sm"
             className="coarse:h-11 coarse:px-4"
             ref={approveRef}
-            disabled={busy || !hashed}
-            aria-describedby={hashed ? undefined : noHashNoteId}
+            disabled={busy || !hashed || stagingHold}
+            aria-describedby={!hashed ? noHashNoteId : stagingHold ? stagingNoteId : undefined}
             aria-keyshortcuts={shortcuts ? 'A' : undefined}
             onClick={startApprove}
           >
@@ -1209,7 +1224,10 @@ function Proposal({
   bundle,
   refused,
   onCancelSchedule,
+  stagingOn,
 }: {
+  /** X8: RoomSnapshot.mode.staging, the same for every caller. */
+  stagingOn: boolean
   /** Set when this person may cancel the proposal's policy countdown (canCancelSchedule). */
   onCancelSchedule?: () => Promise<CancelResult>
   /** The room's driver while the room is open, else null (see LayerRow). */
@@ -1236,6 +1254,7 @@ function Proposal({
 }) {
   const titleId = useId()
   const noteId = useId()
+  const stagingNoteId = useId()
   // "Got it" hides the note for one stale hash. The note itself comes from `sentHash`, which
   // useRoom keeps across the room reload (this card is unmounted while the room loads).
   const [acknowledged, setAcknowledged] = useState<string | null>(null)
@@ -1246,6 +1265,9 @@ function Proposal({
   const pending = proposal.required_layers.filter((l) => (proposal.approvals[l] ?? 'pending') === 'pending')
   const approved = proposal.required_layers.filter((l) => proposal.approvals[l] === 'approved').length
   const previous = latestDecision(proposal)
+  // X8: a healthy stage is owed, so no Approve until it exists (the server answers 409 staging_required anyway).
+  const stagingHold = nudge.roomOpen && stagingRequired(proposal)
+  const canStage = canTryStaging(proposal, { stagingOn, isDriver: nudge.isDriver, viewer: isViewer(user), roomOpen: nudge.roomOpen })
   // A layer nobody owns waits on the driver, not on an owner (P2b).
   const ownersPending = pending.filter((l) => !isFallbackLayer(proposal, l))
   const waitingOn = [
@@ -1319,6 +1341,8 @@ function Proposal({
 
         <BlastRadius proposal={proposal} topology={topology} />
 
+        <StagingCard proposal={proposal} required={stagingHold} canTry={canStage} onStage={actions.stage} noteId={stagingNoteId} />
+
         {hashed ? (
           <ParamsHash hash={proposal.params_hash} deciding={mine.length > 0} noteId={noteId} />
         ) : open ? (
@@ -1373,6 +1397,8 @@ function Proposal({
             writeOff={writeOff}
             driver={driver}
             bundled={bundle !== null}
+            stagingHold={stagingHold}
+            stagingNoteId={stagingNoteId}
           />
         ))}
         {bundle && (
@@ -1387,6 +1413,8 @@ function Proposal({
             noHashNoteId={noteId}
             headingId={titleId}
             onSolo={onSolo}
+            stagingHold={stagingHold}
+            stagingNoteId={stagingNoteId}
           />
         )}
       </div>
@@ -1398,7 +1426,16 @@ function Proposal({
             : { asDriver: nudge.isDriver, onSteer: actions.steer, sends: actions.sends }
         }
       />
-      {proposal.verification && <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} />}
+      <RecoveryProgress proposal={proposal} />
+      {proposal.verification && (
+        <VerificationCard
+          verification={proposal.verification}
+          title={proposal.title}
+          nudge={nudge}
+          isRecovery={proposal.class === 'recovery'}
+          recovery={proposal.recovery}
+        />
+      )}
     </article>
   )
 }
@@ -1514,6 +1551,7 @@ export function ProposalsPanel({
               bundle={bundleFor(p)}
               refused={state.approve_all_refused?.[p.proposal_id]}
               onCancelSchedule={cancelFor(p)}
+              stagingOn={state.mode?.staging === true}
             />
           ))}
         </div>

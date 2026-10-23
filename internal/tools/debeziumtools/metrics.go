@@ -3,12 +3,10 @@ package debeziumtools
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
-	"time"
 
 	"piperoom/internal/clients/prom"
 	"piperoom/internal/tools"
@@ -38,58 +36,24 @@ type Report struct {
 }
 
 func (t *metricsTool) run(ctx context.Context, in json.RawMessage) (tools.Result, error) {
-	var input struct {
-		Connector string `json:"connector"`
-	}
-	if len(in) == 0 {
-		return tools.Result{}, fmt.Errorf("%w: missing input", tools.ErrBadInput)
-	}
-	if err := json.Unmarshal(in, &input); err != nil {
-		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
-	}
-	if input.Connector == "" {
-		return tools.Result{}, fmt.Errorf("%w: connector is required", tools.ErrBadInput)
-	}
-	sc, err := tools.ScopeFor(ctx, t.d.Owners)
-	if err != nil {
-		return tools.Result{}, err
-	}
-	if err := sc.CheckConnector(input.Connector); err != nil {
-		return tools.Result{}, err
-	}
-	if t.d.Metrics.URL == "" {
-		return tools.Result{Summary: "not configured: set DEBEZIUM_METRICS_URL", Data: map[string]any{"configured": false}}, nil
-	}
-
-	if t.d.Connect == nil {
-		return tools.Result{}, errors.New("debeziumtools: debezium_metrics: Kafka Connect is not configured")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, toolTimeout)
 	defer cancel()
-	cfg, err := t.d.Connect.Config(ctx, input.Connector)
+	tg, err := t.d.resolve(ctx, in, t.Name())
 	if err != nil {
-		return tools.Result{}, fmt.Errorf("debeziumtools: debezium_metrics: connector config: %w", err)
+		return tools.Result{}, err
 	}
-	prefix := cfg["topic.prefix"]
-	if prefix == "" {
-		prefix = cfg["database.server.name"] // Debezium < 2.0
+	if !tg.configured {
+		return notConfigured(), nil
 	}
-	if prefix == "" {
-		return tools.Result{}, fmt.Errorf("%w: connector %q has no topic.prefix, so its metrics cannot be selected", tools.ErrBadInput, input.Connector)
-	}
-	if !sc.Unscoped() && prefix != sc.Pipeline().TopicPrefix {
-		return tools.Result{}, fmt.Errorf("%w: connector %q has topic.prefix %q, not this room's pipeline prefix %q", tools.ErrBadInput, input.Connector, prefix, sc.Pipeline().TopicPrefix)
-	}
-
 	samples, err := t.d.Scraper.Scrape(ctx, t.d.Metrics.URL, prom.DefaultMaxBytes)
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("debeziumtools: debezium_metrics: %w", err)
 	}
 	var tables []string
-	if !sc.Unscoped() {
-		tables = sc.Pipeline().SourceTables
+	if !tg.sc.Unscoped() {
+		tables = tg.sc.Pipeline().SourceTables
 	}
-	rep := collect(samples, t.d.Metrics.Prefix, prefix, input.Connector, tables)
+	rep := collect(samples, t.d.Metrics.Prefix, tg.prefix, tg.connector, tables)
 	summary := render(rep, t.d.Metrics.Prefix)
 	summary, truncated := tools.Truncate(summary)
 	return tools.Result{Summary: summary, Data: rep, Truncated: truncated}, nil

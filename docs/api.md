@@ -128,9 +128,9 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 413 | `too_large` (signed alert body over 1 MB; X4: `POST /api/changes/webhook` body over 4 KB) |
 | 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; #459: `client_id_reused` (an idempotency key sent again with another route or body); P2: `not_scheduled` (`POST /api/proposals/{pid}/cancel` when no `proposal.scheduled` of the proposal is pending); X3: `watch_off` (`accept-config` when this server keeps no baseline for the connector: the watcher is off, runs on another server replica, or does not watch the pipeline or connector); X4: `slack_off` (`page-team` while the Slack bridge is off), `not_upstream` (`page-team` when the current hypothesis's `scope` is not `upstream_app` or `vendor`); X8 (see **X8 staging** under Objects): `no_staging` (`POST /api/proposals/{pid}/stage` when the room's pipeline declares no `staging:` or write mode is off), `not_stageable` (no step's action implements `actions.Stager`), `stage_in_progress` (a stage of the proposal is still running), `staging_required` (`approve` or `approve-all` while a `require_staging:` step has no healthy stage for the current `params_hash`; the message names the step and action) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
-| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; X4: the 61st verified `POST /api/changes/webhook` of one pipeline within a minute, and a second `page-team` of the same team in one room within an hour); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket); P3: `too_many_proposals` (a sixth open driver-authored proposal in one room); X8: `rate_limited` (a sixth `POST /api/proposals/{pid}/stage` of one proposal) |
+| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; X4: the 61st verified `POST /api/changes/webhook` of one pipeline within a minute, and a second `page-team` of the same team in one room within an hour, or while a page of that team in that room is still being sent); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket); P3: `too_many_proposals` (a sixth open driver-authored proposal in one room); X8: `rate_limited` (a sixth `POST /api/proposals/{pid}/stage` of one proposal) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
-| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working); X3: `connect_unavailable` (`accept-config` could not read Kafka Connect) |
+| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working); X3: `connect_unavailable` (`accept-config` could not read Kafka Connect); X4: `slack_unavailable` (`page-team`: Slack did not accept the post, e.g. the bot is not in the team's channel, a Slack error or a timeout; the message names Slack's error code only, nothing is written and the driver may retry) |
 
 Every text field a person types (for example titles, comments, steers, resolutions, trace keys, labels, verdict notes, decline and delete reasons, checklist notes, shadow grades, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Such text that contains a bidirectional control character (U+202A–U+202E, U+2066–U+2069) is refused the same way with `400 validation` ("text contains bidirectional control characters (U+202A-U+202E, U+2066-U+2069)") (#358). Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD, bidirectional control characters are dropped). Alert room titles, watcher notes, a label's `cause` and `fix_that_worked`, and a close resolution (which the web app pre-fills from agent text) have bidirectional control characters dropped instead of refused.
 
@@ -371,7 +371,9 @@ hashes are unchanged; clients ignore `room.escalated` until they know it.
 - **Forecast rooms.** `room.created.origin: "forecast"` (`events.RoomOriginForecast`, server X3c): a forecast signal
   opened the room, `severity: "sev4"`, the trend summary is its first system message and **no agent runs** (no
   `agent.*` event, no usage) until the first `steer.sent`, the first `comment.added` with `mentions_agent: true`, or a
-  `room.escalated`. The room's driver, proposals and close work as in any room.
+  `room.escalated`. The room's driver, proposals and close work as in any room. On a pipeline in shadow mode the
+  one-shot shadow run starts at open as in any shadow room (lead ruling, batch 5): steers never start a shadow run,
+  so a quiet shadow room would otherwise never be measured, even after it escalates.
 - **`room.escalated {severity, from, signal}`** (system actor; X3c). The watcher's normal signal on the same pipeline
   (for example `slot_wal` once the slot really fills) joined an open room of lower severity: `severity` is the new
   level, `from` the old, `signal` the signal that caused it. The snapshot's `severity` is the newest one. In a
@@ -386,7 +388,9 @@ Additive like the F wave. Implemented by A4 (agent, X4c), A5 and C12 (page, X4d)
 - **Hypothesis scope.** `agent.hypothesis` may carry `scope` ∈ `pipeline | upstream_app | vendor | unknown`, `team?`
   and `change_id?`. `scope` is where the cause is: `pipeline` (a pipeline fix is the root fix), `upstream_app` (an
   application deploy or migration outside the pipeline; the agent proposes only mitigations, labelled as such),
-  `vendor` (a vendor's incident), `unknown` (not established). `unknown` is never written: the key is omitted, and a
+  `vendor` (a vendor's incident; the root fix is the vendor's, so proposals are labelled mitigations too: X4c's
+  `propose_fix` prefixes the title with `Mitigation: ` while the latest hypothesis is `upstream_app` or `vendor`),
+  `unknown` (not established). `unknown` is never written: the key is omitted, and a
   missing, `null` or unrecognised `scope` (every hypothesis written before X4) reads as `unknown`, so old events and
   their export hashes are unchanged. `team` is an `owners.yaml` `teams[].id` (see External changes), set only with
   `upstream_app` or `vendor`. `change_id` is the `PipelineChange.id` the scope rests on (`0`/absent when none).
@@ -827,7 +831,7 @@ before X7 has the same JSON and a client that ignores them reads the map as befo
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
 | POST | `/api/rooms/{id}/hypothesis` | `{verdict: "confirmed"\|"disputed", note?}` | `Event` (`hypothesis.verdict`) | F9 (server F9b, implemented by A5; web F9c, A6). Any member (viewers `403 viewer`); open rooms only (`409 room_closed`); a shadow room `409 room_open`; no hypothesis yet `409 no_hypothesis`; the same person repeating the same verdict on the same hypothesis `409 already_decided`; `note` ≤ 500 characters, typed-text rule. The event carries `hypothesis_seq`; a new `agent.hypothesis` clears every verdict. The agent receives it as a comment and wakes. Renews the driver lease only when the caller is the driver |
-| POST | `/api/rooms/{id}/page-team` | `{team}` | `Event` (`room.team_paged`) | X4 (X4-0 contract; server and Slack post X4d by A5 and C12; web follow-up A6). The driver pages a team that owns an upstream cause: one Slack post to the team's `slack_channel` with the current hypothesis text, the cited change's summary and URL (`change_id`), the cited step numbers and the room link. Never automatic; the team's reply is not ingested. Driver only (`403 not_driver`; viewers `403 viewer`); open rooms only (`409 room_closed`); `team` must be a `teams[].id` of `owners.yaml` visible to the room's pipeline (its tenant's teams with a `tenants:` block), else `400 validation` (another tenant's team reads as unknown); no hypothesis `409 no_hypothesis`; the current hypothesis's `scope` is not `upstream_app` or `vendor` `409 not_upstream`; the Slack bridge is off (`SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` not both set) `409 slack_off`, nothing written; the same team paged in this room in the last hour `429 rate_limited` (the message says when). The event carries `hypothesis_seq` and `change_id` of the hypothesis paged. The page text is untrusted: titles and hypothesis text are escaped (no mentions, no links but the room's and the change's `url`) |
+| POST | `/api/rooms/{id}/page-team` | `{team}` | `Event` (`room.team_paged`) | X4 (X4-0 contract; server and Slack post X4d by A5 and C12; web follow-up A6). The driver pages a team that owns an upstream cause: one Slack post to the team's `slack_channel` with: the driver's display name, the room id and pipeline id, the hypothesis's `scope` as fixed words, its `confidence` and text, the cited change (`change_id`: its kind, `service`, time, summary and `url`; only `#<change_id>` when the change log no longer holds it), the cited step numbers (as the room numbers its steps) and the room link. Nothing else: no tool result, row or config value. Never automatic; the team's reply is not ingested. Driver only (`403 not_driver`; viewers `403 viewer`); open rooms only (`409 room_closed`); `team` must be a `teams[].id` of `owners.yaml` visible to the room's pipeline (its tenant's teams with a `tenants:` block), else `400 validation` (another tenant's team reads as unknown); no hypothesis `409 no_hypothesis`; the current hypothesis's `scope` is not `upstream_app` or `vendor` `409 not_upstream`; the Slack bridge is off (`SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` not both set) `409 slack_off`, nothing written; the same team paged in this room in the last hour `429 rate_limited` (the message says when), and a second click while that team's page is still being sent `429 rate_limited` ("a page of team … is being sent"); Slack did not accept the post `503 slack_unavailable`, nothing written. The event is written only after Slack accepted the post, so a recorded page always went out. The event carries `hypothesis_seq` and `change_id` of the hypothesis paged. The page text is untrusted: titles and hypothesis text are escaped (no mentions, no links but the room's and the change's `url`) |
 | POST | `/api/rooms/{id}/nudge` | `{proposal_id, layer}` | `Event` (`approval.nudged`) | F9 (implemented by A5). Any member (viewers `403 viewer`); open rooms (`409 room_closed`); the proposal must be open and `layer` pending on it (`409 already_decided`); one per proposal and layer per 10 minutes (`409 already_nudged`). Mirrored to the Slack thread when the bridge is on (C12 follow-up) |
 | POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the incident layers (`events.IncidentLayers()`, eight; `environment` is refused) or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
 | POST | `/api/rooms/{id}/checklist` | `{step_id, tool_use_id, hit, item, done, note?}` | `Event` (`checklist.step_done`) | F8 (implemented by A5). Open rooms only (`409 room_closed`); any member (viewers `403 viewer`); `tool_use_id` must be a `runbook_lookup` result of this room and `hit`/`item` within its `data` (`400 validation`); `note` ≤ 300 characters, typed-text rule; idempotent (the same state again still appends) |
@@ -948,7 +952,9 @@ deadline (the store's default when the request has none).
   graded: `room.labelled` carries no grade, see AgentStats); `at` is the time of that event.
 - `checked_at`: when the watcher last checked the pipeline; omitted when it never did.
 
-**`FleetChangesPage`**: `{ "changes": [PipelineChange], "next": "<cursor>" }`. `next` is `""` on the last page. A
+**`FleetChangesPage`**: `{ "changes": [PipelineChange], "next": "<cursor>" }`. `next` is `""` on the last page —
+except at `limit=200` (the reader's cap), where a final exactly-full page may still carry a non-empty `next`; the
+page it names is then empty with `next` `""`, and that empty page ends the pagination. A
 `PipelineChange` here is exactly the F8 row (`id, pipeline_id, kind, object, at, actor?, source, fingerprint,
 before?, after?, summary`): config values masked `***`, a DDL statement only in `summary` (≤ 300 runes), and for
 X4's external kinds `after` is a `clients.ExternalChange` (untrusted sender text; see External changes); clients
@@ -1034,8 +1040,8 @@ closes; `--demo` forces it off.
 
   | `signal` | Default severity | Entry | Fires when |
   |---|---|---|---|
-  | `count_drift` | `sev2` | `DriftSignal` | source and sink row counts over the last closed hour, shifted by the sink's lag, differ by more than `watch.count_tolerance` (default 0.5 %) on 2 checks in a row |
-  | `row_drift` | `sev2` | `DriftSignal` | a sampled source key is missing on the sink after the lag, or one of its timestamp columns differs |
+  | `count_drift` | `sev2` | `DriftSignal` | source and sink row counts over the last closed hour, shifted by the sink's lag (on an idle sink: the hour ending at its newest row), differ by more than `watch.count_tolerance` (default 0.5 %) on 2 checks in a row |
+  | `row_drift` | `sev2` | `DriftSignal` | a sampled source key is missing on the sink after the lag, or one of its timestamp columns differs; or rows that landed on the sink in the last hour hold `sink_ts_column` NULL; or sink rows hold Debezium's unavailable-value placeholder in a toastable column; or a column is missing on the sink |
   | `dup_keys` | `sev3` | `DriftSignal` | the CDC topic holds the same (key, source position) more than once in the window |
   | `order_skew` | `sev3` | `DriftSignal` | the source position goes backwards for one key on the CDC topic |
   | `forecast` | `sev4` | `ForecastSignal` | a pipeline metric's trend reaches its limit within `PIPEROOM_WATCH_FORECAST_HORIZON` (below) |
@@ -1047,7 +1053,16 @@ closes; `--demo` forces it off.
   detail?}`: `window` is half-open `[from, to)` (RFC 3339, UTC), an object here while `dlq_growth`'s `window` is a
   word such as `"15m"`, so a reader goes by `signal` first; the five numbers are always present (0 is evidence).
   `count_drift`: `source`/`sink` are the row counts and `missing` is `source - sink` when positive. `row_drift`:
-  `sample` keys compared (at most 200), `missing` not on the sink, `mismatched` with a differing timestamp.
+  `sample` keys compared (at most 200), `missing` not on the sink, `mismatched` with a differing timestamp; X1b-fix:
+  `mismatched` also counts sampled rows that landed in the last hour (by the wall clock, not shifted by the lag) and
+  that the sink holds with `sink_ts_column` NULL (a sampled row the sink does not hold yet is not judged), and the
+  sink rows of that hour holding Debezium's default `__debezium_unavailable_value` in one of the source's toastable
+  columns (at most 4 columns per table and check, in turn; never `sink_ts_column` or a column whose name looks like
+  personal data); `detail` names the column. A column missing on the sink (`sink_ts_column`, or a column both tables
+  had at an earlier check of this server process) fires with all counts 0, `detail` naming the columns and an empty
+  window (`from` = `to` = the time of the catalog read); with `sink_ts_column` gone no other check runs, since each
+  keys on it. The parts of one check are one `row_drift` entry: their counts are summed and `window` is the first
+  breaching part's.
   `dup_keys`: `source` records scanned, `missing` duplicate events, `sample` keys affected. `order_skew`:
   `source` records scanned, `mismatched` regressions, `sample` keys affected. `detail` is one line of
   watcher-written text, at most 200 bytes; clients render it as text, never HTML. The web shows `count_drift`
@@ -1060,7 +1075,10 @@ closes; `--demo` forces it off.
   `SampleKeys` at most 200 primary-key values of the newest rows in a window `[since, until)` (the watcher samples
   the hour before `now - sink lag - 2 min`, rows that had time to reach the sink; never a table whose key column
   looks like personal data) that stay inside the watcher, and `RowTimes` at most 1000 keys' timestamp columns,
-  never another column. A client without the reader, or answering `ErrNotSupported`, turns
+  never another column. An idle sink (the source has no row newer than the sink's newest, and that row is more than
+  2 min old: nothing is in flight) is not shifted by a lag that grows while idle: `count_drift` and `row_drift` read
+  the hour ending at the sink's newest row. A sink that is behind keeps the shifted windows, so a row in flight is
+  never judged. A client without the reader, or answering `ErrNotSupported`, turns
   the check off for that pipeline with one INFO log. Settings live in `owners.yaml` `watch:`
   (`reconcile_interval` default 15 min, `count_tolerance`, `reconcile: off` per table), not in the environment.
 
@@ -1127,12 +1145,19 @@ closes; `--demo` forces it off.
   `compact_cdc_topic` (a CDC topic with `cleanup.policy` `compact` and no `delete`: deletes are compacted away, with or
   without a declaration). `configured`/`declared` are durations (`1d`, `36h`, `infinite`); `topic` or `table`;
   `retention_bytes?` when a size cap is set; `cleanup_policy?`; `text` one watcher-written line, at most 200 bytes,
-  shown as text. No declaration, or equal values, is no finding. A retention finding is `sev4`: it makes
-  `config_risk` fire (so it is in `/api/fleet` `signals_firing`) but opens no room on its own, whatever
+  shown as text. No declaration, or equal values, is no finding. **Lead rulings (batch 8):** a topic whose
+  `cleanup.policy` is `compact` without `delete` keeps the latest record of every key forever, so its configured
+  retention is `infinite` whatever `retention.ms` says (`retention.ms` deletes nothing without `delete`); a sink table
+  whose warehouse reports no retention setting keeps its rows forever, so it is `infinite` too. Both are judged
+  against the declaration in both directions like any other value (a compacted CDC topic declared `7d` is
+  `compact_cdc_topic` and `retention_longer_than_declared`). Under `delete`, a `retention.ms` of `0` or one that does not
+  parse is not judged. A retention finding is `sev4`: it makes `config_risk` fire (so it is in `/api/fleet` `signals_firing`) but opens no room on its own, whatever
   `config_risk`'s action; it rides along when another signal of the pipeline opens or joins a room. A topic config
   the watcher cannot read (no `DescribeConfigs` ACL) gives one INFO log and no finding. Names, durations and the
-  policy word only, never another config value. The agent sees these keys once `agent.AlertEvidenceText` (A4)
-  allow-lists them.
+  policy word only, never another config value. The agent sees each finding through `agent.AlertEvidenceText`
+  as `retention_risk=<topic or table>:<code>` with `configured`, `declared`, `retention_bytes` and `cleanup_policy`
+  when they have their documented shape (never `text`), both inside a `config_risk` signal and from the body's
+  top-level `config_risks` list (another signal opened or joined the room).
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`. F6 plans `rooms` as
@@ -1223,8 +1248,9 @@ pipelines:
 ```
 A room sees the teams of its pipeline's tenant (all teams without a `tenants:` block). The agent may set
 `agent.hypothesis.team` only to one of them; the page route refuses any other id as unknown. The page posts to the
-team's `slack_channel` with the bridge's bot token: that channel sees the hypothesis text, the cited change's title
-and URL, the cited step numbers and the room link (`docs/pilot/data-handling.md`, Slack).
+team's `slack_channel` with the bridge's bot token: that channel sees the driver's name, the room and pipeline ids, the
+hypothesis (scope, confidence, text), the cited change (kind, service, time, summary, URL), the cited step numbers and
+the room link (`docs/pilot/data-handling.md`, Slack).
 
 ### Spend limits (design `docs/design/cost.md`)
 

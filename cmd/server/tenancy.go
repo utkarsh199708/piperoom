@@ -73,7 +73,7 @@ type stackFinder interface {
 func roomStacks(st stackFinder) func(pipelineID string) room.PipelineStack {
 	return func(pipelineID string) room.PipelineStack {
 		s := st.For(pipelineID)
-		return room.PipelineStack{Tools: s.Tools, Actions: s.Actions}
+		return room.PipelineStack{Tools: s.Tools, Actions: s.Actions, Staging: s.HasStaging()}
 	}
 }
 

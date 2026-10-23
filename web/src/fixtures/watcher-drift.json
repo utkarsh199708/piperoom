@@ -1,0 +1,44 @@
+{
+  "source": "watcher",
+  "pipeline": "orders",
+  "severity": "sev2",
+  "at": "2026-10-21T11:20:00Z",
+  "reason": "firing",
+  "signals": [
+    {
+      "signal": "count_drift",
+      "severity": "sev2",
+      "table": "public.orders",
+      "topic": "pg.public.orders",
+      "window": { "from": "2026-10-21T10:00:00Z", "to": "2026-10-21T11:00:00Z" },
+      "source": 100000,
+      "sink": 97900,
+      "missing": 2100,
+      "mismatched": 0,
+      "sample": 0,
+      "since": "2026-10-21T11:15:00Z",
+      "firing_for_seconds": 300
+    },
+    {
+      "signal": "dup_keys",
+      "severity": "sev3",
+      "topic": "pg.public.orders",
+      "window": { "from": "2026-10-21T10:00:00Z", "to": "2026-10-21T11:00:00Z" },
+      "source": 48210,
+      "sink": 0,
+      "missing": 3,
+      "mismatched": 0,
+      "sample": 2,
+      "detail": "scan capped at 50000 records",
+      "since": "2026-10-21T11:15:00Z",
+      "firing_for_seconds": 300
+    },
+    {
+      "signal": "dlq_growth",
+      "severity": "sev3",
+      "topic": "orders-dlq",
+      "window": "15m",
+      "added": 12
+    }
+  ]
+}

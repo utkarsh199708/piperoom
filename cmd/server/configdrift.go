@@ -19,7 +19,7 @@ import (
 
 // connectorApprover is the part of *watch.Watcher the action hook calls.
 type connectorApprover interface {
-	ApproveConnectorChange(pipelineID, connector string)
+	ApproveConnectorChangeBy(pipelineID, connector, proposalID string)
 }
 
 // configAccepter is the part of *watch.Watcher accept-config calls.
@@ -47,8 +47,9 @@ func stepConnector(params json.RawMessage) string {
 
 // onActionExecuted matches room.Deps.OnActionExecuted: a step that names a
 // connector moves that connector's approved config in the watcher (if this
-// replica runs it). It does no I/O.
-func (h *roomClosedHook) onActionExecuted(_ context.Context, pipelineID string, step events.ProposalStep) {
+// replica runs it), and the config version it produces names the proposal
+// (X5c). It does no I/O.
+func (h *roomClosedHook) onActionExecuted(_ context.Context, pipelineID, proposalID string, step events.ProposalStep) {
 	c := stepConnector(step.Params)
 	if c == "" {
 		return
@@ -57,7 +58,7 @@ func (h *roomClosedHook) onActionExecuted(_ context.Context, pipelineID string, 
 	w := h.watcher
 	h.mu.RUnlock()
 	if a, ok := w.(connectorApprover); ok {
-		a.ApproveConnectorChange(pipelineID, c)
+		a.ApproveConnectorChangeBy(pipelineID, c, proposalID)
 	}
 }
 

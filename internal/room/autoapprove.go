@@ -227,6 +227,11 @@ func (s *Service) scheduleCheckLocked(st *roomState, proposalID string) error {
 	if !previewAllOK(p) || !s.policyCovers(st.snap.PipelineID, p.Steps) {
 		return errNotAutoApprovable
 	}
+	// X8: a require_staging: step waits for a healthy stage; the stage's
+	// result tries the schedule again (runStage).
+	if s.stagingGate(st.snap.PipelineID, p) != nil {
+		return errNotAutoApprovable
+	}
 	return nil
 }
 
@@ -275,6 +280,9 @@ func (s *Service) fireCheckLocked(st *roomState, proposalID string) (Proposal, e
 	}
 	if !s.policyCovers(st.snap.PipelineID, p.Steps) {
 		return Proposal{}, &policyRefusal{why: "the auto_approve: list no longer covers every step"}
+	}
+	if s.stagingGate(st.snap.PipelineID, p) != nil {
+		return Proposal{}, &policyRefusal{why: "a require_staging: step has no healthy stage for the current params"}
 	}
 	// Every approved layer must be one the policy approved: the fold stops
 	// the countdown on a person's approval, so this holds for any log the

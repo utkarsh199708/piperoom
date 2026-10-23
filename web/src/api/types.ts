@@ -55,11 +55,15 @@ export type EventType =
   | 'room.labelled'
   | 'checklist.step_done'
   | 'proposal.previewed'
+  | 'proposal.stage_started'
+  | 'proposal.staged'
   | 'agent.verification'
+  | 'agent.recovery_check'
   | 'postmortem.drafted'
   | 'postmortem.failed'
   | 'proposal.scheduled'
   | 'proposal.cancelled'
+  | 'room.escalated'
 
 export interface Event {
   room_id: string
@@ -110,6 +114,75 @@ export interface RoomCreatedPayload {
   dedup_key?: string
   /** The pipeline had shadow mode on when the room opened (docs/design/shadow.md); the agent runs silently and its numbers are revealed after close. */
   shadow?: boolean
+  /** X3: "forecast" for a room a forecast signal opened (sev4, no agent until someone asks); absent otherwise. */
+  origin?: string
+}
+
+/** room.escalated (X3, system actor): a watcher signal raised an open room's severity; a room is never lowered. */
+export interface RoomEscalatedPayload {
+  severity: string // the new level, "sev1".."sev3"
+  from: string
+  signal: string
+}
+
+// ---- watcher evidence (room.created.alert when alert_source is "watcher"; docs/api.md "Watcher alerts") ----
+
+/** The four X1 drift signal names (events.SignalCountDrift etc.). */
+export type DriftKind = 'count_drift' | 'row_drift' | 'dup_keys' | 'order_skew'
+
+/** events.DriftWindow: half-open [from, to), RFC 3339 UTC. */
+export interface DriftWindow {
+  from: string
+  to: string
+}
+
+/**
+ * events.DriftSignal: one flat entry of the watcher evidence's `signals` list. Names, counts and a window only;
+ * `detail` and `table` are untrusted text, rendered as text. `window` is an object here, while dlq_growth's is a
+ * word, so a reader goes by `signal` first.
+ */
+export interface DriftSignal {
+  signal: DriftKind
+  severity: string
+  table?: string
+  topic?: string
+  window: DriftWindow
+  /** count_drift: source rows; dup_keys/order_skew: records scanned. */
+  source: number
+  /** count_drift: sink rows; 0 otherwise. */
+  sink: number
+  /** count_drift: source - sink when positive; row_drift: sampled keys not on the sink; dup_keys: duplicate events. */
+  missing: number
+  /** row_drift: sampled keys whose timestamp differs; order_skew: position regressions. */
+  mismatched: number
+  /** row_drift: keys compared; dup_keys/order_skew: distinct keys affected. */
+  sample: number
+  detail?: string
+}
+
+/** events.ForecastSignal (X3): a metric's trend reaches its limit within the forecast horizon. */
+export interface ForecastSignal {
+  signal: 'forecast'
+  severity: string
+  metric: string
+  object?: string
+  current: number
+  limit: number
+  eta: string
+  slope_per_hour: number
+  r2: number
+  samples: number
+}
+
+/** events.ConfigDriftSignal (X3): a connector's config changed outside an approved fix. Key names only. */
+export interface ConfigDriftSignal {
+  signal: 'config_drift'
+  severity: string
+  connector: string
+  old_hash: string
+  new_hash: string
+  changed_keys: string[]
+  keys_omitted?: number
 }
 
 export interface RoomClosedPayload {
@@ -273,6 +346,10 @@ export interface PreviewResult {
   reversible: boolean
   rollback?: string
   dry_run?: DryRunResult
+  /** X2: how much a recovery step would re-emit, read from the target by the action's Preview. Absent for a fix. */
+  count?: number
+  /** X2: what `count` counts. Anything else is shown without a unit word. */
+  unit?: RecoveryUnit
 }
 
 export interface StepPreview {
@@ -284,6 +361,47 @@ export interface StepPreview {
 export interface ProposalPreviewedPayload {
   proposal_id: string
   steps: StepPreview[]
+  at: string
+}
+
+/** The three states a staged step shows (events.StageResult.Outcome). */
+export type StageOutcome = 'healthy' | 'failed' | 'not_applied'
+
+/**
+ * What one step did on the staging stack (X8, docs/api.md "X8 staging"). `detail`, `leftover` and
+ * `target` are staging's own words, untrusted: render them as text.
+ */
+export interface StageResult {
+  target?: string
+  applied: boolean
+  healthy: boolean
+  detail?: string
+  dry_run?: DryRunResult
+  /** What the stage could not put back on staging; absent when staging is as it was. */
+  leftover?: string
+  duration_ms: number
+}
+
+/** One staged step: exactly one of `result` (staging gave a verdict) and `error` (it did not). */
+export interface StageStepResult {
+  step_index: number
+  result?: StageResult
+  error?: string
+}
+
+/** proposal.stage_started (actor: the driver): `steps` are the indexes of the stageable steps. */
+export interface ProposalStageStartedPayload {
+  proposal_id: string
+  params_hash: string
+  steps: number[]
+  expires_at: string
+}
+
+/** proposal.staged (system actor): one entry per index of the matching stage_started. */
+export interface ProposalStagedPayload {
+  proposal_id: string
+  params_hash: string
+  steps: StageStepResult[]
   at: string
 }
 
@@ -309,6 +427,31 @@ export interface DataFlowCheck {
   detail?: string
 }
 
+/** X2: what a recovery count counts (docs/api.md, X2 recovery actions). */
+export type RecoveryUnit = 'rows' | 'records'
+
+/** X2: how a recovery proposal ended (events.RecoveryOutcomeFor). */
+export type RecoveryOutcome = 'recovered' | 'partial' | 'not_recovered' | 'unverifiable'
+
+/** X2: proposal.created.class. Absent reads as "fix". */
+export type ProposalClass = 'fix' | 'recovery' | 'performance'
+
+/**
+ * agent.recovery_check (agent actor): one poll of a recovery step's Verify after it ran. Progress only,
+ * never a verdict. `poll` counts from 1 and never exceeds `max_polls`.
+ */
+export interface AgentRecoveryCheckPayload {
+  proposal_id: string
+  step_index: number
+  poll: number
+  max_polls: number
+  /** The gap the action set out to repair. */
+  before: number
+  /** What is still missing at this poll. */
+  after: number
+  unit: RecoveryUnit
+}
+
 /** The agent's verdict on a fix (agent.verification). `repeat` means "already verified", no checks. */
 export interface AgentVerificationPayload {
   proposal_id: string
@@ -317,6 +460,15 @@ export interface AgentVerificationPayload {
   recovered: boolean
   verdict: string
   repeat?: boolean
+  /**
+   * X2, recovery proposals only: the counted verdict. `before`/`after` are nullable pointers on the
+   * wire (absent for `unverifiable`); `after: 0` is a real count, never "missing". `recovered` is true
+   * only with outcome "recovered".
+   */
+  outcome?: RecoveryOutcome
+  before?: number | null
+  after?: number | null
+  unit?: RecoveryUnit
 }
 
 export interface ProposalCreatedPayload {
@@ -333,6 +485,8 @@ export interface ProposalCreatedPayload {
    * Absent when every layer has an owner.
    */
   fallback_layers?: string[]
+  /** X2/X6: set by the room service from the action registry. Absent reads as "fix". */
+  class?: ProposalClass
 }
 
 /**
@@ -503,6 +657,16 @@ export interface ProposalSummary {
    * 45 s in the past (#652); the web folds proposal.scheduled itself and never reads this field.
    */
   scheduled?: { run_at: string; cancel_until: string }
+  /** X2: copied from proposal.created.class; absent reads as "fix". */
+  class?: ProposalClass
+  /** X8: step indexes whose action implements actions.Stager; [] or absent when none (and before X8c). */
+  stageable?: number[]
+  /** X8: a proposal.stage_started with no proposal.staged yet, before its expires_at. */
+  stage_running?: { by: Actor; started_at: string; expires_at: string; steps: number[] }
+  /** X8: the newest proposal.staged payload, kept while its params_hash differs from the proposal's. */
+  staged?: ProposalStagedPayload
+  /** X8: a step's action is in require_staging: and no healthy stage for the current params_hash exists. */
+  staging_required?: boolean
 }
 
 /**
@@ -516,6 +680,8 @@ export interface RoomMode {
   solo: boolean
   /** The pipeline's auto_approve: list from owners.yaml. */
   auto_approve: string[]
+  /** X8: the pipeline declares staging: and write mode is on, so "Try in staging" may exist. Absent before X8c. */
+  staging?: boolean
 }
 
 export interface SuggestionSummary {
@@ -613,6 +779,45 @@ export interface RoomSnapshot {
   postmortem?: PostmortemSummary
   /** P1a/P2b: on the room GET only (list rows have none); absent on an older server, which means write mode on. */
   mode?: RoomMode
+  /** X3: room.created.origin ("forecast" for a forecast room); absent for every other room. */
+  origin?: string
+  /** X3: the newest forecast signal of the room's evidence; absent when none. */
+  forecast?: ForecastSummary
+}
+
+/**
+ * The trend metrics the watcher samples (clients.WatchMetrics, docs/api.md "Trends"). Units: bytes for
+ * slot_wal_bytes and db_size_bytes, records for dlq_records and group_lag, seconds for topic_oldest_unread_age.
+ */
+export const WATCH_METRICS = [
+  'slot_wal_bytes',
+  'dlq_records',
+  'group_lag',
+  'db_size_bytes',
+  'topic_oldest_unread_age',
+] as const
+export type WatchMetric = (typeof WATCH_METRICS)[number]
+
+/** One sample of GET /api/pipelines/{pid}/trends (clients.SamplePoint): oldest first, `value` in the metric's unit. */
+export interface TrendPoint {
+  at: string
+  value: number
+}
+
+/**
+ * RoomSnapshot.forecast (X3, events.ForecastSignal minus signal/severity, plus `at`): `current`, `limit` and
+ * `slope_per_hour` in the metric's unit; `eta` is when the fitted line reaches `limit`; `object` names the slot,
+ * topic, group or database the series follows (absent for a pipeline total).
+ */
+export interface ForecastSummary {
+  metric: string
+  object?: string
+  current: number
+  limit: number
+  eta: string
+  slope_per_hour: number
+  r2: number
+  at?: string
 }
 
 /** RoomSnapshot.postmortem (docs/api.md, F2). */
@@ -673,6 +878,21 @@ export interface AgentStats {
   cost_available: boolean
   enough_data: boolean
   shadow: { rooms: number; graded: number; layer_correct: number }
+  /** X6 infrastructure cost hints, last 7 days of watch samples; null without history, absent before X6d. */
+  infra?: AgentStatsInfra | null
+}
+
+/**
+ * X6 `infra` of agent-stats (docs/api.md): units only, never a currency. Each metric is null when the
+ * pipeline has no sample of it in the window; `from`/`to` are the first and newest sample used.
+ */
+export interface AgentStatsInfra {
+  from: string
+  to: string
+  samples: number
+  wal_retained_gb_days: number | null
+  dlq_records: number | null
+  oldest_unread_age_s: number | null
 }
 
 export interface TopologyNode {
@@ -733,6 +953,66 @@ export interface PipelineInfo {
   shadow: boolean
   /** P0 item 8 (server P4a-4): `cdc` or `batch`. Missing (an older server) means `cdc`. */
   kind?: 'cdc' | 'batch'
+}
+
+/** FleetPipeline.forecasts[] (X5): one firing forecast; `metric` is an X3 sample metric name. */
+export interface FleetForecast {
+  metric: string
+  eta: string
+}
+
+/** FleetPipeline.last_verdict (X5): the human judgement of the pipeline's last judged room. */
+export interface FleetVerdict {
+  room_id: string
+  /** `confirmed` | `disputed`, or '' when the room has only a grade. */
+  verdict: string
+  /** null when the room was not graded. */
+  layer_correct: boolean | null
+  at: string
+}
+
+export type FleetHealth = 'ok' | 'warn' | 'fail' | 'unknown'
+
+/** One row of GET /api/fleet (docs/api.md "Fleet view", X5-0). */
+export interface FleetPipeline {
+  pipeline_id: string
+  title: string
+  kind: string
+  tenant: string
+  team: string
+  health: FleetHealth
+  /** A topology node id as GET .../topology names it (`connect:<connector>`, `pg:<table>`); '' when nothing fires. */
+  worst_node: string
+  open_rooms: number
+  /** Watcher signal names now firing or acked, worst first. */
+  signals_firing: string[]
+  changes_24h: number
+  /** Soonest ETA first. */
+  forecasts: FleetForecast[]
+  last_verdict: FleetVerdict | null
+  /** Omitted when the watcher never checked the pipeline. */
+  checked_at?: string
+}
+
+/** One F8 `pipeline_changes` row as GET /api/fleet/changes returns it (already masked; untrusted text). */
+export interface PipelineChange {
+  id: number
+  pipeline_id: string
+  kind: string
+  object: string
+  at: string
+  actor?: string
+  source: string
+  fingerprint: string
+  before?: unknown
+  after?: unknown
+  summary: string
+}
+
+/** GET /api/fleet/changes: one page, newest first; `next` is '' on the last page. */
+export interface FleetChangesPage {
+  changes: PipelineChange[]
+  next: string
 }
 
 export interface Person {

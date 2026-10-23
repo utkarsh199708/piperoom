@@ -87,6 +87,11 @@ func (definitionKafka) ACLs(context.Context, []string, []string) ([]clients.ACLE
 	return nil, errNotReplayed
 }
 
+// DupScan registers kafka_dup_keys (X1c), as the production Kafka client does.
+func (definitionKafka) DupScan(context.Context, string, time.Time, int) (clients.DupReport, error) {
+	return clients.DupReport{}, errNotReplayed
+}
+
 // LiveActions returns the production write actions, backed by replay clients
 // that know only res and what recs recorded: actions.Register's seven and
 // the P3 actions (replay_actions.go). The agent can propose them (their real
@@ -772,6 +777,22 @@ func (a *recordingAction) Execute(ctx context.Context, params json.RawMessage) (
 		return a.Action.Execute(ctx, params)
 	}
 	return a.log.exec.execute(a.Name(), params)
+}
+
+// Class passes the wrapped action's class through: without it every wrapped
+// action reads as a fix, and the agent would never verify a recovery step by
+// its counts (X2c).
+func (a *recordingAction) Class() string { return actions.ClassOf(a.Action) }
+
+// Verify runs the wrapped action's Verify on its replay clients (X2e), so a
+// recovery step executed in a run is counted as in production. An action
+// without one is not countable.
+func (a *recordingAction) Verify(ctx context.Context, params json.RawMessage, executedAt time.Time) (actions.VerifyResult, error) {
+	v, ok := a.Action.(actions.Verifier)
+	if !ok {
+		return actions.VerifyResult{}, fmt.Errorf("evals: action %q has no Verify: %w", a.Name(), clients.ErrNotSupported)
+	}
+	return v.Verify(ctx, params, executedAt)
 }
 
 // CheckScope keeps the wrapper honest about scope: it delegates when the

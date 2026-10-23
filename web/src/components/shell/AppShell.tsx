@@ -260,6 +260,23 @@ function Breadcrumb({ pipelineId }: { pipelineId?: string }) {
   if (pathname === '/settings') {
     return <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Settings</h1>
   }
+  if (pathname === '/fleet') {
+    return <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Fleet</h1>
+  }
+  if (pathname.startsWith('/pipelines/')) {
+    // X5b: one pipeline's lane, reached from the fleet. The id is the route's, shown as text.
+    return (
+      <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
+        <Link to="/fleet" className="text-muted-foreground hover:text-foreground">
+          Fleet
+        </Link>
+        <ChevronRight className="size-3 shrink-0 text-subtle-foreground" aria-hidden="true" />
+        <h1 className="m-0 truncate font-mono text-sm font-medium text-foreground">
+          {safeDecode(pathname.slice('/pipelines/'.length))}
+        </h1>
+      </nav>
+    )
+  }
   if (!inRoom) {
     return (
       <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">

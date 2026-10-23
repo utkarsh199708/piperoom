@@ -34,6 +34,22 @@ const (
   "source": "reconciliation",
   "description": "Orders created in the last hour exist in the source and in topic pg.public.orders but not in analytics.orders. order-sync was redeployed shortly before and has since been stopped."
 }`
+	rowsLostAlert = `{
+  "title": "orders: rows of public.orders missing from analytics.orders",
+  "severity": "sev2",
+  "pipeline_id": "orders",
+  "dedup_key": "devctl-rows-lost-after-retention",
+  "source": "reconciliation",
+  "description": "Orders written while order-sync was stopped for a node drain are in public.orders but not in analytics.orders. order-sync is running again with lag 0."
+}`
+	skippedRangeAlert = `{
+  "title": "orders: rows of public.orders missing from analytics.orders",
+  "severity": "sev2",
+  "pipeline_id": "orders",
+  "dedup_key": "devctl-consumer-skipped-range",
+  "source": "reconciliation",
+  "description": "Orders written during the order-sync deploy are in public.orders but not in analytics.orders. order-sync is running again with lag 0."
+}`
 )
 
 // alertOpts are the parsed `devctl alert` arguments.

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:piperoom:spec:facets:1-0-0:PiperoomActionRunFacet.json",
+  "$defs": {
+    "PiperoomActionRunFacet": {
+      "allOf": [
+        { "$ref": "https://openlineage.io/spec/2-0-2/OpenLineage.json#/$defs/RunFacet" },
+        {
+          "type": "object",
+          "properties": {
+            "pipeline_id": {
+              "description": "The owners.yaml id of the pipeline the room is about.",
+              "type": "string"
+            },
+            "proposal_id": {
+              "description": "The Piperoom proposal whose approved step ran.",
+              "type": "string"
+            },
+            "step_index": {
+              "description": "The 0-based index of the step in the proposal.",
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": true,
+          "required": ["pipeline_id", "proposal_id", "step_index"]
+        }
+      ],
+      "type": "object"
+    }
+  },
+  "type": "object",
+  "properties": {
+    "piperoom_action": { "$ref": "#/$defs/PiperoomActionRunFacet" }
+  }
+}
