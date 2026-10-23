@@ -523,6 +523,12 @@ func materialisedRefusal(p string, env Env) error {
 	return nil
 }
 
+// MaterialisedRefusal is the refusal file_write and file_delete apply to a
+// materialised secret file (ErrSecretPath), exported so another writer in the
+// setup tree (compose's and host's properties_write, service_install) refuses
+// the same paths rather than overwrite a secret the runner materialised.
+func MaterialisedRefusal(p string, env Env) error { return materialisedRefusal(p, env) }
+
 // materialisedFromStore reads .piperoom/materialised through the project
 // root: a symlinked .piperoom or list is ignored (the store refuses to create
 // one), and a missing list means nothing was materialised yet.

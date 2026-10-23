@@ -18,14 +18,20 @@ import (
 // helper, and assemble, which sets the fields. The actions.Register call in
 // RegisterTools is allowed separately (see rawClientUses).
 var rawClientAllow = map[string]bool{
-	"readConnect":    true,
-	"readRegistry":   true,
-	"actionRegistry": true,
-	"assemble":       true,
+	"readConnect": true,
+	// Q1d: readConnect without the Q-wave reads, for the actions with
+	// write mode off; it wraps the client exactly as readConnect did.
+	"readConnectBase": true,
+	"readRegistry":    true,
+	"actionRegistry":  true,
+	"assemble":        true,
 	// X6c: hands the whole Connect client to connect_tune_throughput with
 	// write mode on only (the read-only adapter otherwise), like the
 	// actions.Register call in registerActions.
 	"registerTuning": true,
+	// Q5d: hands the whole Connect client to the lifecycle actions, and
+	// registers nothing with write mode off.
+	"registerLifecycle": true,
 }
 
 // stubImporter gives every import an empty, complete package. The check only

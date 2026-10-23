@@ -173,10 +173,16 @@ var corpusMatcherRows = []corpusRow{
 	// Item 2: "nothing ... except" tells the exception.
 	fb("r3.2", []string{"order-sync", "crash*"}, "Nothing crashed except order-sync.", true),
 	fb("r3.2", []string{"slot", "lost"}, "Nothing was lost except the slot.", true),
-	// Nit 9: "nothing" before two auxiliaries or an adverb.
-	gap(fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing has been lost.", false), "#334 nothing, waits on #454"),
-	gap(fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing was ever lost.", false), "#334 nothing, waits on #454"),
-	gap(fb("r3.11", []string{"slot", "drop*"}, "The slot is fine and nothing has been dropped.", false), "#334 nothing, waits on #454"),
+	// Nit 9: "nothing" before two auxiliaries or an adverb. The copula
+	// exoneration ("the slot is intact") clears the slot (Q2g review, item 7).
+	fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing has been lost.", false),
+	fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing was ever lost.", false),
+	fb("r3.11", []string{"slot", "drop*"}, "The slot is fine and nothing has been dropped.", false),
+	// The exoneration reaches only the words right before its copula.
+	fb("q2g.7", []string{"slot", "lost"}, "The slot was lost and Connect is fine.", true),
+	fb("q2g.7", []string{"slot", "lost"}, "The slot was lost, Connect is fine.", true),
+	fb("q2g.7", []string{"slot", "lost"}, "The slot is fine except it was lost.", true),
+	fb("q2g.7", []string{"slot", "lost"}, "The lost slot is the cause and the slot theory is wrong.", true),
 	// Nit 11: wrong on main and here alike; logged so the next change is
 	// measured against them.
 	gap(fb("r3.11", []string{"reset*", "latest"}, "I can neither confirm nor rule out a reset to latest.", true), "neither ... nor rule out"),

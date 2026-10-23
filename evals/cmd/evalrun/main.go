@@ -400,7 +400,9 @@ func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 	if err := evals.ComparePaired(base, cand).WriteMarkdown(stdout); err != nil {
 		return 1, err
 	}
-	if f.failOnRegr && c.Regressions > 0 {
+	// Invalid tool calls per run growing fails like a regression, as misses
+	// per run growing fails evals-live; unknown (an older baseline) never does.
+	if f.failOnRegr && (c.Regressions > 0 || c.InvalidToolCalls.Grew) {
 		return exitRegressed, nil
 	}
 	return 0, nil

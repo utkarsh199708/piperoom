@@ -340,3 +340,35 @@ func TestRunCheckValidatesLearnedAndPending(t *testing.T) {
 		t.Fatalf("code %d err %v", code, err)
 	}
 }
+
+// TestRunCompareInvalidCalls: invalid tool calls per run growing fails
+// -fail-on-regression like a regression; an older baseline without the
+// counter is unknown and never fails.
+func TestRunCompareInvalidCalls(t *testing.T) {
+	dir := t.TempDir()
+	sum := func(invalid *int) evals.ScenarioSummary {
+		return evals.ScenarioSummary{Name: "a", Summary: evals.Summary{Runs: 3, Passes: 3, PassRate: 1, MeanScore: 90, InvalidToolCalls: invalid}}
+	}
+	n := func(v int) *int { return &v }
+	base := saveReport(t, dir, "base.json", evals.Report{Label: "main", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(n(0))}})
+	old := saveReport(t, dir, "old.json", evals.Report{Label: "old", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(nil)}})
+	same := saveReport(t, dir, "same.json", evals.Report{Label: "same", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(n(0))}})
+	more := saveReport(t, dir, "more.json", evals.Report{Label: "more", Runs: 3, Scenarios: []evals.ScenarioSummary{sum(n(2))}})
+
+	cases := []struct {
+		name, base, cand string
+		code             int
+		want             string
+	}{
+		{"same", base, same, 0, "invalid tool calls per run over 1 shared scenario(s): 0.00 → 0.00"},
+		{"grew", base, more, exitRegressed, "**invalid tool calls per run grew**"},
+		{"old baseline", old, more, 0, "invalid tool calls: unknown, not compared"},
+	}
+	for _, tc := range cases {
+		var out bytes.Buffer
+		code, err := run(flags{compare: tc.base + "," + tc.cand, failOnRegr: true, tolerance: 5}, &out, &out)
+		if err != nil || code != tc.code || !strings.Contains(out.String(), tc.want) {
+			t.Errorf("%s: code %d err %v out:\n%s", tc.name, code, err, out.String())
+		}
+	}
+}

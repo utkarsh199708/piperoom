@@ -1,0 +1,43 @@
+# Piperoom reference project: Debezium Engine configuration ({{.SourceTitle}}, Debezium {{.Release}}).
+# No password is written here: ${secret:NAME} is read from the environment
+# variable PIPEROOM_SECRET_NAME when the program starts.
+name={{.ArtifactID}}
+connector.class={{.ConnectorClass}}
+topic.prefix={{.TopicPrefix}}
+
+# Offsets in a local file, so a restart resumes where the engine stopped.
+offset.storage=org.apache.kafka.connect.storage.FileOffsetBackingStore
+offset.storage.file.filename=data/offsets.dat
+offset.flush.interval.ms=5000
+converter.schemas.enable=false
+
+database.hostname={{.Host}}
+database.port={{.Port}}
+database.user={{.User}}
+database.password=${secret:{{.PasswordSecret}}}
+{{- if eq .TLS "verify"}}
+# TLS with the server certificate and host name checked (see the README for
+# pointing at your CA).
+{{- else if eq .TLS "require"}}
+# TLS without a certificate check: encrypted, but open to a man in the middle.
+# Use {{if eq .Source "postgres"}}verify-full{{else}}verify_identity{{end}} once the CA is set up (see the README).
+{{- else}}
+# Plain text: no TLS at all. Only for a database on this host.
+{{- end}}
+{{.TLSKey}}={{.TLSValue}}
+{{- if eq .Source "postgres"}}
+database.dbname={{.Database}}
+plugin.name=pgoutput
+slot.name={{.SlotName}}
+publication.name={{.PublicationName}}
+publication.autocreate.mode=filtered
+{{- end}}
+{{- if eq .Source "mysql"}}
+database.server.id={{.ServerID}}
+database.include.list={{.Database}}
+schema.history.internal=io.debezium.storage.file.history.FileSchemaHistory
+schema.history.internal.file.filename=data/schema-history.dat
+{{- end}}
+{{- if .TableList}}
+table.include.list={{.TableList}}
+{{- end}}

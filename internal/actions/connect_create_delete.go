@@ -269,7 +269,7 @@ func (a *createConnector) Execute(ctx context.Context, raw json.RawMessage) (str
 	defer cancel()
 	lw, ok := a.d.Connect.(connect.ConnectLifecycleWriter)
 	if !ok {
-		return "", fmt.Errorf("actions: %s: connect client does not support CreateConnector (connect.ConnectLifecycleWriter); is write mode on?", CreateConnectorName)
+		return "", fmt.Errorf("actions: %s: %w", CreateConnectorName, ErrNoLifecycleWriter)
 	}
 	present, err := a.present(ctx, p.Connector)
 	if err != nil {
@@ -464,7 +464,7 @@ func (a *deleteConnector) Execute(ctx context.Context, raw json.RawMessage) (str
 	defer cancel()
 	lw, ok := a.d.Connect.(connect.ConnectLifecycleWriter)
 	if !ok {
-		return "", fmt.Errorf("actions: %s: connect client does not support DeleteConnector (connect.ConnectLifecycleWriter); is write mode on?", DeleteConnectorName)
+		return "", fmt.Errorf("actions: %s: %w", DeleteConnectorName, ErrNoLifecycleWriter)
 	}
 	if err := a.d.connectorExists(ctx, name); err != nil {
 		return "", err

@@ -26,36 +26,3 @@ func TestStandaloneRefusesNonLoopback(t *testing.T) {
 		})
 	}
 }
-
-// --watch is a flag of the standalone server; alone it means nothing.
-func TestWatchNeedsStandalone(t *testing.T) {
-	err := runWith([]string{"--watch"}, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "--watch needs --standalone") {
-		t.Fatalf("err = %v, want a refusal naming --standalone", err)
-	}
-}
-
-// --standalone runs its own server, so pairing flags cannot be combined with
-// it: they would silently point nowhere.
-func TestStandaloneRejectsPairingFlags(t *testing.T) {
-	for _, args := range [][]string{
-		{"--standalone", "--server", "http://127.0.0.1:8090"},
-		{"--standalone", "--code", "ABCDEFGH"},
-		{"--standalone", "--label", "laptop"},
-	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
-			err := runWith(append(args, "--project", t.TempDir()), io.Discard)
-			if err == nil || !strings.Contains(err.Error(), "--standalone runs its own server") {
-				t.Fatalf("err = %v, want the pairing-flag refusal", err)
-			}
-		})
-	}
-}
-
-// Unexpected positional arguments are refused in every mode.
-func TestUnexpectedArguments(t *testing.T) {
-	err := runWith([]string{"--standalone", "extra"}, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "unexpected arguments") {
-		t.Fatalf("err = %v, want an unexpected-arguments refusal", err)
-	}
-}

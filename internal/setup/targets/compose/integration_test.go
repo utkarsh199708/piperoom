@@ -130,6 +130,16 @@ func TestComposeStackToHealthyConnect(t *testing.T) {
 	if !strings.Contains(string(raw), "BOOTSTRAP_SERVERS") {
 		t.Errorf("container_inspect does not carry the environment names: %s", raw)
 	}
+	// U5a: the real docker logs output, read newest last and capped. The
+	// Connect worker has logged its startup by now.
+	logs := execOp("container_logs", LogsParams{Service: "connect"}, time.Minute)
+	logsData := resultMap(t, logs)
+	if count, _ := logsData["count"].(float64); count < 1 || count > LogLines {
+		t.Errorf("container_logs count = %v, want 1..%d", logsData["count"], LogLines)
+	}
+	if !strings.HasPrefix(logs.Summary, "connect logs (container ") {
+		t.Errorf("container_logs summary = %.200q", logs.Summary)
+	}
 
 	down := execOp("compose_down", StackParams{}, 3*time.Minute)
 	downData := resultMap(t, down)

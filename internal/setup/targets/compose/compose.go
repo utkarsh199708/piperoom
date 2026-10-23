@@ -4,7 +4,8 @@
 // validator every render and every Compose file the runner is pointed at must
 // pass, and the catalogue ops of this target — compose_write and
 // properties_write (T1); the reads docker_info, compose_ps, compose_config
-// (masked) and container_inspect (T0, env names only); the stack writes
+// (masked), container_inspect (T0, env names only) and container_logs (T0,
+// row U5a: the last 200 lines, capped and redacted); the stack writes
 // compose_up, compose_restart and compose_down (T1, volumes always kept); and
 // plugin_install (T1), which downloads one connector archive from an
 // allow-listed host and verifies the digest the knowledge index pins.
@@ -164,6 +165,7 @@ func Register(r *ops.Registry, opts Options) (*Driver, error) {
 	}
 	reads := []ops.Op{
 		dockerInfoOp{d: d}, composePSOp{d: d}, composeConfigOp{d: d}, containerInspectOp{d: d},
+		containerLogsOp{d: d},
 	}
 	for _, op := range append(reads, writes...) {
 		if err := r.Register(op); err != nil {

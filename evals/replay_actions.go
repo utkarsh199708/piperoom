@@ -57,7 +57,7 @@ const maxWriteNotes = 20
 
 // writeTargetKeys are the argument names that name a write's object, in the
 // order the first present one is shown.
-var writeTargetKeys = []string{"connector", "group", "topic", "slot", "publication", "subject", "signal_table"}
+var writeTargetKeys = []string{"connector", "group", "topic", "slot", "publication", "subject", "signal_table", "table", "role"}
 
 // writeNotes reduces a write log to what a report shows: the method and one
 // target name each, at most maxWriteNotes of them.

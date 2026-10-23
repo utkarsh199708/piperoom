@@ -16,6 +16,7 @@ import (
 	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/runbooks"
 )
 
 const (
@@ -87,6 +88,10 @@ type runner struct {
 	// causes remembers the external changes this run's what_changed reads
 	// listed and the latest hypothesis's scope (X4c, externalcause.go).
 	causes *externalCauses
+
+	// versions are the room's running versions, read once with
+	// connect_plugins for runbook_lookup (Q1d, versions.go). Nil passes none.
+	versions *versionReads
 
 	// recoveredIdle is true while the pipeline is verified recovered and nothing
 	// since has broken that (a failed or unknown step, or a NOT recovered
@@ -217,6 +222,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		steps:     steps,
 		gaps:      gaps,
 		causes:    newExternalCauses(alert, time.Now()),
+		versions:  newVersionReads(),
 
 		noneSubjects: map[string]bool{},
 	}, nil
@@ -855,6 +861,19 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	if err := validateInput(entry.schema, cleaned); err != nil {
 		return r.failReadTool(ctx, u, why, "invalid tool input: "+err.Error(), events.ToolRejectedInvalidInput)
 	}
+	// Q1d: runbook_lookup gets the room's running versions (versions.go) for
+	// every component the model did not name. The tool_call event shows the
+	// input the tool ran with, so the room log says what was judged.
+	callInput := u.input
+	var added []runbooks.RunningVersion
+	if u.name == runbooks.ToolName {
+		if merged, add := withRunningVersions(cleaned, r.runningVersions(ctx)); len(add) > 0 && validateInput(entry.schema, merged) == nil {
+			cleaned, added = merged, add
+			if in, a := withRunningVersions(u.input, add); len(a) > 0 {
+				callInput = in
+			}
+		}
+	}
 
 	title := why
 	if title == "" {
@@ -867,7 +886,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
-		Input:     u.input,
+		Input:     callInput,
 	})
 
 	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
@@ -917,6 +936,9 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		}
 	}
 
+	if len(added) > 0 {
+		res.Summary = runningVersionsLine(added) + "\n" + res.Summary
+	}
 	// Defensively re-cap the summary before it reaches the model; a tool that
 	// ignores MaxSummaryBytes must not be able to bloat the request.
 	summary, reTruncated := tools.Truncate(res.Summary)
