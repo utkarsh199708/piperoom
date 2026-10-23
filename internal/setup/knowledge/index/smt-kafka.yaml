@@ -1,0 +1,346 @@
+# Apache Kafka Connect built-in transforms and predicates. Schema: Entry in
+# ../index.go.
+#
+# Keys and defaults were read from the Kafka connect-transforms 4.1.0 sources
+# jar (the Kafka of the allow-listed apache/kafka:4.1.0 image). "versions"
+# lower bounds come from listing the connect-transforms sources jars of
+# 0.10.2.0, 0.11.0.0, 2.5.0, 2.6.0, 2.8.0 and 3.0.0: the class is absent from
+# the release checked before the bound. A key's "since" was found the same
+# way (replace.null.with.default: absent in 3.8.0, present in 3.9.0;
+# field.syntax.version: absent in 3.7.0, present in 3.8.0). Built-ins ship
+# with every Connect worker, so none has an archive.
+#
+# A class with variants is configured as Class$Key or Class$Value; the bare
+# class is abstract.
+
+- name: insert-field
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.InsertField
+  variants: [Key, Value]
+  versions: ">=0.10.2.0"
+  summary: Inserts the record's topic, partition, offset, timestamp or a static value as a field.
+  install: bundled
+  keys:
+    - {name: topic.field}
+    - {name: partition.field}
+    - {name: offset.field}
+    - {name: timestamp.field}
+    - {name: static.field}
+    - {name: static.value}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - Use InsertField$Value (or $Key); the bare class is abstract and fails to load.
+    - A field name suffixed with ! is required, with ? optional (the default).
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: replace-field
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.ReplaceField
+  variants: [Key, Value]
+  versions: ">=0.10.2.0"
+  summary: Drops, keeps or renames fields.
+  install: bundled
+  keys:
+    - name: exclude
+      default: ""
+      since: 2.7.0
+      formerly: [blacklist]
+      check: blacklist was the name before 2.7.0, a deprecated alias through 3.9 and is gone in 4.0.0.
+    - name: include
+      default: ""
+      since: 2.7.0
+      formerly: [whitelist]
+      check: whitelist was the name before 2.7.0, a deprecated alias through 3.9 and is gone in 4.0.0.
+    - {name: renames, default: "", check: "A list of old:new pairs."}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - On Kafka 4.0 or later a config with blacklist or whitelist must use exclude or include.
+    - Use ReplaceField$Value (or $Key); the bare class is abstract.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: mask-field
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.MaskField
+  variants: [Key, Value]
+  versions: ">=0.10.2.0"
+  summary: Replaces the listed fields with the type's empty value or a replacement.
+  install: bundled
+  keys:
+    - {name: fields, required: true}
+    - {name: replacement}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - Masking happens in the pipeline after capture; the unmasked value is still read from the source database.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: value-to-key
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.ValueToKey
+  versions: ">=0.10.2.0"
+  summary: Replaces the record key with a struct of fields copied from the value.
+  install: bundled
+  keys:
+    - {name: fields, required: true}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - Changing the key changes partitioning, so events of one source row may land in another partition than before.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: hoist-field
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.HoistField
+  variants: [Key, Value]
+  versions: ">=0.10.2.0"
+  summary: Wraps the key or value in a struct (or map) under one field.
+  install: bundled
+  keys:
+    - {name: field, required: true}
+  checks:
+    - Use HoistField$Value (or $Key); the bare class is abstract.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: extract-field
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.ExtractField
+  variants: [Key, Value]
+  versions: ">=0.10.2.0"
+  summary: Replaces the key or value with one of its fields.
+  install: bundled
+  keys:
+    - {name: field, required: true}
+    - {name: field.syntax.version, default: "V1", values: [V1, V2], since: 3.8.0, check: "V2 lets field name a nested path; V1 reads only the top level."}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - A nested field path needs field.syntax.version=V2 and Kafka 3.8 or later.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: set-schema-metadata
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.SetSchemaMetadata
+  variants: [Key, Value]
+  versions: ">=0.10.2.0"
+  summary: Sets the schema name or version of the key or value.
+  install: bundled
+  keys:
+    - {name: schema.name}
+    - {name: schema.version}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - With Avro and Schema Registry the schema name becomes the record name, so a rename changes the registered subject's schema.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: timestamp-router
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.TimestampRouter
+  versions: ">=0.10.2.0"
+  summary: Renames the topic with the record timestamp, for time-bucketed indexes and tables.
+  install: bundled
+  keys:
+    - {name: topic.format, default: "${topic}-${timestamp}"}
+    - {name: timestamp.format, default: "yyyyMMdd"}
+  checks:
+    - Records without a timestamp cannot be routed and fail the transform.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: regex-router
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.RegexRouter
+  versions: ">=0.10.2.0"
+  summary: Renames the topic with a regular expression and replacement.
+  install: bundled
+  keys:
+    - {name: regex, required: true}
+    - {name: replacement, required: true}
+  checks:
+    - On a source connector the renamed topics are the ones Kafka must have or auto-create; on a sink the renamed topic is the target table name.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: flatten
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.Flatten
+  variants: [Key, Value]
+  versions: ">=0.11.0.0"
+  summary: Flattens nested structs into top-level fields joined by a delimiter.
+  install: bundled
+  keys:
+    - {name: delimiter, default: "."}
+  checks:
+    - The default delimiter "." yields column names with dots, which many SQL sinks reject; set delimiter to "_" for them.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: cast
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.Cast
+  variants: [Key, Value]
+  versions: ">=0.11.0.0"
+  summary: Casts fields (or the whole key or value) to another primitive type.
+  install: bundled
+  keys:
+    - {name: spec, required: true, check: "field:type pairs, or a single type for the whole key or value."}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - Use Cast$Value (or $Key); the bare class is abstract.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: timestamp-converter
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.TimestampConverter
+  variants: [Key, Value]
+  versions: ">=0.11.0.0"
+  summary: Converts a timestamp field between string, epoch and Connect Date, Time and Timestamp types.
+  install: bundled
+  keys:
+    - {name: field, default: ""}
+    - {name: target.type, required: true, values: [string, unix, Date, Time, Timestamp]}
+    - {name: format, default: "", check: "A java.text.SimpleDateFormat pattern; needed when either side is a string."}
+    - {name: unix.precision, default: "milliseconds", values: [seconds, milliseconds, microseconds, nanoseconds], since: 3.7.0}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - Debezium emits many temporal columns as epoch integers with a semantic type (io.debezium.time.*), not as Connect Timestamp; check the source type before choosing target.type.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: kafka-filter
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.Filter
+  versions: ">=2.6.0"
+  summary: Drops every record it is applied to; used with a predicate to drop the records the predicate matches.
+  install: bundled
+  keys:
+    - {name: predicate, check: "The name of a predicate under predicates.<name>; without one every record is dropped."}
+    - {name: negate, default: "false"}
+  checks:
+    - Without a predicate the connector drops all records.
+    - Not Debezium's io.debezium.transforms.Filter, which takes a script condition.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: insert-header
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.InsertHeader
+  versions: ">=3.0.0"
+  summary: Adds a header with a literal value to each record.
+  install: bundled
+  keys:
+    - {name: header, required: true}
+    - {name: value.literal, required: true}
+  checks:
+    - Not in Kafka before 3.0.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: drop-headers
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.DropHeaders
+  versions: ">=3.0.0"
+  summary: Removes the named headers from each record.
+  install: bundled
+  keys:
+    - {name: headers, required: true}
+  checks:
+    - Not in Kafka before 3.0.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: header-from
+  kind: smt
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.HeaderFrom
+  variants: [Key, Value]
+  versions: ">=3.0.0"
+  summary: Copies or moves fields of the key or value into headers.
+  install: bundled
+  keys:
+    - {name: fields, required: true}
+    - {name: headers, required: true}
+    - {name: operation, required: true, values: [move, copy]}
+    - {name: replace.null.with.default, default: "true", since: 3.9.0}
+  checks:
+    - fields and headers are paired by position, so both lists need the same length.
+  doc: https://kafka.apache.org/documentation/#connect_transforms
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: topic-name-matches
+  kind: predicate
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.predicates.TopicNameMatches
+  versions: ">=2.6.0"
+  summary: True for records whose topic name matches a regular expression.
+  install: bundled
+  keys:
+    - {name: pattern, required: true}
+  checks:
+    - Declared under predicates.<name>.type and referenced from transforms.<name>.predicate.
+  doc: https://kafka.apache.org/documentation/#connect_predicates
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: has-header-key
+  kind: predicate
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.predicates.HasHeaderKey
+  versions: ">=2.6.0"
+  summary: True for records with at least one header of the given name.
+  install: bundled
+  keys:
+    - {name: name, required: true}
+  checks:
+    - Declared under predicates.<name>.type and referenced from transforms.<name>.predicate.
+  doc: https://kafka.apache.org/documentation/#connect_predicates
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar
+
+- name: record-is-tombstone
+  kind: predicate
+  component: kafka
+  runtime: connect
+  class: org.apache.kafka.connect.transforms.predicates.RecordIsTombstone
+  versions: ">=2.6.0"
+  summary: True for tombstones (records with a null value).
+  install: bundled
+  checks:
+    - Referenced from a transform with negate=true, it keeps that transform from seeing tombstones.
+  doc: https://kafka.apache.org/documentation/#connect_predicates
+  source: https://repo1.maven.org/maven2/org/apache/kafka/connect-transforms/4.1.0/connect-transforms-4.1.0-sources.jar

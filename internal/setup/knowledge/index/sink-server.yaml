@@ -1,0 +1,282 @@
+# Debezium Server sinks (debezium.sink.type). Schema: Entry in ../index.go.
+#
+# Keys and defaults were read from each sink's 3.2.0.Final sources jar on
+# Maven Central (the release of the allow-listed debezium/server image); the
+# Redis connection keys from debezium-storage-redis 3.2.0.Final, which the
+# Redis sink builds on. Every sink ships in the debezium/server image, so none
+# has an archive. Only 3.2.0.Final was checked, so that is each lower bound.
+
+- name: server-http
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: http
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server HTTP client sink; POSTs each change event to a URL.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.http.url, required: true, check: "Under Knative the K_SINK environment variable replaces it."}
+    - {name: debezium.sink.http.timeout.ms, default: "60000"}
+    - {name: debezium.sink.http.retries, default: "5"}
+    - {name: debezium.sink.http.retry.interval.ms, default: "1000"}
+    - {name: debezium.sink.http.headers.prefix, default: "X-DEBEZIUM-"}
+    - {name: debezium.sink.http.headers.encode.base64}
+    - {name: debezium.sink.http.authentication.type, values: [jwt, standard-webhooks]}
+    - {name: debezium.sink.http.authentication.jwt.url}
+    - {name: debezium.sink.http.authentication.jwt.username}
+    - {name: debezium.sink.http.authentication.jwt.password}
+    - {name: debezium.sink.http.authentication.webhook.secret}
+  checks:
+    - The Content-Type follows debezium.format.value (avro gives avro/bytes, cloudevents gives application/cloudevents+json, otherwise JSON).
+    - Only 200, 202 and 204 count as delivered; any other answer is retried, retry.interval.ms apart, up to the retries limit.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-http/3.2.0.Final/debezium-server-http-3.2.0.Final-sources.jar
+
+- name: server-kinesis
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: kinesis
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Amazon Kinesis sink; writes each table's events to the stream named like its topic.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.kinesis.region, required: true}
+    - {name: debezium.sink.kinesis.endpoint}
+    - {name: debezium.sink.kinesis.credentials.profile}
+    - {name: debezium.sink.kinesis.batch.size, default: "500"}
+    - {name: debezium.sink.kinesis.default.retries, default: "5"}
+    - {name: debezium.sink.kinesis.null.key, default: "default"}
+  checks:
+    - The sink does not create Kinesis streams; each one must exist before events arrive.
+    - Credentials come from the AWS default provider chain, or from the named profile when credentials.profile is set.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-kinesis/3.2.0.Final/debezium-server-kinesis-3.2.0.Final-sources.jar
+
+- name: server-pubsub
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: pubsub
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Google Cloud Pub/Sub sink.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.pubsub.project.id, check: "Defaults to the project of the Google credentials in use."}
+    - {name: debezium.sink.pubsub.ordering.enabled, default: "true"}
+    - {name: debezium.sink.pubsub.null.key, default: "default"}
+    - {name: debezium.sink.pubsub.batch.delay.threshold.ms, default: "100"}
+    - {name: debezium.sink.pubsub.batch.element.count.threshold, default: "100"}
+    - {name: debezium.sink.pubsub.batch.request.byte.threshold, default: "9500000"}
+    - {name: debezium.sink.pubsub.flowcontrol.enabled, default: "false"}
+    - {name: debezium.sink.pubsub.retry.total.timeout.ms, default: "60000"}
+    - {name: debezium.sink.pubsub.wait.message.delivery.timeout.ms, default: "30000"}
+    - {name: debezium.sink.pubsub.address}
+    - {name: debezium.sink.pubsub.region}
+  checks:
+    - The sink does not create topics; they must exist in the project before events arrive.
+    - With ordering.enabled (the default) messages carry an ordering key; a subscription delivers them in order only if it was created with message ordering on.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-pubsub/3.2.0.Final/debezium-server-pubsub-3.2.0.Final-sources.jar
+
+- name: server-pubsub-lite
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: pubsublite
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Google Cloud Pub/Sub Lite sink.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.pubsublite.project.id}
+    - {name: debezium.sink.pubsublite.region, required: true}
+    - {name: debezium.sink.pubsublite.ordering.enabled, default: "true"}
+    - {name: debezium.sink.pubsublite.null.key, default: "default"}
+    - {name: debezium.sink.pubsublite.wait.message.delivery.timeout.ms, default: "30000"}
+  checks:
+    - region is required and must be the location the Lite topics were created in.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-pubsub/3.2.0.Final/debezium-server-pubsub-3.2.0.Final-sources.jar
+
+- name: server-redis
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: redis
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Redis Streams sink; appends events to one stream per topic.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.redis.address, required: true}
+    - {name: debezium.sink.redis.user}
+    - {name: debezium.sink.redis.password}
+    - {name: debezium.sink.redis.db.index, default: "0"}
+    - {name: debezium.sink.redis.ssl.enabled, default: "false"}
+    - {name: debezium.sink.redis.batch.size, default: "500"}
+    - {name: debezium.sink.redis.null.key, default: "default"}
+    - {name: debezium.sink.redis.null.value, default: "default"}
+    - {name: debezium.sink.redis.message.format, default: "compact", values: [compact, extended]}
+    - {name: debezium.sink.redis.memory.limit.mb, default: "0"}
+    - {name: debezium.sink.redis.skip.heartbeat.messages, default: "true"}
+    - {name: debezium.sink.redis.connection.timeout.ms, default: "2000"}
+    - {name: debezium.sink.redis.socket.timeout.ms, default: "2000"}
+  checks:
+    - With memory.limit.mb=0 (the default) the sink backs off against the Redis server's own maxmemory setting instead of a limit of its own.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-redis/3.2.0.Final/debezium-server-redis-3.2.0.Final-sources.jar
+
+- name: server-kafka
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: kafka
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Apache Kafka sink; produces events with a Kafka producer configured under debezium.sink.kafka.producer.*.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.kafka.producer.bootstrap.servers, required: true, check: "Every debezium.sink.kafka.producer.* key is passed to the producer."}
+    - {name: debezium.sink.kafka.producer.key.serializer, required: true}
+    - {name: debezium.sink.kafka.producer.value.serializer, required: true}
+    - {name: debezium.sink.kafka.wait.message.delivery.timeout.ms, default: "30000"}
+  checks:
+    - The producer gets only the debezium.sink.kafka.producer.* keys, so its serializers must be set there.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-kafka/3.2.0.Final/debezium-server-kafka-3.2.0.Final-sources.jar
+
+- name: server-pulsar
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: pulsar
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Apache Pulsar sink; client and producer settings pass through under client.* and producer.*.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.pulsar.client.serviceUrl, required: true}
+    - {name: debezium.sink.pulsar.tenant, default: "public"}
+    - {name: debezium.sink.pulsar.namespace, default: "default"}
+    - {name: debezium.sink.pulsar.null.key, default: "default"}
+    - {name: debezium.sink.pulsar.timeout, default: "0"}
+    - {name: debezium.sink.pulsar.producer.batcherBuilder, default: "DEFAULT"}
+  checks:
+    - Topics are created under the configured tenant and namespace, which must exist.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-pulsar/3.2.0.Final/debezium-server-pulsar-3.2.0.Final-sources.jar
+
+- name: server-rabbitmq
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: rabbitmq
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server RabbitMQ (AMQP) sink; connection settings pass through under connection.*.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.rabbitmq.connection.host, required: true}
+    - {name: debezium.sink.rabbitmq.connection.port}
+    - {name: debezium.sink.rabbitmq.exchange, default: ""}
+    - {name: debezium.sink.rabbitmq.routingKey, default: ""}
+    - {name: debezium.sink.rabbitmq.autoCreateRoutingKey, default: "false"}
+    - {name: debezium.sink.rabbitmq.routingKeyDurable, default: "true"}
+    - {name: debezium.sink.rabbitmq.routingKey.source, default: "static"}
+    - {name: debezium.sink.rabbitmq.routingKeyFromTopicName, default: "false"}
+    - {name: debezium.sink.rabbitmq.deliveryMode, default: "2"}
+    - {name: debezium.sink.rabbitmq.ackTimeout, default: "30000"}
+    - {name: debezium.sink.rabbitmq.null.value, default: "default"}
+  checks:
+    - Through the default (empty) exchange a message reaches only the queue named by its routing key, so that queue must exist.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-rabbitmq/3.2.0.Final/debezium-server-rabbitmq-3.2.0.Final-sources.jar
+
+- name: server-rabbitmq-stream
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: rabbitmqstream
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server RabbitMQ Streams sink.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.rabbitmqstream.host, default: "localhost"}
+    - {name: debezium.sink.rabbitmqstream.port, default: "5552"}
+    - {name: debezium.sink.rabbitmqstream.username, default: "guest"}
+    - {name: debezium.sink.rabbitmqstream.password, default: "guest"}
+    - {name: debezium.sink.rabbitmqstream.virtualHost, default: "/"}
+    - {name: debezium.sink.rabbitmqstream.stream}
+    - {name: debezium.sink.rabbitmqstream.producer.batchSize, default: "100"}
+  checks:
+    - The guest/guest defaults only work against a broker on the same host; a remote broker needs real credentials, given as a secret reference.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-rabbitmq/3.2.0.Final/debezium-server-rabbitmq-3.2.0.Final-sources.jar
+
+- name: server-eventhubs
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: eventhubs
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Azure Event Hubs sink.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.eventhubs.connectionstring, required: true}
+    - {name: debezium.sink.eventhubs.hubname, required: true}
+    - {name: debezium.sink.eventhubs.partitionid}
+    - {name: debezium.sink.eventhubs.partitionkey}
+    - {name: debezium.sink.eventhubs.maxbatchsize}
+  checks:
+    - The connection string carries a shared access key; keep it a secret reference, never a literal.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-eventhubs/3.2.0.Final/debezium-server-eventhubs-3.2.0.Final-sources.jar
+
+- name: server-nats-jetstream
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: nats-jetstream
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server NATS JetStream sink.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.nats-jetstream.url, required: true}
+    - {name: debezium.sink.nats-jetstream.create-stream, default: "false"}
+    - {name: debezium.sink.nats-jetstream.subjects, default: "*.*.*"}
+    - {name: debezium.sink.nats-jetstream.storage, default: "memory"}
+    - {name: debezium.sink.nats-jetstream.auth.jwt}
+    - {name: debezium.sink.nats-jetstream.auth.seed}
+    - {name: debezium.sink.nats-jetstream.auth.user}
+    - {name: debezium.sink.nats-jetstream.auth.password}
+  checks:
+    - With create-stream=false (the default) the stream must already exist; subjects and storage apply only when the sink creates its basic stream (named DebeziumStream).
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-nats-jetstream/3.2.0.Final/debezium-server-nats-jetstream-3.2.0.Final-sources.jar
+
+- name: server-infinispan
+  kind: sink
+  component: debezium
+  runtime: server
+  sink_type: infinispan
+  versions: ">=3.2.0.Final"
+  summary: Debezium Server Infinispan sink; writes events into a remote cache.
+  install: bundled
+  runtime_image: server
+  keys:
+    - {name: debezium.sink.infinispan.server.host, required: true}
+    - {name: debezium.sink.infinispan.server.port, default: "11222"}
+    - {name: debezium.sink.infinispan.cache, required: true}
+    - {name: debezium.sink.infinispan.user}
+    - {name: debezium.sink.infinispan.password}
+  checks:
+    - The cache must exist on the Infinispan server.
+  doc: https://debezium.io/documentation/reference/3.2/operations/debezium-server.html
+  source: https://repo1.maven.org/maven2/io/debezium/debezium-server-infinispan/3.2.0.Final/debezium-server-infinispan-3.2.0.Final-sources.jar
