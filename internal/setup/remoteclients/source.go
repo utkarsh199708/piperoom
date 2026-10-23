@@ -51,8 +51,13 @@ type roleTablesParams struct {
 	Tables []string `json:"tables"`
 }
 
+// blockersParams: Scoped tells the runner to anonymise every session outside
+// Tables (BlockersOnTables), even when Tables is empty, as the postgres
+// client does; without it a pipeline with no source_tables would read every
+// session's identity.
 type blockersParams struct {
 	OlderThanMS int64    `json:"older_than_ms"`
+	Scoped      bool     `json:"scoped,omitempty"`
 	Tables      []string `json:"tables,omitempty"`
 }
 
@@ -154,28 +159,38 @@ func (s *Source) RoleInfo(ctx context.Context, role string, tables []string) (po
 // Blockers lists the sessions that can hold back logical replication, with
 // full identity on every row.
 func (s *Source) Blockers(ctx context.Context, olderThan time.Duration) ([]postgres.DBSession, error) {
-	return s.blockers(ctx, olderThan, nil)
+	return s.blockers(ctx, olderThan, nil, false)
 }
 
 // BlockersOnTables is Blockers limited to a pipeline's view: every blocker is
 // listed, but a session that does not hold or wait for a lock on one of tables
 // has its user, application and query blanked by the runner.
 func (s *Source) BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]postgres.DBSession, error) {
-	return s.blockers(ctx, olderThan, tables)
+	return s.blockers(ctx, olderThan, tables, true)
 }
 
-func (s *Source) blockers(ctx context.Context, olderThan time.Duration, tables []string) ([]postgres.DBSession, error) {
+func (s *Source) blockers(ctx context.Context, olderThan time.Duration, tables []string, scoped bool) ([]postgres.DBSession, error) {
 	if olderThan < 0 {
 		return nil, fmt.Errorf("remoteclients: %s: negative age %s: %w", OpSourceBlockers, olderThan, ErrBadArgs)
 	}
 	res, err := s.s.do(ctx, OpSourceBlockers, protocol.TierT0,
-		blockersParams{OlderThanMS: olderThan.Milliseconds(), Tables: tables})
+		blockersParams{OlderThanMS: olderThan.Milliseconds(), Scoped: scoped, Tables: tables})
 	if err != nil {
 		return nil, err
 	}
 	var out []postgres.DBSession
 	if err := decode(res, "sessions", &out); err != nil {
 		return nil, err
+	}
+	if scoped {
+		// The runner's anonymisation is not trusted alone: a session it
+		// marks out of scope never carries an identity here, whatever the
+		// runner's build sends.
+		for i := range out {
+			if !out[i].InScope {
+				out[i].User, out[i].App, out[i].Query = "", "", ""
+			}
+		}
 	}
 	return out, nil
 }

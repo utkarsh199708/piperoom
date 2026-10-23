@@ -178,10 +178,14 @@ func (s *Session) do(ctx context.Context, op, tier string, params any) (protocol
 		return protocol.OpResult{}, wrapOp(op, ErrNoRunner)
 	}
 	roomID := s.roomID
-	if roomID == "" {
+	if ctxRoom := room.RoomID(ctx); roomID == "" {
 		// A session wired without a room (the U1-7 action adapter passes one
 		// in ctx instead): the call's context may carry it.
-		roomID = room.RoomID(ctx)
+		roomID = ctxRoom
+	} else if ctxRoom != "" && ctxRoom != roomID {
+		// A session bound to one room used for a call in another would send
+		// this room's reads (and writes) to the other room's runner.
+		return protocol.OpResult{}, wrapOp(op, fmt.Errorf("session is bound to another room than the call's: %w", ErrNoRunner))
 	}
 	if roomID == "" {
 		// No room, no runner: the executor is keyed by room.
