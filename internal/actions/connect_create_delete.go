@@ -389,7 +389,7 @@ func (a *deleteConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) err
 // readConfig reads the connector config and refuses one with a plaintext
 // credential. The config never leaves this function.
 func (a *deleteConnector) readConfig(ctx context.Context, name string) error {
-	cfg, err := a.d.Connect.Config(ctx, name)
+	cfg, err := a.configWithRetry(ctx, name)
 	if err != nil {
 		return fmt.Errorf("actions: %s: read config of %s: %w", DeleteConnectorName, name, err)
 	}
@@ -397,6 +397,31 @@ func (a *deleteConnector) readConfig(ctx context.Context, name string) error {
 		return fmt.Errorf("actions: %s: connector %s: %w", DeleteConnectorName, name, err)
 	}
 	return nil
+}
+
+// configWithRetry reads name's config, retrying with a growing pause while
+// ctx has time left when Connect answers that its workers are rebalancing (a
+// 500 "rebalance is expected" on this read, common right after a create or
+// delete) or the request outlasts the HTTP client's own bound. Only this read
+// is retried; it changes nothing on Connect, and ctx (the action's read or
+// write bound) still caps the whole wait.
+func (a *deleteConnector) configWithRetry(ctx context.Context, name string) (map[string]string, error) {
+	pause := 250 * time.Millisecond
+	for {
+		cfg, err := a.d.Connect.Config(ctx, name)
+		if err == nil {
+			return cfg, nil
+		}
+		if ctx.Err() != nil || (!isTimeoutErr(err) && !connect.IsRebalancing(err)) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(pause):
+		}
+		pause = min(2*pause, 2*time.Second)
+	}
 }
 
 func (a *deleteConnector) Validate(ctx context.Context, raw json.RawMessage) error {
