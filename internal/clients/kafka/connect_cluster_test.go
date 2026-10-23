@@ -198,6 +198,50 @@ func TestInternalTopicRole(t *testing.T) {
 	}
 }
 
+func TestAttributeInternalTopics(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		topics []string
+		groups []string
+		want   map[string]string
+	}{
+		{"dev stack: generic names go to the group no suffixed topic claims",
+			[]string{"_connect_configs", "_connect_offsets", "_connect_configs_staging", "_connect_status_staging"},
+			[]string{"piperoom-connect", "piperoom-connect-staging"},
+			map[string]string{"_connect_configs": "piperoom-connect", "_connect_offsets": "piperoom-connect",
+				"_connect_configs_staging": "piperoom-connect-staging", "_connect_status_staging": "piperoom-connect-staging"}},
+		{"strimzi: <group>-<role>, exact beats a partial match",
+			[]string{"orders-connect-configs", "orders-eu-connect-offsets"},
+			[]string{"orders-connect", "orders-eu-connect"},
+			map[string]string{"orders-connect-configs": "orders-connect", "orders-eu-connect-offsets": "orders-eu-connect"}},
+		{"one group: generic names are its own",
+			[]string{"my_connect_configs", "connect-status"}, []string{"1"},
+			map[string]string{"my_connect_configs": "1", "connect-status": "1"}},
+		{"two unclaimed groups: generic names are anyone's",
+			[]string{"connect-configs"}, []string{"connect-a", "connect-b"}, map[string]string{}},
+		{"a stopped cluster's topics belong to no group",
+			[]string{"legacy-billing-configs"}, []string{"connect-prod"}, map[string]string{}},
+		{"two groups matching equally: ambiguous",
+			[]string{"eu-configs"}, []string{"eu-west", "eu-north"}, map[string]string{}},
+		{"no groups (unreadable): nothing tied",
+			[]string{"connect-configs", "prod-configs"}, nil, map[string]string{}},
+		{"case and separators do not matter",
+			[]string{"Connect_Prod-offsets"}, []string{"connect-prod"}, map[string]string{"Connect_Prod-offsets": "connect-prod"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AttributeInternalTopics(tc.topics, tc.groups)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("%s -> %q, want %q (all: %v)", k, got[k], v, got)
+				}
+			}
+		})
+	}
+}
+
 // fakeConnectAdm is the connectAdmin seam for the error paths.
 type fakeConnectAdm struct {
 	listed    kadm.ListedGroups

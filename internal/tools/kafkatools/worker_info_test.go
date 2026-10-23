@@ -45,9 +45,12 @@ func (f *fakeWorkerConnect) Loggers(ctx context.Context) ([]connect.LoggerLevel,
 
 func healthyTopics([]string) ([]kafka.InternalTopic, error) {
 	return []kafka.InternalTopic{
-		{Name: "connect-configs", Role: "config", Partitions: 1, ReplicationFactor: 3, CleanupPolicy: "compact", MinInSyncReplicas: 2, Brokers: 3},
-		{Name: "connect-offsets", Role: "offset", Partitions: 25, ReplicationFactor: 3, CleanupPolicy: "compact", Brokers: 3},
-		{Name: "connect-status", Role: "status", Partitions: 5, ReplicationFactor: 3, CleanupPolicy: "compact", Brokers: 3},
+		{Name: "connect-analytics-configs", Role: "config", Partitions: 1, ReplicationFactor: 3, CleanupPolicy: "compact", Brokers: 3},
+		{Name: "connect-analytics-offsets", Role: "offset", Partitions: 25, ReplicationFactor: 3, CleanupPolicy: "compact", Brokers: 3},
+		{Name: "connect-analytics-status", Role: "status", Partitions: 5, ReplicationFactor: 3, CleanupPolicy: "compact", Brokers: 3},
+		{Name: "connect-prod-configs", Role: "config", Partitions: 1, ReplicationFactor: 3, CleanupPolicy: "compact", MinInSyncReplicas: 2, Brokers: 3},
+		{Name: "connect-prod-offsets", Role: "offset", Partitions: 25, ReplicationFactor: 3, CleanupPolicy: "compact", Brokers: 3},
+		{Name: "connect-prod-status", Role: "status", Partitions: 5, ReplicationFactor: 3, CleanupPolicy: "compact", Brokers: 3},
 	}, nil
 }
 
@@ -97,10 +100,12 @@ func TestWorkerInfoScopedShowsOnlyTheRoomsGroup(t *testing.T) {
 		"group connect-prod (Stable): 2 workers; runs the pipeline's connectors",
 		"worker 10.0.0.5 http://10.0.0.5:8083/ leader; runs pg-orders-connector; 1 other connectors",
 		"worker 10.0.0.6 (REST URL not advertised); 1 other connectors",
-		"config connect-configs: 1 partitions, RF 3, cleanup compact, min ISR 2",
+		"config connect-prod-configs: 1 partitions, RF 3, cleanup compact, min ISR 2",
+		"status connect-prod-status: 5 partitions",
 		"Kafka 3.6.1; 6 plugins",
 		"Log levels: root INFO; DEBUG io.debezium",
 		"1 other Connect worker group not shown",
+		"3 other Connect internal topics not shown",
 	} {
 		if !strings.Contains(r.Summary, want) {
 			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
@@ -118,6 +123,121 @@ func TestWorkerInfoScopedShowsOnlyTheRoomsGroup(t *testing.T) {
 	}
 	if fk.gotNames != nil {
 		t.Errorf("no CONNECT_INTERNAL_TOPICS: names = %v, want discovery", fk.gotNames)
+	}
+}
+
+// devStackTwoClusters is the dev stack with its staging profile: two Connect
+// clusters on one Kafka, the default one with Debezium-image-style generic
+// topic names and the staging one with suffixed names.
+func devStackTwoClusters() *fakeWorkerKafka {
+	topic := func(name, role string) kafka.InternalTopic {
+		return kafka.InternalTopic{Name: name, Role: role, Partitions: 1, ReplicationFactor: 1, CleanupPolicy: "compact", Brokers: 1}
+	}
+	return &fakeWorkerKafka{fakeKafka: &fakeKafka{},
+		groups: []kafka.ConnectWorkerGroup{
+			{GroupID: "piperoom-connect", State: "Stable", Workers: []kafka.ConnectWorker{{MemberID: "m1", Host: "connect", Connectors: []string{"pg-orders-connector"}}}},
+			{GroupID: "piperoom-connect-staging", State: "Stable", Workers: []kafka.ConnectWorker{{MemberID: "s1", Host: "connect-staging", Connectors: []string{"staging-billing-source"}}}},
+		},
+		topics: func([]string) ([]kafka.InternalTopic, error) {
+			return []kafka.InternalTopic{
+				topic("_connect_configs", "config"), topic("_connect_configs_staging", "config"),
+				topic("_connect_offsets", "offset"), topic("_connect_offsets_staging", "offset"),
+				topic("_connect_status", "status"), topic("_connect_status_staging", "status"),
+			}, nil
+		},
+	}
+}
+
+func TestWorkerInfoTwoConnectClustersDoNotLeak(t *testing.T) {
+	fk := devStackTwoClusters()
+	tool := workerInfoTool(t, Deps{Kafka: fk, Connect: &fakeConnect{}})
+
+	for _, tc := range []struct {
+		name      string
+		connector string
+		want      []string
+		leaks     []string
+	}{
+		{"default cluster's room", "pg-orders-connector",
+			[]string{"group piperoom-connect (Stable)", "config _connect_configs:", "offset _connect_offsets:", "status _connect_status:"},
+			[]string{"staging"}},
+		{"staging cluster's room", "staging-billing-source",
+			[]string{"group piperoom-connect-staging (Stable)", "config _connect_configs_staging:", "status _connect_status_staging:"},
+			[]string{"_connect_configs:", "_connect_offsets:", "_connect_status:", "\"_connect_configs\"", "pg-orders"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := tools.WithPipeline(context.Background(), owners.Pipeline{ID: "p", Connectors: []string{tc.connector}})
+			r, err := tool.Run(ctx, json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range append(tc.want, "1 other Connect worker group not shown", "3 other Connect internal topics not shown") {
+				if !strings.Contains(r.Summary, want) {
+					t.Errorf("summary lacks %q:\n%s", want, r.Summary)
+				}
+			}
+			b, _ := json.Marshal(r.Data)
+			for _, leak := range tc.leaks {
+				if strings.Contains(r.Summary, leak) || strings.Contains(string(b), leak) {
+					t.Errorf("%q leaked:\n%s\n%s", leak, r.Summary, b)
+				}
+			}
+			if d := r.Data.(workerInfoData); len(d.InternalTopics) != 3 || d.TopicsNotShown != 3 {
+				t.Errorf("topics = %+v, not shown = %d", d.InternalTopics, d.TopicsNotShown)
+			}
+		})
+	}
+
+	// Unscoped sees both clusters' topics.
+	r := runTool(t, tool, `{}`)
+	if d := r.Data.(workerInfoData); len(d.InternalTopics) != 6 || d.TopicsNotShown != 0 {
+		t.Errorf("unscoped topics = %+v, not shown = %d", d.InternalTopics, d.TopicsNotShown)
+	}
+
+	// CONNECT_INTERNAL_TOPICS is the operator's word: shown as named.
+	named := workerInfoTool(t, Deps{Kafka: fk, Connect: &fakeConnect{}, ConnectInternalTopics: []string{"_connect_configs_staging"}})
+	fk.topics = func(names []string) ([]kafka.InternalTopic, error) {
+		return []kafka.InternalTopic{{Name: names[0], Partitions: 1, ReplicationFactor: 1, CleanupPolicy: "compact", Brokers: 1}}, nil
+	}
+	r, err := named.Run(ordersCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Summary, "config _connect_configs_staging: 1 partitions") || strings.Contains(r.Summary, "internal topic not shown") {
+		t.Errorf("configured topics scoped away:\n%s", r.Summary)
+	}
+}
+
+func TestWorkerInfoTopicsHiddenWhenUntied(t *testing.T) {
+	// Groups unreadable: no topic can be tied to the room, so all are a count.
+	fk := devStackTwoClusters()
+	fk.groupsErr = errors.New("broker down")
+	tool := workerInfoTool(t, Deps{Kafka: fk, Connect: &fakeConnect{}})
+	r, err := tool.Run(ordersCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"6 other Connect internal topics not shown", "no Connect internal topic is tied to this room's worker group by name; set CONNECT_INTERNAL_TOPICS"} {
+		if !strings.Contains(r.Summary, want) {
+			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
+		}
+	}
+	if strings.Contains(r.Summary, "_connect_") {
+		t.Errorf("topic names shown without a tie:\n%s", r.Summary)
+	}
+
+	// A stopped cluster's topics (no group of that name) stay hidden.
+	fk.groupsErr = nil
+	fk.groups = fk.groups[:1]
+	fk.topics = func([]string) ([]kafka.InternalTopic, error) {
+		return []kafka.InternalTopic{{Name: "_connect_configs", Role: "config", Partitions: 1}, {Name: "legacy-billing-configs", Role: "config", Partitions: 1}}, nil
+	}
+	r, err = tool.Run(ordersCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.Summary, "config _connect_configs:") || strings.Contains(r.Summary, "legacy-billing") || !strings.Contains(r.Summary, "1 other Connect internal topic not shown") {
+		t.Errorf("summary:\n%s", r.Summary)
 	}
 }
 
@@ -250,7 +370,7 @@ func TestWorkerInfoPartialFailures(t *testing.T) {
 	r := runTool(t, tool, `{}`)
 	for _, want := range []string{
 		"could not list Connect worker groups: broker down",
-		"config connect-configs",
+		"config connect-prod-configs",
 		"could not list plugins: connect down - forged line",
 		"Log levels: this Connect has no GET /admin/loggers (Kafka Connect 2.4+)",
 	} {
