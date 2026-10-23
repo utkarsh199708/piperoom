@@ -24,7 +24,7 @@ the read access and the original Connect and Registry writes.
 | dbt (batch transform) | `dbt_run_results`, `dbt_model_lineage`, `dbt_model_sql` | read `run_results.json` / `manifest.json` (a directory, or dbt Cloud with a read-only service token) | **none** |
 | Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record` | describe topics/groups, describe topic configs, read pipeline topics | **none** |
 | Other tools | `pipeline_map` reads the clients above and no new grant; `runbook_lookup` reads only the runbook text embedded in the binary (`internal/tools/runbooks/runbooks.go`) | none | none |
-| Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
+| Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config`, `connect_source_offsets` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
 | Schema Registry | `schema_registry_subjects`, `_versions`, `_diff` | REST `GET` | 2 actions: `schema_set_compatibility`, `schema_register` |
 | Room database | room service | n/a | full access to its **own** database only (it creates its tables itself) |
 | Model provider | agent | `anthropic`: API key (env var). `bedrock`: AWS identity with invoke rights in `AWS_REGION`. `vertex`: Google identity with Vertex AI access in `VERTEX_PROJECT_ID` | n/a |
@@ -421,6 +421,8 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 | `GET /connectors` | `connect_list_connectors`; actions check that a connector exists | `connect.go` |
 | `GET /connectors/{name}/status` | `connect_status`; actions read state and poll it | `connect.go` |
 | `GET /connectors/{name}/config` | `connect_config`; the config action reads it before and after its write | `connect.go`, `internal/actions/connector_config.go` |
+| `GET /connectors/{name}/offsets` | `connect_source_offsets` (Kafka Connect 3.5+, KIP-875; positions only, no record data) | `internal/clients/connect/lifecycle.go` (`SourceOffsets`); `internal/tools/kafkatools/connect_offsets.go` |
+| `GET /` | `connect_source_offsets`, only to name the worker's version when the offsets endpoint is missing | `lifecycle.go` (`ServerInfo`) |
 
 **Write calls (only for approved fixes, one per action):**
 
@@ -433,7 +435,11 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 
 Notes on the table:
 
-- Piperoom sends no other write. No create, no delete, no pause, and no `PUT` on config.
+- These are the original four. Write mode adds the pause and the N-key config patch, and the connector lifecycle
+  actions (stop, offsets reset, create, delete; not registered yet, Q5d); every one of those calls, with the Kafka
+  Connect version it needs, is in [write-roles.md](write-roles.md#kafka-connect). The staged config change
+  (`internal/actions/stage.go`) sends `PUT /connectors/{name}/config` (`PutConnectorConfig`,
+  `internal/clients/connect/put_config.go`); it is not covered on these two pages.
 - `connect_update_connector_config` may change only these keys and values
   (`defaultConnectorConfigAllowList` in `internal/actions/connector_config.go`):
   `decimal.handling.mode` = `precise|string` (`double` is not offered: it loses precision, which matters
@@ -451,8 +457,9 @@ Notes on the table:
   reported as an error. There is no `PUT` fallback (`Client.UpdateConfig`).
 - Connect restarts the connector's tasks when its config changes, so the update is not free.
 
-**Read-only mode (recommended default):** allow only these three `GET` calls:
-`GET /connectors`, `GET /connectors/{name}/status` and `GET /connectors/{name}/config`.
+**Read-only mode (recommended default):** allow these `GET` calls:
+`GET /connectors`, `GET /connectors/{name}/status`, `GET /connectors/{name}/config`, and for
+`connect_source_offsets` `GET /connectors/{name}/offsets` and `GET /`.
 Proposals that need a write will then fail, by design.
 
 **Write mode (only to allow approved fixes):** additionally allow exactly these four calls:
