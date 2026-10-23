@@ -200,7 +200,7 @@ func New(ctx context.Context, o Options) (*Model, error) {
 	}
 	m.client = &http.Client{
 		Timeout:       TurnTimeout,
-		Transport:     &hostGuard{host: m.base.URL.Host, base: auth},
+		Transport:     &hostGuard{scheme: m.base.URL.Scheme, host: m.base.URL.Host, base: auth},
 		CheckRedirect: refuseRedirect,
 	}
 	return m, nil

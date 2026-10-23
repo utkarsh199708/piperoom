@@ -100,10 +100,12 @@ func TestRedirectNotFollowed(t *testing.T) {
 }
 
 func TestHostGuard(t *testing.T) {
-	g := &hostGuard{host: "api.example:443", base: http.DefaultTransport}
-	req, _ := http.NewRequest(http.MethodGet, "https://elsewhere.example/", nil)
-	if _, err := g.RoundTrip(req); !errors.Is(err, errDenied) {
-		t.Fatalf("err = %v", err)
+	g := &hostGuard{scheme: "https", host: "api.example:443", base: http.DefaultTransport}
+	for _, u := range []string{"https://elsewhere.example/", "http://api.example:443/"} {
+		req, _ := http.NewRequest(http.MethodGet, u, nil)
+		if _, err := g.RoundTrip(req); !errors.Is(err, errDenied) {
+			t.Fatalf("%s: err = %v", u, err)
+		}
 	}
 }
 

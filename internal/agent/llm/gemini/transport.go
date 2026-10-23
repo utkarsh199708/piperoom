@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -80,6 +81,9 @@ func modelTransport(base config.BaseURL, useProxy bool, fromEnv proxyFunc) *http
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
+		// A model answer's headers are small; a hostile endpoint's are capped.
+		MaxResponseHeaderBytes: 64 << 10,
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
 		// Proxy stays nil unless PIPEROOM_MODEL_PROXY=on: through a proxy the
 		// dial hook sees only the proxy's address.
 	}
@@ -125,15 +129,17 @@ func checkedProxy(base config.BaseURL, fromEnv proxyFunc, r resolver) proxyFunc 
 	}
 }
 
-// hostGuard refuses any request to a host other than the configured one, so
-// neither the key nor a token can leave for another host.
+// hostGuard refuses any request to a scheme or host other than the
+// configured ones, so neither the key nor a token can leave for another host
+// or go over plain http to the https host.
 type hostGuard struct {
-	host string
-	base http.RoundTripper
+	scheme string
+	host   string
+	base   http.RoundTripper
 }
 
 func (g *hostGuard) RoundTrip(req *http.Request) (*http.Response, error) {
-	if !strings.EqualFold(req.URL.Host, g.host) {
+	if !strings.EqualFold(req.URL.Scheme, g.scheme) || !strings.EqualFold(req.URL.Host, g.host) {
 		if req.Body != nil {
 			_ = req.Body.Close()
 		}
