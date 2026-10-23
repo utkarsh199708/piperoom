@@ -238,6 +238,10 @@ export interface ProposalState {
   schedule_seen?: boolean;
   /** X2: proposal.created.class. Left off for a fix, so such a proposal folds as before. */
   class?: ProposalClass;
+  /** P3c: "driver" for a fix the driver wrote (POST /api/rooms/{id}/proposals). Left off for the agent's. */
+  origin?: "driver";
+  /** P3c: the driver who wrote it (proposal.created's actor); set with origin "driver" only. */
+  author?: Actor;
   /** X2: recovery proposals only; see RecoveryProgress. */
   recovery?: RecoveryProgress;
 }

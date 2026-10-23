@@ -32,6 +32,8 @@ import { ActivityFeed } from './ActivityFeed'
 import { TracePanel } from './TracePanel'
 import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
+import { ProposeFixDialog } from './room/ProposeFixDialog'
+import { canProposeFix } from '../lib/proposeFix'
 import { NoDriverBanner } from './NoDriverBanner'
 import { WriteModeBanner } from './WriteModeBanner'
 import { ChangesLane } from './room/ChangesLane'
@@ -194,6 +196,8 @@ export function RoomScreen() {
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
+  // P3d-2: the driver's "Propose a fix yourself" dialog.
+  const [proposeOpen, setProposeOpen] = useState(false)
   const [closeText, setCloseText] = useState('')
   const [labelOpen, setLabelOpen] = useState(false)
   const [postmortemOpen, setPostmortemOpen] = useState(false)
@@ -511,7 +515,7 @@ export function RoomScreen() {
           />
           <WriteModeBanner mode={state.mode} />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
-          <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
+          <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} onProposeFix={() => setProposeOpen(true)} />
           {/* U1-12a: a setup room shows the pairing command until a runner attaches, then the
               plan's stepper above the feed. Neither renders on an incident room. */}
           <SetupPairingCard state={state} />
@@ -624,6 +628,14 @@ export function RoomScreen() {
         />
       )}
       {/* Gone once room.closed arrives: the "Resolved" strip above takes over. */}
+      {/* Unmounted once the person stops being the driver or the room closes: the server would refuse it. */}
+      {proposeOpen && canProposeFix(state, user) && (
+        <ProposeFixDialog
+          roomId={state.id}
+          onClose={() => setProposeOpen(false)}
+          onCreated={() => toast.success('Fix proposed. Its preview fills in on the card; it runs only after every required layer approves.')}
+        />
+      )}
       {closeOpen && state.status === 'open' && (
         <CloseRoomDialog state={state} actions={actions} initialText={closeText} onClose={() => setCloseOpen(false)} />
       )}

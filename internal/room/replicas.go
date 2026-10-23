@@ -979,10 +979,8 @@ func (s *Service) rebuildStale(ctx context.Context, roomID string, st *roomState
 	}
 	s.unlockRoom(st)
 	var inputs []agent.HumanInput
-	l, err := s.rebuildWith(ctx, roomID, func(e events.Event) {
-		if in := inputFor(e); in != nil {
-			inputs = append(inputs, *in)
-		}
+	l, err := s.rebuildWith(ctx, roomID, func(snap RoomSnapshot, e events.Event) {
+		inputs = append(inputs, inputsFor(snap, e)...)
 	})
 	if errors.Is(err, store.ErrNotFound) {
 		// Deleted by another replica: evict, as followRoom would.
@@ -1055,14 +1053,14 @@ func (s *Service) swapRebuiltLocked(ctx context.Context, roomID string, st *room
 			tmp.snap = Apply(tmp.snap, e)
 			tmp.logBytes += int64(len(e.Payload))
 			trackPending(tmp, e)
-			if in := inputFor(e); in != nil && gaps.contains(e.Seq) {
-				feed = append(feed, *in)
+			if gaps.contains(e.Seq) {
+				feed = append(feed, inputsFor(tmp.snap, e)...)
 			}
 		}
 	}
 	// The rebuild's inputs end at its last seq and the tail's start after
 	// it, but an input after old came from the rebuild: keep log order.
-	slices.SortFunc(feed, func(a, b agent.HumanInput) int { return cmp.Compare(a.Seq, b.Seq) })
+	slices.SortStableFunc(feed, func(a, b agent.HumanInput) int { return cmp.Compare(a.Seq, b.Seq) })
 	s.setDeadline(&tmp.snap)
 	wasOpen := s.roomOpen(st)
 	full := st.snap.LogCap == LogCapFull
@@ -1184,11 +1182,11 @@ func trackPending(st *roomState, e events.Event) {
 		}
 		return
 	}
-	in := inputFor(e)
-	if in == nil {
+	ins := inputsFor(st.snap, e)
+	if len(ins) == 0 {
 		return
 	}
-	st.pending = append(st.pending, *in)
+	st.pending = append(st.pending, ins...)
 	if n := len(st.pending); n > maxPendingInputs {
 		st.pending = append([]agent.HumanInput(nil), st.pending[n-maxPendingInputs:]...)
 	}

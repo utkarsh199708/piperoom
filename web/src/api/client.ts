@@ -7,7 +7,9 @@
 // This client never sends the old user-id header: with a cookie for another user
 // the server answers 403 proxy_identity (docs/design/auth.md section 5.2).
 import type {
+  ActionInfo,
   ApiError,
+  CreateProposalBody,
   AuthUser,
   ChecklistStepDonePayload,
   Event,
@@ -313,6 +315,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
+  // P3c: the registered write actions (any member, viewers included); the propose dialog builds its form from params_schema.
+  actions: () => request<ActionInfo[]>('/api/actions'),
+  // P3c: a driver-authored fix. Answers proposal.created (origin "driver"); the preview follows as
+  // proposal.previewed over the socket. 403 not_driver, 409 room_closed, 400 validation (names the
+  // step index), 429 too_many_proposals (a sixth open driver-authored proposal).
+  proposeFix: (roomId: string, body: CreateProposalBody) =>
+    request<Event>(`${room(roomId)}/proposals`, { method: 'POST', body: JSON.stringify(body) }),
   // paramsHash: the hash shown with the proposal, same rule as approve.
   reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
