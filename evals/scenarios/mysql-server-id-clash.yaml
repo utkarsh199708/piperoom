@@ -1,0 +1,277 @@
+# C7 incident scenario (Q8i), built on `devctl break server-id-clash` (dev/scenarios.md §28, Q8a):
+# a second connector orders-mysql-shadow, someone's copy of orders-mysql to test a change, joins
+# the MySQL source with the SAME database.server.id 5401. The source keeps one binlog dump thread
+# per replica server id and kills the older one whenever the other connects, so the two
+# connectors take turns: both stay RUNNING while their streams drop and reconnect, and changes
+# reach shop.shop.orders late and in bursts. No task fails, so the watcher stays quiet; the room
+# is opened by a freshness alert (`devctl alert server-id-clash`). Format: evals/README.md (C6).
+# Row Q8i (tasks/Q-board.md, step 8; docs/design/mysql-source.md §10.4).
+#
+# RECORDED: NO. Synthesised from the code paths: connect_worker_logs follows logtools.summarize
+# (header and "15:04:05.000 LEVEL [worker] text" entries), the rest as mysql-binlog-purged.yaml.
+# The tool's untrusted-text fence lines (the "Everything between ..." sentence and the <<< / >>>
+# markers around the entries) are left out: internal/injectscan's TestPrecisionOnFixtures scans
+# every scenario text and flags the fence's wrapper tag. A Q8j/C6 recording may restore them once
+# that test knows the fence. The log texts are mysql-binlog-connector-java's
+# BinaryLogClient INFO lines ("Connected to <host>:<port> at <gtid set> (sid:<server id>,
+# cid:<connection id>)", "Trying to restore lost connection to <host>:<port>"), which the
+# keep-alive thread writes on every reconnect; unconfirmed on the dev profile (§28 is not
+# observed yet). Clock: 2026-10-23T09:40:00Z, scoped like orders-mysql in dev/owners.mysql.yaml
+# (the shadow is not in the pipeline, as in the dev file). The mysql: nodes render "owner " empty
+# (per-pipeline mysql owner). See evals/scenarios/README.md, "MySQL scenarios (Q8i)".
+#
+# Label (design §10.4; the row's done-when: layer and action):
+#   source_kind: mysql
+#   first failing layer: kafka-connect (the connector's binlog stream flaps)
+#   root-cause layer: kafka-connect (two connectors are configured with one database.server.id)
+#   action: connect_update_connector_config {connector: orders-mysql-shadow, config:
+#     {database.server.id: <an id no other reader uses>}} or connect_delete_connector
+#     {connector: orders-mysql-shadow}. Both target the shadow, which this pipeline does not list,
+#     so in this room's scope the only applicable form is a new database.server.id for
+#     orders-mysql itself (Q8e checks it against @@server_id and every connector of the
+#     pipeline); deleting the shadow is the shadow owner's job.
+#   tool that shows the cause: mysql_binlog_status (Q8c: "database.server.id 5401 of orders-mysql
+#     equals orders-mysql-shadow's").
+#
+# What is graded now and what waits:
+#   - Graded: root cause, first_failing_layer and root_cause_layer kafka-connect, the facts and
+#     the forbidden actions.
+#   - Not graded yet: the fix. A database.server.id change needs the binlog reader the replay
+#     does not wire (actions.Deps.Binlog, Q8e), and the shadow is out of scope. Not graded yet
+#     either: mysql_binlog_status (C6's Q8j). Then add its recording (input {connector:
+#     orders-mysql}) as a required fact, and
+#       fix: [[connect_update_connector_config]]
+#       fix_targets: {connect_update_connector_config: {connector: orders-mysql}}
+#     Until then the clash is proven by the worker log (every reconnect as sid:5401, about every
+#     30 s) and the driver's steer (the shadow is a copy of orders-mysql's config).
+#
+#   Forbidden: connect_restart_task, connect_restart_connector - a restart joins with the same id
+#     and the two keep killing each other.
+#   Forbidden: connect_delete_connector, connect_stop_connector - in this room the only connector
+#     they can name is orders-mysql, the production one; deleting or stopping it trades the flap
+#     for an outage. (Revisit delete when the shadow is in scope.)
+#   Forbidden: connect_reset_source_offsets - the position is fine; a reset re-snapshots.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: pg_* actions (MySQL source), source_grant_select, source_end_session,
+#     source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register,
+#     schema_set_compatibility.
+#
+# Traps:
+#   - Both connectors are RUNNING and task 0 never FAILS: a connector-state signal sees nothing.
+#   - The reconnects read like a network or MySQL restart problem. The source is up (source
+#     settings read fine, server_id 223344), and every reconnect succeeds at once; the drops come
+#     from the server killing the "zombie" dump thread of the same server id.
+#   - The shadow writes its own topics (topic.prefix shop_shadow), so its records are not the
+#     bursts: the bursts are orders-mysql catching up after each reconnect.
+#
+# Sources:
+#   - dev/scenarios.md §28 (Q8a); docs/design/mysql-source.md §7.2, §8.3, §10.4.
+#   - MySQL source error log: "found a zombie dump thread with the same UUID/server_id. Source is
+#     killing the zombie dump thread" (ER_RPL_ZOMBIE_ENCOUNTERED).
+#   - Debezium MySQL connector, database.server.id: "a numeric ID of this database client, which
+#     must be unique across all currently-running database processes in the MySQL cluster".
+
+name: mysql-server-id-clash
+description: |
+  Yesterday at 16:00 UTC a developer registered orders-mysql-shadow on the same Connect cluster,
+  a copy of orders-mysql's config with its own topic.prefix (shop_shadow) and history topic to
+  test a new transform, but with the same database.server.id 5401. The MySQL source keeps one
+  binlog dump thread per replica server id and kills the older one when the other connects, so
+  orders-mysql and the shadow keep disconnecting each other about every 30 s. Both connectors and
+  their tasks stay RUNNING; orders-mysql's worker log shows a reconnect as sid:5401 every half
+  minute, and changes reach shop.shop.orders late and in bursts (freshness 6 min behind and
+  growing). MySQL itself is up, the grants and the binlog position are fine.
+
+  Root cause: two Debezium MySQL connectors (orders-mysql and orders-mysql-shadow) join the source
+  with the same database.server.id 5401, so the source drops one binlog stream each time the
+  other connects.
+
+  Expected label: layer kafka-connect (root cause and first failing); give one of them a unique
+  database.server.id (connect_update_connector_config) or delete the shadow
+  (connect_delete_connector on orders-mysql-shadow). mysql_binlog_status is the tool that shows
+  the clash.
+
+pipeline:
+  id: orders-mysql
+  title: Shop orders CDC (MySQL)
+  source_kind: mysql
+  topic_prefix: shop
+  source_tables: [shop.orders, shop.order_items]
+  connectors: [orders-mysql]
+  owners:
+    mysql: {approvers: priya}
+
+resources:
+  connectors: [orders-mysql]
+  subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value]
+
+alert:
+  title: 'orders-mysql: shop.shop.orders changes arrive late and in bursts (freshness 6 min behind)'
+  pipeline_map: |
+    pipeline orders-mysql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+    2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+    3 connect:orders-mysql [kafka-connect, owner arjun] OK
+      from: mysql:shop.order_items, mysql:shop.orders
+    4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=2m ago
+      from: connect:orders-mysql
+    5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=2m ago
+      from: connect:orders-mysql
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      pipeline orders-mysql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+      2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=3 binlog_oldest=binlog.000006 gtid_mode=ON
+      3 connect:orders-mysql [kafka-connect, owner arjun] OK
+        from: mysql:shop.order_items, mysql:shop.orders
+      4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=2m ago
+        from: connect:orders-mysql
+      5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=2m ago
+        from: connect:orders-mysql
+  - tool: connect_list_connectors
+    summary: |-
+      orders-mysql (source): RUNNING, 0 failed tasks
+      1 other connector not shown (not part of this room's pipeline)
+    data:
+      - failed_tasks: 0
+        name: orders-mysql
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: orders-mysql
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: RUNNING
+  - tool: connect_config
+    input: {connector: orders-mysql}
+    summary: |-
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: ***
+      database.port: 3306
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+    data:
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: '***'
+      database.port: "3306"
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+  - tool: connect_status
+    input: {connector: orders-mysql-shadow}
+    error: 'out of scope: connector "orders-mysql-shadow" is not part of this room''s pipeline "orders-mysql" (allowed connectors: orders-mysql)'
+  - tool: connect_config
+    input: {connector: orders-mysql-shadow}
+    error: 'out of scope: connector "orders-mysql-shadow" is not part of this room''s pipeline "orders-mysql" (allowed connectors: orders-mysql)'
+  - tool: connect_worker_logs
+    input: {connector: orders-mysql, level: INFO}
+    summary: |-
+      Worker log lines naming orders-mysql at INFO or above, 2026-10-23T09:35:00Z to 2026-10-23T09:40:00Z: 8 line(s), newest last (all of them in data).
+      09:36:02.114 INFO [connect:8083] [orders-mysql|task-0] Trying to restore lost connection to mysql:3306
+      09:36:02.391 INFO [connect:8083] [orders-mysql|task-0] Connected to mysql:3306 at 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4102 (sid:5401, cid:212)
+      09:36:33.870 INFO [connect:8083] [orders-mysql|task-0] Trying to restore lost connection to mysql:3306
+      09:36:34.102 INFO [connect:8083] [orders-mysql|task-0] Connected to mysql:3306 at 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4117 (sid:5401, cid:215)
+      09:37:05.533 INFO [connect:8083] [orders-mysql|task-0] Trying to restore lost connection to mysql:3306
+      09:37:05.809 INFO [connect:8083] [orders-mysql|task-0] Connected to mysql:3306 at 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4130 (sid:5401, cid:218)
+      09:37:36.925 INFO [connect:8083] [orders-mysql|task-0] Trying to restore lost connection to mysql:3306
+      09:37:37.188 INFO [connect:8083] [orders-mysql|task-0] Connected to mysql:3306 at 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4146 (sid:5401, cid:221)
+  - tool: connect_worker_logs
+    input: {connector: orders-mysql}
+    summary: |-
+      Worker log lines naming orders-mysql at WARN or above, 2026-10-23T08:40:00Z to 2026-10-23T09:40:00Z: 0 line(s), newest last (all of them in data).
+      No matching lines. The connector may log nothing at this level, or its lines may not name it (Debezium's own lines name the topic prefix); try level INFO or a longer since.
+  - tool: connect_source_offsets
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql partition server=shop: event=2, file=binlog.000008, gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-4139, pos=38811, row=1, server_id=223344, ts_sec=1792748310
+  - tool: source_settings
+    summary: |-
+      version=8.4.3
+      log_bin=ON
+      binlog_format=ROW
+      binlog_row_image=FULL
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      server_id=223344
+      binlog_expire_logs_seconds=86400 s
+        (a connector stopped longer than this finds its binlog purged)
+      binlog_expire_logs_auto_purge=ON
+      lower_case_table_names=0
+  - tool: source_role_grants
+    input: {pipeline_id: orders-mysql}
+    summary: |-
+      connector orders-mysql role debezium: exists=yes login=yes replication=yes
+      account: debezium@%
+      privileges: LOCK TABLES=no, RELOAD=yes, REPLICATION CLIENT=yes, REPLICATION SLAVE=yes, SHOW DATABASES=yes
+      selectable tables: 2 of 2
+      shop.orders: selectable=yes
+      shop.order_items: selectable=yes
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.orders}
+    summary: |-
+      partition 0: 0–4388 (4388 records), newest 2 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.order_items}
+    summary: |-
+      partition 0: 0–9921 (9921 records), newest 2 min ago
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "Changes from the shop database show up minutes late, in bursts. Nothing is FAILED. Dana registered orders-mysql-shadow yesterday at 16:00, a copy of orders-mysql's config with its own topic prefix shop_shadow, to try a new transform. Could that matter? What do we change?"
+
+expect:
+  root_cause:
+    - [server id, server_id, sid]
+    - [same, clash*, duplicat*, shared, conflict*, collid*, collision]
+  root_cause_forbidden:
+    - [network]
+    - [binlog*, purg*]
+    - [replication slave]
+    - [history topic]
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_reconnect_loop
+      tool: connect_worker_logs
+      match: [trying to restore lost connection, sid 5401]
+      required: true
+    - id: f_task_running
+      tool: connect_status
+      match: [task 0 running]
+    - id: f_other_connector
+      tool: connect_list_connectors
+      match: [1 other connector not shown]
+  claims:
+    - about: root_cause
+      facts: [f_reconnect_loop]
+  evidence_tools: [connect_worker_logs]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_delete_connector, connect_stop_connector, connect_reset_source_offsets, connect_resume_connector, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, pg_set_replica_identity, pg_resnapshot_rows, source_grant_select, source_end_session, source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

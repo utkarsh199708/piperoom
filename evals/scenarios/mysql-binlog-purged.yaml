@@ -1,0 +1,298 @@
+# C7 incident scenario (Q8i), built on `devctl break binlog-purged` (dev/scenarios.md §25, Q8a,
+# cmd/devctl/scenarios_mysql.go): the Debezium MySQL connector orders-mysql was stopped for a
+# maintenance window; meanwhile the binary logs it still needed were purged, so on resume task 0
+# FAILS because the stored binlog position (file, pos and GTIDs) is no longer on the server.
+# Format: evals/README.md (C6). Row Q8i (tasks/Q-board.md, step 8; docs/design/mysql-source.md
+# §10.4).
+#
+# RECORDED: NO. Synthesised from the code paths: every summary follows the format strings of the
+# real tools on this branch (internal/tools/{kafkatools,dbtools}, internal/topology/mysql.go for
+# the mysql: source node, dbtools source_settings and source_role_grants on a MySQL source), with
+# values composed by hand from §25's break (the Q5f approach; the Q8i session had no Docker, and
+# §25 itself is not observed yet). The task's error is Debezium MySQL's message for a stored
+# binlog position the server no longer has (unconfirmed on Debezium 3.2, as §25 says). Clock:
+# 2026-10-23T09:40:00Z, scoped like the orders-mysql pipeline of dev/owners.mysql.yaml. To
+# replace it with a real recording, see evals/scenarios/README.md, "MySQL scenarios (Q8i)".
+# The mysql: nodes render "owner " empty, as the topology builder does today: its layerOwner
+# reads the top-level layers: map only, and the mysql owner is per pipeline (owners:).
+#
+# Label (design §10.4; the row's done-when: layer and action):
+#   source_kind: mysql
+#   first failing layer: kafka-connect (task 0 FAILED)
+#   root-cause layer: mysql (the source purged the binlogs the connector's stored position needs)
+#   action: ONE proposal of
+#     1. connect_stop_connector       {connector: orders-mysql}
+#     2. connect_reset_source_offsets {connector: orders-mysql, stop_first: true} to empty (no
+#        position): on resume Debezium re-snapshots shop.orders and shop.order_items (snapshot.mode
+#        initial) and streams from the current binlog. No position can be kept: every position
+#        between the stored one and now is purged.
+#   tools that show the cause: mysql_binlog_status (Q8c: "the binlog the connector needs is
+#     purged"), connect_source_offsets (the stored file and GTIDs), pipeline_map (binlog_oldest).
+#
+# What is graded now and what waits (the Q5f precedent):
+#   - Graded: first_failing_layer kafka-connect, the fix (stop + reset, both Q5b actions that
+#     evals.LiveActions registers; a reset to empty needs no binlog reader) and the facts below.
+#   - Not graded yet: root_cause_layer mysql. events.Layers does not list the mysql layer until
+#     the Q0 item 7 contract lands (owners.KnownLayers adds it locally, design §5.1), and
+#     expect.root_cause_layer must be one of events.IncidentLayers(). Then add
+#       root_cause_layer: mysql
+#   - Not graded yet: mysql_binlog_status. evals.LiveTools() does not register mysqltools (C6's
+#     Q8j adds "the MySQL tool set when a scenario says source_kind: mysql"). Then add its
+#     recording (input {connector: orders-mysql}): "stored file binlog.000003 is purged (oldest
+#     on the server binlog.000006); stored gtids miss gtid_purged: the binlog the connector needs
+#     is purged", make it a required fact and an evidence tool. Until then the purge is proven
+#     from connect_source_offsets (file binlog.000003) against pipeline_map (binlog_oldest
+#     binlog.000006) and the task's error.
+#
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector - every
+#     start reads the same stored position and fails the same way (and the connector is not
+#     paused or stopped).
+#   Forbidden: connect_update_connector_config - snapshot.mode=recovery (the only MySQL
+#     snapshot.mode it sets) rebuilds the schema history and keeps the purged position; the
+#     history topic is fine. On this replay the MySQL keys are not offered at all (no binlog
+#     reader is wired).
+#   Forbidden: connect_delete_connector - deleting the connector loses its config and topics'
+#     producer; the reset does what is needed.
+#   Forbidden: pg_* actions - the source is MySQL (Q8g offers none in a MySQL room).
+#   Forbidden: source_grant_select, source_end_session, source_create_heartbeat_table - grants,
+#     sessions and heartbeats are not involved.
+#   Forbidden: kafka_reset_consumer_offsets, schema_register, schema_set_compatibility.
+#
+# Traps:
+#   - "no longer available on the server" is also the stale-source-offsets story (a repointed
+#     connector with another database's offsets). Here the server, topic.prefix and database are
+#     unchanged; the stored file is older than the oldest binlog the server keeps.
+#   - binlog_expire_logs_seconds is 86400 and the connector was stopped 11 h: retention did NOT
+#     purge it by age; the 09:05 manual PURGE BINARY LOGS did (the DBA's steer). The fix is the
+#     same either way.
+#   - The schema history topic schema-history.shop is present (no "history topic is missing"):
+#     a recovery snapshot is the history-topic-deleted fix, not this one.
+#
+# Sources:
+#   - dev/scenarios.md §25 (Q8a): the break, the expected symptoms, the fix (re-snapshot: stop,
+#     clear the offsets, resume).
+#   - docs/design/mysql-source.md §7.2, §8.2, §10.4.
+#   - Debezium MySQL connector: "The connector is trying to read binlog starting at ..., but this
+#     is no longer available on the server. Reconfigure the connector to use a snapshot when
+#     needed." (MySqlConnectorTask; text unconfirmed on 3.2).
+#   - Kafka Connect KIP-875: PUT /connectors/{name}/stop, DELETE /connectors/{name}/offsets.
+
+name: mysql-binlog-purged
+description: |
+  orders-mysql (Debezium MySQL connector, topic.prefix shop, capturing shop.orders and
+  shop.order_items) was stopped at 22:00 UTC yesterday for a MySQL maintenance window. After the
+  maintenance, at 09:05, the DBA freed disk with FLUSH BINARY LOGS and PURGE BINARY LOGS TO
+  'binlog.000006'. The connector was resumed at 09:12: its stored source offset is binlog.000003
+  position 4523 with GTIDs 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1287, but the server now keeps
+  only binlog.000006 and binlog.000007 (gtid_purged ...:1-1412). Task 0 FAILED with "The connector
+  is trying to read binlog starting at ..., but this is no longer available on the server". No
+  change has reached shop.shop.orders since 22:00. Kafka and the schema history topic are healthy.
+
+  Root cause: the binlog files (and GTIDs) after the connector's stored position were purged on
+  the MySQL source while the connector was stopped, so the position it must resume from is gone.
+
+  Expected label: layer mysql (root cause; first failing kafka-connect); in one proposal stop
+  orders-mysql (connect_stop_connector) and reset its source offsets to empty
+  (connect_reset_source_offsets), so on resume Debezium re-snapshots the two tables.
+  connect_source_offsets and mysql_binlog_status are the tools that show the cause.
+
+pipeline:
+  id: orders-mysql
+  title: Shop orders CDC (MySQL)
+  source_kind: mysql
+  topic_prefix: shop
+  source_tables: [shop.orders, shop.order_items]
+  connectors: [orders-mysql]
+  owners:
+    mysql: {approvers: priya}
+
+resources:
+  connectors: [orders-mysql]
+  subjects: [shop.shop.orders-key, shop.shop.orders-value, shop.shop.order_items-key, shop.shop.order_items-value]
+
+alert:
+  title: 'orders-mysql: connector orders-mysql task 0 FAILED (no recent records in shop.shop.orders)'
+  pipeline_map: |
+    pipeline orders-mysql
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+    2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+    3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: mysql:shop.order_items, mysql:shop.orders
+    4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=11.7h ago
+      from: connect:orders-mysql
+    5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=11.7h ago
+      from: connect:orders-mysql
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders-mysql}
+    summary: |
+      pipeline orders-mysql
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 mysql:shop.order_items [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+      2 mysql:shop.orders [mysql, owner ] OK binlog_expire=24.0h binlog_files=2 binlog_oldest=binlog.000006 gtid_mode=ON
+      3 connect:orders-mysql [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: mysql:shop.order_items, mysql:shop.orders
+      4 topic:shop.shop.order_items [kafka, owner arjun] OK newest_record=11.7h ago
+        from: connect:orders-mysql
+      5 topic:shop.shop.orders [kafka, owner arjun] OK newest_record=11.7h ago
+        from: connect:orders-mysql
+  - tool: connect_list_connectors
+    summary: |-
+      orders-mysql (source): RUNNING, 1 failed tasks
+    data:
+      - failed_tasks: 1
+        name: orders-mysql
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      io.debezium.DebeziumException: The connector is trying to read binlog starting at SourceInfo [currentGtid=null, currentBinlogFilename=binlog.000003, currentBinlogPosition=4523, currentRowNumber=0, serverId=0, sourceTime=null, threadId=-1, currentQuery=null, tableIds=[], databaseName=null], but this is no longer available on the server. Reconfigure the connector to use a snapshot when needed.
+    data:
+      name: orders-mysql
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - id: 0
+          state: FAILED
+          error: "io.debezium.DebeziumException: The connector is trying to read binlog starting at SourceInfo [currentGtid=null, currentBinlogFilename=binlog.000003, currentBinlogPosition=4523, currentRowNumber=0, serverId=0, sourceTime=null, threadId=-1, currentQuery=null, tableIds=[], databaseName=null], but this is no longer available on the server. Reconfigure the connector to use a snapshot when needed."
+  - tool: connect_config
+    input: {connector: orders-mysql}
+    summary: |-
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: ***
+      database.port: 3306
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+    data:
+      connector.class: io.debezium.connector.mysql.MySqlConnector
+      database.hostname: mysql
+      database.password: '***'
+      database.port: "3306"
+      database.user: debezium
+      table.include.list: shop.orders,shop.order_items
+      topic.prefix: shop
+  - tool: connect_source_offsets
+    input: {connector: orders-mysql}
+    summary: |-
+      orders-mysql partition server=shop: event=2, file=binlog.000003, gtids=3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1287, pos=4523, row=1, server_id=223344, ts_sec=1792706400
+    data:
+      connectors:
+        - connector: orders-mysql
+          offsets:
+            - partition: {server: shop}
+              offset: {event: 2, file: binlog.000003, gtids: "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1287", pos: 4523, row: 1, server_id: 223344, ts_sec: 1792706400}
+  - tool: source_settings
+    summary: |-
+      version=8.4.3
+      log_bin=ON
+      binlog_format=ROW
+      binlog_row_image=FULL
+      gtid_mode=ON
+      enforce_gtid_consistency=ON
+      server_id=223344
+      binlog_expire_logs_seconds=86400 s
+        (a connector stopped longer than this finds its binlog purged)
+      binlog_expire_logs_auto_purge=ON
+      lower_case_table_names=0
+    data:
+      - {name: version, value: 8.4.3}
+      - {name: log_bin, value: "ON"}
+      - {name: binlog_format, value: ROW}
+      - {name: binlog_row_image, value: FULL}
+      - {name: gtid_mode, value: "ON"}
+      - {name: enforce_gtid_consistency, value: "ON"}
+      - {name: server_id, value: "223344"}
+      - {name: binlog_expire_logs_seconds, value: "86400", unit: s}
+      - {name: binlog_expire_logs_auto_purge, value: "ON"}
+      - {name: lower_case_table_names, value: "0"}
+  - tool: source_role_grants
+    input: {pipeline_id: orders-mysql}
+    summary: |-
+      connector orders-mysql role debezium: exists=yes login=yes replication=yes
+      account: debezium@%
+      privileges: LOCK TABLES=no, RELOAD=yes, REPLICATION CLIENT=yes, REPLICATION SLAVE=yes, SHOW DATABASES=yes
+      selectable tables: 2 of 2
+      shop.orders: selectable=yes
+      shop.order_items: selectable=yes
+  - tool: source_table_replication
+    input: {pipeline_id: orders-mysql}
+    summary: |-
+      tables=2 without_primary_key=0 engine_not_innodb=0
+      shop.orders: has_primary_key=yes engine=InnoDB
+      shop.order_items: has_primary_key=yes engine=InnoDB
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.orders}
+    summary: |-
+      partition 0: 0–2214 (2214 records), newest 698 min ago
+  - tool: kafka_topic_offsets
+    input: {topic: shop.shop.order_items}
+    summary: |-
+      partition 0: 0–5031 (5031 records), newest 698 min ago
+  - tool: schema_registry_subjects
+    summary: |-
+      shop.shop.order_items-key
+      shop.shop.order_items-value
+      shop.shop.orders-key
+      shop.shop.orders-value
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders-mysql (1 past room searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "We stopped orders-mysql at 22:00 for the MySQL maintenance. This morning at 09:05 I ran FLUSH BINARY LOGS and PURGE BINARY LOGS TO 'binlog.000006' to get disk back before resuming it at 09:12. Why does task 0 fail now, and what gets the shop tables flowing again?"
+
+expect:
+  root_cause:
+    - [binlog*, gtid*]
+    - [purg*, no longer available, removed, deleted, gone]
+  root_cause_forbidden:
+    - [history topic, missing]
+    - [history topic, deleted]
+    - [server id, clash]
+    - [replication slave]
+    - [repoint*]
+    - [schema change]
+  first_failing_layer: kafka-connect
+  expected_facts:
+    - id: f_task_failed_binlog
+      tool: connect_status
+      match: [task 0 failed, read binlog, no longer available on the server]
+      required: true
+    - id: f_stored_position
+      tool: connect_source_offsets
+      match: [file binlog 000003, pos 4523]
+      required: true
+    - id: f_oldest_binlog
+      tool: pipeline_map
+      match: [binlog oldest binlog 000006]
+    - id: f_expire
+      tool: source_settings
+      match: [binlog expire logs seconds 86400]
+  claims:
+    - about: root_cause
+      facts: [f_task_failed_binlog, f_stored_position, f_oldest_binlog]
+  evidence_tools: [connect_status, connect_source_offsets]
+  fix: [[connect_stop_connector], [connect_reset_source_offsets]]
+  fix_targets:
+    connect_stop_connector: {connector: orders-mysql}
+    connect_reset_source_offsets: {connector: orders-mysql}
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, connect_delete_connector, pg_drop_replication_slot, pg_add_publication_table, pg_snapshot_signal, pg_set_replica_identity, pg_resnapshot_rows, source_grant_select, source_end_session, source_create_heartbeat_table, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

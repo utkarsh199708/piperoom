@@ -530,6 +530,61 @@ connector key fixes either), the slot drop and the offset reset.
 `devctl break` for either incident (an A1 follow-up: a second listener on the dev broker that advertises an
 unresolvable name, and a firewall rule between the Connect and Postgres containers). Re-record them with the
 procedure of "Stale source offsets (Q5f)" above once those breaks exist.
+
+### MySQL scenarios (Q8i)
+
+Four files on the MySQL pipeline `orders-mysql` (`source_kind: mysql`, Debezium MySQL connector `orders-mysql`,
+`topic.prefix` shop, tables `shop.orders` and `shop.order_items`), one per `devctl break` of the `mysql` dev
+profile (`dev/scenarios.md` §25-§28, Q8a; `docs/design/mysql-source.md` §10.4, Jira KAN-302). Each label (the
+header, the description and this table) names the **layer and the action**, the row's done-when. The pipeline is
+the one of `dev/owners.mysql.yaml` with its per-pipeline `mysql` owner.
+
+| Scenario | How the room opens | Root cause | First failing / root-cause layer | Label (action) | Tool that shows it |
+|---|---|---|---|---|---|
+| `mysql-binlog-purged` | task 0 FAILED after a resume | the binlogs after the stored position (binlog.000003, GTIDs ...:1-1287) were purged during a maintenance stop | kafka-connect / **mysql** | `connect_stop_connector` + `connect_reset_source_offsets` to empty, one proposal (a re-snapshot) | `mysql_binlog_status` (purged); `connect_source_offsets` against `pipeline_map`'s `binlog_oldest` |
+| `mysql-history-topic-deleted` | task 0 FAILED after a resume | a topic clean-up deleted the schema history topic `schema-history.shop` | kafka-connect / kafka | `connect_update_connector_config` `snapshot.mode=recovery`, then back | `kafka_schema_history` (missing) |
+| `mysql-missing-replication-grant` | task 0 FAILED after a task restart | `REPLICATION SLAVE` revoked from `debezium@%` | kafka-connect / **mysql** | none: the room drafts `GRANT REPLICATION SLAVE ON *.* TO 'debezium'@'%'` (design §8.4), then a task restart | `source_role_grants` (`REPLICATION SLAVE=no`) |
+| `mysql-server-id-clash` | freshness alert: changes late and in bursts, nothing FAILED | `orders-mysql-shadow`, a copy of the config, joins with the same `database.server.id` 5401 | kafka-connect / kafka-connect | `connect_update_connector_config` `database.server.id` (a unique id), or `connect_delete_connector` on the shadow | `mysql_binlog_status` (id clash); the worker log's reconnects as `sid:5401` |
+
+**What is graded now.** Every file loads and validates against today's `LiveTools`/`LiveActions`. Graded: root
+cause, first failing layer, the facts, the forbidden actions, `root_cause_layer` where it is `kafka` or
+`kafka-connect`, and `mysql-binlog-purged`'s fix (both Q5b actions are replayed and a reset to empty needs no
+binlog reader; its script is in `../q6_replay_test.go`'s `q6Fixes`). **Not graded yet**, each named in its
+header with the exact `expect` lines to add:
+
+- `root_cause_layer: mysql` (binlog-purged, missing-replication-grant): `events.Layers` lists no `mysql` layer
+  until the Q0 item 7 contract lands (`owners.KnownLayers` adds it locally), and validation takes only
+  `events.IncidentLayers()`.
+- `mysql_binlog_status` and `kafka_schema_history` recordings and facts: `evals.LiveTools()` registers neither
+  (Q8j, C6, builds "the MySQL tool set when a scenario says `source_kind: mysql`").
+- the `snapshot.mode` and `database.server.id` fixes: `connect_update_connector_config` offers the two MySQL keys
+  only where a binlog reader is wired (`actions.Deps.Binlog`, Q8e), which the replay does not do. The shadow
+  connector of `server-id-clash` is outside the pipeline, as in `dev/owners.mysql.yaml`, so in this room the
+  in-scope form is a new id for `orders-mysql` itself; the file forbids deleting or stopping `orders-mysql`.
+
+Until then each file proves its cause from replayed reads: the task's error in `connect_status`, the stored
+binlog position in `connect_source_offsets`, `binlog_oldest` on the `mysql:` nodes of `pipeline_map`, the
+privileges line of `source_role_grants` on MySQL, and (server-id-clash) `connect_worker_logs` at `INFO` showing a
+reconnect as `sid:5401` every 30 s, plus a steer from the person who made the change. The `mysql:` nodes render
+`owner ` empty, as the topology builder does today (its `layerOwner` reads the top-level `layers:` only).
+
+**Synthesised from the code paths, not recorded** (`RECORDED: NO`): no Docker in the session, and §25-§28 are not
+observed on the profile yet, including Debezium's error texts. The clock is 2026-10-23T09:40:00Z. To re-record
+one (needs Docker and `ANTHROPIC_API_KEY`):
+
+```sh
+go run ./cmd/devctl up --owner <tag>
+docker compose -f dev/docker-compose.yml --profile mysql up -d --wait mysql
+go run ./cmd/devctl break binlog-purged        # or history-topic-deleted, missing-replication-grant, server-id-clash
+OWNERS_FILE=dev/owners.mysql.yaml go run ./cmd/server   # server-id-clash: go run ./cmd/devctl alert server-id-clash
+# let the agent investigate, label the room (cause, layer, action), close it, then export and convert it:
+curl -s -H 'X-User: arjun' http://127.0.0.1:8090/api/rooms/<id>/export > room.json
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.mysql.yaml -out ~/piperoom-learned
+go run ./cmd/devctl fix binlog-purged
+```
+
+then replace the recordings as in "Stale source offsets (Q5f)" above.
+
 ### Setup scenarios (U1-19)
 
 Six files about `piperoom-setup`, where the failure is a setup check, a compose validator rule or the

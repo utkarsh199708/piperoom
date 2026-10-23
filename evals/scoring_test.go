@@ -458,6 +458,23 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The setup check connect-source-reachable fails: the Connect container resolves the source host postgres to 192.0.2.1, a TEST-NET-1 black-hole address from a stale /etc/hosts entry, so pg-orders-connector task 0 FAILED with java.net.SocketTimeoutException: connect timed out while the database answers the room's own reads. Restart the Connect service with compose_restart so Docker regenerates /etc/hosts and the worker starts with an empty DNS cache.",
 		wrong: "The source Postgres is down, so the connector stays idle; restart the database and the connector.",
 	},
+	// The Q8i MySQL scenarios (C7, KAN-302).
+	"mysql-binlog-purged": {
+		good:  "orders-mysql task 0 FAILED in Kafka Connect: its stored source offset is binlog.000003 position 4523 (GTIDs 3e11fa47-71ca-11e1-9e33-c80aa9429562:1-1287), but the MySQL source purged every binlog before binlog.000006 at 09:05 (PURGE BINARY LOGS), so the position the connector must resume from is gone from the server. Stop orders-mysql and reset its source offsets to empty in one proposal; on resume Debezium re-snapshots shop.orders and shop.order_items.",
+		wrong: "The schema history topic schema-history.shop is missing, so Debezium fails to rebuild the table schemas; set snapshot.mode=recovery on the connector.",
+	},
+	"mysql-history-topic-deleted": {
+		good:  "orders-mysql task 0 FAILED in Kafka Connect with 'The db history topic is missing': the weekly Kafka topic clean-up deleted the connector's schema history topic schema-history.shop at 08:45 while it was stopped, so Debezium fails to rebuild the table schemas for its stored position binlog.000007, which is still on the server. Set snapshot.mode=recovery on orders-mysql with connect_update_connector_config so it rebuilds the history and keeps its position, then set it back.",
+		wrong: "The MySQL server purged the binlog the connector needs while it was stopped; reset its offsets and re-snapshot.",
+	},
+	"mysql-missing-replication-grant": {
+		good:  "orders-mysql task 0 FAILED in Kafka Connect: the MySQL source refuses its binlog stream with 'Access denied; you need the REPLICATION SLAVE privilege', because the 09:00 privilege clean-up revoked REPLICATION SLAVE from the connector account debezium@% (source_role_grants shows the REPLICATION SLAVE flag false, while login and SELECT on both tables work). A DBA must run GRANT REPLICATION SLAVE ON *.* TO 'debezium'@'%'; then restart task 0.",
+		wrong: "The debezium account's password was rotated, so the connector's login to MySQL fails; update database.password and restart it.",
+	},
+	"mysql-server-id-clash": {
+		good:  "orders-mysql's binlog stream in Kafka Connect keeps dropping and reconnecting about every 30 s (the worker log shows each reconnect as sid:5401): orders-mysql-shadow, registered yesterday as a copy of orders-mysql's config, joins the MySQL source with the same database.server.id 5401, so the source kills the older binlog dump thread each time the other connects. Give the shadow or orders-mysql a unique database.server.id, or delete orders-mysql-shadow.",
+		wrong: "The network between Kafka Connect and MySQL is unstable, so the binlog connection keeps dropping; check the firewall and the load balancer idle timeout.",
+	},
 }
 
 // TestScoringOldVsNew prints, for every scenario and each of {good,

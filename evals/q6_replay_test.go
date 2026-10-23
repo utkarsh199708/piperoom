@@ -40,6 +40,11 @@ var q6Fixes = map[string][]events.ProposalStep{
 		ps("connect_stop_connector", `{"connector":"pg-orders-connector"}`),
 		ps("connect_reset_source_offsets", `{"connector":"pg-orders-connector","stop_first":true}`),
 	},
+	// Q8i: a MySQL connector's reset to empty needs no binlog reader.
+	"mysql-binlog-purged": {
+		ps("connect_stop_connector", `{"connector":"orders-mysql"}`),
+		ps("connect_reset_source_offsets", `{"connector":"orders-mysql","stop_first":true}`),
+	},
 }
 
 // requiredFacts returns sc's required facts on tool.
