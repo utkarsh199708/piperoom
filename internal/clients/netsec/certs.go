@@ -27,8 +27,8 @@ type CertInfo struct {
 	// for the dialed host name.
 	Verified bool `json:"verified"`
 	// NameMatches reports whether the certificate is valid for the dialed
-	// name (a SAN DNS name, a SAN IP address, or the common name when the
-	// certificate has no SANs). It separates "the name does not match" from
+	// name (a SAN DNS name or a SAN IP address; like Go's own TLS clients it
+	// never falls back to the common name). It separates "the name does not match" from
 	// "the chain is not trusted", which a caller must tell apart: the first is
 	// usually a server misconfiguration, the second a missing CA.
 	NameMatches bool `json:"name_matches"`

@@ -107,7 +107,7 @@ func (r roomTargets) Labels(p owners.Pipeline) []string {
 	cfg := overlayLiteral(r.cfg, p)
 	b := newTargetSet()
 	for _, ct := range kafkatools.CertTargets(cfg) {
-		b.add(kindOfCertLabel(ct.Label), labelOf(ct.Label), ct.Addr, ct.TLS, ct.Config, "")
+		b.add(kindOfCertLabel(ct.Label), labelOf(ct.Label), certAddr(ct), ct.TLS, ct.Config, "")
 	}
 	if strings.EqualFold(warehouseKind(cfg.WarehouseKind), "postgres") {
 		if addr := hostPortOf(cfg.WarehouseDBURL, "5432"); addr != "" {
@@ -135,7 +135,7 @@ func (r roomTargets) Target(ctx context.Context, p owners.Pipeline, label string
 			if labelOf(ct.Label) != label {
 				continue
 			}
-			b.add(kindOfCertLabel(ct.Label), labelOf(ct.Label), ct.Addr, ct.TLS, ct.Config, "")
+			b.add(kindOfCertLabel(ct.Label), labelOf(ct.Label), certAddr(ct), ct.TLS, ct.Config, "")
 		}
 		if kindOfLabel(label) == KindWarehouse && strings.EqualFold(warehouseKind(cfg.WarehouseKind), "postgres") {
 			if addr := hostPortOf(cfg.WarehouseDBURL, "5432"); addr != "" {
@@ -421,6 +421,25 @@ func schemePort(scheme, fallback string) string {
 		return "9000"
 	}
 	return fallback
+}
+
+// certAddr is a configured endpoint's address in the Endpoint.Addr form
+// (lower-case host, numeric port). A broker may be listed without a port,
+// which the Kafka client reads as 9092; Connect and the registry get their
+// standard ports the same way. An address that does not reduce stays as
+// written, so its dns check reports it.
+func certAddr(ct kafkatools.CertTarget) string {
+	port := "9092"
+	switch kindOfCertLabel(ct.Label) {
+	case KindConnect:
+		port = "8083"
+	case KindRegistry:
+		port = "8081"
+	}
+	if addr := hostPortOf(ct.Addr, port); addr != "" {
+		return addr
+	}
+	return ct.Addr
 }
 
 // hostPortOf reads the host and port out of a DSN, URL or bare host[:port],

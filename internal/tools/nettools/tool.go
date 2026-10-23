@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -222,27 +223,26 @@ func redactedText(s string) string {
 
 // result renders the Summary and applies the caps. A failed check is a finding,
 // not a tool error: the room records the result and the model reads which step
-// failed and how to fix it.
+// failed and how to fix it. The verdict counts every check, before the cap, and
+// the cap keeps every failure and warning and the target-wide checks
+// (listeners, connect_view) ahead of passing per-endpoint steps, so a long
+// broker list cannot push the one failing check out of the result.
 func (t *netProbe) result(d probeData) tools.Result {
 	total := len(d.Checks)
+	failed, warned := countChecks(d.Checks)
 	cut := false
 	if total > maxChecks {
-		d.Checks = d.Checks[:maxChecks]
+		d.Checks = capChecks(d.Checks, maxChecks)
 		cut = true
 	}
-	summary := summarize(d, total)
+	summary := summarize(d, total, failed, warned)
 	s, truncated := tools.Truncate(summary)
 	return tools.Result{Summary: s, Data: d, Truncated: truncated || cut}
 }
 
-// summarize is the model-readable view: one header with the target and its
-// endpoints, then one line per check, failures and warnings first in the order
-// they were run. total is the check count before Data's cap, so the "more
-// checks" line never hides a check Data does not carry either.
-func summarize(d probeData, total int) string {
-	var sb strings.Builder
-	failed, warned := 0, 0
-	for _, c := range d.Checks {
+// countChecks counts the failed and warned checks.
+func countChecks(checks []Check) (failed, warned int) {
+	for _, c := range checks {
 		switch c.Status {
 		case StatusFail:
 			failed++
@@ -250,6 +250,50 @@ func summarize(d probeData, total int) string {
 			warned++
 		}
 	}
+	return failed, warned
+}
+
+// checkRank orders checks for the caps: failures, then warnings, then the
+// target-wide checks, then the passing or skipped per-endpoint steps.
+func checkRank(c Check) int {
+	switch {
+	case c.Status == StatusFail:
+		return 0
+	case c.Status == StatusWarn:
+		return 1
+	case c.ID != "dns" && c.ID != "tcp" && c.ID != "tls":
+		return 2
+	}
+	return 3
+}
+
+// byRank returns the indexes of checks ordered by checkRank, keeping run order
+// within a rank.
+func byRank(checks []Check) []int {
+	idx := make([]int, len(checks))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool { return checkRank(checks[idx[a]]) < checkRank(checks[idx[b]]) })
+	return idx
+}
+
+// capChecks keeps the n highest-ranked checks, in the order they ran.
+func capChecks(checks []Check, n int) []Check {
+	keep := byRank(checks)[:n]
+	sort.Ints(keep)
+	out := make([]Check, 0, n)
+	for _, i := range keep {
+		out = append(out, checks[i])
+	}
+	return out
+}
+
+// summarize is the model-readable view: one header with the target, its
+// endpoints and the verdict over all total checks, then one line per check,
+// failures and warnings first, at most maxSummaryChecks lines.
+func summarize(d probeData, total, failed, warned int) string {
+	var sb strings.Builder
 	fmt.Fprintf(&sb, "net_probe %s (%s): ", d.Target, strings.Join(d.Endpoints, ", "))
 	switch {
 	case failed > 0:
@@ -262,12 +306,21 @@ func summarize(d probeData, total int) string {
 	if failed+warned == 0 {
 		sb.WriteString(": " + checkSummary(d.Checks))
 	}
-	for i, c := range d.Checks {
-		if i >= maxSummaryChecks {
-			fmt.Fprintf(&sb, "\n… %d more checks not shown (the data is capped at %d)", total-maxSummaryChecks, total)
+	shown := 0
+	for _, i := range byRank(d.Checks) {
+		if shown == maxSummaryChecks {
 			break
 		}
-		sb.WriteString("\n- " + checkLine(c))
+		sb.WriteString("\n- " + checkLine(d.Checks[i]))
+		shown++
+	}
+	if hidden := total - shown; hidden > 0 {
+		fmt.Fprintf(&sb, "\n… %d more checks not shown", hidden)
+		if dropped := total - len(d.Checks); dropped > 0 {
+			fmt.Fprintf(&sb, " (Data carries %d of the %d; the other %d are in neither)", len(d.Checks), total, dropped)
+		} else {
+			sb.WriteString(" (all are in Data)")
+		}
 	}
 	if d.Note != "" {
 		sb.WriteString("\nnote: " + d.Note)
