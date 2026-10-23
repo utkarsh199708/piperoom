@@ -2,10 +2,11 @@
 
 Piperoom is **read-only by default**: the agent proposes fixes, people approve them, but a fully
 approved fix never runs until you turn write mode on. This page lists every write call of the P3 fix
-actions and the exact, minimal credential for each, for the day you set `PIPEROOM_WRITE_MODE=on`. The
-read-only grants are in [permissions.md](permissions.md); keep them too. The switch stops the executor,
-it does not take write rights away from a role that has them (`cmd/server/writemode.go`). Grant exactly
-what is below and nothing more, on **dedicated** service accounts, never a human or application credential.
+actions, except the four source admin actions in [source-admin.md](source-admin.md), with the exact,
+minimal credential for each, for the day you set `PIPEROOM_WRITE_MODE=on`. The read-only grants are in
+[permissions.md](permissions.md); keep them too. The switch stops the executor, it does not take write
+rights away from a role that has them (`cmd/server/writemode.go`). Grant exactly what is below and nothing
+more, on **dedicated** service accounts, never a human or application credential.
 
 ## The two settings
 
@@ -26,7 +27,9 @@ role whose sessions start read-only (`default_transaction_read_only = on`) and a
 pool at 2 connections and applies `lock_timeout` (5 s) and `statement_timeout` (10 s) inside each write
 transaction.
 
-Three actions write through it (layer `postgres`):
+Three actions write through it (layer `postgres`); the four source admin actions of the same pool
+(`pg_set_replica_identity`, `source_grant_select`, `source_end_session`, `source_create_heartbeat_table`)
+are in [source-admin.md](source-admin.md):
 
 | Action | SQL | Minimal grant | Code |
 |---|---|---|---|
@@ -70,9 +73,10 @@ Notes:
   (and the other replication-slot functions) to superusers and roles with the `REPLICATION` attribute, so
   owning the slot, or being a member of its owner, does not by itself permit the call. The slot is usually
   owned by Debezium's own replication user.
-- **Do not grant table or schema `SELECT` to the writer.** It does not need it, and it must not read data
-  the read-only role cannot. The writer's re-reads (`pg_publication`, `pg_publication_tables`,
-  `pg_replication_slots`) are readable by any role.
+- **Do not grant table or schema `SELECT` to the writer**, except the `SELECT ... WITH GRANT OPTION` that
+  `source_grant_select` needs on the captured tables ([source-admin.md](source-admin.md)). It needs no
+  other read, and it must not read data the read-only role cannot. The writer's re-reads (`pg_publication`,
+  `pg_publication_tables`, `pg_replication_slots`) are readable by any role.
 - The signal table (`signal.data.collection`) must already exist and be in the publication; creating it and
   putting it in the publication is a DBA step, not one of these grants. `pg_snapshot_signal` refuses a signal
   table that is also a source table (`internal/actions/pgactions/snapshot_signal.go`).
