@@ -144,7 +144,7 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 			// connector, placeholder topics out of it) but say none of it is
 			// proven.
 			for _, tbl := range p.SourceTables {
-				fromTables = append(fromTables, inferred(Edge{From: "pg:" + tbl, To: cid}))
+				fromTables = append(fromTables, inferred(Edge{From: sourceNodeID(p, tbl), To: cid}))
 			}
 			for _, t := range fallbackTopics(p.SourceTables) {
 				addTopic(t, true)
@@ -165,10 +165,10 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 			switch {
 			case !exact:
 				streamed = append(streamed, tbl)
-				fromTables = append(fromTables, inferred(Edge{From: "pg:" + tbl, To: cid}))
+				fromTables = append(fromTables, inferred(Edge{From: sourceNodeID(p, tbl), To: cid}))
 			case m.streams(tbl):
 				streamed = append(streamed, tbl)
-				fromTables = append(fromTables, Edge{From: "pg:" + tbl, To: cid})
+				fromTables = append(fromTables, Edge{From: sourceNodeID(p, tbl), To: cid})
 			}
 		}
 		ts, proven, placeholder := sourceTopics(snap.config, streamed)

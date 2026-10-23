@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
 
@@ -322,7 +323,20 @@ func (s Scope) CheckSubject(subject string) error {
 	return refuse("subject", subject, s, "allowed subjects: "+strings.Join(allowed, ", "))
 }
 
-// CheckSourceTable refuses a table that is not one of the pipeline's source tables.
+// SourceKind returns the room pipeline's source kind, owners.SourceKindPostgres
+// or owners.SourceKindMySQL; "" when unscoped and for a batch pipeline (no
+// source database). The source-table rules do not depend on it: a MySQL
+// source_tables entry is db.table, the same two-part shape as a Postgres
+// schema.table, and its topic is <topic_prefix>.<db>.<table> (Q8d).
+func (s Scope) SourceKind() string {
+	if s.unscoped || s.p.KindOrDefault() != events.PipelineKindCDC {
+		return ""
+	}
+	return s.p.SourceKindOrDefault()
+}
+
+// CheckSourceTable refuses a table that is not one of the pipeline's source
+// tables (schema.table on Postgres, db.table on MySQL).
 func (s Scope) CheckSourceTable(table string) error {
 	if s.unscoped || contains(s.p.SourceTables, table) {
 		return nil
@@ -517,12 +531,19 @@ type ConfigReader interface {
 // not a valid slot name (blank included) is an error too, so it never turns
 // into the default slot, which can belong to another pipeline. Only a config
 // with no slot.name key means the default. An empty list with a nil error
-// means no connector of the pipeline is a Debezium Postgres source.
+// means no connector of the pipeline is a Debezium Postgres source, or the
+// pipeline's source_kind is mysql.
 //
 // Unscoped callers do not filter, so calling it unscoped is an error.
 func (s Scope) Slots(ctx context.Context, cr ConfigReader) ([]string, error) {
 	if s.unscoped {
 		return nil, errors.New("tools: Slots needs a room pipeline (unscoped callers do not filter)")
+	}
+	if s.p.IsMySQL() {
+		// MySQL has no replication slots (Load refuses watch.slot on it), so
+		// no Connect call and no default "debezium" slot that could be
+		// another pipeline's.
+		return nil, nil
 	}
 	if declared := s.p.Watch().Slot; declared != "" {
 		return []string{declared}, nil

@@ -1,0 +1,150 @@
+{
+  "scenario": "setup/flat-plugin-dir",
+  "source": "postgres",
+  "target": "compose",
+  "sink": "none",
+  "recorded_at": "2026-10-25T09:40:00Z",
+  "note": "Composed from jar_list's own listing (internal/setup/ops/envops.go), plugin_install's pinned artifact (internal/setup/targets/compose/plugin.go) and compose_restart's argv, on the fixed clock of the U1-19 setup scenarios. No Docker session: re-record on the dev stack per evals/scenarios/README.md, Setup scenarios (U1-19).",
+  "ops": [
+    {
+      "op": "jar_list",
+      "tier": "T0",
+      "class": "local",
+      "params": {"path": "."},
+      "result": {
+        "ok": true,
+        "summary": "12 jar(s) directly in /kafka/connect; each connector needs its own directory",
+        "data": {
+          "path": "/kafka/connect",
+          "jars": [],
+          "flat": [
+            "debezium-api-3.2.0.Final.jar",
+            "debezium-connector-postgres-3.2.0.Final.jar",
+            "debezium-core-3.2.0.Final.jar",
+            "debezium-embedded-3.2.0.Final.jar",
+            "postgresql-42.7.4.jar",
+            "kafka-connect-jdbc-10.7.6.jar",
+            "guava-33.2.1-jre.jar",
+            "jackson-core-2.17.2.jar",
+            "jackson-databind-2.17.2.jar",
+            "jackson-annotations-2.17.2.jar",
+            "antlr4-runtime-4.13.1.jar",
+            "protobuf-java-3.25.3.jar"
+          ],
+          "debezium_versions": ["3.2.0.Final"],
+          "issues": ["jars sit directly in the plugin root, not in a plugin directory"],
+          "scanned_dirs": 1
+        },
+        "receipt": {
+          "kind": "file",
+          "target": "/kafka/connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:40:07Z",
+          "took_ms": 12,
+          "out_mac": "91b3d5f7902a4c6e8b0d2f47c9e1a3b5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e"
+        }
+      }
+    },
+    {
+      "op": "plugin_install",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_1",
+      "step_index": 0,
+      "params_hash": "73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012b3d4a6c8e0f1a2b3c4d5e6f",
+      "params": {"release": "3.2.0.Final", "connector": "postgres"},
+      "result": {
+        "ok": true,
+        "summary": "installed debezium-connector-postgres 3.2.0.Final into connect-plugins/debezium-connector-postgres (12 jars)",
+        "data": {
+          "dir": "connect-plugins/debezium-connector-postgres",
+          "release": "3.2.0.Final",
+          "connector": "postgres",
+          "jars": 12,
+          "sha512": "4f1c0a6e8b2d5f7901a3c5e7b9d0f2a4c6e8b1d3f5a7c9e0b2d4f6a8c1e3b5d7"
+        },
+        "receipt": {
+          "kind": "http",
+          "target": "https://repo1.maven.org/maven2/io/debezium/debezium-connector-postgres/3.2.0.Final/debezium-connector-postgres-3.2.0.Final-plugin.tar.gz",
+          "exit_code": 0,
+          "at": "2026-10-25T09:41:16Z",
+          "took_ms": 18422,
+          "out_mac": "a3c5e7b9d0f2a4c6e8b1d3f5a7c9e0b2d4f6a8c1e3b5d7902a4c6e8b0d2f471c"
+        }
+      }
+    },
+    {
+      "op": "compose_restart",
+      "tier": "T1",
+      "class": "local",
+      "proposal_id": "p_setup_2",
+      "step_index": 0,
+      "params_hash": "4a6c8e0f1a2b3c4d5e6f73b1d0f6a9c2e48b7d5a1f0c3e6b8d2a4c5e7f9012b3d",
+      "params": {"services": ["connect"]},
+      "result": {
+        "ok": true,
+        "summary": "compose restart: connect",
+        "data": {"project": "piperoom-orders", "services": [{"service": "connect", "state": "running"}]},
+        "receipt": {
+          "kind": "exec",
+          "argv": ["docker", "compose", "--project-directory", "C:\\orders", "-f", "compose.yaml", "--env-file", ".env", "restart", "connect"],
+          "target": "connect",
+          "exit_code": 0,
+          "at": "2026-10-25T09:43:04Z",
+          "took_ms": 9231,
+          "out_mac": "6e8b0d2f47c9e1a3b5d8f0a2c4e6b8d1f3a5c7e9b0d2f4a6c8e1b3d5f7902a4c"
+        }
+      }
+    }
+  ],
+  "ladder": {
+    "plan_id": "pl_orders_setup",
+    "nonce_hash": "29654c444daab10f544bc97271139ee943c860e9c9681e284dace9c14667ea5a",
+    "reads": [
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:46:02Z"
+      },
+      {
+        "tool": "connect_status",
+        "data": {"name": "pg-orders-connector", "state": "RUNNING", "tasks": [{"id": 0, "state": "RUNNING"}]},
+        "at": "2026-10-25T09:46:02Z"
+      },
+      {
+        "tool": "kafka_topic_offsets",
+        "data": {"topic": "pg.public.orders", "partitions": [{"partition": 0, "start": 0, "end": 2}], "total_records": 2},
+        "at": "2026-10-25T09:46:03Z"
+      },
+      {
+        "tool": "debezium_metrics",
+        "data": {"connector": "pg-orders-connector", "metrics_found": 11, "snapshot": {"SnapshotCompleted": 1, "SnapshotRunning": 0}},
+        "at": "2026-10-25T09:46:04Z"
+      },
+      {
+        "tool": "kafka_find_by_key",
+        "data": {"topic": "pg.public.orders", "key": "0b3f8d2a7c4e19f6a5d8b0c2e4f60718", "found": true, "records": [{"partition": 0, "offset": 1}]},
+        "at": "2026-10-25T09:46:05Z"
+      },
+      {
+        "tool": "schema_registry_subjects",
+        "data": {"subjects": ["pg.public.orders-key", "pg.public.orders-value"], "deleted_subjects": []},
+        "at": "2026-10-25T09:46:06Z"
+      }
+    ],
+    "verified": {
+      "rungs": [
+        {"name": "connector_running", "ok": true, "note": "the connector is RUNNING"},
+        {"name": "tasks_running", "ok": true, "note": "1 task(s) RUNNING"},
+        {"name": "canary_topic", "ok": true, "note": "the topic exists with 1 partition(s)"},
+        {"name": "snapshot_complete", "ok": true, "note": "SnapshotCompleted"},
+        {"name": "canary_event", "ok": true, "note": "the canary event with the nonce as key is on the topic"},
+        {"name": "canary_subject", "ok": true, "note": "2 subject(s) under the canary topic's prefix"},
+        {"name": "sink_row", "ok": true, "note": "no sink was set up"},
+        {"name": "person_change", "ok": false, "note": "awaiting the person's change"}
+      ]
+    },
+    "table": "public.orders",
+    "example_sql": "INSERT INTO public.orders (id, amount, status, updated_at) VALUES (900001, 42.50, 'packed', now());"
+  }
+}

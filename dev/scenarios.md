@@ -955,3 +955,116 @@ then puts the dev baseline back instead of resuming on the new database: the con
 `dev/connectors` (`orders`, `debezium_orders`), `devctl_orders_v2` and its slot dropped, resume with no offsets
 (Debezium snapshots `orders`; the load is an upsert), and waits for an active slot, a marker order in the warehouse
 and order-sync lag 0. On a healthy stack without `devctl_orders_v2` it does nothing.
+
+## MySQL source: `binlog-purged`, `history-topic-deleted`, `missing-replication-grant`, `server-id-clash` (Q8a)
+
+Four causes of a MySQL pipeline from the Q wave's Stack Overflow analysis (`docs/design/mysql-source.md` §10.1), on
+the opt-in `mysql` compose profile: MySQL 8.4 LTS (GTIDs on, ROW binlog, full row images, `server-id=223344`) read by
+the Debezium MySQL connector `orders-mysql` on the shared `connect` worker (`database.server.id=5401`,
+`topic.prefix=shop`, history topic `schema-history.shop`). Start it next to the default stack:
+
+```
+go run ./cmd/devctl up --owner <tag>
+docker compose -f dev/docker-compose.yml --profile mysql up -d --wait mysql
+```
+
+Every break and fix first checks the profile answers (else it stops with that command) and registers `orders-mysql`
+from `dev/connectors/orders-mysql.json` when it is missing, waiting for its snapshot in `shop.shop.orders`. They take
+the stack lock like every other break. Rooms need the server on **`OWNERS_FILE=dev/owners.mysql.yaml`** (the
+baseline plus pipeline `orders-mysql`, `source_kind: mysql`, layer owner `mysql`), which loads only once Q8d merges.
+Users and passwords (dev only): `dev/mysql/README.md`.
+
+Written on 2026-10-23 **without a running stack** (no Docker daemon in that session): the SQL and REST steps are
+unit-tested against a fake profile (`go test ./cmd/devctl -run 'MySQL|BinlogPurged|HistoryTopic|MissingReplication|ServerIDClash'`),
+but **nothing in §25-§28 has been observed yet**, including the Debezium error texts below (from the Debezium MySQL
+connector's messages, unconfirmed on 3.2). Whoever runs them first: replace the "Expected" blocks with what you saw,
+and record the profile's start time (the row asks for under 3 minutes). Scenarios label by cause, not by error text.
+
+| Scenario | How the room opens | Tool that shows it | What ends it |
+|---|---|---|---|
+| `binlog-purged` | watcher: `connector_down` (task 0 FAILED) | `mysql_binlog_status` (Q8c): "the binlog the connector needs is purged" | `connect_stop_connector` + `connect_reset_source_offsets` (to empty): a re-snapshot |
+| `history-topic-deleted` | watcher: `connector_down` | `kafka_schema_history` (Q8e): the topic is missing | `connect_update_connector_config` `snapshot.mode=recovery` |
+| `missing-replication-grant` | watcher: `connector_down` | `source_role_grants` on MySQL: `REPLICATION SLAVE` false | a DBA's `GRANT` (drafted, no action: design §8.4) |
+| `server-id-clash` | alert (`devctl alert server-id-clash`, `source: freshness`): both connectors stay RUNNING | `mysql_binlog_status`: `database.server.id` equals another connector's | `connect_delete_connector` on the shadow, or a new `database.server.id` for it |
+
+### 25. `binlog-purged` — the binlog the connector needs is gone
+
+**Break (`devctl break binlog-purged`):** `orders-mysql` is stopped (Connect REST `stop`: a maintenance window), three
+orders are written, `FLUSH BINARY LOGS` runs twice and `PURGE BINARY LOGS TO` the newest file drops every older one,
+so the stored file/position and the GTIDs after it are no longer on the server. Resumed, Debezium (default
+`snapshot.mode` `initial`) cannot continue and fails. Refuses unless task 0 is `RUNNING`. The log line carries the
+stored position and `@@gtid_purged`.
+
+**Expected (not yet observed):**
+```
+connector   orders-mysql: RUNNING, tasks 0=FAILED  trace: ... The connector is trying to read binlog starting at ..., but this is no longer available on the server ...
+            (with GTIDs it may instead say that GTIDs it needs have been purged)
+mysql_binlog_status   stored gtids miss gtid_purged: the binlog the connector needs is purged
+watcher     connector_down (sev2)
+```
+
+**Fix:** re-snapshot. `devctl fix` stops the connector, deletes its stored offsets and `schema-history.shop` (it
+describes the old position; the snapshot writes it again), resumes, and waits for task 0 `RUNNING`, the history topic,
+and a marker order in `shop.shop.orders`. On a `RUNNING` connector it does nothing.
+
+### 26. `history-topic-deleted` — the schema history topic is missing
+
+**Break (`devctl break history-topic-deleted`):** a topic clean-up deletes `schema-history.shop` while the connector
+is stopped. The stored offset says the snapshot is done, so on resume Debezium needs the history to know the table
+schemas at that position, finds no topic and fails. Refuses when the topic is already missing or task 0 is not
+`RUNNING`.
+
+**Expected (not yet observed):**
+```
+connector   orders-mysql: RUNNING, tasks 0=FAILED  trace: ... The db history topic is missing. You may attempt to recover it by reconfiguring the connector to recovery
+kafka_schema_history   orders-mysql: schema-history.shop does not exist
+watcher     connector_down (sev2)
+```
+
+**Fix:** `snapshot.mode=recovery` (Debezium 3.x; `schema_only_recovery` before 3.0): the connector rebuilds the
+history from the current table schemas and keeps its binlog position. Safe here because no DDL ran since the stored
+position; in an incident `kafka_schema_history` cannot prove that, and the action's preview says so. `devctl fix`
+stops the connector (and deletes a partial history topic if one exists), sets the mode, resumes, waits for task 0
+`RUNNING` and the topic, then puts the `dev/connectors` config back (no `snapshot.mode`) and waits for a marker order.
+On a `RUNNING` connector with its history topic it does nothing.
+
+### 27. `missing-replication-grant` — the connector user cannot read the binlog
+
+**Break (`devctl break missing-replication-grant`):** a privilege clean-up runs `REVOKE REPLICATION SLAVE ON *.* FROM
+'debezium'@'%'`. A global privilege change reaches a session only when it reconnects, so the break restarts task 0;
+the new binlog connection is refused. Refuses unless the grant is there and task 0 is `RUNNING`.
+
+**Expected (not yet observed):**
+```
+connector   orders-mysql: RUNNING, tasks 0=FAILED  trace: ... Access denied; you need (at least one of) the REPLICATION SLAVE privilege(s) for this operation
+source_role_grants   'debezium'@'%': replication_slave=false
+watcher     connector_down (sev2)
+```
+
+**Fix:** `GRANT REPLICATION SLAVE ON *.* TO 'debezium'@'%'` (Piperoom drafts the GRANT and adds no action for it,
+design §8.4), then a task restart. `devctl fix` grants it when missing, resumes or restarts the task, and waits for a
+marker order. With the grant and a `RUNNING` task it does nothing.
+
+### 28. `server-id-clash` — two connectors with one `database.server.id`
+
+**Break (`devctl break server-id-clash`):** a second connector `orders-mysql-shadow` (someone's copy to test a
+change) is registered with the **same** `database.server.id` (5401) and its own topics (`topic.prefix=shop_shadow`,
+history `schema-history.shop-shadow`, `snapshot.mode=no_data`), so only the id clashes. The source keeps one binlog
+dump thread per server id and kills the older one whenever the other connects, so the two connectors take turns:
+both report `RUNNING` while their streams drop and reconnect. The watcher sees no failed task; open the room with
+`devctl alert server-id-clash`. The break waits for the shadow's task `RUNNING`, then up to 60 s for the source's
+"zombie dump thread" warning in `performance_schema.error_log` (inserting a marker order every poll); without it the
+break still succeeds and logs a warning. Refuses when the shadow exists or `orders-mysql` is not `RUNNING`.
+
+**Expected (not yet observed):**
+```
+connector   orders-mysql and orders-mysql-shadow: RUNNING, tasks 0=RUNNING (both)
+error_log   [Warning] ... found a zombie dump thread with the same UUID/server_id. Source is killing the zombie dump thread(...)
+connect log binlog client disconnects and reconnects; shop.shop.orders changes arrive late and in bursts
+mysql_binlog_status   database.server.id 5401 of orders-mysql equals orders-mysql-shadow's
+```
+
+**Fix:** `connect_delete_connector` on the shadow (or `connect_update_connector_config` with a new
+`database.server.id`). `devctl fix` stops the shadow, deletes its offsets, the connector and its topics
+(`shop_shadow`, `shop_shadow.shop.*`, `schema-history.shop-shadow`; its Avro subjects stay), then resumes or restarts
+`orders-mysql` when needed and waits for a marker order. Without the shadow it only checks `orders-mysql`.

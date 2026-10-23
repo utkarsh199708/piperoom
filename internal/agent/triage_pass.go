@@ -209,12 +209,16 @@ func (p *triagePass) setup() error {
 	p.rec = &stepRecorder{inner: deps.Sink, byUse: map[string]TriageStep{}}
 	deps.Sink = p.rec
 	b := p.ep.budgetWithLimit(p.alert.RoomID, p.opts.TokenBudget)
-	m := &budgetModel{inner: p.ep.model, budget: b, loop: true, guard: p.ep.guard(p.alert.RoomID, p.alert.PipelineID)}
+	quals := p.ep.firstLook.quals
+	if quals == nil {
+		quals = p.ep.mainQuals
+	}
+	m := &budgetModel{inner: p.ep.firstLookModel(), budget: b, loop: true, guard: p.ep.guardWith(p.alert.RoomID, p.alert.PipelineID, quals)}
 	r, err := newRunnerWith(p.alert, deps, p.opts, m)
 	if err != nil {
 		return err
 	}
-	r.prices = p.ep.prices()
+	r.prices = p.ep.pricesFor(quals)
 	r.toolList = buildToolListWithCap(r.deps.Tools, nil, strictCap(m.Capabilities(p.cfg.model)))
 	p.r = r
 	return nil
