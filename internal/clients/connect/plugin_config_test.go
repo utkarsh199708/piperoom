@@ -26,14 +26,18 @@ func defsClient(t *testing.T, status int, body string, gotPath *string) *Client 
 
 func TestPluginConfigDef(t *testing.T) {
 	var path string
-	body := `{"name":"io.debezium.connector.postgresql.PostgresConnector","type":"source","configs":[
+	// KIP-769: the endpoint answers a top-level JSON array of ConfigKeyInfo
+	// (apache/kafka ConnectorPluginsResource.getConnectorConfigDef returns
+	// List<ConfigKeyInfo>). default_value is a Java String on the wire, but a
+	// scalar is tolerated.
+	body := `[
 		{"name":"database.hostname","type":"STRING","required":true,"default_value":null},
 		{"name":"database.port","type":"INT","required":false,"default_value":5432},
 		{"name":"topic.prefix","type":"STRING","required":true,"default_value":"pg"},
 		{"name":"decimal.handling.mode","type":"STRING","required":false,"default_value":"precise"},
 		{"name":"tombstones.on.delete","type":"BOOLEAN","required":false,"default_value":true},
 		{"name":"","type":"STRING"}
-	]}`
+	]`
 	c := defsClient(t, http.StatusOK, body, &path)
 	defs, err := c.PluginConfigDef(context.Background(), "io.debezium.connector.postgresql.PostgresConnector")
 	if err != nil {
@@ -68,8 +72,9 @@ func TestPluginConfigDefErrors(t *testing.T) {
 		wantText string
 	}{
 		{"not found on an older Connect", http.StatusNotFound, "", clients.ErrNotFound, ""},
-		{"method not allowed", http.StatusMethodNotAllowed, "nope", nil, "status 405"},
-		{"bad JSON", http.StatusOK, `{"configs":`, nil, "decode"},
+		{"method not allowed is ErrNotSupported", http.StatusMethodNotAllowed, "nope", clients.ErrNotSupported, ""},
+		{"bad JSON", http.StatusOK, `[`, nil, "decode"},
+		{"envelope object instead of the KIP-769 array", http.StatusOK, `{"configs":[]}`, nil, "decode"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

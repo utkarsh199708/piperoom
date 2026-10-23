@@ -292,20 +292,25 @@ func (c *Client) PluginConfigDef(ctx context.Context, class string) ([]ConfigKey
 	if class == "" {
 		return nil, fmt.Errorf("connect: plugin config defs: empty connector.class")
 	}
-	var out struct {
-		Configs []struct {
-			Name       string          `json:"name"`
-			Type       string          `json:"type"`
-			Required   bool            `json:"required"`
-			DefaultRaw json.RawMessage `json:"default_value"`
-		} `json:"configs"`
+	// KIP-769: the endpoint answers a TOP-LEVEL JSON array of ConfigKeyInfo
+	// objects (apache/kafka ConnectorPluginsResource.getConnectorConfigDef
+	// returns List<ConfigKeyInfo>), not an envelope object.
+	var out []struct {
+		Name       string          `json:"name"`
+		Type       string          `json:"type"`
+		Required   bool            `json:"required"`
+		DefaultRaw json.RawMessage `json:"default_value"`
 	}
 	path := "/connector-plugins/" + url.PathEscape(class) + "/config"
 	if err := c.do(ctx, http.MethodGet, path, &out); err != nil {
+		var se *statusError
+		if errors.As(err, &se) && se.Code == http.StatusMethodNotAllowed {
+			return nil, fmt.Errorf("connect: plugin config defs: %w", clients.ErrNotSupported)
+		}
 		return nil, err
 	}
-	defs := make([]ConfigKeyDef, 0, len(out.Configs))
-	for _, d := range out.Configs {
+	defs := make([]ConfigKeyDef, 0, len(out))
+	for _, d := range out {
 		if d.Name == "" {
 			continue
 		}

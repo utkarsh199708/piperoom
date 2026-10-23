@@ -72,7 +72,7 @@ func (a *validateAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	switch {
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/connector-plugins/") && strings.HasSuffix(r.URL.Path, "/config"):
-		a.writeJSON(w, a.defsStatus, map[string]any{"configs": a.defs})
+		a.writeJSON(w, a.defsStatus, a.defs) // KIP-769: a top-level array
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/connector-plugins/") && strings.HasSuffix(r.URL.Path, "/config/validate"):
 		var body map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -331,8 +331,17 @@ func TestConnectValidateConfigHostGuard(t *testing.T) {
 	t.Run("a host reference is refused", func(t *testing.T) {
 		fc := &fakeConnect{}
 		tl := newValidateTool(t, fc, validateOwners(), nil)
-		_, err := runValidate(t, tl, "orders", `{"class":"`+validateClass+`","config":{"database.hostname":"${env:DB_HOST}"}}`)
+		// A ${secret:...} reference passes the input gate (a host key accepts
+		// a reference form) and the host guard then refuses it: a host must
+		// be a literal.
+		_, err := runValidate(t, tl, "orders", `{"class":"`+validateClass+`","config":{"database.hostname":"${secret:db-host}"}}`)
 		if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "literal host") {
+			t.Fatalf("err = %v, want ErrBadInput", err)
+		}
+		// A ${env:...} reference is refused at the input gate, whatever the
+		// key: Connect could resolve it and echo the value.
+		_, err = runValidate(t, tl, "orders", `{"class":"`+validateClass+`","config":{"database.hostname":"${env:DB_HOST}"}}`)
+		if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "only ${secret:...} is accepted") {
 			t.Fatalf("err = %v, want ErrBadInput", err)
 		}
 	})
@@ -563,6 +572,9 @@ func TestConnectValidateConfigBadInput(t *testing.T) {
 		{"bad key", `{"class":"c","config":{"not a key":"x"}}`},
 		{"oversized value", `{"class":"c","config":{"k":"` + strings.Repeat("x", maxValidateValueBytes+1) + `"}}`},
 		{"non-string value", `{"class":"c","config":{"k":1}}`},
+		{"oversized class", `{"class":"` + strings.Repeat("c", maxValidateClassBytes+1) + `","config":{}}`},
+		{"oversized well-formed key", `{"class":"c","config":{"` + strings.Repeat("k", maxValidateKeyBytes+1) + `":"x"}}`},
+		{"too many keys", tooManyKeysInput()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -602,6 +614,8 @@ func TestConfigHosts(t *testing.T) {
 		{"postgres://u:p@db.acme:5432/orders?sslmode=disable", []string{"db.acme"}},
 		{"jdbc:postgresql://db.evil/x@db.acme", []string{"db.evil"}},
 		{"jdbc:postgresql://db.evil?@db.acme", []string{"db.evil"}},
+		{"jdbc:postgresql://db.evil#x@db.acme", []string{"db.evil"}},
+		{"db.evil#frag@db.acme", []string{"db.evil"}},
 		{"jdbc:mysql://db.acme,db.evil/db", []string{"db.acme", "db.evil"}},
 		{"jdbc:mysql:loadbalance://db.acme,db.evil:3306/db", []string{"db.acme", "db.evil"}},
 		{"jdbc:sqlserver://db.acme;serverName=db.evil", []string{"db.acme", "servername=db.evil"}},
@@ -639,6 +653,7 @@ func TestConnectValidateConfigHostGuardBypasses(t *testing.T) {
 	}{
 		{"userinfo in path", "connection.url", "jdbc:postgresql://db.evil/x@db.acme", tools.ErrOutOfScope},
 		{"userinfo in query", "connection.url", "jdbc:postgresql://db.evil?@db.acme", tools.ErrOutOfScope},
+		{"userinfo in fragment", "connection.url", "jdbc:postgresql://db.evil#x@db.acme", tools.ErrOutOfScope},
 		{"failover host list", "connection.url", "jdbc:mysql://db.acme,db.evil/db", tools.ErrOutOfScope},
 		{"loadbalance host list", "connection.url", "jdbc:mysql:loadbalance://db.acme,db.evil:3306/db", tools.ErrOutOfScope},
 		{"sqlserver property segment", "connection.url", "jdbc:sqlserver://db.acme;serverName=db.evil", tools.ErrBadInput},
@@ -703,13 +718,20 @@ func TestConnectValidateConfigReferenceOnlyOnCredentialKeys(t *testing.T) {
 		},
 	}
 	tl := newValidateTool(t, fc, validateOwners(), nil)
-	for _, in := range []string{
-		`{"class":"` + validateClass + `","config":{"tasks.max":"${file:/etc/kafka/secret.properties:password}"}}`,
-		`{"class":"` + validateClass + `","config":{"decimal.handling.mode":"${env:ANYTHING}"}}`,
+	// ${file:...}/${env:...} are refused outright (they could read an
+	// arbitrary server file or environment variable back through an echoed
+	// validation message); a ${secret:...} is refused on a non-credential key.
+	for in, want := range map[string]string{
+		`{"class":"` + validateClass + `","config":{"tasks.max":"${file:/etc/kafka/secret.properties:password}"}}`: "only ${secret:...} is accepted",
+		`{"class":"` + validateClass + `","config":{"tasks.max":"${file:/etc/passwd:0}"}}`:                         "only ${secret:...} is accepted",
+		`{"class":"` + validateClass + `","config":{"decimal.handling.mode":"${env:ANYTHING}"}}`:                   "only ${secret:...} is accepted",
+		`{"class":"` + validateClass + `","config":{"database.password":"${file:/etc/passwd:0}"}}`:                 "only ${secret:...} is accepted",
+		`{"class":"` + validateClass + `","config":{"value.converter.basic.auth.user.info":"${env:SECRET}"}}`:      "only ${secret:...} is accepted",
+		`{"class":"` + validateClass + `","config":{"tasks.max":"${secret:name}"}}`:                                "not a credential key",
 	} {
 		_, err := runValidate(t, tl, "orders", in)
-		if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "not a credential key") {
-			t.Fatalf("err = %v, want ErrBadInput refusing the reference", err)
+		if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("input %s: err = %v, want ErrBadInput with %q", in, err, want)
 		}
 	}
 	if called.Load() != 0 {
@@ -794,5 +816,145 @@ func TestConnectValidateConfigRenamedKeyListedOnce(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("database.server.name listed %d times in unknown_keys: %+v", n, data.UnknownKeys)
+	}
+}
+
+// tooManyKeysInput builds a config one key over the cap; each key is
+// well-formed, so only the count refuses it.
+func tooManyKeysInput() string {
+	var sb strings.Builder
+	sb.WriteString(`{"class":"c","config":{`)
+	for i := 0; i <= maxValidateConfigKeys; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `"k%d":"v"`, i)
+	}
+	sb.WriteString("}}")
+	return sb.String()
+}
+
+// A message carrying a known credential in any form is dropped whole:
+// literal, query-escaped (space becomes '+') and path-escaped (space becomes
+// "%20") differ, and a Connect message quoting a connection URL can carry any
+// of them.
+func TestRedactMessageEncodedForms(t *testing.T) {
+	const secret = "p@ss w0rd"
+	for _, m := range []string{
+		"could not log in with p@ss w0rd",
+		"could not reach jdbc:postgresql://u:p%40ss+w0rd@db/x", // QueryEscape
+		"could not open path /creds/p@ss%20w0rd/pgpass",        // PathEscape
+	} {
+		if got := redactMessage(m, []string{secret}); got != "invalid value (details redacted)" {
+			t.Errorf("redactMessage(%q) = %q, want the message dropped", m, got)
+		}
+	}
+	if got := redactMessage("value must be a number", []string{secret}); got != "value must be a number" {
+		t.Errorf("clean message changed: %q", got)
+	}
+}
+
+// The base credential overrides the model's value, but an empty base
+// credential must not clobber the model's ${secret:...} reference (Connect
+// would then report a spurious missing credential), and "" never enters the
+// never-echo list, where it would drop every message.
+func TestMergeBaseConfigEmptyCredential(t *testing.T) {
+	merged := map[string]string{
+		"database.password": "${secret:db_pass}",
+		"jdbc.password":     "${secret:jdbc}",
+		"tasks.max":         "2",
+	}
+	base := map[string]string{
+		"database.password": "",
+		"jdbc.password":     "server-side-pw",
+		"database.hostname": "db.acme",
+		"tasks.max":         "1",
+	}
+	secrets := mergeBaseConfig(merged, base)
+	if merged["database.password"] != "${secret:db_pass}" {
+		t.Errorf("empty base credential clobbered the reference: %q", merged["database.password"])
+	}
+	if merged["jdbc.password"] != "server-side-pw" {
+		t.Errorf("base credential did not win: %q", merged["jdbc.password"])
+	}
+	if merged["database.hostname"] != "db.acme" || merged["tasks.max"] != "2" {
+		t.Errorf("merge wrong: %+v", merged)
+	}
+	if len(secrets) != 1 || secrets[0] != "server-side-pw" {
+		t.Errorf("secrets = %q, want only the non-empty base credential", secrets)
+	}
+}
+
+// With no plugin definitions (an older Connect) unknown-key detection cannot
+// run, but a known renamed key is still reported through the lookup.
+func TestUnknownConfigKeysRenamedWithoutDefs(t *testing.T) {
+	lookup := func(k string) (string, string, bool) {
+		if k == "database.server.name" {
+			return "topic.prefix", "DBZ-1234", true
+		}
+		return "", "", false
+	}
+	out := unknownConfigKeys(map[string]string{
+		"database.server.name": "pg",
+		"made.up.key":          "x",
+	}, nil, lookup)
+	if len(out) != 1 || out[0].Key != "database.server.name" || out[0].NewKey != "topic.prefix" || out[0].IssueID != "DBZ-1234" {
+		t.Fatalf("out = %+v, want only the renamed key", out)
+	}
+	if out := unknownConfigKeys(map[string]string{"made.up.key": "x"}, nil, nil); out != nil {
+		t.Fatalf("no defs and no lookup: out = %+v, want nil", out)
+	}
+}
+
+// An out-of-scope host refusal names only the model's own key and host: the
+// allowed set (the pipeline's source host, the base connector's internal
+// hosts) must not be handed out by probing with a bad host.
+func TestConnectValidateConfigOutOfScopeNamesNoAllowedHost(t *testing.T) {
+	api := newValidateAPI(t)
+	api.baseConfig = map[string]string{
+		"connector.class":   validateClass,
+		"database.hostname": "internal-db.corp.example",
+	}
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	tl := newValidateTool(t, connect.New(srv.URL, srv.Client()), validateOwners("pg-orders-connector"), nil)
+	_, err := runValidate(t, tl, "orders", `{"class":"`+validateClass+`","config":{"database.hostname":"db.evil"},"base_connector":"pg-orders-connector"}`)
+	if !errors.Is(err, tools.ErrOutOfScope) {
+		t.Fatalf("err = %v, want ErrOutOfScope", err)
+	}
+	msg := fmt.Sprint(err)
+	if !strings.Contains(msg, "db.evil") {
+		t.Fatalf("refusal does not name the model's own host: %v", err)
+	}
+	for _, h := range []string{"internal-db", "corp.example", "db.acme"} {
+		if strings.Contains(msg, h) {
+			t.Fatalf("refusal echoes allowed host %q: %v", h, err)
+		}
+	}
+	if _, _, _, put := api.counts(); put != 0 {
+		t.Fatalf("validate was called despite the refusal")
+	}
+}
+
+// An older Connect without the plugin-config endpoint (404/405) must not fail
+// the validation itself: the result says the definitions are unavailable and
+// names the version that adds the endpoint.
+func TestConnectValidateConfigDefsUnsupported(t *testing.T) {
+	fc := &fakeConnect{
+		validateFn: func(context.Context, string, map[string]string) (connect.ValidateResult, error) {
+			return connect.ValidateResult{}, nil
+		},
+		defsFn: func(context.Context, string) ([]connect.ConfigKeyDef, error) {
+			return nil, fmt.Errorf("connect: plugin config defs: %w", clients.ErrNotSupported)
+		},
+	}
+	tl := newValidateTool(t, fc, validateOwners(), nil)
+	r := mustRunValidate(t, tl, `{"class":"`+validateClass+`","config":{"tasks.max":"1"}}`)
+	data := r.Data.(validateData)
+	if !strings.Contains(data.DefsUnavailable, "Kafka Connect 3.2+") {
+		t.Fatalf("DefsUnavailable = %q, want the 3.2+ note", data.DefsUnavailable)
+	}
+	if !strings.Contains(r.Summary, "plugin config definitions unavailable") {
+		t.Fatalf("summary missed the note: %q", r.Summary)
 	}
 }

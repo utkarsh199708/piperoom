@@ -41,7 +41,7 @@ func (t *connectValidateConfig) InputSchema() map[string]any {
 		"class": strProp("connector plugin class, e.g. io.debezium.connector.postgresql.PostgresConnector"),
 		"config": map[string]any{
 			"type":        "object",
-			"description": "connector configuration key -> value. Credential-looking keys are refused in plain text; use a ${secret:name}, ${file:path:key} or ${env:NAME} reference, or omit them and pass base_connector so the server fills them in.",
+			"description": "connector configuration key -> value. Credential-looking keys are refused in plain text; use a ${secret:name} reference, or omit them and pass base_connector so the server fills them in. ${file:...} and ${env:...} references are refused: Connect could resolve one and echo a server file or environment value back.",
 			// A connector config is a free-form map. Strict tool use prefers a
 			// closed object, but a config has no fixed key list; the agent's
 			// schema check accepts this form.
@@ -151,14 +151,20 @@ func checkValidateInput(class string, cfg map[string]string) error {
 			return fmt.Errorf("%w: the value of %s is longer than %d bytes", tools.ErrBadInput, k, maxValidateValueBytes)
 		}
 		if plaintextSecretKey(k) && v != "" && !isConfigReference(v) {
-			return fmt.Errorf("%w: %s looks like a credential; pass a ${secret:...}, ${file:...} or ${env:...} reference, or omit it and pass base_connector so the server fills it in", tools.ErrBadInput, k)
+			return fmt.Errorf("%w: %s looks like a credential; pass a ${secret:...} reference, or omit it and pass base_connector so the server fills it in", tools.ErrBadInput, k)
 		}
-		// A reference is only accepted where a credential belongs. On any
-		// other key Connect may resolve the reference server-side and echo
-		// the resolved value in a validation message ("Invalid value X for
-		// configuration tasks.max"), which would read a server secret back
-		// to the model. A host key's reference is refused by the host guard
-		// with its own message.
+		// Only the named-secret-store form is accepted from the model.
+		// Connect may resolve a provider reference server-side and echo the
+		// resolved value in a validation message, so a model-chosen
+		// ${file:path} or ${env:NAME} would read an arbitrary server file or
+		// environment variable back to the model, whatever key it sits under.
+		// Server-side configs (base_connector) may hold any provider form.
+		if isConfigReference(v) && !isSecretReference(v) {
+			return fmt.Errorf("%w: %s uses a ${file:...} or ${env:...} reference, which could echo a server-side file or environment value in a validation message; only ${secret:...} is accepted from the model", tools.ErrBadInput, k)
+		}
+		// A reference is only accepted where a credential belongs, for the
+		// same echo reason. A host key's reference is refused by the host
+		// guard with its own message.
 		if isConfigReference(v) && !referenceAllowedKey(k) {
 			return fmt.Errorf("%w: %s is not a credential key; a ${...} config reference is only accepted on a credential key, so a validation message cannot echo a server-side value", tools.ErrBadInput, k)
 		}
@@ -218,6 +224,16 @@ func plaintextSecretKey(k string) bool {
 			return false
 		}
 	}
+	// Common connector keys whose bare "key" segment means the record key,
+	// not a credential: Elasticsearch's key.ignore, Debezium's
+	// message.key.columns, and the *.key.format / *.key.fields family. Their
+	// values are booleans and column lists; refusing them would make the tool
+	// unusable for ordinary configs.
+	for _, suffix := range []string{"key.ignore", "message.key.columns", "key.format", "key.fields"} {
+		if lk == suffix || strings.HasSuffix(lk, "."+suffix) {
+			return false
+		}
+	}
 	return true
 }
 
@@ -241,7 +257,8 @@ func referenceAllowedKey(k string) bool {
 
 // isConfigReference reports whether v is a Connect config provider reference.
 // ${secret:...} is accepted as a non-secret value (U0); ${file:...} and
-// ${env:...} are the other documented providers (design, Q5c).
+// ${env:...} are the other documented providers (design, Q5c), recognized so
+// they can be refused from the model (see checkValidateInput).
 func isConfigReference(v string) bool {
 	v = strings.TrimSpace(v)
 	if !strings.HasPrefix(v, "${") || !strings.HasSuffix(v, "}") || len(v) < 4 {
@@ -254,6 +271,13 @@ func isConfigReference(v string) bool {
 		}
 	}
 	return false
+}
+
+// isSecretReference reports whether v is the named-secret-store form, the only
+// provider reference the model may send.
+func isSecretReference(v string) bool {
+	v = strings.TrimSpace(v)
+	return strings.HasPrefix(v, "${secret:") && strings.HasSuffix(v, "}") && len(v) > len("${secret:}")
 }
 
 // mergeBaseConfig lays the base connector's config under the model's and
@@ -273,21 +297,26 @@ func mergeBaseConfig(merged, base map[string]string) []string {
 		if !plaintextSecretKey(k) {
 			continue
 		}
+		// The base value wins even when the model sent a reference — but an
+		// EMPTY base value must not clobber the model's ${secret:...}
+		// reference with "", which would make Connect report a spurious
+		// missing credential.
 		if v != "" {
 			secrets = append(secrets, v)
+			merged[k] = v
 		}
-		// The base value wins even when the model sent a reference.
-		merged[k] = v
 	}
 	return secrets
 }
 
 // addConfigHosts adds the hosts named by a (server-side) config's host keys.
 // Every host of a multi-host value (a failover JDBC URL, a bootstrap server
-// list) is added; an entry that is not a host is skipped.
+// list) is added; an entry that is not a host is skipped. A credential-named
+// key is skipped even when it matches a host fragment (jdbc.password): its
+// value is a secret, and nothing a refusal message might name may hold one.
 func addConfigHosts(set map[string]bool, cfg map[string]string) {
 	for k, v := range cfg {
-		if !isHostConfigKey(k) {
+		if !isHostConfigKey(k) || plaintextSecretKey(k) {
 			continue
 		}
 		for _, h := range configHosts(v) {
@@ -347,6 +376,13 @@ func (t *connectValidateConfig) addSourceConnectorHosts(ctx context.Context, sc 
 // usable with a value whose hosts the pipeline already reaches.
 func isHostConfigKey(k string) bool {
 	lk := strings.ToLower(k)
+	// ssl.endpoint.identification.algorithm (and its Debezium producer/
+	// consumer override forms) holds "https"/"" — a TLS mode, not a host.
+	// Without this exemption every TLS-hardened config would be refused with
+	// "points at https".
+	if strings.HasSuffix(lk, "ssl.endpoint.identification.algorithm") {
+		return false
+	}
 	switch {
 	case strings.Contains(lk, "host"):
 		return true
@@ -456,8 +492,11 @@ func checkConfigHosts(model, merged map[string]string, allowed map[string]bool) 
 			if len(allowed) == 0 {
 				return fmt.Errorf("%w: host key %s points at %s, but the pipeline has no known source host; pass base_connector so its host can be checked", tools.ErrOutOfScope, k, h)
 			}
+			// The refusal names only the model's own key and host: listing the
+			// allowed set would hand out the pipeline's internal hostnames
+			// (and whatever a misnamed server-side key holds) in one call.
 			if !allowed[h] {
-				return fmt.Errorf("%w: host key %s points at %s, which is neither the pipeline's source host nor the base connector's (allowed: %s)", tools.ErrOutOfScope, k, h, strings.Join(sortedHosts(allowed), ", "))
+				return fmt.Errorf("%w: host key %s points at %s, which is neither the pipeline's source host nor the base connector's", tools.ErrOutOfScope, k, h)
 			}
 		}
 	}
@@ -479,7 +518,8 @@ func sortedHosts(set map[string]bool) []string {
 func (t *connectValidateConfig) pluginDefs(ctx context.Context, val ConfigValidator, class string) (map[string]bool, error) {
 	defs, err := val.PluginConfigDef(ctx, class)
 	if err != nil {
-		if errors.Is(err, clients.ErrNotFound) {
+		// An endpoint-less Connect answers 404 or 405 (see PluginConfigDef).
+		if errors.Is(err, clients.ErrNotFound) || errors.Is(err, clients.ErrNotSupported) {
 			return nil, fmt.Errorf("Connect has no plugin config endpoint (needs Kafka Connect 3.2+)")
 		}
 		return nil, err
@@ -508,13 +548,27 @@ type unknownConfigKey struct {
 
 // unknownConfigKeys compares the model's keys with the plugin's definitions and
 // returns at most maxUnknownKeys, in key order. A known renamed key is resolved
-// through lookup first; otherwise the nearest defined key is suggested.
+// through lookup first; otherwise the nearest defined key is suggested. With no
+// definitions (an older Connect) rename lookups still run — they need no defs —
+// but unknown-key detection cannot.
 func unknownConfigKeys(cfg map[string]string, defs map[string]bool, lookup func(string) (string, string, bool)) []unknownConfigKey {
-	if len(defs) == 0 {
-		return nil
-	}
 	keys := sortedKeys(cfg)
 	var out []unknownConfigKey
+	if len(defs) == 0 {
+		if lookup == nil {
+			return nil
+		}
+		for _, k := range keys {
+			if len(out) == maxUnknownKeys {
+				break
+			}
+			if newKey, issueID, ok := lookup(k); ok {
+				out = append(out, unknownConfigKey{Key: k, NewKey: newKey, IssueID: issueID})
+			}
+		}
+		return out
+	}
+	sortedDefs := sortedKeySet(defs)
 	for _, k := range keys {
 		if defs[k] {
 			continue
@@ -530,19 +584,35 @@ func unknownConfigKeys(cfg map[string]string, defs map[string]bool, lookup func(
 				continue
 			}
 		}
-		u.Suggestion = nearestConfigKey(k, defs)
+		u.Suggestion = nearestConfigKey(k, sortedDefs)
 		out = append(out, u)
 	}
 	return out
 }
 
+// maxSuggestionDefs caps the definitions a suggestion scan considers: the def
+// list is server data, and a hostile or buggy Connect must not be able to buy
+// unbounded CPU with a huge one. Real plugins define a few hundred keys.
+const maxSuggestionDefs = 2048
+
 // nearestConfigKey returns the defined key closest to key, or "" when none is
 // close enough. The threshold keeps a wholly new key from getting a misleading
-// suggestion: distance <= 3 and at most 40% of the key's length.
-func nearestConfigKey(key string, defs map[string]bool) string {
+// suggestion: distance <= 3 and at most 40% of the key's length. Definitions
+// whose length differs from the key's by more than the threshold are skipped
+// before the quadratic distance runs (|len difference| is a lower bound on the
+// distance), so a server-supplied def list cannot make this scan expensive.
+func nearestConfigKey(key string, sortedDefs []string) string {
+	key = strings.ToLower(key)
 	best, bestDist := "", 1<<30
-	for _, d := range sortedKeySet(defs) {
-		if dist := editDistance(strings.ToLower(key), strings.ToLower(d)); dist < bestDist {
+	defs := sortedDefs
+	if len(defs) > maxSuggestionDefs {
+		defs = defs[:maxSuggestionDefs]
+	}
+	for _, d := range defs {
+		if diff := len(d) - len(key); diff > 3 || diff < -3 {
+			continue
+		}
+		if dist := editDistance(key, strings.ToLower(d)); dist < bestDist {
 			best, bestDist = d, dist
 		}
 	}
