@@ -941,7 +941,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		foldStepOutcome(&snap, e.Seq, p)
 		if p.OK && p.PullRequest != nil {
-			snap.PullRequests = addPullRequest(snap.PullRequests, p, e.At)
+			origin := ""
+			if op, ok := openProposal(snap, p.ProposalID); ok {
+				origin = op.Origin
+			}
+			snap.PullRequests = notePROrigin(addPullRequest(snap.PullRequests, p, e.At), p.ProposalID, p.StepIndex, origin)
 		}
 		// The proposal leaves the open list when its last step runs, or when
 		// any step fails (the executor stops there, so it is decided).

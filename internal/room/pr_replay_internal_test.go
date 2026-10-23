@@ -2,6 +2,8 @@ package room
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
+	"piperoom/internal/store"
 )
 
 // Review of #934 (fix-PR Major 2): the pr_merged input is drained by the run
@@ -153,5 +156,71 @@ func TestPRReplayInputsFromTheSnapshot(t *testing.T) {
 	}
 	if got := prReplayInputs(l.snap); len(got) != 1 || got[0].Kind != "pr_closed" {
 		t.Fatalf("rebuilt replays %+v", got)
+	}
+}
+
+// ProposalOrigin (agent.ProposalOriginReader) answers who wrote a fix-PR
+// proposal after it ran, also on a restarted server; an unknown id or
+// another room's proposal is not found.
+func TestProposalOriginOfAFixPR(t *testing.T) {
+	_, roomID, pr, svc2 := mergeAndRestart(t)
+	pc := proposalCreator{s: svc2, roomID: roomID}
+	if o, err := pc.ProposalOrigin(context.Background(), pr.ProposalID); err != nil || o != events.ProposalOriginAgent {
+		t.Fatalf("agent proposal origin = %q, %v; want agent", o, err)
+	}
+	if _, err := pc.ProposalOrigin(context.Background(), "p_unknown"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unknown proposal: %v, want store.ErrNotFound", err)
+	}
+	if _, err := (proposalCreator{s: svc2, roomID: "r_other"}).ProposalOrigin(context.Background(), pr.ProposalID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("another room's proposal: %v, want store.ErrNotFound", err)
+	}
+}
+
+func TestProposalOriginOfADriverFixPR(t *testing.T) {
+	r := newPRRig(t)
+	ctx := context.Background()
+	arjun, _ := r.svc.LookupUser("arjun")
+	snap, err := r.svc.CreateRoom(ctx, arjun, "Incident", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, err := r.svc.CreateDriverProposal(ctx, arjun, snap.ID, events.ProposalCreatedPayload{
+		Title: "fix", Risk: "low", Rollback: "close the pull request",
+		Steps: []events.ProposalStep{{Action: "repo_open_pull_request", Layer: "",
+			Params: json.RawMessage(`{"repo":"connect-config","title":"connect image: add the plugin"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := events.Decode[events.ProposalCreatedPayload](ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := created.ProposalID
+	pc := proposalCreator{s: r.svc, roomID: snap.ID}
+	if o, err := pc.ProposalOrigin(ctx, pid); err != nil || o != events.ProposalOriginDriver {
+		t.Fatalf("open driver proposal origin = %q, %v; want driver", o, err)
+	}
+	waitForCond(t, 5*time.Second, func() bool {
+		p, ok := openProposal(mustRoom(t, r.svc, snap.ID), pid)
+		return ok && p.Preview != nil
+	}, "preview never folded")
+	p, _ := openProposal(mustRoom(t, r.svc, snap.ID), pid)
+	if _, err := r.svc.ApproveProposal(ctx, arjun, pid, "kafka-connect", p.ParamsHash); err != nil {
+		t.Fatal(err)
+	}
+	waitForCond(t, 5*time.Second, func() bool { return len(mustRoom(t, r.svc, snap.ID).PullRequests) == 1 }, "PR never followed")
+	if _, ok := openProposal(mustRoom(t, r.svc, snap.ID), pid); ok {
+		t.Fatal("the executed proposal is still open")
+	}
+	if o, err := pc.ProposalOrigin(ctx, pid); err != nil || o != events.ProposalOriginDriver {
+		t.Fatalf("executed driver proposal origin = %q, %v; want driver", o, err)
+	}
+	l, err := r.svc.rebuild(ctx, snap.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.snap.PullRequests[0].origin; got != events.ProposalOriginDriver {
+		t.Fatalf("rebuilt PR origin %q, want driver", got)
 	}
 }

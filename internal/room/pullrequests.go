@@ -1,6 +1,7 @@
 package room
 
 import (
+	"slices"
 	"time"
 
 	"piperoom/internal/clients"
@@ -44,6 +45,11 @@ type PullRequest struct {
 	// it may have died with its apply wait (restart, lease move).
 	final    *events.Event
 	verified bool
+	// origin is the proposal's origin ("agent" or "driver"), taken from the
+	// open proposal when the step opened the PR: the proposal leaves the
+	// open list once it ran, and a run rebuilt after a restart asks for it
+	// (proposalCreator.ProposalOrigin).
+	origin string
 }
 
 // ref is the PullRequestRef of the step that opened the PR.
@@ -53,6 +59,18 @@ func (pr PullRequest) ref() events.PullRequestRef {
 
 // followed reports whether the follower still polls the PR: it is open.
 func (pr PullRequest) followed() bool { return pr.State == clients.PRStateOpen }
+
+// notePROrigin sets the proposal origin on the PR of the step, once. It
+// never changes prs.
+func notePROrigin(prs []PullRequest, proposalID string, step int, origin string) []PullRequest {
+	i := slices.IndexFunc(prs, func(pr PullRequest) bool { return pr.ProposalID == proposalID && pr.StepIndex == step })
+	if i < 0 || origin == "" || prs[i].origin != "" {
+		return prs
+	}
+	out := slices.Clone(prs)
+	out[i].origin = origin
+	return out
+}
 
 // addPullRequest folds the PR an action.executed opened in at, newest first.
 // A repeated event for the same step changes nothing. Over the cap the oldest

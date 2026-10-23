@@ -1789,6 +1789,35 @@ func (p proposalCreator) ProposalSteps(ctx context.Context, proposalID string) (
 	return steps, nil
 }
 
+// ProposalOrigin is who wrote a proposal of this run's room,
+// events.ProposalOriginAgent or events.ProposalOriginDriver (the optional
+// agent.ProposalOriginReader): a run rebuilt after a restart or a lease move
+// takes a fix PR's attribution from it, never from whether it remembers the
+// proposal. It answers from the room's snapshot: an open proposal, or the fix
+// PRs its steps opened. Any other id (unknown, another room's, or a proposal
+// that opened no PR and is decided) is a not-found error.
+func (p proposalCreator) ProposalOrigin(ctx context.Context, proposalID string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	// The published snapshot, read with no lock: the runner never calls the
+	// room under its lock, and this read needs no newer state than that.
+	st := p.s.cached(p.roomID)
+	if st == nil || st.pub.Load() == nil {
+		return "", fmt.Errorf("room: proposal origin of %q: %w", proposalID, store.ErrNotFound)
+	}
+	snap := *st.pub.Load()
+	if op, ok := openProposal(snap, proposalID); ok {
+		return proposalOrigin(op.Origin), nil
+	}
+	for _, pr := range snap.PullRequests {
+		if pr.ProposalID == proposalID && pr.origin != "" {
+			return proposalOrigin(pr.origin), nil
+		}
+	}
+	return "", fmt.Errorf("room: proposal origin of %q: %w", proposalID, store.ErrNotFound)
+}
+
 // Agent auto-restart bounds (LEAD-ARCH round 4, arch should-fix): a failed
 // agent run is retried with growing backoff so a transient error does not
 // leave the room without an agent forever.
