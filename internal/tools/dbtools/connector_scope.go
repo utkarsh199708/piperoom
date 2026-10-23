@@ -103,7 +103,8 @@ func connectorScopeGapTool(d Deps) tools.Tool {
 
 			text := connectorScopeSummary(conn, inc, rows, gaps)
 			if !sc.Unscoped() && other > 0 {
-				if line := tools.NotShown(other, "other table in publication "+conn.publication, "other tables in publication "+conn.publication); line != "" {
+				pub := oneLineShort(conn.publication, 64)
+				if line := tools.NotShown(other, "other table in publication "+pub, "other tables in publication "+pub); line != "" {
 					text += line + "\n"
 				}
 			}
@@ -119,11 +120,14 @@ func connectorScopeGapTool(d Deps) tools.Tool {
 
 // connectorScopeSummary renders the header, one line per table and the
 // follow-up for every table the connector streams outside declared scope.
+// The publication, role, streamed table names and include/exclude entries
+// come from the connector's Connect config — text chosen outside piperoom —
+// so each is folded to one line before it joins the summary the model reads.
 func connectorScopeSummary(conn connectorConfig, inc owners.ConnectorInclude, rows []scopeTable, gaps []string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "connector %s, publication %s (connector user %s)\n", conn.name, conn.publication, conn.role)
+	fmt.Fprintf(&sb, "connector %s, publication %s (connector user %s)\n", conn.name, oneLineShort(conn.publication, 64), oneLineShort(conn.role, 64))
 	for _, r := range rows {
-		fmt.Fprintf(&sb, "%s: declared=%s, in_connector=%s, in_publication=%s", r.Table, yesNo(r.Declared), yesNo(r.InConnector), yesNo(r.InPublication))
+		fmt.Fprintf(&sb, "%s: declared=%s, in_connector=%s, in_publication=%s", oneLineShort(r.Table, 128), yesNo(r.Declared), yesNo(r.InConnector), yesNo(r.InPublication))
 		if !r.Declared {
 			sb.WriteString(" (in connector, outside declared scope)")
 		}
@@ -133,13 +137,13 @@ func connectorScopeSummary(conn connectorConfig, inc owners.ConnectorInclude, ro
 	case inc.Unbounded:
 		sb.WriteString("table.include.list is not set: the connector captures every table in the schema, so its scope cannot be compared with owners.yaml.\n")
 	case len(inc.Patterns) > 0:
-		fmt.Fprintf(&sb, "table.include.list has patterns that cannot be expanded: %s; check their tables by hand.\n", strings.Join(inc.Patterns, ", "))
+		fmt.Fprintf(&sb, "table.include.list has patterns that cannot be expanded: %s; check their tables by hand.\n", oneLineShort(strings.Join(inc.Patterns, ", "), 512))
 	}
 	if len(inc.Invalid) > 0 {
-		fmt.Fprintf(&sb, "ignored unreadable include/exclude entries: %s.\n", strings.Join(inc.Invalid, ", "))
+		fmt.Fprintf(&sb, "ignored unreadable include/exclude entries: %s.\n", oneLineShort(strings.Join(inc.Invalid, ", "), 512))
 	}
 	for _, t := range gaps {
-		fmt.Fprintf(&sb, "%s is streamed by the connector but owners.yaml does not declare it: ask the pipeline owner to add it to source_tables before proposing a fix for it.\n", t)
+		fmt.Fprintf(&sb, "%s is streamed by the connector but owners.yaml does not declare it: ask the pipeline owner to add it to source_tables before proposing a fix for it.\n", oneLineShort(t, 128))
 	}
 	return sb.String()
 }

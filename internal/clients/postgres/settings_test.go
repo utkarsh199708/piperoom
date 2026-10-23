@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -252,7 +253,7 @@ func TestBlockersRedactAndCutQuery(t *testing.T) {
 	secret := "Sup3rS3cretPw"
 	long := "update orders set note='password=" + secret + "' where id=7 " + strings.Repeat("x", 400)
 	q := &settingsQuerier{queryRows: [][]any{
-		{int64(41), started, xact, "app", "orders-api", "idle in transaction", long, true},
+		{int64(41), started, xact, "app", "orders-api", "idle in transaction", long, true, true},
 	}}
 	got, err := testDB(q).Blockers(context.Background(), 5*time.Minute)
 	if err != nil {
@@ -262,7 +263,7 @@ func TestBlockersRedactAndCutQuery(t *testing.T) {
 		t.Fatalf("got %d sessions, want 1", len(got))
 	}
 	s := got[0]
-	if s.PID != 41 || s.User != "app" || s.App != "orders-api" || s.State != "idle in transaction" || !s.BlocksSlot {
+	if s.PID != 41 || s.User != "app" || s.App != "orders-api" || s.State != "idle in transaction" || !s.BlocksSlot || !s.InScope {
 		t.Fatalf("session = %+v", s)
 	}
 	if !s.StartedAt.Equal(started) || !s.XactStart.Equal(xact) {
@@ -277,7 +278,7 @@ func TestBlockersRedactAndCutQuery(t *testing.T) {
 	if !strings.HasSuffix(s.Query, "…") {
 		t.Fatalf("cut query has no marker: %q", s.Query)
 	}
-	if !q.deadline || len(q.args) != 1 || q.args[0][0] != 300.0 {
+	if !q.deadline || len(q.args) != 1 || len(q.args[0]) != 4 || q.args[0][0] != 300.0 || q.args[0][3] != false {
 		t.Fatalf("deadline = %v, args = %v", q.deadline, q.args)
 	}
 	for _, want := range []string{"pg_stat_activity", "backend_xmin", "make_interval", "walsender"} {
@@ -287,15 +288,49 @@ func TestBlockersRedactAndCutQuery(t *testing.T) {
 	}
 }
 
-// xid has no min() aggregate and no ordering operators in any Postgres
-// version: the horizon must be computed via age(backend_xmin), or every
-// Blockers read fails on a real server with "function min(xid) does not
-// exist" (regression: the first version used min() and <= on xid).
-func TestBlockersSQLComparesXidByAge(t *testing.T) {
-	if !strings.Contains(blockersSQL, "age(backend_xmin)") {
-		t.Fatalf("blockersSQL does not use age(backend_xmin):\n%s", blockersSQL)
+// BlockersOnTables validates every identifier before any I/O and passes the
+// scope flag with the table parts.
+func TestBlockersOnTablesScopesAndValidates(t *testing.T) {
+	q := &settingsQuerier{}
+	if _, err := testDB(q).BlockersOnTables(context.Background(), time.Minute, []string{"public.or-ders"}); err == nil {
+		t.Fatal("a bad table identifier was accepted")
 	}
-	for _, bad := range []string{"min(backend_xmin)", "backend_xmin <=", "backend_xmin >=", "backend_xmin <", "backend_xmin >"} {
+	if len(q.sqls) != 0 {
+		t.Fatalf("read before validating: %v", q.sqls)
+	}
+	if _, err := testDB(q).BlockersOnTables(context.Background(), time.Minute, []string{"public.orders"}); err != nil {
+		t.Fatalf("BlockersOnTables: %v", err)
+	}
+	if len(q.args) != 1 || len(q.args[0]) != 4 || q.args[0][3] != true {
+		t.Fatalf("args = %v", q.args)
+	}
+	if got, want := q.args[0][1], []string{"public"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("schemas = %v", got)
+	}
+	if got, want := q.args[0][2], []string{"orders"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tables = %v", got)
+	}
+}
+
+// xid has no min() aggregate and no ordering operators in any Postgres
+// version: the horizon must be computed via age(), or every Blockers read
+// fails on a real server with "function min(xid) does not exist" (regression:
+// the first version used min() and <= on xid). And the horizon must take the
+// larger of age(backend_xid) and age(backend_xmin): a READ COMMITTED writer
+// idle in transaction has backend_xid set but backend_xmin NULL (regression:
+// the second version read backend_xmin alone and called that session not a
+// blocker — the CI integration run caught it).
+func TestBlockersSQLComparesXidByAge(t *testing.T) {
+	for _, want := range []string{"age(a.backend_xmin)", "age(a.backend_xid)", "GREATEST(", "pid <> pg_backend_pid()", "backend_type <> 'walsender'"} {
+		if !strings.Contains(blockersSQL, want) {
+			t.Fatalf("blockersSQL misses %q:\n%s", want, blockersSQL)
+		}
+	}
+	for _, bad := range []string{
+		"min(backend_xmin)", "min(backend_xid)", "min(a.backend_xmin)", "min(a.backend_xid)",
+		"backend_xmin <=", "backend_xmin >=", "backend_xmin <", "backend_xmin >",
+		"backend_xid <=", "backend_xid >=", "backend_xid <", "backend_xid >",
+	} {
 		if strings.Contains(blockersSQL, bad) {
 			t.Fatalf("blockersSQL compares xid with %q, which Postgres has no operator for:\n%s", bad, blockersSQL)
 		}

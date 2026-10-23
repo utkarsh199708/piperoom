@@ -3,6 +3,7 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -32,6 +33,14 @@ type sourceSettingsClient interface {
 	TableReplication(ctx context.Context, tables []string) ([]postgres.TableReplication, error)
 	RoleInfo(ctx context.Context, role string, tables []string) (postgres.RoleInfo, error)
 	Blockers(ctx context.Context, olderThan time.Duration) ([]postgres.DBSession, error)
+}
+
+// scopedBlockersClient is the scoped variant of Blockers: in a room scoped to
+// a pipeline, only sessions touching the pipeline's tables may show their
+// identity, so a client that cannot filter is refused rather than read in
+// full (the pg_long_transactions rule).
+type scopedBlockersClient interface {
+	BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]postgres.DBSession, error)
 }
 
 // settingsReader returns the source client's settings reader, or an error
@@ -84,6 +93,7 @@ func settingsSummary(settings []postgres.DBSetting) string {
 	}
 	for _, s := range settings {
 		if !seen[s.Name] {
+			seen[s.Name] = true
 			writeSetting(&sb, s)
 		}
 	}
@@ -93,10 +103,13 @@ func settingsSummary(settings []postgres.DBSetting) string {
 	return sb.String()
 }
 
+// writeSetting folds name, value and unit to one line each: the real client
+// reads them from pg_settings, but a fake or future client must not be able
+// to add summary lines of its own.
 func writeSetting(sb *strings.Builder, s postgres.DBSetting) {
-	fmt.Fprintf(sb, "%s=%s", s.Name, s.Value)
+	fmt.Fprintf(sb, "%s=%s", oneLineShort(s.Name, 64), oneLineShort(s.Value, 128))
 	if s.Unit != "" {
-		sb.WriteString(" " + s.Unit)
+		sb.WriteString(" " + oneLineShort(s.Unit, 16))
 	}
 	if s.PendingRestart {
 		sb.WriteString(" (pending_restart: the configured value is not the running one)")
@@ -296,7 +309,8 @@ func sourceRoleGrantsTool(d Deps) tools.Tool {
 			for _, t := range tables[:shown] {
 				fmt.Fprintf(&sb, "%s: selectable=%s\n", t, yesNo(info.Selectable[t]))
 			}
-			if more := len(tables) - shown; more > 0 {
+			more := len(tables) - shown
+			if more > 0 {
 				fmt.Fprintf(&sb, "(%d more %s, in Data)\n", more, tools.Plural(more, "table", "tables"))
 			}
 			summary, truncated := tools.Truncate(sb.String())
@@ -308,7 +322,7 @@ func sourceRoleGrantsTool(d Deps) tools.Tool {
 					ConnectorUserSource: "connector " + conn.name + " config database.user",
 					Role:                info,
 				},
-				Truncated: truncated,
+				Truncated: truncated || more > 0,
 			}, nil
 		},
 	}
@@ -319,7 +333,7 @@ func sourceRoleGrantsTool(d Deps) tools.Tool {
 func sourceBlockingSessionsTool(d Deps) tools.Tool {
 	return &tool{
 		name: "source_blocking_sessions",
-		desc: "List the source Postgres sessions that hold back logical replication: an open transaction older than older_than_minutes, or the session holding the server's oldest xmin (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT waits for it). Each row has pid, start times, user, application, state, whether it blocks a slot, and its query redacted and cut to 200 bytes as untrusted text. Use it when a slot keeps WAL or a slot creation hangs; ending a session is an action, not this tool.",
+		desc: "List the source Postgres sessions that hold back logical replication: an open transaction older than older_than_minutes, or a session holding the server's oldest xid horizon (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT waits for it). Each row has pid, start times, user, application, state, whether it blocks a slot, and its query redacted and cut to 200 bytes as untrusted text; a session outside the pipeline's tables is listed with identity hidden. Prepared transactions and sessions the connecting role may not see (pg_read_all_stats) are not listed. Use it when a slot keeps WAL or a slot creation hangs; ending a session is an action, not this tool.",
 		schema: objSchema(map[string]any{
 			"older_than_minutes": intProp("Minimum transaction age in minutes, 1-43200. Default 5."),
 		}),
@@ -334,7 +348,8 @@ func sourceBlockingSessionsTool(d Deps) tools.Tool {
 			if err != nil {
 				return tools.Result{}, err
 			}
-			if _, err := d.scope(ctx); err != nil {
+			sc, err := d.scope(ctx)
+			if err != nil {
 				return tools.Result{}, err
 			}
 			c, err := d.settingsReader("source_blocking_sessions")
@@ -344,7 +359,25 @@ func sourceBlockingSessionsTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			sessions, err := c.Blockers(ctx, time.Duration(minutes)*time.Minute)
+			var sessions []postgres.DBSession
+			if sc.Unscoped() {
+				sessions, err = c.Blockers(ctx, time.Duration(minutes)*time.Minute)
+			} else {
+				// Scoped: identity (user, application, query) is shown only for
+				// sessions touching the pipeline's tables; every other session
+				// belongs to another pipeline, user or database and appears
+				// anonymised. A client that cannot filter is refused, never
+				// read in full (the pg_long_transactions rule).
+				l, ok := d.Src.(scopedBlockersClient)
+				if !ok {
+					return tools.Result{}, errors.New("dbtools: source_blocking_sessions: the source client cannot scope sessions to the pipeline's tables, so none are shown")
+				}
+				tables, terr := pipelineTables(sc.Pipeline().ID, sc.Pipeline().SourceTables)
+				if terr != nil {
+					return tools.Result{}, terr
+				}
+				sessions, err = l.BlockersOnTables(ctx, time.Duration(minutes)*time.Minute, tables)
+			}
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: source_blocking_sessions: %w", err)
 			}
@@ -353,6 +386,12 @@ func sourceBlockingSessionsTool(d Deps) tools.Tool {
 			// future client cannot put an unredacted query in the room.
 			rows := make([]postgres.DBSession, 0, len(sessions))
 			for _, s := range sessions {
+				if !s.InScope {
+					// The client already blanks these in SQL; enforce it here
+					// too so a fake or future client cannot hand another
+					// pipeline's identity to the room.
+					s.User, s.App, s.Query = "", "", ""
+				}
 				s.Query = postgres.RedactSessionQuery(s.Query)
 				// usename and application_name are chosen by whoever connects
 				// to the source: fold control characters so a crafted name
@@ -378,11 +417,16 @@ func sourceBlockingSessionsTool(d Deps) tools.Tool {
 				if s.XactStart.IsZero() {
 					age = now.Sub(s.StartedAt)
 				}
+				if !s.InScope {
+					fmt.Fprintf(&sb, "pid=%d state=%s age=%s blocks_slot=%s (outside the pipeline's tables; identity hidden)\n",
+						s.PID, orDash(s.State), topology.HumanAge(age), yesNo(s.BlocksSlot))
+					continue
+				}
 				fmt.Fprintf(&sb, "pid=%d user=%s app=%s state=%s age=%s blocks_slot=%s query=%q\n",
 					s.PID, orDash(s.User), orDash(s.App), orDash(s.State), topology.HumanAge(age), yesNo(s.BlocksSlot), s.Query)
 			}
 			if total == 0 {
-				sb.WriteString("(no blocking sessions)\n")
+				sb.WriteString("(no blocking sessions visible to this role; other sessions' transactions need pg_read_all_stats, and prepared transactions are not listed)\n")
 			}
 			if more := len(data) - shown; more > 0 {
 				fmt.Fprintf(&sb, "(%d more %s, in Data)\n", more, tools.Plural(more, "session", "sessions"))

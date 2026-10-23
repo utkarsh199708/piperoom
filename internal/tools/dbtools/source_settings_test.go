@@ -152,19 +152,24 @@ func TestSourceTableReplicationRefusesBadInputBeforeIO(t *testing.T) {
 			in:     `{"pipeline_id":"orders"}`,
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			src := &fakeSource{}
-			d := settingsDeps(src)
-			d.Owners = &owners.Owners{Pipelines: []owners.Pipeline{{ID: "orders", SourceTables: tc.tables, Connectors: []string{"pg-orders-connector"}}}}
-			_, err := scopedTool(t, d, "source_table_replication").Run(tc.ctx, json.RawMessage(tc.in))
-			if !errors.Is(err, tools.ErrBadInput) {
-				t.Fatalf("err = %v, want ErrBadInput", err)
-			}
-			if src.replCalls != 0 {
-				t.Fatalf("source was read before validation")
-			}
-		})
+	// Both table-capped tools must refuse before any I/O: the database must
+	// not be read, and source_role_grants must not read the connector config
+	// either.
+	for _, tool := range []string{"source_table_replication", "source_role_grants"} {
+		for _, tc := range cases {
+			t.Run(tool+"/"+tc.name, func(t *testing.T) {
+				src := &fakeSource{}
+				d := settingsDeps(src)
+				d.Owners = &owners.Owners{Pipelines: []owners.Pipeline{{ID: "orders", SourceTables: tc.tables, Connectors: []string{"pg-orders-connector"}}}}
+				_, err := scopedTool(t, d, tool).Run(tc.ctx, json.RawMessage(tc.in))
+				if !errors.Is(err, tools.ErrBadInput) {
+					t.Fatalf("err = %v, want ErrBadInput", err)
+				}
+				if src.replCalls != 0 || src.roleCalls != 0 {
+					t.Fatalf("source was read before validation: repl=%d role=%d", src.replCalls, src.roleCalls)
+				}
+			})
+		}
 	}
 }
 
@@ -268,11 +273,16 @@ func TestSourceBlockingSessionsRedactAndReport(t *testing.T) {
 		PID: 41, StartedAt: xact.Add(-time.Hour), XactStart: xact,
 		User: "app", App: "orders-api", State: "idle in transaction",
 		Query:      "update orders set note='password=" + secret + "' where id=7 " + strings.Repeat("x", 400),
-		BlocksSlot: true,
+		BlocksSlot: true, InScope: true,
 	}}}
 	r, err := runScoped(t, settingsDeps(src), "source_blocking_sessions", `{"older_than_minutes":10}`)
 	if err != nil {
 		t.Fatalf("source_blocking_sessions: %v", err)
+	}
+	// A scoped room reads through the table-scoped variant, never the
+	// cluster-wide one.
+	if len(src.blockTables) == 0 {
+		t.Fatal("scoped read did not pass the pipeline's tables")
 	}
 	if strings.Contains(r.Summary, secret) {
 		t.Fatalf("secret leaked into the summary: %q", r.Summary)
@@ -321,7 +331,7 @@ func makeSessions(n int) []postgres.DBSession {
 	for i := range out {
 		out[i] = postgres.DBSession{
 			PID: int64(1000 + i), StartedAt: now.Add(-time.Hour), XactStart: now.Add(-30 * time.Minute),
-			User: "app", App: "orders-api", State: "idle in transaction", Query: "select 1", BlocksSlot: true,
+			User: "app", App: "orders-api", State: "idle in transaction", Query: "select 1", BlocksSlot: true, InScope: true,
 		}
 	}
 	return out
@@ -340,7 +350,7 @@ func TestSourceBlockingSessionsSanitizesIdentityFields(t *testing.T) {
 		App:        "app\r\ninjected line\x1b[31m",
 		State:      "free\ntext",
 		Query:      "select 1",
-		BlocksSlot: false,
+		BlocksSlot: false, InScope: true,
 	}}}
 	r, err := runScoped(t, settingsDeps(src), "source_blocking_sessions", `{}`)
 	if err != nil {
@@ -402,7 +412,60 @@ func TestSourceBlockingSessionsNoBlockers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("source_blocking_sessions: %v", err)
 	}
-	if !strings.Contains(r.Summary, "(no blocking sessions)") {
+	if !strings.Contains(r.Summary, "(no blocking sessions visible to this role") {
+		t.Fatalf("summary = %q", r.Summary)
+	}
+}
+
+// In a scoped room, a session outside the pipeline's tables is anonymised:
+// even if a (fake or future) client returns its identity, the tool blanks it
+// before anything joins the room, and the summary says why.
+func TestSourceBlockingSessionsScopedHidesForeignIdentity(t *testing.T) {
+	now := time.Now()
+	src := &fakeSource{blockers: []postgres.DBSession{{
+		PID: 9, StartedAt: now.Add(-time.Hour), XactStart: now.Add(-40 * time.Minute),
+		User: "other-tenant", App: "their-app", State: "idle in transaction",
+		Query: "update payroll set salary=1", BlocksSlot: true, InScope: false,
+	}}}
+	r, err := runScoped(t, settingsDeps(src), "source_blocking_sessions", `{}`)
+	if err != nil {
+		t.Fatalf("source_blocking_sessions: %v", err)
+	}
+	for _, leak := range []string{"other-tenant", "their-app", "payroll"} {
+		if strings.Contains(r.Summary, leak) {
+			t.Fatalf("foreign session identity leaked into the summary: %q", r.Summary)
+		}
+	}
+	if !strings.Contains(r.Summary, "pid=9") || !strings.Contains(r.Summary, "identity hidden") || !strings.Contains(r.Summary, "blocks_slot=yes") {
+		t.Fatalf("summary misses the anonymised row: %q", r.Summary)
+	}
+	data, ok := r.Data.([]postgres.DBSession)
+	if !ok || len(data) != 1 {
+		t.Fatalf("data = %T %+v", r.Data, r.Data)
+	}
+	if data[0].User != "" || data[0].App != "" || data[0].Query != "" {
+		t.Fatalf("foreign session identity leaked into Data: %+v", data[0])
+	}
+}
+
+// A room without scope cannot read sessions at all unless explicitly
+// unscoped; with the unscoped opt-in the cluster-wide read is used and every
+// row keeps its identity.
+func TestSourceBlockingSessionsUnscopedReadsClusterWide(t *testing.T) {
+	now := time.Now()
+	src := &fakeSource{blockers: []postgres.DBSession{{
+		PID: 4, StartedAt: now.Add(-time.Hour), XactStart: now.Add(-40 * time.Minute),
+		User: "app", App: "orders-api", State: "active", Query: "select 1", BlocksSlot: true, InScope: true,
+	}}}
+	d := settingsDeps(src)
+	r, err := scopedTool(t, d, "source_blocking_sessions").Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("source_blocking_sessions: %v", err)
+	}
+	if src.blockTables != nil {
+		t.Fatalf("unscoped read passed tables: %v", src.blockTables)
+	}
+	if !strings.Contains(r.Summary, "user=app") {
 		t.Fatalf("summary = %q", r.Summary)
 	}
 }

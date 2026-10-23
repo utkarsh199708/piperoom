@@ -55,6 +55,7 @@ type fakeSource struct {
 	// context deadline.
 	settingsCalls, replCalls, roleCalls, blockCalls int
 	tablesAsked                                     []string
+	blockTables                                     []string
 	roleAsked                                       string
 	olderThan                                       time.Duration
 	settingsDeadline                                bool
@@ -171,6 +172,13 @@ func (f *fakeSource) Blockers(ctx context.Context, olderThan time.Duration) ([]p
 		return nil, f.blockErr
 	}
 	return f.blockers, nil
+}
+
+// BlockersOnTables is the scoped Blockers: it records the tables it was
+// limited to and returns the same scripted sessions.
+func (f *fakeSource) BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]postgres.DBSession, error) {
+	f.blockTables = tables
+	return f.Blockers(ctx, olderThan)
 }
 
 func (f *fakeSource) noteDeadline(ctx context.Context) {

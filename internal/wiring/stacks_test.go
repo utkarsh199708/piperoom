@@ -116,6 +116,11 @@ func (s *spy) Blockers(context.Context, time.Duration) ([]postgres.DBSession, er
 	return nil, nil
 }
 
+// BlockersOnTables is the scoped Blockers a scoped room reads through.
+func (s *spy) BlockersOnTables(ctx context.Context, olderThan time.Duration, _ []string) ([]postgres.DBSession, error) {
+	return s.Blockers(ctx, olderThan)
+}
+
 // spySourceReads are the source methods of spy. spySource holds the spy
 // behind them only, as the real source client (*postgres.DB) has no write
 // method: the P3 pg actions hold the source client, and the reachability
@@ -131,6 +136,7 @@ type spySourceReads interface {
 	TableReplication(context.Context, []string) ([]postgres.TableReplication, error)
 	RoleInfo(context.Context, string, []string) (postgres.RoleInfo, error)
 	Blockers(context.Context, time.Duration) ([]postgres.DBSession, error)
+	BlockersOnTables(context.Context, time.Duration, []string) ([]postgres.DBSession, error)
 }
 
 type spySource struct{ spySourceReads }

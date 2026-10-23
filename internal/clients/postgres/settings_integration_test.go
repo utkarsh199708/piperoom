@@ -135,23 +135,59 @@ func TestBlockersIntegration(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// olderThan 0 lists every open transaction; ours holds an xid, so it is a
-	// slot blocker on both counts.
+	// olderThan 0 lists every open transaction. Ours is idle in transaction
+	// with an assigned xid (backend_xmin may already be NULL between
+	// statements), so it must count as a slot blocker.
 	sessions, err := db.Blockers(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("Blockers: %v", err)
 	}
+	found := false
 	for _, s := range sessions {
 		if s.PID != pid {
 			continue
 		}
-		if !s.BlocksSlot || s.StartedAt.IsZero() || s.XactStart.IsZero() {
+		if !s.BlocksSlot || s.StartedAt.IsZero() || s.XactStart.IsZero() || !s.InScope {
 			t.Fatalf("session = %+v", s)
 		}
 		if len(s.Query) > MaxSessionQueryBytes {
 			t.Fatalf("query is %d bytes, cap %d", len(s.Query), MaxSessionQueryBytes)
 		}
-		return
+		found = true
 	}
-	t.Fatalf("session %d not in %+v", pid, sessions)
+	if !found {
+		t.Fatalf("session %d not in %+v", pid, sessions)
+	}
+
+	// Scoped to our table, the session keeps its identity; scoped to another
+	// table, the same session is anonymised but still listed as a blocker.
+	inScope, err := db.BlockersOnTables(context.Background(), 0, []string{"public." + table})
+	if err != nil {
+		t.Fatalf("BlockersOnTables(own table): %v", err)
+	}
+	foreign, err := db.BlockersOnTables(context.Background(), 0, []string{"public.it_blockers_no_such_table"})
+	if err != nil {
+		t.Fatalf("BlockersOnTables(other table): %v", err)
+	}
+	check := func(sessions []DBSession, wantInScope bool, label string) {
+		t.Helper()
+		for _, s := range sessions {
+			if s.PID != pid {
+				continue
+			}
+			if s.InScope != wantInScope || !s.BlocksSlot {
+				t.Fatalf("%s: session = %+v", label, s)
+			}
+			if !wantInScope && (s.User != "" || s.App != "" || s.Query != "") {
+				t.Fatalf("%s: identity not anonymised: %+v", label, s)
+			}
+			if wantInScope && s.Query == "" {
+				t.Fatalf("%s: in-scope session lost its query: %+v", label, s)
+			}
+			return
+		}
+		t.Fatalf("%s: session %d not in %+v", label, pid, sessions)
+	}
+	check(inScope, true, "own table")
+	check(foreign, false, "other table")
 }

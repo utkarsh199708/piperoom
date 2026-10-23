@@ -71,7 +71,11 @@ type RoleInfo struct {
 }
 
 // DBSession is one session that can hold back logical replication. Query is
-// untrusted text: redacted and cut before it leaves the client.
+// untrusted text: redacted and cut before it leaves the client. InScope is
+// false for a session a scoped read anonymised (see BlockersOnTables): its
+// User, App and Query are blank because they belong to another pipeline, user
+// or database. (InScope is additive to the Q-board shape; see the PR's
+// contract change request.)
 type DBSession struct {
 	PID        int64     `json:"pid"`
 	StartedAt  time.Time `json:"started_at"` // backend start; with PID, the identity EndSession re-checks
@@ -81,6 +85,7 @@ type DBSession struct {
 	State      string    `json:"state"`
 	Query      string    `json:"query"` // untrusted, redacted, at most 200 bytes
 	BlocksSlot bool      `json:"blocks_slot"`
+	InScope    bool      `json:"in_scope"`
 }
 
 var _ SourceSettingsReader = (*DB)(nil)
@@ -142,10 +147,16 @@ func (d *DB) Settings(ctx context.Context) ([]DBSetting, error) {
 // tableReplicationSQL reads, for each requested table ($1 schemas, $2 names,
 // matched pairwise, in order), whether the relation exists, its replica
 // identity and whether it has a primary key. Only pg_catalog is read.
+// relreplident stays 'i' after the REPLICA IDENTITY USING INDEX index is
+// dropped or invalidated, while the table then behaves as NOTHING — the exact
+// update/delete failure this read exists to show — so 'i' is reported as 'n'
+// unless a valid identity index actually exists.
 const tableReplicationSQL = `
 		SELECT v.pos,
 		       c.oid IS NOT NULL,
-		       COALESCE(c.relreplident::text, ''),
+		       COALESCE(CASE WHEN c.relreplident = 'i' AND NOT EXISTS (
+		           SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisreplident AND i.indisvalid)
+		           THEN 'n' ELSE c.relreplident::text END, ''),
 		       COALESCE(EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary), false)
 		FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS v(nsp, relname, pos)
 		LEFT JOIN pg_namespace n ON n.nspname = v.nsp
@@ -201,13 +212,17 @@ func (d *DB) TableReplication(ctx context.Context, tables []string) ([]TableRepl
 }
 
 // roleGrantsSQL reports role $1's SELECT privilege on each table ($2 schemas,
-// $3 names). A missing table reads as no privilege; has_table_privilege
-// counts inherited grants, which is what the connector's queries get.
+// $3 names). A missing table reads as no privilege, and only real or
+// partitioned tables count, like tableReplicationSQL (a stray index or type
+// under the name would make has_table_privilege error out). Caveat:
+// has_table_privilege counts privileges available via role membership even
+// when the member role is NOINHERIT, so it can say yes where the connector's
+// own queries would still be denied until SET ROLE.
 const roleGrantsSQL = `
 		SELECT v.pos, COALESCE(c.oid IS NOT NULL AND has_table_privilege($1::name, c.oid, 'SELECT'), false)
 		FROM unnest($2::text[], $3::text[]) WITH ORDINALITY AS v(nsp, relname, pos)
 		LEFT JOIN pg_namespace n ON n.nspname = v.nsp
-		LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.relname
+		LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.relname AND c.relkind IN ('r', 'p')
 		ORDER BY v.pos`
 
 // RoleInfo reports whether role exists, can log in and may replicate, and its
@@ -268,46 +283,93 @@ func (d *DB) RoleInfo(ctx context.Context, role string, tables []string) (RoleIn
 }
 
 // blockersSQL lists the sessions that hold back a slot: an open transaction
-// older than $1 seconds, or the session whose backend_xmin is the oldest on
-// the server (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT
-// waits for it). xid has no min() aggregate and no ordering operators, so the
-// oldest xmin is found as the largest age(backend_xmin), which is also
-// wraparound-safe. Walsenders are left out (their own xmin is not a blocker)
-// and so is this backend.
+// older than $1 seconds, or a session holding the server's oldest xid horizon
+// (a logical slot cannot advance past it, and CREATE_REPLICATION_SLOT waits
+// for it). The horizon is the larger of age(backend_xid) and
+// age(backend_xmin): a READ COMMITTED writer that went idle in transaction
+// releases its snapshot between statements, so backend_xmin is NULL while its
+// assigned backend_xid still pins the horizon — exactly the classic blocker.
+// xid has no min() aggregate and no ordering operators, so the oldest is the
+// largest age(), which is also wraparound-safe; GREATEST ignores a NULL arm.
+// Walsenders are left out (their own xmin is not a blocker) and so is this
+// backend. Prepared transactions (pg_prepared_xacts) hold the horizon too but
+// are not sessions and are not listed here.
+//
+// $4 scopes the read to a pipeline: when true, a session counts as in scope
+// only if it holds or waits for a relation lock on one of the tables ($2
+// schemas, $3 names, matched pairwise) in the current database. The identity
+// of an out-of-scope session belongs to another pipeline, user or database,
+// so its usename, application_name and query are blanked in SQL and never
+// leave the server (the pg_long_transactions rule); pid, times, state and
+// blocks_slot remain, which is what "a foreign session holds the horizon"
+// needs. With $4 false every session is in scope and shown in full.
 const blockersSQL = `
-		WITH activity AS (
-			SELECT pid, backend_start, xact_start, usename, application_name, state, query,
-			       age(backend_xmin) AS xmin_age,
-			       (xact_start IS NOT NULL AND xact_start < now() - make_interval(secs => $1)) AS old
-			FROM pg_stat_activity
-			WHERE pid <> pg_backend_pid()
-			  AND backend_type <> 'walsender'
+		WITH rel AS (
+			SELECT c.oid
+			FROM unnest($2::text[], $3::text[]) AS v(nsp, relname)
+			JOIN pg_namespace n ON n.nspname = v.nsp
+			JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.relname
+		), activity AS (
+			SELECT a.pid, a.backend_start, a.xact_start, a.usename, a.application_name, a.state, a.query,
+			       GREATEST(age(a.backend_xid), age(a.backend_xmin)) AS xid_age,
+			       (a.xact_start IS NOT NULL AND a.xact_start < now() - make_interval(secs => $1)) AS old,
+			       (NOT $4::boolean OR COALESCE(a.datname = current_database() AND EXISTS (
+			           SELECT 1 FROM pg_locks l
+			           WHERE l.pid = a.pid
+			             AND l.locktype = 'relation'
+			             AND l.database = a.datid
+			             AND l.relation IN (SELECT oid FROM rel)), false)) AS in_scope
+			FROM pg_stat_activity a
+			WHERE a.pid <> pg_backend_pid()
+			  AND a.backend_type <> 'walsender'
 		), horizon AS (
-			SELECT max(xmin_age) AS max_age FROM activity
+			SELECT max(xid_age) AS max_age FROM activity
 		)
 		SELECT a.pid,
 		       a.backend_start,
 		       COALESCE(a.xact_start, a.backend_start),
-		       COALESCE(a.usename, ''),
-		       COALESCE(a.application_name, ''),
+		       CASE WHEN a.in_scope THEN COALESCE(a.usename, '') ELSE '' END,
+		       CASE WHEN a.in_scope THEN COALESCE(a.application_name, '') ELSE '' END,
 		       COALESCE(a.state, ''),
-		       COALESCE(a.query, ''),
-		       (a.xmin_age IS NOT NULL AND a.xmin_age >= h.max_age) AS blocks_slot
+		       CASE WHEN a.in_scope THEN COALESCE(a.query, '') ELSE '' END,
+		       (a.xid_age IS NOT NULL AND a.xid_age >= h.max_age) AS blocks_slot,
+		       a.in_scope
 		FROM activity a, horizon h
-		WHERE a.old OR (a.xmin_age IS NOT NULL AND a.xmin_age >= h.max_age)
+		WHERE a.old OR (a.xid_age IS NOT NULL AND a.xid_age >= h.max_age)
 		ORDER BY a.xact_start NULLS LAST, a.pid`
 
-// Blockers lists the sessions that can hold back logical replication. The
-// query text of each is redacted (N5) and cut to MaxSessionQueryBytes; only
-// the documented DBSession fields leave this method.
+// Blockers lists the sessions that can hold back logical replication, with
+// full identity on every row (InScope is always true). The query text of each
+// is redacted (N5) and cut to MaxSessionQueryBytes; only the documented
+// DBSession fields leave this method.
 func (d *DB) Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession, error) {
+	return d.blockers(ctx, olderThan, nil, nil, false)
+}
+
+// BlockersOnTables is Blockers limited to a pipeline's view: every blocker is
+// still listed, but a session that does not hold or wait for a lock on one of
+// tables (each "schema.table") in the current database has its user,
+// application and query blanked — it belongs to another pipeline, user or
+// database, and only its pid, times, state and blocks_slot are shown.
+func (d *DB) BlockersOnTables(ctx context.Context, olderThan time.Duration, tables []string) ([]DBSession, error) {
+	schemas, names, err := splitTables(tables)
+	if err != nil {
+		return nil, err
+	}
+	return d.blockers(ctx, olderThan, schemas, names, true)
+}
+
+func (d *DB) blockers(ctx context.Context, olderThan time.Duration, schemas, names []string, scoped bool) ([]DBSession, error) {
 	if olderThan < 0 {
 		return nil, fmt.Errorf("postgres: blockers: negative age %s", olderThan)
+	}
+	if schemas == nil {
+		schemas, names = []string{}, []string{}
 	}
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
-	rows, err := d.query(ctx, blockersSQL, olderThan.Seconds())
+	rows, err := d.query(ctx, blockersSQL, olderThan.Seconds(), schemas, names, scoped)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list blocking sessions: %w", err)
 	}
@@ -316,7 +378,7 @@ func (d *DB) Blockers(ctx context.Context, olderThan time.Duration) ([]DBSession
 	var out []DBSession
 	for rows.Next() {
 		var s DBSession
-		if err := rows.Scan(&s.PID, &s.StartedAt, &s.XactStart, &s.User, &s.App, &s.State, &s.Query, &s.BlocksSlot); err != nil {
+		if err := rows.Scan(&s.PID, &s.StartedAt, &s.XactStart, &s.User, &s.App, &s.State, &s.Query, &s.BlocksSlot, &s.InScope); err != nil {
 			return nil, fmt.Errorf("postgres: scan blocking session: %w", err)
 		}
 		s.Query = RedactSessionQuery(s.Query)
