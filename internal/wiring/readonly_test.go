@@ -231,6 +231,34 @@ func TestActionsStillGetWriters(t *testing.T) {
 	}
 }
 
+// readOnlyAdapterMethods is every exported method a read-only adapter may
+// have: the reads it forwards and the writes that refuse with ErrReadOnly.
+// The no-writer walks skip descending into an adapter (it holds the raw
+// client in an unexported field by design), so its method set is the only
+// surface a smuggled forwarding write could ship on; assertAdapterMethodSet
+// fails on any method outside this list, so adding a method to an adapter
+// means consciously adding it here too.
+var readOnlyAdapterMethods = map[string]bool{
+	// Forwarded reads.
+	"ListConnectors": true, "Status": true, "Config": true,
+	"ValidateConfig": true, "PluginConfigDef": true, "WorkerTasks": true,
+	"Subjects": true, "Versions": true, "Schema": true, "Compatibility": true,
+	"SubjectsIncludingDeleted": true, "VersionsIncludingDeleted": true,
+	"CheckCompatibility": true,
+	// Writes that refuse (ErrReadOnly, or errNoRegistry on noRegistry).
+	"RestartTask": true, "RestartConnector": true,
+	"SetCompatibility": true, "Register": true,
+}
+
+func assertAdapterMethodSet(t *testing.T, path string, ty reflect.Type) {
+	t.Helper()
+	for i := 0; i < ty.NumMethod(); i++ {
+		if m := ty.Method(i).Name; !readOnlyAdapterMethods[m] {
+			t.Errorf("%s: read-only adapter %s has method %s outside the known reads and refusing writes; a forwarding write would ship exactly here", path, ty, m)
+		}
+	}
+}
+
 // TestRegisteredToolsHoldNoWriter registers every tool over a Wired whose
 // Connect and Registry are the writing spy, then walks each tool's fields (and
 // the topology builder they reach) looking for any value that can write. The
@@ -287,7 +315,12 @@ func TestRegisteredToolsHoldNoWriter(t *testing.T) {
 			return
 		}
 		if allowed[v.Type()] {
-			return // the refusing wrappers hold the writer by design
+			// The refusing wrappers hold the writer in unexported fields by
+			// design, so the walk does not descend into them — which makes
+			// their own method set the only surface a smuggled forwarding
+			// write could ship on. Check it instead of trusting the type.
+			assertAdapterMethodSet(t, path, v.Type())
+			return
 		}
 		// An interface-typed field is judged by the value inside it: its
 		// static type (clients.ConnectClient) always has write methods.

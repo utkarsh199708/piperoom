@@ -586,6 +586,11 @@ func TestConnectValidateConfigBadInput(t *testing.T) {
 	}
 }
 
+// pairLessConnect narrows a fakeConnect to the plain ConnectClient method
+// set: ValidateConfig and PluginConfigDef are not promoted through the
+// interface, so the registration's type assertion must fail on it.
+type pairLessConnect struct{ clients.ConnectClient }
+
 // The real client is the ConfigValidator the tool asserts; a fake without the
 // pair is not registered.
 func TestConnectValidateConfigRegistration(t *testing.T) {
@@ -597,6 +602,16 @@ func TestConnectValidateConfigRegistration(t *testing.T) {
 		t.Fatal("a client with the validator pair did not register the tool")
 	}
 	var _ ConfigValidator = (*connect.Client)(nil)
+
+	// The negative half: a client without the pair leaves the tool
+	// unregistered, so the model is never offered a call that always fails.
+	reg2 := tools.NewRegistry()
+	if err := Register(reg2, Deps{Connect: pairLessConnect{&fakeConnect{}}, Owners: validateOwners()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := reg2.Get("connect_validate_config"); ok {
+		t.Fatal("a client without the validator pair registered the tool")
+	}
 }
 
 // Host-guard reductions: a URL whose path or query holds '@' must reduce to

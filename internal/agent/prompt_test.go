@@ -1086,16 +1086,12 @@ func TestSystemPromptValidatesAConnectorConfigBeforeCreate(t *testing.T) {
 	}
 	rule := prompt[start:]
 	rule = rule[:strings.Index(rule, "\n")]
-	for _, want := range []string{
-		"connect_validate_config",
-		"before proposing a create",
-		"no base connector: from scratch",
-		"propose nothing on errors",
-		"known-issue id",
-	} {
-		if !strings.Contains(rule, want) {
-			t.Errorf("create-validation rule lacks %q: %s", want, rule)
-		}
+	// Pin the whole sentence, not fragments: substring checks survive a
+	// negation ("no need to run connect_validate_config ...") or a weakening
+	// ("validate only the keys you changed") that keeps the fragments.
+	const want = "- Connector missing: validate the full config with connect_validate_config before proposing a create (no base connector: from scratch); propose nothing on errors; name a known-issue id it reports."
+	if rule != want {
+		t.Errorf("create-validation rule is\n%q, want\n%q", rule, want)
 	}
 	if strings.Contains(systemPromptFor(events.PipelineKindBatch), "connect_validate_config") {
 		t.Error("the batch prompt carries the CDC create-validation rule")

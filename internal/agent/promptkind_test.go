@@ -62,9 +62,13 @@ var updatePromptSnapshots = flag.Bool("update-prompt", false, "rewrite testdata/
 // path validates the full config with connect_validate_config before a create
 // is proposed, proposes nothing on a validation error, validates from scratch
 // when there is no base connector, and names a known-issue id for a renamed
-// key. The CDC prompt stays under 1335 words by trimming repeated wording
-// (the pause bullet's backlog report, the scheduling note, the log/style
-// bullet's examples) without dropping a rule.
+// key. The new rule is ~30 words; to stay under the 1335-word ceiling
+// (LEAD-ARCH ruling on #659) repeated wording was tightened (the scheduling
+// and write-off notes, the reply_to and action-result phrasings, the id
+// examples) and three rule words were traded away: the pause bullet lost
+// "report backlog and retention headroom", the similar-incidents rule now
+// asks for the step id without "and reads", and Style lost "Short
+// sentences.". Restoring those needs the ceiling moved.
 // It is pinned here, beside the snapshot
 // file, so a regenerated snapshot cannot silently move the CDC prompt: the
 // CDC evals and the prompt cache depend on these exact bytes.

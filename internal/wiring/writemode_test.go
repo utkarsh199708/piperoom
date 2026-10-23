@@ -177,6 +177,12 @@ func assertNoWriterReachable(t *testing.T, name string, areg *actions.Registry) 
 	connW, regW := ifaceOf[clients.ConnectWriter](), ifaceOf[clients.SchemaRegistryWriter]()
 	adapters := 0
 	for ty := range reachableTypes(areg) {
+		// A refusing adapter is exempt from the writer-interface checks
+		// below, so its own method set must carry nothing but known reads
+		// and refusing writes (a smuggled forwarding write hides there).
+		if refusingAdapters[ty] {
+			assertAdapterMethodSet(t, name, ty)
+		}
 		never := writers
 		if !readOnlyKafkaViews[ty] {
 			never = append(slices.Clone(writers), writerReads...)
