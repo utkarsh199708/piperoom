@@ -64,15 +64,22 @@ jobs:
           set -euo pipefail
           skip=""
           if [ "$RUNNER_OS" = "Windows" ]; then
-            # TestPropertiesWriteFixesMode asserts the 0600 POSIX mode after an
-            # unchanged properties_write. NTFS reports 0666 for every writable
-            # file and os.Chmod only toggles the read-only bit, so the
-            # assertion cannot pass on Windows: the test needs a
-            # `//go:build !windows` or a Windows branch (A9 follow-up, reported
-            # in the U1-16 PR). Only this test is skipped by the flag; the two
-            # path-table rows that create real symlinks still skip themselves
-            # where the OS user may not, which the next step accounts for.
-            skip='-skip=^TestPropertiesWriteFixesMode$'
+            # Three upstream tests cannot pass on Windows for environment
+            # reasons, not logic, and none of them has a skip of its own:
+            #  - TestPropertiesWriteFixesMode (security_fixes_test.go) and
+            #    TestStackOpsRunValidatedSnapshot (allowlist_test.go, #887)
+            #    assert 0600 on a file they wrote. NTFS reports 0666 for every
+            #    writable file and os.Chmod only toggles the read-only bit.
+            #  - TestStackRefusesSymlinkBind (allowlist_test.go, #887) creates
+            #    a symlink. A runner user without SeCreateSymbolicLinkPrivilege
+            #    cannot.
+            # They run on the ubuntu and macOS legs. Each needs a
+            # `//go:build !windows` or a Windows branch: C19's, named as a
+            # follow-up in the U1-16 PR. Only these three are skipped by the
+            # flag; the two path-table rows that create real symlinks still
+            # skip themselves where the OS user may not, which the next step
+            # accounts for.
+            skip='-skip=^(TestPropertiesWriteFixesMode|TestStackOpsRunValidatedSnapshot|TestStackRefusesSymlinkBind)$'
           fi
           go test -count=1 -timeout 10m $skip ./internal/setup/... ./cmd/setup/...
       - name: "Section 2.3 path table tests (run, never skipped)"
