@@ -287,7 +287,13 @@ func javaHomeConfined(env ops.Env, home string) error {
 		return errors.New("host: the project root is not open")
 	}
 	dirs := []string{env.Confine.Dir()}
-	if real, err := filepath.EvalSymlinks(dirs[0]); err == nil && real != dirs[0] {
+	real, err := filepath.EvalSymlinks(dirs[0])
+	if err != nil {
+		// Without the resolved project directory a JDK reached through a
+		// symlinked parent cannot be told apart from one outside it.
+		return fmt.Errorf("%w: resolving the project directory: %v", ErrDetect, err)
+	}
+	if real != dirs[0] {
 		dirs = append(dirs, real)
 	}
 	for _, dir := range dirs {
