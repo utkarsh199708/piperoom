@@ -83,8 +83,9 @@ func pausedState(state string) bool {
 // readToolContent is the text of a successful read's tool_result: the wrapped
 // summary, plus the pause rule when the read shows a paused connector, the
 // upgrade rule when a known issue affects a running version (Q1d) and the
-// skip rule when a connector's error handling drops records (Q3e, only when
-// the room offers the worker tools it names).
+// skip rule when a connector's error handling drops records (Q3e) and the
+// net rule when Connect reports a network or TLS failure (Q6b), each only
+// when the room offers the tools it names.
 func (r *runner) readToolContent(tool, stepID, summary string, data any) string {
 	content := r.wrapReadToolOutput(tool, stepID, summary)
 	if pausedConnector(tool, data) {
@@ -95,6 +96,9 @@ func (r *runner) readToolContent(tool, stepID, summary string, data any) string 
 	}
 	if skipsRecords(tool, data) && r.offers(skipRuleTools...) {
 		content += "\n" + skipRuleNote
+	}
+	if networkFailureRead(tool, data) && r.offers(netRuleTool) {
+		content += "\n" + netRuleNote
 	}
 	return content
 }

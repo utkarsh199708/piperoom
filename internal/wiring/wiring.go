@@ -88,11 +88,26 @@ type Wired struct {
 	// as WorkerLogs, until internal/config has it.
 	ConnectInternalTopics string
 
+	// ProbeTools registers net_probe (Q6a) over this set. It is a hook, not
+	// a direct call, because nettools imports internal/connprobe, which
+	// imports this package, so wiring cannot import nettools. The caller sets
+	// it to netwire.Register (internal/wiring/netwire) after Open, or in
+	// StackOptions.Prepare, before RegisterTools. Nil leaves net_probe
+	// unregistered.
+	ProbeTools func(reg *tools.Registry, w *Wired) error
+
 	// Rooms is where similar_incidents reads past closed rooms (the room
 	// store). The caller that owns the store sets it after Open, before
 	// RegisterTools; nil leaves the tool unregistered (CLI runs have no room
 	// store).
 	Rooms similarincidents.Source
+
+	// conn is the connection settings this set was opened with (the
+	// process-wide settings, or one pipeline's resolved connections: block).
+	// net_probe lists its targets from them, so a set never names another
+	// set's host. Zero for a Wired built by hand: net_probe then offers only
+	// the pipeline's literal connections and its connectors' hosts.
+	conn config.Config
 
 	// write is true when the set was opened with write mode on
 	// (PIPEROOM_WRITE_MODE=on and not StackOptions.ReadOnly). Only then do
@@ -362,6 +377,7 @@ func openClientsWith(ctx context.Context, cfg config.Config, awsCfg *aws.Config,
 	w.DebeziumMetrics = dm
 	w.Orchestrator, w.Transform = orch, tr
 	w.write, w.writers = write, wc
+	w.conn = cfg
 	return w, nil
 }
 

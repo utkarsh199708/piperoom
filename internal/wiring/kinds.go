@@ -142,6 +142,16 @@ func toolPackages() []toolPackage {
 			}
 			return logtools.Register(reg, d)
 		}},
+		// net_probe (Q6a) through the caller's hook (Wired.ProbeTools): it
+		// probes the set's own endpoints and asks Connect to validate the
+		// source connector's config, to compare Piperoom's view of a host
+		// with Connect's.
+		{name: "net probe", kinds: cdcKind, register: func(reg *tools.Registry, w *Wired) error {
+			if w.ProbeTools == nil {
+				return nil
+			}
+			return w.ProbeTools(reg, w)
+		}},
 		// Schedule is left nil: batchtools.Register falls back to the
 		// orchestrator's clients.DAGScheduleReader (*airflow.Client), the one
 		// copy of that fallback.
