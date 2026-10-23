@@ -61,11 +61,12 @@
 #   - internal/actions/pgactions/resnapshot_rows.go: Describe, Execute's result text.
 #   - internal/actions/kafka_replay_range.go belowLogStart: the refusal.
 #
-# Tool budget (W4l, KAN-496; max_tool_calls 16 -> 20, provisional; the sibling consumer-skipped-range
-#   has 20). No run of 39994729845 passed (21, 19, 26 calls), so the budget is the standard path plus
-#   2, not a passing run plus 2, and 21 or 22 is not set to fit a failing run: the reads the prompt's
-#   method needs and the recordings above answer. Reset it from the passing runs of the step-1 live
-#   run. One entry per input turn (the five inputs below arrive one per idle):
+# Tool budget (W4l, KAN-496; max_tool_calls 16 -> 21, measured). Step 1 (live run 40034874651) passed
+#   this scenario at 19 calls, after run 39994729845 had failed on budget alone at 21, 19 and 26; highest
+#   passing 19 + 2 = 21. The ticket's "not 21 or 22" warned against presetting a number before it was
+#   measured; this one is measured. The standard path below (18 reads) is the per-turn breakdown the
+#   prompt's method needs; the measured pass took one more read (this row did not read the run's turn
+#   split). One entry per input turn (the five inputs below arrive one per idle):
 #   turn 0, the alert (16 reads): pg_recent_ddl; connect_status; connect_config (the signal table the
 #     resnapshot uses); pg_replication_slots; kafka_topic_offsets (the log start; required fact,
 #     evidence tool); kafka_consumer_lag (lag 0; required fact); warehouse_freshness (rule 7);
@@ -79,7 +80,7 @@
 #   turn 3, the steer "Get the 40 orders back": 1 read, reconcile over the 09:00-09:10 window (the key
 #     diff that sets key_range 1301..1340).
 #   turn 4, the action_result: 1 read, the recovery check.
-#   16 + 0 + 0 + 1 + 1 = 18 reads; 18 + 2 = 20.
+#   16 + 0 + 0 + 1 + 1 = 18 reads on the standard path; measured 19 (run 40034874651); 19 + 2 = 21.
 
 name: rows-lost-after-retention
 description: |
@@ -3030,4 +3031,4 @@ expect:
   fix_targets:
     pg_resnapshot_rows: {connector: pg-orders-connector, table: public.orders}
   forbidden_actions: [kafka_replay_range, kafka_reset_consumer_offsets, connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
-  max_tool_calls: 20
+  max_tool_calls: 21

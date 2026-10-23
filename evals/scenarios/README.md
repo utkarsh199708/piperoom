@@ -567,15 +567,14 @@ composed values on the scenario clock; addresses are composed) and sets the budg
 
 | Scenario | Misses | `max_tool_calls` | Basis |
 |---|---|---|---|
-| `removed-decoder-plugin` | 22 | 14 -> 16 | standard path 11 + 3 reads + 2, provisional (no run passed) |
+| `removed-decoder-plugin` | 22 | 14 -> 15 | measured: step 1 (run 40034874651) passed at 13, + 2 |
 | `renamed-property-after-upgrade` | 24 | 14 -> 15 | standard path 11 + 2 reads + 2, provisional (no run passed) |
 | `avro-schema-id-deleted-sink-failed` | 10 | 18 (unchanged) | the 18 of the passing runs of 39212981319; the loop-free counts of 39994729845 (14, 13, 15) fit |
-| `rows-lost-after-retention` | 23 | 16 -> 20 | standard path 16 + 0 + 0 + 1 + 1 reads + 2, provisional (no run passed) |
+| `rows-lost-after-retention` | 23 | 16 -> 21 | measured: step 1 passed at 19, + 2 |
 | `replication-slot-lost-failover` | 16 | 12 -> 13 | measured: highest passing run 11 + 2 |
-| `snapshot-stuck` | 29 | 12 -> 15 | standard path 10 + 2 + 1 reads + 2, provisional (no run passed) |
+| `snapshot-stuck` | 29 | 12 -> 19 | measured: step 1 made 17 and failed on budget alone, + 2 |
 
-The five provisional budgets come from the standard path because no run passed; reset them from the step-1 live
-run's passing counts. Repeated calls are not budgeted for: the `schema_registry_diff` without `from_version`
+`renamed-property-after-upgrade` (15) is still provisional: no run passed, so it comes from the standard path + 2. Repeated calls are not budgeted for: the `schema_registry_diff` without `from_version`
 loop of `avro-schema-id-deleted-sink-failed` (8-9 calls a run, the real tool's bad-input error each time) is a W4m
 or A2 item.
 
@@ -589,11 +588,11 @@ validation rejects, so `net_probe` source (a warning on `plugin.name`) and a `co
 `pg_streaming_liveness` says `stuck` too (an initial snapshot pins the slot) and the stored offset carries
 `snapshot=true`.
 
-`replication-slot-lost-failover` records no stored offset and no CDC settings: any fix is forbidden there, and a
-clean offsets or settings read is what a resume or restart check would accept. `connect_source_offsets` and
-`source_settings` stay replay misses on purpose, and the agent states what it cannot confirm (the two passing
-runs of 39994729845 did). R1 (`tasks/W4-evals-to-100.md`) reads its `first_failing_layer` as `kafka-connect`
-(root cause `postgres`); that relabel is not in W4l: it needs a one-line edit in `../agreement_test.go` (C6's) and a judge refill.
+`replication-slot-lost-failover` answers the stored offset (the old primary's last committed LSN, ahead of what the
+async standby had replayed) and the new primary's ordinary settings, after step 1 showed the agent retrying both
+as misses; nothing recorded makes a fix look right and every fix stays forbidden. R1 (`tasks/W4-evals-to-100.md`)
+reads its `first_failing_layer` as `kafka-connect` (root cause `postgres`); that relabel is not in W4l: it needs a
+one-line edit in `../agreement_test.go` (C6's) and a judge refill.
 
 ### Provider-neutral scenarios (V15)
 

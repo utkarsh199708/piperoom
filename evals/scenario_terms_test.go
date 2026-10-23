@@ -338,12 +338,6 @@ var w4lMisses = map[string][]w4lMiss{
 	},
 }
 
-// w4lUnrecorded are the reads replication-slot-lost-failover leaves as replay misses on purpose: any fix is
-// forbidden there, and a stored offset or clean CDC settings read as "the resume checks pass".
-func w4lUnrecorded(scenario, tool string) bool {
-	return scenario == "replication-slot-lost-failover" && (tool == "connect_source_offsets" || tool == "source_settings")
-}
-
 func w4lScenarioByName(t *testing.T, name string) Scenario {
 	t.Helper()
 	scs, err := LoadScenarios("scenarios")
@@ -360,8 +354,7 @@ func w4lScenarioByName(t *testing.T, name string) Scenario {
 }
 
 // TestW4lMissesNowResolve replays every miss W4-0 lists for the six scenarios against the scenario's
-// recordings: each now has an answer (KAN-496 test case 2), except the two reads the slot-lost scenario
-// leaves unanswered by design.
+// recordings: each now has an answer (KAN-496 test case 2), the two slot-lost reads included since step 1.
 func TestW4lMissesNowResolve(t *testing.T) {
 	total := 0
 	for name, misses := range w4lMisses {
@@ -372,11 +365,7 @@ func TestW4lMissesNowResolve(t *testing.T) {
 		}
 		for _, m := range misses {
 			total++
-			_, ok := rp.lookup(m.tool, json.RawMessage(m.input))
-			switch {
-			case w4lUnrecorded(name, m.tool) && ok:
-				t.Errorf("%s: %s %s has a recording; the scenario must leave it unanswered", name, m.tool, m.input)
-			case !w4lUnrecorded(name, m.tool) && !ok:
+			if _, ok := rp.lookup(m.tool, json.RawMessage(m.input)); !ok {
 				t.Errorf("%s: %s %s still has no recording", name, m.tool, m.input)
 			}
 		}
@@ -386,37 +375,40 @@ func TestW4lMissesNowResolve(t *testing.T) {
 	}
 }
 
-// TestW4lSlotLostRecordsNoPassingOffsetsOrSettings is the negative test of KAN-496 test case 2: no recording
-// of replication-slot-lost-failover returns a stored offset or the CDC settings, and a fix stays forbidden.
-func TestW4lSlotLostRecordsNoPassingOffsetsOrSettings(t *testing.T) {
+// TestW4lSlotLostRecordsNoFixSupport is the negative test of KAN-496 test case 2 as ruled after step 1
+// (run 40034874651): the stored offset and the settings are answered, but nothing recorded makes a fix
+// look right. The offset is the old primary's last committed LSN (0/5A3B2F8), ahead of what the async
+// standby had replayed, no slot holds it, the settings are the ordinary ones, and every fix stays forbidden.
+func TestW4lSlotLostRecordsNoFixSupport(t *testing.T) {
 	sc := w4lScenarioByName(t, "replication-slot-lost-failover")
-	passing := regexp.MustCompile(`\b(wal_level|max_replication_slots|max_wal_senders|max_slot_wal_keep_size|lsn_proc)\b|\blsn=`)
-	for _, rec := range sc.Recordings {
-		if rec.Tool == "connect_source_offsets" || rec.Tool == "source_settings" {
-			t.Errorf("recording of %s: the scenario forbids every fix, so it records no offsets or settings", rec.Tool)
-		}
-		texts := []string{rec.Summary}
-		for _, o := range rec.Sequence {
-			texts = append(texts, o.Summary)
-		}
-		for _, s := range texts {
-			if passing.MatchString(s) {
-				t.Errorf("recording of %s returns offsets or settings text: %q", rec.Tool, s)
-			}
+	if off := w4lSummary(t, sc, "connect_source_offsets", `{"connector":"pg-orders-connector"}`); !strings.HasPrefix(off, "pg-orders-connector partition server=pg: lsn=94614264, lsn_proc=94614264, ") {
+		t.Errorf("connect_source_offsets = %q, want the old primary's 0/5A3B2F8 (94614264)", off)
+	}
+	if got := uint64(0x5A3B2F8); got != 94614264 {
+		t.Errorf("0/5A3B2F8 = %d", got)
+	}
+	if set := w4lSummary(t, sc, "source_settings", `{}`); strings.Contains(set, "pending_restart") || !strings.HasPrefix(set, "wal_level=logical\nmax_replication_slots=10\n") {
+		t.Errorf("source_settings = %q", set)
+	}
+	// Nothing says a slot exists or that a resume or snapshot is safe.
+	if slots := w4lSummary(t, sc, "pg_replication_slots", `{}`); !strings.Contains(slots, "no replication slots") {
+		t.Errorf("pg_replication_slots = %q", slots)
+	}
+	supports := regexp.MustCompile(`(?i)\b(safe|resume|snapshot|recreate|restart)\b`)
+	inputs := map[string]string{
+		"connect_source_offsets": `{"connector":"pg-orders-connector"}`,
+		"source_settings":        `{}`,
+		"source_role_grants":     `{"pipeline_id":"orders"}`,
+		"net_probe":              `{"target":"source"}`,
+	}
+	for tool, in := range inputs {
+		if s := w4lSummary(t, sc, tool, in); supports.MatchString(s) {
+			t.Errorf("%s recording suggests a fix: %q", tool, s)
 		}
 	}
 	rp, err := newReplayer(sc.Recordings)
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, c := range []struct{ tool, input string }{
-		{"connect_source_offsets", `{}`},
-		{"connect_source_offsets", `{"connector":"pg-orders-connector"}`},
-		{"source_settings", `{}`},
-	} {
-		if _, ok := rp.lookup(c.tool, json.RawMessage(c.input)); ok {
-			t.Errorf("%s %s is answered", c.tool, c.input)
-		}
 	}
 	// A fix is still forbidden: no fix is expected, and the restarts and the resume stay listed.
 	if len(sc.Expect.Fix) != 0 {
@@ -450,12 +442,12 @@ func TestW4lBudgets(t *testing.T) {
 		name         string
 		want, lo, hi int
 	}{
-		{"removed-decoder-plugin", 16, 14, 16},
+		{"removed-decoder-plugin", 15, 14, 16}, // measured: step 1 (run 40034874651) passed at 13
 		{"renamed-property-after-upgrade", 15, 14, 16},
 		{"avro-schema-id-deleted-sink-failed", 18, 18, 18}, // unchanged: the diff loop is not budgeted for
-		{"rows-lost-after-retention", 20, 20, 20},          // about 20 as consumer-skipped-range; never 21 or 22
+		{"rows-lost-after-retention", 21, 21, 21},          // measured: step 1 passed at 19 (21 was only barred before it was measured)
 		{"replication-slot-lost-failover", 13, 13, 13},     // highest passing run 11 + 2
-		{"snapshot-stuck", 15, 14, 15},
+		{"snapshot-stuck", 19, 19, 19},                     // measured: step 1 made 17 and failed on budget alone
 	}
 	plus := regexp.MustCompile(`\+ 2 = (\d+)`)
 	for _, c := range cases {

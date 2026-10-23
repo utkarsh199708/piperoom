@@ -68,10 +68,11 @@
 #     value '<value>' is invalid: <problem>".
 #   - internal/tools/dbtools/pg.go: pg_replication_slots data carries each slot's plugin.
 #
-# Tool budget (W4l, KAN-496; max_tool_calls 14 -> 16, provisional). No run of 39994729845 passed (18,
-#   20 and 18 calls; turn 0 alone 14, 16, 14), so the budget is the standard path plus 2, not a
-#   passing run plus 2: the reads the prompt's method needs and the recordings above answer. Reset it
-#   from the passing runs of the step-1 live run. One entry per input turn (inputs arrive one per idle):
+# Tool budget (W4l, KAN-496; max_tool_calls 14 -> 15, measured). Step 1 (live run 40034874651) passed
+#   this scenario at 13 calls (run 39994729845 had failed on budget alone at 18, 20 and 18); highest
+#   passing 13 + 2 = 15. The standard path below (11 + 3 = 14 reads, the ceiling of a focused run) is
+#   the per-turn breakdown of those 13; this row did not read the run's turn split. One entry per input
+#   turn (inputs arrive one per idle):
 #   turn 0, the alert (11 reads):
 #     1 pg_recent_ddl (rule 2; what_changed is not offered in the harness)
 #     2 connect_status (task 0 FAILED; required fact, evidence tool)
@@ -85,8 +86,9 @@
 #   turn 1, arjun's steer (3 reads): runbook_lookup again with the log line's words,
 #     connect_validate_config of the pgoutput config with a new slot name (the prompt's pre-fix check),
 #     pg_publication_tables (the new slot needs a publication).
-#   11 + 3 = 14 reads; 14 + 2 = 16. The other calls of the failing runs went to net_probe on three
-#   targets, worker logs, metrics, info and offsets: all answered above now, and not on this path.
+#   Standard path 11 + 3 = 14 reads; measured 13 (run 40034874651); 13 + 2 = 15. The other calls of the
+#   failing runs of 39994729845 went to net_probe on three targets, worker logs, metrics, info and
+#   offsets: answered above now, and not on this path.
 
 name: removed-decoder-plugin
 description: |
@@ -450,4 +452,4 @@ expect:
       facts: [f_task_config_error, f_slot_inactive]
   evidence_tools: [connect_status, pg_replication_slots]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, pg_drop_replication_slot, kafka_reset_consumer_offsets, schema_register, schema_set_compatibility]
-  max_tool_calls: 16
+  max_tool_calls: 15
