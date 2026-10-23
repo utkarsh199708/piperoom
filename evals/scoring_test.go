@@ -431,6 +431,33 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "The Debezium Postgres plugin jar set is absent from the Connect worker's plugin.path: Connect fails to find any class that implements Connector and matches io.debezium.connector.postgresql.PostgresConnector, so pg-orders-connector FAILED and a re-registration fails during plugin discovery. Restore the plugin jars in plugin.path and restart the workers; the stored config is correct.",
 		wrong: "The connector's database.user piperoom lost its privileges on public.orders after the redeploy, so the snapshot fails; grant SELECT again and restart it.",
 	},
+	// The U1-19 setup scenarios. The labels name the setup check and the
+	// fixing op (or the validator rule). Two of them happen before the stack
+	// exists, so the hypothesis is the whole run.
+	"setup/compose-postgres-clean": {
+		good:  "The setup validator refused the compose file with rule secret: the postgres service sets POSTGRES_PASSWORD to a plain-text credential. Write the .env with properties_write (POSTGRES_USER, POSTGRES_DB and POSTGRES_PASSWORD: ${secret:postgres_password}), re-render the source-postgres template with compose_write so it interpolates the reference, and start the stack with compose_up.",
+		wrong: "The stack stays down because the postgres image lacks the pinned digest the setup allow-list requires; pull the pinned image and render the compose file again.",
+	},
+	"setup/compose-privileged-refused": {
+		good:  "The setup validator refused the compose file with rule privilege: the connect service declares privileged: true. Re-render the stack from the driver's templates with compose_write (the connect template renders only the allow-listed service fields: image, command, environment, ports, volumes, depends_on and healthcheck) and bring it up with compose_up.",
+		wrong: "The connect service uses an image tag that is absent from the setup knowledge index, so the stack stays down; pin the image digest and run it again.",
+	},
+	"setup/flat-plugin-dir": {
+		good:  "The setup check plugin-layout fails: the Debezium Postgres plugin jars sit directly in the Connect worker's plugin root (/kafka/connect) outside their own directory, so the worker's plugin scan misses io.debezium.connector.postgresql.PostgresConnector and pg-orders-connector FAILED with 'Failed to find any class'. Run plugin_install {release: 3.2.0.Final, connector: postgres} (it installs into connect-plugins/debezium-connector-postgres, one plugin per directory), then compose_restart {services: [connect]} so the worker rescans plugin.path.",
+		wrong: "pg-orders-connector failed because its config is invalid after the image upgrade; restart the connector and task 0.",
+	},
+	"setup/wal-level-replica": {
+		good:  "The setup check postgres-wal-level fails: the source Postgres runs with wal_level=replica, so logical decoding and every logical replication slot are unavailable. pg-orders-connector task 0 FAILED with 'logical decoding requires wal_level >= logical'. Set wal_level=logical with source_alter_system and restart the server with source_restart (or re-render the source-postgres template with compose_write when the compose command line pins -c wal_level=replica), then take a new slot and snapshot.",
+		wrong: "The Postgres failover lost the replication slot, so pg-orders-connector task 0 failed; recreate the slot and restart the connector.",
+	},
+	"setup/missing-grant": {
+		good:  "The setup check source-role-grants fails: pg-orders-connector task 0 FAILED with permission denied for table orders, because the setup run pointed it at its own role devctl_setup_grant, which holds LOGIN and CONNECT only. In Postgres that role needs REPLICATION for a logical replication connection and SELECT on public.orders for the snapshot. Fix it with ALTER ROLE devctl_setup_grant WITH REPLICATION, source_grant_select for public.orders, then connect_restart_task for task 0.",
+		wrong: "The replication slot debezium_orders was lost after the host move, so pg-orders-connector task 0 failed; recreate the slot with a fresh snapshot.",
+	},
+	"setup/db-unreachable-from-connect": {
+		good:  "The setup check connect-source-reachable fails: the Connect container resolves the source host postgres to 192.0.2.1, a TEST-NET-1 black-hole address from a stale /etc/hosts entry, so pg-orders-connector task 0 FAILED with java.net.SocketTimeoutException: connect timed out while the database answers the room's own reads. Restart the Connect service with compose_restart so Docker regenerates /etc/hosts and the worker starts with an empty DNS cache.",
+		wrong: "The source Postgres is down, so the connector stays idle; restart the database and the connector.",
+	},
 }
 
 // TestScoringOldVsNew prints, for every scenario and each of {good,

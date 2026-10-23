@@ -428,13 +428,29 @@ inputs:
 
 expect:
   root_cause:
-    - [plugin]
-    - [missing, not installed, not found, absent, removed, not loaded, not on the worker, classpath]
-  # The wrong stories of a connector that cannot be loaded.
+    # Not a bare "plugin": Connect's own trace says "PluginDesc{...}", and a
+    # paste of it is no diagnosis.
+    - [plugin path, plugin jar*, plugin folder, plugin dir*, connector plugin, postgres plugin, debezium plugin,
+       plugin is, plugin was, plugin isn, plugin wasn]
+    # No "classpath": the trace lists location='classpath' for every plugin.
+    - [missing, not installed, isn t installed, not found, absent, removed, not loaded, not on the worker,
+       no longer contains]
+  # The wrong stories of a connector that cannot be loaded: the config, the
+  # role and the renamed key are all fine.
   root_cause_forbidden:
     - ['schema change']
     - ['database server name']
-    - ['topic prefix']
+    - ['topic prefix is missing']
+    - ['missing topic prefix']
+    - ['topic prefix is required']
+    - ['config is missing']
+    - ['config lacks']
+    - ['missing a key']
+    - ['missing key']
+    - ['database hostname']
+    - ['database user']
+    - [privilege*]
+    - [grant*]
     - ['permission denied']
     - ['slot was lost']
     - ['disk full']

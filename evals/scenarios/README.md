@@ -530,6 +530,33 @@ connector key fixes either), the slot drop and the offset reset.
 `devctl break` for either incident (an A1 follow-up: a second listener on the dev broker that advertises an
 unresolvable name, and a firewall rule between the Connect and Postgres containers). Re-record them with the
 procedure of "Stale source offsets (Q5f)" above once those breaks exist.
+### Setup scenarios (U1-19)
+
+Six files about `piperoom-setup`, where the failure is a setup check, a compose validator rule or the
+plugin layout rather than a CDC symptom. The label names the **failing check and the fixing op**, or the
+**validator rule**. Four are built on `devctl setup-break` names (PR #880). Each scenario's `name`
+carries the `setup/` prefix; the files are flat (`setup-<check>.yaml`) because the loader globs one
+directory.
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-postgres-clean` | the compose step was refused before `compose_up` | the postgres service holds `POSTGRES_PASSWORD` as a plain-text credential | postgres / postgres | validator rule secret; `properties_write` the `.env`, `compose_write`, `compose_up` |
+| `setup/compose-privileged-refused` | the compose step was refused before `compose_up` | the connect service declares `privileged: true` | kafka-connect / kafka-connect | validator rule privilege; re-render with `compose_write`, `compose_up` |
+| `setup/flat-plugin-dir` | check `plugin-layout` failed (every jar directly in `/kafka/connect`) | the Debezium jars sit in the plugin root, so the worker's scan misses the class | kafka-connect / kafka-connect | `plugin-layout`; `plugin_install`, then `compose_restart connect` |
+| `setup/wal-level-replica` | check `postgres-wal-level` failed | the source runs `wal_level=replica`, so logical decoding is unavailable | kafka-connect / postgres | `postgres-wal-level`; `source_alter_system` + `source_restart` (or `compose_write`/`compose_up`) |
+| `setup/missing-grant` | check `source-role-grants` failed; task 0 permission denied | the connector role has LOGIN only: no REPLICATION, no SELECT | kafka-connect / postgres | `source-role-grants`; `ALTER ROLE ... REPLICATION`, `source_grant_select`, `connect_restart_task` |
+| `setup/db-unreachable-from-connect` | check `connect-source-reachable` failed | the Connect container resolves postgres to 192.0.2.1 from a stale `/etc/hosts` entry | kafka-connect / kafka-connect | `connect-source-reachable`; `compose_restart connect` |
+
+**Synthesised from the code paths, not recorded**, and no setup op is a room action yet. The check names
+and messages are `cmd/devctl/setupbreaks.go`, `internal/setup/targets/compose`'s validator and
+`internal/setup/ops`; the clock is 2026-10-25T09:40:00Z. The two compose scenarios fail before the stack
+exists, so the only read they replay is `similar_incidents` (the past-room lookup that answers without a
+pipeline) and they have no `expected_facts`; the other four replay the CDC reads and fact-check the
+diagnosis. Neither `plugin_install`, `compose_restart`, `source_alter_system`, `source_restart`,
+`jar_list` nor `compose_up` is in `evals.LiveTools`, and `source_grant_select` is not in
+`evals.LiveActions` (Q2h), so each file names its check and op in the label and the alert, sets no
+`expect.fix`, and forbids the restarts, resume, config update, slot drop and schema actions that repeat
+the failure.
 
 ## Outcome scenarios (E2)
 
@@ -592,11 +619,11 @@ recording of `consumer-poison-pill` is now a sequence whose first result is the 
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passed then with `11 scenario(s) OK` (6 originally); today
-  `go run ./evals/cmd/evalrun -validate` reports `54 scenario(s) OK` here (52 before the two Q6c
-  network-probe ones, 50 before the two Q1e
-  version-knowledge ones, 46 before the four Q3f/Q5f ones, 44 before the two Q4c register-rejection
-  scenarios, 40 before the four Q2g source-setting ones, 38 before the two X2e recovery scenarios, 34 before the four X1e silent-corruption ones, 30 before the
-  four CH-4 ClickHouse ones), and `-set heldout` 6.
+  `go run ./evals/cmd/evalrun -validate` reports `60 scenario(s) OK` here (54 before the six U1-19
+  ones, 52 before the two Q6c network-probe ones, 50 before the two Q1e version-knowledge ones, 46
+  before the four Q3f/Q5f ones, 44 before the two Q4c register-rejection scenarios, 40 before the four
+  Q2g source-setting ones, 38 before the two X2e recovery scenarios, 34 before the four X1e
+  silent-corruption ones, 30 before the four CH-4 ClickHouse ones), and `-set heldout` 6.
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100
   and passes, with 0 misses.
 - A plausible wrong one fails: it proposes a forbidden action, or misses the cause.

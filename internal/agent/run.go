@@ -856,15 +856,15 @@ func (r *runner) toolScope(ctx context.Context) context.Context {
 func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	entry, ok := r.toolList.byName[u.name]
 	if !ok {
-		return r.failReadTool(ctx, u, "", "unknown tool "+u.name)
+		return r.failReadTool(ctx, u, "", "unknown tool "+u.name, events.ToolRejectedUnknownTool)
 	}
 
 	cleaned, why, err := stripWhy(u.input)
 	if err != nil {
-		return r.failReadTool(ctx, u, u.name, "invalid tool input: "+err.Error())
+		return r.failReadTool(ctx, u, u.name, "invalid tool input: "+err.Error(), inputRejection(u.input))
 	}
 	if err := validateInput(entry.schema, cleaned); err != nil {
-		return r.failReadTool(ctx, u, why, "invalid tool input: "+err.Error())
+		return r.failReadTool(ctx, u, why, "invalid tool input: "+err.Error(), events.ToolRejectedInvalidInput)
 	}
 	// Q1d: runbook_lookup gets the room's running versions (versions.go) for
 	// every component the model did not name. The tool_call event shows the
@@ -988,29 +988,25 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	}
 }
 
+// inputRejection names why arguments that could not be decoded were refused:
+// text that is not JSON at all, or JSON that is not an object (which the
+// schema refuses).
+func inputRejection(raw json.RawMessage) string {
+	if !json.Valid(raw) {
+		return events.ToolRejectedInvalidJSON
+	}
+	return events.ToolRejectedInvalidInput
+}
+
 // failReadTool reports a tool call that could not be validated (unknown tool,
-// bad input) without panicking.
-func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string) toolResult {
+// bad input) without panicking. rejected is the events.ToolRejected* reason
+// recorded on the tool_result; the model's tool_result text does not carry it.
+func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg, rejected string) toolResult {
 	if title == "" {
 		title = u.name
 	}
-	stepID := newStepID()
-	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
-	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
-		StepID:    stepID,
-		ToolUseID: u.id,
-		Tool:      u.name,
-		Input:     u.input,
-	})
-	summary, truncated := tools.Truncate("error: " + msg)
-	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
-		StepID:    stepID,
-		ToolUseID: u.id,
-		Tool:      u.name,
-		Summary:   summary,
-		IsError:   true,
-		Truncated: truncated,
-	})
+	stepID := r.emitRejected(ctx, u, title, "error: "+msg, rejected)
+	summary, _ := tools.Truncate("error: " + msg)
 	r.steps.add(stepID, u.name, summary, true)
 	return toolResult{
 		toolUseID: u.id,
@@ -1021,10 +1017,12 @@ func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string)
 
 // runRoomTool executes one room tool (update_hypothesis, propose_fix,
 // post_message). These emit their own domain events rather than step/tool_call
-// events, but still return a tool_result block to the model.
+// events, but still return a tool_result block to the model. A call refused
+// before it runs (unknown name, schema check) gets a step (emitRejected).
 func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	entry, ok := r.toolList.byName[u.name]
 	if !ok {
+		r.emitRejected(ctx, u, u.name, "error: unknown tool", events.ToolRejectedUnknownTool)
 		return toolResult{
 			toolUseID: u.id,
 			content:   wrapToolOutput(u.name, "", "error: unknown tool"),
@@ -1032,6 +1030,12 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 		}
 	}
 	if err := validateInput(entry.schema, u.input); err != nil {
+		// Only the schema check is a rejection here. The room tools' own
+		// checks inside Run (cited steps, the healthy-verdict guard, a
+		// proposal step's action Validate) judge what the model concluded,
+		// not whether it called the tool well; proposal refusals are counted
+		// apart as rejected_attempts (docs/design/model-providers.md 5.1).
+		r.emitRejected(ctx, u, u.name, "error: invalid input: "+err.Error(), inputRejection(u.input))
 		return toolResult{
 			toolUseID: u.id,
 			content:   wrapToolOutput(u.name, "", "error: invalid input: "+err.Error()),
@@ -1058,6 +1062,40 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 		content:   wrapToolOutput(u.name, "", res.Summary),
 		isError:   false,
 	}
+}
+
+// emitRejected writes the step of a tool call refused before it ran:
+// step.started, tool_call and a tool_result with IsError and Rejected set
+// (V1t). It returns the step id. It does not touch the step ledger or what the
+// model is sent, so a rejection changes no request bytes. A room tool's
+// rejection gets a step too, so its tool_result pairs with a tool_call like a
+// read tool's.
+func (r *runner) emitRejected(ctx context.Context, u toolUse, title, text, rejected string) string {
+	stepID := newStepID()
+	input := u.input
+	if !json.Valid(input) {
+		// Arguments that are not JSON cannot go in the event's JSON input
+		// (the event would fail to encode and be lost); the summary says why.
+		input = nil
+	}
+	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
+	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
+		StepID:    stepID,
+		ToolUseID: u.id,
+		Tool:      u.name,
+		Input:     input,
+	})
+	summary, truncated := tools.Truncate(text)
+	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+		StepID:    stepID,
+		ToolUseID: u.id,
+		Tool:      u.name,
+		Summary:   summary,
+		IsError:   true,
+		Truncated: truncated,
+		Rejected:  rejected,
+	})
+	return stepID
 }
 
 // wrapToolOutput marks tool output as untrusted data. The system prompt tells
