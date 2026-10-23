@@ -22,7 +22,9 @@ import type {
   FleetChangesPage,
   FleetPipeline,
   PipelineInfo,
+  CreateSetupResponse,
   RoomSnapshot,
+  SetupRequest,
   ShadowBlindBody,
   ShadowGradeBody,
   ShadowMetrics,
@@ -217,6 +219,9 @@ export const api = {
   rooms: () => request<RoomSnapshot[]>('/api/rooms'),
   createRoom: (body: { title: string; severity: string; pipeline_id: string }) =>
     request<RoomSnapshot>('/api/rooms', { method: 'POST', body: JSON.stringify(body) }),
+  // U: opens a setup room; the answer carries the single-use pairing code and the line to paste.
+  createSetup: (body: SetupRequest) =>
+    request<CreateSetupResponse>('/api/setup', { method: 'POST', body: JSON.stringify(body) }),
   room: (roomId: string) => request<RoomSnapshot>(room(roomId)),
   events: (roomId: string, after: number, limit = 500) =>
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),

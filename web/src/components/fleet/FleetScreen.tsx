@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, X } from 'lucide-react'
+import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, ChevronDown, Plus, X } from 'lucide-react'
 import type { FleetHealth, FleetPipeline } from '../../api/types'
 import { useCurrentUser } from '../../context/user'
 import { useFleet } from '../../hooks/useFleet'
@@ -121,6 +121,16 @@ export function FleetScreen() {
     </span>
   )
 
+  // U1-12a: a pipeline that is not watched yet starts in a setup room, not an incident room.
+  const newPipeline = !isViewer(user) && (
+    <Button asChild variant="outline" size="sm">
+      <Link to="/setup">
+        <Plus aria-hidden="true" />
+        New pipeline
+      </Link>
+    </Button>
+  )
+
   let body: ReactNode
   if (fleet.rows === null && fleet.error === null) {
     body = <FleetSkeleton />
@@ -185,11 +195,15 @@ export function FleetScreen() {
   return (
     <div className="flex min-w-0 flex-col gap-4 px-3 py-5 md:px-6">
       {inShell ? (
-        <TopBarSlot>{live}</TopBarSlot>
+        <TopBarSlot>
+          {newPipeline}
+          {live}
+        </TopBarSlot>
       ) : (
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold tracking-tight">Fleet</h1>
           {live}
+          {newPipeline}
         </div>
       )}
       <Tabs value={tab} onValueChange={(v) => set({ tab: v === 'changes' ? 'changes' : null })} className="flex flex-col gap-4">
