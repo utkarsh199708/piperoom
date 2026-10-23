@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	evalsetup "piperoom/evals/setup"
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
 	"piperoom/internal/tools"
@@ -65,6 +66,13 @@ type Config struct {
 	// evaluation (0: DefaultJudgeMaxCalls; negative: none). Past the cap an
 	// ambiguous hypothesis is unjudged and counts as not passed.
 	JudgeMaxCalls int
+	// SetupDir is the directory of runner-session recordings (U1-20;
+	// evals/setup/recordings). A scenario with a recording gets the source
+	// and target kinds it reports under when it names none, so the report's
+	// per-source and per-target pass rates cover the setup scenarios; the
+	// recordings are also the replay a setup run's runner needs (evals/setup).
+	// Empty reads none.
+	SetupDir string
 	// judge is the evaluation's shared judge gate (Evaluate sets it).
 	judge *judgeGate
 	// refusal latches the first API refusal of the evaluation (infra.go).
@@ -111,6 +119,20 @@ func (c Config) gate() *judgeGate {
 // ctx's.
 func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, error) {
 	cfg = cfg.withDefaults()
+	if cfg.SetupDir != "" {
+		recs, err := evalsetup.LoadDir(cfg.SetupDir)
+		if err != nil {
+			return Report{}, err
+		}
+		// Copy the slice: attaching the recordings' kinds must not mutate the
+		// caller's scenarios.
+		scenarios = append([]Scenario(nil), scenarios...)
+		for i := range scenarios {
+			if rec, ok := recs[scenarios[i].Name]; ok {
+				attachSetup(&scenarios[i], rec)
+			}
+		}
+	}
 	if cfg.Runner == nil {
 		run, err := NewEndpointRunner(ctx, config.Load(), cfg.Logger)
 		if err != nil {

@@ -52,6 +52,14 @@ var (
 	}
 )
 
+// ValidSourceKind reports whether kind is a source kind a setup request
+// accepts (events.SetupRequest.SourceKind).
+func ValidSourceKind(kind string) bool { return sourceKinds[kind] }
+
+// ValidTargetKind reports whether kind is a target kind a setup request
+// accepts (events.SetupRequest.Target).
+func ValidTargetKind(kind string) bool { return targetKinds[kind] }
+
 // Errors of Load and Replay, matched with errors.Is.
 var (
 	// ErrRecording: the file is not a usable recording (bad JSON, an unknown

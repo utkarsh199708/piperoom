@@ -325,6 +325,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		JudgeCache:     f.judgeCache,
 		JudgeCacheOnly: f.cacheOnly,
 		JudgeMaxCalls:  judgeMaxCalls(f.maxCalls),
+		SetupDir:       setupRecordingsDir(f.scenarios),
 		Options:        opts,
 		Runs:           f.runs,
 		Parallel:       f.parallel,
@@ -610,6 +611,18 @@ const (
 	setDefault = "default"
 	setHeldout = "heldout"
 )
+
+// setupRecordingsDir is the sibling setup/recordings directory of the
+// scenarios directory (U1-20), or "" when it does not exist: a checkout
+// without the recordings runs exactly as before, and a run with them groups
+// the setup scenarios by source and target in the report.
+func setupRecordingsDir(scenariosDir string) string {
+	d := filepath.Join(filepath.Dir(filepath.Clean(scenariosDir)), "setup", "recordings")
+	if info, err := os.Stat(d); err == nil && info.IsDir() {
+		return d
+	}
+	return ""
+}
 
 // loadSet reads the scenarios a run replays and the pending ones only -check
 // validates. The default set is the scenarios directory plus, when -learned
