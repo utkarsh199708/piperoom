@@ -8,7 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"piperoom/internal/clients/clickhouse"
+	"piperoom/internal/clients/warehouse"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/logtools"
 )
@@ -153,7 +156,7 @@ var (
 	w4oThruRE   = regexp.MustCompile(`^orders last (30m|1h|2h): no skew found\npg\.public\.orders: \d+ records \([\d.]+/s\) over 3 partitions; median [\d.]+/s, max p\d [\d.]+/s → even\norder-sync \((Stable|Empty), \d+ members\): lag \d+(; pg\.public\.orders p\d \d+% \(\d+\))?\nno consumed rate or lag trend: Kafka keeps no committed-offset history and this process has no group_lag watch samples \(the watcher does not run here\)$`)
 	w4oLoadRE   = regexp.MustCompile(`^postgres warehouse has no load history\. analytics\.orders: \d+ rows inserted since stats reset, \d+ dead tuples, last autovacuum (never|` + w4oStamp + `), 0 session\(s\) waiting on a lock$`)
 	w4oBucketRE = regexp.MustCompile(`^(\d\d:\d\d) \| (\d+) \| (\d+) \| (\d+) \| ([+-]\d+)$`)
-	w4oKeysRE   = regexp.MustCompile(`^keys not compared: \d+ source / \d+ sink keys exceed the 2000-key cap; narrow since/until for a key diff$`)
+	w4oKeysRE   = regexp.MustCompile(`^keys not compared: (\d+ source / \d+ sink keys exceed the 2000-key cap; narrow since/until for a key diff|the warehouse client cannot list keys)$`)
 	w4oNoteRE   = regexp.MustCompile(`^note: rows newer than \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{9}Z \(the last 2m0s\) are in flight and not judged$`)
 )
 
@@ -352,5 +355,42 @@ func checkReconcileRecording(t *testing.T, where, s string) {
 	}
 	if !w4oNoteRE.MatchString(rest[2]) {
 		t.Errorf("%s: note line %q", where, rest[2])
+	}
+}
+
+// w4oKeyLister is the optional reader reconcile's key diff needs
+// (dbtools/reconcile_keys.go windowKeysReader).
+type w4oKeyLister interface {
+	WindowKeys(ctx context.Context, table, keyColumn, tsColumn string, since, until time.Time, limit int) ([]string, int64, error)
+}
+
+// The key line follows the warehouse's client: the Postgres warehouse lists
+// keys, so a window over the cap gets the key-cap note; the ClickHouse client
+// does not, so reconcile on clickhouse-mv-schema-change says the warehouse
+// client cannot list keys. If ClickHouse ever gains WindowKeys this fails and
+// the recordings must be redone with the key diff.
+func TestW4oReconcileKeyLineFollowsTheWarehouseClient(t *testing.T) {
+	if _, ok := any((*warehouse.DB)(nil)).(w4oKeyLister); !ok {
+		t.Fatal("the Postgres warehouse client no longer lists keys: the key-cap recordings need redoing")
+	}
+	if _, ok := any((*clickhouse.Client)(nil)).(w4oKeyLister); ok {
+		t.Fatal("the ClickHouse client lists keys now: redo clickhouse-mv-schema-change's reconcile recordings")
+	}
+	sc, err := LoadScenario(w4oScenarioPath("clickhouse-mv-schema-change"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, rec := range sc.Recordings {
+		if rec.Tool != "reconcile" || !strings.Contains(rec.Summary, "source rows | topic events") {
+			continue
+		}
+		seen++
+		if !strings.Contains(rec.Summary, "\nkeys not compared: the warehouse client cannot list keys\n") {
+			t.Errorf("reconcile %v on a ClickHouse sink: key line is not the client's note:\n%s", rec.Input, rec.Summary)
+		}
+	}
+	if seen != 2 {
+		t.Errorf("checked %d current-format reconcile recordings, want 2", seen)
 	}
 }

@@ -147,6 +147,9 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  # The sink is ClickHouse: its client counts rows (clients.CountReader) but cannot list keys
+  # (only the Postgres source and the Postgres warehouse implement WindowKeys), so reconcile ends
+  # with "keys not compared: the warehouse client cannot list keys" (dbtools/reconcile_keys.go).
   - tool: reconcile
     input: {table: public.orders, since: "2026-10-20T08:00:00Z"}
     summary: |-
@@ -165,7 +168,7 @@ recordings:
       08:50 | 1221 | 1270 | 0 | -1221
       08:55 | 954 | 993 | 0 | -954
       verdict: sink is missing 4862 rows in 08:35–09:00; the topic carried 5059 change events for 4862 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
-      keys not compared: 9756 source / 4894 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+      keys not compared: the warehouse client cannot list keys
       note: rows newer than 2026-10-20T08:58:08.412785093Z (the last 2m0s) are in flight and not judged
   - tool: reconcile
     input: {table: public.orders, since: "2026-10-20T08:10:00Z"}
@@ -183,7 +186,7 @@ recordings:
       08:50 | 1221 | 1270 | 0 | -1221
       08:55 | 954 | 993 | 0 | -954
       verdict: sink is missing 4862 rows in 08:35–09:00; the topic carried 5059 change events for 4862 source rows, so the rows may be there, but events include updates and deletes: the side is unproven, confirm one missing key with warehouse_row before naming a writer
-      keys not compared: 7276 source / 2414 sink keys exceed the 2000-key cap; narrow since/until for a key diff
+      keys not compared: the warehouse client cannot list keys
       note: rows newer than 2026-10-20T08:58:08.412785093Z (the last 2m0s) are in flight and not judged
 
 inputs:
