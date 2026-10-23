@@ -573,6 +573,38 @@ header says `RECORDED: NO`). They run on Claude unchanged; their point is the no
 `internal/injectscan` flags the planted recording of `injection-template-tokens` (its test map lists
 the file with `connect_status`).
 
+### Setup scenarios: Oracle (U9d)
+
+Four setup scenarios on an Oracle Database Free 23ai source (the `oracle` dev profile: CDB `FREE`, PDB `FREEPDB1`,
+LogMiner user `C##DBZUSER`, `dev/oracle/README.md`) and the Compose target, each with a runner session in
+`evals/setup/recordings` (the eval replay). Three are built on the U9c `devctl setup-break` names; their labels name
+the failing check (the check names and messages of `cmd/devctl/setupbreaks_oracle.go`, which evaluate the U9a client
+`internal/clients/oracle`'s types) and the fix with its tier from `tasks/U-board.md` (U9a, U9b).
+
+| Scenario | Alert | Root cause | First failing / root-cause layer | Label |
+|---|---|---|---|---|
+| `setup/compose-oracle-clean` | verification rungs 1-7 green, rung 8 awaiting the person's change | none: every Oracle check passed | - | outcome `healthy`; no proposal |
+| `setup/no-archivelog` | task 0 FAILED; check `oracle-archive-log-mode` failed | the database restarted in NOARCHIVELOG, so LogMiner has no archived redo | kafka-connect / postgres | `oracle-archive-log-mode`; T3 in a maintenance window: a DBA's `SHUTDOWN IMMEDIATE; STARTUP MOUNT; ALTER DATABASE ARCHIVELOG; ALTER DATABASE OPEN` (the allow-listed `source_alter_system archive_log` is refused by the U9a writer on an open instance; the runner session records it), then `connect_restart_task` |
+| `setup/no-supplemental-logging` | task 0 FAILED; check `oracle-supplemental-logging` failed | the minimal supplemental logging and the table's ALL COLUMNS group were dropped | kafka-connect / postgres | `oracle-supplemental-logging`; a DBA's `ALTER DATABASE ADD SUPPLEMENTAL LOG DATA`, `source_create_publication` for `PIPEROOM.ORDERS` (T2, the ALL COLUMNS group), then `connect_restart_task` |
+| `setup/missing-logminer-grant` | task 0 FAILED (ORA-01031); check `oracle-logminer-grants` failed | `LOGMINING` revoked from `C##DBZUSER` | kafka-connect / postgres | `oracle-logminer-grants`; `GRANT LOGMINING TO C##DBZUSER CONTAINER=ALL` (a documented ask: the person's user), or the setup's own LogMiner user from `source_create_read_role` (T2); then `connect_restart_task` |
+
+**Synthesised, not recorded** (`RECORDED: NO`): the summaries follow the real tools' formats, the runner sessions the
+U9a client's DTOs, and the Oracle driver (U9b) is not on main, so its check reads are recorded under the remote
+clients' source op names (`source_settings`, `source_table_replication`, `source_role_info`). Digests are synthetic
+placeholders. The task traces are Debezium's own archive log and supplemental logging checks and Oracle's ORA-01031,
+each under Debezium's change-event-producer wrapper. Conventions shared with the other setup sources: the source
+database is graded as the source layer `postgres` (owners.yaml has no `oracle` source kind), the room's `source_*`
+tools record their real "cannot read database settings" error, and a title names the failed task and the check, not
+the check's message. The topic prefix is `ora`, so a topic (`ora.PIPEROOM.ORDERS`, Oracle's upper case kept) is not a
+word of the source layer.
+
+To re-record on the dev stack once U9b and U1-10 land: start the profile (`docker compose -f dev/docker-compose.yml
+--profile oracle up -d --wait oracle`), run `piperoom-setup` into a fresh project with the Compose target and the
+profile as the source, then one of `devctl setup-break no-archivelog`, `no-supplemental-logging` or
+`missing-logminer-grant` after the first verification, re-verify and re-run the checks. Take the room's tool results
+from `GET /api/rooms/{id}/export` and the runner's op log for the session file, and set `RECORDED: YES`. `devctl
+setup-fix` restores the profile.
+
 ## Outcome scenarios (E2)
 
 Three more files on the same pipeline test whether the agent holds back when it should. They reuse
