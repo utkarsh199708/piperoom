@@ -75,12 +75,21 @@ var (
 // reject a valid stack. The list is deliberately a copy; the shared rule is
 // the connector-config rule, this is the artifact-validator rule.
 var credentialWords = []string{
-	"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "private",
+	"password", "passwd", "secret", "token", "credential", "jaas", "apikey", "accesskey", "private",
 }
 
-// looksCredential reports whether key names a credential.
+// looksCredential reports whether key names a credential. Separators are
+// dropped before the match, so API_KEY, api.key and S3_ACCESS_KEY read as
+// apikey and accesskey: each spelling names the same credential, and a mask
+// that knows only the glued form would print the separated ones.
 func looksCredential(key string) bool {
-	k := strings.ToLower(key)
+	k := strings.Map(func(r rune) rune {
+		switch r {
+		case '_', '.', '-':
+			return -1
+		}
+		return r
+	}, strings.ToLower(key))
 	for _, w := range credentialWords {
 		if strings.Contains(k, w) {
 			return true

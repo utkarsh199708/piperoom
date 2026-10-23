@@ -94,6 +94,9 @@ func (o *stackWriteOp) Execute(ctx context.Context, params json.RawMessage, env 
 	if err != nil {
 		return ops.Result{}, err
 	}
+	if err := validateStackFile(env, clean, o.d.classOrDefault()); err != nil {
+		return ops.Result{}, err
+	}
 	argv, err := stackArgv(env.Confine.Dir(), p.File, o.sub, o.flags, p.Services)
 	if err != nil {
 		return ops.Result{}, err

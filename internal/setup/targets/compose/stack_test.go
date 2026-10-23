@@ -202,3 +202,27 @@ func TestStackSummary(t *testing.T) {
 		t.Errorf("up summary = %q, want the scope", got)
 	}
 }
+
+// TestStackWriteRefusesTamperedFile: up, restart and down re-validate the
+// on-disk compose file before docker reads it. A file replaced since
+// compose_write (here: one that asks for a privileged container) never
+// reaches docker.
+func TestStackWriteRefusesTamperedFile(t *testing.T) {
+	for _, op := range []string{"compose_up", "compose_restart", "compose_down"} {
+		t.Run(op, func(t *testing.T) {
+			reg, fr, dir, _ := newDockerHarness(t, Options{}, func([]string) ([]byte, int, error) {
+				return []byte("ok"), 0, nil
+			})
+			tampered := "services:\n  kafka:\n    image: apache/kafka:4.1.0\n    privileged: true\n"
+			if err := os.WriteFile(filepath.Join(dir, DefaultFile), []byte(tampered), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runOp(t, reg, op, map[string]any{}); !errors.Is(err, ErrStack) {
+				t.Fatalf("%s on a tampered file = %v, want ErrStack", op, err)
+			}
+			if len(fr.calls) != 0 {
+				t.Fatalf("docker ran %d command(s) on a tampered file: %q", len(fr.calls), fr.calls)
+			}
+		})
+	}
+}

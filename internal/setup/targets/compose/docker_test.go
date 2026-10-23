@@ -444,3 +444,51 @@ func TestReadOpsCatalogue(t *testing.T) {
 		t.Fatal("a refused container_inspect still ran a command")
 	}
 }
+
+// TestParseComposePSExitCode: Docker prints ExitCode; the decode must bridge
+// it to the whitelisted exit_code field, because Go's case-insensitive field
+// match never crosses the underscore, so decoding into the output struct read
+// every exit code as 0.
+func TestParseComposePSExitCode(t *testing.T) {
+	array := `[{"ID":"0123456789abcdef","Name":"p-kafka-1","Service":"kafka","State":"exited","ExitCode":137}]`
+	lines := `{"ID":"0123456789abcdef","Name":"p-kafka-1","Service":"kafka","State":"exited","ExitCode":137}`
+	for name, raw := range map[string]string{"array": array, "lines": lines} {
+		t.Run(name, func(t *testing.T) {
+			rows, truncated, err := parseComposePS([]byte(raw))
+			if err != nil || truncated {
+				t.Fatalf("parseComposePS = %v (truncated %v)", err, truncated)
+			}
+			if len(rows) != 1 || rows[0].ExitCode != 137 {
+				t.Fatalf("rows = %+v, want one row with ExitCode 137", rows)
+			}
+			if rows[0].ID != "0123456789ab" {
+				t.Errorf("ID = %q, want the 12-character short id", rows[0].ID)
+			}
+		})
+	}
+}
+
+// TestMaskComposeConfigSeparatedCredentialKeys: API_KEY and S3_ACCESS_KEY
+// name credentials as surely as APIKEY does; the separator must not defeat
+// the mask. KEY_CONVERTER stays unmasked: "key" alone is not a credential
+// word.
+func TestMaskComposeConfigSeparatedCredentialKeys(t *testing.T) {
+	doc := []byte("services:\n  minio:\n    environment:\n      API_KEY: a1b2c3secretA\n      S3_ACCESS_KEY: d4e5f6secretB\n      KEY_CONVERTER: jsonconv\n")
+	masked, keys, err := maskComposeConfig(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(masked)
+	for _, leaked := range []string{"a1b2c3secretA", "d4e5f6secretB"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("masked render still carries %q:\n%s", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "jsonconv") {
+		t.Errorf("KEY_CONVERTER value was masked:\n%s", got)
+	}
+	want := []string{"API_KEY", "S3_ACCESS_KEY"}
+	if len(keys) != 2 || keys[0] != want[0] || keys[1] != want[1] {
+		t.Errorf("masked keys = %v, want %v", keys, want)
+	}
+}

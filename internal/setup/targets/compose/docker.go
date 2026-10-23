@@ -137,6 +137,33 @@ func stackFiles(env ops.Env, file string) (string, error) {
 	return clean, nil
 }
 
+// validateStackFile re-validates the on-disk compose file against the S1
+// rules (ValidateYAML) before docker reads it. compose_write validated the
+// bytes it wrote, but the file a later up, restart or down names is whatever
+// is on disk NOW: a file replaced since the write (another tool, a person
+// editing the project) would otherwise run with every privilege it asks for,
+// and the whole validator would hang on nothing but the file staying put.
+func validateStackFile(env ops.Env, clean, class string) error {
+	root, err := projectRoot(env)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	f, err := root.Open(clean)
+	if err != nil {
+		return fmt.Errorf("compose: opening %s: %w", q(clean), err)
+	}
+	defer f.Close()
+	doc, err := io.ReadAll(io.LimitReader(f, maxComposeBytes+1))
+	if err != nil {
+		return fmt.Errorf("compose: reading %s: %w", q(clean), err)
+	}
+	if err := ValidateYAML(doc, class); err != nil {
+		return fmt.Errorf("%w: %s on disk no longer passes validation (run compose_write again): %w", ErrStack, q(clean), err)
+	}
+	return nil
+}
+
 // commandResult is one docker invocation: the capped output, the exit code,
 // and whether the cap cut the output.
 type commandResult struct {
@@ -327,6 +354,34 @@ type psContainer struct {
 	ExitCode int    `json:"exit_code,omitempty"`
 }
 
+// psContainerJSON is the shape `docker compose ps --format json` prints. The
+// output struct cannot double as the decode target: Go's case-insensitive
+// field match never bridges exit_code to Docker's ExitCode (the underscore
+// survives the comparison), so the exit code of an exited container was
+// silently decoded as 0.
+type psContainerJSON struct {
+	ID       string `json:"ID"`
+	Name     string `json:"Name"`
+	Service  string `json:"Service"`
+	State    string `json:"State"`
+	Health   string `json:"Health"`
+	Image    string `json:"Image"`
+	ExitCode int    `json:"ExitCode"`
+}
+
+// container is the raw row as the whitelisted output shape.
+func (r psContainerJSON) container() psContainer {
+	return psContainer{
+		ID:       clip(shortID(r.ID)),
+		Name:     clip(r.Name),
+		Service:  clip(r.Service),
+		State:    clip(r.State),
+		Health:   clip(r.Health),
+		Image:    clip(r.Image),
+		ExitCode: r.ExitCode,
+	}
+}
+
 type composePSData struct {
 	File       string        `json:"file"`
 	Containers []psContainer `json:"containers"`
@@ -395,9 +450,9 @@ func parseComposePS(raw []byte) ([]psContainer, bool, error) {
 	if len(trimmed) == 0 {
 		return nil, false, nil
 	}
-	var rows []psContainer
+	var raws []psContainerJSON
 	if trimmed[0] == '[' {
-		if err := json.Unmarshal(trimmed, &rows); err != nil {
+		if err := json.Unmarshal(trimmed, &raws); err != nil {
 			return nil, false, fmt.Errorf("compose: parsing compose ps output: %w", err)
 		}
 	} else {
@@ -406,24 +461,20 @@ func parseComposePS(raw []byte) ([]psContainer, bool, error) {
 			if len(line) == 0 {
 				continue
 			}
-			var one psContainer
+			var one psContainerJSON
 			if err := json.Unmarshal(line, &one); err != nil {
 				return nil, false, fmt.Errorf("compose: parsing compose ps output: %w", err)
 			}
-			rows = append(rows, one)
+			raws = append(raws, one)
 		}
 	}
-	truncated := len(rows) > maxPSContainers
+	truncated := len(raws) > maxPSContainers
 	if truncated {
-		rows = rows[:maxPSContainers]
+		raws = raws[:maxPSContainers]
 	}
-	for i := range rows {
-		rows[i].ID = clip(shortID(rows[i].ID))
-		rows[i].Name = clip(rows[i].Name)
-		rows[i].Service = clip(rows[i].Service)
-		rows[i].State = clip(rows[i].State)
-		rows[i].Health = clip(rows[i].Health)
-		rows[i].Image = clip(rows[i].Image)
+	rows := make([]psContainer, len(raws))
+	for i, r := range raws {
+		rows[i] = r.container()
 	}
 	return rows, truncated, nil
 }
