@@ -51,10 +51,10 @@
 #     key with the nearest known key from PluginConfigDef, and names the Q1 known-issue id when
 #     Deps.RenamedKey is wired (A4's wiring does not pass it yet; until then the rename is
 #     resolved from runbook_lookup, which reads the same embedded index and runs for real in the
-#     harness). The eval harness cannot replay connect_validate_config at all yet (C6's Q6d adds
-#     the definition-only Connect client), so this file proves the key from connect_config and
-#     task 0's trace instead; when Q6d lands, add the connect_validate_config read (input
-#     {class}) with its summary and a fact on it.
+#     harness). Since Q6d the harness replays connect_validate_config: the recording below
+#     (input {class}) is the tool's output for the stored config, with the fact
+#     f_validate_unknown_key on it (not required: connect_config and task 0's trace prove the
+#     key too). connect_create_connector's Preview reads the same recording.
 #   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html: topic.prefix is
 #     required; it replaced database.server.name in 2.0.
 #   - Kafka Connect validates a config only on the REST create/update path (AbstractHerder
@@ -406,6 +406,22 @@ recordings:
   - tool: similar_incidents
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: connect_validate_config
+    input: {class: io.debezium.connector.postgresql.PostgresConnector}
+    summary: |-
+      1 error in io.debezium.connector.postgresql.PostgresConnector:
+        topic.prefix: The 'topic.prefix' value is invalid: A value is required
+      unknown key "database.server.name": not a known key of this plugin
+    data:
+      base_connector: pg-orders-connector
+      class: io.debezium.connector.postgresql.PostgresConnector
+      config_keys: 4
+      error_count: 1
+      errors:
+        topic.prefix:
+          - 'The ''topic.prefix'' value is invalid: A value is required'
+      unknown_keys:
+        - key: database.server.name
   # Calls no recording above covers: the real tools' not-found answers.
   - tool: connect_status
     error: 'connect: GET /connectors/<name>/status: not found'
@@ -475,6 +491,9 @@ expect:
     - id: f_one_schema_version
       tool: schema_registry_versions
       match: [versions 1, latest id 2]
+    - id: f_validate_unknown_key
+      tool: connect_validate_config
+      match: [unknown key, database server name]
   claims:
     - about: root_cause
       facts: [f_old_key_in_config, f_task_config_error]

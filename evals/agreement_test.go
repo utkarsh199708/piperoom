@@ -367,6 +367,9 @@ var syntheticLabels = map[string]Label{
 	"internal-topic-not-compacted": {"kafka-connect", []string{"compact*", "cleanup.policy", "offsets topic"}},
 	"rebalance-loop":               {"kafka-connect", []string{"rebalance loop", "group.id", "staging"}},
 	"stale-source-offsets":         {"kafka-connect", []string{"source offsets", "old orders database", "repointed"}},
+	// The Q6c network-probe scenarios (KAN-250).
+	"advertised-listener-wrong":   {"kafka-connect", []string{"advertis*", "cluster.local", "headless"}},
+	"db-unreachable-from-connect": {"kafka-connect", []string{"segmentation", "network policy", "firewall*"}},
 	// The X2e recovery scenarios (KAN-427).
 	"rows-lost-after-retention": {"kafka", []string{"retention", "log start", "deleted"}},
 	"consumer-skipped-range":    {"consumer", []string{"reset", "latest", "skipp*"}},
@@ -381,6 +384,10 @@ var syntheticLabels = map[string]Label{
 	// The two Q4c config-validation scenarios.
 	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
 	"register-rejected-missing-plugin": {"kafka-connect", []string{"plugin", "not installed"}},
+	// The two Q1e version-knowledge scenarios (KAN-182): each label names the
+	// known-issue id of the Q1 index and the key or value it is about.
+	"renamed-property-after-upgrade": {"kafka-connect", []string{"dbz-topic-heartbeat-transaction", "heartbeat.topics.prefix", "topic.heartbeat.prefix"}},
+	"removed-decoder-plugin":         {"kafka-connect", []string{"dbz-wal2json-removed", "wal2json"}},
 	// The U1-19 setup scenarios: the label terms name the cause; the alert
 	// titles name the failing check, which is why the check names are not
 	// terms here (a title that names its own check is not a diagnosis).
@@ -469,6 +476,11 @@ var syntheticTruth = map[string]map[string]truth{
 	"internal-topic-not-compacted": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"rebalance-loop":               {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"stale-source-offsets":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// Q6c: the lazy texts are the alert titles, which name the failed task
+	// (kafka-connect) and no cause. The wrong texts blame a down broker
+	// (kafka) and a down database (postgres).
+	"advertised-listener-wrong":   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"db-unreachable-from-connect": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// X2e: the lazy texts are the reconciliation titles, which name the
 	// source and the warehouse and no cause. The wrong texts blame the
 	// connector (kafka-connect, not kafka) and a consumer filter (the right
@@ -496,6 +508,12 @@ var syntheticTruth = map[string]map[string]truth{
 	// layer; a layer miss on it counts against the accuracy.
 	"register-rejected-renamed-key":    {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"register-rejected-missing-plugin": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	// Q1e: the renamed-property title names the stale warehouse next to a
+	// RUNNING connector, the removed-decoder one the failed task
+	// (kafka-connect); neither names a cause. The wrong texts blame a quiet
+	// table's WAL and a dropped slot (both postgres).
+	"renamed-property-after-upgrade": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"removed-decoder-plugin":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	// U1-19: the lazy texts are the alert titles, which name the failing check
 	// and the service it failed on. The first layer word is postgres for
 	// compose-postgres-clean (the label layer) and for wal-level-replica (a

@@ -43,7 +43,8 @@ func readySource() *fakeSource {
 		tables: map[string]TableReplication{"public.refunds": {Table: "public.refunds", ReplicaIdentity: "default"}},
 		role:   RoleInfo{Role: "debezium", Exists: true, CanLogin: true, Replication: true, Selectable: map[string]bool{"public.refunds": false}},
 		sessions: []DBSession{{PID: 4242, StartedAt: testStart, XactStart: testStart.Add(time.Minute), User: "app", App: "billing",
-			State: "idle in transaction", Query: "UPDATE accounts SET password = 'hunter2' WHERE id = 7", InScope: true}},
+			State: "idle in transaction", Query: "UPDATE accounts SET password = 'hunter2' WHERE id = 7", InScope: true,
+			OldXact: true, SameDB: true, ClientBackend: true}},
 		rows: 1000,
 	}
 }

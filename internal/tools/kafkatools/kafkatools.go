@@ -13,6 +13,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
+	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -50,6 +51,10 @@ type Deps struct {
 	// index). Nil until that index is wired: connect_validate_config then only
 	// suggests the nearest key from PluginConfigDef and cannot name an issue.
 	RenamedKey func(key string) (newKey, issueID string, ok bool)
+	// ConnectInternalTopics are the Connect cluster's config, offset and
+	// status topics, in that order, from CONNECT_INTERNAL_TOPICS
+	// (ParseInternalTopics). Empty = connect_worker_info finds them by name.
+	ConnectInternalTopics []string
 }
 
 const timeout = 10 * time.Second
@@ -132,6 +137,12 @@ func Register(reg *tools.Registry, d Deps) error {
 	// The plugin/version read is optional for the same reason (Q1c).
 	if _, ok := d.Connect.(connect.PluginReader); ok {
 		if err := reg.Register(&connectPlugins{d: d}); err != nil {
+			return err
+		}
+	}
+	// Q3a: the Connect worker-group read is optional on the Kafka client.
+	if _, ok := d.Kafka.(kafka.ConnectClusterReader); ok {
+		if err := reg.Register(&workerInfo{d: d}); err != nil {
 			return err
 		}
 	}

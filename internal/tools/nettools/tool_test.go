@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -228,6 +229,34 @@ func TestToolKafkaAdvertisedListeners(t *testing.T) {
 	}
 	if !advertisedTCP {
 		t.Fatalf("checks = %+v", data.Checks)
+	}
+}
+
+// A broker that advertises a name that does not resolve from here (a
+// Kubernetes headless-service name) fails the listeners check like a refused
+// port, with the dns step of the advertised address as the failing step.
+func TestToolKafkaAdvertisedListenerUnresolvable(t *testing.T) {
+	bootstrap := listenLoopback(t)
+	bHost, bPort := hostPortOfAddr(t, bootstrap)
+	const internalName = "kafka-2.kafka-headless.kafka.svc.cluster.local"
+	loc := &fakeLocation{lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if host == internalName {
+			return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+		}
+		return ProcessLocation{}.Lookup(ctx, host)
+	}}
+	kk := &fakeKafka{health: clients.ClusterHealth{Brokers: []clients.BrokerHealth{
+		{NodeID: 1, Host: bHost, Port: int32(bPort)},
+		{NodeID: 2, Host: internalName, Port: 9094},
+	}}}
+	res, err := run(t, Deps{Config: config.Config{KafkaBrokers: bootstrap}, Kafka: kk, Location: loc}, scoped(owners.Pipeline{ID: "orders"}), `{"target":"kafka"}`)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, want := range []string{"2 of ", "listeners fail: node 2 advertises " + internalName + ":9094", "not reachable from here", "dns " + internalName + ":9094 fail"} {
+		if !strings.Contains(res.Summary, want) {
+			t.Fatalf("summary lacks %q:\n%s", want, res.Summary)
+		}
 	}
 }
 

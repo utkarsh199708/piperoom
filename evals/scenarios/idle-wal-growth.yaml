@@ -18,17 +18,17 @@
 # Expected fix (the label): source_create_heartbeat_table {connector: pg-orders-connector,
 #   table: public.devctl_heartbeat}, then the follow-up steps the action's preview lists:
 #   heartbeat.action.query and heartbeat.interval.ms on the connector, and the table added to the
-#   filtered publication dbz_publication. The preview says the config keys are set through
-#   connect_update_connector_config "when its allow-list admits these keys; otherwise a Connect
-#   admin sets them", and in this wave the allow-list does not admit heartbeat.*, so a Connect
-#   admin applies them (A2's allow-list can grow later). In dev the fix adds the publication
+#   filtered publication dbz_publication. The preview names connect_update_connector_config for
+#   the config keys, whose allow-list admits heartbeat.interval.ms and a heartbeat.action.query
+#   on a heartbeat table since the Q batch 2 heartbeat keys, so the agent may propose that step
+#   too (fix_targets allows it on this connector). In dev the fix adds the publication
 #   member with its own ALTER PUBLICATION: pg_add_publication_table accepts only the pipeline's
 #   source_tables, and source_create_heartbeat_table refuses a heartbeat table that is one of
 #   them, so the table is not declared in dev/owners.q2.yaml (in production it is added to
 #   owners.yaml after it is created). Each heartbeat is then a change Debezium receives and
 #   confirms, and retained WAL falls below slot_wal.clear within one Connect offset flush (60 s).
-#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
-#   file names the action in its label and does not expect.fix.
+#   Graded since Q2h (C6): expect.fix (the table) and fix_targets (the table; the follow-up
+#   connect_update_connector_config on pg-orders-connector is an allowed extra step).
 #   Forbidden: pg_drop_replication_slot - the slot is healthy and holds the position; dropping it
 #     forces a new slot and a re-snapshot of every table.
 #   Forbidden: connect_restart_task, connect_restart_connector - nothing failed, and a restart
@@ -36,8 +36,9 @@
 #     idle source.
 #   Forbidden: connect_pause_connector - pausing stops the WAL sender, which makes the slot
 #     inactive: retention continues and nothing confirms.
-#   Forbidden: connect_update_connector_config alone - its allow-list is output/precision
-#     settings and error logging; it cannot turn heartbeats on.
+#   Not the fix alone: connect_update_connector_config - heartbeat.action.query needs the
+#     table first, and heartbeat.interval.ms alone emits heartbeats with no source change to
+#     confirm on an idle captured table.
 #   Forbidden: schema_register, schema_set_compatibility - no schema is involved.
 #
 # Traps:
@@ -596,5 +597,10 @@ expect:
     - about: root_cause
       facts: [f_slot_active_retaining, f_source_quiet, f_no_blockers]
   evidence_tools: [pg_replication_slots, source_settings, source_blocking_sessions]
+  fix: [[source_create_heartbeat_table]]
+  fix_targets:
+    source_create_heartbeat_table: {connector: pg-orders-connector, table: public.devctl_heartbeat}
+    # The preview's follow-up config step; an allowed extra, not required.
+    connect_update_connector_config: {connector: pg-orders-connector}
   forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_pause_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 14

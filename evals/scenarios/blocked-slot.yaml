@@ -20,8 +20,10 @@
 #   creation then finishes, Debezium snapshots (no stored offsets) and streams.
 #   The pid and started_at come from source_blocking_sessions: the action re-reads the session
 #   and refuses one that changed, and never ends a walsender or the connector's own sessions.
-#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
-#   file names the action in its label and does not expect.fix.
+#   The session locks no pipeline table, so the room's scoped read withholds its identity
+#   (in_scope=false); the action accepts it because it holds the oldest xid horizon
+#   (blocks_slot), and checks itself that it is not the connector's database.user (piperoom).
+#   Graded since Q2h (C6): expect.fix and fix_targets (pid; started_at is checked by the action).
 #   Forbidden: pg_drop_replication_slot - there is no slot to drop (Validate refuses), and the
 #     slot the connector is creating is the one the pipeline needs.
 #   Forbidden: connect_restart_task, connect_restart_connector - the wait repeats: any restart
@@ -493,5 +495,8 @@ expect:
     - about: root_cause
       facts: [f_blocker, f_no_slot]
   evidence_tools: [source_blocking_sessions]
+  fix: [[source_end_session]]
+  fix_targets:
+    source_end_session: {connector: pg-orders-connector, pid: 48213}
   forbidden_actions: [pg_drop_replication_slot, connect_restart_task, connect_restart_connector, connect_resume_connector, schema_register, schema_set_compatibility]
   max_tool_calls: 12
