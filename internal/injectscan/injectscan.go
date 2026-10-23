@@ -487,9 +487,9 @@ func cutBefore(s string, n int) string {
 }
 
 func identity(n int) []int {
-	m := make([]int, n+1)
-	for i := range m {
-		m[i] = i
+	m := make([]int, 0, prealloc(n)+1)
+	for i := 0; i <= n; i++ {
+		m = append(m, i)
 	}
 	return m
 }

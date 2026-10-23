@@ -310,7 +310,11 @@ func (c *Client) TaskLogTailMapped(ctx context.Context, dagID, runID, taskID str
 	if maxBytes <= 0 {
 		maxBytes = DefaultLogTailBytes
 	}
-	maxBytes = min(maxBytes, MaxResponseBytes)
+	// An explicit bound (not min) so static analysis sees maxBytes+1 below
+	// cannot overflow.
+	if maxBytes > MaxResponseBytes {
+		maxBytes = MaxResponseBytes
+	}
 	path := runPath(dagID, runID) + "/taskInstances/" + url.PathEscape(taskID) + "/logs/" + strconv.Itoa(try)
 	if mapIndex >= 0 {
 		path += "?map_index=" + strconv.Itoa(mapIndex)

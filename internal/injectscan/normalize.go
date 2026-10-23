@@ -23,6 +23,22 @@ func Normalize(s string) string {
 	return out
 }
 
+// maxPrealloc bounds a slice capacity hint taken from an input's length: the
+// slice still grows by append past it, so the result is the same, and the
+// arithmetic on the hint can never overflow (CodeQL go/allocation-size-overflow).
+const maxPrealloc = 1 << 20
+
+// prealloc is n clamped to [0, maxPrealloc], for use as a capacity hint.
+func prealloc(n int) int {
+	if n < 0 {
+		return 0
+	}
+	if n > maxPrealloc {
+		return maxPrealloc
+	}
+	return n
+}
+
 // normalize undoes the cheap tricks that hide an instruction from a plain
 // pattern match. The standard library has no NFKC, so this is a small, fixed
 // mapping:
@@ -48,7 +64,7 @@ func Normalize(s string) string {
 func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, hadCf bool) {
 	var b strings.Builder
 	b.Grow(len(s))
-	origin = make([]int, 0, len(s)+1)
+	origin = make([]int, 0, prealloc(len(s))+1)
 	inSpace, newlines := false, 0
 	for i, r := range s {
 		m, keep := mapRune(r)
