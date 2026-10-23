@@ -318,7 +318,7 @@ func TestRunnerActionsAndPromptByKind(t *testing.T) {
 		m := &promptCapture{}
 		r, err := newRunnerWith(Alert{Title: "t", PipelineID: "p", PipelineKind: tt.kind}, Deps{
 			Tools: reg, Actions: acts, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: &fakeSink{}, Logger: discardLogger(),
-		}, Options{MaxTurns: 3}, m)
+		}, Options{MaxTurns: 3}, viaSDK(m))
 		if err != nil {
 			t.Fatalf("kind %q: %v", tt.kind, err)
 		}
@@ -357,7 +357,7 @@ func TestRunnerActionsAndPromptByKind(t *testing.T) {
 // toolNamesSent are the tool names of the request's tool list, in order.
 func toolNamesSent(r *runner) []string {
 	var out []string
-	for _, p := range r.toolList.params {
+	for _, p := range r.toolList.wire() {
 		if p.OfTool != nil {
 			out = append(out, p.OfTool.Name)
 		}
@@ -387,7 +387,7 @@ func TestRoomToolsForKind(t *testing.T) {
 		reg, _ := kindTestRegistry(t)
 		r, err := newRunnerWith(Alert{Title: "t", PipelineID: "p", PipelineKind: tt.kind}, Deps{
 			Tools: reg, Actions: tt.acts, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: &fakeSink{}, Logger: discardLogger(),
-		}, Options{MaxTurns: 3}, &promptCapture{})
+		}, Options{MaxTurns: 3}, viaSDK(&promptCapture{}))
 		if err != nil {
 			t.Fatalf("%s: %v", tt.name, err)
 		}

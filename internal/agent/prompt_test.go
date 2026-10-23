@@ -500,7 +500,7 @@ func TestRequestSetsCompactionInstructions(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
 	r := newTestRunner(t, &scriptedModel{}, &fakeInbox{waitErr: context.Canceled}, &fakeSink{}, rec, Options{MaxTurns: 3})
 
-	params := r.request(nil)
+	params := sdkRequest(t, r.request(nil))
 	if len(params.ContextManagement.Edits) != 1 {
 		t.Fatalf("context management edits = %d, want 1", len(params.ContextManagement.Edits))
 	}

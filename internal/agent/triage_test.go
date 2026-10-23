@@ -65,7 +65,7 @@ func TestPickModelRules(t *testing.T) {
 	})
 }
 
-func triageRunner(t *testing.T, m model, inbox Inbox, sink *fakeSink, triageTurns int) *runner {
+func triageRunner(t *testing.T, m sdkModel, inbox Inbox, sink *fakeSink, triageTurns int) *runner {
 	t.Helper()
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
 	r := newTestRunner(t, m, inbox, sink, rec, Options{Model: "main", MaxTurns: 20})
@@ -98,7 +98,7 @@ func TestRunRerunsAProposeFixTurnOnTheMainModel(t *testing.T) {
 	sink := &fakeSink{}
 	r := triageRunner(t, m, &fakeInbox{waitErr: context.Canceled}, sink, 6)
 	b := newTokenBudget(0)
-	r.model = &budgetModel{inner: m, budget: b, loop: true}
+	r.model = &budgetModel{inner: viaSDK(m), budget: b, loop: true}
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)

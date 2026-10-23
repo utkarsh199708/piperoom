@@ -51,7 +51,7 @@ func tuneStep() events.ProposalStep {
 
 // newPerfRunner registers a performance action answering answers and a
 // connect_status that passes, and wires the action's clock to the runner's.
-func newPerfRunner(t *testing.T, m model, inbox Inbox, sink *fakeSink, answers ...verifyAnswer) (*runner, *tickClock, *fakePerfAction) {
+func newPerfRunner(t *testing.T, m sdkModel, inbox Inbox, sink *fakeSink, answers ...verifyAnswer) (*runner, *tickClock, *fakePerfAction) {
 	t.Helper()
 	act := &fakePerfAction{fakeRecoveryAction: &fakeRecoveryAction{fakeAction: fakeAction{name: "connect_tune_throughput", layer: "kafka-connect"}, answers: answers}}
 	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}

@@ -165,7 +165,7 @@ func bothResults(id string) []HumanInput {
 }
 
 // waitRunner is a compat runner on a gated clock, fed by a push inbox.
-func waitRunner(t *testing.T, model model, inbox Inbox) (*runner, *gatedClock, *fakeSink) {
+func waitRunner(t *testing.T, model sdkModel, inbox Inbox) (*runner, *gatedClock, *fakeSink) {
 	t.Helper()
 	sink := &fakeSink{}
 	r, _ := newCompatRunner(t, model, inbox, sink, compatSteps("BACKWARD"), compatEnv{})

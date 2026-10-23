@@ -175,10 +175,10 @@ func TestEveryToolSchemaObjectHasAdditionalPropertiesFalse(t *testing.T) {
 	}
 
 	tl := buildToolList(reg, newRoomTools(Deps{Actions: areg}, nil))
-	if len(tl.params) == 0 {
+	if len(tl.wire()) == 0 {
 		t.Fatal("no tools built")
 	}
-	for _, p := range tl.params {
+	for _, p := range tl.wire() {
 		b, err := json.Marshal(p)
 		if err != nil {
 			t.Fatalf("marshal tool param: %v", err)
@@ -527,7 +527,7 @@ func TestWriteHandoffRefusal(t *testing.T) {
 		StopReason: anthropic.BetaStopReasonRefusal,
 		Content:    nil,
 	}}
-	_, err := writeHandoff(context.Background(), []events.Event{{Type: events.RoomCreated}}, Options{}, m)
+	_, err := writeHandoff(context.Background(), []events.Event{{Type: events.RoomCreated}}, Options{}, viaSDK(m))
 	if err == nil {
 		t.Fatal("expected an error when the handoff model refuses")
 	}

@@ -10,8 +10,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 )
 
@@ -98,26 +97,22 @@ func judgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSumma
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: marshal summary: %w", err)
 	}
 	user := "Hand-off summary:\n" + wrapUntrusted(string(sj)) + "\n\n" + renderRoomEvents(evs)
-	params := anthropic.BetaMessageNewParams{
-		Model:     opts.Model,
-		MaxTokens: judgeMaxTokens,
-		System:    []anthropic.BetaTextBlockParam{{Text: judgePrompt()}},
-		Messages: []anthropic.BetaMessageParam{
-			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(user)),
-		},
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Effort: anthropic.BetaOutputConfigEffort(judgeEffort(opts)),
-			Format: anthropic.BetaJSONOutputFormatParam{Schema: judgeSchema()},
-		},
+	params := llm.Request{
+		Model:        opts.Model,
+		MaxTokens:    judgeMaxTokens,
+		System:       judgePrompt(),
+		Messages:     []llm.Message{userMessage(textPart(user))},
+		Effort:       judgeEffort(opts),
+		OutputSchema: judgeSchema(),
 	}
 	msg, err := m.Turn(ctx, params)
 	if err != nil {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: request: %w", err)
 	}
-	if msg.StopReason == anthropic.BetaStopReasonRefusal {
+	if msg.Stop == llm.StopRefusal {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: model refused the request")
 	}
-	dec := json.NewDecoder(strings.NewReader(extractText(msg.Content)))
+	dec := json.NewDecoder(strings.NewReader(extractText(msg.Message.Parts)))
 	dec.DisallowUnknownFields()
 	var v HandoffVerdict
 	if err := dec.Decode(&v); err != nil {

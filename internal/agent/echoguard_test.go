@@ -354,7 +354,7 @@ func TestEchoGuardSeededTriageReads(t *testing.T) {
 		{StepID: echoSeedStep, Tool: "runbook_lookup", Summary: trace},
 	}}}
 	// The production path: newRunnerWith seeds and scans the triage reads.
-	r, err := newRunnerWith(alert, d, Options{MaxTurns: 1}, &scriptedModel{})
+	r, err := newRunnerWith(alert, d, Options{MaxTurns: 1}, viaSDK(&scriptedModel{}))
 	if err != nil {
 		t.Fatal(err)
 	}

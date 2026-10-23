@@ -43,7 +43,7 @@ func fullRegistry(t *testing.T) *tools.Registry {
 func strictNames(t *testing.T, tl toolList) (order []string, strict map[string]bool) {
 	t.Helper()
 	strict = map[string]bool{}
-	for _, p := range tl.params {
+	for _, p := range tl.wire() {
 		b, err := json.Marshal(p)
 		if err != nil {
 			t.Fatalf("marshal tool param: %v", err)

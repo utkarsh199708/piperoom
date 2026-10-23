@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/bedrock"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/anthropics/anthropic-sdk-go/vertex"
@@ -19,14 +18,17 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"golang.org/x/oauth2/google"
 
+	"piperoom/internal/agent/llm"
+	anthropicllm "piperoom/internal/agent/llm/anthropic"
 	"piperoom/internal/events"
 )
 
-// Model providers an Endpoint can talk to.
+// Model providers an Endpoint can talk to: the Claude providers of the llm
+// contract, all served by the Claude adapter (internal/agent/llm/anthropic).
 const (
-	ProviderAnthropic = "anthropic"
-	ProviderBedrock   = "bedrock"
-	ProviderVertex    = "vertex"
+	ProviderAnthropic = llm.ProviderAnthropic
+	ProviderBedrock   = llm.ProviderBedrock
+	ProviderVertex    = llm.ProviderVertex
 )
 
 // defaultTriageTurns is how many turns run on the triage model before the
@@ -296,7 +298,7 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 		triageTurns: cfg.TriageTurns,
 		triagePass:  triagePassSettings(cfg),
 		limit:       limit,
-		model:       &anthropicModel{client: anthropic.NewClient(opts...), log: log},
+		model:       anthropicllm.New(cfg.Provider, opts, log),
 		log:         log,
 		budgets:     map[string]*tokenBudget{},
 	}, nil

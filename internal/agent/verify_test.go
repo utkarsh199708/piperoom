@@ -12,6 +12,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
@@ -89,7 +90,7 @@ func connectBrokenResult() tools.Result {
 
 // newVerifyRunner builds a runner with the given read tools and a seeded
 // proposal "p_1", so tests can drive the loop straight into verify-after-fix.
-func newVerifyRunner(t *testing.T, model model, inbox Inbox, sink Sink, regTools []tools.Tool, steps []events.ProposalStep) *runner {
+func newVerifyRunner(t *testing.T, model sdkModel, inbox Inbox, sink Sink, regTools []tools.Tool, steps []events.ProposalStep) *runner {
 	t.Helper()
 	reg := tools.NewRegistry()
 	for _, tt := range regTools {
@@ -106,7 +107,7 @@ func newVerifyRunner(t *testing.T, model model, inbox Inbox, sink Sink, regTools
 	if err != nil {
 		t.Fatalf("newRunner: %v", err)
 	}
-	r.model = model
+	r.model = viaSDK(model)
 	r.clk = &fakeClock{} // settle and freshness waits are instant
 	if steps != nil {
 		r.proposals.record("p_1", steps)
@@ -1051,20 +1052,17 @@ func TestRoomToolPlaceholderIsIsErrorResult(t *testing.T) {
 // appendUser extends a trailing user turn and otherwise starts a new one, so a
 // request never carries two user messages in a row.
 func TestAppendUserExtendsTrailingUserTurn(t *testing.T) {
-	msgs := []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("a"))}
-	msgs = appendUser(msgs, anthropic.NewBetaTextBlock("b"))
-	if len(msgs) != 1 || len(msgs[0].Content) != 2 {
+	msgs := []llm.Message{userMessage(textPart("a"))}
+	msgs = appendUser(msgs, textPart("b"))
+	if len(msgs) != 1 || len(msgs[0].Parts) != 2 {
 		t.Fatalf("trailing user turn must be extended, got %d messages", len(msgs))
 	}
-	msgs = append(msgs, anthropic.BetaMessageParam{
-		Role:    anthropic.BetaMessageParamRoleAssistant,
-		Content: []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock("c")},
-	})
-	msgs = appendUser(msgs, anthropic.NewBetaTextBlock("d"))
+	msgs = append(msgs, llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{textPart("c")}})
+	msgs = appendUser(msgs, textPart("d"))
 	if len(msgs) != 3 {
 		t.Fatalf("after an assistant turn a new user turn is added, got %d messages", len(msgs))
 	}
-	assertNoConsecutiveUsers(t, msgs)
+	assertNoConsecutiveUsers(t, sdkRequest(t, llm.Request{Messages: msgs}).Messages)
 }
 
 // The max-turns pause appends the steer to the trailing tool-result turn, so the

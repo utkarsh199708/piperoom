@@ -337,7 +337,7 @@ func TestHandoffRegressionFakeModel(t *testing.T) {
 				StopReason: anthropic.BetaStopReasonEndTurn,
 				Content:    []anthropic.BetaContentBlockUnion{{Type: "text", Text: string(js)}},
 			}}
-			got, err := writeHandoff(context.Background(), c.events, Options{}, m)
+			got, err := writeHandoff(context.Background(), c.events, Options{}, viaSDK(m))
 			if err != nil {
 				t.Fatalf("writeHandoff: %v", err)
 			}

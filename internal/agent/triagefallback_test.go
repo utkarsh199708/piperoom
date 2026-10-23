@@ -15,15 +15,18 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 
+	anthropicllm "piperoom/internal/agent/llm/anthropic"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
 
-// apiErr builds an API error with a response body, wrapped like a stream error.
+// apiErr builds an API error with a response body, wrapped like a stream
+// error, as the Claude adapter returns it: classified into an *llm.APIError
+// that keeps the SDK error.
 func apiErr(code int, body string) error {
 	e := &anthropic.Error{StatusCode: code}
 	_ = e.UnmarshalJSON([]byte(body))
-	return fmt.Errorf("agent: stream: %w", e)
+	return anthropicllm.ClassifyError(ProviderAnthropic, fmt.Errorf("agent: stream: %w", e), nil)
 }
 
 func TestTriageRejected(t *testing.T) {

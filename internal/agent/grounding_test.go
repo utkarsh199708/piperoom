@@ -155,7 +155,7 @@ const (
 
 func TestWriteHandoffRetriesOnceOnViolations(t *testing.T) {
 	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(badSummary), handoffText(goodSummary)}}
-	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, m)
+	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, viaSDK(m))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +182,7 @@ func TestWriteHandoffRetriesOnceOnViolations(t *testing.T) {
 
 func TestWriteHandoffNoRetryWhenClean(t *testing.T) {
 	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(goodSummary)}}
-	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, m)
+	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, viaSDK(m))
 	if err != nil || len(m.calls) != 1 {
 		t.Fatalf("err = %v, %d calls", err, len(m.calls))
 	}
@@ -193,7 +193,7 @@ func TestWriteHandoffNoRetryWhenClean(t *testing.T) {
 
 func TestWriteHandoffStoresRemainingViolations(t *testing.T) {
 	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(badSummary), handoffText(badSummary)}}
-	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, m)
+	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, viaSDK(m))
 	if err != nil {
 		t.Fatalf("a summary with violations must still be returned: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestWriteHandoffStoresRemainingViolations(t *testing.T) {
 
 func TestWriteHandoffKeepsFirstSummaryWhenRetryFails(t *testing.T) {
 	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(badSummary), handoffText("not json")}}
-	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, m)
+	got, err := writeHandoff(context.Background(), handoffLog(), Options{}, viaSDK(m))
 	if err != nil {
 		t.Fatalf("a failed retry must not fail the hand-off: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestToEventViolationsCaps(t *testing.T) {
 func TestPostmortemIsNotRetried(t *testing.T) {
 	// The post-mortem shares the request but not the hand-off check.
 	m := &scriptedModel{turns: []anthropic.BetaMessage{handoffText(badSummary)}}
-	if _, err := writeSummary(context.Background(), handoffLog(), Options{}, m, postmortemPrompt(), "postmortem"); err != nil {
+	if _, err := writeSummary(context.Background(), handoffLog(), Options{}, viaSDK(m), postmortemPrompt(), "postmortem"); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.calls) != 1 {

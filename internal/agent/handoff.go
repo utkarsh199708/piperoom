@@ -7,8 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"piperoom/internal/agent/llm"
 	"piperoom/internal/events"
 )
 
@@ -38,12 +37,9 @@ func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, 
 	vs := CheckHandoff(roomEvents, summary)
 	if len(vs) > 0 {
 		retry := params
-		retry.Messages = append(append([]anthropic.BetaMessageParam(nil), params.Messages...),
-			anthropic.BetaMessageParam{
-				Role:    anthropic.BetaMessageParamRoleAssistant,
-				Content: []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(raw)},
-			},
-			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(retryNote(vs))),
+		retry.Messages = append(append([]llm.Message(nil), params.Messages...),
+			llm.Message{Role: llm.RoleAssistant, Parts: []llm.Part{textPart(raw)}},
+			userMessage(textPart(retryNote(vs))),
 		)
 		// A failed or late second attempt keeps the first summary and its
 		// violations: the request deadline is shared, so the retry gets what is left.
@@ -83,41 +79,34 @@ func writeSummary(ctx context.Context, roomEvents []events.Event, opts Options, 
 }
 
 // summaryParams builds the structured request over the room log.
-func summaryParams(roomEvents []events.Event, opts Options, prompt, what string) (anthropic.BetaMessageNewParams, error) {
+func summaryParams(roomEvents []events.Event, opts Options, prompt, what string) (llm.Request, error) {
 	if len(roomEvents) == 0 {
-		return anthropic.BetaMessageNewParams{}, fmt.Errorf("agent: cannot write %s from an empty room", what)
+		return llm.Request{}, fmt.Errorf("agent: cannot write %s from an empty room", what)
 	}
-	return anthropic.BetaMessageNewParams{
-		Model:     opts.Model,
-		MaxTokens: handoffMaxTokens,
-		System: []anthropic.BetaTextBlockParam{
-			{Text: prompt, CacheControl: anthropic.NewBetaCacheControlEphemeralParam()},
-		},
-		Messages: []anthropic.BetaMessageParam{
-			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(renderRoomEvents(roomEvents))),
-		},
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Effort: anthropic.BetaOutputConfigEffort(opts.effort()),
-			Format: anthropic.BetaJSONOutputFormatParam{Schema: handoffSchema()},
-		},
-		Thinking: anthropic.BetaThinkingConfigParamUnion{
-			OfAdaptive: &anthropic.BetaThinkingConfigAdaptiveParam{},
-		},
+	return llm.Request{
+		Model:        opts.Model,
+		MaxTokens:    handoffMaxTokens,
+		System:       prompt,
+		Messages:     []llm.Message{userMessage(textPart(renderRoomEvents(roomEvents)))},
+		Effort:       opts.effort(),
+		OutputSchema: handoffSchema(),
+		Thinking:     true,
+		Cache:        llm.CacheHints{System: true},
 	}, nil
 }
 
 // requestSummary sends one request and parses the summary. It also returns the
 // model's raw text, which a retry replays as the assistant turn.
-func requestSummary(ctx context.Context, params anthropic.BetaMessageNewParams, m model, what string) (events.HandoffSummary, string, error) {
+func requestSummary(ctx context.Context, params llm.Request, m model, what string) (events.HandoffSummary, string, error) {
 	msg, err := m.Turn(ctx, params)
 	if err != nil {
 		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s request: %w", what, err)
 	}
-	if msg.StopReason == anthropic.BetaStopReasonRefusal {
+	if msg.Stop == llm.StopRefusal {
 		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s: model refused the request", what)
 	}
 
-	text := extractText(msg.Content)
+	text := extractText(msg.Message.Parts)
 	if strings.TrimSpace(text) == "" {
 		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s: model returned no text", what)
 	}
@@ -135,12 +124,12 @@ func requestSummary(ctx context.Context, params anthropic.BetaMessageNewParams, 
 	return summary, text, nil
 }
 
-// extractText concatenates the text blocks of a message.
-func extractText(content []anthropic.BetaContentBlockUnion) string {
+// extractText concatenates the text parts of a message.
+func extractText(parts []llm.Part) string {
 	var b strings.Builder
-	for _, block := range content {
-		if block.Type == "text" {
-			b.WriteString(block.Text)
+	for _, p := range parts {
+		if p.Kind == llm.PartText {
+			b.WriteString(p.Text)
 		}
 	}
 	return b.String()

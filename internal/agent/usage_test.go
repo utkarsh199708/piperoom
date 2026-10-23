@@ -142,7 +142,7 @@ func TestUsageEventSplitsTheCompactionPass(t *testing.T) {
 	for _, p := range got {
 		sum += p.InputTokens + p.CacheCreationInputTokens + p.CacheReadInputTokens + p.OutputTokens
 	}
-	if u := messageUsage(turn); sum != u.total() {
+	if u := messageUsage(sdkUsage(turn)); sum != u.total() {
 		t.Fatalf("events sum to %d, messageUsage = %d", sum, u.total())
 	}
 }
@@ -178,7 +178,8 @@ func TestUsageEventCarriesNoText(t *testing.T) {
 	end := mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"the cause is `+marker+`"}],"usage":{"input_tokens":70,"output_tokens":5}}`)
 	sink := &fakeSink{}
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "status " + marker}}
-	r := newTestRunner(t, &scriptedModel{turns: []anthropic.BetaMessage{toolUse, end}}, &fakeInbox{
+	scripted := &scriptedModel{turns: []anthropic.BetaMessage{toolUse, end}}
+	r := newTestRunner(t, scripted, &fakeInbox{
 		drains:  [][]HumanInput{{{Kind: "steer", Text: "look at " + marker}}},
 		waitErr: context.Canceled,
 	}, sink, rec, Options{Model: "main"})
@@ -190,7 +191,7 @@ func TestUsageEventCarriesNoText(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	// The marker reached the model and the room, so the test can see a leak.
-	if !strings.Contains(messagesJSON(r.model.(*scriptedModel).calls[0]), marker) {
+	if !strings.Contains(messagesJSON(scripted.calls[0]), marker) {
 		t.Fatal("test setup: the marker is not in the prompt")
 	}
 	evs := sink.ofType(events.AgentUsage)
@@ -349,11 +350,11 @@ func TestSplitUsageAddsUpToMessageUsage(t *testing.T) {
 	msg := mustMessage(t, `{"usage":{"input_tokens":1,"cache_creation_input_tokens":2,"cache_read_input_tokens":3,"output_tokens":4,
 		"iterations":[{"type":"compaction","input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":30,"cache_read_input_tokens":40},
 		{"type":"compaction","input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":1,"cache_read_input_tokens":1}]}}`)
-	own, comp, compacted := splitUsage(msg)
+	own, comp, compacted := splitUsage(sdkUsage(msg))
 	if !compacted || own.total() != 10 || comp.total() != 104 {
 		t.Fatalf("own %+v comp %+v compacted %v", own, comp, compacted)
 	}
-	if own.total()+comp.total() != messageUsage(msg).total() {
+	if own.total()+comp.total() != messageUsage(sdkUsage(msg)).total() {
 		t.Fatal("splitUsage and messageUsage disagree")
 	}
 }

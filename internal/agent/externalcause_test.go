@@ -301,7 +301,7 @@ func x4Runner(t *testing.T, changes []clients.PipelineChange, summary string, fn
 		}
 		return mustMessage(t, `{"stop_reason":"tool_use","content":[`+content+`]}`), nil
 	}}
-	r.model = m
+	r.model = viaSDK(m)
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}

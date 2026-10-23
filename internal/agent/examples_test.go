@@ -111,7 +111,7 @@ func exampleRunner(t *testing.T, log *slog.Logger, sink *fakeSink, ts ...tools.T
 	m := &scriptedModel{}
 	r, err := newRunnerWith(Alert{Title: "orders stale", PipelineID: "orders", RoomID: "r_new"}, Deps{
 		Tools: reg, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: sink, Logger: log,
-	}, Options{MaxTurns: 2}, m)
+	}, Options{MaxTurns: 2}, viaSDK(m))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestPastIncidentsUsageTokensGrowByTheBlock(t *testing.T) {
 	inputTokens := func(ts ...tools.Tool) int64 {
 		sink := &fakeSink{}
 		r, _ := exampleRunner(t, nil, sink, ts...)
-		r.model = &sizeModel{}
+		r.model = viaSDK(&sizeModel{})
 		if err := r.run(context.Background()); err != nil {
 			t.Fatalf("run: %v", err)
 		}
