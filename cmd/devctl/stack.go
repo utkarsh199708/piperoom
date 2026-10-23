@@ -43,7 +43,10 @@ type stack struct {
 	composeOverrideFn func(ctx context.Context, override string, args ...string) error
 	// execInFn replaces `docker exec` output reads (the setup-break plugin
 	// layout and reachability checks) in unit tests.
-	execInFn         func(ctx context.Context, container string, argv ...string) (string, int, error)
+	execInFn func(ctx context.Context, container string, argv ...string) (string, int, error)
+	// execAsFn is execInFn with the user the command runs as ("" = the
+	// image's user, "0" = root); it wins over execInFn when both are set.
+	execAsFn         func(ctx context.Context, user, container string, argv ...string) (string, int, error)
 	clickhouseExecFn func(ctx context.Context, query string) error
 	groupFn          func(ctx context.Context, group string) (groupView, error)
 	// detachFn replaces runDetached (`docker exec -d …`, a session that
@@ -65,6 +68,9 @@ type stack struct {
 	stagingStepTimeout time.Duration
 	// poll is how often waitFor checks its condition (default 2 s).
 	poll time.Duration
+	// connectStart bounds a Connect worker start in the setup breaks
+	// (default connectStartTimeout).
+	connectStart time.Duration
 	// clickhouseRetryEvery and clickhouseRetryFor pace the ClickHouse init
 	// retry (default every 2 s for up to 60 s).
 	clickhouseRetryEvery, clickhouseRetryFor time.Duration
@@ -152,6 +158,9 @@ func (s *stack) execIn(ctx context.Context, container string, argv ...string) (s
 // setup breaks write /etc/hosts in the Connect container, which is root-owned
 // while the worker runs unprivileged.
 func (s *stack) execInUser(ctx context.Context, user, container string, argv ...string) (string, int, error) {
+	if s.execAsFn != nil {
+		return s.execAsFn(ctx, user, container, argv...)
+	}
 	if s.execInFn != nil {
 		return s.execInFn(ctx, container, argv...)
 	}
@@ -184,17 +193,23 @@ func (s *stack) composeWith(ctx context.Context, override string, args ...string
 	if s.composeOverrideFn != nil {
 		return s.composeOverrideFn(ctx, override, args...)
 	}
-	full := []string{"compose", "-f", filepath.Join(s.root, "dev", "docker-compose.yml")}
-	if override != "" {
-		full = append(full, "-f", override)
-	}
-	full = append(full, args...)
-	cmd := exec.CommandContext(ctx, "docker", full...)
+	cmd := exec.CommandContext(ctx, "docker", composeWithArgv(s.root, override, args...)...)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("devctl: docker %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
+}
+
+// composeWithArgv is the docker argv of composeWith: the base dev file, then
+// the override when there is one (Compose merges later files over earlier
+// ones), then the subcommand.
+func composeWithArgv(root, override string, args ...string) []string {
+	full := []string{"compose", "-f", filepath.Join(root, "dev", "docker-compose.yml")}
+	if override != "" {
+		full = append(full, "-f", override)
+	}
+	return append(full, args...)
 }
 
 func (s *stack) up(ctx context.Context) error { return s.upWith(ctx, false) }

@@ -216,6 +216,9 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		if len(rest) != 1 {
 			return fmt.Errorf("usage: devctl %s <scenario> (%s)", cmd, strings.Join(setupScenarioNames(), ", "))
 		}
+		if _, ok := setupScenarios[rest[0]]; !ok {
+			return fmt.Errorf("unknown setup-break scenario %q (%s)", rest[0], strings.Join(setupScenarioNames(), ", "))
+		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}

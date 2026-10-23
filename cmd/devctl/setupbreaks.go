@@ -190,6 +190,15 @@ const (
 	connectStartTimeout = 6 * time.Minute
 )
 
+// connectStartTimeout is the stack's bound on a Connect worker start: the
+// connectStart field when set (tests), else the constant.
+func (s *stack) connectStartTimeout() time.Duration {
+	if s.connectStart > 0 {
+		return s.connectStart
+	}
+	return connectStartTimeout
+}
+
 // pluginDirView is the plugin path as jar_list reads it: jars directly in the
 // plugins root (flat), and the connector directory's jars.
 type pluginDirView struct {
@@ -826,10 +835,10 @@ func fixDBUnreachable(ctx context.Context, s *stack) error {
 	if err := s.compose(ctx, nil, "restart", "connect"); err != nil {
 		return err
 	}
-	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connectors", connectStartTimeout); err != nil {
+	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connectors", s.connectStartTimeout()); err != nil {
 		return err
 	}
-	if err := s.waitConnector(ctx, "RUNNING", connectStartTimeout); err != nil {
+	if err := s.waitConnector(ctx, "RUNNING", s.connectStartTimeout()); err != nil {
 		return fmt.Errorf("the connector did not return to RUNNING: %w", err)
 	}
 	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
@@ -921,10 +930,10 @@ func breakPluginAfterScan(ctx context.Context, s *stack) error {
 	if err := s.compose(ctx, nil, "restart", "connect"); err != nil {
 		return err
 	}
-	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connector-plugins", connectStartTimeout); err != nil {
+	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connector-plugins", s.connectStartTimeout()); err != nil {
 		return err
 	}
-	if err := s.waitFor(ctx, connectStartTimeout, func() (bool, error) {
+	if err := s.waitFor(ctx, s.connectStartTimeout(), func() (bool, error) {
 		classes, err := s.connectorPluginClasses(ctx)
 		if err != nil {
 			return false, nil
@@ -962,10 +971,10 @@ func fixPluginAfterScan(ctx context.Context, s *stack) error {
 	if err := s.compose(ctx, nil, "restart", "connect"); err != nil {
 		return err
 	}
-	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connector-plugins", connectStartTimeout); err != nil {
+	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connector-plugins", s.connectStartTimeout()); err != nil {
 		return err
 	}
-	if err := s.waitFor(ctx, connectStartTimeout, func() (bool, error) {
+	if err := s.waitFor(ctx, s.connectStartTimeout(), func() (bool, error) {
 		classes, err := s.connectorPluginClasses(ctx)
 		if err != nil {
 			return false, nil
@@ -974,7 +983,7 @@ func fixPluginAfterScan(ctx context.Context, s *stack) error {
 	}); err != nil {
 		return fmt.Errorf("the worker did not list %s after the restart: %w", postgresConnector, err)
 	}
-	if err := s.waitConnector(ctx, "RUNNING", connectStartTimeout); err != nil {
+	if err := s.waitConnector(ctx, "RUNNING", s.connectStartTimeout()); err != nil {
 		return fmt.Errorf("the connector did not return to RUNNING after the worker restart: %w", err)
 	}
 	s.log.Info("fixed: worker restarted, " + postgresConnector + " in the plugin list, connector RUNNING")
