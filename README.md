@@ -1,7 +1,8 @@
 # Piperoom
 
-Piperoom is a shared incident room for CDC/Kafka data pipelines (Postgres → Debezium →
-Kafka → consumers → warehouse). When an alert fires, it opens a room where an AI agent
+Piperoom is a shared incident room for CDC/Kafka data pipelines (Postgres or MySQL →
+Debezium → Kafka → consumers → warehouse; a MySQL source is `source_kind: mysql` in
+`owners.yaml`, `docs/pilot/mysql-users.md`). When an alert fires, it opens a room where an AI agent
 (Claude) investigates with read-only tools while engineers watch live, comment, and steer.
 Only one person — the **driver** — steers the agent at a time; everyone else suggests. The
 agent can only propose a fix, and a fix runs only once every layer owner it touches has
