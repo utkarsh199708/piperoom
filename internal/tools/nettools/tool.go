@@ -54,7 +54,8 @@ type Deps struct {
 	// never names another tenant's host).
 	Config config.Config
 	// Targets replaces where the targets come from. The setup runner passes
-	// TargetsFromSetup; nil builds RoomTargets(Config, Connect).
+	// TargetsFromSetup; nil builds RoomTargets(Config, Connect), whose
+	// connector-config reads are bounded by StepTimeout.
 	Targets TargetSource
 	// Location is the network position the probe runs from. Nil =
 	// ProcessLocation{} (the room service's own position).
@@ -149,7 +150,7 @@ func (t *netProbe) Run(ctx context.Context, raw json.RawMessage) (tools.Result, 
 
 	src := t.d.Targets
 	if src == nil {
-		src = RoomTargets(t.d.Config, t.d.Connect)
+		src = roomTargets{cfg: t.d.Config, connect: t.d.Connect, step: t.d.StepTimeout}
 	}
 	pl := sc.Pipeline()
 	labels := src.Labels(pl)

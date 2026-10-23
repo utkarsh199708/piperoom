@@ -158,3 +158,28 @@ func TestCertExpiryErrors(t *testing.T) {
 		t.Error("plain-text server: want error")
 	}
 }
+
+// A certificate that expired earlier today has under a day of negative
+// lifetime, which truncates to 0 days; it must still read as expired.
+func TestCertInfoExpiredEarlierToday(t *testing.T) {
+	now := time.Now()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "kafka-1"}, DNSNames: []string{"localhost"},
+		NotBefore: now.Add(-48 * time.Hour), NotAfter: now.Add(-time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info := certInfo([]*x509.Certificate{leaf}, "localhost", nil); info.DaysLeft != -1 {
+		t.Fatalf("DaysLeft = %d, want -1", info.DaysLeft)
+	}
+}

@@ -101,6 +101,9 @@ func RoomTargets(cfg config.Config, connect clients.ConnectClient) TargetSource 
 type roomTargets struct {
 	cfg     config.Config
 	connect clients.ConnectClient
+	// step bounds one connector-config read; 0 = stepTimeout. The tool passes
+	// its Deps.StepTimeout, so a configured step bound reaches every step.
+	step time.Duration
 }
 
 func (r roomTargets) Labels(p owners.Pipeline) []string {
@@ -150,7 +153,7 @@ func (r roomTargets) Target(ctx context.Context, p owners.Pipeline, label string
 		return Target{}, fmt.Errorf("net_probe: label %q has no target kind", clip(label))
 	}
 	if kindOfLabel(label) == KindSource {
-		notes := b.addConnectors(ctx, r.connect, p)
+		notes := b.addConnectors(ctx, r.connect, p, r.step)
 		targets := b.list()
 		if len(targets) == 0 {
 			return Target{Label: label, Kind: KindSource, Note: strings.Join(notes, "; ")}, nil
@@ -167,16 +170,17 @@ func (r roomTargets) Target(ctx context.Context, p owners.Pipeline, label string
 }
 
 // addConnectors adds the source host each of the pipeline's connectors names.
-// Only database.hostname/database.port are read: a credential value never is.
+// Each read is bounded by step (stepOr). Only database.hostname/database.port
+// are read: a credential value never is.
 // A connector Connect cannot describe is a note, not a failed probe: the
 // settings may still name the host.
-func (b *targetSet) addConnectors(ctx context.Context, connect clients.ConnectClient, p owners.Pipeline) []string {
+func (b *targetSet) addConnectors(ctx context.Context, connect clients.ConnectClient, p owners.Pipeline, step time.Duration) []string {
 	if connect == nil || len(p.Connectors) == 0 {
 		return nil
 	}
 	var notes []string
 	for _, name := range p.Connectors {
-		cctx, cancel := context.WithTimeout(ctx, stepTimeout)
+		cctx, cancel := context.WithTimeout(ctx, stepOr(step))
 		cfg, err := connect.Config(cctx, name)
 		cancel()
 		if err != nil {

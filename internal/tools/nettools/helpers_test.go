@@ -64,6 +64,11 @@ type certOpts struct {
 	ips       []string
 	notBefore time.Time
 	notAfter  time.Time
+	// cn is the subject (and, self-signed, issuer) common name; "" =
+	// "test-endpoint".
+	cn string
+	// onHello, when set, sees each ClientHello (the SNI a client sent).
+	onHello func(*tls.ClientHelloInfo)
 }
 
 // tlsServer serves a self-signed certificate and counts the client
@@ -76,9 +81,13 @@ func tlsServer(t *testing.T, o certOpts) (addr string, roots *x509.CertPool, caF
 	if err != nil {
 		t.Fatal(err)
 	}
+	cn := o.cn
+	if cn == "" {
+		cn = "test-endpoint"
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "test-endpoint"},
+		Subject:               pkix.Name{CommonName: cn},
 		DNSNames:              o.dns,
 		NotBefore:             o.notBefore,
 		NotAfter:              o.notAfter,
@@ -110,6 +119,12 @@ func tlsServer(t *testing.T, o certOpts) (addr string, roots *x509.CertPool, caF
 		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
 			count.Add(int32(len(raw)))
 			return nil
+		},
+		GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+			if o.onHello != nil {
+				o.onHello(h)
+			}
+			return nil, nil
 		},
 	})
 	if err != nil {
