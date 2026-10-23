@@ -370,6 +370,17 @@ var syntheticLabels = map[string]Label{
 	// The X2e recovery scenarios (KAN-427).
 	"rows-lost-after-retention": {"kafka", []string{"retention", "log start", "deleted"}},
 	"consumer-skipped-range":    {"consumer", []string{"reset", "latest", "skipp*"}},
+	// The four Q2g source-database scenarios. The label term is what only the right
+	// story states: the title of no-replica-identity carries the application's error
+	// ("does not have a replica identity") but not NOTHING, and the other titles name
+	// the failed task, the missing slot or the retained WAL, never the cause.
+	"no-replica-identity": {"postgres", []string{"omits the old tuple"}},
+	"missing-grant":       {"kafka-connect", []string{"devctl_cdc", "permission denied"}},
+	"blocked-slot":        {"postgres", []string{"devctl-blocker", "blocks_slot"}},
+	"idle-wal-growth":     {"postgres", []string{"idle", "heartbeat", "confirms nothing"}},
+	// The two Q4c config-validation scenarios.
+	"register-rejected-renamed-key":    {"kafka-connect", []string{"database.server.name", "renamed"}},
+	"register-rejected-missing-plugin": {"kafka-connect", []string{"plugin", "not installed"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -456,6 +467,24 @@ var syntheticTruth = map[string]map[string]truth{
 	// rows-lost good text: the clause that says what failed names order-sync.
 	"rows-lost-after-retention": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"consumer-skipped-range":    {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	// Q2g: the lazy texts are the alert/watcher titles. no-replica-identity's
+	// names the failing application update (no layer word); missing-grant's
+	// names the failed task (kafka-connect); blocked-slot's and
+	// idle-wal-growth's name the slot and the retained WAL (postgres). The
+	// wrong texts blame the consumer, a dropped slot, a lagging consumer and a
+	// lost slot. The matcher misses the layer of idle-wal-growth's good text:
+	// its failure clause names Debezium (kafka-connect) before Postgres, the
+	// same read as watcher-start's.
+	"no-replica-identity": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"missing-grant":       {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"blocked-slot":        {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"idle-wal-growth":     {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// Q4c: both lazy texts name the failed connector (kafka-connect) and no
+	// cause. The renamed-key wrong text blames the Schema Registry; the
+	// missing-plugin one blames the connector's role (kafka-connect, the right
+	// layer, the wrong cause).
+	"register-rejected-renamed-key":    {"good": {false, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"register-rejected-missing-plugin": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 }
 
 // watcherTitle is the title the watcher gives watcher-start's room.

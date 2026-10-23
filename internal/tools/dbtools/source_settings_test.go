@@ -117,8 +117,8 @@ func TestSourceTableReplicationHappyPath(t *testing.T) {
 	}
 	for _, want := range []string{
 		"tables=2 without_primary_key=1 replica_identity_nothing=1",
-		"public.orders: primary_key=yes replica_identity=default",
-		"public.orders_audit: primary_key=no replica_identity=nothing",
+		"public.orders: has_primary_key=yes replica_identity=default",
+		"public.orders_audit: has_primary_key=no replica_identity=nothing",
 	} {
 		if !strings.Contains(r.Summary, want) {
 			t.Fatalf("summary misses %q: %q", want, r.Summary)

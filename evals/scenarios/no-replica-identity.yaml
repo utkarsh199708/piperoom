@@ -1,0 +1,477 @@
+# C7 incident scenario (Q2g): every UPDATE and DELETE on the captured table fails on the source,
+# because a migration set REPLICA IDENTITY NOTHING on public.orders and the publication publishes
+# updates. Format: evals/README.md (C6). Built on `devctl break no-replica-identity`
+# (dev/scenarios.md §20, PR #866).
+#
+# RECORDED: NO. Every summary and data payload below is the exact output of the real
+# source_table_replication, source_settings, dbtools and kafkatools code from main, composed by
+# hand from those tools' format strings (same approach as the P3 and X1e files; the Q2g session
+# had no Docker and dev/scenarios.md §20 is not observed on the stack yet). Clock:
+# 2026-10-23T09:40:00Z, scoped by dev/owners.yaml (source_tables: public.orders). To replace it
+# with a real recording, see evals/scenarios/README.md, "Source-database settings (Q2g)".
+#
+# First failing layer: postgres (the source table refuses the write). Root-cause layer:
+#   postgres. Nothing FAILS in the pipeline: pg-orders-connector and task 0 are RUNNING, the
+#   slot is active, order-sync has lag 0 and analytics.orders is current - inserts and updates
+#   of other tables still stream, so no consumer or warehouse symptom appears.
+#
+# Expected fix (the label): pg_set_replica_identity {table: public.orders, mode: full} (the
+#   postgres owner approves; the dev baseline is FULL, dev/postgres-init/01-orders.sql). mode
+#   default also restores writes (public.orders has a primary key), and devctl fix uses FULL.
+#   The ALTER takes a brief ACCESS EXCLUSIVE lock and FULL adds the old row to the WAL of every
+#   UPDATE and DELETE, which the action's preview sizes from the table size.
+#   Graded from Q2h (C6): evals.LiveActions does not register the source actions yet, so this
+#   file names the action in its label and does not score expect.fix.
+#   Forbidden: connect_restart_task, connect_restart_connector, connect_resume_connector -
+#     nothing failed in Connect; a restart re-reads the same table and the application's UPDATE
+#     still fails.
+#   Forbidden: connect_update_connector_config - no connector setting turns a replica identity
+#     on; message.key.columns changes what a record carries, not what Postgres allows.
+#   Forbidden: schema_register, schema_set_compatibility - the schema is unchanged (no DDL on
+#     any captured column) and the events that do flow deserialize.
+#
+# Traps:
+#   - The alert is the application's error, so "the app is broken" or "the consumer rejects the
+#     write" is the nearby wrong story. Inserts still reach analytics.orders: the pipeline is
+#     not stalled.
+#   - pg_recent_ddl shows the migration's ALTER TABLE ... REPLICA IDENTITY NOTHING, which reads
+#     like the schema-change demo; no column changed, and schema_registry_diff shows nothing.
+#   - The slot is active with little retained WAL, so a slot_wal / dead-slot story fails.
+#
+# Sources:
+#   - cmd/devctl/scenarios_q2.go breakNoReplicaIdentity (#866): ALTER TABLE public.orders
+#     REPLICA IDENTITY NOTHING, then a no-op UPDATE that must fail with "does not have a
+#     replica identity", then a marker order that proves inserts still stream.
+#   - https://www.postgresql.org/docs/17/sql-altertable.html: REPLICA IDENTITY NOTHING records
+#     no old key; with a publication that publishes UPDATE or DELETE, Postgres refuses the
+#     write: "cannot update table ... because it does not have a replica identity and publishes
+#     updates".
+#   - internal/tools/dbtools/source_settings.go: source_table_replication's summary and Data
+#     (replica_identity=nothing, has_primary_key=yes).
+#   - internal/actions/sourceactions/replica_identity.go: pg_set_replica_identity's params and
+#     preview.
+
+name: no-replica-identity
+description: |
+  At 08:58 UTC a migration copied from a table that Debezium does not capture ran
+  `ALTER TABLE public.orders REPLICA IDENTITY NOTHING`. dbz_publication publishes updates, so
+  from 09:02 UTC every application UPDATE and DELETE on public.orders fails with `cannot
+  update table "orders" because it does not have a replica identity and publishes updates`;
+  inserts still succeed and still reach Kafka. Nothing in the pipeline failed:
+  pg-orders-connector and task 0 are RUNNING, the slot debezium_orders is active with 1.2 MiB
+  retained, order-sync is Stable at lag 0 and analytics.orders is current.
+
+  Root cause: public.orders has REPLICA IDENTITY NOTHING while dbz_publication publishes
+  updates, so Postgres refuses every UPDATE and DELETE on the table.
+
+  Expected fix (label): pg_set_replica_identity for public.orders with mode full (the table has
+  a primary key, so mode default also restores the writes).
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+# devctl alert no-replica-identity posts this alert (source: app); its description's facts are
+# in the title, since agent.Alert.Raw never reaches the model (evals/README.md).
+alert:
+  title: 'orders: updates to public.orders failing in the orders service (cannot update table "orders" because it does not have a replica identity and publishes updates; inserts still succeed)'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.2 MiB wal_status=reserved
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.2 MiB wal_status=reserved
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+    data:
+      edges:
+        - from: pg:public.orders
+          to: connect:pg-orders-connector
+        - from: connect:pg-orders-connector
+          to: topic:pg.public.orders
+        - from: topic:pg.public.orders
+          to: group:order-sync
+        - from: group:order-sync
+          mapping: inferred
+          to: wh:analytics.orders
+      nodes:
+        - facts:
+            slot_active: "true"
+            slot_retained: 1.2 MiB
+            wal_status: reserved
+          health: ok
+          id: pg:public.orders
+          kind: source_table
+          layer: postgres
+          name: public.orders
+          owner: priya
+        - health: ok
+          id: connect:pg-orders-connector
+          kind: connector
+          layer: kafka-connect
+          name: pg-orders-connector
+          owner: arjun
+        - facts:
+            newest_record: 1m ago
+          health: ok
+          id: topic:pg.public.orders
+          kind: topic
+          layer: kafka
+          name: pg.public.orders
+          owner: arjun
+        - facts:
+            lag: "0"
+            state: Stable
+          health: ok
+          id: group:order-sync
+          kind: consumer_group
+          layer: consumer
+          name: order-sync
+          owner: kabir
+        - facts:
+            stale_for: 1m
+            ts_column: updated_at
+          health: ok
+          id: wh:analytics.orders
+          kind: sink_table
+          layer: warehouse
+          name: analytics.orders
+          owner: meera
+      pipeline_id: orders
+  - tool: source_table_replication
+    input: {pipeline_id: orders}
+    summary: |-
+      tables=1 without_primary_key=0 replica_identity_nothing=1
+      public.orders: has_primary_key=yes replica_identity=nothing
+    data:
+      - table: public.orders
+        has_primary_key: true
+        replica_identity: nothing
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+    data:
+      - failed_tasks: 0
+        name: pg-orders-connector
+        state: RUNNING
+        type: source
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      tasks:
+        - id: 0
+          state: RUNNING
+      worker: connect:8083
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+    data:
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: '***'
+      database.port: "5432"
+      database.user: piperoom
+      publication.autocreate.mode: filtered
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: source_settings
+    summary: |-
+      wal_level=logical
+      max_replication_slots=10
+      max_wal_senders=10
+      max_slot_wal_keep_size=-1
+      wal_sender_timeout=60000 ms
+    data:
+      - {name: wal_level, value: logical}
+      - {name: max_replication_slots, value: "10"}
+      - {name: max_wal_senders, value: "10"}
+      - {name: max_slot_wal_keep_size, value: "-1"}
+      - {name: wal_sender_timeout, value: "60000", unit: ms}
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=1.2 MiB wal_status=reserved
+    data:
+      - active: true
+        confirmed_flush_lsn: 3D/1A2B4C60
+        name: debezium_orders
+        plugin: pgoutput
+        restart_lsn: 3D/1A2B4B90
+        retained_wal_bytes: 1258291
+        wal_status: reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-23T08:58:12Z ALTER TABLE orders | ALTER TABLE public.orders REPLICA IDENTITY NOTHING | piperoom
+    data:
+      - at: "2026-10-23T08:58:12Z"
+        command_tag: ALTER TABLE
+        object_identity: orders
+        query: ALTER TABLE public.orders REPLICA IDENTITY NOTHING
+        username: piperoom
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-23T08:58:12Z ALTER TABLE orders | ALTER TABLE public.orders REPLICA IDENTITY NOTHING | piperoom
+    data:
+      - at: "2026-10-23T08:58:12Z"
+        command_tag: ALTER TABLE
+        object_identity: orders
+        query: ALTER TABLE public.orders REPLICA IDENTITY NOTHING
+        username: piperoom
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+    data:
+      connector: pg-orders-connector
+      connector_user: piperoom
+      connector_user_source: connector pg-orders-connector config database.user
+      publication: dbz_publication
+      publication_source: default
+      publication_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+      source_tables:
+        - in_publication: true
+          schema: public
+          selectable: true
+          table: orders
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+    data:
+      - pg.public.orders-key
+      - pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+    data:
+      compatibility: BACKWARD
+      compatibility_scope: global
+      latest_id: 2
+      subject: pg.public.orders-value
+      versions:
+        - 1
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      no field changes
+    data:
+      changes: []
+      from_version: 1
+      subject: pg.public.orders-value
+      to_version: 2
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 0–1431 (1431 records), newest 1 min ago
+      partition 1: 0–1420 (1420 records), newest 1 min ago
+      partition 2: 0–1406 (1406 records), newest 1 min ago
+    data:
+      partitions:
+        - end: 1431
+          last_timestamp: "2026-10-23T09:39:02Z"
+          partition: 0
+          start: 0
+        - end: 1420
+          last_timestamp: "2026-10-23T09:39:02Z"
+          partition: 1
+          start: 0
+        - end: 1406
+          last_timestamp: "2026-10-23T09:39:02Z"
+          partition: 2
+          start: 0
+      topic: pg.public.orders
+      total_records: 4257
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+    data:
+      - group: order-sync
+        state: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 1431, end 1431, lag 0
+        pg.public.orders/1: committed 1420, end 1420, lag 0
+        pg.public.orders/2: committed 1406, end 1406, lag 0
+    data:
+      group: order-sync
+      members: 1
+      state: Stable
+      total_lag: 0
+      worst_partitions:
+        - committed: 1431
+          end: 1431
+          lag: 0
+          partition: 0
+          topic: pg.public.orders
+        - committed: 1420
+          end: 1420
+          lag: 0
+          partition: 1
+          topic: pg.public.orders
+        - committed: 1406
+          end: 1406
+          lag: 0
+          partition: 2
+          topic: pg.public.orders
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-23T09:38:54Z (stale for 1m)
+    data:
+      newest: "2026-10-23T09:38:54Z"
+      stale_for: 1m
+      table: analytics.orders
+      ts_column: updated_at
+  - tool: pg_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: public.orders}
+    summary: |-
+      found: yes, columns=[amount, customer_id, id=1432, status, updated_at=2026-10-23T09:39:01Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1432"
+      status: null
+      updated_at: "2026-10-23T09:39:01Z"
+  - tool: warehouse_row
+    input: {key: "1432", pipeline_id: orders, pk_column: id, table: analytics.orders}
+    summary: |-
+      found: yes, columns=[amount, customer_id, id=1432, status, updated_at=2026-10-23T09:39:01Z]
+    data:
+      amount: null
+      customer_id: null
+      id: "1432"
+      status: null
+      updated_at: "2026-10-23T09:39:01Z"
+  - tool: similar_incidents
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  # Calls no recording above covers: the real tools' not-found answers.
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: pipeline_map
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "orders"; read tools only work on the room''s own pipeline'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: priya
+    text: "The app team says every UPDATE on orders fails but inserts work. I own the database: tell me what to change on the table and propose it."
+
+expect:
+  root_cause:
+    - [replica identity]
+    # "omits the old tuple" is the positive phrasing of NOTHING: an answer that
+    # states it with a cause term stays out of the ambiguous set (no negation).
+    - [nothing, not recorded, no old key, no key, omits the old tuple]
+  # The wrong stories of a source write failure: the pipeline stages are healthy.
+  root_cause_forbidden:
+    - ['task failed']
+    - ['connector failed']
+    - ['consumer rejected']
+    - ['schema change']
+    - [slot, inactive]
+    - [slot, lost]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_replica_identity_nothing
+      tool: source_table_replication
+      match: [public orders, replica identity nothing]
+      required: true
+    - id: f_connector_running
+      tool: connect_status
+      match: [task 0, running]
+    - id: f_slot_active
+      tool: pg_replication_slots
+      match: [debezium orders, active true]
+    - id: f_no_schema_change
+      tool: schema_registry_diff
+      match: [no field changes]
+  claims:
+    - about: root_cause
+      facts: [f_replica_identity_nothing]
+  evidence_tools: [source_table_replication]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_register, schema_set_compatibility]
+  max_tool_calls: 12

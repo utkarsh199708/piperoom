@@ -14,7 +14,7 @@ import (
 // public.debezium_heartbeat (sourceactions.heartbeatQuery): it must pass.
 const hbQuery = `INSERT INTO "public"."debezium_heartbeat" (id, ts) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts`
 
-const pgSourceClass = "io.debezium.connector.postgresql.PostgresConnector"
+// pgSourceClass is declared in connect_stop_reset_test.go (Q5b, same package).
 
 func hbParams(t *testing.T, changes map[string]string) json.RawMessage {
 	t.Helper()
