@@ -436,8 +436,10 @@ func TestSetupRouteTiers(t *testing.T) {
 		{"T1 local", "compose_write", `{"target":"127.0.0.1:5432"}`, plan.TierT1, plan.ClassLocal, ""},
 		{"T2 shared", "compose_write", `{"target":"db.acme:5432"}`, plan.TierT2, plan.ClassShared, ""},
 		{"T3 production", "compose_write", `{"target":"db.prod.acme:5432"}`, plan.TierT3, plan.ClassProduction, ""},
-		{"unregistered endpoint is shared", "compose_write", `{"target":"elsewhere:5432"}`, plan.TierT2, plan.ClassShared, ""},
-		{"no target is shared", "compose_write", `{}`, plan.TierT2, plan.ClassShared, ""},
+		// A driver step (no plan) that names no registered endpoint may reach
+		// any of the room's endpoints: it routes at the room's highest class.
+		{"unregistered endpoint is the room's highest class", "compose_write", `{"target":"elsewhere:5432"}`, plan.TierT3, plan.ClassProduction, ""},
+		{"no target is the room's highest class", "compose_write", `{}`, plan.TierT3, plan.ClassProduction, ""},
 		{"not Tiered is T2", "plain_op", `{"target":"127.0.0.1:5432"}`, plan.TierT2, plan.ClassLocal, ""},
 		{"T0 is refused", "env_detect", `{"target":"127.0.0.1:5432"}`, "", "", "T0 ops are tools"},
 		{"guard on production", "source_drop_table", `{"target":"db.prod.acme:5432"}`, "", "", "(drop_table)"},

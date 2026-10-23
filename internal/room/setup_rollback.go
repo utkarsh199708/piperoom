@@ -31,9 +31,10 @@ import (
 // recorded is a refusal with that step's name, never a silent skip: a partial
 // rollback that looks complete is worse than no rollback.
 //
-// The derivation reads the log from the current setup.plan's own seq
-// (SetupSnapshot.planSeq), so only the current plan's steps are in scope and a
-// room's earlier history is not read at all.
+// The derivation reads the log from the room's first setup.plan
+// (SetupSnapshot.firstPlanSeq): a plan that replaced a failed one (Supersedes)
+// does not hide what the earlier plan already ran. Each executed step keeps the
+// target of the plan that was current when it ran.
 
 const (
 	// setupRolledBackResolution is room.closed.resolution once the last
@@ -46,11 +47,13 @@ const (
 	// setupRollbackPage is one read of the plan's log slice; the walk stops on
 	// a short page.
 	setupRollbackPage = 500
-	// maxSetupRollbackEvents bounds how much of a room's log the derivation
-	// reads. A setup plan allows a bounded number of steps, so its slice is
-	// small in practice; the cap keeps a runaway room from making a click read
-	// a whole 490k-event log.
+	// maxSetupRollbackEvents bounds the events the derivation keeps: only
+	// setup.plan, proposal.created, proposal.previewed and action.executed are
+	// kept, so comments and other chatter do not count against it.
 	maxSetupRollbackEvents = 20_000
+	// maxSetupRollbackScan bounds how much of a room's log one derivation
+	// reads at all, so a click never reads a whole 490k-event log.
+	maxSetupRollbackScan = 100_000
 	// maxSetupRollbackRecord caps one recorded rollback's text. It is a
 	// preview field the room wrote, and the parse refuses anything larger
 	// rather than carry it into params.
@@ -61,21 +64,24 @@ const (
 // name: the op naming rule the catalogue keeps.
 var setupRollbackActionRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
-// setupEndpointKeys are the params fields a setup step names its endpoint in
-// (setupStepResolve). The rollback step repeats the original step's value so
-// the undo routes at the same class the step did.
-var setupEndpointKeys = []string{"target", "address", "host", "url"}
-
 // setupRanStep is one step the log recorded as executed in the current setup
 // plan: what ran, and the rollback the room recorded for it. Action is "" when
 // the plan's slice does not hold the proposal the step belonged to (a proposal
 // created before the plan), which the derivation reports rather than skips.
 type setupRanStep struct {
 	PlanIndex int
-	Action    string
-	Layer     string
-	Params    json.RawMessage
-	Rollback  string
+	// PlanTarget is the target of the plan step in the plan that was current
+	// when the step ran (a later plan may renumber or drop it).
+	PlanTarget string
+	Action     string
+	Layer      string
+	Params     json.RawMessage
+	Rollback   string
+	// Unknown marks a step whose outcome is unknown (the runner lost it
+	// mid-step): it may have run, so it counts as executed, but nothing
+	// undoes it automatically and the room is never closed "rolled back"
+	// while it stands.
+	Unknown bool
 }
 
 // CreateSetupRollback is POST /api/rooms/{id}/setup/rollback: "roll back this
@@ -108,19 +114,23 @@ func (s *Service) CreateSetupRollback(ctx context.Context, user User, roomID str
 	if snap == nil || !snap.IsSetupRoom() {
 		return events.Event{}, notSetupRoom()
 	}
-	steps, err := s.setupRollbackPlan(ctx, snap)
+	if open, ok := openSetupRollback(*snap); ok {
+		return events.Event{}, setupRollbackOpen(open)
+	}
+	steps, unknown, err := s.setupRollbackPlan(ctx, snap)
 	if err != nil {
 		return events.Event{}, err
 	}
-	if open, ok := openSetupRollback(*snap, steps); ok {
-		return events.Event{}, validation(fmt.Sprintf(
-			"a rollback of this setup is already open (proposal %s); approve or reject it first", open))
+	risk := fmt.Sprintf("Undoes the %d executed step(s) of this setup, newest first, on their own targets: %s. "+
+		"Every step passes the guard again before it runs.",
+		len(steps), setupRollbackNames(steps))
+	if len(unknown) > 0 {
+		risk += " Not undone here, because their outcome is unknown (they may or may not have run): " +
+			truncateDetail(strings.Join(unknown, ", ")) + "; check those targets by hand. The room stays open until they are settled."
 	}
 	p := events.ProposalCreatedPayload{
 		Title: setupRollbackTitle,
-		Risk: fmt.Sprintf("Undoes the %d executed step(s) of setup plan %s, newest first, on their own targets: %s. "+
-			"Every step passes the guard again before it runs.",
-			len(steps), cleanPlanName(snap.Setup.PlanID), setupRollbackNames(steps)),
+		Risk:  risk,
 		Rollback: "This proposal undoes the setup; it does not undo itself. " +
 			"Record a new setup plan and run its steps again if the setup is still wanted.",
 		// The driver's own write: the rollback ops are not plan steps, so the
@@ -129,7 +139,18 @@ func (s *Service) CreateSetupRollback(ctx context.Context, user User, roomID str
 		Origin: events.ProposalOriginDriver,
 		Steps:  steps,
 	}
-	_, ev, err := s.createProposal(ctx, roomID, p, s.humanActor(user), s.driverProposalFence(user))
+	fence := s.driverProposalFence(user)
+	_, ev, err := s.createProposal(ctx, roomID, p, s.humanActor(user), func(st *roomState) error {
+		if err := fence(st); err != nil {
+			return err
+		}
+		// Again under the room's lock: two clicks read the snapshot before
+		// either created its proposal.
+		if open, ok := openSetupRollback(st.snap); ok {
+			return setupRollbackOpen(open)
+		}
+		return nil
+	})
 	if err != nil {
 		return events.Event{}, err
 	}
@@ -166,44 +187,63 @@ func setupRollbackNames(steps []events.ProposalStep) string {
 }
 
 // setupRollbackPlan derives the rollback proposal's steps: one step per
-// executed setup step of the current plan that has not been undone yet,
-// newest first. Each step runs the action and params the room recorded as that
-// step's rollback, on the endpoint the original step reached.
-func (s *Service) setupRollbackPlan(ctx context.Context, snap *RoomSnapshot) ([]events.ProposalStep, error) {
+// executed setup step that has not been undone yet, newest first, across every
+// plan the room recorded. Each step runs the action and params the room
+// recorded as that step's rollback. A step whose outcome is unknown is not
+// undone automatically; its name comes back in unknown.
+func (s *Service) setupRollbackPlan(ctx context.Context, snap *RoomSnapshot) ([]events.ProposalStep, []string, error) {
 	if snap == nil || snap.Setup == nil {
-		return nil, notSetupRoom()
+		return nil, nil, notSetupRoom()
 	}
-	if snap.Setup.PlanID == "" || snap.Setup.planSeq == 0 {
-		return nil, validation("nothing to roll back: this room has no setup plan")
+	if snap.Setup.PlanID == "" || snap.Setup.firstPlanSeq == 0 {
+		return nil, nil, validation("nothing to roll back: this room has no setup plan")
 	}
 	ran, executed, err := s.setupRanSteps(ctx, snap)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	switch {
 	case executed == 0:
-		return nil, validation("nothing to roll back: no step of the current setup plan was executed")
+		return nil, nil, validation("nothing to roll back: no step of a setup plan was executed")
 	case len(ran) == 0:
-		return nil, validation("nothing to roll back: every executed step of the current setup plan was already rolled back")
+		return nil, nil, validation("nothing to roll back: every executed setup step was already rolled back")
 	}
 	acts := s.actionsFor(snap.PipelineID)
 	steps := make([]events.ProposalStep, 0, len(ran))
+	var unknown []string
 	for i := len(ran) - 1; i >= 0; i-- {
 		r := ran[i]
+		if r.Unknown {
+			unknown = append(unknown, fmt.Sprintf("step %d (%s)", r.PlanIndex+1, cleanPlanName(r.Action)))
+			continue
+		}
 		if r.Action == "" {
-			return nil, validation(fmt.Sprintf(
+			return nil, nil, validation(fmt.Sprintf(
 				"step %d: the room log does not hold the proposal of this executed step, so its rollback is unknown; record a new setup plan before rolling back",
 				r.PlanIndex+1))
 		}
-		op, params, err := setupRollbackOf(r, setupPlanTarget(snap.Setup, r.PlanIndex))
+		op, params, err := setupRollbackOf(r)
 		if err != nil {
-			return nil, validation(fmt.Sprintf("step %d (%s): %v", r.PlanIndex+1, cleanPlanName(r.Action), err))
+			return nil, nil, validation(fmt.Sprintf("step %d (%s): %v", r.PlanIndex+1, cleanPlanName(r.Action), err))
 		}
 		a, ok := acts.Get(op)
 		if !ok {
-			return nil, validation(fmt.Sprintf(
+			return nil, nil, validation(fmt.Sprintf(
 				"step %d (%s): its recorded rollback names the action %q, which this server does not have",
 				r.PlanIndex+1, cleanPlanName(r.Action), cleanPlanName(op)))
+		}
+		ranClass := setupRanClass(snap.Setup, r)
+		undo, err := routeSetupSteps(snap, acts, []events.ProposalStep{{Action: op, Layer: a.Layer(), Params: params}}, false, false, 0, s.now().UTC())
+		if err != nil {
+			return nil, nil, validation(fmt.Sprintf("step %d (%s): %v", r.PlanIndex+1, cleanPlanName(r.Action), err))
+		}
+		if undoClass := undo.Class; setupClassRank[undoClass] < setupClassRank[ranClass] {
+			// The undo would be guarded at a lower class than the step ran
+			// at (its params name no registered endpoint of that class), so
+			// the room cannot prove the guard sees it right.
+			return nil, nil, validation(fmt.Sprintf(
+				"step %d (%s): it ran on a %s target, but its recorded rollback (%s) names no endpoint of that class, so the guard would see it as %s; undo it by hand",
+				r.PlanIndex+1, cleanPlanName(r.Action), ranClass, cleanPlanName(op), undoClass))
 		}
 		steps = append(steps, events.ProposalStep{
 			Action: op,
@@ -213,7 +253,28 @@ func (s *Service) setupRollbackPlan(ctx context.Context, snap *RoomSnapshot) ([]
 				r.PlanIndex+1, cleanPlanName(r.Action), cleanPlanName(op)),
 		})
 	}
-	return steps, nil
+	if len(steps) == 0 {
+		return nil, nil, validation("nothing to roll back automatically: the outcome of " +
+			truncateDetail(strings.Join(unknown, ", ")) + " is unknown (it may or may not have run); check those targets by hand")
+	}
+	return steps, unknown, nil
+}
+
+// setupRanClass is the class a step was routed at: the class its params
+// resolve to, raised to its plan step's target class when the params name no
+// registered endpoint (routeSetupSteps' rule).
+func setupRanClass(setup *SetupSnapshot, r setupRanStep) string {
+	target, class := setupStepResolve(setup, r.Params)
+	if target == "" && r.PlanTarget != "" {
+		class = classAtLeast(class, setupStepClass(setup, r.PlanTarget))
+	}
+	return class
+}
+
+// setupRollbackOpen is the refusal while a rollback proposal is still open.
+func setupRollbackOpen(id string) error {
+	return validation(fmt.Sprintf(
+		"a rollback of this setup is already open (proposal %s); let it finish, or reject it, first", id))
 }
 
 // setupRanSteps reads the log slice of the current setup plan and returns the
@@ -222,11 +283,11 @@ func (s *Service) setupRollbackPlan(ctx context.Context, snap *RoomSnapshot) ([]
 // what tells "nothing ran yet" from "everything was rolled back": both leave
 // the first list empty.
 func (s *Service) setupRanSteps(ctx context.Context, snap *RoomSnapshot) ([]setupRanStep, int, error) {
-	evs, err := s.setupLogSince(ctx, snap.ID, snap.Setup.planSeq)
+	evs, err := s.setupLogSince(ctx, snap.ID, snap.Setup.firstPlanSeq-1)
 	if err != nil {
 		return nil, 0, err
 	}
-	ran, executed := setupWalkRan(snap.Setup, evs)
+	ran, executed := setupWalkRan(evs)
 	return ran, executed, nil
 }
 
@@ -234,6 +295,7 @@ func (s *Service) setupRanSteps(ctx context.Context, snap *RoomSnapshot) ([]setu
 // maxSetupRollbackEvents. It stops on a short page (the log's head).
 func (s *Service) setupLogSince(ctx context.Context, roomID string, afterSeq int64) ([]events.Event, error) {
 	var out []events.Event
+	scanned := 0
 	for {
 		page, err := s.store.Since(ctx, roomID, afterSeq, setupRollbackPage)
 		if err != nil {
@@ -242,40 +304,48 @@ func (s *Service) setupLogSince(ctx context.Context, roomID string, afterSeq int
 		if len(page) == 0 {
 			return out, nil
 		}
-		if len(out)+len(page) > maxSetupRollbackEvents {
+		scanned += len(page)
+		if scanned > maxSetupRollbackScan {
 			return nil, validation(fmt.Sprintf(
-				"the room log holds more than %d events since the current setup plan; nothing was derived", maxSetupRollbackEvents))
+				"the room log holds more than %d events since the first setup plan; nothing was derived", maxSetupRollbackScan))
 		}
-		out = append(out, page...)
+		for _, e := range page {
+			switch e.Type {
+			case events.SetupPlan, events.ProposalCreated, events.ProposalPreviewed, events.ActionExecuted:
+				out = append(out, e)
+			}
+		}
+		if len(out) > maxSetupRollbackEvents {
+			return nil, validation(fmt.Sprintf(
+				"the room log holds more than %d proposal and step events since the first setup plan; nothing was derived", maxSetupRollbackEvents))
+		}
 		afterSeq = page[len(page)-1].Seq
 	}
 }
 
-// setupWalkRan walks a setup plan's log slice and collects what it says about
-// the plan's steps: a proposal.created carries a proposal's steps, a
-// proposal.previewed the rollback recorded for each of them, an action.executed
-// with a plan step's index says the step ran, and an action.executed outside
-// the plan that is exactly a recorded rollback says that step is undone.
+// setupWalkRan walks the setup's log slice and collects what it says about
+// the plan steps: a setup.plan sets the plan whose targets the next steps ran
+// against, a proposal.created carries a proposal's steps, a proposal.previewed
+// the rollback recorded for each of them, an action.executed with a plan
+// step's index says the step ran (or may have: OutcomeUnknown), and an
+// action.executed outside the plan that is exactly a recorded rollback says
+// that step is undone.
+//
+// Proposals and previews are gathered first, over the whole slice: a preview
+// is written asynchronously and may land after its step executed.
 //
 // Every piece of the answer is server-written: the preview's rollback, the
 // plan index and the step's own params. The model writes params, but only a
 // proposal that was created (and so validated, guarded and approved) has them.
-func setupWalkRan(setup *SetupSnapshot, evs []events.Event) ([]setupRanStep, int) {
-	if setup == nil {
-		return nil, 0
-	}
+func setupWalkRan(evs []events.Event) ([]setupRanStep, int) {
 	proposals := map[string][]events.ProposalStep{}
 	previews := map[string]map[int]string{}
-	var ran []setupRanStep
-	executed := 0
 	for _, e := range evs {
 		switch e.Type {
 		case events.ProposalCreated:
-			p, ok := decode[events.ProposalCreatedPayload](e)
-			if !ok {
-				continue
+			if p, ok := decode[events.ProposalCreatedPayload](e); ok {
+				proposals[p.ProposalID] = p.Steps
 			}
-			proposals[p.ProposalID] = p.Steps
 		case events.ProposalPreviewed:
 			p, ok := decode[events.ProposalPreviewedPayload](e)
 			if !ok {
@@ -290,16 +360,30 @@ func setupWalkRan(setup *SetupSnapshot, evs []events.Event) ([]setupRanStep, int
 				}
 			}
 			previews[p.ProposalID] = recs
+		}
+	}
+	var phases []events.SetupPlanPhase
+	var ran []setupRanStep
+	executed := 0
+	for _, e := range evs {
+		switch e.Type {
+		case events.SetupPlan:
+			if p, ok := decode[events.SetupPlanPayload](e); ok {
+				phases = p.Phases
+			}
 		case events.ActionExecuted:
 			p, ok := decode[events.ActionExecutedPayload](e)
-			if !ok || !p.OK {
+			if !ok {
 				continue
 			}
 			steps := proposals[p.ProposalID]
 			found := p.StepIndex >= 0 && p.StepIndex < len(steps)
 			if p.PlanStepIndex != nil {
+				if !p.OK && !p.OutcomeUnknown {
+					continue // refused or failed before it changed anything
+				}
 				executed++
-				r := setupRanStep{PlanIndex: *p.PlanStepIndex}
+				r := setupRanStep{PlanIndex: *p.PlanStepIndex, PlanTarget: planStepTarget(phases, *p.PlanStepIndex), Unknown: !p.OK}
 				if found {
 					step := steps[p.StepIndex]
 					r.Action, r.Layer, r.Params = step.Action, step.Layer, step.Params
@@ -309,11 +393,11 @@ func setupWalkRan(setup *SetupSnapshot, evs []events.Event) ([]setupRanStep, int
 				continue
 			}
 			// A write outside the plan: when it is exactly the recorded
-			// rollback of a step the plan ran, that step is undone.
-			if !found {
+			// rollback of a step that ran, that step is undone.
+			if !p.OK || !found {
 				continue
 			}
-			if i := setupUndoneIndex(setup, ran, steps[p.StepIndex]); i >= 0 {
+			if i := setupUndoneIndex(ran, steps[p.StepIndex]); i >= 0 {
 				ran = append(ran[:i], ran[i+1:]...)
 			}
 		}
@@ -325,13 +409,13 @@ func setupWalkRan(setup *SetupSnapshot, evs []events.Event) ([]setupRanStep, int
 // recorded rollback is exactly step's action and params), or -1. Newest first
 // is the rollback order, so a repeated rollback of two identical steps undoes
 // the one that ran last.
-func setupUndoneIndex(setup *SetupSnapshot, ran []setupRanStep, step events.ProposalStep) int {
+func setupUndoneIndex(ran []setupRanStep, step events.ProposalStep) int {
 	for i := len(ran) - 1; i >= 0; i-- {
 		r := ran[i]
 		if r.Action == "" {
 			continue
 		}
-		op, params, err := setupRollbackOf(r, setupPlanTarget(setup, r.PlanIndex))
+		op, params, err := setupRollbackOf(r)
 		if err != nil || op != step.Action {
 			continue
 		}
@@ -356,7 +440,7 @@ func setupSameParams(a, b json.RawMessage) bool {
 
 // setupRollbackOf resolves one executed step's rollback: the action to run and
 // the params it runs with.
-func setupRollbackOf(r setupRanStep, planTarget string) (string, json.RawMessage, error) {
+func setupRollbackOf(r setupRanStep) (string, json.RawMessage, error) {
 	record := strings.TrimSpace(r.Rollback)
 	if record == "" {
 		return "", nil, errors.New("the room recorded no rollback for it, so no action can undo it")
@@ -365,7 +449,7 @@ func setupRollbackOf(r setupRanStep, planTarget string) (string, json.RawMessage
 	if err != nil {
 		return "", nil, err
 	}
-	params, err := setupRollbackParams(op, r.Params, obj, planTarget)
+	params, err := setupRollbackParams(op, obj)
 	if err != nil {
 		return "", nil, err
 	}
@@ -398,9 +482,12 @@ func parseSetupRollback(record string) (string, map[string]any, error) {
 }
 
 // setupRollbackParams builds the params the rollback step runs with: the
-// recorded ones, the original step's endpoint when they do not name one, and
-// for compose_down the room's volumes-kept mark.
-func setupRollbackParams(op string, orig json.RawMessage, recorded map[string]any, planTarget string) (json.RawMessage, error) {
+// recorded ones as written, and for compose_down the room's volumes-kept mark.
+// Nothing else is added: an action decodes its params strictly, and an
+// injected field would make it refuse its own rollback. The class the undo
+// routes at is checked against the class the step ran at instead
+// (setupRollbackPlan).
+func setupRollbackParams(op string, recorded map[string]any) (json.RawMessage, error) {
 	if op == plan.OpComposeDown {
 		// The rollback of a compose_up is a compose_down that keeps its
 		// volumes (U1-14b, design §2.5: no op deletes data). The catalogue has
@@ -414,15 +501,6 @@ func setupRollbackParams(op string, orig json.RawMessage, recorded map[string]an
 		}
 		recorded["volumes_kept"] = true
 	}
-	if !setupNamesEndpoint(recorded) {
-		if addr := setupEndpointOf(orig, planTarget); addr != "" {
-			// The undo acts on the same endpoint the step reached: a recorded
-			// rollback often names only the object (a connector, a
-			// publication), and the class must resolve from the original
-			// endpoint or the guard would see "shared" for a production step.
-			recorded["target"] = addr
-		}
-	}
 	raw, err := json.Marshal(recorded)
 	if err != nil {
 		return nil, fmt.Errorf("its recorded rollback cannot be written as params: %v", err)
@@ -430,37 +508,10 @@ func setupRollbackParams(op string, orig json.RawMessage, recorded map[string]an
 	return raw, nil
 }
 
-// setupNamesEndpoint reports whether params already name an endpoint.
-func setupNamesEndpoint(obj map[string]any) bool {
-	for _, key := range setupEndpointKeys {
-		if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// setupEndpointOf is the endpoint the original step reached: the first
-// endpoint field its params carry, else the plan step's target.
-func setupEndpointOf(params json.RawMessage, planTarget string) string {
-	var obj map[string]any
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &obj)
-	}
-	for _, key := range setupEndpointKeys {
-		if v, ok := obj[key].(string); ok && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return strings.TrimSpace(planTarget)
-}
-
-// setupPlanTarget is the plan step's target by index ("" when there is none).
-func setupPlanTarget(setup *SetupSnapshot, index int) string {
-	if setup == nil {
-		return ""
-	}
-	for _, phase := range setup.phases {
+// planStepTarget is a plan step's target by index in phases ("" when there is
+// none).
+func planStepTarget(phases []events.SetupPlanPhase, index int) string {
+	for _, phase := range phases {
 		for _, step := range phase.Steps {
 			if step.Index == index {
 				return step.Target
@@ -470,22 +521,12 @@ func setupPlanTarget(setup *SetupSnapshot, index int) string {
 	return ""
 }
 
-// openSetupRollback returns the open rollback proposal that already carries
-// steps, if any: a second click while the first rollback is undecided would
-// queue a second run of the same undo.
-func openSetupRollback(snap RoomSnapshot, steps []events.ProposalStep) (string, bool) {
+// openSetupRollback returns an open rollback proposal of this setup, if any.
+// Any open one blocks another: while one runs, the walk already counts its
+// executed steps as undone, so a second click would queue the rest twice.
+func openSetupRollback(snap RoomSnapshot) (string, bool) {
 	for _, p := range snap.OpenProposals {
-		if p.Title != setupRollbackTitle || len(p.Steps) != len(steps) {
-			continue
-		}
-		same := true
-		for i := range steps {
-			if p.Steps[i].Action != steps[i].Action || !setupSameParams(p.Steps[i].Params, steps[i].Params) {
-				same = false
-				break
-			}
-		}
-		if same {
+		if p.Title == setupRollbackTitle {
 			return p.ProposalID, true
 		}
 	}
@@ -501,7 +542,7 @@ func openSetupRollback(snap RoomSnapshot, steps []events.ProposalStep) (string, 
 // "roll back this setup" covers what remains.
 func (s *Service) closeRolledBackSetup(ctx context.Context, roomID string) {
 	snap, err := s.readRoom(ctx, roomID)
-	if err != nil || snap == nil || !snap.IsSetupRoom() || snap.Setup == nil || snap.Setup.planSeq == 0 {
+	if err != nil || snap == nil || !snap.IsSetupRoom() || snap.Setup == nil || snap.Setup.firstPlanSeq == 0 {
 		return
 	}
 	if !s.isRoomOpen(ctx, roomID) {

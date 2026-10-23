@@ -157,15 +157,17 @@ func TestSetupRollbackThreeSteps(t *testing.T) {
 		}
 	}
 
-	// Every rollback step acts on the endpoint the step it undoes reached: the
-	// recorded rollbacks name only the object, and the class must resolve.
+	// Every rollback step carries exactly what its record says: the recorded
+	// rollbacks name only the object, and the room adds no endpoint of its
+	// own (the steps' params decode strictly). With no endpoint named, the
+	// step routes at the room's highest class (routeSetupSteps).
 	for i, step := range p.Steps {
 		var params map[string]any
 		if err := json.Unmarshal(step.Params, &params); err != nil {
 			t.Fatalf("step %d params: %v", i, err)
 		}
-		if params["target"] != target {
-			t.Fatalf("step %d (%s) params = %v, want the original target %s", i, step.Action, params, target)
+		if _, ok := params["target"]; ok {
+			t.Fatalf("step %d (%s) params = %v, want no target the record did not name", i, step.Action, params)
 		}
 	}
 
@@ -360,7 +362,7 @@ func TestSetupRollbackPartialThenRetry(t *testing.T) {
 	// The failed rollback leaves the room open: the setup is only partly back.
 	waitForCond(t, 5*time.Second, func() bool {
 		snap := mustRoom(t, r.svc, roomID)
-		_, open := openSetupRollback(snap, first.Steps)
+		_, open := openSetupRollback(snap)
 		return !open
 	}, "the failed rollback proposal is still open")
 	if snap := mustRoom(t, r.svc, roomID); snap.Status != "open" {
@@ -396,22 +398,24 @@ func TestSetupRollbackRecord(t *testing.T) {
 		name        string
 		record      string
 		orig        string
-		planTarget  string
 		wantOp      string
 		wantParams  map[string]any
 		wantTarget  string
 		wantErrText string
 	}{
 		{
+			// The undo carries what the record says and nothing the room
+			// guessed: a target taken from the original step or the plan could
+			// point the undo at a different endpoint than the one the record
+			// names, and the steps' params decode strictly.
 			name:       "action and params",
 			record:     `connect_delete_connector {"connector": "orders-src"}`,
 			orig:       `{"target": "db.acme:5432", "connector": "orders-src"}`,
 			wantOp:     "connect_delete_connector",
 			wantParams: map[string]any{"connector": "orders-src"},
-			wantTarget: "db.acme:5432",
 		},
 		{
-			name:       "the record's own endpoint wins",
+			name:       "the record's own endpoint stays",
 			record:     `connect_delete_connector {"connector": "orders-src", "target": "db.prod.acme:5432"}`,
 			orig:       `{"target": "db.acme:5432"}`,
 			wantOp:     "connect_delete_connector",
@@ -419,21 +423,11 @@ func TestSetupRollbackRecord(t *testing.T) {
 			wantTarget: "db.prod.acme:5432",
 		},
 		{
-			name:       "the plan's target fills a silent step",
-			record:     `connect_delete_connector {"connector": "orders-src"}`,
-			orig:       `{"connector": "orders-src"}`,
-			planTarget: "10.0.0.5:5432",
-			wantOp:     "connect_delete_connector",
-			wantParams: map[string]any{"connector": "orders-src"},
-			wantTarget: "10.0.0.5:5432",
-		},
-		{
 			name:       "compose_down keeps its volumes",
 			record:     `compose_down {"file": "compose.yaml", "services": ["kafka"], "volumes": true, "args": ["-v"]}`,
 			orig:       `{"target": "127.0.0.1:5432"}`,
 			wantOp:     "compose_down",
 			wantParams: map[string]any{"file": "compose.yaml", "volumes_kept": true},
-			wantTarget: "127.0.0.1:5432",
 		},
 		{name: "a sentence", record: `Undo it by hand, there is no action`, wantErrText: "not an action and params"},
 		{name: "no params", record: `compose_down`, wantErrText: "carries no params object"},
@@ -445,7 +439,7 @@ func TestSetupRollbackRecord(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ran := setupRanStep{PlanIndex: 0, Action: "step", Params: json.RawMessage(c.orig), Rollback: c.record}
-			op, params, err := setupRollbackOf(ran, c.planTarget)
+			op, params, err := setupRollbackOf(ran)
 			if c.wantErrText != "" {
 				if err == nil || !strings.Contains(err.Error(), c.wantErrText) {
 					t.Fatalf("err = %v, want %q", err, c.wantErrText)
@@ -467,7 +461,11 @@ func TestSetupRollbackRecord(t *testing.T) {
 					t.Fatalf("params = %v, want %s=%v", got, key, want)
 				}
 			}
-			if got["target"] != c.wantTarget {
+			if c.wantTarget == "" {
+				if _, ok := got["target"]; ok {
+					t.Fatalf("params = %v, want no target the record did not carry", got)
+				}
+			} else if got["target"] != c.wantTarget {
 				t.Fatalf("params = %v, want target %q", got, c.wantTarget)
 			}
 			for _, key := range []string{"args", "volumes", "remove_volumes"} {

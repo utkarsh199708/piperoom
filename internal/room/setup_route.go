@@ -171,6 +171,14 @@ func routeSetupSteps(snap *RoomSnapshot, acts *actions.Registry, steps []events.
 				}
 			}
 		}
+		if !requirePlan && target == "" {
+			// A driver step (the setup rollback among them) has no plan step
+			// to name its endpoint, and its params name no registered one: the
+			// action may reach any endpoint the room has, so it is routed and
+			// guarded at the room's highest class. A class raised after Create
+			// then still reaches the executor's re-check.
+			class = classAtLeast(class, setupRoomClass(snap.Setup))
+		}
 		tier, err := setupStepTier(acts, step, class)
 		if err != nil {
 			return setupRoute{}, validation(fmt.Sprintf("step %d (%s): %v", base+i, cleanPlanName(op), err))
@@ -341,6 +349,21 @@ func collectSetupStrings(v any, out *[]string, depth int) {
 
 // maxSetupParamsStrings bounds collectSetupStrings.
 const maxSetupParamsStrings = 64
+
+// setupRoomClass is the highest class of the room's targets, or "" when none
+// has a valid class.
+func setupRoomClass(setup *SetupSnapshot) string {
+	class := ""
+	if setup == nil {
+		return class
+	}
+	for _, t := range setup.Targets {
+		if validSetupClass(t.Class) {
+			class = classAtLeast(class, t.Class)
+		}
+	}
+	return class
+}
 
 // setupStepClass is the class of the endpoint a step names: the class of the
 // registered target it resolves to, or "shared" when it resolves to none. It
